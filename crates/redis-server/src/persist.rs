@@ -77,6 +77,24 @@ pub struct Manifest {
     pub after_seq: u64,
 }
 
+/// Object storage for tests: S3 under a unique prefix when `ROLL_E2E_S3_BUCKET` is set (with
+/// `ROLL_E2E_S3_ENDPOINT` and the usual AWS credentials), otherwise a fresh temp directory.
+pub fn test_objects(name: &str) -> Objects {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let unique = format!("{name}-{}-{n}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    let cfg = match std::env::var("ROLL_E2E_S3_BUCKET") {
+        Ok(bucket) => StorageConfig::S3 {
+            bucket,
+            region: std::env::var("AWS_REGION").ok(),
+            endpoint: std::env::var("ROLL_E2E_S3_ENDPOINT").ok(),
+            prefix: Some(format!("redis-tests/{unique}")),
+        },
+        Err(_) => StorageConfig::Local(std::env::temp_dir().join(format!("roll-redis-{unique}"))),
+    };
+    Objects::new(&cfg).expect("test object storage")
+}
+
 pub fn manifest_key(db: &str) -> String {
     format!("redis/db/{db}/manifest.json")
 }

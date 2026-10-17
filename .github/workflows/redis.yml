@@ -1,0 +1,79 @@
+name: redis
+
+# Runs only when Redis-related code changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/redis-proto/**"
+      - "crates/redis-engine/**"
+      - "crates/redis-server/**"
+      - "crates/redis-control/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/test-redis.sh"
+      - ".github/workflows/redis.yml"
+  pull_request:
+    paths:
+      - "crates/redis-proto/**"
+      - "crates/redis-engine/**"
+      - "crates/redis-server/**"
+      - "crates/redis-control/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/test-redis.sh"
+      - ".github/workflows/redis.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: redis-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/test-redis.sh --force --unit
+
+  compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: docker pull -q redis:8-alpine
+      - name: Differential compatibility with Redis 8
+        run: ROLL_COMPAT_REQUIRED=1 cargo test -p redis-server --test compat
+
+  s3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AWS_ACCESS_KEY_ID: roll
+      AWS_SECRET_ACCESS_KEY: roll
+      AWS_REGION: us-east-1
+      ROLL_E2E_S3_BUCKET: roll-e2e
+      ROLL_E2E_S3_ENDPOINT: http://127.0.0.1:8333
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: S3 object store (SeaweedFS)
+        run: |
+          docker run -d --name seaweed -p 8333:8333 chrislusf/seaweedfs server -s3
+          for i in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && break; sleep 1; done
+          docker exec seaweed sh -c 'echo "s3.bucket.create -name roll-e2e" | weed shell'
+      - name: Durability, replicas and the control plane on S3
+        run: |
+          cargo test -p redis-server --test persist --test repl --test node
+          cargo test -p redis-control --tests

@@ -4,7 +4,7 @@ use redis_engine::Reply;
 use redis_server::client::RespClient;
 use redis_server::directory::AuthRequest;
 use redis_server::node::{DbSpec, Node, NodeConfig, StaticCatalog, route};
-use redis_server::persist::{Objects, Shipper, ShipperConfig, StorageConfig};
+use redis_server::persist::{Shipper, ShipperConfig};
 use redis_server::{Directory, serve_tcp};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,10 +15,7 @@ fn spec(id: &str, secret: &str) -> DbSpec {
 }
 
 async fn start(idle: Option<Duration>) -> (SocketAddr, Arc<Node>) {
-    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let o = Objects::new(&StorageConfig::Local(std::env::temp_dir().join(format!("roll-node-{n}-{i}")))).unwrap();
+    let o = redis_server::persist::test_objects("node");
     let cfg = ShipperConfig { flush_interval: Duration::from_millis(20), ..Default::default() };
     let shipper = Shipper::start("n1", o, cfg).await.unwrap();
     let catalog = Arc::new(StaticCatalog::default());
@@ -56,9 +53,16 @@ async fn tenants_are_isolated() {
     assert_eq!(a.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
     assert_eq!(a.cmd(["SET", "k", "from-alpha"]).await.unwrap(), Reply::Ok);
     let mut b = RespClient::connect(addr).await.unwrap();
-    assert_eq!(b.cmd(["AUTH", "app@beta", "pb"]).await.unwrap(), Reply::Ok);
+    assert_eq!(b.cmd(["AUTH", "default@beta", "pb"]).await.unwrap(), Reply::Ok);
     assert_eq!(b.cmd(["GET", "k"]).await.unwrap(), Reply::Nil);
     assert_eq!(b.cmd(["DBSIZE"]).await.unwrap(), Reply::Int(0));
+    // `user@db` names a tenant ACL user; the platform secret is only the default user's.
+    assert!(matches!(b.cmd(["AUTH", "app@beta", "pb"]).await.unwrap(), Reply::Error(e) if e.starts_with("WRONGPASS")));
+    assert_eq!(b.cmd(["ACL", "SETUSER", "app", "on", ">apppw", "~*", "+@all"]).await.unwrap(), Reply::Ok);
+    let mut app = RespClient::connect(addr).await.unwrap();
+    assert_eq!(app.cmd(["AUTH", "app@beta", "apppw"]).await.unwrap(), Reply::Ok);
+    assert_eq!(app.cmd(["ACL", "WHOAMI"]).await.unwrap(), Reply::bulk(b"app"));
+    assert!(matches!(app.cmd(["AUTH", "app@alpha", "apppw"]).await.unwrap(), Reply::Error(e) if e.starts_with("WRONGPASS")));
     // Pub/sub is per database too.
     assert_eq!(b.cmd(["PUBLISH", "c", "x"]).await.unwrap(), Reply::Int(0));
 }

@@ -3,14 +3,12 @@
 use bytes::Bytes;
 use redis_engine::{Client, Config, Reply};
 use redis_server::Database;
-use redis_server::persist::{self, Objects, Shipper, ShipperConfig, StorageConfig, Until};
+use redis_server::persist::{self, Objects, Shipper, ShipperConfig, Until};
 use std::sync::Arc;
 use std::time::Duration;
 
 fn objects(name: &str) -> Objects {
-    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("roll-redis-{name}-{n}"));
-    Objects::new(&StorageConfig::Local(dir)).unwrap()
+    persist::test_objects(name)
 }
 
 fn cfg() -> ShipperConfig {

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 async fn start(password: Option<&str>) -> (String, Arc<Database>) {
     let db = Database::new("t", Config::default(), 1);
-    let dir: Arc<dyn Directory> = Arc::new(Single { db: db.clone(), password: password.map(String::from) });
+    let dir: Arc<dyn Directory> = Arc::new(Single::new(db.clone(), password.map(String::from)));
     let addr = redis_server::http::start(dir).await.unwrap();
     (format!("http://{addr}"), db)
 }

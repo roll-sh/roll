@@ -91,19 +91,18 @@ pub trait Directory: Send + Sync + 'static {
     fn anonymous(&self) -> BoxFuture<'_, Option<Session>>;
 }
 
-/// One database (tests, local dev, single-tenant nodes). Users come from the database's ACL;
-/// `password` is `requirepass` (the default user's password).
+/// One database (tests, local dev, single-tenant nodes). Users come from the database's ACL.
 pub struct Single {
     pub db: Arc<Database>,
-    pub password: Option<String>,
 }
 
 impl Single {
+    /// `password` is `requirepass` (the default user's password).
     pub fn new(db: Arc<Database>, password: Option<String>) -> Self {
         if let Some(p) = &password {
             db.acl.write().set_default_password(Some(p.as_bytes()));
         }
-        Self { db, password }
+        Self { db }
     }
 }
 

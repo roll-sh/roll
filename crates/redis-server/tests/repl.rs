@@ -4,15 +4,14 @@ use bytes::Bytes;
 use redis_engine::{Client, Config, Reply};
 use redis_server::Database;
 use redis_server::client::RespClient;
-use redis_server::persist::{self, Objects, Shipper, ShipperConfig, StorageConfig};
+use redis_server::persist::{self, Objects, Shipper, ShipperConfig};
 use redis_server::repl::{self, Follower, PrimaryMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 fn objects(name: &str) -> Objects {
-    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    Objects::new(&StorageConfig::Local(std::env::temp_dir().join(format!("roll-repl-{name}-{n}")))).unwrap()
+    persist::test_objects(name)
 }
 
 fn run(db: &Database, c: &mut Client, line: &str) -> Reply {

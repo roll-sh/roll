@@ -3,7 +3,6 @@
 use redis_control::{Control, RedisConfig};
 use redis_engine::Reply;
 use redis_server::client::RespClient;
-use redis_server::persist::{Objects, StorageConfig};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +19,7 @@ async fn env() -> Env {
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let home = std::env::temp_dir().join(format!("roll-redis-control-{}-{n}-{i}", std::process::id()));
-    let objects = Objects::new(&StorageConfig::Local(home.join("objects"))).unwrap();
+    let objects = redis_server::persist::test_objects("control");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let resp = listener.local_addr().unwrap();
     let mut cfg = RedisConfig::local(home);
