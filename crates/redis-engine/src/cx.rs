@@ -183,6 +183,12 @@ impl KeyMut<'_> {
             _ => unreachable!("type checked by lookup"),
         }
     }
+    pub fn vset(&mut self) -> &mut crate::vset::VSet {
+        match &mut self.entry.value {
+            Value::VSet(x) => x,
+            _ => unreachable!("type checked by lookup"),
+        }
+    }
 }
 
 impl Drop for KeyMut<'_> {

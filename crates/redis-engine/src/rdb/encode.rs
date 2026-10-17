@@ -91,7 +91,7 @@ pub(crate) fn type_of(v: &Value, dump: bool) -> u8 {
         Value::Hash(_) => ty::HASH,
         Value::Stream(_) => ty::STREAM_LISTPACKS_5,
         Value::Array(_) => ty::ARRAY,
-        Value::Json(_) | Value::Sketch(_) => ty::MODULE_2,
+        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) => ty::MODULE_2,
     }
 }
 
@@ -171,6 +171,11 @@ impl Encoder {
             Value::Array(a) => self.array(a),
             Value::Json(j) => self.json(j),
             Value::Sketch(x) => self.sketch(x),
+            Value::VSet(v) => {
+                self.len(crate::bloom::type_id(crate::vset::TYPE_NAME, crate::vset::ENCVER));
+                v.save(self);
+                self.len(super::MODULE_OPCODE_EOF);
+            }
         }
     }
 

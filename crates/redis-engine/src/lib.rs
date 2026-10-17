@@ -25,6 +25,7 @@ pub mod tre;
 pub mod types;
 pub mod util;
 pub mod value;
+pub mod vset;
 
 pub use client::Client;
 pub use config::Config;

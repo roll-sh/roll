@@ -957,6 +957,8 @@ pub static PARAMS: &[Param] = &[
     .apply(|c| if get_bind(c) != BIND { Err("Failed to bind to specified addresses.".into()) } else { Ok(()) }),
     special("replicaof", Some("slaveof"), IMMUTABLE | MULTI_ARG, |_| String::new(), |_, _| Ok(true)),
     special("latency-tracking-info-percentiles", None, MODIFIABLE | MULTI_ARG, get_percentiles, set_percentiles),
+    // The vectorset module's (unprefixed) config: searches here never run on threads anyway.
+    boolean("vset-force-single-threaded-execution", None, MODIFIABLE, false),
     // RedisBloom's module configs (unprefixed string configs)
     special("bf-error-rate", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::ErrorRate), |c, a| bloom_set(c, BloomOpt::ErrorRate, a)),
     special("bf-initial-size", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::BfInitialSize), |c, a| bloom_set(c, BloomOpt::BfInitialSize, a)),

@@ -729,7 +729,7 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
         Value::Hash(_) => 4,
         Value::Stream(_) => 6,
         Value::Array(_) => 7,
-        Value::Json(_) | Value::Sketch(_) => 5,
+        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) => 5,
     };
     mix_digest(d, &ty.to_be_bytes());
     match &e.value {
@@ -779,6 +779,20 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
         }
         // RedisJSON and RedisBloom have no digest callback: only the type counts.
         Value::Json(_) | Value::Sketch(_) => {}
+        // A module digest: each sequence mixed from zero, the sequences xor'ed together.
+        Value::VSet(v) => {
+            let mut x = [0u8; 20];
+            v.digest_sequences(|seq| {
+                let mut o = [0u8; 20];
+                for part in seq {
+                    mix_digest(&mut o, part);
+                }
+                for (a, b) in x.iter_mut().zip(o) {
+                    *a ^= b;
+                }
+            });
+            xor_digest(d, &x);
+        }
     }
     if e.expire != 0 {
         xor_digest(d, b"!!expire!!");

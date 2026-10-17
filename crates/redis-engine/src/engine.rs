@@ -575,6 +575,13 @@ impl Engine {
                 if top && let Some(m) = client.multi.as_mut() {
                     m.error = true;
                 }
+                // An arity error is a rejected call of the command it names (rejectCommand).
+                if let Reply::Error(t) = &e
+                    && let Some(name) = t.strip_prefix("ERR wrong number of arguments for '").and_then(|r| r.strip_suffix("' command"))
+                {
+                    let name = name.to_string();
+                    return Outcome::Reply(self.reject(&name, e));
+                }
                 self.count_error(&e);
                 return Outcome::Reply(e);
             }

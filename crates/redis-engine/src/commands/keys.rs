@@ -436,7 +436,7 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         cx.eng.sig.touch(to as u16, dst);
     }
     // Module types without a copy callback.
-    if matches!(entry.value, crate::value::Value::Sketch(_)) {
+    if matches!(entry.value, crate::value::Value::Sketch(_) | crate::value::Value::VSet(_)) {
         return Err(Error::new("ERR not supported for this module key"));
     }
     let mut entry = entry;

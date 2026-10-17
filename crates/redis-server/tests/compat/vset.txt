@@ -1,0 +1,540 @@
+# Vector sets (the vectorset module built into Redis 8.10): every command with its errors and
+# RESP3 replies, the three quantizations, REDUCE projections, FILTER expressions, attributes,
+# MEMORY USAGE, DUMP/RESTORE, keyspace events, dirty counts and command metadata. HNSW levels are
+# random in Redis, so answers that show them (VLINKS, VINFO max-level) are masked or avoided;
+# similarity searches over small sets are exact.
+
+FLUSHALL
+SET str v
+
+# ---- VADD errors ----
+VADD k VALUES 3 1 2 3
+VADD k VALUES 3 1 2
+VADD k VALUES 0 1 e
+VADD k VALUES -1 1 e
+VADD k VALUES 65537 1 e
+VADD k VALUES abc 1 e
+VADD k VALUES 3 1 2 x e
+VADD k VALUES 3 1 2 nan e
+VADD k FP32 abc e
+VADD k FP32 "" e
+VADD k FOO 1 e
+VADD k REDUCE 2 VALUES 1 1 e
+VADD k REDUCE 0 VALUES 3 1 2 3 e
+VADD k REDUCE x VALUES 3 1 2 3 e
+VADD k REDUCE 2 FP32
+VADD str VALUES 2 1 2 e
+VADD k VALUES 3 1 2 3 a EF 0
+VADD k VALUES 3 1 2 3 a EF 1000001
+VADD k VALUES 3 1 2 3 a EF x
+VADD k VALUES 3 1 2 3 a M 3
+VADD k VALUES 3 1 2 3 a M 4097
+VADD k VALUES 3 1 2 3 a BAD
+VADD k VALUES 3 1 2 3 a EF
+VADD k VALUES 3 1 2 3 a SETATTR
+VADD k VALUES 3 1 2 3 a M
+EXISTS k
+
+# ---- Q8 (default) ----
+VADD k VALUES 3 1 0 0 a
+VADD k VALUES 3 0 1 0 b
+VADD k VALUES 3 0 0 1 c SETATTR "{\"x\":1}"
+VADD k VALUES 3 1 0 0 a
+VADD k VALUES 3 0.5 0.5 0 a
+VCARD k
+VDIM k
+VEMB k a
+VEMB k b
+VEMB k a RAW
+VEMB k a raw
+VEMB k a FOO
+VEMB k missing
+VEMB nokey a
+VEMB str a
+VEMB k
+!mask vset-uid,max-level VINFO k
+VINFO nokey
+VINFO str
+VADD k VALUES 2 1 2 d
+VADD k VALUES 3 1 2 3 d NOQUANT
+VADD k VALUES 3 1 2 3 d BIN
+VADD k VALUES 3 1 2 3 d M 8
+VADD k VALUES 3 1 2 3 d M 16 Q8 EF 10 CAS
+VADD k REDUCE 2 VALUES 3 1 2 3 d
+VCARD k
+
+# ---- VSIM over a small set: exact answers ----
+DEL v
+VADD v VALUES 4 0.1 0.2 0.3 0.4 e1
+VADD v VALUES 4 0.4 0.3 0.2 0.1 e2
+VADD v VALUES 4 -0.1 0.5 0.25 0.9 e3
+VADD v VALUES 4 0.33 -0.71 0.12 0.05 e4
+VADD v VALUES 4 0.9 0.1 -0.4 0.2 e5
+VADD v VALUES 4 -0.6 -0.2 0.7 -0.3 e6
+VSIM v VALUES 4 0.1 0.2 0.3 0.41
+VSIM v VALUES 4 0.1 0.2 0.3 0.41 WITHSCORES
+VSIM v ELE e1 WITHSCORES
+VSIM v ELE e5 WITHSCORES COUNT 3
+VSIM v ELE e5 WITHSCORES COUNT 3 EF 1
+VSIM v ELE e5 WITHSCORES TRUTH
+VSIM v ELE e2 WITHSCORES EPSILON 0.2
+VSIM v ELE e2 WITHSCORES EPSILON 0.5 NOTHREAD
+VSIM v ELE e2 WITHATTRIBS
+VSIM v ELE e2 WITHSCORES WITHATTRIBS COUNT 2
+VSIM v ELE missing
+VSIM nokey ELE x
+VSIM nokey FOO
+VSIM str ELE x
+VSIM v VALUES 3 1 2 3
+VSIM v VALUES 4 1 2 3
+VSIM v VALUES 4 1 2 3 x
+VSIM v FP32 abc
+VSIM v FOO 1
+VSIM v REDUCE 2 VALUES 4 1 2 3 4
+VSIM v ELE e1 COUNT 0
+VSIM v ELE e1 COUNT -1
+VSIM v ELE e1 COUNT x
+VSIM v ELE e1 EPSILON 0
+VSIM v ELE e1 EPSILON x
+VSIM v ELE e1 EF 0
+VSIM v ELE e1 EF 1000001
+VSIM v ELE e1 FILTER-EF 0
+VSIM v ELE e1 COUNT
+VSIM v ELE e1 BAD
+VSIM v ELE e1 WITHSCORES WITHSCORES
+VSIM v
+VSIM v ELE
+
+# ---- NOQUANT and BIN ----
+VADD f VALUES 9 0.11 0.27 -0.35 0.48 0.52 -0.61 0.73 0.89 -0.97 a NOQUANT
+VADD f VALUES 9 0.31 -0.22 0.15 0.68 -0.44 0.29 0.81 -0.13 0.57 b NOQUANT
+VADD f VALUES 9 -0.71 0.42 0.39 -0.18 0.93 0.07 -0.26 0.64 0.35 c NOQUANT
+VADD f VALUES 9 0.123456 0.654321 0.111111 0.999999 -0.5 0.25 -0.125 0.0625 0.03125 d NOQUANT
+VEMB f a
+VEMB f a RAW
+VEMB f d
+VEMB f d RAW
+VSIM f ELE a WITHSCORES
+VSIM f ELE d WITHSCORES
+VSIM f VALUES 9 0.2 0.1 0.3 0.5 0.4 0.6 0.8 0.7 0.9 WITHSCORES
+!mask vset-uid,max-level VINFO f
+VADD f17 VALUES 17 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 1.1 1.2 1.3 1.4 1.5 1.6 1.7 a NOQUANT
+VADD f17 VALUES 17 -0.1 0.25 0.3 -0.45 0.5 0.66 -0.7 0.8 0.91 -1.0 1.15 1.2 -1.33 1.4 1.5 -1.6 1.75 b NOQUANT
+VADD f17 VALUES 17 0.3 0.1 0.4 0.1 0.5 0.9 0.2 0.6 0.5 0.3 0.5 0.8 0.9 0.7 0.9 0.3 0.2 c NOQUANT
+VEMB f17 a RAW
+VEMB f17 b
+VSIM f17 ELE a WITHSCORES
+VSIM f17 VALUES 17 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 WITHSCORES
+VADD q17 VALUES 17 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 1.1 1.2 1.3 1.4 1.5 1.6 1.7 a
+VADD q17 VALUES 17 -0.1 0.25 0.3 -0.45 0.5 0.66 -0.7 0.8 0.91 -1.0 1.15 1.2 -1.33 1.4 1.5 -1.6 1.75 b
+VADD q17 VALUES 17 0.3 0.1 0.4 0.1 0.5 0.9 0.2 0.6 0.5 0.3 0.5 0.8 0.9 0.7 0.9 0.3 0.2 c
+VEMB q17 b RAW
+VEMB q17 b
+VSIM q17 ELE a WITHSCORES
+VSIM q17 VALUES 17 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 WITHSCORES
+VADD b VALUES 5 1 -1 1 -1 1 a BIN
+VADD b VALUES 5 1 1 1 -1 1 b BIN
+VADD b VALUES 5 -1 -1 -1 1 1 c BIN
+VEMB b a
+VEMB b a RAW
+VSIM b ELE a WITHSCORES
+!mask vset-uid,max-level VINFO b
+VADD z VALUES 3 0 0 0 zero
+VADD z VALUES 3 1 2 3 one
+VEMB z zero
+VEMB z zero RAW
+!sort VSIM z ELE zero WITHSCORES
+VSIM z ELE one WITHSCORES
+
+# ---- REDUCE ----
+VADD r REDUCE 2 VALUES 4 1 2 3 4 a
+VADD r REDUCE 2 VALUES 4 4 3 2 1 b
+VADD r REDUCE 2 VALUES 4 -1 2 -3 4 c
+VDIM r
+!mask vset-uid,max-level VINFO r
+VEMB r a
+VSIM r VALUES 4 1 2 3 5 WITHSCORES
+VSIM r VALUES 2 1 2 WITHSCORES
+VSIM r VALUES 3 1 2 3
+VADD r VALUES 4 1 2 3 4 d
+VADD r REDUCE 3 VALUES 4 1 2 3 4 d
+VADD r REDUCE 2 VALUES 5 1 2 3 4 5 d
+VADD r VALUES 2 1 2 d
+VADD k REDUCE 2 VALUES 3 1 2 3 x
+
+# ---- attributes ----
+VGETATTR k c
+VGETATTR k a
+VGETATTR k missing
+VGETATTR nokey a
+VGETATTR str a
+VSETATTR k a "{\"x\":2,\"name\":\"alpha\"}"
+VGETATTR k a
+VSETATTR k missing "{}"
+VSETATTR nokey a "{}"
+VSETATTR str a "{}"
+!mask vset-uid,max-level VINFO k
+VSETATTR k a ""
+VGETATTR k a
+!mask vset-uid,max-level VINFO k
+VADD k VALUES 3 0.2 0.3 0.4 e SETATTR ""
+VGETATTR k e
+!mask vset-uid,max-level VINFO k
+VADD k VALUES 3 0.2 0.3 0.5 e SETATTR "{\"y\":1}"
+VGETATTR k e
+VADD k VALUES 3 0.2 0.3 0.5 e
+VGETATTR k e
+VADD k VALUES 3 0.2 0.3 0.5 e SETATTR ""
+VGETATTR k e
+!mask vset-uid,max-level VINFO k
+
+# ---- FILTER ----
+DEL m
+VADD m VALUES 2 1 0.1 a SETATTR "{\"year\":1984,\"name\":\"The Matrix\",\"tags\":[\"sf\",\"action\"],\"ok\":true}"
+VADD m VALUES 2 1 0.2 b SETATTR "{\"year\":1999,\"name\":\"Matrix Reloaded\",\"tags\":[\"sf\"],\"ok\":false}"
+VADD m VALUES 2 1 0.3 c SETATTR "{\"year\":2003,\"rating\":7.5,\"n\":null}"
+VADD m VALUES 2 1 0.4 d
+VADD m VALUES 2 1 0.5 e SETATTR "not json"
+VADD m VALUES 2 1 0.6 f SETATTR "{\"year\":\"1990\",\"s\":\"a\\\"b\"}"
+VSIM m VALUES 2 1 0 FILTER ".year > 1990"
+VSIM m VALUES 2 1 0 FILTER ".year >= 1984 and .year < 2000"
+VSIM m VALUES 2 1 0 FILTER ".year == 1990"
+VSIM m VALUES 2 1 0 FILTER "'sf' in .tags"
+VSIM m VALUES 2 1 0 FILTER "'Matrix' in .name"
+VSIM m VALUES 2 1 0 FILTER ".ok"
+VSIM m VALUES 2 1 0 FILTER "!.ok"
+VSIM m VALUES 2 1 0 FILTER "not .ok"
+VSIM m VALUES 2 1 0 FILTER ".n == null"
+VSIM m VALUES 2 1 0 FILTER ".rating * 2 == 15"
+VSIM m VALUES 2 1 0 FILTER "(.year - 1900) % 4 == 3"
+VSIM m VALUES 2 1 0 FILTER "2 ** 3 ** 2 == 512"
+VSIM m VALUES 2 1 0 FILTER "1"
+VSIM m VALUES 2 1 0 FILTER "0"
+VSIM m VALUES 2 1 0 FILTER ".year in [1984, 2003]"
+VSIM m VALUES 2 1 0 FILTER ".missing"
+VSIM m VALUES 2 1 0 FILTER ".year > 1980 || .rating > 5"
+VSIM m VALUES 2 1 0 FILTER ".year > 1980 && .year < 1990"
+VSIM m VALUES 2 1 0 FILTER "-1 < .year"
+VSIM m VALUES 2 1 0 FILTER ".year != 1984"
+VSIM m VALUES 2 1 0 FILTER ".year > 1980" WITHSCORES WITHATTRIBS
+VSIM m VALUES 2 1 0 FILTER ".year > 1980" COUNT 1
+VSIM m VALUES 2 1 0 FILTER ".year > 1980" FILTER-EF 1000
+VSIM m VALUES 2 1 0 FILTER ".year > 1980" TRUTH
+VSIM m VALUES 2 1 0 FILTER ".year >"
+VSIM m VALUES 2 1 0 FILTER "(.year > 1"
+VSIM m VALUES 2 1 0 FILTER ".year > 1)"
+VSIM m VALUES 2 1 0 FILTER ".year @ 1"
+VSIM m VALUES 2 1 0 FILTER ".year == 'x"
+VSIM m VALUES 2 1 0 FILTER ".year == 1e-5"
+VSIM m VALUES 2 1 0 FILTER "(.n == null)"
+VSIM m VALUES 2 1 0 FILTER ".year and"
+VSIM m VALUES 2 1 0 FILTER ""
+VSIM m VALUES 2 1 0 FILTER "[1, 2"
+VSIM m VALUES 2 1 0 FILTER ".year > 1980" FILTER ".year < 2000"
+
+# ---- VREM ----
+VREM k a
+VREM k a
+VREM nokey a
+VREM str a
+VCARD k
+VADD one VALUES 2 1 2 x
+VREM one x
+EXISTS one
+VCARD nokey
+VCARD str
+VDIM nokey
+VDIM str
+
+# ---- VISMEMBER / VRANDMEMBER / VRANGE ----
+VISMEMBER k b
+VISMEMBER k a
+VISMEMBER nokey a
+VISMEMBER str a
+VRANDMEMBER nokey
+VRANDMEMBER nokey 5
+VRANDMEMBER nokey 0
+VRANDMEMBER k 0
+VRANDMEMBER k x
+VRANDMEMBER k -9223372036854775808
+VRANDMEMBER str
+VRANDMEMBER str 1
+!sort VRANDMEMBER k 100
+!type VRANDMEMBER k 3
+!type VRANDMEMBER k
+!type VRANDMEMBER k -5
+VRANDMEMBER k 1 2
+VRANGE k - +
+VRANGE k - + 2
+VRANGE k - + 0
+VRANGE k - + -1
+VRANGE k [b +
+VRANGE k (b +
+VRANGE k [b [d
+VRANGE k [b (d
+VRANGE k - (c
+VRANGE k [zz +
+VRANGE k + -
+VRANGE k - -
+VRANGE k b +
+VRANGE k [ +
+VRANGE k "" +
+VRANGE k - + x
+VRANGE nokey - +
+VRANGE str - +
+VRANGE k - + 1 2
+
+# ---- VLINKS ----
+VLINKS k missing
+VLINKS nokey a
+VLINKS str a
+VLINKS k b FOO
+VLINKS k b WITHSCORES x
+!type VLINKS one2 x
+
+# ---- generic commands ----
+TYPE k
+OBJECT ENCODING k
+!sort SCAN 0 TYPE vectorset COUNT 1000
+COPY k k2
+EXISTS k2
+RENAME k k3
+VCARD k3
+RENAME k3 k
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d); return redis.call('VCARD', KEYS[2])" 2 v v2
+VSIM v2 ELE e1 WITHSCORES
+VEMB v2 e3
+VEMB v2 e3 RAW
+!mask vset-uid,max-level VINFO v2
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d); return redis.call('VSIM', KEYS[2], 'ELE', 'a', 'WITHSCORES')" 2 f f2
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d); return redis.call('VGETATTR', KEYS[2], 'a')" 2 m m2
+VGETATTR m2 e
+VGETATTR m2 c
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d); return redis.call('VSIM', KEYS[2], 'VALUES', 4, 1, 2, 3, 5, 'WITHSCORES')" 2 r r2
+VADD v2 VALUES 4 0.2 0.2 0.2 0.2 e7
+VSIM v2 ELE e7 WITHSCORES
+VREM v2 e1
+VSIM v2 ELE e7 WITHSCORES
+EXPIRE v 100
+VADD v VALUES 4 0.3 0.3 0.3 0.3 e8
+TTL v
+
+# ---- MEMORY USAGE ----
+MEMORY USAGE v
+MEMORY USAGE f
+MEMORY USAGE b
+MEMORY USAGE m
+MEMORY USAGE r
+MEMORY USAGE v2
+
+# ---- RESP3 ----
+@resp 3
+VSIM v ELE e1 WITHSCORES
+VSIM v ELE e1 WITHATTRIBS
+VSIM v ELE e1 WITHSCORES WITHATTRIBS COUNT 2
+VSIM v ELE e1
+VSIM nokey ELE e1 WITHSCORES
+!mask vset-uid,max-level VINFO v
+VINFO nokey
+VISMEMBER v e1
+VADD v VALUES 4 0.3 0.3 0.3 0.31 e9
+VREM v e9
+VREM v e9
+VSETATTR v e2 "{}"
+VEMB v e2 RAW
+VEMB v e2
+VEMB v missing
+VGETATTR v e2
+VRANDMEMBER nokey
+@resp 2
+
+# ---- config ----
+CONFIG GET vset-force-single-threaded-execution
+CONFIG SET vset-force-single-threaded-execution yes
+CONFIG GET vset-force-single-threaded-execution
+VSIM v ELE e1 COUNT 2
+CONFIG SET vset-force-single-threaded-execution maybe
+CONFIG SET vset-force-single-threaded-execution no
+
+# ---- metadata ----
+COMMAND INFO VADD VSIM VRANGE VSETATTR
+VCARD
+vcard a b
+
+# ---- FP32 blobs ----
+EVAL "return redis.call('VADD', KEYS[1], 'FP32', struct.pack('<ffff', 1, 0.5, 0.25, 2), 'p1')" 1 fp
+EVAL "return redis.call('VADD', KEYS[1], 'FP32', struct.pack('<ffff', -1, 0.5, 3, 2), 'p2')" 1 fp
+EVAL "return redis.call('VADD', KEYS[1], 'NOQUANT', 'FP32', struct.pack('<ffff', 1, 0.5, 0.25, 2), 'p3')" 1 fp
+EVAL "return redis.call('VSIM', KEYS[1], 'FP32', struct.pack('<ffff', 1, 1, 1, 1), 'WITHSCORES')" 1 fp
+EVAL "return redis.call('VADD', KEYS[1], 'FP32', struct.pack('<fff', 1, 0.5, 0.25), 'p4')" 1 fp
+EVAL "return redis.pcall('VSIM', KEYS[1], 'FP32', struct.pack('<fff', 1, 0.5, 0.25))" 1 fp
+EVAL "return redis.call('VADD', KEYS[1], 'REDUCE', 2, 'FP32', struct.pack('<ffff', 1, 0.5, 0.25, 2), 'p1')" 1 fpr
+VEMB fp p1
+VEMB fpr p1
+EVAL "return struct.unpack('<ffff', redis.call('VEMB', KEYS[1], 'p1', 'RAW')[2])" 1 fp
+
+# ---- a larger set: brute-force TRUTH answers ----
+EVAL "for i = 1, 120 do local v = {} for k = 1, 8 do v[k] = (i * i * (k + 3) + k * 31) % 97 - 48 end redis.call('VADD', KEYS[1], 'NOQUANT', 'VALUES', 8, v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], 'e' .. i, 'SETATTR', '{\"i\":' .. i .. ',\"odd\":' .. (i % 2) .. '}') end return redis.call('VCARD', KEYS[1])" 1 big
+EVAL "for i = 1, 120 do local v = {} for k = 1, 8 do v[k] = (i * i * (k + 3) + k * 31) % 97 - 48 end redis.call('VADD', KEYS[1], 'VALUES', 8, v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], 'e' .. i) end return redis.call('VCARD', KEYS[1])" 1 bigq
+VSIM big ELE e1 COUNT 10 TRUTH WITHSCORES
+VSIM big ELE e77 COUNT 5 TRUTH WITHSCORES WITHATTRIBS
+VSIM big VALUES 8 1 2 3 4 5 6 7 8 COUNT 7 TRUTH WITHSCORES
+VSIM big ELE e3 COUNT 6 TRUTH FILTER ".odd == 1 and .i > 50" WITHSCORES
+VSIM big ELE e3 COUNT 6 TRUTH FILTER ".i in [5, 6, 7, 100]"
+VSIM bigq ELE e1 COUNT 10 TRUTH WITHSCORES
+VSIM bigq VALUES 8 1 2 3 4 5 6 7 8 COUNT 7 TRUTH WITHSCORES
+VSIM big ELE e1 COUNT 3 EPSILON 0.2 TRUTH WITHSCORES
+!mask vset-uid,max-level VINFO big
+MEMORY USAGE big
+MEMORY USAGE bigq
+EVAL "for i = 1, 120, 3 do redis.call('VREM', KEYS[1], 'e' .. i) end return redis.call('VCARD', KEYS[1])" 1 big
+VSIM big ELE e2 COUNT 10 TRUTH WITHSCORES
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d); return redis.call('VSIM', KEYS[2], 'ELE', 'e2', 'COUNT', 10, 'TRUTH', 'WITHSCORES')" 2 big big2
+EVAL "local a = redis.call('VSIM', KEYS[1], 'ELE', 'e2', 'COUNT', 1000, 'TRUTH') local n = 0 for _, e in ipairs(a) do n = n + 1 end return n" 1 big2
+!sort VRANGE big2 - + 1000
+
+# ---- keyspace events ----
+CONFIG SET notify-keyspace-events KEAnm
+@conn 2
+!send PSUBSCRIBE __key*__:ev*
+@recv
+@conn 1
+VADD evv VALUES 2 1 0 a
+VADD evv VALUES 2 1 0 a
+VADD evv VALUES 2 0 1 b SETATTR "{\"x\":1}"
+VSETATTR evv a "{\"y\":2}"
+VREM evv a
+VREM evv zz
+VSIM evv ELE b
+EXPIRE evv 100
+VREM evv b
+EXISTS evv
+VCARD evmiss
+VREM evmiss a
+VADD evw VALUES 2 1 0 a
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d); return 1" 2 evw evx
+DEL evw evx
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+
+# ---- dirty (one change per replicated command) ----
+SAVE
+VADD dy VALUES 2 1 0 a
+!info rdb_changes_since_last_save INFO persistence
+VADD dy VALUES 2 1 0 a
+VADD dy VALUES 2 1 1 a
+!info rdb_changes_since_last_save INFO persistence
+VSIM dy ELE a
+VREM dy zz
+VREM nosuch zz
+!info rdb_changes_since_last_save INFO persistence
+VSETATTR dy a "{}"
+VSETATTR dy zz "{}"
+VSETATTR dy a "bad json"
+!info rdb_changes_since_last_save INFO persistence
+VADD dy VALUES 2 0 1 b
+VREM dy a
+VREM dy b
+!info rdb_changes_since_last_save INFO persistence
+VADD dy VALUES 3 0 1 1 c
+!info rdb_changes_since_last_save INFO persistence
+
+# ---- error stats ----
+CONFIG RESETSTAT
+VADD dy VALUES 3 0 1 1 c
+VSIM nokey2 ELE a FILTER "(("
+VCARD
+!info errorstat_ERR,errorstat_WRONGTYPE INFO errorstats
+!info total_error_replies INFO stats
+!sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
+
+# ---- WATCH: opening a key for writing touches it ----
+WATCH wv
+@conn 2
+VADD wv VALUES 2 1 0 a
+@conn 1
+MULTI
+PING
+EXEC
+WATCH wv
+@conn 2
+VSIM wv ELE a
+VCARD wv
+VEMB wv a
+@conn 1
+MULTI
+PING
+EXEC
+WATCH wv
+@conn 2
+VREM wv zz
+@conn 1
+MULTI
+PING
+EXEC
+WATCH wv
+@conn 2
+VSETATTR wv zz "{}"
+@conn 1
+MULTI
+PING
+EXEC
+WATCH nosuchw
+@conn 2
+VREM nosuchw a
+@conn 1
+MULTI
+PING
+EXEC
+WATCH nosuchw
+@conn 2
+VADD nosuchw VALUES 2 1 0 a
+VREM nosuchw a
+@conn 1
+MULTI
+PING
+EXEC
+
+# ---- scripts and transactions ----
+EVAL "return redis.call('VADD', KEYS[1], 'VALUES', 2, 1, 0, 'a')" 1 sv
+EVAL "return redis.pcall('VADD', KEYS[1], 'VALUES', 3, 1, 0, 0, 'a')" 1 sv
+EVAL "return redis.call('VSIM', KEYS[1], 'ELE', 'a', 'WITHSCORES')" 1 sv
+EVAL "return redis.call('VINFO', KEYS[1])[1]" 1 sv
+EVAL "return redis.call('VEMB', KEYS[1], 'a')" 1 sv
+EVAL "return redis.call('VISMEMBER', KEYS[1], 'a')" 1 sv
+EVAL "return redis.pcall('VSIM', KEYS[1], 'ELE', 'zz')" 1 sv
+EVAL_RO "return redis.call('VCARD', KEYS[1])" 1 sv
+EVAL_RO "return redis.pcall('VADD', KEYS[1], 'VALUES', 2, 1, 0, 'b')" 1 sv
+MULTI
+VADD txv VALUES 2 1 0 a
+VSIM txv ELE a WITHSCORES
+VADD txv VALUES 3 1 0 0 b
+VCARD txv
+EXEC
+SET str x
+VADD str VALUES 2 1 0 a
+VSIM str ELE a
+VCARD str
+VREM str a
+
+# ---- command metadata ----
+COMMAND INFO VREM VCARD VEMB VLINKS VRANDMEMBER VISMEMBER VGETATTR VINFO VDIM
+COMMAND GETKEYS VADD k VALUES 2 1 0 a
+COMMAND GETKEYS VSIM k ELE a
+!sort COMMAND LIST FILTERBY MODULE vectorset
+!sort COMMAND LIST FILTERBY PATTERN v*
+COMMAND DOCS VADD
+COMMAND DOCS VSIM
+
+FLUSHALL

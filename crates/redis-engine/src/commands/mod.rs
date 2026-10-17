@@ -33,6 +33,7 @@ pub mod sketch;
 pub mod sort;
 pub mod streams;
 pub mod strings;
+pub mod vset;
 pub mod zsets;
 
 use crate::cx::Cx;
@@ -375,9 +376,16 @@ pub fn table() -> &'static Table {
             json::COMMANDS,
             bloom::COMMANDS,
             sketch::COMMANDS,
+            vset::COMMANDS,
         ] {
             for c in family {
-                assert!(by_name.insert(c.name, c).is_none(), "duplicate command {}", c.name);
+                // Modules may register uppercase names (VADD): lookups are by lowercase name.
+                let name: &'static str = if c.name.bytes().any(|b| b.is_ascii_uppercase()) {
+                    Box::leak(c.name.to_ascii_lowercase().into_boxed_str())
+                } else {
+                    c.name
+                };
+                assert!(by_name.insert(name, c).is_none(), "duplicate command {}", c.name);
                 all.push(c);
             }
         }
@@ -395,6 +403,25 @@ pub fn lookup(name: &[u8]) -> Option<&'static Command> {
     lower.copy_from_slice(name);
     lower.make_ascii_lowercase();
     table().by_name.get(std::str::from_utf8(lower).ok()?).copied()
+}
+
+/// The module a command belongs to (`MODULE LIST` names), `None` for core commands.
+pub fn module_of(c: &Command) -> Option<&'static str> {
+    if c.group != Group::Module {
+        return None;
+    }
+    let n = c.name.to_ascii_lowercase();
+    Some(if n.starts_with("json.") {
+        "ReJSON"
+    } else if ["bf.", "cf.", "cms.", "topk.", "tdigest."].iter().any(|p| n.starts_with(p)) {
+        "bf"
+    } else if n.starts_with("ts.") {
+        "timeseries"
+    } else if n.starts_with("ft.") {
+        "search"
+    } else {
+        crate::vset::TYPE_NAME
+    })
 }
 
 /// What CLIENT LIST shows as the command of `args` (Redis' `lastcmd`, set before checks):

@@ -432,6 +432,13 @@ impl<'c, S: Src> Dec<'c, S> {
                 return Err(e);
             }
             Value::Sketch(Box::new(v.ok_or(bad("module value its module can't load"))?))
+        } else if id >> 10 == crate::bloom::type_id(crate::vset::TYPE_NAME, 0) >> 10 {
+            let mut r = ModuleReader { dec: self, err: None };
+            let v = crate::vset::VSet::load(id & 1023, &mut r);
+            if let Some(e) = r.err {
+                return Err(e);
+            }
+            Value::VSet(Box::new(v.ok_or(bad("module value its module can't load"))?))
         } else {
             return Err(RdbError::Unsupported("module values"));
         };

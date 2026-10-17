@@ -501,10 +501,7 @@ pub fn command_list(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                     let cat = String::from_utf8_lossy(v).to_lowercase();
                     c.categories().contains(&cat.as_str())
                 }
-                Some((by, v)) if eq(by, "module") => {
-                    let _ = v;
-                    false
-                }
+                Some((by, v)) if eq(by, "module") => super::module_of(c).is_some_and(|m| m.as_bytes().eq_ignore_ascii_case(v)),
                 Some(_) => return Err(SYNTAX),
             };
             if keep {

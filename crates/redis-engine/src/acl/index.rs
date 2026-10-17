@@ -235,7 +235,9 @@ fn fallback_categories(c: &Command) -> u32 {
 /// read or write, and the module's own.
 fn module_categories(c: &Command) -> u32 {
     let module = [("json.", "json"), ("bf.", "bloom"), ("cf.", "cuckoo"), ("cms.", "cms"), ("topk.", "topk"), ("tdigest.", "tdigest")];
-    let mut m = module.iter().find(|(p, _)| c.name.starts_with(p)).map_or(0, |(_, n)| cat(n));
+    // A module that declares no categories (vector sets) has none.
+    let Some(&(_, name)) = module.iter().find(|(p, _)| c.name.starts_with(p)) else { return 0 };
+    let mut m = cat(name);
     if c.has(commands::WRITE) {
         m |= C_WRITE;
     }

@@ -168,6 +168,7 @@ fn contents(v: &Value) -> String {
         Value::Array(a) => return format!("{} {:?}", a.insert_idx(), a.iter().collect::<Vec<_>>()),
         Value::Json(j) => return crate::json::ser::compact(j.root()),
         Value::Sketch(x) => return format!("{x:?}"),
+        Value::VSet(v) => return format!("{:?}", v.dict.keys().collect::<Vec<_>>()),
     };
     parts.sort();
     format!("{} {}", v.encoding(), parts.join(","))
@@ -679,4 +680,41 @@ fn restore_command() {
     assert_eq!(restore(&mut e, &mut c, &[b"idle", b"0", &p, b"IDLETIME", b"1000"]), Reply::Ok);
     let Reply::Int(idle) = run(&mut e, &mut c, "OBJECT IDLETIME idle") else { panic!() };
     assert!((1000..1003).contains(&idle), "{idle}");
+}
+
+/// A vector set DUMPed by Redis 8.10 (three Q8 elements, one with attributes, all at level 0):
+/// loads with its links and vectors, answers like Redis did, and saves back the same bytes once
+/// the list order (reversed by a load) is reversed again, links sorted by id as a load leaves
+/// them.
+#[test]
+fn vector_set_payload_from_redis() {
+    const P: &str = "0781bde72da2bb1eb40002030203025001020205016305000503c1207f02080203028001000000020202200202020102813f8b9d850000000102813f5f74823f6aa0bd050162050005030e7f2a02080202028001000000020202200201020302813f10b03d0000000102813f71865b3f74355c05016105077b2278223a317d05037f3f2002080201028001000000020202200202020302813f8b9d850000000102813f5f74823f92a476000f0081e62de6bd62de68";
+    let p = unhex(P);
+    let (mut e, mut c) = engine();
+    assert_eq!(call(&mut e, &mut c, &[b"RESTORE", b"v", b"0", &p]), Reply::Ok);
+    assert_eq!(run(&mut e, &mut c, "VCARD v"), Reply::Int(3));
+    assert_eq!(run(&mut e, &mut c, "VGETATTR v a"), Reply::bulk("{\"x\":1}"));
+    assert_eq!(
+        run(&mut e, &mut c, "VSIM v ELE a WITHSCORES"),
+        Reply::Array(vec![
+            Reply::bulk("a"),
+            Reply::Double(0.999440977233462),
+            Reply::bulk("b"),
+            Reply::Double(0.7842775285243988),
+            Reply::bulk("c"),
+            Reply::Double(0.45457690954208374),
+        ])
+    );
+    let Reply::Array(raw) = run(&mut e, &mut c, "VEMB v c RAW") else { panic!() };
+    assert_eq!(raw[2], Reply::Double(0.9165151715278625));
+    assert_eq!(raw[3], Reply::Double(0.8728715181350708));
+    let Reply::Array(links) = run(&mut e, &mut c, "VLINKS v a") else { panic!() };
+    assert_eq!(links, vec![Reply::Array(vec![Reply::bulk("b"), Reply::bulk("c")])]);
+    let Value::VSet(v) = restore(&p, &cfg()).unwrap() else { panic!() };
+    let again = restore(&dump(&Value::VSet(v), 0), &cfg()).unwrap();
+    // Element c's links were saved as ids [2, 1].
+    let mut sorted = p[..p.len() - 10].to_vec();
+    let at = sorted.windows(4).position(|w| w == [2, 2, 2, 1]).unwrap();
+    sorted[at..at + 4].copy_from_slice(&[2, 1, 2, 2]);
+    assert_eq!(dump(&again, 0), payload(&sorted));
 }

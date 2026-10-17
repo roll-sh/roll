@@ -58,6 +58,9 @@ MGET k1 nokey k1
 EXISTS k1
 INCR k1
 NOSUCHCOMMAND
+GET
+CONFIG GET
+XINFO
 PUBLISH ch m
 !sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
 !info total_commands_processed,keyspace_hits,keyspace_misses,total_error_replies,unexpected_error_replies,expired_keys,expired_keys_active,evicted_keys,pubsub_channels,pubsub_patterns,pubsubshard_channels,tracking_total_keys,tracking_total_items,tracking_total_prefixes,migrate_cached_sockets,dump_payload_sanitizations,rejected_connections,sync_full,sync_partial_ok,sync_partial_err,total_forks,evicted_clients,slave_expires_tracked_keys INFO stats
