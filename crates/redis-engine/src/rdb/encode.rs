@@ -91,7 +91,7 @@ pub(crate) fn type_of(v: &Value, dump: bool) -> u8 {
         Value::Hash(_) => ty::HASH,
         Value::Stream(_) => ty::STREAM_LISTPACKS_5,
         Value::Array(_) => ty::ARRAY,
-        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) => ty::MODULE_2,
+        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) | Value::Sug(_) => ty::MODULE_2,
     }
 }
 
@@ -181,6 +181,11 @@ impl Encoder {
                 self.len(crate::bloom::type_id(crate::ts::TYPE_NAME, crate::ts::ENCVER as u64));
                 let persist = !self.dump;
                 crate::ts::rdb::save(t, self, persist);
+                self.len(super::MODULE_OPCODE_EOF);
+            }
+            Value::Sug(t) => {
+                self.len(crate::bloom::type_id(crate::search::trie::TYPE_NAME, crate::search::trie::TRIE_ENCVER_CURRENT as u64));
+                t.rdb_save(&mut crate::search::trie::ModuleSink(self));
                 self.len(super::MODULE_OPCODE_EOF);
             }
         }

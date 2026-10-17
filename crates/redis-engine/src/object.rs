@@ -293,6 +293,7 @@ pub fn usage(e: &Entry, key_len: usize) -> usize {
         Value::VSet(x) => jemalloc_size(header(e, key_len)) + x.mem_usage() as usize,
         // The series' share of the label index is added by the caller, which has the index.
         Value::Ts(x) => jemalloc_size(header(e, key_len)) + x.mem_usage(0),
+        Value::Sug(x) => jemalloc_size(header(e, key_len)) + x.mem_usage(),
         v => header(e, key_len) + v.alloc_size(),
     }
 }

@@ -15,14 +15,14 @@ EVAL "return redis.call('backup', 'start')" 0
 
 # ---- start, seal ----
 BACKUP START
-# (Generous waits: the reference's snapshot is slow when the host is busy.)
-@sleep 2500
+# (The reference's snapshot is slow when the host is busy: wait for the state, not a time.)
+@until 20000 incrementing BACKUP STATUS
 !mask start_time,end_time BACKUP STATUS
 !info aof_enabled,aof_rewrite_in_progress,backup_in_progress INFO persistence
 BACKUP START
 BACKUP SEAL
 BGREWRITEAOF
-@sleep 3000
+@until 20000 aof_rewrite_in_progress:0\r\naof_rewrite_scheduled:0 INFO persistence
 !mask start_time,end_time BACKUP STATUS
 EVAL "local r = redis.call('backup', 'list') for i, v in ipairs(r) do r[i] = (string.gsub(v, '%.%d+%.', '.N.')) end return r" 0
 SET a 1
@@ -36,7 +36,7 @@ BACKUP SEAL
 BACKUP CLEANUP
 !mask start_time,end_time BACKUP STATUS
 BACKUP LIST
-@sleep 1500
+@until 20000 aof_rewrite_in_progress:0\r\naof_rewrite_scheduled:0 INFO persistence
 
 # ---- abort ----
 BACKUP START
@@ -55,14 +55,14 @@ CONFIG SET appendonly no
 !mask start_time,end_time BACKUP STATUS
 !info aof_enabled,backup_in_progress INFO persistence
 BACKUP CLEANUP
-@sleep 1500
+@until 20000 aof_rewrite_in_progress:0\r\naof_rewrite_scheduled:0 INFO persistence
 
 # ---- START inside a transaction waits for the cron ----
 MULTI
 BACKUP START
 !mask start_time,end_time BACKUP STATUS
 EXEC
-@sleep 1500
+@until 20000 incrementing BACKUP STATUS
 !mask start_time,end_time BACKUP STATUS
 EVAL "local r = redis.call('backup', 'list') for i, v in ipairs(r) do r[i] = (string.gsub(v, '%.%d+%.', '.N.')) end return r" 0
 BACKUP ABORT

@@ -62,7 +62,7 @@ pub fn del(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn exists(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let mut n = 0;
     for k in &args[1..] {
-        if cx.exists(k) {
+        if cx.get_notouch(k).is_some() {
             n += 1;
         }
     }
@@ -70,7 +70,7 @@ pub fn exists(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 pub fn type_(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    Ok(Reply::status(cx.peek(&args[1]).map_or("none", |e| e.value.kind().name())))
+    Ok(Reply::status(cx.get_notouch(&args[1]).map_or("none", |e| e.value.kind().name())))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -162,8 +162,8 @@ pub fn pexpireat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 fn ttl_generic(cx: &mut Cx, key: &[u8], ms: bool) -> CmdResult {
-    // TTL touches the key like any read (lookupKeyReadWithFlags with LOOKUP_NOTOUCH).
-    let Some(e) = cx.peek(key) else { return Ok(Reply::Int(-2)) };
+    // lookupKeyReadWithFlags(LOOKUP_NOTOUCH): counted, the access time left alone.
+    let Some(e) = cx.get_notouch(key) else { return Ok(Reply::Int(-2)) };
     if e.expire == 0 {
         return Ok(Reply::Int(-1));
     }
@@ -179,7 +179,7 @@ pub fn pttl(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 fn expiretime_generic(cx: &mut Cx, key: &[u8], ms: bool) -> CmdResult {
-    let Some(e) = cx.peek(key) else { return Ok(Reply::Int(-2)) };
+    let Some(e) = cx.get_notouch(key) else { return Ok(Reply::Int(-2)) };
     if e.expire == 0 {
         return Ok(Reply::Int(-1));
     }
@@ -424,7 +424,8 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if from == to && src == dst {
         return Err(Error::new("ERR source and destination objects are the same"));
     }
-    let Some(entry) = cx.peek(src).cloned() else { return Ok(Reply::Int(0)) };
+    // lookupKeyRead.
+    let Some(entry) = cx.get_entry(src).cloned() else { return Ok(Reply::Int(0)) };
     let now = cx.eng.expiry_clock(cx.now);
     let exists = cx.eng.dbs[to].keys.get(dst).is_some_and(|e| !e.expired(now));
     if exists && !replace {
@@ -436,7 +437,7 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         cx.eng.sig.touch(to as u16, dst);
     }
     // Module types without a copy callback.
-    if matches!(entry.value, crate::value::Value::Sketch(_) | crate::value::Value::VSet(_)) {
+    if matches!(entry.value, crate::value::Value::Sketch(_) | crate::value::Value::VSet(_) | crate::value::Value::Sug(_)) {
         return Err(Error::new("ERR not supported for this module key"));
     }
     let mut entry = entry;
@@ -578,41 +579,37 @@ fn overwritten(cx: &mut Cx, db: usize, key: &[u8], old: crate::value::Kind, new:
 }
 
 pub fn object_encoding(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    Ok(match cx.peek(&args[2]) {
+    Ok(match cx.get_object(&args[2]) {
         Some(e) => Reply::bulk(e.encoding(args[2].len())),
         None => Reply::Nil,
     })
 }
 
 pub fn object_freq(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let now = cx.now;
+    if cx.get_object(&args[2]).is_none() {
+        return Ok(Reply::Nil);
+    }
     if !cx.cfg().maxmemory_policy.is_lfu() {
         return Err(Error::new("ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."));
     }
-    let now = cx.now;
-    let Some(e) = cx.peek(&args[2]).cloned() else { return Ok(Reply::Nil) };
-    Ok(Reply::Int(cx.eng.lfu_counter(&e, now) as i64))
+    let e = cx.eng.dbs[cx.client.db].keys.get(&args[2]).expect("looked up");
+    Ok(Reply::Int(cx.eng.lfu_counter(e, now) as i64))
 }
 
 pub fn object_idletime(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let now = cx.now;
+    let Some(idle) = cx.get_object(&args[2]).map(|e| Engine::idle_secs(e, now)) else { return Ok(Reply::Nil) };
     if cx.cfg().maxmemory_policy.is_lfu() {
         return Err(Error::new("ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."));
     }
-    let now = cx.now;
-    Ok(match cx.peek(&args[2]) {
-        Some(e) => Reply::Int(Engine::idle_secs(e, now) as i64),
-        None => Reply::Nil,
-    })
+    Ok(Reply::Int(idle as i64))
 }
 
 pub fn object_refcount(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    Ok(match cx.peek(&args[2]) {
-        // Small integers are shared objects in Redis (refcount INT_MAX).
-        Some(e) => match &e.value {
-            crate::value::Value::Str(s) if s.len() <= 4 && crate::util::parse_i64(s).is_some_and(|v| (0..10000).contains(&v)) => {
-                Reply::Int(i32::MAX as i64)
-            }
-            _ => Reply::Int(1),
-        },
+    // A key's value is its kvobj (the key embedded), never a shared object.
+    Ok(match cx.get_object(&args[2]) {
+        Some(_) => Reply::Int(1),
         None => Reply::Nil,
     })
 }

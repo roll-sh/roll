@@ -144,3 +144,72 @@ DBSIZE
 FLUSHDB ASYNC
 FLUSHDB FOO
 FLUSHALL SYNC
+
+# ---- read lookups' statistics: NOTOUCH (EXISTS, TYPE, TTL…) and OBJECT (NOTOUCH|NONOTIFY) still count hits and misses ----
+FLUSHALL
+CONFIG SET notify-keyspace-events KEm
+@conn 7
+PSUBSCRIBE __key*@0__:*
+@conn 1
+SET int 1
+OBJECT REFCOUNT int
+CONFIG RESETSTAT
+SET a 1
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+TYPE a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+TYPE nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT ENCODING a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT ENCODING nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+TTL a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+PTTL nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+EXPIRETIME a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+COPY a b
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT FREQ a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT IDLETIME a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT IDLETIME nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT REFCOUNT a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+EXISTS a nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+TOUCH a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+DUMP a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+STRLEN a
+!info keyspace_hits,keyspace_misses INFO stats
+@conn 7
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+FLUSHALL

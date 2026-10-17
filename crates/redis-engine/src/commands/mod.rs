@@ -29,6 +29,7 @@ pub mod pubsub;
 pub mod scripting;
 pub mod ft;
 pub mod ft_admin;
+pub mod ft_sug;
 pub mod search;
 pub mod server;
 pub mod sets;

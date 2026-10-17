@@ -170,6 +170,7 @@ fn contents(v: &Value) -> String {
         Value::Sketch(x) => return format!("{x:?}"),
         Value::VSet(v) => return format!("{:?}", v.dict.keys().collect::<Vec<_>>()),
         Value::Ts(t) => return format!("{:?}", crate::ts::iter::Samples::new(t, &crate::ts::iter::Range::span(0, u64::MAX), false, false, None).collect::<Vec<_>>()),
+        Value::Sug(t) => return format!("{t:?}"),
     };
     parts.sort();
     format!("{} {}", v.encoding(), parts.join(","))
@@ -718,4 +719,23 @@ fn vector_set_payload_from_redis() {
     let at = sorted.windows(4).position(|w| w == [2, 2, 2, 1]).unwrap();
     sorted[at..at + 4].copy_from_slice(&[2, 1, 2, 2]);
     assert_eq!(dump(&again, 0), payload(&sorted));
+}
+
+/// A suggestion dictionary (FT.SUGADD b 1, ba 2.5, 日本 3) as Redis 8.10's RediSearch dumps it:
+/// trietype0 encver 2, the entries in score order, each with its empty payload and numDocs.
+#[test]
+fn sug_trie_dump_matches_redis_bytes() {
+    let redis: &[u8] = &[
+        7, 129, 182, 184, 158, 183, 42, 94, 208, 2, 2, 3, 5, 7, 230, 151, 165, 230, 156, 172, 0, 4, 0, 0, 0, 0, 0, 0, 8, 64, 5, 1, 0, 2, 0, 5, 2, 98, 0, 4, 0,
+        0, 0, 0, 0, 0, 240, 63, 5, 1, 0, 2, 0, 5, 3, 98, 97, 0, 4, 0, 0, 0, 0, 0, 0, 4, 64, 5, 1, 0, 2, 0, 0, 15, 0, 150, 192, 25, 12, 119, 91, 158, 206,
+    ];
+    let (mut e, mut c) = engine();
+    for line in ["FT.SUGADD s b 1", "FT.SUGADD s ba 2.5", "FT.SUGADD s 日本 3"] {
+        run(&mut e, &mut c, line);
+    }
+    assert_eq!(run(&mut e, &mut c, "DUMP s"), Reply::bulk(redis));
+    let v = restore(redis, &cfg()).unwrap();
+    let Value::Sug(t) = &v else { panic!("not a trie") };
+    assert_eq!(t.size(), 3);
+    assert_eq!(dump(&v, 0), redis);
 }

@@ -189,6 +189,12 @@ impl KeyMut<'_> {
             _ => unreachable!("type checked by lookup"),
         }
     }
+    pub fn sug(&mut self) -> &mut crate::search::trie::Trie {
+        match &mut self.entry.value {
+            Value::Sug(x) => x,
+            _ => unreachable!("type checked by lookup"),
+        }
+    }
 }
 
 impl Drop for KeyMut<'_> {
@@ -247,9 +253,26 @@ impl<'a> Cx<'a> {
     }
 
     pub fn get_entry(&mut self, key: &[u8]) -> Option<&Entry> {
+        self.lookup(key, true, true)
+    }
+
+    /// `lookupKeyReadWithFlags(LOOKUP_NOTOUCH)` (EXISTS, TYPE, TTL…): counted, no access time.
+    pub fn get_notouch(&mut self, key: &[u8]) -> Option<&Entry> {
+        self.lookup(key, false, true)
+    }
+
+    /// `objectCommandLookup` (`LOOKUP_NOTOUCH | LOOKUP_NONOTIFY`): counted, no access time, no
+    /// `keymiss`.
+    pub fn get_object(&mut self, key: &[u8]) -> Option<&Entry> {
+        self.lookup(key, false, false)
+    }
+
+    /// `lookupKey` for reading: lazy expiry, then the hit/miss stats (read lookups only), the
+    /// access time unless `NOTOUCH`, and `keymiss` unless `NONOTIFY`.
+    fn lookup(&mut self, key: &[u8], touch: bool, notify_miss: bool) -> Option<&Entry> {
         let expired = self.expire_check(key);
         let now = self.now;
-        let no_touch = self.client.no_touch;
+        let no_touch = self.client.no_touch || !touch;
         let read = self.read_stats;
         let Engine { dbs, cfg, rng, stats, sig, .. } = &mut *self.eng;
         let found = if expired { None } else { dbs[self.client.db].keys.get_mut(key) };
@@ -266,7 +289,9 @@ impl<'a> Cx<'a> {
             None => {
                 if read {
                     stats.keyspace_misses += 1;
-                    sig.notify(notify::KEY_MISS, "keymiss", self.client.db as u16, key);
+                    if notify_miss {
+                        sig.notify(notify::KEY_MISS, "keymiss", self.client.db as u16, key);
+                    }
                 }
                 None
             }

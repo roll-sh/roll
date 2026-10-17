@@ -459,6 +459,13 @@ impl<'c, S: Src> Dec<'c, S> {
                 return Err(e);
             }
             Value::Ts(Box::new(v.ok_or(bad("module value its module can't load"))?))
+        } else if id >> 10 == crate::bloom::type_id(crate::search::trie::TYPE_NAME, 0) >> 10 {
+            let mut r = ModuleReader { dec: self, err: None };
+            let v = crate::search::trie::Trie::rdb_load(&mut crate::search::trie::ModuleSource(&mut r), (id & 1023) as i32);
+            if let Some(e) = r.err {
+                return Err(e);
+            }
+            Value::Sug(Box::new(v.ok_or(bad("module value its module can't load"))?))
         } else {
             return Err(RdbError::Unsupported("module values"));
         };

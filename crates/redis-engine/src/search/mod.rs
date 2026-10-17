@@ -15,11 +15,13 @@ pub mod index;
 pub mod info;
 pub mod invidx;
 pub mod jsonpath;
+pub mod levenshtein;
 pub mod numtree;
 pub mod phonetic;
 pub mod rsdict;
 pub mod spec;
 pub mod tokenize;
+pub mod trie;
 pub mod triemap;
 pub mod vector;
 
