@@ -9,6 +9,7 @@
 //! durable log and replicas. Holding the engine lock while publishing keeps the stream in
 //! execution order.
 
+use crate::repl::Backlog;
 use bytes::{Bytes, BytesMut};
 use parking_lot::{Mutex, MutexGuard};
 use redis_engine::{Config, Effect, Engine, Hub};
@@ -16,6 +17,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+use tokio::sync::watch;
 
 pub struct Shard {
     pub engine: Mutex<Engine>,
@@ -52,6 +54,35 @@ pub struct Database {
     pub net_out: AtomicU64,
     /// Set when the database is being unloaded or moved: new commands get `LOADING`/`TRYAGAIN`.
     pub closed: AtomicBool,
+    /// Durable (in object storage) stream offset, when the database is persisted.
+    pub durability: Mutex<Option<Durability>>,
+    /// Replies to writes wait until they are durable (zero acknowledged-write loss).
+    pub sync_writes: AtomicBool,
+    /// Replication backlog, when this database is a primary with replicas.
+    pub backlog: Mutex<Option<Arc<Backlog>>>,
+}
+
+#[derive(Clone)]
+pub struct Durability {
+    pub durable: watch::Receiver<u64>,
+    /// Ask for an early flush.
+    pub kick: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Durability {
+    /// Wait until `offset` is durable, up to `timeout` (`None`: forever). Returns whether it is.
+    pub async fn wait(&self, offset: u64, timeout: Option<Duration>) -> bool {
+        let mut rx = self.durable.clone();
+        if *rx.borrow() >= offset {
+            return true;
+        }
+        (self.kick)();
+        let fut = rx.wait_for(|d| *d >= offset);
+        match timeout {
+            Some(t) => matches!(tokio::time::timeout(t, fut).await, Ok(Ok(_))),
+            None => fut.await.is_ok(),
+        }
+    }
 }
 
 /// Exclusive access to a shard's engine. Publishes the effects of whatever ran when dropped.
@@ -103,6 +134,9 @@ impl Database {
             net_in: AtomicU64::new(0),
             net_out: AtomicU64::new(0),
             closed: AtomicBool::new(false),
+            durability: Mutex::new(None),
+            sync_writes: AtomicBool::new(false),
+            backlog: Mutex::new(None),
         })
     }
 

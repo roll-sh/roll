@@ -234,7 +234,16 @@ impl Shipper {
         manifest.after_seq = self.last_seq();
         // Record ownership right away so a crash before the first lazy manifest is recoverable.
         self.objects.put(&manifest_key(&db.id), Bytes::from(serde_json::to_vec(&manifest)?)).await?;
-        let (durable, _) = watch::channel(offset);
+        let (durable, rx) = watch::channel(offset);
+        let me = Arc::downgrade(self);
+        *db.durability.lock() = Some(crate::database::Durability {
+            durable: rx,
+            kick: Arc::new(move || {
+                if let Some(s) = me.upgrade() {
+                    s.kick();
+                }
+            }),
+        });
         self.dbs.lock().insert(db.id.clone(), DbLog { manifest, durable, dirty: false, feed_id });
         Ok(())
     }
@@ -245,6 +254,7 @@ impl Shipper {
         let log = self.dbs.lock().remove(&db.id);
         let Some(log) = log else { anyhow::bail!("database {} is not attached", db.id) };
         db.unsubscribe(log.feed_id);
+        *db.durability.lock() = None;
         let mut m = log.manifest;
         m.after_seq = self.last_seq();
         self.objects.put(&manifest_key(&db.id), Bytes::from(serde_json::to_vec(&m)?)).await?;

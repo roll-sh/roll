@@ -8,6 +8,7 @@ pub mod exec;
 pub mod http;
 pub mod node;
 pub mod persist;
+pub mod repl;
 
 pub use database::Database;
 pub use directory::{Directory, Session, Single};

@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -226,6 +227,7 @@ impl Conn<'_> {
                 continue;
             };
             let mut n = 0u64;
+            let before = db.repl_offset();
             {
                 let mut eng = db.engine(0);
                 while let Some(args) = self.pending.front() {
@@ -251,6 +253,15 @@ impl Conn<'_> {
                 }
             }
             db.touch(n);
+            if db.sync_writes.load(Ordering::Relaxed) {
+                let after = db.repl_offset();
+                let durability = db.durability.lock().clone();
+                if after > before
+                    && let Some(d) = durability
+                {
+                    d.wait(after, None).await;
+                }
+            }
         }
     }
 
@@ -309,15 +320,79 @@ impl Conn<'_> {
             return Some(Reply::Ok);
         }
         if eq(name, "wait") {
-            return Some(Reply::Int(0));
+            return Some(self.wait(&args).await);
         }
         if eq(name, "waitaof") {
-            return Some(Reply::Array(vec![Reply::Int(1), Reply::Int(0)]));
+            return Some(self.waitaof(&args).await);
         }
         if eq(name, "save") || eq(name, "bgsave") || eq(name, "bgrewriteaof") {
             return Some(Reply::status(if eq(name, "save") { "OK" } else { "Background saving started" }));
         }
         None
+    }
+
+    /// `WAIT numreplicas timeout`: replicas that acknowledged everything written so far.
+    async fn wait(&mut self, args: &[Bytes]) -> Reply {
+        if args.len() != 3 {
+            return Reply::error("ERR wrong number of arguments for 'wait' command");
+        }
+        let Some(n) = parse_int(&args[1]) else { return Reply::error("ERR value is not an integer or out of range") };
+        let timeout = match parse_timeout(&args[2]) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let db = self.db().cloned().unwrap();
+        let offset = db.repl_offset();
+        let backlog = db.backlog.lock().clone();
+        match backlog {
+            Some(b) => Reply::Int(crate::repl::wait_acks(&b, offset, n.max(0) as usize, timeout).await as i64),
+            None if n <= 0 => Reply::Int(0),
+            None => {
+                // No replicas: wait out the timeout like Redis (0 blocks forever).
+                if timeout.is_zero() {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep(timeout).await;
+                Reply::Int(0)
+            }
+        }
+    }
+
+    /// `WAITAOF numlocal numreplicas timeout`. "Local" durability is the object-storage log.
+    async fn waitaof(&mut self, args: &[Bytes]) -> Reply {
+        if args.len() != 4 {
+            return Reply::error("ERR wrong number of arguments for 'waitaof' command");
+        }
+        let (Some(local), Some(replicas)) = (parse_int(&args[1]), parse_int(&args[2])) else {
+            return Reply::error("ERR value is not an integer or out of range");
+        };
+        let timeout = match parse_timeout(&args[3]) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let db = self.db().cloned().unwrap();
+        let durability = db.durability.lock().clone();
+        if local > 0 && durability.is_none() {
+            return Reply::error("ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled.");
+        }
+        let offset = db.repl_offset();
+        let limit = (!timeout.is_zero()).then_some(timeout);
+        let started = tokio::time::Instant::now();
+        let local_ok = match &durability {
+            Some(d) if local > 0 => d.wait(offset, limit).await,
+            Some(d) => *d.durable.borrow() >= offset,
+            None => false,
+        };
+        let backlog = db.backlog.lock().clone();
+        let acked = match backlog {
+            Some(b) if replicas > 0 => {
+                let left = if timeout.is_zero() { Duration::ZERO } else { timeout.saturating_sub(started.elapsed()).max(Duration::from_millis(1)) };
+                crate::repl::wait_acks(&b, offset, replicas as usize, left).await
+            }
+            Some(b) => b.acked_count(offset),
+            None => 0,
+        };
+        Reply::Array(vec![Reply::Int(local_ok as i64), Reply::Int(acked as i64)])
     }
 
     async fn auth(&mut self, args: &[Bytes]) -> Reply {
@@ -352,6 +427,19 @@ impl Conn<'_> {
                 shard.engine.lock().remove_client(self.client.id);
             }
         }
+    }
+}
+
+fn parse_int(b: &[u8]) -> Option<i64> {
+    redis_engine::util::parse_i64(b)
+}
+
+/// Milliseconds, like Redis' `getTimeoutFromObjectOrReply` with `UNIT_MILLISECONDS`.
+fn parse_timeout(b: &[u8]) -> Result<Duration, Reply> {
+    match parse_int(b) {
+        None => Err(Reply::error("ERR timeout is not an integer or out of range")),
+        Some(t) if t < 0 => Err(Reply::error("ERR timeout is negative")),
+        Some(t) => Ok(Duration::from_millis(t as u64)),
     }
 }
 

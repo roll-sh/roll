@@ -118,3 +118,23 @@ async fn idle_databases_cost_nothing() {
     shipper.flush().await.unwrap();
     assert_eq!(shipper.objects_put.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
+
+#[tokio::test]
+async fn sync_writes_reply_after_durable() {
+    let o = objects("sync");
+    let shipper = Shipper::start("n1", o.clone(), cfg()).await.unwrap();
+    let db = Database::new("s", Config::default(), 1);
+    shipper.attach(&db, Default::default()).await.unwrap();
+    db.sync_writes.store(true, std::sync::atomic::Ordering::Relaxed);
+    let addr = redis_server::start_single(db.clone(), None).await.unwrap();
+    let mut c = redis_server::client::RespClient::connect(addr).await.unwrap();
+    // The flush interval is an hour: the write's reply forces an early flush.
+    let r = tokio::time::timeout(Duration::from_secs(5), c.cmd(["SET", "k", "v"])).await.unwrap().unwrap();
+    assert_eq!(r, Reply::Ok);
+    assert_eq!(*shipper.durable("s").unwrap().borrow(), db.repl_offset());
+    // Reads don't wait.
+    assert_eq!(c.cmd(["GET", "k"]).await.unwrap(), Reply::bulk(b"v"));
+    // WAITAOF reports the object-storage log as local durability.
+    assert_eq!(c.cmd(["WAITAOF", "1", "0", "1000"]).await.unwrap(), Reply::Array(vec![Reply::Int(1), Reply::Int(0)]));
+    assert_eq!(shipper.objects_put.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
