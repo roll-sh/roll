@@ -291,6 +291,7 @@ impl Engine {
         let p = &mut self.persist;
         (p.aof_rewrites, p.total_forks, p.latest_fork_us) = (0, 0, 0);
         self.hub.obuf_disconnections.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.hub.qbuf_disconnections.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -511,12 +512,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
         let sc = &eng.scripting;
         let (vm_eval, vm_functions) = (sc.memory() as u64, sc.functions_memory() as u64);
         let (scripts_eval, functions) = (sc.scripts_memory() as u64, sc.libraries_memory() as u64);
-        let clients_mem: u64 = eng
-            .clients
-            .by_id
-            .values()
-            .map(|e| e.stats.qbuf_cap.load(Ordering::Relaxed) + e.stats.obuf.load(Ordering::Relaxed) + 16 * 1024 + 1024)
-            .sum();
+        let clients_mem = eng.clients_memory();
         let startup = eng.startup_memory as u64;
         let keys_overhead: u64 = eng.dbs.iter().map(|d| (d.len() * crate::value::KEY_OVERHEAD + d.keys.table_bytes() + d.volatile.table_bytes()) as u64).sum();
         let overhead = (startup + clients_mem + eng.overhead as u64 + keys_overhead + scripts_eval + functions).min(used.max(startup));
@@ -614,19 +610,20 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
         let kbps = |x: &Metric| x.get() as f64 / 1024.0;
         let acl = eng.acl.read().log.lock().denied;
         let obuf_disconnections = eng.hub.obuf_disconnections.load(Ordering::Relaxed);
+        let qbuf_disconnections = eng.hub.qbuf_disconnections.load(Ordering::Relaxed);
         let _ = write!(
             s,
             "total_connections_received:{}\r\ntotal_commands_processed:{}\r\ninstantaneous_ops_per_sec:{}\r\ntotal_net_input_bytes:{}\r\ntotal_net_output_bytes:{}\r\n\
              total_net_repl_input_bytes:{}\r\ntotal_net_repl_output_bytes:{}\r\ninstantaneous_input_kbps:{:.2}\r\ninstantaneous_output_kbps:{:.2}\r\n\
              instantaneous_input_repl_kbps:{:.2}\r\ninstantaneous_output_repl_kbps:{:.2}\r\nrejected_connections:{}\r\nsync_full:{}\r\nsync_partial_ok:{}\r\nsync_partial_err:{}\r\n\
              expired_subkeys:{}\r\nexpired_subkeys_active:{}\r\nexpired_keys:{}\r\nexpired_keys_active:{}\r\nexpired_stale_perc:{:.2}\r\nexpired_time_cap_reached_count:{}\r\n\
-             expire_cycle_cpu_milliseconds:{}\r\nevicted_keys:{}\r\nevicted_clients:0\r\nevicted_scripts:{}\r\ntotal_eviction_exceeded_time:{}\r\ncurrent_eviction_exceeded_time:0\r\n\
+             expire_cycle_cpu_milliseconds:{}\r\nevicted_keys:{}\r\nevicted_clients:{}\r\nevicted_scripts:{}\r\ntotal_eviction_exceeded_time:{}\r\ncurrent_eviction_exceeded_time:0\r\n\
              keyspace_hits:{}\r\nkeyspace_misses:{}\r\npubsub_channels:{}\r\npubsub_patterns:{}\r\npubsubshard_channels:{}\r\nlatest_fork_usec:{}\r\ntotal_forks:{}\r\n\
              migrate_cached_sockets:{}\r\nslave_expires_tracked_keys:0\r\nactive_defrag_hits:0\r\nactive_defrag_misses:0\r\nactive_defrag_key_hits:0\r\nactive_defrag_key_misses:0\r\n\
              total_active_defrag_time:0\r\ncurrent_active_defrag_time:0\r\ntracking_total_keys:{}\r\ntracking_total_items:{}\r\ntracking_total_prefixes:{}\r\n\
              unexpected_error_replies:{}\r\ntotal_error_replies:{}\r\ndump_payload_sanitizations:0\r\ntotal_reads_processed:{}\r\ntotal_writes_processed:{}\r\n\
              io_threaded_reads_processed:0\r\nio_threaded_writes_processed:0\r\nio_threaded_total_prefetch_batches:0\r\nio_threaded_total_prefetch_entries:0\r\n\
-             client_query_buffer_limit_disconnections:0\r\nclient_output_buffer_limit_disconnections:{obuf_disconnections}\r\nreply_buffer_shrinks:0\r\nreply_buffer_expands:0\r\n\
+             client_query_buffer_limit_disconnections:{qbuf_disconnections}\r\nclient_output_buffer_limit_disconnections:{obuf_disconnections}\r\nreply_buffer_shrinks:{}\r\nreply_buffer_expands:{}\r\n\
              eventloop_cycles:{}\r\neventloop_duration_sum:{}\r\neventloop_duration_cmd_sum:{}\r\ninstantaneous_eventloop_cycles_per_sec:{}\r\ninstantaneous_eventloop_duration_usec:{}\r\n\
              eventloop_cycles_with_clients_processing:{}\r\ntotal_client_processing_events:{}\r\navg_pipeline_length_sum:{}\r\navg_pipeline_length_cnt:{}\r\navg_pipeline_length:{:.2}\r\n\
              slowlog_commands_count:{}\r\nslowlog_commands_time_ms_max:{:.2}\r\nslowlog_commands_time_ms_sum:{:.2}\r\nhash_templates:0\r\nhash_template_keys:0\r\n\
@@ -654,6 +651,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
             st.expired_time_cap_reached,
             st.expire_cycle_us / 1000,
             st.evicted_keys,
+            st.evicted_clients,
             st.evicted_scripts,
             st.total_eviction_exceeded_time_ms,
             st.keyspace_hits,
@@ -671,6 +669,8 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
             st.error_replies,
             counters.reads,
             counters.writes,
+            st.reply_buffer_shrinks,
+            st.reply_buffer_expands,
             m.cycles,
             m.duration_us,
             m.cmd_us,

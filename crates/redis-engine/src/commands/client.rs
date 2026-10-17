@@ -136,6 +136,68 @@ impl<'a> Derived<'a> {
     }
 }
 
+/// A client's memory as Redis accounts it (`getClientMemoryUsage`).
+pub struct Mem {
+    pub qbuf: u64,
+    pub qbuf_free: u64,
+    pub argv_mem: u64,
+    pub total: u64,
+}
+
+/// `getClientMemoryUsage`: the query buffer (Redis' shared 16KB one while a command runs from
+/// it), the client struct, the static reply buffer, argv, MULTI state, watched keys, pub/sub
+/// and tracking prefix dictionaries, and the reply list.
+pub fn mem(v: &View, d: &Derived, stats: Option<&crate::client::ConnStats>, current: Option<&[Bytes]>) -> Mem {
+    const CLIENT_STRUCT: u64 = 1280;
+    let load = |f: fn(&crate::client::ConnStats) -> u64| stats.map_or(0, f);
+    let unparsed = load(|s| s.qbuf.load(Ordering::Relaxed));
+    let parsed = load(|s| s.pending_input.load(Ordering::Relaxed));
+    // The command being run is still in the query buffer, parsed into argv (a connection counts
+    // it among its parsed input already).
+    let (cur_qbuf, argv_mem, argc) = current.map_or((0, 0, 0), |a| {
+        (redis_proto::command_len(a) as u64, a.iter().map(|x| x.len() as u64).sum::<u64>(), a.len() as u64)
+    });
+    let qbuf = unparsed + if parsed > 0 { parsed } else { cur_qbuf };
+    // An sds string sized for `cap` (at least the 16KB Redis starts with) takes the allocator's
+    // size class; the rest past its header is free.
+    let (qbuf_free, qbuf_alloc) = if qbuf == 0 {
+        (0, 0)
+    } else {
+        // PROTO_IOBUF_LEN at least.
+        let cap = load(|s| s.qbuf_cap.load(Ordering::Relaxed)).max(16 * 1024).max(qbuf);
+        let header = if cap < 256 {
+            3
+        } else if cap < 65536 {
+            5
+        } else {
+            9
+        };
+        let usable = crate::client::jemalloc_size((cap + header + 1) as usize) as u64;
+        (usable - header - 1 - qbuf, usable)
+    };
+    let multi = if v.multi >= 0 {
+        let count = v.multi as u64;
+        v.multi_mem as u64 + count * 136 + count.next_power_of_two() * 8 * u64::from(count > 0)
+    } else {
+        0
+    };
+    let dict = |n: usize| if n == 0 { 0 } else { n as u64 * 24 + (n.max(4).next_power_of_two() as u64) * 8 };
+    let pubsub = dict(v.sub) + dict(v.psub) + dict(v.ssub);
+    let prefixes = d.track.map_or(0, |t| if t.prefixes.is_empty() { 0 } else { (t.prefixes.len() as u64 + 1) * 32 });
+    let omem = load(|s| s.obuf.load(Ordering::Relaxed));
+    let total = qbuf_alloc
+        + CLIENT_STRUCT
+        + stats.map_or(crate::client::REPLY_CHUNK as u64, |s| s.reply_buffer_size())
+        + argv_mem
+        + 8 * argc
+        + multi
+        + d.watch as u64 * 80
+        + pubsub
+        + prefixes
+        + omem;
+    Mem { qbuf, qbuf_free, argv_mem, total }
+}
+
 /// The CLIENT LIST / CLIENT INFO line of a registered client.
 pub fn line(eng: &Engine, id: u64, v: &View, stats: Option<&crate::client::ConnStats>, current: Option<&[Bytes]>, now: i64) -> String {
     line_with(id, v, &Derived::of(eng, id), stats, current, now)
@@ -189,19 +251,12 @@ pub fn line_with(id: u64, v: &View, d: &Derived, stats: Option<&crate::client::C
         flags.push('N');
     }
     let load = |f: fn(&crate::client::ConnStats) -> u64| stats.map_or(0, f);
-    // The command being run is still in the query buffer, parsed into argv.
-    let (cur_qbuf, argv_mem) = current.map_or((0, 0), |a| {
-        let mut b = bytes::BytesMut::new();
-        redis_proto::encode_command(a, &mut b);
-        (b.len() as u64, a.iter().map(|x| x.len() as u64).sum::<u64>())
-    });
-    let qbuf = load(|s| s.qbuf.load(Ordering::Relaxed)) + cur_qbuf;
-    let qbuf_cap = load(|s| s.qbuf_cap.load(Ordering::Relaxed)).max(qbuf);
-    let qbuf_free = qbuf_cap - qbuf;
+    let Mem { qbuf, qbuf_free, argv_mem, total: tot_mem } = mem(v, d, stats, current);
     let omem = load(|s| s.obuf.load(Ordering::Relaxed));
     let (obl, oll) = (load(|s| s.obl.load(Ordering::Relaxed)), load(|s| s.oll.load(Ordering::Relaxed)));
-    let rbs: u64 = 16384;
-    let tot_mem = qbuf_cap + rbs + argv_mem + v.multi_mem as u64 + omem + 1024;
+    let rbs = stats.map_or(crate::client::REPLY_CHUNK as u64, |s| s.reply_buffer_size());
+    // Until the cron first sees it, a client's peak is its whole buffer.
+    let rbp = stats.map_or(rbs, |s| if s.rbs.load(Ordering::Relaxed) == 0 { rbs } else { s.rbp.load(Ordering::Relaxed) });
     let idle = if current.is_some() {
         0
     } else {
@@ -211,7 +266,7 @@ pub fn line_with(id: u64, v: &View, d: &Derived, stats: Option<&crate::client::C
     let watch = d.watch;
     let redir = track.map_or(-1, |t| t.redirect as i64);
     format!(
-        "id={id} addr={} laddr={} fd={fd} name={} age={} idle={idle} flags={flags} db={} sub={} psub={} ssub={} multi={} watch={watch} qbuf={qbuf} qbuf-free={qbuf_free} argv-mem={argv_mem} multi-mem={} rbs={rbs} rbp={rbs} obl={obl} oll={oll} omem={omem} omem-shared=0 omem-unshared={omem} tot-mem={tot_mem} events=r cmd={} user={} redir={redir} resp={} lib-name={} lib-ver={} io-thread=0 tot-net-in={} tot-net-out={} tot-cmds={} read-events={} avg-pipeline-len-sum={} avg-pipeline-len-cnt={}",
+        "id={id} addr={} laddr={} fd={fd} name={} age={} idle={idle} flags={flags} db={} sub={} psub={} ssub={} multi={} watch={watch} qbuf={qbuf} qbuf-free={qbuf_free} argv-mem={argv_mem} multi-mem={} rbs={rbs} rbp={rbp} obl={obl} oll={oll} omem={omem} omem-shared=0 omem-unshared={omem} tot-mem={tot_mem} events=r cmd={} user={} redir={redir} resp={} lib-name={} lib-ver={} io-thread=0 tot-net-in={} tot-net-out={} tot-cmds={} read-events={} avg-pipeline-len-sum={} avg-pipeline-len-cnt={}",
         v.addr,
         v.laddr,
         v.name.as_ref().map(|n| String::from_utf8_lossy(n).into_owned()).unwrap_or_default(),
@@ -664,4 +719,97 @@ fn client_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
         "HELP",
         "    Print this help.",
     ]))
+}
+
+impl Engine {
+    /// Memory of every registered connection that isn't closing, by Redis' accounting:
+    /// (id, memory, evictable). Replicas aren't evictable, nor `CLIENT NO-EVICT` clients, whose
+    /// memory counts as the cron last measured it (`cron`: measure now). Only normal and pub/sub
+    /// clients count toward `maxmemory-clients`.
+    fn client_memory(&self, cron: bool) -> Vec<(u64, u64, bool)> {
+        self.clients
+            .by_id
+            .iter()
+            .filter(|(_, e)| !e.stats.killed.load(Ordering::Relaxed) && !e.stats.replica.load(Ordering::Relaxed))
+            .map(|(&id, e)| {
+                let evictable = !e.view.no_evict;
+                let m = if evictable || cron {
+                    let m = mem(&e.view, &Derived::of(self, id), Some(&e.stats), None).total;
+                    e.stats.cron_mem.store(m, Ordering::Relaxed);
+                    m
+                } else {
+                    e.stats.cron_mem.load(Ordering::Relaxed)
+                };
+                (id, m, evictable)
+            })
+            .collect()
+    }
+
+    /// `clientsCron`: idle timeouts and reply buffer resizing, for every client when there are
+    /// few, otherwise a share of them per tick so each comes around about once a second.
+    pub fn clients_cron(&mut self, now_ms: i64) {
+        let n = self.clients.by_id.len();
+        let per_tick = (n / self.cfg.hz.max(1) as usize).max(5);
+        let start = self.clients.cron_cursor;
+        let ids: Vec<u64> = self.clients.by_id.range(start..).chain(self.clients.by_id.range(..start)).take(per_tick).map(|(&id, _)| id).collect();
+        self.clients.cron_cursor = ids.last().map_or(0, |id| id + 1);
+        let timeout = self.cfg.timeout;
+        for id in ids {
+            let e = &self.clients.by_id[&id];
+            // `timeout`: close clients idle that long, except replicas, MONITOR, blocked and
+            // pub/sub clients.
+            let idle = now_ms / 1000 - e.stats.last_interaction.load(Ordering::Relaxed);
+            if timeout > 0
+                && idle > timeout as i64
+                && !e.stats.replica.load(Ordering::Relaxed)
+                && !e.view.monitor
+                && e.view.subscriptions() == 0
+                && !e.stats.postponed.load(Ordering::Relaxed)
+                && !self.is_blocked(id)
+            {
+                e.stats.killed.store(true, Ordering::Relaxed);
+                if let Some(s) = &e.sink {
+                    s.kill();
+                }
+                continue;
+            }
+            let (shrunk, expanded) = e.stats.resize_reply_buffer(now_ms);
+            self.stats.reply_buffer_shrinks += shrunk as u64;
+            self.stats.reply_buffer_expands += expanded as u64;
+        }
+    }
+
+    /// Memory of normal and pub/sub clients (INFO `mem_clients_normal`).
+    pub fn clients_memory(&self) -> u64 {
+        self.client_memory(false).iter().map(|c| c.1).sum()
+    }
+
+    /// `evictClients`: while normal and pub/sub clients use `maxmemory-clients` or more, close
+    /// evictable ones, the largest first (by power-of-two memory bucket, from 32KB up).
+    pub fn evict_clients(&mut self, cron: bool) {
+        let limit = crate::config::client_eviction_limit(&self.cfg);
+        if limit == 0 {
+            return;
+        }
+        let clients = self.client_memory(cron);
+        let mut total: u64 = clients.iter().map(|c| c.1).sum();
+        if total < limit {
+            return;
+        }
+        let bucket = |m: u64| (u64::BITS - m.leading_zeros()).clamp(15, 33);
+        let mut order: Vec<(u64, u64)> = clients.iter().filter(|c| c.2).map(|c| (c.0, c.1)).collect();
+        order.sort_by(|a, b| bucket(b.1).cmp(&bucket(a.1)).then(a.0.cmp(&b.0)));
+        for (id, m) in order {
+            if total < limit {
+                break;
+            }
+            let Some(e) = self.clients.by_id.get(&id) else { continue };
+            e.stats.killed.store(true, Ordering::Relaxed);
+            if let Some(s) = &e.sink {
+                s.kill();
+            }
+            total -= m;
+            self.stats.evicted_clients += 1;
+        }
+    }
 }

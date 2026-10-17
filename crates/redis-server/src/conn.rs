@@ -83,6 +83,8 @@ pub struct Conn<'a> {
     rbuf: ReplyBuf,
     soft_since: i64,
     obuf_closed: bool,
+    /// Protocol bytes of the parsed commands in `pending`.
+    pending_bytes: u64,
 }
 
 pub async fn serve<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, fd: i64)
@@ -142,16 +144,19 @@ where
         rbuf: ReplyBuf::default(),
         soft_since: 0,
         obuf_closed: false,
+        pending_bytes: 0,
     };
     let mut inbuf = BytesMut::with_capacity(16 * 1024);
     'conn: loop {
         if conn.blocked.is_none() {
-            let limits = Limits { authenticated: conn.client.authenticated, ..Limits::default() };
+            let max_bulk = conn.db().map_or(Limits::default().max_bulk, |db| db.hub.limits().max_bulk as usize);
+            let limits = Limits { authenticated: conn.client.authenticated, max_bulk };
             let queued = conn.pending.len();
             loop {
                 match parse_request(&mut inbuf, limits) {
                     Ok(Some(args)) if args.is_empty() => {}
                     Ok(Some(args)) => {
+                        conn.pending_bytes += redis_proto::command_len(&args) as u64;
                         conn.pending.push_back(args);
                         if conn.pending.len() >= MAX_BATCH {
                             conn.more = true;
@@ -160,8 +165,22 @@ where
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        Reply::Error(e.to_string()).encode(conn.client.resp, &mut conn.out);
+                        Reply::Error(format!("ERR {e}")).encode(conn.client.resp, &mut conn.out);
                         let _ = wr.write_all(&conn.out).await;
+                        let _ = wr.shutdown().await;
+                        // Take what the client is still sending for a moment, so closing with
+                        // unread input doesn't reset the connection before it reads the error.
+                        let drain = async {
+                            let mut sink = vec![0u8; 64 * 1024];
+                            let mut left = 64usize << 20;
+                            while left > 0 {
+                                match rd.read(&mut sink).await {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => left = left.saturating_sub(n),
+                                }
+                            }
+                        };
+                        let _ = tokio::time::timeout(Duration::from_secs(1), drain).await;
                         break 'conn;
                     }
                 }
@@ -175,8 +194,7 @@ where
                     db.io.pipeline_sum.fetch_add(parsed, Ordering::Relaxed);
                 }
             }
-            conn.stats.qbuf.store(inbuf.len() as u64, Ordering::Relaxed);
-            conn.stats.qbuf_cap.store(inbuf.capacity() as u64, Ordering::Relaxed);
+            conn.publish_qbuf(&inbuf);
             if !conn.pending.is_empty() {
                 conn.run_pending().await;
             }
@@ -225,6 +243,13 @@ where
                     if let Some(db) = &db {
                         db.io.reads.fetch_add(1, Ordering::Relaxed);
                         db.net_in.fetch_add(n as u64, Ordering::Relaxed);
+                    }
+                    if conn.query_buffer_exceeded(inbuf.len()) {
+                        break;
+                    }
+                    conn.publish_qbuf(&inbuf);
+                    if conn.evict_clients() {
+                        break;
                     }
                 }
             },
@@ -278,6 +303,40 @@ impl Conn<'_> {
         self.session.as_ref().map(|s| &s.db)
     }
 
+    /// The query buffer as Redis would hold it: waiting on a big argument, only that argument
+    /// in a buffer of its size.
+    fn publish_qbuf(&self, inbuf: &BytesMut) {
+        let big = if inbuf.len() >= redis_proto::BIG_ARG { redis_proto::pending_big_arg(inbuf) } else { None };
+        let (len, cap) = match big {
+            Some((start, n)) => (inbuf.len() - start, n + 2),
+            None => (inbuf.len(), inbuf.capacity()),
+        };
+        self.stats.qbuf.store(len as u64, Ordering::Relaxed);
+        self.stats.qbuf_cap.store(cap as u64, Ordering::Relaxed);
+    }
+
+    /// Take the next command to run; until the next one, CLIENT LIST counts it in the query
+    /// buffer (as Redis does while running it from there).
+    fn pop_pending(&mut self) -> Vec<Bytes> {
+        self.stats.pending_input.store(self.pending_bytes, Ordering::Relaxed);
+        let args = self.pending.pop_front().unwrap();
+        self.pending_bytes -= redis_proto::command_len(&args) as u64;
+        args
+    }
+
+    /// `maxmemory-clients`: close the largest clients while all of them use too much (this one
+    /// included). True if this connection was evicted.
+    fn evict_clients(&self) -> bool {
+        let Some(db) = self.db() else { return false };
+        if db.hub.limits().client_eviction == 0 {
+            return false;
+        }
+        if let Some(mut eng) = db.engine_unless_busy(0) {
+            eng.evict_clients(false);
+        }
+        self.stats.killed.load(Ordering::Relaxed)
+    }
+
     fn write_reply(&mut self, r: &Reply) {
         if self.obuf_closed {
             return;
@@ -321,7 +380,7 @@ impl Conn<'_> {
         if n == 0 {
             return;
         }
-        self.rbuf.append(n);
+        self.rbuf.append(n, &self.stats);
         self.check_obuf();
     }
 
@@ -345,7 +404,7 @@ impl Conn<'_> {
             return;
         }
         let db = self.db().cloned();
-        let limit = db.as_ref().map(|db| db.hub.obuf_limit(self.obuf_class())).unwrap_or_default();
+        let limit = db.as_ref().map(|db| db.hub.limits().obuf[self.obuf_class()]).unwrap_or_default();
         let now = redis_engine::util::now_ms() / 1000;
         if !redis_engine::client::obuf_limit_reached(self.rbuf.mem(), &limit, !self.client.authenticated, &mut self.soft_since, now) {
             return;
@@ -357,15 +416,32 @@ impl Conn<'_> {
         self.obuf_closed = true;
         self.close_after = true;
         self.pending.clear();
+        self.pending_bytes = 0;
         self.out.clear();
         self.rbuf.clear();
         self.rbuf.publish(&self.stats);
     }
 
+    /// `client-query-buffer-limit` (1MB before authenticating), counting commands queued in
+    /// MULTI: past it the connection is closed.
+    fn query_buffer_exceeded(&self, qbuf: usize) -> bool {
+        let queued: usize = self.client.multi.as_ref().map_or(0, |m| m.queued.iter().flatten().map(|a| a.len()).sum());
+        let used = (qbuf + queued) as u64;
+        let limit = self.db().map_or(redis_engine::hub::ConnLimits::default().query_buffer, |db| db.hub.limits().query_buffer);
+        if used <= limit && (used <= 1024 * 1024 || self.client.authenticated) {
+            return false;
+        }
+        tracing::warn!(client = self.client.id, qbuf, "closing client that reached max query buffer length");
+        if let Some(db) = self.db() {
+            db.hub.qbuf_disconnections.fetch_add(1, Ordering::Relaxed);
+        }
+        true
+    }
+
     /// What the output buffer limit leaves for the next reply before it closes the connection:
     /// a reply past this is sure to break the hard limit.
     fn reply_budget(&self, db: &Database) -> u64 {
-        let hard = db.hub.obuf_limit(self.obuf_class()).hard;
+        let hard = db.hub.limits().obuf[self.obuf_class()].hard;
         if hard == 0 {
             return u64::MAX;
         }
@@ -448,6 +524,7 @@ impl Conn<'_> {
             // A connection whose ACL user was deleted is closed (like Redis does right away).
             if self.client.user.is_deleted() {
                 self.pending.clear();
+        self.pending_bytes = 0;
                 self.close_after = true;
                 break;
             }
@@ -464,7 +541,7 @@ impl Conn<'_> {
             let args = self.pending.front().unwrap();
             let started = std::time::Instant::now();
             if let Some(r) = self.intercept(args.clone()).await {
-                let args = self.pending.pop_front().unwrap();
+                let args = self.pop_pending();
                 // HELLO went through the engine already; the rest is accounted here.
                 if !eq(&args[0], "hello")
                     && let Some(db) = self.db().cloned()
@@ -476,7 +553,7 @@ impl Conn<'_> {
                 continue;
             }
             let Some(db) = self.db().cloned() else {
-                let args = self.pending.pop_front().unwrap();
+                let args = self.pop_pending();
                 self.emit(&args, Reply::error("NOAUTH Authentication required."));
                 continue;
             };
@@ -485,18 +562,30 @@ impl Conn<'_> {
             let mut actions = Vec::new();
             {
                 let Some(mut eng) = db.engine_unless_busy(0) else {
-                    let args = self.pending.pop_front().unwrap();
+                    let args = self.pop_pending();
                     let r = redis_engine::commands::scripting::while_busy(&db.shard(0).scripts, &args);
                     self.emit(&args, r);
                     continue;
                 };
                 let mut first = true;
+                let evicting = db.hub.limits().client_eviction > 0;
                 while let Some(args) = self.pending.front() {
                     if is_intercepted(args, &self.client) || (!first && eng.paused_for(&mut self.client, args).is_some()) {
                         break;
                     }
                     first = false;
-                    let args = self.pending.pop_front().unwrap();
+                    // Clients past maxmemory-clients go before the command runs.
+                    if evicting {
+                        self.stats.pending_input.store(self.pending_bytes, Ordering::Relaxed);
+                        eng.evict_clients(false);
+                        if self.stats.killed.load(Ordering::Relaxed) {
+                            self.pending.clear();
+                            self.pending_bytes = 0;
+                            self.close_after = true;
+                            break;
+                        }
+                    }
+                    let args = self.pop_pending();
                     n += 1;
                     self.client.reply_budget = self.reply_budget(&db);
                     let client = &mut self.client;
@@ -527,6 +616,13 @@ impl Conn<'_> {
             }
             if !actions.is_empty() {
                 self.server_actions(&db, actions);
+            }
+            self.stats.pending_input.store(self.pending_bytes, Ordering::Relaxed);
+            // Like Redis before sleeping: replies may have grown clients past maxmemory-clients.
+            if self.evict_clients() {
+                self.pending.clear();
+                self.pending_bytes = 0;
+                self.close_after = true;
             }
             db.touch(n);
             if db.sync_writes.load(Ordering::Relaxed) {

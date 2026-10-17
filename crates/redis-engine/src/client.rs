@@ -34,11 +34,23 @@ pub struct ConnStats {
     /// Unparsed input buffered, and the buffer's capacity.
     pub qbuf: AtomicU64,
     pub qbuf_cap: AtomicU64,
+    /// Parsed commands waiting to run (and the one running), as their protocol bytes: still
+    /// part of Redis' query buffer.
+    pub pending_input: AtomicU64,
+    /// Memory last measured by the cron, which is how Redis tracks clients that can't be
+    /// evicted (CLIENT NO-EVICT).
+    pub cron_mem: AtomicU64,
     /// Output waiting to be written, measured like Redis' `omem` (reply blocks allocated past
     /// the static buffer), and the static buffer's fill (`obl`) and block count (`oll`).
     pub obuf: AtomicU64,
     pub obl: AtomicU64,
     pub oll: AtomicU64,
+    /// The static reply buffer's size (`rbs`, 0: not resized yet, 16KB), its peak use since the
+    /// last reset (`rbp`) and when that was (Unix ms): the cron resizes it like Redis'
+    /// `clientsCronResizeOutputBuffer`.
+    pub rbs: AtomicU64,
+    pub rbp: AtomicU64,
+    pub rbp_reset_ms: AtomicI64,
     /// Commands processed (CLIENT LIST `tot-cmds`).
     pub cmds: AtomicU64,
     pub read_events: AtomicU64,
@@ -174,6 +186,8 @@ pub fn jemalloc_size(n: usize) -> usize {
 /// takes them.
 #[derive(Debug, Default)]
 pub struct ReplyBuf {
+    /// The static buffer's size when last appended to.
+    cap: usize,
     bufpos: usize,
     buf_sent: usize,
     /// (size, used, sent) per block.
@@ -182,11 +196,15 @@ pub struct ReplyBuf {
 }
 
 impl ReplyBuf {
-    pub fn append(&mut self, mut n: usize) {
+    /// Queue `n` bytes; `stats` has the static buffer's current size and records its peak.
+    pub fn append(&mut self, mut n: usize, stats: &ConnStats) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.cap = stats.reply_buffer_size() as usize;
         if self.blocks.is_empty() {
-            let take = n.min(REPLY_CHUNK - self.bufpos);
+            let take = n.min(self.cap.saturating_sub(self.bufpos));
             self.bufpos += take;
             n -= take;
+            stats.rbp.fetch_max(self.bufpos as u64, Relaxed);
         }
         if let Some((size, used, _)) = self.blocks.back_mut() {
             let take = n.min(*size - *used);
@@ -229,7 +247,7 @@ impl ReplyBuf {
     pub fn free(&self) -> usize {
         match self.blocks.back() {
             Some((size, used, _)) => size - used,
-            None => REPLY_CHUNK - self.bufpos,
+            None => self.cap.saturating_sub(self.bufpos),
         }
     }
 
@@ -243,6 +261,48 @@ impl ReplyBuf {
         stats.obuf.store(self.mem, Relaxed);
         stats.obl.store(self.bufpos as u64, Relaxed);
         stats.oll.store(self.blocks.len() as u64, Relaxed);
+    }
+}
+
+impl ConnStats {
+    /// The static reply buffer's size (`rbs`).
+    pub fn reply_buffer_size(&self) -> u64 {
+        match self.rbs.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => REPLY_CHUNK as u64,
+            n => n,
+        }
+    }
+
+    /// `clientsCronResizeOutputBuffer`: shrink the static reply buffer to its peak use when that
+    /// stayed under half of it, double it when the peak filled it (up to 16KB), and reset the
+    /// peak every 5 seconds. Returns (shrunk, expanded).
+    pub fn resize_reply_buffer(&self, now_ms: i64) -> (bool, bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        const MIN: u64 = 1024;
+        const PEAK_RESET_MS: i64 = 5000;
+        let fresh = self.rbs.load(Relaxed) == 0;
+        let size = self.reply_buffer_size();
+        // A new client's peak is its whole buffer.
+        let peak = if fresh { size } else { self.rbp.load(Relaxed) };
+        let mut new = 0;
+        let (mut shrunk, mut expanded) = (false, false);
+        if size / 2 >= MIN && peak < size / 2 {
+            new = MIN.max(peak + 1);
+            shrunk = true;
+        } else if size * 2 < 2 * REPLY_CHUNK as u64 && peak == size {
+            new = (REPLY_CHUNK as u64).min(size * 2);
+            expanded = true;
+        }
+        if now_ms - self.rbp_reset_ms.load(Relaxed) >= PEAK_RESET_MS {
+            self.rbp.store(self.obl.load(Relaxed), Relaxed);
+            self.rbp_reset_ms.store(now_ms, Relaxed);
+        }
+        if new > 0 {
+            self.rbs.store(jemalloc_size(new as usize) as u64, Relaxed);
+        } else if fresh {
+            self.rbs.store(size, Relaxed);
+        }
+        (shrunk, expanded)
     }
 }
 
@@ -289,11 +349,12 @@ mod reply_buf_tests {
     #[test]
     fn blocks_fill_then_drain() {
         let mut b = ReplyBuf::default();
-        b.append(10_000);
+        let s = ConnStats::default();
+        b.append(10_000, &s);
         assert_eq!(b.mem(), 0);
-        b.append(10_000);
+        b.append(10_000, &s);
         assert_eq!(b.mem(), 20456);
-        b.append(200_000);
+        b.append(200_000, &s);
         assert_eq!(b.mem(), 20456 + jemalloc_size(200_000 - (20456 - 3616) + 24) as u64 - 24);
         b.sent(16384);
         assert_eq!(b.blocks.len(), 2);
@@ -301,5 +362,21 @@ mod reply_buf_tests {
         assert_eq!(b.blocks.len(), 1);
         b.sent(1 << 30);
         assert_eq!(b.mem(), 0);
+    }
+
+    #[test]
+    fn reply_buffer_shrinks_when_idle_and_grows_back() {
+        let s = ConnStats::default();
+        // First pass: a new client's peak is its whole buffer; the peak resets.
+        assert_eq!(s.resize_reply_buffer(10_000), (false, false));
+        assert_eq!((s.reply_buffer_size(), s.rbp.load(std::sync::atomic::Ordering::Relaxed)), (16384, 0));
+        assert_eq!(s.resize_reply_buffer(10_100), (true, false));
+        assert_eq!(s.reply_buffer_size(), 1024);
+        // A reply filling it doubles it on the next pass.
+        let mut b = ReplyBuf::default();
+        b.append(3000, &s);
+        assert_eq!(b.mem(), jemalloc_size(16384 + 24) as u64 - 24);
+        assert_eq!(s.resize_reply_buffer(10_200), (false, true));
+        assert_eq!(s.reply_buffer_size(), 2048);
     }
 }

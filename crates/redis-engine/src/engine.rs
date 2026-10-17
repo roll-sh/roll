@@ -67,6 +67,9 @@ pub struct Stats {
     pub expired_stale_perc: f64,
     pub expired_time_cap_reached: u64,
     pub evicted_keys: u64,
+    pub evicted_clients: u64,
+    pub reply_buffer_shrinks: u64,
+    pub reply_buffer_expands: u64,
     pub evicted_scripts: u64,
     pub total_eviction_exceeded_time_ms: u64,
     pub rejected_calls: u64,
@@ -366,7 +369,7 @@ impl Engine {
         };
         e.startup_memory = e.used_memory();
         e.peak_memory = e.startup_memory;
-        e.hub.set_obuf_limits(e.cfg.obuf_limits);
+        e.hub.set_limits(&e.cfg);
         if e.cfg.appendonly {
             e.open_aof_at_start();
         }

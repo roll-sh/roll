@@ -462,6 +462,10 @@ impl Database {
                     eng.rehash(100);
                     eng.cron_metrics();
                     eng.persist_cron(redis_engine::util::now_ms());
+                    if i == 0 {
+                        eng.clients_cron(redis_engine::util::now_ms());
+                        eng.evict_clients(true);
+                    }
                     eng.metrics.cron_us += started.elapsed().as_micros() as u64;
                 }
             }

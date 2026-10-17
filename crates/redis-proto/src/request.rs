@@ -31,6 +31,36 @@ impl std::fmt::Display for ProtoError {
 
 impl std::error::Error for ProtoError {}
 
+/// Arguments from this size on are read into a buffer of their own size (`PROTO_MBULK_BIG_ARG`).
+pub const BIG_ARG: usize = 32 * 1024;
+
+/// When `buf` holds an incomplete multibulk command waiting on a big argument: where the
+/// argument's data starts in `buf`, and its length. Redis then keeps only that argument in its
+/// query buffer, sized for it.
+pub fn pending_big_arg(buf: &[u8]) -> Option<(usize, usize)> {
+    if buf.first() != Some(&b'*') {
+        return None;
+    }
+    let line = |from: usize| -> Option<(i64, usize)> {
+        let end = from + memchr::memchr(b'\r', buf.get(from..)?)?;
+        let n = std::str::from_utf8(&buf[from..end]).ok()?.parse().ok()?;
+        (buf.get(end + 1) == Some(&b'\n')).then_some((n, end + 2))
+    };
+    let (count, mut pos) = line(1)?;
+    for _ in 0..count {
+        if buf.get(pos) != Some(&b'$') {
+            return None;
+        }
+        let (len, data) = line(pos + 1)?;
+        let len = usize::try_from(len).ok()?;
+        if buf.len() < data + len + 2 {
+            return (len >= BIG_ARG).then_some((data, len));
+        }
+        pos = data + len + 2;
+    }
+    None
+}
+
 /// Take one complete command off the front of `buf`.
 ///
 /// `Ok(None)` means more bytes are needed. An empty vector is a no-op request (an empty inline
@@ -281,5 +311,16 @@ mod tests {
         assert!(split_args(b"'a").is_none());
         assert_eq!(split_args(b"  ").unwrap(), Vec::<Vec<u8>>::new());
         assert_eq!(split_args(b"\"\"").unwrap(), vec![Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn big_arg_pending() {
+        let mut req = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$40000\r\n".to_vec();
+        let data = req.len();
+        req.extend_from_slice(&[b'x'; 100]);
+        assert_eq!(super::pending_big_arg(&req), Some((data, 40000)));
+        assert_eq!(super::pending_big_arg(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$4000\r\nxx"), None);
+        assert_eq!(super::pending_big_arg(b"*3\r\n$3\r\nSE"), None);
+        assert_eq!(super::pending_big_arg(b"PING\r\n"), None);
     }
 }

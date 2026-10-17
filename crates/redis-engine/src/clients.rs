@@ -148,6 +148,8 @@ pub struct Clients {
     limit_misses: u32,
     /// CLIENT PAUSE: until (Unix ms), and whether all commands or only writes are paused.
     pub pause: Option<(i64, bool)>,
+    /// Where the clients cron continues (client id).
+    pub cron_cursor: u64,
 }
 
 const TRACKING_CHANNEL: &[u8] = b"__redis__:invalidate";

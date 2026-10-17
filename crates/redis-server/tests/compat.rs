@@ -264,6 +264,23 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
         c.cmd(["SCRIPT", "FLUSH"]).await.unwrap();
         c.cmd(["FUNCTION", "FLUSH"]).await.unwrap();
         c.cmd(["CONFIG", "SET", "notify-keyspace-events", ""]).await.unwrap();
+        // Connection limits a script may have changed and left behind if it failed midway.
+        c.cmd([
+            "CONFIG",
+            "SET",
+            "timeout",
+            "0",
+            "maxmemory-clients",
+            "0",
+            "proto-max-bulk-len",
+            "512mb",
+            "client-query-buffer-limit",
+            "1gb",
+            "client-output-buffer-limit",
+            "normal 0 0 0 replica 256mb 64mb 60 pubsub 32mb 8mb 60",
+        ])
+        .await
+        .unwrap();
         // ACL users and log.
         if let Ok(Reply::Array(users)) = c.cmd(["ACL", "USERS"]).await {
             for u in users {

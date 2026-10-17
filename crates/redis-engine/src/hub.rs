@@ -37,13 +37,43 @@ struct Inner {
     monitors: Subs,
 }
 
+/// The configuration connections enforce themselves, without an engine.
+#[derive(Clone, Copy, Debug)]
+pub struct ConnLimits {
+    /// `client-output-buffer-limit` per class.
+    pub obuf: [crate::config::ObufLimit; 3],
+    /// `proto-max-bulk-len`.
+    pub max_bulk: u64,
+    /// `client-query-buffer-limit`.
+    pub query_buffer: u64,
+    /// `maxmemory-clients` in bytes (0: no client eviction).
+    pub client_eviction: u64,
+}
+
+impl ConnLimits {
+    pub fn of(cfg: &crate::Config) -> Self {
+        Self {
+            obuf: cfg.obuf_limits,
+            max_bulk: cfg.proto_max_bulk_len,
+            query_buffer: cfg.client_query_buffer_limit,
+            client_eviction: crate::config::client_eviction_limit(cfg),
+        }
+    }
+}
+
+impl Default for ConnLimits {
+    fn default() -> Self {
+        Self::of(&crate::Config::default())
+    }
+}
+
 #[derive(Default)]
 pub struct Hub {
     inner: Mutex<Inner>,
-    /// `client-output-buffer-limit` per class, for connections to check without an engine.
-    obuf_limits: Mutex<[crate::config::ObufLimit; 3]>,
-    /// Clients closed for overcoming their output buffer limit (INFO).
+    limits: Mutex<ConnLimits>,
+    /// Clients closed for overcoming their output or query buffer limit (INFO).
     pub obuf_disconnections: std::sync::atomic::AtomicU64,
+    pub qbuf_disconnections: std::sync::atomic::AtomicU64,
 }
 
 /// Encode a push lazily, once per protocol version.
@@ -75,12 +105,12 @@ impl Hub {
         Arc::new(Self::default())
     }
 
-    pub fn set_obuf_limits(&self, limits: [crate::config::ObufLimit; 3]) {
-        *self.obuf_limits.lock() = limits;
+    pub fn set_limits(&self, cfg: &crate::Config) {
+        *self.limits.lock() = ConnLimits::of(cfg);
     }
 
-    pub fn obuf_limit(&self, class: usize) -> crate::config::ObufLimit {
-        self.obuf_limits.lock()[class]
+    pub fn limits(&self) -> ConnLimits {
+        *self.limits.lock()
     }
 
     fn map<'a>(inner: &'a mut Inner, kind: &Kind) -> &'a mut HashMap<Bytes, Subs> {

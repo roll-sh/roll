@@ -421,12 +421,12 @@ pub fn config_set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 let pass = cx.eng.cfg.requirepass.clone();
                 cx.eng.acl.write().set_default_password(pass.as_deref().map(str::as_bytes));
             }
-            "client-output-buffer-limit" => cx.eng.hub.set_obuf_limits(cx.eng.cfg.obuf_limits),
             "acllog-max-len" => cx.eng.acl.read().log.lock().max_len = cx.eng.cfg.acllog_max_len as usize,
             "appendonly" if cx.eng.cfg.appendonly != before.appendonly => cx.eng.set_appendonly(cx.eng.cfg.appendonly, cx.now, cx.mode == crate::engine::Mode::Exec),
             _ => {}
         }
     }
+    cx.eng.hub.set_limits(&cx.eng.cfg);
     Ok(Reply::Ok)
 }
 

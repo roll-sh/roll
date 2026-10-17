@@ -973,6 +973,20 @@ pub fn aof_use_rdb_preamble(c: &Config) -> bool {
     c.extra.get("aof-use-rdb-preamble").is_none_or(Val::bool)
 }
 
+/// `getClientEvictionLimit`: `maxmemory-clients` in bytes (negative: a percentage of
+/// `maxmemory`), at least 128KB; 0 = no client eviction.
+pub fn client_eviction_limit(c: &Config) -> u64 {
+    let v = c.extra.get("maxmemory-clients").map_or(0, |v| v.num());
+    let bytes = if v < 0 && c.maxmemory > 0 {
+        (c.maxmemory as f64 * -(v as f64) / 100.0) as u64
+    } else if v > 0 {
+        v as u64
+    } else {
+        return 0;
+    };
+    bytes.max(128 * 1024)
+}
+
 pub fn backup_sealed_ttl(c: &Config) -> i64 {
     c.extra.get("backup-sealed-ttl").map_or(0, |v| v.num() as i64)
 }

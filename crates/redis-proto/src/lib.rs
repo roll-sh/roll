@@ -12,7 +12,7 @@ mod request;
 
 pub use decode::{DecodeError, decode};
 pub use double::{fmt_double, fmt_long_double, parse_double};
-pub use request::{Limits, ProtoError, parse_request, split_args};
+pub use request::{BIG_ARG, Limits, ProtoError, parse_request, pending_big_arg, split_args};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -199,6 +199,12 @@ pub fn bulk(out: &mut BytesMut, b: &[u8]) {
 }
 
 /// Encode a command as a multibulk request (`*N` of bulk strings).
+/// Length of `args` encoded as a RESP command (what [`encode_command`] writes).
+pub fn command_len<T: AsRef<[u8]>>(args: &[T]) -> usize {
+    let digits = |n: usize| n.checked_ilog10().unwrap_or(0) as usize + 1;
+    3 + digits(args.len()) + args.iter().map(|a| a.as_ref().len()).map(|n| 5 + digits(n) + n).sum::<usize>()
+}
+
 pub fn encode_command<I, T>(args: I, out: &mut BytesMut)
 where
     I: IntoIterator<Item = T>,
@@ -252,5 +258,17 @@ mod tests {
         let (back, n) = decode(&bytes).unwrap().unwrap();
         assert_eq!(n, bytes.len());
         assert_eq!(back, r);
+    }
+}
+
+#[cfg(test)]
+mod command_len_tests {
+    #[test]
+    fn matches_encoding() {
+        for args in [vec![], vec!["get"], vec!["set", "k", "0123456789x"], vec!["a"; 12]] {
+            let mut b = bytes::BytesMut::new();
+            super::encode_command(&args, &mut b);
+            assert_eq!(super::command_len(&args), b.len());
+        }
     }
 }
