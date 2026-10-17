@@ -143,16 +143,42 @@ pub struct Entry {
     pub expire: i64,
     /// LRU clock (seconds, 24 bits) or LFU state (16-bit minutes + 8-bit counter), per policy.
     pub lru: u32,
+    /// The INFO keysizes histogram slot this key is counted in ([`Value::size_slot`]), kept by
+    /// [`crate::db::Db`].
+    pub sized: u16,
 }
 
 impl Entry {
     pub fn new(value: Value, lru: u32) -> Self {
-        Self { value, expire: 0, lru }
+        Self { value, expire: 0, lru, sized: NO_SIZE }
     }
 
     #[inline]
     pub fn expired(&self, now: i64) -> bool {
         self.expire != 0 && self.expire <= now
+    }
+}
+
+/// Not counted in the keysizes histogram (streams).
+pub const NO_SIZE: u16 = u16::MAX;
+/// Keysizes histogram dimensions: strings, lists, sets, zsets, hashes × power-of-two bins.
+pub const SIZE_TYPES: usize = 5;
+pub const SIZE_BINS: usize = 60;
+
+impl Value {
+    /// The keysizes histogram slot (`type * SIZE_BINS + bin`): bin 0 for an empty value, else
+    /// `floor(log2(len)) + 1` of the string length or element count (Redis' `getObjectLength`).
+    pub fn size_slot(&self) -> u16 {
+        let (t, n) = match self {
+            Value::Str(s) => (0, s.len()),
+            Value::List(l) => (1, l.len()),
+            Value::Set(s) => (2, s.len()),
+            Value::ZSet(z) => (3, z.len()),
+            Value::Hash(h) => (4, h.len()),
+            Value::Stream(_) => return NO_SIZE,
+        };
+        let bin = (usize::BITS - n.leading_zeros()) as usize;
+        (t * SIZE_BINS + bin.min(SIZE_BINS - 1)) as u16
     }
 }
 

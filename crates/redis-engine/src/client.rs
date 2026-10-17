@@ -44,6 +44,8 @@ pub struct ConnStats {
     pub pipeline_cnt: AtomicU64,
     /// Unix seconds of the last command or read.
     pub last_interaction: AtomicI64,
+    /// Unix ms of the last command (INFO `active_clients`).
+    pub last_cmd_ms: AtomicI64,
     /// CLIENT KILL: close the connection (after the current reply).
     pub killed: AtomicBool,
     /// Waiting for CLIENT PAUSE to end (shown blocked).

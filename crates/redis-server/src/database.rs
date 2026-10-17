@@ -69,6 +69,93 @@ pub struct Database {
     /// Signalled to disconnect every client (delete, restore, move to another node).
     pub kicked: tokio::sync::Notify,
     pub evicting: AtomicBool,
+    /// Connection-level counters for INFO.
+    pub io: IoStats,
+    /// Replication id of this database's write stream (INFO `master_replid`).
+    pub replid: String,
+    /// The primary this database follows, when it is a replica.
+    pub upstream: Mutex<Option<(std::net::SocketAddr, std::sync::Weak<crate::repl::Follower>)>>,
+}
+
+/// Connection-level counters (INFO stats and threads).
+#[derive(Default)]
+pub struct IoStats {
+    /// Connections that attached to the database (`total_connections_received`).
+    pub accepted: AtomicU64,
+    pub reads: AtomicU64,
+    pub writes: AtomicU64,
+    /// Reads that parsed commands, and how many they parsed.
+    pub events: AtomicU64,
+    pub pipeline_sum: AtomicU64,
+    /// Replication stream bytes received (replica) and sent (primary).
+    pub repl_in: AtomicU64,
+    pub repl_out: AtomicU64,
+}
+
+/// INFO's view of the server around an engine.
+struct DbHost(std::sync::Weak<Database>);
+
+impl redis_engine::commands::info::Host for DbHost {
+    fn counters(&self) -> redis_engine::commands::info::Counters {
+        let Some(db) = self.0.upgrade() else { return Default::default() };
+        let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        redis_engine::commands::info::Counters {
+            connections: l(&db.io.accepted),
+            net_in: l(&db.net_in),
+            net_out: l(&db.net_out),
+            net_repl_in: l(&db.io.repl_in),
+            net_repl_out: l(&db.io.repl_out),
+            reads: l(&db.io.reads),
+            writes: l(&db.io.writes),
+            processing_events: l(&db.io.events),
+            pipeline_sum: l(&db.io.pipeline_sum),
+            pipeline_cnt: l(&db.io.events),
+            ..Default::default()
+        }
+    }
+
+    fn replication(&self) -> redis_engine::commands::info::Replication {
+        use redis_engine::commands::info::{MasterInfo, ReplicaInfo, Replication};
+        let Some(db) = self.0.upgrade() else { return Default::default() };
+        let mut r = Replication { replid: db.replid.clone(), offset: db.repl_offset(), ..Default::default() };
+        let backlog = db.backlog.lock().clone();
+        if let Some(b) = backlog {
+            let (start, end) = b.range();
+            r.backlog = Some((b.cap as u64, start + 1, end - start));
+            let now = redis_engine::util::now_ms();
+            let acks = b.acks.lock().clone();
+            for (id, (addr, at)) in b.peers.lock().iter() {
+                r.replicas.push(ReplicaInfo {
+                    ip: addr.ip().to_string(),
+                    port: addr.port(),
+                    offset: acks.get(id).copied().unwrap_or(0),
+                    lag: (now - *at).max(0) / 1000,
+                });
+            }
+        }
+        if let Some((addr, f)) = db.upstream.lock().clone()
+            && let Some(f) = f.upgrade()
+        {
+            let now = redis_engine::util::now_ms();
+            let last = f.last_contact.load(Ordering::Relaxed) as i64;
+            let changed = (f.link_changed.load(Ordering::Relaxed) / 1000) as i64;
+            let up = f.connected.load(Ordering::Relaxed);
+            r.master = Some(MasterInfo {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                link_up: up,
+                last_io: if last > 0 { (now - last) / 1000 } else { -1 },
+                offset: f.applied(),
+                down_since: if up { 0 } else { changed },
+                up_since: if up { changed } else { 0 },
+            });
+        }
+        r
+    }
+
+    fn aof_enabled(&self) -> bool {
+        self.0.upgrade().is_some_and(|db| db.durability.lock().is_some())
+    }
 }
 
 #[derive(Clone)]
@@ -98,6 +185,16 @@ impl Durability {
 pub struct EngineGuard<'a> {
     db: &'a Database,
     eng: MutexGuard<'a, Engine>,
+    /// When the lock was taken and the command count then (INFO's event-loop cycles).
+    since: std::time::Instant,
+    commands: u64,
+}
+
+impl<'a> EngineGuard<'a> {
+    fn new(db: &'a Database, eng: MutexGuard<'a, Engine>) -> Self {
+        let commands = eng.stats.commands;
+        Self { db, eng, since: std::time::Instant::now(), commands }
+    }
 }
 
 impl Deref for EngineGuard<'_> {
@@ -116,6 +213,8 @@ impl DerefMut for EngineGuard<'_> {
 impl Drop for EngineGuard<'_> {
     fn drop(&mut self) {
         self.eng.before_sleep();
+        let cmds = self.eng.stats.commands.saturating_sub(self.commands);
+        self.eng.cycle_done(cmds, self.since.elapsed().as_micros() as u64);
         if !self.eng.effects.is_empty() {
             let effects = self.eng.take_effects();
             self.db.publish(&effects);
@@ -136,7 +235,9 @@ impl Database {
                 Shard { engine: Mutex::new(e), scripts }
             })
             .collect();
-        Arc::new(Self {
+        let mut rng = redis_engine::util::Rng::new();
+        let replid = (0..40).map(|_| char::from_digit((rng.next_u64() % 16) as u32, 16).unwrap()).collect();
+        let db = Arc::new(Self {
             id: id.into(),
             shards,
             hub,
@@ -153,7 +254,15 @@ impl Database {
             backlog: Mutex::new(None),
             kicked: tokio::sync::Notify::new(),
             evicting: AtomicBool::new(false),
-        })
+            io: IoStats::default(),
+            replid,
+            upstream: Mutex::new(None),
+        });
+        let host: Arc<dyn redis_engine::commands::info::Host> = Arc::new(DbHost(Arc::downgrade(&db)));
+        for s in &db.shards {
+            s.engine.lock().host = Some(host.clone());
+        }
+        db
     }
 
     /// Close the database to new sessions and disconnect current clients. They reconnect and
@@ -170,7 +279,7 @@ impl Database {
 
     /// Lock shard `i`'s engine.
     pub fn engine(&self, i: usize) -> EngineGuard<'_> {
-        EngineGuard { db: self, eng: self.shards[i].engine.lock() }
+        EngineGuard::new(self, self.shards[i].engine.lock())
     }
 
     /// Lock shard `i`'s engine, unless a script holding it runs past `busy-reply-threshold`:
@@ -179,7 +288,7 @@ impl Database {
         let shard = &self.shards[i];
         loop {
             if let Some(eng) = shard.engine.try_lock_for(std::time::Duration::from_millis(10)) {
-                return Some(EngineGuard { db: self, eng });
+                return Some(EngineGuard::new(self, eng));
             }
             if shard.scripts.busy.load(Ordering::SeqCst) {
                 return None;
@@ -275,11 +384,17 @@ impl Database {
                     return;
                 }
                 for i in 0..db.shards.len() {
-                    let mut eng = db.engine(i);
+                    // A busy script holds the engine: skip the tick rather than tie up a worker
+                    // that SCRIPT KILL may need.
+                    let Some(mut eng) = db.engine_unless_busy(i) else { continue };
                     let hz = eng.cfg.hz.max(1) as u64;
                     // Redis' slow cycle: 25% of each tick's CPU time at most.
+                    let started = std::time::Instant::now();
                     eng.active_expire(250_000 / hz);
                     eng.rehash(100);
+                    eng.cron_metrics();
+                    eng.persist_cron(redis_engine::util::now_ms());
+                    eng.metrics.cron_us += started.elapsed().as_micros() as u64;
                 }
             }
         });

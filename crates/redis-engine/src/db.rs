@@ -1,9 +1,8 @@
 //! One logical database (`SELECT n`): the keyspace plus the index of keys with a TTL.
 
 use crate::dict::Dict;
-use crate::value::{Entry, KEY_OVERHEAD, Str, Value, key_mem};
+use crate::value::{Entry, KEY_OVERHEAD, NO_SIZE, SIZE_BINS, SIZE_TYPES, Str, Value, key_mem};
 
-#[derive(Default)]
 pub struct Db {
     pub keys: Dict<Str, Entry>,
     /// Keys that have a TTL, for active expiry and `volatile-*` eviction.
@@ -20,6 +19,23 @@ pub struct Db {
     pub subexpires: Dict<Str, i64>,
     /// Cursor of the active field-expiry scan over `subexpires`.
     pub subexpire_cursor: u64,
+    /// INFO keysizes: keys per [`Value::size_slot`].
+    pub keysizes: Vec<u64>,
+}
+
+impl Default for Db {
+    fn default() -> Self {
+        Self {
+            keys: Default::default(),
+            volatile: Default::default(),
+            mem: 0,
+            expire_cursor: 0,
+            avg_ttl: 0,
+            subexpires: Default::default(),
+            subexpire_cursor: 0,
+            keysizes: vec![0; SIZE_TYPES * SIZE_BINS],
+        }
+    }
 }
 
 /// The subexpiry registration of a value (0 = none).
@@ -51,8 +67,12 @@ impl Db {
     }
 
     /// Insert a brand-new key (caller checked it is absent).
-    pub fn insert_new(&mut self, key: &[u8], entry: Entry) -> &mut Entry {
+    pub fn insert_new(&mut self, key: &[u8], mut entry: Entry) -> &mut Entry {
         let k = Str::from_slice(key);
+        entry.sized = entry.value.size_slot();
+        if entry.sized != NO_SIZE {
+            self.keysizes[entry.sized as usize] += 1;
+        }
         self.mem += Self::key_cost(&k) + entry.value.mem();
         if entry.expire != 0 {
             self.volatile.insert(k.clone(), ());
@@ -70,6 +90,9 @@ impl Db {
     pub fn remove(&mut self, key: &[u8]) -> Option<Entry> {
         let (k, e) = self.keys.remove_entry(key)?;
         self.mem = self.mem.saturating_sub(Self::key_cost(&k) + e.value.mem());
+        if e.sized != NO_SIZE {
+            self.keysizes[e.sized as usize] -= 1;
+        }
         if e.expire != 0 {
             self.volatile.remove(key);
             self.mem = self.mem.saturating_sub(Self::key_cost(&k));
@@ -118,7 +141,36 @@ impl Db {
         }
     }
 
+    /// Re-count a key whose value may have changed size (after a command touched it).
+    pub fn resize(&mut self, key: &[u8]) {
+        let Some(e) = self.keys.get_mut(key) else { return };
+        let slot = e.value.size_slot();
+        if slot != e.sized {
+            if e.sized != NO_SIZE {
+                self.keysizes[e.sized as usize] -= 1;
+            }
+            if slot != NO_SIZE {
+                self.keysizes[slot as usize] += 1;
+            }
+            e.sized = slot;
+        }
+    }
+
+    /// Recount the keysizes histogram from scratch (after the keyspace was replaced wholesale).
+    pub fn recount_sizes(&mut self) {
+        self.keysizes.iter_mut().for_each(|n| *n = 0);
+        let mut counts = std::mem::take(&mut self.keysizes);
+        self.keys.for_each_mut(|_, e| {
+            e.sized = e.value.size_slot();
+            if e.sized != NO_SIZE {
+                counts[e.sized as usize] += 1;
+            }
+        });
+        self.keysizes = counts;
+    }
+
     pub fn clear(&mut self) {
+        self.keysizes.iter_mut().for_each(|n| *n = 0);
         self.keys.clear();
         self.volatile.clear();
         self.subexpires.clear();

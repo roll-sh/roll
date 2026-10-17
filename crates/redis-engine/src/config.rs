@@ -103,6 +103,8 @@ pub struct Config {
     pub active_expire_effort: u32,
     pub latency_monitor_threshold: u64,
     pub latency_tracking: bool,
+    /// `latency-tracking-info-percentiles`.
+    pub latency_percentiles: Vec<f64>,
     pub tracking_table_max_keys: u64,
     pub maxclients: u64,
     /// Client idle timeout in seconds (0 = never).
@@ -117,6 +119,9 @@ pub struct Config {
     pub databases: usize,
     pub hz: u32,
     pub enable_debug_command: bool,
+    /// Microseconds a background save spends per key (a hidden testing knob).
+    pub rdb_key_save_delay: i64,
+    pub key_load_delay: i64,
 }
 
 impl Default for Config {
@@ -151,6 +156,7 @@ impl Default for Config {
             active_expire_effort: 1,
             latency_monitor_threshold: 0,
             latency_tracking: true,
+            latency_percentiles: vec![50.0, 99.0, 99.9],
             tracking_table_max_keys: 1_000_000,
             maxclients: 10_000,
             timeout: 0,
@@ -164,6 +170,8 @@ impl Default for Config {
             databases: 16,
             hz: 10,
             enable_debug_command: true,
+            rdb_key_save_delay: 0,
+            key_load_delay: 0,
         }
     }
 }
@@ -318,7 +326,23 @@ pub static PARAMS: &[Param] = &[
     p!("active-expire-effort", active_expire_effort, num, 1u32, 10u32),
     p!("latency-monitor-threshold", latency_monitor_threshold, num),
     p!("latency-tracking", latency_tracking, bool),
-    Param { name: "latency-tracking-info-percentiles", alias: None, get: |_| "50 99 99.9".into(), set: Some(|_, _| Ok(())) },
+    Param {
+        name: "latency-tracking-info-percentiles",
+        alias: None,
+        get: |c| c.latency_percentiles.iter().map(|p| crate::commands::info::trim_double(*p)).collect::<Vec<_>>().join(" "),
+        set: Some(|c, v| {
+            let mut out = Vec::new();
+            for a in v.split_whitespace() {
+                let p: f64 = a.parse().ok().filter(|p: &f64| p.is_finite()).ok_or("Invalid latency-tracking-info-percentiles parameters")?;
+                if !(0.0..=100.0).contains(&p) {
+                    return Err("latency-tracking-info-percentiles parameters should sit between [0.0,100.0]".into());
+                }
+                out.push(p);
+            }
+            c.latency_percentiles = out;
+            Ok(())
+        }),
+    },
     p!("tracking-table-max-keys", tracking_table_max_keys, num),
     p!("maxclients", maxclients, num),
     p!("timeout", timeout, num),
@@ -376,6 +400,37 @@ pub static PARAMS: &[Param] = &[
     p!("hide-user-data-from-log", "no"),
     p!("requirepass", ""),
     p!("masterauth", ""),
+    // Hidden: only an exact CONFIG GET name finds these.
+    p!("rdb-key-save-delay", rdb_key_save_delay, num, i32::MIN as i64, i32::MAX as i64),
+    p!("key-load-delay", key_load_delay, num, i32::MIN as i64, i32::MAX as i64),
+    p!("repl-rdb-channel", "yes"),
+    p!("use-exit-on-panic", "no"),
+    p!("aof-disable-auto-gc", "no"),
+    p!("lazyexpire-nested-arbitrary-keys", "yes"),
+    p!("lua-enable-deprecated-api", "no"),
+    p!("prefetch-batch-max-size", "16"),
+    p!("watchdog-period", "0"),
+    p!("cluster-slot-migration-max-archived-tasks", "32"),
+    p!("cluster-ping-interval", "0"),
+    p!("cluster-slot-migration-sync-buffer-drain-timeout", "60000"),
+    p!("loading-process-events-interval-bytes", "524288"),
+];
+
+/// Redis' HIDDEN_CONFIG parameters: left out of pattern matches.
+const HIDDEN: &[&str] = &[
+    "rdb-key-save-delay",
+    "key-load-delay",
+    "repl-rdb-channel",
+    "use-exit-on-panic",
+    "aof-disable-auto-gc",
+    "lazyexpire-nested-arbitrary-keys",
+    "lua-enable-deprecated-api",
+    "prefetch-batch-max-size",
+    "watchdog-period",
+    "cluster-slot-migration-max-archived-tasks",
+    "cluster-ping-interval",
+    "cluster-slot-migration-sync-buffer-drain-timeout",
+    "loading-process-events-interval-bytes",
 ];
 
 pub fn find(name: &str) -> Option<&'static Param> {
@@ -383,11 +438,19 @@ pub fn find(name: &str) -> Option<&'static Param> {
 }
 
 impl Config {
-    /// `CONFIG GET pattern`: matching `(name, value)` pairs, aliases included like Redis.
+    /// `CONFIG GET pattern`: matching `(name, value)` pairs, aliases included like Redis. A name
+    /// without glob characters is looked up directly (hidden parameters too) and echoed as given.
     pub fn get(&self, pattern: &[u8]) -> Vec<(String, String)> {
         let mut out = Vec::new();
+        if !pattern.iter().any(|c| b"[*?".contains(c)) {
+            let name = String::from_utf8_lossy(pattern);
+            if let Some(p) = find(&name) {
+                out.push((name.into_owned(), (p.get)(self)));
+            }
+            return out;
+        }
         let mut seen = std::collections::HashSet::new();
-        for p in PARAMS {
+        for p in PARAMS.iter().filter(|p| !HIDDEN.contains(&p.name)) {
             for name in std::iter::once(p.name).chain(p.alias) {
                 if crate::util::glob_match(pattern, name.as_bytes(), true) && seen.insert(name) {
                     out.push((name.to_string(), (p.get)(self)));

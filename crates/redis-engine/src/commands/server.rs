@@ -9,7 +9,7 @@ use crate::value::Value;
 use crate::{cmd, container};
 
 /// The Redis version we are compatible with (reported by INFO and HELLO).
-pub const REDIS_VERSION: &str = "8.2.0";
+pub const REDIS_VERSION: &str = "8.10.2";
 
 const CONN_FLAGS: u64 = NOSCRIPT | LOADING | STALE | FAST | NO_AUTH | ALLOW_BUSY;
 
@@ -23,8 +23,8 @@ pub static COMMANDS: &[Command] = &[
     cmd!("flushall", -1, WRITE | ALL_SHARDS | DANGEROUS, 0, 0, 0, flushall, Server),
     cmd!("time", 1, LOADING | STALE | FAST, 0, 0, 0, time, Server),
     cmd!("lastsave", 1, LOADING | STALE | FAST, 0, 0, 0, lastsave, Server),
-    cmd!("info", -1, LOADING | STALE | DANGEROUS, 0, 0, 0, info, Server),
-    cmd!("lolwut", -1, READONLY | FAST, 0, 0, 0, lolwut, Server),
+    cmd!("info", -1, LOADING | STALE | DANGEROUS, 0, 0, 0, super::info::info, Server),
+    cmd!("lolwut", -1, READONLY | FAST, 0, 0, 0, super::lolwut::lolwut, Server),
     cmd!("hello", -1, CONN_FLAGS, 0, 0, 0, hello, Connection),
     cmd!("reset", 1, CONN_FLAGS | SUBSCRIBED_OK | TXN_CONTROL, 0, 0, 0, reset, Connection),
     cmd!("quit", -1, CONN_FLAGS | SUBSCRIBED_OK | TXN_CONTROL, 0, 0, 0, quit, Connection),
@@ -32,9 +32,9 @@ pub static COMMANDS: &[Command] = &[
     cmd!("monitor", 1, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
     cmd!("wait", 3, BLOCKING, 0, 0, 0, server_only, Generic),
     cmd!("waitaof", 4, BLOCKING, 0, 0, 0, server_only, Generic),
-    cmd!("save", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING | NO_MULTI, 0, 0, 0, server_only, Server),
-    cmd!("bgsave", -1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, server_only, Server),
-    cmd!("bgrewriteaof", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, server_only, Server),
+    cmd!("save", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING | NO_MULTI, 0, 0, 0, super::persist::save, Server),
+    cmd!("bgsave", -1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, super::persist::bgsave, Server),
+    cmd!("bgrewriteaof", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, super::persist::bgrewriteaof, Server),
     cmd!("shutdown", -1, ADMIN | NOSCRIPT | LOADING | STALE | NO_MULTI | ALLOW_BUSY, 0, 0, 0, server_only, Server),
     cmd!("replicaof", 3, ADMIN | NOSCRIPT | STALE | NO_ASYNC_LOADING, 0, 0, 0, server_only, Server),
     cmd!("slaveof", 3, ADMIN | NOSCRIPT | STALE | NO_ASYNC_LOADING, 0, 0, 0, server_only, Server),
@@ -226,6 +226,7 @@ pub fn flushdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn flushall(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     flush_mode(args)?;
     cx.eng.flush_all();
+    cx.eng.persist.kill_rdb(cx.now);
     cx.eng.sig.dirty += 1;
     Ok(Reply::Ok)
 }
@@ -237,10 +238,6 @@ pub fn time(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
 
 pub fn lastsave(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     Ok(Reply::Int(cx.eng.lastsave))
-}
-
-pub fn lolwut(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Verbatim("txt", Bytes::from(format!("roll — serverless Redis\nRedis ver. {REDIS_VERSION}\n"))))
 }
 
 pub fn role(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
@@ -358,7 +355,7 @@ pub fn config_get(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let mut out = Vec::new();
     for pat in &args[2..] {
         for (k, v) in cx.eng.cfg.get(pat) {
-            if seen.insert(k.clone()) {
+            if seen.insert(k.to_ascii_lowercase()) {
                 out.push((Reply::bulk_str(k), Reply::bulk_str(v)));
             }
         }
@@ -384,9 +381,7 @@ pub fn config_set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 pub fn config_resetstat(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    cx.eng.stats = Default::default();
-    cx.eng.cmdstats.clear();
-    cx.eng.errorstats.clear();
+    cx.eng.reset_stats();
     Ok(Reply::Ok)
 }
 
@@ -845,195 +840,3 @@ pub fn debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     Err(Error::msg(format!("ERR unknown subcommand '{}'. Try DEBUG HELP.", String::from_utf8_lossy(sub))))
 }
 
-// ---- INFO ----
-
-fn human(n: u64) -> String {
-    let f = n as f64;
-    if f < 1024.0 {
-        format!("{n}B")
-    } else if f < 1024.0 * 1024.0 {
-        format!("{:.2}K", f / 1024.0)
-    } else if f < 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.2}M", f / 1024.0 / 1024.0)
-    } else {
-        format!("{:.2}G", f / 1024.0 / 1024.0 / 1024.0)
-    }
-}
-
-/// Engine-level INFO sections. The server layer adds or replaces `server`, `clients`,
-/// `persistence` and `replication` with its own view.
-pub fn info_section(eng: &crate::engine::Engine, name: &str, now: i64) -> Option<String> {
-    let mut s = String::new();
-    use std::fmt::Write;
-    match name {
-        "server" => {
-            let up = (now - eng.start_ms) / 1000;
-            let _ = write!(
-                s,
-                "# Server\r\nredis_version:{REDIS_VERSION}\r\nredis_git_sha1:00000000\r\nredis_git_dirty:0\r\nredis_build_id:0\r\nredis_mode:standalone\r\nos:roll\r\narch_bits:64\r\nmultiplexing_api:tokio\r\nprocess_id:1\r\nrun_id:{:040x}\r\ntcp_port:6379\r\nserver_time_usec:{}\r\nuptime_in_seconds:{up}\r\nuptime_in_days:{}\r\nhz:{}\r\nconfigured_hz:{}\r\nlru_clock:{}\r\nexecutable:roll\r\nconfig_file:\r\n",
-                eng.start_ms as u128 * 7919,
-                now_us(),
-                up / 86400,
-                eng.cfg.hz,
-                eng.cfg.hz,
-                crate::engine::Engine::lru_clock(now)
-            );
-        }
-        "memory" => {
-            let used = eng.used_memory() as u64;
-            let sc = &eng.scripting;
-            let (vm_eval, vm_functions) = (sc.memory() as u64, sc.functions_memory() as u64);
-            let (scripts_eval, functions) = (sc.scripts_memory() as u64, sc.libraries_memory() as u64);
-            let _ = write!(
-                s,
-                "# Memory\r\nused_memory:{used}\r\nused_memory_human:{}\r\nused_memory_rss:{used}\r\nused_memory_peak:{used}\r\nused_memory_peak_human:{}\r\nused_memory_overhead:{}\r\nused_memory_dataset:{used}\r\n\
-                 used_memory_lua:{vm_eval}\r\nused_memory_vm_eval:{vm_eval}\r\nused_memory_lua_human:{}\r\nused_memory_scripts_eval:{scripts_eval}\r\nnumber_of_cached_scripts:{}\r\nnumber_of_functions:{}\r\nnumber_of_libraries:{}\r\nused_memory_vm_functions:{vm_functions}\r\nused_memory_vm_total:{}\r\nused_memory_vm_total_human:{}\r\nused_memory_functions:{functions}\r\nused_memory_scripts:{}\r\nused_memory_scripts_human:{}\r\n\
-                 maxmemory:{}\r\nmaxmemory_human:{}\r\nmaxmemory_policy:{}\r\nmem_fragmentation_ratio:1.00\r\nmem_allocator:system\r\nlazyfree_pending_objects:0\r\n",
-                human(used),
-                human(used),
-                eng.overhead,
-                human(vm_eval),
-                sc.cached_scripts(),
-                sc.functions_count(),
-                sc.libraries().len(),
-                vm_eval + vm_functions,
-                human(vm_eval + vm_functions),
-                scripts_eval + functions,
-                human(scripts_eval + functions),
-                eng.cfg.maxmemory,
-                human(eng.cfg.maxmemory),
-                eng.cfg.maxmemory_policy.name()
-            );
-        }
-        "stats" => {
-            let st = &eng.stats;
-            let _ = write!(
-                s,
-                "# Stats\r\ntotal_commands_processed:{}\r\ninstantaneous_ops_per_sec:0\r\nexpired_keys:{}\r\nexpired_stale_perc:0.00\r\nexpired_time_cap_reached_count:{}\r\nevicted_keys:{}\r\nevicted_scripts:{}\r\ntotal_eviction_exceeded_time:{}\r\nkeyspace_hits:{}\r\nkeyspace_misses:{}\r\npubsub_channels:{}\r\npubsub_patterns:{}\r\npubsubshard_channels:{}\r\nunexpected_error_replies:0\r\ntotal_error_replies:{}\r\n",
-                st.commands,
-                st.expired_keys,
-                st.expired_time_cap_reached,
-                st.evicted_keys,
-                st.evicted_scripts,
-                st.total_eviction_exceeded_time_ms,
-                st.keyspace_hits,
-                st.keyspace_misses,
-                eng.hub.channels(crate::hub::Kind::Channel, None).len(),
-                eng.hub.numpat(),
-                eng.hub.channels(crate::hub::Kind::Shard, None).len(),
-                eng.errorstats.values().sum::<u64>()
-            );
-        }
-        "persistence" => {
-            let _ = write!(
-                s,
-                "# Persistence\r\nloading:0\r\nasync_loading:0\r\nrdb_changes_since_last_save:{}\r\nrdb_bgsave_in_progress:0\r\nrdb_last_save_time:{}\r\nrdb_last_bgsave_status:ok\r\naof_enabled:1\r\naof_rewrite_in_progress:0\r\naof_last_write_status:ok\r\n",
-                eng.dirty, eng.lastsave
-            );
-        }
-        "replication" => {
-            let _ = write!(s, "# Replication\r\nrole:{}\r\nconnected_slaves:0\r\n", if eng.replica { "slave" } else { "master" });
-        }
-        "clients" => {
-            let _ = write!(s, "# Clients\r\nconnected_clients:1\r\nblocked_clients:{}\r\ntotal_blocking_keys:{}\r\nwatching_clients:{}\r\n", eng.blocked_clients(), eng.blocking.by_key.len(), eng.watches.by_client.len());
-        }
-        "cpu" => {
-            s.push_str("# CPU\r\nused_cpu_sys:0.000000\r\nused_cpu_user:0.000000\r\n");
-        }
-        "hotkeys" => {
-            s.push_str("# Hotkeys\r\n");
-            if let Some(h) = &eng.hotkeys {
-                let _ = write!(s, "hotkeys-tracking-active:{}\r\nhotkeys-cmd-cpu-time:{}\r\n", h.active as i32, h.cpu_time);
-            }
-        }
-        "modules" => s.push_str("# Modules\r\n"),
-        "cluster" => s.push_str("# Cluster\r\ncluster_enabled:0\r\n"),
-        "errorstats" => {
-            s.push_str("# Errorstats\r\n");
-            let mut errs: Vec<_> = eng.errorstats.iter().collect();
-            errs.sort();
-            for (k, v) in errs {
-                let _ = write!(s, "errorstat_{k}:count={v}\r\n");
-            }
-        }
-        "commandstats" => {
-            s.push_str("# Commandstats\r\n");
-            let mut cmds: Vec<_> = eng.cmdstats.iter().collect();
-            cmds.sort_by(|a, b| a.0.cmp(b.0));
-            for (k, v) in cmds {
-                let per = if v.calls > 0 { v.usec as f64 / v.calls as f64 } else { 0.0 };
-                let _ = write!(
-                    s,
-                    "cmdstat_{k}:calls={},usec={},usec_per_call={per:.2},rejected_calls={},failed_calls={}\r\n",
-                    v.calls, v.usec, v.rejected, v.failed
-                );
-            }
-        }
-        "latencystats" => s.push_str("# Latencystats\r\n"),
-        "keyspace" => {
-            s.push_str("# Keyspace\r\n");
-            for (i, d) in eng.dbs.iter().enumerate() {
-                if !d.is_empty() {
-                    let _ = write!(s, "db{i}:keys={},expires={},avg_ttl={},subexpiry={}\r\n", d.len(), d.expires(), d.avg_ttl, d.subexpires.len());
-                }
-            }
-        }
-        _ => return None,
-    }
-    Some(s)
-}
-
-pub const DEFAULT_SECTIONS: &[&str] =
-    &["server", "clients", "memory", "persistence", "stats", "replication", "cpu", "hotkeys", "modules", "errorstats", "cluster", "keyspace"];
-pub const ALL_SECTIONS: &[&str] = &[
-    "server",
-    "clients",
-    "memory",
-    "persistence",
-    "stats",
-    "replication",
-    "cpu",
-    "hotkeys",
-    "modules",
-    "commandstats",
-    "errorstats",
-    "latencystats",
-    "cluster",
-    "keyspace",
-];
-
-/// Which sections an `INFO [section …]` call asks for.
-pub fn info_sections(args: &[Bytes]) -> Vec<&'static str> {
-    if args.len() <= 1 {
-        return DEFAULT_SECTIONS.to_vec();
-    }
-    let mut out: Vec<&'static str> = Vec::new();
-    for a in &args[1..] {
-        let a = String::from_utf8_lossy(a).to_lowercase();
-        let add: Vec<&'static str> = match a.as_str() {
-            "all" | "everything" => ALL_SECTIONS.to_vec(),
-            "default" => DEFAULT_SECTIONS.to_vec(),
-            other => ALL_SECTIONS.iter().filter(|s| **s == other).copied().collect(),
-        };
-        for s in add {
-            if !out.contains(&s) {
-                out.push(s);
-            }
-        }
-    }
-    out
-}
-
-pub fn info(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let now = cx.now;
-    let mut s = String::new();
-    for sec in info_sections(args) {
-        if let Some(text) = info_section(cx.eng, sec, now) {
-            if !s.is_empty() {
-                s.push_str("\r\n");
-            }
-            s.push_str(&text);
-        }
-    }
-    Ok(Reply::Verbatim("txt", Bytes::from(s)))
-}

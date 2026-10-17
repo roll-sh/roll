@@ -37,6 +37,8 @@ pub struct Backlog {
     pub acks: Mutex<HashMap<u64, u64>>,
     pub acked: Notify,
     next_replica: AtomicU64,
+    /// Connected replicas: address and Unix ms of their last acknowledgement (INFO `slaveN`).
+    pub peers: Mutex<HashMap<u64, (SocketAddr, i64)>>,
 }
 
 #[derive(Default)]
@@ -57,6 +59,7 @@ impl Backlog {
             acks: Mutex::new(HashMap::new()),
             acked: Notify::new(),
             next_replica: AtomicU64::new(1),
+            peers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -98,6 +101,12 @@ impl Backlog {
 
     pub fn end(&self) -> u64 {
         self.inner.lock().end
+    }
+
+    /// Offsets of the first byte held and of the end.
+    pub fn range(&self) -> (u64, u64) {
+        let i = self.inner.lock();
+        (i.start, i.end)
     }
 
     /// Replicas whose acknowledged offset is at least `offset`.
@@ -191,7 +200,7 @@ async fn serve_link(
         return Ok(());
     }
     let id = String::from_utf8_lossy(&args[1]).into_owned();
-    let Some((_db, backlog)) = primaries.primary(&id) else {
+    let Some((db, backlog)) = primaries.primary(&id) else {
         sock.write_all(b"-ERR no such primary\r\n").await?;
         return Ok(());
     };
@@ -203,6 +212,7 @@ async fn serve_link(
     sock.write_all(format!("+CONTINUE {offset}\r\n").as_bytes()).await?;
     let rid = backlog.next_replica.fetch_add(1, Ordering::Relaxed);
     backlog.acks.lock().insert(rid, offset);
+    backlog.peers.lock().insert(rid, (peer, redis_engine::util::now_ms()));
     tracing::info!(db = id, %peer, offset, "replica attached");
     let (mut rd, mut wr) = sock.into_split();
     let acks = {
@@ -214,6 +224,9 @@ async fn serve_link(
                     Ok(a) if a.len() == 3 && eq(&a[0], "replconf") && eq(&a[1], "ack") => {
                         if let Some(o) = std::str::from_utf8(&a[2]).ok().and_then(|s| s.parse().ok()) {
                             backlog.acks.lock().insert(rid, o);
+                            if let Some(p) = backlog.peers.lock().get_mut(&rid) {
+                                p.1 = redis_engine::util::now_ms();
+                            }
                             backlog.acked.notify_waiters();
                         }
                     }
@@ -240,12 +253,14 @@ async fn serve_link(
             for c in chunks {
                 wr.write_all(&c).await?;
                 offset += c.len() as u64;
+                db.io.repl_out.fetch_add(c.len() as u64, Ordering::Relaxed);
             }
         }
     }
     .await;
     acks.abort();
     backlog.acks.lock().remove(&rid);
+    backlog.peers.lock().remove(&rid);
     backlog.acked.notify_waiters();
     result
 }
@@ -308,6 +323,8 @@ pub struct Follower {
     pub connected: std::sync::atomic::AtomicBool,
     /// Unix ms of the last applied data or ping from the primary.
     pub last_contact: AtomicU64,
+    /// Unix ms the link last went up or down.
+    pub link_changed: AtomicU64,
     stop: Notify,
     /// For resyncs from object storage, which can start from a snapshot.
     codec: Option<Arc<dyn persist::SnapshotCodec>>,
@@ -328,6 +345,7 @@ impl Follower {
             applied: AtomicU64::new(applied),
             connected: Default::default(),
             last_contact: AtomicU64::new(0),
+            link_changed: AtomicU64::new(redis_engine::util::now_ms() as u64),
             stop: Notify::new(),
             codec,
         })
@@ -404,6 +422,7 @@ impl Follower {
 
     /// Follow a primary over a replication link until [`Follower::promote`].
     pub async fn stream(self: Arc<Self>, primary: SocketAddr, primary_db: String, secret: String, objects: Option<Objects>) {
+        *self.db.upstream.lock() = Some((primary, Arc::downgrade(&self)));
         let mut backoff = Duration::from_millis(50);
         loop {
             let stopped = self.stop.notified();
@@ -411,6 +430,7 @@ impl Follower {
                 _ = stopped => return,
                 r = self.stream_once(primary, &primary_db, &secret, objects.as_ref()) => {
                     self.connected.store(false, Ordering::SeqCst);
+                    self.link_changed.store(redis_engine::util::now_ms() as u64, Ordering::Relaxed);
                     if let Err(e) = r {
                         tracing::debug!(error = %e, "replication link lost");
                     }
@@ -451,6 +471,7 @@ impl Follower {
             anyhow::bail!("primary refused replication: {line}");
         }
         self.connected.store(true, Ordering::SeqCst);
+        self.link_changed.store(redis_engine::util::now_ms() as u64, Ordering::Relaxed);
         let (mut rd, mut wr) = sock.into_split();
         let mut dbsel = 0u16;
         // Stream bytes may have arrived together with the handshake line.
@@ -459,9 +480,11 @@ impl Follower {
         loop {
             tokio::select! {
                 r = rd.read_buf(&mut buf) => {
-                    if r? == 0 {
+                    let n = r?;
+                    if n == 0 {
                         anyhow::bail!("primary closed the link");
                     }
+                    self.db.io.repl_in.fetch_add(n as u64, Ordering::Relaxed);
                     self.apply(&mut buf, &mut dbsel)?;
                 }
                 _ = ack.tick() => {

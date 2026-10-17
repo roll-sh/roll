@@ -74,6 +74,21 @@ pub struct Stats {
     pub unexpected_error_replies: u64,
     pub total_blocking_keys: u64,
     pub dirty_total: u64,
+    /// Keys deleted by the active-expiry cycle (also counted in `expired_keys`).
+    pub expired_keys_active: u64,
+    /// Hash fields expired, and those expired by the active cycle.
+    pub expired_subkeys: u64,
+    pub expired_subkeys_active: u64,
+    /// Microseconds spent in active expiry.
+    pub expire_cycle_us: u64,
+    /// Commands that went to the slowlog, their total and longest duration (µs).
+    pub slowlog_count: u64,
+    pub slowlog_us_sum: u64,
+    pub slowlog_us_max: u64,
+    /// SAVE / BGSAVE runs.
+    pub rdb_saves: u64,
+    /// Error replies sent (`total_error_replies`).
+    pub error_replies: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -82,6 +97,11 @@ pub struct CmdStat {
     pub usec: u64,
     pub rejected: u64,
     pub failed: u64,
+    pub slowlog_count: u64,
+    pub slowlog_us_sum: u64,
+    pub slowlog_us_max: u64,
+    /// Latency distribution (INFO latencystats), while `latency-tracking` is on.
+    pub latency: Option<Box<crate::commands::info::Histogram>>,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +164,8 @@ pub(crate) struct Waiter {
     /// Re-run at this absolute Unix ms even if no key changed (XREADGROUP CLAIM: a pending
     /// entry becomes claimable); 0 = never.
     pub wake_at: i64,
+    /// Execution time of the attempts so far: Redis charges it with the call that ends the block.
+    pub micros: u64,
 }
 
 #[derive(Default)]
@@ -180,6 +202,8 @@ pub struct Engine {
     /// Changes since the last snapshot (`rdb_changes_since_last_save`).
     pub dirty: u64,
     pub lastsave: i64,
+    /// SAVE / BGSAVE / BGREWRITEAOF bookkeeping.
+    pub persist: crate::commands::persist::Persist,
     pub start_ms: i64,
     /// Effects of executed writes, drained by the server into the replication log.
     pub effects: Vec<Effect>,
@@ -205,6 +229,17 @@ pub struct Engine {
     pub hotkeys: Option<crate::commands::hotkeys::Stats>,
     /// Reply bytes of the EXEC running now, so far (Redis counts them per queued command).
     pub(crate) exec_out_bytes: u64,
+    /// What the server around the engine reports for INFO (connections, network, replication).
+    pub host: Option<Arc<dyn crate::commands::info::Host>>,
+    /// INFO memory: the peak of `used_memory` and when it was reached (Unix s), and the usage
+    /// right after startup.
+    pub peak_memory: usize,
+    pub peak_time: i64,
+    pub startup_memory: usize,
+    /// INFO `instantaneous_*` samples.
+    pub metrics: crate::commands::info::Metrics,
+    /// `total_error_replies` when the current command started or its last nested call ended.
+    pub(crate) prev_errors: u64,
 }
 
 /// The arguments as SLOWLOG and MONITOR show them: secrets replaced by `(redacted)`, like Redis'
@@ -266,7 +301,7 @@ impl Engine {
     pub fn new(cfg: Config, hub: Arc<Hub>) -> Self {
         let dbs = (0..cfg.databases).map(|_| Db::default()).collect();
         let now = now_ms();
-        Self {
+        let mut e = Self {
             dbs,
             cfg,
             hub,
@@ -279,6 +314,7 @@ impl Engine {
             replica: false,
             dirty: 0,
             lastsave: now / 1000,
+            persist: Default::default(),
             start_ms: now,
             effects: Vec::new(),
             scripting: Default::default(),
@@ -294,7 +330,16 @@ impl Engine {
             clients: Default::default(),
             hotkeys: None,
             exec_out_bytes: 0,
-        }
+            host: None,
+            peak_memory: 0,
+            peak_time: now / 1000,
+            startup_memory: 0,
+            metrics: Default::default(),
+            prev_errors: 0,
+        };
+        e.startup_memory = e.used_memory();
+        e.peak_memory = e.startup_memory;
+        e
     }
 
     /// A standalone engine with default config, for tests and tools.
@@ -308,6 +353,9 @@ impl Engine {
         // Connections register on connect when the engine is free, else on their first command.
         if client.conn.is_some() && !self.clients.by_id.contains_key(&client.id) {
             self.clients.register(client);
+        }
+        if let Some(c) = &client.conn {
+            c.last_cmd_ms.store(now, std::sync::atomic::Ordering::Relaxed);
         }
         if self.clients.tracking_clients > 0 {
             self.clients.limit(self.cfg.tracking_table_max_keys, &mut self.rng);
@@ -570,12 +618,16 @@ impl Engine {
 
         // ---- execute ----
         self.sig.notify = self.cfg.notify;
-        self.sig.track = !self.watches.keys.is_empty() || !self.blocking.by_key.is_empty() || self.clients.wants_touches();
+        // Always: touched keys also update the keysizes histogram.
+        self.sig.track = true;
         let db_at_start = client.db as u16;
         let dirty_before = self.sig.dirty;
         let started = Instant::now();
         let (res, rewrite, block, no_propagate) = {
+            // Error replies from here on (to anyone) make the command a failed call.
+            self.prev_errors = self.stats.error_replies;
             let mut cx = Cx::new(self, client, now, cmd, mode);
+            cx.read_stats = crate::cx::read_lookups(cmd, args);
             let res = (cmd.handler)(&mut cx, args);
             (res, cx.rewrite.take(), cx.block.take(), cx.no_propagate)
         };
@@ -607,7 +659,9 @@ impl Engine {
                 let keys = commands::keyspec::keys_with_flags(cmd, &full_name, args);
                 self.clients.remember(current, keys.into_iter().map(|(i, _)| args[i].clone()));
             }
-            if let Some(e) = self.clients.by_id.get(&current) {
+            if block.is_none()
+                && let Some(e) = self.clients.by_id.get(&current)
+            {
                 e.stats.cmds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if top {
@@ -615,18 +669,12 @@ impl Engine {
             }
         }
 
-        let stat = self.cmdstats.entry(full_name.clone()).or_default();
-        stat.calls += 1;
-        stat.usec += micros;
-        self.stats.commands += 1;
-        if mode != Mode::Replay && !cmd.has(commands::SKIP_SLOWLOG) {
-            self.slowlog_push(client, &redacted(&full_name, args), micros, now);
-        }
-
+        // A command that blocks is accounted for once, by the call that ends the block (served,
+        // timed out or CLIENT UNBLOCKed), with the time of all its attempts.
         if let Some(b) = block {
             match mode {
                 Mode::Top => {
-                    self.register_waiter(client, args, b);
+                    self.register_waiter(client, args, b, micros);
                     return Outcome::Blocked;
                 }
                 Mode::Unblock => {
@@ -635,24 +683,33 @@ impl Engine {
                             w.args = a;
                         }
                         w.wake_at = b.wake_at;
+                        w.micros += micros;
                     }
                     return Outcome::Blocked;
                 }
-                _ => return Outcome::Reply(b.timeout_reply),
+                _ => {
+                    self.count_call(client, &full_name, cmd, args, micros, now, mode);
+                    return Outcome::Reply(b.timeout_reply);
+                }
             }
         }
+        let micros = if mode == Mode::Unblock { micros + self.blocking.waiters.get(&client.id).map_or(0, |w| w.micros) } else { micros };
+        self.count_call(client, &full_name, cmd, args, micros, now, mode);
 
         let reply = match res {
             Ok(r) => r,
             Err(e) => {
-                let s = self.cmdstats.get_mut(&full_name).unwrap();
-                s.failed += 1;
-                self.stats.failed_calls += 1;
                 let r: Reply = e.into();
                 self.count_error(&r);
                 r
             }
         };
+        // `incrCommandStatsOnError`: errors since the last check (nested calls check their own).
+        if self.stats.error_replies > self.prev_errors {
+            self.cmdstats.get_mut(&full_name).unwrap().failed += 1;
+            self.stats.failed_calls += 1;
+        }
+        self.prev_errors = self.stats.error_replies;
         if self.hotkeys.as_ref().is_some_and(|h| h.active) && matches!(mode, Mode::Top | Mode::Exec | Mode::Unblock) {
             self.track_hotkeys(client, cmd, &full_name, args, micros, &reply, mode);
         }
@@ -715,6 +772,7 @@ impl Engine {
         if let Reply::Error(e) = r {
             let code = e.split(' ').next().unwrap_or("ERR").to_string();
             *self.errorstats.entry(code).or_default() += 1;
+            self.stats.error_replies += 1;
         }
     }
 
@@ -740,10 +798,48 @@ impl Engine {
         self.hub.monitor(&line);
     }
 
-    fn slowlog_push(&mut self, client: &Client, args: &[Bytes], micros: u64, now: i64) {
+    /// Command stats for one finished call: calls and time, latency histogram, slowlog.
+    #[allow(clippy::too_many_arguments)]
+    fn count_call(&mut self, client: &Client, full: &str, cmd: &Command, args: &[Bytes], micros: u64, now: i64, mode: Mode) {
+        let tracking = self.cfg.latency_tracking;
+        let stat = self.cmdstats.entry(full.to_string()).or_default();
+        stat.calls += 1;
+        stat.usec += micros;
+        if tracking {
+            stat.latency.get_or_insert_with(Default::default).record(micros as i64 * 1000);
+        }
+        self.stats.commands += 1;
+        if mode != Mode::Replay && !cmd.has(commands::SKIP_SLOWLOG) && self.slowlog_push(client, &redacted(full, args), micros, now) {
+            let st = &mut self.stats;
+            st.slowlog_count += 1;
+            st.slowlog_us_sum += micros;
+            st.slowlog_us_max = st.slowlog_us_max.max(micros);
+            let stat = self.cmdstats.get_mut(full).unwrap();
+            stat.slowlog_count += 1;
+            stat.slowlog_us_sum += micros;
+            stat.slowlog_us_max = stat.slowlog_us_max.max(micros);
+        }
+    }
+
+    /// A blocked command ends without running again (timeout, CLIENT UNBLOCK): account for it
+    /// now (`updateStatsOnUnblock`).
+    fn count_unblocked(&mut self, w: &Waiter, failed: bool) {
+        let Ok((cmd, full)) = Self::resolve(&w.args) else { return };
+        self.count_call(&w.client, &full, cmd, &w.args, w.micros, now_ms(), Mode::Unblock);
+        if failed {
+            self.cmdstats.get_mut(&full).unwrap().failed += 1;
+            self.stats.failed_calls += 1;
+        }
+        if let Some(e) = self.clients.by_id.get(&w.client.id) {
+            e.stats.cmds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Log the command if it ran for at least `slowlog-log-slower-than`. Returns whether it did.
+    fn slowlog_push(&mut self, client: &Client, args: &[Bytes], micros: u64, now: i64) -> bool {
         let threshold = self.cfg.slowlog_log_slower_than;
         if threshold < 0 || micros < threshold as u64 {
-            return;
+            return false;
         }
         let mut kept: Vec<Bytes> = Vec::new();
         let max_args = 32;
@@ -774,6 +870,7 @@ impl Engine {
         while self.slowlog.len() as u64 > self.cfg.slowlog_max_len {
             self.slowlog.pop_back();
         }
+        true
     }
 
     // ---- key lifecycle ----
@@ -837,6 +934,7 @@ impl Engine {
             return;
         }
         for (db, key) in std::mem::take(&mut self.sig.touched) {
+            self.dbs[db as usize].resize(&key);
             let k = (db, key);
             if let Some(ids) = self.watches.keys.get(&k) {
                 self.watches.dirty.extend(ids.iter().copied());
@@ -924,7 +1022,7 @@ impl Engine {
 
     // ---- blocking ----
 
-    fn register_waiter(&mut self, client: &Client, args: &[Bytes], b: BlockReq) {
+    fn register_waiter(&mut self, client: &Client, args: &[Bytes], b: BlockReq, micros: u64) {
         let db = client.db as u16;
         let keys: Vec<(u16, Str)> = b.keys.into_iter().map(|k| (db, k)).collect();
         for k in &keys {
@@ -942,6 +1040,7 @@ impl Engine {
             deadline: b.deadline,
             unblock_on_nokey: b.unblock_on_nokey,
             wake_at: b.wake_at,
+            micros,
         };
         self.blocking.waiters.insert(client.id, w);
     }
@@ -995,15 +1094,22 @@ impl Engine {
                 }
             }
         }
-        let r = self.unregister_waiter(client_id).map(|w| w.timeout_reply);
+        let w = self.unregister_waiter(client_id)?;
+        self.count_unblocked(&w, false);
         self.serve_blocked(now);
-        r
+        Some(w.timeout_reply)
     }
 
     /// `CLIENT UNBLOCK id [TIMEOUT|ERROR]`.
     pub fn unblock(&mut self, client_id: u64, error: bool) -> Option<Reply> {
         let w = self.unregister_waiter(client_id)?;
-        Some(if error { Reply::error("UNBLOCKED client unblocked via CLIENT UNBLOCK") } else { w.timeout_reply })
+        self.count_unblocked(&w, error);
+        if !error {
+            return Some(w.timeout_reply);
+        }
+        let r = Reply::error("UNBLOCKED client unblocked via CLIENT UNBLOCK");
+        self.count_error(&r);
+        Some(r)
     }
 
     /// Serve clients blocked on keys that became ready.
@@ -1212,7 +1318,7 @@ impl Engine {
         let per_loop = 20 + 5 * (self.cfg.active_expire_effort as usize - 1).min(9);
         let mut total = 0;
         self.sig.notify = self.cfg.notify;
-        self.sig.track = !self.watches.keys.is_empty() || !self.blocking.by_key.is_empty();
+        self.sig.track = true;
         for db in 0..self.dbs.len() {
             loop {
                 if self.dbs[db].volatile.is_empty() {
@@ -1250,6 +1356,7 @@ impl Engine {
                 for k in expired {
                     self.delete_expired(db, &k);
                 }
+                self.stats.expired_keys_active += n as u64;
                 total += n;
                 if start.elapsed().as_micros() as u64 > budget_us {
                     self.stats.expired_time_cap_reached += 1;
@@ -1261,8 +1368,11 @@ impl Engine {
                 }
             }
             // Hash fields with a TTL (Redis' activeSubexpiresCycle).
-            total += commands::hashes::active_expire_fields(self, db, now, start, budget_us);
+            let fields = commands::hashes::active_expire_fields(self, db, now, start, budget_us);
+            self.stats.expired_subkeys_active += fields as u64;
+            total += fields;
         }
+        self.stats.expire_cycle_us += start.elapsed().as_micros() as u64;
         if total > 0 {
             self.process_touched();
             self.flush_events();

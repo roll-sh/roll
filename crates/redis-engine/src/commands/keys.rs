@@ -512,7 +512,7 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let lru = Engine::restored_lru(cx.cfg(), freq, idle, now);
     let db = cx.db_index();
-    cx.put_entry(db, key, crate::value::Entry { value, expire: at, lru });
+    cx.put_entry(db, key, crate::value::Entry { value, expire: at, lru, sized: crate::value::NO_SIZE });
     if ttl != 0 && !absttl {
         // Replicate the absolute expiry.
         let mut argv = args.to_vec();

@@ -105,6 +105,7 @@ where
     if let Some(s) = &session {
         client.user = s.user.clone();
         s.user.watch(client.id, client.sink.as_ref().unwrap());
+        s.db.io.accepted.fetch_add(1, Ordering::Relaxed);
         register(&s.db, &client);
     }
     let mut conn = Conn {
@@ -147,6 +148,10 @@ where
             if parsed > 0 {
                 conn.stats.pipeline_sum.fetch_add(parsed, Ordering::Relaxed);
                 conn.stats.pipeline_cnt.fetch_add(1, Ordering::Relaxed);
+                if let Some(db) = conn.db() {
+                    db.io.events.fetch_add(1, Ordering::Relaxed);
+                    db.io.pipeline_sum.fetch_add(parsed, Ordering::Relaxed);
+                }
             }
             conn.stats.qbuf.store(inbuf.len() as u64, Ordering::Relaxed);
             conn.stats.qbuf_cap.store(inbuf.capacity() as u64, Ordering::Relaxed);
@@ -160,6 +165,7 @@ where
             }
             conn.stats.net_out.fetch_add(conn.out.len() as u64, Ordering::Relaxed);
             if let Some(db) = conn.db() {
+                db.io.writes.fetch_add(1, Ordering::Relaxed);
                 db.net_out.fetch_add(conn.out.len() as u64, Ordering::Relaxed);
             }
             conn.out.clear();
@@ -198,6 +204,7 @@ where
                     conn.stats.read_events.fetch_add(1, Ordering::Relaxed);
                     conn.stats.last_interaction.store(redis_engine::util::now_ms() / 1000, Ordering::Relaxed);
                     if let Some(db) = &db {
+                        db.io.reads.fetch_add(1, Ordering::Relaxed);
                         db.net_in.fetch_add(n as u64, Ordering::Relaxed);
                     }
                 }
@@ -463,9 +470,6 @@ impl Conn<'_> {
         if eq(name, "waitaof") {
             return Some(self.waitaof(&args).await);
         }
-        if eq(name, "save") || eq(name, "bgsave") || eq(name, "bgrewriteaof") {
-            return Some(Reply::status(if eq(name, "save") { "OK" } else { "Background saving started" }));
-        }
         None
     }
 
@@ -542,6 +546,9 @@ impl Conn<'_> {
         let req = AuthRequest { user: user.map(|u| &u[..]), password: pass, sni: self.sni.as_deref(), client: Some(&self.client), command: &args[0] };
         match self.dir.authenticate(req).await {
             Ok(s) => {
+                if self.session.as_ref().is_none_or(|old| !Arc::ptr_eq(&old.db, &s.db)) {
+                    s.db.io.accepted.fetch_add(1, Ordering::Relaxed);
+                }
                 if self.session.as_ref().is_some_and(|old| !Arc::ptr_eq(&old.db, &s.db)) {
                     // Switching databases: leave the old one completely.
                     self.cleanup();
@@ -599,5 +606,5 @@ pub(crate) fn long_running<R>(args: &[Bytes], f: impl FnOnce() -> R) -> R {
 
 fn is_intercepted(args: &[Bytes]) -> bool {
     let n = &args[0];
-    eq(n, "auth") || eq(n, "hello") || eq(n, "monitor") || eq(n, "wait") || eq(n, "waitaof") || eq(n, "save") || eq(n, "bgsave") || eq(n, "bgrewriteaof")
+    eq(n, "auth") || eq(n, "hello") || eq(n, "monitor") || eq(n, "wait") || eq(n, "waitaof")
 }

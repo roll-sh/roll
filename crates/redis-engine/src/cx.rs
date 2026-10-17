@@ -28,6 +28,23 @@ pub struct Cx<'a> {
     pub(crate) rewrite: Option<Vec<Bytes>>,
     pub(crate) block: Option<BlockReq>,
     pub(crate) no_propagate: bool,
+    /// Lookups count keyspace hits/misses and emit `keymiss` ([`read_lookups`]).
+    pub(crate) read_stats: bool,
+}
+
+/// Do the command's lookups count as reads (`lookupKeyRead`: keyspace hits/misses, `keymiss`)?
+/// Write commands look keys up for writing (no stats), except those Redis reads through.
+pub(crate) fn read_lookups(cmd: &Command, args: &[Bytes]) -> bool {
+    if !cmd.is_write() {
+        return true;
+    }
+    match cmd.name {
+        "getdel" | "getex" | "copy" | "delex" | "bitop" | "pfmerge" | "sort" | "georadius" | "georadiusbymember" | "geosearchstore" | "sinterstore"
+        | "sunionstore" | "sdiffstore" | "zunionstore" | "zinterstore" | "zdiffstore" | "zrangestore" | "xack" | "xackdel" | "xautoclaim" | "xclaim" => true,
+        // SET … GET reads the old value like GET.
+        "set" => args.iter().skip(3).any(|a| a.eq_ignore_ascii_case(b"get")),
+        _ => false,
+    }
 }
 
 /// Mutable access to a key's entry. On drop it updates memory accounting, signals the key as
@@ -132,7 +149,7 @@ macro_rules! typed_get {
 
 impl<'a> Cx<'a> {
     pub(crate) fn new(eng: &'a mut Engine, client: &'a mut Client, now: i64, cmd: &'static Command, mode: Mode) -> Self {
-        Self { eng, client, now, cmd, mode, rewrite: None, block: None, no_propagate: false }
+        Self { eng, client, now, cmd, mode, rewrite: None, block: None, no_propagate: false, read_stats: true }
     }
 
     #[inline]
@@ -160,19 +177,24 @@ impl<'a> Cx<'a> {
         let expired = self.expire_check(key);
         let now = self.now;
         let no_touch = self.client.no_touch;
+        let read = self.read_stats;
         let Engine { dbs, cfg, rng, stats, sig, .. } = &mut *self.eng;
         let found = if expired { None } else { dbs[self.client.db].keys.get_mut(key) };
         match found {
             Some(e) => {
-                stats.keyspace_hits += 1;
+                if read {
+                    stats.keyspace_hits += 1;
+                }
                 if !no_touch {
                     Engine::touch_entry(cfg, rng, e, now);
                 }
                 Some(&*e)
             }
             None => {
-                stats.keyspace_misses += 1;
-                sig.notify(notify::KEY_MISS, "keymiss", self.client.db as u16, key);
+                if read {
+                    stats.keyspace_misses += 1;
+                    sig.notify(notify::KEY_MISS, "keymiss", self.client.db as u16, key);
+                }
                 None
             }
         }

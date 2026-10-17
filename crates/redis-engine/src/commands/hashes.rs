@@ -201,6 +201,7 @@ fn unregister_if_no_ttls(cx: &mut Cx, key: &[u8], had_ttls: bool) {
 /// own, emitted before the command, that doesn't count as a change made by the command.
 fn field_expired_effect(eng: &mut Engine, db: usize, key: &[u8], field: &[u8]) {
     eng.effects.push(Effect { db: db as u16, args: vec![b("HDEL"), Bytes::copy_from_slice(key), Bytes::copy_from_slice(field)] });
+    eng.stats.expired_subkeys += 1;
     eng.sig.touch(db as u16, key);
     eng.sig.dirty -= 1;
     eng.dirty += 1;

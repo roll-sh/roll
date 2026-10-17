@@ -49,6 +49,14 @@ struct Cached {
 pub struct Sockets(HashMap<String, Cached>);
 
 impl Sockets {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Close connections idle for more than 10 seconds (`migrateCloseTimedoutSockets`).
     pub fn expire(&mut self) {
         self.0.retain(|_, c| c.last_use.elapsed() <= CACHE_TTL);

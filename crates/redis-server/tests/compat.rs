@@ -13,6 +13,8 @@
 //! !mask a,b CMD           replace the values following the fields `a` and `b` (in maps and flat
 //!                         key/value arrays, at any depth, and `a=…` tokens in text replies such
 //!                         as CLIENT LIST) before comparing (timestamps, ids…)
+//! !info a,b* INFO …       compare INFO's sections and field names; values only for fields `a`
+//!                         and those starting with `b` (`!info - …`: names only)
 //! !ids CMD                in the reply, integers and `id=`/`redir=` tokens equal to a
 //!                         connection's client id become `id:N` (ids differ between servers)
 //! CLIENT KILL ID {id:2}   `{id:N}` expands to connection N's client id on each server
@@ -101,6 +103,7 @@ fn shape(r: &Reply) -> String {
         Reply::Set(v) => format!("set({})", v.len()),
         Reply::Map(v) => format!("map({})", v.len()),
         Reply::Bulk(_) => "bulk".into(),
+        Reply::Verbatim(..) => "verbatim".into(),
         Reply::Int(_) => "int".into(),
         Reply::Error(_) => "error".into(),
         Reply::Status(_) | Reply::Ok => "status".into(),
@@ -143,6 +146,42 @@ fn mask(r: &Reply, fields: &[String]) -> Reply {
         })),
         other => other.clone(),
     }
+}
+
+/// INFO text: keep section headers and field names (and their order); values only for the fields
+/// matching `keep` (`name`, or `prefix*`).
+fn info_fields(r: &Reply, keep: &[String], masked: &[String], sort: bool) -> Reply {
+    let (Reply::Bulk(b) | Reply::Verbatim(_, b)) = r else { return r.clone() };
+    let kept = |k: &str| keep.iter().any(|p| p.strip_suffix('*').map_or(p == k, |pre| k.starts_with(pre)));
+    // `a=1,b=2` values: masked sub-fields become `*`.
+    let sub = |v: &str| {
+        v.split(',')
+            .map(|t| match t.split_once('=') {
+                Some((k, _)) if masked.iter().any(|m| m == k) => format!("{k}=*"),
+                _ => t.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let text = String::from_utf8_lossy(b);
+    let mut lines: Vec<String> = text
+        .split("\r\n")
+        .map(|line| match line.split_once(':') {
+            Some((k, v)) if !line.starts_with('#') => format!("{k}:{}", if kept(k) { sub(v) } else { "*".to_string() }),
+            _ => line.to_string(),
+        })
+        .collect();
+    if sort {
+        // Within each section (Redis lists commands in hash-table order).
+        let mut start = 0;
+        for i in 0..=lines.len() {
+            if i == lines.len() || lines[i].starts_with('#') || lines[i].is_empty() {
+                lines[start..i].sort();
+                start = i + 1;
+            }
+        }
+    }
+    Reply::Bulk(bytes::Bytes::from(lines.join("\r\n")))
 }
 
 /// Rewrite the values of `key=value` tokens in a text reply (CLIENT LIST lines).
@@ -288,6 +327,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             }
             continue;
         }
+        let mut info_keep: Option<Vec<String>> = None;
         let (cmp, send_only, cmdline, masked, by_id) = {
             let mut cmp = Cmp::Exact;
             let mut send = false;
@@ -308,6 +348,11 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                     "skip" => cmp = Cmp::Skip,
                     "send" => send = true,
                     "ids" => by_id = true,
+                    "info" => {
+                        let (fields, t) = tail.split_once(' ').unwrap_or((tail, ""));
+                        info_keep = Some(fields.split(',').filter(|f| *f != "-").map(str::to_string).collect());
+                        tail = t;
+                    }
                     other => panic!("{fname}:{lineno}: unknown modifier !{other}"),
                 }
                 l = tail.trim_start();
@@ -325,9 +370,15 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             p.pending.push((cmp, cmdline.to_string(), lineno));
             continue;
         }
-        let a = p.redis.cmd(&args_r).await.map(|r| if masked.is_empty() { r } else { mask(&r, &masked) });
-        let b = p.roll.read_timeout_after_send(&args).await.map(|r| r.map(|r| if masked.is_empty() { r } else { mask(&r, &masked) }));
+        let shown = |r: Reply| match &info_keep {
+            Some(k) => info_fields(&r, k, &masked, cmp == Cmp::Sort),
+            None if masked.is_empty() => r,
+            None => mask(&r, &masked),
+        };
+        let a = p.redis.cmd(&args_r).await.map(shown);
+        let b = p.roll.read_timeout_after_send(&args).await.map(|r| r.map(shown));
         let (a, b) = if by_id { (a.map(|r| name_ids(&r, &ids_r)), b.map(|r| r.map(|r| name_ids(&r, &ids_o)))) } else { (a, b) };
+
         match (a, b) {
             (Ok(a), Ok(Some(b))) => {
                 if !same(cmp, &a, &b) {
@@ -429,6 +480,8 @@ async fn compat_with_redis() {
     assert!(ready, "reference Redis at {ref_addr} not ready");
 
     let db = Database::new("compat", Config::default(), 1);
+    // Active expiry and INFO's samples, like a node runs.
+    db.start_cron();
     let roll = start_single(db, None).await.unwrap();
 
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/compat");
