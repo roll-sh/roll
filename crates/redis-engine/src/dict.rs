@@ -26,6 +26,8 @@ pub struct Dict<K, V> {
     rehash_idx: usize,
     len: usize,
     hasher: RandomState,
+    /// Grows and shrinks on its own (DEBUG DICT-RESIZING 0 turns this off for the keyspace).
+    resize: bool,
 }
 
 const MIN_SIZE: usize = 4;
@@ -40,7 +42,13 @@ impl<K: AsRef<[u8]>, V> Default for Dict<K, V> {
 
 impl<K: AsRef<[u8]>, V> Dict<K, V> {
     pub fn new() -> Self {
-        Self { t0: Vec::new(), t1: Vec::new(), rehash_idx: 0, len: 0, hasher: RandomState::default() }
+        Self { t0: Vec::new(), t1: Vec::new(), rehash_idx: 0, len: 0, hasher: RandomState::default(), resize: true }
+    }
+
+    /// Allow or stop automatic expands and shrinks (`dictTypeResizeAllowed`). Explicit
+    /// [`Dict::expand`] still applies.
+    pub fn set_resize(&mut self, on: bool) {
+        self.resize = on;
     }
 
     pub fn with_capacity(n: usize) -> Self {
@@ -488,13 +496,13 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
         }
         if self.t0.is_empty() {
             self.t0 = empty_table(MIN_SIZE);
-        } else if self.len >= self.t0.len() {
+        } else if self.resize && self.len >= self.t0.len() {
             self.start_resize((self.len + 1).next_power_of_two());
         }
     }
 
     fn shrink_if_needed(&mut self) {
-        if self.is_rehashing() || self.t0.len() <= MIN_SIZE {
+        if self.is_rehashing() || self.t0.len() <= MIN_SIZE || !self.resize {
             return;
         }
         if self.len == 0 {

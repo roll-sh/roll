@@ -329,7 +329,16 @@ pub fn debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             cx.eng.debug.skip_checksum = flag();
             Ok(Reply::Ok)
         }
-        _ if (is("enable-keymeta-runtime-registration") || is("aof-flush-sleep") || is("reply-copy-avoidance") || is("dict-resizing")) && n == 3 => Ok(Reply::Ok),
+        _ if (is("enable-keymeta-runtime-registration") || is("aof-flush-sleep") || is("reply-copy-avoidance")) && n == 3 => Ok(Reply::Ok),
+        // `dictResizeAllowed`: the keyspace and expires tables stop growing and shrinking.
+        _ if is("dict-resizing") && n == 3 => {
+            let on = flag();
+            for db in &mut cx.eng.dbs {
+                db.keys.set_resize(on);
+                db.volatile.set_resize(on);
+            }
+            Ok(Reply::Ok)
+        }
         _ if is("replicate") && n >= 3 => {
             cx.eng.server_actions.push(ServerAction::Replicate(args[2..].to_vec()));
             Ok(Reply::Ok)

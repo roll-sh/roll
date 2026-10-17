@@ -205,10 +205,16 @@ fn map_tokens(b: &[u8], f: impl Fn(&str, &str) -> String) -> bytes::Bytes {
     let lines: Vec<String> = text
         .split('\n')
         .map(|line| {
+            // `k=v` tokens, and `a=1,b=2` lists (INFO keyspace) item by item.
             line.split(' ')
-                .map(|tok| match tok.split_once('=') {
-                    Some((k, v)) => format!("{k}={}", f(k, v)),
-                    None => tok.to_string(),
+                .map(|tok| {
+                    tok.split(',')
+                        .map(|item| match item.split_once('=') {
+                            Some((k, v)) => format!("{k}={}", f(k, v)),
+                            None => item.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
                 })
                 .collect::<Vec<_>>()
                 .join(" ")

@@ -179,7 +179,7 @@ fn push_scored(out: &mut Vec<Reply>, resp3: bool, withscores: bool, m: &[u8], s:
 /// Read-only access to a zset without going through the `Cx` lookup again (call after a
 /// `cx.get*` did expiry, stats and type checks).
 pub(crate) fn zset_ref<'b>(cx: &'b Cx<'_>, key: &[u8]) -> Option<&'b ZSet> {
-    let now = cx.now;
+    let now = cx.eng.expiry_clock(cx.now);
     match cx.eng.dbs[cx.client.db].keys.get(key) {
         Some(e) if !e.expired(now) => match &e.value {
             Value::ZSet(z) => Some(z),
@@ -516,7 +516,7 @@ fn zsetop(cx: &mut Cx, args: &[Bytes], dst: Option<&Bytes>, numkeys_idx: usize, 
 
     let lim = limits(cx);
     let resp3 = cx.resp() >= 3;
-    let now = cx.now;
+    let now = cx.eng.expiry_clock(cx.now);
     let db = &cx.eng.dbs[cx.client.db];
     let mut srcs: Vec<(Src, f64, &Bytes)> = keys
         .iter()

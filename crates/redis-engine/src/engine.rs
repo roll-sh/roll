@@ -937,6 +937,12 @@ impl Engine {
         }
     }
 
+    /// The clock keys are checked against (`keyIsExpired`): before every expiry while DEBUG
+    /// SET-ALLOW-ACCESS-EXPIRED is on.
+    pub(crate) fn expiry_clock(&self, now: i64) -> i64 {
+        if self.debug.allow_access_expired { i64::MIN } else { now }
+    }
+
     /// If `key` is logically expired, delete it (on a primary) and report true.
     pub(crate) fn expire_if_needed(&mut self, db: usize, key: &[u8], now: i64, mode: Mode) -> bool {
         if self.debug.allow_access_expired {
@@ -1080,6 +1086,7 @@ impl Engine {
     // ---- WATCH ----
 
     pub(crate) fn watch(&mut self, client: &Client, key: &[u8], now: i64) {
+        let now = self.expiry_clock(now);
         let db = client.db as u16;
         let list = self.watches.by_client.entry(client.id).or_default();
         if list.iter().any(|(d, k, _)| *d == db && k.as_slice() == key) {
@@ -1110,6 +1117,7 @@ impl Engine {
         if self.watches.dirty.contains(&client_id) {
             return true;
         }
+        let now = self.expiry_clock(now);
         self.watches.by_client.get(&client_id).is_some_and(|list| {
             list.iter().any(|(db, key, missing)| {
                 !missing && self.dbs[*db as usize].keys.get(key).is_some_and(|e| e.expired(now))

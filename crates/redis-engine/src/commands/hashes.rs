@@ -106,8 +106,9 @@ struct Clock {
 }
 
 fn clock(cx: &Cx) -> Clock {
-    if cx.mode == Mode::Replay {
-        // The primary decides what expired; its HDELs follow.
+    if cx.mode == Mode::Replay || cx.eng.debug.allow_access_expired {
+        // The primary decides what expired; its HDELs follow. DEBUG SET-ALLOW-ACCESS-EXPIRED
+        // shows expired fields as they are.
         Clock { now: i64::MIN, delete: false }
     } else {
         Clock { now: cx.now, delete: !cx.eng.replica }

@@ -207,7 +207,7 @@ pub fn persist(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn keys(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let pat = &args[1];
     let all = pat.as_ref() == b"*";
-    let now = cx.now;
+    let now = cx.eng.expiry_clock(cx.now);
     let budget = cx.reply_budget();
     let mut out = Vec::new();
     let mut bytes = 0u64;
@@ -291,7 +291,7 @@ impl ScanOpts {
 
 /// One SCAN step over the current database: `(next cursor, keys)`.
 pub fn scan_db(cx: &mut Cx, cursor: u64, o: &ScanOpts) -> (u64, Vec<Str>) {
-    let now = cx.now;
+    let now = cx.eng.expiry_clock(cx.now);
     let db = cx.db();
     let mut found: Vec<(Str, bool, Kind)> = Vec::new();
     let mut c = cursor;
@@ -318,7 +318,7 @@ pub fn scan_db(cx: &mut Cx, cursor: u64, o: &ScanOpts) -> (u64, Vec<Str>) {
 }
 
 pub fn randomkey(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    let now = cx.now;
+    let now = cx.eng.expiry_clock(cx.now);
     for _ in 0..100 {
         let Engine { dbs, rng, .. } = &mut *cx.eng;
         let db = &dbs[cx.client.db];
@@ -387,7 +387,7 @@ pub fn move_(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if cx.peek(key).is_none() {
         return Ok(Reply::Int(0));
     }
-    let now = cx.now;
+    let now = cx.eng.expiry_clock(cx.now);
     if let Some(e) = cx.eng.dbs[to].keys.get(key) {
         if !e.expired(now) {
             return Ok(Reply::Int(0));
@@ -425,7 +425,7 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(Error::new("ERR source and destination objects are the same"));
     }
     let Some(entry) = cx.peek(src).cloned() else { return Ok(Reply::Int(0)) };
-    let now = cx.now;
+    let now = cx.eng.expiry_clock(cx.now);
     let exists = cx.eng.dbs[to].keys.get(dst).is_some_and(|e| !e.expired(now));
     if exists && !replace {
         return Ok(Reply::Int(0));
