@@ -279,14 +279,23 @@ impl<'a> Cx<'a> {
     /// Create or overwrite a key. `keep_ttl` keeps an existing TTL (SET KEEPTTL); otherwise any
     /// TTL is removed.
     pub fn set(&mut self, key: &[u8], value: Value, keep_ttl: bool) {
+        self.set_value(key, value, keep_ttl, true);
+    }
+
+    /// Like [`Cx::set`] without the `overwritten` / `type_changed` events (`dbReplaceValue`).
+    pub fn replace(&mut self, key: &[u8], value: Value, keep_ttl: bool) {
+        self.set_value(key, value, keep_ttl, false);
+    }
+
+    fn set_value(&mut self, key: &[u8], value: Value, keep_ttl: bool, events: bool) {
         self.expire_check(key);
         let db = self.client.db;
         let lru = self.eng.new_lru(self.now);
         let d = &mut self.eng.dbs[db];
         match d.keys.get_mut(key) {
             Some(e) => {
-                let old = e.value.mem();
-                let new = value.mem();
+                let (old, old_kind) = (e.value.mem(), e.value.kind());
+                let (new, new_kind) = (value.mem(), value.kind());
                 let hashes = matches!(e.value, Value::Hash(_)) || matches!(value, Value::Hash(_));
                 e.value = value;
                 e.lru = lru;
@@ -298,6 +307,12 @@ impl<'a> Cx<'a> {
                 if hashes {
                     // A hash with field TTLs replaced (or installed): keep `subexpires` in sync.
                     d.sync_subexpiry(key);
+                }
+                if events {
+                    self.eng.sig.notify(notify::OVERWRITTEN, "overwritten", db as u16, key);
+                    if old_kind != new_kind {
+                        self.eng.sig.notify(notify::TYPE_CHANGED, "type_changed", db as u16, key);
+                    }
                 }
             }
             None => {
@@ -375,6 +390,12 @@ impl<'a> Cx<'a> {
     /// Emit a keyspace notification for `key` in the current database.
     pub fn notify(&mut self, class: u32, event: &'static str, key: &[u8]) {
         self.eng.sig.notify(class, event, self.client.db as u16, key);
+    }
+
+    /// An event naming some of the key's fields (hash commands), also sent on the subkey channels.
+    pub fn notify_fields<F: AsRef<[u8]>>(&mut self, class: u32, event: &'static str, key: &[u8], fields: impl IntoIterator<Item = F>) {
+        let db = self.client.db as u16;
+        self.eng.sig.notify_fields(class, event, db, key, fields);
     }
 
     /// Signal `key` as modified (WATCH, blocked clients, propagation) without going through a

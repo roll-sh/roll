@@ -444,7 +444,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
 
     if want.has("server") {
         begin(&mut s, "# Server");
-        let bind = crate::config::find("bind").map_or_else(|| "* -::*".to_string(), |p| (p.get)(&eng.cfg));
+        let bind = crate::config::find("bind").map_or_else(|| "* -::*".to_string(), |p| p.get(&eng.cfg));
         let _ = write!(
             s,
             "redis_version:{REDIS_VERSION}\r\nredis_git_sha1:00000000\r\nredis_git_dirty:0\r\nredis_build_id:{:016x}\r\nredis_mode:standalone\r\nos:{}\r\narch_bits:{}\r\n\
@@ -566,7 +566,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
 
     if want.has("persistence") {
         begin(&mut s, "# Persistence");
-        let aof = eng.host.as_ref().is_some_and(|h| h.aof_enabled());
+        let aof = eng.cfg.appendonly || eng.host.as_ref().is_some_and(|h| h.aof_enabled());
         let (p, now_s) = (&eng.persist, now / 1000);
         let _ = write!(
             s,

@@ -361,9 +361,14 @@ pub fn quit(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
 pub fn config_get(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    // The primary this server follows with REPLICAOF (platform replicas follow no Redis primary).
+    let master = cx.eng.host.as_ref().and_then(|h| h.replication().master).filter(|m| !m.managed).map(|m| format!("{} {}", m.host, m.port));
     for pat in &args[2..] {
-        for (k, v) in cx.eng.cfg.get(pat) {
+        for (k, mut v) in cx.eng.cfg.get(pat) {
             if seen.insert(k.to_ascii_lowercase()) {
+                if k.eq_ignore_ascii_case("replicaof") || k.eq_ignore_ascii_case("slaveof") {
+                    v = master.clone().unwrap_or_default();
+                }
                 out.push((Reply::bulk_str(k), Reply::bulk_str(v)));
             }
         }
@@ -371,20 +376,35 @@ pub fn config_get(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     Ok(Reply::Map(out))
 }
 
+/// `allowProtectedAction`: `yes`, or `local` for a loopback connection.
+pub(crate) fn protected_allowed(setting: u8, client: &crate::client::Client) -> bool {
+    setting == crate::config::PROTECTED_YES
+        || (setting == crate::config::PROTECTED_LOCAL
+            && client.addr.rsplit_once(':').and_then(|(ip, _)| ip.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback()))
+}
+
 pub fn config_set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if !(args.len() - 2).is_multiple_of(2) {
-        return Err(arity_error("config|set"));
+        return Err(SYNTAX);
     }
-    let mut next = cx.eng.cfg.clone();
-    let mut seen = std::collections::HashSet::new();
-    for kv in args[2..].chunks(2) {
-        let name = String::from_utf8_lossy(&kv[0]).to_lowercase();
-        if !seen.insert(name.clone()) {
-            return Err(Error::msg(format!("ERR CONFIG SET failed (possibly related to argument '{name}') - duplicate parameter")));
+    let pairs: Vec<(String, String)> =
+        args[2..].chunks(2).map(|kv| (String::from_utf8_lossy(&kv[0]).into_owned(), String::from_utf8_lossy(&kv[1]).into_owned())).collect();
+    let pairs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let protected_ok = protected_allowed(cx.eng.cfg.enable_protected_configs, cx.client);
+    let before = cx.eng.cfg.clone();
+    let set = cx.eng.cfg.set_many(&pairs, protected_ok).map_err(|e| Error::msg(format!("ERR {e}")))?;
+    // What the apply step does beyond storing the value.
+    for name in set {
+        match name {
+            "requirepass" => {
+                let pass = cx.eng.cfg.requirepass.clone();
+                cx.eng.acl.write().set_default_password(pass.as_deref().map(str::as_bytes));
+            }
+            "acllog-max-len" => cx.eng.acl.read().log.lock().max_len = cx.eng.cfg.acllog_max_len as usize,
+            "appendonly" if cx.eng.cfg.appendonly != before.appendonly => cx.eng.set_appendonly(cx.eng.cfg.appendonly, cx.now, cx.mode == crate::engine::Mode::Exec),
+            _ => {}
         }
-        next.set(&name, &String::from_utf8_lossy(&kv[1])).map_err(|e| Error::msg(format!("ERR {e}")))?;
     }
-    cx.eng.cfg = next;
     Ok(Reply::Ok)
 }
 
@@ -705,6 +725,7 @@ pub fn slowlog_get(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                     Reply::Array(e.args.iter().cloned().map(Reply::Bulk).collect()),
                     Reply::bulk(&e.addr),
                     Reply::bulk(&e.name),
+                    Reply::Int(e.argc as i64),
                 ])
             })
             .collect(),
@@ -790,7 +811,7 @@ pub fn module_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
 
 /// DEBUG: the subset tests and tools rely on.
 pub fn debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    if !cx.cfg().enable_debug_command {
+    if !protected_allowed(cx.cfg().enable_debug_command, cx.client) {
         return Err(Error::new("ERR DEBUG command not allowed. If the enable-debug-command option is set to \"local\", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server."));
     }
     let sub = &args[1];

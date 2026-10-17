@@ -1,0 +1,150 @@
+# Keyspace events 'o' (overwritten) and 'c' (type_changed): setKey, RENAME, COPY, RESTORE.
+CONFIG SET notify-keyspace-events KEA$oc
+@conn 2
+PSUBSCRIBE __key*__:*
+@conn 1
+SET k v
+SET k v2
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+RPUSH l a
+SET l str
+GETSET l x
+MSET l y m z
+INCRBY n 1
+INCRBY n 1
+INCRBYFLOAT n 1.5
+APPEND n x
+SETRANGE n 0 y
+SADD s a
+SUNIONSTORE l s
+ZADD z 1 a
+ZRANGESTORE l z 0 -1
+SORT s STORE l
+BITOP NOT l n
+DEL l
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+SET a 1
+RPUSH b x
+RENAME a b
+SET c 2
+RENAME b c
+COPY c d
+COPY c d REPLACE
+SADD e m
+COPY e d REPLACE
+EVAL "local d = redis.call('dump', KEYS[1]) redis.call('restore', KEYS[2], 0, d, 'REPLACE') return 1" 2 c d
+EVAL "local d = redis.call('dump', KEYS[1]) redis.call('restore', KEYS[2], 0, d, 'REPLACE') return 1" 2 c d
+DEL c d e
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""

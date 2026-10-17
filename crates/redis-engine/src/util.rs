@@ -100,6 +100,34 @@ pub fn strtoull(s: &[u8]) -> Option<u64> {
     Some(if neg { v.wrapping_neg() } else { v })
 }
 
+/// C `strtoll(s, &end, 10)` with `*end == '\0'` required: leading whitespace and a sign allowed,
+/// overflow clamps, the empty string is 0.
+pub fn strtoll_full(s: &[u8]) -> Option<i64> {
+    if s.is_empty() {
+        return Some(0);
+    }
+    let mut i = 0;
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
+        neg = s[i] == b'-';
+        i += 1;
+    }
+    let start = i;
+    let mut v: i128 = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        v = (v * 10 + (s[i] - b'0') as i128).min(1 << 64);
+        i += 1;
+    }
+    if i == start || i != s.len() {
+        return None;
+    }
+    let v = if neg { -v } else { v };
+    Some(v.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
+}
+
 /// Redis' `string2ull`.
 pub fn string2ull(s: &[u8]) -> Option<u64> {
     if let Some(v) = parse_i64(s) {

@@ -623,7 +623,7 @@ pub fn increx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     } else {
         IncrExpire::Keep
     };
-    cx.set(key, Value::str(new.as_bytes()), true);
+    cx.replace(key, Value::str(new.as_bytes()), true);
     let nb = Bytes::from(new);
     cx.notify(notify::STRING, if float { "incrbyfloat" } else { "incrby" }, key);
     match what {

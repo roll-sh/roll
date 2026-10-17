@@ -346,13 +346,17 @@ fn rename_generic(cx: &mut Cx, args: &[Bytes], nx: bool) -> CmdResult {
     }
     let entry = cx.take(src).unwrap();
     let db = cx.db_index();
-    let dst_existed = cx.peek(dst).is_some();
-    if dst_existed {
+    let src_kind = entry.value.kind();
+    let dst_kind = cx.peek(dst).map(|e| e.value.kind());
+    if dst_kind.is_some() {
         cx.delete(dst);
     }
     cx.put_entry(db, dst, entry);
     cx.notify(notify::GENERIC, "rename_from", src);
     cx.notify(notify::GENERIC, "rename_to", dst);
+    if let Some(k) = dst_kind {
+        overwritten(cx, db, dst, k, src_kind);
+    }
     Ok(if nx { Reply::Int(1) } else { Reply::Ok })
 }
 
@@ -422,14 +426,19 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if exists && !replace {
         return Ok(Reply::Int(0));
     }
-    if cx.eng.dbs[to].keys.get(dst).is_some() {
+    let old_kind = cx.eng.dbs[to].keys.get(dst).map(|e| e.value.kind());
+    if old_kind.is_some() {
         cx.eng.dbs[to].remove(dst);
         cx.eng.sig.touch(to as u16, dst);
     }
     let mut entry = entry;
     entry.lru = cx.eng.new_lru(now);
+    let new_kind = entry.value.kind();
     cx.put_entry(to, dst, entry);
     cx.eng.sig.notify(notify::GENERIC, "copy_to", to as u16, dst);
+    if let Some(k) = old_kind.filter(|_| exists) {
+        overwritten(cx, to, dst, k, new_kind);
+    }
     Ok(Reply::Int(1))
 }
 
@@ -499,6 +508,7 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         Err(_) => return Err(Error::new("ERR Bad data format")),
     };
     let at = if ttl != 0 && !absttl { ttl.wrapping_add(now) } else { ttl };
+    let old_kind = cx.peek(key).map(|e| e.value.kind()).filter(|_| replace);
     let deleted = replace && cx.delete(key);
     if at != 0 && at <= now && !cx.eng.replica && cx.mode != crate::engine::Mode::Replay {
         // Already expired: nothing is created; a replaced key is deleted.
@@ -521,7 +531,19 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         cx.propagate_as(argv);
     }
     cx.notify(notify::GENERIC, "restore", key);
+    if let Some(k) = old_kind {
+        let new_kind = cx.peek(key).map_or(k, |e| e.value.kind());
+        overwritten(cx, db, key, k, new_kind);
+    }
     Ok(Reply::Ok)
+}
+
+/// The `overwritten` (and on a type change `type_changed`) events of a replaced key.
+fn overwritten(cx: &mut Cx, db: usize, key: &[u8], old: crate::value::Kind, new: crate::value::Kind) {
+    cx.eng.sig.notify(notify::OVERWRITTEN, "overwritten", db as u16, key);
+    if old != new {
+        cx.eng.sig.notify(notify::TYPE_CHANGED, "type_changed", db as u16, key);
+    }
 }
 
 pub fn object_encoding(cx: &mut Cx, args: &[Bytes]) -> CmdResult {

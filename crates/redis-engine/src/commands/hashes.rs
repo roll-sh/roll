@@ -238,7 +238,7 @@ fn get_field(cx: &mut Cx, key: &[u8], field: &[u8], notify: bool, keep_hash: boo
     field_expired_effect(cx.eng, db, key, field);
     if !empty {
         if notify {
-            cx.notify(notify::HASH, "hexpired", key);
+            cx.notify_fields(notify::HASH, "hexpired", key, [field]);
         }
         return Got::Expired;
     }
@@ -279,7 +279,7 @@ pub(crate) fn expire_fields(eng: &mut Engine, db: usize, key: &[u8], now: i64) -
     for f in &gone {
         field_expired_effect(eng, db, key, f);
     }
-    eng.sig.notify(notify::HASH, "hexpired", db as u16, key);
+    eng.sig.notify_fields(notify::HASH, "hexpired", db as u16, key, &gone);
     if empty {
         eng.sig.notify(notify::GENERIC, "del", db as u16, key);
         eng.dbs[db].remove(key);
@@ -358,7 +358,7 @@ pub fn hset(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     })
     .unwrap_or(0);
     cx.touch(key);
-    cx.notify(notify::HASH, "hset", key);
+    cx.notify_fields(notify::HASH, "hset", key, args[2..].iter().step_by(2));
     Ok(if cx.cmd.name == "hset" { Reply::Int(created as i64) } else { Reply::Ok })
 }
 
@@ -376,7 +376,7 @@ pub fn hsetnx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         h.set(field, value, false, lim);
     });
     cx.touch(key);
-    cx.notify(notify::HASH, "hset", key);
+    cx.notify_fields(notify::HASH, "hset", key, [field]);
     Ok(Reply::Int(1))
 }
 
@@ -393,7 +393,7 @@ pub fn hget(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn hmget(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let key = &args[1];
     let mut exists = read_hash(cx, key)?;
-    let mut expired_any = false;
+    let mut expired: Vec<&Bytes> = Vec::new();
     let mut deleted = false;
     let mut out = Vec::with_capacity(args.len() - 2);
     for f in &args[2..] {
@@ -404,7 +404,7 @@ pub fn hmget(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         out.push(match get_field(cx, key, f, false, false) {
             Got::Value(v) => Reply::Bulk(v),
             Got::Expired => {
-                expired_any = true;
+                expired.push(f);
                 Reply::Nil
             }
             Got::ExpiredHash => {
@@ -415,8 +415,8 @@ pub fn hmget(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             Got::Missing => Reply::Nil,
         });
     }
-    if expired_any {
-        cx.notify(notify::HASH, "hexpired", key);
+    if !expired.is_empty() {
+        cx.notify_fields(notify::HASH, "hexpired", key, expired);
     }
     if deleted {
         cx.notify(notify::GENERIC, "del", key);
@@ -472,19 +472,20 @@ pub fn hdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Ok(Reply::Int(0));
     }
     let had_ttls = hash_ref(cx, key).is_some_and(|h| h.has_expiring());
-    let (n, removed) = with_hash(cx, key, |h| {
-        let mut n = 0;
+    let (gone, removed) = with_hash(cx, key, |h| {
+        let mut gone: Vec<&Bytes> = Vec::new();
         for f in &args[2..] {
             if h.remove(f) {
-                n += 1;
+                gone.push(f);
                 if h.is_empty() {
-                    return (n, true);
+                    return (gone, true);
                 }
             }
         }
-        (n, false)
+        (gone, false)
     })
-    .unwrap_or((0, false));
+    .unwrap_or_default();
+    let n = gone.len() as i64;
     if n > 0 {
         if removed {
             drop_key(cx, key);
@@ -492,7 +493,7 @@ pub fn hdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             unregister_if_no_ttls(cx, key, had_ttls);
             cx.touch(key);
         }
-        cx.notify(notify::HASH, "hdel", key);
+        cx.notify_fields(notify::HASH, "hdel", key, gone);
         if removed {
             cx.notify(notify::GENERIC, "del", key);
         }
@@ -541,7 +542,7 @@ pub fn hincrby(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         h.set(field, &s, true, lim);
     });
     cx.touch(key);
-    cx.notify(notify::HASH, "hincrby", key);
+    cx.notify_fields(notify::HASH, "hincrby", key, [field]);
     Ok(Reply::Int(new))
 }
 
@@ -587,7 +588,7 @@ pub fn hincrbyfloat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         h.set(field, new.as_bytes(), true, lim);
     });
     cx.touch(key);
-    cx.notify(notify::HASH, "hincrbyfloat", key);
+    cx.notify_fields(notify::HASH, "hincrbyfloat", key, [field]);
     // Replicated as the final value, keeping the field's TTL.
     let nb = Bytes::from(new);
     cx.propagate_as(vec![b("HSETEX"), key.clone(), b("KEEPTTL"), b("FIELDS"), b("1"), field.clone(), nb.clone()]);
@@ -926,31 +927,28 @@ fn hexpire_generic(cx: &mut Cx, args: &[Bytes], secs: bool, relative: bool) -> C
     let mut ex = setex_init(cx, key, cond);
     let mut out = Vec::with_capacity(n);
     let mut kept = Vec::with_capacity(n);
-    let (mut updated, mut deleted) = (0, 0);
+    let mut deleted = Vec::new();
     for f in fields {
         let r = setex_field(cx, key, f, at, &mut ex);
         match r {
-            UPDATED => {
-                updated += 1;
-                kept.push(f.clone());
-            }
-            DELETED => deleted += 1,
+            UPDATED => kept.push(f.clone()),
+            DELETED => deleted.push(f),
             _ => {}
         }
         out.push(Reply::Int(r));
     }
     setex_done(cx, key, &ex);
-    if updated + deleted > 0 {
+    if !kept.is_empty() || !deleted.is_empty() {
         cx.touch(key);
-        if deleted > 0 {
-            cx.notify(notify::HASH, "hdel", key);
+        if !deleted.is_empty() {
+            cx.notify_fields(notify::HASH, "hdel", key, deleted);
         }
-        if updated > 0 {
-            cx.notify(notify::HASH, "hexpire", key);
+        if !kept.is_empty() {
+            cx.notify_fields(notify::HASH, "hexpire", key, &kept);
         }
     }
     drop_if_empty(cx, key);
-    if updated == 0 {
+    if kept.is_empty() {
         cx.no_propagate();
     } else {
         // Propagate as HPEXPIREAT with only the fields that were updated.
@@ -1031,7 +1029,7 @@ pub fn hpersist(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let now = clock(cx).now;
     let mut out = Vec::with_capacity(fields.len());
-    let mut persisted = 0;
+    let mut persisted = Vec::new();
     for f in fields {
         let r = match hash_ref(cx, key).and_then(|h| h.expire_of(f)) {
             None => NO_FIELD,
@@ -1039,14 +1037,14 @@ pub fn hpersist(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             Some(at) if at < now => NO_FIELD,
             Some(_) => {
                 with_hash(cx, key, |h| h.set_expire(f, 0));
-                persisted += 1;
+                persisted.push(f);
                 UPDATED
             }
         };
         out.push(Reply::Int(r));
     }
-    if persisted > 0 {
-        cx.notify(notify::HASH, "hpersist", key);
+    if !persisted.is_empty() {
+        cx.notify_fields(notify::HASH, "hpersist", key, persisted);
         cx.touch(key);
     }
     Ok(Reply::Array(out))
@@ -1062,22 +1060,22 @@ pub fn hgetdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let had_ttls = hash_ref(cx, key).is_some_and(|h| h.has_expiring());
     let mut out = Vec::with_capacity(fields.len());
-    let (mut expired_n, mut deleted_n) = (0, 0);
+    let (mut expired, mut deleted) = (Vec::new(), Vec::new());
     for f in fields {
         out.push(match get_field(cx, key, f, false, true) {
             Got::Value(v) => {
                 with_hash(cx, key, |h| h.remove(f));
-                deleted_n += 1;
+                deleted.push(f);
                 Reply::Bulk(v)
             }
             Got::Expired | Got::ExpiredHash => {
-                expired_n += 1;
+                expired.push(f);
                 Reply::Nil
             }
             Got::Missing => Reply::Nil,
         });
     }
-    if expired_n == 0 && deleted_n == 0 {
+    if expired.is_empty() && deleted.is_empty() {
         return Ok(Reply::Array(out));
     }
     let empty = hash_ref(cx, key).is_none_or(|h| h.is_empty());
@@ -1085,11 +1083,11 @@ pub fn hgetdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         unregister_if_no_ttls(cx, key, had_ttls);
     }
     cx.touch(key);
-    if expired_n > 0 {
-        cx.notify(notify::HASH, "hexpired", key);
+    if !expired.is_empty() {
+        cx.notify_fields(notify::HASH, "hexpired", key, expired);
     }
-    if deleted_n > 0 {
-        cx.notify(notify::HASH, "hdel", key);
+    if !deleted.is_empty() {
+        cx.notify_fields(notify::HASH, "hdel", key, deleted);
         let mut prop = vec![b("HDEL"), key.clone()];
         prop.extend_from_slice(fields);
         cx.propagate_as(prop);
@@ -1222,21 +1220,21 @@ pub fn hgetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     };
     let mut ex = if change { Some(setex_init(cx, key, Cond::None)) } else { None };
     let mut out = Vec::with_capacity(o.n);
-    let (mut expired_n, mut deleted_n, mut updated_n) = (0, 0, 0);
+    let (mut expired, mut deleted, mut updated) = (Vec::new(), Vec::new(), Vec::new());
     for f in fields {
         match get_field(cx, key, f, false, true) {
             Got::Value(v) => {
                 out.push(Reply::Bulk(v));
                 if let Some(ex) = ex.as_mut() {
                     match setex_field(cx, key, f, at, ex) {
-                        DELETED => deleted_n += 1,
-                        UPDATED => updated_n += 1,
+                        DELETED => deleted.push(f),
+                        UPDATED => updated.push(f),
                         _ => {}
                     }
                 }
             }
             Got::Expired | Got::ExpiredHash => {
-                expired_n += 1;
+                expired.push(f);
                 out.push(Reply::Nil);
             }
             Got::Missing => out.push(Reply::Nil),
@@ -1245,19 +1243,19 @@ pub fn hgetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if let Some(ex) = &ex {
         setex_done(cx, key, ex);
     }
-    if expired_n + deleted_n + updated_n == 0 {
+    if expired.is_empty() && deleted.is_empty() && updated.is_empty() {
         return Ok(Reply::Array(out));
     }
     cx.touch(key);
-    if expired_n > 0 {
-        cx.notify(notify::HASH, "hexpired", key);
+    if !expired.is_empty() {
+        cx.notify_fields(notify::HASH, "hexpired", key, expired);
     }
-    if updated_n > 0 {
+    if !updated.is_empty() {
         let mut prop = if o.ttl == Ttl::Persist {
-            cx.notify(notify::HASH, "hpersist", key);
+            cx.notify_fields(notify::HASH, "hpersist", key, updated);
             vec![b("HPERSIST"), key.clone()]
         } else {
-            cx.notify(notify::HASH, "hexpire", key);
+            cx.notify_fields(notify::HASH, "hexpire", key, updated);
             vec![b("HPEXPIREAT"), key.clone(), int_bytes(at)]
         };
         prop.push(b("FIELDS"));
@@ -1265,8 +1263,8 @@ pub fn hgetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         prop.extend_from_slice(fields);
         cx.propagate_as(prop);
     } else {
-        if deleted_n > 0 {
-            cx.notify(notify::HASH, "hdel", key);
+        if !deleted.is_empty() {
+            cx.notify_fields(notify::HASH, "hdel", key, deleted);
         }
         // Lazily expired or deleted fields were propagated as HDELs.
         cx.no_propagate();
@@ -1286,7 +1284,7 @@ pub fn hsetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         create_hash(cx, key);
     }
     let pair = |i: usize| (&args[o.first + 2 * i], &args[o.first + 2 * i + 1]);
-    let mut expired_n = 0;
+    let mut expired = Vec::new();
     let mut ok = true;
     if o.fxx || o.fnx {
         let mut found = 0;
@@ -1294,7 +1292,7 @@ pub fn hsetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             let exists = match get_field(cx, key, pair(i).0, false, true) {
                 Got::Value(_) => true,
                 Got::Expired | Got::ExpiredHash => {
-                    expired_n += 1;
+                    expired.push(pair(i).0);
                     false
                 }
                 Got::Missing => false,
@@ -1306,7 +1304,7 @@ pub fn hsetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
         ok = !((o.fnx && found != 0) || (o.fxx && found != o.n));
     }
-    let (mut deleted_n, mut updated_n) = (0, 0);
+    let (mut deleted, mut updated) = (Vec::new(), Vec::new());
     if ok {
         let lim = limits(cx);
         let tail = &args[o.first..];
@@ -1322,8 +1320,8 @@ pub fn hsetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             with_hash(cx, key, |h| h.set(f, v, keep, lim));
             if let (Some(at), Some(ex)) = (at, ex.as_mut()) {
                 match setex_field(cx, key, f, at, ex) {
-                    UPDATED => updated_n += 1,
-                    DELETED => deleted_n += 1,
+                    UPDATED => updated.push(f),
+                    DELETED => deleted.push(f),
                     _ => {}
                 }
             }
@@ -1331,7 +1329,7 @@ pub fn hsetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         if let Some(ex) = &ex {
             setex_done(cx, key, ex);
         }
-        if deleted_n > 0 {
+        if !deleted.is_empty() {
             // The fields' HDELs were propagated already.
             cx.no_propagate();
         } else if let Ttl::At(at, pos, false) = o.ttl {
@@ -1343,17 +1341,17 @@ pub fn hsetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     } else {
         cx.no_propagate();
     }
-    if ok || expired_n > 0 {
+    if ok || !expired.is_empty() {
         cx.touch(key);
-        if expired_n > 0 {
-            cx.notify(notify::HASH, "hexpired", key);
+        if !expired.is_empty() {
+            cx.notify_fields(notify::HASH, "hexpired", key, expired);
         }
         if ok {
-            cx.notify(notify::HASH, "hset", key);
-            if deleted_n > 0 {
-                cx.notify(notify::HASH, "hdel", key);
-            } else if updated_n > 0 {
-                cx.notify(notify::HASH, "hexpire", key);
+            cx.notify_fields(notify::HASH, "hset", key, (0..o.n).map(|i| pair(i).0));
+            if !deleted.is_empty() {
+                cx.notify_fields(notify::HASH, "hdel", key, deleted);
+            } else if !updated.is_empty() {
+                cx.notify_fields(notify::HASH, "hexpire", key, updated);
             }
         }
         drop_if_empty(cx, key);

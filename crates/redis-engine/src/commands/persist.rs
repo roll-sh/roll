@@ -86,7 +86,8 @@ impl Engine {
         p.latest_fork_us = started.elapsed().as_micros().max(1) as u64;
     }
 
-    /// serverCron's part: finish the running child, then start what was scheduled.
+    /// serverCron's part: finish the running child, apply the `save` rules, then start what was
+    /// scheduled.
     pub fn persist_cron(&mut self, now_ms: i64) {
         let now_s = now_ms / 1000;
         if self.persist.child.is_none() && self.persist.aof_rewrite_scheduled {
@@ -94,22 +95,45 @@ impl Engine {
             self.fork(ChildKind::Aof, now_ms);
             return;
         }
-        if self.persist.child.as_ref().is_some_and(|c| c.end_ms <= now_ms)
-            && let Some(c) = self.persist.child.take()
-        {
-            match c.kind {
-                _ if c.killed => {}
-                ChildKind::Rdb => {
-                    self.dirty -= c.dirty_before.min(self.dirty);
-                    self.lastsave = now_s;
-                    self.persist.rdb_last_time = now_s - c.start;
+        if let Some(c) = &self.persist.child {
+            if c.end_ms <= now_ms
+                && let Some(c) = self.persist.child.take()
+            {
+                match c.kind {
+                    _ if c.killed => {}
+                    ChildKind::Rdb => {
+                        self.dirty -= c.dirty_before.min(self.dirty);
+                        self.lastsave = now_s;
+                        self.persist.rdb_last_time = now_s - c.start;
+                    }
+                    ChildKind::Aof => self.persist.aof_last_time = now_s - c.start,
                 }
-                ChildKind::Aof => self.persist.aof_last_time = now_s - c.start,
             }
+        } else if self.cfg.save.iter().any(|&(secs, changes)| self.dirty >= changes as u64 && now_s - self.lastsave > secs) {
+            self.fork(ChildKind::Rdb, now_ms);
         }
         if self.persist.child.is_none() && self.persist.bgsave_scheduled {
             self.persist.bgsave_scheduled = false;
             self.fork(ChildKind::Rdb, now_ms);
+        }
+    }
+
+    /// CONFIG SET appendonly: `startAppendOnly` (a rewrite now, or scheduled behind another child
+    /// or a transaction) and `stopAppendOnly` (the rewrite is abandoned).
+    pub fn set_appendonly(&mut self, on: bool, now_ms: i64, in_exec: bool) {
+        let p = &mut self.persist;
+        if !on {
+            p.aof_rewrite_scheduled = false;
+            if p.in_progress(ChildKind::Aof) {
+                p.child = None;
+            }
+            return;
+        }
+        if p.child.as_ref().is_some_and(|c| c.kind != ChildKind::Aof) || in_exec {
+            p.aof_rewrite_scheduled = true;
+        } else {
+            p.child = None;
+            self.fork(ChildKind::Aof, now_ms);
         }
     }
 }

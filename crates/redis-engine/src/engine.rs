@@ -112,6 +112,8 @@ pub struct SlowEntry {
     pub args: Vec<Bytes>,
     pub addr: String,
     pub name: String,
+    /// The command's full argument count.
+    pub argc: usize,
 }
 
 #[derive(Default)]
@@ -121,8 +123,8 @@ pub(crate) struct Signals {
     pub touched: Vec<(u16, Str)>,
     /// Aggregates that may have become empty and must be deleted.
     pub empty: Vec<(u16, Str)>,
-    /// Keyspace notifications to publish: (class, event, db, key).
-    pub events: Vec<(u32, &'static str, u16, Str)>,
+    /// Keyspace notifications to publish: (class, event, db, key, subkeys).
+    pub events: Vec<(u32, &'static str, u16, Str, Vec<Bytes>)>,
     pub notify: u32,
     /// Changes made; drives propagation.
     pub dirty: u64,
@@ -132,8 +134,22 @@ impl Signals {
     #[inline]
     pub fn notify(&mut self, class: u32, event: &'static str, db: u16, key: &[u8]) {
         if self.notify & class != 0 && self.notify & (notify::KEYSPACE | notify::KEYEVENT) != 0 {
-            self.events.push((class, event, db, Str::from_slice(key)));
+            self.events.push((class, event, db, Str::from_slice(key), Vec::new()));
         }
+    }
+
+    /// An event about some of the key's fields (`notifyKeyspaceEventWithSubkeys`): also published
+    /// on the subkey channels when those are enabled.
+    pub fn notify_fields<F: AsRef<[u8]>>(&mut self, class: u32, event: &'static str, db: u16, key: &[u8], fields: impl IntoIterator<Item = F>) {
+        if self.notify & class == 0 || self.notify & (notify::KEYSPACE | notify::KEYEVENT | notify::SUBKEY_ALL) == 0 {
+            return;
+        }
+        let subkeys = if self.notify & notify::SUBKEY_ALL != 0 {
+            fields.into_iter().map(|f| Bytes::copy_from_slice(f.as_ref())).collect()
+        } else {
+            Vec::new()
+        };
+        self.events.push((class, event, db, Str::from_slice(key), subkeys));
     }
     #[inline]
     pub fn touch(&mut self, db: u16, key: &[u8]) {
@@ -248,14 +264,13 @@ pub struct Engine {
 /// The arguments as SLOWLOG and MONITOR show them: secrets replaced by `(redacted)`, like Redis'
 /// `redactClientCommandArgument` (passwords, ACL rules, sensitive configs).
 pub(crate) fn redacted<'a>(full: &str, args: &'a [Bytes]) -> std::borrow::Cow<'a, [Bytes]> {
-    const SENSITIVE: [&str; 5] = ["masteruser", "masterauth", "requirepass", "tls-key-file-pass", "tls-client-key-file-pass"];
     let hide: Vec<usize> = match full {
         "auth" => (1..args.len().min(3)).collect(),
         "acl|setuser" | "acl|deluser" => (2..args.len()).collect(),
         "acl|getuser" => vec![2],
         "config|set" => (2..args.len())
             .step_by(2)
-            .filter(|&i| SENSITIVE.iter().any(|c| c.as_bytes().eq_ignore_ascii_case(&args[i])))
+            .filter(|&i| i + 1 < args.len() && crate::config::is_sensitive(&args[i]))
             .map(|i| i + 1)
             .collect(),
         "hello" => {
@@ -850,18 +865,16 @@ impl Engine {
             return false;
         }
         let mut kept: Vec<Bytes> = Vec::new();
-        let max_args = 32;
+        let (max_args, max_len) = (self.cfg.slowlog_max_argc, self.cfg.slowlog_max_string_len);
         for (i, a) in args.iter().enumerate() {
             if i == max_args - 1 && args.len() > max_args {
                 kept.push(Bytes::from(format!("... ({} more arguments)", args.len() - max_args + 1)));
                 break;
             }
-            if a.len() > 128 {
-                kept.push(Bytes::from(format!(
-                    "{}... ({} more bytes)",
-                    String::from_utf8_lossy(&a[..128]),
-                    a.len() - 128
-                )));
+            if a.len() > max_len {
+                let mut s = a[..max_len].to_vec();
+                s.extend_from_slice(format!("... ({} more bytes)", a.len() - max_len).as_bytes());
+                kept.push(Bytes::from(s));
             } else {
                 kept.push(a.clone());
             }
@@ -872,6 +885,7 @@ impl Engine {
             micros,
             args: kept,
             addr: client.addr.clone(),
+            argc: args.len(),
             name: client.name.as_ref().map(|n| String::from_utf8_lossy(n).into_owned()).unwrap_or_default(),
         });
         self.slowlog_next_id += 1;
@@ -960,7 +974,7 @@ impl Engine {
         }
         let events = std::mem::take(&mut self.sig.events);
         let flags = self.cfg.notify;
-        for (_, event, db, key) in events {
+        for (_, event, db, key, subkeys) in events {
             if flags & notify::KEYSPACE != 0 {
                 let mut ch = format!("__keyspace@{db}__:").into_bytes();
                 ch.extend_from_slice(&key);
@@ -969,6 +983,52 @@ impl Engine {
             if flags & notify::KEYEVENT != 0 {
                 let ch = format!("__keyevent@{db}__:{event}");
                 self.hub.publish(ch.as_bytes(), &key);
+            }
+            if subkeys.is_empty() {
+                continue;
+            }
+            // `<len>:<subkey>[,<len>:<subkey>…]`
+            let list = || {
+                let mut p = Vec::new();
+                for (i, f) in subkeys.iter().enumerate() {
+                    if i > 0 {
+                        p.push(b',');
+                    }
+                    p.extend_from_slice(format!("{}:", f.len()).as_bytes());
+                    p.extend_from_slice(f);
+                }
+                p
+            };
+            // A '|' in the event name would make the separator ambiguous.
+            let plain = !event.contains('|');
+            if flags & notify::SUBKEYSPACE != 0 && plain {
+                let mut ch = format!("__subkeyspace@{db}__:").into_bytes();
+                ch.extend_from_slice(&key);
+                let mut p = format!("{event}|").into_bytes();
+                p.extend(list());
+                self.hub.publish(&ch, &p);
+            }
+            if flags & notify::SUBKEYEVENT != 0 {
+                let ch = format!("__subkeyevent@{db}__:{event}");
+                let mut p = format!("{}:", key.len()).into_bytes();
+                p.extend_from_slice(&key);
+                p.push(b'|');
+                p.extend(list());
+                self.hub.publish(ch.as_bytes(), &p);
+            }
+            if flags & notify::SUBKEYSPACEITEM != 0 && !key.contains(&b'\n') {
+                for f in &subkeys {
+                    let mut ch = format!("__subkeyspaceitem@{db}__:").into_bytes();
+                    ch.extend_from_slice(&key);
+                    ch.push(b'\n');
+                    ch.extend_from_slice(f);
+                    self.hub.publish(&ch, event.as_bytes());
+                }
+            }
+            if flags & notify::SUBKEYSPACEEVENT != 0 && plain {
+                let mut ch = format!("__subkeyspaceevent@{db}__:{event}|").into_bytes();
+                ch.extend_from_slice(&key);
+                self.hub.publish(&ch, &list());
             }
         }
     }
