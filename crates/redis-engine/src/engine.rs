@@ -837,6 +837,26 @@ impl Engine {
         }
     }
 
+    /// `objectSetLRUOrLFU`: the LRU/LFU field of a key restored with a frequency (LFU policies)
+    /// or an idle time in seconds (other policies), as RESTORE and RDB loading do; a fresh one
+    /// when the matching hint is missing.
+    pub fn restored_lru(cfg: &Config, freq: Option<u8>, idle: Option<u64>, now: i64) -> u32 {
+        let lfu = cfg.maxmemory_policy.is_lfu();
+        if lfu && let Some(f) = freq {
+            return (lfu_minutes(now) << 8) | f as u32;
+        }
+        if !lfu && let Some(idle) = idle.and_then(|i| i64::try_from(i).ok()) {
+            // `lru_idle * 1000 / LRU_CLOCK_RESOLUTION`, wrapping like C, then unwrap the clock.
+            let idle = idle.wrapping_mul(1000) / 1000;
+            let mut abs = (Self::lru_clock(now) as i64).wrapping_sub(idle);
+            if abs < 0 {
+                abs = abs.wrapping_add(LRU_CLOCK_MAX as i64);
+            }
+            return abs as u32 & LRU_CLOCK_MAX;
+        }
+        if lfu { (lfu_minutes(now) << 8) | LFU_INIT_VAL } else { Self::lru_clock(now) }
+    }
+
     /// Seconds since last access (`OBJECT IDLETIME`).
     pub fn idle_secs(e: &Entry, now: i64) -> u64 {
         let clock = Self::lru_clock(now);

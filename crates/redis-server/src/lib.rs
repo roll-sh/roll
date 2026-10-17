@@ -10,9 +10,11 @@ pub mod net;
 pub mod node;
 pub mod persist;
 pub mod repl;
+pub mod snapshot;
 
 pub use database::Database;
 pub use directory::{Directory, Session, Single};
+pub use snapshot::RdbCodec;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

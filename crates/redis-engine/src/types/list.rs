@@ -491,6 +491,39 @@ impl List {
         l
     }
 
+    /// RDB load: an empty quicklist to fill with [`List::load_node`], then [`List::finish_load`].
+    pub fn new_quicklist(fill: i64) -> Self {
+        List { nodes: Nodes::Quick(VecDeque::new(), clamp_fill(fill)), len: 0, mem: 0 }
+    }
+
+    /// RDB load: append a node as stored (`quicklistAppendListpack` / `quicklistAppendPlainNode`);
+    /// `fill` pushes its elements. A plain node holds one element; empty nodes are dropped.
+    pub fn load_node(&mut self, plain: bool, fill: impl FnOnce(&mut dyn FnMut(&[u8]))) {
+        let mut n = Node::packed();
+        fill(&mut |v: &[u8]| n.push_back(v));
+        if n.count == 0 {
+            return;
+        }
+        if plain {
+            n.plain = true;
+            n.sz = n.first().map_or(0, <[u8]>::len);
+        }
+        n.buf.shrink_to_fit();
+        self.len += n.len();
+        let at = self.nodes();
+        self.insert_node(at, n);
+    }
+
+    /// RDB load done: a single small packed node becomes a listpack (`listTypeTryConversion`).
+    pub fn finish_load(&mut self, fill: i64) {
+        self.convert_quicklist(fill, false);
+    }
+
+    /// RDB save: every node as (plain, elements), in order (a listpack is one packed node).
+    pub fn raw_nodes(&self) -> impl Iterator<Item = (bool, impl Iterator<Item = &[u8]>)> {
+        self.node_iter().map(|n| (n.plain, n.iter()))
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }

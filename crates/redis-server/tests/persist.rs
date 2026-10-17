@@ -319,3 +319,108 @@ async fn databases_snapshot_on_unload() {
     let db = node.open(&spec).await.unwrap();
     assert_eq!(run(&db, &mut c, "MGET k0 k1 k2"), Reply::Array(vec![Reply::bulk(b"0"), Reply::bulk(b"1"), Reply::bulk(b"2")]));
 }
+
+/// Order-insensitive form of a reply (hashtable sets and hashes iterate in hash order).
+fn sorted(r: Reply) -> Vec<String> {
+    let mut v: Vec<String> = match r {
+        Reply::Array(v) | Reply::Set(v) => v.iter().map(|r| format!("{r:?}")).collect(),
+        Reply::Map(v) => v.iter().map(|p| format!("{p:?}")).collect(),
+        r => vec![format!("{r:?}")],
+    };
+    v.sort();
+    v
+}
+
+#[tokio::test]
+async fn rdb_snapshots_round_trip_every_type() {
+    use redis_server::RdbCodec;
+    let o = objects("rdb-snap");
+    let codec: Arc<dyn persist::SnapshotCodec> = Arc::new(RdbCodec);
+    let shipper = Shipper::start("n1", o.clone(), ShipperConfig { codec: Some(codec.clone()), ..cfg() }).await.unwrap();
+    let db = Database::new("rdb", Config::default(), 1);
+    shipper.attach(&db, Default::default()).await.unwrap();
+    let mut c = Client::new(1);
+    let many = |prefix: &str, n: usize| (0..n).map(|i| format!("{prefix}{i}")).collect::<Vec<_>>().join(" ");
+    let pairs = |n: usize| (0..n).map(|i| format!("f{i} v{i}")).collect::<Vec<_>>().join(" ");
+    let scored = |n: usize| (0..n).map(|i| format!("{} m{i}", i as f64 / 4.0)).collect::<Vec<_>>().join(" ");
+    let far = "4102444800000";
+    let lines = [
+        "SET str hello".to_string(),
+        "SET int -12345".into(),
+        format!("SET lzf {}", "abc".repeat(40)),
+        format!("SET ttl x PXAT {far}"),
+        "RPUSH list a b 1 -2".into(),
+        format!("RPUSH quick {}", many("item-", 1200)),
+        "SADD intset 1 2 3 100000".into(),
+        "SADD setlp x y z".into(),
+        format!("SADD setht {}", many("m", 300)),
+        "ZADD zlp 1 a 2.5 b -inf c".into(),
+        format!("ZADD zskip {}", scored(300)),
+        "HSET hlp f v n 42".into(),
+        format!("HSET hht {}", pairs(600)),
+        "HSET hlpex a 1 b 2".into(),
+        format!("HPEXPIREAT hlpex {far} FIELDS 1 a"),
+        format!("HSET hhtex {}", pairs(600)),
+        format!("HPEXPIREAT hhtex {far} FIELDS 2 f1 f2"),
+        "XADD stream 1-0 n 1".into(),
+        "XADD stream 2-0 n 2".into(),
+        "XADD stream 3-0 n 3 extra field".into(),
+        "XGROUP CREATE stream g 0".into(),
+        "XREADGROUP GROUP g c1 COUNT 2 STREAMS stream >".into(),
+        format!("PEXPIREAT list {far}"),
+        "SELECT 1".into(),
+        "SET db1key one".into(),
+        "SADD db1set q".into(),
+        format!("PEXPIREAT db1set {far}"),
+        "SELECT 5".into(),
+        "SET db5key 5".into(),
+        "SET gone x PX 1".into(),
+    ];
+    for l in &lines {
+        assert!(!matches!(run(&db, &mut c, l), Reply::Error(_)), "{l}");
+    }
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let snap = shipper.snapshot(&db, 0).await.unwrap().unwrap();
+    assert_eq!(snap.offset, db.repl_offset());
+    shipper.detach(&db).await.unwrap();
+
+    // Loaded from the snapshot alone (no segments after it).
+    let back = Database::new("rdb", Config::default(), 1);
+    persist::restore(&o, &back, Some(&*codec)).await.unwrap();
+    let keys = |d: &Database| -> Vec<(usize, Vec<u8>)> {
+        let eng = d.engine(0);
+        let mut v: Vec<_> = eng.dbs.iter().enumerate().flat_map(|(i, db)| db.keys.iter().map(move |(k, _)| (i, k.to_vec()))).collect();
+        v.sort();
+        v
+    };
+    let mut want = keys(&db);
+    want.retain(|(_, k)| k != b"gone");
+    assert_eq!(want.len(), 19);
+    assert_eq!(keys(&back), want, "the expired key is not written");
+    let mut c2 = Client::new(2);
+    let mut reordered = 0;
+    for (i, k) in &want {
+        let k = String::from_utf8_lossy(k);
+        run(&db, &mut c, &format!("SELECT {i}"));
+        run(&back, &mut c2, &format!("SELECT {i}"));
+        for cmd in ["PEXPIRETIME", "OBJECT ENCODING", "TYPE"] {
+            assert_eq!(run(&back, &mut c2, &format!("{cmd} {k}")), run(&db, &mut c, &format!("{cmd} {k}")), "{cmd} {k}");
+        }
+        let (a, b) = (run(&db, &mut c, &format!("DUMP {k}")), run(&back, &mut c2, &format!("DUMP {k}")));
+        assert!(matches!(a, Reply::Bulk(_)), "DUMP {k}");
+        if a == b {
+            continue;
+        }
+        // Only hashtables may serialize in another order: same contents.
+        assert_eq!(run(&db, &mut c, &format!("OBJECT ENCODING {k}")), Reply::bulk(b"hashtable"), "DUMP {k}");
+        reordered += 1;
+        let cmd = if run(&db, &mut c, &format!("TYPE {k}")) == Reply::status("set") { "SMEMBERS" } else { "HGETALL" };
+        assert_eq!(sorted(run(&back, &mut c2, &format!("{cmd} {k}"))), sorted(run(&db, &mut c, &format!("{cmd} {k}"))), "{k}");
+    }
+    assert!(reordered <= 3);
+    run(&back, &mut c2, "SELECT 0");
+    run(&db, &mut c, "SELECT 0");
+    let fields = run(&back, &mut c2, "HPEXPIRETIME hhtex FIELDS 3 f1 f2 f3");
+    assert_eq!(fields, Reply::Array(vec![Reply::Int(far.parse().unwrap()), Reply::Int(far.parse().unwrap()), Reply::Int(-1)]));
+    assert_eq!(run(&back, &mut c2, "XPENDING stream g"), run(&db, &mut c, "XPENDING stream g"));
+}
