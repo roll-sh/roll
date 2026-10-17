@@ -1,0 +1,57 @@
+[package]
+name = "tasks"
+description = "roll tasks: durable messages, queues, schedules and workflows over HTTP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "roll-tasks"
+path = "src/main.rs"
+
+[features]
+default = ["dynamo", "restore"]
+# DynamoDB store for AWS (the default AWS store is the log store on S3, always built).
+dynamo = ["dep:aws-config", "dep:aws-sdk-dynamodb"]
+# Run the API as an AWS Lambda function (Function URL / API Gateway).
+lambda = ["dep:lambda_http"]
+# `roll-tasks restore`: point-in-time restore of a log store from S3 object versions.
+restore = ["dep:aws-config", "dep:aws-sdk-s3"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+clap.workspace = true
+croner.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+humantime.workspace = true
+reqwest = { workspace = true, features = ["rustls", "stream", "http2"] }
+object_store.workspace = true
+rusqlite = { workspace = true, features = ["session", "backup"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+zstd.workspace = true
+
+aws-config = { workspace = true, optional = true }
+aws-sdk-dynamodb = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+lambda_http = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"

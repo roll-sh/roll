@@ -1,0 +1,51 @@
+name: tasks
+
+# Runs only when roll tasks code changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/tasks/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/test-tasks.sh"
+      - ".github/workflows/tasks.yml"
+      - "deploy/aws/**"
+  workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
+
+concurrency:
+  group: tasks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # SQLite and the log store in memory.
+  sqlite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/test-tasks.sh --force --unit
+
+  # The log store on S3 (MinIO) and DynamoDB Local.
+  aws:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Pull images
+        run: |
+          docker pull -q amazon/dynamodb-local & docker pull -q chrislusf/seaweedfs &
+          docker pull -q cgr.dev/chainguard/minio & docker pull -q cgr.dev/chainguard/minio-client & wait
+      - run: scripts/test-tasks.sh --force

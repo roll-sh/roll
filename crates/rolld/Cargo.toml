@@ -15,6 +15,7 @@ mimalloc.workspace = true
 pg-control.workspace = true
 pg-proxy.workspace = true
 pg-storage.workspace = true
+tasks.workspace = true
 stream-broker.workspace = true
 tokio.workspace = true
 tracing.workspace = true

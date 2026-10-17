@@ -15,7 +15,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
-/// roll daemon: serverless Postgres and Kafka-compatible streams on your machine (or an EC2 host).
+/// roll daemon: serverless Postgres, Kafka-compatible streams and tasks on your machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -82,6 +82,9 @@ struct Args {
     /// Keep closed partitions' data on local disk instead of serving it from object storage.
     #[arg(long, env = "ROLL_STREAM_KEEP_LOCAL")]
     stream_keep_local: bool,
+    /// Token for the tasks API (`/v1/tasks`); without one it's open, like the rest of the local API.
+    #[arg(long, env = "ROLL_TASKS_TOKEN")]
+    tasks_token: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -101,11 +104,19 @@ async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,stream_broker=info".into()),
+                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,stream_broker=info,tasks=info".into()),
         )
         .init();
     let args = Args::parse();
     let home = std::path::absolute(&args.home)?;
+
+    let tasks_store = std::sync::Arc::new(tasks::store::sqlite::SqliteStore::open(&home.join("tasks.db"), 4)?);
+    let tasks = tasks::Tasks::new(
+        tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), ..tasks::Config::default() },
+        tasks_store,
+    )
+    .await?;
+    let tasks_worker = tasks::start(tasks.clone());
 
     let mut stream_config = stream_broker::Config::local(home.clone());
     stream_config.listen = args.kafka;
@@ -154,7 +165,9 @@ async fn run() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
-    let router = api::router(control.clone()).merge(stream_broker::http::router(broker.clone()));
+    let router = api::router(control.clone())
+        .merge(stream_broker::http::router(broker.clone()))
+        .merge(tasks::api::router(tasks.clone()));
 
     tokio::select! {
         r = proxy.serve() => r?,
@@ -164,6 +177,7 @@ async fn run() -> anyhow::Result<()> {
         _ = broker.clone().run() => {}
         _ = tokio::signal::ctrl_c() => info!("shutting down; computes keep running and are adopted on next start"),
     }
+    tasks_worker.shutdown().await;
     broker.sync_all().await;
     Ok(())
 }

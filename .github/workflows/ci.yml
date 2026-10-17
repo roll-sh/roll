@@ -16,6 +16,7 @@ jobs:
     outputs:
       postgres: ${{ steps.diff.outputs.postgres }}
       stream: ${{ steps.diff.outputs.stream }}
+      tasks: ${{ steps.diff.outputs.tasks }}
       web: ${{ steps.diff.outputs.web }}
     steps:
       - uses: actions/checkout@v5
@@ -30,6 +31,7 @@ jobs:
           match() { if grep -qE "$2" <<< "$files"; then echo "$1=true"; else echo "$1=false"; fi >> "$GITHUB_OUTPUT"; }
           match postgres '^(crates/(pg-proxy|pg-storage|pg-control|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-postgres\.sh$|\.github/workflows/(postgres|ci)\.yml$)'
           match stream '^(crates/(stream-log|stream-broker|pg-storage|rolld|roll-cli)/|vendor/kafka-protocol/|Cargo\.(toml|lock)$|scripts/test-stream\.sh$|\.github/workflows/(stream|ci)\.yml$)'
+          match tasks '^(crates/(tasks|rolld|roll-cli)/|deploy/aws/|Cargo\.(toml|lock)$|scripts/test-tasks\.sh$|\.github/workflows/(tasks|ci)\.yml$)'
           match web '^(apps/|packages/|package\.json$|pnpm-(lock|workspace)\.yaml$|\.github/workflows/(web|ci)\.yml$)'
 
   postgres:
@@ -42,13 +44,18 @@ jobs:
     if: needs.changes.outputs.stream == 'true'
     uses: ./.github/workflows/stream.yml
 
+  tasks:
+    needs: changes
+    if: needs.changes.outputs.tasks == 'true'
+    uses: ./.github/workflows/tasks.yml
+
   web:
     needs: changes
     if: needs.changes.outputs.web == 'true'
     uses: ./.github/workflows/web.yml
 
   ci:
-    needs: [changes, postgres, stream, web]
+    needs: [changes, postgres, stream, tasks, web]
     if: always()
     runs-on: ubuntu-latest
     steps:
