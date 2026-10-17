@@ -2,6 +2,8 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
+mod redis;
+
 /// roll — serverless infrastructure.
 #[derive(Parser)]
 #[command(version)]
@@ -21,6 +23,9 @@ enum Cmd {
     /// Serverless Postgres.
     #[command(subcommand, alias = "pg")]
     Db(Db),
+    /// Serverless Redis.
+    #[command(subcommand, alias = "kv")]
+    Redis(redis::Redis),
 }
 
 #[derive(Subcommand)]
@@ -234,7 +239,10 @@ async fn project(api: &Api, key: &str) -> anyhow::Result<Value> {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new() };
-    let Cmd::Db(cmd) = cli.cmd;
+    let cmd = match cli.cmd {
+        Cmd::Db(cmd) => cmd,
+        Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
+    };
     let out = match cmd {
         Db::List => {
             let v = api.get("/v1/projects").await?;

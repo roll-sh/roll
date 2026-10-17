@@ -1865,6 +1865,8 @@ dependencies = [
  "pg-control",
  "pg-proxy",
  "pg-storage",
+ "redis-control",
+ "redis-server",
  "tokio",
  "tracing",
  "tracing-subscriber",
