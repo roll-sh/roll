@@ -450,7 +450,6 @@ fn kvstore_stats(len: usize, stats: Vec<DictStats>, full: bool) -> String {
 /// DEBUG OBJECT key
 fn object(cx: &mut Cx, key: &[u8]) -> CmdResult {
     let now = cx.now;
-    let compress = cx.cfg().list_compress_depth != 0;
     let Some(e) = cx.eng.dbs[cx.client.db].keys.get(key) else { return Err(NO_KEY) };
     let mut extra = String::new();
     if let Value::List(l) = &e.value
@@ -458,9 +457,10 @@ fn object(cx: &mut Cx, key: &[u8]) -> CmdResult {
     {
         let (nodes, size) = sizes.fold((0usize, 0usize), |(n, s), sz| (n + 1, s + sz));
         extra = format!(
-            " ql_nodes:{nodes} ql_avg_node:{:.2} ql_listpack_max:{fill} ql_compressed:{} ql_uncompressed_size:{size}",
+            " ql_nodes:{nodes} ql_avg_node:{:.2} ql_listpack_max:{} ql_compressed:{} ql_uncompressed_size:{size}",
             l.len() as f64 / nodes as f64,
-            compress as u8
+            fill.size,
+            (fill.compress != 0) as u8
         );
     }
     Ok(Reply::Status(format!(

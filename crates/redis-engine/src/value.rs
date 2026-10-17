@@ -109,6 +109,20 @@ impl Value {
         }
     }
 
+    /// What Redis allocates for an aggregate's encoding (`kvobjAllocSize` past the object and its
+    /// key; strings are measured with their object, [`crate::object::usage`]).
+    pub fn alloc_size(&self) -> usize {
+        match self {
+            Value::Str(_) => 0,
+            Value::List(l) => l.alloc_size(),
+            Value::Hash(h) => h.alloc_size(),
+            Value::Set(x) => x.alloc_size(),
+            Value::ZSet(z) => z.alloc_size(),
+            Value::Stream(x) => x.alloc_size(),
+            Value::Array(x) => x.mem(),
+        }
+    }
+
     /// Aggregates are deleted when they become empty. Strings and streams never are.
     #[inline]
     pub fn is_empty_aggregate(&self) -> bool {

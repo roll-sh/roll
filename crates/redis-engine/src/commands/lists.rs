@@ -82,7 +82,7 @@ fn long_in(a: &[u8], min: i64, max: i64, msg: Option<&'static str>) -> Result<i6
 }
 
 fn fill(cx: &Cx) -> Fill {
-    Fill { size: cx.cfg().list_max_listpack_size, packed_threshold: cx.eng.debug.packed_threshold }
+    Fill { size: cx.cfg().list_max_listpack_size, packed_threshold: cx.eng.debug.packed_threshold, compress: cx.cfg().list_compress_depth as usize }
 }
 
 /// Length of the list at `key`: `None` if missing, WRONGTYPE for another type. No LRU touch.

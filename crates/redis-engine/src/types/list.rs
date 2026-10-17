@@ -39,17 +39,19 @@ fn exceeds_limit(fill: i64, sz: usize, count: usize) -> bool {
     if sz_limit != usize::MAX { sz > sz_limit } else { sz > SIZE_SAFETY_LIMIT || count as u64 > count_limit }
 }
 
-/// How a list packs its nodes: `list-max-listpack-size`, and the element size from which an
-/// element gets a node of its own (DEBUG QUICKLIST-PACKED-THRESHOLD; 0 decides by the fill).
+/// How a list packs its nodes: `list-max-listpack-size`, the element size from which an
+/// element gets a node of its own (DEBUG QUICKLIST-PACKED-THRESHOLD; 0 decides by the fill), and
+/// `list-compress-depth` (nodes kept uncompressed at each end; 0 compresses nothing).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fill {
     pub size: i64,
     pub packed_threshold: usize,
+    pub compress: usize,
 }
 
 impl From<i64> for Fill {
     fn from(size: i64) -> Self {
-        Fill { size, packed_threshold: 0 }
+        Fill { size, packed_threshold: 0, compress: 0 }
     }
 }
 
@@ -559,6 +561,23 @@ impl List {
         self.mem
     }
 
+    /// `listTypeAllocSize`: the listpack's bytes, or the quicklist with its nodes and their
+    /// listpacks (plain nodes: the element). With a compress depth, the nodes past it at both ends
+    /// are compressed (as Redis leaves them once operations have passed them).
+    pub fn alloc_size(&self) -> usize {
+        // `sizeof(quicklist)` and `sizeof(quicklistNode)`, as the allocator sizes them.
+        const QUICKLIST: usize = 48;
+        const QUICKLIST_NODE: usize = 40;
+        match &self.nodes {
+            Nodes::Pack(n) => n.sz,
+            Nodes::Quick(nodes, fill) => {
+                let d = fill.compress;
+                let inner = |i: usize| d > 0 && nodes.len() >= 2 * d && i >= d && i < nodes.len() - d;
+                QUICKLIST + nodes.iter().enumerate().map(|(i, n)| QUICKLIST_NODE + node_bytes(n, inner(i))).sum::<usize>()
+            }
+        }
+    }
+
     pub fn encoding(&self) -> &'static str {
         match self.nodes {
             Nodes::Pack(_) => "listpack",
@@ -570,10 +589,10 @@ impl List {
         matches!(self.nodes, Nodes::Quick(..))
     }
 
-    /// DEBUG OBJECT of a quicklist: its fill and the nodes' listpack (or plain element) bytes.
-    pub fn quicklist_info(&self) -> Option<(i64, impl Iterator<Item = usize> + '_)> {
+    /// DEBUG OBJECT of a quicklist: its options and the nodes' listpack (or plain element) bytes.
+    pub fn quicklist_info(&self) -> Option<(Fill, impl Iterator<Item = usize> + '_)> {
         match &self.nodes {
-            Nodes::Quick(q, fill) => Some((fill.size, q.iter().map(|n| n.sz))),
+            Nodes::Quick(q, fill) => Some((*fill, q.iter().map(|n| n.sz))),
             Nodes::Pack(_) => None,
         }
     }
@@ -1054,8 +1073,37 @@ impl List {
     }
 }
 
+/// `quicklistSetOptions`: the fill within its bits, the depth at most `COMPRESS_MAX`.
 fn clamp_fill(fill: Fill) -> Fill {
-    Fill { size: fill.size.clamp(-5, 32767), ..fill }
+    Fill { size: fill.size.clamp(-5, 32767), compress: fill.compress.min(65535), ..fill }
+}
+
+/// `MIN_COMPRESS_BYTES` and `MIN_COMPRESS_IMPROVE`: smaller nodes, and compression saving less,
+/// stay uncompressed.
+const MIN_COMPRESS_BYTES: usize = 48;
+const MIN_COMPRESS_IMPROVE: usize = 8;
+
+/// The bytes Redis keeps for a node: its listpack (or plain element), or `quicklistLZF` (its
+/// size and the LZF data) when `compress` and LZF saves enough.
+fn node_bytes(n: &Node, compress: bool) -> usize {
+    if !compress || n.sz < MIN_COMPRESS_BYTES {
+        return n.sz;
+    }
+    let mut raw = Vec::with_capacity(n.sz);
+    if n.plain {
+        raw.extend_from_slice(n.iter().next().unwrap_or_default());
+    } else {
+        let mut w = crate::rdb::LpWriter::new(&mut raw);
+        for v in n.iter() {
+            w.str(v);
+        }
+        w.finish();
+    }
+    let mut z = Vec::new();
+    match crate::rdb::lzf_compress(&raw, n.sz, &mut z) {
+        true if z.len() + MIN_COMPRESS_IMPROVE < n.sz => 8 + z.len(),
+        _ => n.sz,
+    }
 }
 
 #[cfg(test)]
@@ -1161,7 +1209,7 @@ mod tests {
 
     #[test]
     fn packed_threshold_makes_plain_nodes() {
-        let fill = Fill { size: -2, packed_threshold: 4 };
+        let fill = Fill { size: -2, packed_threshold: 4, compress: 0 };
         let mut l = List::default();
         for v in ["a", "b", "c"] {
             l.grow(fill, v.len(), 1);

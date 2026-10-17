@@ -31,7 +31,8 @@ use crate::dict::Dict;
 use crate::pack::Pack;
 use crate::util::Rng;
 use crate::value::Str;
-use std::collections::BTreeSet;
+use crate::object::{EntryValue, entry_layout, entry_usage};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Listpack size limits (`hash-max-listpack-entries`, `hash-max-listpack-value`).
@@ -142,6 +143,19 @@ struct Table {
     ttl: Option<Box<Ttls>>,
     /// Heap bytes of nodes, fields, values and TTL index entries (tables excluded).
     heap: usize,
+    /// Redis' `entryMemUsage` of every entry (the dict's metadata).
+    entries: usize,
+    /// Entries Redis lays out otherwise than `entryCreate` would now: an update that kept a
+    /// bigger embedded value allocation, TTL metadata kept after HPERSIST.
+    shapes: Option<HashMap<Str, Shape>>,
+}
+
+/// How Redis holds a hash table entry (`entry.c`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Shape {
+    /// Carries `ExpireMeta` (it had a TTL; HPERSIST leaves it).
+    meta: bool,
+    value: EntryValue,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -180,7 +194,72 @@ impl Ttls {
 
 impl Table {
     fn with_capacity(n: usize) -> Self {
-        Table { map: Dict::with_capacity(n), ttl: None, heap: 0 }
+        Table { map: Dict::with_capacity(n), ttl: None, heap: 0, entries: 0, shapes: None }
+    }
+
+    /// The layout of field `f` with a `vlen` byte value.
+    fn shape(&self, f: &[u8], vlen: usize) -> Shape {
+        if let Some(s) = self.shapes.as_ref().and_then(|m| m.get(f)) {
+            return *s;
+        }
+        let meta = self.ttl_of(f) != 0;
+        Shape { meta, value: entry_layout(f.len(), vlen, meta) }
+    }
+
+    /// Field `f` (now with a `vlen` byte value and its final TTL) took shape `s`; it used `old`
+    /// bytes before.
+    fn reshape(&mut self, f: &[u8], vlen: usize, old: usize, s: Shape) {
+        self.entries = self.entries + entry_usage(f.len(), vlen, s.meta, s.value) - old;
+        let meta = self.ttl_of(f) != 0;
+        if s == (Shape { meta, value: entry_layout(f.len(), vlen, meta) }) {
+            if let Some(m) = &mut self.shapes {
+                m.remove(f);
+            }
+        } else {
+            self.shapes.get_or_insert_with(HashMap::new).insert(Str::from_slice(f), s);
+        }
+    }
+
+    fn entry_mem(&self, f: &[u8], vlen: usize) -> usize {
+        let s = self.shape(f, vlen);
+        entry_usage(f.len(), vlen, s.meta, s.value)
+    }
+
+    /// Replace an existing field's value, clearing its TTL unless `keep_ttl` (`entryUpdate`: the
+    /// entry is rebuilt when its TTL metadata comes or goes or the value changes between embedded
+    /// and pointer; an embedded value keeps its allocation while it fits at least 3/4 of it).
+    fn update(&mut self, f: &[u8], value: &[u8], keep_ttl: bool) {
+        let Some(v) = self.map.get(f) else { return };
+        let (old_len, old_heap) = (v.len(), spill(v));
+        let old = self.shape(f, old_len);
+        let old_mem = entry_usage(f.len(), old_len, old.meta, old.value);
+        let had_ttl = self.ttl_of(f) != 0;
+        let meta = keep_ttl && had_ttl;
+        let fresh = entry_layout(f.len(), value.len(), meta);
+        let kept = match (old.value, fresh) {
+            (EntryValue::Embedded(slot), EntryValue::Embedded(req)) if old.meta == meta && req <= slot && req >= slot * 3 / 4 => old.value,
+            _ => fresh,
+        };
+        if let Some(v) = self.map.get_mut(f) {
+            *v = Str::from_slice(value);
+        }
+        self.heap = (self.heap + spill_len(value.len())).saturating_sub(old_heap);
+        if !keep_ttl && had_ttl {
+            self.set_ttl(f, 0);
+        }
+        self.reshape(f, value.len(), old_mem, Shape { meta, value: kept });
+    }
+
+    /// HEXPIRE / HPERSIST on an existing field: the entry gets TTL metadata the first time (a
+    /// rebuild) and keeps it when the TTL goes.
+    fn expire(&mut self, f: &[u8], at: i64) {
+        // A lookup that steps a rehash, like `dictFindLink`.
+        let Some(vlen) = self.map.get_mut(f).map(|v| v.len()) else { return };
+        let old = self.shape(f, vlen);
+        let old_mem = entry_usage(f.len(), vlen, old.meta, old.value);
+        self.set_ttl(f, at);
+        let s = if at != 0 && !old.meta { Shape { meta: true, value: entry_layout(f.len(), vlen, true) } } else { old };
+        self.reshape(f, vlen, old_mem, s);
     }
 
     fn ttl_of(&self, f: &[u8]) -> i64 {
@@ -189,6 +268,7 @@ impl Table {
 
     fn insert_new(&mut self, f: Str, v: Str) {
         self.heap += node_cost(&f, &v);
+        self.entries += entry_usage(f.len(), v.len(), false, entry_layout(f.len(), v.len(), false));
         self.map.insert_new(f, v);
     }
 
@@ -216,8 +296,13 @@ impl Table {
     }
 
     fn remove(&mut self, f: &[u8]) -> bool {
+        let mem = self.entry_mem(f, self.map.get(f).map_or(0, |v| v.len()));
         let Some((k, v)) = self.map.remove_entry(f) else { return false };
         self.heap = self.heap.saturating_sub(node_cost(&k, &v));
+        self.entries -= mem;
+        if let Some(m) = &mut self.shapes {
+            m.remove(f);
+        }
         if self.ttl_of(f) != 0 {
             self.set_ttl(f, 0);
         }
@@ -717,7 +802,7 @@ impl Hash {
                 for (i, (f, v)) in x.pack.iter_pairs().enumerate() {
                     t.insert_new(Str::from_slice(f), Str::from_slice(v));
                     if let Some(&at) = x.ttl.get(i) {
-                        t.set_ttl(f, at);
+                        t.expire(f, at);
                     }
                 }
             }
@@ -779,17 +864,12 @@ impl Hash {
                 }
             },
             Enc::Table(t) => {
-                match t.map.get_mut(field) {
-                    Some(v) => {
-                        let old = spill(v);
-                        *v = Str::from_slice(value);
-                        t.heap = (t.heap + spill_len(value.len())).saturating_sub(old);
-                        if !keep_ttl && t.ttl_of(field) != 0 {
-                            t.set_ttl(field, 0);
-                        }
+                match t.map.contains_key(field) {
+                    true => {
+                        t.update(field, value, keep_ttl);
                         false
                     }
-                    None => {
+                    false => {
                         t.insert_new(Str::from_slice(field), Str::from_slice(value));
                         true
                     }
@@ -861,7 +941,7 @@ impl Hash {
                 if !t.map.contains_key(field) {
                     return false;
                 }
-                t.set_ttl(field, at);
+                t.expire(field, at);
                 true
             }
         }
@@ -891,6 +971,28 @@ impl Hash {
             }
         }
         out
+    }
+
+    /// `hashTypeAllocSize`: the listpack (`listpackex`: in a struct, with each field's TTL), the
+    /// table with its entries, or a template hash's values.
+    pub fn alloc_size(&self) -> usize {
+        use crate::object::{lp_bytes, lp_with, sds_alloc};
+        use crate::types::list::lp_entry_size;
+        match &self.enc {
+            Enc::Pack(p) => lp_bytes(p.iter()),
+            Enc::PackEx(x) => {
+                // `sizeof(listpackEx)`.
+                const LISTPACK_EX: usize = 24;
+                let ttls: usize = (0..x.pack.pairs()).map(|i| lp_entry_size(itoa::Buffer::new().format(x.ttl_at(i)).as_bytes())).sum();
+                LISTPACK_EX + lp_with(x.pack.iter().map(lp_entry_size).sum::<usize>() + ttls)
+            }
+            Enc::Table(t) => crate::object::dict_usage(t.map.len(), t.map.buckets()) + t.entries,
+            Enc::Tmpl(x) => match &x.vals {
+                Vals::Pack(p) => lp_bytes(p.iter()),
+                // `sizeof(hashTemplateArray)` and a pointer per value.
+                Vals::Array(a) => 16 + a.len() * 8 + a.iter().map(|v| sds_alloc(v.len())).sum::<usize>(),
+            },
+        }
     }
 
     /// Release excess capacity (after bulk deletions).

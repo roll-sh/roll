@@ -255,7 +255,11 @@ fn sort_generic(cx: &mut Cx, args: &[Bytes], readonly: bool) -> CmdResult {
     let db = cx.db_index();
     if !values.is_empty() {
         cx.changes(values.len());
-        let list = List::from_items(&values, crate::types::list::Fill { size: cx.cfg().list_max_listpack_size, packed_threshold: cx.eng.debug.packed_threshold });
+        let list = List::from_items(&values, crate::types::list::Fill {
+            size: cx.cfg().list_max_listpack_size,
+            packed_threshold: cx.eng.debug.packed_threshold,
+            compress: cx.cfg().list_compress_depth as usize,
+        });
         cx.set(dst, Value::List(Box::new(list)), false);
         cx.notify(notify::LIST, "sortstore", dst);
         propagate_list(cx, db, dst, values);

@@ -562,8 +562,9 @@ impl<'c, S: Src> Dec<'c, S> {
         Ok(a)
     }
 
-    fn fill_param(&self) -> i64 {
-        self.cfg.list_max_listpack_size
+    /// Loaded lists take the current `list-max-listpack-size` and `list-compress-depth`.
+    fn fill_param(&self) -> crate::types::list::Fill {
+        crate::types::list::Fill { size: self.cfg.list_max_listpack_size, packed_threshold: 0, compress: self.cfg.list_compress_depth as usize }
     }
 
     /// RDB_TYPE_LIST: elements, then the encoding a list of this size gets.

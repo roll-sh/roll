@@ -173,9 +173,14 @@ impl Val {
         }
     }
 
-    /// Bytes owned outside the slot (for memory accounting).
+    /// Bytes owned outside the slot, as Redis allocates them (`arStringNew`: a 2 byte length
+    /// header, 8 past 32767 bytes).
     fn heap_mem(&self) -> usize {
-        if self.is_heap() { 8 + self.heap_bytes().len() } else { 0 }
+        if !self.is_heap() {
+            return 0;
+        }
+        let len = self.heap_bytes().len();
+        usable(if len <= 32767 { 2 } else { 8 } + len)
     }
 }
 
@@ -254,6 +259,14 @@ pub fn val_from_rdb_int(i: i64) -> Val {
 
 /// `sizeof(arSlice)` in Redis (for the demotion heuristic and memory figures).
 const SLICE_HDR: usize = 32;
+
+/// What the allocator gives for `n` bytes (nothing for none).
+fn usable(n: usize) -> usize {
+    if n == 0 { 0 } else { crate::client::jemalloc_size(n) }
+}
+
+/// `zmalloc_size(ar)`: the array header.
+const ARRAY_HDR: usize = 80;
 
 fn dense_alloc_size(winsize: u32) -> usize {
     SLICE_HDR + winsize as usize * 8
@@ -443,11 +456,12 @@ impl Slice {
         }
     }
 
+    /// The slice's allocation (`arAllocAndTrack` counts what the allocator gives).
     fn alloc_size(&self) -> usize {
-        match self {
+        usable(match self {
             Slice::Dense(d) => dense_alloc_size(d.winsize()),
             Slice::Sparse(s) => sparse_alloc_size(s.cap),
-        }
+        })
     }
 
     /// `arDenseMaybeDemote` (a no-op on sparse slices).
@@ -610,7 +624,7 @@ impl Array {
             num_slices: 0,
             slice_size,
             bits: slice_size.trailing_zeros(),
-            alloc: 0,
+            alloc: ARRAY_HDR,
         }
     }
 
@@ -708,11 +722,11 @@ impl Array {
                 if !found {
                     if blocks.len() as u32 >= *cap {
                         let new_cap = if *cap == 0 { 4 } else { *cap * 2 };
-                        self.alloc += (new_cap - *cap) as usize * SDIR_ENTRY;
+                        self.alloc += usable(new_cap as usize * SDIR_ENTRY) - usable(*cap as usize * SDIR_ENTRY);
                         *cap = new_cap;
                     }
                     blocks.insert(pos, Block::new(block_id));
-                    self.alloc += SUPER_BLOCK_SLOTS as usize * 8;
+                    self.alloc += usable(SUPER_BLOCK_SLOTS as usize * 8);
                 }
                 let b = &mut blocks[pos];
                 b.slots[(id % SUPER_BLOCK_SLOTS) as usize] = Some(s);
@@ -743,7 +757,7 @@ impl Array {
                     self.num_slices -= 1;
                     if b.count == 0 {
                         blocks.remove(pos);
-                        self.alloc -= SUPER_BLOCK_SLOTS as usize * 8;
+                        self.alloc -= usable(SUPER_BLOCK_SLOTS as usize * 8);
                     }
                 }
             }
@@ -757,8 +771,8 @@ impl Array {
         {
             // arPromoteToSuperDir: the flat directory becomes block 0.
             let flat = std::mem::take(d);
-            self.alloc -= flat.len() * 8;
-            self.alloc += 4 * SDIR_ENTRY;
+            self.alloc -= usable(flat.len() * 8);
+            self.alloc += usable(4 * SDIR_ENTRY);
             let mut blocks = Vec::new();
             if !flat.is_empty() {
                 let mut b = Block::new(0);
@@ -769,7 +783,7 @@ impl Array {
                     b.slots[i] = s;
                 }
                 blocks.push(b);
-                self.alloc += SUPER_BLOCK_SLOTS as usize * 8;
+                self.alloc += usable(SUPER_BLOCK_SLOTS as usize * 8);
             }
             self.dir = Dir::Super { blocks, cap: 4 };
         }
@@ -780,7 +794,7 @@ impl Array {
             while n as u64 <= id {
                 n <<= 1;
             }
-            self.alloc += (n - d.len()) * 8;
+            self.alloc += usable(n * 8) - usable(d.len() * 8);
             d.resize_with(n, || None);
         }
     }
@@ -798,7 +812,7 @@ impl Array {
         if n >= d.len() {
             return;
         }
-        self.alloc -= (d.len() - n) * 8;
+        self.alloc -= usable(d.len() * 8) - usable(n * 8);
         d.truncate(n);
         d.shrink_to_fit();
     }
@@ -1260,7 +1274,8 @@ mod tests {
         assert!(!a.del(3, lim()));
         assert_eq!(a.delete_range(0, 100, lim()), 18);
         assert_eq!((a.count(), a.len()), (0, 0));
-        assert_eq!(a.mem(), 8);
+        // The header and a one-slot directory remain.
+        assert_eq!(a.mem(), 88);
     }
 
     #[test]

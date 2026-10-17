@@ -269,6 +269,93 @@ pub fn string_usage(e: &Entry, key_len: usize, s: &[u8]) -> usize {
     }
 }
 
+// --- aggregates (`kvobjAllocSize` by type) ---
+
+/// `sizeof(dict)`.
+const DICT: usize = 56;
+/// `sizeof(dictEntryNoValue)`: what `dictMemUsage` charges per element of a set, sorted set or
+/// hash table.
+const DICT_ENTRY: usize = 16;
+/// An empty listpack: its 6 byte header and the end byte.
+const LP_EMPTY: usize = 7;
+/// `sizeof(ExpireMeta)`.
+pub const EXPIRE_META: usize = 16;
+/// `EMBED_VALUE_MAX_ALLOC_SIZE`: a hash entry embeds its value while the whole entry fits.
+const EMBED_VALUE_MAX: usize = 128;
+
+/// MEMORY USAGE (`kvobjAllocSize`): the object with its key, and what the value allocates.
+pub fn usage(e: &Entry, key_len: usize) -> usize {
+    match &e.value {
+        Value::Str(s) => string_usage(e, key_len, s),
+        v => header(e, key_len) + v.alloc_size(),
+    }
+}
+
+/// `sizeof(dict) + dictMemUsage(d)`: the struct, a bucket pointer per slot of both tables and an
+/// entry per element.
+pub fn dict_usage(len: usize, buckets: usize) -> usize {
+    DICT + len * DICT_ENTRY + buckets * 8
+}
+
+/// `sdsAllocSize` of an `sdsnewlen` copy of `len` bytes.
+pub fn sds_alloc(len: usize) -> usize {
+    Sds::new(len).size()
+}
+
+/// `sdsReqSize` with the smallest type for `len` bytes: an sds placed inside another allocation.
+pub fn sds_req(len: usize) -> usize {
+    hdr(req_type(len)) + len + 1
+}
+
+/// `lpBytes` of a listpack holding `items`.
+pub fn lp_bytes<'a>(items: impl IntoIterator<Item = &'a [u8]>) -> usize {
+    LP_EMPTY + items.into_iter().map(crate::types::list::lp_entry_size).sum::<usize>()
+}
+
+/// `lpBytes` of an empty listpack plus `entries` bytes of entries.
+pub fn lp_with(entries: usize) -> usize {
+    LP_EMPTY + entries
+}
+
+/// How a hash table entry (`entry.c`) holds its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryValue {
+    /// Embedded after the field as a type 8 sds of this many bytes.
+    Embedded(usize),
+    /// Behind a pointer, in an sds of its own.
+    Pointer,
+}
+
+/// The layout `entryCreate` picks for a field and value: the value embedded while the entry
+/// (field, TTL metadata, value) fits [`EMBED_VALUE_MAX`] bytes.
+pub fn entry_layout(field_len: usize, value_len: usize, meta: bool) -> EntryValue {
+    let embedded = 3 + value_len + 1;
+    if entry_field(field_len, meta, false) + if meta { EXPIRE_META } else { 0 } + embedded <= EMBED_VALUE_MAX {
+        EntryValue::Embedded(embedded)
+    } else {
+        EntryValue::Pointer
+    }
+}
+
+/// The field's sds in an entry: type 8 at least when its aux bits are needed (TTL metadata or a
+/// value pointer).
+fn entry_field(field_len: usize, meta: bool, pointer: bool) -> usize {
+    let mut t = req_type(field_len);
+    if t == SdsType::T5 && (meta || pointer) {
+        t = SdsType::T8;
+    }
+    hdr(t) + field_len + 1
+}
+
+/// `entryMemUsage`: the field, the value (embedded, or a pointer and its sds) and the TTL metadata.
+pub fn entry_usage(field_len: usize, value_len: usize, meta: bool, value: EntryValue) -> usize {
+    let exp = if meta { EXPIRE_META } else { 0 };
+    match value {
+        EntryValue::Embedded(slot) => entry_field(field_len, meta, false) + exp + slot,
+        EntryValue::Pointer => entry_field(field_len, meta, true) + exp + 8 + sds_alloc(value_len),
+    }
+}
+
 /// DEBUG SDSLEN for a string that isn't `int`: the key's sds and object allocation, the value's
 /// length, free space and allocation (0 when embedded).
 pub fn sdslen(e: &Entry, key_len: usize, s: &[u8]) -> Option<String> {

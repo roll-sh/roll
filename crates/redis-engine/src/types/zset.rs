@@ -15,6 +15,7 @@
 
 use crate::config::Config;
 use crate::pack::{Pack, PackIter};
+use crate::types::list::lp_entry_size;
 use crate::util::Rng;
 use crate::value::Str;
 use foldhash::fast::RandomState;
@@ -212,6 +213,11 @@ thread_local! {
     static LEVEL_RNG: Cell<u64> = Cell::new((crate::util::now_us() as u64) ^ 0x9E37_79B9_7F4A_7C15 | 1);
 }
 
+/// `zslCreateNode`: one allocation for the node, its levels and the member as an sds.
+fn node_alloc(height: usize, len: usize) -> usize {
+    crate::client::jemalloc_size(16 + height * 16 + crate::object::sds_req(len))
+}
+
 /// `zslRandomLevel`: P = 1/4, at most 32.
 fn random_level() -> usize {
     LEVEL_RNG.with(|c| {
@@ -251,6 +257,8 @@ pub struct SkipList {
     hasher: RandomState,
     /// Heap bytes of spilled members.
     heap: usize,
+    /// What Redis allocates for the nodes (each with its levels and member).
+    node_alloc: usize,
 }
 
 impl std::fmt::Debug for SkipList {
@@ -282,6 +290,7 @@ impl SkipList {
             rehash_idx: 0,
             hasher,
             heap: 0,
+            node_alloc: 0,
         };
         if cap > 0 {
             sl.t0 = vec![NIL; cap.next_power_of_two().max(MIN_BUCKETS)];
@@ -389,6 +398,7 @@ impl SkipList {
         if ele.spilled() {
             self.heap += ele.capacity();
         }
+        self.node_alloc += node_alloc(height, ele.len());
         let node = Node { score, ele, back: NIL, next: NIL, hnext: NIL, up, height: height as u8 };
         if self.free != NIL {
             let i = self.free;
@@ -421,6 +431,7 @@ impl SkipList {
         if n.ele.spilled() {
             self.heap -= n.ele.capacity();
         }
+        self.node_alloc -= node_alloc(n.height as usize, n.ele.len());
         n.ele = Str::new();
         let extra = n.height as usize - 1;
         let up = n.up;
@@ -700,6 +711,16 @@ impl SkipList {
     }
 
     /// The member index as `dictGetStats` sees it.
+    /// `zsetAllocSize` of the skiplist encoding: the zset, the skiplist with its 32 level header
+    /// and nodes, and the member dict.
+    fn alloc_size(&self) -> usize {
+        // `sizeof(zset)`, `zskiplist` and the header node, as the allocator sizes them.
+        const ZSET: usize = 16;
+        const ZSKIPLIST: usize = 40;
+        let header = crate::client::jemalloc_size(16 + MAX_LEVEL * 16);
+        ZSET + ZSKIPLIST + header + self.node_alloc + crate::object::dict_usage(self.len, self.t0.len() + self.t1.len())
+    }
+
     fn index_stats(&self, full: bool) -> Vec<crate::dict::DictStats> {
         let chains = |t: &[u32]| {
             t.iter()
@@ -1072,6 +1093,29 @@ impl ZSet {
         match &self.enc {
             Enc::Pack(p) => p.mem(),
             Enc::Skip(s) => std::mem::size_of::<SkipList>() + s.mem(),
+        }
+    }
+
+    /// `zsetAllocSize`: the listpack (scores as integers when integral), or the skiplist and dict.
+    pub fn alloc_size(&self) -> usize {
+        match &self.enc {
+            Enc::Pack(p) => crate::object::lp_with(
+                p.iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        if i % 2 == 0 {
+                            lp_entry_size(b)
+                        } else {
+                            let s = dec_score(b);
+                            match crate::rdb::double2ll(s) {
+                                Some(n) => lp_entry_size(itoa::Buffer::new().format(n).as_bytes()),
+                                None => lp_entry_size(redis_proto::fmt_double(s).as_bytes()),
+                            }
+                        }
+                    })
+                    .sum(),
+            ),
+            Enc::Skip(s) => s.alloc_size(),
         }
     }
 

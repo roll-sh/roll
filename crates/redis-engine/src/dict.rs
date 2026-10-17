@@ -98,6 +98,11 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
         (self.t0.capacity() + self.t1.capacity()) * std::mem::size_of::<Link<K, V>>()
     }
 
+    /// Buckets of both tables (`dictBuckets`).
+    pub fn buckets(&self) -> usize {
+        self.t0.len() + self.t1.len()
+    }
+
     /// Bytes per node beyond the key and value contents.
     pub const NODE_OVERHEAD: usize = std::mem::size_of::<Node<K, V>>() + 16;
 

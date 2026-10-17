@@ -17,6 +17,8 @@
 //! index, and the time-ordered delivery list Redis uses for `XREADGROUP … CLAIM` (with the
 //! "NACK zone" of `XNACK`ed entries at its head).
 
+use super::rax;
+use crate::client::jemalloc_size;
 use crate::pack::Pack;
 use crate::value::Str;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -728,6 +730,9 @@ struct RaxShape {
     free: Vec<u32>,
     head: u32,
     live: usize,
+    /// The head's allocation after its last key was removed in place (`raxRemove` empties a
+    /// leaf parent head without reallocating it); 0 while it is sized by its contents.
+    head_alloc: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -743,7 +748,7 @@ const RAX_KEY_LEN: usize = 16;
 
 impl Default for RaxShape {
     fn default() -> Self {
-        RaxShape { nodes: vec![RaxNode::default()], free: Vec::new(), head: 0, live: 1 }
+        RaxShape { nodes: vec![RaxNode::default()], free: Vec::new(), head: 0, live: 1, head_alloc: 0 }
     }
 }
 
@@ -777,6 +782,21 @@ impl RaxShape {
         self.live -= 1;
         self.nodes[i as usize] = RaxNode::default();
         self.free.push(i);
+    }
+
+    /// What Redis allocates for the tree's nodes.
+    fn alloc_size(&self) -> usize {
+        let mut total = 0;
+        let mut stack = vec![self.head];
+        while let Some(i) = stack.pop() {
+            let n = &self.nodes[i as usize];
+            total += match self.head_alloc {
+                a if a != 0 && i == self.head => a,
+                _ => rax::node_alloc(n.data.len(), n.compr, false),
+            };
+            stack.extend_from_slice(&n.kids);
+        }
+        total
     }
 
     fn step(&self, i: u32) -> usize {
@@ -827,6 +847,8 @@ impl RaxShape {
         if stop.found {
             return;
         }
+        // Inserting into the emptied head compresses it, reallocating it to size.
+        self.head_alloc = 0;
         let (mut h, mut i, j) = (stop.node, stop.consumed, stop.pos);
         if self.nodes[h as usize].compr {
             // Split the compressed node at `j` (ALGO 1).
@@ -880,6 +902,9 @@ impl RaxShape {
             if !n.compr && n.data.len() > 1 {
                 n.data.remove(slot);
                 return;
+            }
+            if h == self.head {
+                self.head_alloc = rax::node_alloc(n.data.len(), n.compr, false);
             }
             *n = RaxNode::default();
         }
@@ -1076,6 +1101,8 @@ pub struct Consumer {
     /// -1 until the consumer successfully read or claimed something.
     pub active_time: i64,
     pel: BTreeSet<StreamId>,
+    /// Has had pending entries (its emptied PEL tree keeps a node's allocation).
+    had_pending: bool,
 }
 
 impl Consumer {
@@ -1105,6 +1132,8 @@ pub struct Group {
     nacked: usize,
     consumers: BTreeMap<Str, Consumer>,
     mem: usize,
+    /// Has had pending entries (Redis then keeps the stream's `cgroups_ref` tree).
+    nacked_ever: bool,
 }
 
 impl Group {
@@ -1118,6 +1147,7 @@ impl Group {
             nacked: 0,
             consumers: BTreeMap::new(),
             mem: GROUP_OVERHEAD,
+            nacked_ever: false,
         }
     }
 
@@ -1201,7 +1231,7 @@ impl Group {
         if self.consumers.contains_key(name) {
             return false;
         }
-        self.consumers.insert(Str::from_slice(name), Consumer { seen_time: now, active_time: -1, pel: BTreeSet::new() });
+        self.consumers.insert(Str::from_slice(name), Consumer { seen_time: now, active_time: -1, pel: BTreeSet::new(), had_pending: false });
         self.mem += CONSUMER_OVERHEAD + name.len();
         true
     }
@@ -1233,12 +1263,14 @@ impl Group {
 
     /// Add a new pending entry at the tail of the delivery list (delivery count 1).
     pub fn add_nack(&mut self, id: StreamId, consumer: Option<&[u8]>, time: i64) {
+        self.nacked_ever = true;
         let key = self.next_key(false, time);
         self.order.insert(key, id);
         if let Some(c) = consumer
             && let Some(cons) = self.consumers.get_mut(c)
         {
             cons.pel.insert(id);
+            cons.had_pending = true;
         }
         if let Some(old) = self.pel.insert(id, Nack { delivery_time: time, delivery_count: 1, consumer: consumer.map(Str::from_slice), key }) {
             self.order.remove(&old.key);
@@ -1252,6 +1284,7 @@ impl Group {
 
     /// Add a pending entry straight into the NACK zone (`XNACK … FORCE`, RDB load).
     pub fn add_nacked(&mut self, id: StreamId, delivery_count: u64) {
+        self.nacked_ever = true;
         let key = self.next_key(true, 0);
         self.order.insert(key, id);
         self.nacked += 1;
@@ -1295,6 +1328,7 @@ impl Group {
         n.consumer = Some(Str::from_slice(consumer));
         if let Some(cons) = self.consumers.get_mut(consumer) {
             cons.pel.insert(id);
+            cons.had_pending = true;
         }
     }
 
@@ -1358,6 +1392,10 @@ impl Group {
 pub struct Groups {
     map: BTreeMap<Str, Group>,
     mem: usize,
+    /// Redis made the groups tree (`s->cgroups`, kept once made).
+    made: bool,
+    /// A removed group had pending entries (`s->cgroups_ref` is kept once made).
+    refs_made: bool,
 }
 
 /// Mutable access to one group; keeps the groups' memory total in sync on drop.
@@ -1413,12 +1451,14 @@ impl Groups {
             return false;
         }
         let g = Group::new(last_id, entries_read);
+        self.made = true;
         self.mem += g.mem + name.len();
         self.map.insert(Str::from_slice(name), g);
         true
     }
     /// Insert a fully built group (RDB load), replacing any with the same name.
     pub fn insert(&mut self, name: &[u8], group: Group) {
+        self.made = true;
         self.mem += group.mem + name.len();
         if let Some(old) = self.map.insert(Str::from_slice(name), group) {
             self.mem -= old.mem + name.len();
@@ -1427,7 +1467,49 @@ impl Groups {
     pub fn remove(&mut self, name: &[u8]) -> Option<Group> {
         let g = self.map.remove(name)?;
         self.mem -= g.mem + name.len();
+        self.refs_made |= g.nacked_ever;
         Some(g)
+    }
+
+    /// What Redis allocates for the groups: the groups tree, each group with its PEL and
+    /// consumers trees, pending entries and consumers (with their names and PELs), and the
+    /// `cgroups_ref` tree indexing every pending ID. PEL and name trees are sized in the shape
+    /// insertions give them.
+    fn alloc_size(&self) -> usize {
+        // `sizeof(streamCG)`, `streamNACK` and `streamConsumer`.
+        const GROUP: usize = 64;
+        const NACK: usize = 64;
+        const CONSUMER: usize = 32;
+        // A PEL tree; one that lost its last entry keeps the head that held it (`raxRemove`
+        // empties a leaf parent head in place).
+        fn ids<'a>(ids: impl Iterator<Item = &'a StreamId>, used: bool) -> usize {
+            let keys: Vec<[u8; 16]> = ids.map(|id| id.to_be_bytes()).collect();
+            if keys.is_empty() && used {
+                return rax::RAX + rax::node_alloc(16, true, false);
+            }
+            let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+            rax::alloc(&refs, Some(16))
+        }
+        if !self.made {
+            return 0;
+        }
+        let names: Vec<&[u8]> = self.map.keys().map(|k| k.as_slice()).collect();
+        let mut total = rax::alloc(&names, None);
+        let mut pending = BTreeSet::new();
+        let mut refs = self.refs_made;
+        for g in self.map.values() {
+            let consumers: Vec<&[u8]> = g.consumers.keys().map(|k| k.as_slice()).collect();
+            total += GROUP + ids(g.pel.keys(), g.nacked_ever) + rax::alloc(&consumers, None) + g.pel.len() * NACK;
+            for (name, c) in &g.consumers {
+                total += CONSUMER + crate::object::sds_alloc(name.len()) + ids(c.pel.iter(), c.had_pending);
+            }
+            pending.extend(g.pel.keys().copied());
+            refs |= g.nacked_ever;
+        }
+        if refs {
+            total += ids(pending.iter(), true);
+        }
+        total
     }
 
     /// The smallest `last_id` across groups (`min_cgroup_last_id`).
@@ -1487,6 +1569,8 @@ impl Producer {
 pub struct Idmp {
     producers: BTreeMap<Str, Producer>,
     mem: usize,
+    /// Redis made the producers tree (it stays once made).
+    made: bool,
 }
 
 const IID_OVERHEAD: usize = 64;
@@ -1495,6 +1579,20 @@ impl Idmp {
     pub fn is_empty(&self) -> bool {
         self.producers.is_empty()
     }
+
+    /// What Redis allocates for IDMP: the producers tree, each producer and its IIDs.
+    fn alloc_size(&self) -> usize {
+        if !self.made {
+            return 0;
+        }
+        // `sizeof(idmpProducer)` and `idmpEntry` before the IID.
+        const PRODUCER: usize = 24;
+        const ENTRY: usize = 32;
+        let pids: Vec<&[u8]> = self.producers.keys().map(|k| k.as_slice()).collect();
+        rax::alloc(&pids, None)
+            + self.producers.values().map(|p| PRODUCER + p.order.iter().map(|(iid, _)| jemalloc_size(ENTRY + iid.len())).sum::<usize>()).sum::<usize>()
+    }
+
     pub fn producers(&self) -> impl Iterator<Item = (&[u8], &Producer)> {
         self.producers.iter().map(|(k, v)| (k.as_slice(), v))
     }
@@ -1503,6 +1601,7 @@ impl Idmp {
     }
     /// Record `iid -> id` for producer `pid`, evicting the oldest beyond `max`.
     pub fn insert(&mut self, pid: &[u8], iid: &[u8], id: StreamId, max: u64) {
+        self.made = true;
         if !self.producers.contains_key(pid) {
             self.producers.insert(Str::from_slice(pid), Producer::default());
             self.mem += 96 + pid.len();
@@ -1521,6 +1620,7 @@ impl Idmp {
     }
     /// Make sure a producer exists (Redis creates it before the duplicate check).
     pub fn ensure_producer(&mut self, pid: &[u8]) {
+        self.made = true;
         if !self.producers.contains_key(pid) {
             self.producers.insert(Str::from_slice(pid), Producer::default());
             self.mem += 96 + pid.len();
@@ -1622,6 +1722,15 @@ impl Stream {
     /// Heap bytes owned, maintained incrementally so this is O(1).
     pub fn mem(&self) -> usize {
         self.entries.mem() + self.groups.mem() + self.idmp.mem()
+    }
+
+    /// `s->alloc_size`: the stream, its tree of nodes and their listpacks, consumer groups and
+    /// IDMP producers.
+    pub fn alloc_size(&self) -> usize {
+        // `sizeof(stream)`.
+        const STREAM: usize = 160;
+        let e = &self.entries;
+        STREAM + rax::RAX + e.rax.alloc_size() + e.nodes.values().map(|n| n.lp_bytes() as usize).sum::<usize>() + self.groups.alloc_size() + self.idmp.alloc_size()
     }
 
     pub fn encoding(&self) -> &'static str {

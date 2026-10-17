@@ -264,6 +264,10 @@ SET e3 v PX 20
 @sleep 50
 GET e3
 EXISTS e3
+DEBUG SET-ALLOW-ACCESS-EXPIRED 0
+# MEMORY USAGE measures an expired key that is still there.
+MEMORY USAGE e3
+DEBUG SET-ALLOW-ACCESS-EXPIRED 1
 # KEYS, SCAN, RANDOMKEY, MOVE, WATCH and hash fields see expired entries too.
 SELECT 8
 FLUSHDB

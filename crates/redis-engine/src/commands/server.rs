@@ -672,31 +672,29 @@ pub fn command_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     ]))
 }
 
+/// MEMORY USAGE key [SAMPLES n]...: `kvobjAllocSize`, found without expiring it (`dbFind`).
 pub fn memory_usage(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    if args.len() > 3 && !(args.len() == 5 && eq(&args[3], "samples")) {
-        return Err(SYNTAX);
-    }
-    if args.len() == 5 {
-        int(&args[4])?;
+    let mut j = 3;
+    while j < args.len() {
+        if !(eq(&args[j], "samples") && j + 1 < args.len()) {
+            return Err(SYNTAX);
+        }
+        if int(&args[j + 1])? < 0 {
+            return Err(SYNTAX);
+        }
+        j += 2;
     }
     let key = &args[2];
-    Ok(match cx.peek(key) {
-        Some(e) => {
-            // A template hash also carries its share of the template.
-            let share = match &e.value {
-                crate::value::Value::Hash(h) => h.template().map_or(0, |t| {
-                    let keys = t.registry().map_or(1, |r| r.keys_of(t).max(1));
-                    t.mem() / keys as usize
-                }),
-                _ => 0,
-            };
-            Reply::Int(match &e.value {
-                crate::value::Value::Str(s) => crate::object::string_usage(e, key.len(), s),
-                v => crate::value::KEY_OVERHEAD + key.len().saturating_sub(22) + v.mem() + share,
-            } as i64)
-        }
-        None => Reply::Nil,
-    })
+    let Some(e) = cx.db().keys.get(key) else { return Ok(Reply::Nil) };
+    // A template hash also carries its share of the template.
+    let share = match &e.value {
+        crate::value::Value::Hash(h) => h.template().map_or(0, |t| {
+            let keys = t.registry().map_or(1, |r| r.keys_of(t).max(1));
+            t.mem() / keys as usize
+        }),
+        _ => 0,
+    };
+    Ok(Reply::Int((crate::object::usage(e, key.len()) + share) as i64))
 }
 
 pub fn memory_stats(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {

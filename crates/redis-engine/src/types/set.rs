@@ -65,6 +65,15 @@ impl Ints {
         ints_dispatch!(self, v => v.len())
     }
 
+    /// Bytes per member.
+    fn width(&self) -> usize {
+        match self {
+            Ints::W16(_) => 2,
+            Ints::W32(_) => 4,
+            Ints::W64(_) => 8,
+        }
+    }
+
     fn get(&self, i: usize) -> i64 {
         match self {
             Ints::W16(v) => v[i].into(),
@@ -165,6 +174,8 @@ impl Ints {
 struct Table {
     d: Dict<Str, ()>,
     heap: usize,
+    /// Redis' `sdsAllocSize` of every member (the dict's metadata).
+    sds: usize,
 }
 
 #[inline]
@@ -174,7 +185,7 @@ fn str_heap(s: &Str) -> usize {
 
 impl Table {
     fn with_capacity(n: usize) -> Self {
-        Self { d: Dict::with_capacity(n), heap: 0 }
+        Self { d: Dict::with_capacity(n), heap: 0, sds: 0 }
     }
 
     fn insert(&mut self, m: &[u8]) -> bool {
@@ -183,6 +194,7 @@ impl Table {
         }
         let k = Str::from_slice(m);
         self.heap += str_heap(&k);
+        self.sds += crate::object::sds_alloc(k.len());
         self.d.insert_new(k, ());
         true
     }
@@ -191,6 +203,7 @@ impl Table {
         match self.d.remove_entry(m) {
             Some((k, ())) => {
                 self.heap -= str_heap(&k);
+                self.sds -= crate::object::sds_alloc(k.len());
                 true
             }
             None => false,
@@ -335,6 +348,16 @@ impl Set {
             Enc::Ints(v) => v.mem(),
             Enc::Pack(p) => p.mem(),
             Enc::Hash(t) => t.mem(),
+        }
+    }
+
+    /// `setTypeAllocSize`: the intset, the listpack, or the table with every member's sds.
+    pub fn alloc_size(&self) -> usize {
+        match &self.enc {
+            // `sizeof(intset)` and the members at the set's width.
+            Enc::Ints(v) => 8 + v.len() * v.width(),
+            Enc::Pack(p) => crate::object::lp_bytes(p.iter()),
+            Enc::Hash(t) => crate::object::dict_usage(t.d.len(), t.d.buckets()) + t.sds,
         }
     }
 

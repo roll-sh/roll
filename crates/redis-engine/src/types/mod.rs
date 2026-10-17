@@ -5,6 +5,7 @@
 pub mod array;
 pub mod hash;
 pub mod list;
+pub mod rax;
 pub mod set;
 pub mod stream;
 pub mod template;

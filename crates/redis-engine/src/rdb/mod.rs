@@ -18,6 +18,9 @@ mod ziplist;
 
 pub use crc64::crc64;
 pub use encode::{Lru, RdbWriter};
+pub(crate) use encode::double2ll;
+pub(crate) use listpack::LpWriter;
+pub(crate) use lzf::compress as lzf_compress;
 
 use crate::config::Config;
 use crate::db::Db;

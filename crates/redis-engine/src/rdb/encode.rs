@@ -58,7 +58,7 @@ pub(crate) fn put_string(out: &mut Vec<u8>, s: &[u8], z: &mut Vec<u8>) {
 
 /// `double2ll`: the integer a listpack stores for an integral score.
 #[inline]
-fn double2ll(d: f64) -> Option<i64> {
+pub(crate) fn double2ll(d: f64) -> Option<i64> {
     const HALF: f64 = (i64::MAX / 2) as f64;
     if !(-HALF..=HALF).contains(&d) {
         return None;
