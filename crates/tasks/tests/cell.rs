@@ -53,6 +53,7 @@ async fn start_node_with(objects: Arc<dyn ObjectStore>, id: &str, token: Option<
     cfg.fail_after = 3;
     cfg.lease_check_ms = 200;
     cfg.forward_wait_ms = 10_000;
+    cfg.linger_ms = 500;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let (stop, rx) = watch::channel(Stop::Run);
@@ -170,11 +171,28 @@ async fn a_graceful_hand_over_is_quick_and_delivers_everything_once() {
     }
     let started = std::time::Instant::now();
     a.stop.send(Stop::Graceful).unwrap();
-    // Keep publishing through the hand-over.
-    for i in 40..60 {
-        ids.push(publish(&http, &proxy, json!({ "url": recv.url("/m"), "body": format!("{i}") })).await);
-    }
+    // Keep publishing through the hand-over, from several clients at once: every publish must get
+    // a definite answer (none may be cut off by the old leader closing its connections).
+    let busy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let publishers: Vec<_> = (0..4)
+        .map(|p| {
+            let (http, proxy, url, busy) = (http.clone(), proxy.clone(), recv.url("/m"), busy.clone());
+            tokio::spawn(async move {
+                let mut ids = Vec::new();
+                let mut i = 0;
+                while busy.load(std::sync::atomic::Ordering::SeqCst) || i < 5 {
+                    ids.push(publish(&http, &proxy, json!({ "url": url, "body": format!("p{p}-{i}") })).await);
+                    i += 1;
+                }
+                ids
+            })
+        })
+        .collect();
     assert_eq!(a.done.await.unwrap().unwrap(), Exit::Stopped);
+    busy.store(false, std::sync::atomic::Ordering::SeqCst);
+    for p in publishers {
+        ids.extend(p.await.unwrap());
+    }
     let l = wait_leader(&*objects, Some("node-a")).await;
     assert_eq!(l.node, "node-b");
     assert!(started.elapsed() < Duration::from_secs(8), "hand-over took {:?}", started.elapsed());

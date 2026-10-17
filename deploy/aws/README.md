@@ -56,7 +56,8 @@ There are two layouts. Both use the same image (`deploy/aws/Dockerfile`), API, S
     compare-and-swap. It rebuilds from the last snapshot plus the log and serves. That takes the
     time to download and decompress the snapshot; snapshots keep the log to replay short.
   - **Deploy or Spot reclaim (SIGTERM).** The leader drains deliveries, commits, releases the lease
-    and exits. A standby takes over in about a second.
+    and exits. A standby takes over in about a second. For 3 more seconds the old leader still
+    answers, sending stragglers on to the new one, so no request is cut off mid-flight by its exit.
   - **During a switch.** The Lambda proxy (or, behind the load balancer, the standby that got the
     request) holds requests for up to 25s. A request cut off by the switch gets a retryable 503,
     and the proxy retries it.

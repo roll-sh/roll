@@ -207,11 +207,16 @@ pub struct NodeConfig {
     pub lease_refresh_ms: u64,
     /// How long a request may wait for a leader when forwarded.
     pub forward_wait_ms: u64,
+    /// After stepping down, keep answering this long ("not the leader", or forwarding to the new
+    /// one) before closing the listener. Proxies holding a connection to this node then move to
+    /// the new leader on a definite answer, instead of a request cut off by the close, whose
+    /// fate they couldn't know.
+    pub linger_ms: u64,
 }
 
 impl NodeConfig {
     pub fn new(log: LogConfig, tasks: Config) -> Self {
-        Self { log, tasks, advertise: None, health_ms: 1_000, fail_after: 3, lease_check_ms: 5_000, lease_refresh_ms: 30_000, forward_wait_ms: 25_000 }
+        Self { log, tasks, advertise: None, health_ms: 1_000, fail_after: 3, lease_check_ms: 5_000, lease_refresh_ms: 30_000, forward_wait_ms: 25_000, linger_ms: 3_000 }
     }
 }
 
@@ -281,6 +286,15 @@ async fn status(State(s): State<Arc<Shared>>) -> Response {
     axum::Json(json!({ "node": s.node, "role": role, "epoch": s.epoch.load(Ordering::Relaxed) })).into_response()
 }
 
+/// A node on its way out tells clients not to reuse their connection to it.
+async fn close_when_stopping(State(s): State<Arc<Shared>>, req: Request, next: axum::middleware::Next) -> Response {
+    let mut res = next.run(req).await;
+    if *s.role.lock().unwrap() == Role::Stopping {
+        res.headers_mut().insert(header::CONNECTION, header::HeaderValue::from_static("close"));
+    }
+    res
+}
+
 async fn handle(State(s): State<Arc<Shared>>, req: Request) -> Response {
     let api = s.api.read().unwrap().clone();
     if let Some(api) = api {
@@ -323,7 +337,11 @@ pub async fn run_node(listener: tokio::net::TcpListener, cfg: NodeConfig, mut st
         serving: AtomicUsize::new(0),
         proxy: Arc::new(proxy),
     });
-    let app = Router::new().route("/_roll/node", get(status)).fallback(handle).with_state(shared.clone());
+    let app = Router::new()
+        .route("/_roll/node", get(status))
+        .fallback(handle)
+        .layer(axum::middleware::from_fn_with_state(shared.clone(), close_when_stopping))
+        .with_state(shared.clone());
     let (server_stop, server_stopped) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app)
@@ -482,6 +500,20 @@ pub async fn run_node(listener: tokio::net::TcpListener, cfg: NodeConfig, mut st
         shared.set_role(Role::Stopping);
         *shared.api.write().unwrap() = None;
         cell.kill();
+    }
+    // Answer stragglers for a while (see `linger_ms`), then close.
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(cfg.linger_ms)) => {}
+        _ = async {
+            loop {
+                if *stop.borrow_and_update() == Stop::Crash {
+                    return;
+                }
+                if stop.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        } => {}
     }
     let _ = server_stop.send(());
     let _ = server.await;
