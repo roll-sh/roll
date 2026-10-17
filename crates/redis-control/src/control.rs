@@ -223,11 +223,15 @@ impl Control {
         let control = Arc::new(Self { cfg, store, node, shipper });
         control.clone().start_metering();
         if let Some(every) = control.cfg.gc_interval {
-            let objects = control.objects().clone();
+            let weak = Arc::downgrade(&control);
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(every).await;
-                    match persist::collect_garbage(&objects, every).await {
+                    let Some(control) = weak.upgrade() else { return };
+                    if let Err(e) = control.expire_archives().await {
+                        tracing::warn!(error = %e, "expiring redis restore archives failed");
+                    }
+                    match persist::collect_garbage(control.objects(), every).await {
                         Ok(st) => tracing::info!(deleted = st.deleted, bytes = st.deleted_bytes, pending = st.unreferenced - st.deleted, "redis storage gc"),
                         Err(e) => tracing::warn!(error = %e, "redis storage gc failed"),
                     }
@@ -239,6 +243,25 @@ impl Control {
 
     pub fn objects(&self) -> &Objects {
         &self.shipper.objects
+    }
+
+    /// Delete the manifests of in-place restore archives (`<id>.<unix ms>`) older than their
+    /// database's restore window; garbage collection then frees what only they used. Returns
+    /// how many were deleted.
+    pub async fn expire_archives(&self) -> anyhow::Result<usize> {
+        let now_ms = redis_engine::util::now_ms();
+        let mut n = 0;
+        for (key, _) in self.objects().list("redis/db/").await? {
+            let Some(id) = key.strip_prefix("redis/db/").and_then(|k| k.strip_suffix("/manifest.json")) else { continue };
+            let Some((db, ms)) = id.rsplit_once('.') else { continue };
+            let Ok(ms) = ms.parse::<i64>() else { continue };
+            let window = self.store.db(db)?.map_or(0, |d| d.history_retention_s * 1000);
+            if ms + window < now_ms {
+                self.objects().delete(&key).await?;
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     /// `redis://` and HTTP connection details for a database or replica.

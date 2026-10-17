@@ -173,10 +173,20 @@ async fn branches_restore_and_replicas() {
     let (s, _) = e.call(reqwest::Method::POST, &format!("/v1/redis/databases/{id}/restore"), Some(json!({"at": 1}))).await;
     assert_eq!(s, 400);
 
+    // The archived pre-restore state lasts as long as the restore window.
+    let archive = res["previous_state"].as_str().unwrap();
+    assert_eq!(e.control.expire_archives().await.unwrap(), 0);
+    let (s, _) = e.call(reqwest::Method::PATCH, &format!("/v1/redis/databases/{id}"), Some(json!({"history_retention_s": 0}))).await;
+    assert_eq!(s, 200);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(e.control.expire_archives().await.unwrap(), 1);
+    assert!(redis_server::persist::read_manifest(e.control.objects(), archive).await.unwrap().is_none());
+
     // Branches carry their own history: the parent can go, and the branch still loads.
     drop((b, c, r));
     let (s, v) = e.call(reqwest::Method::DELETE, &format!("/v1/redis/databases/{id}"), None).await;
     assert_eq!(s, 200, "{v}");
+    assert!(redis_server::persist::read_manifest(e.control.objects(), &id).await.unwrap().is_none());
     let bid = br["id"].as_str().unwrap();
     assert!(e.post(&format!("/v1/redis/databases/{bid}/unload"), json!({})).await["unloaded"].as_bool().unwrap());
     let mut b = e.connect(&token(&br)).await;

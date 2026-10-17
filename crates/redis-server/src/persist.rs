@@ -527,6 +527,10 @@ impl Shipper {
         let mut dbs = self.dbs.lock();
         let Some(l) = dbs.get_mut(db) else { return Vec::new() };
         let horizon = snap.at_ms - retain_ms;
+        // Two snapshots of the same point (a periodic one racing the one on unload).
+        if l.manifest.snapshots.last().is_some_and(|s| s.offset == snap.offset) {
+            return Vec::new();
+        }
         l.manifest.snapshots.push(snap);
         let keep_from = l.manifest.snapshots.iter().rposition(|s| s.at_ms <= horizon).unwrap_or(0);
         let dropped: Vec<SnapRef> = l.manifest.snapshots.drain(..keep_from).collect();
