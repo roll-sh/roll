@@ -29,8 +29,8 @@ pub static COMMANDS: &[Command] = &[
     cmd!("FT.DICTDUMP", 2, READONLY | MODULE, 0, 0, 0, super::ft_admin::ft_dictdump, Module),
     cmd!("FT.DROP", -1, WRITE | MODULE, 0, 0, 0, super::ft::ft_drop, Module),
     cmd!("FT.DROPINDEX", -2, WRITE | MODULE, 0, 0, 0, super::ft::ft_dropindex, Module),
-    cmd!("FT.EXPLAIN", -3, READONLY | MODULE, 0, 0, 0, not_yet, Module),
-    cmd!("FT.EXPLAINCLI", -3, READONLY | MODULE, 0, 0, 0, not_yet, Module),
+    cmd!("FT.EXPLAIN", -3, READONLY | MODULE, 0, 0, 0, super::ft_query::ft_explain, Module),
+    cmd!("FT.EXPLAINCLI", -3, READONLY | MODULE, 0, 0, 0, super::ft_query::ft_explaincli, Module),
     cmd!("FT.GET", -1, READONLY | MODULE, 2, 2, 1, not_yet, Module),
     cmd!("FT.HYBRID", -7, READONLY | MODULE, 0, 0, 0, not_yet, Module),
     cmd!("FT.INFO", 2, READONLY | MODULE, 0, 0, 0, super::ft::ft_info, Module),
@@ -257,7 +257,7 @@ fn ft_config(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         let Some(set) = var.set else {
             return Err(QErr::new(Code::BadOption, "Not modifiable at runtime").into());
         };
-        let mut ac = Ac { objs: args, offset: 3 };
+        let mut ac = Ac { objs: args, offset: 3, sds: false };
         let mut cfg = cx.eng.cfg.clone();
         set(&mut cfg, &mut ac).map_err(Error::from)?;
         cx.eng.cfg = cfg;

@@ -1009,7 +1009,7 @@ pub(super) fn ft_list(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 // ---------------------------------------------------------------------------------------------
 
 /// A C string as a simple string, with CR and LF escaped (`REPLY_SIMPLE_SAFE`).
-fn safe(s: &[u8]) -> Reply {
+pub(super) fn safe(s: &[u8]) -> Reply {
     let s = crate::util::cstr(s);
     let mut out = String::with_capacity(s.len());
     for c in String::from_utf8_lossy(s).chars() {

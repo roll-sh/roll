@@ -2,6 +2,7 @@
 //! hashes and JSON documents, the query language, aggregations, vectors, suggestions, spelling
 //! dictionaries and synonyms, with RediSearch's replies, errors and limits.
 
+pub mod areq;
 pub mod args;
 pub mod casefold;
 pub mod cluster;
@@ -15,11 +16,17 @@ pub mod index;
 pub mod info;
 pub mod invidx;
 pub mod jsonpath;
+pub mod lalr;
 pub mod levenshtein;
 pub mod numtree;
 pub mod phonetic;
+pub mod qast;
+pub mod qgrammar;
+pub mod qlex;
+pub mod qparse;
 pub mod rsdict;
 pub mod spec;
+pub mod strconv;
 pub mod tokenize;
 pub mod trie;
 pub mod triemap;

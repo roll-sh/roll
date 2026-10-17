@@ -36,6 +36,9 @@ pub const COALESCE: u32 = 0x800;
 pub struct Ac<'a> {
     pub objs: &'a [Bytes],
     pub offset: usize,
+    /// `AC_TYPE_SDS`: numbers are read with `strtoll`/`strtod` (as C strings) rather than
+    /// Redis' string conversions.
+    pub sds: bool,
 }
 
 /// A C string comparison of an argument with a name, ignoring case.
@@ -50,7 +53,12 @@ pub fn c_eq_bytes(a: &[u8], b: &[u8]) -> bool {
 
 impl<'a> Ac<'a> {
     pub fn new(objs: &'a [Bytes]) -> Self {
-        Ac { objs, offset: 0 }
+        Ac { objs, offset: 0, sds: false }
+    }
+
+    /// `ArgsCursor_InitSDS`.
+    pub fn new_sds(objs: &'a [Bytes]) -> Self {
+        Ac { objs, offset: 0, sds: true }
     }
 
     pub fn argc(&self) -> usize {
@@ -104,13 +112,29 @@ impl<'a> Ac<'a> {
         self.get().ok()
     }
 
+    /// `AC_GetDouble`'s conversion.
+    fn double_at(&self, a: &[u8]) -> Option<f64> {
+        if self.sds {
+            let s = cstr(a);
+            let (d, n) = super::strconv::c_strtod(s);
+            (n == s.len() && d.abs() != f64::INFINITY).then_some(d)
+        } else {
+            zfloat(a)
+        }
+    }
+
     fn ll_at(&self, flags: u32) -> AcResult<i64> {
         let a = self.objs.get(self.offset).ok_or(AcErr::NoArg)?;
-        let v = match parse_i64(a) {
+        let int = if self.sds {
+            crate::util::strtoll_full(cstr(a)).filter(|&v| v != i64::MIN && v != i64::MAX)
+        } else {
+            parse_i64(a)
+        };
+        let v = match int {
             Some(v) => v,
             None => {
                 // `tryReadAsDouble`.
-                let d = zfloat(a).ok_or(AcErr::Parse)?;
+                let d = self.double_at(a).ok_or(AcErr::Parse)?;
                 if d.is_nan() {
                     return Err(AcErr::Parse);
                 }
@@ -177,7 +201,7 @@ impl<'a> Ac<'a> {
     /// `AC_GetDouble`.
     pub fn get_double(&mut self, flags: u32) -> AcResult<f64> {
         let a = self.objs.get(self.offset).ok_or(AcErr::NoArg)?;
-        let d = zfloat(a).ok_or(AcErr::Parse)?;
+        let d = self.double_at(a).ok_or(AcErr::Parse)?;
         if flags & GE0 != 0 && d < 0.0 {
             return Err(AcErr::Limit);
         }
@@ -193,7 +217,7 @@ impl<'a> Ac<'a> {
         if n > self.remaining() {
             return Err(AcErr::NoArg);
         }
-        let s = Ac { objs: &self.objs[self.offset..self.offset + n], offset: 0 };
+        let s = Ac { objs: &self.objs[self.offset..self.offset + n], offset: 0, sds: self.sds };
         self.offset += n;
         Ok(s)
     }

@@ -1,0 +1,298 @@
+# Query parsing through FT.EXPLAIN and FT.EXPLAINCLI: both grammars (dialect 1 and 2+), every
+# node type and its printing, attributes, parameters, stopwords, synonyms, stemming and phonetic
+# expansion, validation errors, the request options FT.SEARCH/FT.AGGREGATE share (their parsing
+# errors, legacy filters, INKEYS, INFIELDS) and the dialect 4 optimizer's removal of the sort
+# field's range.
+
+FLUSHALL
+FT.CREATE idx ON HASH PREFIX 1 d: SCHEMA t TEXT t2 TEXT NOSTEM n NUMERIC n2 NUMERIC tg TAG g GEO tm TEXT INDEXMISSING INDEXEMPTY ph TEXT PHONETIC dm:en
+HSET d:1 t hello n 5 tg a
+HSET d:2 t world n 6
+FT.EXPLAIN
+FT.EXPLAIN idx
+FT.EXPLAIN nosuch hello
+FT.EXPLAIN idx hello
+FT.EXPLAIN idx "hello world"
+FT.EXPLAINCLI idx "hello world"
+FT.EXPLAIN idx "hello | world"
+FT.EXPLAIN idx "hello -world"
+FT.EXPLAIN idx "hello ~world"
+FT.EXPLAIN idx "\"hello world\""
+FT.EXPLAIN idx "@t:hello"
+FT.EXPLAIN idx "@t2:hello"
+FT.EXPLAIN idx "@t|t2:hello"
+FT.EXPLAIN idx "@nosuch:hello"
+FT.EXPLAIN idx "@n:hello"
+FT.EXPLAIN idx "@n:[1 2]"
+FT.EXPLAIN idx "@n:[(1 (2]"
+FT.EXPLAIN idx "@n:[-inf +inf]"
+FT.EXPLAIN idx "@n:[3 1]"
+FT.EXPLAIN idx "@n>=3"
+FT.EXPLAIN idx "@n!=3"
+FT.EXPLAIN idx "@n<3 @n2>4"
+FT.EXPLAIN idx "@n==3"
+FT.EXPLAIN idx "@tg:{a}"
+FT.EXPLAIN idx "@tg:{a|b c}"
+FT.EXPLAIN idx "@tg:{a*}"
+FT.EXPLAIN idx "@t:{a}"
+FT.EXPLAIN idx "@g:[1 2 3 km]"
+FT.EXPLAIN idx "@g:[1 2 3 parsecs]"
+FT.EXPLAIN idx "@g:[200 2 3 km]"
+FT.EXPLAIN idx "hel*"
+FT.EXPLAIN idx "*llo"
+FT.EXPLAIN idx "*ll*"
+FT.EXPLAIN idx "%hello%"
+FT.EXPLAIN idx "%%hello%%"
+FT.EXPLAIN idx "%%%hello%%%"
+FT.EXPLAIN idx "w'he?lo'"
+FT.EXPLAIN idx "ismissing(@tm)"
+FT.EXPLAIN idx "ismissing(@t)"
+FT.EXPLAIN idx "@tm:\"\""
+FT.EXPLAIN idx "@t:\"\""
+FT.EXPLAIN idx "*"
+FT.EXPLAIN idx ""
+FT.EXPLAIN idx "the"
+FT.EXPLAIN idx "the" NOSTOPWORDS
+FT.EXPLAIN idx "the" DIALECT 1
+FT.EXPLAIN idx "hello" VERBATIM
+FT.EXPLAIN idx "running" LANGUAGE german
+FT.EXPLAIN idx "running" LANGUAGE klingon
+FT.EXPLAIN idx "running" EXPANDER SBSTEM
+FT.EXPLAIN idx "running" EXPANDER bogus
+FT.EXPLAIN idx "hello" SCORER BM25
+FT.EXPLAIN idx "hello" SCORER bogus
+FT.EXPLAIN idx "hello" INFIELDS 1 t
+FT.EXPLAIN idx "hello" INKEYS 2 d:1 d:9
+FT.EXPLAIN idx "hello world" INKEYS 1 d:1
+FT.EXPLAIN idx "hello" SLOP 2 INORDER
+FT.EXPLAIN idx "hello" DIALECT 0
+FT.EXPLAIN idx "hello" DIALECT 5
+FT.EXPLAIN idx "hello" DIALECT x
+FT.EXPLAIN idx "hello" DIALECT
+FT.EXPLAIN idx "hello" LIMIT 0
+FT.EXPLAIN idx "hello" LIMIT a b
+FT.EXPLAIN idx "hello" LIMIT 5 0
+FT.EXPLAIN idx "hello" LIMIT 0 0
+FT.EXPLAIN idx "hello" LIMIT 0 99999999999
+FT.EXPLAIN idx "hello" SORTBY
+FT.EXPLAIN idx "hello" SORTBY 1 n
+FT.EXPLAIN idx "hello" SORTBY 2 @n DESC
+FT.EXPLAIN idx "hello" SORTBY 2 @n DESC SORTBY 1 @n
+FT.EXPLAIN idx "hello" SORTBY 1 @n MAX x
+FT.EXPLAIN idx "hello" SORTBY 9 @a @b @c @d @e @f @g @h @i
+FT.EXPLAIN idx "hello" TIMEOUT -1
+FT.EXPLAIN idx "hello" TIMEOUT
+FT.EXPLAIN idx "hello" WITHCURSOR COUNT 0
+FT.EXPLAIN idx "hello" WITHCURSOR MAXIDLE x
+FT.EXPLAIN idx "hello" FORMAT
+FT.EXPLAIN idx "hello" FORMAT XML
+FT.EXPLAIN idx "hello" FORMAT EXPAND
+FT.EXPLAIN idx "hello" FORMAT EXPAND DIALECT 2
+FT.EXPLAIN idx "hello" PARAMS 1 a
+FT.EXPLAIN idx "hello" PARAMS 2 a b PARAMS 2 c d
+FT.EXPLAIN idx "hello" PARAMS 4 a b a c
+FT.EXPLAIN idx "hello" PARAMS x
+FT.EXPLAIN idx "hello" BOGUS
+FT.EXPLAIN idx "hello" GROUPBY 1 n
+FT.EXPLAIN idx "hello" GROUPBY 1 @n REDUCE
+FT.EXPLAIN idx "hello" HIGHLIGHT GROUPBY 1 @n
+FT.EXPLAIN idx "hello" LOAD x
+FT.EXPLAIN idx "hello" LOAD 3 a
+FT.EXPLAIN idx "hello" APPLY
+FT.EXPLAIN idx "hello" APPLY 1 AS
+FT.EXPLAIN idx "hello" EXPLAINSCORE
+FT.EXPLAIN idx "hello" RETURN 1 t AS
+FT.EXPLAIN idx "hello" RETURN 3 t AS as
+FT.EXPLAIN idx "hello" HIGHLIGHT FILTER n 1 2
+FT.EXPLAIN idx "hello" HIGHLIGHT FILTER nosuch 1 2
+FT.EXPLAIN idx "hello" HIGHLIGHT FILTER nosuch 1 2 DIALECT 1
+FT.EXPLAIN idx "hello" HIGHLIGHT FILTER t 1 2
+FT.EXPLAIN idx "hello" HIGHLIGHT FILTER n (1 +inf
+FT.EXPLAIN idx "hello" HIGHLIGHT FILTER n x 2
+FT.EXPLAIN idx "hello" HIGHLIGHT FILTER n "" 2
+FT.EXPLAIN idx "hello" HIGHLIGHT FILTER n "" 2 DIALECT 1
+FT.EXPLAIN idx "hello" HIGHLIGHT FILTER n 1
+FT.EXPLAIN idx "hello" HIGHLIGHT GEOFILTER g 1 2 3 km
+FT.EXPLAIN idx "hello" HIGHLIGHT GEOFILTER g 1 2 3 parsecs
+FT.EXPLAIN idx "hello" HIGHLIGHT GEOFILTER g x 2 3 km
+FT.EXPLAIN idx "hello" SUMMARIZE LEN x
+FT.EXPLAIN idx "@t:$x" PARAMS 2 x hello
+FT.EXPLAIN idx "@t:$x"
+FT.EXPLAIN idx "@n:[$a $b]" PARAMS 4 a 1 b 2
+FT.EXPLAIN idx "@n:[$a $b]" PARAMS 4 a x b 2
+FT.EXPLAIN idx "@n>$a" PARAMS 2 a 3
+FT.EXPLAIN idx "hello=>{$weight:2}"
+FT.EXPLAIN idx "hello=>{$weight:-2}"
+FT.EXPLAIN idx "hello=>{$bogus:2}"
+FT.EXPLAIN idx "hello=>{$slop:1;$inorder:true}"
+FT.EXPLAIN idx "(hello world)=>{$weight:$w}" PARAMS 2 w 3
+FT.EXPLAIN idx "hello world" DIALECT 1
+FT.EXPLAIN idx "@t:hello @n:[1 2]" DIALECT 1
+FT.EXPLAIN idx "@tg:{a | b}" DIALECT 1
+FT.EXPLAIN idx "@g:[1 2 3 km]" DIALECT 1
+FT.EXPLAIN idx "@nosuch:{a}" DIALECT 1
+FT.EXPLAIN idx "(((hello"
+FT.EXPLAIN idx "hello)"
+FT.EXPLAIN idx "@n:[1"
+FT.EXPLAIN idx "hello (world"
+FT.EXPLAIN idx "@t:(hello|world) -@n:[1 2]"
+FT.EXPLAIN idx "hello @n:[1 2]" DIALECT 4 SORTBY 1 @n
+FT.EXPLAIN idx "@n:[1 2] @n2:[1 2] hello" DIALECT 4 SORTBY 1 @n2
+FT.EXPLAIN idx "@n:[1 2] world hello" DIALECT 4 SORTBY 1 @n WITHCOUNT
+FT.EXPLAIN idx "@ph:hello"
+FT.EXPLAIN idx "@ph:hello=>{$phonetic:false}"
+FT.EXPLAIN idx "@t:hello=>{$phonetic:true}"
+FT.EXPLAINCLI idx "@t:(a|b) @n:[1 2] -c ~d"
+# Each request that compiles counts a use of the index.
+!mask total_indexing_time FT.INFO idx
+
+FLUSHALL
+FT.CREATE noofs ON HASH PREFIX 1 o: NOOFFSETS SCHEMA t TEXT
+FT.CREATE js ON JSON PREFIX 1 j: SCHEMA $.a AS a TEXT $.b[*] AS b TEXT
+FT.SYNUPDATE idx g1 hello hi greetings
+FT.EXPLAIN idx "hello"
+FT.EXPLAIN idx "hi there"
+FT.EXPLAIN idx "hello" EXPANDER SYNONYM
+FT.EXPLAIN idx "hello" EXPANDER PHONETIC
+FT.EXPLAIN noofs "hello" HIGHLIGHT
+FT.EXPLAIN noofs "hello" SUMMARIZE
+FT.EXPLAIN js "hello" HIGHLIGHT
+FT.EXPLAIN js "hello" HIGHLIGHT RETURN 1 a
+FT.EXPLAIN js "hello" HIGHLIGHT RETURN 1 b
+FT.EXPLAIN js "hello" HIGHLIGHT FIELDS 1 a RETURN 1 $.a
+FT.EXPLAIN js "hello" FORMAT EXPAND
+FT.EXPLAIN idx "@gs:[WITHIN $p]" PARAMS 2 p "POINT(1 2)"
+FT.EXPLAIN idx "@gs:[CONTAINS $p]" PARAMS 2 p "POINT(1 2)"
+FT.EXPLAIN idx "@gs:[NEAR $p]" PARAMS 2 p "POINT(1 2)"
+FT.EXPLAIN idx "@t:[WITHIN $p]" PARAMS 2 p "POINT(1 2)"
+FT.EXPLAIN idx "*=>[KNN 3 @v $b]" PARAMS 2 b 12345678
+FT.EXPLAIN idx "*=>[KNN 3 @v $b AS dist]" PARAMS 2 b 12345678
+FT.EXPLAIN idx "*=>[KNN 3 @v $b EF_RUNTIME 5]" PARAMS 2 b 12345678
+FT.EXPLAIN idx "hello=>[KNN 3 @v $b]" PARAMS 2 b 12345678
+FT.EXPLAIN idx "(hello world)=>[KNN $k @v $b]" PARAMS 4 b 12345678 k 4
+FT.EXPLAIN idx "*=>[KNN 3 @t $b]" PARAMS 2 b 12345678
+FT.EXPLAIN idx "*=>[FOO 3 @v $b]" PARAMS 2 b 12345678
+FT.EXPLAIN idx "@v:[VECTOR_RANGE 0.5 $b]" PARAMS 2 b 12345678
+FT.EXPLAIN idx "@v:[VECTOR_RANGE 0.5 $b]=>{$yield_distance_as:d}" PARAMS 2 b 12345678
+FT.EXPLAIN idx "@v:[RANGE 0.5 $b]" PARAMS 2 b 12345678
+FT.EXPLAIN idx "*=>[KNN 3 @v $b]=>{$yield_distance_as:dd}" PARAMS 2 b 12345678
+FT.EXPLAIN idx "@tc:{Hello}"
+FT.EXPLAIN idx "@tg:{Hello}"
+FT.EXPLAIN idx "@tg:{hello world}"
+FT.EXPLAIN idx "@tg:{hello\\ world}"
+FT.EXPLAIN idx "@tg:{$x}" PARAMS 2 x Foo
+FT.EXPLAIN idx "@tc:{$x}" PARAMS 2 x Foo
+FT.EXPLAIN idx "@tg:{w'a*'}"
+FT.EXPLAIN idx "@tg:{a*|*b|*c*}"
+FT.EXPLAIN idx "@t:(a b c)=>{$inorder:true;$slop:0}"
+FT.EXPLAIN idx "@t:a @t2:b"
+FT.EXPLAIN idx "a b | c d"
+FT.EXPLAIN idx "a (b | c) d"
+FT.EXPLAIN idx "-a -b"
+FT.EXPLAIN idx "--a"
+FT.EXPLAIN idx "~~a"
+FT.EXPLAIN idx "a -(b c)"
+FT.EXPLAIN idx "\"a b\" \"c d\""
+FT.EXPLAIN idx "'a b'"
+FT.EXPLAIN idx "\"$x\""
+FT.EXPLAIN idx "'$x'"
+FT.EXPLAIN idx "$x" PARAMS 2 x hello
+FT.EXPLAIN idx "$x" PARAMS 2 x 42
+FT.EXPLAIN idx "hel* $x*" PARAMS 2 x wor
+FT.EXPLAIN idx "%$x%" PARAMS 2 x wor
+FT.EXPLAIN idx "w'$x'" PARAMS 2 x "w?r"
+FT.EXPLAIN idx "12 1.5 -3 1e5 .5 5. inf -inf"
+FT.EXPLAIN idx "@n:[1e5 inf]"
+FT.EXPLAIN idx "@n:[.5 5.]"
+FT.EXPLAIN idx "@n:[1 2 3]"
+FT.EXPLAIN idx "@n:[1]"
+FT.EXPLAIN idx "@n:[(1]"
+FT.EXPLAIN idx "@n:[$a]" PARAMS 2 a 7
+FT.EXPLAIN idx "@n:[(-$a $a]" PARAMS 2 a 7
+FT.EXPLAIN idx "@n:[$a $b]" PARAMS 4 a "" b 2
+FT.EXPLAIN idx "@n:[$a $b]" PARAMS 4 a "(1" b "inf"
+FT.EXPLAIN idx "@n:[$a $b]" PARAMS 4 a "-inf" b "(+inf"
+FT.EXPLAIN idx "@n >= -$a" PARAMS 2 a 3
+FT.EXPLAIN idx "@n>=x"
+FT.EXPLAIN idx "@g:[$lon $lat $r $u]" PARAMS 8 lon 1 lat 2 r 3 u mi
+FT.EXPLAIN idx "@g:[$lon $lat $r $u]" PARAMS 8 lon 1 lat 2 r 3 u yards
+FT.EXPLAIN idx "@g:[$lon $lat $r $u]" PARAMS 8 lon 1 lat 99 r 3 u km
+FT.EXPLAIN idx "@g:[1 2 -3 km]"
+FT.EXPLAIN idx "@g:[1 2 3 4]"
+FT.EXPLAIN idx "hello" DIALECT 3
+FT.EXPLAIN idx "hello" DIALECT 4
+FT.EXPLAIN idx "@t:hello\\,world"
+FT.EXPLAIN idx "hello\\-world"
+FT.EXPLAIN idx "@t\\-x:hello"
+FT.EXPLAIN idx "@t\\-x:hello" DIALECT 1
+FT.EXPLAIN idx "café ÜBER straße"
+FT.EXPLAIN idx "hello world" INFIELDS 2 t2 nosuch
+FT.EXPLAIN idx "@t:hello" INFIELDS 1 t2
+FT.EXPLAIN idx "hello" SLOP x
+FT.EXPLAIN idx "hello" SLOP 1.7
+FT.EXPLAIN idx "hello" LANGUAGE
+FT.EXPLAIN idx "hello" PAYLOAD
+FT.EXPLAIN idx "hello" INKEYS 3 a
+FT.EXPLAIN idx "hello" RETURN
+FT.EXPLAIN idx "hello" WITHCOUNT WITHOUTCOUNT
+FT.EXPLAIN idx "hello" BM25STD_TANH_FACTOR 0
+FT.EXPLAIN idx "hello" BM25STD_TANH_FACTOR 99999
+FT.EXPLAIN idx "hello" _NUM_SSTRING WITHRAWIDS
+FT.EXPLAIN idx "hello" _REQUIRED_FIELDS 2 a
+FT.EXPLAIN idx "hello" _INDEX_PREFIXES 1 d:
+FT.EXPLAIN idx "hello" _INDEX_PREFIXES 1 x:
+FT.EXPLAIN idx "hello" _INDEX_PREFIXES 0
+FT.EXPLAIN idx "hello" GROUPBY 0 REDUCE COUNT 0
+FT.EXPLAIN idx "hello" GROUPBY 1 @n REDUCE COUNT 0 AS
+FT.EXPLAIN idx "hello" GROUPBY 1 @n REDUCE COUNT x
+FT.EXPLAIN idx "hello" GROUPBY x
+FT.EXPLAIN idx "hello" GROUPBY 2 @n
+FT.EXPLAIN idx "hello" LOAD *
+FT.EXPLAIN idx "hello" LOAD
+FT.EXPLAIN idx "hello" FILTER
+FT.EXPLAIN idx "hello" SUMMARIZE FIELDS 1 t LEN 5 FRAGS 2 SEPARATOR x HIGHLIGHT TAGS a b
+FT.EXPLAIN idx "hello" HIGHLIGHT TAGS a
+FT.EXPLAIN idx "hello" HIGHLIGHT FIELDS x
+FT.EXPLAIN idx "hello" WITHSCORES EXPLAINSCORE ADDSCORES
+FT.EXPLAIN idx "hello" WITHCURSOR
+FT.EXPLAIN idx "hello" WITHCURSOR COUNT 5 MAXIDLE 10 LIMIT 0 5
+FT.EXPLAIN idx "hello" SORTBY 2 @n BOGUS
+FT.EXPLAIN idx "hello" SORTBY 3 ASC @n DESC
+FT.EXPLAIN idx "hello" SORTBY 0
+FT.EXPLAIN idx "hello" SORTBY 0 SORTBY 1 @n
+FT.EXPLAIN idx "hello" LIMIT 0 5 SORTBY 0 SORTBY 1 @n
+FT.EXPLAIN idx "hello" SORTBY 0 MAX 3 SORTBY 1 @n
+FT.EXPLAIN idx "hello" HIGHLIGHT SORTBY n DESC SORTBY n
+FT.EXPLAIN idx "hello" HIGHLIGHT SORTBY
+FT.EXPLAIN idx "hello" HIGHLIGHT SORTBY n MAX 3
+FT.EXPLAIN idx "hello" HIGHLIGHT LIMIT 0 2000000
+FT.EXPLAIN idx "hello" LIMIT 2000000 1
+FT.EXPLAIN idx "hello" LIMIT -1 1
+FT.EXPLAIN idx "hello" DIALECT 2 DIALECT 1
+FT.EXPLAIN idx "the hello" DIALECT 1 NOSTOPWORDS
+FT.EXPLAIN idx "%the%" DIALECT 1
+FT.EXPLAIN idx "the*" DIALECT 1
+FT.EXPLAIN idx "@t:the" DIALECT 1
+FT.EXPLAIN idx "@t|t2:hello" DIALECT 1
+FT.EXPLAIN idx "@t|nosuch:hello" DIALECT 1
+FT.EXPLAIN idx "@nosuch:hello" DIALECT 1
+FT.EXPLAIN idx "@n:[1 (2]" DIALECT 1
+FT.EXPLAIN idx "@n:[-1 -(2]" DIALECT 1
+FT.EXPLAIN idx "@n:[3 1]" DIALECT 1
+FT.EXPLAIN idx "@g:[1 2 3 parsecs]" DIALECT 1
+FT.EXPLAIN idx "@g:[1 2 3 x]" DIALECT 1
+FT.EXPLAIN idx "hello=>{$weight:2}" DIALECT 1
+FT.EXPLAIN idx "hello=>{$weight:x}" DIALECT 1
+FT.EXPLAIN idx "\"hello world\"=>{$slop:2}" DIALECT 1
+FT.EXPLAIN idx "@tg:{a b|c}" DIALECT 1
+FT.EXPLAIN idx "@tg:{the}" DIALECT 1
+FT.EXPLAIN idx "@tg:{a\\ b}" DIALECT 1
+FT.EXPLAIN idx "hello ) world" DIALECT 1
+FT.EXPLAIN idx "(((a" DIALECT 1
+FT.EXPLAIN idx "*" DIALECT 1
+FT.EXPLAIN idx "* hello" DIALECT 1
+FT.EXPLAIN idx "hello *" DIALECT 2
+FT.EXPLAIN idx "$x" DIALECT 1
+FT.EXPLAIN idx "-hello" DIALECT 1
+FT.EXPLAIN idx "a|b|c" DIALECT 1
+FT.EXPLAIN idx "a b|c d" DIALECT 1
