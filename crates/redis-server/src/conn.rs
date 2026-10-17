@@ -52,6 +52,7 @@ const MAX_BATCH: usize = 512;
 
 pub struct Conn<'a> {
     dir: &'a dyn Directory,
+    sni: Option<String>,
     session: Option<Session>,
     client: Client,
     pending: VecDeque<Vec<Bytes>>,
@@ -68,6 +69,14 @@ pub async fn serve<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<d
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    serve_with(stream, peer, local, dir, None).await
+}
+
+/// Serve a connection; `sni` is the TLS server name the client asked for (database routing).
+pub async fn serve_with<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, sni: Option<String>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let (mut rd, mut wr) = tokio::io::split(stream);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let sink: Arc<dyn Sink> = Arc::new(ConnSink { tx });
@@ -81,6 +90,7 @@ where
     }
     let mut conn = Conn {
         dir: dir.as_ref(),
+        sni,
         session,
         client,
         pending: VecDeque::new(),
@@ -401,7 +411,7 @@ impl Conn<'_> {
             3 => (Some(&args[1]), &args[2]),
             _ => return Reply::Error("ERR syntax error".into()),
         };
-        match self.dir.authenticate(AuthRequest { user: user.map(|u| &u[..]), password: pass, sni: None }).await {
+        match self.dir.authenticate(AuthRequest { user: user.map(|u| &u[..]), password: pass, sni: self.sni.as_deref() }).await {
             Ok(s) => {
                 if self.session.as_ref().is_some_and(|old| !Arc::ptr_eq(&old.db, &s.db)) {
                     // Switching databases: leave the old one completely.

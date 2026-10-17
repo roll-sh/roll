@@ -6,6 +6,7 @@ pub mod database;
 pub mod directory;
 pub mod exec;
 pub mod http;
+pub mod net;
 pub mod node;
 pub mod persist;
 pub mod repl;

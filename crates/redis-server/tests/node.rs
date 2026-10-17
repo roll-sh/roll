@@ -113,3 +113,40 @@ async fn http_wakes_databases_too() {
     assert_eq!(r, serde_json::json!({"result": "1"}));
     let _ = addr;
 }
+
+#[tokio::test]
+async fn tls_with_sni_routing() {
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
+    let ck = rcgen::generate_simple_self_signed(vec!["*.redis.test".into()]).unwrap();
+    let cert_pem = ck.cert.pem();
+    let acceptor = redis_server::net::tls_acceptor(cert_pem.as_bytes(), ck.signing_key.serialize_pem().as_bytes()).unwrap();
+
+    let (_, node) = start(None).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let dir: Arc<dyn Directory> = node.clone();
+    tokio::spawn(redis_server::net::serve(listener, dir, redis_server::net::ListenOptions { tls: Some(acceptor), proxy_protocol: true }));
+
+    let mut roots = RootCertStore::empty();
+    roots.add(ck.cert.der().clone()).unwrap();
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let cfg = ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().unwrap().with_root_certificates(roots).with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // As if behind an NLB with proxy protocol v1.
+    tcp.write_all(b"PROXY TCP4 203.0.113.7 10.0.0.1 51234 6379\r\n").await.unwrap();
+    let mut tls = connector.connect(ServerName::try_from("beta.redis.test").unwrap(), tcp).await.unwrap();
+    // Plain password: the database comes from SNI.
+    tls.write_all(b"AUTH pb\r\nCLIENT INFO\r\n").await.unwrap();
+    let mut buf = vec![0u8; 4096];
+    let mut got = Vec::new();
+    // +OK, the bulk header and the CLIENT INFO line.
+    while got.windows(2).filter(|w| *w == b"\r\n").count() < 3 {
+        let n = tls.read(&mut buf).await.unwrap();
+        got.extend_from_slice(&buf[..n]);
+    }
+    let s = String::from_utf8_lossy(&got);
+    assert!(s.starts_with("+OK\r\n"), "{s}");
+    assert!(s.contains("addr=203.0.113.7:51234"), "{s}");
+}
