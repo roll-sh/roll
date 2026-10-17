@@ -53,6 +53,11 @@ impl<'a> SliceSrc<'a> {
         SliceSrc { data, pos: 0 }
     }
 
+    /// Bytes read so far.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
     #[inline]
     fn take(&mut self, n: usize) -> R<&'a [u8]> {
         let end = self.pos.checked_add(n).filter(|&e| e <= self.data.len()).ok_or(RdbError::Truncated)?;
@@ -155,6 +160,10 @@ impl<'c, S: Src> Dec<'c, S> {
 
     pub fn crc(&self) -> u64 {
         self.src.crc()
+    }
+
+    pub fn src(&self) -> &S {
+        &self.src
     }
 
     #[inline]

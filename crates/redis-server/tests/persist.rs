@@ -424,3 +424,33 @@ async fn rdb_snapshots_round_trip_every_type() {
     assert_eq!(fields, Reply::Array(vec![Reply::Int(far.parse().unwrap()), Reply::Int(far.parse().unwrap()), Reply::Int(-1)]));
     assert_eq!(run(&back, &mut c2, "XPENDING stream g"), run(&db, &mut c, "XPENDING stream g"));
 }
+
+#[tokio::test]
+async fn function_libraries_survive_rdb_snapshots() {
+    use redis_server::RdbCodec;
+    let o = objects("rdb-functions");
+    let codec: Arc<dyn persist::SnapshotCodec> = Arc::new(RdbCodec);
+    let shipper = Shipper::start("n1", o.clone(), ShipperConfig { codec: Some(codec.clone()), ..cfg() }).await.unwrap();
+    let db = Database::new("rdbf", Config::default(), 1);
+    shipper.attach(&db, Default::default()).await.unwrap();
+    let mut c = Client::new(1);
+    let call = |db: &Database, c: &mut Client, line: &str| {
+        let args: Vec<Bytes> = redis_server::client::args(line).into_iter().map(Bytes::from).collect();
+        db.engine(0).call(c, &args).unwrap_reply()
+    };
+    let lib = "FUNCTION LOAD \"#!lua name=keep\nredis.register_function{function_name='hello', callback=function(keys) return 'hi ' .. keys[1] end, flags={'no-writes'}, description='greets'}\"";
+    assert_eq!(call(&db, &mut c, lib), Reply::bulk(b"keep"));
+    call(&db, &mut c, "FUNCTION LOAD \"#!lua name=second\nredis.register_function('two', function() return 2 end)\"");
+    call(&db, &mut c, "SET k v");
+    let snap = shipper.snapshot(&db, 0).await.unwrap().unwrap();
+    assert_eq!(snap.offset, db.repl_offset());
+    shipper.detach(&db).await.unwrap();
+
+    let back = Database::new("rdbf", Config::default(), 1);
+    persist::restore(&o, &back, Some(&*codec)).await.unwrap();
+    let mut c2 = Client::new(2);
+    assert_eq!(call(&back, &mut c2, "FCALL_RO hello 1 there"), Reply::bulk(b"hi there"));
+    assert_eq!(call(&back, &mut c2, "FCALL two 0"), Reply::Int(2));
+    assert_eq!(sorted(call(&back, &mut c2, "FUNCTION LIST WITHCODE")), sorted(call(&db, &mut c, "FUNCTION LIST WITHCODE")));
+    assert_eq!(call(&back, &mut c2, "GET k"), Reply::bulk(b"v"));
+}

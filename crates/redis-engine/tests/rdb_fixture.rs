@@ -49,6 +49,12 @@ fn loads_a_real_redis_rdb() {
     assert!(aux.contains(&("aof-base".into(), "0".into())));
     assert_eq!(funcs.len(), 1);
     assert!(funcs[0].starts_with(b"#!lua name=mylib\n"));
+    // The library loads and its function runs.
+    let mut eng = redis_engine::Engine::standalone();
+    eng.scripting.restore_libraries(&funcs, redis_engine::commands::scripting::RestorePolicy::Append).unwrap();
+    assert_eq!(eng.scripting.libraries()[0].name, "mylib");
+    let r = eng.call(&mut redis_engine::Client::new(1), &[bytes::Bytes::from_static(b"FUNCTION"), bytes::Bytes::from_static(b"LIST")]);
+    assert!(format!("{:?}", r.unwrap_reply()).contains("mylib"));
 
     let enc = |db, k| get(&keys, db, k).value.encoding();
     for (k, e) in [

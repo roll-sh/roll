@@ -43,11 +43,13 @@ static SCRIPT: &[Command] = &[
 
 static FUNCTION: &[Command] = &[
     Command { since: "7.0.0", ..cmd!("delete", 3, NOSCRIPT | WRITE, 0, 0, 0, function_delete, Scripting) },
+    Command { since: "7.0.0", ..cmd!("dump", 2, NOSCRIPT, 0, 0, 0, function_dump, Scripting) },
     Command { since: "7.0.0", ..cmd!("flush", -2, NOSCRIPT | WRITE, 0, 0, 0, function_flush, Scripting) },
     Command { since: "7.0.0", ..cmd!("help", 2, LOADING | STALE, 0, 0, 0, function_help, Scripting) },
     Command { since: "7.0.0", ..cmd!("kill", 2, NOSCRIPT | ALLOW_BUSY, 0, 0, 0, function_kill, Scripting) },
     Command { since: "7.0.0", ..cmd!("list", -2, NOSCRIPT, 0, 0, 0, function_list, Scripting) },
     Command { since: "7.0.0", ..cmd!("load", -3, NOSCRIPT | WRITE | DENYOOM, 0, 0, 0, function_load, Scripting) },
+    Command { since: "7.0.0", ..cmd!("restore", -3, NOSCRIPT | WRITE | DENYOOM, 0, 0, 0, function_restore, Scripting) },
     Command { since: "7.0.0", ..cmd!("stats", 2, NOSCRIPT | ALLOW_BUSY, 0, 0, 0, function_stats, Scripting) },
 ];
 
@@ -366,6 +368,40 @@ impl Scripting {
         Ok(name)
     }
 
+    /// FUNCTION RESTORE (and snapshot load): add these libraries, all or none. Errors are the
+    /// message without its code.
+    pub fn restore_libraries(&mut self, codes: &[Vec<u8>], policy: RestorePolicy) -> Result<(), String> {
+        // Compiled apart first, so a bad payload changes nothing.
+        let mut staged = Scripting::default();
+        for code in codes {
+            staged.load_library(&Bytes::copy_from_slice(code), false, 0)?;
+        }
+        if policy == RestorePolicy::Flush {
+            self.flush_functions();
+        } else {
+            let replaced = |name: &str| staged.libs.iter().any(|l| l.name == name);
+            if policy == RestorePolicy::Append
+                && let Some(lib) = staged.libs.iter().find(|l| self.libs.iter().any(|o| o.name == l.name))
+            {
+                return Err(format!("Library {} already exists", lib.name));
+            }
+            for f in staged.libs.iter().flat_map(|l| &l.functions) {
+                if let Some(&(li, _)) = self.fn_index.get(&f.name.to_ascii_lowercase())
+                    && !replaced(&self.libs[li].name)
+                {
+                    return Err(format!("Function {} already exists", f.name));
+                }
+            }
+            for lib in &staged.libs {
+                self.delete_library(lib.name.as_bytes());
+            }
+        }
+        for lib in &staged.libs {
+            self.load_library(&lib.code, false, 0)?;
+        }
+        Ok(())
+    }
+
     pub fn delete_library(&mut self, name: &[u8]) -> bool {
         let Some(i) = self.libs.iter().position(|l| l.name.as_bytes() == name) else { return false };
         let lib = self.libs.remove(i);
@@ -377,6 +413,13 @@ impl Scripting {
         self.reindex();
         true
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RestorePolicy {
+    Append,
+    Replace,
+    Flush,
 }
 
 /// `#!<engine> name=<library>` and the code after it (from its newline on).
@@ -962,6 +1005,33 @@ fn function_flush(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     Ok(Reply::Ok)
 }
 
+fn function_dump(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Ok(Reply::Bulk(crate::rdb::dump_functions(cx.eng.scripting.libs.iter().map(|l| &l.code[..])).into()))
+}
+
+fn function_restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if args.len() > 4 {
+        return Err(Error::msg(format!(
+            "ERR unknown subcommand or wrong number of arguments for '{}'. Try FUNCTION HELP.",
+            String::from_utf8_lossy(&args[1])
+        )));
+    }
+    let policy = match args.get(3) {
+        None => RestorePolicy::Append,
+        Some(p) if eq(p, "append") => RestorePolicy::Append,
+        Some(p) if eq(p, "replace") => RestorePolicy::Replace,
+        Some(p) if eq(p, "flush") => RestorePolicy::Flush,
+        Some(_) => return Err(Error::new("ERR Wrong restore policy given, value should be either FLUSH, APPEND or REPLACE.")),
+    };
+    let codes = crate::rdb::restore_functions(&args[2]).map_err(|e| match e {
+        crate::rdb::FunctionsPayloadError::Footer => Error::new("ERR DUMP payload version or checksum are wrong"),
+        crate::rdb::FunctionsPayloadError::Message(m) => Error::msg(format!("ERR {m}")),
+    })?;
+    cx.eng.scripting.restore_libraries(&codes, policy).map_err(|e| Error::msg(format!("ERR {e}")))?;
+    changed(cx);
+    Ok(Reply::Ok)
+}
+
 fn function_kill(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     Err(Error::new("NOTBUSY No scripts in execution right now."))
 }
@@ -1080,14 +1150,6 @@ pub fn while_busy(ctl: &ScriptCtl, args: &[Bytes]) -> Reply {
         return stats(ctl);
     }
     Reply::error(if is_eval { BUSY_EVAL } else { BUSY_FUNCTION })
-}
-
-/// Reload libraries saved by [`Scripting::library_codes`] (snapshot load).
-pub fn restore_libraries(eng: &mut Engine, codes: &[Bytes]) -> Result<(), String> {
-    for code in codes {
-        eng.scripting.load_library(code, true, 0)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 /// [`SnapshotCodec`] over [`rdb`]. Every database of the engine is written with its expiries,
 /// plus the idle time (LRU/LRM policies) or the frequency counter (LFU policies) of each key,
-/// as Redis does. Function libraries are not carried yet.
+/// as Redis does, and the function libraries.
 pub struct RdbCodec;
 
 impl SnapshotCodec for RdbCodec {
@@ -29,6 +29,9 @@ impl SnapshotCodec for RdbCodec {
             ("aof-base", "0"),
         ];
         let mut w = RdbWriter::new(out, &aux, now)?;
+        for code in engine.scripting.library_codes() {
+            w.function(&code)?;
+        }
         for (i, db) in engine.dbs.iter().enumerate() {
             if db.is_empty() {
                 continue;
@@ -56,8 +59,11 @@ impl SnapshotCodec for RdbCodec {
         let now = redis_engine::util::now_ms();
         let mut eng = db.engine(0);
         let cfg = eng.cfg.clone();
+        let mut functions = Vec::new();
         rdb::load(data, &cfg, |it| {
-            if let LoadItem::Entry { db, key, entry } = it {
+            if let LoadItem::Function(code) = it {
+                functions.push(code);
+            } else if let LoadItem::Entry { db, key, entry } = it {
                 let Some(d) = eng.dbs.get_mut(db) else { return Err(RdbError::Corrupt("database index out of range")) };
                 if entry.expired(now) {
                     return Ok(());
@@ -70,6 +76,9 @@ impl SnapshotCodec for RdbCodec {
             Ok(())
         })
         .map_err(|e| anyhow::anyhow!("RDB snapshot: {e}"))?;
+        eng.scripting
+            .restore_libraries(&functions, redis_engine::commands::scripting::RestorePolicy::Replace)
+            .map_err(|e| anyhow::anyhow!("RDB snapshot functions: {e}"))?;
         Ok(())
     }
 }

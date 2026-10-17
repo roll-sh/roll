@@ -170,3 +170,40 @@ FUNCTION LOAD "#!lua name=many\nfor i = 1, 50 do redis.register_function('fn' ..
 FCALL fn1 0
 FCALL fn50 0
 FUNCTION STATS
+
+# ---- DUMP / RESTORE ----
+FUNCTION FLUSH
+FUNCTION DUMP
+FUNCTION RESTORE "\x0f\x00\x95\x8f\x1c\xac\x17\x8d\x9a\x13"
+FUNCTION LOAD "#!lua name=dumped\nredis.register_function('d1', function() return 'd1' end)\nredis.register_function('d2', function() return 'd2' end)"
+FUNCTION DUMP
+FUNCTION RESTORE "\xf5\x40\x85#!lua name=dumped\nredis.register_function('d1', function() return 'd1' end)\nredis.register_function('d2', function() return 'd2' end)\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+FUNCTION FLUSH
+FUNCTION RESTORE "\xf5\x40\x85#!lua name=dumped\nredis.register_function('d1', function() return 'd1' end)\nredis.register_function('d2', function() return 'd2' end)\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+FUNCTION RESTORE bogus
+FUNCTION RESTORE ""
+FUNCTION RESTORE "\x00\x01a\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+FUNCTION RESTORE "\xf6\x01a\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+FUNCTION RESTORE "\xf5\x05hello\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+FUNCTION RESTORE "\xf5\x0f#!lua name=bad\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+FUNCTION RESTORE "\xf5\x0f\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+FUNCTION RESTORE "\xf5\x01a\x63\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+FUNCTION RESTORE "\xf5\x01a\x0f\x00\x01\x02\x03\x04\x05\x06\x07\x08"
+FUNCTION RESTORE "\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00" BOGUS
+FUNCTION RESTORE "\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00" FLUSH extra
+FUNCTION RESTORE
+FCALL d1 0
+FUNCTION LOAD "#!lua name=other\nredis.register_function('o1', function() return 'o1' end)"
+FUNCTION RESTORE "\xf5\x40\x85#!lua name=dumped\nredis.register_function('d1', function() return 'd1' end)\nredis.register_function('d2', function() return 'd2' end)\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00" APPEND
+FUNCTION RESTORE "\xf5\x40\x85#!lua name=dumped\nredis.register_function('d1', function() return 'd1' end)\nredis.register_function('d2', function() return 'd2' end)\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00" append
+FUNCTION RESTORE "\xf5\x40\x85#!lua name=dumped\nredis.register_function('d1', function() return 'd1' end)\nredis.register_function('d2', function() return 'd2' end)\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00" REPLACE
+!sort FUNCTION LIST
+FUNCTION RESTORE "\xf5\x40\x85#!lua name=dumped\nredis.register_function('d1', function() return 'd1' end)\nredis.register_function('d2', function() return 'd2' end)\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00" FLUSH
+!sort FUNCTION LIST
+FCALL o1 0
+FCALL d2 0
+FUNCTION DELETE dumped
+FUNCTION LOAD "#!lua name=clash\nredis.register_function('d1', function() return 'clash' end)"
+FUNCTION RESTORE "\xf5\x40\x85#!lua name=dumped\nredis.register_function('d1', function() return 'd1' end)\nredis.register_function('d2', function() return 'd2' end)\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00" REPLACE
+FCALL d1 0
+FUNCTION STATS

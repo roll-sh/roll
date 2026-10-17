@@ -163,6 +163,50 @@ pub fn restore_at(payload: &[u8], cfg: &Config, now_ms: i64) -> Result<Value, Rd
     d.object(t)
 }
 
+/// `FUNCTION DUMP`: every library as a `FUNCTION2` record, then the RDB version and CRC64 footer.
+pub fn dump_functions<'a>(codes: impl IntoIterator<Item = &'a [u8]>) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut scratch = Vec::new();
+    for code in codes {
+        out.push(op::FUNCTION2);
+        encode::put_string(&mut out, code, &mut scratch);
+    }
+    out.extend_from_slice(&RDB_VERSION.to_le_bytes());
+    let crc = crc64(0, &out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out
+}
+
+/// Why a `FUNCTION RESTORE` payload was rejected (the reply's message, without `ERR`).
+#[derive(Debug, PartialEq)]
+pub enum FunctionsPayloadError {
+    /// Bad footer: "DUMP payload version or checksum are wrong".
+    Footer,
+    Message(&'static str),
+}
+
+/// `FUNCTION RESTORE`: the library sources of a [`dump_functions`] payload.
+pub fn restore_functions(payload: &[u8]) -> Result<Vec<Vec<u8>>, FunctionsPayloadError> {
+    verify_payload(payload).map_err(|_| FunctionsPayloadError::Footer)?;
+    let cfg = Config::default();
+    // Like Redis, records are read from the whole buffer (a string may overrun into the footer)
+    // until only the footer is left.
+    let mut d = Dec::new(SliceSrc::new(payload), &cfg, 0, RDB_VERSION);
+    let mut codes = Vec::new();
+    while payload.len() - d.src().pos() > 10 {
+        let t = d.byte().map_err(|_| FunctionsPayloadError::Message("can not read data type"))?;
+        match t {
+            op::FUNCTION_PRE_GA => return Err(FunctionsPayloadError::Message("Pre-GA function format not supported")),
+            op::FUNCTION2 => {}
+            _ => return Err(FunctionsPayloadError::Message("given type is not a function")),
+        }
+        let mut code = Vec::new();
+        d.string(&mut code).map_err(|_| FunctionsPayloadError::Message("Failed loading library payload"))?;
+        codes.push(code);
+    }
+    Ok(codes)
+}
+
 /// `verifyDumpPayload`: check the footer. Too short to have one counts as a checksum failure.
 fn verify_payload(p: &[u8]) -> Result<(), RdbError> {
     if p.len() < 10 {

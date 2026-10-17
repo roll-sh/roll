@@ -977,14 +977,25 @@ pub fn info_section(eng: &crate::engine::Engine, name: &str, now: i64) -> Option
         }
         "memory" => {
             let used = eng.used_memory() as u64;
+            let sc = &eng.scripting;
+            let (vm_eval, vm_functions) = (sc.memory() as u64, sc.functions_memory() as u64);
+            let (scripts_eval, functions) = (sc.scripts_memory() as u64, sc.libraries_memory() as u64);
             let _ = write!(
                 s,
-                "# Memory\r\nused_memory:{used}\r\nused_memory_human:{}\r\nused_memory_rss:{used}\r\nused_memory_peak:{used}\r\nused_memory_peak_human:{}\r\nused_memory_overhead:{}\r\nused_memory_dataset:{used}\r\nused_memory_lua:{}\r\nused_memory_scripts:0\r\nnumber_of_cached_scripts:{}\r\nmaxmemory:{}\r\nmaxmemory_human:{}\r\nmaxmemory_policy:{}\r\nmem_fragmentation_ratio:1.00\r\nmem_allocator:system\r\nlazyfree_pending_objects:0\r\n",
+                "# Memory\r\nused_memory:{used}\r\nused_memory_human:{}\r\nused_memory_rss:{used}\r\nused_memory_peak:{used}\r\nused_memory_peak_human:{}\r\nused_memory_overhead:{}\r\nused_memory_dataset:{used}\r\n\
+                 used_memory_lua:{vm_eval}\r\nused_memory_vm_eval:{vm_eval}\r\nused_memory_lua_human:{}\r\nused_memory_scripts_eval:{scripts_eval}\r\nnumber_of_cached_scripts:{}\r\nnumber_of_functions:{}\r\nnumber_of_libraries:{}\r\nused_memory_vm_functions:{vm_functions}\r\nused_memory_vm_total:{}\r\nused_memory_vm_total_human:{}\r\nused_memory_functions:{functions}\r\nused_memory_scripts:{}\r\nused_memory_scripts_human:{}\r\n\
+                 maxmemory:{}\r\nmaxmemory_human:{}\r\nmaxmemory_policy:{}\r\nmem_fragmentation_ratio:1.00\r\nmem_allocator:system\r\nlazyfree_pending_objects:0\r\n",
                 human(used),
                 human(used),
                 eng.overhead,
-                eng.scripting.memory(),
-                eng.scripting.cached_scripts(),
+                human(vm_eval),
+                sc.cached_scripts(),
+                sc.functions_count(),
+                sc.libraries().len(),
+                vm_eval + vm_functions,
+                human(vm_eval + vm_functions),
+                scripts_eval + functions,
+                human(scripts_eval + functions),
                 eng.cfg.maxmemory,
                 human(eng.cfg.maxmemory),
                 eng.cfg.maxmemory_policy.name()
