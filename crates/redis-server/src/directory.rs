@@ -89,6 +89,24 @@ pub trait Directory: Send + Sync + 'static {
     fn authenticate<'a>(&'a self, req: AuthRequest<'a>) -> BoxFuture<'a, Result<Session, AuthError>>;
     /// The session for connections that haven't authenticated, if allowed.
     fn anonymous(&self) -> BoxFuture<'_, Option<Session>>;
+    /// SHUTDOWN: restart `db`. Its clients are disconnected and it serves again (with its data)
+    /// on the next connection. The caller has released its own session.
+    fn shutdown(&self, db: Arc<Database>) -> BoxFuture<'_, ()> {
+        Box::pin(async move { kick_all(&db).await })
+    }
+}
+
+/// Disconnect every client of `db` and let new ones in again.
+pub async fn kick_all(db: &Database) {
+    db.evicting.store(true, Ordering::SeqCst);
+    db.kicked.notify_waiters();
+    for _ in 0..500 {
+        if db.connections.load(Ordering::SeqCst) == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    db.evicting.store(false, Ordering::SeqCst);
 }
 
 /// One database (tests, local dev, single-tenant nodes). Users come from the database's ACL.

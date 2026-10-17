@@ -505,6 +505,9 @@ impl Conn<'_> {
         if eq(name, "waitaof") {
             return Some(self.waitaof(&args).await);
         }
+        if eq(name, "shutdown") {
+            return Some(self.shutdown(&args).await);
+        }
         if eq(name, "replconf") {
             return Some(psync::replconf(&mut self.repl_conf, &args).unwrap_or(Reply::Raw(Bytes::new())));
         }
@@ -666,6 +669,82 @@ impl Conn<'_> {
         }
     }
 
+    /// `SHUTDOWN [NOSAVE | SAVE] [NOW] [FORCE] [ABORT]`. The data is always durable, so shutting
+    /// down restarts the database: every client is disconnected (this one without a reply) and
+    /// the database serves again on the next connection. Unless NOW, replicas first get up to
+    /// `shutdown-timeout` seconds to catch up, with writes paused; SHUTDOWN ABORT cancels that.
+    async fn shutdown(&mut self, args: &[Bytes]) -> Reply {
+        let (mut save, mut nosave, mut now, mut force, mut abort) = (false, false, false, false, false);
+        for a in &args[1..] {
+            let flag = if eq(a, "nosave") {
+                &mut nosave
+            } else if eq(a, "save") {
+                &mut save
+            } else if eq(a, "now") {
+                &mut now
+            } else if eq(a, "force") {
+                &mut force
+            } else if eq(a, "abort") {
+                &mut abort
+            } else {
+                return Reply::error("ERR syntax error");
+            };
+            *flag = true;
+        }
+        if (abort && (save || nosave || now || force)) || (save && nosave) {
+            return Reply::error("ERR syntax error");
+        }
+        let db = self.db().cloned().unwrap();
+        if abort {
+            return match db.shutdown.lock().take() {
+                Some(n) => {
+                    n.notify_one();
+                    Reply::Ok
+                }
+                None => Reply::error("ERR No shutdown in progress."),
+            };
+        }
+        let timeout = db.engine(0).cfg.get(b"shutdown-timeout").first().and_then(|(_, v)| v.parse::<u64>().ok()).unwrap_or(10);
+        let replicas = db.io.redis_replicas.load(Ordering::Relaxed) as usize;
+        if !now && timeout > 0 && replicas > 0 {
+            let cancel = Arc::new(tokio::sync::Notify::new());
+            *db.shutdown.lock() = Some(cancel.clone());
+            let until = redis_engine::util::now_ms() + timeout as i64 * 1000;
+            let paused: Vec<_> = (0..db.shards.len())
+                .map(|i| {
+                    let mut e = db.engine(i);
+                    let prev = e.clients.pause;
+                    e.clients.pause = Some((until, false));
+                    prev
+                })
+                .collect();
+            let offset = db.repl_offset();
+            db.publish_raw(&[b"REPLCONF", b"GETACK", b"*"]);
+            let backlog = db.backlog.lock().clone();
+            let caught_up = async {
+                if let Some(b) = backlog {
+                    crate::repl::wait_acks(&b, offset, replicas, std::time::Duration::from_secs(timeout)).await;
+                }
+            };
+            let aborted = tokio::select! {
+                _ = caught_up => false,
+                _ = cancel.notified() => true,
+            };
+            db.shutdown.lock().take();
+            if aborted {
+                for (i, prev) in paused.into_iter().enumerate() {
+                    db.engine(i).clients.pause = prev;
+                }
+                return Reply::error("ERR Errors trying to SHUTDOWN. Check logs.");
+            }
+        }
+        // Release this connection's hold on the database, then restart it.
+        self.session = None;
+        self.dir.shutdown(db).await;
+        self.close_after = true;
+        Reply::Raw(Bytes::new())
+    }
+
     /// `WAITAOF numlocal numreplicas timeout`. "Local" durability is the object-storage log.
     async fn waitaof(&mut self, args: &[Bytes]) -> Reply {
         if args.len() != 4 {
@@ -781,5 +860,5 @@ fn is_intercepted(args: &[Bytes], client: &Client) -> bool {
         return true;
     }
     // Inside MULTI these are queued (or refused) by the engine like any command.
-    client.multi.is_none() && (eq(n, "replconf") || eq(n, "sync") || eq(n, "psync"))
+    client.multi.is_none() && (eq(n, "replconf") || eq(n, "sync") || eq(n, "psync") || eq(n, "shutdown"))
 }

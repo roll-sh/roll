@@ -193,3 +193,24 @@ async fn evict_disconnects_and_clients_reconnect_to_reloaded_state() {
     assert_eq!(c.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
     assert_eq!(c.cmd(["GET", "k"]).await.unwrap(), Reply::bulk(b"v"));
 }
+
+#[tokio::test]
+async fn shutdown_restarts_the_database_with_its_data() {
+    let (addr, node) = start(None).await;
+    let mut c = RespClient::connect(addr).await.unwrap();
+    let mut other = RespClient::connect(addr).await.unwrap();
+    assert_eq!(c.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
+    assert_eq!(other.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
+    assert_eq!(c.cmd(["SET", "k", "v"]).await.unwrap(), Reply::Ok);
+    assert_eq!(c.cmd(["CONFIG", "SET", "maxmemory-samples", "7"]).await.unwrap(), Reply::Ok);
+    assert_eq!(c.cmd(["SHUTDOWN", "ABORT"]).await.unwrap(), Reply::error("ERR No shutdown in progress."));
+    // No reply: the connection closes, and so does every other one.
+    assert!(c.cmd(["SHUTDOWN", "NOSAVE"]).await.is_err());
+    assert!(other.cmd(["PING"]).await.is_err());
+    assert!(node.get_loaded("alpha").is_none(), "unloaded");
+    // The next connection finds the data, and a fresh server's runtime state.
+    let mut c = RespClient::connect(addr).await.unwrap();
+    assert_eq!(c.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
+    assert_eq!(c.cmd(["GET", "k"]).await.unwrap(), Reply::bulk(b"v"));
+    assert_eq!(c.cmd(["CONFIG", "GET", "maxmemory-samples"]).await.unwrap(), Reply::Array(vec![Reply::bulk(b"maxmemory-samples"), Reply::bulk(b"5")]));
+}

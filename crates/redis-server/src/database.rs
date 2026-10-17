@@ -79,6 +79,8 @@ pub struct Database {
     pub upstream: Mutex<Option<Upstream>>,
     /// Signalled when the replication history changes (REPLICAOF): Redis replicas reconnect.
     pub replicas_reset: tokio::sync::Notify,
+    /// A SHUTDOWN waiting for replicas to catch up: SHUTDOWN ABORT signals it.
+    pub shutdown: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 /// The primary a replica database follows.
@@ -294,6 +296,7 @@ impl Database {
             replid2: Mutex::new(None),
             upstream: Mutex::new(None),
             replicas_reset: tokio::sync::Notify::new(),
+            shutdown: Mutex::new(None),
         });
         let host: Arc<dyn redis_engine::commands::info::Host> = Arc::new(DbHost(Arc::downgrade(&db)));
         for s in &db.shards {

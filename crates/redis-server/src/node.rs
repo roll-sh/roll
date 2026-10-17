@@ -477,4 +477,16 @@ impl Directory for Node {
     fn anonymous(&self) -> BoxFuture<'_, Option<Session>> {
         Box::pin(async { None })
     }
+
+    /// Unload the database (flushed to object storage): the next connection loads it afresh, like
+    /// a restarted server. Without object storage its clients are just disconnected.
+    fn shutdown(&self, db: Arc<Database>) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            match self.evict(&db.id).await {
+                Ok(true) => {}
+                Ok(false) => crate::directory::kick_all(&db).await,
+                Err(e) => tracing::warn!(db = db.id, error = %e, "shutdown failed"),
+            }
+        })
+    }
 }
