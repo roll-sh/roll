@@ -1,0 +1,172 @@
+# Functions: FUNCTION LOAD / DELETE / FLUSH / LIST / STATS / KILL / HELP, FCALL / FCALL_RO,
+# library metadata, register_function forms and flags, errors, the library sandbox.
+
+# ---- load and call ----
+FUNCTION LOAD "#!lua name=mylib\nredis.register_function('myfunc', function(keys, args) return {keys[1], args[1]} end)"
+FCALL myfunc 1 k a
+FCALL MYFUNC 1 k a
+FCALL myfunc 0
+FCALL myfunc 0 a b c
+FCALL myfunc 2 k
+FCALL myfunc -1
+FCALL myfunc abc
+FCALL nosuch 0
+FCALL
+FCALL myfunc
+FUNCTION LOAD "#!lua name=mylib\nredis.register_function('myfunc', function() return 1 end)"
+FUNCTION LOAD REPLACE "#!lua name=mylib\nredis.register_function('myfunc', function() return 'replaced' end)"
+FCALL myfunc 0
+FUNCTION LOAD replace "#!lua name=mylib\nredis.register_function('myfunc', function() return 'again' end)"
+FCALL myfunc 0
+FUNCTION LOAD BOGUS "#!lua name=x\nredis.register_function('x', function() end)"
+FUNCTION LOAD REPLACE REPLACE "#!lua name=x\nredis.register_function('x', function() end)"
+
+# ---- register_function forms ----
+FUNCTION LOAD "#!lua name=forms\nredis.register_function{function_name='named', callback=function() return 'named' end, description='a description', flags={'no-writes', 'allow-oom'}}\nredis.register_function('positional', function() return 'positional' end)"
+FCALL named 0
+FCALL positional 0
+FCALL_RO named 0
+FCALL_RO positional 0
+!sort FUNCTION LIST
+!sort FUNCTION LIST WITHCODE
+!sort FUNCTION LIST LIBRARYNAME for*
+!sort FUNCTION LIST LIBRARYNAME FOR*
+!sort FUNCTION LIST LIBRARYNAME nomatch
+!sort FUNCTION LIST LIBRARYNAME my* WITHCODE
+!sort FUNCTION LIST WITHCODE LIBRARYNAME my*
+!sort FUNCTION LIST LIBRARYNAME
+!sort FUNCTION LIST WITHCODE WITHCODE
+!sort FUNCTION LIST LIBRARYNAME a LIBRARYNAME b
+!sort FUNCTION LIST BOGUS
+FUNCTION STATS
+
+# ---- register_function errors ----
+FUNCTION LOAD "#!lua name=e1\nredis.register_function()"
+FUNCTION LOAD "#!lua name=e2\nredis.register_function('f')"
+FUNCTION LOAD "#!lua name=e3\nredis.register_function('f', 'notafunction')"
+FUNCTION LOAD "#!lua name=e4\nredis.register_function(1, function() end)"
+FUNCTION LOAD "#!lua name=e5\nredis.register_function('bad-name', function() end)"
+FUNCTION LOAD "#!lua name=e6\nredis.register_function('', function() end)"
+FUNCTION LOAD "#!lua name=e7\nredis.register_function{function_name='f'}"
+FUNCTION LOAD "#!lua name=e8\nredis.register_function{callback=function() end}"
+FUNCTION LOAD "#!lua name=e9\nredis.register_function{function_name='f', callback=function() end, flags={'bogus'}}"
+FUNCTION LOAD "#!lua name=e10\nredis.register_function{function_name='f', callback=function() end, flags='no-writes'}"
+FUNCTION LOAD "#!lua name=e11\nredis.register_function{function_name='f', callback=function() end, bogus=1}"
+FUNCTION LOAD "#!lua name=e12\nredis.register_function{function_name='f', callback=function() end, description=1}"
+FUNCTION LOAD "#!lua name=e13\nredis.register_function{function_name='f', callback=function() end, flags={'NO-WRITES'}}"
+FUNCTION LOAD "#!lua name=e14\nredis.register_function('f', function() end, 'extra')"
+FUNCTION LOAD "#!lua name=e15\nredis.register_function('dup', function() end)\nredis.register_function('dup', function() end)"
+FUNCTION LOAD "#!lua name=e16\nredis.register_function('myfunc', function() end)"
+FUNCTION LOAD "#!lua name=e17\nredis.register_function('positional', function() end)"
+FUNCTION LOAD "#!lua name=e18\nlocal x = 1"
+FUNCTION LOAD "#!lua name=e19\nreturn 1 +"
+FUNCTION LOAD "#!lua name=e20\nerror('boom')"
+FUNCTION LOAD "#!lua name=e21\nerror({err='CUSTOM table'})"
+FUNCTION LOAD "#!lua name=e22\nredis.call('SET', 'k', 'v')"
+FUNCTION LOAD "#!lua name=e23\nredis.setresp(3)"
+FUNCTION LOAD "#!lua name=e24\nreturn redis.sha1hex('x')"
+FUNCTION LOAD "#!lua name=e25\nx = 1"
+FUNCTION LOAD "#!lua name=e26\nreturn nosuch"
+FUNCTION LOAD "#!lua name=e27\nredis.register_function('f', function() end) error('after register')"
+FCALL f 0
+!sort FUNCTION LIST LIBRARYNAME e*
+
+# ---- library metadata errors ----
+FUNCTION LOAD "redis.register_function('f', function() end)"
+FUNCTION LOAD "#!lua\nredis.register_function('f', function() end)"
+FUNCTION LOAD "#!lua name=a name=b\nredis.register_function('f', function() end)"
+FUNCTION LOAD "#!lua bogus=1\nredis.register_function('f', function() end)"
+FUNCTION LOAD "#!lua name=bad-name\nredis.register_function('f', function() end)"
+FUNCTION LOAD "#!lua name=\nredis.register_function('f', function() end)"
+FUNCTION LOAD "#!python name=py\nredis.register_function('f', function() end)"
+FUNCTION LOAD "#!LUA name=upper\nredis.register_function('upperf', function() return 'upper' end)"
+FCALL upperf 0
+FUNCTION LOAD "#!lua NAME=uppername\nredis.register_function('unf', function() return 1 end)"
+FUNCTION LOAD "#!lua name=noline"
+FUNCTION LOAD "#!lua name=\"quoted\"\nredis.register_function('qf', function() return 1 end)"
+FUNCTION LOAD "#!lua name=q2 \nredis.register_function('q2f', function() return 1 end)"
+FUNCTION LOAD "#!"
+FUNCTION LOAD ""
+FUNCTION LOAD
+
+# ---- calling: keys, args, writes, errors ----
+FUNCTION LOAD "#!lua name=calls\nredis.register_function('setget', function(keys, args) redis.call('SET', keys[1], args[1]) return redis.call('GET', keys[1]) end)\nredis.register_function('fail', function() error('failed here') end)\nredis.register_function('failtab', function() return redis.error_reply('MY custom') end)\nredis.register_function('wrongtype', function() return redis.call('LPUSH', 'str', 'x') end)\nredis.register_function{function_name='rofn', callback=function(keys) return redis.call('SET', keys[1], 'x') end, flags={'no-writes'}}\nredis.register_function('globals', function() return type(KEYS) end)\nredis.register_function('counts', function(keys, args) return {#keys, #args} end)\nredis.register_function('resp3', function() redis.setresp(3) return redis.call('HGETALL', 'hh') end)"
+FCALL setget 1 fk fv
+GET fk
+FCALL fail 0
+FCALL failtab 0
+SET str v
+FCALL wrongtype 0
+FCALL rofn 1 rk
+FCALL_RO rofn 1 rk
+FCALL_RO setget 1 fk fv
+FCALL globals 0
+FCALL counts 2 a b c d e
+FCALL counts 0
+HSET hh a 1
+FCALL resp3 0
+@resp 3
+FCALL resp3 0
+@resp 2
+
+# ---- functions can't create globals, but can use upvalues ----
+FUNCTION LOAD "#!lua name=state\nlocal n = 0\nredis.register_function('bump', function() n = n + 1 return n end)\nredis.register_function('setglobal', function() x = 1 end)\nredis.register_function('readglobal', function() return nosuch end)"
+FCALL bump 0
+FCALL bump 0
+FCALL setglobal 0
+FCALL readglobal 0
+
+# ---- library code sees only the library API while loading ----
+FUNCTION LOAD "#!lua name=api\nlocal ok = pcall(redis.call, 'PING')\nredis.register_function('apiinfo', function() return {type(redis.call), type(redis.register_function), type(redis.log), type(redis.REDIS_VERSION_NUM)} end)"
+FCALL apiinfo 0
+FUNCTION LOAD "#!lua name=api2\nredis.register_function('t', function() return 1 end)\nreturn {type(redis.call)}"
+FUNCTION LOAD "#!lua name=api3\nif redis.call then error('call visible') end\nredis.register_function('t3', function() return 1 end)"
+FUNCTION LOAD "#!lua name=api4\nif redis.setresp then error('setresp visible') end\nif not redis.log then error('log missing') end\nif not redis.LOG_WARNING then error('LOG_WARNING missing') end\nif not redis.REDIS_VERSION then error('version missing') end\nredis.register_function('t4', function() return 1 end)"
+FUNCTION LOAD "#!lua name=api5\nif string == nil or cjson == nil or math == nil then error('libs missing') end\nredis.register_function('t5', function() return cjson.encode({1}) end)"
+FCALL t5 0
+FUNCTION LOAD "#!lua name=api6\nredis.register_function('t6', function() return redis.register_function('x', function() end) end)"
+FCALL t6 0
+
+# ---- delete / flush ----
+FUNCTION DELETE mylib
+FCALL myfunc 0
+FUNCTION DELETE mylib
+FUNCTION DELETE
+FUNCTION DELETE a b
+FUNCTION STATS
+FUNCTION FLUSH
+!sort FUNCTION LIST
+FUNCTION STATS
+FUNCTION FLUSH ASYNC
+FUNCTION FLUSH SYNC
+FUNCTION FLUSH bogus
+FUNCTION FLUSH SYNC extra
+FUNCTION KILL
+FUNCTION KILL extra
+FUNCTION HELP
+FUNCTION BOGUS
+FUNCTION
+
+# ---- shebang flags on functions ----
+FUNCTION LOAD "#!lua name=flags\nredis.register_function{function_name='nw', callback=function() return redis.call('GET', 'k') end, flags={'no-writes'}}\nredis.register_function{function_name='nwpub', callback=function() return redis.call('PUBLISH', 'c', 'm') end, flags={'no-writes'}}\nredis.register_function{function_name='all', callback=function() return 1 end, flags={'no-writes', 'allow-oom', 'allow-stale', 'no-cluster', 'allow-cross-slot-keys'}}\nredis.register_function{function_name='none', callback=function() return 1 end, flags={}}"
+FCALL nw 0
+FCALL nwpub 0
+FCALL_RO nwpub 0
+FCALL all 0
+FCALL none 0
+FCALL_RO none 0
+!sort FUNCTION LIST LIBRARYNAME flags
+
+# ---- inside MULTI ----
+MULTI
+FCALL nw 0
+FUNCTION LOAD "#!lua name=inmulti\nredis.register_function('im', function() return 'im' end)"
+FCALL im 0
+EXEC
+FCALL im 0
+
+# ---- many functions in one library ----
+FUNCTION LOAD "#!lua name=many\nfor i = 1, 50 do redis.register_function('fn' .. i, function() return i end) end"
+FCALL fn1 0
+FCALL fn50 0
+FUNCTION STATS

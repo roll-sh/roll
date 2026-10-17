@@ -194,6 +194,9 @@ pub struct Engine {
     pub shard: u16,
     /// The database's ACL users and log, shared by all of its shards.
     pub acl: Arc<parking_lot::RwLock<crate::acl::Acl>>,
+    /// Over maxmemory when the current top-level command started (`pre_command_oom_state`):
+    /// scripts check it before their first write.
+    pub(crate) pre_oom: bool,
 }
 
 impl Engine {
@@ -223,6 +226,7 @@ impl Engine {
             overhead: 0,
             shard: 0,
             acl: Default::default(),
+            pre_oom: false,
         }
     }
 
@@ -265,7 +269,7 @@ impl Engine {
     }
 
     pub fn used_memory(&self) -> usize {
-        self.dbs.iter().map(|d| d.used_bytes()).sum::<usize>() + self.overhead
+        self.dbs.iter().map(|d| d.used_bytes()).sum::<usize>() + self.overhead + self.scripting.memory() + self.scripting.functions_memory()
     }
 
     pub fn total_keys(&self) -> usize {
@@ -386,7 +390,8 @@ impl Engine {
             if cmd.has(commands::NOSCRIPT) {
                 return Outcome::Reply(self.reject(&full_name, Reply::error("ERR This Redis command is not allowed from script")));
             }
-            if read_only && cmd.is_write() {
+            // May-replicate commands count as writes here, so read-only scripts can't publish.
+            if read_only && (cmd.is_write() || cmd.has(commands::MAY_REPLICATE)) {
                 return Outcome::Reply(self.reject(&full_name, Reply::error("ERR Write commands are not allowed from read-only scripts.")));
             }
         }
@@ -395,14 +400,33 @@ impl Engine {
             return Outcome::Reply(self.reject(&full_name, Reply::error("READONLY You can't write against a read only replica.")));
         }
 
-        if mode != Mode::Replay && self.cfg.maxmemory > 0 && !matches!(mode, Mode::Script { .. } | Mode::Exec) {
-            let fits = self.evict_to_fit(now);
-            if !fits && cmd.has(commands::DENYOOM) && !client.internal {
-                return Outcome::Reply(self.reject(&full_name, commands::OOM.into()));
+        if mode != Mode::Replay && !matches!(mode, Mode::Script { .. } | Mode::Exec) {
+            self.pre_oom = false;
+            if self.cfg.maxmemory > 0 {
+                let fits = self.evict_to_fit(now);
+                self.pre_oom = !fits;
+                if !fits && cmd.has(commands::DENYOOM) && !client.internal {
+                    return Outcome::Reply(self.reject(&full_name, commands::OOM.into()));
+                }
             }
         }
 
-        if top && !cmd.has(commands::SKIP_MONITOR) && !cmd.has(commands::ADMIN) && self.hub.has_monitors() {
+        if matches!(mode, Mode::Script { .. })
+            && let Some(run) = self.scripting.running.as_mut()
+        {
+            // A script can't be stopped half way, so memory is only checked before its first
+            // write, and only if it was over the limit when it started.
+            if !run.allow_oom && self.cfg.maxmemory > 0 && !run.write_dirty && self.pre_oom && cmd.has(commands::DENYOOM) {
+                return Outcome::Reply(self.reject(&full_name, commands::OOM.into()));
+            }
+            if cmd.is_write() {
+                run.write_dirty = true;
+                self.scripting.ctl.dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let monitored = top || matches!(mode, Mode::Script { .. });
+        if monitored && !cmd.has(commands::SKIP_MONITOR) && !cmd.has(commands::ADMIN) && self.hub.has_monitors() {
             self.feed_monitor(client, args, now);
         }
 
@@ -425,7 +449,8 @@ impl Engine {
             self.dirty += self.sig.dirty - dirty_before;
             self.stats.dirty_total += self.sig.dirty - dirty_before;
         }
-        if changed && !no_propagate && mode != Mode::Replay {
+        let propagate = !matches!(mode, Mode::Script { .. }) || self.scripting.running.as_ref().is_none_or(|r| r.propagate);
+        if changed && !no_propagate && propagate && mode != Mode::Replay {
             self.effects.push(Effect { db: db_at_start, args: rewrite.unwrap_or_else(|| args.to_vec()) });
         }
         self.process_touched();
@@ -473,21 +498,21 @@ impl Engine {
         Outcome::Reply(reply)
     }
 
-    fn reject(&mut self, name: &str, r: Reply) -> Reply {
+    pub(crate) fn reject(&mut self, name: &str, r: Reply) -> Reply {
         self.cmdstats.entry(name.to_string()).or_default().rejected += 1;
         self.stats.rejected_calls += 1;
         self.count_error(&r);
         r
     }
 
-    fn count_error(&mut self, r: &Reply) {
+    pub(crate) fn count_error(&mut self, r: &Reply) {
         if let Reply::Error(e) = r {
             let code = e.split(' ').next().unwrap_or("ERR").to_string();
             *self.errorstats.entry(code).or_default() += 1;
         }
     }
 
-    fn feed_monitor(&self, client: &Client, args: &[Bytes], now: i64) {
+    pub(crate) fn feed_monitor(&self, client: &Client, args: &[Bytes], now: i64) {
         let mut line = format!("{}.{:06} [{} {}]", now / 1000, (now % 1000) * 1000, client.db, client.addr);
         for a in args {
             line.push_str(" \"");

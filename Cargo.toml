@@ -44,7 +44,9 @@ sha2 = "0.11"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 libm = "0.2"
 rustc_apfloat = "0.2"
+cc = "1"
 pg-control = { path = "crates/pg-control" }
+redis-lua = { path = "crates/redis-lua" }
 pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
 redis-proto = { path = "crates/redis-proto" }

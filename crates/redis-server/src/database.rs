@@ -13,6 +13,7 @@ use crate::repl::Backlog;
 use bytes::{Bytes, BytesMut};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use redis_engine::acl::Acl;
+use redis_engine::commands::scripting::ScriptCtl;
 use redis_engine::{Config, Effect, Engine, Hub};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -22,6 +23,8 @@ use tokio::sync::watch;
 
 pub struct Shard {
     pub engine: Mutex<Engine>,
+    /// The engine's running-script state, readable while a script holds the engine.
+    pub scripts: Arc<ScriptCtl>,
 }
 
 /// Receives the database's write stream.
@@ -128,7 +131,8 @@ impl Database {
                 let mut e = Engine::new(config.clone(), hub.clone());
                 e.shard = i as u16;
                 e.acl = acl.clone();
-                Shard { engine: Mutex::new(e) }
+                let scripts = e.scripting.ctl.clone();
+                Shard { engine: Mutex::new(e), scripts }
             })
             .collect();
         Arc::new(Self {
@@ -166,6 +170,20 @@ impl Database {
     /// Lock shard `i`'s engine.
     pub fn engine(&self, i: usize) -> EngineGuard<'_> {
         EngineGuard { db: self, eng: self.shards[i].engine.lock() }
+    }
+
+    /// Lock shard `i`'s engine, unless a script holding it runs past `busy-reply-threshold`:
+    /// then `None`, and the caller answers with [`redis_engine::commands::scripting::while_busy`].
+    pub fn engine_unless_busy(&self, i: usize) -> Option<EngineGuard<'_>> {
+        let shard = &self.shards[i];
+        loop {
+            if let Some(eng) = shard.engine.try_lock_for(std::time::Duration::from_millis(10)) {
+                return Some(EngineGuard { db: self, eng });
+            }
+            if shard.scripts.busy.load(Ordering::SeqCst) {
+                return None;
+            }
+        }
     }
 
     pub fn touch(&self, n: u64) {

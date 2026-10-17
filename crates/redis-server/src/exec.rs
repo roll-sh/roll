@@ -35,9 +35,14 @@ impl Detached {
         while it.peek().is_some() {
             let mut blocked = None;
             {
-                let mut eng = self.db.engine(0);
+                let Some(mut eng) = self.db.engine_unless_busy(0) else {
+                    let args = it.next().unwrap();
+                    out.push(redis_engine::commands::scripting::while_busy(&self.db.shard(0).scripts, &args));
+                    continue;
+                };
                 for args in it.by_ref() {
-                    match eng.call(&mut self.client, &args) {
+                    let client = &mut self.client;
+                    match crate::conn::long_running(&args, || eng.call(client, &args)) {
                         Outcome::Reply(r) => out.push(r),
                         Outcome::Blocked => {
                             blocked = Some(eng.block_deadline(self.client.id).unwrap_or(0));

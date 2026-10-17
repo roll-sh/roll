@@ -149,3 +149,45 @@ async fn storage_tailing_replica() {
     eventually(|| f.applied() == end).await;
     assert_eq!(f.db.total_keys(), 49);
 }
+
+/// `redis-cli` quoting, for script bodies.
+fn run_quoted(db: &Database, c: &mut Client, line: &str) -> Reply {
+    let args: Vec<Bytes> = redis_server::client::args(line).into_iter().map(Bytes::from).collect();
+    db.engine(0).call(c, &args).unwrap_reply()
+}
+
+#[tokio::test]
+async fn scripts_and_functions_replicate_as_their_effects() {
+    let primary = Database::new("p", Config::default(), 1);
+    let map = Arc::new(PrimaryMap::default());
+    let backlog = map.add(primary.clone(), 1 << 20);
+    let addr = repl_server(map, 0).await;
+    let replica_db = Database::new("p", Config::default(), 1);
+    let f = Follower::new(replica_db.clone());
+    tokio::spawn(f.clone().stream(addr, "p".into(), "s3cret".into(), None));
+
+    let mut c = Client::new(1);
+    // Non-deterministic writes replicate as what they did, not as the script.
+    let r = run_quoted(&primary, &mut c, "EVAL \"redis.call('SET', 'r', math.random(1000000)) redis.call('RPUSH', 'l', redis.call('TIME')[1]) return redis.call('GET', 'r')\" 0");
+    let Reply::Bulk(r) = r else { panic!("{r:?}") };
+    run_quoted(&primary, &mut c, "EVAL \"redis.set_repl(redis.REPL_NONE) redis.call('SET', 'local_only', 1)\" 0");
+    let lib = "FUNCTION LOAD \"#!lua name=lib\nredis.register_function('incr2', function(keys) redis.call('INCR', keys[1]) return redis.call('INCR', keys[1]) end)\"";
+    assert_eq!(run_quoted(&primary, &mut c, lib), Reply::bulk(b"lib"));
+    assert_eq!(run_quoted(&primary, &mut c, "FCALL incr2 1 n"), Reply::Int(2));
+    let end = primary.repl_offset();
+    assert_eq!(repl::wait_acks(&backlog, end, 1, Duration::from_secs(5)).await, 1);
+
+    let mut rc = Client::new(2);
+    assert_eq!(run(&replica_db, &mut rc, "GET r"), Reply::Bulk(r));
+    assert_eq!(run(&replica_db, &mut rc, "LLEN l"), Reply::Int(1));
+    assert_eq!(run(&replica_db, &mut rc, "EXISTS local_only"), Reply::Int(0));
+    assert_eq!(run(&replica_db, &mut rc, "GET n"), Reply::bulk(b"2"));
+    // The library itself replicated: read-only functions run on the replica, writing ones don't.
+    assert!(matches!(run_quoted(&replica_db, &mut rc, "FCALL incr2 1 n"), Reply::Error(e) if e.starts_with("READONLY")));
+    assert_eq!(run_quoted(&replica_db, &mut rc, "FUNCTION LIST"), run_quoted(&primary, &mut c, "FUNCTION LIST"));
+
+    run_quoted(&primary, &mut c, "FUNCTION DELETE lib");
+    let end = primary.repl_offset();
+    assert_eq!(repl::wait_acks(&backlog, end, 1, Duration::from_secs(5)).await, 1);
+    assert_eq!(run_quoted(&replica_db, &mut rc, "FUNCTION LIST"), Reply::Array(vec![]));
+}

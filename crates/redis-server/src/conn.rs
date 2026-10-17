@@ -272,14 +272,20 @@ impl Conn<'_> {
             let mut n = 0u64;
             let before = db.repl_offset();
             {
-                let mut eng = db.engine(0);
+                let Some(mut eng) = db.engine_unless_busy(0) else {
+                    let args = self.pending.pop_front().unwrap();
+                    let r = redis_engine::commands::scripting::while_busy(&db.shard(0).scripts, &args);
+                    self.emit(&args, r);
+                    continue;
+                };
                 while let Some(args) = self.pending.front() {
                     if is_intercepted(args) {
                         break;
                     }
                     let args = self.pending.pop_front().unwrap();
                     n += 1;
-                    match eng.call(&mut self.client, &args) {
+                    let client = &mut self.client;
+                    match long_running(&args, || eng.call(client, &args)) {
                         Outcome::Reply(r) => {
                             let quit = eq(&args[0], "quit");
                             self.emit(&args, r);
@@ -497,6 +503,15 @@ fn parse_timeout(b: &[u8]) -> Result<Duration, Reply> {
         Some(t) if t < 0 => Err(Reply::error("ERR timeout is negative")),
         Some(t) => Ok(Duration::from_millis(t as u64)),
     }
+}
+
+/// Run `f` for `args`, letting the runtime move this worker's other tasks elsewhere first if the
+/// command can run for long (a script: until it ends or is killed from another connection, which
+/// must get scheduled meanwhile).
+pub(crate) fn long_running<R>(args: &[Bytes], f: impl FnOnce() -> R) -> R {
+    let script = [&b"eval"[..], b"evalsha", b"eval_ro", b"evalsha_ro", b"fcall", b"fcall_ro"].iter().any(|n| args[0].eq_ignore_ascii_case(n));
+    let multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    if script && multi_thread { tokio::task::block_in_place(f) } else { f() }
 }
 
 fn is_intercepted(args: &[Bytes]) -> bool {

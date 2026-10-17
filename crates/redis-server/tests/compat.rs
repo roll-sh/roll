@@ -24,7 +24,8 @@
 //!
 //! `ROLL_COMPAT_REDIS=host:port` uses an existing reference server; otherwise a private Docker
 //! container is started for the run. `ROLL_COMPAT_FILTER=lists` runs matching files only. Without
-//! Docker the test is skipped unless `ROLL_COMPAT_REQUIRED=1`.
+//! Docker the test is skipped unless `ROLL_COMPAT_REQUIRED=1`. `ROLL_COMPAT_TRACE=1` prints each line
+//! before running it (to find a hang).
 
 use redis_engine::{Config, Reply};
 use redis_server::client::RespClient;
@@ -164,6 +165,8 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
     let mut admin_o = RespClient::connect(roll_addr).await.unwrap();
     for c in [&mut admin_r, &mut admin_o] {
         c.cmd(["FLUSHALL"]).await.unwrap();
+        c.cmd(["SCRIPT", "FLUSH"]).await.unwrap();
+        c.cmd(["FUNCTION", "FLUSH"]).await.unwrap();
         c.cmd(["CONFIG", "SET", "notify-keyspace-events", ""]).await.unwrap();
         // ACL users and log.
         if let Ok(Reply::Array(users)) = c.cmd(["ACL", "USERS"]).await {
@@ -184,6 +187,9 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
+        }
+        if std::env::var("ROLL_COMPAT_TRACE").is_ok() {
+            eprintln!("{fname}:{lineno}: {line}");
         }
         if let std::collections::hash_map::Entry::Vacant(e) = conns.entry(cur) {
             let p = Pair {

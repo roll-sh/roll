@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PATHS=(crates/redis-proto crates/redis-engine crates/redis-server crates/redis-control crates/rolld crates/roll-cli
+PATHS=(crates/redis-proto crates/redis-lua crates/redis-engine crates/redis-server crates/redis-control crates/rolld crates/roll-cli
        Cargo.toml Cargo.lock scripts/test-redis.sh .github/workflows/redis.yml)
 STAMP=target/.test-redis.hash
 
@@ -28,7 +28,7 @@ if [[ $force == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]]; then
   exit 0
 fi
 
-CRATES=(-p redis-proto -p redis-engine -p redis-server -p redis-control)
+CRATES=(-p redis-proto -p redis-lua -p redis-engine -p redis-server -p redis-control)
 cargo build "${CRATES[@]}" -p rolld -p roll-cli
 cargo clippy "${CRATES[@]}" -p rolld -p roll-cli --all-targets -- -D warnings
 # Everything except the Docker compat suite.
