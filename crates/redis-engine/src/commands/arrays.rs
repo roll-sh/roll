@@ -10,6 +10,7 @@ use super::*;
 use crate::cx::KeyMut;
 use crate::decimal::Ld;
 use crate::notify;
+use crate::tre;
 use crate::types::array::{self, Array, Decoded, Limits, Val};
 use crate::util::{cstr, glob_match, parse_i64, string2ull};
 use crate::value::Kind;
@@ -35,28 +36,6 @@ pub static COMMANDS: &[Command] = &[
     cmd!("arlastitems", -3, READONLY, 1, 1, 1, arlastitems, Array),
     cmd!("arinfo", -2, READONLY, 1, 1, 1, arinfo, Array),
 ];
-
-// Until the TRE port lands: every RE predicate fails to compile.
-mod tre {
-    pub struct Regex;
-    pub struct E;
-    impl E {
-        pub fn message(&self) -> &'static str {
-            "Invalid regexp"
-        }
-    }
-    impl Regex {
-        pub fn new(_: &[u8], _: bool) -> Result<Regex, E> {
-            Err(E)
-        }
-        pub fn has_backrefs(&self) -> bool {
-            false
-        }
-        pub fn is_match(&self, _: &[u8]) -> bool {
-            false
-        }
-    }
-}
 
 const INVALID_INDEX: Error = Error::new("ERR invalid array index");
 const INDEX_OVERFLOW: Error = Error::new("ERR array index overflow");

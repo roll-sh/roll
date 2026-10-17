@@ -204,6 +204,20 @@ ARGREP r - + RE ""
 ARGREP r - + RE {2049*a}
 ARGREP r - + {251*EXACT a }
 ARGREP r 100 200 EXACT apple
+ARGREP r - + RE "^a.*e$" WITHVALUES
+ARGREP r - + RE "^A" NOCASE
+ARGREP r - + RE "p{2}"
+ARGREP r - + RE "[[:digit:]]+"
+ARGREP r - + RE "(an)+a" OR RE "^pie" WITHVALUES
+ARGREP r - + RE "a|b" AND MATCH n
+ARGREP r - + RE "(a)\\1"
+ARGREP r - + RE "a**"
+ARGREP r - + RE "(a"
+ARGREP r - + RE "[a"
+ARGREP r - + RE "a{2,1}"
+ARGREP r - + RE "\\"
+ARGREP r - + RE "[[:nope:]]"
+ARGREP r + - RE "." LIMIT 3
 DEL r
 
 # AROP
