@@ -91,6 +91,9 @@ pub struct Config {
     pub list_compress_depth: u32,
     pub stream_node_max_bytes: usize,
     pub stream_node_max_entries: usize,
+    /// Default IDMP settings of new streams (seconds / entries per producer).
+    pub stream_idmp_duration: u64,
+    pub stream_idmp_maxsize: u64,
     pub hll_sparse_max_bytes: usize,
     /// Lua/function busy threshold in milliseconds (`busy-reply-threshold`, alias `lua-time-limit`).
     pub busy_reply_threshold: u64,
@@ -138,6 +141,8 @@ impl Default for Config {
             list_compress_depth: 0,
             stream_node_max_bytes: 4096,
             stream_node_max_entries: 100,
+            stream_idmp_duration: 100,
+            stream_idmp_maxsize: 100,
             hll_sparse_max_bytes: 3000,
             busy_reply_threshold: 5000,
             proto_max_bulk_len: 512 * 1024 * 1024,
@@ -283,6 +288,8 @@ pub static PARAMS: &[Param] = &[
     p!("list-compress-depth", list_compress_depth, num),
     p!("stream-node-max-bytes", stream_node_max_bytes, num),
     p!("stream-node-max-entries", stream_node_max_entries, num),
+    p!("stream-idmp-duration", stream_idmp_duration, num, 1u64, 86400u64),
+    p!("stream-idmp-maxsize", stream_idmp_maxsize, num, 1u64, 10000u64),
     p!("hll-sparse-max-bytes", hll_sparse_max_bytes, num),
     Param {
         name: "busy-reply-threshold",

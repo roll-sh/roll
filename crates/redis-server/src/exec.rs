@@ -54,7 +54,7 @@ impl Detached {
         out
     }
 
-    async fn wait_unblock(&mut self, deadline: i64) -> Reply {
+    async fn wait_unblock(&mut self, mut deadline: i64) -> Reply {
         loop {
             let timer = async {
                 let now = redis_engine::util::now_ms();
@@ -69,10 +69,13 @@ impl Detached {
                     None => return Reply::Nil,
                 },
                 _ = timer, if deadline > 0 => {
-                    if let Some(r) = self.db.engine(0).block_timeout(self.client.id) {
+                    let mut eng = self.db.engine(0);
+                    if let Some(r) = eng.block_timeout(self.client.id) {
                         return r;
                     }
-                    // Served concurrently: the reply is already in the channel.
+                    // Re-run and still blocked until the next deadline, or served concurrently
+                    // (the reply is already in the channel).
+                    deadline = eng.block_deadline(self.client.id).unwrap_or(0);
                 }
             }
         }
