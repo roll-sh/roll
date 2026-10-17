@@ -11,11 +11,13 @@ name = "roll-tasks"
 path = "src/main.rs"
 
 [features]
-default = ["dynamo"]
+default = ["dynamo", "restore"]
 # DynamoDB store for AWS (the default AWS store is the log store on S3, always built).
 dynamo = ["dep:aws-config", "dep:aws-sdk-dynamodb"]
 # Run the API as an AWS Lambda function (Function URL / API Gateway).
 lambda = ["dep:lambda_http"]
+# `roll-tasks restore`: point-in-time restore of a log store from S3 object versions.
+restore = ["dep:aws-config", "dep:aws-sdk-s3"]
 
 [dependencies]
 anyhow.workspace = true
@@ -48,6 +50,7 @@ zstd.workspace = true
 
 aws-config = { workspace = true, optional = true }
 aws-sdk-dynamodb = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
 lambda_http = { workspace = true, optional = true }
 
 [dev-dependencies]

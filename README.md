@@ -235,6 +235,10 @@ What it does:
   Managed with the node's token: `roll tasks tenants create|list|key|delete`.
 - **Retention.** Keeping data longer costs S3 storage ($0.023/GB-month) and local disk, nothing per
   request. The default is 30 days.
+- **Backups.** The bucket is versioned, and overwritten or deleted objects are kept for 30 days
+  (`BackupDays`). `roll-tasks restore --at <time>` puts a stopped cell back to how it was at any
+  second in that window, and can itself be undone. See
+  [deploy/aws/README.md](deploy/aws/README.md#backups-and-point-in-time-restore).
 
 ### Cost
 
@@ -291,13 +295,15 @@ writers horizontally. See [deploy/aws/README.md](deploy/aws/README.md).
    - fencing
    - snapshots and pruning
    - fallback past a corrupt snapshot
+   - point-in-time restore on a versioned bucket (MinIO): the exact state at a moment, refusal
+     while the lease is held, and undoing a restore
    - refusing to open across a gap
    - tenants: isolation, shared commits, deletion, restore, and per-tenant cost shares
    - the cell: crash failover, graceful hand-over, standby forwarding, a deposed leader stepping
      down, zero idle writes, and hosted tenants (admin API, key isolation, hand-over)
 4. Every suite again on the log store in memory.
 5. In Docker, every suite again on:
-   - the log store on S3 (MinIO, real conditional writes)
+   - the log store on S3 (MinIO, versioned like production, real conditional writes)
    - DynamoDB Local with large bodies in S3 (SeaweedFS)
 
 `cargo test -p tasks --release --test cell -- --ignored --nocapture cost_profile` prints the

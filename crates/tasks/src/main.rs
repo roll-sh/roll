@@ -1,4 +1,4 @@
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +18,8 @@ use tracing::info;
 #[derive(Parser)]
 #[command(version)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     #[arg(long, env = "ROLL_TASKS_ROLE", value_enum, default_value_t = Role::All)]
     role: Role,
     #[arg(long, env = "ROLL_TASKS_LISTEN", default_value = "127.0.0.1:7071")]
@@ -112,6 +114,22 @@ enum Role {
     Proxy,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Put the log store at `--log` back to how it was at a moment, from the versions its
+    /// (versioned) S3 bucket keeps. Stop the cell first. Shows what it would do unless `--apply`.
+    Restore {
+        /// RFC 3339 (`2026-10-17T09:30:00Z`) or unix seconds.
+        #[arg(long)]
+        at: String,
+        #[arg(long)]
+        apply: bool,
+        /// Run even though a node holds the lease (it crashed and can't release it).
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum StoreKind {
     Sqlite,
@@ -148,6 +166,9 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tasks=info".into()))
         .init();
     let a = Args::parse();
+    if let Some(Command::Restore { at, apply, force }) = &a.command {
+        return restore(&a, at, *apply, *force).await;
+    }
     let config = Config {
         poll_ms: a.poll_ms,
         max_inflight: a.max_inflight,
@@ -193,6 +214,26 @@ async fn main() -> anyhow::Result<()> {
     }
     tasks.flush_usage().await?;
     Ok(())
+}
+
+#[cfg(feature = "restore")]
+async fn restore(a: &Args, at: &str, apply: bool, force: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(a.wal.as_deref().unwrap_or("").is_empty(), "restore needs the whole log in one versioned bucket (no --wal)");
+    let at = tasks::restore::parse_time(at)?;
+    let s = tasks::restore::run(&a.log, at, apply, force).await?;
+    if s.applied {
+        println!("restored {} objects and deleted {} newer ones; start the cell again", s.restored, s.deleted);
+    } else if s.restored + s.deleted == 0 {
+        println!("nothing to do: the log already is as it was then");
+    } else {
+        println!("would restore {} objects and delete {} newer ones; run again with --apply", s.restored, s.deleted);
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "restore"))]
+async fn restore(_: &Args, _: &str, _: bool, _: bool) -> anyhow::Result<()> {
+    anyhow::bail!("built without the restore feature")
 }
 
 /// The log store layout: a node of the cell, or a proxy in front of it.

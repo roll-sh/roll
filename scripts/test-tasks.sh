@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # roll tasks test suite: build (incl. the Lambda feature), clippy, every test on SQLite and on the
-# log store (in memory), then in Docker: the log store on S3 (MinIO: conditional writes for
-# commits and the lease), and DynamoDB Local with large bodies in S3 (SeaweedFS).
+# log store (in memory), then in Docker: the log store on S3 (MinIO, versioned like production:
+# conditional writes for commits and the lease, point-in-time restore), and DynamoDB Local with
+# large bodies in S3 (SeaweedFS).
 #
 # Only runs when something tasks-related changed since the last green run. `--force` runs
 # regardless; `--unit` skips the Docker run. Extra args go to cargo test (e.g. a test name).
@@ -49,10 +50,14 @@ if [[ $unit_only == 0 ]]; then
     curl -sf -o /dev/null "http://127.0.0.1:$minio_port/minio/health/live" && break
     sleep 1
   done
-  docker run --rm --network "container:$minio" -e MC_HOST_l=http://roll:roll-tasks-test@127.0.0.1:9000 \
-    cgr.dev/chainguard/minio-client mb l/roll-tasks-log >/dev/null
+  for cmd in "mb l/roll-tasks-log" "version enable l/roll-tasks-log"; do
+    # shellcheck disable=SC2086
+    docker run --rm --network "container:$minio" -e MC_HOST_l=http://roll:roll-tasks-test@127.0.0.1:9000 \
+      cgr.dev/chainguard/minio-client $cmd >/dev/null
+  done
   AWS_ACCESS_KEY_ID=roll AWS_SECRET_ACCESS_KEY=roll-tasks-test AWS_REGION=us-east-1 \
   AWS_ENDPOINT_URL="http://127.0.0.1:$minio_port" ROLL_TASKS_E2E_LOG=s3://roll-tasks-log/e2e \
+  ROLL_TASKS_E2E_VERSIONED=s3://roll-tasks-log/e2e \
     cargo test -p tasks --tests ${args[@]+"${args[@]}"}
   docker rm -f "$minio" >/dev/null 2>&1 || true
 

@@ -41,6 +41,7 @@ sha2 = "0.10"
 url = "2"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1"
+aws-sdk-s3 = "1"
 lambda_http = { version = "1", default-features = false, features = ["apigw_http", "apigw_rest", "alb"] }
 tasks = { path = "crates/tasks" }
 pg-control = { path = "crates/pg-control" }

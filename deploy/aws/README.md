@@ -98,6 +98,48 @@ charge, so it's cheaper above roughly 50 million calls a month.
 To upgrade, push a new tag and redeploy with `ImageUri=$REPO:v2`. New nodes join as standbys
 before old ones hand over, so the API stays up throughout. Lambda switches atomically.
 
+### Backups and point-in-time restore
+
+The bucket is versioned. Whatever the cell overwrites or deletes (pruned commits, replaced
+snapshots, prune markers) stays as a noncurrent version for `BackupDays` (30 by default), then
+expires. That protects against a bug, a bad deploy or a mistaken delete: you can put the whole
+cell back to how it was at any second in that window.
+
+```sh
+STACK=roll-tasks
+out() { aws cloudformation describe-stacks --stack-name $STACK --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+CLUSTER=$(out Cluster) SERVICE=$(out Service) LOG=s3://$(out Bucket)/tasks
+
+# 1. Stop the cell. Leaders hand over and release the lease as they stop.
+aws ecs update-service --cluster $CLUSTER --service $SERVICE --desired-count 0
+aws ecs wait services-stable --cluster $CLUSTER --services $SERVICE
+
+# 2. See what the restore would do, then do it.
+cargo run -q -p tasks --release --bin roll-tasks -- --log $LOG restore --at 2026-10-17T09:30:00Z
+cargo run -q -p tasks --release --bin roll-tasks -- --log $LOG restore --at 2026-10-17T09:30:00Z --apply
+
+# 3. Start the cell again (Nodes, 2 by default).
+aws ecs update-service --cluster $CLUSTER --service $SERVICE --desired-count 2
+```
+
+- **What comes back.** Every tenant, message, run and key as a crash at that second would have
+  left them (everything acknowledged by then), including tenants deleted since. Anything created
+  later is gone from the restored cell.
+- **Nothing is destroyed.** The restore copies old versions back and puts delete markers on newer
+  objects; the newer versions stay in the bucket. Restoring to a later time undoes it.
+- **The cell must be stopped.** The restore refuses to run while a node holds the lease. After a
+  crash that left it held, check that no node is running and pass `--force`.
+- **It's downtime.** The API is unavailable from step 1 until a leader is back in step 3. Expect
+  a minute or two for ECS, plus the restore, which takes a few seconds per thousand changed
+  objects.
+- **Your credentials** need `s3:GetBucketVersioning`, `s3:ListBucketVersions`, `s3:GetObject`,
+  `s3:GetObjectVersion`, `s3:PutObject` and `s3:DeleteObject` on the bucket.
+- **Cost.** Storage only, at $0.023/GB-month: about `BackupDays` worth of commits plus the
+  snapshots replaced in that time. Expiring old versions is free.
+- **Not covered.** Commits in an S3 Express bucket (`ExpressZoneId`): directory buckets have no
+  versions. Also not covered: losing the whole bucket or region (S3 replication would be the next
+  step).
+
 ### Sizing and limits
 
 | knob | effect |
@@ -109,6 +151,7 @@ before old ones hand over, so the API stays up throughout. Lambda switches atomi
 | `MaxInflight` | Concurrent deliveries. |
 | `Retention` | How long finished messages, runs and events are kept. Costs storage only. |
 | `CertificateArn`, `Domain` | Serve the API from a Network Load Balancer instead of Lambda. |
+| `BackupDays` | How far back a point-in-time restore can go (30). |
 
 - **Throughput.** Throughput is that of one leader. On a laptop (4 runtime threads) it reached about
   1,300 published and delivered messages per second against a 30 ms S3. A 0.25 vCPU node will do

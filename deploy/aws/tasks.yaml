@@ -49,6 +49,13 @@ Parameters:
     Type: String
     Default: 30d
     Description: How long finished messages, runs and events are kept.
+  BackupDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: >-
+      How far back `roll-tasks restore` can put the data: overwritten and deleted log objects are
+      kept this long as noncurrent versions (S3 storage only, a few cents per GB).
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
@@ -66,7 +73,8 @@ Parameters:
     Description: >-
       An AZ id (e.g. use1-az4) to keep the log's commits in an S3 Express One Zone bucket there:
       about a quarter of the PUT cost, but the commits since the last snapshot live in that one
-      AZ (lost with it). Snapshots and the lease stay in S3 Standard. Needs a lowercase stack name.
+      AZ (lost with it), and directory buckets have no versions to restore from. Snapshots and the
+      lease stay in S3 Standard. Needs a lowercase stack name.
   Domain:
     Type: String
     Default: ""
@@ -241,11 +249,20 @@ Resources:
         RestrictPublicBuckets: true
       OwnershipControls:
         Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      # Point-in-time backups: whatever the cell overwrites or deletes stays as a noncurrent
+      # version for BackupDays (see `roll-tasks restore`).
+      VersioningConfiguration: { Status: Enabled }
       LifecycleConfiguration:
         Rules:
           - Id: abort-uploads
             Status: Enabled
             AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+          - Id: backups
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: !Ref BackupDays }
+          - Id: delete-markers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
 
   # Optional: the commits alone, in one AZ, at about a quarter of the PUT price.
   LogExpress:
@@ -523,3 +540,6 @@ Outputs:
     Value: !Ref Data
   Cluster:
     Value: !Ref Cluster
+  Service:
+    Description: The cell's ECS service (scale it to 0 before a restore).
+    Value: !GetAtt Cell.Name

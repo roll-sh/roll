@@ -20,6 +20,7 @@ pub mod ids;
 pub mod model;
 pub mod pull;
 pub mod schedule;
+pub mod restore;
 pub mod schedules;
 pub mod sign;
 pub mod tenants;
