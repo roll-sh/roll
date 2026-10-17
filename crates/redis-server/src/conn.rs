@@ -31,6 +31,12 @@ pub struct ConnSink {
     tx: mpsc::UnboundedSender<Msg>,
 }
 
+impl ConnSink {
+    pub fn new(tx: mpsc::UnboundedSender<Msg>) -> Self {
+        Self { tx }
+    }
+}
+
 impl Sink for ConnSink {
     fn push(&self, msg: Bytes) {
         let _ = self.tx.send(Msg::Push(msg));
@@ -71,7 +77,6 @@ where
     client.authenticated = session.is_some();
     if let Some(s) = &session {
         client.user = s.user.clone();
-        s.db.connections.fetch_add(1, Ordering::Relaxed);
     }
     let mut conn = Conn {
         dir: dir.as_ref(),
@@ -222,7 +227,7 @@ impl Conn<'_> {
             };
             let mut n = 0u64;
             {
-                let mut eng = db.shard(0).engine.lock();
+                let mut eng = db.engine(0);
                 while let Some(args) = self.pending.front() {
                     if is_intercepted(args) {
                         break;
@@ -244,7 +249,6 @@ impl Conn<'_> {
                         }
                     }
                 }
-                let _effects = eng.take_effects();
             }
             db.touch(n);
         }
@@ -252,7 +256,7 @@ impl Conn<'_> {
 
     fn on_block_timeout(&mut self) {
         let Some(db) = self.db().cloned() else { return };
-        let r = db.shard(0).engine.lock().block_timeout(self.client.id);
+        let r = db.engine(0).block_timeout(self.client.id);
         match r {
             Some(r) => {
                 self.emit(&[], r);
@@ -290,7 +294,7 @@ impl Conn<'_> {
                 return Some(Reply::error("NOAUTH HELLO must be called with the client already authenticated, otherwise the HELLO <proto> AUTH <user> <pass> option can be used to authenticate the client and select the RESP protocol version at the same time"));
             }
             let db = self.db().cloned().unwrap();
-            let r = db.shard(0).engine.lock().call(&mut self.client, &args);
+            let r = db.engine(0).call(&mut self.client, &args);
             return Some(match r {
                 Outcome::Reply(r) => r,
                 Outcome::Blocked => Reply::Nil,
@@ -324,13 +328,13 @@ impl Conn<'_> {
         };
         match self.dir.authenticate(AuthRequest { user: user.map(|u| &u[..]), password: pass, sni: None }).await {
             Ok(s) => {
-                if let Some(old) = &self.session {
-                    if !Arc::ptr_eq(&old.db, &s.db) {
-                        old.db.connections.fetch_sub(1, Ordering::Relaxed);
-                        s.db.connections.fetch_add(1, Ordering::Relaxed);
-                    }
-                } else {
-                    s.db.connections.fetch_add(1, Ordering::Relaxed);
+                if self.session.as_ref().is_some_and(|old| !Arc::ptr_eq(&old.db, &s.db)) {
+                    // Switching databases: leave the old one completely.
+                    self.cleanup();
+                    self.client.subs.clear();
+                    self.client.psubs.clear();
+                    self.client.ssubs.clear();
+                    self.client.multi = None;
                 }
                 self.client.user = s.user.clone();
                 self.client.authenticated = true;
@@ -343,7 +347,6 @@ impl Conn<'_> {
 
     fn cleanup(&mut self) {
         if let Some(s) = self.session.take() {
-            s.db.connections.fetch_sub(1, Ordering::Relaxed);
             s.db.hub.remove_client(self.client.id);
             for shard in &s.db.shards {
                 shard.engine.lock().remove_client(self.client.id);

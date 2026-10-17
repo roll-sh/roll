@@ -2,25 +2,84 @@
 //!
 //! Shards give a database multi-core parallelism (keys are routed by hash slot, like Redis
 //! Cluster) and are the unit that moves between nodes when a database scales out.
+//!
+//! Every engine access goes through [`Database::engine`]. When the guard drops, the effects the
+//! commands produced are encoded as a RESP command stream (with `SELECT` when the logical db
+//! changes, like Redis' replication stream) and handed to the [`Feed`]'s subscribers: the
+//! durable log and replicas. Holding the engine lock while publishing keeps the stream in
+//! execution order.
 
-use parking_lot::Mutex;
-use redis_engine::{Config, Engine, Hub};
+use bytes::{Bytes, BytesMut};
+use parking_lot::{Mutex, MutexGuard};
+use redis_engine::{Config, Effect, Engine, Hub};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 pub struct Shard {
     pub engine: Mutex<Engine>,
+}
+
+/// Receives the database's write stream.
+pub trait FeedSink: Send + Sync {
+    /// `chunk` is RESP-encoded commands; `end` is the replication offset after it.
+    fn write(&self, chunk: &Bytes, end: u64);
+}
+
+#[derive(Default)]
+pub struct Feed {
+    /// Logical db of the last command in the stream (`u16::MAX`: none yet, emit `SELECT`).
+    last_db: u16,
+    /// Bytes of write stream produced since the database was created (`master_repl_offset`).
+    pub offset: u64,
+    sinks: Vec<(u64, Arc<dyn FeedSink>)>,
+    next_sink: u64,
 }
 
 pub struct Database {
     pub id: String,
     pub shards: Vec<Shard>,
     pub hub: Arc<Hub>,
+    pub feed: Mutex<Feed>,
     /// Connections currently attached (for scale-to-zero decisions and metering).
     pub connections: AtomicU64,
     /// Unix ms of the last command (idle detection).
     pub last_active: AtomicU64,
     pub commands: AtomicU64,
+    /// Bytes read from / written to clients (metering).
+    pub net_in: AtomicU64,
+    pub net_out: AtomicU64,
+    /// Set when the database is being unloaded or moved: new commands get `LOADING`/`TRYAGAIN`.
+    pub closed: AtomicBool,
+}
+
+/// Exclusive access to a shard's engine. Publishes the effects of whatever ran when dropped.
+pub struct EngineGuard<'a> {
+    db: &'a Database,
+    eng: MutexGuard<'a, Engine>,
+}
+
+impl Deref for EngineGuard<'_> {
+    type Target = Engine;
+    fn deref(&self) -> &Engine {
+        &self.eng
+    }
+}
+
+impl DerefMut for EngineGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Engine {
+        &mut self.eng
+    }
+}
+
+impl Drop for EngineGuard<'_> {
+    fn drop(&mut self) {
+        if !self.eng.effects.is_empty() {
+            let effects = self.eng.take_effects();
+            self.db.publish(&effects);
+        }
+    }
 }
 
 impl Database {
@@ -37,9 +96,13 @@ impl Database {
             id: id.into(),
             shards,
             hub,
+            feed: Mutex::new(Feed { last_db: u16::MAX, ..Feed::default() }),
             connections: AtomicU64::new(0),
             last_active: AtomicU64::new(redis_engine::util::now_ms() as u64),
             commands: AtomicU64::new(0),
+            net_in: AtomicU64::new(0),
+            net_out: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -47,8 +110,116 @@ impl Database {
         &self.shards[i]
     }
 
+    /// Lock shard `i`'s engine.
+    pub fn engine(&self, i: usize) -> EngineGuard<'_> {
+        EngineGuard { db: self, eng: self.shards[i].engine.lock() }
+    }
+
     pub fn touch(&self, n: u64) {
         self.last_active.store(redis_engine::util::now_ms() as u64, Ordering::Relaxed);
         self.commands.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Unix ms since the last command.
+    pub fn idle_ms(&self) -> u64 {
+        (redis_engine::util::now_ms() as u64).saturating_sub(self.last_active.load(Ordering::Relaxed))
+    }
+
+    pub fn used_memory(&self) -> usize {
+        self.shards.iter().map(|s| s.engine.lock().used_memory()).sum()
+    }
+
+    pub fn total_keys(&self) -> usize {
+        self.shards.iter().map(|s| s.engine.lock().total_keys()).sum()
+    }
+
+    /// Subscribe to the write stream. Returns the id (for [`Database::unsubscribe`]) and the
+    /// current offset; everything after that offset reaches `sink`.
+    pub fn subscribe(&self, sink: Arc<dyn FeedSink>) -> (u64, u64) {
+        let mut f = self.feed.lock();
+        let id = f.next_sink;
+        f.next_sink += 1;
+        f.sinks.push((id, sink));
+        // The next chunk starts with SELECT so a subscriber can join mid-stream.
+        f.last_db = u16::MAX;
+        (id, f.offset)
+    }
+
+    pub fn unsubscribe(&self, id: u64) {
+        self.feed.lock().sinks.retain(|(i, _)| *i != id);
+    }
+
+    pub fn repl_offset(&self) -> u64 {
+        self.feed.lock().offset
+    }
+
+    /// Continue the stream at `offset` (after restoring state up to it).
+    pub fn set_offset(&self, offset: u64) {
+        let mut f = self.feed.lock();
+        f.offset = offset;
+        f.last_db = u16::MAX;
+    }
+
+    /// Call with the engine locked when capturing a snapshot: returns the offset the snapshot is
+    /// consistent with, and makes the stream after it self-contained (starts with `SELECT`).
+    pub fn snapshot_point(&self) -> u64 {
+        let mut f = self.feed.lock();
+        f.last_db = u16::MAX;
+        f.offset
+    }
+
+    fn publish(&self, effects: &[Effect]) {
+        let mut f = self.feed.lock();
+        let mut out = BytesMut::new();
+        for e in effects {
+            if e.db != f.last_db {
+                let db = e.db.to_string();
+                redis_proto::encode_command([b"SELECT".as_slice(), db.as_bytes()], &mut out);
+                f.last_db = e.db;
+            }
+            redis_proto::encode_command(&e.args, &mut out);
+        }
+        f.offset += out.len() as u64;
+        if f.sinks.is_empty() {
+            return;
+        }
+        let chunk = out.freeze();
+        for (_, s) in &f.sinks {
+            s.write(&chunk, f.offset);
+        }
+    }
+
+    /// Background maintenance (Redis' serverCron): active expiry and incremental rehashing,
+    /// `hz` times a second. Stops when the database is closed and dropped.
+    pub fn start_cron(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let Some(db) = weak.upgrade() else { return };
+                if db.closed.load(Ordering::Relaxed) {
+                    return;
+                }
+                for i in 0..db.shards.len() {
+                    let mut eng = db.engine(i);
+                    let hz = eng.cfg.hz.max(1) as u64;
+                    // Redis' slow cycle: 25% of each tick's CPU time at most.
+                    eng.active_expire(250_000 / hz);
+                    eng.rehash(100);
+                }
+            }
+        });
+    }
+}
+
+/// A feed sink that collects the stream (tests).
+#[derive(Default)]
+pub struct VecFeed(pub Mutex<Vec<u8>>);
+
+impl FeedSink for VecFeed {
+    fn write(&self, chunk: &Bytes, _end: u64) {
+        self.0.lock().extend_from_slice(chunk);
     }
 }

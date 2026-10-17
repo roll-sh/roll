@@ -1566,14 +1566,21 @@ name = "redis-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "parking_lot",
+ "pg-storage",
  "redis-engine",
  "redis-proto",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]

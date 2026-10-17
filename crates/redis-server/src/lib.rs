@@ -4,6 +4,10 @@ pub mod client;
 pub mod conn;
 pub mod database;
 pub mod directory;
+pub mod exec;
+pub mod http;
+pub mod node;
+pub mod persist;
 
 pub use database::Database;
 pub use directory::{Directory, Session, Single};

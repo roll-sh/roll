@@ -8,13 +8,21 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
+pg-storage.workspace = true
 redis-engine.workspace = true
 redis-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
+reqwest.workspace = true
+serde_json.workspace = true
 tracing-subscriber.workspace = true

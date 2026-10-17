@@ -4,6 +4,7 @@ use crate::database::Database;
 use futures::future::BoxFuture;
 use redis_engine::acl::User;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 pub struct AuthRequest<'a> {
     pub user: Option<&'a [u8]>,
@@ -16,6 +17,39 @@ pub struct AuthRequest<'a> {
 pub struct Session {
     pub db: Arc<Database>,
     pub user: Arc<User>,
+    /// Keeps the database loaded while the session lives.
+    pub lease: Arc<Lease>,
+}
+
+impl Session {
+    /// A session on `db`, or `None` if the database is closing (unloading or moving away); the
+    /// caller should look it up again.
+    pub fn new(db: Arc<Database>, user: Arc<User>) -> Option<Self> {
+        let lease = Lease::acquire(&db)?;
+        Some(Self { db, user, lease: Arc::new(lease) })
+    }
+}
+
+/// One active user of a database (a connection or an in-flight HTTP request). Databases are only
+/// unloaded when they have none.
+pub struct Lease(Arc<Database>);
+
+impl Lease {
+    pub fn acquire(db: &Arc<Database>) -> Option<Self> {
+        // Pairs with the unloader, which sets `closed` and then checks `connections`.
+        db.connections.fetch_add(1, Ordering::SeqCst);
+        if db.closed.load(Ordering::SeqCst) {
+            db.connections.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Self(db.clone()))
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.0.connections.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +89,7 @@ impl Directory for Single {
                 None => true,
             };
             if user_ok && pass_ok {
-                Ok(Session { db: self.db.clone(), user: User::default_user() })
+                Session::new(self.db.clone(), User::default_user()).ok_or_else(|| AuthError::Unavailable("database is closed".into()))
             } else {
                 Err(AuthError::WrongPass)
             }
@@ -63,6 +97,6 @@ impl Directory for Single {
     }
 
     fn anonymous(&self) -> BoxFuture<'_, Option<Session>> {
-        Box::pin(async move { self.password.is_none().then(|| Session { db: self.db.clone(), user: User::default_user() }) })
+        Box::pin(async move { if self.password.is_none() { Session::new(self.db.clone(), User::default_user()) } else { None } })
     }
 }
