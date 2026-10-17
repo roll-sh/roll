@@ -14,7 +14,7 @@ use crate::db::Db;
 use crate::hub::Hub;
 use crate::notify;
 use crate::util::{Rng, now_ms};
-use crate::value::{Entry, Str};
+use crate::value::{Entry, Str, Value};
 use bytes::Bytes;
 use redis_proto::Reply;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -530,6 +530,16 @@ impl Engine {
     pub(crate) fn expire_if_needed(&mut self, db: usize, key: &[u8], now: i64, mode: Mode) -> bool {
         let Some(e) = self.dbs[db].keys.get(key) else { return false };
         if !e.expired(now) {
+            // A hash whose registered field expiry is due: run its active field expiry now (Redis
+            // does it from the cron), so the command sees what it would see on Redis. True if
+            // that deleted the whole hash.
+            if let Value::Hash(h) = &e.value
+                && h.subexpiry_due(now)
+                && mode != Mode::Replay
+                && !self.replica
+            {
+                return commands::hashes::expire_fields(self, db, key, now);
+            }
             return false;
         }
         if mode == Mode::Replay {
@@ -919,6 +929,8 @@ impl Engine {
                     break;
                 }
             }
+            // Hash fields with a TTL (Redis' activeSubexpiresCycle).
+            total += commands::hashes::active_expire_fields(self, db, now, start, budget_us);
         }
         if total > 0 {
             self.process_touched();

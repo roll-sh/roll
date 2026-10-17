@@ -1070,7 +1070,7 @@ pub fn info_section(eng: &crate::engine::Engine, name: &str, now: i64) -> Option
             s.push_str("# Keyspace\r\n");
             for (i, d) in eng.dbs.iter().enumerate() {
                 if !d.is_empty() {
-                    let _ = write!(s, "db{i}:keys={},expires={},avg_ttl={},subexpiry=0\r\n", d.len(), d.expires(), d.avg_ttl);
+                    let _ = write!(s, "db{i}:keys={},expires={},avg_ttl={},subexpiry={}\r\n", d.len(), d.expires(), d.avg_ttl, d.subexpires.len());
                 }
             }
         }

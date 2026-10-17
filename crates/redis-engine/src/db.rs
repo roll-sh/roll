@@ -1,7 +1,7 @@
 //! One logical database (`SELECT n`): the keyspace plus the index of keys with a TTL.
 
 use crate::dict::Dict;
-use crate::value::{Entry, KEY_OVERHEAD, Str, key_mem};
+use crate::value::{Entry, KEY_OVERHEAD, Str, Value, key_mem};
 
 #[derive(Default)]
 pub struct Db {
@@ -14,6 +14,21 @@ pub struct Db {
     pub expire_cursor: u64,
     /// Running average TTL of sampled keys (INFO keyspace `avg_ttl`).
     pub avg_ttl: i64,
+    /// Hashes with field TTLs (Redis' `subexpires`): key → the next field expiry the hash is
+    /// registered with ([`crate::types::Hash::subexpiry`]), for active field expiry and INFO
+    /// keyspace `subexpiry`. Kept in sync on insert/remove and by [`Db::sync_subexpiry`].
+    pub subexpires: Dict<Str, i64>,
+    /// Cursor of the active field-expiry scan over `subexpires`.
+    pub subexpire_cursor: u64,
+}
+
+/// The subexpiry registration of a value (0 = none).
+#[inline]
+fn subexpiry_of(v: &Value) -> i64 {
+    match v {
+        Value::Hash(h) => h.subexpiry(),
+        _ => 0,
+    }
 }
 
 impl Db {
@@ -43,6 +58,11 @@ impl Db {
             self.volatile.insert(k.clone(), ());
             self.mem += Self::key_cost(&k);
         }
+        let sub = subexpiry_of(&entry.value);
+        if sub != 0 {
+            self.subexpires.insert(k.clone(), sub);
+            self.mem += Self::key_cost(&k);
+        }
         self.keys.insert_new(k, entry)
     }
 
@@ -52,6 +72,9 @@ impl Db {
         self.mem = self.mem.saturating_sub(Self::key_cost(&k) + e.value.mem());
         if e.expire != 0 {
             self.volatile.remove(key);
+            self.mem = self.mem.saturating_sub(Self::key_cost(&k));
+        }
+        if matches!(e.value, Value::Hash(_)) && !self.subexpires.is_empty() && self.subexpires.remove(key).is_some() {
             self.mem = self.mem.saturating_sub(Self::key_cost(&k));
         }
         Some(e)
@@ -78,9 +101,28 @@ impl Db {
         true
     }
 
+    /// Bring the `subexpires` index in line with the registration of the value at `key` (after a
+    /// hash changed its registration, or the key's value was replaced).
+    pub fn sync_subexpiry(&mut self, key: &[u8]) {
+        let sub = self.keys.get(key).map_or(0, |e| subexpiry_of(&e.value));
+        if sub == 0 {
+            if !self.subexpires.is_empty() && let Some((k, _)) = self.subexpires.remove_entry(key) {
+                self.mem = self.mem.saturating_sub(Self::key_cost(&k));
+            }
+        } else if let Some(at) = self.subexpires.get_mut(key) {
+            *at = sub;
+        } else {
+            let k = Str::from_slice(key);
+            self.mem += Self::key_cost(&k);
+            self.subexpires.insert_new(k, sub);
+        }
+    }
+
     pub fn clear(&mut self) {
         self.keys.clear();
         self.volatile.clear();
+        self.subexpires.clear();
+        self.subexpire_cursor = 0;
         self.mem = 0;
         self.expire_cursor = 0;
         self.avg_ttl = 0;
@@ -88,6 +130,6 @@ impl Db {
 
     /// Total bytes including the hash tables themselves.
     pub fn used_bytes(&self) -> usize {
-        self.mem + self.keys.table_bytes() + self.volatile.table_bytes()
+        self.mem + self.keys.table_bytes() + self.volatile.table_bytes() + self.subexpires.table_bytes()
     }
 }

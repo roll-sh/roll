@@ -69,7 +69,8 @@ enum Cmp {
 fn sort_reply(r: &Reply) -> Reply {
     match r {
         Reply::Array(items) | Reply::Set(items) => {
-            let mut v = items.clone();
+            // Nested arrays too (e.g. the elements of a hashtable HSCAN page).
+            let mut v: Vec<Reply> = items.iter().map(sort_reply).collect();
             v.sort_by_key(|x| format!("{x:?}"));
             Reply::Array(v)
         }

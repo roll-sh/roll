@@ -124,7 +124,7 @@ impl Default for Config {
             lfu_log_factor: 10,
             lfu_decay_time: 1,
             notify: 0,
-            hash_max_listpack_entries: 128,
+            hash_max_listpack_entries: 512,
             hash_max_listpack_value: 64,
             set_max_intset_entries: 512,
             set_max_listpack_entries: 128,
