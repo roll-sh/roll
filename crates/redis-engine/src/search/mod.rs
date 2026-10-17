@@ -3,10 +3,25 @@
 //! dictionaries and synonyms, with RediSearch's replies, errors and limits.
 
 pub mod args;
+pub mod casefold;
 pub mod cluster;
 pub mod config;
+pub mod doctable;
 pub mod error;
+pub mod eval;
+pub mod expr;
+pub mod global;
+pub mod index;
 pub mod info;
+pub mod invidx;
+pub mod jsonpath;
+pub mod numtree;
+pub mod phonetic;
+pub mod rsdict;
+pub mod spec;
+pub mod tokenize;
+pub mod triemap;
+pub mod vector;
 
 /// `MODULE LIST`'s version (8.10.1).
 pub const VERSION: i64 = 81001;

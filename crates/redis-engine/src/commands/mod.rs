@@ -27,6 +27,7 @@ pub mod lists;
 pub mod multi;
 pub mod pubsub;
 pub mod scripting;
+pub mod ft;
 pub mod search;
 pub mod server;
 pub mod sets;

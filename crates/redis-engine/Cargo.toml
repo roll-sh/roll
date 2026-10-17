@@ -20,6 +20,7 @@ libm.workspace = true
 libc.workspace = true
 rustc_apfloat.workspace = true
 redis-lua.workspace = true
+snowball.workspace = true
 sha1.workspace = true
 tracing.workspace = true
 serde.workspace = true

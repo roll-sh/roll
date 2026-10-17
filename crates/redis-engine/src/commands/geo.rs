@@ -145,6 +145,22 @@ fn encode_wgs84(lon: f64, lat: f64, step: u8) -> Option<Bits> {
     encode(LONG_RANGE, LAT_RANGE, lon, lat, step)
 }
 
+/// RediSearch's `encodeGeo`: the 52-bit score of a point (`None` outside the WGS-84 range).
+pub(crate) fn score_of(lon: f64, lat: f64) -> Option<u64> {
+    encode_wgs84(lon, lat, 26).map(|b| b.bits)
+}
+
+/// RediSearch's `decodeGeo`: the centre of a 52-bit score's cell.
+#[allow(dead_code)] // the GEO query filters use it
+pub(crate) fn point_of(score: u64) -> (f64, f64) {
+    let sep = deinterleave64(score);
+    let (ilat, ilon) = (sep as u32, (sep >> 32) as u32);
+    let d = (1u64 << 26) as f64;
+    let lon = (LONG_MIN + ((ilon as f64 + 0.5) / d) * (LONG_MAX - LONG_MIN)).clamp(LONG_MIN, LONG_MAX);
+    let lat = (LAT_MIN + ((ilat as f64 + 0.5) / d) * (LAT_MAX - LAT_MIN)).clamp(LAT_MIN, LAT_MAX);
+    (lon, lat)
+}
+
 /// `geohashDecode` (the reference fuses `min + x * scale`).
 fn decode(lon_r: Range, lat_r: Range, hash: Bits) -> Option<Area> {
     if hash.is_zero() {

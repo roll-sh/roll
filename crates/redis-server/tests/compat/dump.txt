@@ -361,10 +361,13 @@ TTL t:5
 RESTORE t:6 0 "\x00\x05\x68\x65\x6c\x6c\x6f\x0f\x00\x78\xf6\xba\x7a\xcb\x98\xdd\xf2" IDLETIME 1000
 !type OBJECT IDLETIME t:6
 CONFIG SET maxmemory-policy allkeys-lfu
+# The modules' handlers touch a restored key (LFU increments are random above the initial value).
+CONFIG SET lfu-log-factor 0
 RESTORE t:7 0 "\x00\x05\x68\x65\x6c\x6c\x6f\x0f\x00\x78\xf6\xba\x7a\xcb\x98\xdd\xf2" FREQ 42
 OBJECT FREQ t:7
 RESTORE t:8 0 "\x00\x05\x68\x65\x6c\x6c\x6f\x0f\x00\x78\xf6\xba\x7a\xcb\x98\xdd\xf2" IDLETIME 5
 OBJECT FREQ t:8
+CONFIG SET lfu-log-factor 10
 CONFIG SET maxmemory-policy noeviction
 RESTORE t:9 0 "\x00\x05\x68\x65\x6c\x6c\x6f\x0f\x00\x78\xf6\xba\x7a\xcb\x98\xdd\xf2" FREQ 7
 !type OBJECT IDLETIME t:9

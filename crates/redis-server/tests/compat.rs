@@ -555,6 +555,19 @@ async fn run_suite(env: &str, args: &[&str], scripts: &str, cfg: Config) {
     // Active expiry and INFO's samples, like a node runs.
     db.start_cron();
     let roll = start_single(db, None).await.unwrap();
+    // RediSearch and RedisTimeSeries subscribe to keyspace events with their first index or
+    // series and never unsubscribe; from then on their handlers' key lookups show (`keymiss`,
+    // hit/miss stats, LFU). A long-running reference may already be subscribed, so both sides
+    // start subscribed.
+    if scripts == "tests/compat" {
+        for addr in [ref_addr.clone(), roll.to_string()] {
+            let mut c = RespClient::connect(&addr).await.unwrap();
+            c.cmd(["FT.CREATE", "compat-subscribe", "ON", "HASH", "PREFIX", "1", "compat-subscribe:", "SCHEMA", "t", "TEXT"]).await.unwrap();
+            c.cmd(["FT.DROPINDEX", "compat-subscribe"]).await.unwrap();
+            c.cmd(["TS.CREATE", "compat-subscribe"]).await.unwrap();
+            c.cmd(["DEL", "compat-subscribe"]).await.unwrap();
+        }
+    }
 
     let dir = std::env::var_os("ROLL_COMPAT_DIR")
         .map(PathBuf::from)

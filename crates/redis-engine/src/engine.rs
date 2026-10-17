@@ -136,6 +136,10 @@ pub(crate) struct Signals {
     /// listens to are queued for it whatever `notify-keyspace-events` says.
     pub ts_hook: bool,
     pub ts_events: Vec<(&'static str, u16, Str)>,
+    /// RediSearch subscribed to keyspace events (its first index was created): the events of
+    /// its classes are queued for it.
+    pub search_hook: bool,
+    pub search_events: Vec<(&'static str, u16, Str)>,
 }
 
 impl Signals {
@@ -144,14 +148,30 @@ impl Signals {
         if self.ts_hook && crate::ts::hooked(event) {
             self.ts_events.push((event, db, Str::from_slice(key)));
         }
+        if self.search_hook && class & crate::search::global::EVENT_CLASSES != 0 {
+            self.search_event(event, db, key);
+        }
         if self.notify & class != 0 && self.notify & (notify::KEYSPACE | notify::KEYEVENT) != 0 {
             self.events.push((class, event, db, Str::from_slice(key), Vec::new()));
         }
     }
 
+    /// Queue an event for RediSearch's handler. Modules are called before the event is published,
+    /// so where the handler opens the key with effects (a `keymiss`, the hit/miss stats) a probe
+    /// holds the place ahead of the event.
+    fn search_event(&mut self, event: &'static str, db: u16, key: &[u8]) {
+        if crate::commands::ft::probes_key(event) {
+            self.events.push((notify::SEARCH_PROBE, "", 0, Str::from_slice(key), Vec::new()));
+        }
+        self.search_events.push((event, db, Str::from_slice(key)));
+    }
+
     /// An event about some of the key's fields (`notifyKeyspaceEventWithSubkeys`): also published
     /// on the subkey channels when those are enabled.
     pub fn notify_fields<F: AsRef<[u8]>>(&mut self, class: u32, event: &'static str, db: u16, key: &[u8], fields: impl IntoIterator<Item = F>) {
+        if self.search_hook && class & crate::search::global::EVENT_CLASSES != 0 {
+            self.search_event(event, db, key);
+        }
         if self.notify & class == 0 || self.notify & (notify::KEYSPACE | notify::KEYEVENT | notify::SUBKEY_ALL) == 0 {
             return;
         }
@@ -287,6 +307,8 @@ pub struct Engine {
     pub debug: crate::commands::debug::Switches,
     /// RedisTimeSeries' global state: the label index (over every database).
     pub ts: crate::ts::Global,
+    /// RediSearch's global state: the indexes, their prefixes, aliases and dictionaries.
+    pub search: crate::search::global::Global,
 }
 
 /// The arguments as SLOWLOG and MONITOR show them: secrets replaced by `(redacted)`, like Redis'
@@ -387,6 +409,7 @@ impl Engine {
             prev_errors: 0,
             debug: Default::default(),
             ts: Default::default(),
+            search: Default::default(),
         };
         e.startup_memory = e.used_memory();
         e.peak_memory = e.startup_memory;
@@ -612,6 +635,14 @@ impl Engine {
         if top {
             client.last_cmd = commands::last_cmd_name(args);
         }
+        // RediSearch: events from outside commands (expiry, eviction), then its command filter
+        // (which runs as the command is read, so at queue time inside MULTI).
+        if !self.sig.search_events.is_empty() {
+            crate::commands::ft::drain(self);
+        }
+        if matches!(mode, Mode::Top | Mode::Script { .. } | Mode::Replay) {
+            crate::commands::ft::command_filter(self, args);
+        }
         let (cmd, full_name) = match Self::resolve_as(args, client.internal || mode == Mode::Replay) {
             Ok(c) => c,
             Err(e) => {
@@ -735,6 +766,9 @@ impl Engine {
             let res = (cmd.handler)(&mut cx, args);
             if !cx.eng.sig.ts_events.is_empty() {
                 crate::commands::ts::drain(&mut cx);
+            }
+            if !cx.eng.sig.search_events.is_empty() {
+                crate::commands::ft::drain(cx.eng);
             }
             (res, cx.rewrite.take(), cx.block.take(), cx.no_propagate, cx.force_propagate)
         };
@@ -1061,6 +1095,9 @@ impl Engine {
     pub(crate) fn flush_events(&mut self) {
         if self.sig.events.is_empty() {
             return;
+        }
+        if self.sig.events.iter().any(|e| e.0 == notify::SEARCH_PROBE) {
+            crate::commands::ft::resolve_probes(self);
         }
         let events = std::mem::take(&mut self.sig.events);
         let flags = self.cfg.notify;

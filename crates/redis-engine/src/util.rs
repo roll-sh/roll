@@ -343,6 +343,12 @@ mod tests {
 
 /// C's `%g` (six significant digits, trailing zeros dropped, exponent form outside 1e-4..1e6).
 pub fn fmt_g(v: f64) -> String {
+    fmt_g_prec(v, 6)
+}
+
+/// C's `%.<p>g`.
+pub fn fmt_g_prec(v: f64, p: usize) -> String {
+    let p = p.max(1);
     if v.is_nan() {
         return if v.is_sign_negative() { "-nan" } else { "nan" }.into();
     }
@@ -355,11 +361,11 @@ pub fn fmt_g(v: f64) -> String {
     fn trim(s: &str) -> &str {
         if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { s }
     }
-    let e = format!("{v:.5e}");
+    let e = format!("{v:.*e}", p - 1);
     let (mant, exp) = e.split_once('e').expect("exponent form");
     let x: i32 = exp.parse().expect("exponent");
-    if (-4..6).contains(&x) {
-        trim(&format!("{:.*}", (5 - x) as usize, v)).to_string()
+    if x >= -4 && x < p as i32 {
+        trim(&format!("{:.*}", (p as i32 - 1 - x) as usize, v)).to_string()
     } else {
         format!("{}e{}{:02}", trim(mant), if x < 0 { '-' } else { '+' }, x.abs())
     }
@@ -380,5 +386,8 @@ mod fmt_g_tests {
         assert_eq!(fmt_g(0.1), "0.1");
         assert_eq!(fmt_g(1.5), "1.5");
         assert_eq!(fmt_g(1e-300), "1e-300");
+        assert_eq!(super::fmt_g_prec(0.1 + 0.2, 12), "0.3");
+        assert_eq!(super::fmt_g_prec(1.0 / 3.0, 12), "0.333333333333");
+        assert_eq!(super::fmt_g_prec(1e300, 12), "1e+300");
     }
 }

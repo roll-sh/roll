@@ -240,8 +240,9 @@ pub fn flushdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let db = cx.db_index();
     cx.eng.touch_all_watched(Some(db as u16));
     cx.eng.clients.flushed();
-    // RedisTimeSeries forgets every indexed series on any flush.
+    // RedisTimeSeries forgets every indexed series on any flush, RediSearch every index.
     cx.eng.ts.index.clear();
+    cx.eng.search.flush();
     let removed = cx.eng.dbs[db].len() as u64;
     let reg = cx.eng.hub.templates.clone();
     if flush_in_background(cx, args) {
@@ -257,6 +258,8 @@ pub fn flushdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn flushall(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     flush_mode(args)?;
     let removed: u64 = cx.eng.dbs.iter().map(|d| d.len() as u64).sum();
+    // RediSearch's `onFlush`: every index and dictionary goes.
+    cx.eng.search.flush();
     let reg = cx.eng.hub.templates.clone();
     if flush_in_background(cx, args) {
         reg.deferred(|| cx.eng.flush_all());

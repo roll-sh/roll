@@ -22,6 +22,10 @@ pub const SUBKEYEVENT: u32 = 1 << 18; // T
 pub const SUBKEYSPACEITEM: u32 = 1 << 19; // I
 pub const SUBKEYSPACEEVENT: u32 = 1 << 20; // V
 /// The subkey channels (`S`, `T`, `I`, `V`).
+/// Not a class: a placeholder in the event queue where RediSearch's handler opened the key from db 0
+/// (`getDocTypeFromString`), resolved before the events are published (`ft::resolve_probes`).
+pub const SEARCH_PROBE: u32 = 1 << 31;
+
 pub const SUBKEY_ALL: u32 = SUBKEYSPACE | SUBKEYEVENT | SUBKEYSPACEITEM | SUBKEYSPACEEVENT;
 /// `A`: every class except `m`, `n`, `o`, `c` and the subkey ones.
 pub const ALL: u32 = GENERIC | STRING | LIST | SET | HASH | ZSET | EXPIRED | EVICTED | STREAM | MODULE | ARRAY;

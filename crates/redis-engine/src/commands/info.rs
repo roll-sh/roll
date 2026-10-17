@@ -399,7 +399,7 @@ fn process_rss() -> u64 {
     if cfg!(target_os = "macos") { ru.ru_maxrss as u64 } else { ru.ru_maxrss as u64 * 1024 }
 }
 
-fn system_memory() -> u64 {
+pub fn system_memory() -> u64 {
     unsafe {
         let pages = libc::sysconf(libc::_SC_PHYS_PAGES);
         let size = libc::sysconf(libc::_SC_PAGESIZE);

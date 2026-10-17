@@ -56,6 +56,7 @@ rustc_apfloat = "0.2"
 cc = "1"
 pg-control = { path = "crates/pg-control" }
 redis-lua = { path = "crates/redis-lua" }
+snowball = { path = "crates/snowball" }
 pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
 redis-proto = { path = "crates/redis-proto" }

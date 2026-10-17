@@ -224,6 +224,15 @@ impl Rules {
         self.selectors.iter().any(|s| s.allkeys || s.keys.iter().any(|k| k.perm & need == need && crate::util::glob_match(&k.pattern, key, false)))
     }
 
+    /// `ACLUserCheckKeyPerm` with `CMD_KEY_PREFIX`: does a selector grant `need` on every key
+    /// starting with `prefix` (a pattern matching the prefix itself and ending in an unescaped `*`)?
+    fn prefix_perm(&self, prefix: &[u8], need: u8) -> bool {
+        let open_ended = |p: &[u8]| p.last() == Some(&b'*') && p[..p.len() - 1].iter().rev().take_while(|&&c| c == b'\\').count() % 2 == 0;
+        self.selectors.iter().any(|s| {
+            s.allkeys || s.keys.iter().any(|k| k.perm & need == need && crate::util::glob_match(&k.pattern, prefix, false) && open_ended(&k.pattern))
+        })
+    }
+
     /// May a client subscribed to these channels keep its subscriptions?
     fn subscriptions_allowed(&self, client: &Client) -> bool {
         let s = &self.selectors;
@@ -340,6 +349,12 @@ impl User {
     /// `RM_ACLCheckKeyPermissions`: may this user read (`write` false) or update `key`?
     pub fn can_use_key(&self, key: &[u8], write: bool) -> bool {
         self.open.load(Ordering::Acquire) || self.rules.read().key_perm(key, if write { index::PERM_W } else { index::PERM_R })
+    }
+
+    /// `RM_ACLCheckKeyPrefixPermissions(..., CMD_KEY_ACCESS)`: may this user read every key
+    /// under `prefix`?
+    pub fn can_access_prefix(&self, prefix: &[u8]) -> bool {
+        self.open.load(Ordering::Acquire) || self.rules.read().prefix_perm(prefix, index::PERM_R)
     }
 
     /// A copy of the current rules.

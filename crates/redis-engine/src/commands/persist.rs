@@ -239,6 +239,11 @@ impl Engine {
             }
             d.insert_new(&key, entry);
             self.ts_loaded(i, &key);
+            if self.sig.search_hook {
+                crate::commands::ft::probe(self, &key, true);
+                self.sig.search_events.push(("loaded", i as u16, crate::value::Str::from_slice(&key)));
+                crate::commands::ft::drain(self);
+            }
             loaded += 1;
         }
         let lim = crate::types::hash::Limits::of(&cfg);
