@@ -171,10 +171,19 @@ impl KeyMut<'_> {
             _ => unreachable!("type checked by lookup"),
         }
     }
+    pub fn json(&mut self) -> &mut crate::json::Json {
+        match &mut self.entry.value {
+            Value::Json(j) => j,
+            _ => unreachable!("type checked by lookup"),
+        }
+    }
 }
 
 impl Drop for KeyMut<'_> {
     fn drop(&mut self) {
+        if let Value::Json(j) = &mut self.entry.value {
+            j.refresh();
+        }
         let new = self.entry.value.mem();
         *self.mem = (*self.mem + new).saturating_sub(self.old);
         if self.changed {

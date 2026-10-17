@@ -287,6 +287,8 @@ const EMBED_VALUE_MAX: usize = 128;
 pub fn usage(e: &Entry, key_len: usize) -> usize {
     match &e.value {
         Value::Str(s) => string_usage(e, key_len, s),
+        // kvobjComputeSize takes zmalloc_size of a module value's object.
+        Value::Json(j) => jemalloc_size(header(e, key_len)) + j.usage(),
         v => header(e, key_len) + v.alloc_size(),
     }
 }

@@ -727,6 +727,7 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
         Value::Hash(_) => 4,
         Value::Stream(_) => 6,
         Value::Array(_) => 7,
+        Value::Json(_) => 5,
     };
     mix_digest(d, &ty.to_be_bytes());
     match &e.value {
@@ -774,6 +775,8 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
                 mix_digest(d, b"(null)");
             }
         }
+        // RedisJSON has no digest callback: only the type counts.
+        Value::Json(_) => {}
     }
     if e.expire != 0 {
         xor_digest(d, b"!!expire!!");

@@ -15,6 +15,7 @@ pub mod decimal;
 pub mod dict;
 pub mod engine;
 pub mod hub;
+pub mod json;
 pub mod notify;
 pub mod object;
 pub mod pack;

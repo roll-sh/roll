@@ -16,6 +16,7 @@ pub mod meta;
 pub mod client;
 pub mod hotkeys;
 pub mod info;
+pub mod json;
 pub mod lolwut;
 pub mod persist;
 pub mod replication;
@@ -136,6 +137,7 @@ pub enum Group {
     Stream,
     Bitmap,
     Array,
+    Module,
 }
 
 impl Group {
@@ -158,6 +160,7 @@ impl Group {
             Group::Stream => "stream",
             Group::Bitmap => "bitmap",
             Group::Array => "array",
+            Group::Module => "module",
         }
     }
 }
@@ -365,6 +368,7 @@ pub fn table() -> &'static Table {
             scripting::COMMANDS,
             migrate::COMMANDS,
             hotkeys::COMMANDS,
+            json::COMMANDS,
         ] {
             for c in family {
                 assert!(by_name.insert(c.name, c).is_none(), "duplicate command {}", c.name);

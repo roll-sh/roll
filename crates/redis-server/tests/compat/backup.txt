@@ -15,6 +15,7 @@ EVAL "return redis.call('backup', 'start')" 0
 
 # ---- start, seal ----
 BACKUP START
+@sleep 500
 !mask start_time,end_time BACKUP STATUS
 !info aof_enabled,aof_rewrite_in_progress,backup_in_progress INFO persistence
 BACKUP START

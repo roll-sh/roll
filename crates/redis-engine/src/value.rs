@@ -1,5 +1,6 @@
 //! Values stored in the keyspace.
 
+use crate::json::Json;
 use crate::types::{Array, Hash, List, Set, Stream, ZSet};
 use smallvec::SmallVec;
 
@@ -20,6 +21,8 @@ pub enum Kind {
     ZSet,
     Stream,
     Array,
+    /// RedisJSON documents (a module type).
+    Json,
 }
 
 impl Kind {
@@ -32,6 +35,7 @@ impl Kind {
             Kind::ZSet => "zset",
             Kind::Stream => "stream",
             Kind::Array => "array",
+            Kind::Json => "ReJSON-RL",
         }
     }
 
@@ -44,6 +48,7 @@ impl Kind {
             b"zset" => Kind::ZSet,
             b"stream" => Kind::Stream,
             b"array" => Kind::Array,
+            b"rejson-rl" => Kind::Json,
             _ => return None,
         })
     }
@@ -58,6 +63,7 @@ pub enum Value {
     ZSet(Box<ZSet>),
     Stream(Box<Stream>),
     Array(Box<Array>),
+    Json(Box<Json>),
 }
 
 impl Value {
@@ -75,6 +81,7 @@ impl Value {
             Value::ZSet(_) => Kind::ZSet,
             Value::Stream(_) => Kind::Stream,
             Value::Array(_) => Kind::Array,
+            Value::Json(_) => Kind::Json,
         }
     }
 
@@ -87,6 +94,7 @@ impl Value {
             Kind::ZSet => Value::ZSet(Box::default()),
             Kind::Stream => Value::Stream(Box::default()),
             Kind::Array => Value::Array(Box::default()),
+            Kind::Json => Value::Json(Box::default()),
         }
     }
 
@@ -106,6 +114,7 @@ impl Value {
             Value::ZSet(z) => std::mem::size_of::<ZSet>() + z.mem(),
             Value::Stream(x) => std::mem::size_of::<Stream>() + x.mem(),
             Value::Array(x) => std::mem::size_of::<Array>() + x.mem(),
+            Value::Json(j) => std::mem::size_of::<Json>() + j.mem(),
         }
     }
 
@@ -120,6 +129,7 @@ impl Value {
             Value::ZSet(z) => z.alloc_size(),
             Value::Stream(x) => x.alloc_size(),
             Value::Array(x) => x.mem(),
+            Value::Json(j) => j.usage(),
         }
     }
 
@@ -127,7 +137,7 @@ impl Value {
     #[inline]
     pub fn is_empty_aggregate(&self) -> bool {
         match self {
-            Value::Str(_) | Value::Stream(_) => false,
+            Value::Str(_) | Value::Stream(_) | Value::Json(_) => false,
             Value::List(l) => l.is_empty(),
             Value::Hash(h) => h.is_empty(),
             Value::Set(x) => x.is_empty(),
@@ -154,6 +164,7 @@ impl Value {
             Value::ZSet(z) => z.encoding(),
             Value::Stream(_) => "stream",
             Value::Array(_) => "sliced-array",
+            Value::Json(_) => "raw",
         }
     }
 }
@@ -207,7 +218,7 @@ impl Value {
             Value::Set(s) => (2, s.len()),
             Value::ZSet(z) => (3, z.len()),
             Value::Hash(h) => (4, h.len()),
-            Value::Stream(_) | Value::Array(_) => return NO_SIZE,
+            Value::Stream(_) | Value::Array(_) | Value::Json(_) => return NO_SIZE,
         };
         let bin = (usize::BITS - n.leading_zeros()) as usize;
         (t * SIZE_BINS + bin.min(SIZE_BINS - 1)) as u16

@@ -19,6 +19,14 @@ reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# JSON documents (RedisJSON): the JSONPath grammar runs on the pest version RedisJSON pins, so
+# syntax errors are reported identically.
+pest = "=2.8.6"
+pest_derive = "=2.8.6"
+regex = "1"
+half = "2.7"
+ryu = "1.0.23"
+indexmap = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }

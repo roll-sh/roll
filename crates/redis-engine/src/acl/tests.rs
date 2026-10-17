@@ -218,7 +218,8 @@ fn categories_match_redis() {
     assert_eq!(full_name(lookup_sub(config, b"get").unwrap()), Some("config|get"));
     let string = commands_in_category(category_bit(b"STRING").unwrap());
     assert!(string.contains(&"get") && string.contains(&"set") && !string.contains(&"del"));
-    assert!(commands_in_category(category_bit(b"json").unwrap()).is_empty());
+    let json = commands_in_category(category_bit(b"json").unwrap());
+    assert!(json.contains(&"json.get") && json.contains(&"json.set") && json.len() == 25);
     assert_eq!(CATEGORIES.len(), 30);
 }
 

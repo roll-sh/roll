@@ -166,6 +166,7 @@ fn contents(v: &Value) -> String {
         Value::Hash(h) => h.iter().map(|(f, v, at)| format!("{f:?}={v:?}@{at}")).collect(),
         Value::Stream(_) => return format!("{:?}", dump(v, CAPTURED_AT)),
         Value::Array(a) => return format!("{} {:?}", a.insert_idx(), a.iter().collect::<Vec<_>>()),
+        Value::Json(j) => return crate::json::ser::compact(j.root()),
     };
     parts.sort();
     format!("{} {}", v.encoding(), parts.join(","))
@@ -480,7 +481,7 @@ fn rejects_bad_payloads() {
     p[n - 8..].fill(0);
     assert!(restore(&p, &c).is_ok());
     // Modules and other things this engine can't hold.
-    for t in [ty::MODULE_2, ty::GCRA] {
+    for t in [ty::MODULE_PRE_GA, ty::GCRA] {
         assert!(matches!(restore(&payload(&[t, 0]), &c), Err(RdbError::Unsupported(_))), "type {t}");
     }
     // Template hashes referencing a file's template record can't be in a DUMP payload.

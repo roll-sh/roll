@@ -83,6 +83,20 @@ enum Cmp {
     Type,
     Err,
     Skip,
+    Json,
+}
+
+/// Bulk strings holding JSON objects with their members in key order (RedisJSON answers a
+/// multi-path JSON.GET from a hash map, so the order differs from run to run).
+fn json_reply(r: &Reply) -> Reply {
+    match r {
+        Reply::Bulk(b) => match serde_json::from_slice::<serde_json::Value>(b) {
+            Ok(v) => Reply::Bulk(serde_json::to_vec(&v).unwrap().into()),
+            Err(_) => r.clone(),
+        },
+        Reply::Array(items) => Reply::Array(items.iter().map(json_reply).collect()),
+        other => other.clone(),
+    }
 }
 
 fn sort_reply(r: &Reply) -> Reply {
@@ -94,7 +108,7 @@ fn sort_reply(r: &Reply) -> Reply {
             Reply::Array(v)
         }
         Reply::Map(pairs) => {
-            let mut v = pairs.clone();
+            let mut v: Vec<(Reply, Reply)> = pairs.iter().map(|(k, v)| (k.clone(), sort_reply(v))).collect();
             v.sort_by_key(|(k, _)| format!("{k:?}"));
             Reply::Map(v)
         }
@@ -245,6 +259,7 @@ fn same(cmp: Cmp, a: &Reply, b: &Reply) -> bool {
         Cmp::Type => shape(a) == shape(b),
         Cmp::Err => err_code(a).is_some() && err_code(a) == err_code(b),
         Cmp::Skip => true,
+        Cmp::Json => json_reply(a) == json_reply(b),
     }
 }
 
@@ -384,6 +399,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                     "type" => cmp = Cmp::Type,
                     "err" => cmp = Cmp::Err,
                     "skip" => cmp = Cmp::Skip,
+                    "json" => cmp = Cmp::Json,
                     "send" => send = true,
                     "ids" => by_id = true,
                     "info" => {
@@ -401,6 +417,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
         let ids_o: HashMap<u32, i64> = conns.iter().map(|(n, p)| (*n, p.ids.1)).collect();
         let args_r = redis_server::client::args(&with_ids(&expand(cmdline), &ids_r));
         let args = redis_server::client::args(&with_ids(&expand(cmdline), &ids_o));
+        assert!(!args.is_empty(), "{fname}:{lineno}: unbalanced quotes in {cmdline}");
         let p = conns.get_mut(&cur).unwrap();
         if send_only {
             p.redis.send(&args_r).await.unwrap();

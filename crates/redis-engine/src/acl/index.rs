@@ -183,6 +183,9 @@ fn push(idx: &mut Index, c: &'static Command, full: String, parent: Option<u16>)
 /// Categories for a command Redis doesn't have, derived from its flags and group the way
 /// Redis' implicit categories work.
 fn fallback_categories(c: &Command) -> u32 {
+    if c.group == Group::Module {
+        return module_categories(c);
+    }
     let mut m = match c.group {
         Group::Generic => cat("keyspace"),
         Group::String => cat("string"),
@@ -199,7 +202,7 @@ fn fallback_categories(c: &Command) -> u32 {
         Group::Stream => cat("stream"),
         Group::Bitmap => cat("bitmap"),
         Group::Array => cat("array"),
-        Group::Server | Group::Cluster => 0,
+        Group::Server | Group::Cluster | Group::Module => 0,
     };
     if c.has(commands::WRITE) {
         m |= C_WRITE;
@@ -224,6 +227,19 @@ fn fallback_categories(c: &Command) -> u32 {
     }
     if m & C_FAST == 0 {
         m |= C_SLOW;
+    }
+    m
+}
+
+/// A module command has exactly the categories its module declares (no implicit @slow):
+/// read or write, and the module's own.
+fn module_categories(c: &Command) -> u32 {
+    let mut m = if c.name.starts_with("json.") { cat("json") } else { 0 };
+    if c.has(commands::WRITE) {
+        m |= C_WRITE;
+    }
+    if c.has(commands::READONLY) {
+        m |= C_READ;
     }
     m
 }

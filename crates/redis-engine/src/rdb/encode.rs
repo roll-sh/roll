@@ -90,6 +90,7 @@ pub(crate) fn type_of(v: &Value, dump: bool) -> u8 {
         Value::Hash(_) => ty::HASH,
         Value::Stream(_) => ty::STREAM_LISTPACKS_5,
         Value::Array(_) => ty::ARRAY,
+        Value::Json(_) => ty::MODULE_2,
     }
 }
 
@@ -150,7 +151,18 @@ impl Encoder {
             Value::Hash(h) => self.hash(h),
             Value::Stream(s) => self.stream(s),
             Value::Array(a) => self.array(a),
+            Value::Json(j) => self.json(j),
         }
+    }
+
+    /// A module value: the type's id, what the module saves (`RM_SaveStringBuffer` of the
+    /// document's CBOR), then the EOF opcode.
+    fn json(&mut self, j: &crate::json::Json) {
+        self.len(crate::json::TYPE_ID);
+        self.len(super::MODULE_OPCODE_STRING);
+        let cbor = crate::json::cbor::encode(j.root());
+        self.string(&cbor);
+        self.len(super::MODULE_OPCODE_EOF);
     }
 
     /// Count, the insert cursor (flag 0, or 1 and the index), then index-tagged elements.

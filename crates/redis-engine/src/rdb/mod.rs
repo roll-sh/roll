@@ -72,6 +72,11 @@ pub(crate) mod ty {
     pub const GCRA: u8 = 33;
 }
 
+/// Opcodes inside a `MODULE_2` value (`RDB_MODULE_OPCODE_*`).
+pub(crate) const MODULE_OPCODE_EOF: u64 = 0;
+pub(crate) const MODULE_OPCODE_UINT: u64 = 2;
+pub(crate) const MODULE_OPCODE_STRING: u64 = 5;
+
 /// File opcodes (`RDB_OPCODE_*`).
 pub(crate) mod op {
     pub const HASH_TEMPLATE: u8 = 242;

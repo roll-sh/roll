@@ -376,12 +376,62 @@ impl<'c, S: Src> Dec<'c, S> {
             | ty::STREAM_LISTPACKS_3
             | ty::STREAM_LISTPACKS_4
             | ty::STREAM_LISTPACKS_5 => Value::Stream(Box::new(self.stream(t)?)),
-            ty::MODULE_PRE_GA | ty::MODULE_2 => return Err(RdbError::Unsupported("module values")),
+            ty::MODULE_2 => Value::Json(Box::new(self.module()?)),
+            ty::MODULE_PRE_GA => return Err(RdbError::Unsupported("module values")),
             ty::ARRAY => Value::Array(Box::new(self.array()?)),
             ty::HASH_TMPL_LP..=ty::HASH_TMPL_ARRAY_REF => Value::Hash(Box::new(self.template_hash(t)?)),
             ty::GCRA => return Err(RdbError::Unsupported("GCRA values")),
             _ => return Err(bad("unknown object type")),
         })
+    }
+
+    /// A `MODULE_2` value: the module type id, what its `rdb_load` reads, the EOF opcode. Only
+    /// RedisJSON documents are known (`ReJSON-RL`, encoding versions 2 to 4).
+    fn module(&mut self) -> R<crate::json::Json> {
+        use crate::json;
+        let id = self.len()?;
+        if id >> 10 != json::TYPE_ID >> 10 {
+            return Err(RdbError::Unsupported("module values"));
+        }
+        let mut buf = Vec::new();
+        let root = match id & 1023 {
+            4 => {
+                self.module_string(&mut buf)?;
+                json::cbor::decode(&buf)
+            }
+            v @ (2 | 3) => {
+                self.module_string(&mut buf)?;
+                if v == 2 && self.module_uint()? > 0 {
+                    // Search's old auxiliary fields.
+                    let mut skip = Vec::new();
+                    self.module_string(&mut skip)?;
+                    self.module_string(&mut skip)?;
+                }
+                std::str::from_utf8(&buf).ok().and_then(|t| json::de::parse(t, None).ok())
+            }
+            _ => None,
+        };
+        let root = root.ok_or(bad("module value its module can't load"))?;
+        if self.len()? != super::MODULE_OPCODE_EOF {
+            return Err(bad("module value not terminated by EOF"));
+        }
+        Ok(json::Json::new(root))
+    }
+
+    /// `RM_LoadStringBuffer` of a `MODULE_2` value: the opcode, then a string.
+    fn module_string(&mut self, out: &mut Vec<u8>) -> R<()> {
+        if self.len()? != super::MODULE_OPCODE_STRING {
+            return Err(bad("module string expected"));
+        }
+        self.string(out)
+    }
+
+    /// `RM_LoadUnsigned` of a `MODULE_2` value.
+    fn module_uint(&mut self) -> R<u64> {
+        if self.len()? != super::MODULE_OPCODE_UINT {
+            return Err(bad("module unsigned expected"));
+        }
+        self.len()
     }
 
     /// `count` strings (no allocation sized by the count alone).
