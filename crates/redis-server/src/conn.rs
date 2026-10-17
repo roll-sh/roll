@@ -144,7 +144,21 @@ where
             Some(d) if d > 0 => Some(d),
             _ => None,
         };
+        let db = conn.db().cloned();
+        let kicked = async {
+            match &db {
+                Some(db) => {
+                    // Register before checking the flag so a kick in between isn't missed.
+                    let n = db.kicked.notified();
+                    if !db.evicting.load(Ordering::SeqCst) {
+                        n.await;
+                    }
+                }
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
+            _ = kicked => break,
             r = rd.read_buf(&mut inbuf) => match r {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}

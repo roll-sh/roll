@@ -60,6 +60,9 @@ pub struct Database {
     pub sync_writes: AtomicBool,
     /// Replication backlog, when this database is a primary with replicas.
     pub backlog: Mutex<Option<Arc<Backlog>>>,
+    /// Signalled to disconnect every client (delete, restore, move to another node).
+    pub kicked: tokio::sync::Notify,
+    pub evicting: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -137,7 +140,17 @@ impl Database {
             durability: Mutex::new(None),
             sync_writes: AtomicBool::new(false),
             backlog: Mutex::new(None),
+            kicked: tokio::sync::Notify::new(),
+            evicting: AtomicBool::new(false),
         })
+    }
+
+    /// Close the database to new sessions and disconnect current clients. They reconnect and
+    /// find the database wherever it is next (reloaded, restored, or on another node).
+    pub fn close_and_kick(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.evicting.store(true, Ordering::SeqCst);
+        self.kicked.notify_waiters();
     }
 
     pub fn shard(&self, i: usize) -> &Shard {

@@ -35,6 +35,8 @@ pub struct DbSpec {
     pub replica_of: Option<String>,
     /// Acknowledge writes only once they are in object storage.
     pub sync_writes: bool,
+    /// Unload after this long without clients (`None`: the node's default).
+    pub idle_timeout: Option<Duration>,
 }
 
 impl DbSpec {
@@ -46,6 +48,7 @@ impl DbSpec {
             secrets: vec![Secret { value: secret.into(), read_only: false }],
             replica_of: None,
             sync_writes: false,
+            idle_timeout: None,
         }
     }
 }
@@ -100,6 +103,7 @@ pub struct Node {
     pub cfg: NodeConfig,
     dbs: Mutex<HashMap<String, Slot>>,
     followers: Mutex<HashMap<String, Arc<Follower>>>,
+    idle_overrides: Mutex<HashMap<String, Duration>>,
     /// How often replicas poll object storage for new log segments.
     pub replica_poll: Duration,
     /// Serialises loads and unloads of the same database.
@@ -142,6 +146,7 @@ impl Node {
             cfg,
             dbs: Mutex::new(HashMap::new()),
             followers: Mutex::new(HashMap::new()),
+            idle_overrides: Mutex::new(HashMap::new()),
             replica_poll: Duration::from_millis(100),
             transitions: Mutex::new(HashMap::new()),
         });
@@ -176,12 +181,24 @@ impl Node {
         self.dbs.lock().get(id).and_then(|s| s.get().cloned())
     }
 
-    fn idle(&self, idle: Duration) -> Vec<String> {
+    fn idle(&self, default: Duration) -> Vec<String> {
+        let overrides = self.idle_overrides.lock().clone();
         self.loaded()
             .into_iter()
-            .filter(|d| d.connections.load(Ordering::SeqCst) == 0 && d.idle_ms() >= idle.as_millis() as u64)
+            .filter(|d| {
+                let idle = overrides.get(&d.id).copied().unwrap_or(default);
+                d.connections.load(Ordering::SeqCst) == 0 && !idle.is_zero() && d.idle_ms() >= idle.as_millis() as u64
+            })
             .map(|d| d.id.clone())
             .collect()
+    }
+
+    /// Change a database's idle timeout (zero: never unload).
+    pub fn set_idle_timeout(&self, id: &str, idle: Option<Duration>) {
+        match idle {
+            Some(d) => self.idle_overrides.lock().insert(id.to_string(), d),
+            None => self.idle_overrides.lock().remove(id),
+        };
     }
 
     /// The database, restoring it from object storage if it isn't in memory.
@@ -194,6 +211,7 @@ impl Node {
                     let _g = lock.lock().await;
                     let db = Database::new(spec.id.clone(), spec.config.clone(), spec.shards);
                     db.sync_writes.store(spec.sync_writes, Ordering::Relaxed);
+                    self.set_idle_timeout(&spec.id, spec.idle_timeout);
                     if let Some(primary) = &spec.replica_of {
                         let Some(shipper) = &self.shipper else { anyhow::bail!("replicas need object storage") };
                         persist::restore_at(&shipper.objects, primary, &db, persist::Until::LATEST, None).await?;
@@ -226,13 +244,38 @@ impl Node {
     /// Flush a database to object storage and drop it from memory, unless it is in use.
     /// Returns whether it was unloaded.
     pub async fn unload(&self, id: &str) -> anyhow::Result<bool> {
+        self.unload_inner(id, false).await
+    }
+
+    /// Unload even if clients are connected: they are disconnected first (and reconnect to the
+    /// reloaded database). Used for deletes, in-place restores and moves.
+    pub async fn evict(&self, id: &str) -> anyhow::Result<bool> {
+        self.unload_inner(id, true).await
+    }
+
+    async fn unload_inner(&self, id: &str, force: bool) -> anyhow::Result<bool> {
         let Some(shipper) = &self.shipper else { return Ok(false) };
         let lock = self.transition_lock(id);
         let _g = lock.lock().await;
         let Some(db) = self.get_loaded(id) else { return Ok(false) };
-        db.closed.store(true, Ordering::SeqCst);
+        if force {
+            db.close_and_kick();
+            // In-flight HTTP requests and connections finish their current batch.
+            for _ in 0..500 {
+                if db.connections.load(Ordering::SeqCst) == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } else {
+            db.closed.store(true, Ordering::SeqCst);
+        }
         if db.connections.load(Ordering::SeqCst) > 0 {
             db.closed.store(false, Ordering::SeqCst);
+            db.evicting.store(false, Ordering::SeqCst);
+            if force {
+                anyhow::bail!("database {id} still has clients after disconnecting them");
+            }
             return Ok(false);
         }
         let follower = self.followers.lock().remove(id);

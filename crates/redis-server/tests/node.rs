@@ -174,3 +174,16 @@ async fn read_replica_endpoint() {
     assert_eq!(r.cmd(["SET", "x", "1"]).await.unwrap(), Reply::error("READONLY You can't write against a read only replica."));
     assert!(matches!(r.cmd(["ROLE"]).await.unwrap(), Reply::Array(a) if a[0] == Reply::bulk(b"slave")));
 }
+
+#[tokio::test]
+async fn evict_disconnects_and_clients_reconnect_to_reloaded_state() {
+    let (addr, node) = start(None).await;
+    let mut c = RespClient::connect(addr).await.unwrap();
+    assert_eq!(c.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
+    assert_eq!(c.cmd(["SET", "k", "v"]).await.unwrap(), Reply::Ok);
+    assert!(node.evict("alpha").await.unwrap());
+    assert!(c.cmd(["PING"]).await.is_err(), "the connection is closed");
+    let mut c = RespClient::connect(addr).await.unwrap();
+    assert_eq!(c.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
+    assert_eq!(c.cmd(["GET", "k"]).await.unwrap(), Reply::bulk(b"v"));
+}
