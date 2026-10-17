@@ -1,3 +1,4 @@
+mod stream;
 mod tasks;
 
 use anyhow::{Context, bail};
@@ -20,6 +21,9 @@ struct Cli {
     /// Print raw JSON.
     #[arg(long, global = true)]
     json: bool,
+    /// API key (`username:secret`) for streams that require one.
+    #[arg(long, env = "ROLL_API_KEY", global = true, hide_env_values = true)]
+    api_key: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -32,6 +36,9 @@ enum Cmd {
     /// Messages, queues, schedules and workflows.
     #[command(subcommand)]
     Tasks(Box<tasks::Cmd>),
+    /// Kafka-compatible streams.
+    #[command(subcommand, alias = "kafka")]
+    Stream(stream::Stream),
 }
 
 #[derive(Subcommand)]
@@ -136,15 +143,15 @@ enum Db {
 
 struct Api {
     base: String,
-    token: Option<String>,
     http: reqwest::Client,
+    key: Option<String>,
 }
 
 impl Api {
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
-        if let Some(t) = &self.token {
-            req = req.bearer_auth(t);
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
         }
         if let Some(b) = body {
             req = req.json(&b);
@@ -154,7 +161,9 @@ impl Api {
         let text = res.text().await?;
         let value: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text)? };
         if !status.is_success() {
-            bail!("{}", value["error"].as_str().unwrap_or(&text));
+            // Batch endpoints report per-record errors.
+            let per_record = value["offsets"].as_array().and_then(|o| o.iter().find_map(|r| r["error"].as_str()));
+            bail!("{}", value["error"].as_str().or(per_record).unwrap_or(&text));
         }
         Ok(value)
     }
@@ -167,7 +176,7 @@ impl Api {
         {
             base = root;
         }
-        Api { base: base.to_string(), token: self.token.clone(), http: self.http.clone() }
+        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone() }
     }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
@@ -259,16 +268,21 @@ async fn project(api: &Api, key: &str) -> anyhow::Result<Value> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let base = cli.api.trim_end_matches('/').to_string();
+    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
+        Cmd::Stream(cmd) => {
+            if let Some(out) = stream::run(&api, cli.json, cmd).await? {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+            return Ok(());
+        }
         Cmd::Tasks(cmd) => {
-            let base = cli.tasks_url.map(|u| u.trim_end_matches('/').to_string()).unwrap_or(format!("{base}/v1/tasks"));
-            let api = Api { base, token: cli.token.filter(|t| !t.is_empty()), http: reqwest::Client::new() };
-            return tasks::run(&api, *cmd, cli.json).await;
+            let base = cli.tasks_url.map(|u| u.trim_end_matches('/').to_string()).unwrap_or(format!("{}/v1/tasks", api.base));
+            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()) };
+            return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
     };
-    let api = Api { base, token: None, http: reqwest::Client::new() };
     let out = match cmd {
         Db::List => {
             let v = api.get("/v1/projects").await?;

@@ -1,6 +1,6 @@
 [package]
 name = "rolld"
-description = "roll daemon: Postgres proxy + control plane API + reconciler"
+description = "roll daemon: Postgres proxy, Kafka-compatible streams, control plane API and reconciler"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,10 +10,13 @@ publish.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+libmimalloc-sys.workspace = true
+mimalloc.workspace = true
 pg-control.workspace = true
 pg-proxy.workspace = true
 pg-storage.workspace = true
 tasks.workspace = true
+stream-broker.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

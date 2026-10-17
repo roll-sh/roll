@@ -6,15 +6,17 @@ Serverless infrastructure for everything.
 
 ```
 apps/
-  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/databases, /dashboard/tasks)
+  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/databases, /dashboard/streams, /dashboard/tasks)
 packages/
   brand/            @roll/brand — logo geometry, animation engine, React components, SVG assets
   tasks/            @roll/tasks — TypeScript SDK: client, pull consumer, signature verification, workflows
 crates/
   pg-proxy/         Postgres wire-protocol proxy (routing, wake-on-connect, cancel forwarding)
   pg-control/       Control plane: projects, branches, endpoints, autoscaling, metering, HTTP API
+  stream-log/       Kafka-format partition log: segments, group commit, idempotence, transactions
+  stream-broker/    Kafka-compatible broker: wire protocol, coordinators, tiering, compaction, HTTP API
   tasks/            roll tasks: messages, queues, schedules, workflows (SQLite, its own S3 log store, or DynamoDB)
-  rolld/            Daemon: proxy + API + reconciler (+ roll tasks on /v1/tasks)
+  rolld/            Daemon: proxy + API + reconciler + Kafka listener (+ roll tasks on /v1/tasks)
   roll-cli/         `roll` CLI
 deploy/aws/         roll tasks on AWS: Dockerfile + CloudFormation
 ```
@@ -148,6 +150,119 @@ against S3 (SeaweedFS). To point the e2e tests at S3 locally, set `ROLL_E2E_S3_B
 they are sized to the load, they run on Graviton, the settings are tuned (`jit=off`, SSD costs, WAL
 compression), and pooling comes next. The query engine itself is stock Postgres; that is what keeps it
 100% compatible.
+
+## Streams
+
+Kafka-compatible streams: any Kafka client, tool or framework connects to `rolld` on `:9092`. You can
+also skip the client entirely and produce and consume over plain HTTP. Storage is bottomless: data is
+fsynced locally and uploaded to object storage (local directory or S3), and idle partitions close and
+cost nothing but their objects.
+
+```sh
+cargo run -p rolld                                        # Kafka on :9092, HTTP API on :7070
+cargo run -p roll-cli -- stream create shop               # bootstrap address, SASL key, client properties
+cargo run -p roll-cli -- stream topic create shop orders -p 6
+echo '{"id":1}' | cargo run -q -p roll-cli -- stream produce shop orders -k user-1
+cargo run -p roll-cli -- stream consume shop orders --group billing --follow
+
+curl localhost:7070/v1/streams/shop/topics/orders/records -d '{"key":"user-1","value":{"id":2}}'
+curl 'localhost:7070/v1/streams/shop/topics/orders/records?from=earliest&wait_ms=10000'
+curl -N localhost:7070/v1/streams/shop/topics/orders/tail     # Server-Sent Events
+```
+
+Unauthenticated Kafka connections use the `default` stream (`--default-stream`). Other streams
+authenticate with SASL SCRAM-SHA-256/512 or PLAIN using a stream key, and each stream is its own
+isolated cluster: topics, groups, transactions and quotas. `/dashboard/streams` shows throughput, topics,
+partitions (hot vs object-storage bytes), keys, a live tail and the AWS cost next to MSK.
+
+How it works:
+
+- **Zero-copy data path.** Produce validates record batches (CRC, sequence, size, timestamps) and
+  appends them as received, patching only the offset. Fetch returns the same bytes. A recent-batch
+  cache serves tailing consumers from memory. Responses are pipelined in order, and long-polling
+  fetches wake on the high watermark.
+- **Durability.** `acks=all` waits for a group-commit fsync, and consumers only see durable data, so a
+  crash never exposes records that could be lost. On restart, torn tails are cut at the last valid batch.
+- **Tiering.** Sealed (and sufficiently old) data is uploaded as chunks of whole batches. Local copies
+  are dropped by `local.retention.*`, and reads below the local range are served from object storage
+  through a cache. `retention.*`, `DeleteRecords` and topic deletion remove the objects.
+- **Compaction.** `cleanup.policy=compact` keeps the latest record per key. It drops keyless records,
+  aborted transactional data and, after `delete.retention.ms`, tombstones. It rewrites uploaded chunks
+  into new objects and swaps them in atomically; offsets never change. The trigger is
+  `min.cleanable.dirty.ratio`, `min.compaction.lag.ms` or `max.compaction.lag.ms`.
+- **Semantics.**
+  - Idempotent producers (KIP-360 recovery).
+  - Transactions with KIP-890 verification, the LSO and read_committed.
+  - Exactly-once consume-transform-produce.
+  - Classic consumer groups, including static membership (KIP-345).
+  - Quotas with KIP-219 throttling.
+- **HTTP data plane.**
+  - Produce JSON, NDJSON or raw bodies. Partitioning uses Kafka's murmur2, so keys land where Kafka
+    clients put them.
+  - Read with stateless cursors, or through server-managed groups. The broker leases partitions per
+    consumer and commits for you (`auto`, `read` or `manual`), and the committed offsets are the same
+    ones Kafka groups see.
+  - Confluent REST v3 (`/kafka/v3/clusters/...`) for existing tooling.
+
+### Tests
+
+`pnpm test:stream` (or `scripts/test-stream.sh`) runs clippy and the suite:
+
+- `protocol.rs`: every API at every version (default and populated requests), version negotiation,
+  pipelining, malformed frames, SASL and tenancy, quotas.
+- `rdkafka.rs`: librdkafka for produce/consume across codecs, idempotence, groups, seeks and
+  timestamps, transactions and EOS, admin, SASL, restarts.
+- `java.rs`, against `apache/kafka:4.1.0` in Docker:
+  - `kafka-topics`, the console clients, `kafka-consumer-groups`, `kafka-configs`
+  - perf tools, `kafka-transactions` and the verifiable clients
+  - `kafka-delete-records`, `kafka-log-dirs`, `kafka-metadata-quorum`
+  - SASL SCRAM/PLAIN and TLS
+  - a Kafka Streams word count with `exactly_once_v2`
+- `storage.rs`: tiered reads from object storage, retention, torn writes, unclean stops, scale to zero,
+  open transactions across restarts.
+- `compaction.rs`: latest value per key, tombstones, librdkafka reading across gaps, compact+delete.
+- `http.rs`: the control plane, produce formats, cursors, managed groups, SSE, auth, Confluent v3,
+  and interop with Kafka clients.
+
+The suite only runs when a stream crate changed since the last green run (`--force`, `--unit` as for
+Postgres). CI (`.github/workflows/stream.yml`) also runs the storage, compaction, HTTP and librdkafka
+tests against S3 (SeaweedFS).
+
+Measured locally with a release build on an M-series Mac, using a single `rolld`. The Java perf tools
+run in Docker Desktop, so their bytes also cross its VM network:
+
+| what | result |
+| --- | --- |
+| librdkafka produce, 200 B records, `acks=all`, 6 partitions (`examples/bench.rs`) | 0.8–1.1M rec/s (160–225 MB/s) |
+| librdkafka produce, 1 KB records, `acks=all` | 246k rec/s (252 MB/s) |
+| librdkafka consume, 200 B / 1 KB records | 1.44M rec/s (289 MB/s) / 1.04M rec/s (1.07 GB/s) |
+| `kafka-producer-perf-test`, 200 B, `acks=all`, uncompressed / lz4 (Docker) | 321k / 300k rec/s (61 / 57 MB/s: Docker Desktop's network is the limit) |
+| `kafka-producer-perf-test` at 1,000 rec/s, `acks=all`, `linger.ms=0` (Docker) | p50 14 ms, p99 63 ms, fsync included |
+| `kafka-consumer-perf-test` (Docker) | 509k rec/s (97 MB/s) |
+| HTTP produce: 100k records (20 MB) in one NDJSON request | 158 ms until durable (630k rec/s) |
+| `rolld` memory after 5M records | 243 MB RSS |
+
+The data path doesn't decode records, so throughput follows bytes and batches, not record count.
+[`crates/stream-broker/README.md`](crates/stream-broker/README.md) covers the internals, cold start,
+idle usage, how to reproduce these numbers, and the current limits.
+
+### Compared with Kafka, Confluent and Redpanda
+
+| feature | status |
+| --- | --- |
+| Kafka protocol (produce v3–13, fetch v4–18, admin, groups, transactions, SASL, TLS, quotas) | ✅ |
+| Java clients, librdkafka (Go/Python/.NET/Node), Kafka Streams, Kafka CLI tools | ✅ tested |
+| Bottomless storage in S3, scale to zero, no disks to size | ✅ |
+| Log compaction | ✅ |
+| HTTP produce/consume without a client, SSE, Confluent REST v3 | ✅ |
+| Multi-tenant streams with per-stream keys, quotas, usage and cost | ✅ |
+| Online partition and config changes | ✅ |
+| Replication across brokers / multi-AZ | next: durability today is local fsync plus object storage (seconds of RPO for the active segment on host loss) |
+| Several brokers serving one cluster (partition leadership) | next: one `rolld` serves every partition today |
+| KIP-848 consumer protocol, share groups (KIP-932) | next: classic groups only |
+| Fetch sessions (KIP-227) | next: full fetches only (clients fall back automatically) |
+| ACLs | next: keys scope a whole stream; `DescribeAcls` reports security disabled |
+| Schema Registry, Connect | later |
 
 ## Tasks
 
@@ -310,5 +425,5 @@ writers horizontally. See [deploy/aws/README.md](deploy/aws/README.md).
 single-tenant rows of the cost table, and `multi_tenant_cost_profile` the shared-cell row.
 
 It skips itself when nothing tasks-related changed. `--force` runs anyway, and `--unit` skips Docker.
-CI is `.github/workflows/tasks.yml`. The SDK has its own suite against the real binary:
+CI is `.github/workflows/tasks.yml` (through `ci.yml` for pull requests and the merge queue). The SDK has its own suite against the real binary:
 `pnpm --filter @roll/tasks test`.

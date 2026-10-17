@@ -1,0 +1,69 @@
+name: stream
+
+# Runs only when stream-related code changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/stream-log/**"
+      - "crates/stream-broker/**"
+      - "vendor/kafka-protocol/**"
+      - "crates/pg-storage/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/test-stream.sh"
+      - ".github/workflows/stream.yml"
+  workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
+
+concurrency:
+  group: stream-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # librdkafka is built from source for the client tests; it includes the curl headers on Linux.
+      - run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libsasl2-dev
+      - run: scripts/test-stream.sh --force --unit
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Kafka tool containers reach the broker through the Docker host gateway.
+      ROLL_E2E_BIND: 0.0.0.0
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libsasl2-dev
+      - name: Pull the Kafka image
+        run: docker pull -q apache/kafka:4.1.0
+      - name: Java clients and tools
+        run: scripts/test-stream.sh --force
+
+      - name: Object storage on S3 (SeaweedFS)
+        env:
+          AWS_ACCESS_KEY_ID: roll
+          AWS_SECRET_ACCESS_KEY: roll
+          AWS_REGION: us-east-1
+          ROLL_E2E_S3_BUCKET: roll-e2e
+          ROLL_E2E_S3_ENDPOINT: http://127.0.0.1:8333
+        run: |
+          docker run -d --name seaweed -p 8333:8333 chrislusf/seaweedfs server -s3
+          for i in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && break; sleep 1; done
+          docker exec seaweed sh -c 'echo "s3.bucket.create -name roll-e2e" | weed shell'
+          cargo test -p stream-broker --test storage --test compaction --test rdkafka --test http

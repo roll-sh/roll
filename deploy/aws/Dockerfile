@@ -7,6 +7,8 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
+# Patched dependencies of other workspace crates; Cargo resolves the whole workspace.
+COPY vendor vendor
 ENV CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 CARGO_PROFILE_RELEASE_STRIP=true
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \

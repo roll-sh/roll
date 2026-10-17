@@ -13,17 +13,9 @@ on:
       - "scripts/test-tasks.sh"
       - ".github/workflows/tasks.yml"
       - "deploy/aws/**"
-  pull_request:
-    paths:
-      - "crates/tasks/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-tasks.sh"
-      - ".github/workflows/tasks.yml"
-      - "deploy/aws/**"
   workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
 
 concurrency:
   group: tasks-${{ github.ref }}

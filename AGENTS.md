@@ -81,6 +81,28 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - `crates/pg-proxy` is the Postgres wire proxy. `crates/pg-control` is the control plane. `rolld` is the daemon and `roll-cli` is the `roll` CLI.
   - Run `cargo build`, `cargo test` and `cargo clippy` before you finish.
   - After touching anything Postgres-related, run `pnpm test:pg` (Docker e2e; it skips itself when nothing relevant changed). New Postgres features need an e2e test in `crates/pg-control/tests/e2e.rs`.
+- **Streams (Kafka-compatible):**
+  - `crates/stream-log` is the partition log. It holds Kafka record batches v2 in segment files, group-commit fsync (the high watermark is the durable end), idempotent producer state and transactions, plus hooks for tiering. It does no network or object-storage I/O.
+  - `crates/stream-broker` is the broker:
+    - the Kafka wire protocol (`handlers/`, one module per API family; supported versions are in `handlers/mod.rs` `APIS`)
+    - group and transaction coordinators, SASL tenancy, quotas
+    - tiering to `pg_storage::Objects`, retention and compaction (`compaction.rs`)
+    - the HTTP API (`http/`): the control plane, a connectionless data plane, and Confluent REST v3
+  - Produce and fetch never decode records: batches go to disk and back to clients as received. Only compaction, timestamp lookups, compacted-topic key checks and the HTTP API decode them, through `records.rs`.
+  - Compaction rewrites uploaded chunks into new objects with `.c<generation>.kb` keys and swaps them in atomically, keeping offsets. Never reuse a chunk key.
+  - Local disk is a cache: closed partitions drop their local copies (`evict_on_unload`), and `local_disk_bytes` caps open ones. Never drop a segment that isn't fully uploaded or that holds an open transaction (`keep_local_from`): transaction state is rebuilt from local segments.
+  - Encoding fails if a response sets a field outside its version range. Gate every field on `ctx.version`. `tests/protocol.rs` encodes every API at every version.
+  - Never size an allocation from a count or length a peer sent; bound it by the bytes actually present. `kafka-protocol` is vendored with bounded decoders (`vendor/kafka-protocol/ROLL.md`), and the broker tests fail any allocation over 1 GiB (`tests/common`).
+  - After touching anything stream-related, run `pnpm test:stream`. It skips itself when nothing relevant changed and runs the Java tool tests in Docker (`apache/kafka:4.1.0`).
+  - Put new tests in the matching file:
+    - wire behaviour: `tests/protocol.rs`
+    - librdkafka: `tests/rdkafka.rs`
+    - Java clients and tools: `tests/java.rs`
+    - HTTP: `tests/http.rs`
+    - storage: `tests/storage.rs`
+    - compaction: `tests/compaction.rs`
+  - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the broker tests against S3.
+  - `roll stream …` in `crates/roll-cli` and `/dashboard/streams` both use the HTTP API.
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.
   - Test Postgres with `docker run --rm postgres:18-alpine psql "postgres://...@host.docker.internal:55432/main?options=endpoint%3D<ep>"`, because there is no local psql.

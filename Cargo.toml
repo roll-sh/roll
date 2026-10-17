@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -44,6 +45,22 @@ aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1"
 lambda_http = { version = "1", default-features = false, features = ["apigw_http", "apigw_rest", "alb"] }
 tasks = { path = "crates/tasks" }
+kafka-protocol = { version = "0.18", features = ["messages_enums"] }
+mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
+crc32c = "0.6"
+uuid = "1"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "zstd"] }
+rcgen = "0.14"
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
+stream-log = { path = "crates/stream-log" }
+stream-broker = { path = "crates/stream-broker" }
+
+# kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
+[patch.crates-io]
+kafka-protocol = { path = "vendor/kafka-protocol" }
