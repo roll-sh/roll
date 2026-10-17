@@ -80,6 +80,8 @@ pub struct Config {
     pub hosted: bool,
     /// What carries API calls to a log store cell (prices usage).
     pub front_door: crate::cost::FrontDoor,
+    /// The log's commits go to S3 Express One Zone (prices usage).
+    pub log_express: bool,
     pub user_agent: String,
 }
 
@@ -112,6 +114,7 @@ impl Default for Config {
             require_auth: false,
             hosted: false,
             front_door: crate::cost::FrontDoor::Lambda,
+            log_express: false,
             user_agent: format!("roll-tasks/{}", env!("CARGO_PKG_VERSION")),
         }
     }
@@ -1160,7 +1163,13 @@ impl Tasks {
         let workers = self.cache.read().unwrap().nodes.len();
         let cost = crate::cost::estimate(
             &total,
-            crate::cost::Deployment { layout, workers, front_door: self.config.front_door, hosted: self.config.hosted },
+            crate::cost::Deployment {
+                layout,
+                workers,
+                front_door: self.config.front_door,
+                hosted: self.config.hosted,
+                log_express: self.config.log_express,
+            },
         );
         let per_day = cost.total_usd / days as f64;
         Ok(json!({

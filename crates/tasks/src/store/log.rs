@@ -10,6 +10,9 @@
 //! <prefix>/meta/pruned                                log entries up to here are gone
 //! ```
 //!
+//! The `wal/` entries can live in a bucket of their own (`LogConfig::wal`, e.g. S3 Express One
+//! Zone for cheaper PUTs); the rest stays in the main one.
+//!
 //! - **Durability.** A write returns once the commit holding it is in S3 (multi-AZ). Commits
 //!   group everything written while the previous one uploaded, by every tenant of the cell, and
 //!   start at most every `commit_ms`: the S3 bill follows the commit rate, which is capped,
@@ -52,6 +55,10 @@ pub struct LogConfig {
     pub objects: Arc<dyn ObjectStore>,
     /// Key prefix inside the bucket, e.g. `tasks`.
     pub prefix: String,
+    /// Where commits go, with their own key prefix, if not with everything else: an S3 Express
+    /// One Zone bucket costs about a quarter per PUT, but keeps the log in one AZ. Snapshots, the
+    /// prune marker and the lease stay in `objects`.
+    pub wal: Option<(Arc<dyn ObjectStore>, String)>,
     /// Local working directory for the databases.
     pub dir: PathBuf,
     /// Due-index shards of the default tenant …
@@ -77,10 +84,16 @@ pub struct LogConfig {
 }
 
 impl LogConfig {
+    /// The store and key prefix of the commits.
+    fn wal_store(&self) -> (Arc<dyn ObjectStore>, String) {
+        self.wal.clone().unwrap_or_else(|| (self.objects.clone(), self.prefix.clone()))
+    }
+
     pub fn new(objects: Arc<dyn ObjectStore>, prefix: impl Into<String>, dir: PathBuf) -> Self {
         Self {
             objects,
             prefix: prefix.into(),
+            wal: None,
             dir,
             shards: 4,
             tenant_shards: 2,
@@ -454,9 +467,11 @@ impl Log {
             replay.tenants.insert(tenant, (db, snap, prev, snap));
         }
 
-        // The log after the pruned point, in order, without gaps.
-        let mut seqs: Vec<u64> = objects
-            .list_with_offset(Some(&ObjPath::from(format!("{prefix}/wal"))), &wal_path(&prefix, pruned))
+        // The log after the pruned point, in order, without gaps. (A plain list: directory buckets
+        // neither sort listings nor start after a key; pruned entries are deleted anyway.)
+        let (wal_objects, wal_prefix) = cfg.wal_store();
+        let mut seqs: Vec<u64> = wal_objects
+            .list(Some(&ObjPath::from(format!("{wal_prefix}/wal"))))
             .map_ok(|m| seq_of(&m.location))
             .try_collect::<Vec<_>>()
             .await?
@@ -472,7 +487,7 @@ impl Log {
         let mut wal = VecDeque::new();
         let mut entries = futures::stream::iter(seqs.clone())
             .map(|s| {
-                let (objects, prefix) = (objects.clone(), prefix.clone());
+                let (objects, prefix) = (wal_objects.clone(), wal_prefix.clone());
                 async move { Ok::<_, anyhow::Error>((s, objects.get(&wal_path(&prefix, s)).await?.bytes().await?)) }
             })
             .buffered(64);
@@ -489,10 +504,10 @@ impl Log {
         let mut seq = last + 1;
         loop {
             let marker = encode(seq, "takeover", &cfg.node, &[]);
-            match objects.put_opts(&wal_path(&prefix, seq), PutPayload::from(marker), PutMode::Create.into()).await {
+            match wal_objects.put_opts(&wal_path(&wal_prefix, seq), PutPayload::from(marker), PutMode::Create.into()).await {
                 Ok(_) => break,
                 Err(object_store::Error::AlreadyExists { .. }) => {
-                    let bytes = objects.get(&wal_path(&prefix, seq)).await?.bytes().await?;
+                    let bytes = wal_objects.get(&wal_path(&wal_prefix, seq)).await?.bytes().await?;
                     replay.apply(seq, decode(&bytes)?)?;
                     wal.push_back((seq, bytes.len() as u64));
                     seq += 1;
@@ -693,17 +708,18 @@ impl Log {
 
     /// Upload one entry, retrying transient errors. `Ok(false)`: the slot was taken (fenced).
     async fn put_entry(&self, seq: u64, body: Vec<u8>) -> Result<bool> {
-        let path = wal_path(&self.cfg.prefix, seq);
+        let (objects, prefix) = self.cfg.wal_store();
+        let path = wal_path(&prefix, seq);
         let payload = PutPayload::from(Bytes::from(body));
         let mut delay = 50u64;
         let started = Instant::now();
         let mut retried = false;
         loop {
-            match self.cfg.objects.put_opts(&path, payload.clone(), PutMode::Create.into()).await {
+            match objects.put_opts(&path, payload.clone(), PutMode::Create.into()).await {
                 Ok(_) => return Ok(true),
                 // A retry can find the entry an earlier, seemingly failed attempt wrote.
                 Err(object_store::Error::AlreadyExists { .. }) if retried => {
-                    let found = self.cfg.objects.get(&path).await?.bytes().await?;
+                    let found = objects.get(&path).await?.bytes().await?;
                     return Ok(found.iter().eq(payload.iter().flat_map(|b| b.iter())));
                 }
                 Err(object_store::Error::AlreadyExists { .. }) => return Ok(false),
@@ -873,9 +889,9 @@ async fn prune(log: Arc<Log>, through: u64) -> Result<()> {
     let marker = serde_json::to_vec(&serde_json::json!({ "through": through, "at": now_ms() }))?;
     log.cfg.objects.put(&pruned_path(&log.cfg.prefix), PutPayload::from(marker)).await?;
     log.metered.fetch_add(1, Ordering::Relaxed);
-    let prefix = log.cfg.prefix.clone();
+    let (objects, prefix) = log.cfg.wal_store();
     let paths = futures::stream::iter((from..=through).map(move |s| Ok(wal_path(&prefix, s)))).boxed();
-    let deleted: Vec<_> = log.cfg.objects.delete_stream(paths).collect().await;
+    let deleted: Vec<_> = objects.delete_stream(paths).collect().await;
     for d in deleted {
         if let Err(e) = d
             && !matches!(e, object_store::Error::NotFound { .. })
@@ -1577,6 +1593,43 @@ mod tests {
         let mut c = config(objects, dir);
         f(&mut c);
         Log::open(c).await.unwrap()
+    }
+
+    /// Commits in their own bucket (S3 Express), the rest in the main one: everything still
+    /// restores, fences and prunes.
+    #[tokio::test]
+    async fn the_log_can_live_in_its_own_bucket() {
+        let main: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let express: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let split = |c: &mut LogConfig| {
+            c.wal = Some((express.clone(), "x".into()));
+            c.snapshot_commits = 4;
+        };
+        let d1 = tempfile::tempdir().unwrap();
+        let log = open_log(main.clone(), d1.path(), split).await;
+        let a = log.create_tenant("a").await.unwrap();
+        for i in 0..40 {
+            put(&a, "q", &format!("k{i}"), i).await;
+        }
+        eventually(|| log.stats().snapshots >= 2 && log.stats().pruned > 0).await;
+        let in_main: Vec<_> = main.list(Some(&ObjPath::from("t/wal"))).try_collect().await.unwrap();
+        assert!(in_main.is_empty(), "commits went to the main bucket");
+        let snaps: Vec<_> = main.list(Some(&ObjPath::from("t/snap/a"))).try_collect().await.unwrap();
+        assert!(!snaps.is_empty(), "snapshots stay in the main bucket");
+        let pruned = log.stats().pruned;
+        let wal: Vec<u64> = express.list(Some(&ObjPath::from("x/wal"))).map_ok(|m| seq_of(&m.location).unwrap()).try_collect().await.unwrap();
+        assert!(!wal.is_empty() && wal.iter().all(|s| *s > pruned), "pruned in the log's bucket: {wal:?} through {pruned}");
+
+        // A new leader restores from both, and fences the old one.
+        let d2 = tempfile::tempdir().unwrap();
+        let next = open_log(main.clone(), d2.path(), split).await;
+        let a2 = next.tenant("a").unwrap();
+        for i in 0..40 {
+            assert_eq!(get(&a2, "q", &format!("k{i}")).await, Some(i));
+        }
+        assert!(a.doc_put("q", "late", &json!({ "n": 1 }), Expect::Any).await.is_err(), "the old leader is fenced");
+        put(&a2, "q", "new", 1).await;
+        next.close().await;
     }
 
     #[tokio::test]

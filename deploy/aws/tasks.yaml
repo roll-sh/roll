@@ -59,6 +59,14 @@ Parameters:
       ACM certificate for Domain. Set it to serve the API from a Network Load Balancer (about
       $20/month, no per-request charge) instead of Lambda (about $0.40 per million calls): cheaper
       above roughly 50 million calls a month.
+  ExpressZoneId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^([a-z0-9]+-az[0-9]+)?$"
+    Description: >-
+      An AZ id (e.g. use1-az4) to keep the log's commits in an S3 Express One Zone bucket there:
+      about a quarter of the PUT cost, but the commits since the last snapshot live in that one
+      AZ (lost with it). Snapshots and the lease stay in S3 Standard. Needs a lowercase stack name.
   Domain:
     Type: String
     Default: ""
@@ -74,6 +82,7 @@ Rules:
 Conditions:
   UseNlb: !Not [!Equals [!Ref CertificateArn, ""]]
   UseLambda: !Equals [!Ref CertificateArn, ""]
+  UseExpress: !Not [!Equals [!Ref ExpressZoneId, ""]]
 
 Resources:
   # --- network: public subnets, no NAT; S3 through a free gateway endpoint ---
@@ -141,6 +150,15 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref Routes]
+
+  S3ExpressEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseExpress
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3express
       VpcEndpointType: Gateway
       RouteTableIds: [!Ref Routes]
 
@@ -228,6 +246,17 @@ Resources:
           - Id: abort-uploads
             Status: Enabled
             AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+
+  # Optional: the commits alone, in one AZ, at about a quarter of the PUT price.
+  LogExpress:
+    Type: AWS::S3Express::DirectoryBucket
+    Condition: UseExpress
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-log--${ExpressZoneId}--x-s3
+      DataRedundancy: SingleAvailabilityZone
+      LocationName: !Ref ExpressZoneId
 
   # --- front door, either: a Lambda function URL that forwards to the leader ---
 
@@ -393,6 +422,12 @@ Resources:
                 Resource: !GetAtt Data.Arn
                 Condition:
                   StringLike: { s3:prefix: ["tasks/*"] }
+              - !If
+                - UseExpress
+                - Effect: Allow
+                  Action: s3express:CreateSession
+                  Resource: !GetAtt LogExpress.Arn
+                - !Ref AWS::NoValue
 
   NodeExecutionRole:
     Type: AWS::IAM::Role
@@ -437,6 +472,10 @@ Resources:
             - { Name: ROLL_TASKS_MAX_INFLIGHT, Value: !Ref MaxInflight }
             - { Name: ROLL_TASKS_DRAIN_S, Value: "25" }
             - { Name: ROLL_TASKS_FRONT_DOOR, Value: !If [UseNlb, nlb, lambda] }
+            - !If
+              - UseExpress
+              - { Name: ROLL_TASKS_WAL, Value: !Sub "s3express://${LogExpress}/tasks" }
+              - !Ref AWS::NoValue
           LogConfiguration:
             LogDriver: awslogs
             Options:

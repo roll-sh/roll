@@ -120,9 +120,17 @@ before old ones hand over, so the API stays up throughout. Lambda switches atomi
 - **Commit latency.** An API write waits for the next commit window (up to `ROLL_TASKS_COMMIT_MS`,
   100 ms) and one S3 PUT, typically 20–60 ms on S3 Standard. One client publishing one message at a
   time therefore gets about 10 a second; use `/batch` or concurrency for more.
-- **Lower latency.** For lower latency, `ROLL_TASKS_LOG=s3express://<bucket--azid--x-s3>/tasks` uses
-  S3 Express One Zone: single-digit-ms PUTs at about a quarter of the price, but the data lives in
-  one AZ. This needs conditional writes on directory buckets and isn't covered by the tests here.
+- **S3 Express for the log (`ExpressZoneId`).** The template can put the commits alone in an S3
+  Express One Zone bucket, with snapshots and the lease staying in S3 Standard
+  (`ROLL_TASKS_WAL=s3express://<name>--<az-id>--x-s3/tasks`). The trade-offs:
+  - Each commit costs $1.13 per million PUTs instead of $5.
+  - Commits take single-digit ms instead of 20–60 ms.
+  - The commits since the last snapshot live in that one AZ. If the AZ is lost, so are they;
+    while it's down, a new leader can't start.
+
+  Fencing relies on create-only writes (`If-None-Match`) in the directory bucket. The store
+  handles its unsorted listings, and the split layout is tested locally. It hasn't been run
+  against real S3 Express, so try it on a test stack first.
 
 ### Cost (us-east-1 list prices)
 
@@ -147,6 +155,8 @@ before old ones hand over, so the API stays up throughout. Lambda switches atomi
     10 PUTs a second, about $130/month, however many messages flow. Lower it for latency, raise it
     to lower the cap.
   - Each tenant's usage carries its share of the commits it was in.
+  - With `ExpressZoneId`, commits cost about a quarter as much: the shared-cell row drops to about
+    $0.06.
 - **Front door.**
   - Lambda proxy: about $0.40 per million API calls (256 MB, waiting for the commit).
   - Network Load Balancer: about $16/month plus about $0.006 per GB, which is roughly $0.02 per

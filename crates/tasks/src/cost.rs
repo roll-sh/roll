@@ -13,6 +13,8 @@ use serde::Serialize;
 /// S3 Standard PUT/LIST and GET, per million requests.
 pub const S3_PUT_PER_M: f64 = 5.0;
 pub const S3_GET_PER_M: f64 = 0.4;
+/// S3 Express One Zone PUTs (objects under 512 KB carry no per-GB upload charge).
+pub const S3_EXPRESS_PUT_PER_M: f64 = 1.13;
 /// DynamoDB on-demand, per million write / read request units.
 pub const DDB_WRITE_PER_M: f64 = 0.625;
 pub const DDB_READ_PER_M: f64 = 0.125;
@@ -88,6 +90,8 @@ pub struct Deployment {
     pub front_door: FrontDoor,
     /// A tenant hosted on a shared cell: the cell's fixed cost is the platform's, not its own.
     pub hosted: bool,
+    /// The log's commits go to S3 Express One Zone.
+    pub log_express: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -121,7 +125,9 @@ pub fn estimate(u: &Usage, d: Deployment) -> Cost {
     let egress_per_m = 1e6 * 1024.0 / 1e9 * EGRESS_PER_GB;
     match layout {
         Layout::Log => {
-            let s3 = u.storage_writes as f64 / 1e6 * S3_PUT_PER_M;
+            // Nearly all storage writes are commits; snapshots (in S3 Standard) are rare.
+            let put = if d.log_express { S3_EXPRESS_PUT_PER_M } else { S3_PUT_PER_M };
+            let s3 = u.storage_writes as f64 / 1e6 * put;
             let puts_per_message = if u.published > 0 && u.storage_writes > 0 {
                 u.storage_writes as f64 / u.published as f64
             } else {
@@ -147,7 +153,7 @@ pub fn estimate(u: &Usage, d: Deployment) -> Cost {
                 hosted: d.hosted,
                 items: vec![CostItem { name: "S3 requests", usd: s3 }, CostItem { name: door, usd: door_usd }, CostItem { name: "Egress", usd: egress }],
                 total_usd: s3 + door_usd + egress,
-                usd_per_million_messages: puts_per_message * S3_PUT_PER_M + door_per_m + egress_per_m,
+                usd_per_million_messages: puts_per_message * put + door_per_m + egress_per_m,
                 fixed_usd_per_month,
                 fixed,
             }
@@ -181,7 +187,7 @@ mod tests {
     use super::*;
 
     fn on(layout: Layout, workers: usize) -> Deployment {
-        Deployment { layout, workers, front_door: FrontDoor::Lambda, hosted: false }
+        Deployment { layout, workers, front_door: FrontDoor::Lambda, hosted: false, log_express: false }
     }
 
     fn million() -> Usage {
@@ -223,6 +229,10 @@ mod tests {
         assert!(nlb.usd_per_million_messages < lambda.usd_per_million_messages - 0.3, "{nlb:?} {lambda:?}");
         assert!(nlb.fixed_usd_per_month > lambda.fixed_usd_per_month + 15.0);
         assert_eq!(nlb.items[1].name, "Load balancer");
+        let express = estimate(&shared, Deployment { front_door: FrontDoor::Nlb, log_express: true, ..on(Layout::Log, 1) });
+        assert!(express.items[0].usd < nlb.items[0].usd / 4.0 + 0.001, "{express:?}");
+        // $0.06 of S3, $0.02 of load balancer, $0.09 of egress.
+        assert!(express.usd_per_million_messages < 0.2, "{express:?}");
         let tenant = estimate(&shared, Deployment { hosted: true, ..on(Layout::Log, 1) });
         assert_eq!(tenant.fixed_usd_per_month, 0.0);
         assert_eq!("nlb".parse::<FrontDoor>().unwrap(), FrontDoor::Nlb);

@@ -258,6 +258,10 @@ bill is capped at 10 PUTs a second (about $130/month), however busy the cell. Me
 - **Shared platform.** A shared cell behind the load balancer costs about **$0.30 per million
   messages** (S3 plus load balancer, before egress at $0.09/GB), plus about $26/month for the whole
   cell. That's below Cloud Tasks' $0.40.
+- **S3 Express (optional).** The commits alone can go to an S3 Express One Zone bucket
+  (`ROLL_TASKS_WAL`, `ExpressZoneId` in the template) at $1.13 instead of $5 per million PUTs.
+  The shared cell then comes to about **$0.08 per million messages** before egress, but recent
+  commits live in one AZ. It hasn't been tried on real S3 Express yet.
 - **DynamoDB layout.** About $6.90 per million messages at any volume.
 - **Latency.** A publish waits for its commit: about 100 ms. One publisher sending one message at a
   time gets about 10 a second, so use `/batch` or concurrency. A lower `ROLL_TASKS_COMMIT_MS`

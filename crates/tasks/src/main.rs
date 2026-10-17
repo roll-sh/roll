@@ -30,6 +30,11 @@ struct Args {
     /// Log store location: `s3://bucket/prefix`, `s3express://bucket/prefix`, `file:///dir`.
     #[arg(long, env = "ROLL_TASKS_LOG", default_value = "file://.roll/tasks-log")]
     log: String,
+    /// Put the log's commits in their own bucket, e.g. `s3express://<name>--<az-id>--x-s3/tasks`:
+    /// S3 Express One Zone PUTs cost about a quarter, but the commits since the last snapshot then
+    /// live in one AZ. Snapshots and the lease stay in `--log`.
+    #[arg(long, env = "ROLL_TASKS_WAL")]
+    wal: Option<String>,
     /// Local working directory of a log store node.
     #[arg(long, env = "ROLL_TASKS_DATA", default_value = ".roll/tasks-node")]
     data: PathBuf,
@@ -153,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         drain_ms: a.drain_s * 1000,
         emf_metrics: a.emf_metrics,
         front_door: a.front_door,
+        log_express: a.wal.as_deref().is_some_and(|u| u.starts_with("s3express://")),
         ..Config::default()
     };
     if a.role == Role::Node || a.role == Role::Proxy {
@@ -203,6 +209,9 @@ async fn cell(a: Args, config: Config) -> anyhow::Result<()> {
         return Ok(axum::serve(listener, proxy.router()).with_graceful_shutdown(shutdown_signal()).await?);
     }
     let mut log = tasks::store::log::LogConfig::new(objects, prefix, a.data.clone());
+    if let Some(url) = a.wal.as_deref().filter(|u| !u.is_empty()) {
+        log.wal = Some(tasks::store::log::objects_from_url(url)?);
+    }
     // One SQLite writer either way: a few lanes are plenty.
     log.shards = a.shards.min(4);
     log.tenant_shards = a.tenant_shards.clamp(1, 4);
