@@ -650,12 +650,26 @@ pub fn command_info(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     Ok(Reply::Array(
         args[2..]
             .iter()
-            .map(|n| match lookup(n) {
-                Some(c) => info_entry(c, c.name),
+            .map(|n| match lookup_full(n) {
+                Some((c, full)) => info_entry(c, &full),
                 None => Reply::Nil,
             })
             .collect(),
     ))
+}
+
+/// `lookupCommandBySds`: `name` or `container|sub`.
+fn lookup_full(name: &[u8]) -> Option<(&'static Command, String)> {
+    let mut parts = name.split(|&b| b == b'|');
+    let base = lookup(parts.next()?)?;
+    match (parts.next(), parts.next()) {
+        (None, _) => Some((base, base.name.to_string())),
+        (Some(sub), None) if !base.subs.is_empty() => {
+            let s = lookup_sub(base, sub)?;
+            Some((s, format!("{}|{}", base.name, s.name)))
+        }
+        _ => None,
+    }
 }
 
 /// Redis' own docs for the command, with only the subcommands roll has.
@@ -694,34 +708,53 @@ fn docs_entry(c: &Command, full: &str) -> Reply {
 }
 
 pub fn command_docs(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let list: Vec<&Command> = if args.len() == 2 { table().all.clone() } else { args[2..].iter().filter_map(|n| lookup(n)).collect() };
-    Ok(Reply::Map(list.into_iter().map(|c| (Reply::bulk(c.name), docs_entry(c, c.name))).collect()))
+    let list: Vec<(&Command, String)> = if args.len() == 2 {
+        table().all.iter().map(|c| (*c, c.name.to_string())).collect()
+    } else {
+        args[2..].iter().filter_map(|n| lookup_full(n)).collect()
+    };
+    Ok(Reply::Map(list.into_iter().map(|(c, full)| (Reply::bulk_str(full.clone()), docs_entry(c, &full))).collect()))
 }
 
-fn getkeys_cmd(args: &[Bytes]) -> Result<(&'static Command, Vec<usize>), Error> {
+/// `lookupCommand` on `COMMAND GETKEYS`'s arguments: a container without a subcommand argument
+/// is the container itself.
+fn getkeys_cmd(args: &[Bytes]) -> Result<Vec<(usize, u16)>, Error> {
     let sub = &args[2..];
-    let (cmd, _) = crate::engine::Engine::resolve(sub).map_err(|_| Error::new("ERR Invalid command specified"))?;
-    let keys: Vec<usize> = cmd.key_positions(sub);
-    if keys.is_empty() {
+    let invalid = || Error::new("ERR Invalid command specified");
+    let base = lookup(&sub[0]).ok_or_else(invalid)?;
+    let (cmd, full) = if sub.len() == 1 || base.subs.is_empty() {
+        (base, base.name.to_string())
+    } else {
+        let s = lookup_sub(base, &sub[1]).ok_or_else(invalid)?;
+        (s, format!("{}|{}", base.name, s.name))
+    };
+    if !super::keyspec::has_keys(cmd, &full) {
         return Err(Error::new("ERR The command has no key arguments"));
     }
-    Ok((cmd, keys))
+    if !cmd.check_arity(sub.len()) {
+        return Err(Error::new("ERR Invalid number of arguments specified for command"));
+    }
+    let keys = super::keyspec::keys_with_flags(cmd, &full, sub);
+    if keys.is_empty() && !cmd.has(NO_MANDATORY_KEYS) {
+        return Err(Error::new("ERR Invalid arguments specified for command"));
+    }
+    Ok(keys)
 }
 
 pub fn command_getkeys(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let (_, keys) = getkeys_cmd(args)?;
-    Ok(Reply::Array(keys.into_iter().map(|i| Reply::Bulk(args[2 + i].clone())).collect()))
+    let keys = getkeys_cmd(args)?;
+    Ok(Reply::Array(keys.into_iter().map(|(i, _)| Reply::Bulk(args[2 + i].clone())).collect()))
 }
 
 pub fn command_getkeysandflags(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let (cmd, keys) = getkeys_cmd(args)?;
-    let flags: Vec<Reply> = if cmd.is_write() {
-        vec![Reply::status("RW"), Reply::status("UPDATE")]
-    } else {
-        vec![Reply::status("RO"), Reply::status("ACCESS")]
-    };
+    let keys = getkeys_cmd(args)?;
     Ok(Reply::Array(
-        keys.into_iter().map(|i| Reply::Array(vec![Reply::Bulk(args[2 + i].clone()), Reply::Set(flags.clone())])).collect(),
+        keys.into_iter()
+            .map(|(i, f)| {
+                let flags = super::keyspec::flag_names(f).into_iter().map(Reply::status).collect();
+                Reply::Array(vec![Reply::Bulk(args[2 + i].clone()), Reply::Set(flags)])
+            })
+            .collect(),
     ))
 }
 
@@ -1081,6 +1114,12 @@ pub fn info_section(eng: &crate::engine::Engine, name: &str, now: i64) -> Option
         "cpu" => {
             s.push_str("# CPU\r\nused_cpu_sys:0.000000\r\nused_cpu_user:0.000000\r\n");
         }
+        "hotkeys" => {
+            s.push_str("# Hotkeys\r\n");
+            if let Some(h) = &eng.hotkeys {
+                let _ = write!(s, "hotkeys-tracking-active:{}\r\nhotkeys-cmd-cpu-time:{}\r\n", h.active as i32, h.cpu_time);
+            }
+        }
         "modules" => s.push_str("# Modules\r\n"),
         "cluster" => s.push_str("# Cluster\r\ncluster_enabled:0\r\n"),
         "errorstats" => {
@@ -1119,7 +1158,7 @@ pub fn info_section(eng: &crate::engine::Engine, name: &str, now: i64) -> Option
 }
 
 pub const DEFAULT_SECTIONS: &[&str] =
-    &["server", "clients", "memory", "persistence", "stats", "replication", "cpu", "modules", "errorstats", "cluster", "keyspace"];
+    &["server", "clients", "memory", "persistence", "stats", "replication", "cpu", "hotkeys", "modules", "errorstats", "cluster", "keyspace"];
 pub const ALL_SECTIONS: &[&str] = &[
     "server",
     "clients",
@@ -1128,6 +1167,7 @@ pub const ALL_SECTIONS: &[&str] = &[
     "stats",
     "replication",
     "cpu",
+    "hotkeys",
     "modules",
     "commandstats",
     "errorstats",

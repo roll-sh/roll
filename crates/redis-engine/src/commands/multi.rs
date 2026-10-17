@@ -64,6 +64,7 @@ pub fn exec(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     }
     let start = cx.eng.effects.len();
     let mut replies = Vec::with_capacity(m.queued.len());
+    cx.eng.exec_out_bytes = format!("*{}\r\n", m.queued.len()).len() as u64;
     for args in &m.queued {
         replies.push(cx.call(args, Mode::Exec));
     }

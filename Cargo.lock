@@ -1748,6 +1748,7 @@ dependencies = [
  "foldhash",
  "getrandom 0.4.3",
  "itoa",
+ "libc",
  "libm",
  "parking_lot",
  "redis-lua",

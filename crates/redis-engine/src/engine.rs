@@ -199,6 +199,10 @@ pub struct Engine {
     pub(crate) pre_oom: bool,
     /// MIGRATE's cached target connections.
     pub(crate) migrate_sockets: crate::commands::migrate::Sockets,
+    /// The HOTKEYS session, if one was started and not reset.
+    pub hotkeys: Option<crate::commands::hotkeys::Stats>,
+    /// Reply bytes of the EXEC running now, so far (Redis counts them per queued command).
+    pub(crate) exec_out_bytes: u64,
 }
 
 /// The arguments as SLOWLOG and MONITOR show them: secrets replaced by `(redacted)`, like Redis'
@@ -285,6 +289,8 @@ impl Engine {
             acl: Default::default(),
             pre_oom: false,
             migrate_sockets: Default::default(),
+            hotkeys: None,
+            exec_out_bytes: 0,
         }
     }
 
@@ -556,7 +562,30 @@ impl Engine {
                 r
             }
         };
+        if self.hotkeys.as_ref().is_some_and(|h| h.active) && matches!(mode, Mode::Top | Mode::Exec | Mode::Unblock) {
+            self.track_hotkeys(client, cmd, &full_name, args, micros, &reply, mode);
+        }
         Outcome::Reply(reply)
+    }
+
+    /// Feed HOTKEYS: the command's CPU time and its request and reply bytes. Inside EXEC, Redis
+    /// charges each queued command EXEC's own 14 request bytes and the transaction's reply so far.
+    #[allow(clippy::too_many_arguments)]
+    fn track_hotkeys(&mut self, client: &Client, cmd: &Command, full: &str, args: &[Bytes], micros: u64, reply: &Reply, mode: Mode) {
+        let mut out = bytes::BytesMut::new();
+        reply.encode(client.resp, &mut out);
+        let bytes = if mode == Mode::Exec {
+            self.exec_out_bytes += out.len() as u64;
+            14 + self.exec_out_bytes
+        } else {
+            let mut req = bytes::BytesMut::new();
+            redis_proto::encode_command(args, &mut req);
+            (req.len() + out.len()) as u64
+        };
+        let keys: Vec<usize> = commands::keyspec::keys_with_flags(cmd, full, args).into_iter().map(|(i, _)| i).collect();
+        if let Some(h) = self.hotkeys.as_mut() {
+            h.track(args, &keys, micros, bytes);
+        }
     }
 
     /// Account for a command the server layer executed itself (AUTH, WAIT…): MONITOR, SLOWLOG
@@ -1072,6 +1101,9 @@ impl Engine {
             return 0;
         }
         let now = now_ms();
+        if let Some(h) = self.hotkeys.as_mut() {
+            h.expire(now);
+        }
         let start = Instant::now();
         let per_loop = 20 + 5 * (self.cfg.active_expire_effort as usize - 1).min(9);
         let mut total = 0;

@@ -11,6 +11,8 @@ pub mod hashes;
 pub mod hll;
 pub mod keys;
 pub mod meta;
+pub mod hotkeys;
+pub mod keyspec;
 pub mod migrate;
 pub mod lists;
 pub mod multi;
@@ -352,6 +354,7 @@ pub fn table() -> &'static Table {
             geo::COMMANDS,
             scripting::COMMANDS,
             migrate::COMMANDS,
+            hotkeys::COMMANDS,
         ] {
             for c in family {
                 assert!(by_name.insert(c.name, c).is_none(), "duplicate command {}", c.name);

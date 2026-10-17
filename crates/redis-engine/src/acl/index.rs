@@ -90,10 +90,9 @@ pub fn category_names(mask: u32) -> Vec<&'static str> {
 pub const BITS: usize = 1024;
 pub const FUTURE_BIT: u16 = (BITS - 1) as u16;
 
-/// Key-spec permission bits.
+/// Key permission bits of `%R~` / `%W~` patterns.
 pub const PERM_R: u8 = 1;
 pub const PERM_W: u8 = 2;
-pub const NOT_KEY: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channels {
@@ -106,26 +105,14 @@ pub enum Channels {
     Publish,
 }
 
-/// Commands whose key permissions depend on the arguments (Redis' VARIABLE_FLAGS key specs).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Variable {
-    No,
-    /// SET: write, plus read with `GET`.
-    Set,
-    /// BITFIELD: read-only when it only has GET operations.
-    Bitfield,
-}
-
 pub struct Meta {
     pub cmd: &'static Command,
     pub id: u16,
     /// `get`, `config|get`.
     pub full: String,
     pub cats: u32,
-    /// Permissions per key spec (first key uses the first spec, later keys the last one).
-    pub specs: &'static [u8],
+    /// `doesCommandHaveKeys`.
     pub has_keys: bool,
-    pub variable: Variable,
     pub channels: Channels,
     pub parent: Option<u16>,
     pub subs: Vec<u16>,
@@ -176,10 +163,8 @@ fn build() -> Index {
 
 fn push(idx: &mut Index, c: &'static Command, full: String, parent: Option<u16>) -> u16 {
     let id = idx.cmds.len() as u16;
-    let (cats, specs, has_keys) = match spec_of(&full) {
-        Some((cats, specs)) => (cats, specs, specs.iter().any(|p| p & NOT_KEY == 0)),
-        None => (fallback_categories(c), &[][..], c.first_key > 0 || c.keys_fn.is_some()),
-    };
+    let cats = spec_of(&full).map_or_else(|| fallback_categories(c), |(cats, _)| cats);
+    let has_keys = commands::keyspec::has_keys(c, &full);
     let channels = if parent.is_some() {
         Channels::None
     } else {
@@ -190,13 +175,8 @@ fn push(idx: &mut Index, c: &'static Command, full: String, parent: Option<u16>)
             _ => Channels::None,
         }
     };
-    let variable = match (parent, c.name) {
-        (None, "set") => Variable::Set,
-        (None, "bitfield") => Variable::Bitfield,
-        _ => Variable::No,
-    };
     idx.by_ptr.insert(c as *const Command as usize, id);
-    idx.cmds.push(Meta { cmd: c, id, full, cats, specs, has_keys, variable, channels, parent, subs: Vec::new() });
+    idx.cmds.push(Meta { cmd: c, id, full, cats, has_keys, channels, parent, subs: Vec::new() });
     id
 }
 

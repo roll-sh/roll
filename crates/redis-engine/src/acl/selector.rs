@@ -3,11 +3,10 @@
 //! This follows Redis' `aclSelector` closely, including how rules are remembered for display
 //! (`command_rules`: the ordered `+cmd`/`-@cat` rules applied after the last `+@all`/`-@all`).
 
-use super::index::{self, BITS, Channels, FUTURE_BIT, Meta, PERM_R, PERM_W, Variable, index};
+use super::index::{self, BITS, Channels, FUTURE_BIT, Meta, PERM_R, PERM_W, index};
 use crate::commands::{self, Command};
 use crate::util::glob_match;
 use bytes::Bytes;
-use smallvec::SmallVec;
 
 /// Why a rule was rejected (Redis' errno values in `ACLSetUser`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -372,8 +371,8 @@ impl Selector {
             }
         }
         if !self.allkeys && m.has_keys {
-            for (n, &pos) in keys.get(m.cmd, args).iter().enumerate() {
-                let need = key_perm(m, n, args);
+            for &(pos, flags) in keys.get(m, args) {
+                let need = key_perm(flags);
                 let key = &args[pos];
                 if !self.keys.iter().any(|k| k.perm & need == need && glob_match(&k.pattern, key, false)) {
                     return Err((Reason::Key, pos));
@@ -415,74 +414,34 @@ pub fn channel_allowed(list: &[Vec<u8>], channel: &[u8], is_pattern: bool) -> bo
     list.iter().any(|p| if is_pattern { p == channel } else { glob_match(p, channel, false) })
 }
 
-/// Read/write permission needed for the `n`th key of a command.
-fn key_perm(m: &Meta, n: usize, args: &[Bytes]) -> u8 {
-    match m.variable {
-        Variable::Set => {
-            let get = args.iter().skip(3).any(|a| a.eq_ignore_ascii_case(b"get"));
-            return PERM_W | if get { PERM_R } else { 0 };
-        }
-        Variable::Bitfield => return if bitfield_readonly(args) { PERM_R } else { PERM_R | PERM_W },
-        Variable::No => {}
+/// Read/write permission a key with these key-spec flags needs (`ACLSelectorCheckKey`).
+fn key_perm(flags: u16) -> u8 {
+    use crate::commands::keyspec::{ACCESS, DELETE, INSERT, UPDATE};
+    let mut need = 0;
+    if flags & ACCESS != 0 {
+        need |= PERM_R;
     }
-    match m.specs {
-        [] => {
-            if m.cmd.is_write() {
-                PERM_R | PERM_W
-            } else {
-                PERM_R
-            }
-        }
-        [first, ..] if n == 0 => first & (PERM_R | PERM_W),
-        [.., last] => last & (PERM_R | PERM_W),
+    if flags & (INSERT | DELETE | UPDATE) != 0 {
+        need |= PERM_W;
     }
+    need
 }
 
-/// Redis' `bitfieldGetKeys`: only GET (and OVERFLOW) operations.
-fn bitfield_readonly(args: &[Bytes]) -> bool {
-    let mut i = 2;
-    while i < args.len() {
-        let rem = args.len() - i - 1;
-        let a = &args[i];
-        if a.eq_ignore_ascii_case(b"get") && rem >= 2 {
-            i += 3;
-        } else if (a.eq_ignore_ascii_case(b"set") || a.eq_ignore_ascii_case(b"incrby")) && rem >= 3 {
-            return false;
-        } else if a.eq_ignore_ascii_case(b"overflow") && rem >= 1 {
-            i += 2;
-        } else {
-            return false;
-        }
-    }
-    true
-}
-
-/// Key positions of the command being checked, computed once for all selectors. Range-key
-/// commands don't allocate.
+/// Keys of the command being checked with their key-spec flags, computed once for all
+/// selectors.
 #[derive(Default)]
 pub(crate) struct Keys {
     done: bool,
-    pos: SmallVec<[usize; 8]>,
+    keys: Vec<(usize, u16)>,
 }
 
 impl Keys {
-    fn get(&mut self, cmd: &Command, args: &[Bytes]) -> &[usize] {
+    fn get(&mut self, m: &Meta, args: &[Bytes]) -> &[(usize, u16)] {
         if !self.done {
             self.done = true;
-            if cmd.keys_fn.is_some() {
-                self.pos.extend(cmd.key_positions(args));
-            } else if cmd.first_key > 0 {
-                let n = args.len() as i32;
-                let last = if cmd.last_key < 0 { n + cmd.last_key } else { cmd.last_key };
-                let step = cmd.key_step.max(1);
-                let mut i = cmd.first_key;
-                while i <= last && i < n {
-                    self.pos.push(i as usize);
-                    i += step;
-                }
-            }
+            self.keys = crate::commands::keyspec::keys_with_flags(m.cmd, &m.full, args);
         }
-        &self.pos
+        &self.keys
     }
 }
 
