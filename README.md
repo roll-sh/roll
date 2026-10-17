@@ -12,6 +12,10 @@ packages/
 crates/
   pg-proxy/         Postgres wire-protocol proxy (routing, wake-on-connect, cancel forwarding)
   pg-control/       Control plane: projects, branches, endpoints, autoscaling, metering, HTTP API
+  redis-proto/      RESP2/RESP3 parser and encoder
+  redis-engine/     Redis data structures and commands (pure, synchronous, one engine per shard)
+  redis-server/     Redis network layer: RESP + TLS, REST API, tenants, durability on S3, replicas
+  redis-control/    Redis control plane: databases, branches, restore, replicas, metering, HTTP API
   rolld/            Daemon: proxy + API + reconciler
   roll-cli/         `roll` CLI
 ```
@@ -145,3 +149,74 @@ against S3 (SeaweedFS). To point the e2e tests at S3 locally, set `ROLL_E2E_S3_B
 they are sized to the load, they run on Graviton, the settings are tuned (`jit=off`, SSD costs, WAL
 compression), and pooling comes next. The query engine itself is stock Postgres; that is what keeps it
 100% compatible.
+
+## Redis
+
+Serverless Redis, written in Rust and compatible with Redis 8 clients. It speaks RESP2/RESP3 over TCP
+or TLS, and also has an Upstash-compatible REST API, so serverless and edge functions need no connection.
+Data is durable in object storage (S3), so a database that nobody uses costs nothing but storage.
+
+```sh
+cargo run -p rolld                                # RESP on :56380, REST on :58080
+cargo run -p roll-cli -- redis create cache --memory 256
+redis-cli -u "$(cargo run -q -p roll-cli -- redis url cache)"
+cargo run -p roll-cli -- redis rest cache         # UPSTASH_REDIS_REST_URL / _TOKEN
+cargo run -p roll-cli -- redis branch cache dev --at 15m
+cargo run -p roll-cli -- redis usage cache        # cost, next to ElastiCache Serverless
+```
+
+Any Redis client works with the `redis://` URL. The REST endpoint works with `@upstash/redis` or plain
+`curl` (`curl $URL/incr/n -H "Authorization: Bearer $TOKEN"`).
+
+How it works:
+
+- **Many tenants per node.** One process serves many databases. Clients pick a database in one of
+  three ways:
+  - the TLS server name (`<db>.<domain>`);
+  - `AUTH user@<db> <password>`;
+  - a single `<db>_<secret>` token.
+- **Scale to zero.** A database is loaded on its first `AUTH` or HTTP request. It is unloaded after
+  `idle_timeout_s` with no clients, and after that it costs nothing but S3.
+- **Bottomless durability.**
+  - Every write becomes a deterministic effect. Effects are written in Redis's replication format:
+    `EXPIRE` becomes `PEXPIREAT`, `SPOP` becomes `SREM`, and so on.
+  - Each node group-commits the effects of all its tenants into one zstd segment per second. S3 PUTs
+    therefore scale with the number of nodes, not tenants.
+  - `durability: sync` makes replies wait until the write is in S3. `WAITAOF` reports the same thing.
+- **Point in time.**
+  - Branches are zero-copy: a branch's log starts where the parent's left off.
+  - You can branch from any second in the retention window.
+  - Restore in place keeps the replaced state as an archive.
+- **Read replicas.**
+  - A replica streams from the primary's backlog, and `WAIT` counts replica acks.
+  - When the primary is asleep, a replica tails S3 instead.
+  - Each replica gets its own read-only endpoint, and replicas can be promoted.
+- **AWS-friendly networking.**
+  - TLS with SNI routing.
+  - PROXY protocol v1/v2, for client IPs behind an NLB.
+  - Plain S3, or any S3-compatible store, for storage.
+- **Metering.** The control plane meters GiB-hours while a database is loaded, plus commands, egress and
+  storage. Costs are priced at Graviton memory ($0.0067/GiB-h) and compared with ElastiCache Serverless
+  ($0.125/GB-h, with a 1 GB minimum).
+
+Commands: strings, keys and expiry, lists, hashes (with field TTLs), sets, HyperLogLog, bitmaps,
+transactions and `WATCH`, pub/sub (including sharded), ACLs, `CLIENT`, `CONFIG`, `INFO`, `SCAN`, blocking
+list ops, eviction policies and keyspace notifications. In progress: sorted sets and geo, streams, Lua
+scripting and functions, JSON, and the Bloom family.
+
+### Tests
+
+`pnpm test:redis` (or `scripts/test-redis.sh`) runs unit tests, clippy, and the integration suites:
+
+- the REST API;
+- durability and PITR;
+- tenants, TLS and eviction;
+- replication;
+- the control plane.
+
+It also runs a differential compatibility suite. That suite sends the same scripts to roll and to
+`redis:8-alpine` in Docker and compares the replies byte for byte.
+
+The script skips itself when nothing relevant changed. Pass `--force` to run anyway, or `--unit` to skip
+Docker. CI is in `.github/workflows/redis.yml`. To run the durability tests against S3, set
+`ROLL_E2E_S3_BUCKET` and `ROLL_E2E_S3_ENDPOINT` (plus AWS credentials).
