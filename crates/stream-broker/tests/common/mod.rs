@@ -3,6 +3,7 @@
 
 pub mod client;
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -10,6 +11,30 @@ use stream_broker::store::Settings;
 use stream_broker::{Broker, Config, server};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+
+/// Fails any single allocation over 1 GiB, as Linux does, so a buffer sized from a peer's count
+/// aborts the tests on every platform (macOS would hand it out lazily).
+struct Capped;
+
+const MAX_ALLOC: usize = 1 << 30;
+
+unsafe impl GlobalAlloc for Capped {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if layout.size() > MAX_ALLOC { std::ptr::null_mut() } else { unsafe { System.alloc(layout) } }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if layout.size() > MAX_ALLOC { std::ptr::null_mut() } else { unsafe { System.alloc_zeroed(layout) } }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if new_size > MAX_ALLOC { std::ptr::null_mut() } else { unsafe { System.realloc(ptr, layout, new_size) } }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOC: Capped = Capped;
 
 pub struct TestBroker {
     pub broker: Arc<Broker>,

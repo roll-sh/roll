@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PATHS=(crates/stream-log crates/stream-broker crates/pg-storage crates/rolld crates/roll-cli
+PATHS=(crates/stream-log crates/stream-broker crates/pg-storage crates/rolld crates/roll-cli vendor/kafka-protocol
        Cargo.toml Cargo.lock scripts/test-stream.sh .github/workflows/stream.yml)
 STAMP=target/.test-stream.hash
 KAFKA_IMAGE=${ROLL_E2E_KAFKA_IMAGE:-apache/kafka:4.1.0}

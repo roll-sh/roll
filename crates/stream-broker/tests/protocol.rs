@@ -4,7 +4,7 @@
 
 mod common;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use common::TestBroker;
 use common::client::Conn;
 use kafka_protocol::ResponseError;
@@ -636,6 +636,38 @@ async fn malformed_frames_close_the_connection() {
     let mut c = Conn::connect(&tb.addr).await;
     c.send_frame(&[0, 3, 0, 9, 0, 0, 0, 1, 0xff, 0xff, 1, 2, 3]).await;
     assert!(c.closed_within(Duration::from_secs(5)).await, "undecodable body");
+}
+
+/// Counts and lengths come from the peer: one that lies has to cost an error, not an allocation of
+/// what it claims (`common::Capped` aborts the test on anything over 1 GiB).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lying_counts_and_lengths_are_rejected_without_allocating_them() {
+    let tb = TestBroker::start("proto-lengths").await;
+    let header = |api: i16, version: i16| -> Vec<u8> { [&api.to_be_bytes()[..], &version.to_be_bytes(), &1i32.to_be_bytes(), &(-1i16).to_be_bytes()].concat() };
+    // Metadata v4: a topics array claiming i32::MAX entries.
+    let array = [header(3, 4), i32::MAX.to_be_bytes().to_vec()].concat();
+    // Metadata v12 (flexible): no header tags, then a compact array claiming u32::MAX - 1 entries.
+    let compact = [header(3, 12), vec![0, 0xff, 0xff, 0xff, 0xff, 0x0f]].concat();
+    // SaslAuthenticate v0: auth bytes claiming i32::MAX bytes.
+    let bytes = [header(36, 0), i32::MAX.to_be_bytes().to_vec()].concat();
+    for (what, frame) in [("array", array), ("compact array", compact), ("bytes", bytes)] {
+        let mut c = Conn::connect(&tb.addr).await;
+        c.send_frame(&frame).await;
+        assert!(c.closed_within(Duration::from_secs(5)).await, "{what}");
+    }
+
+    // A batch with a valid CRC whose header claims far more records than it holds, on a compacted
+    // topic, where the broker decodes records to check their keys.
+    let mut c = Conn::connect(&tb.addr).await;
+    create(&mut c, "lying", 1, &[("cleanup.policy", "compact")]).await;
+    let recs: Vec<NewRecord> = (0..2).map(|i| NewRecord { key: Some(Bytes::from(format!("k{i}"))), value: Some(Bytes::from_static(b"v")), ..Default::default() }).collect();
+    let mut b = BytesMut::from(&batch::build(&recs, BatchOptions::default(), now_ms())[..]);
+    b[23..27].copy_from_slice(&(i32::MAX - 1).to_be_bytes()); // last offset delta
+    b[57..61].copy_from_slice(&i32::MAX.to_be_bytes()); // record count
+    let crc = batch::compute_crc(&b);
+    b[17..21].copy_from_slice(&crc.to_be_bytes());
+    assert_ne!(produce(&mut c, 9, "lying", 0, b.freeze()).await.error_code, 0);
+    assert_eq!(produce(&mut c, 9, "lying", 0, batch::build(&recs, BatchOptions::default(), now_ms())).await.error_code, 0, "still serving");
 }
 
 async fn scram_login(c: &mut Conn, mech: Mechanism, name: &str, user: &str, pass: &str) -> i16 {

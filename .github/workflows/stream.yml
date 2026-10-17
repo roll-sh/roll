@@ -7,6 +7,7 @@ on:
     paths:
       - "crates/stream-log/**"
       - "crates/stream-broker/**"
+      - "vendor/kafka-protocol/**"
       - "crates/pg-storage/**"
       - "crates/rolld/**"
       - "crates/roll-cli/**"

@@ -419,9 +419,14 @@ pub struct Record {
     pub headers: Vec<(Bytes, Option<Bytes>)>,
 }
 
-/// Decode the records of an uncompressed record section (`records` bytes after the header).
+/// Smallest encoded record: length, attributes, timestamp and offset deltas, key and value lengths
+/// and header count, one byte each.
+const MIN_RECORD_LEN: usize = 7;
+
+/// Decode the records of an uncompressed record section (`records` bytes after the header). The
+/// counts come from the producer, so they only bound what's reserved by the bytes present.
 pub fn decode_records(body: &Bytes, base_offset: i64, base_timestamp: i64, count: i32) -> Option<Vec<Record>> {
-    let mut out = Vec::with_capacity(count.max(0) as usize);
+    let mut out = Vec::with_capacity((count.max(0) as usize).min(body.len() / MIN_RECORD_LEN));
     let mut pos = 0usize;
     let take = |pos: &mut usize| -> Option<Option<Bytes>> {
         let len = get_varint(body, pos)?;
@@ -438,6 +443,9 @@ pub fn decode_records(body: &Bytes, base_offset: i64, base_timestamp: i64, count
     };
     for _ in 0..count {
         let len = get_varint(body, &mut pos)?;
+        if len < MIN_RECORD_LEN as i64 - 1 {
+            return None;
+        }
         let end = pos.checked_add(len as usize)?;
         if end > body.len() {
             return None;
@@ -448,10 +456,17 @@ pub fn decode_records(body: &Bytes, base_offset: i64, base_timestamp: i64, count
         let key = take(&mut pos)?;
         let value = take(&mut pos)?;
         let n = get_varint(body, &mut pos)?;
-        let mut headers = Vec::with_capacity(n.max(0) as usize);
+        // Each header takes at least two bytes.
+        let mut headers = Vec::with_capacity((n.max(0) as usize).min(end.saturating_sub(pos) / 2));
         for _ in 0..n {
             let k = take(&mut pos)?.unwrap_or_default();
             headers.push((k, take(&mut pos)?));
+            if pos > end {
+                return None;
+            }
+        }
+        if pos > end {
+            return None;
         }
         pos = end;
         out.push(Record { offset: base_offset + off_delta, timestamp: base_timestamp + ts_delta, key, value, headers });
@@ -586,5 +601,24 @@ mod tests {
         assign_offset(&mut m, 0, 0);
         let h = validate(&m).unwrap();
         assert_eq!(h.last_sequence(), 0);
+    }
+
+    #[test]
+    fn decode_records_rejects_counts_and_lengths_the_bytes_cannot_hold() {
+        let b = build(&[rec("a"), rec("b")], BatchOptions::default(), 1000);
+        let h = parse_header(&b).unwrap();
+        let body = b.slice(HEADER_LEN..h.size);
+        assert_eq!(decode_records(&body, 0, 1000, 2).unwrap().len(), 2);
+        // More records than the body holds: an error, not a 2^31-record reservation.
+        assert!(decode_records(&body, 0, 1000, i32::MAX).is_none());
+        // A record claiming a zero length can't make progress one byte at a time.
+        assert!(decode_records(&Bytes::from(vec![0u8; 64]), 0, 1000, 64).is_none());
+        // A header count larger than the record: an error.
+        let mut lying = Vec::new();
+        put_varint(&mut lying, 7); // record length
+        lying.extend([0, 0, 0, 1, 1]); // attributes, timestamp/offset deltas, null key, null value
+        put_varint(&mut lying, i32::MAX as i64); // header count
+        lying.push(0);
+        assert!(decode_records(&Bytes::from(lying), 0, 1000, 1).is_none());
     }
 }

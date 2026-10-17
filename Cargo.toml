@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -48,3 +49,7 @@ pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
 stream-log = { path = "crates/stream-log" }
 stream-broker = { path = "crates/stream-broker" }
+
+# kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
+[patch.crates-io]
+kafka-protocol = { path = "vendor/kafka-protocol" }
