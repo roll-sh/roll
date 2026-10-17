@@ -9,6 +9,7 @@ use super::ziplist::{Ziplist, Zipmap, intset};
 use super::{RdbError, crc64, lzf, ty};
 use crate::config::Config;
 use crate::types::stream::{Group, Stream, StreamId};
+use crate::types::array::{self, Array};
 use crate::types::{Hash, List, Set, ZSet, hash, set, zset};
 use crate::value::{Str, Value};
 use foldhash::fast::RandomState;
@@ -357,11 +358,53 @@ impl<'c, S: Src> Dec<'c, S> {
             | ty::STREAM_LISTPACKS_4
             | ty::STREAM_LISTPACKS_5 => Value::Stream(Box::new(self.stream(t)?)),
             ty::MODULE_PRE_GA | ty::MODULE_2 => return Err(RdbError::Unsupported("module values")),
-            ty::ARRAY => return Err(RdbError::Unsupported("array values")),
+            ty::ARRAY => Value::Array(Box::new(self.array()?)),
             ty::HASH_TMPL_LP..=ty::HASH_TMPL_ARRAY_REF => return Err(RdbError::Unsupported("template-encoded hashes")),
             ty::GCRA => return Err(RdbError::Unsupported("GCRA values")),
             _ => return Err(bad("unknown object type")),
         })
+    }
+
+    /// RDB_TYPE_ARRAY: rebuilt with the current `array-slice-size`, element by element.
+    fn array(&mut self) -> R<Array> {
+        let count = self.len()?;
+        if count == 0 {
+            return Err(bad("Empty array (count == 0) is invalid"));
+        }
+        let insert_idx = match self.len()? {
+            0 => array::INSERT_NONE,
+            1 => self.len()?,
+            _ => return Err(bad("Invalid array insert_idx_flag")),
+        };
+        let lim = array::Limits { kmax: self.cfg.array_sparse_kmax, kmin: self.cfg.array_sparse_kmin };
+        let mut a = Array::new(self.cfg.array_slice_size);
+        a.set_insert_idx(insert_idx);
+        let mut buf = take(&mut self.a);
+        for _ in 0..count {
+            let (idx, enc) = self.len_enc()?;
+            if enc || idx == u64::MAX {
+                return Err(bad("Invalid array index"));
+            }
+            let v = match self.len()? {
+                array::RDB_TAG_INT => array::val_from_rdb_int(self.ms()?),
+                array::RDB_TAG_FLOAT => array::val_from_rdb_float(self.f64()?),
+                array::RDB_TAG_SMALLSTR => {
+                    self.string(&mut buf)?;
+                    if buf.len() > 7 {
+                        return Err(bad("Invalid small string length in array"));
+                    }
+                    array::Val::small(&buf)
+                }
+                array::RDB_TAG_SDS => {
+                    self.string(&mut buf)?;
+                    array::Val::encode(&buf)
+                }
+                _ => return Err(bad("Unknown array element type_tag")),
+            };
+            a.set(idx, v, lim);
+        }
+        self.a = buf;
+        Ok(a)
     }
 
     fn fill_param(&self) -> i64 {

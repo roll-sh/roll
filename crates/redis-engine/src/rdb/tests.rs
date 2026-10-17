@@ -165,6 +165,7 @@ fn contents(v: &Value) -> String {
         Value::ZSet(z) => return format!("{:?}", z.iter().collect::<Vec<_>>()),
         Value::Hash(h) => h.iter().map(|(f, v, at)| format!("{f:?}={v:?}@{at}")).collect(),
         Value::Stream(_) => return format!("{:?}", dump(v, CAPTURED_AT)),
+        Value::Array(a) => return format!("{} {:?}", a.insert_idx(), a.iter().collect::<Vec<_>>()),
     };
     parts.sort();
     format!("{} {}", v.encoding(), parts.join(","))
@@ -479,10 +480,16 @@ fn rejects_bad_payloads() {
     p[n - 8..].fill(0);
     assert!(restore(&p, &c).is_ok());
     // Modules and other things this engine can't hold.
-    for t in [ty::MODULE_2, ty::ARRAY, 30, ty::GCRA] {
+    for t in [ty::MODULE_2, 30, ty::GCRA] {
         assert!(matches!(restore(&payload(&[t, 0]), &c), Err(RdbError::Unsupported(_))), "type {t}");
     }
     assert!(matches!(restore(&payload(&[8, 0]), &c), Err(RdbError::Corrupt(_))));
+    // An empty array is corrupt (not an empty key), as is a bad cursor flag or element tag.
+    assert!(matches!(restore(&payload(&[ty::ARRAY, 0]), &c), Err(RdbError::Corrupt(_))));
+    assert!(matches!(restore(&payload(&[ty::ARRAY, 1, 2]), &c), Err(RdbError::Corrupt(_))));
+    assert!(matches!(restore(&payload(&[ty::ARRAY, 1, 0, 0, 9]), &c), Err(RdbError::Corrupt(_))));
+    let Value::Array(a) = restore(&payload(&[ty::ARRAY, 1, 1, 7, 3, 3, 2, b'h', b'i']), &c).unwrap() else { panic!() };
+    assert_eq!((a.count(), a.insert_idx(), a.get(3).map(|v| v.text().into_owned())), (1, 7, Some(b"hi".to_vec())));
     // Empty aggregates.
     for t in [ty::LIST, ty::SET, ty::ZSET_2, ty::HASH, ty::LIST_QUICKLIST_2] {
         assert!(matches!(restore(&payload(&[t, 0]), &c), Err(RdbError::EmptyKey)), "type {t}");

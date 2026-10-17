@@ -5,6 +5,7 @@
 //! `COMMAND GETKEYS`), its group (ACL categories, `COMMAND DOCS`) and optional subcommands.
 
 pub mod acl;
+pub mod arrays;
 pub mod bitmaps;
 pub mod geo;
 pub mod hashes;
@@ -133,6 +134,7 @@ pub enum Group {
     Geo,
     Stream,
     Bitmap,
+    Array,
 }
 
 impl Group {
@@ -154,6 +156,7 @@ impl Group {
             Group::Geo => "geo",
             Group::Stream => "stream",
             Group::Bitmap => "bitmap",
+            Group::Array => "array",
         }
     }
 }
@@ -354,6 +357,7 @@ pub fn table() -> &'static Table {
             sort::COMMANDS,
             zsets::COMMANDS,
             streams::COMMANDS,
+            arrays::COMMANDS,
             bitmaps::COMMANDS,
             hll::COMMANDS,
             geo::COMMANDS,

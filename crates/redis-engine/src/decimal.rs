@@ -6,7 +6,8 @@
 //! exact binary value the way `printf` does.
 
 use rustc_apfloat::ieee::Quad;
-use rustc_apfloat::{Float, Round};
+use rustc_apfloat::ieee::Double;
+use rustc_apfloat::{Float, FloatConvert, Round};
 
 /// `MAX_LONG_DOUBLE_CHARS`: `string2ld` refuses anything this long.
 const MAX_CHARS: usize = 5 * 1024;
@@ -277,12 +278,82 @@ impl Ld {
         if self.0.is_nan() {
             return "nan".into();
         }
-        format(&exact(self.0))
+        format(&exact(self.0, true))
+    }
+
+    pub fn from_i64(i: i64) -> Ld {
+        Ld(Quad::from_i128(i as i128).value)
+    }
+
+    pub fn from_f64(d: f64) -> Ld {
+        let mut loses = false;
+        Ld(Double::from_bits(d.to_bits() as u128).convert(&mut loses).value)
+    }
+
+    pub fn is_nan(&self) -> bool {
+        self.0.is_nan()
+    }
+
+    /// `(int64_t)x` for a value already known to be within the i64 range (truncates).
+    pub fn to_i64(&self) -> Option<i64> {
+        if self.0.is_nan() || self.0 < Quad::from_i128(i64::MIN as i128).value || self.0 > Quad::from_i128(i64::MAX as i128).value {
+            return None;
+        }
+        let mut exact = false;
+        Some(self.0.to_i128_r(64, Round::TowardZero, &mut exact).value as i64)
+    }
+
+    /// `ld2string(…, LD_STR_AUTO)`: `%.17Lg`.
+    pub fn auto(&self) -> String {
+        if self.0.is_infinite() {
+            return if self.0.is_negative() { "-inf".into() } else { "inf".into() };
+        }
+        if self.0.is_nan() {
+            return "nan".into();
+        }
+        let sign = if self.0.is_negative() { "-" } else { "" };
+        let mut d = exact(self.0, false);
+        if d.digits.is_empty() {
+            return format!("{sign}0");
+        }
+        // Round to 17 significant digits, half to even on the exact value.
+        const P: usize = 17;
+        if d.digits.len() > P {
+            let cut = d.digits.len() - P;
+            let rest = d.digits.split_off(P);
+            let up = rest[0] > 5 || (rest[0] == 5 && (rest[1..].iter().any(|&c| c != 0) || d.digits[P - 1] % 2 == 1));
+            d.exp += cut as i64;
+            if up {
+                increment(&mut d.digits);
+            }
+            d = normalize(d);
+        }
+        let digits: String = d.digits.iter().map(|c| (b'0' + c) as char).collect();
+        let x = d.digits.len() as i64 + d.exp - 1;
+        if x < -4 || x >= P as i64 {
+            let mut m = digits[..1].to_string();
+            if digits.len() > 1 {
+                m.push('.');
+                m.push_str(&digits[1..]);
+            }
+            return format!("{sign}{m}e{}{:02}", if x < 0 { '-' } else { '+' }, x.abs());
+        }
+        let n = digits.len() as i64;
+        let body = if d.exp >= 0 {
+            format!("{digits}{}", "0".repeat(d.exp as usize))
+        } else if n + d.exp > 0 {
+            let int = (n + d.exp) as usize;
+            format!("{}.{}", &digits[..int], &digits[int..])
+        } else {
+            format!("0.{}{digits}", "0".repeat((-(n + d.exp)) as usize))
+        };
+        format!("{sign}{body}")
     }
 }
 
-/// The exact decimal value of a finite quad (or 0 if it is far below `%.17Lf`'s precision).
-fn exact(q: Quad) -> Dec {
+/// The exact decimal value of a finite quad (with `cutoff`, 0 if it is far below `%.17Lf`'s
+/// precision).
+fn exact(q: Quad, cutoff: bool) -> Dec {
     const BASE: u64 = 1_000_000_000;
     let bits = q.to_bits();
     let neg = bits >> 127 == 1;
@@ -291,7 +362,7 @@ fn exact(q: Quad) -> Dec {
     let (m, e) = if field == 0 { (frac, -16494) } else { (frac | 1 << 112, field - 16383 - 112) };
     let width = 128 - m.leading_zeros() as i64;
     // Under 2^-60 (< 1e-18) prints as 0.
-    if m == 0 || e + width <= -60 {
+    if m == 0 || (cutoff && e + width <= -60) {
         return Dec { neg: false, digits: vec![], exp: 0 };
     }
     // Little-endian base-1e9 limbs of m, then × 2^e or × 5^-e (with the point moved by e).
@@ -372,6 +443,25 @@ mod tests {
         assert_eq!(incr_by_float(b"abc", b"1"), Err(IncrError::NotFloat));
         assert_eq!(incr_by_float(b"1", b"inf"), Err(IncrError::NanOrInf));
         assert_eq!(incr_by_float(b"1", b" 1"), Err(IncrError::NotFloat));
+    }
+
+    #[test]
+    fn long_double_auto() {
+        let p = |s: &str| Ld::parse(s.as_bytes()).unwrap();
+        assert_eq!(p("3").auto(), "3");
+        assert_eq!(p("0.1").auto(), "0.1");
+        assert_eq!(Ld::from_f64(0.1).auto(), "0.10000000000000001");
+        assert_eq!(Ld::from_f64(1.5).add(&Ld::from_i64(2)).auto(), "3.5");
+        assert_eq!(Ld::from_f64(1e20).auto(), "1e+20");
+        assert_eq!(Ld::from_f64(123456789012345678.0).auto(), "1.2345678901234568e+17");
+        assert_eq!(Ld::from_f64(0.0001).auto(), "0.0001");
+        assert_eq!(Ld::from_f64(0.00001).auto(), "1.0000000000000001e-05");
+        assert_eq!(Ld::from_f64(-0.0).auto(), "-0");
+        assert_eq!(Ld::from_i64(i64::MAX).auto(), "9.2233720368547758e+18");
+        assert_eq!(Ld::from_i64(-12).auto(), "-12");
+        assert_eq!(Ld::from_f64(2.5).to_i64(), Some(2));
+        assert_eq!(Ld::from_f64(-2.5).to_i64(), Some(-2));
+        assert_eq!(Ld::from_f64(1e19).to_i64(), None);
     }
 
     #[test]

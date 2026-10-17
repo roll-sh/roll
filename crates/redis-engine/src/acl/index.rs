@@ -198,6 +198,7 @@ fn fallback_categories(c: &Command) -> u32 {
         Group::Geo => cat("geo"),
         Group::Stream => cat("stream"),
         Group::Bitmap => cat("bitmap"),
+        Group::Array => cat("array"),
         Group::Server | Group::Cluster => 0,
     };
     if c.has(commands::WRITE) {

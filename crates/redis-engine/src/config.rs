@@ -95,6 +95,10 @@ pub struct Config {
     pub stream_idmp_duration: u64,
     pub stream_idmp_maxsize: u64,
     pub hll_sparse_max_bytes: usize,
+    /// Arrays: slice size of new arrays (a power of two), and the sparse-slice thresholds.
+    pub array_slice_size: u32,
+    pub array_sparse_kmax: u32,
+    pub array_sparse_kmin: u32,
     /// Lua/function busy threshold in milliseconds (`busy-reply-threshold`, alias `lua-time-limit`).
     pub busy_reply_threshold: u64,
     pub proto_max_bulk_len: u64,
@@ -152,6 +156,9 @@ impl Default for Config {
             stream_idmp_duration: 100,
             stream_idmp_maxsize: 100,
             hll_sparse_max_bytes: 3000,
+            array_slice_size: crate::types::array::SLICE_SIZE_DEFAULT,
+            array_sparse_kmax: crate::types::array::KMAX_DEFAULT,
+            array_sparse_kmin: crate::types::array::KMIN_DEFAULT,
             busy_reply_threshold: 5000,
             proto_max_bulk_len: 512 * 1024 * 1024,
             slowlog_log_slower_than: 10_000,
@@ -217,6 +224,19 @@ pub fn parse_memory(v: &str) -> Result<u64, String> {
 
 fn parse_num<T: std::str::FromStr>(v: &str) -> Result<T, String> {
     v.parse().map_err(|_| "argument couldn't be parsed into an integer".to_string())
+}
+
+/// An unsigned integer config within `[min, max]`.
+fn ranged_u32(v: &str, min: u32, max: u32) -> Result<u32, String> {
+    let range = || format!("argument must be between {min} and {max} inclusive");
+    if v.parse::<i128>().is_ok_and(|w| w < min as i128 || w > max as i128) {
+        return Err(range());
+    }
+    let n: u32 = parse_num(v)?;
+    if n < min || n > max {
+        return Err(range());
+    }
+    Ok(n)
 }
 
 macro_rules! p {
@@ -308,6 +328,45 @@ pub static PARAMS: &[Param] = &[
     p!("stream-idmp-duration", stream_idmp_duration, num, 1u64, 86400u64),
     p!("stream-idmp-maxsize", stream_idmp_maxsize, num, 1u64, 10000u64),
     p!("hll-sparse-max-bytes", hll_sparse_max_bytes, num),
+    Param {
+        name: "array-slice-size",
+        alias: None,
+        get: |c| c.array_slice_size.to_string(),
+        set: Some(|c, v| {
+            let n = ranged_u32(v, 256, 65536)?;
+            if !n.is_power_of_two() {
+                return Err("array-slice-size must be a power of two".into());
+            }
+            c.array_slice_size = n;
+            Ok(())
+        }),
+    },
+    Param {
+        name: "array-sparse-kmax",
+        alias: None,
+        get: |c| c.array_sparse_kmax.to_string(),
+        set: Some(|c, v| {
+            let n = ranged_u32(v, 0, 256)?;
+            if n > 0 && n <= c.array_sparse_kmin {
+                return Err("array-sparse-kmax must be greater than array-sparse-kmin when non-zero".into());
+            }
+            c.array_sparse_kmax = n;
+            Ok(())
+        }),
+    },
+    Param {
+        name: "array-sparse-kmin",
+        alias: None,
+        get: |c| c.array_sparse_kmin.to_string(),
+        set: Some(|c, v| {
+            let n = ranged_u32(v, 0, 256)?;
+            if c.array_sparse_kmax > 0 && n >= c.array_sparse_kmax {
+                return Err("array-sparse-kmin must be less than array-sparse-kmax".into());
+            }
+            c.array_sparse_kmin = n;
+            Ok(())
+        }),
+    },
     Param {
         name: "busy-reply-threshold",
         alias: Some("lua-time-limit"),

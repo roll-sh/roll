@@ -1,0 +1,442 @@
+# Arrays (Redis 8.10): every command, value encodings, the slice layout ARINFO reports, ring
+# buffers, AROP arithmetic, keyspace events, persistence and the array-* configs.
+
+FLUSHALL
+CONFIG SET array-slice-size 4096
+CONFIG SET array-sparse-kmax 10
+CONFIG SET array-sparse-kmin 5
+
+# ARSET / ARGET / ARMGET
+ARSET a 0 x 1.5 3 hello12345
+ARGET a 0
+ARGET a 1
+ARGET a 2
+ARGET a 3
+ARGET a 4
+ARGET nosuch 0
+ARMGET a 0 1 2 3 4 5
+ARMGET nosuch 0 1
+ARMGET a 0 -1
+ARMGET a 0 abc
+TYPE a
+OBJECT ENCODING a
+ARINFO a
+ARINFO a FULL
+ARLEN a
+ARCOUNT a
+ARLEN nosuch
+ARCOUNT nosuch
+ARSET a 1 y
+ARSET a 2 z w
+ARGETRANGE a 0 5
+ARSET a 18446744073709551614 last
+ARSET a 18446744073709551614 x y
+ARSET a 18446744073709551613 x y z
+ARSET a 18446744073709551615 x
+ARSET a -1 x
+ARSET a 1.5 x
+ARSET a abc x
+ARSET a " 5" spaced
+ARSET a +6 plus
+ARSET a 007 zeros
+ARSET a -0 negzero
+ARGET a 5
+ARGET a 6
+ARGET a 7
+ARGET a " 5"
+ARGET a 18446744073709551614
+ARLEN a
+ARCOUNT a
+ARINFO a FULL
+DEL a
+
+# Value encodings round-trip as text.
+ARSET v 0 123 -0 2305843009213693951 2305843009213693952 -2305843009213693952 -2305843009213693953 1.5 1.0 -0.0 0.1 1.00 00.5 .5 5. - . "" "hello" "hello world" 1e5 0.25 12345678.5 100000000000000000000.0 0.30000000000000004 9223372036854775807 -9223372036854775808 18446744073709551616
+ARGETRANGE v 0 30
+ARSCAN v 0 100
+DUMP v
+EVAL "local d = redis.call('dump', KEYS[1]); redis.call('restore', KEYS[2], 0, d); return redis.call('arscan', KEYS[2], 0, 100)" 2 v v2
+ARINFO v2 FULL
+DEL v v2
+
+# Wrong types.
+SET s str
+ARGET s 0
+ARSET s 0 x
+ARMGET s 0
+ARDEL s 0
+ARLEN s
+ARINFO s
+AROP s 0 1 SUM
+ARINSERT s x
+ARRING s 3 x
+ARNEXT s
+ARSEEK s 1
+ARLASTITEMS s 1
+ARSCAN s 0 1
+ARGREP s - + EXACT x
+ARGETRANGE s 0 1
+ARGET s abc
+DEL s
+
+# ARMSET
+ARMSET m 0 a 10 b 100 c
+ARMSET m 0 a 10
+ARMSET m 0 a 10
+ARMSET m 0 a 10 b x
+ARMSET m 0 a -1 b
+ARMSET m 18446744073709551615 a
+ARSCAN m 0 1000
+ARINFO m FULL
+DEL m
+
+# ARDEL / ARDELRANGE
+ARSET d 0 a b c d e f g h i j k l m n o p q r s t
+ARDEL d 0 0 1 100
+ARDEL d -1
+ARDEL nosuch 0
+ARDEL nosuch -1
+ARCOUNT d
+ARDELRANGE d 10 5
+ARDELRANGE d 15 15 2 3
+ARDELRANGE d 0
+ARDELRANGE d 0 x
+ARDELRANGE nosuch 0 10
+ARSCAN d 0 100
+ARINFO d FULL
+ARDELRANGE d 0 18446744073709551614
+EXISTS d
+
+# Holes, sparse and dense slices, demotion.
+ARMSET h 0 a 100 b 1000 c 4095 d 4096 e 8191 f
+ARINFO h FULL
+ARLEN h
+ARSET h 200 v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12
+ARINFO h FULL
+ARDELRANGE h 200 209
+ARINFO h FULL
+ARDEL h 210 211
+ARINFO h FULL
+ARSCAN h 0 10000
+ARSCAN h 10000 0
+ARSCAN h 0 10000 LIMIT 3
+ARSCAN h 10000 0 LIMIT 2
+ARSCAN h 0 10000 LIMIT 0
+ARSCAN h 0 10000 LIMIT -1
+ARSCAN h 0 10000 LIMIT x
+ARSCAN h 0 10000 LIMITS 1
+ARSCAN h 0 10000 LIMIT
+ARSCAN h 0 10000 LIMIT 1 2
+ARSCAN nosuch 0 10
+ARSCAN h 5000 5000
+DEL h
+
+# Growing dense windows left and right, one element at a time.
+ARSET g 2000 a
+ARSET g 2001 a
+ARSET g 2003 a
+ARSET g 2005 a
+ARSET g 1990 a
+ARSET g 1980 a
+ARSET g 2010 a
+ARSET g 2020 a
+ARSET g 2030 a
+ARSET g 2040 a
+ARSET g 2050 a
+ARINFO g FULL
+ARSET g 1000 a
+ARINFO g FULL
+ARSET g 4095 a
+ARINFO g FULL
+ARSET g 0 a
+ARINFO g FULL
+ARDELRANGE g 1000 4000
+ARINFO g FULL
+ARDEL g 4095
+ARINFO g FULL
+DEL g
+
+# Bulk sets across slices, superdir.
+ARSET b 4090 {20*x }
+ARINFO b FULL
+ARSET b 8388600 {20*y }
+ARINFO b FULL
+ARSET b 18446744073709551600 {10*z }
+ARINFO b FULL
+ARLEN b
+ARCOUNT b
+ARSCAN b 18446744073709551614 0 LIMIT 5
+ARGETRANGE b 18446744073709551605 18446744073709551614
+ARGETRANGE b 0 999999
+!type ARGETRANGE b 0 999999
+ARGETRANGE b 0 1000000
+ARGETRANGE nosuch 3 0
+ARDELRANGE b 8388605 18446744073709551605
+ARINFO b FULL
+ARDELRANGE b 0 4095
+ARINFO b FULL
+DEL b
+
+# ARGREP
+ARSET r 0 apple Banana cherry "apple pie" 42 4.5 "" APPLE xapplex
+ARGREP r - + EXACT apple
+ARGREP r - + EXACT apple NOCASE
+ARGREP r - + MATCH apple
+ARGREP r - + MATCH APP NOCASE WITHVALUES
+ARGREP r - + GLOB "*an*"
+ARGREP r - + GLOB "[ab]*" NOCASE
+ARGREP r - + MATCH apple MATCH pie AND
+ARGREP r - + MATCH apple MATCH pie OR WITHVALUES
+ARGREP r - + MATCH apple LIMIT 2
+ARGREP r + - MATCH apple LIMIT 2
+ARGREP r 3 1 MATCH a
+ARGREP r 2 + EXACT ""
+ARGREP r - + MATCH ""
+ARGREP r - + EXACT 42 EXACT 4.5
+ARGREP r - + LIMIT 0 EXACT x
+ARGREP r - + EXACT
+ARGREP r - + WITHVALUES NOCASE
+ARGREP r - + FOO bar
+ARGREP r -1 + EXACT x
+ARGREP r - x EXACT x
+ARGREP nosuch - + EXACT x
+ARGREP r - + RE ""
+ARGREP r - + RE {2049*a}
+ARGREP r - + {251*EXACT a }
+ARGREP r 100 200 EXACT apple
+DEL r
+
+# AROP
+ARSET n 0 1 2 3 4.5 x -7 "1e3" " 5" 0x10 inf
+AROP n 0 100 SUM
+AROP n 0 100 MIN
+AROP n 0 100 MAX
+AROP n 0 100 AND
+AROP n 0 100 OR
+AROP n 0 100 XOR
+AROP n 0 100 USED
+AROP n 0 100 MATCH 2
+AROP n 0 100 MATCH x
+AROP n 100 0 SUM
+AROP n 0 3 sum
+AROP n 0 100 MATCH
+AROP n 0 100 SUM x
+AROP n 0 100 AVG
+AROP nosuch 0 1 SUM
+AROP nosuch 0 1 USED
+AROP nosuch 0 1 MATCH x
+AROP nosuch 0 1 AND
+AROP n 20 30 SUM
+AROP n 20 30 AND
+AROP n 20 30 USED
+ARSET f 0 0.1 0.2 0.3 1.5 2.25
+AROP f 0 10 SUM
+AROP f 10 0 SUM
+AROP f 0 10 MIN
+AROP f 0 10 MAX
+AROP f 0 10 OR
+ARSET i 0 9223372036854775807 1 -9223372036854775808 1e30 -2.5 2.5
+AROP i 0 10 SUM
+AROP i 0 10 AND
+AROP i 0 10 OR
+AROP i 0 10 XOR
+AROP i 0 10 MIN
+AROP i 0 10 MAX
+ARSET z 0 -0.0
+AROP z 0 0 SUM
+ARSET inf 0 inf -inf
+AROP inf 0 1 SUM
+AROP inf 0 1 MIN
+AROP inf 0 1 MAX
+DEL n f i z inf
+
+# Ring buffers: ARINSERT, ARRING, ARNEXT, ARSEEK, ARLASTITEMS.
+ARNEXT q
+ARINSERT q a b c
+ARNEXT q
+ARINSERT q d
+ARLASTITEMS q 2
+ARLASTITEMS q 2 REV
+ARLASTITEMS q 100
+ARLASTITEMS q 0
+ARLASTITEMS q -1
+ARLASTITEMS q x
+ARLASTITEMS q 1 FOO
+ARLASTITEMS q 1 REV x
+ARLASTITEMS nosuch 1
+ARSEEK q 10
+ARNEXT q
+ARINSERT q e
+ARLASTITEMS q 3
+ARINFO q
+ARSEEK q 0
+ARNEXT q
+ARLASTITEMS q 3
+ARSEEK q -1
+ARSEEK q x
+ARSEEK nosuch 5
+ARSEEK q 18446744073709551615
+ARNEXT q
+ARINFO q
+ARINSERT q z
+ARSEEK q 18446744073709551614
+ARINSERT q y
+ARINSERT q y
+ARNEXT q
+ARSEEK q 18446744073709551613
+ARINSERT q y z
+ARINSERT q y
+DEL q
+ARRING ring 3 a b c d e
+ARGETRANGE ring 0 3
+ARNEXT ring
+ARLASTITEMS ring 3
+ARRING ring 3 f
+ARLASTITEMS ring 3
+ARRING ring 5 g h
+ARGETRANGE ring 0 5
+ARLASTITEMS ring 5
+ARRING ring 2 i
+ARGETRANGE ring 0 5
+ARLASTITEMS ring 2
+ARINFO ring
+ARRING ring 0 x
+ARRING ring -1 x
+ARRING ring x x
+ARRING ring 4 j k l m n o p
+ARGETRANGE ring 0 5
+ARSEEK ring 0
+ARRING ring 6 q
+ARGETRANGE ring 0 6
+ARSET ring 1 hole
+ARDEL ring 1
+ARRING ring 2 r
+ARGETRANGE ring 0 6
+ARSEEK ring 50
+ARRING ring 10 s
+ARGETRANGE ring 0 11
+DEL ring
+
+# Keyspace events (class a).
+CONFIG SET notify-keyspace-events KEa
+CONFIG GET notify-keyspace-events
+CONFIG SET notify-keyspace-events KEA
+CONFIG GET notify-keyspace-events
+CONFIG SET notify-keyspace-events Kg$lshzxetda
+CONFIG GET notify-keyspace-events
+CONFIG SET notify-keyspace-events ""
+CONFIG SET notify-keyspace-events KEA
+@conn 2
+!send PSUBSCRIBE __key*__:*
+@recv
+@conn 1
+ARSET ev 0 a
+ARMSET ev 1 b
+ARINSERT ev c
+ARRING ev 5 d
+ARSEEK ev 1
+ARDEL ev 9
+ARDEL ev 0
+ARDELRANGE ev 0 10
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+UNSUBSCRIBE
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+
+# COPY, RENAME, SCAN TYPE, persistence.
+ARSET c 5 a 7 b
+ARINSERT c x
+COPY c c2
+ARSCAN c2 0 100
+ARNEXT c2
+ARINFO c2 FULL
+RENAME c2 c3
+!sort SCAN 0 TYPE array
+!sort SCAN 0 TYPE ARRAY
+DEL c c3
+ARSET p 0 x y 1.5 42 "a long value of text"
+ARSEEK p 9
+DUMP p
+EVAL "local d = redis.call('dump', KEYS[1]); redis.call('del', KEYS[1]); redis.call('restore', KEYS[1], 0, d); return redis.call('arnext', KEYS[1])" 1 p
+ARSCAN p 0 10
+ARNEXT p
+DEL p
+
+# Configs.
+!sort CONFIG GET array-*
+CONFIG SET array-slice-size 300
+CONFIG SET array-slice-size 128
+CONFIG SET array-slice-size 131072
+CONFIG SET array-slice-size abc
+CONFIG SET array-slice-size -1
+CONFIG SET array-slice-size 256
+CONFIG SET array-sparse-kmax 5
+CONFIG SET array-sparse-kmax 4
+CONFIG SET array-sparse-kmin 10
+CONFIG SET array-sparse-kmin 9
+CONFIG SET array-sparse-kmax 257
+CONFIG SET array-sparse-kmax 0
+CONFIG SET array-sparse-kmin 200
+!sort CONFIG GET array-*
+ARSET k 0 a
+ARSET k 600 a
+ARSET k 600000 a
+ARINFO k FULL
+ARDEL k 600000
+ARINFO k FULL
+CONFIG SET array-sparse-kmin 5
+CONFIG SET array-sparse-kmax 10
+ARSET k 1 a
+ARSET k 300 a
+ARINFO k FULL
+CONFIG SET array-slice-size 4096
+ARINFO k
+DUMP k
+DEL k
+CONFIG SET array-sparse-kmax 2
+CONFIG SET array-sparse-kmin 1
+ARMSET k 0 a 10 b 20 c 30 d
+ARINFO k FULL
+ARDEL k 0 10
+ARINFO k FULL
+CONFIG SET array-sparse-kmax 10
+CONFIG SET array-sparse-kmin 5
+DEL k
+
+# MULTI and scripts.
+MULTI
+ARSET t 0 a
+ARINSERT t b
+ARGET t 1
+EXEC
+EVAL "return redis.call('arset', KEYS[1], 5, 'x')" 1 t
+EVAL "return redis.call('arscan', KEYS[1], 0, 10)" 1 t
+EVAL "return redis.call('arinfo', KEYS[1])" 1 t
+EVAL "return redis.call('arop', KEYS[1], 0, 10, 'used')" 1 t
+DEL t
+
+# Command metadata.
+!sort ACL CAT array
+COMMAND INFO arset arget armset armget ardel ardelrange arlen arcount argetrange arscan argrep arop arinsert arring arnext arseek arlastitems arinfo
+COMMAND DOCS arset argrep arop arring arinfo
+COMMAND GETKEYS ARSET k 0 v
+COMMAND GETKEYSANDFLAGS ARDELRANGE k 0 1
+COMMAND GETKEYSANDFLAGS ARGREP k - + EXACT x
+!sort COMMAND LIST FILTERBY ACLCAT array

@@ -14,8 +14,9 @@ pub const STREAM: u32 = 1 << 10; // t
 pub const KEY_MISS: u32 = 1 << 11; // m
 pub const MODULE: u32 = 1 << 12; // d
 pub const NEW: u32 = 1 << 13; // n
+pub const ARRAY: u32 = 1 << 14; // a
 /// `A`: every class except `m` and `n`.
-pub const ALL: u32 = GENERIC | STRING | LIST | SET | HASH | ZSET | EXPIRED | EVICTED | STREAM | MODULE;
+pub const ALL: u32 = GENERIC | STRING | LIST | SET | HASH | ZSET | EXPIRED | EVICTED | STREAM | MODULE | ARRAY;
 
 pub fn parse_flags(s: &str) -> Option<u32> {
     let mut f = 0;
@@ -35,6 +36,7 @@ pub fn parse_flags(s: &str) -> Option<u32> {
             't' => STREAM,
             'm' => KEY_MISS,
             'd' => MODULE,
+            'a' => ARRAY,
             'n' => NEW,
             _ => return None,
         };
@@ -58,6 +60,7 @@ pub fn flags_to_string(f: u32) -> String {
             (EVICTED, 'e'),
             (STREAM, 't'),
             (MODULE, 'd'),
+            (ARRAY, 'a'),
             (NEW, 'n'),
         ] {
             if f & bit != 0 {

@@ -68,6 +68,46 @@ pub fn parse_u64(s: &[u8]) -> Option<u64> {
     Some(v)
 }
 
+/// The bytes a C string function would see (up to the first NUL).
+pub fn cstr(a: &[u8]) -> &[u8] {
+    match a.iter().position(|&c| c == 0) {
+        Some(i) => &a[..i],
+        None => a,
+    }
+}
+
+/// `strtoull(s, &end, 10)` accepting the whole string: leading whitespace, a sign (negative
+/// values wrap), digits; no overflow.
+pub fn strtoull(s: &[u8]) -> Option<u64> {
+    let mut i = 0;
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
+        neg = s[i] == b'-';
+        i += 1;
+    }
+    let start = i;
+    let mut v: u64 = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        v = v.checked_mul(10)?.checked_add((s[i] - b'0') as u64)?;
+        i += 1;
+    }
+    if i == start || i != s.len() {
+        return None;
+    }
+    Some(if neg { v.wrapping_neg() } else { v })
+}
+
+/// Redis' `string2ull`.
+pub fn string2ull(s: &[u8]) -> Option<u64> {
+    if let Some(v) = parse_i64(s) {
+        return if v < 0 { None } else { Some(v as u64) };
+    }
+    strtoull(s)
+}
+
 /// Is `s` the canonical text of an i64 (so it can be stored as an integer)?
 pub fn is_int(s: &[u8]) -> bool {
     parse_i64(s).is_some()

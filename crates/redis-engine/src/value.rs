@@ -1,6 +1,6 @@
 //! Values stored in the keyspace.
 
-use crate::types::{Hash, List, Set, Stream, ZSet};
+use crate::types::{Array, Hash, List, Set, Stream, ZSet};
 use smallvec::SmallVec;
 
 /// A byte string with up to 22 bytes stored inline (no allocation): keys, small values, members.
@@ -19,6 +19,7 @@ pub enum Kind {
     Set,
     ZSet,
     Stream,
+    Array,
 }
 
 impl Kind {
@@ -30,6 +31,7 @@ impl Kind {
             Kind::Set => "set",
             Kind::ZSet => "zset",
             Kind::Stream => "stream",
+            Kind::Array => "array",
         }
     }
 
@@ -41,6 +43,7 @@ impl Kind {
             b"set" => Kind::Set,
             b"zset" => Kind::ZSet,
             b"stream" => Kind::Stream,
+            b"array" => Kind::Array,
             _ => return None,
         })
     }
@@ -54,6 +57,7 @@ pub enum Value {
     Set(Box<Set>),
     ZSet(Box<ZSet>),
     Stream(Box<Stream>),
+    Array(Box<Array>),
 }
 
 impl Value {
@@ -70,6 +74,7 @@ impl Value {
             Value::Set(_) => Kind::Set,
             Value::ZSet(_) => Kind::ZSet,
             Value::Stream(_) => Kind::Stream,
+            Value::Array(_) => Kind::Array,
         }
     }
 
@@ -81,6 +86,7 @@ impl Value {
             Kind::Set => Value::Set(Box::default()),
             Kind::ZSet => Value::ZSet(Box::default()),
             Kind::Stream => Value::Stream(Box::default()),
+            Kind::Array => Value::Array(Box::default()),
         }
     }
 
@@ -99,6 +105,7 @@ impl Value {
             Value::Set(x) => std::mem::size_of::<Set>() + x.mem(),
             Value::ZSet(z) => std::mem::size_of::<ZSet>() + z.mem(),
             Value::Stream(x) => std::mem::size_of::<Stream>() + x.mem(),
+            Value::Array(x) => std::mem::size_of::<Array>() + x.mem(),
         }
     }
 
@@ -111,6 +118,7 @@ impl Value {
             Value::Hash(h) => h.is_empty(),
             Value::Set(x) => x.is_empty(),
             Value::ZSet(z) => z.is_empty(),
+            Value::Array(a) => a.is_empty(),
         }
     }
 
@@ -131,6 +139,7 @@ impl Value {
             Value::Set(x) => x.encoding(),
             Value::ZSet(z) => z.encoding(),
             Value::Stream(_) => "stream",
+            Value::Array(_) => "sliced-array",
         }
     }
 }
@@ -159,7 +168,7 @@ impl Entry {
     }
 }
 
-/// Not counted in the keysizes histogram (streams).
+/// Not counted in the keysizes histogram (streams, arrays).
 pub const NO_SIZE: u16 = u16::MAX;
 /// Keysizes histogram dimensions: strings, lists, sets, zsets, hashes × power-of-two bins.
 pub const SIZE_TYPES: usize = 5;
@@ -175,7 +184,7 @@ impl Value {
             Value::Set(s) => (2, s.len()),
             Value::ZSet(z) => (3, z.len()),
             Value::Hash(h) => (4, h.len()),
-            Value::Stream(_) => return NO_SIZE,
+            Value::Stream(_) | Value::Array(_) => return NO_SIZE,
         };
         let bin = (usize::BITS - n.leading_zeros()) as usize;
         (t * SIZE_BINS + bin.min(SIZE_BINS - 1)) as u16

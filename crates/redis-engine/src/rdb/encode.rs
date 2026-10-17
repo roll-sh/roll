@@ -3,6 +3,7 @@
 use super::listpack::LpWriter;
 use super::{RDB_VERSION, crc64, lzf, op, ty};
 use crate::types::stream::{Stream, StreamId};
+use crate::types::array::{self, Array, Decoded};
 use crate::types::{Hash, List, Set, ZSet};
 use crate::util::parse_i64;
 use crate::value::{Entry, Value};
@@ -81,6 +82,7 @@ pub(crate) fn type_of(v: &Value) -> u8 {
         Value::Hash(h) if h.min_expire() != 0 => ty::HASH_METADATA,
         Value::Hash(_) => ty::HASH,
         Value::Stream(_) => ty::STREAM_LISTPACKS_5,
+        Value::Array(_) => ty::ARRAY,
     }
 }
 
@@ -138,6 +140,39 @@ impl Encoder {
             Value::ZSet(z) => self.zset(z),
             Value::Hash(h) => self.hash(h),
             Value::Stream(s) => self.stream(s),
+            Value::Array(a) => self.array(a),
+        }
+    }
+
+    /// Count, the insert cursor (flag 0, or 1 and the index), then index-tagged elements.
+    fn array(&mut self, a: &Array) {
+        self.len(a.count());
+        if a.insert_idx() == array::INSERT_NONE {
+            self.len(0);
+        } else {
+            self.len(1);
+            self.len(a.insert_idx());
+        }
+        for (idx, v) in a.iter() {
+            self.len(idx);
+            match v.decoded() {
+                Decoded::Int(i) => {
+                    self.len(array::RDB_TAG_INT);
+                    self.out.extend_from_slice(&i.to_le_bytes());
+                }
+                Decoded::Float(d) => {
+                    self.len(array::RDB_TAG_FLOAT);
+                    self.out.extend_from_slice(&d.to_le_bytes());
+                }
+                Decoded::Small(s) => {
+                    self.len(array::RDB_TAG_SMALLSTR);
+                    self.string(s);
+                }
+                Decoded::Heap(s) => {
+                    self.len(array::RDB_TAG_SDS);
+                    self.string(s);
+                }
+            }
         }
     }
 

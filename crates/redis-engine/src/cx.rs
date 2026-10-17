@@ -13,7 +13,7 @@ use crate::commands::{Command, Error, WRONGTYPE};
 use crate::db::Db;
 use crate::engine::{BlockReq, Effect, Engine, Mode, Signals};
 use crate::notify;
-use crate::types::{Hash, List, Set, Stream, ZSet};
+use crate::types::{Array, Hash, List, Set, Stream, ZSet};
 use crate::value::{Entry, Kind, Str, Value};
 use bytes::Bytes;
 use redis_proto::Reply;
@@ -119,6 +119,12 @@ impl KeyMut<'_> {
             _ => unreachable!("type checked by lookup"),
         }
     }
+    pub fn array(&mut self) -> &mut Array {
+        match &mut self.entry.value {
+            Value::Array(a) => a,
+            _ => unreachable!("type checked by lookup"),
+        }
+    }
 }
 
 impl Drop for KeyMut<'_> {
@@ -218,6 +224,7 @@ impl<'a> Cx<'a> {
     typed_get!(get_set, Set, Set);
     typed_get!(get_zset, ZSet, ZSet);
     typed_get!(get_stream, Stream, Stream);
+    typed_get!(get_array, Array, Array);
 
     /// Mutable access to an existing key (any type).
     pub fn get_mut(&mut self, key: &[u8]) -> Option<KeyMut<'_>> {
