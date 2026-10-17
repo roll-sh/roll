@@ -55,6 +55,8 @@ pub static COMMANDS: &[Command] = &[
     container!("slowlog", 0, Server, SLOWLOG),
     container!("latency", 0, Server, LATENCY),
     container!("module", 0, Server, MODULE),
+    // Redis declares BACKUP with arity 2 (every subcommand takes no argument).
+    Command { arity: 2, ..container!("backup", 0, Server, BACKUP) },
     cmd!("debug", -2, ADMIN | NOSCRIPT | LOADING | STALE | DANGEROUS, 0, 0, 0, debug, Server),
 ];
 
@@ -118,6 +120,16 @@ static MEMORY: &[Command] = &[
     cmd!("malloc-stats", 2, 0, 0, 0, 0, memory_malloc_stats, Server),
     cmd!("purge", 2, 0, 0, 0, 0, memory_purge, Server),
     cmd!("help", 2, LOADING | STALE, 0, 0, 0, memory_help, Server),
+];
+
+static BACKUP: &[Command] = &[
+    cmd!("abort", 2, ADMIN | NOSCRIPT, 0, 0, 0, super::persist::backup_abort, Server),
+    cmd!("cleanup", 2, ADMIN | NOSCRIPT, 0, 0, 0, super::persist::backup_cleanup, Server),
+    cmd!("help", 2, LOADING | STALE, 0, 0, 0, super::persist::backup_help, Server),
+    cmd!("list", 2, ADMIN | STALE, 0, 0, 0, super::persist::backup_list, Server),
+    cmd!("seal", 2, ADMIN | NOSCRIPT, 0, 0, 0, super::persist::backup_seal, Server),
+    cmd!("start", 2, ADMIN | NOSCRIPT, 0, 0, 0, super::persist::backup_start, Server),
+    cmd!("status", 2, ADMIN | STALE, 0, 0, 0, super::persist::backup_status, Server),
 ];
 
 static SLOWLOG: &[Command] = &[

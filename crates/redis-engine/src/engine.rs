@@ -366,6 +366,9 @@ impl Engine {
         };
         e.startup_memory = e.used_memory();
         e.peak_memory = e.startup_memory;
+        if e.cfg.appendonly {
+            e.open_aof_at_start();
+        }
         e
     }
 

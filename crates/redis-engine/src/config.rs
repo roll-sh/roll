@@ -930,7 +930,7 @@ pub static PARAMS: &[Param] = &[
     string("tls-ciphersuites", None, MODIFIABLE, true, None).apply(apply_tls),
     string("tls-expected-peer-name", None, MODIFIABLE, true, None).check(|_, v| str_check(v, valid_expected_peer_name)),
     // Special configs
-    special("dir", None, MODIFIABLE | PROTECTED | DENY_LOADING, |_| "/data".into(), |_, _| Ok(true)),
+    special("dir", None, MODIFIABLE | PROTECTED | DENY_LOADING, |_| DIR.into(), |_, _| Ok(true)),
     special("save", None, MODIFIABLE | MULTI_ARG, get_save, set_save),
     special("client-output-buffer-limit", None, MODIFIABLE | MULTI_ARG, get_obuf, set_obuf),
     special("oom-score-adj-values", None, MODIFIABLE | MULTI_ARG, get_oom_values, set_oom_values),
@@ -953,6 +953,29 @@ pub static PARAMS: &[Param] = &[
     special("replicaof", Some("slaveof"), IMMUTABLE | MULTI_ARG, |_| String::new(), |_, _| Ok(true)),
     special("latency-tracking-info-percentiles", None, MODIFIABLE | MULTI_ARG, get_percentiles, set_percentiles),
 ];
+
+/// The working directory files are named relative to (`dir`).
+pub const DIR: &str = "/data";
+
+fn extra_str(c: &Config, name: &str, default: &str) -> String {
+    c.extra.get(name).cloned().and_then(Val::string).unwrap_or_else(|| default.into())
+}
+
+pub fn appendfilename(c: &Config) -> String {
+    extra_str(c, "appendfilename", "appendonly.aof")
+}
+
+pub fn backupdirname(c: &Config) -> String {
+    extra_str(c, "backupdirname", "backupdir")
+}
+
+pub fn aof_use_rdb_preamble(c: &Config) -> bool {
+    c.extra.get("aof-use-rdb-preamble").is_none_or(Val::bool)
+}
+
+pub fn backup_sealed_ttl(c: &Config) -> i64 {
+    c.extra.get("backup-sealed-ttl").map_or(0, |v| v.num() as i64)
+}
 
 fn port(c: &Config) -> i128 {
     c.extra.get("port").map_or(PORT, Val::num)

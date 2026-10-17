@@ -566,7 +566,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
 
     if want.has("persistence") {
         begin(&mut s, "# Persistence");
-        let aof = eng.cfg.appendonly || eng.host.as_ref().is_some_and(|h| h.aof_enabled());
+        let aof = eng.persist.aof != crate::commands::persist::AofState::Off || eng.host.as_ref().is_some_and(|h| h.aof_enabled());
         let (p, now_s) = (&eng.persist, now / 1000);
         let _ = write!(
             s,
@@ -575,7 +575,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
              rdb_last_bgsave_time_sec:{}\r\nrdb_current_bgsave_time_sec:{}\r\nrdb_saves:{}\r\nrdb_saves_consecutive_failures:0\r\nrdb_last_cow_size:0\r\n\
              rdb_last_load_keys_expired:0\r\nrdb_last_load_keys_loaded:0\r\naof_enabled:{}\r\naof_rewrite_in_progress:{}\r\naof_rewrite_scheduled:{}\r\n\
              aof_last_rewrite_time_sec:{}\r\naof_current_rewrite_time_sec:{}\r\naof_last_bgrewrite_status:ok\r\naof_rewrites:{}\r\naof_rewrites_consecutive_failures:0\r\n\
-             aof_last_write_status:ok\r\naof_last_cow_size:0\r\nbackup_in_progress:0\r\nmodule_fork_in_progress:0\r\nmodule_fork_last_cow_size:0\r\n",
+             aof_last_write_status:ok\r\naof_last_cow_size:0\r\nbackup_in_progress:{}\r\nmodule_fork_in_progress:0\r\nmodule_fork_last_cow_size:0\r\n",
             p.child.as_ref().map_or(0, |c| c.keys),
             eng.dirty(),
             p.in_progress(ChildKind::Rdb) as i32,
@@ -589,8 +589,9 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
             p.aof_last_time,
             p.current_time(ChildKind::Aof, now_s),
             p.aof_rewrites,
+            p.backup.in_progress() as i32,
         );
-        if aof {
+        if eng.cfg.appendonly || eng.host.as_ref().is_some_and(|h| h.aof_enabled()) {
             let size = eng.host.as_ref().map_or(0, |h| h.replication().offset);
             let _ = write!(
                 s,

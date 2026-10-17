@@ -1,6 +1,8 @@
-//! SAVE, BGSAVE and BGREWRITEAOF. Durability is the platform's log, so these only keep Redis'
-//! bookkeeping: a background "child" runs from the command until the next cron tick, like a
-//! fork that finishes before serverCron notices, with the same replies and INFO fields.
+//! SAVE, BGSAVE, BGREWRITEAOF and BACKUP. Durability is the platform's log, so these only keep
+//! Redis' bookkeeping: a background "child" runs from the command until the next cron tick, like
+//! a fork that finishes before serverCron notices, with the same replies and INFO fields. The AOF
+//! state and the multi-part AOF manifest (file sequence numbers) are tracked so BACKUP names the
+//! files Redis would.
 
 use super::*;
 use crate::engine::{Engine, Mode};
@@ -24,9 +26,79 @@ pub struct Child {
     pub killed: bool,
 }
 
+/// `server.aof_state`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AofState {
+    #[default]
+    Off,
+    WaitRewrite,
+    On,
+}
+
+/// The AOF manifest's bookkeeping: file sequence numbers and the INCR files it lists.
+#[derive(Debug, Default)]
+pub struct AofManifest {
+    pub base_seq: u64,
+    pub incr_seq: u64,
+    pub incrs: Vec<u64>,
+    /// `appenddirname` holds files (a rewrite or an INCR wrote them).
+    pub files: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackupState {
+    #[default]
+    Idle,
+    Pending,
+    Snapshotting,
+    Incrementing,
+    Sealed,
+    Failed,
+}
+
+impl BackupState {
+    fn name(self) -> &'static str {
+        match self {
+            BackupState::Idle => "idle",
+            BackupState::Pending => "pending",
+            BackupState::Snapshotting => "snapshotting",
+            BackupState::Incrementing => "incrementing",
+            BackupState::Sealed => "sealed",
+            BackupState::Failed => "failed",
+        }
+    }
+}
+
+/// BACKUP's state: the window between START and SEAL, and the files it pinned.
+#[derive(Debug, Default)]
+pub struct Backup {
+    pub state: BackupState,
+    pub error: Option<String>,
+    pub start: i64,
+    pub end: i64,
+    pub base: Option<String>,
+    pub incr: Option<String>,
+    pub manifest: Option<String>,
+    /// The AOF directory belongs to the backup (it started the AOF on an empty one).
+    pub owns_aof_dir: bool,
+}
+
+impl Backup {
+    pub fn in_progress(&self) -> bool {
+        matches!(self.state, BackupState::Pending | BackupState::Snapshotting | BackupState::Incrementing)
+    }
+
+    fn clear_files(&mut self) {
+        (self.base, self.incr, self.manifest) = (None, None, None);
+    }
+}
+
 #[derive(Debug)]
 pub struct Persist {
     pub child: Option<Child>,
+    pub aof: AofState,
+    pub manifest: AofManifest,
+    pub backup: Backup,
     pub bgsave_scheduled: bool,
     pub aof_rewrite_scheduled: bool,
     pub rdb_last_time: i64,
@@ -40,6 +112,9 @@ impl Default for Persist {
     fn default() -> Self {
         Self {
             child: None,
+            aof: AofState::Off,
+            manifest: AofManifest::default(),
+            backup: Backup::default(),
             bgsave_scheduled: false,
             aof_rewrite_scheduled: false,
             rdb_last_time: -1,
@@ -87,13 +162,177 @@ impl Engine {
         p.latest_fork_us = started.elapsed().as_micros().max(1) as u64;
     }
 
-    /// serverCron's part: finish the running child, apply the `save` rules, then start what was
-    /// scheduled.
+    /// `rewriteAppendOnlyFileBackground`: false when a child runs or a backup window is open.
+    fn aof_rewrite(&mut self, now_ms: i64) -> bool {
+        let p = &mut self.persist;
+        if p.child.is_some() || matches!(p.backup.state, BackupState::Snapshotting | BackupState::Incrementing) {
+            return false;
+        }
+        if p.aof == AofState::On {
+            // `openNewIncrAofForAppend`: writes go to a new INCR file during the rewrite.
+            p.manifest.incr_seq += 1;
+            let seq = p.manifest.incr_seq;
+            p.manifest.incrs.push(seq);
+            p.manifest.files = true;
+        }
+        p.aof_rewrite_scheduled = false;
+        self.fork(ChildKind::Aof, now_ms);
+        true
+    }
+
+    /// `backgroundRewriteDoneHandler` on success: a new BASE, the rewritten INCRs become history.
+    fn aof_rewrite_done(&mut self) {
+        let p = &mut self.persist;
+        let m = &mut p.manifest;
+        m.base_seq += 1;
+        m.files = true;
+        if p.aof == AofState::WaitRewrite {
+            m.incr_seq += 1;
+            m.incrs.push(m.incr_seq);
+        }
+        // With the AOF open, the INCR being written stays; the others were rewritten.
+        if p.aof == AofState::Off {
+            m.incrs.clear();
+        } else if let Some(&last) = m.incrs.last() {
+            m.incrs = vec![last];
+        }
+        if p.aof == AofState::WaitRewrite {
+            p.aof = AofState::On;
+        }
+        // `backupHandleSnapshotDone`: pin the new BASE.
+        if p.backup.state == BackupState::Snapshotting {
+            let base = self.base_file_name();
+            let b = &mut self.persist.backup;
+            b.base = Some(base);
+            b.state = BackupState::Incrementing;
+        }
+    }
+
+    fn base_file_name(&self) -> String {
+        let suffix = if crate::config::aof_use_rdb_preamble(&self.cfg) { "rdb" } else { "aof" };
+        format!("{}.{}.base.{suffix}", crate::config::appendfilename(&self.cfg), self.persist.manifest.base_seq)
+    }
+
+    fn incr_file_name(&self, seq: u64) -> String {
+        format!("{}.{seq}.incr.aof", crate::config::appendfilename(&self.cfg))
+    }
+
+    /// `startAppendOnly`: a rewrite now (replacing a running one), or scheduled behind another
+    /// child or a transaction.
+    fn start_append_only(&mut self, now_ms: i64, in_exec: bool) -> bool {
+        let p = &mut self.persist;
+        p.aof = AofState::WaitRewrite;
+        if p.child.as_ref().is_some_and(|c| c.kind != ChildKind::Aof) || in_exec {
+            p.aof_rewrite_scheduled = true;
+            return true;
+        }
+        if p.in_progress(ChildKind::Aof) {
+            p.child = None;
+        }
+        if !self.aof_rewrite(now_ms) {
+            self.persist.aof = AofState::Off;
+            return false;
+        }
+        true
+    }
+
+    /// `stopAppendOnly`: the rewrite is abandoned, and a backup that needed the AOF fails.
+    fn stop_append_only(&mut self) {
+        let p = &mut self.persist;
+        p.aof = AofState::Off;
+        p.aof_rewrite_scheduled = false;
+        if p.in_progress(ChildKind::Aof) {
+            p.child = None;
+        }
+        self.backup_failed("appendonly is stopped");
+    }
+
+    /// Stop the AOF a backup started under `appendonly no`, keeping a postponed BGREWRITEAOF.
+    fn backup_stop_temp_aof(&mut self) {
+        if self.cfg.appendonly || self.persist.aof == AofState::Off {
+            return;
+        }
+        let postponed = self.persist.aof_rewrite_scheduled;
+        self.stop_append_only();
+        self.persist.aof_rewrite_scheduled = postponed;
+    }
+
+    /// Forget the AOF files a backup created in a directory it owned.
+    fn backup_remove_aof_dir(&mut self) {
+        if self.persist.backup.owns_aof_dir {
+            self.persist.manifest = AofManifest::default();
+        }
+    }
+
+    /// `backupSetFailed`.
+    pub(crate) fn backup_failed(&mut self, err: &str) {
+        if !self.persist.backup.in_progress() {
+            return;
+        }
+        let b = &mut self.persist.backup;
+        b.state = BackupState::Failed;
+        b.error = Some(err.to_string());
+        self.backup_stop_temp_aof();
+        self.backup_remove_aof_dir();
+        let b = &mut self.persist.backup;
+        b.clear_files();
+        b.owns_aof_dir = false;
+        b.end = 0;
+    }
+
+    /// `backupStartPendingSnapshot`: start (or join) the rewrite that makes the backup's BASE.
+    fn backup_start_snapshot(&mut self, now_ms: i64) -> bool {
+        if self.persist.backup.state != BackupState::Pending {
+            return true;
+        }
+        if self.persist.in_progress(ChildKind::Aof) {
+            // A rewrite feeding an open AOF can be reused; one without can't.
+            if self.persist.aof != AofState::Off {
+                self.persist.backup.start = now_ms / 1000;
+                self.persist.backup.state = BackupState::Snapshotting;
+            }
+            return true;
+        }
+        if self.persist.child.is_some() {
+            return true;
+        }
+        if self.persist.aof == AofState::Off {
+            self.persist.backup.owns_aof_dir = !self.persist.manifest.files && !self.persist.aof_rewrite_scheduled;
+            if !self.start_append_only(now_ms, false) {
+                self.backup_failed("failed to temporarily enable AOF for backup");
+                return false;
+            }
+        } else if !self.aof_rewrite(now_ms) {
+            self.backup_failed("failed to start AOF rewrite for backup");
+            return false;
+        }
+        if !self.persist.in_progress(ChildKind::Aof) {
+            self.backup_failed("failed to start AOF rewrite child for backup");
+            return false;
+        }
+        self.persist.backup.start = now_ms / 1000;
+        self.persist.backup.state = BackupState::Snapshotting;
+        true
+    }
+
+    /// `backupCron`: start a pending snapshot, expire a sealed backup after `backup-sealed-ttl`.
+    fn backup_cron(&mut self, now_ms: i64) {
+        self.backup_start_snapshot(now_ms);
+        let now_s = now_ms / 1000;
+        let ttl = crate::config::backup_sealed_ttl(&self.cfg);
+        let b = &mut self.persist.backup;
+        if b.state == BackupState::Sealed && ttl > 0 && b.end > 0 && now_s >= b.end && now_s - b.end >= ttl {
+            *b = Backup::default();
+        }
+    }
+
+    /// serverCron's part: the backup, a scheduled rewrite, finishing the running child, the
+    /// `save` rules, then a scheduled BGSAVE.
     pub fn persist_cron(&mut self, now_ms: i64) {
         let now_s = now_ms / 1000;
-        if self.persist.child.is_none() && self.persist.aof_rewrite_scheduled {
-            self.persist.aof_rewrite_scheduled = false;
-            self.fork(ChildKind::Aof, now_ms);
+        self.backup_cron(now_ms);
+        if self.persist.child.is_none() && self.persist.aof_rewrite_scheduled && !self.persist.backup.in_progress() {
+            self.aof_rewrite(now_ms);
             return;
         }
         if let Some(c) = &self.persist.child {
@@ -107,7 +346,10 @@ impl Engine {
                         self.lastsave = now_s;
                         self.persist.rdb_last_time = now_s - c.start;
                     }
-                    ChildKind::Aof => self.persist.aof_last_time = now_s - c.start,
+                    ChildKind::Aof => {
+                        self.persist.aof_last_time = now_s - c.start;
+                        self.aof_rewrite_done();
+                    }
                 }
             }
         } else if self.cfg.save.iter().any(|&(secs, changes)| self.dirty() >= changes as u64 && now_s - self.lastsave > secs) {
@@ -119,23 +361,21 @@ impl Engine {
         }
     }
 
-    /// CONFIG SET appendonly: `startAppendOnly` (a rewrite now, or scheduled behind another child
-    /// or a transaction) and `stopAppendOnly` (the rewrite is abandoned).
+    /// CONFIG SET appendonly (`updateAppendonly`): start or stop the AOF when its state differs
+    /// (a backup may have opened one under `appendonly no`).
     pub fn set_appendonly(&mut self, on: bool, now_ms: i64, in_exec: bool) {
+        if !on && self.persist.aof != AofState::Off {
+            self.stop_append_only();
+        } else if on && self.persist.aof == AofState::Off {
+            self.start_append_only(now_ms, in_exec);
+        }
+    }
+
+    /// The AOF at startup with `appendonly yes`: a BASE and an INCR are created.
+    pub fn open_aof_at_start(&mut self) {
         let p = &mut self.persist;
-        if !on {
-            p.aof_rewrite_scheduled = false;
-            if p.in_progress(ChildKind::Aof) {
-                p.child = None;
-            }
-            return;
-        }
-        if p.child.as_ref().is_some_and(|c| c.kind != ChildKind::Aof) || in_exec {
-            p.aof_rewrite_scheduled = true;
-        } else {
-            p.child = None;
-            self.fork(ChildKind::Aof, now_ms);
-        }
+        p.aof = AofState::On;
+        p.manifest = AofManifest { base_seq: 1, incr_seq: 1, incrs: vec![1], files: true };
     }
 }
 
@@ -180,13 +420,123 @@ pub fn bgsave(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn bgrewriteaof(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     let exec = cx.mode == Mode::Exec;
     let p = &mut cx.eng.persist;
-    if p.in_progress(ChildKind::Aof) {
+    if p.backup.in_progress() {
+        p.aof_rewrite_scheduled = true;
+        Ok(Reply::status("Background append only file rewriting scheduled"))
+    } else if p.in_progress(ChildKind::Aof) {
         Err(Error::new("ERR Background append only file rewriting already in progress"))
     } else if p.child.is_some() || exec {
         p.aof_rewrite_scheduled = true;
         Ok(Reply::status("Background append only file rewriting scheduled"))
-    } else {
-        cx.eng.fork(ChildKind::Aof, cx.now);
+    } else if cx.eng.aof_rewrite(cx.now) {
         Ok(Reply::status("Background append only file rewriting started"))
+    } else {
+        Err(Error::new("ERR Can't execute an AOF background rewriting. Please check the server logs for more information."))
     }
+}
+
+/// BACKUP START
+pub fn backup_start(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    let b = &cx.eng.persist.backup;
+    if b.in_progress() {
+        return Err(Error::new("ERR A backup is already in progress, ABORT it first"));
+    }
+    if b.state == BackupState::Sealed {
+        return Err(Error::new("ERR A sealed backup exists, CLEANUP it first"));
+    }
+    cx.eng.persist.backup = Backup { state: BackupState::Pending, ..Backup::default() };
+    // Not from inside EXEC: the BASE could capture half a transaction. The cron starts it.
+    if cx.mode != Mode::Exec && !cx.eng.backup_start_snapshot(cx.now) {
+        return Err(Error::new("ERR Can't start the AOF rewrite for the backup"));
+    }
+    Ok(Reply::Ok)
+}
+
+/// BACKUP SEAL: pin the INCR and the manifest; the backup is complete.
+pub fn backup_seal(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    if cx.eng.persist.backup.state != BackupState::Incrementing {
+        return Err(Error::new("ERR No backup ready to seal (must be in the incrementing state)"));
+    }
+    let m = &mut cx.eng.persist.manifest;
+    if m.incrs.is_empty() {
+        m.incr_seq += 1;
+        m.incrs.push(m.incr_seq);
+    }
+    let incr = cx.eng.incr_file_name(*cx.eng.persist.manifest.incrs.last().expect("one INCR"));
+    let manifest = format!("{}.manifest", crate::config::appendfilename(&cx.eng.cfg));
+    let b = &mut cx.eng.persist.backup;
+    (b.incr, b.manifest) = (Some(incr), Some(manifest));
+    if !cx.eng.cfg.appendonly {
+        cx.eng.persist.backup.state = BackupState::Sealed;
+        cx.eng.backup_stop_temp_aof();
+        cx.eng.backup_remove_aof_dir();
+    } else {
+        // The live AOF moves to a new INCR so the pinned one stops growing.
+        let m = &mut cx.eng.persist.manifest;
+        m.incr_seq += 1;
+        m.incrs.push(m.incr_seq);
+        cx.eng.persist.backup.state = BackupState::Sealed;
+    }
+    cx.eng.persist.backup.end = cx.now / 1000;
+    Ok(Reply::Ok)
+}
+
+/// BACKUP ABORT
+pub fn backup_abort(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    if !cx.eng.persist.backup.in_progress() {
+        return Err(Error::new("ERR No backup in progress"));
+    }
+    cx.eng.backup_failed("aborted by user");
+    Ok(Reply::Ok)
+}
+
+/// BACKUP CLEANUP
+pub fn backup_cleanup(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    if cx.eng.persist.backup.in_progress() {
+        return Err(Error::new("ERR Backup is in progress"));
+    }
+    cx.eng.persist.backup = Backup::default();
+    Ok(Reply::Ok)
+}
+
+/// BACKUP STATUS
+pub fn backup_status(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    let b = &cx.eng.persist.backup;
+    Ok(Reply::Map(vec![
+        (Reply::bulk("state"), Reply::bulk(b.state.name())),
+        (Reply::bulk("error"), Reply::bulk_str(b.error.clone().unwrap_or_default())),
+        (Reply::bulk("start_time"), Reply::Int(b.start)),
+        (Reply::bulk("end_time"), Reply::Int(b.end)),
+    ]))
+}
+
+/// BACKUP LIST: absolute paths of the files pinned so far.
+pub fn backup_list(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    let dir = crate::config::backupdirname(&cx.eng.cfg);
+    let root = if dir.starts_with('/') { dir } else { format!("{}/{dir}", crate::config::DIR) };
+    let b = &cx.eng.persist.backup;
+    Ok(Reply::Array([&b.base, &b.incr, &b.manifest].into_iter().flatten().map(|f| Reply::bulk_str(format!("{root}/{f}"))).collect()))
+}
+
+/// BACKUP HELP
+pub fn backup_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Ok(help(&[
+        "BACKUP <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "START",
+        "    Start a new backup into the configured 'backupdirname'.",
+        "SEAL",
+        "    Freeze the current backup (BASE + INCR + manifest).",
+        "ABORT",
+        "    Cancel a backup that has not been sealed yet.",
+        "CLEANUP",
+        "    Remove a sealed backup's files and return to idle.",
+        "STATUS",
+        "    Report the current backup state.",
+        "LIST",
+        "    List the immutable files pinned so far.",
+        "HELP",
+        "    Return this help.",
+        "HELP",
+        "    Print this help.",
+    ]))
 }

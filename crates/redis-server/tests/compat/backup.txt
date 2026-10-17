@@ -1,0 +1,68 @@
+# BACKUP (Redis 8.10): the START … SEAL window over an AOF rewrite (a temporary AOF under
+# appendonly no), its errors, STATUS, LIST (sequence numbers normalized) and its interplay with
+# BGREWRITEAOF, CONFIG SET appendonly and MULTI.
+BACKUP CLEANUP
+!mask start_time,end_time BACKUP STATUS
+BACKUP HELP
+BACKUP NOPE
+BACKUP
+BACKUP STATUS extra
+BACKUP SEAL
+BACKUP ABORT
+BACKUP LIST
+EVAL "return redis.call('backup', 'start')" 0
+!info aof_enabled,backup_in_progress INFO persistence
+
+# ---- start, seal ----
+BACKUP START
+!mask start_time,end_time BACKUP STATUS
+!info aof_enabled,aof_rewrite_in_progress,backup_in_progress INFO persistence
+BACKUP START
+BACKUP SEAL
+BGREWRITEAOF
+@sleep 1500
+!mask start_time,end_time BACKUP STATUS
+EVAL "local r = redis.call('backup', 'list') for i, v in ipairs(r) do r[i] = (string.gsub(v, '%.%d+%.', '.N.')) end return r" 0
+SET a 1
+BACKUP SEAL
+!mask start_time,end_time BACKUP STATUS
+EVAL "local r = redis.call('backup', 'list') for i, v in ipairs(r) do r[i] = (string.gsub(v, '%.%d+%.', '.N.')) end return r" 0
+!info aof_enabled,backup_in_progress INFO persistence
+BACKUP START
+BACKUP ABORT
+BACKUP SEAL
+BACKUP CLEANUP
+!mask start_time,end_time BACKUP STATUS
+BACKUP LIST
+@sleep 1500
+
+# ---- abort ----
+BACKUP START
+BACKUP ABORT
+!mask start_time,end_time BACKUP STATUS
+BACKUP LIST
+!info aof_enabled,backup_in_progress INFO persistence
+BACKUP ABORT
+BACKUP CLEANUP
+
+# ---- stopping the AOF fails the backup ----
+BACKUP START
+CONFIG SET appendonly yes
+!info aof_enabled INFO persistence
+CONFIG SET appendonly no
+!mask start_time,end_time BACKUP STATUS
+!info aof_enabled,backup_in_progress INFO persistence
+BACKUP CLEANUP
+@sleep 1500
+
+# ---- START inside a transaction waits for the cron ----
+MULTI
+BACKUP START
+!mask start_time,end_time BACKUP STATUS
+EXEC
+@sleep 1500
+!mask start_time,end_time BACKUP STATUS
+EVAL "local r = redis.call('backup', 'list') for i, v in ipairs(r) do r[i] = (string.gsub(v, '%.%d+%.', '.N.')) end return r" 0
+BACKUP ABORT
+BACKUP CLEANUP
+!mask start_time,end_time BACKUP STATUS
