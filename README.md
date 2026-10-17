@@ -199,10 +199,32 @@ How it works:
   storage. Costs are priced at Graviton memory ($0.0067/GiB-h) and compared with ElastiCache Serverless
   ($0.125/GB-h, with a 1 GB minimum).
 
-Commands: strings, keys and expiry, lists, hashes (with field TTLs), sets, HyperLogLog, bitmaps,
-transactions and `WATCH`, pub/sub (including sharded), ACLs, `CLIENT`, `CONFIG`, `INFO`, `SCAN`, blocking
-list ops, eviction policies and keyspace notifications. In progress: sorted sets and geo, streams, Lua
-scripting and functions, JSON, and the Bloom family.
+Commands:
+
+- **Data types:**
+  - strings, keys and expiry;
+  - lists;
+  - hashes, with field TTLs;
+  - sets and sorted sets;
+  - geo;
+  - streams, with consumer groups;
+  - HyperLogLog and bitmaps.
+- **Transactions:** MULTI/EXEC and `WATCH`.
+- **Pub/sub,** including sharded pub/sub.
+- **Server:** ACLs, `CLIENT`, `CONFIG`, `INFO` and `SCAN`.
+- **Behaviour:** blocking ops, eviction policies and keyspace notifications.
+
+Still in progress: Lua scripting and functions, `DUMP`/`RESTORE` and RDB import/export, JSON, and the Bloom
+family.
+
+Storage stays bounded:
+
+- A database snapshots once its log grows larger than its data, and again when it unloads.
+- Snapshots and log older than `history_retention_s` are dropped.
+- A garbage collector deletes objects that no database, branch or restore archive references any
+  more. An object must be found unreferenced on two passes an hour apart before it is deleted.
+- A branch records the part of its parent's history it starts from, so the parent can be deleted
+  without breaking the branch.
 
 ### Tests
 
