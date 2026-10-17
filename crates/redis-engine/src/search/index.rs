@@ -296,6 +296,10 @@ pub struct Index {
     /// `monitorDocumentExpiration` / `monitorFieldExpiration`.
     pub monitor_expiration: bool,
     pub monitor_field_expiration: bool,
+    /// `aliases`: the index's aliases, in the order they were added (removed by swapping).
+    pub aliases: Vec<Bytes>,
+    /// `smap`: synonym terms → their groups (`~id`), created by the first FT.SYNUPDATE.
+    pub synonyms: Option<super::rsdict::RsDict<Vec<Bytes>>>,
 }
 
 impl Index {
@@ -322,12 +326,25 @@ impl Index {
             used_dialects: 0,
             monitor_expiration: true,
             monitor_field_expiration: true,
+            aliases: Vec::new(),
+            synonyms: None,
             spec,
         }
     }
 
     pub fn name(&self) -> &Bytes {
         &self.spec.name
+    }
+
+    /// After FT.ALTER added fields: their (empty) indexes, and the suffix trie a new
+    /// WITHSUFFIXTRIE text field needs (`IndexSpec_EnsureSuffixForField`).
+    pub fn fields_added(&mut self) {
+        while self.fields.len() < self.spec.fields.len() {
+            self.fields.push(FieldIndex::default());
+        }
+        if self.spec.flags & spec::I_SUFFIX_TRIE != 0 && self.suffix.is_none() {
+            self.suffix = Some(TrieMap::new());
+        }
     }
 
     /// `IndexSpec_collect_text_overhead`.
@@ -471,7 +488,7 @@ impl Index {
                         continue;
                     }
                     let rc = match t {
-                        spec::T_TEXT => fulltext(fs, f, &mut sv, &mut tok, &mut fw, offsets, set, &mut total_tokens, &mut byte_offsets),
+                        spec::T_TEXT => fulltext(fs, f, &mut sv, &mut tok, &mut fw, offsets, set, &mut total_tokens, &mut byte_offsets, self.synonyms.as_ref()),
                         spec::T_NUMERIC => numeric(fs, f, &mut fdatas[i], &mut sv),
                         spec::T_GEO => geo(fs, f, &mut fdatas[i], &mut sv),
                         spec::T_TAG => tag(fs, f, &mut fdatas[i], &mut sv),
@@ -710,6 +727,7 @@ fn fulltext(
     set: &Settings,
     total_tokens: &mut u32,
     byte_offsets: &mut Option<ByteOffsets>,
+    syn: Option<&super::rsdict::RsDict<Vec<Bytes>>>,
 ) -> Result<(), QErr> {
     let values: Vec<Bytes> = match &f.value {
         Value::Null => return Ok(()),
@@ -756,6 +774,12 @@ fn fulltext(
             fw.handle(&t.tok, t.pos, fs.weight, ft_id, false, true, offsets);
             if let Some(stem) = &t.stem {
                 fw.handle(stem, t.pos, fs.weight, ft_id, true, false, offsets);
+            }
+            // `forwardIndexTokenFunc`: the token's synonym groups (`~id`), then its phonetics.
+            if let Some(ids) = syn.and_then(|m| m.get(crate::util::cstr(&t.tok))) {
+                for id in ids {
+                    fw.handle(crate::util::cstr(id), t.pos, fs.weight, ft_id, false, false, offsets);
+                }
             }
             if let Some(p) = &t.phonetic {
                 fw.handle(p, t.pos, fs.weight, ft_id, false, false, offsets);

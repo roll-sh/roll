@@ -103,14 +103,14 @@ CONFIG SET search-disk-max-open-files 5
 CONFIG GET search-workers
 CONFIG GET search-threads
 
-# ---- INFO and MODULE LIST ----
-MODULE LIST
-!info module INFO modules
+# ---- INFO and MODULE LIST (modules sit in a dict under the server's random hash seed: order varies per start) ----
+!sort MODULE LIST
+!sort !info module INFO modules
 !info search_* INFO search
 !info search_* INFO search_version
 !info search_* INFO search_runtime_configurations
 !info search_* INFO SEARCH_INDEXES
-!info module,search_* INFO modules
+!sort !info module,search_* INFO modules
 !info search_* INFO keyspace search
 !info - INFO server search_version
 INFO search_nosuch

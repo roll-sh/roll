@@ -126,7 +126,11 @@ pub(crate) fn probe(eng: &mut Engine, key: &[u8], loading: bool) {
         if !eng.sig.empty.is_empty() {
             eng.flush_empty();
         }
-        eng.expire_if_needed(0, key, now, Mode::Top);
+        // `lookupKey`'s lazy expiry is the key's own TTL; hash fields only expire in hash commands
+        // and the cron.
+        if eng.dbs[0].keys.get(key).is_some_and(|e| e.expired(now)) {
+            eng.expire_if_needed(0, key, now, Mode::Top);
+        }
     }
     let Engine { dbs, cfg, rng, stats, sig, .. } = &mut *eng;
     match dbs[0].keys.get_mut(key).filter(|e| loading || !e.expired(now)) {
@@ -728,6 +732,14 @@ fn update_doc(eng: &mut Engine, name: &Bytes, db: usize, key: &[u8], ty: DocType
     }
 }
 
+/// `IndexSpec_ScanAndReindex` from FT.ALTER and FT.SYNUPDATE: only when the client's database has
+/// keys (`RedisModule_DbSize`); the scan itself goes over db 0.
+pub(super) fn scan_if_any(eng: &mut Engine, db: usize, name: &Bytes) {
+    if !eng.dbs[db].keys.is_empty() {
+        scan(eng, name);
+    }
+}
+
 /// `IndexSpec_ScanAndReindex`: index what db 0 already holds (synchronously; the reference scans
 /// in the background, in SCAN order).
 fn scan(eng: &mut Engine, name: &Bytes) {
@@ -750,7 +762,7 @@ fn scan(eng: &mut Engine, name: &Bytes) {
 
 /// Run the `_FT.*` twin as `RM_Call` would: counted as a call (and a failure) of its own; its
 /// error reaches the client (and the error statistics) once, through the outer command.
-fn rm_call(cx: &mut Cx, name: &str, f: impl FnOnce(&mut Cx) -> CmdResult) -> CmdResult {
+pub(super) fn rm_call(cx: &mut Cx, name: &str, f: impl FnOnce(&mut Cx) -> CmdResult) -> CmdResult {
     let started = Instant::now();
     let res = f(cx);
     let micros = started.elapsed().as_micros() as u64;
@@ -765,13 +777,13 @@ fn rm_call(cx: &mut Cx, name: &str, f: impl FnOnce(&mut Cx) -> CmdResult) -> Cmd
     res
 }
 
-fn not_found(name: &[u8]) -> Error {
+pub(super) fn not_found(name: &[u8]) -> Error {
     Error::msg(format!("{}: {}", Code::NoIndex.strerror(), spec::text(name)))
 }
 
 /// `VERIFY_ACL`: the index must exist (looked up without counting a use), and the user must be
 /// allowed every key under its prefixes.
-fn verify_acl(cx: &mut Cx, name: &[u8]) -> Result<(), Error> {
+pub(super) fn verify_acl(cx: &mut Cx, name: &[u8]) -> Result<(), Error> {
     let Some(real) = cx.eng.search.resolve(crate::util::cstr(name)).cloned() else {
         return Err(not_found(name));
     };
@@ -1301,6 +1313,25 @@ mod tests {
             run(&mut e, &mut c, "HSET d:2 other x");
             assert_eq!(max_id(&e), if partial { 5 } else { 8 });
         }
+    }
+
+    /// The handler's db-0 lookup (an event in another db naming the same key) expires a key whose
+    /// TTL is due, never a hash's due fields: `OpenKey` doesn't run field expiry.
+    #[test]
+    fn probe_leaves_due_hash_fields() {
+        let mut e = Engine::new(Config::default(), Hub::new());
+        let mut c = Client::new(1);
+        run(&mut e, &mut c, "FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t TEXT");
+        run(&mut e, &mut c, "HSET h f v y v");
+        run(&mut e, &mut c, "HPEXPIRE h 1 FIELDS 2 y f");
+        run(&mut e, &mut c, "SET k 1 PX 1");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        run(&mut e, &mut c, "SELECT 1");
+        run(&mut e, &mut c, "SET h 1");
+        run(&mut e, &mut c, "SET k 1");
+        let Some(Value::Hash(h)) = e.dbs[0].keys.get(&b"h"[..]).map(|en| &en.value) else { panic!("h is gone") };
+        assert_eq!(h.len(), 2);
+        assert!(e.dbs[0].keys.get(&b"k"[..]).is_none());
     }
 }
 

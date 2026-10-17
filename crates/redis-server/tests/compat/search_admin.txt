@@ -1,0 +1,228 @@
+# Search index administration: FT.ALTER and FT._ALTERIFNX, aliases (FT.ALIASADD/ALIASDEL/
+# ALIASUPDATE/ALIASLIST and the IF[N]X twins), spelling dictionaries (FT.DICTADD/DICTDEL/DICTDUMP),
+# synonym groups (FT.SYNUPDATE/SYNDUMP, FT.SYNADD) and FT.TAGVALS.
+
+FLUSHALL
+CONFIG RESETSTAT
+
+# ---- FT.ALTER ----
+!info rdb_changes_since_last_save INFO persistence
+FT.ALTER
+FT.ALTER idx
+FT.ALTER idx SCHEMA
+FT.ALTER idx SCHEMA ADD
+FT.ALTER nosuch SCHEMA ADD t TEXT
+FT.CREATE idx ON HASH PREFIX 1 d: SCHEMA t TEXT
+FT.ALTER idx SCHEMA ADD
+FT.ALTER idx BOGUS ADD n NUMERIC
+FT.ALTER idx SCHEMA BOGUS n NUMERIC
+FT.ALTER idx SKIPINITIALSCAN BOGUS ADD n NUMERIC
+FT.ALTER idx SCHEMA ADD t TEXT
+FT.ALTER idx SCHEMA ADD n BOGUS
+FT.ALTER idx SCHEMA ADD n NUMERIC SORTABLE BOGUS
+HSET d:1 t hello n 5 tg a,b
+HSET d:2 t world n 6 tg b,c
+!mask total_indexing_time FT.INFO idx
+FT.ALTER idx SCHEMA ADD n NUMERIC SORTABLE
+!mask total_indexing_time FT.INFO idx
+FT.ALTER idx SKIPINITIALSCAN SCHEMA ADD tg TAG
+!mask total_indexing_time FT.INFO idx
+FT.TAGVALS idx tg
+HSET d:3 tg c,d
+FT.TAGVALS idx tg
+FT._ALTERIFNX idx SCHEMA ADD tg TAG
+FT._ALTERIFNX idx SCHEMA ADD x TEXT y NUMERIC
+FT._ALTERIFNX nosuch SCHEMA ADD x TEXT
+!info rdb_changes_since_last_save INFO persistence
+!mask total_indexing_time FT.INFO idx
+FT.ALTER idx SCHEMA ADD v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2 g GEO
+FT.ALTER idx SCHEMA ADD s TEXT WITHSUFFIXTRIE tt TAG WITHSUFFIXTRIE
+!mask total_indexing_time FT.INFO idx
+SELECT 1
+FT.ALTER idx SCHEMA ADD z TEXT
+SELECT 0
+!mask total_indexing_time FT.INFO idx
+
+# ---- FT.TAGVALS ----
+FT.TAGVALS
+FT.TAGVALS idx
+FT.TAGVALS idx tg x
+FT.TAGVALS nosuch tg
+FT.TAGVALS idx nosuch
+FT.TAGVALS idx t
+FT.TAGVALS idx n
+FT.TAGVALS idx tt
+DEL d:1 d:2 d:3
+FT.TAGVALS idx tg
+HSET d:4 tg "  Mixed Case , UPPER,lower  "
+FT.TAGVALS idx tg
+FT.CREATE cs ON HASH PREFIX 1 c: SCHEMA tg TAG CASESENSITIVE SEPARATOR ;
+HSET c:1 tg "Ab;aB;AB"
+FT.TAGVALS cs tg
+
+# ---- aliases ----
+FT.ALIASADD
+FT.ALIASADD al
+FT.ALIASADD al idx x
+FT.ALIASADD al nosuch
+FT.ALIASADD idx cs
+FT.ALIASADD al idx
+FT.ALIASADD al idx
+FT.ALIASADD al cs
+FT.ALIASADD AL idx
+FT.ALIASADD al2 al
+FT.ALIASLIST idx
+FT.ALIASLIST al
+FT.ALIASLIST nosuch
+FT.ALIASLIST
+!mask total_indexing_time FT.INFO al
+FT.TAGVALS al tg
+FT._ALIASADDIFNX al idx
+FT._ALIASADDIFNX al cs
+FT._ALIASADDIFNX al3 idx
+FT._ALIASADDIFNX al3
+!info rdb_changes_since_last_save INFO persistence
+FT.ALIASLIST idx
+FT.CREATE al SCHEMA t TEXT
+FT.ALIASDEL
+FT.ALIASDEL nosuch
+FT.ALIASDEL al x
+FT.ALIASDEL idx
+FT.ALIASDEL AL
+FT.ALIASLIST idx
+FT.ALIASDEL al
+FT.ALIASLIST idx
+FT._ALIASDELIFX al
+FT._ALIASDELIFX al3
+FT._ALIASDELIFX
+FT.ALIASLIST idx
+# The table still holds "al" (only "AL" left the list); with the index gone it resolves again.
+FT.DROPINDEX al
+FT.ALIASDEL al
+FT.ALIASLIST idx
+FT.INFO al
+FT.ALIASUPDATE
+FT.ALIASUPDATE x
+FT.ALIASUPDATE x y z
+FT.ALIASUPDATE u nosuch
+FT.ALIASUPDATE u idx
+FT.ALIASUPDATE u idx
+FT.ALIASUPDATE u cs
+FT.ALIASUPDATE u nosuch
+FT.ALIASLIST idx
+FT.ALIASLIST cs
+FT.ALIASUPDATE idx cs
+FT.ALIASUPDATE cs cs
+FT.ALIASADD a1 cs
+FT.ALIASADD a2 cs
+FT.ALIASADD a3 cs
+FT.ALIASDEL a1
+FT.ALIASLIST cs
+FT.ALTER u SCHEMA ADD extra TEXT
+FT.SYNUPDATE u g1 x
+FT.DROPINDEX cs
+FT.ALIASLIST cs
+FT.INFO u
+FT.ALIASADD u idx
+FT.ALIASADD a2 idx
+!sort FT._LIST
+FT.ALIASDEL u
+FT.ALIASDEL a2
+FT.CREATE tmp SCHEMA t TEXT
+FT.ALIASADD tmpa tmp
+FT.DROPINDEX tmpa
+FT.INFO tmp
+FT.INFO tmpa
+FT.ALIASLIST idx
+!info rdb_changes_since_last_save INFO persistence
+
+# ---- dictionaries ----
+FT.DICTADD
+FT.DICTADD d
+FT.DICTDEL d
+FT.DICTDUMP
+FT.DICTDUMP d x
+FT.DICTDUMP nosuch
+FT.DICTADD d hello world hello
+FT.DICTADD d World ""
+FT.DICTADD d éclair Zebra apple ÄÖÜ 日本 😀
+FT.DICTDUMP d
+FT.DICTDEL d hello nosuch hello
+FT.DICTDUMP d
+FT.DICTADD d2 x
+FT.DICTDEL d2 x
+FT.DICTDUMP d2
+FT.DICTDEL d2 x
+FT.DICTDEL nosuch x
+!info rdb_changes_since_last_save INFO persistence
+FT.DICTADD d aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+FT.DICTADD d aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+FT.DICTADD d bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+FT.DICTADD d ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé
+FT.DICTADD d éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé
+FT.DICTDUMP d
+FT.DICTDEL d aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+FT.DICTDUMP d
+@resp 3
+FT.DICTDUMP d
+FT.DICTDUMP nosuch
+@resp 2
+
+# ---- synonyms ----
+FT.SYNADD
+FT.SYNADD idx a b
+FT.SYNUPDATE
+FT.SYNUPDATE idx
+FT.SYNUPDATE idx g1
+FT.SYNUPDATE nosuch g1 a
+FT.SYNDUMP
+FT.SYNDUMP idx x
+FT.SYNDUMP nosuch
+FT.SYNDUMP idx
+FT.CREATE sy ON HASH PREFIX 1 s: SCHEMA t TEXT
+HSET s:1 t "the quick boy ran"
+!mask total_indexing_time FT.INFO sy
+FT.SYNUPDATE sy g1 Boy CHILD kid
+FT.SYNDUMP sy
+!mask total_indexing_time FT.INFO sy
+FT.SYNUPDATE sy SKIPINITIALSCAN quick fast
+FT.SYNUPDATE sy g2 SKIPINITIALSCAN quick fast boy
+FT.SYNDUMP sy
+!mask total_indexing_time FT.INFO sy
+HSET s:2 t "a fast kid"
+!mask total_indexing_time FT.INFO sy
+FT.SYNUPDATE sy g1 boy
+FT.SYNUPDATE sy 0 Ünïcödé ÉCLAIR
+FT.SYNDUMP sy
+@resp 3
+FT.SYNDUMP sy
+FT.SYNDUMP idx
+@resp 2
+FT.ALIASADD sya sy
+FT.SYNUPDATE sya g3 sky
+FT.SYNDUMP sya
+!info rdb_changes_since_last_save INFO persistence
+FT.ALIASDEL sya
+
+# ---- ACL ----
+ACL SETUSER adm on nopass ~d:* +@all
+AUTH adm x
+FT.TAGVALS idx tg
+FT.SYNDUMP sy
+FT.SYNUPDATE sy g9 a
+FT.ALTER sy SCHEMA ADD q TEXT
+FT.ALIASADD q sy
+FT.ALIASADD q idx
+FT.ALIASLIST idx
+FT.ALIASLIST sy
+FT.ALIASDEL q
+FT.DICTADD dd x
+FT.DICTDEL dd x
+AUTH default x
+ACL DELUSER adm
+!info rdb_changes_since_last_save INFO persistence
+
+# ---- replication and statistics ----
+FLUSHALL
+!sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
+!info errorstat* INFO errorstats

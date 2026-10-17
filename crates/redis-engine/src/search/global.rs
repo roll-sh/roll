@@ -4,9 +4,9 @@
 
 use super::index::Index;
 use super::rsdict::RsDict;
+use super::error::{Code, QErr};
 use super::triemap::TrieMap;
 use bytes::Bytes;
-use std::collections::HashMap;
 
 /// `maxIndexes_g`.
 pub const MAX_INDEXES: usize = 200_000;
@@ -32,8 +32,8 @@ pub struct Global {
     pub hash_fields: Option<Vec<Bytes>>,
     /// `global_RenameFromKey`.
     pub rename_from: Option<Bytes>,
-    /// Spelling dictionaries (FT.DICTADD).
-    pub dicts: HashMap<Bytes, std::collections::BTreeSet<Bytes>>,
+    /// `spellCheckDicts`: spelling dictionaries (FT.DICTADD), their terms as runes in trie order.
+    pub dicts: RsDict<std::collections::BTreeSet<Vec<u16>>>,
     /// `maxIndexes_g` when FT.DEBUG SET_MAX_INDEXES changed it.
     pub max_indexes: Option<usize>,
 }
@@ -60,6 +60,15 @@ impl Global {
         self.max_indexes.unwrap_or(MAX_INDEXES)
     }
 
+    /// `Indexes_LoadIndexSpecUnsafeEx`: by name (or alias, unless `no_alias`), counting a use.
+    pub fn load(&mut self, name: &[u8], no_alias: bool) -> Option<Bytes> {
+        let n = if no_alias { self.indexes.get_key_value(name).map(|(k, _)| k) } else { self.resolve(name) }.cloned()?;
+        if let Some(ix) = self.indexes.get_mut(&n) {
+            ix.counter += 1;
+        }
+        Some(n)
+    }
+
     /// `IndexSpec_OnAcquire`: a lookup by name or alias counts a use (FT.INFO's `number_of_uses`).
     pub fn count_use(&mut self, name: &[u8]) {
         if let Some(n) = self.resolve(name).cloned()
@@ -78,6 +87,28 @@ impl Global {
         self.prefixes = TrieMap::new();
         self.aliases.clear();
         self.dicts.clear();
+    }
+
+    /// `IndexAlias_Add`.
+    pub fn add_alias(&mut self, alias: Bytes, target: &Bytes) -> Result<(), QErr> {
+        if !self.aliases.add(alias.clone(), target.clone()) {
+            return Err(QErr::new(Code::IndexExists, "Alias already exists"));
+        }
+        if let Some(ix) = self.indexes.get_mut(target) {
+            ix.aliases.push(alias);
+        }
+        Ok(())
+    }
+
+    /// `IndexAlias_Del`: the alias must be one of the index's (compared without case).
+    pub fn del_alias(&mut self, alias: &[u8], target: &Bytes) -> Result<(), QErr> {
+        let Some(ix) = self.indexes.get_mut(target) else { return Ok(()) };
+        let Some(i) = ix.aliases.iter().position(|a| a.eq_ignore_ascii_case(alias)) else {
+            return Err(QErr::new(Code::NoIndex, "Alias does not belong to provided spec"));
+        };
+        ix.aliases.swap_remove(i);
+        self.aliases.delete(alias);
+        Ok(())
     }
 
     /// Registers a new index and its prefixes (`SchemaPrefixes_Add`).
@@ -108,8 +139,13 @@ impl Global {
             }
         }
         // `IndexSpec_ClearAliases`.
-        let aliases: Vec<Bytes> = self.aliases.iter().filter(|(_, n)| n.as_ref() == name).map(|(a, _)| a.clone()).collect();
-        for a in aliases {
+        for a in &index.aliases {
+            self.aliases.delete(a);
+        }
+        // An alias the index's list lost track of (FT.ALIASDEL with another case removes the list
+        // entry but not the table's) would dangle in the module, a use-after-free; here it goes.
+        let stale: Vec<Bytes> = self.aliases.iter().filter(|(_, t)| t.as_ref() == name).map(|(a, _)| a.clone()).collect();
+        for a in stale {
             self.aliases.delete(&a);
         }
         Some(index)
