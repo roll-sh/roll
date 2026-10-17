@@ -218,16 +218,25 @@ pub fn flushdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let db = cx.db_index();
     cx.eng.touch_all_watched(Some(db as u16));
     cx.eng.clients.flushed();
+    let removed = cx.eng.dbs[db].len() as u64;
     cx.eng.dbs[db].clear();
-    cx.eng.sig.dirty += 1;
+    cx.eng.sig.dirty += removed;
+    cx.force_propagate();
     Ok(Reply::Ok)
 }
 
 pub fn flushall(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     flush_mode(args)?;
+    let removed: u64 = cx.eng.dbs.iter().map(|d| d.len() as u64).sum();
     cx.eng.flush_all();
+    cx.eng.sig.dirty += removed;
     cx.eng.persist.kill_rdb(cx.now);
-    cx.eng.sig.dirty += 1;
+    // With save points configured the empty dataset is saved right away (`rdbSave`).
+    if !cx.cfg().save.is_empty() {
+        cx.eng.reset_dirty();
+        cx.eng.lastsave = cx.now / 1000;
+    }
+    cx.force_propagate();
     Ok(Reply::Ok)
 }
 

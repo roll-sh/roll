@@ -73,7 +73,6 @@ pub struct Stats {
     pub failed_calls: u64,
     pub unexpected_error_replies: u64,
     pub total_blocking_keys: u64,
-    pub dirty_total: u64,
     /// Keys deleted by the active-expiry cycle (also counted in `expired_keys`).
     pub expired_keys_active: u64,
     /// Hash fields expired, and those expired by the active cycle.
@@ -126,8 +125,10 @@ pub(crate) struct Signals {
     /// Keyspace notifications to publish: (class, event, db, key, subkeys).
     pub events: Vec<(u32, &'static str, u16, Str, Vec<Bytes>)>,
     pub notify: u32,
-    /// Changes made; drives propagation.
+    /// Changes made (Redis' `server.dirty`); drives propagation.
     pub dirty: u64,
+    /// The running command's own count of changes, replacing its touches (`server.dirty += n`).
+    pub counted: Option<u64>,
 }
 
 impl Signals {
@@ -154,6 +155,13 @@ impl Signals {
     #[inline]
     pub fn touch(&mut self, db: u16, key: &[u8]) {
         self.dirty += 1;
+        self.touch_quiet(db, key);
+    }
+
+    /// Signal a modified key without counting a change: expiry, eviction and the deletion of an
+    /// emptied aggregate aren't changes of their own in Redis.
+    #[inline]
+    pub fn touch_quiet(&mut self, db: u16, key: &[u8]) {
         if self.track {
             self.touched.push((db, Str::from_slice(key)));
         }
@@ -215,8 +223,8 @@ pub struct Engine {
     pub rng: Rng,
     /// Read-only replica: writes are rejected and keys are expired only by the primary's DELs.
     pub replica: bool,
-    /// Changes since the last snapshot (`rdb_changes_since_last_save`).
-    pub dirty: u64,
+    /// `sig.dirty` at the last snapshot: changes since are `rdb_changes_since_last_save`.
+    pub dirty_mark: u64,
     pub lastsave: i64,
     /// SAVE / BGSAVE / BGREWRITEAOF bookkeeping.
     pub persist: crate::commands::persist::Persist,
@@ -330,7 +338,7 @@ impl Engine {
             slowlog_next_id: 0,
             rng: Rng::new(),
             replica: false,
-            dirty: 0,
+            dirty_mark: 0,
             lastsave: now / 1000,
             persist: Default::default(),
             start_ms: now,
@@ -359,6 +367,16 @@ impl Engine {
         e.startup_memory = e.used_memory();
         e.peak_memory = e.startup_memory;
         e
+    }
+
+    /// Changes since the last snapshot (`rdb_changes_since_last_save`).
+    pub fn dirty(&self) -> u64 {
+        self.sig.dirty.saturating_sub(self.dirty_mark)
+    }
+
+    /// Restart the count of changes since the last snapshot (a save succeeded).
+    pub fn reset_dirty(&mut self) {
+        self.dirty_mark = self.sig.dirty;
     }
 
     /// A standalone engine with default config, for tests and tools.
@@ -645,25 +663,25 @@ impl Engine {
         self.sig.track = true;
         let db_at_start = client.db as u16;
         let dirty_before = self.sig.dirty;
+        let outer_counted = self.sig.counted.take();
         let started = Instant::now();
-        let (res, rewrite, block, no_propagate) = {
+        let (res, rewrite, block, no_propagate, force) = {
             // Error replies from here on (to anyone) make the command a failed call.
             self.prev_errors = self.stats.error_replies;
             let mut cx = Cx::new(self, client, now, cmd, mode);
             cx.read_stats = crate::cx::read_lookups(cmd, args);
             let res = (cmd.handler)(&mut cx, args);
-            (res, cx.rewrite.take(), cx.block.take(), cx.no_propagate)
+            (res, cx.rewrite.take(), cx.block.take(), cx.no_propagate, cx.force_propagate)
         };
         let micros = started.elapsed().as_micros() as u64;
+        if let Some(n) = std::mem::replace(&mut self.sig.counted, outer_counted) {
+            self.sig.dirty = dirty_before + n;
+        }
         self.flush_empty();
 
         let changed = self.sig.dirty != dirty_before;
-        if changed {
-            self.dirty += self.sig.dirty - dirty_before;
-            self.stats.dirty_total += self.sig.dirty - dirty_before;
-        }
         let propagate = !matches!(mode, Mode::Script { .. }) || self.scripting.running.as_ref().is_none_or(|r| r.propagate);
-        if changed && !no_propagate && propagate && mode != Mode::Replay {
+        if (changed || force) && !no_propagate && propagate && mode != Mode::Replay {
             self.effects.push(Effect { db: db_at_start, args: rewrite.unwrap_or_else(|| args.to_vec()) });
         }
         self.process_touched();
@@ -904,7 +922,7 @@ impl Engine {
             if d.keys.get(&key).is_some_and(|e| e.value.is_empty_aggregate()) {
                 d.remove(&key);
                 self.sig.notify(notify::GENERIC, "del", db, &key);
-                self.sig.touch(db, &key);
+                self.sig.touch_quiet(db, &key);
             }
         }
     }
@@ -943,11 +961,9 @@ impl Engine {
         }
         self.stats.expired_keys += 1;
         self.sig.notify(notify::EXPIRED, "expired", db as u16, key);
-        self.sig.touch(db as u16, key);
-        // The touch counted as a change for propagation of the current command; expiry DELs are
-        // propagated on their own, before the command that noticed them.
-        self.sig.dirty -= 1;
-        self.dirty += 1;
+        // Not a change of the current command: expiry DELs are propagated on their own, before
+        // the command that noticed them.
+        self.sig.touch_quiet(db as u16, key);
         self.effects.push(Effect { db: db as u16, args: vec![Bytes::from_static(b"DEL"), Bytes::copy_from_slice(key)] });
     }
 
@@ -1319,9 +1335,7 @@ impl Engine {
             self.dbs[db as usize].remove(&key);
             self.stats.evicted_keys += 1;
             self.sig.notify(notify::EVICTED, "evicted", db, &key);
-            self.sig.touch(db, &key);
-            self.sig.dirty -= 1;
-            self.dirty += 1;
+            self.sig.touch_quiet(db, &key);
             self.effects.push(Effect { db, args: vec![Bytes::from_static(b"DEL"), Bytes::copy_from_slice(&key)] });
             freed_any = true;
             if start.elapsed().as_micros() as u64 > 500 * self.cfg.maxmemory_eviction_tenacity.max(1) as u64 {

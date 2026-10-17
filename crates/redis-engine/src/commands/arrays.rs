@@ -118,6 +118,7 @@ pub fn arset(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let added = a.count() - before;
     e.notify(notify::ARRAY, "arset");
+    e.changes(n as usize);
     Ok(Reply::Int(added as i64))
 }
 
@@ -136,6 +137,7 @@ pub fn armset(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let added = a.count() - before;
     e.notify(notify::ARRAY, "armset");
+    e.changes((args.len() - 2) / 2);
     Ok(Reply::Int(added as i64))
 }
 
@@ -148,6 +150,7 @@ pub fn ardel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let deleted = idxs.into_iter().filter(|&i| a.del(i, lim)).count();
     if deleted > 0 {
         e.notify(notify::ARRAY, "ardel");
+        e.changes(deleted);
     } else {
         e.unchanged();
     }
@@ -170,6 +173,7 @@ pub fn ardelrange(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let deleted: u64 = ranges.into_iter().map(|(lo, hi)| a.delete_range(lo, hi, lim)).sum();
     if deleted > 0 {
         e.notify(notify::ARRAY, "ardelrange");
+        e.changes(deleted as usize);
     } else {
         e.unchanged();
     }
@@ -446,6 +450,7 @@ pub fn arinsert(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     a.set_insert_idx(last);
     e.notify(notify::ARRAY, "arinsert");
+    e.changes(n as usize);
     Ok(unsigned(last))
 }
 
@@ -517,6 +522,7 @@ pub fn arring(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         a.set_insert_idx(cursor);
     }
     e.notify(notify::ARRAY, "arring");
+    e.changes(args.len() - 3);
     Ok(unsigned(cursor))
 }
 

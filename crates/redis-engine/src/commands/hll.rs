@@ -574,14 +574,15 @@ pub fn pfadd(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         if !corrupt && updated > 0 {
             invalidate_cache(s);
         }
-        if corrupt { Err(INVALIDOBJ) } else { Ok(updated > 0) }
+        if corrupt { Err(INVALIDOBJ) } else { Ok(updated) }
     };
     match res {
-        Ok(true) => {
+        Ok(n) if n > 0 => {
             e.notify(notify::STRING, "pfadd");
+            e.changes(n);
             Ok(Reply::Int(1))
         }
-        Ok(false) => {
+        Ok(_) => {
             e.unchanged();
             Ok(Reply::Int(0))
         }

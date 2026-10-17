@@ -199,7 +199,11 @@ fn bulk_size(b: &[u8]) -> u64 {
 /// Count a write that doesn't signal the key (Redis' `keyModified(…, 0)` + `server.dirty++`):
 /// drives propagation of the command without invalidating WATCH or waking blocked clients.
 fn dirty(cx: &mut Cx) {
-    cx.eng.sig.dirty += 1;
+    dirty_n(cx, 1);
+}
+
+fn dirty_n(cx: &mut Cx, n: usize) {
+    cx.eng.sig.dirty += n as u64;
 }
 
 /// Propagate an effect now (skipped when replaying, where effects aren't recorded).
@@ -544,6 +548,7 @@ pub fn xtrim(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     drop(km);
     if deleted > 0 {
+        cx.changes(deleted as usize);
         cx.notify(notify::STREAM, "xtrim", key);
         if let Some(v) = rewrite {
             let mut out = args.to_vec();
@@ -1135,6 +1140,7 @@ pub fn xdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     drop(km);
     if deleted > 0 {
+        cx.changes(deleted as usize);
         cx.notify(notify::STREAM, "xdel", key);
     }
     Ok(Reply::Int(deleted))
@@ -1368,7 +1374,8 @@ pub fn xgroup_create(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if !created {
         return Err(Error::new("BUSYGROUP Consumer Group name already exists"));
     }
-    dirty(cx);
+    // MKSTREAM's creation isn't a change of its own.
+    cx.changes(1);
     cx.notify(notify::STREAM, "xgroup-create", key);
     Ok(Reply::Ok)
 }
@@ -1632,9 +1639,7 @@ pub fn xack(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let acked = ids.into_iter().filter(|&id| g.remove_nack(id).is_some()).count();
     drop(g);
     drop(km);
-    if acked > 0 {
-        dirty(cx);
-    }
+    dirty_n(cx, acked);
     Ok(Reply::Int(acked as i64))
 }
 
@@ -1934,9 +1939,8 @@ fn xclaim_inner(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         dirty(cx);
         cx.notify(notify::STREAM, "xgroup-createconsumer", key);
     }
-    if !props.is_empty() {
-        dirty(cx);
-    }
+    // One change per claimed or cleared entry, plus the group's last id.
+    dirty_n(cx, props.len());
     for p in props {
         prop(cx, p);
     }
@@ -2040,9 +2044,8 @@ fn xautoclaim_inner(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         dirty(cx);
         cx.notify(notify::STREAM, "xgroup-createconsumer", key);
     }
-    if !props.is_empty() {
-        dirty(cx);
-    }
+    // One change per claimed or cleared entry, plus the group's last id.
+    dirty_n(cx, props.len());
     for p in props {
         prop(cx, p);
     }

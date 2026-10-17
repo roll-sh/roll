@@ -28,6 +28,8 @@ pub struct Cx<'a> {
     pub(crate) rewrite: Option<Vec<Bytes>>,
     pub(crate) block: Option<BlockReq>,
     pub(crate) no_propagate: bool,
+    /// Propagate even without changes (`forceCommandPropagation`).
+    pub(crate) force_propagate: bool,
     /// Lookups count keyspace hits/misses and emit `keymiss` ([`read_lookups`]).
     pub(crate) read_stats: bool,
 }
@@ -73,6 +75,11 @@ impl KeyMut<'_> {
     /// Mark changed again after `unchanged()` (e.g. a later step did modify).
     pub fn changed(&mut self) {
         self.changed = true;
+    }
+
+    /// Count `n` changes for the command (`Cx::changes`).
+    pub fn changes(&mut self, n: usize) {
+        *self.sig.counted.get_or_insert(0) += n as u64;
     }
 
     pub fn notify(&mut self, class: u32, event: &'static str) {
@@ -155,7 +162,7 @@ macro_rules! typed_get {
 
 impl<'a> Cx<'a> {
     pub(crate) fn new(eng: &'a mut Engine, client: &'a mut Client, now: i64, cmd: &'static Command, mode: Mode) -> Self {
-        Self { eng, client, now, cmd, mode, rewrite: None, block: None, no_propagate: false, read_stats: true }
+        Self { eng, client, now, cmd, mode, rewrite: None, block: None, no_propagate: false, force_propagate: false, read_stats: true }
     }
 
     #[inline]
@@ -404,9 +411,21 @@ impl<'a> Cx<'a> {
         self.eng.sig.touch(self.client.db as u16, key);
     }
 
+    /// Count `n` changes (`server.dirty += n`): once called, the command's changes are what it
+    /// counts rather than the keys it touched. Zero means the command changed nothing and isn't
+    /// propagated.
+    pub fn changes(&mut self, n: usize) {
+        *self.eng.sig.counted.get_or_insert(0) += n as u64;
+    }
+
     /// Propagate these arguments instead of the original command.
     pub fn propagate_as(&mut self, args: Vec<Bytes>) {
         self.rewrite = Some(args);
+    }
+
+    /// Propagate the command even if it changed nothing (FLUSHDB of an empty database).
+    pub fn force_propagate(&mut self) {
+        self.force_propagate = true;
     }
 
     /// Don't propagate the command itself (its effects were propagated individually).

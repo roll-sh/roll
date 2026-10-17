@@ -577,7 +577,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
              aof_last_rewrite_time_sec:{}\r\naof_current_rewrite_time_sec:{}\r\naof_last_bgrewrite_status:ok\r\naof_rewrites:{}\r\naof_rewrites_consecutive_failures:0\r\n\
              aof_last_write_status:ok\r\naof_last_cow_size:0\r\nbackup_in_progress:0\r\nmodule_fork_in_progress:0\r\nmodule_fork_last_cow_size:0\r\n",
             p.child.as_ref().map_or(0, |c| c.keys),
-            eng.dirty,
+            eng.dirty(),
             p.in_progress(ChildKind::Rdb) as i32,
             eng.lastsave,
             p.rdb_last_time,

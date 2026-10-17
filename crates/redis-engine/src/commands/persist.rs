@@ -75,13 +75,14 @@ impl Engine {
         let started = std::time::Instant::now();
         let keys: u64 = self.dbs.iter().map(|d| d.len() as u64).sum();
         let end_ms = now_ms + (keys as i64).saturating_mul(self.cfg.rdb_key_save_delay.max(0)) / 1000;
+        let dirty_before = self.dirty();
         let p = &mut self.persist;
         if kind == ChildKind::Rdb {
             self.stats.rdb_saves += 1;
         } else {
             p.aof_rewrites += 1;
         }
-        p.child = Some(Child { kind, start: now_ms / 1000, dirty_before: self.dirty, keys, end_ms, killed: false });
+        p.child = Some(Child { kind, start: now_ms / 1000, dirty_before, keys, end_ms, killed: false });
         p.total_forks += 1;
         p.latest_fork_us = started.elapsed().as_micros().max(1) as u64;
     }
@@ -102,14 +103,14 @@ impl Engine {
                 match c.kind {
                     _ if c.killed => {}
                     ChildKind::Rdb => {
-                        self.dirty -= c.dirty_before.min(self.dirty);
+                        self.dirty_mark += c.dirty_before.min(self.dirty());
                         self.lastsave = now_s;
                         self.persist.rdb_last_time = now_s - c.start;
                     }
                     ChildKind::Aof => self.persist.aof_last_time = now_s - c.start,
                 }
             }
-        } else if self.cfg.save.iter().any(|&(secs, changes)| self.dirty >= changes as u64 && now_s - self.lastsave > secs) {
+        } else if self.cfg.save.iter().any(|&(secs, changes)| self.dirty() >= changes as u64 && now_s - self.lastsave > secs) {
             self.fork(ChildKind::Rdb, now_ms);
         }
         if self.persist.child.is_none() && self.persist.bgsave_scheduled {
@@ -144,7 +145,7 @@ pub fn save(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
         return Err(Error::new("ERR Background save already in progress"));
     }
     cx.eng.stats.rdb_saves += 1;
-    cx.eng.dirty = 0;
+    cx.eng.reset_dirty();
     cx.eng.lastsave = cx.now / 1000;
     Ok(Reply::Ok)
 }

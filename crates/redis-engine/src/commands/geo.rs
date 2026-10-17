@@ -785,7 +785,11 @@ fn georadius_generic(cx: &mut Cx, args: &[Bytes], src_idx: usize, flags: u8) -> 
             items.dedup_by(|a, b| a.0 == b.0);
             let z = zset_from_pairs(&items, lim);
             let event = if search_cmd { "geosearchstore" } else { "georadiusstore" };
-            Ok(Reply::Int(store_result(cx, dst, z, event)))
+            let n = store_result(cx, dst, z, event);
+            if n > 0 {
+                cx.changes(n as usize);
+            }
+            Ok(Reply::Int(n))
         }
     }
 }

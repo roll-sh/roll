@@ -254,6 +254,7 @@ fn sort_generic(cx: &mut Cx, args: &[Bytes], readonly: bool) -> CmdResult {
     cx.no_propagate();
     let db = cx.db_index();
     if !values.is_empty() {
+        cx.changes(values.len());
         let list = List::from_items(&values, cx.cfg().list_max_listpack_size);
         cx.set(dst, Value::List(Box::new(list)), false);
         cx.notify(notify::LIST, "sortstore", dst);

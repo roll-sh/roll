@@ -601,6 +601,7 @@ fn bitfield_generic(cx: &mut Cx, args: &[Bytes], read_only_cmd: bool) -> CmdResu
     } else if !grown {
         e.unchanged();
     }
+    e.changes(changes);
     Ok(Reply::Array(out))
 }
 

@@ -138,6 +138,7 @@ fn push(cx: &mut Cx, args: &[Bytes], left: bool, xx: bool) -> CmdResult {
     }
     let len = l.len();
     e.notify(notify::LIST, push_event(left));
+    e.changes(vals.len());
     Ok(Reply::Int(len as i64))
 }
 
@@ -167,12 +168,17 @@ fn pop_from(cx: &mut Cx, key: &[u8], left: bool, count: Option<usize>) -> Reply 
     let fill = fill(cx);
     let mut e = cx.get_mut(key).expect("checked");
     let l = e.list();
-    let reply = match count {
-        None => bulk(l.pop(left).expect("non-empty")),
-        Some(n) => Reply::Array(l.pop_n(left, n).into_iter().map(bulk).collect()),
+    let (reply, n) = match count {
+        None => (bulk(l.pop(left).expect("non-empty")), 1),
+        Some(n) => {
+            let vals = l.pop_n(left, n);
+            let n = vals.len();
+            (Reply::Array(vals.into_iter().map(bulk).collect()), n)
+        }
     };
     l.shrink(fill);
     e.notify(notify::LIST, pop_event(left));
+    e.changes(n);
     reply
 }
 
@@ -370,6 +376,7 @@ pub fn lrem(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     } else {
         l.shrink(fill);
         e.notify(notify::LIST, "lrem");
+        e.changes(removed);
     }
     Ok(Reply::Int(removed as i64))
 }
@@ -400,6 +407,7 @@ pub fn ltrim(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     l.remove_range(rest - rtrim as usize, rtrim as usize);
     l.shrink(fill);
     e.notify(notify::LIST, "ltrim");
+    e.changes((ltrim + rtrim) as usize);
     Ok(Reply::Ok)
 }
 
@@ -421,6 +429,7 @@ fn move_one(cx: &mut Cx, src: &[u8], dst: &[u8], from_left: bool, to_left: bool)
         l.shrink(fill);
         e.notify(notify::LIST, push_event(to_left));
         e.notify(notify::LIST, pop_event(from_left));
+        e.changes(1);
         return Ok(Some(v));
     }
     cx.check_type(dst, Kind::List)?;
@@ -441,6 +450,7 @@ fn move_one(cx: &mut Cx, src: &[u8], dst: &[u8], from_left: bool, to_left: bool)
     l.remove_range(at, 1);
     l.shrink(fill);
     s.notify(notify::LIST, pop_event(from_left));
+    s.changes(1);
     Ok(Some(v))
 }
 
@@ -527,6 +537,7 @@ fn move_many(cx: &mut Cx, src: &[u8], dst: &[u8], from_left: bool, to_left: bool
         // Unlike LMOVE, an in-place LMOVEM rotation reports the pop first.
         e.notify(notify::LIST, pop_event(from_left));
         e.notify(notify::LIST, push_event(to_left));
+        e.changes(n);
         return Ok(Some(vals));
     }
     let (mut vals, quick) = match cx.peek(src).map(|e| &e.value) {
@@ -551,6 +562,7 @@ fn move_many(cx: &mut Cx, src: &[u8], dst: &[u8], from_left: bool, to_left: bool
     l.remove_range(at, n);
     l.shrink(fill);
     s.notify(notify::LIST, pop_event(from_left));
+    s.changes(n);
     Ok(Some(vals))
 }
 

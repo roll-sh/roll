@@ -175,12 +175,16 @@ pub fn set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 fn write_string(cx: &mut Cx, key: &Bytes, value: &Bytes, exp: Expiry) {
     match exp {
         Expiry::At(at) if at <= cx.now => {
-            // Already expired: the key is set and immediately deleted (Redis propagates a DEL).
-            cx.set(key, Value::str(value), false);
-            cx.notify(notify::STRING, "set", key);
-            cx.delete(key);
-            cx.notify(notify::GENERIC, "del", key);
-            cx.propagate_as(vec![b("DEL"), key.clone()]);
+            // Already expired: an existing key is deleted (propagated as a DEL) and nothing is
+            // stored; stats count it as set and expired.
+            if cx.delete(key) {
+                cx.notify(notify::GENERIC, "del", key);
+                let del = if cx.cfg().lazyfree_lazy_server_del { "UNLINK" } else { "DEL" };
+                cx.propagate_as(vec![b(del), key.clone()]);
+            } else {
+                cx.changes(0);
+            }
+            cx.eng.stats.expired_keys += 1;
         }
         Expiry::At(at) => {
             cx.set_with_expire(key, Value::str(value), at);
@@ -624,6 +628,7 @@ pub fn increx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         IncrExpire::Keep
     };
     cx.replace(key, Value::str(new.as_bytes()), true);
+    cx.changes(1);
     let nb = Bytes::from(new);
     cx.notify(notify::STRING, if float { "incrbyfloat" } else { "incrby" }, key);
     match what {

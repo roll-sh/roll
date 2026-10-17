@@ -31,7 +31,8 @@
 //!
 //! `ROLL_COMPAT_REDIS=host:port` uses an existing reference server; otherwise a private Docker
 //! container is started for the run. `ROLL_COMPAT_FILTER=lists` runs matching files only. Without
-//! Docker the test is skipped unless `ROLL_COMPAT_REQUIRED=1`. `ROLL_COMPAT_TRACE=1` prints each line
+//! Docker the test is skipped unless `ROLL_COMPAT_REQUIRED=1`. `ROLL_COMPAT_DIR` runs scripts from
+//! another directory. `ROLL_COMPAT_TRACE=1` prints each line
 //! before running it (to find a hang).
 
 use redis_engine::{Config, Reply};
@@ -484,7 +485,9 @@ async fn compat_with_redis() {
     db.start_cron();
     let roll = start_single(db, None).await.unwrap();
 
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/compat");
+    let dir = std::env::var_os("ROLL_COMPAT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/compat"));
     let filter = std::env::var("ROLL_COMPAT_FILTER").ok();
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()

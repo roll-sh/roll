@@ -75,6 +75,7 @@ pub fn sadd(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     if added > 0 {
         e.notify(notify::SET, "sadd");
+        e.changes(added as usize);
     } else {
         e.unchanged();
     }
@@ -95,6 +96,7 @@ pub fn srem(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     if n > 0 {
         e.notify(notify::SET, "srem");
+        e.changes(n as usize);
     } else {
         e.unchanged();
     }
@@ -177,6 +179,7 @@ fn spop_count(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let size = e.set().len() as u64;
     e.notify(notify::SET, "spop");
+    e.changes(count.min(size) as usize);
     let s = e.set();
     if count >= size {
         // The whole set: the key goes away (the guard deletes it, emitting `del`).

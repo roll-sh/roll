@@ -352,6 +352,7 @@ fn rename_generic(cx: &mut Cx, args: &[Bytes], nx: bool) -> CmdResult {
         cx.delete(dst);
     }
     cx.put_entry(db, dst, entry);
+    cx.changes(1);
     cx.notify(notify::GENERIC, "rename_from", src);
     cx.notify(notify::GENERIC, "rename_to", dst);
     if let Some(k) = dst_kind {
@@ -394,6 +395,7 @@ pub fn move_(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let entry = cx.take(key).unwrap();
     cx.put_entry(to, key, entry);
+    cx.changes(1);
     cx.notify(notify::GENERIC, "move_from", key);
     cx.eng.sig.notify(notify::GENERIC, "move_to", to as u16, key);
     Ok(Reply::Int(1))
@@ -435,6 +437,7 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     entry.lru = cx.eng.new_lru(now);
     let new_kind = entry.value.kind();
     cx.put_entry(to, dst, entry);
+    cx.changes(1);
     cx.eng.sig.notify(notify::GENERIC, "copy_to", to as u16, dst);
     if let Some(k) = old_kind.filter(|_| exists) {
         overwritten(cx, to, dst, k, new_kind);
@@ -523,6 +526,7 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let lru = Engine::restored_lru(cx.cfg(), freq, idle, now);
     let db = cx.db_index();
     cx.put_entry(db, key, crate::value::Entry { value, expire: at, lru, sized: crate::value::NO_SIZE });
+    cx.changes(1);
     if ttl != 0 && !absttl {
         // Replicate the absolute expiry.
         let mut argv = args.to_vec();

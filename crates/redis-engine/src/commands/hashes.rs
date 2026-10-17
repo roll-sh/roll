@@ -202,9 +202,7 @@ fn unregister_if_no_ttls(cx: &mut Cx, key: &[u8], had_ttls: bool) {
 fn field_expired_effect(eng: &mut Engine, db: usize, key: &[u8], field: &[u8]) {
     eng.effects.push(Effect { db: db as u16, args: vec![b("HDEL"), Bytes::copy_from_slice(key), Bytes::copy_from_slice(field)] });
     eng.stats.expired_subkeys += 1;
-    eng.sig.touch(db as u16, key);
-    eng.sig.dirty -= 1;
-    eng.dirty += 1;
+    eng.sig.touch_quiet(db as u16, key);
 }
 
 enum Got {
@@ -358,6 +356,7 @@ pub fn hset(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     })
     .unwrap_or(0);
     cx.touch(key);
+    cx.changes(pairs);
     cx.notify_fields(notify::HASH, "hset", key, args[2..].iter().step_by(2));
     Ok(if cx.cmd.name == "hset" { Reply::Int(created as i64) } else { Reply::Ok })
 }
@@ -487,6 +486,7 @@ pub fn hdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     .unwrap_or_default();
     let n = gone.len() as i64;
     if n > 0 {
+        cx.changes(gone.len());
         if removed {
             drop_key(cx, key);
         } else {
@@ -940,6 +940,7 @@ fn hexpire_generic(cx: &mut Cx, args: &[Bytes], secs: bool, relative: bool) -> C
     setex_done(cx, key, &ex);
     if !kept.is_empty() || !deleted.is_empty() {
         cx.touch(key);
+        cx.changes(kept.len() + deleted.len());
         if !deleted.is_empty() {
             cx.notify_fields(notify::HASH, "hdel", key, deleted);
         }
@@ -1083,6 +1084,7 @@ pub fn hgetdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         unregister_if_no_ttls(cx, key, had_ttls);
     }
     cx.touch(key);
+    cx.changes(deleted.len());
     if !expired.is_empty() {
         cx.notify_fields(notify::HASH, "hexpired", key, expired);
     }
@@ -1247,6 +1249,7 @@ pub fn hgetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Ok(Reply::Array(out));
     }
     cx.touch(key);
+    cx.changes(deleted.len() + updated.len());
     if !expired.is_empty() {
         cx.notify_fields(notify::HASH, "hexpired", key, expired);
     }
@@ -1343,6 +1346,7 @@ pub fn hsetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     if ok || !expired.is_empty() {
         cx.touch(key);
+        cx.changes(if ok { o.n } else { 0 });
         if !expired.is_empty() {
             cx.notify_fields(notify::HASH, "hexpired", key, expired);
         }

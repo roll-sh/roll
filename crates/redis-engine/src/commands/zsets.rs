@@ -302,6 +302,7 @@ pub(crate) fn zadd_generic(cx: &mut Cx, args: &[Bytes], incr: bool) -> CmdResult
     }
     if added + updated > 0 {
         e.notify(notify::ZSET, if f.incr { "zincr" } else { "zadd" });
+        e.changes((added + updated) as usize);
     } else {
         e.unchanged();
     }
@@ -332,6 +333,7 @@ pub fn zrem(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     if deleted > 0 {
         e.notify(notify::ZSET, "zrem");
+        e.changes(deleted as usize);
     } else {
         e.unchanged();
     }
@@ -357,6 +359,7 @@ fn zremrange(cx: &mut Cx, args: &[Bytes], r: RemRange, event: &'static str) -> C
     };
     if deleted > 0 {
         e.notify(notify::ZSET, event);
+        e.changes(deleted);
     } else {
         e.unchanged();
     }
@@ -966,6 +969,7 @@ fn zpop_generic<'k>(
         }
     }
     e.notify(notify::ZSET, if max { "zpopmax" } else { "zpopmin" });
+    e.changes(n);
     drop(e);
     let reply = match (emitkey, nested) {
         (false, _) => Reply::Array(items),
