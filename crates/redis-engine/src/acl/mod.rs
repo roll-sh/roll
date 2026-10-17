@@ -201,6 +201,19 @@ impl Rules {
         Err(Denied { reason: worst.0, pos: worst.1 })
     }
 
+    /// `ACLUserCheckCmdWithUnrestrictedKeyAccess` for reads: does a selector that allows the
+    /// command also allow reading every key (`allkeys`, or a `*` pattern with read access)?
+    fn full_key_access(&self, cmd: &Command, args: &[Bytes]) -> bool {
+        if self.unrestricted() {
+            return true;
+        }
+        let Some(m) = index().meta(cmd) else { return false };
+        let mut keys = Keys::default();
+        self.selectors.iter().any(|s| {
+            s.check(m, args, &mut keys).is_ok() && (s.allkeys || s.keys.iter().any(|k| k.perm & index::PERM_R != 0 && k.pattern == b"*"))
+        })
+    }
+
     /// May a client subscribed to these channels keep its subscriptions?
     fn subscriptions_allowed(&self, client: &Client) -> bool {
         let s = &self.selectors;
@@ -302,6 +315,11 @@ impl User {
             return Ok(());
         }
         self.rules.read().check(cmd, args)
+    }
+
+    /// May this user's `cmd` read keys it names only indirectly (SORT's BY and GET patterns)?
+    pub fn full_key_access(&self, cmd: &Command, args: &[Bytes]) -> bool {
+        self.open.load(Ordering::Acquire) || self.rules.read().full_key_access(cmd, args)
     }
 
     /// A copy of the current rules.

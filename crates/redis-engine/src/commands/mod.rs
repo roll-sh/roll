@@ -16,6 +16,7 @@ pub mod pubsub;
 pub mod scripting;
 pub mod server;
 pub mod sets;
+pub mod sort;
 pub mod streams;
 pub mod strings;
 pub mod zsets;
@@ -327,6 +328,7 @@ pub fn table() -> &'static Table {
             lists::COMMANDS,
             hashes::COMMANDS,
             sets::COMMANDS,
+            sort::COMMANDS,
             zsets::COMMANDS,
             streams::COMMANDS,
             bitmaps::COMMANDS,
