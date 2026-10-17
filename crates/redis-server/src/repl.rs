@@ -339,6 +339,12 @@ impl Follower {
         self.db.set_offset(self.applied());
     }
 
+    /// Stop following, staying read-only (the replica is being unloaded or deleted).
+    pub fn stop(&self) {
+        self.stop.notify_waiters();
+        self.stop.notify_one();
+    }
+
     fn apply(&self, buf: &mut BytesMut, dbsel: &mut u16) -> anyhow::Result<()> {
         let mut effects = Vec::new();
         let mut consumed = 0usize;

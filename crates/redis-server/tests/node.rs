@@ -1,9 +1,9 @@
 //! Multi-tenant nodes: routing, scale to zero, lazy restore.
 
-use redis_engine::{Config, Reply};
+use redis_engine::Reply;
 use redis_server::client::RespClient;
 use redis_server::directory::AuthRequest;
-use redis_server::node::{DbSpec, Node, NodeConfig, Secret, StaticCatalog, route};
+use redis_server::node::{DbSpec, Node, NodeConfig, StaticCatalog, route};
 use redis_server::persist::{Objects, Shipper, ShipperConfig, StorageConfig};
 use redis_server::{Directory, serve_tcp};
 use std::net::SocketAddr;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn spec(id: &str, secret: &str) -> DbSpec {
-    DbSpec { id: id.into(), config: Config::default(), shards: 1, secrets: vec![Secret { value: secret.into(), read_only: false }] }
+    DbSpec::new(id, secret)
 }
 
 async fn start(idle: Option<Duration>) -> (SocketAddr, Arc<Node>) {
@@ -22,6 +22,7 @@ async fn start(idle: Option<Duration>) -> (SocketAddr, Arc<Node>) {
     let catalog = Arc::new(StaticCatalog::default());
     catalog.insert(spec("alpha", "pa"));
     catalog.insert(spec("beta", "pb"));
+    catalog.insert(DbSpec { replica_of: Some("alpha".into()), ..spec("alpha-ro", "pr") });
     let node = Node::new(catalog, Some(shipper), NodeConfig { idle_timeout: idle, domain: Some("redis.test".into()) });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -149,4 +150,27 @@ async fn tls_with_sni_routing() {
     let s = String::from_utf8_lossy(&got);
     assert!(s.starts_with("+OK\r\n"), "{s}");
     assert!(s.contains("addr=203.0.113.7:51234"), "{s}");
+}
+
+#[tokio::test]
+async fn read_replica_endpoint() {
+    let (addr, _node) = start(None).await;
+    let mut p = RespClient::connect(addr).await.unwrap();
+    assert_eq!(p.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
+    assert_eq!(p.cmd(["SET", "before", "1"]).await.unwrap(), Reply::Ok);
+    let mut r = RespClient::connect(addr).await.unwrap();
+    assert_eq!(r.cmd(["AUTH", "alpha-ro_pr"]).await.unwrap(), Reply::Ok);
+    assert_eq!(p.cmd(["SET", "after", "2"]).await.unwrap(), Reply::Ok);
+    let mut ok = false;
+    for _ in 0..100 {
+        if r.cmd(["GET", "after"]).await.unwrap() == Reply::bulk(b"2") {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(ok, "replica should catch up");
+    assert_eq!(r.cmd(["GET", "before"]).await.unwrap(), Reply::bulk(b"1"));
+    assert_eq!(r.cmd(["SET", "x", "1"]).await.unwrap(), Reply::error("READONLY You can't write against a read only replica."));
+    assert!(matches!(r.cmd(["ROLE"]).await.unwrap(), Reply::Array(a) if a[0] == Reply::bulk(b"slave")));
 }

@@ -12,6 +12,7 @@
 use crate::database::Database;
 use crate::directory::{AuthError, AuthRequest, Directory, Session};
 use crate::persist::{self, Shipper};
+use crate::repl::Follower;
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use redis_engine::Config;
@@ -30,6 +31,23 @@ pub struct DbSpec {
     pub shards: usize,
     /// Accepted secrets (password, or the part after `<db>_` of a token).
     pub secrets: Vec<Secret>,
+    /// A read replica of this database: restored from its history, then follows its log.
+    pub replica_of: Option<String>,
+    /// Acknowledge writes only once they are in object storage.
+    pub sync_writes: bool,
+}
+
+impl DbSpec {
+    pub fn new(id: impl Into<String>, secret: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            config: Config::default(),
+            shards: 1,
+            secrets: vec![Secret { value: secret.into(), read_only: false }],
+            replica_of: None,
+            sync_writes: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +99,9 @@ pub struct Node {
     pub shipper: Option<Arc<Shipper>>,
     pub cfg: NodeConfig,
     dbs: Mutex<HashMap<String, Slot>>,
+    followers: Mutex<HashMap<String, Arc<Follower>>>,
+    /// How often replicas poll object storage for new log segments.
+    pub replica_poll: Duration,
     /// Serialises loads and unloads of the same database.
     transitions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -115,7 +136,15 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
 impl Node {
     pub fn new(catalog: Arc<dyn Catalog>, shipper: Option<Arc<Shipper>>, cfg: NodeConfig) -> Arc<Self> {
-        let node = Arc::new(Self { catalog, shipper, cfg, dbs: Mutex::new(HashMap::new()), transitions: Mutex::new(HashMap::new()) });
+        let node = Arc::new(Self {
+            catalog,
+            shipper,
+            cfg,
+            dbs: Mutex::new(HashMap::new()),
+            followers: Mutex::new(HashMap::new()),
+            replica_poll: Duration::from_millis(100),
+            transitions: Mutex::new(HashMap::new()),
+        });
         if let (Some(idle), Some(_)) = (node.cfg.idle_timeout, &node.shipper) {
             let weak = Arc::downgrade(&node);
             tokio::spawn(async move {
@@ -164,6 +193,16 @@ impl Node {
                     let lock = self.transition_lock(&spec.id);
                     let _g = lock.lock().await;
                     let db = Database::new(spec.id.clone(), spec.config.clone(), spec.shards);
+                    db.sync_writes.store(spec.sync_writes, Ordering::Relaxed);
+                    if let Some(primary) = &spec.replica_of {
+                        let Some(shipper) = &self.shipper else { anyhow::bail!("replicas need object storage") };
+                        persist::restore_at(&shipper.objects, primary, &db, persist::Until::LATEST, None).await?;
+                        let f = Follower::new(db.clone());
+                        tokio::spawn(f.clone().tail_storage(shipper.objects.clone(), primary.clone(), self.replica_poll));
+                        self.followers.lock().insert(spec.id.clone(), f);
+                        db.start_cron();
+                        return anyhow::Ok(db);
+                    }
                     if let Some(shipper) = &self.shipper {
                         let started = std::time::Instant::now();
                         let m = persist::restore(&shipper.objects, &db, None).await?;
@@ -196,7 +235,11 @@ impl Node {
             db.closed.store(false, Ordering::SeqCst);
             return Ok(false);
         }
-        if let Err(e) = shipper.detach(&db).await {
+        let follower = self.followers.lock().remove(id);
+        if let Some(f) = follower {
+            // Replicas have nothing to flush: they're rebuilt from the primary's log.
+            f.stop();
+        } else if let Err(e) = shipper.detach(&db).await {
             db.closed.store(false, Ordering::SeqCst);
             return Err(e);
         }
@@ -225,6 +268,10 @@ impl Node {
         };
         shipper.objects.put(&persist::manifest_key(child), bytes::Bytes::from(serde_json::to_vec(&manifest)?)).await?;
         Ok(m.end)
+    }
+
+    pub fn follower(&self, id: &str) -> Option<Arc<Follower>> {
+        self.followers.lock().get(id).cloned()
     }
 
     async fn session_for(&self, spec: &DbSpec, user: Arc<User>) -> Result<Session, AuthError> {
