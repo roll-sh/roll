@@ -29,6 +29,8 @@ pub static COMMANDS: &[Command] = &[
     cmd!("move", 3, WRITE | FAST, 1, 1, 1, move_, Generic),
     cmd!("copy", -3, WRITE | DENYOOM, 1, 2, 1, copy, Generic),
     cmd!("touch", -2, READONLY | FAST, 1, -1, 1, touch, Generic),
+    cmd!("dump", 2, READONLY, 1, 1, 1, dump, Generic),
+    cmd!("restore", -4, WRITE | DENYOOM, 1, 1, 1, restore, Generic),
     container!("object", READONLY, Generic, OBJECT),
 ];
 
@@ -437,6 +439,87 @@ pub fn touch(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
     }
     Ok(Reply::Int(n))
+}
+
+/// `DUMP key`: the value in RDB format (see [`crate::rdb::dump`]).
+pub fn dump(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let now = cx.now;
+    Ok(match cx.get(&args[1]) {
+        Some(v) => Reply::Bulk(Bytes::from(crate::rdb::dump(v, now))),
+        None => Reply::Nil,
+    })
+}
+
+/// `RESTORE key ttl payload [REPLACE] [ABSTTL] [IDLETIME s] [FREQ f]` (`restoreCommand`).
+pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let (mut replace, mut absttl) = (false, false);
+    let (mut idle, mut freq) = (None::<u64>, None::<u8>);
+    let mut j = 4;
+    while j < args.len() {
+        let more = j + 1 < args.len();
+        if eq(&args[j], "replace") {
+            replace = true;
+        } else if eq(&args[j], "absttl") {
+            absttl = true;
+        } else if eq(&args[j], "idletime") && more && freq.is_none() {
+            let v = int(&args[j + 1])?;
+            if v < 0 {
+                return Err(Error::new("ERR Invalid IDLETIME value, must be >= 0"));
+            }
+            idle = Some(v as u64);
+            j += 1;
+        } else if eq(&args[j], "freq") && more && idle.is_none() {
+            let v = int(&args[j + 1])?;
+            if !(0..=255).contains(&v) {
+                return Err(Error::new("ERR Invalid FREQ value, must be >= 0 and <= 255"));
+            }
+            freq = Some(v as u8);
+            j += 1;
+        } else {
+            return Err(SYNTAX);
+        }
+        j += 1;
+    }
+    let key = &args[1];
+    if !replace && cx.peek(key).is_some() {
+        return Err(Error::new("BUSYKEY Target key name already exists."));
+    }
+    let ttl = int(&args[2])?;
+    if ttl < 0 {
+        return Err(Error::new("ERR Invalid TTL value, must be >= 0"));
+    }
+    let now = cx.now;
+    let value = match crate::rdb::restore_at(&args[3], cx.cfg(), now) {
+        Ok(v) => v,
+        Err(crate::rdb::RdbError::Version(_) | crate::rdb::RdbError::Checksum) => {
+            return Err(Error::new("ERR DUMP payload version or checksum are wrong"));
+        }
+        Err(_) => return Err(Error::new("ERR Bad data format")),
+    };
+    let at = if ttl != 0 && !absttl { ttl.wrapping_add(now) } else { ttl };
+    let deleted = replace && cx.delete(key);
+    if at != 0 && at <= now && !cx.eng.replica && cx.mode != crate::engine::Mode::Replay {
+        // Already expired: nothing is created; a replaced key is deleted.
+        if deleted {
+            let del = if cx.cfg().lazyfree_lazy_server_del { "UNLINK" } else { "DEL" };
+            cx.propagate_as(vec![b(del), key.clone()]);
+            cx.notify(notify::GENERIC, "del", key);
+        }
+        cx.eng.stats.expired_keys += 1;
+        return Ok(Reply::Ok);
+    }
+    let lru = Engine::restored_lru(cx.cfg(), freq, idle, now);
+    let db = cx.db_index();
+    cx.put_entry(db, key, crate::value::Entry { value, expire: at, lru });
+    if ttl != 0 && !absttl {
+        // Replicate the absolute expiry.
+        let mut argv = args.to_vec();
+        argv[2] = Bytes::from(fmt_i64(at));
+        argv.push(b("ABSTTL"));
+        cx.propagate_as(argv);
+    }
+    cx.notify(notify::GENERIC, "restore", key);
+    Ok(Reply::Ok)
 }
 
 pub fn object_encoding(cx: &mut Cx, args: &[Bytes]) -> CmdResult {

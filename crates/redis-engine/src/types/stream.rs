@@ -267,6 +267,11 @@ impl<'a> EntryRef<'a> {
         self.nfields == 0
     }
 
+    /// Stored with the master entry's field names (`STREAM_ITEM_FLAG_SAMEFIELDS`).
+    pub fn same_fields(&self) -> bool {
+        self.same
+    }
+
     pub fn fields(&self) -> FieldIter<'a> {
         FieldIter { master: if self.same { Some(self.master.iter()) } else { None }, data: self.data, pos: 0, left: self.nfields }
     }

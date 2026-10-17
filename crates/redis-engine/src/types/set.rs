@@ -280,6 +280,43 @@ impl Set {
         }
     }
 
+    /// RDB load: an intset of `width`-byte integers (2, 4 or 8) from strictly ascending members.
+    pub fn from_intset(width: usize, members: impl Iterator<Item = i64>) -> Self {
+        let ints = match width {
+            2 => Ints::W16(members.map(|x| x as i16).collect()),
+            4 => Ints::W32(members.map(|x| x as i32).collect()),
+            _ => Ints::W64(members.collect()),
+        };
+        Self { enc: Enc::Ints(ints) }
+    }
+
+    /// RDB save: the element width in bytes and the members (ascending) of an intset.
+    pub fn intset(&self) -> Option<(usize, impl Iterator<Item = i64> + '_)> {
+        match &self.enc {
+            Enc::Ints(v) => {
+                let w = match v {
+                    Ints::W16(_) => 2,
+                    Ints::W32(_) => 4,
+                    Ints::W64(_) => 8,
+                };
+                Some((w, v.iter()))
+            }
+            _ => None,
+        }
+    }
+
+    /// RDB load: append `m` to a listpack set as stored, whatever its length. False if it is
+    /// already a member (or the set is not a listpack).
+    pub fn load_listpack_member(&mut self, m: &[u8]) -> bool {
+        match &mut self.enc {
+            Enc::Pack(p) if p.position(m).is_none() => {
+                p.push_back(m);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn len(&self) -> usize {
         match &self.enc {
             Enc::Ints(v) => v.len(),

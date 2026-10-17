@@ -218,6 +218,36 @@ impl Hash {
         h
     }
 
+    /// RDB load: an empty `listpack` (`listpackex` when `ex`) to fill with
+    /// [`Hash::load_pack_entry`].
+    pub fn new_pack(ex: bool) -> Self {
+        let enc = if ex { Enc::PackEx(PackEx::default()) } else { Enc::Pack(Pack::new()) };
+        Hash { enc, reg: 0 }
+    }
+
+    /// RDB load: append a pair as stored, whatever its size. In `listpackex` the fields with a
+    /// TTL come first, in ascending order (the caller checks); `at` is ignored for `listpack`.
+    pub fn load_pack_entry(&mut self, field: &[u8], value: &[u8], at: i64) {
+        match &mut self.enc {
+            Enc::Pack(p) => {
+                p.push_back(field);
+                p.push_back(value);
+            }
+            Enc::PackEx(x) => {
+                x.pack.push_back(field);
+                x.pack.push_back(value);
+                if at != 0 {
+                    x.ttl.push(at);
+                }
+            }
+            Enc::Table(_) => {}
+        }
+    }
+
+    pub fn is_listpack_ex(&self) -> bool {
+        matches!(self.enc, Enc::PackEx(_))
+    }
+
     /// Number of stored fields, including expired ones not deleted yet (what HLEN reports).
     pub fn len(&self) -> usize {
         match &self.enc {

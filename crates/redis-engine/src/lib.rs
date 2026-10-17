@@ -16,6 +16,7 @@ pub mod engine;
 pub mod hub;
 pub mod notify;
 pub mod pack;
+pub mod rdb;
 pub mod types;
 pub mod util;
 pub mod value;

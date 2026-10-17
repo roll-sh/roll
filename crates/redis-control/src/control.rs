@@ -214,7 +214,7 @@ impl Control {
     pub async fn new(cfg: RedisConfig, objects: Objects) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.home)?;
         let store = Arc::new(Store::open(&cfg.home.join("redis.db"))?);
-        let shipper = Shipper::start(&cfg.node_name, objects, ShipperConfig { flush_interval: cfg.flush_interval, ..Default::default() }).await?;
+        let shipper = Shipper::start(&cfg.node_name, objects, ShipperConfig { flush_interval: cfg.flush_interval, codec: Some(Arc::new(redis_server::RdbCodec)), ..Default::default() }).await?;
         let node = Node::new(
             Arc::new(StoreCatalog(store.clone())),
             Some(shipper.clone()),
