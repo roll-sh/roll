@@ -1,0 +1,74 @@
+name: postgres
+
+# Runs only when Postgres-related code changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/pg-proxy/**"
+      - "crates/pg-storage/**"
+      - "crates/pg-control/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/test-postgres.sh"
+      - ".github/workflows/postgres.yml"
+  pull_request:
+    paths:
+      - "crates/pg-proxy/**"
+      - "crates/pg-storage/**"
+      - "crates/pg-control/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/test-postgres.sh"
+      - ".github/workflows/postgres.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: postgres-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/test-postgres.sh --force --unit
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Computes reach the control plane through the Docker host gateway.
+      ROLL_E2E_BIND: 0.0.0.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Pull Postgres images
+        run: for v in 16 17 18; do docker pull -q postgres:$v-alpine & done; wait
+      - name: Local object store
+        run: scripts/test-postgres.sh --force
+
+      - name: S3 object store (SeaweedFS)
+        env:
+          AWS_ACCESS_KEY_ID: roll
+          AWS_SECRET_ACCESS_KEY: roll
+          AWS_REGION: us-east-1
+          ROLL_E2E_S3_BUCKET: roll-e2e
+          ROLL_E2E_S3_ENDPOINT: http://127.0.0.1:8333
+        run: |
+          docker run -d --name seaweed -p 8333:8333 chrislusf/seaweedfs server -s3
+          for i in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && break; sleep 1; done
+          docker exec seaweed sh -c 'echo "s3.bucket.create -name roll-e2e" | weed shell'
+          ROLL_E2E=1 cargo test -p pg-control --test e2e -- --test-threads=4 \
+            point_in_time restore_in_place eviction survives read_replicas retention

@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #000000;
+  --fg: #ededed;
+  --muted: #8f8f8f;
+  --subtle: #5c5c5c;
+  --panel: #0a0a0a;
+  --panel-2: #111111;
+  --line: #1f1f1f;
+  --line-2: #2e2e2e;
+  --accent: #4c8dff;
+  --ok: #3ddc84;
+  --danger: #ff3b30;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fafafa;
+    --fg: #0a0a0a;
+    --muted: #6b6b6b;
+    --subtle: #9a9a9a;
+    --panel: #ffffff;
+    --panel-2: #f4f4f4;
+    --line: #ebebeb;
+    --line-2: #dcdcdc;
+    color-scheme: light;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-accent: var(--accent);
+  --color-ok: var(--ok);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* "AI is thinking" text shimmer */
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, var(--subtle) 0%, var(--subtle) 40%, var(--fg) 50%, var(--subtle) 60%, var(--subtle) 100%);
+  background-size: 200% 100%;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.8s linear infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+.caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--accent);
+  animation: caret 1s steps(1) infinite;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.rise {
+  animation: rise 0.35s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer,
+  .caret::after,
+  .rise {
+    animation: none;
+  }
+  .shimmer {
+    color: var(--muted);
+  }
+}

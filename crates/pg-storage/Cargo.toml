@@ -1,0 +1,19 @@
+[package]
+name = "pg-storage"
+description = "Bottomless Postgres storage: WAL safekeeper, base images and restore on S3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+futures.workspace = true
+object_store.workspace = true
+pg-proxy.workspace = true
+postgres-protocol.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zstd.workspace = true

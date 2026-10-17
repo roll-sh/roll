@@ -1,0 +1,11 @@
+{
+  "name": "roll",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter dashboard dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test:pg": "scripts/test-postgres.sh"
+  },
+  "packageManager": "pnpm@12.10.1"
+}

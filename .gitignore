@@ -1,0 +1,12 @@
+node_modules
+.next
+out
+dist
+.turbo
+*.tsbuildinfo
+.env*.local
+.DS_Store
+
+# rust / local state
+/target
+.roll
