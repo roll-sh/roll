@@ -69,6 +69,11 @@ impl Db {
     /// Insert a brand-new key (caller checked it is absent).
     pub fn insert_new(&mut self, key: &[u8], mut entry: Entry) -> &mut Entry {
         let k = Str::from_slice(key);
+        // The object gets an expire slot for a TTL or a long key (`kvobjCreate`).
+        entry.obj &= !crate::object::SLOT;
+        if entry.expire != 0 || key.len() >= crate::object::SLOT_KEY_LEN {
+            entry.obj |= crate::object::SLOT;
+        }
         entry.sized = entry.value.size_slot();
         if entry.sized != NO_SIZE {
             self.keysizes[entry.sized as usize] += 1;
@@ -118,6 +123,10 @@ impl Db {
         let Some(e) = self.keys.get_mut(key) else { return false };
         let had = e.expire != 0;
         e.expire = at;
+        // An expire slot stays once added (PERSIST keeps it).
+        if at != 0 {
+            e.obj |= crate::object::SLOT;
+        }
         match (had, at != 0) {
             (false, true) => {
                 let k = Str::from_slice(key);

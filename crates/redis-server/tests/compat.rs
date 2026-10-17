@@ -29,7 +29,8 @@
 //!
 //! A command after which both servers closed the connection counts as a match.
 //!
-//! `ROLL_COMPAT_REDIS=host:port` uses an existing reference server; otherwise a private Docker
+//! `ROLL_COMPAT_REDIS=host:port` uses an existing reference server (`ROLL_COMPAT_DEBUG_REDIS` for
+//! `tests/compat_debug`, one with `enable-debug-command yes`); otherwise a private Docker
 //! container is started for the run. `ROLL_COMPAT_FILTER=lists` runs matching files only. Without
 //! Docker the test is skipped unless `ROLL_COMPAT_REQUIRED=1`. `ROLL_COMPAT_DIR` runs scripts from
 //! another directory. `ROLL_COMPAT_TRACE=1` prints each line
@@ -50,14 +51,17 @@ impl Drop for Container {
     }
 }
 
-fn reference() -> Option<(String, Option<Container>)> {
-    if let Ok(addr) = std::env::var("ROLL_COMPAT_REDIS") {
+/// The reference server: `env` names a running one, otherwise a container is started with
+/// `args` for `redis-server`.
+fn reference(env: &str, args: &[&str]) -> Option<(String, Option<Container>)> {
+    if let Ok(addr) = std::env::var(env) {
         return Some((addr, None));
     }
     let name = format!("roll-compat-{}-{}", std::process::id(), redis_engine::util::now_us() % 1_000_000);
     let image = std::env::var("ROLL_COMPAT_IMAGE").unwrap_or_else(|_| "redis:8-alpine".into());
     let out = Command::new("docker")
         .args(["run", "-d", "--rm", "--name", &name, "-p", "127.0.0.1::6379", &image])
+        .args(if args.is_empty() { vec![] } else { [&["redis-server"][..], args].concat() })
         .output()
         .ok()?;
     if !out.status.success() {
@@ -476,11 +480,23 @@ impl SendRead for RespClient {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn compat_with_redis() {
-    let Some((ref_addr, _guard)) = reference() else {
+    run_suite("ROLL_COMPAT_REDIS", &[], "tests/compat", Config::default()).await;
+}
+
+/// DEBUG needs `enable-debug-command` (immutable, so a server of its own): `tests/compat_debug`
+/// runs against `ROLL_COMPAT_DEBUG_REDIS` or a container started with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compat_debug_with_redis() {
+    let cfg = Config { enable_debug_command: redis_engine::config::PROTECTED_YES, ..Config::default() };
+    run_suite("ROLL_COMPAT_DEBUG_REDIS", &["--enable-debug-command", "yes"], "tests/compat_debug", cfg).await;
+}
+
+async fn run_suite(env: &str, args: &[&str], scripts: &str, cfg: Config) {
+    let Some((ref_addr, _guard)) = reference(env, args) else {
         if std::env::var("ROLL_COMPAT_REQUIRED").is_ok() {
             panic!("compat: no reference Redis (Docker unavailable)");
         }
-        eprintln!("compat: skipped (no Docker); set ROLL_COMPAT_REDIS=host:port to use a running Redis");
+        eprintln!("compat: skipped (no Docker); set {env}=host:port to use a running Redis");
         return;
     };
     // Wait for the reference to accept connections.
@@ -497,14 +513,14 @@ async fn compat_with_redis() {
     }
     assert!(ready, "reference Redis at {ref_addr} not ready");
 
-    let db = Database::new("compat", Config::default(), 1);
+    let db = Database::new("compat", cfg, 1);
     // Active expiry and INFO's samples, like a node runs.
     db.start_cron();
     let roll = start_single(db, None).await.unwrap();
 
     let dir = std::env::var_os("ROLL_COMPAT_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/compat"));
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(scripts));
     let filter = std::env::var("ROLL_COMPAT_FILTER").ok();
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()

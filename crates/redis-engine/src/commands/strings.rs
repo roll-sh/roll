@@ -399,8 +399,14 @@ pub fn append(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         && cur.len() + args[2].len() > limit {
             return Err(TOO_BIG);
         }
+    let existed = cx.peek(&args[1]).is_some();
     let mut e = cx.get_or_create(&args[1], Kind::String)?;
-    let s = e.str();
+    let s = if existed {
+        let to = e.str().len() + args[2].len();
+        e.str_in_place(to)
+    } else {
+        e.str()
+    };
     s.extend_from_slice(&args[2]);
     let len = s.len();
     e.notify(notify::STRING, "append");
@@ -417,10 +423,17 @@ fn incr_generic(cx: &mut Cx, key: &Bytes, by: i64) -> CmdResult {
         None => 0,
     };
     let new = cur.checked_add(by).ok_or(OVERFLOW)?;
+    let shared_ints = cx.cfg().shared_integers();
     let mut e = cx.get_or_create(key, Kind::String)?;
+    // An int-encoded value changes in place; anything else is replaced.
+    let in_place = e.encoding() == "int";
+    let embedded = e.embedded();
     let s = e.str();
     s.clear();
     s.extend_from_slice(itoa::Buffer::new().format(new).as_bytes());
+    if !in_place {
+        e.str_replaced(embedded, crate::object::ENC_AUTO, shared_ints);
+    }
     e.notify(notify::STRING, "incrby");
     Ok(Reply::Int(new))
 }
@@ -452,14 +465,17 @@ pub fn incrbyfloat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if !decimal::valid(&args[2]) {
         return Err(NOT_FLOAT);
     }
+    let shared_ints = cx.cfg().shared_integers();
     let new = decimal::incr_by_float(&cur, &args[2]).map_err(|e| match e {
         IncrError::NotFloat => NOT_FLOAT,
         IncrError::NanOrInf => Error::new("ERR increment would produce NaN or Infinity"),
     })?;
     let mut e = cx.get_or_create(key, Kind::String)?;
+    let embedded = e.embedded();
     let s = e.str();
     s.clear();
     s.extend_from_slice(new.as_bytes());
+    e.str_replaced(embedded, crate::object::ENC_STR, shared_ints);
     e.notify(notify::STRING, "incrbyfloat");
     drop(e);
     let nb = Bytes::from(new);
@@ -689,7 +705,7 @@ pub fn setrange(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(TOO_BIG);
     }
     let mut e = cx.get_or_create(&args[1], Kind::String)?;
-    let s = e.str();
+    let s = if cur_len.is_some() { e.str_in_place(offset + value.len()) } else { e.str_new_raw() };
     if s.len() < offset + value.len() {
         s.resize(offset + value.len(), 0);
     }

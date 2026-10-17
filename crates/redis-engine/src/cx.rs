@@ -96,6 +96,45 @@ impl KeyMut<'_> {
             _ => unreachable!("type checked by lookup"),
         }
     }
+
+    /// An existing string about to change in place, to at least `grow_to` bytes: raw from now
+    /// on (`dbUnshareStringValue`), its sds grown like Redis grows it (`sdsMakeRoomFor`).
+    pub fn str_in_place(&mut self, grow_to: usize) -> &mut Str {
+        let len = self.str().len();
+        self.entry.unshare(self.key.len());
+        if grow_to > len {
+            self.entry.sds_make_room(grow_to - len);
+        }
+        self.str()
+    }
+
+    /// A string just created raw and exactly sized (SETRANGE, SETBIT on a new key).
+    pub fn str_new_raw(&mut self) -> &mut Str {
+        self.entry.obj = (self.entry.obj & crate::object::SLOT) | crate::object::ENC_RAW;
+        self.entry.sds = 0;
+        self.str()
+    }
+
+    /// `dbUnshareStringValue` without growing (HyperLogLog commands).
+    pub fn unshare(&mut self) {
+        self.entry.unshare(self.key.len());
+    }
+
+    /// `OBJECT ENCODING` of the value.
+    pub fn encoding(&self) -> &'static str {
+        self.entry.encoding(self.key.len())
+    }
+
+    /// Whether the value is an embedded string (before replacing it: [`KeyMut::str_replaced`]).
+    pub fn embedded(&self) -> bool {
+        self.entry.embedded(self.key.len())
+    }
+
+    /// The string's content was replaced by a value created with `enc` (INCR, INCRBYFLOAT:
+    /// `dbReplaceValue`, keeping the TTL; `shared_ints` from the config).
+    pub fn str_replaced(&mut self, was_embedded: bool, enc: u8, shared_ints: bool) {
+        self.entry.revalue(was_embedded, self.key.len(), enc, true, shared_ints);
+    }
     pub fn list(&mut self) -> &mut List {
         match &mut self.entry.value {
             Value::List(l) => l,
@@ -286,26 +325,35 @@ impl<'a> Cx<'a> {
     /// Create or overwrite a key. `keep_ttl` keeps an existing TTL (SET KEEPTTL); otherwise any
     /// TTL is removed.
     pub fn set(&mut self, key: &[u8], value: Value, keep_ttl: bool) {
-        self.set_value(key, value, keep_ttl, true);
+        self.set_value(key, value, keep_ttl, true, crate::object::ENC_AUTO);
     }
 
     /// Like [`Cx::set`] without the `overwritten` / `type_changed` events (`dbReplaceValue`).
     pub fn replace(&mut self, key: &[u8], value: Value, keep_ttl: bool) {
-        self.set_value(key, value, keep_ttl, false);
+        self.set_value(key, value, keep_ttl, false, crate::object::ENC_AUTO);
     }
 
-    fn set_value(&mut self, key: &[u8], value: Value, keep_ttl: bool, events: bool) {
+    /// [`Cx::set`] for a string created with encoding `enc` ([`crate::object`]): BITOP's raw
+    /// result, INCRBYFLOAT's never-int one.
+    pub fn set_encoded(&mut self, key: &[u8], value: Value, keep_ttl: bool, events: bool, enc: u8) {
+        self.set_value(key, value, keep_ttl, events, enc);
+    }
+
+    fn set_value(&mut self, key: &[u8], value: Value, keep_ttl: bool, events: bool, enc: u8) {
         self.expire_check(key);
         let db = self.client.db;
         let lru = self.eng.new_lru(self.now);
+        let shared_ints = self.eng.cfg.shared_integers();
         let d = &mut self.eng.dbs[db];
         match d.keys.get_mut(key) {
             Some(e) => {
                 let (old, old_kind) = (e.value.mem(), e.value.kind());
                 let (new, new_kind) = (value.mem(), value.kind());
                 let hashes = matches!(e.value, Value::Hash(_)) || matches!(value, Value::Hash(_));
+                let embedded = e.embedded(key.len());
                 e.value = value;
                 e.lru = lru;
+                e.revalue(embedded, key.len(), enc, keep_ttl, shared_ints);
                 let had_ttl = e.expire != 0;
                 d.mem = (d.mem + new).saturating_sub(old);
                 if had_ttl && !keep_ttl {
@@ -323,7 +371,7 @@ impl<'a> Cx<'a> {
                 }
             }
             None => {
-                d.insert_new(key, Entry::new(value, lru));
+                d.insert_new(key, Entry { obj: enc, ..Entry::new(value, lru) });
                 self.eng.sig.notify(notify::NEW, "new", db as u16, key);
             }
         }

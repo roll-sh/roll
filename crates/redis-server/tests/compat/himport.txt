@@ -192,9 +192,9 @@ HIMPORT PREPARE f2 y
 HIMPORT PREPARE f2 z
 HIMPORT DISCARDALL
 HIMPORT DISCARDALL
-# FLUSHALL frees in the background: the template references go at the next cron.
+# FLUSHALL frees in the background: the template references go at a later cron (right after
+# the flush the count depends on the free thread's timing).
 FLUSHALL
-!info hash_template* INFO stats
 @sleep 300
 !info hash_template* INFO stats
 !info used_memory_hash_templates INFO memory

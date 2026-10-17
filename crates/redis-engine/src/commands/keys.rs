@@ -344,7 +344,8 @@ fn rename_generic(cx: &mut Cx, args: &[Bytes], nx: bool) -> CmdResult {
     if nx && cx.peek(dst).is_some() {
         return Ok(Reply::Int(0));
     }
-    let entry = cx.take(src).unwrap();
+    let mut entry = cx.take(src).unwrap();
+    entry.rekey(src.len(), dst.len(), false);
     let db = cx.db_index();
     let src_kind = entry.value.kind();
     let dst_kind = cx.peek(dst).map(|e| e.value.kind());
@@ -393,7 +394,8 @@ pub fn move_(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
         cx.eng.delete_expired(to, key);
     }
-    let entry = cx.take(key).unwrap();
+    let mut entry = cx.take(key).unwrap();
+    entry.rekey(key.len(), key.len(), false);
     cx.put_entry(to, key, entry);
     cx.changes(1);
     cx.notify(notify::GENERIC, "move_from", key);
@@ -435,6 +437,7 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let mut entry = entry;
     entry.lru = cx.eng.new_lru(now);
+    entry.rekey(src.len(), dst.len(), true);
     let new_kind = entry.value.kind();
     cx.put_entry(to, dst, entry);
     cx.changes(1);
@@ -526,7 +529,7 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let lru = Engine::restored_lru(cx.cfg(), freq, idle, now);
     let db = cx.db_index();
-    cx.put_entry(db, key, crate::value::Entry { value, expire: at, lru, sized: crate::value::NO_SIZE });
+    cx.put_entry(db, key, crate::value::Entry::with_expire(value, at, lru));
     cx.changes(1);
     if ttl != 0 && !absttl {
         // Replicate the absolute expiry.
@@ -553,7 +556,7 @@ fn overwritten(cx: &mut Cx, db: usize, key: &[u8], old: crate::value::Kind, new:
 
 pub fn object_encoding(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     Ok(match cx.peek(&args[2]) {
-        Some(e) => Reply::bulk(e.value.encoding()),
+        Some(e) => Reply::bulk(e.encoding(args[2].len())),
         None => Reply::Nil,
     })
 }

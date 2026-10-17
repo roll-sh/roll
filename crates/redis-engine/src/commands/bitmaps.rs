@@ -59,8 +59,9 @@ pub fn setbit(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(BIT_ERR);
     }
     let byte = (off >> 3) as usize;
+    let existed = cx.peek(&args[1]).is_some();
     let mut e = cx.get_or_create(&args[1], Kind::String)?;
-    let s = e.str();
+    let s = if existed { e.str_in_place(byte + 1) } else { e.str_new_raw() };
     let grown = grow_zero(s, byte + 1);
     let bit = 7 - (off & 7) as u32;
     let old = (s[byte] >> bit) & 1;
@@ -340,7 +341,7 @@ pub fn bitop(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let dst = &args[2];
     let n = res.len();
     if n > 0 {
-        cx.set(dst, Value::Str(Str::from_vec(res)), false);
+        cx.set_encoded(dst, Value::Str(Str::from_vec(res)), false, true, crate::object::ENC_RAW);
         cx.notify(notify::STRING, "set", dst);
     } else if cx.delete(dst) {
         cx.notify(notify::GENERIC, "del", dst);
@@ -549,9 +550,10 @@ fn bitfield_generic(cx: &mut Cx, args: &[Bytes], read_only_cmd: bool) -> CmdResu
         return Err(Error::new("ERR BITFIELD_RO only supports the GET subcommand"));
     }
 
-    let mut e = cx.get_or_create(&args[1], Kind::String)?;
-    let s = e.str();
     let need = (highest >> 3) as usize + 1;
+    let existed = cx.peek(&args[1]).is_some();
+    let mut e = cx.get_or_create(&args[1], Kind::String)?;
+    let s = if existed { e.str_in_place(need) } else { e.str_new_raw() };
     let grown = grow_zero(s, need);
     let mut changes = 0;
     let mut out = Vec::with_capacity(fields.len());

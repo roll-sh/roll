@@ -76,6 +76,11 @@ impl Policy {
     pub fn is_lrm(self) -> bool {
         matches!(self, Policy::AllKeysLrm | Policy::VolatileLrm)
     }
+
+    /// Evicts by per-key access data (`MAXMEMORY_FLAG_NO_SHARED_INTEGERS`).
+    pub fn needs_key_access(self) -> bool {
+        !matches!(self, Policy::NoEviction | Policy::AllKeysRandom | Policy::VolatileRandom | Policy::VolatileTtl)
+    }
 }
 
 /// `enable-debug-command` and friends: `no`, `yes` or `local` (loopback connections only).
@@ -1240,6 +1245,12 @@ impl std::fmt::Display for SetError {
 }
 
 impl Config {
+    /// Whether values may be Redis' shared integers 0..9999: not under a maxmemory policy that
+    /// needs per-key access data.
+    pub fn shared_integers(&self) -> bool {
+        self.maxmemory == 0 || !self.maxmemory_policy.needs_key_access()
+    }
+
     /// `CONFIG GET pattern`: matching `(name, value)` pairs, aliases included like Redis. A name
     /// without glob characters is looked up directly (hidden parameters too) and echoed as given.
     pub fn get(&self, pattern: &[u8]) -> Vec<(String, String)> {

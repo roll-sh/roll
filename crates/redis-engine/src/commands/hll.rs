@@ -15,6 +15,7 @@
 use super::*;
 use crate::cmd;
 use crate::notify;
+use crate::object::Sds;
 use crate::util::Rng;
 use crate::value::{Kind, Str, Value};
 
@@ -238,18 +239,26 @@ pub fn sparse_to_dense(s: &mut Str) -> bool {
 }
 
 /// Promote to dense and set the register (the result is always an update).
-fn promote_and_set(s: &mut Str, index: usize, count: u8) -> i32 {
+fn promote_and_set(s: &mut Str, index: usize, count: u8, alloc: &mut Sds) -> i32 {
     if !sparse_to_dense(s) {
         return -1;
     }
+    *alloc = Sds::new(DENSE_SIZE);
     dense_set(&mut s[HDR..], index, count);
     1
 }
 
-/// `hllSparseSet`: 1 if a register changed, 0 if not, -1 if the data is corrupt.
-fn sparse_set(s: &mut Str, index: usize, count: u8, max_bytes: usize) -> i32 {
+/// `hllSparseSet`: 1 if a register changed, 0 if not, -1 if the data is corrupt. `alloc` is the
+/// sds string's allocation, grown ahead like Redis grows it.
+fn sparse_set(s: &mut Str, index: usize, count: u8, max_bytes: usize, alloc: &mut Sds) -> i32 {
     if count > VAL_MAX_VALUE {
-        return promote_and_set(s, index, count);
+        return promote_and_set(s, index, count, alloc);
+    }
+    // Room for a split (3 bytes), with some to spare, within hll-sparse-max-bytes.
+    if alloc.alloc() < max_bytes && alloc.avail(s.len()) < 3 {
+        let mut n = s.len() + 3;
+        n += n.min(300);
+        *alloc = alloc.resize(n.min(max_bytes));
     }
     // Step 1: find the opcode covering `index`.
     let end = s.len();
@@ -320,7 +329,7 @@ fn sparse_set(s: &mut Str, index: usize, count: u8, max_bytes: usize) -> i32 {
         // Step 3: substitute it.
         let oldlen = if xzero { 2 } else { 1 };
         if seq.len() > oldlen && s.len() + (seq.len() - oldlen) > max_bytes {
-            return promote_and_set(s, index, count);
+            return promote_and_set(s, index, count, alloc);
         }
         // A truncated XZERO at the very end: Redis writes the sequence but the string only grows
         // by the length difference, cutting it short.
@@ -368,11 +377,11 @@ fn sparse_set(s: &mut Str, index: usize, count: u8, max_bytes: usize) -> i32 {
 }
 
 /// `hllAdd`: 1 if a register changed, 0 if not, -1 for a corrupt HLL.
-fn hll_add(s: &mut Str, ele: &[u8], max_bytes: usize) -> i32 {
+fn hll_add(s: &mut Str, ele: &[u8], max_bytes: usize, alloc: &mut Sds) -> i32 {
     let (index, count) = pat_len(ele);
     match s[4] {
         DENSE => dense_set(&mut s[HDR..], index, count) as i32,
-        SPARSE => sparse_set(s, index, count, max_bytes),
+        SPARSE => sparse_set(s, index, count, max_bytes, alloc),
         _ => -1,
     }
 }
@@ -553,16 +562,21 @@ pub fn pfadd(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let max_bytes = cx.cfg().hll_sparse_max_bytes;
     let exists = check_key(cx, key)?;
     let mut e = cx.get_or_create(key, Kind::String)?;
+    if exists {
+        e.unshare();
+    } else {
+        *e.str_new_raw() = new_sparse();
+    }
+    let mut alloc = e.entry.sds();
     let res = {
         let s = e.str();
         let mut updated = 0;
         if !exists {
-            *s = new_sparse();
             updated += 1;
         }
         let mut corrupt = false;
         for ele in &args[2..] {
-            match hll_add(s, ele, max_bytes) {
+            match hll_add(s, ele, max_bytes, &mut alloc) {
                 1 => updated += 1,
                 -1 => {
                     corrupt = true;
@@ -576,6 +590,7 @@ pub fn pfadd(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
         if corrupt { Err(INVALIDOBJ) } else { Ok(updated) }
     };
+    e.entry.set_sds(alloc);
     match res {
         Ok(n) if n > 0 => {
             e.notify(notify::STRING, "pfadd");
@@ -622,7 +637,11 @@ pub fn pfcount(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if fresh {
         // Caching the cardinality is a write (propagated, invalidates WATCH), like in Redis.
         let mut e = cx.get_mut(key).expect("looked up above");
+        e.unshare();
         set_cached_card(e.str(), card);
+    } else if let Some(e) = cx.eng.dbs[cx.client.db].keys.get_mut(key) {
+        // The value is made raw either way (`dbUnshareStringValue`).
+        e.unshare(key.len());
     }
     Ok(Reply::Int(card as i64))
 }
@@ -644,13 +663,19 @@ pub fn pfmerge(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let dst = &args[1];
     let exists = cx.peek(dst).is_some();
     let mut e = cx.get_or_create(dst, Kind::String)?;
+    if exists {
+        e.unshare();
+    } else {
+        *e.str_new_raw() = new_sparse();
+    }
+    let mut alloc = e.entry.sds();
     let ok = {
         let s = e.str();
-        if !exists {
-            *s = new_sparse();
-        }
         if use_dense {
-            if sparse_to_dense(s) {
+            if s[4] == SPARSE && sparse_to_dense(s) {
+                alloc = Sds::new(DENSE_SIZE);
+            }
+            if s[4] == DENSE {
                 let d = &mut s[HDR..];
                 for (i, &v) in regs.0.iter().enumerate() {
                     dense_put(d, i, v);
@@ -667,12 +692,13 @@ pub fn pfmerge(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 if s[4] == DENSE {
                     dense_set(&mut s[HDR..], j, v);
                 } else {
-                    sparse_set(s, j, v, max_bytes);
+                    sparse_set(s, j, v, max_bytes, &mut alloc);
                 }
             }
             true
         }
     };
+    e.entry.set_sds(alloc);
     if !ok {
         e.unchanged();
         return Err(INVALIDOBJ);
@@ -716,6 +742,7 @@ pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(Error::msg(format!("ERR Unknown PFDEBUG subcommand '{}'", String::from_utf8_lossy(sub))));
     }
     let mut e = cx.get_mut(key).expect("looked up above");
+    e.unshare();
     let st = e.str();
     let converted = st[4] == SPARSE;
     if converted && !sparse_to_dense(st) {
@@ -728,6 +755,9 @@ pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     } else {
         Reply::Int(converted as i64)
     };
+    if converted {
+        e.entry.set_sds(Sds::new(DENSE_SIZE));
+    }
     if !converted {
         e.unchanged();
     }
@@ -758,8 +788,8 @@ pub fn pfselftest(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     sparse_to_dense(&mut dense);
     for i in 0..20_000u32 {
         let ele = i.to_le_bytes();
-        hll_add(&mut sparse, &ele, usize::MAX);
-        hll_add(&mut dense, &ele, usize::MAX);
+        hll_add(&mut sparse, &ele, usize::MAX, &mut Sds::new(0));
+        hll_add(&mut dense, &ele, usize::MAX, &mut Sds::new(0));
     }
     let (mut a, mut b) = (false, false);
     if histogram(&sparse, &mut a) != histogram(&dense, &mut b) || a || b {
@@ -788,7 +818,7 @@ mod tests {
         // PFADD h a b c on redis:8 gives these bytes.
         let mut s = new_sparse();
         for e in [b"a", b"b", b"c"] {
-            assert_eq!(hll_add(&mut s, e, 3000), 1);
+            assert_eq!(hll_add(&mut s, e, 3000, &mut Sds::new(0)), 1);
         }
         invalidate_cache(&mut s);
         assert_eq!(&s[..], b"HYLL\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80`\xf3\x80P\xb1\x84K\xfb\x80BZ");
@@ -804,8 +834,8 @@ mod tests {
         assert!(sparse_to_dense(&mut d));
         for i in 0..5000 {
             let e = format!("e{i}");
-            hll_add(&mut s, e.as_bytes(), 1 << 20);
-            hll_add(&mut d, e.as_bytes(), 1 << 20);
+            hll_add(&mut s, e.as_bytes(), 1 << 20, &mut Sds::new(0));
+            hll_add(&mut d, e.as_bytes(), 1 << 20, &mut Sds::new(0));
         }
         let (mut a, mut b) = (false, false);
         assert_eq!(histogram(&s, &mut a), histogram(&d, &mut b));

@@ -16,6 +16,7 @@ pub mod dict;
 pub mod engine;
 pub mod hub;
 pub mod notify;
+pub mod object;
 pub mod pack;
 pub mod rdb;
 pub mod tre;

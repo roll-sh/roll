@@ -480,7 +480,7 @@ pub fn load_with(
                             info.expired += 1;
                         }
                         let lru = crate::engine::Engine::restored_lru(cfg, freq, idle, now);
-                        let entry = Entry { value, expire: at, lru, sized: crate::value::NO_SIZE };
+                        let entry = Entry::with_expire(value, at, lru);
                         sink(LoadItem::Entry { db, key: Str::from_slice(&a), entry })?;
                     }
                     Err(RdbError::EmptyKey) => info.empty_skipped += 1,

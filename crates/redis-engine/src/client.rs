@@ -178,13 +178,14 @@ pub const REPLY_CHUNK: usize = 16 * 1024;
 /// `sizeof(clientReplyBlock)`.
 const BLOCK_HEADER: usize = 24;
 
-/// jemalloc's size class for an allocation of `n` bytes (four classes per doubling).
+/// jemalloc's size class for an allocation of `n` bytes: Redis builds it with an 8 byte quantum,
+/// so 8, 16, 24 … 64, then four classes per doubling.
 pub fn jemalloc_size(n: usize) -> usize {
     if n <= 8 {
         return 8;
     }
     let lg = usize::BITS - (n - 1).leading_zeros() - 1;
-    let step = (1usize << lg.saturating_sub(2)).max(16);
+    let step = (1usize << lg.saturating_sub(2)).max(8);
     n.div_ceil(step) * step
 }
 
@@ -381,7 +382,8 @@ mod reply_buf_tests {
         assert_eq!(jemalloc_size(16384 + 24), 20480);
         assert_eq!(jemalloc_size(183_625 + 24), 196_608);
         assert_eq!(jemalloc_size(16384), 16384);
-        assert_eq!(jemalloc_size(17), 32);
+        assert_eq!(jemalloc_size(17), 24);
+        assert_eq!(jemalloc_size(49), 56);
         assert_eq!(jemalloc_size(100), 112);
     }
 

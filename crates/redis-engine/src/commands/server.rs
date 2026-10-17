@@ -691,7 +691,10 @@ pub fn memory_usage(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 }),
                 _ => 0,
             };
-            Reply::Int((crate::value::KEY_OVERHEAD + key.len().saturating_sub(22) + e.value.mem() + share) as i64)
+            Reply::Int(match &e.value {
+                crate::value::Value::Str(s) => crate::object::string_usage(e, key.len(), s),
+                v => crate::value::KEY_OVERHEAD + key.len().saturating_sub(22) + v.mem() + share,
+            } as i64)
         }
         None => Reply::Nil,
     })

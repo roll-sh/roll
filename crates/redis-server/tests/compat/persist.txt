@@ -36,15 +36,16 @@ SAVE
 BGREWRITEAOF
 !info aof_rewrite_in_progress,aof_rewrite_scheduled,aof_rewrites INFO persistence
 SET c 1
+# (The *_time_sec of finished saves are whole-second differences: they depend on the clock.)
 @sleep 1200
-!info rdb_bgsave_in_progress,rdb_saves,rdb_changes_since_last_save,rdb_last_bgsave_status,rdb_last_bgsave_time_sec,aof_rewrite_scheduled,aof_rewrite_in_progress,aof_rewrites,current_save_keys_total INFO persistence
+!info rdb_bgsave_in_progress,rdb_saves,rdb_changes_since_last_save,rdb_last_bgsave_status,aof_rewrite_scheduled,aof_rewrite_in_progress,aof_rewrites,current_save_keys_total INFO persistence
 BGREWRITEAOF
 BGSAVE
 BGSAVE SCHEDULE
 @sleep 1700
 !info rdb_bgsave_in_progress,aof_rewrite_in_progress,aof_rewrite_scheduled,aof_rewrites,rdb_saves INFO persistence
 @sleep 1700
-!info rdb_bgsave_in_progress,aof_rewrite_in_progress,aof_rewrite_scheduled,aof_rewrites,rdb_saves,aof_last_rewrite_time_sec,aof_last_bgrewrite_status INFO persistence
+!info rdb_bgsave_in_progress,aof_rewrite_in_progress,aof_rewrite_scheduled,aof_rewrites,rdb_saves,aof_last_bgrewrite_status INFO persistence
 !info total_forks INFO stats
 
 # Inside MULTI a BGSAVE is scheduled; SAVE isn't allowed at all.

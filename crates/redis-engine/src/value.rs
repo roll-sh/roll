@@ -155,11 +155,20 @@ pub struct Entry {
     /// The INFO keysizes histogram slot this key is counted in ([`Value::size_slot`]), kept by
     /// [`crate::db::Db`].
     pub sized: u16,
+    /// How Redis would hold the object: string encoding, expire slot ([`crate::object`]).
+    pub obj: u8,
+    /// A grown raw string's sds size class ([`crate::object::GROWN`]).
+    pub sds: u8,
 }
 
 impl Entry {
     pub fn new(value: Value, lru: u32) -> Self {
-        Self { value, expire: 0, lru, sized: NO_SIZE }
+        Self { value, expire: 0, lru, sized: NO_SIZE, obj: 0, sds: 0 }
+    }
+
+    /// A key with a TTL (RESTORE, RDB load).
+    pub fn with_expire(value: Value, expire: i64, lru: u32) -> Self {
+        Self { expire, ..Self::new(value, lru) }
     }
 
     #[inline]
