@@ -478,8 +478,8 @@ impl Follower {
     async fn tail_once(&self, objects: &Objects, id: &str, seen: &mut HashMap<(String, u64), ()>, dbsel: &mut u16) -> anyhow::Result<()> {
         let Some(raw) = objects.get(&persist::manifest_key(id)).await? else { return Ok(()) };
         let m: persist::Manifest = serde_json::from_slice(&raw)?;
-        if m.snapshot.as_ref().is_some_and(|s| s.offset > self.applied()) {
-            // Fell behind a snapshot: start over from it.
+        if m.snapshots.first().is_some_and(|s| s.offset > self.applied()) {
+            // The log we'd need is gone (behind the oldest snapshot): start over.
             self.resync(objects, id).await?;
             return Ok(());
         }
@@ -501,16 +501,15 @@ impl Follower {
             }
             let Some(data) = objects.get(&persist::segment_key(&seg.0, seg.1)).await? else { continue };
             let raw = tokio::task::spawn_blocking(move || zstd::decode_all(&data[..])).await??;
-            for (db, start, data) in persist::frames(&raw) {
+            for f in persist::frames(&raw) {
                 let applied = self.applied();
-                let end = start + data.len() as u64;
-                if db != id || end <= applied {
+                if f.db != id || f.end() <= applied {
                     continue;
                 }
-                if start != applied {
+                if f.start != applied {
                     anyhow::bail!("gap in the log at {applied}");
                 }
-                let mut buf = BytesMut::from(data);
+                let mut buf = BytesMut::from(f.data);
                 self.apply(&mut buf, dbsel)?;
             }
             seen.insert(seg, ());

@@ -1,7 +1,8 @@
 //! A multi-tenant node: many databases in one process, loaded on demand and unloaded when idle.
 //!
 //! - **Routing.** A connection names its database by TLS SNI (`<db>.redis.example.com`), by
-//!   username (`user@<db>`), or by a self-identifying password/token (`<db>_<secret>`), so any
+//!   username (`user@<db>`), or by a self-identifying password/token (`<db>_<secret>`, split at
+//!   the last `_`), so any
 //!   Redis client or HTTP SDK works with a plain URL.
 //! - **Scale to zero.** A database with no connections for `idle_timeout` is flushed to object
 //!   storage and dropped from memory. The next AUTH (or HTTP request) restores it.
@@ -102,8 +103,8 @@ pub fn route<'a>(req: &AuthRequest<'a>, domain: Option<&str>) -> Option<(String,
             return Some((db.to_string(), user, req.password));
         }
     }
-    // `<db>_<secret>` tokens.
-    let pos = req.password.iter().position(|&b| b == b'_')?;
+    // `<db>_<secret>` tokens (database ids may contain `_`, secrets don't).
+    let pos = req.password.iter().rposition(|&b| b == b'_')?;
     let db = std::str::from_utf8(&req.password[..pos]).ok()?;
     Some((db.to_string(), user, &req.password[pos + 1..]))
 }
@@ -202,6 +203,28 @@ impl Node {
         self.dbs.lock().remove(id);
         tracing::info!(db = id, "database unloaded");
         Ok(true)
+    }
+
+    /// Create database `child` from `parent`'s state as of `until` (branching / point-in-time
+    /// restore into a new database). Copies nothing: the child's manifest points at the parent's
+    /// history. Returns the stream offset of the branch point.
+    pub async fn branch(&self, parent: &str, child: &str, until: persist::Until) -> anyhow::Result<u64> {
+        let Some(shipper) = &self.shipper else { anyhow::bail!("branching needs object storage") };
+        if persist::read_manifest(&shipper.objects, child).await?.is_some() {
+            anyhow::bail!("database {child} already exists");
+        }
+        // Make the parent's latest writes visible in storage.
+        shipper.flush().await?;
+        shipper.write_manifests(false).await?;
+        let scratch = Database::new(child, Config::default(), 1);
+        let m = persist::restore_at(&shipper.objects, parent, &scratch, until, None).await?;
+        let manifest = persist::Manifest {
+            base: Some(persist::Base { db: parent.to_string(), offset: m.end, at_ms: until.time_ms.unwrap_or_else(redis_engine::util::now_ms) }),
+            end: m.end,
+            ..Default::default()
+        };
+        shipper.objects.put(&persist::manifest_key(child), bytes::Bytes::from(serde_json::to_vec(&manifest)?)).await?;
+        Ok(m.end)
     }
 
     async fn session_for(&self, spec: &DbSpec, user: Arc<User>) -> Result<Session, AuthError> {

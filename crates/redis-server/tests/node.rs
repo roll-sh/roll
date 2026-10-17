@@ -39,6 +39,7 @@ fn routing() {
     assert_eq!(r(None, "alpha_secret", None), Some(("alpha".into(), None, "secret".into())));
     assert_eq!(r(Some("app@beta"), "pw", None), Some(("beta".into(), Some("app".into()), "pw".into())));
     assert_eq!(r(Some("default"), "pw", Some("gamma.redis.test")), Some(("gamma".into(), Some("default".into()), "pw".into())));
+    assert_eq!(r(None, "rdb_x4k9_secret", None), Some(("rdb_x4k9".into(), None, "secret".into())));
     assert_eq!(r(None, "nounderscore", None), None);
 }
 

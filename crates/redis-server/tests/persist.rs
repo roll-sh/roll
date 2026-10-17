@@ -3,7 +3,8 @@
 use bytes::Bytes;
 use redis_engine::{Client, Config, Reply};
 use redis_server::Database;
-use redis_server::persist::{self, Objects, Shipper, ShipperConfig, StorageConfig};
+use redis_server::persist::{self, Objects, Shipper, ShipperConfig, StorageConfig, Until};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn objects(name: &str) -> Objects {
@@ -137,4 +138,58 @@ async fn sync_writes_reply_after_durable() {
     // WAITAOF reports the object-storage log as local durability.
     assert_eq!(c.cmd(["WAITAOF", "1", "0", "1000"]).await.unwrap(), Reply::Array(vec![Reply::Int(1), Reply::Int(0)]));
     assert_eq!(shipper.objects_put.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn point_in_time_and_branches() {
+    use redis_server::node::{Node, NodeConfig, StaticCatalog};
+    let o = objects("pitr");
+    let shipper = Shipper::start("n1", o.clone(), cfg()).await.unwrap();
+    let node = Node::new(Arc::new(StaticCatalog::default()), Some(shipper.clone()), NodeConfig { idle_timeout: None, domain: None });
+    let db = Database::new("main", Config::default(), 1);
+    shipper.attach(&db, Default::default()).await.unwrap();
+    let mut c = Client::new(1);
+    let mut marks = Vec::new();
+    for v in 1..=3 {
+        run(&db, &mut c, &format!("SET a {v}"));
+        run(&db, &mut c, &format!("RPUSHX nolist {v}"));
+        run(&db, &mut c, &format!("SET v{v} x"));
+        shipper.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        marks.push(redis_engine::util::now_ms());
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Branch as of the first mark: only the first round of writes.
+    node.branch("main", "dev", Until::time(marks[0])).await.unwrap();
+    let dev = Database::new("dev", Config::default(), 1);
+    let m = persist::restore(&o, &dev, None).await.unwrap();
+    let mut c2 = Client::new(2);
+    assert_eq!(run(&dev, &mut c2, "GET a"), Reply::bulk(b"1"));
+    assert_eq!(dev.total_keys(), 2);
+
+    // The branch is independent: its writes don't touch the parent, and survive a restore.
+    shipper.attach(&dev, m).await.unwrap();
+    run(&dev, &mut c2, "SET a dev");
+    run(&dev, &mut c2, "SET only-dev 1");
+    shipper.detach(&dev).await.unwrap();
+    assert_eq!(run(&db, &mut c, "GET a"), Reply::bulk(b"3"));
+    let dev2 = Database::new("dev", Config::default(), 1);
+    persist::restore(&o, &dev2, None).await.unwrap();
+    assert_eq!(run(&dev2, &mut c2, "GET a"), Reply::bulk(b"dev"));
+    assert_eq!(dev2.total_keys(), 3);
+
+    // A branch of a branch.
+    node.branch("dev", "dev-feature", Until::LATEST).await.unwrap();
+    let f = Database::new("dev-feature", Config::default(), 1);
+    persist::restore(&o, &f, None).await.unwrap();
+    assert_eq!(run(&f, &mut c2, "GET only-dev"), Reply::bulk(b"1"));
+    assert_eq!(run(&f, &mut c2, "GET v1"), Reply::bulk(b"x"));
+    assert_eq!(run(&f, &mut c2, "GET v2"), Reply::Nil);
+
+    // Point-in-time view of the parent itself.
+    let past = Database::new("scratch", Config::default(), 1);
+    persist::restore_at(&o, "main", &past, Until::time(marks[1]), None).await.unwrap();
+    assert_eq!(run(&past, &mut c2, "GET a"), Reply::bulk(b"2"));
+    assert_eq!(node.branch("main", "dev", Until::LATEST).await.unwrap_err().to_string(), "database dev already exists");
 }
