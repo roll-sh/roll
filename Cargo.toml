@@ -38,6 +38,7 @@ parking_lot = "0.12"
 rand = "0.8"
 sha1 = "0.10"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+libm = "0.2"
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }

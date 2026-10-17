@@ -14,3 +14,4 @@ parking_lot.workspace = true
 redis-proto.workspace = true
 smallvec.workspace = true
 xxhash-rust.workspace = true
+libm.workspace = true

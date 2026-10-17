@@ -1,0 +1,109 @@
+# Blocking sorted set pops: BZPOPMIN, BZPOPMAX, BZMPOP
+# ---- immediate replies ----
+ZADD z 1 a 2 b 3 c
+BZPOPMIN z 0
+BZPOPMAX z 0
+BZPOPMIN nokey z 0
+ZADD z 4 d
+BZMPOP 0 1 z MIN
+ZADD z 1 a 2 b 3 c
+BZMPOP 0 2 nokey z MAX COUNT 2
+BZMPOP 0 1 z MIN COUNT 10
+EXISTS z
+# ---- argument errors ----
+BZPOPMIN z abc
+BZPOPMIN z -1
+BZPOPMIN z nan
+BZPOPMIN z inf
+BZPOPMIN z
+BZMPOP abc 1 z MIN
+BZMPOP -1 1 z MIN
+BZMPOP 0 0 z MIN
+BZMPOP 0 1 z FOO
+BZMPOP 0 2 z MIN
+BZMPOP 0 1 z MIN COUNT 0
+BZMPOP 0 1 z MIN COUNT abc
+BZMPOP 0 1 z MIN COUNT 1 COUNT 1
+BZMPOP abc 1 z FOO
+BZMPOP abc 0 z MIN
+SET str v
+BZPOPMIN str 0
+BZPOPMIN nokey str 0
+BZMPOP 0 1 str MIN
+# ---- timeouts ----
+BZPOPMIN nokey 0.05
+BZPOPMAX nokey nokey2 0.05
+BZMPOP 0.05 1 nokey MIN
+@resp 3
+BZPOPMIN nokey 0.05
+BZMPOP 0.05 1 nokey MIN
+ZADD r3 1 a 2 b
+BZPOPMIN r3 0
+BZMPOP 0 1 r3 MAX COUNT 3
+@resp 2
+# ---- wake-ups across connections ----
+@conn 2
+!send BZPOPMIN w1 w2 5
+@conn 1
+@sleep 100
+ZADD w2 5 x 6 y
+@conn 2
+@recv
+@conn 1
+ZRANGE w2 0 -1 WITHSCORES
+@conn 2
+!send BZPOPMAX w3 5
+@conn 1
+@sleep 100
+ZADD w3 1 a 2 b 3 c
+@conn 2
+@recv
+@conn 2
+!send BZMPOP 5 2 w4 w5 MIN COUNT 2
+@conn 1
+@sleep 100
+ZADD w5 1 a 2 b 3 c
+@conn 2
+@recv
+@conn 1
+ZRANGE w5 0 -1 WITHSCORES
+# Two waiters on one key: served in order.
+@conn 2
+!send BZPOPMIN w6 5
+@conn 3
+!send BZPOPMIN w6 5
+@conn 1
+@sleep 100
+ZADD w6 1 a 2 b
+@conn 2
+@recv
+@conn 3
+@recv
+@conn 1
+EXISTS w6
+# A waiter woken by a write of another type.
+@conn 2
+!send BZPOPMIN w7 1
+@conn 1
+@sleep 100
+SET w7 x
+DEL w7
+ZADD w7 9 z
+@conn 2
+@recv
+# RESP3 waiter
+@conn 4
+@resp 3
+!send BZMPOP 5 1 w8 MAX
+@conn 1
+@sleep 100
+ZADD w8 1 a 2 b
+@conn 4
+@recv
+@conn 1
+ZRANGE w8 0 -1
+# MULTI never blocks
+MULTI
+BZPOPMIN nokey 0
+BZMPOP 0 1 nokey MIN
+EXEC
