@@ -1,3 +1,5 @@
+mod tasks;
+
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
@@ -9,6 +11,12 @@ struct Cli {
     /// Control-plane API.
     #[arg(long, env = "ROLL_API_URL", default_value = "http://127.0.0.1:7070", global = true)]
     api: String,
+    /// roll tasks API (default: `<api>/v1/tasks`, served by rolld).
+    #[arg(long, env = "ROLL_TASKS_URL", global = true)]
+    tasks_url: Option<String>,
+    /// roll tasks token (admin token or API key).
+    #[arg(long, env = "ROLL_TASKS_TOKEN", global = true, hide_env_values = true)]
+    token: Option<String>,
     /// Print raw JSON.
     #[arg(long, global = true)]
     json: bool,
@@ -21,6 +29,9 @@ enum Cmd {
     /// Serverless Postgres.
     #[command(subcommand, alias = "pg")]
     Db(Db),
+    /// Messages, queues, schedules and workflows.
+    #[command(subcommand)]
+    Tasks(Box<tasks::Cmd>),
 }
 
 #[derive(Subcommand)]
@@ -125,16 +136,20 @@ enum Db {
 
 struct Api {
     base: String,
+    token: Option<String>,
     http: reqwest::Client,
 }
 
 impl Api {
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
         if let Some(b) = body {
             req = req.json(&b);
         }
-        let res = req.send().await.with_context(|| format!("can't reach rolld at {} (is it running?)", self.base))?;
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
         let text = res.text().await?;
         let value: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text)? };
@@ -142,6 +157,17 @@ impl Api {
             bail!("{}", value["error"].as_str().unwrap_or(&text));
         }
         Ok(value)
+    }
+    /// The cell's root (for `/_roll/…`), from a tasks URL that may name a tenant
+    /// (`…/t/<tenant>/v1/tasks`).
+    fn cell(&self) -> Api {
+        let mut base = self.base.trim_end_matches("/v1/tasks");
+        if let Some((root, tenant)) = base.rsplit_once("/t/")
+            && !tenant.contains('/')
+        {
+            base = root;
+        }
+        Api { base: base.to_string(), token: self.token.clone(), http: self.http.clone() }
     }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
@@ -233,8 +259,16 @@ async fn project(api: &Api, key: &str) -> anyhow::Result<Value> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new() };
-    let Cmd::Db(cmd) = cli.cmd;
+    let base = cli.api.trim_end_matches('/').to_string();
+    let cmd = match cli.cmd {
+        Cmd::Db(cmd) => cmd,
+        Cmd::Tasks(cmd) => {
+            let base = cli.tasks_url.map(|u| u.trim_end_matches('/').to_string()).unwrap_or(format!("{base}/v1/tasks"));
+            let api = Api { base, token: cli.token.filter(|t| !t.is_empty()), http: reqwest::Client::new() };
+            return tasks::run(&api, *cmd, cli.json).await;
+        }
+    };
+    let api = Api { base, token: None, http: reqwest::Client::new() };
     let out = match cmd {
         Db::List => {
             let v = api.get("/v1/projects").await?;

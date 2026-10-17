@@ -5,7 +5,8 @@
     "dev": "pnpm --filter dashboard dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "test:pg": "scripts/test-postgres.sh"
+    "test:pg": "scripts/test-postgres.sh",
+    "test:tasks": "scripts/test-tasks.sh"
   },
   "packageManager": "pnpm@12.10.1"
 }

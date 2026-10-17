@@ -12,6 +12,7 @@ import {
   Search,
   Settings,
   SquareFunction,
+  Workflow,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -23,6 +24,7 @@ import { useMarkState } from "./mark-state";
 const nav = [
   { label: "Overview", icon: LayoutGrid, href: "/dashboard" },
   { label: "Databases", icon: Database, href: "/dashboard/databases" },
+  { label: "Tasks", icon: Workflow, href: "/dashboard/tasks" },
   { label: "Functions", icon: SquareFunction },
   { label: "Deployments", icon: Rocket },
   { label: "Edge", icon: Globe },

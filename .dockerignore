@@ -1,0 +1,10 @@
+target
+node_modules
+**/node_modules
+.roll
+.git
+apps
+packages
+**/.next
+**/.test-build
+.env*
