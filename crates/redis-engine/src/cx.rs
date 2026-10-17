@@ -177,6 +177,12 @@ impl KeyMut<'_> {
             _ => unreachable!("type checked by lookup"),
         }
     }
+    pub fn sketch(&mut self) -> &mut crate::bloom::Sketch {
+        match &mut self.entry.value {
+            Value::Sketch(x) => x,
+            _ => unreachable!("type checked by lookup"),
+        }
+    }
 }
 
 impl Drop for KeyMut<'_> {
@@ -299,6 +305,20 @@ impl<'a> Cx<'a> {
         }
         let old = entry.value.mem();
         Some(KeyMut { entry, mem, sig, db: db as u16, key: Str::from_slice(key), old, changed: true })
+    }
+
+    /// Mutable access to a key a module opened for reading and then changes internally (a
+    /// t-digest compressing its buffer): no access time, no signal, no propagation.
+    pub fn get_mut_quiet(&mut self, key: &[u8]) -> Option<KeyMut<'_>> {
+        if self.expire_check(key) {
+            return None;
+        }
+        let db = self.client.db;
+        let Engine { dbs, sig, .. } = &mut *self.eng;
+        let Db { keys, mem, .. } = &mut dbs[db];
+        let entry = keys.get_mut(key)?;
+        let old = entry.value.mem();
+        Some(KeyMut { entry, mem, sig, db: db as u16, key: Str::from_slice(key), old, changed: false })
     }
 
     /// Mutable access to an existing key of `kind` (`Ok(None)` if missing).

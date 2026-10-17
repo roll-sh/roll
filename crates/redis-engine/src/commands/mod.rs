@@ -7,6 +7,7 @@
 pub mod acl;
 pub mod arrays;
 pub mod bitmaps;
+pub mod bloom;
 pub mod debug;
 pub mod geo;
 pub mod hashes;
@@ -28,6 +29,7 @@ pub mod pubsub;
 pub mod scripting;
 pub mod server;
 pub mod sets;
+pub mod sketch;
 pub mod sort;
 pub mod streams;
 pub mod strings;
@@ -117,6 +119,8 @@ pub const SCRIPT_RUNNER: u64 = 1 << 24;
 pub const ASKING: u64 = 1 << 25;
 /// Implemented by a module in Redis (JSON, Bloom, Search…).
 pub const MODULE: u64 = 1 << 26;
+/// Not a command flag: a module command its module puts in the @fast ACL category.
+pub const ACL_FAST: u64 = 1 << 27;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
@@ -369,6 +373,8 @@ pub fn table() -> &'static Table {
             migrate::COMMANDS,
             hotkeys::COMMANDS,
             json::COMMANDS,
+            bloom::COMMANDS,
+            sketch::COMMANDS,
         ] {
             for c in family {
                 assert!(by_name.insert(c.name, c).is_none(), "duplicate command {}", c.name);

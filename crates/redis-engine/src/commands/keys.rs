@@ -435,6 +435,10 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         cx.eng.dbs[to].remove(dst);
         cx.eng.sig.touch(to as u16, dst);
     }
+    // Module types without a copy callback.
+    if matches!(entry.value, crate::value::Value::Sketch(_)) {
+        return Err(Error::new("ERR not supported for this module key"));
+    }
     let mut entry = entry;
     entry.lru = cx.eng.new_lru(now);
     entry.rekey(src.len(), dst.len(), true);
@@ -461,10 +465,13 @@ pub fn touch(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 /// `DUMP key`: the value in RDB format (see [`crate::rdb::dump`]).
 pub fn dump(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let now = cx.now;
-    Ok(match cx.get(&args[1]) {
-        Some(v) => Reply::Bulk(Bytes::from(crate::rdb::dump(v, now))),
-        None => Reply::Nil,
-    })
+    if cx.get(&args[1]).is_none() {
+        return Ok(Reply::Nil);
+    }
+    let db = cx.db_index();
+    let e = cx.eng.dbs[db].keys.get_mut(&args[1]).expect("found");
+    e.value.prepare_save();
+    Ok(Reply::Bulk(Bytes::from(crate::rdb::dump(&e.value, now))))
 }
 
 /// `RESTORE key ttl payload [REPLACE] [ABSTTL] [IDLETIME s] [FREQ f]` (`restoreCommand`).

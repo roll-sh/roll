@@ -5,6 +5,7 @@
 //! synchronous; networking, tenancy, persistence and replication live in `redis-server`.
 
 pub mod acl;
+pub mod bloom;
 pub mod client;
 pub mod clients;
 pub mod commands;

@@ -332,6 +332,8 @@ impl Engine {
     pub fn new(cfg: Config, hub: Arc<Hub>) -> Self {
         let dbs = (0..cfg.databases).map(|_| Db::default()).collect();
         let now = now_ms();
+        // `srand(time(NULL) ^ getpid())` at startup: top-k decay draws from it.
+        crate::bloom::topk::crand::srand(((now / 1000) as u32) ^ std::process::id());
         let mut e = Self {
             dbs,
             cfg,

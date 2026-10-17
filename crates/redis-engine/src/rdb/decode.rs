@@ -7,6 +7,7 @@
 use super::listpack::{Item, Listpack};
 use super::ziplist::{Ziplist, Zipmap, intset};
 use super::{RdbError, crc64, lzf, ty};
+use crate::bloom::{ModuleIn, Sketch, SketchKind};
 use crate::config::Config;
 use crate::types::stream::{Group, Stream, StreamId};
 use crate::types::array::{self, Array};
@@ -119,6 +120,39 @@ impl<T: Read> Src for IoSrc<T> {
 
     fn crc(&self) -> u64 {
         self.crc
+    }
+}
+
+/// [`ModuleIn`] over a decoder: a failed read ends the load, keeping the first error.
+struct ModuleReader<'d, 'c, S: Src> {
+    dec: &'d mut Dec<'c, S>,
+    err: Option<RdbError>,
+}
+
+impl<S: Src> ModuleReader<'_, '_, S> {
+    fn read<T>(&mut self, f: impl FnOnce(&mut Dec<'_, S>) -> R<T>) -> Option<T> {
+        if self.err.is_some() {
+            return None;
+        }
+        f(self.dec).map_err(|e| self.err = Some(e)).ok()
+    }
+}
+
+impl<S: Src> ModuleIn for ModuleReader<'_, '_, S> {
+    fn uint(&mut self) -> Option<u64> {
+        self.read(|d| d.module_uint())
+    }
+
+    fn double(&mut self) -> Option<f64> {
+        self.read(|d| d.module_double())
+    }
+
+    fn buffer(&mut self) -> Option<Vec<u8>> {
+        self.read(|d| {
+            let mut out = Vec::new();
+            d.module_string(&mut out)?;
+            Ok(out)
+        })
     }
 }
 
@@ -376,7 +410,7 @@ impl<'c, S: Src> Dec<'c, S> {
             | ty::STREAM_LISTPACKS_3
             | ty::STREAM_LISTPACKS_4
             | ty::STREAM_LISTPACKS_5 => Value::Stream(Box::new(self.stream(t)?)),
-            ty::MODULE_2 => Value::Json(Box::new(self.module()?)),
+            ty::MODULE_2 => self.module()?,
             ty::MODULE_PRE_GA => return Err(RdbError::Unsupported("module values")),
             ty::ARRAY => Value::Array(Box::new(self.array()?)),
             ty::HASH_TMPL_LP..=ty::HASH_TMPL_ARRAY_REF => Value::Hash(Box::new(self.template_hash(t)?)),
@@ -385,14 +419,31 @@ impl<'c, S: Src> Dec<'c, S> {
         })
     }
 
-    /// A `MODULE_2` value: the module type id, what its `rdb_load` reads, the EOF opcode. Only
-    /// RedisJSON documents are known (`ReJSON-RL`, encoding versions 2 to 4).
-    fn module(&mut self) -> R<crate::json::Json> {
-        use crate::json;
+    /// A `MODULE_2` value: the module type id, what its `rdb_load` reads, the EOF opcode. Known
+    /// types: RedisJSON documents and RedisBloom's.
+    fn module(&mut self) -> R<Value> {
         let id = self.len()?;
-        if id >> 10 != json::TYPE_ID >> 10 {
+        let value = if id >> 10 == crate::json::TYPE_ID >> 10 {
+            Value::Json(Box::new(self.json_module(id)?))
+        } else if let Some(kind) = SketchKind::of_id(id) {
+            let mut r = ModuleReader { dec: self, err: None };
+            let v = Sketch::load(kind, id & 1023, &mut r);
+            if let Some(e) = r.err {
+                return Err(e);
+            }
+            Value::Sketch(Box::new(v.ok_or(bad("module value its module can't load"))?))
+        } else {
             return Err(RdbError::Unsupported("module values"));
+        };
+        if self.len()? != super::MODULE_OPCODE_EOF {
+            return Err(bad("module value not terminated by EOF"));
         }
+        Ok(value)
+    }
+
+    /// A RedisJSON document (`ReJSON-RL`, encoding versions 2 to 4).
+    fn json_module(&mut self, id: u64) -> R<crate::json::Json> {
+        use crate::json;
         let mut buf = Vec::new();
         let root = match id & 1023 {
             4 => {
@@ -411,11 +462,15 @@ impl<'c, S: Src> Dec<'c, S> {
             }
             _ => None,
         };
-        let root = root.ok_or(bad("module value its module can't load"))?;
-        if self.len()? != super::MODULE_OPCODE_EOF {
-            return Err(bad("module value not terminated by EOF"));
+        Ok(json::Json::new(root.ok_or(bad("module value its module can't load"))?))
+    }
+
+    /// `RM_LoadDouble` of a `MODULE_2` value.
+    fn module_double(&mut self) -> R<f64> {
+        if self.len()? != super::MODULE_OPCODE_DOUBLE {
+            return Err(bad("module double expected"));
         }
-        Ok(json::Json::new(root))
+        self.f64()
     }
 
     /// `RM_LoadStringBuffer` of a `MODULE_2` value: the opcode, then a string.

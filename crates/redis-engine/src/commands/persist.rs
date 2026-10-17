@@ -486,6 +486,9 @@ pub fn save(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     if cx.eng.persist.in_progress(ChildKind::Rdb) {
         return Err(Error::new("ERR Background save already in progress"));
     }
+    for d in cx.eng.dbs.iter_mut() {
+        d.keys.for_each_mut(|_, e| e.value.prepare_save());
+    }
     cx.eng.stats.rdb_saves += 1;
     cx.eng.reset_dirty();
     cx.eng.lastsave = cx.now / 1000;

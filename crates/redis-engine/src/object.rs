@@ -289,6 +289,7 @@ pub fn usage(e: &Entry, key_len: usize) -> usize {
         Value::Str(s) => string_usage(e, key_len, s),
         // kvobjComputeSize takes zmalloc_size of a module value's object.
         Value::Json(j) => jemalloc_size(header(e, key_len)) + j.usage(),
+        Value::Sketch(x) => jemalloc_size(header(e, key_len)) + x.mem_usage() as usize,
         v => header(e, key_len) + v.alloc_size(),
     }
 }

@@ -234,12 +234,16 @@ fn fallback_categories(c: &Command) -> u32 {
 /// A module command has exactly the categories its module declares (no implicit @slow):
 /// read or write, and the module's own.
 fn module_categories(c: &Command) -> u32 {
-    let mut m = if c.name.starts_with("json.") { cat("json") } else { 0 };
+    let module = [("json.", "json"), ("bf.", "bloom"), ("cf.", "cuckoo"), ("cms.", "cms"), ("topk.", "topk"), ("tdigest.", "tdigest")];
+    let mut m = module.iter().find(|(p, _)| c.name.starts_with(p)).map_or(0, |(_, n)| cat(n));
     if c.has(commands::WRITE) {
         m |= C_WRITE;
     }
     if c.has(commands::READONLY) {
         m |= C_READ;
+    }
+    if c.has(commands::ACL_FAST) {
+        m |= C_FAST;
     }
     m
 }

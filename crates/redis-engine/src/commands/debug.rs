@@ -450,7 +450,9 @@ fn kvstore_stats(len: usize, stats: Vec<DictStats>, full: bool) -> String {
 /// DEBUG OBJECT key
 fn object(cx: &mut Cx, key: &[u8]) -> CmdResult {
     let now = cx.now;
-    let Some(e) = cx.eng.dbs[cx.client.db].keys.get(key) else { return Err(NO_KEY) };
+    let Some(e) = cx.eng.dbs[cx.client.db].keys.get_mut(key) else { return Err(NO_KEY) };
+    e.value.prepare_save();
+    let e = &*e;
     let mut extra = String::new();
     if let Value::List(l) = &e.value
         && let Some((fill, sizes)) = l.quicklist_info()
@@ -727,7 +729,7 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
         Value::Hash(_) => 4,
         Value::Stream(_) => 6,
         Value::Array(_) => 7,
-        Value::Json(_) => 5,
+        Value::Json(_) | Value::Sketch(_) => 5,
     };
     mix_digest(d, &ty.to_be_bytes());
     match &e.value {
@@ -775,8 +777,8 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
                 mix_digest(d, b"(null)");
             }
         }
-        // RedisJSON has no digest callback: only the type counts.
-        Value::Json(_) => {}
+        // RedisJSON and RedisBloom have no digest callback: only the type counts.
+        Value::Json(_) | Value::Sketch(_) => {}
     }
     if e.expire != 0 {
         xor_digest(d, b"!!expire!!");

@@ -179,7 +179,9 @@ fn migrate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let now = cx.now;
     let mut items: Vec<(Bytes, i64, Vec<u8>)> = Vec::new();
     for k in &args[first..first + count] {
-        if let Some(e) = cx.get_entry(k) {
+        if cx.get_entry(k).is_some() {
+            let e = cx.eng.dbs[cx.client.db].keys.get_mut(k).expect("found");
+            e.value.prepare_save();
             let ttl = if e.expire == 0 { 0 } else { (e.expire - now).max(1) };
             items.push((k.clone(), ttl, crate::rdb::dump(&e.value, now)));
         }

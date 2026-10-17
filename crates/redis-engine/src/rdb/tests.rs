@@ -167,6 +167,7 @@ fn contents(v: &Value) -> String {
         Value::Stream(_) => return format!("{:?}", dump(v, CAPTURED_AT)),
         Value::Array(a) => return format!("{} {:?}", a.insert_idx(), a.iter().collect::<Vec<_>>()),
         Value::Json(j) => return crate::json::ser::compact(j.root()),
+        Value::Sketch(x) => return format!("{x:?}"),
     };
     parts.sort();
     format!("{} {}", v.encoding(), parts.join(","))

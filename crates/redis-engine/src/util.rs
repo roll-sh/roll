@@ -340,3 +340,45 @@ mod tests {
         assert!(!t("*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     }
 }
+
+/// C's `%g` (six significant digits, trailing zeros dropped, exponent form outside 1e-4..1e6).
+pub fn fmt_g(v: f64) -> String {
+    if v.is_nan() {
+        return if v.is_sign_negative() { "-nan" } else { "nan" }.into();
+    }
+    if v.is_infinite() {
+        return if v < 0.0 { "-inf" } else { "inf" }.into();
+    }
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0" } else { "0" }.into();
+    }
+    fn trim(s: &str) -> &str {
+        if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { s }
+    }
+    let e = format!("{v:.5e}");
+    let (mant, exp) = e.split_once('e').expect("exponent form");
+    let x: i32 = exp.parse().expect("exponent");
+    if (-4..6).contains(&x) {
+        trim(&format!("{:.*}", (5 - x) as usize, v)).to_string()
+    } else {
+        format!("{}e{}{:02}", trim(mant), if x < 0 { '-' } else { '+' }, x.abs())
+    }
+}
+
+#[cfg(test)]
+mod fmt_g_tests {
+    use super::fmt_g;
+
+    #[test]
+    fn like_printf() {
+        assert_eq!(fmt_g(0.005), "0.005");
+        assert_eq!(fmt_g(0.0003125), "0.0003125");
+        assert_eq!(fmt_g(7.8125e-05), "7.8125e-05");
+        assert_eq!(fmt_g(100000.0), "100000");
+        assert_eq!(fmt_g(1000000.0), "1e+06");
+        assert_eq!(fmt_g(123456789.0), "1.23457e+08");
+        assert_eq!(fmt_g(0.1), "0.1");
+        assert_eq!(fmt_g(1.5), "1.5");
+        assert_eq!(fmt_g(1e-300), "1e-300");
+    }
+}

@@ -1,6 +1,7 @@
 //! Value → RDB, byte-identical to Redis 8 (`rdbSaveObject` and friends).
 
 use super::listpack::LpWriter;
+use crate::bloom::{ModuleOut, Sketch};
 use super::{RDB_VERSION, crc64, lzf, op, ty};
 use crate::types::stream::{Stream, StreamId};
 use crate::types::array::{self, Array, Decoded};
@@ -90,7 +91,7 @@ pub(crate) fn type_of(v: &Value, dump: bool) -> u8 {
         Value::Hash(_) => ty::HASH,
         Value::Stream(_) => ty::STREAM_LISTPACKS_5,
         Value::Array(_) => ty::ARRAY,
-        Value::Json(_) => ty::MODULE_2,
+        Value::Json(_) | Value::Sketch(_) => ty::MODULE_2,
     }
 }
 
@@ -102,6 +103,23 @@ pub(crate) struct Encoder {
     now: i64,
     /// Writing a `DUMP` payload (self-contained) rather than a file.
     pub dump: bool,
+}
+
+impl ModuleOut for Encoder {
+    fn uint(&mut self, v: u64) {
+        self.len(super::MODULE_OPCODE_UINT);
+        self.len(v);
+    }
+
+    fn double(&mut self, v: f64) {
+        self.len(super::MODULE_OPCODE_DOUBLE);
+        self.out.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn buffer(&mut self, b: &[u8]) {
+        self.len(super::MODULE_OPCODE_STRING);
+        self.string(b);
+    }
 }
 
 impl Encoder {
@@ -152,7 +170,23 @@ impl Encoder {
             Value::Stream(s) => self.stream(s),
             Value::Array(a) => self.array(a),
             Value::Json(j) => self.json(j),
+            Value::Sketch(x) => self.sketch(x),
         }
+    }
+
+    /// A RedisBloom value: the type's id, what the module saves, the EOF opcode. A t-digest is
+    /// saved compressed (its `rdb_save` compresses first).
+    fn sketch(&mut self, x: &Sketch) {
+        self.len(x.kind().type_id());
+        match x {
+            Sketch::TDigest(t) if t.unmerged_nodes > 0 => {
+                let mut t = t.clone();
+                let _ = t.compress();
+                Sketch::TDigest(t).save(self);
+            }
+            _ => x.save(self),
+        }
+        self.len(super::MODULE_OPCODE_EOF);
     }
 
     /// A module value: the type's id, what the module saves (`RM_SaveStringBuffer` of the

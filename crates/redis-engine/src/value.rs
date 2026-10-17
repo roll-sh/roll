@@ -1,5 +1,6 @@
 //! Values stored in the keyspace.
 
+use crate::bloom::{Sketch, SketchKind};
 use crate::json::Json;
 use crate::types::{Array, Hash, List, Set, Stream, ZSet};
 use smallvec::SmallVec;
@@ -23,6 +24,8 @@ pub enum Kind {
     Array,
     /// RedisJSON documents (a module type).
     Json,
+    /// RedisBloom's module types.
+    Sketch(SketchKind),
 }
 
 impl Kind {
@@ -36,11 +39,16 @@ impl Kind {
             Kind::Stream => "stream",
             Kind::Array => "array",
             Kind::Json => "ReJSON-RL",
+            Kind::Sketch(k) => k.name(),
         }
     }
 
     pub fn parse(s: &[u8]) -> Option<Kind> {
-        Some(match s.to_ascii_lowercase().as_slice() {
+        let lower = s.to_ascii_lowercase();
+        if let Some(k) = SketchKind::parse(&lower) {
+            return Some(Kind::Sketch(k));
+        }
+        Some(match lower.as_slice() {
             b"string" => Kind::String,
             b"list" => Kind::List,
             b"hash" => Kind::Hash,
@@ -64,9 +72,20 @@ pub enum Value {
     Stream(Box<Stream>),
     Array(Box<Array>),
     Json(Box<Json>),
+    Sketch(Box<Sketch>),
 }
 
 impl Value {
+    /// What a module's `rdb_save` does to the value it serializes: a t-digest compresses its
+    /// buffered samples (DUMP, DEBUG OBJECT, MIGRATE, SAVE; not forked saves).
+    pub fn prepare_save(&mut self) {
+        if let Value::Sketch(x) = self
+            && let crate::bloom::Sketch::TDigest(t) = &mut **x
+        {
+            let _ = t.compress();
+        }
+    }
+
     pub fn str(b: &[u8]) -> Self {
         Value::Str(Str::from_slice(b))
     }
@@ -82,6 +101,7 @@ impl Value {
             Value::Stream(_) => Kind::Stream,
             Value::Array(_) => Kind::Array,
             Value::Json(_) => Kind::Json,
+            Value::Sketch(s) => Kind::Sketch(s.kind()),
         }
     }
 
@@ -95,6 +115,7 @@ impl Value {
             Kind::Stream => Value::Stream(Box::default()),
             Kind::Array => Value::Array(Box::default()),
             Kind::Json => Value::Json(Box::default()),
+            Kind::Sketch(_) => unreachable!("module values are created by their commands"),
         }
     }
 
@@ -115,6 +136,7 @@ impl Value {
             Value::Stream(x) => std::mem::size_of::<Stream>() + x.mem(),
             Value::Array(x) => std::mem::size_of::<Array>() + x.mem(),
             Value::Json(j) => std::mem::size_of::<Json>() + j.mem(),
+            Value::Sketch(s) => std::mem::size_of::<Sketch>() + s.mem(),
         }
     }
 
@@ -130,6 +152,7 @@ impl Value {
             Value::Stream(x) => x.alloc_size(),
             Value::Array(x) => x.mem(),
             Value::Json(j) => j.usage(),
+            Value::Sketch(s) => s.mem_usage() as usize,
         }
     }
 
@@ -137,7 +160,7 @@ impl Value {
     #[inline]
     pub fn is_empty_aggregate(&self) -> bool {
         match self {
-            Value::Str(_) | Value::Stream(_) | Value::Json(_) => false,
+            Value::Str(_) | Value::Stream(_) | Value::Json(_) | Value::Sketch(_) => false,
             Value::List(l) => l.is_empty(),
             Value::Hash(h) => h.is_empty(),
             Value::Set(x) => x.is_empty(),
@@ -164,7 +187,7 @@ impl Value {
             Value::ZSet(z) => z.encoding(),
             Value::Stream(_) => "stream",
             Value::Array(_) => "sliced-array",
-            Value::Json(_) => "raw",
+            Value::Json(_) | Value::Sketch(_) => "raw",
         }
     }
 }
@@ -218,7 +241,7 @@ impl Value {
             Value::Set(s) => (2, s.len()),
             Value::ZSet(z) => (3, z.len()),
             Value::Hash(h) => (4, h.len()),
-            Value::Stream(_) | Value::Array(_) | Value::Json(_) => return NO_SIZE,
+            Value::Stream(_) | Value::Array(_) | Value::Json(_) | Value::Sketch(_) => return NO_SIZE,
         };
         let bin = (usize::BITS - n.leading_zeros()) as usize;
         (t * SIZE_BINS + bin.min(SIZE_BINS - 1)) as u16

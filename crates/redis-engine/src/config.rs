@@ -957,7 +957,143 @@ pub static PARAMS: &[Param] = &[
     .apply(|c| if get_bind(c) != BIND { Err("Failed to bind to specified addresses.".into()) } else { Ok(()) }),
     special("replicaof", Some("slaveof"), IMMUTABLE | MULTI_ARG, |_| String::new(), |_, _| Ok(true)),
     special("latency-tracking-info-percentiles", None, MODIFIABLE | MULTI_ARG, get_percentiles, set_percentiles),
+    // RedisBloom's module configs (unprefixed string configs)
+    special("bf-error-rate", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::ErrorRate), |c, a| bloom_set(c, BloomOpt::ErrorRate, a)),
+    special("bf-initial-size", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::BfInitialSize), |c, a| bloom_set(c, BloomOpt::BfInitialSize, a)),
+    special("bf-expansion-factor", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::BfExpansion), |c, a| bloom_set(c, BloomOpt::BfExpansion, a)),
+    special("cf-bucket-size", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::CfBucketSize), |c, a| bloom_set(c, BloomOpt::CfBucketSize, a)),
+    special("cf-initial-size", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::CfInitialSize), |c, a| bloom_set(c, BloomOpt::CfInitialSize, a)),
+    special("cf-max-iterations", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::CfMaxIterations), |c, a| bloom_set(c, BloomOpt::CfMaxIterations, a)),
+    special("cf-expansion-factor", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::CfExpansion), |c, a| bloom_set(c, BloomOpt::CfExpansion, a)),
+    special("cf-max-expansions", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::CfMaxExpansions), |c, a| bloom_set(c, BloomOpt::CfMaxExpansions, a)),
 ];
+
+/// A RedisBloom setting. The module keeps the text it was set with (CONFIG GET answers it) and
+/// the parsed value; two of the ranges move with the other cuckoo setting.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BloomOpt {
+    ErrorRate,
+    BfInitialSize,
+    BfExpansion,
+    CfBucketSize,
+    CfInitialSize,
+    CfMaxIterations,
+    CfExpansion,
+    CfMaxExpansions,
+}
+
+impl BloomOpt {
+    pub fn name(self) -> &'static str {
+        match self {
+            BloomOpt::ErrorRate => "bf-error-rate",
+            BloomOpt::BfInitialSize => "bf-initial-size",
+            BloomOpt::BfExpansion => "bf-expansion-factor",
+            BloomOpt::CfBucketSize => "cf-bucket-size",
+            BloomOpt::CfInitialSize => "cf-initial-size",
+            BloomOpt::CfMaxIterations => "cf-max-iterations",
+            BloomOpt::CfExpansion => "cf-expansion-factor",
+            BloomOpt::CfMaxExpansions => "cf-max-expansions",
+        }
+    }
+
+    /// The default value's text (`RedisModule_CreateStringFromLongLong` / `…FromDouble`).
+    fn default_text(self) -> &'static str {
+        match self {
+            BloomOpt::ErrorRate => "0.01",
+            BloomOpt::BfInitialSize => "100",
+            BloomOpt::BfExpansion => "2",
+            BloomOpt::CfBucketSize => "2",
+            BloomOpt::CfInitialSize => "1024",
+            BloomOpt::CfMaxIterations => "20",
+            BloomOpt::CfExpansion => "1",
+            BloomOpt::CfMaxExpansions => "32",
+        }
+    }
+
+    /// Where a moved bound is kept.
+    fn bound_key(self) -> Option<&'static str> {
+        match self {
+            BloomOpt::CfInitialSize => Some("cf-initial-size min"),
+            BloomOpt::CfBucketSize => Some("cf-bucket-size max"),
+            _ => None,
+        }
+    }
+}
+
+/// An integer RedisBloom setting with its current range (`RM_ConfigInteger`).
+#[derive(Clone, Copy, Debug)]
+pub struct BloomInt {
+    pub value: i64,
+    pub min: i64,
+    pub max: i64,
+}
+
+impl BloomInt {
+    pub fn valid(&self, v: i64) -> bool {
+        v >= self.min && v <= self.max
+    }
+}
+
+pub fn bloom_text(c: &Config, o: BloomOpt) -> String {
+    extra_str(c, o.name(), o.default_text())
+}
+
+/// `rm_config.bf_error_rate.value` (its range is (0, 1)).
+pub fn bloom_error_rate(c: &Config) -> f64 {
+    crate::commands::zsets::zfloat(bloom_text(c, BloomOpt::ErrorRate).as_bytes()).unwrap_or(0.01)
+}
+
+pub fn bloom_int(c: &Config, o: BloomOpt) -> BloomInt {
+    let value = crate::util::parse_i64(bloom_text(c, o).as_bytes()).unwrap_or(0);
+    let (min, max) = match o {
+        BloomOpt::ErrorRate => (0, 1),
+        BloomOpt::BfInitialSize => (1, 1 << 30),
+        BloomOpt::BfExpansion => (0, 32768),
+        BloomOpt::CfBucketSize => (1, 255),
+        BloomOpt::CfInitialSize => (4, 1 << 30),
+        BloomOpt::CfMaxIterations => (1, 65535),
+        BloomOpt::CfExpansion => (0, 32768),
+        BloomOpt::CfMaxExpansions => (1, 65536),
+    };
+    let moved = o.bound_key().and_then(|k| c.extra.get(k)).map(|v| v.num() as i64);
+    match o {
+        BloomOpt::CfInitialSize => BloomInt { value, min: moved.unwrap_or(min), max },
+        BloomOpt::CfBucketSize => BloomInt { value, min, max: moved.unwrap_or(max) },
+        _ => BloomInt { value, min, max },
+    }
+}
+
+/// The module's `setFloatValue` / `setIntegerValue`.
+fn bloom_set(c: &mut Config, o: BloomOpt, argv: &[&str]) -> Result<bool, String> {
+    let name = o.name();
+    let text = argv.first().copied().unwrap_or("");
+    if o == BloomOpt::ErrorRate {
+        let v = crate::commands::zsets::zfloat(text.as_bytes()).ok_or_else(|| format!("Invalid value for `{name}`"))?;
+        if !(v > 0.0 && v < 1.0) {
+            return Err(format!("Value for `{name}` must be in the range ({:.6}, {:.6})", 0.0, 1.0));
+        }
+        // Rates above the cap are kept as the cap, spelled `%.17g`.
+        let text = if v > 0.25 { "0.25" } else { text };
+        c.extra.insert(name, Val::Str(Some(text.to_string())));
+        return Ok(true);
+    }
+    let v = crate::util::parse_i64(text.as_bytes()).ok_or_else(|| format!("Invalid value for `{name}`"))?;
+    let r = bloom_int(c, o);
+    if !r.valid(v) {
+        return Err(format!("Value for `{name}` must be in the range [{}, {}]", r.min, r.max));
+    }
+    c.extra.insert(name, Val::Str(Some(text.to_string())));
+    match o {
+        BloomOpt::CfBucketSize => {
+            c.extra.insert("cf-initial-size min", Val::Num(v as i128 * 2));
+        }
+        BloomOpt::CfInitialSize => {
+            c.extra.insert("cf-bucket-size max", Val::Num((v / 2).min(255) as i128));
+        }
+        _ => {}
+    }
+    Ok(true)
+}
 
 /// The working directory files are named relative to (`dir`).
 pub const DIR: &str = "/data";

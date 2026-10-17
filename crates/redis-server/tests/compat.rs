@@ -254,7 +254,8 @@ fn name_ids(r: &Reply, ids: &HashMap<u32, i64>) -> Reply {
 
 fn same(cmp: Cmp, a: &Reply, b: &Reply) -> bool {
     match cmp {
-        Cmp::Exact => a == b,
+        // NaN doubles (RESP3) are the same reply.
+        Cmp::Exact => a == b || format!("{a:?}") == format!("{b:?}"),
         Cmp::Sort => sort_reply(a) == sort_reply(b),
         Cmp::Type => shape(a) == shape(b),
         Cmp::Err => err_code(a).is_some() && err_code(a) == err_code(b),

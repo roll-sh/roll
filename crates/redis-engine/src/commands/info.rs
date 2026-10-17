@@ -792,6 +792,8 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
         let mut errs: Vec<_> = eng.errorstats.iter().collect();
         errs.sort();
         for (k, v) in errs {
+            // `getSafeInfoString`.
+            let k: String = k.chars().map(|c| if matches!(c, '#' | ':' | '\n' | '\r') { '_' } else { c }).collect();
             let _ = write!(s, "errorstat_{k}:count={v}\r\n");
         }
     }
