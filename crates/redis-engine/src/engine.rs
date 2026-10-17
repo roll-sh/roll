@@ -139,6 +139,11 @@ pub(crate) struct Waiter {
     pub timeout_reply: Reply,
     /// Absolute Unix ms; 0 = forever.
     pub deadline: i64,
+    /// Also re-run when the key is deleted (XREADGROUP: the group is gone).
+    pub unblock_on_nokey: bool,
+    /// Re-run at this absolute Unix ms even if no key changed (XREADGROUP CLAIM: a pending
+    /// entry becomes claimable); 0 = never.
+    pub wake_at: i64,
 }
 
 #[derive(Default)]
@@ -154,6 +159,10 @@ pub(crate) struct BlockReq {
     pub keys: Vec<Str>,
     pub timeout_reply: Reply,
     pub deadline: i64,
+    /// Arguments to re-run with instead of the original ones (XREAD rewrites `$`).
+    pub args: Option<Vec<Bytes>>,
+    pub unblock_on_nokey: bool,
+    pub wake_at: i64,
 }
 
 pub struct Engine {
@@ -421,7 +430,15 @@ impl Engine {
                     self.register_waiter(client, args, b);
                     return Outcome::Blocked;
                 }
-                Mode::Unblock => return Outcome::Blocked,
+                Mode::Unblock => {
+                    if let Some(w) = self.blocking.waiters.get_mut(&client.id) {
+                        if let Some(a) = b.args {
+                            w.args = a;
+                        }
+                        w.wake_at = b.wake_at;
+                    }
+                    return Outcome::Blocked;
+                }
                 _ => return Outcome::Reply(b.timeout_reply),
             }
         }
@@ -657,7 +674,17 @@ impl Engine {
         self.stats.total_blocking_keys = self.blocking.by_key.len() as u64;
         let mut c = client.clone();
         c.multi = None;
-        self.blocking.waiters.insert(client.id, Waiter { client: c, args: args.to_vec(), keys, timeout_reply: b.timeout_reply, deadline: b.deadline });
+        let args = b.args.unwrap_or_else(|| args.to_vec());
+        let w = Waiter {
+            client: c,
+            args,
+            keys,
+            timeout_reply: b.timeout_reply,
+            deadline: b.deadline,
+            unblock_on_nokey: b.unblock_on_nokey,
+            wake_at: b.wake_at,
+        };
+        self.blocking.waiters.insert(client.id, w);
     }
 
     fn unregister_waiter(&mut self, id: u64) -> Option<Waiter> {
@@ -678,18 +705,40 @@ impl Engine {
         self.blocking.waiters.len()
     }
 
-    /// When a blocked client times out (absolute Unix ms, 0 = never).
+    /// When a blocked client times out or must be re-run (absolute Unix ms, 0 = never).
     pub fn block_deadline(&self, client_id: u64) -> Option<i64> {
-        self.blocking.waiters.get(&client_id).map(|w| w.deadline)
+        self.blocking.waiters.get(&client_id).map(|w| match (w.deadline, w.wake_at) {
+            (d, 0) => d,
+            (0, wk) => wk,
+            (d, wk) => d.min(wk),
+        })
     }
 
     pub fn is_blocked(&self, client_id: u64) -> bool {
         self.blocking.waiters.contains_key(&client_id)
     }
 
-    /// The client's block timed out: returns the reply to send, if it was still blocked.
+    /// The client's block timed out: returns the reply to send, if it was still blocked. A
+    /// client with a wake-up time before its deadline is re-run instead (and may stay blocked:
+    /// `None`, with [`Engine::block_deadline`] giving the next time).
     pub fn block_timeout(&mut self, client_id: u64) -> Option<Reply> {
-        self.unregister_waiter(client_id).map(|w| w.timeout_reply)
+        let w = self.blocking.waiters.get(&client_id)?;
+        let now = now_ms();
+        if w.wake_at != 0 && (w.deadline == 0 || now < w.deadline) {
+            let mut client = w.client.clone();
+            let args = w.args.clone();
+            match self.dispatch(&mut client, &args, now, Mode::Unblock) {
+                Outcome::Blocked => return None,
+                Outcome::Reply(r) => {
+                    self.unregister_waiter(client_id);
+                    self.serve_blocked(now);
+                    return Some(r);
+                }
+            }
+        }
+        let r = self.unregister_waiter(client_id).map(|w| w.timeout_reply);
+        self.serve_blocked(now);
+        r
     }
 
     /// `CLIENT UNBLOCK id [TIMEOUT|ERROR]`.
@@ -709,10 +758,10 @@ impl Engine {
                 let Some(q) = self.blocking.by_key.get(&k) else { continue };
                 let ids: Vec<u64> = q.iter().copied().collect();
                 for id in ids {
-                    if !self.dbs[k.0 as usize].keys.contains_key(&k.1) {
-                        break;
-                    }
                     let Some(w) = self.blocking.waiters.get(&id) else { continue };
+                    if !w.unblock_on_nokey && !self.dbs[k.0 as usize].keys.contains_key(&k.1) {
+                        continue;
+                    }
                     let mut client = w.client.clone();
                     let args = w.args.clone();
                     match self.dispatch(&mut client, &args, now, Mode::Unblock) {

@@ -376,8 +376,39 @@ impl<'a> Cx<'a> {
             return timeout_reply;
         }
         let deadline = if timeout_ms > 0 { self.now.saturating_add(timeout_ms) } else { 0 };
-        self.block = Some(BlockReq { keys, timeout_reply, deadline });
+        self.block = Some(BlockReq { keys, timeout_reply, deadline, args: None, unblock_on_nokey: false, wake_at: 0 });
         Reply::Nil
+    }
+
+    /// [`Cx::block_on`] with extras: re-run with `args` instead of the original arguments, also
+    /// wake when a key is deleted, and/or re-run at `wake_at` (absolute Unix ms, 0 = never).
+    /// When re-blocking from a re-run, the original deadline is kept.
+    pub fn block_on_ex(
+        &mut self,
+        keys: Vec<Str>,
+        timeout_ms: i64,
+        timeout_reply: Reply,
+        args: Option<Vec<Bytes>>,
+        unblock_on_nokey: bool,
+        wake_at: i64,
+    ) -> Reply {
+        let r = self.block_on(keys, timeout_ms, timeout_reply);
+        if let Some(b) = self.block.as_mut() {
+            b.args = args;
+            b.unblock_on_nokey = unblock_on_nokey;
+            b.wake_at = wake_at;
+        }
+        r
+    }
+
+    /// Wake clients blocked on `key` (they re-run their command) without signalling it as
+    /// modified for WATCH.
+    pub fn signal_ready(&mut self, key: &[u8]) {
+        let k = (self.client.db as u16, Str::from_slice(key));
+        let b = &mut self.eng.blocking;
+        if b.by_key.contains_key(&k) && b.ready_set.insert(k.clone()) {
+            b.ready.push(k);
+        }
     }
 
     /// Run another command as this client (used by EXEC and scripts).

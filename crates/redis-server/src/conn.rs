@@ -252,14 +252,17 @@ impl Conn<'_> {
 
     fn on_block_timeout(&mut self) {
         let Some(db) = self.db().cloned() else { return };
-        let r = db.shard(0).engine.lock().block_timeout(self.client.id);
+        let mut eng = db.shard(0).engine.lock();
+        let r = eng.block_timeout(self.client.id);
         match r {
             Some(r) => {
+                drop(eng);
                 self.emit(&[], r);
                 self.blocked = None;
             }
-            // Served concurrently: the reply is on its way through the sink.
-            None => self.blocked = Some(0),
+            // Served concurrently (the reply is on its way through the sink), or re-run and
+            // still blocked until the next deadline.
+            None => self.blocked = Some(eng.block_deadline(self.client.id).unwrap_or(0)),
         }
     }
 
