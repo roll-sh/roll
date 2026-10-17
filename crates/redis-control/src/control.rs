@@ -477,7 +477,8 @@ impl Control {
         }
         let spec = spec_for(&self.store, &d.id)?.ok_or_else(|| ControlError::NotFound(d.id.clone()))?;
         let db = self.node.open(&spec).await?;
-        let session = redis_server::Session::new(db, redis_engine::acl::User::default_user()).ok_or_else(|| ControlError::Conflict("database is restarting; retry".into()))?;
+        let user = db.acl.read().default_user();
+        let session = redis_server::Session::new(db, user).ok_or_else(|| ControlError::Conflict("database is restarting; retry".into()))?;
         let mut x = redis_server::exec::Detached::new(&session, "console");
         Ok(x.run(vec![args]).await.pop().unwrap_or(redis_engine::Reply::Nil))
     }

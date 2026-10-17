@@ -10,6 +10,8 @@
 //! !type RANDOMKEY         compare only the reply's shape (type and length)
 //! !err CMD                both must be errors with the same code (ERR, WRONGTYPE…)
 //! !skip CMD               run on both, don't compare
+//! !mask a,b CMD           replace the values following the fields `a` and `b` (in maps and flat
+//!                         key/value arrays, at any depth) before comparing (timestamps, ids…)
 //! !send BLPOP l 5         send without reading the reply (read it later with @recv)
 //! @recv                   read one reply on the current connection and compare
 //! @conn 2                 switch to connection 2 (opened on first use)
@@ -17,6 +19,8 @@
 //! @sleep 100              pause (ms)
 //! RPUSH l {9000*x}        `{N*text}` expands to `text` repeated N times (long values, many args)
 //! ```
+//!
+//! A command after which both servers closed the connection counts as a match.
 //!
 //! `ROLL_COMPAT_REDIS=host:port` uses an existing reference server; otherwise a private Docker
 //! container is started for the run. `ROLL_COMPAT_FILTER=lists` runs matching files only. Without
@@ -108,6 +112,30 @@ fn err_code(r: &Reply) -> Option<String> {
     }
 }
 
+/// Replace the value after each field named in `fields` (recursively).
+fn mask(r: &Reply, fields: &[String]) -> Reply {
+    let is_field = |x: &Reply| match x {
+        Reply::Bulk(b) => fields.iter().any(|f| f.as_bytes() == &b[..]),
+        Reply::Status(s) => fields.iter().any(|f| f == s),
+        _ => false,
+    };
+    match r {
+        Reply::Array(items) | Reply::Set(items) | Reply::Push(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            let mut hide = false;
+            for x in items {
+                out.push(if hide { Reply::Nil } else { mask(x, fields) });
+                hide = !hide && is_field(x);
+            }
+            Reply::Array(out)
+        }
+        Reply::Map(pairs) => {
+            Reply::Map(pairs.iter().map(|(k, v)| (k.clone(), if is_field(k) { Reply::Nil } else { mask(v, fields) })).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 fn same(cmp: Cmp, a: &Reply, b: &Reply) -> bool {
     match cmp {
         Cmp::Exact => a == b,
@@ -137,6 +165,18 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
     for c in [&mut admin_r, &mut admin_o] {
         c.cmd(["FLUSHALL"]).await.unwrap();
         c.cmd(["CONFIG", "SET", "notify-keyspace-events", ""]).await.unwrap();
+        // ACL users and log.
+        if let Ok(Reply::Array(users)) = c.cmd(["ACL", "USERS"]).await {
+            for u in users {
+                if let Reply::Bulk(name) = u
+                    && &name[..] != b"default"
+                {
+                    c.cmd([&b"ACL"[..], b"DELUSER", &name]).await.unwrap();
+                }
+            }
+        }
+        c.cmd(["ACL", "SETUSER", "default", "reset", "on", "nopass", "~*", "&*", "+@all"]).await.unwrap();
+        c.cmd(["ACL", "LOG", "RESET"]).await.unwrap();
     }
 
     for (lineno, raw) in text.lines().enumerate() {
@@ -190,13 +230,19 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             }
             continue;
         }
-        let (cmp, send_only, cmdline) = {
+        let (cmp, send_only, cmdline, masked) = {
             let mut cmp = Cmp::Exact;
             let mut send = false;
+            let mut masked: Vec<String> = Vec::new();
             let mut l = line;
             while let Some(rest) = l.strip_prefix('!') {
-                let (m, tail) = rest.split_once(' ').unwrap_or((rest, ""));
+                let (m, mut tail) = rest.split_once(' ').unwrap_or((rest, ""));
                 match m {
+                    "mask" => {
+                        let (fields, t) = tail.split_once(' ').unwrap_or((tail, ""));
+                        masked.extend(fields.split(',').map(str::to_string));
+                        tail = t;
+                    }
                     "sort" => cmp = Cmp::Sort,
                     "type" => cmp = Cmp::Type,
                     "err" => cmp = Cmp::Err,
@@ -206,7 +252,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                 }
                 l = tail.trim_start();
             }
-            (cmp, send, l)
+            (cmp, send, l, masked)
         };
         let args = redis_server::client::args(&expand(cmdline));
         let p = conns.get_mut(&cur).unwrap();
@@ -216,14 +262,16 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             p.pending.push((cmp, cmdline.to_string(), lineno));
             continue;
         }
-        let a = p.redis.cmd(&args).await;
-        let b = p.roll.read_timeout_after_send(&args).await;
+        let a = p.redis.cmd(&args).await.map(|r| if masked.is_empty() { r } else { mask(&r, &masked) });
+        let b = p.roll.read_timeout_after_send(&args).await.map(|r| r.map(|r| if masked.is_empty() { r } else { mask(&r, &masked) }));
         match (a, b) {
             (Ok(a), Ok(Some(b))) => {
                 if !same(cmp, &a, &b) {
                     fails.push(format!("{fname}:{lineno}: {cmdline}\n    redis: {a:?}\n    roll:  {b:?}"));
                 }
             }
+            // Both closed the connection (e.g. its ACL user was deleted).
+            (Err(_), Err(_)) => {}
             (a, b) => fails.push(format!("{fname}:{lineno}: {cmdline}\n    redis: {a:?}\n    roll:  {b:?} (no reply / connection error)")),
         }
         // Commands like SUBSCRIBE a b reply several times: drain extra frames pairwise.

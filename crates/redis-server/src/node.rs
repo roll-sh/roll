@@ -16,7 +16,6 @@ use crate::repl::Follower;
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use redis_engine::Config;
-use redis_engine::acl::User;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -348,25 +347,47 @@ impl Node {
         self.followers.lock().get(id).cloned()
     }
 
-    async fn session_for(&self, spec: &DbSpec, user: Arc<User>) -> Result<Session, AuthError> {
-        loop {
-            let db = self.open(spec).await.map_err(|e| AuthError::Unavailable(e.to_string()))?;
-            if let Some(s) = Session::new(db, user.clone()) {
-                return Ok(s);
-            }
-        }
-    }
 }
 
 impl Directory for Node {
     fn authenticate<'a>(&'a self, req: AuthRequest<'a>) -> BoxFuture<'a, Result<Session, AuthError>> {
         Box::pin(async move {
-            let (db, _user, secret) = route(&req, self.cfg.domain.as_deref()).ok_or(AuthError::WrongPass)?;
+            let (db, user, secret) = route(&req, self.cfg.domain.as_deref()).ok_or(AuthError::WrongPass)?;
             let spec = self.catalog.lookup(&db).await.ok_or(AuthError::WrongPass)?;
             let full = req.password;
-            let ok = spec.secrets.iter().find(|s| ct_eq(s.value.as_bytes(), secret) || ct_eq(s.value.as_bytes(), full));
-            let Some(_secret) = ok else { return Err(AuthError::WrongPass) };
-            self.session_for(&spec, User::default_user()).await
+            let platform = spec.secrets.iter().any(|s| ct_eq(s.value.as_bytes(), secret) || ct_eq(s.value.as_bytes(), full));
+            let is_default = user.as_deref().is_none_or(|u| u == "default");
+            // Only known databases are loaded: a wrong token for an existing database still
+            // wakes it, but that is needed to check tenant-defined ACL users anyway.
+            loop {
+                let db = self.open(&spec).await.map_err(|e| AuthError::Unavailable(e.to_string()))?;
+                let user = {
+                    let acl = db.acl.read();
+                    if platform && is_default {
+                        // The platform credential is the default user, as long as the tenant
+                        // hasn't disabled it.
+                        let u = acl.default_user();
+                        if !u.enabled() {
+                            return Err(AuthError::WrongPass);
+                        }
+                        u
+                    } else {
+                        match acl.authenticate(user.as_deref().map(str::as_bytes), secret) {
+                            Ok(u) => u,
+                            // Including `AUTH <token>` against a nopass default user.
+                            Err(_) => {
+                                if let Some(c) = req.client {
+                                    acl.log_auth_failure(c, req.command, user.as_deref().unwrap_or("default").as_bytes());
+                                }
+                                return Err(AuthError::WrongPass);
+                            }
+                        }
+                    }
+                };
+                if let Some(s) = Session::new(db, user) {
+                    return Ok(s);
+                }
+            }
         })
     }
 

@@ -146,7 +146,7 @@ fn cors(mut r: Response) -> Response {
 async fn authenticate(dir: &dyn Directory, token: Option<&str>) -> Result<Session, Box<Response>> {
     let unauthorized = || Box::new(error(StatusCode::UNAUTHORIZED, "Unauthorized"));
     match token {
-        Some(t) => dir.authenticate(AuthRequest { user: None, password: t.as_bytes(), sni: None }).await.map_err(|_| unauthorized()),
+        Some(t) => dir.authenticate(AuthRequest { user: None, password: t.as_bytes(), sni: None, client: None, command: b"auth" }).await.map_err(|_| unauthorized()),
         None => dir.anonymous().await.ok_or_else(unauthorized),
     }
 }

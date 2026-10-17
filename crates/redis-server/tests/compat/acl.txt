@@ -1,0 +1,385 @@
+# ACL: users, rules, descriptions, permission checks, AUTH and the ACL LOG
+# (ACL LOG fields that vary between runs are masked.)
+
+# ---- the default user ----
+ACL WHOAMI
+ACL USERS
+ACL LIST
+ACL GETUSER default
+ACL GETUSER nosuch
+ACL HELP
+ACL LOAD
+ACL SAVE
+ACL
+ACL FOO
+ACL SETUSER
+ACL GETUSER
+ACL GETUSER a b
+ACL WHOAMI x
+ACL USERS x
+ACL LIST x
+ACL DELUSER
+ACL DRYRUN default
+
+# ---- categories ----
+ACL CAT
+ACL CAT nosuch
+ACL CAT a b
+!sort ACL CAT connection
+!sort ACL CAT transaction
+!sort ACL CAT pubsub
+
+# ---- creating users ----
+ACL SETUSER alice
+ACL LIST
+ACL GETUSER alice
+ACL SETUSER "a b"
+ACL SETUSER "a\x00b"
+ACL USERS
+
+# ---- rules and their normalisation ----
+ACL SETUSER u1 on >pass1 >pass2 >pass1 ~cached:* %R~ro:* %W~wo:* %RW~rw:* &news.* +get +set +@keyspace -del +config|get +select|0
+ACL LIST
+ACL GETUSER u1
+ACL SETUSER u1 <pass2
+ACL GETUSER u1
+ACL SETUSER u1 <pass2
+ACL SETUSER u1 #0000000000000000000000000000000000000000000000000000000000000000
+ACL SETUSER u1 !0000000000000000000000000000000000000000000000000000000000000000
+ACL SETUSER u1 !0000000000000000000000000000000000000000000000000000000000000001
+ACL SETUSER u1 #00000000000000000000000000000000000000000000000000000000000000
+ACL SETUSER u1 #000000000000000000000000000000000000000000000000000000000000000G
+ACL SETUSER u1 #000000000000000000000000000000000000000000000000000000000000000A
+ACL SETUSER u1 !nothex
+ACL SETUSER u1 %R~ro:* %W~ro:*
+ACL GETUSER u1
+ACL SETUSER u2 +@all -@string +get -get +set
+ACL GETUSER u2
+ACL SETUSER u2 +config|get +config|set -config
+ACL GETUSER u2
+ACL SETUSER u2 -@all +config +client|kill -client
+ACL GETUSER u2
+ACL SETUSER u2 nocommands +get allcommands
+ACL GETUSER u2
+ACL SETUSER u2 nocommands +GET +Config|Get +@STRING -@String +SELECT|1 +select|2 +select|1
+ACL GETUSER u2
+ACL SETUSER u2 -@all +get|x +get|y -get
+ACL GETUSER u2
+ACL SETUSER u3 ON NOPASS ~K* ALLCHANNELS ALLKEYS skip-sanitize-payload
+ACL GETUSER u3
+ACL SETUSER u3 sanitize-payload resetkeys ~a ~b ~a resetchannels &x &y &x
+ACL GETUSER u3
+ACL SETUSER u3 allkeys allchannels
+ACL GETUSER u3
+ACL SETUSER u3 reset
+ACL GETUSER u3
+ACL SETUSER u3 on >x nopass
+ACL GETUSER u3
+ACL SETUSER u3 >y resetpass
+ACL GETUSER u3
+ACL SETUSER u3 %RW ~ &
+ACL GETUSER u3
+ACL SETUSER u3 "" on
+ACL GETUSER u3
+ACL LIST
+
+# ---- rule errors (nothing is applied) ----
+ACL SETUSER bad on +get badrule
+ACL GETUSER bad
+ACL SETUSER bad +nosuchcommand
+ACL SETUSER bad -nosuchcommand
+ACL SETUSER bad +@nosuchcategory
+ACL SETUSER bad -@nosuchcategory
+ACL SETUSER bad +@
+ACL SETUSER bad +
+ACL SETUSER bad -
+ACL SETUSER bad allkeys ~a
+ACL SETUSER bad allkeys %R~a
+ACL SETUSER bad allchannels &a
+ACL SETUSER bad +config|get|x
+ACL SETUSER bad +get|
+ACL SETUSER bad +config|nosuch
+ACL SETUSER bad -select|0
+ACL SETUSER bad -config|nosuch
+ACL SETUSER bad %X~a
+ACL SETUSER bad %~a
+ACL SETUSER bad %RR~a
+ACL SETUSER bad %
+ACL SETUSER bad "~a b"
+ACL SETUSER bad "&a b"
+ACL SETUSER bad (on)
+ACL SETUSER bad (~x
+ACL SETUSER bad (~x +get
+ACL SETUSER bad on (~x +nosuch)
+ACL SETUSER bad (allkeys ~x)
+ACL GETUSER bad
+
+# ---- selectors ----
+ACL SETUSER sel on nopass ~a* +get (~b* +set) "(&ch* +publish)"
+ACL LIST
+ACL GETUSER sel
+ACL SETUSER sel ( ~c* +@keyspace )
+ACL GETUSER sel
+ACL SETUSER sel ()
+ACL GETUSER sel
+ACL DRYRUN sel get a1
+ACL DRYRUN sel get b1
+ACL DRYRUN sel set b1 v
+ACL DRYRUN sel set a1 v
+ACL DRYRUN sel publish ch1 m
+ACL DRYRUN sel publish other m
+ACL DRYRUN sel type c1
+ACL DRYRUN sel type a1
+ACL SETUSER sel clearselectors
+ACL GETUSER sel
+ACL DRYRUN sel set b1 v
+
+# ---- dry runs ----
+ACL SETUSER alice on >pass1 ~cached:* %R~ro:* %W~wo:* &chan &news.* +get +set +mget +mset +exists +@keyspace -del +config|get +select|0 +publish +subscribe +psubscribe +rename +ping
+ACL DRYRUN alice get cached:1
+ACL DRYRUN alice get other
+ACL DRYRUN alice get ro:1
+ACL DRYRUN alice get wo:1
+ACL DRYRUN alice set ro:1 v
+ACL DRYRUN alice set wo:1 v
+ACL DRYRUN alice set wo:1 v GET
+ACL DRYRUN alice set wo:1 v get
+ACL DRYRUN alice set wo:1 v EX 10
+ACL DRYRUN alice mget cached:1 ro:1 other
+ACL DRYRUN alice mset cached:1 a wo:1 b other c
+ACL DRYRUN alice mset cached:1 a ro:1 b
+ACL DRYRUN alice exists ro:1 wo:1 cached:1
+ACL DRYRUN alice exists nope
+ACL DRYRUN alice rename cached:1 wo:1
+ACL DRYRUN alice rename wo:1 cached:1
+ACL DRYRUN alice rename ro:1 cached:1
+ACL DRYRUN alice type cached:h
+ACL DRYRUN alice del cached:h
+ACL DRYRUN alice config get maxmemory
+ACL DRYRUN alice config set maxmemory 0
+ACL DRYRUN alice config
+ACL DRYRUN alice config nosub
+ACL DRYRUN alice select 0
+ACL DRYRUN alice select 1
+ACL DRYRUN alice publish chan hi
+ACL DRYRUN alice publish news.today hi
+ACL DRYRUN alice publish other hi
+ACL DRYRUN alice subscribe chan news.x
+ACL DRYRUN alice subscribe chan other
+ACL DRYRUN alice psubscribe news.*
+ACL DRYRUN alice psubscribe news.a
+ACL DRYRUN alice psubscribe chan
+ACL DRYRUN alice ping
+ACL DRYRUN alice echo hi
+ACL DRYRUN alice auth x
+ACL DRYRUN alice hello
+ACL DRYRUN alice nosuchcommand
+ACL DRYRUN alice get
+ACL DRYRUN alice GET Cached:1
+ACL DRYRUN nosuch get a
+ACL DRYRUN u3 get a
+
+# ---- key permissions follow each command's key specs ----
+ACL SETUSER kp on nopass +@all ~any* %R~r* %W~w*
+ACL DRYRUN kp incr w1
+ACL DRYRUN kp incr any1
+ACL DRYRUN kp append w1 x
+ACL DRYRUN kp copy r1 w1
+ACL DRYRUN kp copy w1 r1
+ACL DRYRUN kp del w1
+ACL DRYRUN kp del r1
+ACL DRYRUN kp getdel w1
+ACL DRYRUN kp getex r1
+ACL DRYRUN kp getset w1 v
+ACL DRYRUN kp setrange w1 0 x
+ACL DRYRUN kp strlen r1
+ACL DRYRUN kp type w1
+ACL DRYRUN kp expire w1 10
+ACL DRYRUN kp ttl r1
+ACL DRYRUN kp ttl w1
+ACL DRYRUN kp touch w1
+ACL DRYRUN kp lcs r1 r2
+ACL DRYRUN kp msetnx w1 a w2 b
+ACL DRYRUN kp renamenx w1 any1
+ACL DRYRUN kp unlink w1
+ACL DRYRUN kp scan 0
+ACL DRYRUN kp keys *
+ACL DRYRUN kp flushall
+ACL DRYRUN kp ssubscribe x
+ACL DRYRUN kp spublish x m
+ACL DRYRUN kp sunsubscribe x
+ACL DRYRUN kp unsubscribe x
+ACL DRYRUN kp watch r1 w1
+
+# ---- AUTH and permission checks on a connection ----
+@conn 2
+AUTH alice wrong
+AUTH nosuch pass1
+AUTH pass1
+AUTH a b c
+AUTH alice pass1
+ACL WHOAMI
+GET cached:1
+SET wo:1 v
+GET other
+GET ro:1
+SET ro:1 v
+SET wo:2 v GET
+MGET cached:1 other
+MSET cached:1 a wo:1 b
+EXISTS ro:1 wo:1
+ECHO hi
+CONFIG GET maxmemory
+CONFIG SET maxmemory 0
+CLIENT ID
+SELECT 1
+SELECT 0
+PUBLISH chan hi
+PUBLISH other hi
+PING
+ACL WHOAMI x
+DEL cached:1 wo:1
+
+# EXEC itself denied: the transaction is discarded
+MULTI
+GET cached:1
+EXEC
+@conn 1
+ACL SETUSER alice +multi +exec
+@conn 2
+
+# denied while queueing: the transaction is aborted
+MULTI
+GET cached:1
+GET other
+PING
+EXEC
+
+# permissions changed after queueing: checked again at EXEC
+MULTI
+GET cached:1
+SET wo:9 v
+@conn 1
+ACL SETUSER alice -set
+@conn 2
+EXEC
+
+# rule changes apply to connected clients right away
+@conn 1
+ACL SETUSER alice -get
+@conn 2
+GET cached:1
+@conn 1
+ACL SETUSER alice +get
+@conn 2
+GET cached:1
+
+# ---- ACL LOG ----
+@conn 1
+!mask age-seconds,client-info,timestamp-created,timestamp-last-updated,entry-id ACL LOG
+!mask age-seconds,client-info,timestamp-created,timestamp-last-updated,entry-id ACL LOG 2
+ACL LOG 0
+ACL LOG -1
+ACL LOG abc
+ACL LOG 1 2
+@conn 2
+GET other
+GET other
+@conn 1
+!mask age-seconds,client-info,timestamp-created,timestamp-last-updated,entry-id ACL LOG 1
+@resp 3
+!mask age-seconds,client-info,timestamp-created,timestamp-last-updated,entry-id ACL LOG 2
+ACL GETUSER alice
+ACL GETUSER sel
+@resp 2
+ACL LOG RESET
+ACL LOG
+@conn 3
+HELLO 3 AUTH alice wrong
+AUTH alice pass1
+ACL WHOAMI
+@conn 1
+!mask age-seconds,client-info,timestamp-created,timestamp-last-updated,entry-id ACL LOG
+ACL LOG RESET
+
+# ---- Pub/Sub clients lose their connection when their channels are revoked ----
+@conn 7
+AUTH alice pass1
+SUBSCRIBE chan other
+SUBSCRIBE news.x
+@conn 8
+AUTH alice pass1
+SUBSCRIBE chan
+@conn 1
+ACL SETUSER alice &more
+@sleep 100
+@conn 7
+PING
+@conn 1
+ACL SETUSER alice resetchannels &news.*
+@sleep 100
+@conn 7
+PING
+@conn 8
+PING
+@conn 1
+!mask age-seconds,client-info,timestamp-created,timestamp-last-updated,entry-id ACL LOG 1
+ACL LOG RESET
+
+# ---- disabled users ----
+ACL SETUSER dis off >pw +@all ~*
+@conn 4
+AUTH dis pw
+ACL WHOAMI
+@conn 1
+ACL SETUSER dis on
+@conn 4
+AUTH dis pw
+ACL WHOAMI
+@conn 1
+ACL SETUSER dis off
+@conn 4
+ACL WHOAMI
+GET x
+
+# ---- the default user's password ----
+@conn 1
+ACL SETUSER default resetpass >secret
+ACL LIST
+@conn 5
+GET x
+ACL WHOAMI
+AUTH wrong
+AUTH secret
+ACL WHOAMI
+@conn 6
+AUTH default secret
+GET x
+@conn 1
+ACL SETUSER default nopass
+ACL GETUSER default
+
+# ---- deleting users ----
+ACL DELUSER default
+ACL DELUSER alice default
+ACL DELUSER nosuch
+ACL DELUSER u1 u2 nosuch u1
+ACL USERS
+ACL DELUSER alice
+ACL USERS
+@conn 2
+PING
+@conn 3
+PING
+@conn 1
+!mask age-seconds,client-info,timestamp-created,timestamp-last-updated,entry-id ACL LOG
+ACL GENPASS 0
+ACL GENPASS -1
+ACL GENPASS 4097
+ACL GENPASS abc
+ACL GENPASS 1 2
+!type ACL GENPASS
+!type ACL GENPASS 1
+!type ACL GENPASS 4096
+ACL DELUSER u3 sel dis
+ACL LIST

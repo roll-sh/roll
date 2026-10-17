@@ -1721,9 +1721,11 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "foldhash",
+ "getrandom 0.4.3",
  "itoa",
  "parking_lot",
  "redis-proto",
+ "sha2",
  "smallvec",
  "xxhash-rust",
 ]

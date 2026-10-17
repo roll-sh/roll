@@ -47,7 +47,6 @@ pub static COMMANDS: &[Command] = &[
     cmd!("readwrite", 1, LOADING | STALE | FAST, 0, 0, 0, readwrite, Cluster),
     cmd!("asking", 1, FAST, 0, 0, 0, asking, Cluster),
     container!("cluster", 0, Cluster, CLUSTER),
-    container!("acl", 0, Server, ACL),
     container!("client", 0, Connection, CLIENT),
     container!("config", 0, Server, CONFIG),
     container!("command", LOADING | STALE, Server, COMMAND),
@@ -72,22 +71,6 @@ static CLUSTER: &[Command] = &[
     cmd!("replicas", 3, ADMIN | NOSCRIPT | STALE, 0, 0, 0, server_only, Cluster),
     cmd!("slaves", 3, ADMIN | NOSCRIPT | STALE, 0, 0, 0, server_only, Cluster),
     cmd!("help", 2, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-];
-
-static ACL: &[Command] = &[
-    cmd!("cat", -2, NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("deluser", -3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("dryrun", -4, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("genpass", -2, NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("getuser", 3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("list", 2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("load", 2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("log", -2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("save", 2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("setuser", -3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("users", 2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("whoami", 2, NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("help", 2, LOADING | STALE, 0, 0, 0, server_only, Server),
 ];
 
 static CLIENT: &[Command] = &[

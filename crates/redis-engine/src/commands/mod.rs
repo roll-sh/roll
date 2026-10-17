@@ -4,6 +4,7 @@
 //! command table does: arity, flags, key positions (for cluster routing, ACL key checks and
 //! `COMMAND GETKEYS`), its group (ACL categories, `COMMAND DOCS`) and optional subcommands.
 
+pub mod acl;
 pub mod bitmaps;
 pub mod geo;
 pub mod hashes;
@@ -200,47 +201,10 @@ impl Command {
         if self.arity >= 0 { n == self.arity } else { n >= -self.arity }
     }
 
-    /// ACL categories (`@read`, `@string`, …).
+    /// ACL categories (`@read`, `@string`, …), in Redis' order: Redis' own table for the commands
+    /// it has, otherwise derived from flags and group.
     pub fn categories(&self) -> Vec<&'static str> {
-        let mut c = Vec::new();
-        if self.has(WRITE) {
-            c.push("write");
-        }
-        if self.has(READONLY) && self.group != Group::Scripting {
-            c.push("read");
-        }
-        match self.group {
-            Group::Generic => c.push("keyspace"),
-            Group::String => c.push("string"),
-            Group::List => c.push("list"),
-            Group::Set => c.push("set"),
-            Group::SortedSet => c.push("sortedset"),
-            Group::Hash => c.push("hash"),
-            Group::PubSub => c.push("pubsub"),
-            Group::Transactions => c.push("transaction"),
-            Group::Connection => c.push("connection"),
-            Group::Scripting => c.push("scripting"),
-            Group::HyperLogLog => c.push("hyperloglog"),
-            Group::Geo => c.push("geo"),
-            Group::Stream => c.push("stream"),
-            Group::Bitmap => c.push("bitmap"),
-            Group::Server | Group::Cluster => {}
-        }
-        if self.has(ADMIN) {
-            c.push("admin");
-            c.push("dangerous");
-        } else if self.has(DANGEROUS) {
-            c.push("dangerous");
-        }
-        if self.has(FAST) {
-            c.push("fast");
-        } else {
-            c.push("slow");
-        }
-        if self.has(BLOCKING) {
-            c.push("blocking");
-        }
-        c
+        crate::acl::categories_of(self)
     }
 
     /// `COMMAND INFO`-style flag names.
@@ -357,6 +321,7 @@ pub fn table() -> &'static Table {
             strings::COMMANDS,
             keys::COMMANDS,
             server::COMMANDS,
+            acl::COMMANDS,
             multi::COMMANDS,
             pubsub::COMMANDS,
             lists::COMMANDS,

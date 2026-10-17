@@ -11,7 +11,8 @@
 
 use crate::repl::Backlog;
 use bytes::{Bytes, BytesMut};
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{Mutex, MutexGuard, RwLock};
+use redis_engine::acl::Acl;
 use redis_engine::{Config, Effect, Engine, Hub};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -44,6 +45,8 @@ pub struct Database {
     pub shards: Vec<Shard>,
     pub hub: Arc<Hub>,
     pub feed: Mutex<Feed>,
+    /// ACL users and log, shared by every shard's engine.
+    pub acl: Arc<RwLock<Acl>>,
     /// Connections currently attached (for scale-to-zero decisions and metering).
     pub connections: AtomicU64,
     /// Unix ms of the last command (idle detection).
@@ -119,10 +122,12 @@ impl Drop for EngineGuard<'_> {
 impl Database {
     pub fn new(id: impl Into<String>, config: Config, shards: usize) -> Arc<Self> {
         let hub = Hub::new();
+        let acl = Arc::new(RwLock::new(Acl::new()));
         let shards = (0..shards.max(1))
             .map(|i| {
                 let mut e = Engine::new(config.clone(), hub.clone());
                 e.shard = i as u16;
+                e.acl = acl.clone();
                 Shard { engine: Mutex::new(e) }
             })
             .collect();
@@ -131,6 +136,7 @@ impl Database {
             shards,
             hub,
             feed: Mutex::new(Feed { last_db: u16::MAX, ..Feed::default() }),
+            acl,
             connections: AtomicU64::new(0),
             last_active: AtomicU64::new(redis_engine::util::now_ms() as u64),
             commands: AtomicU64::new(0),

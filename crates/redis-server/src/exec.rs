@@ -65,7 +65,7 @@ impl Detached {
             tokio::select! {
                 msg = self.rx.recv() => match msg {
                     Some(Msg::Unblock(b)) => return Reply::Raw(b),
-                    Some(Msg::Push(_)) => {}
+                    Some(Msg::Push(_) | Msg::AclChanged) => {}
                     None => return Reply::Nil,
                 },
                 _ = timer, if deadline > 0 => {
@@ -84,6 +84,12 @@ impl Detached {
             match self.rx.recv().await? {
                 Msg::Push(b) => return Some(b),
                 Msg::Unblock(_) => {}
+                // A subscriber whose channel permissions were revoked: end the stream.
+                Msg::AclChanged => {
+                    if redis_engine::acl::must_disconnect(&self.client) {
+                        return None;
+                    }
+                }
             }
         }
     }

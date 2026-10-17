@@ -33,7 +33,7 @@ pub async fn serve_tcp(listener: TcpListener, dir: Arc<dyn Directory>) -> anyhow
 pub async fn start_single(db: Arc<Database>, password: Option<String>) -> anyhow::Result<SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let dir: Arc<dyn Directory> = Arc::new(Single { db, password });
+    let dir: Arc<dyn Directory> = Arc::new(Single::new(db, password));
     tokio::spawn(async move { serve_tcp(listener, dir).await });
     Ok(addr)
 }

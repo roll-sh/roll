@@ -36,7 +36,7 @@ async fn start(idle: Option<Duration>) -> (SocketAddr, Arc<Node>) {
 #[test]
 fn routing() {
     let r = |user: Option<&'static str>, pass: &'static str, sni: Option<&'static str>| {
-        route(&AuthRequest { user: user.map(str::as_bytes), password: pass.as_bytes(), sni }, Some("redis.test"))
+        route(&AuthRequest { user: user.map(str::as_bytes), password: pass.as_bytes(), sni, client: None, command: b"auth" }, Some("redis.test"))
             .map(|(db, u, s)| (db, u, String::from_utf8(s.to_vec()).unwrap()))
     };
     assert_eq!(r(None, "alpha_secret", None), Some(("alpha".into(), None, "secret".into())));
