@@ -419,10 +419,11 @@ pub fn eq(a: &[u8], s: &str) -> bool {
 /// Parse a timeout in seconds (float) for blocking commands into milliseconds; 0 = forever.
 pub fn timeout_secs(a: &[u8]) -> Result<i64, Error> {
     let f = redis_proto::parse_double(a).ok_or(Error::new("ERR timeout is not a float or out of range"))?;
-    if f < 0.0 {
+    let ms = f * 1000.0;
+    // Redis truncates to whole ms first, so -0.0005 means "forever", not negative.
+    if ms <= -1.0 {
         return Err(Error::new("ERR timeout is negative"));
     }
-    let ms = f * 1000.0;
     if !ms.is_finite() || ms > (i64::MAX / 2) as f64 {
         return Err(Error::new("ERR timeout is out of range"));
     }
