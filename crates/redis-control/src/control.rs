@@ -7,7 +7,7 @@ use futures::future::BoxFuture;
 use redis_engine::Config as EngineConfig;
 use redis_engine::config::Policy;
 use redis_server::node::{Catalog, DbSpec, Node, NodeConfig, Secret};
-use redis_server::persist::{Objects, Shipper, ShipperConfig, Until};
+use redis_server::persist::{self, Objects, Shipper, ShipperConfig, Until};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,6 +41,9 @@ pub struct RedisConfig {
     pub tls: bool,
     /// Group-commit interval for the durable log.
     pub flush_interval: Duration,
+    /// How often unreferenced log segments and snapshots are looked for; they're deleted once
+    /// found unreferenced twice this far apart. Run on one node per bucket.
+    pub gc_interval: Option<Duration>,
     pub defaults: Defaults,
     pub pricing: Pricing,
 }
@@ -84,6 +87,7 @@ impl RedisConfig {
             http_port: 58080,
             tls: false,
             flush_interval: Duration::from_secs(1),
+            gc_interval: Some(Duration::from_secs(3600)),
             defaults: Defaults {
                 max_memory_mb: 256,
                 eviction_policy: "noeviction".into(),
@@ -166,6 +170,7 @@ fn spec_for(store: &Store, id: &str) -> anyhow::Result<Option<DbSpec>> {
             config: engine_config(&d),
             sync_writes: d.durability == "sync",
             idle_timeout: Some(Duration::from_secs(d.idle_timeout_s.max(0) as u64)),
+            history_retention: Duration::from_secs(d.history_retention_s.max(0) as u64),
             ..DbSpec::new(d.id.clone(), d.password.clone())
         }));
     }
@@ -213,10 +218,22 @@ impl Control {
         let node = Node::new(
             Arc::new(StoreCatalog(store.clone())),
             Some(shipper.clone()),
-            NodeConfig { idle_timeout: Some(Duration::from_secs(cfg.defaults.idle_timeout_s as u64)), domain: None },
+            NodeConfig { idle_timeout: Some(Duration::from_secs(cfg.defaults.idle_timeout_s as u64)), ..Default::default() },
         );
         let control = Arc::new(Self { cfg, store, node, shipper });
         control.clone().start_metering();
+        if let Some(every) = control.cfg.gc_interval {
+            let objects = control.objects().clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(every).await;
+                    match persist::collect_garbage(&objects, every).await {
+                        Ok(st) => tracing::info!(deleted = st.deleted, bytes = st.deleted_bytes, pending = st.unreferenced - st.deleted, "redis storage gc"),
+                        Err(e) => tracing::warn!(error = %e, "redis storage gc failed"),
+                    }
+                }
+            });
+        }
         Ok(control)
     }
 
@@ -365,21 +382,24 @@ impl Control {
 
     pub async fn delete(&self, id: &str) -> Result<()> {
         let d = self.get(id)?;
-        if self.store.dbs()?.iter().any(|c| c.parent_id.as_deref() == Some(d.id.as_str())) {
-            // Branches read their parent's history.
-            return Err(ControlError::Conflict(format!("{} has branches; delete them first", d.name)));
-        }
         for r in self.store.replicas(&d.id)? {
             self.node.evict(&r.id).await?;
         }
         self.node.evict(&d.id).await?;
         self.store.delete_db(&d.id)?;
-        self.objects().delete_prefix(&format!("redis/db/{}/", d.id)).await?;
+        // Only the manifests (the database's and its restore archives'): branches may still use
+        // its snapshots and log, which garbage collection deletes once nothing does.
+        let archives = format!("redis/db/{}.", d.id);
+        for (key, _) in self.objects().list("redis/db/").await? {
+            if key.ends_with("/manifest.json") && (key == persist::manifest_key(&d.id) || key.starts_with(&archives)) {
+                self.objects().delete(&key).await?;
+            }
+        }
         Ok(())
     }
 
     /// A new database with `parent`'s data as of `at` (Unix seconds, default now). Instant: the
-    /// branch reads its parent's history until it writes its own.
+    /// branch records which part of the parent's history it starts from (no data is copied).
     pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>) -> Result<RedisDb> {
         let p = self.get(parent)?;
         if let Some(t) = at {

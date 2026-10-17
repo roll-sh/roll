@@ -137,9 +137,6 @@ async fn branches_restore_and_replicas() {
     assert_eq!(b.cmd(["EXISTS", "w"]).await.unwrap(), Reply::Int(0));
     assert_eq!(b.cmd(["SET", "v", "branch"]).await.unwrap(), Reply::Ok);
     assert_eq!(c.cmd(["GET", "v"]).await.unwrap(), Reply::bulk(b"2"));
-    // A parent with branches can't be deleted.
-    let (s, _) = e.call(reqwest::Method::DELETE, &format!("/v1/redis/databases/{id}"), None).await;
-    assert_eq!(s, 409);
 
     // A read replica follows the primary.
     let rep = e.post(&format!("/v1/redis/databases/{id}/replicas"), json!({})).await;
@@ -175,4 +172,13 @@ async fn branches_restore_and_replicas() {
     // Out of the window.
     let (s, _) = e.call(reqwest::Method::POST, &format!("/v1/redis/databases/{id}/restore"), Some(json!({"at": 1}))).await;
     assert_eq!(s, 400);
+
+    // Branches carry their own history: the parent can go, and the branch still loads.
+    drop((b, c, r));
+    let (s, v) = e.call(reqwest::Method::DELETE, &format!("/v1/redis/databases/{id}"), None).await;
+    assert_eq!(s, 200, "{v}");
+    let bid = br["id"].as_str().unwrap();
+    assert!(e.post(&format!("/v1/redis/databases/{bid}/unload"), json!({})).await["unloaded"].as_bool().unwrap());
+    let mut b = e.connect(&token(&br)).await;
+    assert_eq!(b.cmd(["GET", "v"]).await.unwrap(), Reply::bulk(b"branch"));
 }

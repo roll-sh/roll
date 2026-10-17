@@ -15,14 +15,20 @@
 //! A manifest names the node that owned the database and the last segment it had flushed; after a
 //! crash, the loader also scans that node's later segments, so nothing acknowledged as durable is
 //! lost to the lazy manifest.
+//!
+//! Snapshots ([`Shipper::snapshot`]) bound how much log a load replays. Branches and in-place
+//! restores embed a frozen copy of the history they start from ([`history`]), so a database's
+//! own retention never breaks them, and [`collect_garbage`] can delete whatever no manifest
+//! references.
 
 use crate::database::{Database, FeedSink};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use futures::StreamExt;
 use parking_lot::Mutex;
-use redis_engine::Effect;
+use redis_engine::{Effect, Engine};
 use redis_engine::commands::eq;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -45,6 +51,10 @@ pub struct Base {
     pub db: String,
     pub offset: u64,
     pub at_ms: i64,
+    /// The part of the parent's history leading to `offset`, frozen when the branch was made
+    /// (without it, the parent's current manifest is read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<Box<Manifest>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -101,6 +111,43 @@ pub fn manifest_key(db: &str) -> String {
 
 pub fn segment_key(node: &str, seq: u64) -> String {
     format!("redis/seg/{node}/{seq:016}.zst")
+}
+
+pub fn snapshot_key(db: &str, offset: u64) -> String {
+    format!("redis/db/{db}/snap/{offset:020}.rdb.zst")
+}
+
+/// Serializes a keyspace for snapshots (the RDB format in production).
+pub trait SnapshotCodec: Send + Sync {
+    /// Called with the engine locked (writes wait), so it should only encode.
+    fn save(&self, engine: &Engine, out: &mut Vec<u8>) -> anyhow::Result<()>;
+    /// Load a decoded snapshot into an empty database.
+    fn load(&self, db: &Arc<Database>, data: &[u8]) -> anyhow::Result<()>;
+}
+
+/// A frozen copy of the part of `source`'s history (as returned by [`restore_at`]) that leads
+/// to `upto`: the newest snapshot at or before it, the segments after that, or the base chain.
+pub fn history(m: &Manifest, source: &str, upto: u64) -> Manifest {
+    let snap = m.snapshots.iter().rev().find(|s| s.offset <= upto).cloned();
+    let from = snap.as_ref().map_or(0, |s| s.offset);
+    let mut segments = Vec::new();
+    if from < upto {
+        for s in m.segments.iter().filter(|s| s.end > from) {
+            segments.push(s.clone());
+            if s.end >= upto {
+                break;
+            }
+        }
+    }
+    Manifest {
+        base: if snap.is_some() { None } else { m.base.clone() },
+        snapshots: snap.into_iter().collect(),
+        stream: Some(m.stream.clone().unwrap_or_else(|| source.to_string())),
+        segments,
+        end: upto,
+        node: None,
+        after_seq: 0,
+    }
 }
 
 /// One frame per write batch: `u16 id length, id, u64 start offset, i64 unix ms, u32 length,
@@ -191,13 +238,34 @@ pub struct ShipperConfig {
     pub flush_bytes: usize,
     pub manifest_interval: Duration,
     pub zstd_level: i32,
+    /// Without one, databases never snapshot and loads replay their whole log.
+    pub codec: Option<Arc<dyn SnapshotCodec>>,
 }
 
 impl Default for ShipperConfig {
     fn default() -> Self {
-        Self { flush_interval: Duration::from_secs(1), flush_bytes: 8 << 20, manifest_interval: Duration::from_secs(30), zstd_level: 1 }
+        Self {
+            flush_interval: Duration::from_secs(1),
+            flush_bytes: 8 << 20,
+            manifest_interval: Duration::from_secs(30),
+            zstd_level: 1,
+            codec: None,
+        }
     }
 }
+
+/// Log a database has accumulated since its newest snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LogStats {
+    pub bytes: u64,
+    pub segments: usize,
+    /// It still reads history from another database (an unsnapshotted branch or restore).
+    pub based: bool,
+}
+
+/// Rewrite unchanged manifests once their `after_seq` lags this many segments: a stale one keeps
+/// all of the node's later segments from garbage collection.
+const MANIFEST_LAG: u64 = 600;
 
 /// The node's durability pipeline (one per node).
 pub struct Shipper {
@@ -379,7 +447,8 @@ impl Shipper {
         let todo: Vec<(String, Manifest)> = {
             let mut dbs = self.dbs.lock();
             dbs.iter_mut()
-                .filter(|(_, l)| force || l.dirty)
+                // An idle database's stale `after_seq` would keep this node's segments alive.
+                .filter(|(_, l)| force || l.dirty || after.saturating_sub(l.manifest.after_seq) >= MANIFEST_LAG)
                 .map(|(id, l)| {
                     l.dirty = false;
                     l.manifest.after_seq = after;
@@ -391,6 +460,65 @@ impl Shipper {
             self.objects.put(&manifest_key(&id), Bytes::from(serde_json::to_vec(&m)?)).await?;
         }
         Ok(())
+    }
+
+    pub fn codec(&self) -> Option<Arc<dyn SnapshotCodec>> {
+        self.cfg.codec.clone()
+    }
+
+    pub fn log_stats(&self, db: &str) -> Option<LogStats> {
+        let dbs = self.dbs.lock();
+        let m = &dbs.get(db)?.manifest;
+        let from = m.snapshots.last().map_or(0, |s| s.offset);
+        Some(LogStats {
+            bytes: m.end.saturating_sub(from),
+            segments: m.segments.iter().filter(|s| s.end > from).count(),
+            based: m.snapshots.is_empty() && m.base.is_some(),
+        })
+    }
+
+    /// Snapshot an attached database at its current offset, and record it in the manifest
+    /// (see [`Shipper::snapshotted`] for `retain_ms`). Writes wait while the keyspace is
+    /// encoded; compression and upload don't. `None` without a codec, or when nothing changed
+    /// since the last snapshot.
+    pub async fn snapshot(&self, db: &Arc<Database>, retain_ms: i64) -> anyhow::Result<Option<SnapRef>> {
+        let Some(codec) = self.cfg.codec.clone() else { return Ok(None) };
+        let Some(m) = self.manifest(&db.id) else { anyhow::bail!("database {} is not attached", db.id) };
+        let (offset, raw) = {
+            let eng = db.engine(0);
+            let offset = db.snapshot_point();
+            if m.snapshots.last().is_some_and(|s| s.offset == offset) {
+                return Ok(None);
+            }
+            let mut raw = Vec::new();
+            codec.save(&eng, &mut raw)?;
+            (offset, raw)
+        };
+        let at_ms = redis_engine::util::now_ms();
+        let level = self.cfg.zstd_level.max(3);
+        let data = Bytes::from(tokio::task::spawn_blocking(move || zstd::encode_all(&raw[..], level)).await??);
+        let key = snapshot_key(&db.id, offset);
+        let size = data.len() as u64;
+        self.objects.put(&key, data).await?;
+        self.bytes_put.fetch_add(size, Ordering::Relaxed);
+        self.objects_put.fetch_add(1, Ordering::Relaxed);
+        // The log up to the snapshot is in storage too, so the manifest stays consistent.
+        self.flush().await?;
+        let snap = SnapRef { key, offset, at_ms };
+        self.snapshotted(&db.id, snap.clone(), retain_ms);
+        self.write_manifest(&db.id).await?;
+        Ok(Some(snap))
+    }
+
+    async fn write_manifest(&self, db: &str) -> anyhow::Result<()> {
+        let m = {
+            let mut dbs = self.dbs.lock();
+            let Some(l) = dbs.get_mut(db) else { return Ok(()) };
+            l.dirty = false;
+            l.manifest.after_seq = self.last_seq();
+            l.manifest.clone()
+        };
+        self.objects.put(&manifest_key(db), Bytes::from(serde_json::to_vec(&m)?)).await
     }
 
     /// Record a snapshot. Snapshots older than `retain_ms` (but always the newest) are dropped
@@ -448,9 +576,9 @@ pub async fn read_manifest(objects: &Objects, id: &str) -> anyhow::Result<Option
 
 /// Load a database's latest state from object storage. Returns its manifest, with `end` set to
 /// the restored offset (a database without a manifest starts empty).
-pub async fn restore(objects: &Objects, db: &Arc<Database>, load_snapshot: Option<&SnapshotLoader>) -> anyhow::Result<Manifest> {
+pub async fn restore(objects: &Objects, db: &Arc<Database>, codec: Option<&dyn SnapshotCodec>) -> anyhow::Result<Manifest> {
     let id = db.id.clone();
-    restore_at(objects, &id, db, Until::LATEST, load_snapshot).await
+    restore_at(objects, &id, db, Until::LATEST, codec).await
 }
 
 /// Load the state of database `source` as of `until` into `db` (point-in-time restore when
@@ -458,11 +586,13 @@ pub async fn restore(objects: &Objects, db: &Arc<Database>, load_snapshot: Optio
 /// target allows, then log frames up to the target. Branches restore their parent's history up
 /// to the branch point first. Also scans the segments that the last owning node wrote after the
 /// manifest (crash recovery).
-pub async fn restore_at(objects: &Objects, source: &str, db: &Arc<Database>, until: Until, load_snapshot: Option<&SnapshotLoader>) -> anyhow::Result<Manifest> {
+pub async fn restore_at(objects: &Objects, source: &str, db: &Arc<Database>, until: Until, codec: Option<&dyn SnapshotCodec>) -> anyhow::Result<Manifest> {
     let mut st = Replay { applied: 0, dbsel: 0, last_ms: 0 };
-    let m = replay(objects, source, db, until, load_snapshot, &mut st).await?;
+    let mut m = match read_manifest(objects, source).await? {
+        Some(m) => replay(objects, source, m, db, until, codec, &mut st).await?,
+        None => Manifest::default(),
+    };
     db.set_offset(st.applied);
-    let mut m = m;
     m.end = st.applied;
     Ok(m)
 }
@@ -473,33 +603,38 @@ struct Replay {
     last_ms: i64,
 }
 
+/// Segments fetched ahead while replaying (cold-start latency is mostly GET round trips).
+const PREFETCH: usize = 8;
+
 fn replay<'a>(
     objects: &'a Objects,
     id: &'a str,
+    mut m: Manifest,
     db: &'a Arc<Database>,
     until: Until,
-    load_snapshot: Option<&'a SnapshotLoader>,
+    codec: Option<&'a dyn SnapshotCodec>,
     st: &'a mut Replay,
 ) -> futures::future::BoxFuture<'a, anyhow::Result<Manifest>> {
     Box::pin(async move {
-        let Some(mut m) = read_manifest(objects, id).await? else {
-            return Ok(Manifest::default());
-        };
         let stream = m.stream.clone().unwrap_or_else(|| id.to_string());
         let id = stream.as_str();
         if let Some(snap) = m.snapshots.iter().rev().find(|s| until.allows_snap(s)).cloned() {
-            let loader = load_snapshot.ok_or_else(|| anyhow::anyhow!("snapshot {} needs a snapshot loader", snap.key))?;
+            let codec = codec.ok_or_else(|| anyhow::anyhow!("snapshot {} needs a snapshot codec", snap.key))?;
             let data = objects.get(&snap.key).await?.ok_or_else(|| anyhow::anyhow!("snapshot {} is missing", snap.key))?;
             let data = tokio::task::spawn_blocking(move || zstd::decode_all(&data[..])).await??;
-            loader(db, &data)?;
+            codec.load(db, &data)?;
             st.applied = snap.offset;
             st.last_ms = snap.at_ms;
             st.dbsel = 0;
         } else if !m.snapshots.is_empty() {
             anyhow::bail!("{id}: the requested point is older than the retained history");
-        } else if let Some(base) = &m.base {
+        } else if let Some(base) = m.base.clone() {
             let lim = Until { offset: Some(until.offset.map_or(base.offset, |o| o.min(base.offset))), time_ms: until.time_ms };
-            replay(objects, &base.db, db, lim, load_snapshot, st).await?;
+            let parent = match base.history {
+                Some(h) => *h,
+                None => read_manifest(objects, &base.db).await?.unwrap_or_default(),
+            };
+            replay(objects, &base.db, parent, db, lim, codec, st).await?;
             if st.applied < base.offset && until.offset.is_none_or(|o| o >= base.offset) && until.time_ms.is_none() {
                 anyhow::bail!("{id}: parent {} history ends at {} before the branch point {}", base.db, st.applied, base.offset);
             }
@@ -516,20 +651,22 @@ fn replay<'a>(
             later.sort_unstable();
             segs.extend(later.into_iter().map(|seq| SegRef { node: node.clone(), seq, end: 0 }));
         }
-        let mut seen = std::collections::HashSet::new();
-        'segs: for seg in segs {
-            if !seen.insert((seg.node.clone(), seg.seq)) {
-                continue;
-            }
-            // Listed segments end before what's already applied: skip without fetching.
-            if seg.end != 0 && seg.end <= st.applied {
-                continue;
-            }
-            let key = segment_key(&seg.node, seg.seq);
-            let Some(data) = objects.get(&key).await? else {
-                anyhow::bail!("segment {key} is missing");
-            };
-            let raw = tokio::task::spawn_blocking(move || zstd::decode_all(&data[..])).await??;
+        let mut seen = HashSet::new();
+        // Listed segments that end before what's already applied are skipped without fetching.
+        let applied = st.applied;
+        segs.retain(|s| seen.insert((s.node.clone(), s.seq)) && (s.end == 0 || s.end > applied));
+        let mut fetched = futures::stream::iter(segs)
+            .map(|seg| async move {
+                let key = segment_key(&seg.node, seg.seq);
+                let Some(data) = objects.get(&key).await? else {
+                    anyhow::bail!("segment {key} is missing");
+                };
+                let raw = tokio::task::spawn_blocking(move || zstd::decode_all(&data[..])).await??;
+                anyhow::Ok((seg, key, raw))
+            })
+            .buffered(PREFETCH);
+        while let Some(r) = fetched.next().await {
+            let (seg, key, raw) = r?;
             let mut effects = Vec::new();
             let mut found = None;
             let mut stop = false;
@@ -558,12 +695,93 @@ fn replay<'a>(
                 db.engine(0).apply_all(&effects);
             }
             if stop {
-                break 'segs;
+                break;
             }
         }
         Ok(m)
     })
 }
 
-/// Loads a decompressed snapshot into a database.
-pub type SnapshotLoader = dyn Fn(&Arc<Database>, &[u8]) -> anyhow::Result<()> + Send + Sync;
+/// What a garbage collection pass did.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GcStats {
+    pub manifests: usize,
+    /// Unreferenced objects found this pass (deleted once they've stayed so for `min_age`).
+    pub unreferenced: usize,
+    pub deleted: usize,
+    pub deleted_bytes: u64,
+}
+
+const GC_STATE: &str = "redis/gc/pending.json";
+
+fn mark(m: &Manifest, keep: &mut HashSet<String>, after: &mut HashMap<String, u64>) {
+    keep.extend(m.snapshots.iter().map(|s| s.key.clone()));
+    keep.extend(m.segments.iter().map(|s| segment_key(&s.node, s.seq)));
+    if let Some(node) = &m.node {
+        let a = after.entry(node.clone()).or_insert(u64::MAX);
+        *a = (*a).min(m.after_seq);
+    }
+    if let Some(h) = m.base.as_ref().and_then(|b| b.history.as_deref()) {
+        mark(h, keep, after);
+    }
+}
+
+/// Delete segments and snapshots that no manifest references. Deletion is two-phase: an object
+/// must be found unreferenced by passes at least `min_age` apart, so references that appear
+/// while a pass runs (a branch being made, a manifest not yet rewritten) keep it. Run from one
+/// place per bucket, every `min_age` or so.
+pub async fn collect_garbage(objects: &Objects, min_age: Duration) -> anyhow::Result<GcStats> {
+    let now = redis_engine::util::now_ms();
+    // List candidates before reading manifests: whatever a manifest written after this refers
+    // to is either already listed and marked below, or new and not a candidate.
+    let mut candidates = objects.list("redis/seg/").await?;
+    candidates.extend(objects.list("redis/db/").await?.into_iter().filter(|(k, _)| k.contains("/snap/")));
+    let mut pending: HashMap<String, i64> = match objects.get(GC_STATE).await? {
+        Some(raw) => serde_json::from_slice(&raw).unwrap_or_default(),
+        None => HashMap::new(),
+    };
+    let mut st = GcStats::default();
+    let (mut keep, mut after) = (HashSet::new(), HashMap::new());
+    for (key, _) in objects.list("redis/db/").await? {
+        if !key.ends_with("/manifest.json") {
+            continue;
+        }
+        let Some(raw) = objects.get(&key).await? else { continue };
+        let m: Manifest = serde_json::from_slice(&raw).map_err(|e| anyhow::anyhow!("{key}: {e}"))?;
+        mark(&m, &mut keep, &mut after);
+        st.manifests += 1;
+    }
+    let live = |key: &str| {
+        keep.contains(key)
+            || key.strip_prefix("redis/seg/").and_then(|k| k.split_once('/')).is_some_and(|(node, _)| {
+                // Possibly newer frames of a database whose manifest is lazy (or crash recovery).
+                after.get(node).is_some_and(|a| seq_of(key).is_some_and(|s| s > *a))
+            })
+    };
+    let cutoff = now - min_age.as_millis() as i64;
+    let mut next = HashMap::new();
+    let mut doomed = Vec::new();
+    for (key, size) in candidates {
+        if live(&key) {
+            continue;
+        }
+        st.unreferenced += 1;
+        let since = pending.remove(&key).unwrap_or(now);
+        if since <= cutoff {
+            doomed.push((key, size));
+        } else {
+            next.insert(key, since);
+        }
+    }
+    let results = futures::stream::iter(doomed.into_iter().map(|(key, size)| async move { objects.delete(&key).await.map(|()| size) }))
+        .buffer_unordered(16)
+        .collect::<Vec<_>>()
+        .await;
+    for r in results {
+        let size = r?;
+        st.deleted += 1;
+        st.deleted_bytes += size;
+    }
+    objects.put(GC_STATE, Bytes::from(serde_json::to_vec(&next)?)).await?;
+    Ok(st)
+}

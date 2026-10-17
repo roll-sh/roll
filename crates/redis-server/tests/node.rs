@@ -22,7 +22,7 @@ async fn start(idle: Option<Duration>) -> (SocketAddr, Arc<Node>) {
     catalog.insert(spec("alpha", "pa"));
     catalog.insert(spec("beta", "pb"));
     catalog.insert(DbSpec { replica_of: Some("alpha".into()), ..spec("alpha-ro", "pr") });
-    let node = Node::new(catalog, Some(shipper), NodeConfig { idle_timeout: idle, domain: Some("redis.test".into()) });
+    let node = Node::new(catalog, Some(shipper), NodeConfig { idle_timeout: idle, domain: Some("redis.test".into()), ..Default::default() });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let dir: Arc<dyn Directory> = node.clone();

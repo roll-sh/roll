@@ -297,6 +297,9 @@ pub async fn wait_acks(backlog: &Backlog, offset: u64, n: usize, timeout: Durati
     }
 }
 
+/// Slowest storage poll of an idle primary (the most a quiet replica lags once writes resume).
+pub const MAX_TAIL_POLL: Duration = Duration::from_secs(5);
+
 /// The replica side: keeps a read-only database in sync with its primary.
 pub struct Follower {
     pub db: Arc<Database>,
@@ -306,10 +309,16 @@ pub struct Follower {
     /// Unix ms of the last applied data or ping from the primary.
     pub last_contact: AtomicU64,
     stop: Notify,
+    /// For resyncs from object storage, which can start from a snapshot.
+    codec: Option<Arc<dyn persist::SnapshotCodec>>,
 }
 
 impl Follower {
     pub fn new(db: Arc<Database>) -> Arc<Self> {
+        Self::with_codec(db, None)
+    }
+
+    pub fn with_codec(db: Arc<Database>, codec: Option<Arc<dyn persist::SnapshotCodec>>) -> Arc<Self> {
         for s in &db.shards {
             s.engine.lock().replica = true;
         }
@@ -320,6 +329,7 @@ impl Follower {
             connected: Default::default(),
             last_contact: AtomicU64::new(0),
             stop: Notify::new(),
+            codec,
         })
     }
 
@@ -379,7 +389,7 @@ impl Follower {
     /// Restore from object storage, discarding local state (the backlog no longer has our offset).
     async fn resync(&self, objects: &Objects, primary_db: &str) -> anyhow::Result<()> {
         let fresh = Database::new(primary_db, Default::default(), 1);
-        let m = persist::restore(objects, &fresh, None).await?;
+        let m = persist::restore(objects, &fresh, self.codec.as_deref()).await?;
         // Move the restored keyspace into our database.
         {
             let mut src = fresh.engine(0);
@@ -466,18 +476,23 @@ impl Follower {
 
     /// Follow a database through object storage only: poll for new log segments every
     /// `interval`. Lag is about the primary's flush interval plus `interval`.
+    /// Polls every `interval` while the primary writes, backing off to [`MAX_TAIL_POLL`] while
+    /// it is quiet (each poll is a GET and a LIST).
     pub async fn tail_storage(self: Arc<Self>, objects: Objects, primary_db: String, interval: Duration) {
         let mut seen: HashMap<(String, u64), ()> = HashMap::new();
         let mut dbsel = 0u16;
+        let mut wait = interval;
         loop {
             let stopped = self.stop.notified();
             tokio::select! {
                 _ = stopped => return,
-                _ = tokio::time::sleep(interval) => {}
+                _ = tokio::time::sleep(wait) => {}
             }
+            let before = self.applied();
             if let Err(e) = self.tail_once(&objects, &primary_db, &mut seen, &mut dbsel).await {
                 tracing::debug!(error = %e, "storage tail failed");
             }
+            wait = if self.applied() != before { interval } else { (wait * 2).min(MAX_TAIL_POLL.max(interval)) };
         }
     }
 
@@ -489,7 +504,9 @@ impl Follower {
             self.resync(objects, id).await?;
             return Ok(());
         }
-        let mut segs: Vec<(String, u64)> = m.segments.iter().map(|s| (s.node.clone(), s.seq)).collect();
+        let applied = self.applied();
+        // Listed segments that end before what's applied hold nothing new.
+        let mut segs: Vec<(String, u64)> = m.segments.iter().filter(|s| s.end > applied).map(|s| (s.node.clone(), s.seq)).collect();
         if let Some(node) = &m.node {
             let mut later: Vec<u64> = objects
                 .list(&format!("redis/seg/{node}/"))

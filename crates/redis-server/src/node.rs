@@ -6,6 +6,10 @@
 //!   Redis client or HTTP SDK works with a plain URL.
 //! - **Scale to zero.** A database with no connections for `idle_timeout` is flushed to object
 //!   storage and dropped from memory. The next AUTH (or HTTP request) restores it.
+//! - **Snapshots.** A database snapshots once its log since the last snapshot outgrows the
+//!   data (or spans many segments), and when it unloads with more than a few segments of log,
+//!   so loads replay little. Branches snapshot early, which also ends their dependency on the
+//!   parent's history.
 //! - **Catalog.** Which databases exist and their credentials come from a [`Catalog`]: the
 //!   control plane in production, a static map for local use.
 
@@ -36,6 +40,8 @@ pub struct DbSpec {
     pub sync_writes: bool,
     /// Unload after this long without clients (`None`: the node's default).
     pub idle_timeout: Option<Duration>,
+    /// Point-in-time restore window: older snapshots and log are dropped.
+    pub history_retention: Duration,
 }
 
 impl DbSpec {
@@ -48,6 +54,7 @@ impl DbSpec {
             replica_of: None,
             sync_writes: false,
             idle_timeout: None,
+            history_retention: Duration::from_secs(7 * 86_400),
         }
     }
 }
@@ -85,11 +92,31 @@ pub struct NodeConfig {
     pub idle_timeout: Option<Duration>,
     /// DNS suffix of database hostnames, for SNI routing (`redis.example.com`).
     pub domain: Option<String>,
+    pub snapshots: SnapshotPolicy,
 }
 
 impl Default for NodeConfig {
     fn default() -> Self {
-        Self { idle_timeout: Some(Duration::from_secs(300)), domain: None }
+        Self { idle_timeout: Some(Duration::from_secs(300)), domain: None, snapshots: SnapshotPolicy::default() }
+    }
+}
+
+/// When loaded databases snapshot (with a codec on the shipper).
+#[derive(Clone, Debug)]
+pub struct SnapshotPolicy {
+    /// Snapshot once the log since the last one exceeds both this and the data's size (a
+    /// snapshot costs about the data's size, so the log never costs more than twice it).
+    pub min_log_bytes: u64,
+    /// …or spans this many segments (each is a GET when loading).
+    pub max_segments: usize,
+    /// On unload, snapshot if the log spans more segments than this.
+    pub unload_segments: usize,
+    pub check_interval: Duration,
+}
+
+impl Default for SnapshotPolicy {
+    fn default() -> Self {
+        Self { min_log_bytes: 64 << 20, max_segments: 1000, unload_segments: 8, check_interval: Duration::from_secs(10) }
     }
 }
 
@@ -103,6 +130,7 @@ pub struct Node {
     dbs: Mutex<HashMap<String, Slot>>,
     followers: Mutex<HashMap<String, Arc<Follower>>>,
     idle_overrides: Mutex<HashMap<String, Duration>>,
+    retention: Mutex<HashMap<String, Duration>>,
     /// How often replicas poll object storage for new log segments.
     pub replica_poll: Duration,
     /// Serialises loads and unloads of the same database.
@@ -146,6 +174,7 @@ impl Node {
             dbs: Mutex::new(HashMap::new()),
             followers: Mutex::new(HashMap::new()),
             idle_overrides: Mutex::new(HashMap::new()),
+            retention: Mutex::new(HashMap::new()),
             replica_poll: Duration::from_millis(100),
             transitions: Mutex::new(HashMap::new()),
         });
@@ -164,7 +193,38 @@ impl Node {
                 }
             });
         }
+        if node.shipper.as_ref().is_some_and(|s| s.codec().is_some()) {
+            let weak = Arc::downgrade(&node);
+            let every = node.cfg.snapshots.check_interval;
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(every).await;
+                    let Some(node) = weak.upgrade() else { return };
+                    node.snapshot_due().await;
+                }
+            });
+        }
         node
+    }
+
+    /// Snapshot the loaded primaries whose log outgrew the policy, one at a time.
+    async fn snapshot_due(&self) {
+        let Some(shipper) = &self.shipper else { return };
+        let p = &self.cfg.snapshots;
+        for db in self.loaded() {
+            if self.followers.lock().contains_key(&db.id) || db.closed.load(Ordering::SeqCst) {
+                continue;
+            }
+            let Some(st) = shipper.log_stats(&db.id) else { continue };
+            let due = st.based || st.segments >= p.max_segments || st.bytes >= p.min_log_bytes.max(db.used_memory() as u64);
+            if due && let Err(e) = shipper.snapshot(&db, self.retention_ms(&db.id)).await {
+                tracing::warn!(db = db.id, error = %e, "snapshot failed");
+            }
+        }
+    }
+
+    fn retention_ms(&self, id: &str) -> i64 {
+        self.retention.lock().get(id).map_or(7 * 86_400_000, |d| d.as_millis() as i64)
     }
 
     fn transition_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -211,10 +271,11 @@ impl Node {
                     let db = Database::new(spec.id.clone(), spec.config.clone(), spec.shards);
                     db.sync_writes.store(spec.sync_writes, Ordering::Relaxed);
                     self.set_idle_timeout(&spec.id, spec.idle_timeout);
+                    self.retention.lock().insert(spec.id.clone(), spec.history_retention);
                     if let Some(primary) = &spec.replica_of {
                         let Some(shipper) = &self.shipper else { anyhow::bail!("replicas need object storage") };
-                        persist::restore_at(&shipper.objects, primary, &db, persist::Until::LATEST, None).await?;
-                        let f = Follower::new(db.clone());
+                        persist::restore_at(&shipper.objects, primary, &db, persist::Until::LATEST, shipper.codec().as_deref()).await?;
+                        let f = Follower::with_codec(db.clone(), shipper.codec());
                         tokio::spawn(f.clone().tail_storage(shipper.objects.clone(), primary.clone(), self.replica_poll));
                         self.followers.lock().insert(spec.id.clone(), f);
                         db.start_cron();
@@ -222,7 +283,7 @@ impl Node {
                     }
                     if let Some(shipper) = &self.shipper {
                         let started = std::time::Instant::now();
-                        let m = persist::restore(&shipper.objects, &db, None).await?;
+                        let m = persist::restore(&shipper.objects, &db, shipper.codec().as_deref()).await?;
                         shipper.attach(&db, m).await?;
                         tracing::info!(db = spec.id, keys = db.total_keys(), ms = started.elapsed().as_millis() as u64, "database loaded");
                     }
@@ -281,11 +342,23 @@ impl Node {
         if let Some(f) = follower {
             // Replicas have nothing to flush: they're rebuilt from the primary's log.
             f.stop();
-        } else if let Err(e) = shipper.detach(&db).await {
+        } else if let Err(e) = async {
+            // Nobody is waiting on the database now: a good time to make the next load cheap.
+            let st = shipper.log_stats(id).unwrap_or_default();
+            if (st.based || st.segments > self.cfg.snapshots.unload_segments)
+                && let Err(e) = shipper.snapshot(&db, self.retention_ms(id)).await
+            {
+                tracing::warn!(db = id, error = %e, "snapshot on unload failed");
+            }
+            shipper.detach(&db).await
+        }
+        .await
+        {
             db.closed.store(false, Ordering::SeqCst);
             return Err(e);
         }
         self.dbs.lock().remove(id);
+        self.retention.lock().remove(id);
         tracing::info!(db = id, "database unloaded");
         Ok(true)
     }
@@ -302,9 +375,14 @@ impl Node {
         shipper.flush().await?;
         shipper.write_manifests(false).await?;
         let scratch = Database::new(child, Config::default(), 1);
-        let m = persist::restore_at(&shipper.objects, parent, &scratch, until, None).await?;
+        let m = persist::restore_at(&shipper.objects, parent, &scratch, until, shipper.codec().as_deref()).await?;
         let manifest = persist::Manifest {
-            base: Some(persist::Base { db: parent.to_string(), offset: m.end, at_ms: until.time_ms.unwrap_or_else(redis_engine::util::now_ms) }),
+            base: Some(persist::Base {
+                db: parent.to_string(),
+                offset: m.end,
+                at_ms: until.time_ms.unwrap_or_else(redis_engine::util::now_ms),
+                history: Some(Box::new(persist::history(&m, parent, m.end))),
+            }),
             end: m.end,
             ..Default::default()
         };
@@ -333,9 +411,14 @@ impl Node {
         let raw = bytes::Bytes::from(serde_json::to_vec(&frozen)?);
         shipper.objects.put(&persist::manifest_key(&archive), raw).await?;
         let scratch = Database::new(&archive, Config::default(), 1);
-        let m = persist::restore_at(&shipper.objects, &archive, &scratch, until, None).await?;
+        let m = persist::restore_at(&shipper.objects, &archive, &scratch, until, shipper.codec().as_deref()).await?;
         let manifest = persist::Manifest {
-            base: Some(persist::Base { db: archive.clone(), offset: m.end, at_ms: until.time_ms.unwrap_or_else(redis_engine::util::now_ms) }),
+            base: Some(persist::Base {
+                db: archive.clone(),
+                offset: m.end,
+                at_ms: until.time_ms.unwrap_or_else(redis_engine::util::now_ms),
+                history: Some(Box::new(persist::history(&m, &archive, m.end))),
+            }),
             end: m.end,
             ..Default::default()
         };

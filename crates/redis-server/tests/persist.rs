@@ -143,7 +143,7 @@ async fn point_in_time_and_branches() {
     use redis_server::node::{Node, NodeConfig, StaticCatalog};
     let o = objects("pitr");
     let shipper = Shipper::start("n1", o.clone(), cfg()).await.unwrap();
-    let node = Node::new(Arc::new(StaticCatalog::default()), Some(shipper.clone()), NodeConfig { idle_timeout: None, domain: None });
+    let node = Node::new(Arc::new(StaticCatalog::default()), Some(shipper.clone()), NodeConfig { idle_timeout: None, domain: None, ..Default::default() });
     let db = Database::new("main", Config::default(), 1);
     shipper.attach(&db, Default::default()).await.unwrap();
     let mut c = Client::new(1);
@@ -190,4 +190,132 @@ async fn point_in_time_and_branches() {
     persist::restore_at(&o, "main", &past, Until::time(marks[1]), None).await.unwrap();
     assert_eq!(run(&past, &mut c2, "GET a"), Reply::bulk(b"2"));
     assert_eq!(node.branch("main", "dev", Until::LATEST).await.unwrap_err().to_string(), "database dev already exists");
+}
+
+/// Strings only: enough to test the snapshot pipeline without the RDB codec.
+struct StringCodec;
+
+impl persist::SnapshotCodec for StringCodec {
+    fn save(&self, engine: &redis_engine::Engine, out: &mut Vec<u8>) -> anyhow::Result<()> {
+        for (i, db) in engine.dbs.iter().enumerate() {
+            for (k, e) in db.keys.iter() {
+                let redis_engine::value::Value::Str(v) = &e.value else { anyhow::bail!("strings only") };
+                for part in [&(i as u32).to_be_bytes()[..], &(k.len() as u32).to_be_bytes(), k, &(v.len() as u32).to_be_bytes(), v, &e.expire.to_be_bytes()] {
+                    out.extend_from_slice(part);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn load(&self, db: &Arc<Database>, mut data: &[u8]) -> anyhow::Result<()> {
+        use bytes::Buf;
+        let mut eng = db.engine(0);
+        while data.has_remaining() {
+            let i = data.get_u32() as usize;
+            let n = data.get_u32() as usize;
+            let k = data.copy_to_bytes(n);
+            let n = data.get_u32() as usize;
+            let v = data.copy_to_bytes(n);
+            let mut entry = redis_engine::value::Entry::new(redis_engine::value::Value::str(&v), 0);
+            entry.expire = data.get_i64();
+            eng.dbs[i].insert_new(&k, entry);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn snapshots_retention_and_garbage_collection() {
+    use redis_server::node::{Node, NodeConfig, StaticCatalog};
+    let o = objects("gc");
+    let codec: Arc<dyn persist::SnapshotCodec> = Arc::new(StringCodec);
+    let shipper = Shipper::start("n1", o.clone(), ShipperConfig { codec: Some(codec.clone()), ..cfg() }).await.unwrap();
+    let node = Node::new(Arc::new(StaticCatalog::default()), Some(shipper.clone()), NodeConfig { idle_timeout: None, ..Default::default() });
+    let db = Database::new("main", Config::default(), 1);
+    shipper.attach(&db, Default::default()).await.unwrap();
+    let mut c = Client::new(1);
+    for i in 0..5 {
+        run(&db, &mut c, &format!("SET k{i} {i}"));
+        shipper.flush().await.unwrap();
+    }
+    assert_eq!(shipper.log_stats("main").unwrap(), persist::LogStats { bytes: db.repl_offset(), segments: 5, based: false });
+
+    // A branch made now must survive whatever the parent's retention drops later.
+    node.branch("main", "dev", Until::LATEST).await.unwrap();
+    run(&db, &mut c, "SET k0 changed");
+    run(&db, &mut c, "SET 2 1");
+    let s1 = shipper.snapshot(&db, 0).await.unwrap().unwrap();
+    assert_eq!(s1.offset, db.repl_offset());
+    assert_eq!(shipper.snapshot(&db, 0).await.unwrap(), None, "nothing changed since");
+    assert_eq!(shipper.log_stats("main").unwrap().segments, 0);
+    run(&db, &mut c, "SET after snap");
+    shipper.flush().await.unwrap();
+    // A newer snapshot with zero retention drops the first one from the manifest.
+    run(&db, &mut c, "SET k1 changed");
+    let s2 = shipper.snapshot(&db, 0).await.unwrap().unwrap();
+    let m = shipper.manifest("main").unwrap();
+    assert_eq!(m.snapshots, vec![s2.clone()]);
+    assert!(m.segments.is_empty() && m.base.is_none());
+
+    // Two-phase: the first pass only notes what's unreferenced.
+    let window = Duration::from_millis(100);
+    let first = persist::collect_garbage(&o, window).await.unwrap();
+    assert_eq!(first.deleted, 0);
+    assert!(first.unreferenced > 0);
+    tokio::time::sleep(window).await;
+    let second = persist::collect_garbage(&o, window).await.unwrap();
+    assert_eq!(second.deleted, first.unreferenced);
+    assert!(!o.exists(&s1.key).await.unwrap(), "the dropped snapshot is gone");
+    assert!(o.exists(&s2.key).await.unwrap());
+
+    // The parent loads from its snapshot plus nothing else…
+    let main2 = Database::new("main", Config::default(), 1);
+    persist::restore(&o, &main2, Some(&*codec)).await.unwrap();
+    let mut c2 = Client::new(2);
+    assert_eq!(run(&main2, &mut c2, "MGET k0 k1 after k4"), run(&db, &mut c, "MGET k0 k1 after k4"));
+    assert_eq!(main2.repl_offset(), db.repl_offset());
+    // …and the branch still has the history it was made from.
+    let dev = Database::new("dev", Config::default(), 1);
+    persist::restore(&o, &dev, Some(&*codec)).await.unwrap();
+    assert_eq!(run(&dev, &mut c2, "MGET k0 k1 after"), Reply::Array(vec![Reply::bulk(b"0"), Reply::bulk(b"1"), Reply::Nil]));
+    assert_eq!(dev.total_keys(), 5);
+
+    // Writes after a snapshot replay on top of it.
+    run(&db, &mut c, "SET k2 later");
+    shipper.detach(&db).await.unwrap();
+    let main3 = Database::new("main", Config::default(), 1);
+    persist::restore(&o, &main3, Some(&*codec)).await.unwrap();
+    assert_eq!(run(&main3, &mut c2, "GET k2"), Reply::bulk(b"later"));
+}
+
+#[tokio::test]
+async fn databases_snapshot_on_unload() {
+    use redis_server::node::{DbSpec, Node, NodeConfig, SnapshotPolicy, StaticCatalog};
+    let o = objects("unload-snap");
+    let codec: Arc<dyn persist::SnapshotCodec> = Arc::new(StringCodec);
+    let shipper = Shipper::start("n1", o.clone(), ShipperConfig { codec: Some(codec), ..cfg() }).await.unwrap();
+    let catalog = Arc::new(StaticCatalog::default());
+    catalog.insert(DbSpec::new("a", "pw"));
+    let snapshots = SnapshotPolicy { unload_segments: 2, ..Default::default() };
+    let node = Node::new(catalog, Some(shipper.clone()), NodeConfig { idle_timeout: None, snapshots, ..Default::default() });
+    let spec = DbSpec::new("a", "pw");
+    let db = node.open(&spec).await.unwrap();
+    let mut c = Client::new(1);
+    for i in 0..2 {
+        run(&db, &mut c, &format!("SET k{i} {i}"));
+        shipper.flush().await.unwrap();
+    }
+    assert!(node.unload("a").await.unwrap());
+    assert!(persist::read_manifest(&o, "a").await.unwrap().unwrap().snapshots.is_empty(), "2 segments: under the threshold");
+    let db = node.open(&spec).await.unwrap();
+    run(&db, &mut c, "SET k2 2");
+    shipper.flush().await.unwrap();
+    drop(db);
+    assert!(node.unload("a").await.unwrap());
+    let m = persist::read_manifest(&o, "a").await.unwrap().unwrap();
+    assert_eq!(m.snapshots.len(), 1);
+    assert!(m.segments.is_empty());
+    let db = node.open(&spec).await.unwrap();
+    assert_eq!(run(&db, &mut c, "MGET k0 k1 k2"), Reply::Array(vec![Reply::bulk(b"0"), Reply::bulk(b"1"), Reply::bulk(b"2")]));
 }
