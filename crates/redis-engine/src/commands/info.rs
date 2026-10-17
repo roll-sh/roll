@@ -571,7 +571,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
             "loading:0\r\nasync_loading:0\r\ncurrent_cow_peak:0\r\ncurrent_cow_size:0\r\ncurrent_cow_size_age:0\r\ncurrent_fork_perc:0.00\r\ncurrent_save_keys_processed:0\r\n\
              current_save_keys_total:{}\r\nrdb_changes_since_last_save:{}\r\nrdb_bgsave_in_progress:{}\r\nrdb_last_save_time:{}\r\nrdb_last_bgsave_status:ok\r\n\
              rdb_last_bgsave_time_sec:{}\r\nrdb_current_bgsave_time_sec:{}\r\nrdb_saves:{}\r\nrdb_saves_consecutive_failures:0\r\nrdb_last_cow_size:0\r\n\
-             rdb_last_load_keys_expired:0\r\nrdb_last_load_keys_loaded:0\r\naof_enabled:{}\r\naof_rewrite_in_progress:{}\r\naof_rewrite_scheduled:{}\r\n\
+             rdb_last_load_keys_expired:{}\r\nrdb_last_load_keys_loaded:{}\r\naof_enabled:{}\r\naof_rewrite_in_progress:{}\r\naof_rewrite_scheduled:{}\r\n\
              aof_last_rewrite_time_sec:{}\r\naof_current_rewrite_time_sec:{}\r\naof_last_bgrewrite_status:ok\r\naof_rewrites:{}\r\naof_rewrites_consecutive_failures:0\r\n\
              aof_last_write_status:ok\r\naof_last_cow_size:0\r\nbackup_in_progress:{}\r\nmodule_fork_in_progress:0\r\nmodule_fork_last_cow_size:0\r\n",
             p.child.as_ref().map_or(0, |c| c.keys),
@@ -581,6 +581,8 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
             p.rdb_last_time,
             p.current_time(ChildKind::Rdb, now_s),
             eng.stats.rdb_saves,
+            p.last_load.1,
+            p.last_load.0,
             aof as i32,
             p.in_progress(ChildKind::Aof) as i32,
             p.aof_rewrite_scheduled as i32,

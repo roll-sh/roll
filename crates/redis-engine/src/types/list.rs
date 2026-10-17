@@ -39,9 +39,29 @@ fn exceeds_limit(fill: i64, sz: usize, count: usize) -> bool {
     if sz_limit != usize::MAX { sz > sz_limit } else { sz > SIZE_SAFETY_LIMIT || count as u64 > count_limit }
 }
 
+/// How a list packs its nodes: `list-max-listpack-size`, and the element size from which an
+/// element gets a node of its own (DEBUG QUICKLIST-PACKED-THRESHOLD; 0 decides by the fill).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fill {
+    pub size: i64,
+    pub packed_threshold: usize,
+}
+
+impl From<i64> for Fill {
+    fn from(size: i64) -> Self {
+        Fill { size, packed_threshold: 0 }
+    }
+}
+
 /// Elements this big get a node of their own (a "plain" node in Redis).
-fn is_large(sz: usize, fill: i64) -> bool {
-    if fill >= 0 { sz > SIZE_SAFETY_LIMIT } else { sz > neg_fill_limit(fill) }
+fn is_large(sz: usize, fill: Fill) -> bool {
+    if fill.packed_threshold != 0 {
+        sz >= fill.packed_threshold
+    } else if fill.size >= 0 {
+        sz > SIZE_SAFETY_LIMIT
+    } else {
+        sz > neg_fill_limit(fill.size)
+    }
 }
 
 /// Bytes Redis' listpack spends on `v`: integer-looking strings are stored as integers.
@@ -461,7 +481,7 @@ enum Nodes {
     /// `listpack`: the whole list in one node.
     Pack(Node),
     /// `quicklist` with the fill it was created with (Redis keeps a quicklist's own fill).
-    Quick(VecDeque<Node>, i64),
+    Quick(VecDeque<Node>, Fill),
 }
 
 #[derive(Clone, Debug)]
@@ -482,17 +502,19 @@ type NodesIter<'a> = std::iter::Chain<std::slice::Iter<'a, Node>, std::slice::It
 
 impl List {
     /// Build a list the way SORT … STORE does: append everything, then pick the encoding.
-    pub fn from_items<I: IntoIterator<Item = T>, T: AsRef<[u8]>>(items: I, fill: i64) -> Self {
+    pub fn from_items<I: IntoIterator<Item = T>, T: AsRef<[u8]>>(items: I, fill: impl Into<Fill>) -> Self {
+        let fill = fill.into();
         let mut l = List { nodes: Nodes::Quick(VecDeque::new(), clamp_fill(fill)), len: 0, mem: 0 };
         for v in items {
             l.push_back(v.as_ref());
         }
-        l.convert_quicklist(fill, false);
+        l.convert_quicklist(fill.size, false);
         l
     }
 
     /// RDB load: an empty quicklist to fill with [`List::load_node`], then [`List::finish_load`].
-    pub fn new_quicklist(fill: i64) -> Self {
+    pub fn new_quicklist(fill: impl Into<Fill>) -> Self {
+        let fill = fill.into();
         List { nodes: Nodes::Quick(VecDeque::new(), clamp_fill(fill)), len: 0, mem: 0 }
     }
 
@@ -515,8 +537,8 @@ impl List {
     }
 
     /// RDB load done: a single small packed node becomes a listpack (`listTypeTryConversion`).
-    pub fn finish_load(&mut self, fill: i64) {
-        self.convert_quicklist(fill, false);
+    pub fn finish_load(&mut self, fill: impl Into<Fill>) {
+        self.convert_quicklist(fill.into().size, false);
     }
 
     /// RDB save: every node as (plain, elements), in order (a listpack is one packed node).
@@ -546,6 +568,14 @@ impl List {
 
     pub fn is_quicklist(&self) -> bool {
         matches!(self.nodes, Nodes::Quick(..))
+    }
+
+    /// DEBUG OBJECT of a quicklist: its fill and the nodes' listpack (or plain element) bytes.
+    pub fn quicklist_info(&self) -> Option<(i64, impl Iterator<Item = usize> + '_)> {
+        match &self.nodes {
+            Nodes::Quick(q, fill) => Some((fill.size, q.iter().map(|n| n.sz))),
+            Nodes::Pack(_) => None,
+        }
     }
 
     /// Number of nodes (1 for a listpack).
@@ -586,7 +616,7 @@ impl List {
         r
     }
 
-    fn quick(&mut self) -> (&mut VecDeque<Node>, i64) {
+    fn quick(&mut self) -> (&mut VecDeque<Node>, Fill) {
         match &mut self.nodes {
             Nodes::Quick(q, fill) => (q, *fill),
             Nodes::Pack(_) => unreachable!("quicklist operation on a listpack"),
@@ -668,9 +698,17 @@ impl List {
 
     /// Before adding `add_count` elements totalling `add_bytes`: convert a listpack that would
     /// outgrow `fill` (`list-max-listpack-size`) into a quicklist.
-    pub fn grow(&mut self, fill: i64, add_bytes: usize, add_count: usize) {
-        let Nodes::Pack(n) = &mut self.nodes else { return };
-        if !exceeds_limit(fill, n.sz + add_bytes, n.len() + add_count) {
+    /// A quicklist keeps its fill but follows the current packed threshold.
+    pub fn grow(&mut self, fill: impl Into<Fill>, add_bytes: usize, add_count: usize) {
+        let fill = fill.into();
+        let n = match &mut self.nodes {
+            Nodes::Pack(n) => n,
+            Nodes::Quick(_, f) => {
+                f.packed_threshold = fill.packed_threshold;
+                return;
+            }
+        };
+        if !exceeds_limit(fill.size, n.sz + add_bytes, n.len() + add_count) {
             return;
         }
         let n = std::mem::replace(n, Node::packed());
@@ -686,8 +724,8 @@ impl List {
     }
 
     /// After removing elements: back to a listpack once a single node is under half the limit.
-    pub fn shrink(&mut self, fill: i64) {
-        self.convert_quicklist(fill, true);
+    pub fn shrink(&mut self, fill: impl Into<Fill>) {
+        self.convert_quicklist(fill.into().size, true);
     }
 
     fn convert_quicklist(&mut self, fill: i64, shrinking: bool) {
@@ -711,17 +749,17 @@ impl List {
     // ---- quicklist node rules ----
 
     /// `_quicklistNodeAllowInsert`.
-    fn allow_insert(n: Option<&Node>, fill: i64, sz: usize) -> bool {
+    fn allow_insert(n: Option<&Node>, fill: Fill, sz: usize) -> bool {
         let Some(n) = n else { return false };
         if n.plain || is_large(sz, fill) {
             return false;
         }
-        !exceeds_limit(fill, n.sz + sz + SIZE_ESTIMATE_OVERHEAD, n.len() + 1)
+        !exceeds_limit(fill.size, n.sz + sz + SIZE_ESTIMATE_OVERHEAD, n.len() + 1)
     }
 
     /// `_quicklistNodeAllowMerge`.
-    fn allow_merge(a: &Node, b: &Node, fill: i64) -> bool {
-        !a.plain && !b.plain && !exceeds_limit(fill, a.sz + b.sz - LP_EMPTY, a.len() + b.len())
+    fn allow_merge(a: &Node, b: &Node, fill: Fill) -> bool {
+        !a.plain && !b.plain && !exceeds_limit(fill.size, a.sz + b.sz - LP_EMPTY, a.len() + b.len())
     }
 
     /// Merge node `i + 1` into node `i`.
@@ -1016,8 +1054,8 @@ impl List {
     }
 }
 
-fn clamp_fill(fill: i64) -> i64 {
-    fill.clamp(-5, 32767)
+fn clamp_fill(fill: Fill) -> Fill {
+    Fill { size: fill.size.clamp(-5, 32767), ..fill }
 }
 
 #[cfg(test)]
@@ -1119,6 +1157,31 @@ mod tests {
         // One node of 65 * 62 + 7 = 4037 bytes ≤ 4096.
         assert_eq!(l.encoding(), "listpack");
         check(&l);
+    }
+
+    #[test]
+    fn packed_threshold_makes_plain_nodes() {
+        let fill = Fill { size: -2, packed_threshold: 4 };
+        let mut l = List::default();
+        for v in ["a", "b", "c"] {
+            l.grow(fill, v.len(), 1);
+            l.push_back(v.as_bytes());
+        }
+        // A listpack takes anything; a quicklist follows the threshold.
+        assert_eq!(l.encoding(), "listpack");
+        let mut q = List::new_quicklist(fill);
+        for v in ["a", "bbbb", "c", "dd"] {
+            q.grow(fill, v.len(), 1);
+            q.push_back(v.as_bytes());
+        }
+        check(&q);
+        assert_eq!(q.quicklist_info().unwrap().1.collect::<Vec<_>>(), [10, 4, 14]);
+        // Lowered later, it applies to the next writes.
+        q.grow(Fill { packed_threshold: 2, ..fill }, 2, 1);
+        q.push_front(b"zz");
+        check(&q);
+        assert_eq!(q.nodes(), 4);
+        assert_eq!(items(&q), ["zz", "a", "bbbb", "c", "dd"]);
     }
 
     #[test]

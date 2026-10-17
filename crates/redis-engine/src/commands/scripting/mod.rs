@@ -388,6 +388,16 @@ impl Scripting {
 
     /// FUNCTION RESTORE (and snapshot load): add these libraries, all or none. Errors are the
     /// message without its code.
+    /// The EVAL scripts, by SHA1 (DEBUG SCRIPT LIST).
+    pub fn eval_scripts(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.scripts.iter().map(|(sha, s)| (sha.as_str(), &s.body[..]))
+    }
+
+    /// One EVAL script's body.
+    pub fn eval_script(&self, sha: &str) -> Option<&[u8]> {
+        self.scripts.get(sha).map(|s| &s.body[..])
+    }
+
     pub fn restore_libraries(&mut self, codes: &[Vec<u8>], policy: RestorePolicy) -> Result<(), String> {
         // Compiled apart first, so a bad payload changes nothing.
         let mut staged = Scripting::default();
@@ -545,7 +555,7 @@ impl Run {
                 return r;
             }
         };
-        if cmd.has(NOSCRIPT) {
+        if cmd.has(NOSCRIPT) && !self.cx().eng.debug.disable_deny_scripts {
             let name = Engine::resolve(args).map(|(_, n)| n).unwrap_or_default();
             return self.cx().eng.reject(&name, Reply::error("ERR This Redis command is not allowed from script"));
         }
@@ -1045,7 +1055,7 @@ fn function_restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         Some(p) if eq(p, "flush") => RestorePolicy::Flush,
         Some(_) => return Err(Error::new("ERR Wrong restore policy given, value should be either FLUSH, APPEND or REPLACE.")),
     };
-    let codes = crate::rdb::restore_functions(&args[2]).map_err(|e| match e {
+    let codes = crate::rdb::restore_functions(&args[2], cx.eng.debug.skip_checksum).map_err(|e| match e {
         crate::rdb::FunctionsPayloadError::Footer => Error::new("ERR DUMP payload version or checksum are wrong"),
         crate::rdb::FunctionsPayloadError::Message(m) => Error::msg(format!("ERR {m}")),
     })?;

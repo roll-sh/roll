@@ -721,7 +721,7 @@ impl Engine {
     /// (id, memory, evictable). Replicas aren't evictable, nor `CLIENT NO-EVICT` clients, whose
     /// memory counts as the cron last measured it (`cron`: measure now). Only normal and pub/sub
     /// clients count toward `maxmemory-clients`.
-    fn client_memory(&self, cron: bool) -> Vec<(u64, u64, bool)> {
+    pub(crate) fn client_memory(&self, cron: bool) -> Vec<(u64, u64, bool)> {
         self.clients
             .by_id
             .iter()
@@ -769,7 +769,10 @@ impl Engine {
                 continue;
             }
             e.stats.resize_query_buffer(idle);
-            let (shrunk, expanded) = e.stats.resize_reply_buffer(now_ms);
+            if !self.debug.reply_resizing {
+                continue;
+            }
+            let (shrunk, expanded) = e.stats.resize_reply_buffer(now_ms, self.debug.reply_peak_reset_ms);
             self.stats.reply_buffer_shrinks += shrunk as u64;
             self.stats.reply_buffer_expands += expanded as u64;
         }

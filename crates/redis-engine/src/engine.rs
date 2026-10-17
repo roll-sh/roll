@@ -270,6 +270,8 @@ pub struct Engine {
     pub metrics: crate::commands::info::Metrics,
     /// `total_error_replies` when the current command started or its last nested call ended.
     pub(crate) prev_errors: u64,
+    /// DEBUG's switches.
+    pub debug: crate::commands::debug::Switches,
 }
 
 /// The arguments as SLOWLOG and MONITOR show them: secrets replaced by `(redacted)`, like Redis'
@@ -366,6 +368,7 @@ impl Engine {
             startup_memory: 0,
             metrics: Default::default(),
             prev_errors: 0,
+            debug: Default::default(),
         };
         e.startup_memory = e.used_memory();
         e.peak_memory = e.startup_memory;
@@ -621,7 +624,7 @@ impl Engine {
         }
 
         if let Mode::Script { read_only } = mode {
-            if cmd.has(commands::NOSCRIPT) {
+            if cmd.has(commands::NOSCRIPT) && !self.debug.disable_deny_scripts {
                 return Outcome::Reply(self.reject(&full_name, Reply::error("ERR This Redis command is not allowed from script")));
             }
             // May-replicate commands count as writes here, so read-only scripts can't publish.
@@ -936,6 +939,9 @@ impl Engine {
 
     /// If `key` is logically expired, delete it (on a primary) and report true.
     pub(crate) fn expire_if_needed(&mut self, db: usize, key: &[u8], now: i64, mode: Mode) -> bool {
+        if self.debug.allow_access_expired {
+            return false;
+        }
         let Some(e) = self.dbs[db].keys.get(key) else { return false };
         if !e.expired(now) {
             // A hash whose registered field expiry is due: run its active field expiry now (Redis
@@ -1411,7 +1417,7 @@ impl Engine {
 
     /// One active-expiry pass (call ~`hz` times a second). Returns keys expired.
     pub fn active_expire(&mut self, budget_us: u64) -> usize {
-        if self.replica {
+        if self.replica || !self.debug.active_expire {
             return 0;
         }
         let now = now_ms();

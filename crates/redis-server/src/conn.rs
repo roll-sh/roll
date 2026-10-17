@@ -7,6 +7,7 @@ use crate::repl::psync;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use redis_engine::client::{ConnStats, ReplyBuf, ReplyMode};
 use redis_engine::commands::eq;
+use redis_engine::commands::replication::ServerAction;
 use redis_engine::{Client, Outcome, Reply, Sink};
 use redis_proto::{Limits, parse_request};
 use std::collections::VecDeque;
@@ -614,6 +615,13 @@ impl Conn<'_> {
                     let out = long_running(&args, || eng.call(client, &args));
                     let pushes = eng.take_after_reply();
                     actions.extend(eng.take_server_actions());
+                    if actions.iter().any(|a| matches!(a, ServerAction::Restart { .. })) {
+                        // Like a crashed or restarting server: no reply, nothing more runs.
+                        self.pending.clear();
+                        self.pending_bytes = 0;
+                        self.close_after = true;
+                        break;
+                    }
                     match out {
                         Outcome::Reply(r) => {
                             let quit = eq(&args[0], "quit");
@@ -636,8 +644,18 @@ impl Conn<'_> {
                     }
                 }
             }
+            let restart = actions.iter().find_map(|a| match a {
+                ServerAction::Restart { delay_ms } => Some(*delay_ms),
+                _ => None,
+            });
             if !actions.is_empty() {
                 self.server_actions(&db, actions);
+            }
+            if let Some(delay_ms) = restart {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                self.session = None;
+                self.dir.shutdown(db).await;
+                return;
             }
             self.stats.pending_input.store(self.pending_bytes, Ordering::Relaxed);
             // Like Redis before sleeping: replies may have grown clients past maxmemory-clients.
@@ -772,14 +790,27 @@ impl Conn<'_> {
     }
 
     /// Carry out what the engine asked for after a command (REPLICAOF).
-    fn server_actions(&mut self, db: &Arc<Database>, actions: Vec<redis_engine::commands::replication::ServerAction>) {
-        use redis_engine::commands::replication::ServerAction;
+    fn server_actions(&mut self, db: &Arc<Database>, actions: Vec<ServerAction>) {
         for action in actions {
+            match &action {
+                ServerAction::Restart { .. } => continue,
+                ServerAction::ChangeReplId => {
+                    *db.replid.lock() = crate::database::new_replid();
+                    *db.replid2.lock() = None;
+                    continue;
+                }
+                ServerAction::Replicate(args) => {
+                    db.publish_raw(&args.iter().map(|a| &a[..]).collect::<Vec<_>>());
+                    continue;
+                }
+                _ => {}
+            }
             let upstream = db.upstream.lock().clone();
             if let Some(f) = upstream.as_ref().and_then(|u| u.follower.upgrade()) {
                 match action {
                     ServerAction::NoOne => f.promote(),
                     ServerAction::ReplicaOf { .. } => f.stop(),
+                    _ => {}
                 }
             }
             match action {
@@ -798,6 +829,7 @@ impl Conn<'_> {
                     *db.upstream.lock() = Some(crate::database::Upstream { host: host.clone(), port, follower: Arc::downgrade(&f), user: true });
                     tokio::spawn(f.follow_redis(psync::MasterConf { host, port, user, pass, listening_port }));
                 }
+                _ => {}
             }
             // Replicas reconnect to learn the new history.
             db.replicas_reset.notify_waiters();
@@ -1088,11 +1120,12 @@ fn parse_timeout(b: &[u8]) -> Result<Duration, Reply> {
 
 /// Run `f` for `args`, letting the runtime move this worker's other tasks elsewhere first if the
 /// command can run for long (a script: until it ends or is killed from another connection, which
-/// must get scheduled meanwhile; MIGRATE: waits on the target over the network).
+/// must get scheduled meanwhile; MIGRATE: waits on the target over the network; DEBUG: SLEEP,
+/// RELOAD, POPULATE).
 pub(crate) fn long_running<R>(args: &[Bytes], f: impl FnOnce() -> R) -> R {
-    let script = [&b"eval"[..], b"evalsha", b"eval_ro", b"evalsha_ro", b"fcall", b"fcall_ro", b"migrate"].iter().any(|n| args[0].eq_ignore_ascii_case(n));
+    let long = [&b"eval"[..], b"evalsha", b"eval_ro", b"evalsha_ro", b"fcall", b"fcall_ro", b"migrate", b"debug"].iter().any(|n| args[0].eq_ignore_ascii_case(n));
     let multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
-    if script && multi_thread { tokio::task::block_in_place(f) } else { f() }
+    if long && multi_thread { tokio::task::block_in_place(f) } else { f() }
 }
 
 fn is_intercepted(args: &[Bytes], client: &Client) -> bool {

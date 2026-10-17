@@ -11,8 +11,9 @@
 //! !err CMD                both must be errors with the same code (ERR, WRONGTYPE…)
 //! !skip CMD               run on both, don't compare
 //! !mask a,b CMD           replace the values following the fields `a` and `b` (in maps and flat
-//!                         key/value arrays, at any depth, and `a=…` tokens in text replies such
-//!                         as CLIENT LIST) before comparing (timestamps, ids…)
+//!                         key/value arrays, at any depth, `a=…` tokens in text replies such
+//!                         as CLIENT LIST, and `a:…` words in status replies such as DEBUG
+//!                         OBJECT) before comparing (timestamps, ids…)
 //! !info a,b* INFO …       compare INFO's sections and field names; values only for fields `a`
 //!                         and those starting with `b` (`!info - …`: names only)
 //! !ids CMD                in the reply, integers and `id=`/`redir=` tokens equal to a
@@ -149,6 +150,15 @@ fn mask(r: &Reply, fields: &[String]) -> Reply {
         Reply::Bulk(b) | Reply::Verbatim(_, b) if b.contains(&b'=') => Reply::Bulk(map_tokens(b, |k, v| {
             if fields.iter().any(|f| f == k) { "*".to_string() } else { v.to_string() }
         })),
+        Reply::Status(st) if st.contains(':') => Reply::Status(
+            st.split(' ')
+                .map(|w| match w.split_once(':') {
+                    Some((k, _)) if fields.iter().any(|f| f == k) => format!("{k}:*"),
+                    _ => w.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
         other => other.clone(),
     }
 }
@@ -409,6 +419,10 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             }
             // Both closed the connection (e.g. its ACL user was deleted).
             (Err(_), Err(_)) => {}
+            // Redis replied with an error and closed while the request was still being written:
+            // whether the client sees the error or a broken pipe is a race in Redis too.
+            (Err(e), Ok(Some(Reply::Error(_))))
+                if matches!(e.kind(), std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset) => {}
             (a, b) => fails.push(format!("{fname}:{lineno}: {cmdline}\n    redis: {a:?}\n    roll:  {b:?} (no reply / connection error)")),
         }
         // Commands like SUBSCRIBE a b reply several times: drain extra frames pairwise.

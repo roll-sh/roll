@@ -66,6 +66,25 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
         !self.t1.is_empty()
     }
 
+    /// `dictGetStatsHt` for the main table and, while rehashing, the target table.
+    pub fn stats(&self, full: bool) -> Vec<DictStats> {
+        let target = chains(&self.t1).sum::<usize>();
+        let mut out = vec![DictStats::new(0, self.t0.len(), self.len - target, full.then(|| chains(&self.t0)))];
+        if self.is_rehashing() {
+            out.push(DictStats::new(1, self.t1.len(), target, full.then(|| chains(&self.t1))));
+        }
+        out
+    }
+
+    /// `dictTryExpand`: make room for `n` elements now (no-op while rehashing, or if fewer than
+    /// the elements already there).
+    pub fn expand(&mut self, n: usize) {
+        if self.is_rehashing() || self.len > n {
+            return;
+        }
+        self.start_resize(n.next_power_of_two().max(MIN_SIZE));
+    }
+
     /// Bytes used by the bucket arrays (nodes are accounted by the caller).
     pub fn table_bytes(&self) -> usize {
         (self.t0.capacity() + self.t1.capacity()) * std::mem::size_of::<Link<K, V>>()
@@ -489,6 +508,89 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
     }
 }
 
+/// Chain-length histogram slots (`DICT_STATS_VECTLEN`).
+const STATS_VECTLEN: usize = 50;
+
+/// One hash table's statistics (`dictStats`), as DEBUG HTSTATS prints them.
+#[derive(Clone, Debug)]
+pub struct DictStats {
+    pub htidx: u8,
+    pub size: usize,
+    pub used: usize,
+    pub buckets: usize,
+    pub max_chain: usize,
+    pub total_chain: usize,
+    pub chains: [usize; STATS_VECTLEN],
+}
+
+impl DictStats {
+    /// From each bucket's chain length (only with `full`).
+    pub fn new(htidx: u8, size: usize, used: usize, chains: Option<impl Iterator<Item = usize>>) -> Self {
+        let mut st = DictStats { htidx, size, used, buckets: 0, max_chain: 0, total_chain: 0, chains: [0; STATS_VECTLEN] };
+        for n in chains.into_iter().flatten() {
+            st.chains[n.min(STATS_VECTLEN - 1)] += 1;
+            if n > 0 {
+                st.buckets += 1;
+                st.max_chain = st.max_chain.max(n);
+                st.total_chain += n;
+            }
+        }
+        st
+    }
+
+    /// `dictCombineStats` (a kvstore's dicts summed).
+    pub fn combine(&mut self, o: &DictStats) {
+        self.buckets += o.buckets;
+        self.max_chain = self.max_chain.max(o.max_chain);
+        self.total_chain += o.total_chain;
+        self.size += o.size;
+        self.used += o.used;
+        for (a, b) in self.chains.iter_mut().zip(o.chains) {
+            *a += b;
+        }
+    }
+
+    /// `dictGetStatsMsg`.
+    pub fn msg(&self, full: bool) -> String {
+        use std::fmt::Write;
+        let name = if self.htidx == 0 { "main hash table" } else { "rehashing target" };
+        if self.used == 0 {
+            return format!("Hash table {} stats ({name}):\nNo stats available for empty dictionaries\n", self.htidx);
+        }
+        let mut s = format!("Hash table {} stats ({name}):\n table size: {}\n number of elements: {}\n", self.htidx, self.size, self.used);
+        if full {
+            // C divides in float and prints the result as a double.
+            let ratio = |a: usize, b: usize| (a as f32 / b as f32) as f64;
+            let _ = write!(
+                s,
+                " different slots: {}\n max chain length: {}\n avg chain length (counted): {:.2}\n avg chain length (computed): {:.2}\n Chain length distribution:\n",
+                self.buckets,
+                self.max_chain,
+                ratio(self.total_chain, self.buckets),
+                ratio(self.used, self.buckets)
+            );
+            for (i, &n) in self.chains[..STATS_VECTLEN - 1].iter().enumerate() {
+                if n != 0 {
+                    let _ = writeln!(s, "   {i}: {n} ({:.2}%)", ((n as f32 / self.size as f32) * 100.0) as f64);
+                }
+            }
+        }
+        s
+    }
+}
+
+/// Each bucket's chain length.
+fn chains<K, V>(t: &[Link<K, V>]) -> impl Iterator<Item = usize> + '_ {
+    t.iter().map(|b| {
+        let (mut n, mut cur) = (0, b.as_deref());
+        while let Some(node) = cur {
+            n += 1;
+            cur = node.next.as_deref();
+        }
+        n
+    })
+}
+
 fn empty_table<K, V>(n: usize) -> Vec<Link<K, V>> {
     let mut v = Vec::with_capacity(n);
     v.resize_with(n, || None);
@@ -565,6 +667,32 @@ impl<'a, K, V> Iterator for Iter<'a, K, V> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn stats_and_expand() {
+        let mut d: Dict<Vec<u8>, ()> = Dict::new();
+        d.expand(100);
+        assert_eq!(d.t0.len(), 128);
+        d.insert(b"a".to_vec(), ());
+        let st = d.stats(true);
+        assert_eq!((st.len(), st[0].size, st[0].used, st[0].buckets, st[0].max_chain), (1, 128, 1, 1, 1));
+        assert_eq!(
+            st[0].msg(true),
+            "Hash table 0 stats (main hash table):\n table size: 128\n number of elements: 1\n different slots: 1\n max chain length: 1\n \
+             avg chain length (counted): 1.00\n avg chain length (computed): 1.00\n Chain length distribution:\n   0: 127 (99.22%)\n   1: 1 (0.78%)\n"
+        );
+        assert_eq!(st[0].msg(false), "Hash table 0 stats (main hash table):\n table size: 128\n number of elements: 1\n");
+        // Smaller than the elements there, or the same size: nothing to do.
+        d.expand(0);
+        d.expand(65);
+        assert!(!d.is_rehashing());
+        d.expand(1000);
+        assert!(d.is_rehashing());
+        let st = d.stats(false);
+        assert_eq!((st[1].htidx, st[1].size, st[0].used + st[1].used), (1, 1024, 1));
+        let empty: Dict<Vec<u8>, ()> = Dict::new();
+        assert_eq!(empty.stats(false)[0].msg(false), "Hash table 0 stats (main hash table):\nNo stats available for empty dictionaries\n");
+    }
 
     fn key(i: usize) -> Vec<u8> {
         format!("key:{i}").into_bytes()

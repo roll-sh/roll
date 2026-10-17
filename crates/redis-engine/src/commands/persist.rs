@@ -106,6 +106,8 @@ pub struct Persist {
     pub aof_rewrites: u64,
     pub total_forks: u64,
     pub latest_fork_us: u64,
+    /// Keys loaded and expired keys skipped by the last load (`rdb_last_load_keys_*`).
+    pub last_load: (u64, u64),
 }
 
 impl Default for Persist {
@@ -122,6 +124,7 @@ impl Default for Persist {
             aof_rewrites: 0,
             total_forks: 0,
             latest_fork_us: 0,
+            last_load: (0, 0),
         }
     }
 }
@@ -146,6 +149,105 @@ impl Persist {
 }
 
 impl Engine {
+    /// The dataset as an RDB file, the bytes Redis' SAVE writes: aux fields, the function
+    /// libraries, the hash templates, then every database with expiries and each key's idle time
+    /// (LRU/LRM policies) or frequency counter (LFU policies).
+    pub fn write_rdb(&self, out: &mut Vec<u8>, now: i64) -> std::io::Result<()> {
+        use crate::config::Policy;
+        use crate::rdb::{Lru, RdbWriter};
+        let policy = self.cfg.maxmemory_policy;
+        let lfu = policy.is_lfu();
+        let idle = matches!(policy, Policy::AllKeysLru | Policy::VolatileLru | Policy::AllKeysLrm | Policy::VolatileLrm);
+        let ctime = (now / 1000).to_string();
+        let used = self.used_memory().to_string();
+        let aux = [
+            ("redis-ver", super::server::REDIS_VERSION),
+            ("redis-bits", "64"),
+            ("ctime", &ctime),
+            ("used-mem", &used),
+            ("aof-base", "0"),
+        ];
+        let mut w = RdbWriter::new(out, &aux, now)?;
+        for code in self.scripting.library_codes() {
+            w.function(&code)?;
+        }
+        w.templates(&self.hub.templates)?;
+        for (i, db) in self.dbs.iter().enumerate() {
+            if db.is_empty() {
+                continue;
+            }
+            w.begin_db(i, db.len() as u64, db.expires() as u64)?;
+            for (k, e) in db.keys.iter() {
+                if e.expired(now) {
+                    continue;
+                }
+                let lru = if lfu {
+                    Lru::Freq(self.lfu_counter(e, now).min(255) as u8)
+                } else if idle {
+                    Lru::Idle(Engine::idle_secs(e, now))
+                } else {
+                    Lru::None
+                };
+                w.entry(k, e, lru)?;
+            }
+        }
+        w.finish()?;
+        Ok(())
+    }
+
+    /// `rdbLoad` into the current dataset: the file is parsed first (a bad one changes nothing),
+    /// then its libraries are added and its keys inserted, tables sized by the file's RESIZEDB.
+    /// A primary skips keys that have expired. A key or library that exists already is an error
+    /// (after the libraries, part of the keys may be in), unless `merge` (`RDBFLAGS_ALLOW_DUP`):
+    /// then the file's version replaces it.
+    pub fn read_rdb(&mut self, data: &[u8], merge: bool, now: i64) -> Result<(), crate::rdb::RdbError> {
+        use crate::rdb::{LoadItem, RdbError};
+        let cfg = self.cfg.clone();
+        let reg = self.hub.templates.clone();
+        let (mut entries, mut functions, mut untemplate, mut sizes) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let keep_expired = self.replica;
+        crate::rdb::load_with(data, &cfg, Some(&reg), |it| {
+            match it {
+                LoadItem::Function(code) => functions.push(code),
+                LoadItem::Entry { db, key, entry } => entries.push((db, key, entry)),
+                LoadItem::Untemplate { db, key } => untemplate.push((db, key)),
+                LoadItem::ResizeDb { db, keys, expires } => sizes.push((db, keys, expires)),
+                _ => {}
+            }
+            Ok::<(), RdbError>(())
+        })?;
+        let policy = if merge { super::scripting::RestorePolicy::Replace } else { super::scripting::RestorePolicy::Append };
+        self.scripting.restore_libraries(&functions, policy).map_err(|_| RdbError::Corrupt("function library already exists"))?;
+        for (i, keys, expires) in sizes {
+            if let Some(d) = self.dbs.get_mut(i) {
+                d.keys.expand(keys as usize);
+                d.volatile.expand(expires as usize);
+            }
+        }
+        let (mut loaded, mut expired) = (0, 0);
+        for (i, key, entry) in entries {
+            if !keep_expired && entry.expired(now) {
+                expired += 1;
+                continue;
+            }
+            let d = &mut self.dbs[i];
+            if d.keys.contains_key(&key[..]) {
+                if !merge {
+                    return Err(RdbError::Corrupt("duplicate key"));
+                }
+                d.remove(&key);
+            }
+            d.insert_new(&key, entry);
+            loaded += 1;
+        }
+        let lim = crate::types::hash::Limits::of(&cfg);
+        for (i, key) in untemplate {
+            self.dbs[i].untemplate(&key, lim);
+        }
+        self.persist.last_load = (loaded, expired);
+        Ok(())
+    }
+
     fn fork(&mut self, kind: ChildKind, now_ms: i64) {
         let started = std::time::Instant::now();
         let keys: u64 = self.dbs.iter().map(|d| d.len() as u64).sum();

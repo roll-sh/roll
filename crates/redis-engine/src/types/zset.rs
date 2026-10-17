@@ -699,6 +699,29 @@ impl SkipList {
         !self.t1.is_empty()
     }
 
+    /// The member index as `dictGetStats` sees it.
+    fn index_stats(&self, full: bool) -> Vec<crate::dict::DictStats> {
+        let chains = |t: &[u32]| {
+            t.iter()
+                .map(|&b| {
+                    let (mut n, mut c) = (0, b);
+                    while c != NIL {
+                        n += 1;
+                        c = self.node(c).hnext;
+                    }
+                    n
+                })
+                .collect::<Vec<usize>>()
+        };
+        let target: usize = chains(&self.t1).iter().sum();
+        let stats = |htidx, t: &[u32], used| crate::dict::DictStats::new(htidx, t.len(), used, full.then(|| chains(t).into_iter()));
+        let mut out = vec![stats(0, &self.t0, self.len - target)];
+        if !self.t1.is_empty() {
+            out.push(stats(1, &self.t1, target));
+        }
+        out
+    }
+
     fn find(&self, ele: &[u8]) -> u32 {
         if self.len == 0 {
             return NIL;
@@ -1049,6 +1072,14 @@ impl ZSet {
         match &self.enc {
             Enc::Pack(p) => p.mem(),
             Enc::Skip(s) => std::mem::size_of::<SkipList>() + s.mem(),
+        }
+    }
+
+    /// DEBUG HTSTATS-KEY: the member index's statistics (`None` for a listpack).
+    pub fn dict_stats(&self, full: bool) -> Option<Vec<crate::dict::DictStats>> {
+        match &self.enc {
+            Enc::Skip(s) => Some(s.index_stats(full)),
+            Enc::Pack(_) => None,
         }
     }
 

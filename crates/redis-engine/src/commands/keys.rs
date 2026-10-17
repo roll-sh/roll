@@ -507,7 +507,7 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let now = cx.now;
     let reg = cx.eng.hub.templates.clone();
-    let value = match crate::rdb::restore_with(&args[3], cx.cfg(), &reg, now) {
+    let value = match crate::rdb::restore_with(&args[3], cx.cfg(), &reg, now, cx.eng.debug.skip_checksum) {
         Ok(v) => v,
         Err(crate::rdb::RdbError::Version(_) | crate::rdb::RdbError::Checksum) => {
             return Err(Error::new("ERR DUMP payload version or checksum are wrong"));

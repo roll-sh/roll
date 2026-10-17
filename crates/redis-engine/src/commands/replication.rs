@@ -99,6 +99,13 @@ pub enum ServerAction {
     ReplicaOf { host: String, port: u16 },
     /// Stop following and become writable.
     NoOne,
+    /// DEBUG RESTART / CRASH-AND-RECOVER and the crash subcommands: restart the database after
+    /// `delay_ms` (its clients are disconnected, the command gets no reply).
+    Restart { delay_ms: u64 },
+    /// DEBUG CHANGE-REPL-ID: a new replication ID, and no previous one.
+    ChangeReplId,
+    /// DEBUG REPLICATE: send these arguments to the replicas as a command.
+    Replicate(Vec<Bytes>),
 }
 
 /// REPLCONF run by the engine (inside MULTI/EXEC): validated, with nothing to remember.

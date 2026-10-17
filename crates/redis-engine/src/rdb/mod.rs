@@ -150,6 +150,14 @@ pub fn dump(value: &Value, now_ms: i64) -> Vec<u8> {
     out
 }
 
+/// `rdbSavedObjectLen` (DEBUG OBJECT's `serializedlength`): the value's bytes in an RDB file,
+/// without its type byte.
+pub fn saved_len(value: &Value, now_ms: i64) -> usize {
+    let mut e = encode::Encoder::new(now_ms);
+    e.body(value);
+    e.out.len()
+}
+
 /// `RESTORE`: deserialize a [`dump`] payload (or one from any Redis up to RDB 15), choosing
 /// encodings by `cfg`. [`RdbError::Version`] and [`RdbError::Checksum`] report a bad footer.
 pub fn restore(payload: &[u8], cfg: &Config) -> Result<Value, RdbError> {
@@ -158,12 +166,13 @@ pub fn restore(payload: &[u8], cfg: &Config) -> Result<Value, RdbError> {
 
 /// [`restore`] at a given time (which IDMP entries of a stream have expired).
 pub fn restore_at(payload: &[u8], cfg: &Config, now_ms: i64) -> Result<Value, RdbError> {
-    restore_with(payload, cfg, &Registry::new(), now_ms)
+    restore_with(payload, cfg, &Registry::new(), now_ms, false)
 }
 
-/// [`restore_at`] with template hashes using `reg`.
-pub fn restore_with(payload: &[u8], cfg: &Config, reg: &Arc<Registry>, now_ms: i64) -> Result<Value, RdbError> {
-    verify_payload(payload)?;
+/// [`restore_at`] with template hashes using `reg`; `skip_crc` trusts the checksum (DEBUG
+/// SET-SKIP-CHECKSUM-VALIDATION).
+pub fn restore_with(payload: &[u8], cfg: &Config, reg: &Arc<Registry>, now_ms: i64, skip_crc: bool) -> Result<Value, RdbError> {
+    verify_payload(payload, skip_crc)?;
     // Like Redis, the object is read from the whole buffer: one that overruns into the footer
     // is not rejected.
     let mut d = Dec::new(SliceSrc::new(payload), cfg, now_ms, RDB_VERSION);
@@ -199,8 +208,8 @@ pub enum FunctionsPayloadError {
 }
 
 /// `FUNCTION RESTORE`: the library sources of a [`dump_functions`] payload.
-pub fn restore_functions(payload: &[u8]) -> Result<Vec<Vec<u8>>, FunctionsPayloadError> {
-    verify_payload(payload).map_err(|_| FunctionsPayloadError::Footer)?;
+pub fn restore_functions(payload: &[u8], skip_crc: bool) -> Result<Vec<Vec<u8>>, FunctionsPayloadError> {
+    verify_payload(payload, skip_crc).map_err(|_| FunctionsPayloadError::Footer)?;
     let cfg = Config::default();
     // Like Redis, records are read from the whole buffer (a string may overrun into the footer)
     // until only the footer is left.
@@ -221,7 +230,7 @@ pub fn restore_functions(payload: &[u8]) -> Result<Vec<Vec<u8>>, FunctionsPayloa
 }
 
 /// `verifyDumpPayload`: check the footer. Too short to have one counts as a checksum failure.
-fn verify_payload(p: &[u8]) -> Result<(), RdbError> {
+fn verify_payload(p: &[u8], skip_crc: bool) -> Result<(), RdbError> {
     if p.len() < 10 {
         return Err(RdbError::Checksum);
     }
@@ -231,7 +240,7 @@ fn verify_payload(p: &[u8]) -> Result<(), RdbError> {
         return Err(RdbError::Version(ver));
     }
     let crc = u64::from_le_bytes(footer[2..].try_into().unwrap());
-    if crc != 0 && crc != crc64(0, &p[..p.len() - 8]) {
+    if !skip_crc && crc != 0 && crc != crc64(0, &p[..p.len() - 8]) {
         return Err(RdbError::Checksum);
     }
     Ok(())

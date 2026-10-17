@@ -5,7 +5,6 @@
 use super::*;
 use crate::client::ReplyMode;
 use crate::util::now_us;
-use crate::value::Value;
 use crate::{cmd, container};
 
 /// The Redis version we are compatible with (reported by INFO and HELLO).
@@ -57,7 +56,7 @@ pub static COMMANDS: &[Command] = &[
     container!("module", 0, Server, MODULE),
     // Redis declares BACKUP with arity 2 (every subcommand takes no argument).
     Command { arity: 2, ..container!("backup", 0, Server, BACKUP) },
-    cmd!("debug", -2, ADMIN | NOSCRIPT | LOADING | STALE | DANGEROUS, 0, 0, 0, debug, Server),
+    cmd!("debug", -2, ADMIN | NOSCRIPT | LOADING | STALE | DANGEROUS, 0, 0, 0, super::debug::debug, Server),
 ];
 
 /// Cluster mode is disabled (as on a standalone Redis): every subcommand answers so.
@@ -864,65 +863,5 @@ pub fn module_denied(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
 
 pub fn module_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     Ok(help(&["MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:", "LIST", "HELP"]))
-}
-
-/// DEBUG: the subset tests and tools rely on.
-pub fn debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    if !protected_allowed(cx.cfg().enable_debug_command, cx.client) {
-        return Err(Error::new("ERR DEBUG command not allowed. If the enable-debug-command option is set to \"local\", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server."));
-    }
-    let sub = &args[1];
-    if eq(sub, "help") {
-        return Ok(help(&["DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:", "OBJECT <key>", "SLEEP <seconds>", "SET-ACTIVE-EXPIRE <0|1>", "PROTOCOL <type>", "JMAP", "HELP"]));
-    }
-    if eq(sub, "object") && args.len() == 3 {
-        let Some(e) = cx.peek(&args[2]) else { return Err(NO_KEY) };
-        let ser = e.value.mem();
-        let extra = match &e.value {
-            Value::List(l) => format!(" ql_nodes:1 ql_avg_node:{:.2} ql_listpack_max:-2 ql_compressed:0 ql_uncompressed_size:{}", l.len() as f64, ser),
-            _ => String::new(),
-        };
-        return Ok(Reply::status(format!(
-            "Value at:0x0 refcount:1 encoding:{} serializedlength:{} lru:{} lru_seconds_idle:0{}",
-            e.value.encoding(),
-            ser.max(1),
-            e.lru & crate::engine::LRU_CLOCK_MAX,
-            extra
-        )));
-    }
-    if eq(sub, "sleep") && args.len() == 3 {
-        let secs = float(&args[2])?;
-        std::thread::sleep(std::time::Duration::from_secs_f64(secs.clamp(0.0, 10.0)));
-        return Ok(Reply::Ok);
-    }
-    if eq(sub, "set-active-expire") || eq(sub, "quicklist-packed-threshold") || eq(sub, "set-skip-checksum-validation") || eq(sub, "replybuffer") {
-        return Ok(Reply::Ok);
-    }
-    if eq(sub, "jmap") || eq(sub, "log") {
-        return Ok(Reply::Ok);
-    }
-    if eq(sub, "change-repl-id") {
-        return Ok(Reply::Ok);
-    }
-    if eq(sub, "protocol") && args.len() == 3 {
-        let t = String::from_utf8_lossy(&args[2]).to_lowercase();
-        return Ok(match t.as_str() {
-            "string" => Reply::bulk("Hello World"),
-            "integer" => Reply::Int(12345),
-            "double" => Reply::Double("3.141".parse().unwrap()),
-            "bignum" => Reply::BigNum("1234567999999999999999999999999999999".into()),
-            "null" => Reply::Nil,
-            "array" => Reply::Array((0..3).map(Reply::Int).collect()),
-            "set" => Reply::Set((0..3).map(Reply::Int).collect()),
-            "map" => Reply::Map((0..3).map(|i| (Reply::Int(i), Reply::Bool(i == 1))).collect()),
-            "attrib" => Reply::bulk("Some real reply following the attribute"),
-            "push" => Reply::Push(vec![Reply::bulk("server-cpu-usage"), Reply::Int(42)]),
-            "true" => Reply::Bool(true),
-            "false" => Reply::Bool(false),
-            "verbatim" => Reply::Verbatim("txt", Bytes::from_static(b"This is a verbatim\nstring")),
-            _ => return Err(Error::new("ERR Wrong protocol type name. Please use one of the following: string|integer|double|bignum|null|array|set|map|attrib|push|verbatim|true|false")),
-        });
-    }
-    Err(Error::msg(format!("ERR unknown subcommand '{}'. Try DEBUG HELP.", String::from_utf8_lossy(sub))))
 }
 

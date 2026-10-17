@@ -8,6 +8,7 @@ use super::*;
 use crate::cmd;
 use crate::engine::Mode;
 use crate::notify;
+use crate::types::list::Fill;
 use crate::util::{fmt_i64, parse_i64};
 use crate::value::{Kind, Str, Value};
 
@@ -80,8 +81,8 @@ fn long_in(a: &[u8], min: i64, max: i64, msg: Option<&'static str>) -> Result<i6
     Ok(v)
 }
 
-fn fill(cx: &Cx) -> i64 {
-    cx.cfg().list_max_listpack_size
+fn fill(cx: &Cx) -> Fill {
+    Fill { size: cx.cfg().list_max_listpack_size, packed_threshold: cx.eng.debug.packed_threshold }
 }
 
 /// Length of the list at `key`: `None` if missing, WRONGTYPE for another type. No LRU touch.

@@ -455,6 +455,10 @@ impl Database {
                     // A busy script holds the engine: skip the tick rather than tie up a worker
                     // that SCRIPT KILL may need.
                     let Some(mut eng) = db.engine_unless_busy(i) else { continue };
+                    // DEBUG PAUSE-CRON.
+                    if eng.debug.pause_cron {
+                        continue;
+                    }
                     let hz = eng.cfg.hz.max(1) as u64;
                     // Redis' slow cycle: 25% of each tick's CPU time at most.
                     let started = std::time::Instant::now();

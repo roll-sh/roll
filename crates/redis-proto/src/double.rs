@@ -20,6 +20,20 @@ pub fn fmt_double(d: f64) -> String {
     fpconv(d)
 }
 
+/// `fpconv_dtoa` itself, without `d2string`'s integer form (DEBUG DIGEST's scores).
+pub fn fpconv_dtoa(d: f64) -> String {
+    let sign = if d.is_sign_negative() { "-" } else { "" };
+    if d == 0.0 {
+        format!("{sign}0")
+    } else if d.is_nan() {
+        format!("{sign}nan")
+    } else if d.is_infinite() {
+        format!("{sign}inf")
+    } else {
+        fpconv(d)
+    }
+}
+
 /// fpconv_dtoa: Grisu2 digits (not always the shortest or closest, so they're generated exactly
 /// as the reference does), then the `emit_digits` layout.
 fn fpconv(d: f64) -> String {

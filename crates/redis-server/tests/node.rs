@@ -22,12 +22,54 @@ async fn start(idle: Option<Duration>) -> (SocketAddr, Arc<Node>) {
     catalog.insert(spec("alpha", "pa"));
     catalog.insert(spec("beta", "pb"));
     catalog.insert(DbSpec { replica_of: Some("alpha".into()), ..spec("alpha-ro", "pr") });
+    let mut dbg = spec("dbg", "pd");
+    dbg.config.enable_debug_command = redis_engine::config::PROTECTED_YES;
+    catalog.insert(dbg);
     let node = Node::new(catalog, Some(shipper), NodeConfig { idle_timeout: idle, domain: Some("redis.test".into()), ..Default::default() });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let dir: Arc<dyn Directory> = node.clone();
     tokio::spawn(serve_tcp(listener, dir));
     (addr, node)
+}
+
+/// DEBUG's crash and restart subcommands restart the database like SHUTDOWN: no reply, every
+/// connection closed, the data kept. DEBUG RELOAD with a key already there (NOFLUSH) is a crash.
+#[tokio::test]
+async fn debug_crashes_restart_the_database() {
+    let (addr, node) = start(None).await;
+    let connect = || async {
+        let mut c = RespClient::connect(addr).await.unwrap();
+        assert_eq!(c.cmd(["AUTH", "dbg_pd"]).await.unwrap(), Reply::Ok);
+        c
+    };
+    for crash in [&["DEBUG", "SEGFAULT"][..], &["DEBUG", "PANIC"], &["DEBUG", "ASSERT"], &["DEBUG", "OOM"], &["DEBUG", "RESTART"], &["DEBUG", "CRASH-AND-RECOVER", "10"], &["DEBUG", "RELOAD", "NOFLUSH"]] {
+        let mut c = connect().await;
+        let mut other = connect().await;
+        assert_eq!(c.cmd(["SET", "k", "v"]).await.unwrap(), Reply::Ok);
+        assert_eq!(c.cmd(["CONFIG", "SET", "maxmemory-samples", "7"]).await.unwrap(), Reply::Ok);
+        // Nothing after the crash runs.
+        c.send(crash).await.unwrap();
+        c.send(["SET", "after", "1"]).await.unwrap();
+        assert!(c.read().await.is_err(), "{crash:?}");
+        assert!(other.cmd(["PING"]).await.is_err(), "{crash:?}");
+        assert!(node.get_loaded("dbg").is_none(), "{crash:?}");
+        let mut c = connect().await;
+        assert_eq!(c.cmd(["GET", "k"]).await.unwrap(), Reply::bulk(b"v"), "{crash:?}");
+        assert_eq!(c.cmd(["EXISTS", "after"]).await.unwrap(), Reply::Int(0), "{crash:?}");
+        assert_eq!(c.cmd(["CONFIG", "GET", "maxmemory-samples"]).await.unwrap(), Reply::Array(vec![Reply::bulk(b"maxmemory-samples"), Reply::bulk(b"5")]));
+    }
+    // Inside MULTI too: no EXEC reply.
+    let mut c = connect().await;
+    for cmd in [&["MULTI"][..], &["SET", "m", "1"], &["DEBUG", "PANIC"]] {
+        c.cmd(cmd).await.unwrap();
+    }
+    assert!(c.cmd(["EXEC"]).await.is_err());
+    // Without enable-debug-command, nothing happens.
+    let mut a = RespClient::connect(addr).await.unwrap();
+    assert_eq!(a.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
+    assert!(matches!(a.cmd(["DEBUG", "SEGFAULT"]).await.unwrap(), Reply::Error(e) if e.starts_with("ERR DEBUG command not allowed")));
+    assert_eq!(a.cmd(["PING"]).await.unwrap(), Reply::Status("PONG".into()));
 }
 
 #[test]

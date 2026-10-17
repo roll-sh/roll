@@ -384,6 +384,14 @@ impl Hash {
         }
     }
 
+    /// DEBUG HTSTATS-KEY: the hashtable's statistics (`None` unless hashtable-encoded).
+    pub fn dict_stats(&self, full: bool) -> Option<Vec<crate::dict::DictStats>> {
+        match &self.enc {
+            Enc::Table(t) => Some(t.map.stats(full)),
+            _ => None,
+        }
+    }
+
     pub fn encoding(&self) -> &'static str {
         match &self.enc {
             Enc::Pack(_) => "listpack",

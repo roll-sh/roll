@@ -7,6 +7,7 @@
 pub mod acl;
 pub mod arrays;
 pub mod bitmaps;
+pub mod debug;
 pub mod geo;
 pub mod hashes;
 pub mod hll;

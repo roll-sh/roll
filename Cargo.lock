@@ -1757,6 +1757,7 @@ dependencies = [
  "sha1",
  "sha2",
  "smallvec",
+ "tracing",
  "xxhash-rust",
 ]
 

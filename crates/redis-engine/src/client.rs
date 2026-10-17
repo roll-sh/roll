@@ -316,10 +316,9 @@ impl ConnStats {
     /// `clientsCronResizeOutputBuffer`: shrink the static reply buffer to its peak use when that
     /// stayed under half of it, double it when the peak filled it (up to 16KB), and reset the
     /// peak every 5 seconds. Returns (shrunk, expanded).
-    pub fn resize_reply_buffer(&self, now_ms: i64) -> (bool, bool) {
+    pub fn resize_reply_buffer(&self, now_ms: i64, peak_reset_ms: i64) -> (bool, bool) {
         use std::sync::atomic::Ordering::Relaxed;
         const MIN: u64 = 1024;
-        const PEAK_RESET_MS: i64 = 5000;
         let fresh = self.rbs.load(Relaxed) == 0;
         let size = self.reply_buffer_size();
         // A new client's peak is its whole buffer.
@@ -333,7 +332,7 @@ impl ConnStats {
             new = (REPLY_CHUNK as u64).min(size * 2);
             expanded = true;
         }
-        if now_ms - self.rbp_reset_ms.load(Relaxed) >= PEAK_RESET_MS {
+        if peak_reset_ms >= 0 && now_ms - self.rbp_reset_ms.load(Relaxed) >= peak_reset_ms {
             self.rbp.store(self.obl.load(Relaxed), Relaxed);
             self.rbp_reset_ms.store(now_ms, Relaxed);
         }
@@ -409,15 +408,15 @@ mod reply_buf_tests {
     fn reply_buffer_shrinks_when_idle_and_grows_back() {
         let s = ConnStats::default();
         // First pass: a new client's peak is its whole buffer; the peak resets.
-        assert_eq!(s.resize_reply_buffer(10_000), (false, false));
+        assert_eq!(s.resize_reply_buffer(10_000, 5000), (false, false));
         assert_eq!((s.reply_buffer_size(), s.rbp.load(std::sync::atomic::Ordering::Relaxed)), (16384, 0));
-        assert_eq!(s.resize_reply_buffer(10_100), (true, false));
+        assert_eq!(s.resize_reply_buffer(10_100, 5000), (true, false));
         assert_eq!(s.reply_buffer_size(), 1024);
         // A reply filling it doubles it on the next pass.
         let mut b = ReplyBuf::default();
         b.append(3000, &s);
         assert_eq!(b.mem(), jemalloc_size(16384 + 24) as u64 - 24);
-        assert_eq!(s.resize_reply_buffer(10_200), (false, true));
+        assert_eq!(s.resize_reply_buffer(10_200, 5000), (false, true));
         assert_eq!(s.reply_buffer_size(), 2048);
     }
 }
