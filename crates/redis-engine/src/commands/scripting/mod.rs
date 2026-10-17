@@ -616,6 +616,8 @@ fn script_client(caller: &Client) -> Client {
     c.monitor = false;
     c.reply_mode = ReplyMode::On;
     c.addr = "lua".into();
+    // The script's client has no output buffer limit (it is not a connection).
+    c.reply_budget = u64::MAX;
     c
 }
 

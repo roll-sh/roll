@@ -1145,6 +1145,7 @@ pub fn zrandmember(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(Error::new("ERR value is out of range"));
     }
     let resp3 = cx.resp() >= 3;
+    let budget = cx.reply_budget();
     let reply = with_zset_rng(cx, key, |z, rng| {
         let size = z.len();
         let (count, uniq) = (l.unsigned_abs() as usize, l >= 0);
@@ -1154,10 +1155,15 @@ pub fn zrandmember(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
         let mut push = |m: &[u8], s: f64| push_scored(&mut out, resp3, withscores, m, s);
         if !uniq || count == 1 {
-            // With repetitions, each pick uniform.
+            // With repetitions, each pick uniform, until the output buffer limit closes the client.
+            let mut bytes = 0u64;
             for _ in 0..count {
                 let (m, s) = z.random(rng).expect("non-empty");
                 push(m, s);
+                bytes += m.len() as u64 + 5 + if withscores { 4 } else { 0 };
+                if bytes > budget {
+                    break;
+                }
             }
         } else if count >= size {
             // The whole set, in `zuiNext` order (zsets are walked from the tail).

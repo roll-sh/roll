@@ -4,8 +4,8 @@
 use crate::database::Database;
 use crate::directory::{AuthRequest, Directory, Session};
 use crate::repl::psync;
-use bytes::{Bytes, BytesMut};
-use redis_engine::client::{ConnStats, ReplyMode};
+use bytes::{Buf, Bytes, BytesMut};
+use redis_engine::client::{ConnStats, ReplyBuf, ReplyMode};
 use redis_engine::commands::eq;
 use redis_engine::{Client, Outcome, Reply, Sink};
 use redis_proto::{Limits, parse_request};
@@ -78,6 +78,11 @@ pub struct Conn<'a> {
     /// REPLCONF options, and the replication start once SYNC/PSYNC accepted the connection.
     repl_conf: psync::ReplicaConf,
     sync: Option<psync::Start>,
+    /// `out` measured like Redis' output buffer, when the soft limit was first reached (Unix
+    /// seconds), and whether the output buffer limit closed the connection.
+    rbuf: ReplyBuf,
+    soft_since: i64,
+    obuf_closed: bool,
 }
 
 pub async fn serve<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, fd: i64)
@@ -134,6 +139,9 @@ where
         stats,
         repl_conf: Default::default(),
         sync: None,
+        rbuf: ReplyBuf::default(),
+        soft_since: 0,
+        obuf_closed: false,
     };
     let mut inbuf = BytesMut::with_capacity(16 * 1024);
     'conn: loop {
@@ -173,16 +181,8 @@ where
                 conn.run_pending().await;
             }
         }
-        if !conn.out.is_empty() {
-            if wr.write_all(&conn.out).await.is_err() {
-                break;
-            }
-            conn.stats.net_out.fetch_add(conn.out.len() as u64, Ordering::Relaxed);
-            if let Some(db) = conn.db() {
-                db.io.writes.fetch_add(1, Ordering::Relaxed);
-                db.net_out.fetch_add(conn.out.len() as u64, Ordering::Relaxed);
-            }
-            conn.out.clear();
+        if !conn.out.is_empty() && !conn.flush(&mut wr, &mut rx).await {
+            break;
         }
         // SYNC/PSYNC turned the connection into a replica link.
         if let Some(start) = conn.sync.take() {
@@ -229,21 +229,13 @@ where
                 }
             },
             Some(msg) = rx.recv() => {
-                let mut kill = false;
+                let mut alive = true;
                 let mut next = Some(msg);
                 while let Some(msg) = next {
-                    match msg {
-                        Msg::Push(b) => conn.out.extend_from_slice(&b),
-                        Msg::Unblock(b) => {
-                            conn.write_reply_bytes(&b);
-                            conn.blocked = None;
-                        }
-                        Msg::AclChanged => kill |= redis_engine::acl::must_disconnect(&conn.client),
-                        Msg::Kill => kill = true,
-                    }
+                    alive &= conn.on_msg(msg);
                     next = rx.try_recv().ok();
                 }
-                if kill {
+                if !alive {
                     break;
                 }
             }
@@ -287,14 +279,144 @@ impl Conn<'_> {
     }
 
     fn write_reply(&mut self, r: &Reply) {
+        if self.obuf_closed {
+            return;
+        }
+        let before = self.out.len();
         r.encode(self.client.resp, &mut self.out);
+        self.appended(self.out.len() - before);
     }
 
     fn write_reply_bytes(&mut self, b: &[u8]) {
         if self.client.reply_mode == ReplyMode::Off {
             return;
         }
+        self.put(b);
+    }
+
+    /// Queue raw output (pushes).
+    fn put(&mut self, b: &[u8]) {
+        if self.obuf_closed {
+            return;
+        }
         self.out.extend_from_slice(b);
+        self.appended(b.len());
+    }
+
+    /// Out-of-band data for the connection. False: close it.
+    fn on_msg(&mut self, msg: Msg) -> bool {
+        match msg {
+            Msg::Push(b) => self.put(&b),
+            Msg::Unblock(b) => {
+                self.write_reply_bytes(&b);
+                self.blocked = None;
+            }
+            Msg::AclChanged => return !redis_engine::acl::must_disconnect(&self.client),
+            Msg::Kill => return false,
+        }
+        !self.obuf_closed
+    }
+
+    fn appended(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.rbuf.append(n);
+        self.check_obuf();
+    }
+
+    /// The `client-output-buffer-limit` class of the connection: replica, pubsub or normal.
+    fn obuf_class(&self) -> usize {
+        use redis_engine::client::{OBUF_NORMAL, OBUF_PUBSUB, OBUF_REPLICA};
+        if self.stats.replica.load(Ordering::Relaxed) {
+            OBUF_REPLICA
+        } else if self.client.subscriptions() > 0 {
+            OBUF_PUBSUB
+        } else {
+            OBUF_NORMAL
+        }
+    }
+
+    /// `closeClientOnOutputBufferLimitReached`: past the hard limit, or the soft one for long
+    /// enough, the connection is closed without sending what it has pending.
+    fn check_obuf(&mut self) {
+        self.rbuf.publish(&self.stats);
+        if self.rbuf.mem() == 0 || self.obuf_closed {
+            return;
+        }
+        let db = self.db().cloned();
+        let limit = db.as_ref().map(|db| db.hub.obuf_limit(self.obuf_class())).unwrap_or_default();
+        let now = redis_engine::util::now_ms() / 1000;
+        if !redis_engine::client::obuf_limit_reached(self.rbuf.mem(), &limit, !self.client.authenticated, &mut self.soft_since, now) {
+            return;
+        }
+        tracing::warn!(client = self.client.id, omem = self.rbuf.mem(), "client closed for overcoming of output buffer limits");
+        if let Some(db) = &db {
+            db.hub.obuf_disconnections.fetch_add(1, Ordering::Relaxed);
+        }
+        self.obuf_closed = true;
+        self.close_after = true;
+        self.pending.clear();
+        self.out.clear();
+        self.rbuf.clear();
+        self.rbuf.publish(&self.stats);
+    }
+
+    /// What the output buffer limit leaves for the next reply before it closes the connection:
+    /// a reply past this is sure to break the hard limit.
+    fn reply_budget(&self, db: &Database) -> u64 {
+        let hard = db.hub.obuf_limit(self.obuf_class()).hard;
+        if hard == 0 {
+            return u64::MAX;
+        }
+        hard.saturating_sub(self.rbuf.mem()) + self.rbuf.free() as u64
+    }
+
+    /// Write `out` to the socket. While the socket is slow, keep taking pushes (they count
+    /// against the output buffer limit, checked again periodically for the soft limit). False:
+    /// the connection is gone or must close.
+    async fn flush<W: AsyncWrite + Unpin>(&mut self, wr: &mut W, rx: &mut mpsc::UnboundedReceiver<Msg>) -> bool {
+        enum Ev {
+            Wrote(std::io::Result<usize>),
+            Msg(Option<Msg>),
+            Tick,
+        }
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_millis(100), Duration::from_millis(100));
+        let mut total = 0u64;
+        while !self.out.is_empty() {
+            let ev = tokio::select! {
+                biased;
+                r = wr.write(&self.out) => Ev::Wrote(r),
+                m = rx.recv() => Ev::Msg(m),
+                _ = tick.tick() => Ev::Tick,
+            };
+            match ev {
+                Ev::Wrote(Ok(0) | Err(_)) => return false,
+                Ev::Wrote(Ok(n)) => {
+                    self.out.advance(n);
+                    self.rbuf.sent(n);
+                    self.rbuf.publish(&self.stats);
+                    total += n as u64;
+                }
+                Ev::Msg(Some(m)) => {
+                    if !self.on_msg(m) {
+                        return false;
+                    }
+                }
+                Ev::Msg(None) => {}
+                Ev::Tick => self.check_obuf(),
+            }
+            if self.obuf_closed {
+                return false;
+            }
+        }
+        self.out.clear();
+        self.stats.net_out.fetch_add(total, Ordering::Relaxed);
+        if let Some(db) = self.db() {
+            db.io.writes.fetch_add(1, Ordering::Relaxed);
+            db.net_out.fetch_add(total, Ordering::Relaxed);
+        }
+        true
     }
 
     /// Apply CLIENT REPLY ON/OFF/SKIP to a finished command's reply.
@@ -376,6 +498,7 @@ impl Conn<'_> {
                     first = false;
                     let args = self.pending.pop_front().unwrap();
                     n += 1;
+                    self.client.reply_budget = self.reply_budget(&db);
                     let client = &mut self.client;
                     let out = long_running(&args, || eng.call(client, &args));
                     let pushes = eng.take_after_reply();
@@ -385,16 +508,16 @@ impl Conn<'_> {
                             let quit = eq(&args[0], "quit");
                             self.emit(&args, r);
                             for p in pushes {
-                                self.out.extend_from_slice(&p);
+                                self.put(&p);
                             }
-                            if quit || self.client.user.is_deleted() || self.stats.killed.load(Ordering::Relaxed) {
+                            if quit || self.obuf_closed || self.client.user.is_deleted() || self.stats.killed.load(Ordering::Relaxed) {
                                 self.close_after = true;
                                 break;
                             }
                         }
                         Outcome::Blocked => {
                             for p in pushes {
-                                self.out.extend_from_slice(&p);
+                                self.put(&p);
                             }
                             self.blocked = Some(eng.block_deadline(self.client.id).unwrap_or(0));
                             break;

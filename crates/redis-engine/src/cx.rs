@@ -423,6 +423,12 @@ impl<'a> Cx<'a> {
         self.rewrite = Some(args);
     }
 
+    /// What the client's output buffer limit leaves for this reply (see
+    /// [`crate::client::Client::reply_budget`]).
+    pub fn reply_budget(&self) -> u64 {
+        self.client.reply_budget
+    }
+
     /// Propagate the command even if it changed nothing (FLUSHDB of an empty database).
     pub fn force_propagate(&mut self) {
         self.force_propagate = true;

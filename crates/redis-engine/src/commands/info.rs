@@ -290,6 +290,7 @@ impl Engine {
         self.metrics = Metrics { base, ..Default::default() };
         let p = &mut self.persist;
         (p.aof_rewrites, p.total_forks, p.latest_fork_us) = (0, 0, 0);
+        self.hub.obuf_disconnections.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -612,6 +613,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
         let m = &eng.metrics;
         let kbps = |x: &Metric| x.get() as f64 / 1024.0;
         let acl = eng.acl.read().log.lock().denied;
+        let obuf_disconnections = eng.hub.obuf_disconnections.load(Ordering::Relaxed);
         let _ = write!(
             s,
             "total_connections_received:{}\r\ntotal_commands_processed:{}\r\ninstantaneous_ops_per_sec:{}\r\ntotal_net_input_bytes:{}\r\ntotal_net_output_bytes:{}\r\n\
@@ -624,7 +626,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
              total_active_defrag_time:0\r\ncurrent_active_defrag_time:0\r\ntracking_total_keys:{}\r\ntracking_total_items:{}\r\ntracking_total_prefixes:{}\r\n\
              unexpected_error_replies:{}\r\ntotal_error_replies:{}\r\ndump_payload_sanitizations:0\r\ntotal_reads_processed:{}\r\ntotal_writes_processed:{}\r\n\
              io_threaded_reads_processed:0\r\nio_threaded_writes_processed:0\r\nio_threaded_total_prefetch_batches:0\r\nio_threaded_total_prefetch_entries:0\r\n\
-             client_query_buffer_limit_disconnections:0\r\nclient_output_buffer_limit_disconnections:0\r\nreply_buffer_shrinks:0\r\nreply_buffer_expands:0\r\n\
+             client_query_buffer_limit_disconnections:0\r\nclient_output_buffer_limit_disconnections:{obuf_disconnections}\r\nreply_buffer_shrinks:0\r\nreply_buffer_expands:0\r\n\
              eventloop_cycles:{}\r\neventloop_duration_sum:{}\r\neventloop_duration_cmd_sum:{}\r\ninstantaneous_eventloop_cycles_per_sec:{}\r\ninstantaneous_eventloop_duration_usec:{}\r\n\
              eventloop_cycles_with_clients_processing:{}\r\ntotal_client_processing_events:{}\r\navg_pipeline_length_sum:{}\r\navg_pipeline_length_cnt:{}\r\navg_pipeline_length:{:.2}\r\n\
              slowlog_commands_count:{}\r\nslowlog_commands_time_ms_max:{:.2}\r\nslowlog_commands_time_ms_sum:{:.2}\r\nhash_templates:0\r\nhash_template_keys:0\r\n\

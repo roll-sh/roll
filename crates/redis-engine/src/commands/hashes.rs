@@ -645,13 +645,17 @@ fn hrandfield_count(cx: &mut Cx, key: &[u8], l: i64, withvalues: bool) -> CmdRes
         return Ok(Reply::Array(Vec::new()));
     }
     let resp3 = cx.resp() >= 3;
+    let budget = cx.reply_budget();
     let Engine { dbs, rng, .. } = &mut *cx.eng;
     let Some(Entry { value: Value::Hash(h), .. }) = dbs[cx.client.db].keys.get(key) else {
         return Ok(Reply::Array(Vec::new()));
     };
     let size = h.len() as u64;
     let mut out = Vec::new();
+    let mut bytes = 0u64;
     let mut emit = |f: &[u8], v: &[u8]| {
+        // Whether the reply is past the output buffer limit's budget.
+        bytes += f.len() as u64 + 5 + if withvalues { v.len() as u64 + 5 } else { 0 };
         if withvalues && resp3 {
             out.push(Reply::Array(vec![Reply::bulk(f), Reply::bulk(v)]));
         } else {
@@ -660,12 +664,15 @@ fn hrandfield_count(cx: &mut Cx, key: &[u8], l: i64, withvalues: bool) -> CmdRes
                 out.push(Reply::bulk(v));
             }
         }
+        bytes > budget
     };
     if !uniq || count == 1 {
-        // CASE 1: sampling with repetitions.
+        // CASE 1: sampling with repetitions, until the output buffer limit closes the client.
         for _ in 0..count {
             let (f, v) = h.random(rng).expect("not empty");
-            emit(f, v);
+            if emit(f, v) {
+                break;
+            }
         }
     } else if count >= size {
         // CASE 2: the whole hash.

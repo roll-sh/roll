@@ -34,8 +34,11 @@ pub struct ConnStats {
     /// Unparsed input buffered, and the buffer's capacity.
     pub qbuf: AtomicU64,
     pub qbuf_cap: AtomicU64,
-    /// Output waiting to be written.
+    /// Output waiting to be written, measured like Redis' `omem` (reply blocks allocated past
+    /// the static buffer), and the static buffer's fill (`obl`) and block count (`oll`).
     pub obuf: AtomicU64,
+    pub obl: AtomicU64,
+    pub oll: AtomicU64,
     /// Commands processed (CLIENT LIST `tot-cmds`).
     pub cmds: AtomicU64,
     pub read_events: AtomicU64,
@@ -91,6 +94,10 @@ pub struct Client {
     /// While EXEC runs: the transaction's command count and argument bytes (Redis keeps the
     /// MULTI state until EXEC returns, so CLIENT LIST inside it still shows `x`).
     pub executing: Option<(i64, usize)>,
+    /// Reply bytes the connection can take before its output buffer limit closes it
+    /// (`u64::MAX`: no limit). Commands with unbounded replies (KEYS, *RANDMEMBER with a
+    /// negative count) stop producing once past it, like Redis stops on `CLIENT_CLOSE_ASAP`.
+    pub reply_budget: u64,
 }
 
 impl std::fmt::Debug for Client {
@@ -128,6 +135,7 @@ impl Client {
             conn: None,
             defer_pushes: false,
             executing: None,
+            reply_budget: u64::MAX,
         }
     }
 
@@ -142,5 +150,156 @@ impl Client {
 
     pub fn in_multi(&self) -> bool {
         self.multi.is_some()
+    }
+}
+
+/// Size of Redis' static reply buffer (`PROTO_REPLY_CHUNK_BYTES`).
+pub const REPLY_CHUNK: usize = 16 * 1024;
+/// `sizeof(clientReplyBlock)`.
+const BLOCK_HEADER: usize = 24;
+
+/// jemalloc's size class for an allocation of `n` bytes (four classes per doubling).
+pub fn jemalloc_size(n: usize) -> usize {
+    if n <= 8 {
+        return 8;
+    }
+    let lg = usize::BITS - (n - 1).leading_zeros() - 1;
+    let step = (1usize << lg.saturating_sub(2)).max(16);
+    n.div_ceil(step) * step
+}
+
+/// A connection's output laid out like Redis' (a 16KB static buffer, then a list of reply
+/// blocks of at least 16KB sized by the allocator), to measure it the way
+/// `client-output-buffer-limit` and CLIENT LIST `omem` do. Blocks go away as the socket
+/// takes them.
+#[derive(Debug, Default)]
+pub struct ReplyBuf {
+    bufpos: usize,
+    buf_sent: usize,
+    /// (size, used, sent) per block.
+    blocks: std::collections::VecDeque<(usize, usize, usize)>,
+    mem: u64,
+}
+
+impl ReplyBuf {
+    pub fn append(&mut self, mut n: usize) {
+        if self.blocks.is_empty() {
+            let take = n.min(REPLY_CHUNK - self.bufpos);
+            self.bufpos += take;
+            n -= take;
+        }
+        if let Some((size, used, _)) = self.blocks.back_mut() {
+            let take = n.min(*size - *used);
+            *used += take;
+            n -= take;
+        }
+        if n > 0 {
+            let size = jemalloc_size(n.max(REPLY_CHUNK) + BLOCK_HEADER) - BLOCK_HEADER;
+            self.blocks.push_back((size, n, 0));
+            self.mem += size as u64;
+        }
+    }
+
+    /// The socket took `n` bytes.
+    pub fn sent(&mut self, mut n: usize) {
+        let take = n.min(self.bufpos - self.buf_sent);
+        self.buf_sent += take;
+        n -= take;
+        if self.buf_sent == self.bufpos {
+            self.bufpos = 0;
+            self.buf_sent = 0;
+        }
+        while n > 0 {
+            let Some((size, used, sent)) = self.blocks.front_mut() else { break };
+            let take = n.min(*used - *sent);
+            *sent += take;
+            n -= take;
+            if *sent == *used {
+                self.mem -= *size as u64;
+                self.blocks.pop_front();
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Room left where the next append goes (static buffer, or the last block).
+    pub fn free(&self) -> usize {
+        match self.blocks.back() {
+            Some((size, used, _)) => size - used,
+            None => REPLY_CHUNK - self.bufpos,
+        }
+    }
+
+    /// Reply block bytes (`omem`): 0 while everything fits the static buffer.
+    pub fn mem(&self) -> u64 {
+        self.mem
+    }
+
+    pub fn publish(&self, stats: &ConnStats) {
+        use std::sync::atomic::Ordering::Relaxed;
+        stats.obuf.store(self.mem, Relaxed);
+        stats.obl.store(self.bufpos as u64, Relaxed);
+        stats.oll.store(self.blocks.len() as u64, Relaxed);
+    }
+}
+
+/// Output buffer limit classes, as indexed in `client-output-buffer-limit`.
+pub const OBUF_NORMAL: usize = 0;
+pub const OBUF_REPLICA: usize = 1;
+pub const OBUF_PUBSUB: usize = 2;
+
+/// `checkClientOutputBufferLimits`: whether `mem` bytes of reply blocks break the class's hard
+/// limit, or its soft limit for longer than its seconds (`soft_since` tracks when the soft limit
+/// was first seen, in Unix seconds). Clients that still have to authenticate get 1024 bytes.
+pub fn obuf_limit_reached(mem: u64, limit: &crate::config::ObufLimit, unauthenticated: bool, soft_since: &mut i64, now_s: i64) -> bool {
+    if mem > 1024 && unauthenticated {
+        return true;
+    }
+    let hard = limit.hard != 0 && mem >= limit.hard;
+    let mut soft = limit.soft != 0 && mem >= limit.soft;
+    if soft {
+        if *soft_since == 0 {
+            *soft_since = now_s;
+            soft = false;
+        } else if now_s - *soft_since <= limit.soft_seconds {
+            soft = false;
+        }
+    } else {
+        *soft_since = 0;
+    }
+    hard || soft
+}
+
+#[cfg(test)]
+mod reply_buf_tests {
+    use super::*;
+
+    #[test]
+    fn size_classes() {
+        assert_eq!(jemalloc_size(16384 + 24), 20480);
+        assert_eq!(jemalloc_size(183_625 + 24), 196_608);
+        assert_eq!(jemalloc_size(16384), 16384);
+        assert_eq!(jemalloc_size(17), 32);
+        assert_eq!(jemalloc_size(100), 112);
+    }
+
+    #[test]
+    fn blocks_fill_then_drain() {
+        let mut b = ReplyBuf::default();
+        b.append(10_000);
+        assert_eq!(b.mem(), 0);
+        b.append(10_000);
+        assert_eq!(b.mem(), 20456);
+        b.append(200_000);
+        assert_eq!(b.mem(), 20456 + jemalloc_size(200_000 - (20456 - 3616) + 24) as u64 - 24);
+        b.sent(16384);
+        assert_eq!(b.blocks.len(), 2);
+        b.sent(20456);
+        assert_eq!(b.blocks.len(), 1);
+        b.sent(1 << 30);
+        assert_eq!(b.mem(), 0);
     }
 }

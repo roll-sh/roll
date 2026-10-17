@@ -208,19 +208,19 @@ pub fn keys(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let pat = &args[1];
     let all = pat.as_ref() == b"*";
     let now = cx.now;
+    let budget = cx.reply_budget();
     let mut out = Vec::new();
-    let mut expired = Vec::new();
+    let mut bytes = 0u64;
+    // Expired keys are skipped, not deleted (`keyIsExpired`).
     for (k, e) in cx.db().keys.iter() {
-        if all || glob_match(pat, k, false) {
-            if e.expired(now) {
-                expired.push(k.clone());
-            } else {
-                out.push(Reply::bulk(k));
-            }
+        if (all || glob_match(pat, k, false)) && !e.expired(now) {
+            out.push(Reply::bulk(k));
+            bytes += k.len() as u64 + 5;
         }
-    }
-    for k in expired {
-        cx.peek(&k); // lazily expire
+        // Past the output buffer limit the client is closed: stop producing.
+        if bytes > budget {
+            break;
+        }
     }
     Ok(Reply::Array(out))
 }

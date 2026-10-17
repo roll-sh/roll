@@ -237,13 +237,23 @@ fn srandmember_count(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let (count, uniq) = if l >= 0 { (l as u64, true) } else { (l.unsigned_abs(), false) };
     let mut rng = rng(cx);
+    let budget = cx.reply_budget();
     let Some(s) = cx.get_set(&args[1])? else { return Ok(Reply::Array(vec![])) };
     if count == 0 {
         return Ok(Reply::Array(vec![]));
     }
-    // Repetitions allowed: independent draws.
+    // Repetitions allowed: independent draws, until the output buffer limit closes the client.
     if !uniq || count == 1 {
-        return Ok(Reply::Array((0..count).map(|_| Reply::bulk(s.random_member(&mut rng))).collect()));
+        let (mut out, mut bytes) = (Vec::new(), 0u64);
+        for _ in 0..count {
+            let m = s.random_member(&mut rng);
+            bytes += m.len() as u64 + 5;
+            out.push(Reply::bulk(m));
+            if bytes > budget {
+                break;
+            }
+        }
+        return Ok(Reply::Array(out));
     }
     let size = s.len() as u64;
     // The whole set, in its own order.

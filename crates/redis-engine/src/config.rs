@@ -84,7 +84,7 @@ pub const PROTECTED_YES: u8 = 1;
 pub const PROTECTED_LOCAL: u8 = 2;
 
 /// Output buffer limits for one client class: hard bytes, soft bytes, soft seconds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ObufLimit {
     pub hard: u64,
     pub soft: u64,

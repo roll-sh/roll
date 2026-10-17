@@ -40,6 +40,10 @@ struct Inner {
 #[derive(Default)]
 pub struct Hub {
     inner: Mutex<Inner>,
+    /// `client-output-buffer-limit` per class, for connections to check without an engine.
+    obuf_limits: Mutex<[crate::config::ObufLimit; 3]>,
+    /// Clients closed for overcoming their output buffer limit (INFO).
+    pub obuf_disconnections: std::sync::atomic::AtomicU64,
 }
 
 /// Encode a push lazily, once per protocol version.
@@ -69,6 +73,14 @@ pub enum Kind {
 impl Hub {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub fn set_obuf_limits(&self, limits: [crate::config::ObufLimit; 3]) {
+        *self.obuf_limits.lock() = limits;
+    }
+
+    pub fn obuf_limit(&self, class: usize) -> crate::config::ObufLimit {
+        self.obuf_limits.lock()[class]
     }
 
     fn map<'a>(inner: &'a mut Inner, kind: &Kind) -> &'a mut HashMap<Bytes, Subs> {

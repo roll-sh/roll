@@ -199,6 +199,7 @@ pub fn line_with(id: u64, v: &View, d: &Derived, stats: Option<&crate::client::C
     let qbuf_cap = load(|s| s.qbuf_cap.load(Ordering::Relaxed)).max(qbuf);
     let qbuf_free = qbuf_cap - qbuf;
     let omem = load(|s| s.obuf.load(Ordering::Relaxed));
+    let (obl, oll) = (load(|s| s.obl.load(Ordering::Relaxed)), load(|s| s.oll.load(Ordering::Relaxed)));
     let rbs: u64 = 16384;
     let tot_mem = qbuf_cap + rbs + argv_mem + v.multi_mem as u64 + omem + 1024;
     let idle = if current.is_some() {
@@ -210,7 +211,7 @@ pub fn line_with(id: u64, v: &View, d: &Derived, stats: Option<&crate::client::C
     let watch = d.watch;
     let redir = track.map_or(-1, |t| t.redirect as i64);
     format!(
-        "id={id} addr={} laddr={} fd={fd} name={} age={} idle={idle} flags={flags} db={} sub={} psub={} ssub={} multi={} watch={watch} qbuf={qbuf} qbuf-free={qbuf_free} argv-mem={argv_mem} multi-mem={} rbs={rbs} rbp={rbs} obl=0 oll=0 omem={omem} omem-shared=0 omem-unshared={omem} tot-mem={tot_mem} events=r cmd={} user={} redir={redir} resp={} lib-name={} lib-ver={} io-thread=0 tot-net-in={} tot-net-out={} tot-cmds={} read-events={} avg-pipeline-len-sum={} avg-pipeline-len-cnt={}",
+        "id={id} addr={} laddr={} fd={fd} name={} age={} idle={idle} flags={flags} db={} sub={} psub={} ssub={} multi={} watch={watch} qbuf={qbuf} qbuf-free={qbuf_free} argv-mem={argv_mem} multi-mem={} rbs={rbs} rbp={rbs} obl={obl} oll={oll} omem={omem} omem-shared=0 omem-unshared={omem} tot-mem={tot_mem} events=r cmd={} user={} redir={redir} resp={} lib-name={} lib-ver={} io-thread=0 tot-net-in={} tot-net-out={} tot-cmds={} read-events={} avg-pipeline-len-sum={} avg-pipeline-len-cnt={}",
         v.addr,
         v.laddr,
         v.name.as_ref().map(|n| String::from_utf8_lossy(n).into_owned()).unwrap_or_default(),

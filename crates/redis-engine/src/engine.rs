@@ -366,6 +366,7 @@ impl Engine {
         };
         e.startup_memory = e.used_memory();
         e.peak_memory = e.startup_memory;
+        e.hub.set_obuf_limits(e.cfg.obuf_limits);
         if e.cfg.appendonly {
             e.open_aof_at_start();
         }
