@@ -258,12 +258,17 @@ impl<'a> Cx<'a> {
             Some(e) => {
                 let old = e.value.mem();
                 let new = value.mem();
+                let hashes = matches!(e.value, Value::Hash(_)) || matches!(value, Value::Hash(_));
                 e.value = value;
                 e.lru = lru;
                 let had_ttl = e.expire != 0;
                 d.mem = (d.mem + new).saturating_sub(old);
                 if had_ttl && !keep_ttl {
                     d.set_expire(key, 0);
+                }
+                if hashes {
+                    // A hash with field TTLs replaced (or installed): keep `subexpires` in sync.
+                    d.sync_subexpiry(key);
                 }
             }
             None => {
