@@ -101,6 +101,14 @@ where
     client.conn = Some(stats.clone());
     client.defer_pushes = true;
     let session = dir.anonymous().await;
+    if let Some(s) = &session
+        && !admit(&s.db)
+    {
+        // Turned away before reading anything, like Redis' acceptCommonHandler.
+        let _ = wr.write_all(b"-ERR max number of clients reached\r\n").await;
+        let _ = wr.flush().await;
+        return;
+    }
     client.authenticated = session.is_some();
     if let Some(s) = &session {
         client.user = s.user.clone();
@@ -234,6 +242,17 @@ where
         }
     }
     conn.cleanup();
+}
+
+/// Attach a connection to `db` unless it already has `maxclients` of them.
+fn admit(db: &Database) -> bool {
+    let max = db.engine_unless_busy(0).map(|e| e.cfg.maxclients);
+    if max.is_some_and(|m| db.io.clients.load(Ordering::Relaxed) >= m) {
+        db.io.rejected.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    db.io.clients.fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 /// Show the connection in CLIENT LIST right away unless the engine is busy (a running script):
@@ -547,6 +566,10 @@ impl Conn<'_> {
         match self.dir.authenticate(req).await {
             Ok(s) => {
                 if self.session.as_ref().is_none_or(|old| !Arc::ptr_eq(&old.db, &s.db)) {
+                    if !admit(&s.db) {
+                        self.close_after = true;
+                        return Reply::error("ERR max number of clients reached");
+                    }
                     s.db.io.accepted.fetch_add(1, Ordering::Relaxed);
                 }
                 if self.session.as_ref().is_some_and(|old| !Arc::ptr_eq(&old.db, &s.db)) {
@@ -573,6 +596,7 @@ impl Conn<'_> {
 
     fn cleanup(&mut self) {
         if let Some(s) = self.session.take() {
+            s.db.io.clients.fetch_sub(1, Ordering::Relaxed);
             s.user.unwatch(self.client.id);
             s.db.hub.remove_client(self.client.id);
             for shard in &s.db.shards {

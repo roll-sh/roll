@@ -82,6 +82,9 @@ pub struct Database {
 pub struct IoStats {
     /// Connections that attached to the database (`total_connections_received`).
     pub accepted: AtomicU64,
+    /// Connections attached right now, and the ones turned away by `maxclients`.
+    pub clients: AtomicU64,
+    pub rejected: AtomicU64,
     pub reads: AtomicU64,
     pub writes: AtomicU64,
     /// Reads that parsed commands, and how many they parsed.
@@ -110,6 +113,7 @@ impl redis_engine::commands::info::Host for DbHost {
             processing_events: l(&db.io.events),
             pipeline_sum: l(&db.io.pipeline_sum),
             pipeline_cnt: l(&db.io.events),
+            rejected_connections: l(&db.io.rejected),
             ..Default::default()
         }
     }

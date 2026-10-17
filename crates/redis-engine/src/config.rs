@@ -227,6 +227,10 @@ macro_rules! p {
             alias: None,
             get: |c| c.$field.to_string(),
             set: Some(|c, v| {
+                // An integer of the wrong sign is out of range rather than unparsable.
+                if v.parse::<i128>().is_ok_and(|w| w < $min as i128 || w > $max as i128) {
+                    return Err(format!("argument must be between {} and {} inclusive", $min, $max));
+                }
                 let n = parse_num(v)?;
                 #[allow(unused_comparisons, clippy::manual_range_contains)]
                 let out_of_range = n < $min || n > $max;
@@ -344,7 +348,7 @@ pub static PARAMS: &[Param] = &[
         }),
     },
     p!("tracking-table-max-keys", tracking_table_max_keys, num),
-    p!("maxclients", maxclients, num),
+    p!("maxclients", maxclients, num, 1u64, u32::MAX as u64),
     p!("timeout", timeout, num),
     p!("lazyfree-lazy-eviction", lazyfree_lazy_eviction, bool),
     p!("lazyfree-lazy-expire", lazyfree_lazy_expire, bool),
