@@ -30,6 +30,17 @@ postgres-protocol = "0.6"
 zstd = "0.14"
 humantime = "2"
 futures = "0.3"
+itoa = "1"
+memchr = "2"
+smallvec = { version = "1", features = ["union", "const_generics", "write"] }
+foldhash = "0.2"
+parking_lot = "0.12"
+rand = "0.8"
+sha1 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
+redis-proto = { path = "crates/redis-proto" }
+redis-engine = { path = "crates/redis-engine" }
+redis-server = { path = "crates/redis-server" }

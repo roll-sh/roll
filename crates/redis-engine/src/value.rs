@@ -1,0 +1,166 @@
+//! Values stored in the keyspace.
+
+use crate::types::{Hash, List, Set, Stream, ZSet};
+use smallvec::SmallVec;
+
+/// A byte string with up to 22 bytes stored inline (no allocation): keys, small values, members.
+pub type Str = SmallVec<[u8; 22]>;
+
+#[inline]
+pub fn s(b: &[u8]) -> Str {
+    Str::from_slice(b)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    String,
+    List,
+    Hash,
+    Set,
+    ZSet,
+    Stream,
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::String => "string",
+            Kind::List => "list",
+            Kind::Hash => "hash",
+            Kind::Set => "set",
+            Kind::ZSet => "zset",
+            Kind::Stream => "stream",
+        }
+    }
+
+    pub fn parse(s: &[u8]) -> Option<Kind> {
+        Some(match s.to_ascii_lowercase().as_slice() {
+            b"string" => Kind::String,
+            b"list" => Kind::List,
+            b"hash" => Kind::Hash,
+            b"set" => Kind::Set,
+            b"zset" => Kind::ZSet,
+            b"stream" => Kind::Stream,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Value {
+    Str(Str),
+    List(Box<List>),
+    Hash(Box<Hash>),
+    Set(Box<Set>),
+    ZSet(Box<ZSet>),
+    Stream(Box<Stream>),
+}
+
+impl Value {
+    pub fn str(b: &[u8]) -> Self {
+        Value::Str(Str::from_slice(b))
+    }
+
+    #[inline]
+    pub fn kind(&self) -> Kind {
+        match self {
+            Value::Str(_) => Kind::String,
+            Value::List(_) => Kind::List,
+            Value::Hash(_) => Kind::Hash,
+            Value::Set(_) => Kind::Set,
+            Value::ZSet(_) => Kind::ZSet,
+            Value::Stream(_) => Kind::Stream,
+        }
+    }
+
+    pub fn new_of(kind: Kind) -> Self {
+        match kind {
+            Kind::String => Value::Str(Str::new()),
+            Kind::List => Value::List(Box::default()),
+            Kind::Hash => Value::Hash(Box::default()),
+            Kind::Set => Value::Set(Box::default()),
+            Kind::ZSet => Value::ZSet(Box::default()),
+            Kind::Stream => Value::Stream(Box::default()),
+        }
+    }
+
+    /// Approximate heap bytes owned by the value (excluding the `Value` itself). O(1).
+    pub fn mem(&self) -> usize {
+        match self {
+            Value::Str(s) => {
+                if s.spilled() {
+                    s.capacity()
+                } else {
+                    0
+                }
+            }
+            Value::List(l) => std::mem::size_of::<List>() + l.mem(),
+            Value::Hash(h) => std::mem::size_of::<Hash>() + h.mem(),
+            Value::Set(x) => std::mem::size_of::<Set>() + x.mem(),
+            Value::ZSet(z) => std::mem::size_of::<ZSet>() + z.mem(),
+            Value::Stream(x) => std::mem::size_of::<Stream>() + x.mem(),
+        }
+    }
+
+    /// Aggregates are deleted when they become empty. Strings and streams never are.
+    #[inline]
+    pub fn is_empty_aggregate(&self) -> bool {
+        match self {
+            Value::Str(_) | Value::Stream(_) => false,
+            Value::List(l) => l.is_empty(),
+            Value::Hash(h) => h.is_empty(),
+            Value::Set(x) => x.is_empty(),
+            Value::ZSet(z) => z.is_empty(),
+        }
+    }
+
+    /// `OBJECT ENCODING`.
+    pub fn encoding(&self) -> &'static str {
+        match self {
+            Value::Str(s) => {
+                if s.len() <= 20 && crate::util::is_int(s) {
+                    "int"
+                } else if s.len() <= 44 {
+                    "embstr"
+                } else {
+                    "raw"
+                }
+            }
+            Value::List(l) => l.encoding(),
+            Value::Hash(h) => h.encoding(),
+            Value::Set(x) => x.encoding(),
+            Value::ZSet(z) => z.encoding(),
+            Value::Stream(_) => "stream",
+        }
+    }
+}
+
+/// A key's slot in the keyspace.
+#[derive(Clone, Debug)]
+pub struct Entry {
+    pub value: Value,
+    /// Absolute expiry in Unix milliseconds; 0 means no TTL.
+    pub expire: i64,
+    /// LRU clock (seconds, 24 bits) or LFU state (16-bit minutes + 8-bit counter), per policy.
+    pub lru: u32,
+}
+
+impl Entry {
+    pub fn new(value: Value, lru: u32) -> Self {
+        Self { value, expire: 0, lru }
+    }
+
+    #[inline]
+    pub fn expired(&self, now: i64) -> bool {
+        self.expire != 0 && self.expire <= now
+    }
+}
+
+/// Fixed bytes per key: the dict node plus the entry, and allocator rounding.
+pub const KEY_OVERHEAD: usize = std::mem::size_of::<Entry>() + std::mem::size_of::<Str>() + 24;
+
+/// Heap bytes of a key beyond the fixed overhead.
+#[inline]
+pub fn key_mem(k: &Str) -> usize {
+    if k.spilled() { k.capacity() } else { 0 }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "redis-engine"
+description = "Redis-compatible data engine: keyspace, every data type, expiry, eviction, transactions, scripting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+foldhash.workspace = true
+itoa.workspace = true
+parking_lot.workspace = true
+redis-proto.workspace = true
+smallvec.workspace = true
+xxhash-rust.workspace = true

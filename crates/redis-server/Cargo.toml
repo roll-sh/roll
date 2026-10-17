@@ -1,0 +1,20 @@
+[package]
+name = "redis-server"
+description = "Serverless Redis data plane: RESP/TLS and HTTP endpoints, multi-tenant databases, scale to zero, durability on S3, replicas, sharding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+redis-engine.workspace = true
+redis-proto.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

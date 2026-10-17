@@ -1,0 +1,500 @@
+//! Generic keyspace commands.
+
+use super::*;
+use crate::engine::Engine;
+use crate::notify;
+use crate::util::{fmt_i64, glob_match};
+use crate::value::{Kind, Str};
+use crate::{cmd, container};
+
+pub static COMMANDS: &[Command] = &[
+    cmd!("del", -2, WRITE, 1, -1, 1, del, Generic),
+    cmd!("unlink", -2, WRITE | FAST, 1, -1, 1, del, Generic),
+    cmd!("exists", -2, READONLY | FAST, 1, -1, 1, exists, Generic),
+    cmd!("type", 2, READONLY | FAST, 1, 1, 1, type_, Generic),
+    cmd!("expire", -3, WRITE | FAST, 1, 1, 1, expire, Generic),
+    cmd!("pexpire", -3, WRITE | FAST, 1, 1, 1, pexpire, Generic),
+    cmd!("expireat", -3, WRITE | FAST, 1, 1, 1, expireat, Generic),
+    cmd!("pexpireat", -3, WRITE | FAST, 1, 1, 1, pexpireat, Generic),
+    cmd!("ttl", 2, READONLY | FAST, 1, 1, 1, ttl, Generic),
+    cmd!("pttl", 2, READONLY | FAST, 1, 1, 1, pttl, Generic),
+    cmd!("expiretime", 2, READONLY | FAST, 1, 1, 1, expiretime, Generic),
+    cmd!("pexpiretime", 2, READONLY | FAST, 1, 1, 1, pexpiretime, Generic),
+    cmd!("persist", 2, WRITE | FAST, 1, 1, 1, persist, Generic),
+    cmd!("keys", 2, READONLY, 0, 0, 0, keys, Generic),
+    cmd!("scan", -2, READONLY, 0, 0, 0, scan, Generic),
+    cmd!("randomkey", 1, READONLY, 0, 0, 0, randomkey, Generic),
+    cmd!("rename", 3, WRITE, 1, 2, 1, rename, Generic),
+    cmd!("renamenx", 3, WRITE | FAST, 1, 2, 1, renamenx, Generic),
+    cmd!("move", 3, WRITE | FAST, 1, 1, 1, move_, Generic),
+    cmd!("copy", -3, WRITE | DENYOOM, 1, 2, 1, copy, Generic),
+    cmd!("touch", -2, READONLY | FAST, 1, -1, 1, touch, Generic),
+    container!("object", READONLY, Generic, OBJECT),
+];
+
+static OBJECT: &[Command] = &[
+    cmd!("encoding", 3, READONLY, 2, 2, 1, object_encoding, Generic),
+    cmd!("freq", 3, READONLY, 2, 2, 1, object_freq, Generic),
+    cmd!("idletime", 3, READONLY, 2, 2, 1, object_idletime, Generic),
+    cmd!("refcount", 3, READONLY, 2, 2, 1, object_refcount, Generic),
+    cmd!("help", 2, READONLY | STALE | LOADING, 0, 0, 0, object_help, Generic),
+];
+
+fn b(s: &'static str) -> Bytes {
+    Bytes::from_static(s.as_bytes())
+}
+
+pub fn del(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let mut n = 0;
+    for k in &args[1..] {
+        if cx.delete(k) {
+            cx.notify(notify::GENERIC, "del", k);
+            n += 1;
+        }
+    }
+    Ok(Reply::Int(n))
+}
+
+pub fn exists(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let mut n = 0;
+    for k in &args[1..] {
+        if cx.exists(k) {
+            n += 1;
+        }
+    }
+    Ok(Reply::Int(n))
+}
+
+pub fn type_(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    Ok(Reply::status(cx.peek(&args[1]).map_or("none", |e| e.value.kind().name())))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ExpireFlag {
+    None,
+    Nx,
+    Xx,
+    Gt,
+    Lt,
+}
+
+/// EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT key value [NX | XX | GT | LT]
+fn expire_generic(cx: &mut Cx, args: &[Bytes], secs: bool, absolute: bool) -> CmdResult {
+    let mut flag = ExpireFlag::None;
+    for a in &args[3..] {
+        let f = if eq(a, "nx") {
+            ExpireFlag::Nx
+        } else if eq(a, "xx") {
+            ExpireFlag::Xx
+        } else if eq(a, "gt") {
+            ExpireFlag::Gt
+        } else if eq(a, "lt") {
+            ExpireFlag::Lt
+        } else {
+            return Err(Error::msg(format!("ERR Unsupported option {}", String::from_utf8_lossy(a))));
+        };
+        if flag != ExpireFlag::None && flag != f {
+            let both = |x, y| (flag == x && f == y) || (flag == y && f == x);
+            if both(ExpireFlag::Nx, ExpireFlag::Xx) || both(ExpireFlag::Nx, ExpireFlag::Gt) || both(ExpireFlag::Nx, ExpireFlag::Lt) {
+                return Err(Error::new("ERR NX and XX, GT or LT options at the same time are not compatible"));
+            }
+            if both(ExpireFlag::Gt, ExpireFlag::Lt) {
+                return Err(Error::new("ERR GT and LT options at the same time are not compatible"));
+            }
+            // XX combined with GT/LT is allowed: keep the comparison flag, XX is implied.
+            if f == ExpireFlag::Xx {
+                continue;
+            }
+        }
+        flag = f;
+    }
+    let name = String::from_utf8_lossy(&args[0]).to_lowercase();
+    let invalid = || Error::msg(format!("ERR invalid expire time in '{name}' command"));
+    let v = int(&args[2])?;
+    let mut when = v;
+    if secs {
+        when = when.checked_mul(1000).ok_or_else(invalid)?;
+    }
+    if !absolute {
+        when = when.checked_add(cx.now).ok_or_else(invalid)?;
+    }
+    let key = &args[1];
+    let Some(cur) = cx.expire_of(key) else { return Ok(Reply::Int(0)) };
+    let ok = match flag {
+        ExpireFlag::None => true,
+        ExpireFlag::Nx => cur == 0,
+        ExpireFlag::Xx => cur != 0,
+        // A key without TTL counts as an infinite TTL.
+        ExpireFlag::Gt => cur != 0 && when > cur,
+        ExpireFlag::Lt => cur == 0 || when < cur,
+    };
+    if !ok {
+        return Ok(Reply::Int(0));
+    }
+    if when <= cx.now && !cx.eng.replica && cx.mode != crate::engine::Mode::Replay {
+        // Expiring in the past deletes the key.
+        cx.delete(key);
+        cx.notify(notify::GENERIC, "del", key);
+        cx.propagate_as(vec![b("DEL"), key.clone()]);
+        return Ok(Reply::Int(1));
+    }
+    cx.set_expire(key, when);
+    cx.notify(notify::GENERIC, "expire", key);
+    cx.propagate_as(vec![b("PEXPIREAT"), key.clone(), Bytes::from(fmt_i64(when))]);
+    Ok(Reply::Int(1))
+}
+
+pub fn expire(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    expire_generic(cx, args, true, false)
+}
+pub fn pexpire(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    expire_generic(cx, args, false, false)
+}
+pub fn expireat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    expire_generic(cx, args, true, true)
+}
+pub fn pexpireat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    expire_generic(cx, args, false, true)
+}
+
+fn ttl_generic(cx: &mut Cx, key: &[u8], ms: bool) -> CmdResult {
+    // TTL touches the key like any read (lookupKeyReadWithFlags with LOOKUP_NOTOUCH).
+    let Some(e) = cx.peek(key) else { return Ok(Reply::Int(-2)) };
+    if e.expire == 0 {
+        return Ok(Reply::Int(-1));
+    }
+    let left = (e.expire - cx.now).max(0);
+    Ok(Reply::Int(if ms { left } else { (left + 500) / 1000 }))
+}
+
+pub fn ttl(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    ttl_generic(cx, &args[1], false)
+}
+pub fn pttl(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    ttl_generic(cx, &args[1], true)
+}
+
+fn expiretime_generic(cx: &mut Cx, key: &[u8], ms: bool) -> CmdResult {
+    let Some(e) = cx.peek(key) else { return Ok(Reply::Int(-2)) };
+    if e.expire == 0 {
+        return Ok(Reply::Int(-1));
+    }
+    Ok(Reply::Int(if ms { e.expire } else { e.expire / 1000 }))
+}
+
+pub fn expiretime(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    expiretime_generic(cx, &args[1], false)
+}
+pub fn pexpiretime(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    expiretime_generic(cx, &args[1], true)
+}
+
+pub fn persist(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    match cx.expire_of(&args[1]) {
+        Some(at) if at != 0 => {
+            cx.set_expire(&args[1], 0);
+            cx.notify(notify::GENERIC, "persist", &args[1]);
+            Ok(Reply::Int(1))
+        }
+        _ => Ok(Reply::Int(0)),
+    }
+}
+
+pub fn keys(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let pat = &args[1];
+    let all = pat.as_ref() == b"*";
+    let now = cx.now;
+    let mut out = Vec::new();
+    let mut expired = Vec::new();
+    for (k, e) in cx.db().keys.iter() {
+        if all || glob_match(pat, k, false) {
+            if e.expired(now) {
+                expired.push(k.clone());
+            } else {
+                out.push(Reply::bulk(k));
+            }
+        }
+    }
+    for k in expired {
+        cx.peek(&k); // lazily expire
+    }
+    Ok(Reply::Array(out))
+}
+
+/// SCAN cursor [MATCH pattern] [COUNT count] [TYPE type]
+pub fn scan(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let cursor = parse_cursor(&args[1])?;
+    let opts = ScanOpts::parse(&args[2..], true)?;
+    let (next, keys) = scan_db(cx, cursor, &opts);
+    Ok(scan_reply(next, keys.into_iter().map(Reply::bulk).collect()))
+}
+
+pub fn parse_cursor(a: &[u8]) -> Result<u64, Error> {
+    crate::util::parse_u64(a).ok_or(Error::new("ERR invalid cursor"))
+}
+
+pub fn scan_reply(cursor: u64, items: Vec<Reply>) -> Reply {
+    Reply::Array(vec![Reply::bulk_str(cursor.to_string()), Reply::Array(items)])
+}
+
+pub struct ScanOpts {
+    pub pattern: Option<Bytes>,
+    pub count: usize,
+    pub kind: Option<Kind>,
+    /// Type name given but unknown: return nothing (Redis 7.x behaviour).
+    pub bad_type: bool,
+    pub novalues: bool,
+}
+
+impl ScanOpts {
+    pub fn parse(args: &[Bytes], allow_type: bool) -> Result<Self, Error> {
+        let mut o = ScanOpts { pattern: None, count: 10, kind: None, bad_type: false, novalues: false };
+        let mut i = 0;
+        while i < args.len() {
+            let a = &args[i];
+            if eq(a, "count") && i + 1 < args.len() {
+                let c = int(&args[i + 1])?;
+                if c < 1 {
+                    return Err(SYNTAX);
+                }
+                o.count = c as usize;
+                i += 2;
+            } else if eq(a, "match") && i + 1 < args.len() {
+                let p = args[i + 1].clone();
+                o.pattern = if p.as_ref() == b"*" { None } else { Some(p) };
+                i += 2;
+            } else if allow_type && eq(a, "type") && i + 1 < args.len() {
+                match Kind::parse(&args[i + 1]) {
+                    Some(k) => o.kind = Some(k),
+                    // Redis 8 returns no keys for an unknown type name.
+                    None => o.bad_type = true,
+                }
+                i += 2;
+            } else if !allow_type && eq(a, "novalues") {
+                o.novalues = true;
+                i += 1;
+            } else {
+                return Err(SYNTAX);
+            }
+        }
+        Ok(o)
+    }
+
+    pub fn matches(&self, k: &[u8]) -> bool {
+        self.pattern.as_ref().is_none_or(|p| glob_match(p, k, false))
+    }
+}
+
+/// One SCAN step over the current database: `(next cursor, keys)`.
+pub fn scan_db(cx: &mut Cx, cursor: u64, o: &ScanOpts) -> (u64, Vec<Str>) {
+    let now = cx.now;
+    let db = cx.db();
+    let mut found: Vec<(Str, bool, Kind)> = Vec::new();
+    let mut c = cursor;
+    let mut iterations = o.count * 10;
+    loop {
+        c = db.keys.scan(c, |k, e| found.push((k.clone(), e.expired(now), e.value.kind())));
+        iterations -= 1;
+        if c == 0 || iterations == 0 || found.len() >= o.count {
+            break;
+        }
+    }
+    let mut out = Vec::with_capacity(found.len());
+    for (k, expired, kind) in found {
+        if expired {
+            cx.peek(&k);
+            continue;
+        }
+        if o.bad_type || o.kind.is_some_and(|t| t != kind) || !o.matches(&k) {
+            continue;
+        }
+        out.push(k);
+    }
+    (c, out)
+}
+
+pub fn randomkey(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    let now = cx.now;
+    for _ in 0..100 {
+        let Engine { dbs, rng, .. } = &mut *cx.eng;
+        let db = &dbs[cx.client.db];
+        let Some((k, e)) = db.keys.random(rng) else { return Ok(Reply::Nil) };
+        let (k, expired) = (k.clone(), e.expired(now));
+        if expired && !cx.eng.replica {
+            cx.peek(&k);
+            continue;
+        }
+        return Ok(Reply::bulk(k));
+    }
+    Ok(Reply::Nil)
+}
+
+fn rename_generic(cx: &mut Cx, args: &[Bytes], nx: bool) -> CmdResult {
+    let (src, dst) = (&args[1], &args[2]);
+    if cx.peek(src).is_none() {
+        return Err(NO_KEY);
+    }
+    if src == dst {
+        return Ok(if nx { Reply::Int(0) } else { Reply::Ok });
+    }
+    if nx && cx.peek(dst).is_some() {
+        return Ok(Reply::Int(0));
+    }
+    let entry = cx.take(src).unwrap();
+    let db = cx.db_index();
+    let dst_existed = cx.peek(dst).is_some();
+    if dst_existed {
+        cx.delete(dst);
+    }
+    cx.put_entry(db, dst, entry);
+    cx.notify(notify::GENERIC, "rename_from", src);
+    cx.notify(notify::GENERIC, "rename_to", dst);
+    Ok(if nx { Reply::Int(1) } else { Reply::Ok })
+}
+
+pub fn rename(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    rename_generic(cx, args, false)
+}
+pub fn renamenx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    rename_generic(cx, args, true)
+}
+
+fn db_index(cx: &Cx, a: &[u8]) -> Result<usize, Error> {
+    let n = crate::util::parse_i64(a).ok_or(Error::new("ERR value is not an integer or out of range"))?;
+    if n < 0 || n as usize >= cx.eng.dbs.len() {
+        return Err(Error::new("ERR DB index is out of range"));
+    }
+    Ok(n as usize)
+}
+
+pub fn move_(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let to = db_index(cx, &args[2])?;
+    let from = cx.db_index();
+    if from == to {
+        return Err(Error::new("ERR source and destination objects are the same"));
+    }
+    let key = &args[1];
+    if cx.peek(key).is_none() {
+        return Ok(Reply::Int(0));
+    }
+    let now = cx.now;
+    if let Some(e) = cx.eng.dbs[to].keys.get(key) {
+        if !e.expired(now) {
+            return Ok(Reply::Int(0));
+        }
+        cx.eng.delete_expired(to, key);
+    }
+    let entry = cx.take(key).unwrap();
+    cx.put_entry(to, key, entry);
+    cx.notify(notify::GENERIC, "move_from", key);
+    cx.eng.sig.notify(notify::GENERIC, "move_to", to as u16, key);
+    Ok(Reply::Int(1))
+}
+
+/// COPY source destination [DB destination-db] [REPLACE]
+pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let mut to = cx.db_index();
+    let mut replace = false;
+    let mut i = 3;
+    while i < args.len() {
+        if eq(&args[i], "replace") {
+            replace = true;
+            i += 1;
+        } else if eq(&args[i], "db") && i + 1 < args.len() {
+            to = db_index(cx, &args[i + 1])?;
+            i += 2;
+        } else {
+            return Err(SYNTAX);
+        }
+    }
+    let (src, dst) = (&args[1], &args[2]);
+    let from = cx.db_index();
+    if from == to && src == dst {
+        return Err(Error::new("ERR source and destination objects are the same"));
+    }
+    let Some(entry) = cx.peek(src).cloned() else { return Ok(Reply::Int(0)) };
+    let now = cx.now;
+    let exists = cx.eng.dbs[to].keys.get(dst).is_some_and(|e| !e.expired(now));
+    if exists && !replace {
+        return Ok(Reply::Int(0));
+    }
+    if cx.eng.dbs[to].keys.get(dst).is_some() {
+        cx.eng.dbs[to].remove(dst);
+        cx.eng.sig.touch(to as u16, dst);
+    }
+    let mut entry = entry;
+    entry.lru = cx.eng.new_lru(now);
+    cx.put_entry(to, dst, entry);
+    cx.eng.sig.notify(notify::GENERIC, "copy_to", to as u16, dst);
+    Ok(Reply::Int(1))
+}
+
+pub fn touch(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let mut n = 0;
+    for k in &args[1..] {
+        if cx.get(k).is_some() {
+            n += 1;
+        }
+    }
+    Ok(Reply::Int(n))
+}
+
+pub fn object_encoding(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    Ok(match cx.peek(&args[2]) {
+        Some(e) => Reply::bulk(e.value.encoding()),
+        None => Reply::Nil,
+    })
+}
+
+pub fn object_freq(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if !cx.cfg().maxmemory_policy.is_lfu() {
+        return Err(Error::new("ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."));
+    }
+    let now = cx.now;
+    let Some(e) = cx.peek(&args[2]).cloned() else { return Ok(Reply::Nil) };
+    Ok(Reply::Int(cx.eng.lfu_counter(&e, now) as i64))
+}
+
+pub fn object_idletime(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if cx.cfg().maxmemory_policy.is_lfu() {
+        return Err(Error::new("ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."));
+    }
+    let now = cx.now;
+    Ok(match cx.peek(&args[2]) {
+        Some(e) => Reply::Int(Engine::idle_secs(e, now) as i64),
+        None => Reply::Nil,
+    })
+}
+
+pub fn object_refcount(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    Ok(match cx.peek(&args[2]) {
+        // Small integers are shared objects in Redis (refcount INT_MAX).
+        Some(e) => match &e.value {
+            crate::value::Value::Str(s) if s.len() <= 4 && crate::util::parse_i64(s).is_some_and(|v| (0..10000).contains(&v)) => {
+                Reply::Int(i32::MAX as i64)
+            }
+            _ => Reply::Int(1),
+        },
+        None => Reply::Nil,
+    })
+}
+
+pub fn object_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Ok(help(&[
+        "OBJECT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "ENCODING <key>",
+        "    Return the kind of internal representation used in order to store the value",
+        "    associated with a <key>.",
+        "FREQ <key>",
+        "    Return the access frequency index of the <key>. The returned integer is",
+        "    proportional to the logarithm of the recent access frequency of the key.",
+        "IDLETIME <key>",
+        "    Return the idle time of the <key>, that is the approximated number of",
+        "    seconds elapsed since the last access to the key.",
+        "REFCOUNT <key>",
+        "    Return the number of references of the value associated with the specified",
+        "    <key>.",
+        "HELP",
+        "    Print this help.",
+    ]))
+}

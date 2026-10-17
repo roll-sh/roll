@@ -1,0 +1,666 @@
+//! String commands.
+
+use super::*;
+use crate::cmd;
+use crate::decimal::{self, IncrError};
+use crate::notify;
+use crate::util::{fmt_i64, parse_i64};
+use crate::value::{Kind, Str, Value};
+
+pub static COMMANDS: &[Command] = &[
+    cmd!("get", 2, READONLY | FAST, 1, 1, 1, get, String),
+    cmd!("set", -3, WRITE | DENYOOM, 1, 1, 1, set, String),
+    cmd!("setnx", 3, WRITE | DENYOOM | FAST, 1, 1, 1, setnx, String),
+    cmd!("setex", 4, WRITE | DENYOOM, 1, 1, 1, setex, String),
+    cmd!("psetex", 4, WRITE | DENYOOM, 1, 1, 1, psetex, String),
+    cmd!("getset", 3, WRITE | DENYOOM | FAST, 1, 1, 1, getset, String),
+    cmd!("getdel", 2, WRITE | FAST, 1, 1, 1, getdel, String),
+    cmd!("getex", -2, WRITE | FAST, 1, 1, 1, getex, String),
+    cmd!("mget", -2, READONLY | FAST, 1, -1, 1, mget, String),
+    cmd!("mset", -3, WRITE | DENYOOM, 1, -1, 2, mset, String),
+    cmd!("msetnx", -3, WRITE | DENYOOM, 1, -1, 2, msetnx, String),
+    cmd!("msetex", -4, WRITE | DENYOOM, keys = msetex_keys, msetex, String),
+    cmd!("append", 3, WRITE | DENYOOM | FAST, 1, 1, 1, append, String),
+    cmd!("strlen", 2, READONLY | FAST, 1, 1, 1, strlen, String),
+    cmd!("incr", 2, WRITE | DENYOOM | FAST, 1, 1, 1, incr, String),
+    cmd!("decr", 2, WRITE | DENYOOM | FAST, 1, 1, 1, decr, String),
+    cmd!("incrby", 3, WRITE | DENYOOM | FAST, 1, 1, 1, incrby, String),
+    cmd!("decrby", 3, WRITE | DENYOOM | FAST, 1, 1, 1, decrby, String),
+    cmd!("incrbyfloat", 3, WRITE | DENYOOM | FAST, 1, 1, 1, incrbyfloat, String),
+    cmd!("getrange", 4, READONLY, 1, 1, 1, getrange, String),
+    cmd!("substr", 4, READONLY, 1, 1, 1, getrange, String),
+    cmd!("setrange", 4, WRITE | DENYOOM, 1, 1, 1, setrange, String),
+    cmd!("lcs", -3, READONLY, 1, 2, 1, lcs, String),
+    cmd!("digest", 2, READONLY | FAST, 1, 1, 1, digest, String),
+    cmd!("delex", -2, WRITE | FAST, 1, 1, 1, delex, String),
+];
+
+const TOO_BIG: Error = Error::new("ERR string exceeds maximum allowed size (proto-max-bulk-len)");
+
+fn b(s: &'static str) -> Bytes {
+    Bytes::from_static(s.as_bytes())
+}
+
+fn int_bytes(i: i64) -> Bytes {
+    Bytes::from(fmt_i64(i))
+}
+
+pub fn get(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    Ok(match cx.get_str(&args[1])? {
+        Some(s) => Reply::bulk(s),
+        None => Reply::Nil,
+    })
+}
+
+/// Expiration options shared by SET, GETEX and MSETEX.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Expiry {
+    None,
+    KeepTtl,
+    Persist,
+    /// Absolute Unix ms.
+    At(i64),
+}
+
+/// Parse an EX/PX/EXAT/PXAT value into absolute ms (`getExpireMillisecondsOrReply`).
+pub fn expire_value(opt: &[u8], v: &[u8], now: i64, cmd: &str) -> Result<i64, Error> {
+    let n = int(v)?;
+    let invalid = || Error::msg(format!("ERR invalid expire time in '{cmd}' command"));
+    let secs = eq(opt, "ex") || eq(opt, "exat");
+    if n <= 0 || (secs && n > i64::MAX / 1000) {
+        return Err(invalid());
+    }
+    let mut ms = if secs { n * 1000 } else { n };
+    if eq(opt, "ex") || eq(opt, "px") {
+        ms = ms.checked_add(now).ok_or_else(invalid)?;
+    }
+    Ok(ms)
+}
+
+fn is_expire_opt(a: &[u8]) -> bool {
+    eq(a, "ex") || eq(a, "px") || eq(a, "exat") || eq(a, "pxat")
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Cond<'a> {
+    Any,
+    Nx,
+    Xx,
+    IfEq(&'a [u8]),
+    IfNe(&'a [u8]),
+    IfDeq(&'a [u8]),
+    IfDne(&'a [u8]),
+}
+
+fn xxh3_hex(v: &[u8]) -> String {
+    format!("{:016x}", xxhash_rust::xxh3::xxh3_64(v))
+}
+
+fn cond_holds(cond: Cond, cur: Option<&[u8]>) -> bool {
+    match cond {
+        Cond::Any => true,
+        Cond::Nx => cur.is_none(),
+        Cond::Xx => cur.is_some(),
+        Cond::IfEq(v) => cur == Some(v),
+        Cond::IfNe(v) => cur.is_some_and(|c| c != v),
+        Cond::IfDeq(d) => cur.is_some_and(|c| xxh3_hex(c).as_bytes().eq_ignore_ascii_case(d)),
+        Cond::IfDne(d) => cur.is_some_and(|c| !xxh3_hex(c).as_bytes().eq_ignore_ascii_case(d)),
+    }
+}
+
+/// SET key value [NX | XX | IFEQ v | IFNE v | IFDEQ d | IFDNE d] [GET]
+///     [EX s | PX ms | EXAT ts | PXAT ms | KEEPTTL]
+pub fn set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let mut cond = Cond::Any;
+    let mut get = false;
+    let mut exp = Expiry::None;
+    let mut exp_seen = false;
+    let mut i = 3;
+    while i < args.len() {
+        let a = &args[i];
+        let next = args.get(i + 1);
+        if eq(a, "nx") && cond == Cond::Any {
+            cond = Cond::Nx;
+        } else if eq(a, "xx") && cond == Cond::Any {
+            cond = Cond::Xx;
+        } else if eq(a, "get") {
+            get = true;
+        } else if eq(a, "keepttl") && !exp_seen {
+            exp = Expiry::KeepTtl;
+            exp_seen = true;
+        } else if let Some(v) = next.filter(|_| is_expire_opt(a) && !exp_seen) {
+            exp = Expiry::At(expire_value(a, v, cx.now, "set")?);
+            exp_seen = true;
+            i += 1;
+        } else if let Some(v) = next.filter(|_| cond == Cond::Any && (eq(a, "ifeq") || eq(a, "ifne") || eq(a, "ifdeq") || eq(a, "ifdne"))) {
+            let v = &v[..];
+            cond = if eq(a, "ifeq") {
+                Cond::IfEq(v)
+            } else if eq(a, "ifne") {
+                Cond::IfNe(v)
+            } else if eq(a, "ifdeq") {
+                Cond::IfDeq(v)
+            } else {
+                Cond::IfDne(v)
+            };
+            i += 1;
+        } else {
+            return Err(SYNTAX);
+        }
+        i += 1;
+    }
+    let key = &args[1];
+    let needs_value = get || matches!(cond, Cond::IfEq(_) | Cond::IfNe(_) | Cond::IfDeq(_) | Cond::IfDne(_));
+    let current: Option<Str> = if needs_value {
+        cx.get_str(key)?.cloned()
+    } else {
+        cx.peek(key).map(|_| Str::new())
+    };
+    let exists = current.is_some();
+    let holds = match cond {
+        Cond::Nx => !exists,
+        Cond::Xx => exists,
+        c => cond_holds(c, current.as_deref()),
+    };
+    let old_reply = || if get { Reply::opt_bulk(current.as_deref()) } else { Reply::Nil };
+    if !holds {
+        return Ok(old_reply());
+    }
+    write_string(cx, key, &args[2], exp);
+    Ok(if get { old_reply() } else { Reply::Ok })
+}
+
+/// Store a string with SET semantics (notifications, propagation with absolute expiry).
+fn write_string(cx: &mut Cx, key: &Bytes, value: &Bytes, exp: Expiry) {
+    match exp {
+        Expiry::At(at) if at <= cx.now => {
+            // Already expired: the key is set and immediately deleted (Redis propagates a DEL).
+            cx.set(key, Value::str(value), false);
+            cx.notify(notify::STRING, "set", key);
+            cx.delete(key);
+            cx.notify(notify::GENERIC, "del", key);
+            cx.propagate_as(vec![b("DEL"), key.clone()]);
+        }
+        Expiry::At(at) => {
+            cx.set_with_expire(key, Value::str(value), at);
+            cx.notify(notify::STRING, "set", key);
+            cx.notify(notify::GENERIC, "expire", key);
+            cx.propagate_as(vec![b("SET"), key.clone(), value.clone(), b("PXAT"), int_bytes(at)]);
+        }
+        Expiry::KeepTtl => {
+            cx.set(key, Value::str(value), true);
+            cx.notify(notify::STRING, "set", key);
+            cx.propagate_as(vec![b("SET"), key.clone(), value.clone(), b("KEEPTTL")]);
+        }
+        _ => {
+            cx.set(key, Value::str(value), false);
+            cx.notify(notify::STRING, "set", key);
+            cx.propagate_as(vec![b("SET"), key.clone(), value.clone()]);
+        }
+    }
+}
+
+pub fn setnx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if cx.peek(&args[1]).is_some() {
+        return Ok(Reply::Int(0));
+    }
+    write_string(cx, &args[1], &args[2], Expiry::None);
+    Ok(Reply::Int(1))
+}
+
+fn setex_generic(cx: &mut Cx, args: &[Bytes], unit: &str, name: &str) -> CmdResult {
+    let at = expire_value(unit.as_bytes(), &args[2], cx.now, name)?;
+    write_string(cx, &args[1], &args[3], Expiry::At(at));
+    Ok(Reply::Ok)
+}
+
+pub fn setex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    setex_generic(cx, args, "ex", "setex")
+}
+
+pub fn psetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    setex_generic(cx, args, "px", "psetex")
+}
+
+pub fn getset(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let old = cx.get_str(&args[1])?.cloned();
+    write_string(cx, &args[1], &args[2], Expiry::None);
+    Ok(Reply::opt_bulk(old))
+}
+
+pub fn getdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let Some(v) = cx.get_str(&args[1])?.cloned() else { return Ok(Reply::Nil) };
+    cx.delete(&args[1]);
+    cx.notify(notify::GENERIC, "del", &args[1]);
+    cx.propagate_as(vec![b("DEL"), args[1].clone()]);
+    Ok(Reply::bulk(v))
+}
+
+/// GETEX key [EX s | PX ms | EXAT ts | PXAT ms | PERSIST]
+pub fn getex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let mut exp = Expiry::None;
+    let mut i = 2;
+    while i < args.len() {
+        let a = &args[i];
+        if is_expire_opt(a) && exp == Expiry::None && i + 1 < args.len() {
+            exp = Expiry::At(expire_value(a, &args[i + 1], cx.now, "getex")?);
+            i += 2;
+        } else if eq(a, "persist") && exp == Expiry::None {
+            exp = Expiry::Persist;
+            i += 1;
+        } else {
+            return Err(SYNTAX);
+        }
+    }
+    let key = &args[1];
+    let Some(v) = cx.get_str(key)?.cloned() else { return Ok(Reply::Nil) };
+    match exp {
+        Expiry::At(at) if at <= cx.now => {
+            cx.delete(key);
+            cx.notify(notify::GENERIC, "del", key);
+            cx.propagate_as(vec![b("DEL"), key.clone()]);
+        }
+        Expiry::At(at) => {
+            cx.set_expire(key, at);
+            cx.notify(notify::GENERIC, "expire", key);
+            cx.propagate_as(vec![b("PEXPIREAT"), key.clone(), int_bytes(at)]);
+        }
+        Expiry::Persist
+            if cx.expire_of(key).unwrap_or(0) != 0 => {
+                cx.set_expire(key, 0);
+                cx.notify(notify::GENERIC, "persist", key);
+                cx.propagate_as(vec![b("PERSIST"), key.clone()]);
+            }
+        _ => {}
+    }
+    Ok(Reply::bulk(v))
+}
+
+pub fn mget(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let mut out = Vec::with_capacity(args.len() - 1);
+    for k in &args[1..] {
+        out.push(match cx.get(k) {
+            Some(Value::Str(s)) => Reply::bulk(s),
+            _ => Reply::Nil,
+        });
+    }
+    Ok(Reply::Array(out))
+}
+
+pub fn mset(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if args.len().is_multiple_of(2) {
+        return Err(arity_error("mset"));
+    }
+    for kv in args[1..].chunks(2) {
+        cx.set(&kv[0], Value::str(&kv[1]), false);
+        cx.notify(notify::STRING, "set", &kv[0]);
+    }
+    Ok(Reply::Ok)
+}
+
+pub fn msetnx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if args.len().is_multiple_of(2) {
+        return Err(arity_error("msetnx"));
+    }
+    for kv in args[1..].chunks(2) {
+        if cx.peek(&kv[0]).is_some() {
+            return Ok(Reply::Int(0));
+        }
+    }
+    for kv in args[1..].chunks(2) {
+        cx.set(&kv[0], Value::str(&kv[1]), false);
+        cx.notify(notify::STRING, "set", &kv[0]);
+    }
+    Ok(Reply::Int(1))
+}
+
+fn msetex_keys(args: &[Bytes]) -> Vec<usize> {
+    let Some(n) = args.get(1).and_then(|a| parse_i64(a)) else { return vec![] };
+    (0..n.max(0) as usize).map(|i| 2 + 2 * i).filter(|&i| i < args.len()).collect()
+}
+
+/// MSETEX numkeys key value [key value …] [NX | XX] [EX s | PX ms | EXAT ts | PXAT ms | KEEPTTL]
+pub fn msetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let n = int(&args[1])?;
+    if n <= 0 {
+        return Err(Error::new("ERR invalid numkeys value"));
+    }
+    let n = n as usize;
+    let data_end = 2 + 2 * n;
+    if args.len() < data_end {
+        return Err(arity_error("msetex"));
+    }
+    let (mut nx, mut xx) = (false, false);
+    let mut exp = Expiry::None;
+    let mut i = data_end;
+    while i < args.len() {
+        let a = &args[i];
+        if eq(a, "nx") && !nx && !xx {
+            nx = true;
+        } else if eq(a, "xx") && !nx && !xx {
+            xx = true;
+        } else if eq(a, "keepttl") && exp == Expiry::None {
+            exp = Expiry::KeepTtl;
+        } else if is_expire_opt(a) && exp == Expiry::None && i + 1 < args.len() {
+            exp = Expiry::At(expire_value(a, &args[i + 1], cx.now, "msetex")?);
+            i += 1;
+        } else {
+            return Err(SYNTAX);
+        }
+        i += 1;
+    }
+    let pairs: Vec<(&Bytes, &Bytes)> = (0..n).map(|j| (&args[2 + 2 * j], &args[3 + 2 * j])).collect();
+    if nx || xx {
+        for (k, _) in &pairs {
+            let exists = cx.peek(k).is_some();
+            if (nx && exists) || (xx && !exists) {
+                return Ok(Reply::Int(0));
+            }
+        }
+    }
+    let mut prop = vec![args[0].clone(), args[1].clone()];
+    for (k, v) in &pairs {
+        match exp {
+            Expiry::At(at) => cx.set_with_expire(k, Value::str(v), at),
+            Expiry::KeepTtl => cx.set(k, Value::str(v), true),
+            _ => cx.set(k, Value::str(v), false),
+        }
+        cx.notify(notify::STRING, "set", k);
+        if matches!(exp, Expiry::At(_)) {
+            cx.notify(notify::GENERIC, "expire", k);
+        }
+        prop.push((*k).clone());
+        prop.push((*v).clone());
+    }
+    match exp {
+        Expiry::At(at) => {
+            prop.push(b("PXAT"));
+            prop.push(int_bytes(at));
+        }
+        Expiry::KeepTtl => prop.push(b("KEEPTTL")),
+        _ => {}
+    }
+    cx.propagate_as(prop);
+    Ok(Reply::Int(1))
+}
+
+fn max_bulk(cx: &Cx) -> usize {
+    cx.cfg().proto_max_bulk_len as usize
+}
+
+pub fn append(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let limit = max_bulk(cx);
+    if let Some(cur) = cx.get_str(&args[1])?
+        && cur.len() + args[2].len() > limit {
+            return Err(TOO_BIG);
+        }
+    let mut e = cx.get_or_create(&args[1], Kind::String)?;
+    let s = e.str();
+    s.extend_from_slice(&args[2]);
+    let len = s.len();
+    e.notify(notify::STRING, "append");
+    Ok(Reply::Int(len as i64))
+}
+
+pub fn strlen(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    Ok(Reply::Int(cx.get_str(&args[1])?.map_or(0, |s| s.len()) as i64))
+}
+
+fn incr_generic(cx: &mut Cx, key: &Bytes, by: i64) -> CmdResult {
+    let cur = match cx.get_str(key)? {
+        Some(s) => parse_i64(s).ok_or(NOT_INT)?,
+        None => 0,
+    };
+    let new = cur.checked_add(by).ok_or(OVERFLOW)?;
+    let mut e = cx.get_or_create(key, Kind::String)?;
+    let s = e.str();
+    s.clear();
+    s.extend_from_slice(itoa::Buffer::new().format(new).as_bytes());
+    e.notify(notify::STRING, "incrby");
+    Ok(Reply::Int(new))
+}
+
+pub fn incr(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    incr_generic(cx, &args[1], 1)
+}
+
+pub fn decr(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    incr_generic(cx, &args[1], -1)
+}
+
+pub fn incrby(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let by = int(&args[2])?;
+    incr_generic(cx, &args[1], by)
+}
+
+pub fn decrby(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let by = int(&args[2])?;
+    if by == i64::MIN {
+        return Err(Error::new("ERR decrement would overflow"));
+    }
+    incr_generic(cx, &args[1], -by)
+}
+
+pub fn incrbyfloat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let key = &args[1];
+    let cur: Vec<u8> = cx.get_str(key)?.map_or(b"0".to_vec(), |s| s.to_vec());
+    if !decimal::valid(&args[2]) {
+        return Err(NOT_FLOAT);
+    }
+    let new = decimal::incr_by_float(&cur, &args[2]).map_err(|e| match e {
+        IncrError::NotFloat => NOT_FLOAT,
+        IncrError::NanOrInf => Error::new("ERR increment would produce NaN or Infinity"),
+    })?;
+    let mut e = cx.get_or_create(key, Kind::String)?;
+    let s = e.str();
+    s.clear();
+    s.extend_from_slice(new.as_bytes());
+    e.notify(notify::STRING, "incrbyfloat");
+    drop(e);
+    let nb = Bytes::from(new);
+    cx.propagate_as(vec![b("SET"), key.clone(), nb.clone(), b("KEEPTTL")]);
+    Ok(Reply::Bulk(nb))
+}
+
+pub fn getrange(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let mut start = int(&args[2])?;
+    let mut end = int(&args[3])?;
+    let Some(s) = cx.get_str(&args[1])? else { return Ok(Reply::bulk("")) };
+    let len = s.len() as i64;
+    if start < 0 && end < 0 && start > end {
+        return Ok(Reply::bulk(""));
+    }
+    if start < 0 {
+        start += len;
+    }
+    if end < 0 {
+        end += len;
+    }
+    start = start.max(0);
+    end = end.max(0);
+    if end >= len {
+        end = len - 1;
+    }
+    if start > end || len == 0 {
+        return Ok(Reply::bulk(""));
+    }
+    Ok(Reply::bulk(&s[start as usize..=end as usize]))
+}
+
+pub fn setrange(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let offset = int(&args[2])?;
+    if offset < 0 {
+        return Err(Error::new("ERR offset is out of range"));
+    }
+    let value = &args[3];
+    let offset = offset as usize;
+    let cur_len = cx.get_str(&args[1])?.map(|s| s.len());
+    if value.is_empty() {
+        return Ok(Reply::Int(cur_len.unwrap_or(0) as i64));
+    }
+    if offset + value.len() > max_bulk(cx) {
+        return Err(TOO_BIG);
+    }
+    let mut e = cx.get_or_create(&args[1], Kind::String)?;
+    let s = e.str();
+    if s.len() < offset + value.len() {
+        s.resize(offset + value.len(), 0);
+    }
+    s[offset..offset + value.len()].copy_from_slice(value);
+    let len = s.len();
+    e.notify(notify::STRING, "setrange");
+    Ok(Reply::Int(len as i64))
+}
+
+/// LCS key1 key2 [LEN] [IDX] [MINMATCHLEN len] [WITHMATCHLEN]
+pub fn lcs(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let (mut want_len, mut want_idx, mut with_len) = (false, false, false);
+    let mut min_len: i64 = 0;
+    let mut i = 3;
+    while i < args.len() {
+        let a = &args[i];
+        if eq(a, "len") {
+            want_len = true;
+        } else if eq(a, "idx") {
+            want_idx = true;
+        } else if eq(a, "withmatchlen") {
+            with_len = true;
+        } else if eq(a, "minmatchlen") && i + 1 < args.len() {
+            min_len = int(&args[i + 1])?.max(0);
+            i += 1;
+        } else {
+            return Err(SYNTAX);
+        }
+        i += 1;
+    }
+    let type_err = Error::new("ERR The specified keys must contain string values");
+    let a = match cx.get(&args[1]) {
+        None => Vec::new(),
+        Some(Value::Str(s)) => s.to_vec(),
+        Some(_) => return Err(type_err),
+    };
+    let bv = match cx.get(&args[2]) {
+        None => Vec::new(),
+        Some(Value::Str(s)) => s.to_vec(),
+        Some(_) => return Err(type_err),
+    };
+    if want_len && want_idx {
+        return Err(Error::new("ERR If you want both the length and indexes, please just use IDX."));
+    }
+    let (n, m) = (a.len(), bv.len());
+    if (n + 1).saturating_mul(m + 1) > 512 * 1024 * 1024 {
+        return Err(Error::new("ERR Insufficient memory, transient memory for LCS exceeds proto-max-bulk-len"));
+    }
+    // dp[i][j] = LCS length of a[..i], b[..j]
+    let w = m + 1;
+    let mut dp = vec![0u32; (n + 1) * w];
+    for i in 1..=n {
+        for j in 1..=m {
+            dp[i * w + j] = if a[i - 1] == bv[j - 1] {
+                dp[(i - 1) * w + j - 1] + 1
+            } else {
+                dp[(i - 1) * w + j].max(dp[i * w + j - 1])
+            };
+        }
+    }
+    let total = dp[n * w + m] as usize;
+    if want_len {
+        return Ok(Reply::Int(total as i64));
+    }
+    // Walk back from the end, collecting the LCS and (for IDX) contiguous match ranges.
+    let mut out = vec![0u8; total];
+    let mut idx = total;
+    let (mut i, mut j) = (n, m);
+    let mut matches = Vec::new();
+    let mut range: Option<(usize, usize, usize, usize)> = None; // a_start,a_end,b_start,b_end
+    let flush = |range: &mut Option<(usize, usize, usize, usize)>, matches: &mut Vec<Reply>| {
+        if let Some((a1, a2, b1, b2)) = range.take() {
+            let len = a2 - a1 + 1;
+            if len as i64 >= min_len {
+                let mut m = vec![
+                    Reply::Array(vec![Reply::Int(a1 as i64), Reply::Int(a2 as i64)]),
+                    Reply::Array(vec![Reply::Int(b1 as i64), Reply::Int(b2 as i64)]),
+                ];
+                if with_len {
+                    m.push(Reply::Int(len as i64));
+                }
+                matches.push(Reply::Array(m));
+            }
+        }
+    };
+    while i > 0 && j > 0 {
+        if a[i - 1] == bv[j - 1] {
+            idx -= 1;
+            out[idx] = a[i - 1];
+            let (ai, bi) = (i - 1, j - 1);
+            match &mut range {
+                Some((a1, _, b1, _)) if *a1 == ai + 1 && *b1 == bi + 1 => {
+                    *a1 = ai;
+                    *b1 = bi;
+                }
+                _ => {
+                    flush(&mut range, &mut matches);
+                    range = Some((ai, ai, bi, bi));
+                }
+            }
+            i -= 1;
+            j -= 1;
+        } else if dp[(i - 1) * w + j] > dp[i * w + j - 1] {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    flush(&mut range, &mut matches);
+    if want_idx {
+        return Ok(Reply::Map(vec![
+            (Reply::bulk("matches"), Reply::Array(matches)),
+            (Reply::bulk("len"), Reply::Int(total as i64)),
+        ]));
+    }
+    Ok(Reply::bulk(out))
+}
+
+pub fn digest(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    Ok(match cx.get_str(&args[1])? {
+        Some(s) => Reply::bulk_str(xxh3_hex(s)),
+        None => Reply::Nil,
+    })
+}
+
+/// DELEX key [IFEQ v | IFNE v | IFDEQ d | IFDNE d]
+pub fn delex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let key = &args[1];
+    let cond = match args.len() {
+        2 => Cond::Any,
+        4 => {
+            let v = &args[3][..];
+            let a = &args[2];
+            if eq(a, "ifeq") {
+                Cond::IfEq(v)
+            } else if eq(a, "ifne") {
+                Cond::IfNe(v)
+            } else if eq(a, "ifdeq") {
+                Cond::IfDeq(v)
+            } else if eq(a, "ifdne") {
+                Cond::IfDne(v)
+            } else {
+                return Err(SYNTAX);
+            }
+        }
+        _ => return Err(SYNTAX),
+    };
+    if cond != Cond::Any {
+        let cur = cx.get_str(key)?.cloned();
+        if !cond_holds(cond, cur.as_deref()) {
+            return Ok(Reply::Int(0));
+        }
+    }
+    if cx.delete(key) {
+        cx.notify(notify::GENERIC, "del", key);
+        cx.propagate_as(vec![b("DEL"), key.clone()]);
+        Ok(Reply::Int(1))
+    } else {
+        Ok(Reply::Int(0))
+    }
+}
