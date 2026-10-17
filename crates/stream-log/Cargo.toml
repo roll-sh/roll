@@ -1,0 +1,15 @@
+[package]
+name = "stream-log"
+description = "Kafka-format partition log: record batches, segments, idempotent producers, transactions, tiering hooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+crc32c.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

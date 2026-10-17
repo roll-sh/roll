@@ -30,6 +30,21 @@ postgres-protocol = "0.6"
 zstd = "0.14"
 humantime = "2"
 futures = "0.3"
+kafka-protocol = { version = "0.18", features = ["messages_enums"] }
+mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
+crc32c = "0.6"
+uuid = "1"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+base64 = "0.22"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "zstd"] }
+rcgen = "0.14"
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
+stream-log = { path = "crates/stream-log" }
+stream-broker = { path = "crates/stream-broker" }

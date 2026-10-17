@@ -4,9 +4,18 @@ use pg_proxy::{Proxy, ProxyConfig};
 use pg_storage::StorageConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use stream_broker::config::TlsFiles;
+use stream_broker::store::Settings;
 use tracing::info;
 
-/// roll daemon: serverless Postgres on your machine (or an EC2 host).
+/// mimalloc hands freed memory back to the OS; the system allocator on macOS keeps it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
+/// roll daemon: serverless Postgres and Kafka-compatible streams on your machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -45,19 +54,71 @@ struct Args {
     /// Evict suspended branches to object storage after this many seconds.
     #[arg(long, env = "ROLL_EVICT_AFTER", default_value_t = 86_400)]
     evict_after: i64,
+    /// Kafka listener for streams.
+    #[arg(long, env = "ROLL_KAFKA", default_value = "127.0.0.1:9092")]
+    kafka: SocketAddr,
+    /// Host and port Kafka clients are told to connect to (default: --public-host and the
+    /// listener's port).
+    #[arg(long, env = "ROLL_KAFKA_ADVERTISED_HOST")]
+    kafka_advertised_host: Option<String>,
+    #[arg(long, env = "ROLL_KAFKA_ADVERTISED_PORT")]
+    kafka_advertised_port: Option<u16>,
+    /// Stream for Kafka connections that don't authenticate; created if missing. Empty to
+    /// require SASL on every connection.
+    #[arg(long, env = "ROLL_DEFAULT_STREAM", default_value = "default")]
+    default_stream: String,
+    /// Serve the Kafka listener over TLS with this PEM certificate chain and key.
+    #[arg(long, env = "ROLL_KAFKA_TLS_CERT", requires = "kafka_tls_key")]
+    kafka_tls_cert: Option<PathBuf>,
+    #[arg(long, env = "ROLL_KAFKA_TLS_KEY", requires = "kafka_tls_cert")]
+    kafka_tls_key: Option<PathBuf>,
+    /// Require an API key on the HTTP stream data plane.
+    #[arg(long, env = "ROLL_STREAM_REQUIRE_AUTH")]
+    stream_require_auth: bool,
+    /// Local disk target for stream data across open partitions, in MiB (0 = only per-topic
+    /// `local.retention.*`). Size the volume for this plus a few seconds of ingest.
+    #[arg(long, env = "ROLL_STREAM_DISK_MB", default_value_t = 0)]
+    stream_disk_mb: u64,
+    /// Keep closed partitions' data on local disk instead of serving it from object storage.
+    #[arg(long, env = "ROLL_STREAM_KEEP_LOCAL")]
+    stream_keep_local: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Return freed memory to the OS right away (mimalloc's default waits 1 s), and have each worker
+    // collect its heap when it goes idle: otherwise memory freed after a burst stays with threads
+    // that are parked. Measured: no throughput cost; idle footprint after 256 MB of writes 36–56 MB
+    // → 24–31 MB (and ~90 MB → ~60 MB with 600 partitions).
+    unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_park(|| unsafe { libmimalloc_sys::mi_collect(false) })
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info".into()),
+                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,stream_broker=info".into()),
         )
         .init();
     let args = Args::parse();
+    let home = std::path::absolute(&args.home)?;
 
-    let mut config = Config::local(std::path::absolute(&args.home)?);
+    let mut stream_config = stream_broker::Config::local(home.clone());
+    stream_config.listen = args.kafka;
+    stream_config.advertised_host = args.kafka_advertised_host.clone().unwrap_or_else(|| args.public_host.clone());
+    stream_config.advertised_port = args.kafka_advertised_port.unwrap_or(args.kafka.port());
+    stream_config.default_stream = Some(args.default_stream.clone()).filter(|s| !s.is_empty());
+    stream_config.tls = args.kafka_tls_cert.clone().zip(args.kafka_tls_key.clone()).map(|(cert, key)| TlsFiles { cert, key });
+    stream_config.http_url = format!("http://{}:{}", args.public_host, args.api.port());
+    stream_config.http_require_auth = args.stream_require_auth;
+    stream_config.local_disk_bytes = args.stream_disk_mb << 20;
+    stream_config.evict_on_unload = !args.stream_keep_local;
+
+    let mut config = Config::local(home);
     config.public_host = args.public_host;
     config.public_port = args.proxy.port();
     config.mem_mb_per_cu = args.mem_per_cu;
@@ -71,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
             prefix: args.s3_prefix,
         };
     }
+    stream_config.storage = config.storage.clone();
 
     let control = Control::new(config).await?;
     info!(storage = %control.objects.description, "durable storage");
@@ -80,14 +142,28 @@ async fn main() -> anyhow::Result<()> {
         api::proxy_router(control.clone()),
         ProxyConfig { listen: args.proxy, default_endpoint: args.default_endpoint },
     );
+
+    let broker = stream_broker::Broker::new(stream_config).await?;
+    if let Some(name) = &broker.config.default_stream
+        && broker.find_stream(name).is_none()
+    {
+        broker.create_stream(name, Settings::default())?;
+    }
+    broker.txns.recover(&broker).await?;
+    let kafka = tokio::net::TcpListener::bind(args.kafka).await?;
+
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
+    let router = api::router(control.clone()).merge(stream_broker::http::router(broker.clone()));
 
     tokio::select! {
         r = proxy.serve() => r?,
-        r = axum::serve(listener, api::router(control.clone())) => r?,
+        r = axum::serve(listener, router) => r?,
+        r = stream_broker::server::serve_on(broker.clone(), kafka) => r?,
         _ = reconciler::run(control.clone()) => {}
+        _ = broker.clone().run() => {}
         _ = tokio::signal::ctrl_c() => info!("shutting down; computes keep running and are adopted on next start"),
     }
+    broker.sync_all().await;
     Ok(())
 }
