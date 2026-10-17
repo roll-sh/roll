@@ -16,7 +16,7 @@ CONFIG SET nosuchparam 1
 CONFIG GET hash-max-listpack-entries
 CONFIG SET hash-max-listpack-entries 64 hash-max-listpack-value 32
 !sort CONFIG GET hash-max-listpack-*
-CONFIG SET hash-max-listpack-entries 128 hash-max-listpack-value 64
+CONFIG SET hash-max-listpack-entries 512 hash-max-listpack-value 64
 CONFIG SET notify-keyspace-events KEA
 CONFIG GET notify-keyspace-events
 CONFIG SET notify-keyspace-events Ex$

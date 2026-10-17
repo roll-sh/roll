@@ -17,6 +17,8 @@ pub trait Sink: Send + Sync {
     /// The client's ACL user was deleted or lost channel permissions: the connection should
     /// check [`crate::acl::must_disconnect`].
     fn acl_changed(&self) {}
+    /// CLIENT KILL: close the connection.
+    fn kill(&self) {}
 }
 
 #[derive(Clone)]

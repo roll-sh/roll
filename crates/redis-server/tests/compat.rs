@@ -11,9 +11,14 @@
 //! !err CMD                both must be errors with the same code (ERR, WRONGTYPE…)
 //! !skip CMD               run on both, don't compare
 //! !mask a,b CMD           replace the values following the fields `a` and `b` (in maps and flat
-//!                         key/value arrays, at any depth) before comparing (timestamps, ids…)
+//!                         key/value arrays, at any depth, and `a=…` tokens in text replies such
+//!                         as CLIENT LIST) before comparing (timestamps, ids…)
+//! !ids CMD                in the reply, integers and `id=`/`redir=` tokens equal to a
+//!                         connection's client id become `id:N` (ids differ between servers)
+//! CLIENT KILL ID {id:2}   `{id:N}` expands to connection N's client id on each server
 //! !send BLPOP l 5         send without reading the reply (read it later with @recv)
 //! @recv                   read one reply on the current connection and compare
+//! @recv ids               … with `!ids` applied
 //! @conn 2                 switch to connection 2 (opened on first use)
 //! @resp 3                 HELLO 3 on the current connection (both sides)
 //! @sleep 100              pause (ms)
@@ -133,6 +138,42 @@ fn mask(r: &Reply, fields: &[String]) -> Reply {
         Reply::Map(pairs) => {
             Reply::Map(pairs.iter().map(|(k, v)| (k.clone(), if is_field(k) { Reply::Nil } else { mask(v, fields) })).collect())
         }
+        Reply::Bulk(b) | Reply::Verbatim(_, b) if b.contains(&b'=') => Reply::Bulk(map_tokens(b, |k, v| {
+            if fields.iter().any(|f| f == k) { "*".to_string() } else { v.to_string() }
+        })),
+        other => other.clone(),
+    }
+}
+
+/// Rewrite the values of `key=value` tokens in a text reply (CLIENT LIST lines).
+fn map_tokens(b: &[u8], f: impl Fn(&str, &str) -> String) -> bytes::Bytes {
+    let text = String::from_utf8_lossy(b);
+    let lines: Vec<String> = text
+        .split('\n')
+        .map(|line| {
+            line.split(' ')
+                .map(|tok| match tok.split_once('=') {
+                    Some((k, v)) => format!("{k}={}", f(k, v)),
+                    None => tok.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    bytes::Bytes::from(lines.join("\n"))
+}
+
+/// Replace known client ids (`ids[n]` is connection n's) with `id:n`.
+fn name_ids(r: &Reply, ids: &HashMap<u32, i64>) -> Reply {
+    let find = |v: i64| ids.iter().find(|(_, id)| **id == v).map(|(n, _)| format!("id:{n}"));
+    match r {
+        Reply::Int(v) => find(*v).map_or(Reply::Int(*v), Reply::Status),
+        Reply::Array(items) | Reply::Set(items) | Reply::Push(items) => Reply::Array(items.iter().map(|x| name_ids(x, ids)).collect()),
+        Reply::Map(pairs) => Reply::Map(pairs.iter().map(|(k, v)| (name_ids(k, ids), name_ids(v, ids))).collect()),
+        Reply::Bulk(b) | Reply::Verbatim(_, b) if b.contains(&b'=') => Reply::Bulk(map_tokens(b, |k, v| match (k, v.parse::<i64>()) {
+            ("id" | "redir", Ok(n)) => find(n).unwrap_or_else(|| v.to_string()),
+            _ => v.to_string(),
+        })),
         other => other.clone(),
     }
 }
@@ -151,6 +192,20 @@ struct Pair {
     redis: RespClient,
     roll: RespClient,
     pending: Vec<(Cmp, String, usize)>,
+    /// `CLIENT ID` on each side.
+    ids: (i64, i64),
+}
+
+async fn open_pair(ref_addr: &str, roll_addr: std::net::SocketAddr) -> Pair {
+    let mut redis = RespClient::connect(ref_addr).await.unwrap();
+    let mut roll = RespClient::connect(roll_addr).await.unwrap();
+    // Not authenticated yet (a script changed the default user) or BUSY: no id to substitute.
+    let id = |r: Reply| match r {
+        Reply::Int(n) => n,
+        _ => -1,
+    };
+    let ids = (id(redis.cmd(["CLIENT", "ID"]).await.unwrap()), id(roll.cmd(["CLIENT", "ID"]).await.unwrap()));
+    Pair { redis, roll, pending: Vec::new(), ids }
 }
 
 async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAddr) -> Vec<String> {
@@ -164,6 +219,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
     let mut admin_r = RespClient::connect(ref_addr).await.unwrap();
     let mut admin_o = RespClient::connect(roll_addr).await.unwrap();
     for c in [&mut admin_r, &mut admin_o] {
+        c.cmd(["CLIENT", "UNPAUSE"]).await.unwrap();
         c.cmd(["FLUSHALL"]).await.unwrap();
         c.cmd(["SCRIPT", "FLUSH"]).await.unwrap();
         c.cmd(["FUNCTION", "FLUSH"]).await.unwrap();
@@ -192,12 +248,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             eprintln!("{fname}:{lineno}: {line}");
         }
         if let std::collections::hash_map::Entry::Vacant(e) = conns.entry(cur) {
-            let p = Pair {
-                redis: RespClient::connect(ref_addr).await.unwrap(),
-                roll: RespClient::connect(roll_addr).await.unwrap(),
-                pending: Vec::new(),
-            };
-            e.insert(p);
+            e.insert(open_pair(ref_addr, roll_addr).await);
         }
         if let Some(rest) = line.strip_prefix('@') {
             let (dir, arg) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -205,12 +256,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                 "conn" => {
                     cur = arg.trim().parse().unwrap();
                     if let std::collections::hash_map::Entry::Vacant(e) = conns.entry(cur) {
-                        let p = Pair {
-                            redis: RespClient::connect(ref_addr).await.unwrap(),
-                            roll: RespClient::connect(roll_addr).await.unwrap(),
-                            pending: Vec::new(),
-                        };
-                        e.insert(p);
+                        e.insert(open_pair(ref_addr, roll_addr).await);
                     }
                 }
                 "sleep" => tokio::time::sleep(std::time::Duration::from_millis(arg.trim().parse().unwrap())).await,
@@ -223,10 +269,16 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                     }
                 }
                 "recv" => {
+                    let ids_r: HashMap<u32, i64> = conns.iter().map(|(n, p)| (*n, p.ids.0)).collect();
+                    let ids_o: HashMap<u32, i64> = conns.iter().map(|(n, p)| (*n, p.ids.1)).collect();
                     let p = conns.get_mut(&cur).unwrap();
                     let (cmp, what, at) = if p.pending.is_empty() { (Cmp::Exact, "(push)".to_string(), lineno) } else { p.pending.remove(0) };
-                    let a = p.redis.read_timeout(5000).await.unwrap();
-                    let b = p.roll.read_timeout(5000).await.unwrap();
+                    let mut a = p.redis.read_timeout(5000).await.unwrap();
+                    let mut b = p.roll.read_timeout(5000).await.unwrap();
+                    if arg.trim() == "ids" {
+                        a = a.map(|r| name_ids(&r, &ids_r));
+                        b = b.map(|r| name_ids(&r, &ids_o));
+                    }
                     match (a, b) {
                         (Some(a), Some(b)) if same(cmp, &a, &b) => {}
                         (a, b) => fails.push(format!("{fname}:{lineno} (sent at {at}): {what}\n    redis: {a:?}\n    roll:  {b:?}")),
@@ -236,9 +288,10 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             }
             continue;
         }
-        let (cmp, send_only, cmdline, masked) = {
+        let (cmp, send_only, cmdline, masked, by_id) = {
             let mut cmp = Cmp::Exact;
             let mut send = false;
+            let mut by_id = false;
             let mut masked: Vec<String> = Vec::new();
             let mut l = line;
             while let Some(rest) = l.strip_prefix('!') {
@@ -254,22 +307,27 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                     "err" => cmp = Cmp::Err,
                     "skip" => cmp = Cmp::Skip,
                     "send" => send = true,
+                    "ids" => by_id = true,
                     other => panic!("{fname}:{lineno}: unknown modifier !{other}"),
                 }
                 l = tail.trim_start();
             }
-            (cmp, send, l, masked)
+            (cmp, send, l, masked, by_id)
         };
-        let args = redis_server::client::args(&expand(cmdline));
+        let ids_r: HashMap<u32, i64> = conns.iter().map(|(n, p)| (*n, p.ids.0)).collect();
+        let ids_o: HashMap<u32, i64> = conns.iter().map(|(n, p)| (*n, p.ids.1)).collect();
+        let args_r = redis_server::client::args(&with_ids(&expand(cmdline), &ids_r));
+        let args = redis_server::client::args(&with_ids(&expand(cmdline), &ids_o));
         let p = conns.get_mut(&cur).unwrap();
         if send_only {
-            p.redis.send(&args).await.unwrap();
+            p.redis.send(&args_r).await.unwrap();
             p.roll.send(&args).await.unwrap();
             p.pending.push((cmp, cmdline.to_string(), lineno));
             continue;
         }
-        let a = p.redis.cmd(&args).await.map(|r| if masked.is_empty() { r } else { mask(&r, &masked) });
+        let a = p.redis.cmd(&args_r).await.map(|r| if masked.is_empty() { r } else { mask(&r, &masked) });
         let b = p.roll.read_timeout_after_send(&args).await.map(|r| r.map(|r| if masked.is_empty() { r } else { mask(&r, &masked) }));
+        let (a, b) = if by_id { (a.map(|r| name_ids(&r, &ids_r)), b.map(|r| r.map(|r| name_ids(&r, &ids_o)))) } else { (a, b) };
         match (a, b) {
             (Ok(a), Ok(Some(b))) => {
                 if !same(cmp, &a, &b) {
@@ -299,6 +357,15 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
         }
     }
     fails
+}
+
+/// Expand `{id:N}` into connection N's client id.
+fn with_ids(line: &str, ids: &HashMap<u32, i64>) -> String {
+    let mut out = line.to_string();
+    for (n, id) in ids {
+        out = out.replace(&format!("{{id:{n}}}"), &id.to_string());
+    }
+    out
 }
 
 /// Expand `{N*text}` into `text` repeated N times.

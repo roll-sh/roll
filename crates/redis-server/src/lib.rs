@@ -27,7 +27,22 @@ pub async fn serve_tcp(listener: TcpListener, dir: Arc<dyn Directory>) -> anyhow
         let (sock, peer) = listener.accept().await?;
         let _ = sock.set_nodelay(true);
         let dir = dir.clone();
-        tokio::spawn(async move { conn::serve(sock, peer, local, dir).await });
+        let fd = raw_fd(&sock);
+        tokio::spawn(async move { conn::serve(sock, peer, local, dir, fd).await });
+    }
+}
+
+/// The socket's descriptor, shown by CLIENT LIST (-1 where there is none).
+pub(crate) fn raw_fd(sock: &tokio::net::TcpStream) -> i64 {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        sock.as_raw_fd() as i64
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = sock;
+        -1
     }
 }
 

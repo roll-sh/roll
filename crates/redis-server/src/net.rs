@@ -48,13 +48,14 @@ pub async fn serve(listener: TcpListener, dir: Arc<dyn Directory>, opts: ListenO
                     _ => return,
                 }
             }
+            let fd = crate::raw_fd(&sock);
             match opts.tls {
                 Some(acceptor) => {
                     let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(sock)).await else { return };
                     let sni = tls.get_ref().1.server_name().map(str::to_string);
-                    crate::conn::serve_with(tls, peer, local, dir, sni).await;
+                    crate::conn::serve_with(tls, peer, local, dir, sni, fd).await;
                 }
-                None => crate::conn::serve_with(sock, peer, local, dir, None).await,
+                None => crate::conn::serve_with(sock, peer, local, dir, None, fd).await,
             }
         });
     }

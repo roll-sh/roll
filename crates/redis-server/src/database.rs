@@ -115,6 +115,7 @@ impl DerefMut for EngineGuard<'_> {
 
 impl Drop for EngineGuard<'_> {
     fn drop(&mut self) {
+        self.eng.before_sleep();
         if !self.eng.effects.is_empty() {
             let effects = self.eng.take_effects();
             self.db.publish(&effects);

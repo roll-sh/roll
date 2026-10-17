@@ -47,7 +47,7 @@ pub static COMMANDS: &[Command] = &[
     cmd!("readwrite", 1, LOADING | STALE | FAST, 0, 0, 0, readwrite, Cluster),
     cmd!("asking", 1, FAST, 0, 0, 0, asking, Cluster),
     container!("cluster", 0, Cluster, CLUSTER),
-    container!("client", 0, Connection, CLIENT),
+    container!("client", 0, Connection, super::client::CLIENT),
     container!("config", 0, Server, CONFIG),
     // Bare COMMAND lists every command (arity -1, unlike other containers).
     Command { arity: -1, handler: command_all, ..container!("command", LOADING | STALE, Server, COMMAND) },
@@ -91,27 +91,6 @@ static CLUSTER: &[Command] = &[
     cmd!("slot-stats", -4, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
     cmd!("slots", 2, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
     cmd!("syncslots", -3, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
-];
-
-static CLIENT: &[Command] = &[
-    cmd!("id", 2, NOSCRIPT | LOADING | STALE, 0, 0, 0, client_id, Connection),
-    cmd!("getname", 2, NOSCRIPT | LOADING | STALE, 0, 0, 0, client_getname, Connection),
-    cmd!("setname", 3, NOSCRIPT | LOADING | STALE, 0, 0, 0, client_setname, Connection),
-    cmd!("setinfo", 4, NOSCRIPT | LOADING | STALE, 0, 0, 0, client_setinfo, Connection),
-    cmd!("info", 2, NOSCRIPT | LOADING | STALE, 0, 0, 0, client_info, Connection),
-    cmd!("list", -2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Connection),
-    cmd!("kill", -3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Connection),
-    cmd!("pause", -3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Connection),
-    cmd!("unpause", 2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Connection),
-    cmd!("unblock", -3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Connection),
-    cmd!("reply", 3, NOSCRIPT | LOADING | STALE, 0, 0, 0, client_reply, Connection),
-    cmd!("no-evict", 3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, client_no_evict, Connection),
-    cmd!("no-touch", 3, NOSCRIPT | LOADING | STALE, 0, 0, 0, client_no_touch, Connection),
-    cmd!("tracking", -3, NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Connection),
-    cmd!("trackinginfo", 2, NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Connection),
-    cmd!("caching", 3, NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Connection),
-    cmd!("getredir", 2, NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Connection),
-    cmd!("help", 2, LOADING | STALE, 0, 0, 0, client_help, Connection),
 ];
 
 static CONFIG: &[Command] = &[
@@ -238,6 +217,7 @@ pub fn flushdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     flush_mode(args)?;
     let db = cx.db_index();
     cx.eng.touch_all_watched(Some(db as u16));
+    cx.eng.clients.flushed();
     cx.eng.dbs[db].clear();
     cx.eng.sig.dirty += 1;
     Ok(Reply::Ok)
@@ -328,7 +308,7 @@ pub fn hello(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             if eq(&args[i], "auth") && i + 2 < args.len() {
                 i += 3;
             } else if eq(&args[i], "setname") && i + 1 < args.len() {
-                validate_name(&args[i + 1])?;
+                super::client::validate_name(&args[i + 1])?;
                 name = Some(args[i + 1].clone());
                 i += 2;
             } else {
@@ -365,166 +345,12 @@ pub fn reset(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     cx.client.no_evict = false;
     cx.client.readonly = false;
     cx.client.reply_mode = ReplyMode::On;
-    cx.client.tracking = Default::default();
+    cx.eng.clients.disable_tracking(id);
     Ok(Reply::status("RESET"))
 }
 
 pub fn quit(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     Ok(Reply::Ok)
-}
-
-fn validate_name(n: &[u8]) -> Result<(), Error> {
-    if n.iter().any(|&c| c <= b' ' || c > b'~') {
-        return Err(Error::new("ERR Client names cannot contain spaces, newlines or special characters."));
-    }
-    Ok(())
-}
-
-pub fn client_id(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Int(cx.client.id as i64))
-}
-
-pub fn client_getname(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(cx.client.name.clone().map_or(Reply::Nil, Reply::Bulk))
-}
-
-pub fn client_setname(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    validate_name(&args[2])?;
-    cx.client.name = if args[2].is_empty() { None } else { Some(args[2].clone()) };
-    Ok(Reply::Ok)
-}
-
-pub fn client_setinfo(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let v = &args[3];
-    if v.iter().any(|&c| !(b'!'..=b'~').contains(&c)) {
-        return Err(Error::msg(format!(
-            "ERR {} cannot contain spaces, newlines or special characters.",
-            String::from_utf8_lossy(&args[2]).to_lowercase()
-        )));
-    }
-    let v = String::from_utf8_lossy(v).into_owned();
-    if eq(&args[2], "lib-name") {
-        cx.client.lib_name = Some(v);
-    } else if eq(&args[2], "lib-ver") {
-        cx.client.lib_ver = Some(v);
-    } else {
-        return Err(Error::msg(format!("ERR Unrecognized option '{}'", String::from_utf8_lossy(&args[2]))));
-    }
-    Ok(Reply::Ok)
-}
-
-/// The `CLIENT INFO` / `CLIENT LIST` line for a client.
-pub fn client_line(c: &crate::client::Client, now: i64, extra: &str) -> String {
-    let mut flags = String::new();
-    if c.multi.is_some() {
-        flags.push('x');
-    }
-    if c.subscriptions() > 0 {
-        flags.push('P');
-    }
-    if c.readonly {
-        flags.push('r');
-    }
-    if c.no_evict {
-        flags.push('e');
-    }
-    if c.no_touch {
-        flags.push('T');
-    }
-    if c.tracking.on {
-        flags.push('t');
-    }
-    if c.monitor {
-        flags.push('O');
-    }
-    if flags.is_empty() {
-        flags.push('N');
-    }
-    let age = (now - c.created_ms) / 1000;
-    format!(
-        "id={} addr={} laddr={} fd=8 name={} age={} idle=0 flags={} db={} sub={} psub={} ssub={} multi={} watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem=1024 events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}{}",
-        c.id,
-        c.addr,
-        c.laddr,
-        c.name.as_ref().map(|n| String::from_utf8_lossy(n).into_owned()).unwrap_or_default(),
-        age,
-        flags,
-        c.db,
-        c.subs.len(),
-        c.psubs.len(),
-        c.ssubs.len(),
-        c.multi.as_ref().map_or(-1, |m| m.queued.len() as i64),
-        c.last_cmd,
-        c.user.name,
-        c.tracking.redirect.map_or(-1, |r| r as i64),
-        c.resp,
-        c.lib_name.clone().unwrap_or_default(),
-        c.lib_ver.clone().unwrap_or_default(),
-        extra,
-    )
-}
-
-pub fn client_info(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    let line = client_line(cx.client, cx.now, "");
-    Ok(Reply::Verbatim("txt", Bytes::from(line + "\n")))
-}
-
-pub fn client_reply(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let mode = if eq(&args[2], "on") {
-        ReplyMode::On
-    } else if eq(&args[2], "off") {
-        ReplyMode::Off
-    } else if eq(&args[2], "skip") {
-        ReplyMode::Skip
-    } else {
-        return Err(SYNTAX);
-    };
-    cx.client.reply_mode = mode;
-    Ok(Reply::Ok)
-}
-
-fn on_off(a: &[u8]) -> Result<bool, Error> {
-    if eq(a, "on") {
-        Ok(true)
-    } else if eq(a, "off") {
-        Ok(false)
-    } else {
-        Err(SYNTAX)
-    }
-}
-
-pub fn client_no_evict(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    cx.client.no_evict = on_off(&args[2])?;
-    Ok(Reply::Ok)
-}
-
-pub fn client_no_touch(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    cx.client.no_touch = on_off(&args[2])?;
-    Ok(Reply::Ok)
-}
-
-pub fn client_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(help(&[
-        "CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
-        "CACHING (YES|NO)",
-        "GETNAME",
-        "GETREDIR",
-        "ID",
-        "INFO",
-        "KILL <ip:port> | <option> <value> [...]",
-        "LIST [options ...]",
-        "UNPAUSE",
-        "PAUSE <timeout> [WRITE|ALL]",
-        "REPLY (ON|OFF|SKIP)",
-        "SETINFO <option> <value>",
-        "SETNAME <name>",
-        "TRACKING (ON|OFF) [REDIRECT <id>] [BCAST] [PREFIX <prefix> [...]] [OPTIN] [OPTOUT] [NOLOOP]",
-        "TRACKINGINFO",
-        "UNBLOCK <clientid> [TIMEOUT|ERROR]",
-        "NO-EVICT (ON|OFF)",
-        "NO-TOUCH (ON|OFF)",
-        "HELP",
-    ]))
 }
 
 pub fn config_get(cx: &mut Cx, args: &[Bytes]) -> CmdResult {

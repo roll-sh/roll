@@ -11,6 +11,7 @@ pub mod hashes;
 pub mod hll;
 pub mod keys;
 pub mod meta;
+pub mod client;
 pub mod hotkeys;
 pub mod keyspec;
 pub mod migrate;
@@ -375,6 +376,21 @@ pub fn lookup(name: &[u8]) -> Option<&'static Command> {
     lower.copy_from_slice(name);
     lower.make_ascii_lowercase();
     table().by_name.get(std::str::from_utf8(lower).ok()?).copied()
+}
+
+/// What CLIENT LIST shows as the command of `args` (Redis' `lastcmd`, set before checks):
+/// the full name, or `NULL` for an unknown command or subcommand.
+pub fn last_cmd_name(args: &[Bytes]) -> &'static str {
+    let Some(cmd) = lookup(&args[0]) else { return "NULL" };
+    let cmd = if cmd.subs.is_empty() || args.len() < 2 {
+        cmd
+    } else {
+        match lookup_sub(cmd, &args[1]) {
+            Some(s) => s,
+            None => return "NULL",
+        }
+    };
+    crate::acl::full_name(cmd).unwrap_or(cmd.name)
 }
 
 /// Resolve a container's subcommand.

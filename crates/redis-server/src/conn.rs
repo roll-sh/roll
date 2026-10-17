@@ -4,7 +4,7 @@
 use crate::database::Database;
 use crate::directory::{AuthRequest, Directory, Session};
 use bytes::{Bytes, BytesMut};
-use redis_engine::client::ReplyMode;
+use redis_engine::client::{ConnStats, ReplyMode};
 use redis_engine::commands::eq;
 use redis_engine::{Client, Outcome, Reply, Sink};
 use redis_proto::{Limits, parse_request};
@@ -27,6 +27,8 @@ pub enum Msg {
     Unblock(Bytes),
     /// The client's ACL user changed: disconnect if it was deleted or lost channel access.
     AclChanged,
+    /// CLIENT KILL from another connection.
+    Kill,
 }
 
 /// Delivers out-of-band data to the connection task.
@@ -50,6 +52,9 @@ impl Sink for ConnSink {
     fn acl_changed(&self) {
         let _ = self.tx.send(Msg::AclChanged);
     }
+    fn kill(&self) {
+        let _ = self.tx.send(Msg::Kill);
+    }
 }
 
 /// Most commands executed per lock acquisition, so one pipelining client can't starve others.
@@ -68,17 +73,19 @@ pub struct Conn<'a> {
     blocked: Option<i64>,
     /// More input may be parseable without reading (batch limit reached).
     more: bool,
+    stats: Arc<ConnStats>,
 }
 
-pub async fn serve<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>)
+pub async fn serve<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, fd: i64)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    serve_with(stream, peer, local, dir, None).await
+    serve_with(stream, peer, local, dir, None, fd).await
 }
 
-/// Serve a connection; `sni` is the TLS server name the client asked for (database routing).
-pub async fn serve_with<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, sni: Option<String>)
+/// Serve a connection; `sni` is the TLS server name the client asked for (database routing) and
+/// `fd` the socket's descriptor (-1 if none), shown by CLIENT LIST.
+pub async fn serve_with<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, sni: Option<String>, fd: i64)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -88,11 +95,17 @@ where
     let mut client = Client::with_sink(next_client_id(), sink);
     client.addr = peer.to_string();
     client.laddr = local.to_string();
+    let stats = Arc::new(ConnStats::default());
+    stats.fd.store(fd, Ordering::Relaxed);
+    stats.last_interaction.store(redis_engine::util::now_ms() / 1000, Ordering::Relaxed);
+    client.conn = Some(stats.clone());
+    client.defer_pushes = true;
     let session = dir.anonymous().await;
     client.authenticated = session.is_some();
     if let Some(s) = &session {
         client.user = s.user.clone();
         s.user.watch(client.id, client.sink.as_ref().unwrap());
+        register(&s.db, &client);
     }
     let mut conn = Conn {
         dir: dir.as_ref(),
@@ -105,11 +118,13 @@ where
         close_after: false,
         blocked: None,
         more: false,
+        stats,
     };
     let mut inbuf = BytesMut::with_capacity(16 * 1024);
     'conn: loop {
         if conn.blocked.is_none() {
             let limits = Limits { authenticated: conn.client.authenticated, ..Limits::default() };
+            let queued = conn.pending.len();
             loop {
                 match parse_request(&mut inbuf, limits) {
                     Ok(Some(args)) if args.is_empty() => {}
@@ -128,6 +143,13 @@ where
                     }
                 }
             }
+            let parsed = conn.pending.len().saturating_sub(queued) as u64;
+            if parsed > 0 {
+                conn.stats.pipeline_sum.fetch_add(parsed, Ordering::Relaxed);
+                conn.stats.pipeline_cnt.fetch_add(1, Ordering::Relaxed);
+            }
+            conn.stats.qbuf.store(inbuf.len() as u64, Ordering::Relaxed);
+            conn.stats.qbuf_cap.store(inbuf.capacity() as u64, Ordering::Relaxed);
             if !conn.pending.is_empty() {
                 conn.run_pending().await;
             }
@@ -136,12 +158,13 @@ where
             if wr.write_all(&conn.out).await.is_err() {
                 break;
             }
+            conn.stats.net_out.fetch_add(conn.out.len() as u64, Ordering::Relaxed);
             if let Some(db) = conn.db() {
                 db.net_out.fetch_add(conn.out.len() as u64, Ordering::Relaxed);
             }
             conn.out.clear();
         }
-        if conn.close_after {
+        if conn.close_after || conn.stats.killed.load(Ordering::Relaxed) {
             break;
         }
         // The batch limit was hit with more commands buffered: keep going without waiting.
@@ -171,6 +194,9 @@ where
             r = rd.read_buf(&mut inbuf) => match r {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    conn.stats.net_in.fetch_add(n as u64, Ordering::Relaxed);
+                    conn.stats.read_events.fetch_add(1, Ordering::Relaxed);
+                    conn.stats.last_interaction.store(redis_engine::util::now_ms() / 1000, Ordering::Relaxed);
                     if let Some(db) = &db {
                         db.net_in.fetch_add(n as u64, Ordering::Relaxed);
                     }
@@ -187,6 +213,7 @@ where
                             conn.blocked = None;
                         }
                         Msg::AclChanged => kill |= redis_engine::acl::must_disconnect(&conn.client),
+                        Msg::Kill => kill = true,
                     }
                     next = rx.try_recv().ok();
                 }
@@ -200,6 +227,14 @@ where
         }
     }
     conn.cleanup();
+}
+
+/// Show the connection in CLIENT LIST right away unless the engine is busy (a running script):
+/// then it registers with its first command.
+fn register(db: &Database, client: &Client) {
+    if let Some(mut eng) = db.shards[0].engine.try_lock() {
+        eng.register_client(client);
+    }
 }
 
 async fn sleep_until_ms(at_ms: i64) {
@@ -257,6 +292,15 @@ impl Conn<'_> {
                 self.close_after = true;
                 break;
             }
+            // CLIENT PAUSE postpones the command until the pause ends.
+            if let Some(db) = self.db().cloned() {
+                let args = self.pending.front().unwrap().clone();
+                self.wait_unpaused(&db, &args).await;
+                if self.stats.killed.load(Ordering::Relaxed) {
+                    self.close_after = true;
+                    break;
+                }
+            }
             // Connection-level commands first (they may need to await).
             let args = self.pending.front().unwrap();
             let started = std::time::Instant::now();
@@ -286,23 +330,33 @@ impl Conn<'_> {
                     self.emit(&args, r);
                     continue;
                 };
+                let mut first = true;
                 while let Some(args) = self.pending.front() {
-                    if is_intercepted(args) {
+                    if is_intercepted(args) || (!first && eng.paused_for(&mut self.client, args).is_some()) {
                         break;
                     }
+                    first = false;
                     let args = self.pending.pop_front().unwrap();
                     n += 1;
                     let client = &mut self.client;
-                    match long_running(&args, || eng.call(client, &args)) {
+                    let out = long_running(&args, || eng.call(client, &args));
+                    let pushes = eng.take_after_reply();
+                    match out {
                         Outcome::Reply(r) => {
                             let quit = eq(&args[0], "quit");
                             self.emit(&args, r);
-                            if quit || self.client.user.is_deleted() {
+                            for p in pushes {
+                                self.out.extend_from_slice(&p);
+                            }
+                            if quit || self.client.user.is_deleted() || self.stats.killed.load(Ordering::Relaxed) {
                                 self.close_after = true;
                                 break;
                             }
                         }
                         Outcome::Blocked => {
+                            for p in pushes {
+                                self.out.extend_from_slice(&p);
+                            }
                             self.blocked = Some(eng.block_deadline(self.client.id).unwrap_or(0));
                             break;
                         }
@@ -320,6 +374,26 @@ impl Conn<'_> {
                 }
             }
         }
+    }
+
+    /// Wait while CLIENT PAUSE holds `args` back (shown as blocked in CLIENT LIST meanwhile).
+    async fn wait_unpaused(&mut self, db: &Arc<Database>, args: &[Bytes]) {
+        loop {
+            // A busy script holds the engine: the command gets BUSY instead (checked first, as
+            // in Redis).
+            let end = match db.engine_unless_busy(0) {
+                Some(mut eng) => eng.paused_for(&mut self.client, args),
+                None => None,
+            };
+            let Some(end) = end else { break };
+            if self.stats.killed.load(Ordering::Relaxed) {
+                break;
+            }
+            self.stats.postponed.store(true, Ordering::Relaxed);
+            let left = (end - redis_engine::util::now_ms()).clamp(1, 10);
+            tokio::time::sleep(Duration::from_millis(left as u64)).await;
+        }
+        self.stats.postponed.store(false, Ordering::Relaxed);
     }
 
     fn on_block_timeout(&mut self) {
@@ -482,6 +556,7 @@ impl Conn<'_> {
                 s.user.watch(self.client.id, self.client.sink.as_ref().unwrap());
                 self.client.user = s.user.clone();
                 self.client.authenticated = true;
+                register(&s.db, &self.client);
                 self.session = Some(s);
                 Reply::Ok
             }

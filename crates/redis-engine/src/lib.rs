@@ -6,6 +6,7 @@
 
 pub mod acl;
 pub mod client;
+pub mod clients;
 pub mod commands;
 pub mod config;
 pub mod cx;

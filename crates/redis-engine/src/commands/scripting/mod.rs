@@ -215,6 +215,24 @@ impl Scripting {
         self.scripts.len()
     }
 
+    /// The flags EVAL / EVALSHA / FCALL with these arguments would run with (`COMPAT` for a
+    /// script without a shebang, `None` when it can't be found).
+    pub fn flags_for(&self, args: &[Bytes]) -> Option<u64> {
+        let name = String::from_utf8_lossy(&args[0]).to_ascii_lowercase();
+        if name.starts_with("fcall") {
+            let &(li, fi) = self.fn_index.get(&String::from_utf8_lossy(args.get(1)?).to_ascii_lowercase())?;
+            return Some(self.libs[li].functions[fi].flags);
+        }
+        let by_sha = name.starts_with("evalsha");
+        let body = args.get(1)?;
+        let sha = if by_sha { String::from_utf8_lossy(body).to_ascii_lowercase() } else { sha1_hex(body) };
+        match self.scripts.get(&sha) {
+            Some(s) => Some(s.flags),
+            None if by_sha => None,
+            None => Some(shebang_flags(body).map_or(COMPAT, |(f, _)| f)),
+        }
+    }
+
     pub fn libraries(&self) -> &[Library] {
         &self.libs
     }

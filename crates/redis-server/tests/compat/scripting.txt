@@ -313,7 +313,8 @@ EVAL "return redis.register_function" 0
 EVAL "return redis.setresp" 0
 EVAL "return type(redis.setresp)" 0
 
-# ---- math.random is deterministic ----
+# ---- math.random is deterministic (one process-wide PRNG, so seed first) ----
+EVAL "math.randomseed(0) return {math.random(), math.random(10), math.random(5, 9)}" 0
 EVAL "return {math.random(), math.random(10), math.random(5, 9)}" 0
 EVAL "math.randomseed(42) return {math.random(100), math.random(100), math.random(100)}" 0
 EVAL "math.randomseed(42) return math.random(100)" 0

@@ -214,6 +214,13 @@ impl Rules {
         })
     }
 
+    /// `ACLUserCheckKeyPerm(..., CMD_KEY_ACCESS)`: may a selector read `key`?
+    fn can_read_key(&self, key: &[u8]) -> bool {
+        self.selectors.iter().any(|s| {
+            s.allkeys || s.keys.iter().any(|k| k.perm & index::PERM_R != 0 && crate::util::glob_match(&k.pattern, key, false))
+        })
+    }
+
     /// May a client subscribed to these channels keep its subscriptions?
     fn subscriptions_allowed(&self, client: &Client) -> bool {
         let s = &self.selectors;
@@ -320,6 +327,11 @@ impl User {
     /// May this user's `cmd` read keys it names only indirectly (SORT's BY and GET patterns)?
     pub fn full_key_access(&self, cmd: &Command, args: &[Bytes]) -> bool {
         self.open.load(Ordering::Acquire) || self.rules.read().full_key_access(cmd, args)
+    }
+
+    /// May this user read `key` (BCAST invalidations are filtered by it)?
+    pub fn can_read_key(&self, key: &[u8]) -> bool {
+        self.open.load(Ordering::Acquire) || self.rules.read().can_read_key(key)
     }
 
     /// A copy of the current rules.
@@ -612,7 +624,9 @@ impl Acl {
 
     fn log_entry(&self, client: &Client, reason: LogReason, context: Context, object: Bytes, username: Bytes) {
         let now = crate::util::now_ms();
-        let client_info = crate::commands::server::client_line(client, now, "");
+        let view = crate::clients::View::of(client);
+        let derived = crate::commands::client::Derived::default();
+        let client_info = crate::commands::client::line_with(client.id, &view, &derived, client.conn.as_deref(), None, now);
         self.log.lock().add(LogEntry {
             count: 1,
             reason,

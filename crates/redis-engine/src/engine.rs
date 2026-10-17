@@ -199,6 +199,8 @@ pub struct Engine {
     pub(crate) pre_oom: bool,
     /// MIGRATE's cached target connections.
     pub(crate) migrate_sockets: crate::commands::migrate::Sockets,
+    /// Connected clients, CLIENT PAUSE and client-side caching.
+    pub clients: crate::clients::Clients,
     /// The HOTKEYS session, if one was started and not reset.
     pub hotkeys: Option<crate::commands::hotkeys::Stats>,
     /// Reply bytes of the EXEC running now, so far (Redis counts them per queued command).
@@ -289,6 +291,7 @@ impl Engine {
             acl: Default::default(),
             pre_oom: false,
             migrate_sockets: Default::default(),
+            clients: Default::default(),
             hotkeys: None,
             exec_out_bytes: 0,
         }
@@ -302,9 +305,74 @@ impl Engine {
     /// Execute one client command.
     pub fn call(&mut self, client: &mut Client, args: &[Bytes]) -> Outcome {
         let now = now_ms();
+        // Connections register on connect when the engine is free, else on their first command.
+        if client.conn.is_some() && !self.clients.by_id.contains_key(&client.id) {
+            self.clients.register(client);
+        }
+        if self.clients.tracking_clients > 0 {
+            self.clients.limit(self.cfg.tracking_table_max_keys, &mut self.rng);
+        }
+        self.clients.current = client.id;
+        self.clients.defer_current = client.defer_pushes;
         let out = self.dispatch(client, args, now, Mode::Top);
+        // The client's own invalidations follow its reply.
+        self.clients.flush_pending();
+        self.clients.refresh(client);
+        self.clients.defer_current = false;
         self.serve_blocked(now);
+        self.clients.current = 0;
         out
+    }
+
+    /// Pushes for the client of the last [`Engine::call`] that go after its reply (when it set
+    /// [`Client::defer_pushes`]).
+    pub fn take_after_reply(&mut self) -> Vec<Bytes> {
+        self.clients.take_after_reply()
+    }
+
+    /// Work Redis does before the event loop sleeps: BCAST invalidations of the keys modified
+    /// meanwhile. Call after each batch of commands and from the cron.
+    pub fn before_sleep(&mut self) {
+        self.clients.broadcast();
+    }
+
+    /// Would this command propagate writes (`is_may_replicate_command`): write and
+    /// may-replicate commands, scripts unless they declare `no-writes`, EXEC of such commands.
+    pub fn may_replicate(&self, client: &Client, args: &[Bytes]) -> bool {
+        let Ok((cmd, _)) = Self::resolve(args) else { return false };
+        if cmd.has(commands::SCRIPT_RUNNER) {
+            return match self.scripting.flags_for(args) {
+                Some(f) if f & commands::scripting::COMPAT == 0 => f & commands::scripting::NO_WRITES == 0,
+                _ => true,
+            };
+        }
+        if cmd.name == "exec" {
+            return client.multi.as_ref().is_some_and(|m| m.queued.iter().any(|q| self.may_replicate(client, q)));
+        }
+        cmd.is_write() || cmd.has(commands::MAY_REPLICATE)
+    }
+
+    /// CLIENT PAUSE: until when (Unix ms) this command must wait, if it is paused.
+    /// A postponed command already shows as the client's current one.
+    pub fn paused_for(&mut self, client: &mut Client, args: &[Bytes]) -> Option<i64> {
+        if client.internal || self.clients.pause.is_none() {
+            return None;
+        }
+        let may_replicate = self.may_replicate(client, args);
+        let end = self.clients.paused(now_ms(), may_replicate)?;
+        client.last_cmd = commands::last_cmd_name(args);
+        self.clients.refresh(client);
+        Some(end)
+    }
+
+    /// Paused clients also pause expiry and eviction.
+    pub(crate) fn pause_active(&self, now: i64) -> bool {
+        self.clients.pause.is_some_and(|(end, _)| end > now)
+    }
+
+    /// Register a network client (CLIENT LIST, KILL, tracking…).
+    pub fn register_client(&mut self, client: &Client) {
+        self.clients.register(client);
     }
 
     /// Apply a replicated effect (from the log or a primary).
@@ -397,6 +465,9 @@ impl Engine {
             return Outcome::Reply(Reply::error("ERR empty command"));
         }
         let top = matches!(mode, Mode::Top);
+        if top {
+            client.last_cmd = commands::last_cmd_name(args);
+        }
         let (cmd, full_name) = match Self::resolve(args) {
             Ok(c) => c,
             Err(e) => {
@@ -499,7 +570,7 @@ impl Engine {
 
         // ---- execute ----
         self.sig.notify = self.cfg.notify;
-        self.sig.track = !self.watches.keys.is_empty() || !self.blocking.by_key.is_empty();
+        self.sig.track = !self.watches.keys.is_empty() || !self.blocking.by_key.is_empty() || self.clients.wants_touches();
         let db_at_start = client.db as u16;
         let dirty_before = self.sig.dirty;
         let started = Instant::now();
@@ -523,7 +594,27 @@ impl Engine {
         self.process_touched();
         self.flush_events();
 
-        client.last_cmd = cmd.name;
+        // Client-side caching: the outer client read these keys (scripts' and transactions'
+        // commands count for the client running them).
+        if mode != Mode::Replay && block.is_none() {
+            let current = self.clients.current;
+            if current != 0
+                && cmd.has(commands::READONLY)
+                && !cmd.has(commands::PUBSUB)
+                && !matches!(cmd.name, "eval_ro" | "evalsha_ro" | "fcall_ro")
+                && self.clients.track(current).is_some()
+            {
+                let keys = commands::keyspec::keys_with_flags(cmd, &full_name, args);
+                self.clients.remember(current, keys.into_iter().map(|(i, _)| args[i].clone()));
+            }
+            if let Some(e) = self.clients.by_id.get(&current) {
+                e.stats.cmds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if top {
+                self.clients.command_done(client.id, client.multi.is_some(), full_name == "client" || full_name.starts_with("client|"));
+            }
+        }
+
         let stat = self.cmdstats.entry(full_name.clone()).or_default();
         stat.calls += 1;
         stat.usec += micros;
@@ -591,6 +682,7 @@ impl Engine {
     /// Account for a command the server layer executed itself (AUTH, WAIT…): MONITOR, SLOWLOG
     /// and command/error stats see it as if it had been dispatched here.
     pub fn record_external(&mut self, client: &Client, args: &[Bytes], micros: u64, reply: &Reply) {
+        self.clients.refresh(client);
         let Ok((cmd, full)) = Self::resolve(args) else { return };
         let now = now_ms();
         let shown = redacted(&full, args);
@@ -718,7 +810,8 @@ impl Engine {
             // The primary decides when keys expire; it will send the DEL.
             return false;
         }
-        if self.replica {
+        // Replicas, and a primary during CLIENT PAUSE, hide the key without deleting it.
+        if self.replica || self.pause_active(now) {
             return true;
         }
         self.delete_expired(db, key);
@@ -748,6 +841,7 @@ impl Engine {
             if let Some(ids) = self.watches.keys.get(&k) {
                 self.watches.dirty.extend(ids.iter().copied());
             }
+            self.clients.invalidate(&k.1, true);
             if self.blocking.by_key.contains_key(&k) && self.blocking.ready_set.insert(k.clone()) {
                 self.blocking.ready.push(k);
             }
@@ -929,6 +1023,9 @@ impl Engine {
                     }
                     let mut client = w.client.clone();
                     let args = w.args.clone();
+                    let (current, defer) = (self.clients.current, self.clients.defer_current);
+                    self.clients.current = id;
+                    self.clients.defer_current = false;
                     match self.dispatch(&mut client, &args, now, Mode::Unblock) {
                         Outcome::Blocked => {}
                         Outcome::Reply(r) => {
@@ -936,8 +1033,11 @@ impl Engine {
                             if let Some(sink) = &client.sink {
                                 sink.unblock(r.to_bytes(client.resp));
                             }
+                            self.clients.flush_pending();
                         }
                     }
+                    self.clients.current = current;
+                    self.clients.defer_current = defer;
                 }
             }
         }
@@ -947,6 +1047,7 @@ impl Engine {
     pub fn remove_client(&mut self, client_id: u64) {
         self.unregister_waiter(client_id);
         self.unwatch_all(client_id);
+        self.clients.unregister(client_id);
     }
 
     // ---- LRU / LFU ----
@@ -1016,7 +1117,7 @@ impl Engine {
         if max == 0 || self.used_memory() <= max {
             return true;
         }
-        if self.cfg.maxmemory_policy == Policy::NoEviction {
+        if self.cfg.maxmemory_policy == Policy::NoEviction || self.pause_active(now) {
             return false;
         }
         let start = Instant::now();
@@ -1104,6 +1205,9 @@ impl Engine {
         if let Some(h) = self.hotkeys.as_mut() {
             h.expire(now);
         }
+        if self.pause_active(now) {
+            return 0;
+        }
         let start = Instant::now();
         let per_loop = 20 + 5 * (self.cfg.active_expire_effort as usize - 1).min(9);
         let mut total = 0;
@@ -1177,6 +1281,7 @@ impl Engine {
 
     pub fn flush_all(&mut self) {
         self.touch_all_watched(None);
+        self.clients.flushed();
         for d in &mut self.dbs {
             d.clear();
         }
