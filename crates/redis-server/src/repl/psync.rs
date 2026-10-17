@@ -428,6 +428,7 @@ fn load_full(db: &Database, data: &[u8]) -> anyhow::Result<()> {
         let Some(d) = eng.dbs.get_mut(i) else { anyhow::bail!("MASTER sent database {i}, beyond `databases`") };
         if !d.keys.contains_key(&key[..]) {
             d.insert_new(&key, entry);
+            eng.ts_loaded(i, &key);
         }
     }
     let lim = redis_engine::types::hash::Limits::of(&cfg);

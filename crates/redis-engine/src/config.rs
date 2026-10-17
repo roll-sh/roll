@@ -968,7 +968,111 @@ pub static PARAMS: &[Param] = &[
     special("cf-max-iterations", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::CfMaxIterations), |c, a| bloom_set(c, BloomOpt::CfMaxIterations, a)),
     special("cf-expansion-factor", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::CfExpansion), |c, a| bloom_set(c, BloomOpt::CfExpansion, a)),
     special("cf-max-expansions", None, MODIFIABLE, |c| bloom_text(c, BloomOpt::CfMaxExpansions), |c, a| bloom_set(c, BloomOpt::CfMaxExpansions, a)),
+    // RedisTimeSeries' module configs (unprefixed)
+    special("ts-compaction-policy", None, MODIFIABLE, |c| crate::ts::policy_string(&ts_cfg(c).rules), ts_set_policy),
+    signed("ts-num-threads", None, MODIFIABLE, 1, 16, 3, INTEGER),
+    string("ts-libmr-protocol", None, IMMUTABLE, false, Some("INTERNAL")),
+    signed("ts-retention-policy", None, MODIFIABLE, 0, i64::MAX as i128, 0, INTEGER),
+    special("ts-duplicate-policy", None, MODIFIABLE, |c| ts_cfg(c).dup.name().into(), |c, a| {
+        let text = a.first().copied().unwrap_or("");
+        crate::ts::chunk::Dp::parse(text.as_bytes()).ok_or_else(|| module_err(format!("Invalid duplicate policy: {}", c_text(text))))?;
+        c.extra.insert("ts-duplicate-policy", Val::Str(Some(text.to_string())));
+        Ok(true)
+    }),
+    signed("ts-chunk-size-bytes", None, MODIFIABLE, 48, 1048576, 4096, INTEGER)
+        .check(|_, v| if v.num() % 8 == 0 { Ok(()) } else { Err("TSDB: CHUNK_SIZE value must be a multiple of 8 in the range [48 .. 1048576]".into()) }),
+    special("ts-encoding", None, MODIFIABLE, |c| if ts_cfg(c).uncompressed { "uncompressed".into() } else { "compressed".into() }, |c, a| {
+        let text = a.first().copied().unwrap_or("");
+        let t = c_text(text);
+        let v = if t.eq_ignore_ascii_case("uncompressed") {
+            "uncompressed"
+        } else if t.eq_ignore_ascii_case("compressed") {
+            // The module only clears the compressed bit before setting it: once uncompressed,
+            // the uncompressed bit stays and wins.
+            if ts_cfg(c).uncompressed { "uncompressed" } else { "compressed" }
+        } else {
+            return Err(module_err(format!("Invalid encoding: {t}")));
+        };
+        c.extra.insert("ts-encoding", Val::Str(Some(v.into())));
+        Ok(true)
+    }),
+    signed("ts-ignore-max-time-diff", None, MODIFIABLE, 0, i64::MAX as i128, 0, INTEGER),
+    special("ts-ignore-max-val-diff", None, MODIFIABLE, |c| format!("{:.6}", ts_cfg(c).ignore_val), |c, a| {
+        let text = a.first().copied().unwrap_or("");
+        let name = "ts-ignore-max-val-diff";
+        // `stringToDouble`: an integer, else a double; then the range.
+        let mut err = None;
+        let v = match crate::util::parse_i64(text.as_bytes()) {
+            Some(n) => n as f64,
+            None => crate::commands::zsets::zfloat(text.as_bytes()).unwrap_or_else(|| {
+                err = Some(format!("Invalid value for `{name}`"));
+                0.0
+            }),
+        };
+        if !(0.0..=f64::MAX).contains(&v) {
+            err = Some(format!("Invalid value for `{name}`. Value must be in the range [{:.6} .. {:.6}]", 0.0, f64::MAX));
+        }
+        if let Some(e) = err {
+            return Err(module_err(e));
+        }
+        c.extra.insert(name, Val::Str(Some(v.to_bits().to_string())));
+        Ok(true)
+    }),
+    boolean("ts-topology-events", None, IMMUTABLE, true),
 ];
+
+/// A module config setter's error as Redis passes it on (`propagateErrorString` copies it into
+/// a 256-byte buffer).
+fn module_err(mut e: String) -> String {
+    if e.len() > 255 {
+        let mut n = 255;
+        while !e.is_char_boundary(n) {
+            n -= 1;
+        }
+        e.truncate(n);
+    }
+    e
+}
+
+/// A module string config's text as C sees it (up to a NUL).
+fn c_text(s: &str) -> &str {
+    s.split('\0').next().unwrap_or("")
+}
+
+fn ts_set_policy(c: &mut Config, a: &[&str]) -> Result<bool, String> {
+    let text = a.first().copied().unwrap_or("");
+    if !text.is_empty() && crate::ts::parse_policy(text.as_bytes()).is_none() {
+        return Err(module_err(format!("Invalid compaction policy: {}", c_text(text))));
+    }
+    c.extra.insert("ts-compaction-policy", Val::Str(Some(text.to_string())));
+    Ok(true)
+}
+
+/// RedisTimeSeries' global settings (`TSGlobalConfig`).
+pub struct TsCfg {
+    pub retention: u64,
+    pub chunk_size: u64,
+    pub dup: crate::ts::chunk::Dp,
+    pub ignore_time: i64,
+    pub ignore_val: f64,
+    /// `ts-encoding uncompressed` (only the compactions the global policy creates use it).
+    pub uncompressed: bool,
+    pub rules: Vec<crate::ts::PolicyRule>,
+}
+
+pub fn ts_cfg(c: &Config) -> TsCfg {
+    let num = |name: &str, d: i128| c.extra.get(name).map_or(d, |v| v.num()) as i64;
+    let text = |name: &str| c.extra.get(name).cloned().and_then(Val::string);
+    TsCfg {
+        retention: num("ts-retention-policy", 0) as u64,
+        chunk_size: num("ts-chunk-size-bytes", 4096) as u64,
+        dup: text("ts-duplicate-policy").and_then(|t| crate::ts::chunk::Dp::parse(t.as_bytes())).unwrap_or(crate::ts::chunk::Dp::Block),
+        ignore_time: num("ts-ignore-max-time-diff", 0),
+        ignore_val: text("ts-ignore-max-val-diff").and_then(|t| t.parse::<u64>().ok()).map_or(0.0, f64::from_bits),
+        uncompressed: text("ts-encoding").is_some_and(|t| t == "uncompressed"),
+        rules: text("ts-compaction-policy").filter(|t| !t.is_empty()).and_then(|t| crate::ts::parse_policy(t.as_bytes())).unwrap_or_default(),
+    }
+}
 
 /// A RedisBloom setting. The module keeps the text it was set with (CONFIG GET answers it) and
 /// the parsed value; two of the ranges move with the other cuckoo setting.
@@ -1067,6 +1171,10 @@ pub fn bloom_int(c: &Config, o: BloomOpt) -> BloomInt {
 
 /// The module's `setFloatValue` / `setIntegerValue`.
 fn bloom_set(c: &mut Config, o: BloomOpt, argv: &[&str]) -> Result<bool, String> {
+    bloom_set_inner(c, o, argv).map_err(module_err)
+}
+
+fn bloom_set_inner(c: &mut Config, o: BloomOpt, argv: &[&str]) -> Result<bool, String> {
     let name = o.name();
     let text = argv.first().copied().unwrap_or("");
     if o == BloomOpt::ErrorRate {

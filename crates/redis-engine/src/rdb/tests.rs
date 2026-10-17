@@ -169,6 +169,7 @@ fn contents(v: &Value) -> String {
         Value::Json(j) => return crate::json::ser::compact(j.root()),
         Value::Sketch(x) => return format!("{x:?}"),
         Value::VSet(v) => return format!("{:?}", v.dict.keys().collect::<Vec<_>>()),
+        Value::Ts(t) => return format!("{:?}", crate::ts::iter::Samples::new(t, &crate::ts::iter::Range::span(0, u64::MAX), false, false, None).collect::<Vec<_>>()),
     };
     parts.sort();
     format!("{} {}", v.encoding(), parts.join(","))

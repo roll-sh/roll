@@ -154,6 +154,14 @@ impl<S: Src> ModuleIn for ModuleReader<'_, '_, S> {
             Ok(out)
         })
     }
+
+    fn string(&mut self) -> Option<(Vec<u8>, bool)> {
+        self.read(|d| {
+            let mut out = Vec::new();
+            d.module_string(&mut out)?;
+            Ok((out, d.lzf))
+        })
+    }
 }
 
 /// A flattened listpack item: (offset into the arena, length, integer value).
@@ -177,6 +185,8 @@ pub(crate) struct Dec<'c, S: Src> {
     pub dump: bool,
     /// The file's template records by saved id, held until the load ends.
     pub tmpl_ids: HashMap<u64, HoldRef>,
+    /// The last string read was LZF-compressed (loaded as a raw object, not an embedded one).
+    lzf: bool,
 }
 
 /// A template's field names in a `DUMP` payload.
@@ -203,6 +213,7 @@ impl<'c, S: Src> Dec<'c, S> {
             tmpl: None,
             dump: false,
             tmpl_ids: HashMap::new(),
+            lzf: false,
         }
     }
 
@@ -291,6 +302,7 @@ impl<'c, S: Src> Dec<'c, S> {
     /// `rdbGenericLoadStringObject`: raw, integer-encoded or LZF; replaces `out`'s contents.
     pub fn string(&mut self, out: &mut Vec<u8>) -> R<()> {
         out.clear();
+        self.lzf = false;
         let (n, enc) = self.len_enc()?;
         if !enc {
             let n = usize::try_from(n).map_err(|_| RdbError::Truncated)?;
@@ -320,6 +332,7 @@ impl<'c, S: Src> Dec<'c, S> {
                 self.src.append(clen as usize, &mut z)?;
                 let ok = lzf::decompress(&z, len as usize, out);
                 self.z = z;
+                self.lzf = true;
                 return if ok { Ok(()) } else { Err(bad("invalid LZF compressed string")) };
             }
             _ => return Err(bad("unknown string encoding")),
@@ -439,6 +452,13 @@ impl<'c, S: Src> Dec<'c, S> {
                 return Err(e);
             }
             Value::VSet(Box::new(v.ok_or(bad("module value its module can't load"))?))
+        } else if id >> 10 == crate::bloom::type_id(crate::ts::TYPE_NAME, 0) >> 10 {
+            let mut r = ModuleReader { dec: self, err: None };
+            let v = crate::ts::rdb::load((id & 1023) as u32, &mut r);
+            if let Some(e) = r.err {
+                return Err(e);
+            }
+            Value::Ts(Box::new(v.ok_or(bad("module value its module can't load"))?))
         } else {
             return Err(RdbError::Unsupported("module values"));
         };

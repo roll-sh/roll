@@ -1,4 +1,9 @@
 # DUMP / RESTORE: RDB version 15 payloads, byte for byte
+
+# RedisTimeSeries listens to RESTORE (opening the key: an access) once its first series exists,
+# for the rest of the process: make sure it does on both sides.
+TS.CREATE tsprime
+DEL tsprime
 DUMP nokey
 SET s hello
 DUMP s

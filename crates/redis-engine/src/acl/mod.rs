@@ -216,9 +216,12 @@ impl Rules {
 
     /// `ACLUserCheckKeyPerm(..., CMD_KEY_ACCESS)`: may a selector read `key`?
     fn can_read_key(&self, key: &[u8]) -> bool {
-        self.selectors.iter().any(|s| {
-            s.allkeys || s.keys.iter().any(|k| k.perm & index::PERM_R != 0 && crate::util::glob_match(&k.pattern, key, false))
-        })
+        self.key_perm(key, index::PERM_R)
+    }
+
+    /// `ACLUserCheckKeyPerm`: does a selector grant every permission in `need` on `key`?
+    fn key_perm(&self, key: &[u8], need: u8) -> bool {
+        self.selectors.iter().any(|s| s.allkeys || s.keys.iter().any(|k| k.perm & need == need && crate::util::glob_match(&k.pattern, key, false)))
     }
 
     /// May a client subscribed to these channels keep its subscriptions?
@@ -332,6 +335,11 @@ impl User {
     /// May this user read `key` (BCAST invalidations are filtered by it)?
     pub fn can_read_key(&self, key: &[u8]) -> bool {
         self.open.load(Ordering::Acquire) || self.rules.read().can_read_key(key)
+    }
+
+    /// `RM_ACLCheckKeyPermissions`: may this user read (`write` false) or update `key`?
+    pub fn can_use_key(&self, key: &[u8], write: bool) -> bool {
+        self.open.load(Ordering::Acquire) || self.rules.read().key_perm(key, if write { index::PERM_W } else { index::PERM_R })
     }
 
     /// A copy of the current rules.

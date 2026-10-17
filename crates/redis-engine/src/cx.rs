@@ -539,7 +539,7 @@ impl<'a> Cx<'a> {
             return timeout_reply;
         }
         let deadline = if timeout_ms > 0 { self.now.saturating_add(timeout_ms) } else { 0 };
-        self.block = Some(BlockReq { keys, timeout_reply, deadline, args: None, unblock_on_nokey: false, wake_at: 0 });
+        self.block = Some(BlockReq { keys, timeout_reply, deadline, args: None, unblock_on_nokey: false, wake_at: 0, rerun_on_timeout: false });
         Reply::Nil
     }
 
@@ -562,6 +562,22 @@ impl<'a> Cx<'a> {
             b.wake_at = wake_at;
         }
         r
+    }
+
+    /// A module's `RM_BlockClientOnKeysWithFlags(…, UNBLOCK_DELETED)`: re-run with `args` when
+    /// `key` is signalled or deleted, and once more when `timeout_ms` passes (0 = never) to
+    /// answer with what there is then ([`Cx::timing_out`]).
+    pub fn block_module(&mut self, key: &[u8], timeout_ms: i64, args: Vec<Bytes>) -> Reply {
+        let r = self.block_on_ex(vec![Str::from_slice(key)], timeout_ms, Reply::NilArray, Some(args), true, 0);
+        if let Some(b) = self.block.as_mut() {
+            b.rerun_on_timeout = true;
+        }
+        r
+    }
+
+    /// Is this the re-run of a module block that timed out?
+    pub fn timing_out(&self) -> bool {
+        self.eng.blocking.timing_out
     }
 
     /// Wake clients blocked on `key` (they re-run their command) without signalling it as

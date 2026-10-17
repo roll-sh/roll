@@ -165,6 +165,10 @@ pub trait ModuleIn {
     fn uint(&mut self) -> Option<u64>;
     fn double(&mut self) -> Option<f64>;
     fn buffer(&mut self) -> Option<Vec<u8>>;
+    /// `RM_LoadString`: the bytes, and whether they were stored LZF-compressed.
+    fn string(&mut self) -> Option<(Vec<u8>, bool)> {
+        self.buffer().map(|b| (b, false))
+    }
     fn sint(&mut self) -> Option<i64> {
         self.uint().map(|v| v as i64)
     }

@@ -91,7 +91,7 @@ pub(crate) fn type_of(v: &Value, dump: bool) -> u8 {
         Value::Hash(_) => ty::HASH,
         Value::Stream(_) => ty::STREAM_LISTPACKS_5,
         Value::Array(_) => ty::ARRAY,
-        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) => ty::MODULE_2,
+        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) => ty::MODULE_2,
     }
 }
 
@@ -174,6 +174,13 @@ impl Encoder {
             Value::VSet(v) => {
                 self.len(crate::bloom::type_id(crate::vset::TYPE_NAME, crate::vset::ENCVER));
                 v.save(self);
+                self.len(super::MODULE_OPCODE_EOF);
+            }
+            // A series' links to other keys are kept by a save, not by a DUMP payload.
+            Value::Ts(t) => {
+                self.len(crate::bloom::type_id(crate::ts::TYPE_NAME, crate::ts::ENCVER as u64));
+                let persist = !self.dump;
+                crate::ts::rdb::save(t, self, persist);
                 self.len(super::MODULE_OPCODE_EOF);
             }
         }

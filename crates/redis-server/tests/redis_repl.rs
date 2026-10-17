@@ -145,8 +145,22 @@ async fn redis_replication_protocol() {
     cmd(&mut r, &["SELECT", "2"]).await;
     cmd(&mut r, &["SET", "b", "2"]).await;
     cmd(&mut r, &["SELECT", "0"]).await;
-    let started = ctr.sh(&format!("redis-server --port 6390 --replicaof host.docker.internal {rport} --daemonize yes --save '' --logfile /tmp/r.log"));
-    eventually("the Redis replica to sync", || ctr.cli(&["-p", "6390", "INFO", "replication"]).contains("master_link_status:up")).await;
+    // Time series: a compaction rule (its links travel in the snapshot), labels to reindex.
+    cmd(&mut r, &["TS.CREATE", "tsrc", "LABELS", "k", "v"]).await;
+    cmd(&mut r, &["TS.CREATE", "tdst"]).await;
+    cmd(&mut r, &["TS.CREATERULE", "tsrc", "tdst", "AGGREGATION", "sum", "10"]).await;
+    cmd(&mut r, &["TS.MADD", "tsrc", "1", "1", "tsrc", "5", "2", "tsrc", "12", "3"]).await;
+    // The image's modules (its entrypoint loads them for the main server), for the module values.
+    let modules = "$(for m in /usr/local/lib/redis/modules/*.so; do printf -- '--loadmodule %s ' \"$m\"; done)";
+    let started = ctr.sh(&format!("redis-server --port 6390 {modules} --replicaof host.docker.internal {rport} --daemonize yes --save '' --logfile /tmp/r.log"));
+    let synced = || ctr.cli(&["-p", "6390", "INFO", "replication"]).contains("master_link_status:up");
+    for _ in 0..300 {
+        if synced() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(synced(), "the Redis replica didn't sync:\n{}", ctr.sh("tail -30 /tmp/r.log"));
     assert!(ctr.cli(&["-p", "6390", "GET", "a"]) == "1", "{started}{}", ctr.sh("cat /tmp/r.log"));
     assert_eq!(ctr.cli(&["-p", "6390", "HGET", "h", "f"]), "v");
     assert_eq!(ctr.cli(&["-p", "6390", "LRANGE", "l", "0", "-1"]), "x\ny");
@@ -157,10 +171,15 @@ async fn redis_replication_protocol() {
     assert_eq!(ctr.cli(&["-p", "6390", "HGETALL", "t1"]), "a\n2\nb\n1\nccc\n3");
     assert_eq!(ctr.cli(&["-p", "6390", "OBJECT", "ENCODING", "t2"]), "template-array");
     assert_eq!(field(&ctr.cli(&["-p", "6390", "INFO", "stats"]), "hash_template_keys").as_deref(), Some("2"));
+    assert_eq!(ctr.cli(&["-p", "6390", "TS.RANGE", "tdst", "-", "+"]), "0\n3");
+    assert_eq!(ctr.cli(&["-p", "6390", "TS.RANGE", "tdst", "-", "+", "LATEST"]), "0\n3\n10\n3");
+    assert_eq!(ctr.cli(&["-p", "6390", "TS.QUERYINDEX", "k=v"]), "tsrc");
     // The stream after the snapshot (HIMPORT SET goes as a RESTORE).
     cmd(&mut r, &["HIMPORT", "SET", "t3", "fs", "4", "5", "6"]).await;
     cmd(&mut r, &["SET", "c", "3"]).await;
     cmd(&mut r, &["DEL", "a"]).await;
+    cmd(&mut r, &["TS.ADD", "tsrc", "25", "4"]).await;
+    cmd(&mut r, &["TS.INCRBY", "tsrc", "1", "TIMESTAMP", "26"]).await;
     cmd(&mut r, &["INCR", "n"]).await;
     cmd(&mut r, &["INCR", "n"]).await;
     cmd(&mut r, &["SELECT", "2"]).await;
@@ -172,6 +191,8 @@ async fn redis_replication_protocol() {
     assert_eq!(ctr.cli(&["-p", "6390", "HGETALL", "t3"]), "a\n5\nb\n4\nccc\n6");
     assert_eq!(ctr.cli(&["-p", "6390", "EXISTS", "a"]), "0");
     assert_eq!(ctr.cli(&["-p", "6390", "-n", "2", "EXISTS", "b"]), "0");
+    assert_eq!(ctr.cli(&["-p", "6390", "TS.RANGE", "tdst", "-", "+"]), "0\n3\n10\n3");
+    assert_eq!(ctr.cli(&["-p", "6390", "TS.GET", "tsrc"]), "26\n5");
     // The primary's view of it.
     let i = info(&mut r, "replication").await;
     assert_eq!(field(&i, "connected_slaves").as_deref(), Some("1"), "{i}");
@@ -198,6 +219,8 @@ async fn redis_replication_protocol() {
     eventually("writes after the resync", || ctr.cli(&["-p", "6390", "GET", "after"]) == "resume").await;
     assert_eq!(field(&info(&mut r, "stats").await, "sync_full").as_deref(), Some("1"));
     ctr.cli(&["-p", "6390", "SHUTDOWN", "NOSAVE"]);
+    // (redis-check-rdb has no modules: keep module values out of the snapshot it checks.)
+    cmd(&mut r, &["DEL", "tsrc", "tdst"]).await;
 
     // ---- redis-cli --rdb: a snapshot Redis' own checker accepts ----
     let out = ctr.sh(&format!("redis-cli -h host.docker.internal -p {rport} --rdb /tmp/roll.rdb && redis-check-rdb /tmp/roll.rdb"));
@@ -214,6 +237,10 @@ async fn redis_replication_protocol() {
     cmd(&mut m, &["SET", "mexp", "v", "EX", "1000"]).await;
     cmd(&mut m, &["HIMPORT", "PREPARE", "fs", "y", "x"]).await;
     cmd(&mut m, &["HIMPORT", "SET", "mt", "fs", "1", "2"]).await;
+    cmd(&mut m, &["TS.CREATE", "msrc", "LABELS", "q", "1"]).await;
+    cmd(&mut m, &["TS.CREATE", "mdst"]).await;
+    cmd(&mut m, &["TS.CREATERULE", "msrc", "mdst", "AGGREGATION", "max", "10"]).await;
+    cmd(&mut m, &["TS.MADD", "msrc", "1", "7", "msrc", "11", "2"]).await;
     cmd(&mut m, &["FUNCTION", "LOAD", "REPLACE", "#!lua name=mlib\nredis.register_function{function_name='mf', callback=function() return 2 end, flags={'no-writes'}}"]).await;
     let (r2_addr, mut r2) = roll_server().await;
     let mport = master_addr.rsplit(':').next().unwrap().to_string();
@@ -236,6 +263,8 @@ async fn redis_replication_protocol() {
     assert_eq!(text(&cmd(&mut r2, &["OBJECT", "ENCODING", "mt"]).await), "template-listpack");
     assert_eq!(text(&cmd(&mut r2, &["HGET", "mt", "y"]).await), "1");
     assert_eq!(cmd(&mut r2, &["FCALL_RO", "mf", "0"]).await, Reply::Int(2));
+    assert_eq!(format!("{:?}", cmd(&mut r2, &["TS.RANGE", "mdst", "-", "+"]).await), "Array([Array([Int(0), Status(\"7\")])])");
+    assert_eq!(format!("{:?}", cmd(&mut r2, &["TS.QUERYINDEX", "q=1"]).await), "Array([Bulk(b\"msrc\")])");
     assert!(text(&cmd(&mut r2, &["SET", "x", "1"]).await).starts_with("READONLY"));
     let i = info(&mut r2, "replication").await;
     assert_eq!(field(&i, "role").as_deref(), Some("slave"), "{i}");
@@ -253,6 +282,7 @@ async fn redis_replication_protocol() {
     cmd(&mut m, &["EXEC"]).await;
     cmd(&mut m, &["EVAL", "redis.call('SET', 'ev', 'x') return 1", "0"]).await;
     cmd(&mut m, &["SET", "gone", "v", "PX", "50"]).await;
+    cmd(&mut m, &["TS.ADD", "msrc", "21", "9"]).await;
     eventually_async("the stream from Redis", || {
         let addr = r2_addr;
         async move {
@@ -266,6 +296,7 @@ async fn redis_replication_protocol() {
     assert_eq!(text(&cmd(&mut r2, &["HGET", "mt2", "x"]).await), "4");
     assert_eq!(cmd(&mut r2, &["EXISTS", "m1"]).await, Reply::Int(0));
     assert_eq!(text(&cmd(&mut r2, &["GET", "tx"]).await), "2");
+    assert_eq!(format!("{:?}", cmd(&mut r2, &["TS.RANGE", "mdst", "-", "+"]).await), "Array([Array([Int(0), Status(\"7\")]), Array([Int(10), Status(\"2\")])])");
     let role = format!("{:?}", cmd(&mut r2, &["ROLE"]).await);
     assert!(role.contains("slave") && role.contains("connected"), "{role}");
     // Redis' WAIT is answered through our ACKs.

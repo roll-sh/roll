@@ -22,6 +22,7 @@ pub mod object;
 pub mod pack;
 pub mod rdb;
 pub mod tre;
+pub mod ts;
 pub mod types;
 pub mod util;
 pub mod value;

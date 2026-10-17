@@ -3,6 +3,7 @@
 use crate::bloom::{Sketch, SketchKind};
 use crate::json::Json;
 use crate::types::{Array, Hash, List, Set, Stream, ZSet};
+use crate::ts::Series;
 use crate::vset::VSet;
 use smallvec::SmallVec;
 
@@ -29,6 +30,7 @@ pub enum Kind {
     Sketch(SketchKind),
     /// Vector sets (a module type).
     VSet,
+    Ts,
 }
 
 impl Kind {
@@ -44,6 +46,7 @@ impl Kind {
             Kind::Json => "ReJSON-RL",
             Kind::Sketch(k) => k.name(),
             Kind::VSet => crate::vset::TYPE_NAME,
+            Kind::Ts => crate::ts::TYPE_NAME,
         }
     }
 
@@ -62,6 +65,7 @@ impl Kind {
             b"array" => Kind::Array,
             b"rejson-rl" => Kind::Json,
             b"vectorset" => Kind::VSet,
+            b"tsdb-type" => Kind::Ts,
             _ => return None,
         })
     }
@@ -79,6 +83,7 @@ pub enum Value {
     Json(Box<Json>),
     Sketch(Box<Sketch>),
     VSet(Box<VSet>),
+    Ts(Box<Series>),
 }
 
 impl Value {
@@ -109,6 +114,7 @@ impl Value {
             Value::Json(_) => Kind::Json,
             Value::Sketch(s) => Kind::Sketch(s.kind()),
             Value::VSet(_) => Kind::VSet,
+            Value::Ts(_) => Kind::Ts,
         }
     }
 
@@ -122,7 +128,7 @@ impl Value {
             Kind::Stream => Value::Stream(Box::default()),
             Kind::Array => Value::Array(Box::default()),
             Kind::Json => Value::Json(Box::default()),
-            Kind::Sketch(_) | Kind::VSet => unreachable!("module values are created by their commands"),
+            Kind::Sketch(_) | Kind::VSet | Kind::Ts => unreachable!("module values are created by their commands"),
         }
     }
 
@@ -145,6 +151,7 @@ impl Value {
             Value::Json(j) => std::mem::size_of::<Json>() + j.mem(),
             Value::Sketch(s) => std::mem::size_of::<Sketch>() + s.mem(),
             Value::VSet(v) => v.mem_usage() as usize,
+            Value::Ts(t) => t.approx_mem(),
         }
     }
 
@@ -162,6 +169,7 @@ impl Value {
             Value::Json(j) => j.usage(),
             Value::Sketch(s) => s.mem_usage() as usize,
             Value::VSet(v) => v.mem_usage() as usize,
+            Value::Ts(t) => t.mem_usage(0),
         }
     }
 
@@ -169,7 +177,7 @@ impl Value {
     #[inline]
     pub fn is_empty_aggregate(&self) -> bool {
         match self {
-            Value::Str(_) | Value::Stream(_) | Value::Json(_) | Value::Sketch(_) | Value::VSet(_) => false,
+            Value::Str(_) | Value::Stream(_) | Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) => false,
             Value::List(l) => l.is_empty(),
             Value::Hash(h) => h.is_empty(),
             Value::Set(x) => x.is_empty(),
@@ -196,7 +204,7 @@ impl Value {
             Value::ZSet(z) => z.encoding(),
             Value::Stream(_) => "stream",
             Value::Array(_) => "sliced-array",
-            Value::Json(_) | Value::Sketch(_) | Value::VSet(_) => "raw",
+            Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) => "raw",
         }
     }
 }
@@ -250,7 +258,7 @@ impl Value {
             Value::Set(s) => (2, s.len()),
             Value::ZSet(z) => (3, z.len()),
             Value::Hash(h) => (4, h.len()),
-            Value::Stream(_) | Value::Array(_) | Value::Json(_) | Value::Sketch(_) | Value::VSet(_) => return NO_SIZE,
+            Value::Stream(_) | Value::Array(_) | Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) => return NO_SIZE,
         };
         let bin = (usize::BITS - n.leading_zeros()) as usize;
         (t * SIZE_BINS + bin.min(SIZE_BINS - 1)) as u16

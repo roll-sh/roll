@@ -33,6 +33,7 @@ pub mod sketch;
 pub mod sort;
 pub mod streams;
 pub mod strings;
+pub mod ts;
 pub mod vset;
 pub mod zsets;
 
@@ -377,6 +378,7 @@ pub fn table() -> &'static Table {
             bloom::COMMANDS,
             sketch::COMMANDS,
             vset::COMMANDS,
+            ts::COMMANDS,
         ] {
             for c in family {
                 // Modules may register uppercase names (VADD): lookups are by lowercase name.
@@ -415,7 +417,7 @@ pub fn module_of(c: &Command) -> Option<&'static str> {
         "ReJSON"
     } else if ["bf.", "cf.", "cms.", "topk.", "tdigest."].iter().any(|p| n.starts_with(p)) {
         "bf"
-    } else if n.starts_with("ts.") {
+    } else if n.starts_with("ts.") || n.starts_with("timeseries.") {
         "timeseries"
     } else if n.starts_with("ft.") {
         "search"

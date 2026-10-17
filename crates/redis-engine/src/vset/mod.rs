@@ -48,7 +48,7 @@ pub struct VSet {
 
 /// `RM_MallocSizeString` of an element or attribute: an embedded string object for a short
 /// command argument, else an object and an exactly sized sds.
-fn string_size(len: usize, raw: bool) -> usize {
+pub(crate) fn string_size(len: usize, raw: bool) -> usize {
     if !raw && len <= 44 {
         return jemalloc_size(16 + 3 + len + 1);
     }

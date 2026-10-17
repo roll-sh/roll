@@ -132,11 +132,18 @@ pub(crate) struct Signals {
     pub dirty: u64,
     /// The running command's own count of changes, replacing its touches (`server.dirty += n`).
     pub counted: Option<u64>,
+    /// RedisTimeSeries subscribed to keyspace events (its first series was made): the events it
+    /// listens to are queued for it whatever `notify-keyspace-events` says.
+    pub ts_hook: bool,
+    pub ts_events: Vec<(&'static str, u16, Str)>,
 }
 
 impl Signals {
     #[inline]
     pub fn notify(&mut self, class: u32, event: &'static str, db: u16, key: &[u8]) {
+        if self.ts_hook && crate::ts::hooked(event) {
+            self.ts_events.push((event, db, Str::from_slice(key)));
+        }
         if self.notify & class != 0 && self.notify & (notify::KEYSPACE | notify::KEYEVENT) != 0 {
             self.events.push((class, event, db, Str::from_slice(key), Vec::new()));
         }
@@ -193,6 +200,9 @@ pub(crate) struct Waiter {
     pub wake_at: i64,
     /// Execution time of the attempts so far: Redis charges it with the call that ends the block.
     pub micros: u64,
+    /// A module block: a timeout (or CLIENT UNBLOCK) re-runs the command to answer instead of
+    /// sending `timeout_reply` ([`Engine::timing_out`] is set meanwhile).
+    pub rerun_on_timeout: bool,
 }
 
 #[derive(Default)]
@@ -201,6 +211,8 @@ pub(crate) struct Blocking {
     pub waiters: HashMap<u64, Waiter>,
     pub ready: Vec<(u16, Str)>,
     pub ready_set: HashSet<(u16, Str)>,
+    /// A blocked command is being re-run because its block timed out.
+    pub timing_out: bool,
 }
 
 /// What a handler asks for when it can't complete yet.
@@ -212,6 +224,7 @@ pub(crate) struct BlockReq {
     pub args: Option<Vec<Bytes>>,
     pub unblock_on_nokey: bool,
     pub wake_at: i64,
+    pub rerun_on_timeout: bool,
 }
 
 pub struct Engine {
@@ -272,6 +285,8 @@ pub struct Engine {
     pub(crate) prev_errors: u64,
     /// DEBUG's switches.
     pub debug: crate::commands::debug::Switches,
+    /// RedisTimeSeries' global state: the label index (over every database).
+    pub ts: crate::ts::Global,
 }
 
 /// The arguments as SLOWLOG and MONITOR show them: secrets replaced by `(redacted)`, like Redis'
@@ -371,6 +386,7 @@ impl Engine {
             metrics: Default::default(),
             prev_errors: 0,
             debug: Default::default(),
+            ts: Default::default(),
         };
         e.startup_memory = e.used_memory();
         e.peak_memory = e.startup_memory;
@@ -690,6 +706,9 @@ impl Engine {
             let mut cx = Cx::new(self, client, now, cmd, mode);
             cx.read_stats = crate::cx::read_lookups(cmd, args);
             let res = (cmd.handler)(&mut cx, args);
+            if !cx.eng.sig.ts_events.is_empty() {
+                crate::commands::ts::drain(&mut cx);
+            }
             (res, cx.rewrite.take(), cx.block.take(), cx.no_propagate, cx.force_propagate)
         };
         let micros = started.elapsed().as_micros() as u64;
@@ -1155,6 +1174,7 @@ impl Engine {
             unblock_on_nokey: b.unblock_on_nokey,
             wake_at: b.wake_at,
             micros,
+            rerun_on_timeout: b.rerun_on_timeout,
         };
         self.blocking.waiters.insert(client.id, w);
     }
@@ -1208,10 +1228,29 @@ impl Engine {
                 }
             }
         }
+        if w.rerun_on_timeout {
+            return self.rerun_timed_out(client_id, now);
+        }
         let w = self.unregister_waiter(client_id)?;
         self.count_unblocked(&w, false);
         self.serve_blocked(now);
         Some(w.timeout_reply)
+    }
+
+    /// A module's timeout callback: the command runs once more to answer with what it has.
+    fn rerun_timed_out(&mut self, client_id: u64, now: i64) -> Option<Reply> {
+        let w = self.blocking.waiters.get(&client_id)?;
+        let mut client = w.client.clone();
+        let args = w.args.clone();
+        self.blocking.timing_out = true;
+        let out = self.dispatch(&mut client, &args, now, Mode::Unblock);
+        self.blocking.timing_out = false;
+        self.unregister_waiter(client_id);
+        self.serve_blocked(now);
+        match out {
+            Outcome::Reply(r) => Some(r),
+            Outcome::Blocked => Some(Reply::NilArray),
+        }
     }
 
     /// `CLIENT UNBLOCK id [TIMEOUT|ERROR]`.
@@ -1234,6 +1273,9 @@ impl Engine {
     }
 
     pub fn unblock(&mut self, client_id: u64, error: bool) -> Option<Reply> {
+        if !error && self.blocking.waiters.get(&client_id).is_some_and(|w| w.rerun_on_timeout) {
+            return self.rerun_timed_out(client_id, now_ms());
+        }
         let w = self.unregister_waiter(client_id)?;
         self.count_unblocked(&w, error);
         if !error {
@@ -1519,7 +1561,29 @@ impl Engine {
         }
     }
 
+    /// A key was loaded (RDB, full resync): RedisTimeSeries' `loaded` event indexes a series
+    /// (`IndexMetricFromName`, a counted lookup once it listens).
+    pub fn ts_loaded(&mut self, db: usize, key: &[u8]) {
+        let Some(e) = self.dbs[db].keys.get(key) else { return };
+        let labels = match &e.value {
+            crate::value::Value::Ts(s) => {
+                self.sig.ts_hook = true;
+                Some(s.labels.clone())
+            }
+            _ => None,
+        };
+        if !self.sig.ts_hook {
+            return;
+        }
+        self.stats.keyspace_hits += 1;
+        if let Some(labels) = labels {
+            self.ts.index.remove(key);
+            self.ts.index.add(key, &labels);
+        }
+    }
+
     pub fn flush_all(&mut self) {
+        self.ts.index.clear();
         self.touch_all_watched(None);
         self.clients.flushed();
         for d in &mut self.dbs {

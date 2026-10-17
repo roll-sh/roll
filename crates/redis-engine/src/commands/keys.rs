@@ -440,10 +440,22 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(Error::new("ERR not supported for this module key"));
     }
     let mut entry = entry;
+    // RedisTimeSeries' `CopySeries`: no links to other series, named after the copy, indexed.
+    let ts_labels = match &mut entry.value {
+        crate::value::Value::Ts(t) => {
+            **t = crate::commands::ts::copy_series(t, dst);
+            Some(t.labels.clone())
+        }
+        _ => None,
+    };
     entry.lru = cx.eng.new_lru(now);
     entry.rekey(src.len(), dst.len(), true);
     let new_kind = entry.value.kind();
     cx.put_entry(to, dst, entry);
+    if let Some(labels) = ts_labels {
+        cx.eng.ts.index.remove(dst);
+        cx.eng.ts.index.add(dst, &labels);
+    }
     cx.changes(1);
     cx.eng.sig.notify(notify::GENERIC, "copy_to", to as u16, dst);
     if let Some(k) = old_kind.filter(|_| exists) {
@@ -521,6 +533,10 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
         Err(_) => return Err(Error::new("ERR Bad data format")),
     };
+    if matches!(value, crate::value::Value::Ts(_)) {
+        // Loading a series subscribes RedisTimeSeries to keyspace events (`NewSeries`).
+        cx.eng.sig.ts_hook = true;
+    }
     let at = if ttl != 0 && !absttl { ttl.wrapping_add(now) } else { ttl };
     let old_kind = cx.peek(key).map(|e| e.value.kind()).filter(|_| replace);
     let deleted = replace && cx.delete(key);

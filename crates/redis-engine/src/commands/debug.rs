@@ -729,7 +729,7 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
         Value::Hash(_) => 4,
         Value::Stream(_) => 6,
         Value::Array(_) => 7,
-        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) => 5,
+        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) => 5,
     };
     mix_digest(d, &ty.to_be_bytes());
     match &e.value {
@@ -777,8 +777,8 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
                 mix_digest(d, b"(null)");
             }
         }
-        // RedisJSON and RedisBloom have no digest callback: only the type counts.
-        Value::Json(_) | Value::Sketch(_) => {}
+        // RedisJSON, RedisBloom and RedisTimeSeries have no digest callback: only the type counts.
+        Value::Json(_) | Value::Sketch(_) | Value::Ts(_) => {}
         // A module digest: each sequence mixed from zero, the sequences xor'ed together.
         Value::VSet(v) => {
             let mut x = [0u8; 20];

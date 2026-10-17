@@ -240,6 +240,8 @@ pub fn flushdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let db = cx.db_index();
     cx.eng.touch_all_watched(Some(db as u16));
     cx.eng.clients.flushed();
+    // RedisTimeSeries forgets every indexed series on any flush.
+    cx.eng.ts.index.clear();
     let removed = cx.eng.dbs[db].len() as u64;
     let reg = cx.eng.hub.templates.clone();
     if flush_in_background(cx, args) {
@@ -682,13 +684,15 @@ pub fn memory_usage(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         j += 2;
     }
     let key = &args[2];
-    let Some(e) = cx.db().keys.get(key) else { return Ok(Reply::Nil) };
+    let Some(e) = cx.eng.dbs[cx.client.db].keys.get(key) else { return Ok(Reply::Nil) };
     // A template hash also carries its share of the template.
     let share = match &e.value {
         crate::value::Value::Hash(h) => h.template().map_or(0, |t| {
             let keys = t.registry().map_or(1, |r| r.keys_of(t).max(1));
             t.mem() / keys as usize
         }),
+        // A series also carries its share of the label index (`IndexMemUsage`).
+        crate::value::Value::Ts(t) => cx.eng.ts.index.mem_usage(&t.key.b),
         _ => 0,
     };
     Ok(Reply::Int((crate::object::usage(e, key.len()) + share) as i64))

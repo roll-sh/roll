@@ -238,6 +238,7 @@ impl Engine {
                 d.remove(&key);
             }
             d.insert_new(&key, entry);
+            self.ts_loaded(i, &key);
             loaded += 1;
         }
         let lim = crate::types::hash::Limits::of(&cfg);
