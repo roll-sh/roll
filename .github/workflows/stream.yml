@@ -14,18 +14,9 @@ on:
       - "Cargo.lock"
       - "scripts/test-stream.sh"
       - ".github/workflows/stream.yml"
-  pull_request:
-    paths:
-      - "crates/stream-log/**"
-      - "crates/stream-broker/**"
-      - "crates/pg-storage/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-stream.sh"
-      - ".github/workflows/stream.yml"
   workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
 
 concurrency:
   group: stream-${{ github.ref }}

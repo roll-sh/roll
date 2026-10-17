@@ -11,15 +11,9 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - ".github/workflows/web.yml"
-  pull_request:
-    paths:
-      - "apps/**"
-      - "packages/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - ".github/workflows/web.yml"
   workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
 
 concurrency:
   group: web-${{ github.ref }}
