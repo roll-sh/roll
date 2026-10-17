@@ -27,6 +27,7 @@ pub mod lists;
 pub mod multi;
 pub mod pubsub;
 pub mod scripting;
+pub mod search;
 pub mod server;
 pub mod sets;
 pub mod sketch;
@@ -123,6 +124,9 @@ pub const ASKING: u64 = 1 << 25;
 pub const MODULE: u64 = 1 << 26;
 /// Not a command flag: a module command its module puts in the @fast ACL category.
 pub const ACL_FAST: u64 = 1 << 27;
+/// A module's internal command (`CMD_INTERNAL`): unknown to ordinary connections, left out of
+/// COMMAND's listings (its subcommands stay visible).
+pub const INTERNAL: u64 = 1 << 28;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
@@ -379,6 +383,7 @@ pub fn table() -> &'static Table {
             sketch::COMMANDS,
             vset::COMMANDS,
             ts::COMMANDS,
+            search::COMMANDS,
         ] {
             for c in family {
                 // Modules may register uppercase names (VADD): lookups are by lowercase name.
@@ -419,7 +424,7 @@ pub fn module_of(c: &Command) -> Option<&'static str> {
         "bf"
     } else if n.starts_with("ts.") || n.starts_with("timeseries.") {
         "timeseries"
-    } else if n.starts_with("ft.") {
+    } else if n.starts_with("ft.") || n.starts_with("_ft.") || n.starts_with("search.") {
         "search"
     } else {
         crate::vset::TYPE_NAME

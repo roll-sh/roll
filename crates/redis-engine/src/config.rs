@@ -252,7 +252,10 @@ impl Default for Config {
             masterauth: String::new(),
             masteruser: String::new(),
             requirepass: None,
-            extra: BTreeMap::new(),
+            extra: BTreeMap::from([
+                ("search-workers", Val::Num(std::thread::available_parallelism().map_or(16, |n| n.get().min(16)) as i128)),
+                ("search-default-scorer:value", Val::Str(Some("BM25STD".into()))),
+            ]),
         }
     }
 }
@@ -293,7 +296,7 @@ pub enum Val {
 }
 
 impl Val {
-    fn num(&self) -> i128 {
+    pub fn num(&self) -> i128 {
         match self {
             Val::Num(n) => *n,
             Val::Bool(b) => *b as i128,
@@ -301,11 +304,11 @@ impl Val {
         }
     }
 
-    fn bool(&self) -> bool {
+    pub fn bool(&self) -> bool {
         self.num() != 0
     }
 
-    fn string(self) -> Option<String> {
+    pub fn string(self) -> Option<String> {
         match self {
             Val::Str(s) => s,
             _ => None,
@@ -317,6 +320,9 @@ type Get = fn(&Config) -> Val;
 type Put = fn(&mut Config, Val);
 type Check = fn(&Config, &Val) -> Result<(), String>;
 type Apply = fn(&mut Config) -> Result<(), String>;
+/// A module setter that stores a different value than it was given (clamping, translating) or
+/// refuses it.
+type Conv = fn(&Config, Val) -> Result<Val, String>;
 type SpecialGet = fn(&Config) -> String;
 /// Returns whether the value changed.
 type SpecialSet = fn(&mut Config, &[&str]) -> Result<bool, String>;
@@ -337,11 +343,12 @@ pub struct Param {
     field: Option<(Get, Put)>,
     check: Option<Check>,
     apply: Option<Apply>,
+    conv: Option<Conv>,
 }
 
 impl Param {
     const fn new(name: &'static str, alias: Option<&'static str>, flags: u16, ty: Ty) -> Self {
-        Param { name, alias, flags, ty, field: None, check: None, apply: None }
+        Param { name, alias, flags, ty, field: None, check: None, apply: None, conv: None }
     }
 
     const fn at(mut self, get: Get, put: Put) -> Self {
@@ -356,6 +363,11 @@ impl Param {
 
     const fn apply(mut self, f: Apply) -> Self {
         self.apply = Some(f);
+        self
+    }
+
+    const fn conv(mut self, f: Conv) -> Self {
+        self.conv = Some(f);
         self
     }
 
@@ -436,6 +448,10 @@ impl Param {
                 let ll = parse_numeric(value, *nf)?;
                 Val::Num(bound_check(ll, *min, *max, *unsigned, *nf)?)
             }
+        };
+        let new = match self.conv {
+            Some(conv) => conv(c, new).map_err(module_err)?,
+            None => new,
         };
         if let Some(check) = self.check {
             check(c, &new)?;
@@ -1019,7 +1035,112 @@ pub static PARAMS: &[Param] = &[
         Ok(true)
     }),
     boolean("ts-topology-events", None, IMMUTABLE, true),
+    // RediSearch's module configs (unprefixed; `RegisterModuleConfig_Local`)
+    signed("search-_numeric-ranges-parents", None, MODIFIABLE, 0, 2, 0, INTEGER),
+    signed("search-bg-index-sleep-gap", None, IMMUTABLE, 1, UINT_MAX, 100, INTEGER),
+    signed("search-default-dialect", None, MODIFIABLE, 1, 4, 1, INTEGER),
+    signed("search-fork-gc-clean-threshold", None, MODIFIABLE, 0, LLONG_MAX, 100, INTEGER),
+    signed("search-fork-gc-retry-interval", None, MODIFIABLE, 1, LLONG_MAX, 5, INTEGER),
+    signed("search-fork-gc-run-interval", None, MODIFIABLE, 1, LLONG_MAX, 30, INTEGER),
+    signed("search-fork-gc-sleep-before-exit", None, MODIFIABLE, 0, LLONG_MAX, 0, INTEGER),
+    signed("search-gc-scan-size", None, IMMUTABLE, 1, LLONG_MAX, 100, INTEGER),
+    signed("search-index-cursor-limit", None, MODIFIABLE, 0, LLONG_MAX, 128, INTEGER),
+    signed("search-max-aggregate-results", None, MODIFIABLE, LLONG_MIN, LLONG_MAX, 1 << 31, INTEGER)
+        .conv(|_, v| search_max_results("search-max-aggregate-results", v)),
+    signed("search-max-aggregate-groups", None, MODIFIABLE, 1, 1 << 26, 1_000_000, INTEGER),
+    signed("search-max-prefix-expansions", None, MODIFIABLE, 1, LLONG_MAX, 200, INTEGER).conv(clamp_uint),
+    signed("search-max-doctablesize", None, IMMUTABLE, 1, 100_000_000, 1_000_000, INTEGER),
+    signed("search-cursor-max-idle", None, MODIFIABLE, 1, LLONG_MAX, 300_000, INTEGER),
+    signed("search-max-search-results", None, MODIFIABLE, LLONG_MIN, LLONG_MAX, 1_000_000, INTEGER)
+        .conv(|_, v| search_max_results("search-max-search-results", v)),
+    signed("search-min-operation-workers", None, MODIFIABLE, 0, 16, 4, INTEGER),
+    signed("search-min-phonetic-term-len", None, MODIFIABLE, 1, LLONG_MAX, 3, INTEGER),
+    signed("search-min-prefix", None, MODIFIABLE, 1, LLONG_MAX, 2, INTEGER).conv(clamp_uint),
+    signed("search-min-stem-len", None, MODIFIABLE, 2, UINT_MAX, 4, INTEGER),
+    signed("search-multi-text-slop", None, IMMUTABLE, 0, UINT_MAX, 100, INTEGER),
+    signed("search-tiered-hnsw-buffer-limit", None, IMMUTABLE, 0, LLONG_MAX, 1024, INTEGER),
+    signed("search-timeout", None, MODIFIABLE, 0, LLONG_MAX, 500, INTEGER),
+    signed("search-_max-foreground-timeout-limit", None, MODIFIABLE, 0, LLONG_MAX, 60_000, INTEGER),
+    signed("search-union-iterator-heap", None, MODIFIABLE, 1, LLONG_MAX, 20, INTEGER).conv(clamp_uint),
+    signed("search-vss-max-resize", None, MODIFIABLE, 0, UINT_MAX, 0, INTEGER),
+    // The default is min(16, CPUs) (`GetDefaultWorkerThreads`), set in `Config::default`.
+    signed("search-workers", None, MODIFIABLE, 0, 16, 16, INTEGER),
+    signed("search-workers-priority-bias-threshold", None, IMMUTABLE, 0, LLONG_MAX, 1, INTEGER),
+    signed("search-_bg-index-mem-pct-thr", None, MODIFIABLE, 0, 100, 100, INTEGER),
+    signed("search-bm25std-tanh-factor", None, MODIFIABLE, 1, 10_000, 4, INTEGER),
+    signed("search-_bg-index-oom-pause-time", None, MODIFIABLE, 0, UINT_MAX, 0, INTEGER),
+    signed("search-indexer-yield-every-ops", None, MODIFIABLE, 1, UINT_MAX, 1000, INTEGER),
+    signed("search-bg-index-sleep-duration-us", None, MODIFIABLE, 1, 999_999, 1, INTEGER),
+    signed("search-_min-trim-delay-ms", None, MODIFIABLE, 1, UINT_MAX, 2000, INTEGER).conv(|c, v| {
+        let max = c.num("search-_max-trim-delay-ms");
+        if v.num() >= max {
+            return Err(format!("search-_min-trim-delay-ms ({}) must be less than search-_max-trim-delay-ms ({max})", v.num()));
+        }
+        Ok(v)
+    }),
+    signed("search-_max-trim-delay-ms", None, MODIFIABLE, 1, UINT_MAX, 5000, INTEGER).conv(|c, v| {
+        let min = c.num("search-_min-trim-delay-ms");
+        if v.num() <= min {
+            return Err(format!("search-_max-trim-delay-ms ({}) must be greater than search-_min-trim-delay-ms ({min})", v.num()));
+        }
+        Ok(v)
+    }),
+    signed("search-_trimming-state-check-delay-ms", None, MODIFIABLE, 1, UINT_MAX, 100, INTEGER),
+    string("search-ext-load", None, IMMUTABLE, false, Some("")),
+    string("search-friso-ini", None, IMMUTABLE, false, Some("")),
+    special("search-default-scorer", None, MODIFIABLE, |c| c.text("search-default-scorer:value"), |c, a| {
+        let text = c_text(a.first().copied().unwrap_or(""));
+        if !crate::search::scorer_exists(text) {
+            return Err(module_err("Invalid default scorer value".into()));
+        }
+        c.extra.insert("search-default-scorer:value", Val::Str(Some(text.to_string())));
+        Ok(true)
+    }),
+    enumeration("search-on-timeout", None, MODIFIABLE, SEARCH_ON_TIMEOUT, 0),
+    enumeration("search-on-oom", None, MODIFIABLE, SEARCH_ON_OOM, 0),
+    boolean("search-_free-resource-on-thread", None, MODIFIABLE, true),
+    boolean("search-_numeric-compress", None, MODIFIABLE, false),
+    boolean("search-_print-profile-clock", None, MODIFIABLE, true),
+    boolean("search-_prioritize-intersect-union-children", None, MODIFIABLE, false),
+    boolean("search-no-mem-pools", None, IMMUTABLE, false),
+    boolean("search-no-gc", None, IMMUTABLE, false),
+    boolean("search-partial-indexed-docs", None, IMMUTABLE, false),
+    boolean("search-raw-docid-encoding", None, IMMUTABLE, false),
+    boolean("search-enable-unstable-features", None, MODIFIABLE, false),
+    boolean("search-_simulate-in-flex", None, IMMUTABLE, false),
+    boolean("search-_info-on-zero-indexes", None, MODIFIABLE, false),
+    boolean("search-monitor-expiration", None, MODIFIABLE, true),
+    signed("search-disk-buffer-percentage", None, MODIFIABLE, 0, 100, 20, INTEGER),
+    signed("search-disk-max-open-files", None, MODIFIABLE, -1, INT_MAX, 1024, INTEGER).conv(|_, v| {
+        if v.num() != -1 && v.num() < 11 {
+            return Err("search-disk-max-open-files must be -1 (unlimited) or >= 11".into());
+        }
+        Ok(v)
+    }),
+    boolean("search-disk-drop-read-cache", None, IMMUTABLE, false),
+    boolean("search-disk-use-direct-reads", None, IMMUTABLE, false),
+    boolean("search-_fallback-to-main-thread-when-block-client-unavailable", None, MODIFIABLE, true),
 ];
+
+const LLONG_MAX: i128 = i64::MAX as i128;
+const LLONG_MIN: i128 = i64::MIN as i128;
+static SEARCH_ON_TIMEOUT: &[(&str, i64)] = &[("return", 0), ("fail", 1), ("return-strict", 2)];
+static SEARCH_ON_OOM: &[(&str, i64)] = &[("return", 0), ("fail", 1), ("ignore", 2)];
+
+/// `set_uint_clamped_numeric_config`: values past `UINT32_MAX` are clamped.
+fn clamp_uint(_: &Config, v: Val) -> Result<Val, String> {
+    Ok(Val::Num(v.num().min(u32::MAX as i128)))
+}
+
+/// `set_max_search_results_config` / `set_max_aggregate_results_config`: -1 is unlimited (the
+/// cap, 2^31), other negatives are refused, larger values clamped.
+fn search_max_results(name: &str, v: Val) -> Result<Val, String> {
+    let n = v.num();
+    if n < -1 {
+        return Err(format!("{name}: value {n} is out of range"));
+    }
+    Ok(Val::Num(if n < 0 { 1 << 31 } else { n.min(1 << 31) }))
+}
 
 /// A module config setter's error as Redis passes it on (`propagateErrorString` copies it into
 /// a 256-byte buffer).
@@ -1491,6 +1612,36 @@ impl std::fmt::Display for SetError {
 }
 
 impl Config {
+    /// A registered parameter's value (its default when unset).
+    pub fn val(&self, name: &str) -> Val {
+        match find(name) {
+            Some(p) => p.value(self),
+            None => self.extra.get(name).cloned().unwrap_or(Val::Str(None)),
+        }
+    }
+
+    pub fn num(&self, name: &str) -> i128 {
+        self.val(name).num()
+    }
+
+    pub fn flag(&self, name: &str) -> bool {
+        self.val(name).bool()
+    }
+
+    pub fn text(&self, name: &str) -> String {
+        self.val(name).string().unwrap_or_default()
+    }
+
+    /// Store a registered parameter's value without CONFIG SET's checks.
+    pub fn put(&mut self, name: &'static str, v: Val) {
+        match find(name) {
+            Some(p) => p.store(self, v),
+            None => {
+                self.extra.insert(name, v);
+            }
+        }
+    }
+
     /// Whether values may be Redis' shared integers 0..9999: not under a maxmemory policy that
     /// needs per-key access data.
     pub fn shared_integers(&self) -> bool {

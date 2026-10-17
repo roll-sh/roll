@@ -452,7 +452,7 @@ impl Engine {
     /// Would this command propagate writes (`is_may_replicate_command`): write and
     /// may-replicate commands, scripts unless they declare `no-writes`, EXEC of such commands.
     pub fn may_replicate(&self, client: &Client, args: &[Bytes]) -> bool {
-        let Ok((cmd, _)) = Self::resolve(args) else { return false };
+        let Ok((cmd, _)) = Self::resolve_as(args, client.internal) else { return false };
         if cmd.has(commands::SCRIPT_RUNNER) {
             return match self.scripting.flags_for(args) {
                 Some(f) if f & commands::scripting::COMPAT == 0 => f & commands::scripting::NO_WRITES == 0,
@@ -548,9 +548,36 @@ impl Engine {
 
     /// Resolve the command (and subcommand) for `args`, checking arity.
     pub fn resolve(args: &[Bytes]) -> Result<(&'static Command, String), Reply> {
+        Self::resolve_as(args, false)
+    }
+
+    /// [`Engine::resolve`] for a connection that may (`internal`) or may not see internal
+    /// commands. An internal container's subcommands are visible to all (as in Redis, which
+    /// checks the resolved command).
+    pub fn resolve_as(args: &[Bytes], internal: bool) -> Result<(&'static Command, String), Reply> {
         let Some(cmd) = commands::lookup(&args[0]) else {
             return Err(Self::unknown_command(args));
         };
+        if cmd.has(commands::INTERNAL) && !internal {
+            if cmd.subs.is_empty() {
+                return Err(Self::unknown_command(args));
+            }
+            let name = String::from_utf8_lossy(&args[0]).to_uppercase();
+            if args.len() < 2 {
+                return Err(Reply::Error(format!("ERR missing subcommand. Try {name} HELP.")));
+            }
+            let Some(sub) = commands::lookup_sub(cmd, &args[1]) else {
+                return Err(Reply::Error(format!(
+                    "ERR unknown subcommand '{}'. Try {name} HELP.",
+                    String::from_utf8_lossy(&args[1]).chars().take(128).collect::<String>()
+                )));
+            };
+            let full = format!("{}|{}", cmd.name, sub.name);
+            if !sub.check_arity(args.len()) {
+                return Err(commands::arity_error(&full).into());
+            }
+            return Ok((sub, full));
+        }
         if cmd.subs.is_empty() {
             if !cmd.check_arity(args.len()) {
                 return Err(commands::arity_error(cmd.name).into());
@@ -585,7 +612,7 @@ impl Engine {
         if top {
             client.last_cmd = commands::last_cmd_name(args);
         }
-        let (cmd, full_name) = match Self::resolve(args) {
+        let (cmd, full_name) = match Self::resolve_as(args, client.internal || mode == Mode::Replay) {
             Ok(c) => c,
             Err(e) => {
                 if top && let Some(m) = client.multi.as_mut() {
@@ -819,7 +846,7 @@ impl Engine {
     /// and command/error stats see it as if it had been dispatched here.
     pub fn record_external(&mut self, client: &Client, args: &[Bytes], micros: u64, reply: &Reply) {
         self.clients.refresh(client);
-        let Ok((cmd, full)) = Self::resolve(args) else { return };
+        let Ok((cmd, full)) = Self::resolve_as(args, client.internal) else { return };
         let now = now_ms();
         let shown = redacted(&full, args);
         if !cmd.has(commands::SKIP_MONITOR) && !cmd.has(commands::ADMIN) && self.hub.has_monitors() {
@@ -903,7 +930,7 @@ impl Engine {
     /// A blocked command ends without running again (timeout, CLIENT UNBLOCK): account for it
     /// now (`updateStatsOnUnblock`).
     fn count_unblocked(&mut self, w: &Waiter, failed: bool) {
-        let Ok((cmd, full)) = Self::resolve(&w.args) else { return };
+        let Ok((cmd, full)) = Self::resolve_as(&w.args, true) else { return };
         self.count_call(&w.client, &full, cmd, &w.args, w.micros, now_ms(), Mode::Unblock);
         if failed {
             self.cmdstats.get_mut(&full).unwrap().failed += 1;

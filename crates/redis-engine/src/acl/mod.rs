@@ -784,7 +784,7 @@ pub fn dryrun_message(user: &str, full_name: &str, args: &[Bytes], d: Denied) ->
 /// Check (and log) a command the server layer executes itself (MONITOR, WAIT, SAVE…). `Err` is
 /// the reply to send instead.
 pub fn check_command(acl: &RwLock<Acl>, client: &Client, args: &[Bytes]) -> Result<(), Reply> {
-    let (cmd, full) = crate::engine::Engine::resolve(args)?;
+    let (cmd, full) = crate::engine::Engine::resolve_as(args, true)?;
     match client.user.check(cmd, args) {
         Ok(()) => Ok(()),
         Err(d) => Err(deny(acl, client, &full, args, d, Mode::Top)),

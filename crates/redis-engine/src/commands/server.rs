@@ -375,7 +375,7 @@ pub fn hello(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         (Reply::bulk("id"), Reply::Int(cx.client.id as i64)),
         (Reply::bulk("mode"), Reply::bulk("standalone")),
         (Reply::bulk("role"), Reply::bulk(if cx.eng.replica { "replica" } else { "master" })),
-        (Reply::bulk("modules"), Reply::Array(vec![])),
+        (Reply::bulk("modules"), loaded_modules()),
     ]))
 }
 
@@ -479,11 +479,16 @@ pub fn config_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     ]))
 }
 
-pub fn command_count(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Int(table().all.len() as i64))
+pub fn command_count(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Ok(Reply::Int(table().all.iter().filter(|c| visible(cx, c)).count() as i64))
 }
 
-pub fn command_list(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+/// `commandVisibleForClient`: internal commands only for internal connections.
+fn visible(cx: &Cx, c: &Command) -> bool {
+    !c.has(INTERNAL) || cx.client.internal
+}
+
+pub fn command_list(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let filter = if args.len() == 5 && eq(&args[2], "filterby") {
         Some((args[3].clone(), args[4].clone()))
     } else if args.len() == 2 {
@@ -493,8 +498,10 @@ pub fn command_list(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     };
     let mut out = Vec::new();
     for c in &table().all {
-        let names: Vec<String> =
-            std::iter::once(c.name.to_string()).chain(c.subs.iter().map(|s| format!("{}|{}", c.name, s.name))).collect();
+        let names: Vec<String> = std::iter::once(c.name.to_string())
+            .filter(|_| visible(cx, c))
+            .chain(c.subs.iter().map(|s| format!("{}|{}", c.name, s.name)))
+            .collect();
         for n in names {
             let keep = match &filter {
                 None => true,
@@ -530,20 +537,20 @@ fn info_entry(c: &Command, full: &str) -> Reply {
     ])
 }
 
-pub fn command_all(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Array(table().all.iter().map(|c| info_entry(c, c.name)).collect()))
+pub fn command_all(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Ok(Reply::Array(table().all.iter().filter(|c| visible(cx, c)).map(|c| info_entry(c, c.name)).collect()))
 }
 
-pub fn command_info(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+pub fn command_info(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if args.len() == 2 {
-        return Ok(Reply::Array(table().all.iter().map(|c| info_entry(c, c.name)).collect()));
+        return command_all(cx, args);
     }
     Ok(Reply::Array(
         args[2..]
             .iter()
             .map(|n| match lookup_full(n) {
-                Some((c, full)) => info_entry(c, &full),
-                None => Reply::Nil,
+                Some((c, full)) if visible(cx, c) => info_entry(c, &full),
+                _ => Reply::Nil,
             })
             .collect(),
     ))
@@ -598,18 +605,18 @@ fn docs_entry(c: &Command, full: &str) -> Reply {
     Reply::Map(m)
 }
 
-pub fn command_docs(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+pub fn command_docs(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let list: Vec<(&Command, String)> = if args.len() == 2 {
-        table().all.iter().map(|c| (*c, c.name.to_string())).collect()
+        table().all.iter().filter(|c| visible(cx, c)).map(|c| (*c, c.name.to_string())).collect()
     } else {
-        args[2..].iter().filter_map(|n| lookup_full(n)).collect()
+        args[2..].iter().filter_map(|n| lookup_full(n)).filter(|(c, _)| visible(cx, c)).collect()
     };
     Ok(Reply::Map(list.into_iter().map(|(c, full)| (Reply::bulk_str(full.clone()), docs_entry(c, &full))).collect()))
 }
 
 /// `lookupCommand` on `COMMAND GETKEYS`'s arguments: a container without a subcommand argument
 /// is the container itself.
-fn getkeys_cmd(args: &[Bytes]) -> Result<Vec<(usize, u16)>, Error> {
+fn getkeys_cmd(cx: &Cx, args: &[Bytes]) -> Result<Vec<(usize, u16)>, Error> {
     let sub = &args[2..];
     let invalid = || Error::new("ERR Invalid command specified");
     let base = lookup(&sub[0]).ok_or_else(invalid)?;
@@ -619,6 +626,9 @@ fn getkeys_cmd(args: &[Bytes]) -> Result<Vec<(usize, u16)>, Error> {
         let s = lookup_sub(base, &sub[1]).ok_or_else(invalid)?;
         (s, format!("{}|{}", base.name, s.name))
     };
+    if !visible(cx, cmd) {
+        return Err(invalid());
+    }
     if !super::keyspec::has_keys(cmd, &full) {
         return Err(Error::new("ERR The command has no key arguments"));
     }
@@ -632,13 +642,13 @@ fn getkeys_cmd(args: &[Bytes]) -> Result<Vec<(usize, u16)>, Error> {
     Ok(keys)
 }
 
-pub fn command_getkeys(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let keys = getkeys_cmd(args)?;
+pub fn command_getkeys(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let keys = getkeys_cmd(cx, args)?;
     Ok(Reply::Array(keys.into_iter().map(|(i, _)| Reply::Bulk(args[2 + i].clone())).collect()))
 }
 
-pub fn command_getkeysandflags(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let keys = getkeys_cmd(args)?;
+pub fn command_getkeysandflags(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let keys = getkeys_cmd(cx, args)?;
     Ok(Reply::Array(
         keys.into_iter()
             .map(|(i, f)| {
@@ -852,8 +862,25 @@ pub fn latency_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     ]))
 }
 
+/// `addReplyLoadedModules`.
+fn loaded_modules() -> Reply {
+    Reply::Array(
+        crate::modules::LIST
+            .iter()
+            .map(|m| {
+                Reply::Map(vec![
+                    (Reply::bulk("name"), Reply::bulk(m.name)),
+                    (Reply::bulk("ver"), Reply::Int(m.ver)),
+                    (Reply::bulk("path"), Reply::bulk(m.path)),
+                    (Reply::bulk("args"), Reply::Array(vec![])),
+                ])
+            })
+            .collect(),
+    )
+}
+
 pub fn module_list(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Array(vec![]))
+    Ok(loaded_modules())
 }
 
 pub fn module_denied(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {

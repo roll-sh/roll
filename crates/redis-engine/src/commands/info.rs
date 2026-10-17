@@ -764,6 +764,17 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
 
     if want.has("module_list") || want.names.contains("modules") {
         begin(&mut s, "# Modules");
+        for m in crate::modules::LIST {
+            let _ = write!(
+                s,
+                "module:name={},ver={},api=1,filters=0,usedby=[{}],using=[{}],options=[{}]\r\n",
+                m.name,
+                m.ver,
+                m.usedby.join("|"),
+                m.using.join("|"),
+                m.options.join("|")
+            );
+        }
     }
 
     if want.has("commandstats") {
@@ -851,6 +862,18 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
                     }
                 }
                 s.push_str("\r\n");
+            }
+        }
+    }
+
+    // The modules' own sections (`modulesCollectInfo`): only search registers an INFO callback.
+    // Given for "everything" and "modules", else for the sections named (or the module's name).
+    let pick = want.everything || want.names.contains("modules");
+    if pick || want.names.iter().any(|n| n.starts_with("search")) {
+        for (name, body) in crate::search::info::sections(&eng.cfg) {
+            if pick || want.names.contains(name) || want.names.contains("search") {
+                begin(&mut s, &format!("# {name}"));
+                s.push_str(&body);
             }
         }
     }

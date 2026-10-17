@@ -88,7 +88,13 @@ static META: OnceLock<HashMap<String, Meta>> = OnceLock::new();
 /// Metadata of a command or subcommand by full name (`get`, `config|get`, `ft.search`),
 /// case-insensitive.
 pub fn get(full: &str) -> Option<&'static Meta> {
-    META.get_or_init(build).get(&full.to_ascii_lowercase())
+    let mut full = full.to_ascii_lowercase();
+    // The internal `_FT.CURSOR` (hidden from COMMAND, so not captured) has FT.CURSOR's
+    // subcommands, plus PROFILE, which is declared like GC.
+    if let Some(sub) = full.strip_prefix("_ft.cursor|") {
+        full = format!("ft.cursor|{}", if sub == "profile" { "gc" } else { sub });
+    }
+    META.get_or_init(build).get(&full)
 }
 
 /// Every full name Redis has, lowercase.

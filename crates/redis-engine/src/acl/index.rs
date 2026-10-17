@@ -234,6 +234,10 @@ fn fallback_categories(c: &Command) -> u32 {
 /// A module command has exactly the categories its module declares (no implicit @slow):
 /// read or write, and the module's own.
 fn module_categories(c: &Command) -> u32 {
+    // RediSearch declares each command's categories itself.
+    if let Some(cats) = commands::search::acl_categories(c) {
+        return cats.iter().fold(0, |m, n| m | cat(n));
+    }
     let module = [("json.", "json"), ("bf.", "bloom"), ("cf.", "cuckoo"), ("cms.", "cms"), ("topk.", "topk"), ("tdigest.", "tdigest"), ("ts.", "timeseries")];
     // A module that declares no categories (vector sets) has none.
     let Some(&(_, name)) = module.iter().find(|(p, _)| c.name.starts_with(p)) else { return 0 };

@@ -1,4 +1,4 @@
-use crate::commands::{Command, table};
+use crate::commands::{Command, INTERNAL, table};
 
 fn check(c: &Command, full: &str, bad: &mut Vec<String>) {
     let Some(m) = super::get(full) else {
@@ -31,6 +31,10 @@ fn check(c: &Command, full: &str, bad: &mut Vec<String>) {
 fn command_table_matches_redis() {
     let mut bad = Vec::new();
     for c in &table().all {
+        // Internal commands (`_FT.*`) are hidden from COMMAND, so the capture lacks them.
+        if c.has(INTERNAL) {
+            continue;
+        }
         check(c, c.name, &mut bad);
         for s in c.subs {
             check(s, &format!("{}|{}", c.name, s.name), &mut bad);

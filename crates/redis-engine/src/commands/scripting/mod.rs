@@ -556,7 +556,7 @@ impl Run {
             }
         };
         if cmd.has(NOSCRIPT) && !self.cx().eng.debug.disable_deny_scripts {
-            let name = Engine::resolve(args).map(|(_, n)| n).unwrap_or_default();
+            let name = Engine::resolve_as(args, true).map(|(_, n)| n).unwrap_or_default();
             return self.cx().eng.reject(&name, Reply::error("ERR This Redis command is not allowed from script"));
         }
         let read_only = self.read_only;
@@ -579,7 +579,7 @@ impl Run {
 
     /// redis.acl_check_cmd: may the caller's user run this?
     pub fn acl_check(&mut self, args: &[Bytes]) -> Result<bool, &'static str> {
-        let cmd = match crate::engine::Engine::resolve(args) {
+        let cmd = match crate::engine::Engine::resolve_as(args, true) {
             Ok((c, _)) => c,
             Err(Reply::Error(e)) if e.starts_with("ERR wrong number") => return Err("Wrong number of args for redis.acl_check_cmd()"),
             Err(_) => return Err("Invalid command passed to redis.acl_check_cmd()"),
