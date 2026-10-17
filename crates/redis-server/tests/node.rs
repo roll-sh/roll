@@ -15,8 +15,10 @@ fn spec(id: &str, secret: &str) -> DbSpec {
 }
 
 async fn start(idle: Option<Duration>) -> (SocketAddr, Arc<Node>) {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let o = Objects::new(&StorageConfig::Local(std::env::temp_dir().join(format!("roll-node-{n}")))).unwrap();
+    let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let o = Objects::new(&StorageConfig::Local(std::env::temp_dir().join(format!("roll-node-{n}-{i}")))).unwrap();
     let cfg = ShipperConfig { flush_interval: Duration::from_millis(20), ..Default::default() };
     let shipper = Shipper::start("n1", o, cfg).await.unwrap();
     let catalog = Arc::new(StaticCatalog::default());

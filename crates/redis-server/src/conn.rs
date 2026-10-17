@@ -130,6 +130,9 @@ where
             if wr.write_all(&conn.out).await.is_err() {
                 break;
             }
+            if let Some(db) = conn.db() {
+                db.net_out.fetch_add(conn.out.len() as u64, Ordering::Relaxed);
+            }
             conn.out.clear();
         }
         if conn.close_after {
@@ -161,7 +164,11 @@ where
             _ = kicked => break,
             r = rd.read_buf(&mut inbuf) => match r {
                 Ok(0) | Err(_) => break,
-                Ok(_) => {}
+                Ok(n) => {
+                    if let Some(db) = &db {
+                        db.net_in.fetch_add(n as u64, Ordering::Relaxed);
+                    }
+                }
             },
             Some(msg) = rx.recv() => {
                 match msg {

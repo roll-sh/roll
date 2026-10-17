@@ -71,6 +71,8 @@ impl Policy {
 pub struct Config {
     /// 0 = no limit.
     pub maxmemory: u64,
+    /// Highest `maxmemory` a tenant may set (the plan's memory); 0 = no cap.
+    pub maxmemory_cap: u64,
     pub maxmemory_policy: Policy,
     pub maxmemory_samples: u32,
     pub maxmemory_eviction_tenacity: u32,
@@ -118,6 +120,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             maxmemory: 0,
+            maxmemory_cap: 0,
             maxmemory_policy: Policy::NoEviction,
             maxmemory_samples: 5,
             maxmemory_eviction_tenacity: 10,
@@ -233,7 +236,12 @@ pub static PARAMS: &[Param] = &[
         alias: None,
         get: |c| c.maxmemory.to_string(),
         set: Some(|c, v| {
-            c.maxmemory = parse_memory(v)?;
+            let m = parse_memory(v)?;
+            // Hosted databases can lower their limit but not exceed their plan.
+            if c.maxmemory_cap > 0 && (m == 0 || m > c.maxmemory_cap) {
+                return Err(format!("maxmemory can't exceed this database's plan limit of {} bytes", c.maxmemory_cap));
+            }
+            c.maxmemory = m;
             Ok(())
         }),
     },

@@ -47,3 +47,4 @@ pg-proxy = { path = "crates/pg-proxy" }
 redis-proto = { path = "crates/redis-proto" }
 redis-engine = { path = "crates/redis-engine" }
 redis-server = { path = "crates/redis-server" }
+redis-control = { path = "crates/redis-control" }

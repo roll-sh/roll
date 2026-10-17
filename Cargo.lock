@@ -1694,6 +1694,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "redis-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "futures",
+ "getrandom 0.4.3",
+ "redis-engine",
+ "redis-proto",
+ "redis-server",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tower-http 0.7.1",
+ "tracing",
+]
+
+[[package]]
 name = "redis-engine"
 version = "0.1.0"
 dependencies = [

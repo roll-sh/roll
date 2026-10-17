@@ -313,6 +313,37 @@ impl Node {
         Ok(m.end)
     }
 
+    /// Restore database `id` in place to `until`. Clients are disconnected; the current history
+    /// is kept under a new id (returned) so the restore itself can be undone by branching from it.
+    pub async fn restore_in_place(&self, id: &str, until: persist::Until) -> anyhow::Result<String> {
+        let Some(shipper) = &self.shipper else { anyhow::bail!("restores need object storage") };
+        // Disconnect clients and flush (no-op when not loaded).
+        self.evict(id).await?;
+        let lock = self.transition_lock(id);
+        let _g = lock.lock().await;
+        if self.get_loaded(id).is_some() {
+            anyhow::bail!("database {id} was reopened by a client during the restore; retry");
+        }
+        let Some(current) = persist::read_manifest(&shipper.objects, id).await? else {
+            anyhow::bail!("database {id} has no history yet");
+        };
+        let archive = format!("{id}.{}", redis_engine::util::now_ms());
+        // Frozen: everything was flushed and listed by the eviction, and later segments hold
+        // the restored database's new frames under the same stream id.
+        let frozen = persist::Manifest { stream: Some(current.stream.clone().unwrap_or_else(|| id.to_string())), node: None, ..current };
+        let raw = bytes::Bytes::from(serde_json::to_vec(&frozen)?);
+        shipper.objects.put(&persist::manifest_key(&archive), raw).await?;
+        let scratch = Database::new(&archive, Config::default(), 1);
+        let m = persist::restore_at(&shipper.objects, &archive, &scratch, until, None).await?;
+        let manifest = persist::Manifest {
+            base: Some(persist::Base { db: archive.clone(), offset: m.end, at_ms: until.time_ms.unwrap_or_else(redis_engine::util::now_ms) }),
+            end: m.end,
+            ..Default::default()
+        };
+        shipper.objects.put(&persist::manifest_key(id), bytes::Bytes::from(serde_json::to_vec(&manifest)?)).await?;
+        Ok(archive)
+    }
+
     pub fn follower(&self, id: &str) -> Option<Arc<Follower>> {
         self.followers.lock().get(id).cloned()
     }

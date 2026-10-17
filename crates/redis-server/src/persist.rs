@@ -63,6 +63,10 @@ pub struct Manifest {
     /// Without snapshots: the parent state this database was branched from.
     #[serde(default)]
     pub base: Option<Base>,
+    /// The id the log frames are written under, when it isn't the manifest's own (archived
+    /// histories keep the original database's frames).
+    #[serde(default)]
+    pub stream: Option<String>,
     /// Segments holding the database's frames after the oldest snapshot, in order.
     pub segments: Vec<SegRef>,
     /// Stream offset covered by the snapshot and segments.
@@ -463,6 +467,8 @@ fn replay<'a>(
         let Some(mut m) = read_manifest(objects, id).await? else {
             return Ok(Manifest::default());
         };
+        let stream = m.stream.clone().unwrap_or_else(|| id.to_string());
+        let id = stream.as_str();
         if let Some(snap) = m.snapshots.iter().rev().find(|s| until.allows_snap(s)).cloned() {
             let loader = load_snapshot.ok_or_else(|| anyhow::anyhow!("snapshot {} needs a snapshot loader", snap.key))?;
             let data = objects.get(&snap.key).await?.ok_or_else(|| anyhow::anyhow!("snapshot {} is missing", snap.key))?;
