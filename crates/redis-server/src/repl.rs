@@ -28,6 +28,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
+pub mod psync;
+
+/// ROLE's replica link states.
+const LINK_STATES: [&str; 5] = ["connect", "connecting", "handshake", "sync", "connected"];
+
 /// The tail of a database's write stream, for replicas to catch up from.
 pub struct Backlog {
     inner: Mutex<BacklogInner>,
@@ -116,6 +121,41 @@ impl Backlog {
 
     pub fn replicas(&self) -> Vec<u64> {
         self.acks.lock().values().copied().collect()
+    }
+
+    /// Forget the history: the stream continues at `offset` with other contents (a full
+    /// resynchronization from a primary).
+    pub fn reset(&self, offset: u64) {
+        let mut i = self.inner.lock();
+        i.chunks.clear();
+        i.bytes = 0;
+        i.start = offset;
+        i.end = offset;
+    }
+
+    /// Attach a replica at `addr` (as INFO lists it) streaming from `offset`.
+    pub fn register(&self, addr: SocketAddr, offset: u64) -> u64 {
+        let rid = self.next_replica.fetch_add(1, Ordering::Relaxed);
+        self.acks.lock().insert(rid, offset);
+        self.peers.lock().insert(rid, (addr, redis_engine::util::now_ms()));
+        rid
+    }
+
+    /// A replica acknowledged `offset`.
+    pub fn ack(&self, rid: u64, offset: u64) {
+        if let Some(a) = self.acks.lock().get_mut(&rid) {
+            *a = (*a).max(offset);
+        }
+        if let Some(p) = self.peers.lock().get_mut(&rid) {
+            p.1 = redis_engine::util::now_ms();
+        }
+        self.acked.notify_waiters();
+    }
+
+    pub fn unregister(&self, rid: u64) {
+        self.acks.lock().remove(&rid);
+        self.peers.lock().remove(&rid);
+        self.acked.notify_waiters();
     }
 }
 
@@ -245,8 +285,9 @@ async fn serve_link(
             if chunks.is_empty() {
                 tokio::select! {
                     _ = woken => {}
-                    // Liveness probe so dead replicas are noticed.
-                    _ = tokio::time::sleep(Duration::from_secs(10)) => wr.write_all(b"*1\r\n$4\r\nPING\r\n").await.map(|_| ())?,
+                    // Liveness probe so dead replicas are noticed: an empty line, outside the
+                    // stream's offsets (a PING would count in them).
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => wr.write_all(b"\r\n").await.map(|_| ())?,
                 }
                 continue;
             }
@@ -325,6 +366,10 @@ pub struct Follower {
     pub last_contact: AtomicU64,
     /// Unix ms the link last went up or down.
     pub link_changed: AtomicU64,
+    /// A full resynchronization is being received (INFO `master_sync_in_progress`).
+    pub syncing: std::sync::atomic::AtomicBool,
+    /// ROLE's link state, an index into [`LINK_STATES`].
+    state: std::sync::atomic::AtomicU8,
     stop: Notify,
     /// For resyncs from object storage, which can start from a snapshot.
     codec: Option<Arc<dyn persist::SnapshotCodec>>,
@@ -346,9 +391,21 @@ impl Follower {
             connected: Default::default(),
             last_contact: AtomicU64::new(0),
             link_changed: AtomicU64::new(redis_engine::util::now_ms() as u64),
+            syncing: Default::default(),
+            state: Default::default(),
             stop: Notify::new(),
             codec,
         })
+    }
+
+    /// The link's state as ROLE shows it.
+    pub fn state(&self) -> &'static str {
+        LINK_STATES[self.state.load(Ordering::Relaxed) as usize]
+    }
+
+    fn set_state(&self, s: &str) {
+        let i = LINK_STATES.iter().position(|x| *x == s).unwrap_or(0);
+        self.state.store(i as u8, Ordering::Relaxed);
     }
 
     /// Lag behind the primary's stream, in bytes, if known.
@@ -380,8 +437,13 @@ impl Follower {
         loop {
             let before = buf.len();
             let Some(args) = redis_proto::parse_request(buf, limits).map_err(|e| anyhow::anyhow!("corrupt stream: {e}"))? else { break };
-            consumed += before - buf.len();
+            // Empty lines are the link's keepalive, outside the stream.
             if args.is_empty() {
+                continue;
+            }
+            consumed += before - buf.len();
+            // In-band control: counted in the offset, nothing to apply.
+            if eq(&args[0], "replconf") {
                 continue;
             }
             if args.len() == 2 && eq(&args[0], "select") {
@@ -422,7 +484,8 @@ impl Follower {
 
     /// Follow a primary over a replication link until [`Follower::promote`].
     pub async fn stream(self: Arc<Self>, primary: SocketAddr, primary_db: String, secret: String, objects: Option<Objects>) {
-        *self.db.upstream.lock() = Some((primary, Arc::downgrade(&self)));
+        *self.db.upstream.lock() =
+            Some(crate::database::Upstream { host: primary.ip().to_string(), port: primary.port(), follower: Arc::downgrade(&self), user: false });
         let mut backoff = Duration::from_millis(50);
         loop {
             let stopped = self.stop.notified();
@@ -430,6 +493,7 @@ impl Follower {
                 _ = stopped => return,
                 r = self.stream_once(primary, &primary_db, &secret, objects.as_ref()) => {
                     self.connected.store(false, Ordering::SeqCst);
+                    self.set_state("connect");
                     self.link_changed.store(redis_engine::util::now_ms() as u64, Ordering::Relaxed);
                     if let Err(e) = r {
                         tracing::debug!(error = %e, "replication link lost");
@@ -471,6 +535,7 @@ impl Follower {
             anyhow::bail!("primary refused replication: {line}");
         }
         self.connected.store(true, Ordering::SeqCst);
+        self.set_state("connected");
         self.link_changed.store(redis_engine::util::now_ms() as u64, Ordering::Relaxed);
         let (mut rd, mut wr) = sock.into_split();
         let mut dbsel = 0u16;

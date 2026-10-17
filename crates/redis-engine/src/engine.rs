@@ -231,6 +231,9 @@ pub struct Engine {
     pub(crate) exec_out_bytes: u64,
     /// What the server around the engine reports for INFO (connections, network, replication).
     pub host: Option<Arc<dyn crate::commands::info::Host>>,
+    /// Work for the server after the current command (REPLICAOF), taken with
+    /// [`Engine::take_server_actions`].
+    pub server_actions: Vec<crate::commands::replication::ServerAction>,
     /// INFO memory: the peak of `used_memory` and when it was reached (Unix s), and the usage
     /// right after startup.
     pub peak_memory: usize,
@@ -331,6 +334,7 @@ impl Engine {
             hotkeys: None,
             exec_out_bytes: 0,
             host: None,
+            server_actions: Vec::new(),
             peak_memory: 0,
             peak_time: now / 1000,
             startup_memory: 0,
@@ -454,6 +458,10 @@ impl Engine {
 
     pub fn total_keys(&self) -> usize {
         self.dbs.iter().map(|d| d.len()).sum()
+    }
+
+    pub fn take_server_actions(&mut self) -> Vec<crate::commands::replication::ServerAction> {
+        std::mem::take(&mut self.server_actions)
     }
 
     pub fn take_effects(&mut self) -> Vec<Effect> {
@@ -1101,6 +1109,24 @@ impl Engine {
     }
 
     /// `CLIENT UNBLOCK id [TIMEOUT|ERROR]`.
+    /// Redis' disconnectAllBlockedClients, when the instance becomes a replica: every blocked
+    /// command ends with an error and its connection closes after the reply.
+    pub fn unblock_all_for_role_change(&mut self) {
+        let ids: Vec<u64> = self.blocking.waiters.keys().copied().collect();
+        for id in ids {
+            let Some(w) = self.unregister_waiter(id) else { continue };
+            self.count_unblocked(&w, true);
+            let r = Reply::error("UNBLOCKED force unblock from blocking operation, instance state changed (master -> replica?)");
+            self.count_error(&r);
+            if let Some(e) = self.clients.by_id.get(&id) {
+                e.stats.killed.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(sink) = &w.client.sink {
+                sink.unblock(r.to_bytes(w.client.resp));
+            }
+        }
+    }
+
     pub fn unblock(&mut self, client_id: u64, error: bool) -> Option<Reply> {
         let w = self.unregister_waiter(client_id)?;
         self.count_unblocked(&w, error);

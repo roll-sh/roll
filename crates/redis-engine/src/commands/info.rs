@@ -72,6 +72,8 @@ pub struct Replication {
     pub backlog: Option<(u64, u64, u64)>,
     pub replicas: Vec<ReplicaInfo>,
     pub master: Option<MasterInfo>,
+    /// The previous replication id and the last offset it covers.
+    pub replid2: Option<(String, u64)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -86,6 +88,11 @@ pub struct ReplicaInfo {
 pub struct MasterInfo {
     pub host: String,
     pub port: u16,
+    /// ROLE's link state: connect, connecting, handshake, sync or connected.
+    pub state: &'static str,
+    pub sync_in_progress: bool,
+    /// Set up by the platform (not REPLICAOF): REPLICAOF can't change it.
+    pub managed: bool,
     pub link_up: bool,
     /// Seconds since the last data from the primary (-1: never).
     pub last_io: i64,
@@ -690,12 +697,13 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
             let unix = now / 1000;
             let _ = write!(
                 s,
-                "master_host:{}\r\nmaster_port:{}\r\nmaster_link_status:{}\r\nmaster_last_io_seconds_ago:{}\r\nmaster_sync_in_progress:0\r\nslave_read_repl_offset:{}\r\n\
+                "master_host:{}\r\nmaster_port:{}\r\nmaster_link_status:{}\r\nmaster_last_io_seconds_ago:{}\r\nmaster_sync_in_progress:{}\r\nslave_read_repl_offset:{}\r\n\
                  slave_repl_offset:{}\r\nreplica_full_sync_buffer_size:0\r\nreplica_full_sync_buffer_peak:0\r\nmaster_current_sync_attempts:0\r\nmaster_total_sync_attempts:1\r\n",
                 m.host,
                 m.port,
                 if m.link_up { "up" } else { "down" },
                 if m.link_up { m.last_io } else { -1 },
+                m.sync_in_progress as i32,
                 m.offset,
                 m.offset,
             );
@@ -718,9 +726,11 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
         };
         let _ = write!(
             s,
-            "master_failover_state:no-failover\r\nmaster_replid:{replid}\r\nmaster_replid2:0000000000000000000000000000000000000000\r\nmaster_repl_offset:{}\r\n\
-             second_repl_offset:-1\r\nrepl_backlog_active:{active}\r\nrepl_backlog_size:{size}\r\nrepl_backlog_first_byte_offset:{first}\r\nrepl_backlog_histlen:{hist}\r\n",
-            r.offset
+            "master_failover_state:no-failover\r\nmaster_replid:{replid}\r\nmaster_replid2:{}\r\nmaster_repl_offset:{}\r\n\
+             second_repl_offset:{}\r\nrepl_backlog_active:{active}\r\nrepl_backlog_size:{size}\r\nrepl_backlog_first_byte_offset:{first}\r\nrepl_backlog_histlen:{hist}\r\n",
+            r.replid2.as_ref().map_or("0000000000000000000000000000000000000000", |(id, _)| id.as_str()),
+            r.offset,
+            r.replid2.as_ref().map_or(-1, |(_, o)| *o as i64),
         );
     }
 

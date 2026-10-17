@@ -36,12 +36,12 @@ pub static COMMANDS: &[Command] = &[
     cmd!("bgsave", -1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, super::persist::bgsave, Server),
     cmd!("bgrewriteaof", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, super::persist::bgrewriteaof, Server),
     cmd!("shutdown", -1, ADMIN | NOSCRIPT | LOADING | STALE | NO_MULTI | ALLOW_BUSY, 0, 0, 0, server_only, Server),
-    cmd!("replicaof", 3, ADMIN | NOSCRIPT | STALE | NO_ASYNC_LOADING, 0, 0, 0, server_only, Server),
-    cmd!("slaveof", 3, ADMIN | NOSCRIPT | STALE | NO_ASYNC_LOADING, 0, 0, 0, server_only, Server),
+    cmd!("replicaof", 3, ADMIN | NOSCRIPT | STALE | NO_ASYNC_LOADING, 0, 0, 0, super::replication::replicaof, Server),
+    cmd!("slaveof", 3, ADMIN | NOSCRIPT | STALE | NO_ASYNC_LOADING, 0, 0, 0, super::replication::replicaof, Server),
     cmd!("role", 1, NOSCRIPT | LOADING | STALE | FAST, 0, 0, 0, role, Server),
     cmd!("sync", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING | NO_MULTI, 0, 0, 0, server_only, Server),
     cmd!("psync", -3, ADMIN | NOSCRIPT | NO_ASYNC_LOADING | NO_MULTI, 0, 0, 0, server_only, Server),
-    cmd!("replconf", -1, ADMIN | NOSCRIPT | LOADING | STALE | ALLOW_BUSY, 0, 0, 0, server_only, Server),
+    cmd!("replconf", -1, ADMIN | NOSCRIPT | LOADING | STALE | ALLOW_BUSY, 0, 0, 0, super::replication::replconf_cmd, Server),
     cmd!("failover", -1, ADMIN | NOSCRIPT | STALE, 0, 0, 0, server_only, Server),
     cmd!("readonly", 1, LOADING | STALE | FAST, 0, 0, 0, readonly, Cluster),
     cmd!("readwrite", 1, LOADING | STALE | FAST, 0, 0, 0, readwrite, Cluster),
@@ -241,10 +241,18 @@ pub fn lastsave(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
 }
 
 pub fn role(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    let r = cx.eng.host.as_ref().map(|h| h.replication()).unwrap_or_default();
     Ok(if cx.eng.replica {
-        Reply::Array(vec![Reply::bulk("slave"), Reply::bulk("primary"), Reply::Int(6379), Reply::bulk("connected"), Reply::Int(0)])
+        let m = r.master.unwrap_or_default();
+        let offset = if m.state == "connected" { m.offset as i64 } else { -1 };
+        Reply::Array(vec![Reply::bulk("slave"), Reply::bulk_str(m.host), Reply::Int(m.port as i64), Reply::bulk(m.state), Reply::Int(offset)])
     } else {
-        Reply::Array(vec![Reply::bulk("master"), Reply::Int(0), Reply::Array(vec![])])
+        let replicas = r
+            .replicas
+            .into_iter()
+            .map(|s| Reply::Array(vec![Reply::bulk_str(s.ip), Reply::bulk_str(s.port.to_string()), Reply::bulk_str(s.offset.to_string())]))
+            .collect();
+        Reply::Array(vec![Reply::bulk("master"), Reply::Int(r.offset as i64), Reply::Array(replicas)])
     })
 }
 

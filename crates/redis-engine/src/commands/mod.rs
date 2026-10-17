@@ -16,6 +16,7 @@ pub mod hotkeys;
 pub mod info;
 pub mod lolwut;
 pub mod persist;
+pub mod replication;
 pub mod keyspec;
 pub mod migrate;
 pub mod lists;

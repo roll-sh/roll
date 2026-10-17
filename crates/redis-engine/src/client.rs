@@ -46,6 +46,8 @@ pub struct ConnStats {
     pub last_interaction: AtomicI64,
     /// Unix ms of the last command (INFO `active_clients`).
     pub last_cmd_ms: AtomicI64,
+    /// The connection is a replica's replication link (CLIENT LIST flag `S`).
+    pub replica: AtomicBool,
     /// CLIENT KILL: close the connection (after the current reply).
     pub killed: AtomicBool,
     /// Waiting for CLIENT PAUSE to end (shown blocked).

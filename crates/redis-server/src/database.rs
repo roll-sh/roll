@@ -71,10 +71,30 @@ pub struct Database {
     pub evicting: AtomicBool,
     /// Connection-level counters for INFO.
     pub io: IoStats,
-    /// Replication id of this database's write stream (INFO `master_replid`).
-    pub replid: String,
+    /// Replication id of this database's write stream (INFO `master_replid`), and the previous
+    /// one with the offset it is valid up to (`master_replid2`, `second_repl_offset`).
+    pub replid: Mutex<String>,
+    pub replid2: Mutex<Option<(String, u64)>>,
     /// The primary this database follows, when it is a replica.
-    pub upstream: Mutex<Option<(std::net::SocketAddr, std::sync::Weak<crate::repl::Follower>)>>,
+    pub upstream: Mutex<Option<Upstream>>,
+    /// Signalled when the replication history changes (REPLICAOF): Redis replicas reconnect.
+    pub replicas_reset: tokio::sync::Notify,
+}
+
+/// The primary a replica database follows.
+#[derive(Clone)]
+pub struct Upstream {
+    pub host: String,
+    pub port: u16,
+    pub follower: std::sync::Weak<crate::repl::Follower>,
+    /// Set up with REPLICAOF (Redis' protocol) rather than by the platform.
+    pub user: bool,
+}
+
+/// A random 40-character replication id.
+pub fn new_replid() -> String {
+    let mut rng = redis_engine::util::Rng::new();
+    (0..40).map(|_| char::from_digit((rng.next_u64() % 16) as u32, 16).unwrap()).collect()
 }
 
 /// Connection-level counters (INFO stats and threads).
@@ -93,6 +113,12 @@ pub struct IoStats {
     /// Replication stream bytes received (replica) and sent (primary).
     pub repl_in: AtomicU64,
     pub repl_out: AtomicU64,
+    /// Full and partial resynchronizations served (INFO `sync_*`).
+    pub sync_full: AtomicU64,
+    pub sync_partial_ok: AtomicU64,
+    pub sync_partial_err: AtomicU64,
+    /// Replicas attached with Redis' protocol (they get PINGs in the stream).
+    pub redis_replicas: AtomicU64,
 }
 
 /// INFO's view of the server around an engine.
@@ -114,14 +140,17 @@ impl redis_engine::commands::info::Host for DbHost {
             pipeline_sum: l(&db.io.pipeline_sum),
             pipeline_cnt: l(&db.io.events),
             rejected_connections: l(&db.io.rejected),
-            ..Default::default()
+            sync_full: l(&db.io.sync_full),
+            sync_partial_ok: l(&db.io.sync_partial_ok),
+            sync_partial_err: l(&db.io.sync_partial_err),
         }
     }
 
     fn replication(&self) -> redis_engine::commands::info::Replication {
         use redis_engine::commands::info::{MasterInfo, ReplicaInfo, Replication};
         let Some(db) = self.0.upgrade() else { return Default::default() };
-        let mut r = Replication { replid: db.replid.clone(), offset: db.repl_offset(), ..Default::default() };
+        let mut r = Replication { replid: db.replid.lock().clone(), offset: db.repl_offset(), ..Default::default() };
+        r.replid2 = db.replid2.lock().clone();
         let backlog = db.backlog.lock().clone();
         if let Some(b) = backlog {
             let (start, end) = b.range();
@@ -137,16 +166,19 @@ impl redis_engine::commands::info::Host for DbHost {
                 });
             }
         }
-        if let Some((addr, f)) = db.upstream.lock().clone()
-            && let Some(f) = f.upgrade()
+        if let Some(u) = db.upstream.lock().clone()
+            && let Some(f) = u.follower.upgrade()
         {
             let now = redis_engine::util::now_ms();
             let last = f.last_contact.load(Ordering::Relaxed) as i64;
             let changed = (f.link_changed.load(Ordering::Relaxed) / 1000) as i64;
             let up = f.connected.load(Ordering::Relaxed);
             r.master = Some(MasterInfo {
-                host: addr.ip().to_string(),
-                port: addr.port(),
+                host: u.host.clone(),
+                port: u.port,
+                state: f.state(),
+                sync_in_progress: f.syncing.load(Ordering::Relaxed),
+                managed: !u.user,
                 link_up: up,
                 last_io: if last > 0 { (now - last) / 1000 } else { -1 },
                 offset: f.applied(),
@@ -239,8 +271,7 @@ impl Database {
                 Shard { engine: Mutex::new(e), scripts }
             })
             .collect();
-        let mut rng = redis_engine::util::Rng::new();
-        let replid = (0..40).map(|_| char::from_digit((rng.next_u64() % 16) as u32, 16).unwrap()).collect();
+        let replid = new_replid();
         let db = Arc::new(Self {
             id: id.into(),
             shards,
@@ -259,8 +290,10 @@ impl Database {
             kicked: tokio::sync::Notify::new(),
             evicting: AtomicBool::new(false),
             io: IoStats::default(),
-            replid,
+            replid: Mutex::new(replid),
+            replid2: Mutex::new(None),
             upstream: Mutex::new(None),
+            replicas_reset: tokio::sync::Notify::new(),
         });
         let host: Arc<dyn redis_engine::commands::info::Host> = Arc::new(DbHost(Arc::downgrade(&db)));
         for s in &db.shards {
@@ -353,6 +386,28 @@ impl Database {
         f.offset
     }
 
+    /// Put a command outside any database into the stream (PING, REPLCONF GETACK), as Redis'
+    /// replication cron does: replicas count it in their offset.
+    pub fn publish_raw(&self, args: &[&[u8]]) {
+        let mut f = self.feed.lock();
+        let mut out = BytesMut::new();
+        redis_proto::encode_command(args, &mut out);
+        f.offset += out.len() as u64;
+        let chunk = out.freeze();
+        for (_, s) in &f.sinks {
+            s.write(&chunk, f.offset);
+        }
+    }
+
+    /// Append a primary's stream verbatim (a replica's own stream, for its replicas and backlog).
+    pub fn publish_bytes(&self, chunk: Bytes) {
+        let mut f = self.feed.lock();
+        f.offset += chunk.len() as u64;
+        for (_, s) in &f.sinks {
+            s.write(&chunk, f.offset);
+        }
+    }
+
     fn publish(&self, effects: &[Effect]) {
         let mut f = self.feed.lock();
         let mut out = BytesMut::new();
@@ -381,11 +436,17 @@ impl Database {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut ticks = 0u64;
             loop {
                 tick.tick().await;
+                ticks += 1;
                 let Some(db) = weak.upgrade() else { return };
                 if db.closed.load(Ordering::Relaxed) {
                     return;
+                }
+                // Redis' replication cron: a PING in the stream every repl-ping-replica-period.
+                if ticks.is_multiple_of(crate::repl::psync::PING_PERIOD_S * 10) && db.io.redis_replicas.load(Ordering::Relaxed) > 0 {
+                    db.publish_raw(&[b"PING"]);
                 }
                 for i in 0..db.shards.len() {
                     // A busy script holds the engine: skip the tick rather than tie up a worker

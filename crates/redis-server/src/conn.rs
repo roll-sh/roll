@@ -3,6 +3,7 @@
 
 use crate::database::Database;
 use crate::directory::{AuthRequest, Directory, Session};
+use crate::repl::psync;
 use bytes::{Bytes, BytesMut};
 use redis_engine::client::{ConnStats, ReplyMode};
 use redis_engine::commands::eq;
@@ -74,6 +75,9 @@ pub struct Conn<'a> {
     /// More input may be parseable without reading (batch limit reached).
     more: bool,
     stats: Arc<ConnStats>,
+    /// REPLCONF options, and the replication start once SYNC/PSYNC accepted the connection.
+    repl_conf: psync::ReplicaConf,
+    sync: Option<psync::Start>,
 }
 
 pub async fn serve<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, fd: i64)
@@ -128,6 +132,8 @@ where
         blocked: None,
         more: false,
         stats,
+        repl_conf: Default::default(),
+        sync: None,
     };
     let mut inbuf = BytesMut::with_capacity(16 * 1024);
     'conn: loop {
@@ -177,6 +183,11 @@ where
                 db.net_out.fetch_add(conn.out.len() as u64, Ordering::Relaxed);
             }
             conn.out.clear();
+        }
+        // SYNC/PSYNC turned the connection into a replica link.
+        if let Some(start) = conn.sync.take() {
+            conn.stream_to_replica(&mut rd, &mut wr, &mut inbuf, &mut rx, start).await;
+            break;
         }
         if conn.close_after || conn.stats.killed.load(Ordering::Relaxed) {
             break;
@@ -311,7 +322,7 @@ impl Conn<'_> {
     }
 
     async fn run_pending(&mut self) {
-        while !self.pending.is_empty() && self.blocked.is_none() && !self.close_after {
+        while !self.pending.is_empty() && self.blocked.is_none() && !self.close_after && self.sync.is_none() {
             // A connection whose ACL user was deleted is closed (like Redis does right away).
             if self.client.user.is_deleted() {
                 self.pending.clear();
@@ -349,6 +360,7 @@ impl Conn<'_> {
             };
             let mut n = 0u64;
             let before = db.repl_offset();
+            let mut actions = Vec::new();
             {
                 let Some(mut eng) = db.engine_unless_busy(0) else {
                     let args = self.pending.pop_front().unwrap();
@@ -358,7 +370,7 @@ impl Conn<'_> {
                 };
                 let mut first = true;
                 while let Some(args) = self.pending.front() {
-                    if is_intercepted(args) || (!first && eng.paused_for(&mut self.client, args).is_some()) {
+                    if is_intercepted(args, &self.client) || (!first && eng.paused_for(&mut self.client, args).is_some()) {
                         break;
                     }
                     first = false;
@@ -367,6 +379,7 @@ impl Conn<'_> {
                     let client = &mut self.client;
                     let out = long_running(&args, || eng.call(client, &args));
                     let pushes = eng.take_after_reply();
+                    actions.extend(eng.take_server_actions());
                     match out {
                         Outcome::Reply(r) => {
                             let quit = eq(&args[0], "quit");
@@ -388,6 +401,9 @@ impl Conn<'_> {
                         }
                     }
                 }
+            }
+            if !actions.is_empty() {
+                self.server_actions(&db, actions);
             }
             db.touch(n);
             if db.sync_writes.load(Ordering::Relaxed) {
@@ -441,7 +457,7 @@ impl Conn<'_> {
 
     /// Commands handled here rather than by an engine.
     async fn intercept(&mut self, args: Vec<Bytes>) -> Option<Reply> {
-        if !is_intercepted(&args) {
+        if !is_intercepted(&args, &self.client) {
             return None;
         }
         let name = &args[0];
@@ -489,7 +505,134 @@ impl Conn<'_> {
         if eq(name, "waitaof") {
             return Some(self.waitaof(&args).await);
         }
+        if eq(name, "replconf") {
+            return Some(psync::replconf(&mut self.repl_conf, &args).unwrap_or(Reply::Raw(Bytes::new())));
+        }
+        if eq(name, "sync") || eq(name, "psync") {
+            let (sync, n) = (eq(name, "sync"), args.len());
+            if (sync && n != 1) || (!sync && n < 3) {
+                return Some(Reply::error(format!("ERR wrong number of arguments for '{}' command", if sync { "sync" } else { "psync" })));
+            }
+            if !self.out.is_empty() {
+                return Some(Reply::error("ERR SYNC and PSYNC are invalid with pending output"));
+            }
+            return Some(match psync::start(&db, &args, &self.repl_conf) {
+                Ok(start) => {
+                    self.sync = Some(start);
+                    Reply::Raw(Bytes::new())
+                }
+                Err(r) => r,
+            });
+        }
         None
+    }
+
+    /// Carry out what the engine asked for after a command (REPLICAOF).
+    fn server_actions(&mut self, db: &Arc<Database>, actions: Vec<redis_engine::commands::replication::ServerAction>) {
+        use redis_engine::commands::replication::ServerAction;
+        for action in actions {
+            let upstream = db.upstream.lock().clone();
+            if let Some(f) = upstream.as_ref().and_then(|u| u.follower.upgrade()) {
+                match action {
+                    ServerAction::NoOne => f.promote(),
+                    ServerAction::ReplicaOf { .. } => f.stop(),
+                }
+            }
+            match action {
+                ServerAction::NoOne => {
+                    *db.upstream.lock() = None;
+                    psync::shift_replid(db);
+                }
+                ServerAction::ReplicaOf { host, port } => {
+                    let (user, pass) = {
+                        let eng = db.engine(0);
+                        let c = &eng.cfg;
+                        (Some(c.masteruser.clone()).filter(|s| !s.is_empty()), Some(c.masterauth.clone()).filter(|s| !s.is_empty()))
+                    };
+                    let listening_port = self.client.laddr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(6379);
+                    let f = crate::repl::Follower::new(db.clone());
+                    *db.upstream.lock() = Some(crate::database::Upstream { host: host.clone(), port, follower: Arc::downgrade(&f), user: true });
+                    tokio::spawn(f.follow_redis(psync::MasterConf { host, port, user, pass, listening_port }));
+                }
+            }
+            // Replicas reconnect to learn the new history.
+            db.replicas_reset.notify_waiters();
+        }
+    }
+
+    /// Stream the database's writes to a replica that SYNC/PSYNC accepted, reading its acks.
+    async fn stream_to_replica<R, W>(
+        &mut self,
+        rd: &mut R,
+        wr: &mut W,
+        inbuf: &mut BytesMut,
+        rx: &mut mpsc::UnboundedReceiver<Msg>,
+        start: psync::Start,
+    ) where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        let Some(db) = self.db().cloned() else { return };
+        self.stats.replica.store(true, Ordering::Relaxed);
+        if wr.write_all(&start.preamble).await.is_err() {
+            return;
+        }
+        db.io.repl_out.fetch_add(start.preamble.len() as u64, Ordering::Relaxed);
+        // `redis-cli --rdb` and other snapshot-only clients: closed after the transfer.
+        if start.rdb_only {
+            let _ = wr.flush().await;
+            return;
+        }
+        let backlog = start.backlog;
+        let ip = self.repl_conf.ip.clone().or_else(|| self.client.addr.rsplit_once(':').map(|(h, _)| h.to_string())).unwrap_or_default();
+        let addr = SocketAddr::new(ip.parse().unwrap_or(std::net::Ipv4Addr::LOCALHOST.into()), self.repl_conf.listening_port.clamp(0, 65535) as u16);
+        let rid = backlog.register(addr, start.offset);
+        db.io.redis_replicas.fetch_add(1, Ordering::Relaxed);
+        let mut offset = start.offset;
+        let limits = Limits { authenticated: true, ..Limits::default() };
+        loop {
+            let woken = backlog.wake.notified();
+            let reset = db.replicas_reset.notified();
+            let Some(chunks) = backlog.read_from(offset) else { break };
+            if !chunks.is_empty() {
+                let mut ok = true;
+                for c in chunks {
+                    if wr.write_all(&c).await.is_err() {
+                        ok = false;
+                        break;
+                    }
+                    offset += c.len() as u64;
+                    db.io.repl_out.fetch_add(c.len() as u64, Ordering::Relaxed);
+                }
+                if !ok {
+                    break;
+                }
+                continue;
+            }
+            tokio::select! {
+                _ = woken => {}
+                _ = reset => break,
+                r = rd.read_buf(inbuf) => match r {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        db.io.repl_in.fetch_add(n as u64, Ordering::Relaxed);
+                        while let Ok(Some(a)) = parse_request(inbuf, limits) {
+                            if let Some(o) = psync::parse_ack(&a) {
+                                backlog.ack(rid, o);
+                            }
+                        }
+                    }
+                },
+                Some(msg) = rx.recv() => if matches!(msg, Msg::Kill) {
+                    break;
+                },
+            }
+            if self.stats.killed.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        backlog.unregister(rid);
+        db.io.redis_replicas.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// `WAIT numreplicas timeout`: replicas that acknowledged everything written so far.
@@ -504,6 +647,10 @@ impl Conn<'_> {
         };
         let db = self.db().cloned().unwrap();
         let offset = db.repl_offset();
+        // Redis replicas acknowledge every second; ask them now.
+        if n > 0 && db.io.redis_replicas.load(Ordering::Relaxed) > 0 {
+            db.publish_raw(&[b"REPLCONF", b"GETACK", b"*"]);
+        }
         let backlog = db.backlog.lock().clone();
         match backlog {
             Some(b) => Reply::Int(crate::repl::wait_acks(&b, offset, n.max(0) as usize, timeout).await as i64),
@@ -628,7 +775,11 @@ pub(crate) fn long_running<R>(args: &[Bytes], f: impl FnOnce() -> R) -> R {
     if script && multi_thread { tokio::task::block_in_place(f) } else { f() }
 }
 
-fn is_intercepted(args: &[Bytes]) -> bool {
+fn is_intercepted(args: &[Bytes], client: &Client) -> bool {
     let n = &args[0];
-    eq(n, "auth") || eq(n, "hello") || eq(n, "monitor") || eq(n, "wait") || eq(n, "waitaof")
+    if eq(n, "auth") || eq(n, "hello") || eq(n, "monitor") || eq(n, "wait") || eq(n, "waitaof") {
+        return true;
+    }
+    // Inside MULTI these are queued (or refused) by the engine like any command.
+    client.multi.is_none() && (eq(n, "replconf") || eq(n, "sync") || eq(n, "psync"))
 }

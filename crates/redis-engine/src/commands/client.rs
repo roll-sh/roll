@@ -94,8 +94,14 @@ fn line_for_current(cx: &Cx, args: &[Bytes]) -> String {
 }
 
 /// `getClientType`: 0 normal, 1 replica, 2 pubsub, 3 master.
-fn client_type(view: &View) -> u8 {
-    if view.subscriptions() > 0 { 2 } else { 0 }
+fn client_type(view: &View, stats: Option<&crate::client::ConnStats>) -> u8 {
+    if !view.monitor && stats.is_some_and(|s| s.replica.load(Ordering::Relaxed)) {
+        1
+    } else if view.subscriptions() > 0 {
+        2
+    } else {
+        0
+    }
 }
 
 /// `getClientTypeByName`.
@@ -143,6 +149,8 @@ pub fn line_with(id: u64, v: &View, d: &Derived, stats: Option<&crate::client::C
     let mut flags = String::new();
     if v.monitor {
         flags.push('O');
+    } else if stats.is_some_and(|s| s.replica.load(Ordering::Relaxed)) {
+        flags.push('S');
     }
     if v.subscriptions() > 0 {
         flags.push('P');
@@ -268,7 +276,12 @@ fn list(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 all.sort_unstable();
             }
             for id in all {
-                let t = if id == me { client_type(&View::of(cx.client)) } else { client_type(&cx.eng.clients.by_id[&id].view) };
+                let t = if id == me {
+                    client_type(&View::of(cx.client), cx.client.conn.as_deref())
+                } else {
+                    let e = &cx.eng.clients.by_id[&id];
+                    client_type(&e.view, Some(&e.stats))
+                };
                 if ty.is_none_or(|ty| ty == t) {
                     push(cx, id);
                 }
@@ -330,13 +343,16 @@ fn kill(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let me = cx.client.id;
     let now = cx.now;
     let mut killed = 0;
-    let mut targets: Vec<(u64, View)> = cx.eng.clients.by_id.iter().filter(|(i, _)| **i != me).map(|(i, e)| (*i, e.view.clone())).collect();
-    targets.push((me, View::of(cx.client)));
-    targets.sort_by_key(|(i, _)| *i);
-    for (cid, v) in targets {
+    let mut targets: Vec<(u64, View, u8)> =
+        cx.eng.clients.by_id.iter().filter(|(i, _)| **i != me).map(|(i, e)| (*i, e.view.clone(), client_type(&e.view, Some(&e.stats)))).collect();
+    let mine = View::of(cx.client);
+    let my_type = client_type(&mine, cx.client.conn.as_deref());
+    targets.push((me, mine, my_type));
+    targets.sort_by_key(|(i, _, _)| *i);
+    for (cid, v, vtype) in targets {
         if addr.as_ref().is_some_and(|a| a[..] != *v.addr.as_bytes())
             || laddr.as_ref().is_some_and(|a| a[..] != *v.laddr.as_bytes())
-            || ty.is_some_and(|t| t != client_type(&v))
+            || ty.is_some_and(|t| t != vtype)
             || (id != 0 && cid != id)
             || user.as_ref().is_some_and(|u| !Arc::ptr_eq(u, &v.user))
             || (cid == me && skipme)

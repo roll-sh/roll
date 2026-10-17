@@ -122,6 +122,9 @@ pub struct Config {
     /// Microseconds a background save spends per key (a hidden testing knob).
     pub rdb_key_save_delay: i64,
     pub key_load_delay: i64,
+    /// Credentials for a Redis primary followed with REPLICAOF.
+    pub masterauth: String,
+    pub masteruser: String,
 }
 
 impl Default for Config {
@@ -172,6 +175,8 @@ impl Default for Config {
             enable_debug_command: true,
             rdb_key_save_delay: 0,
             key_load_delay: 0,
+            masterauth: String::new(),
+            masteruser: String::new(),
         }
     }
 }
@@ -403,7 +408,8 @@ pub static PARAMS: &[Param] = &[
     p!("hash-rdb-load-max-template-entries", "0"),
     p!("hide-user-data-from-log", "no"),
     p!("requirepass", ""),
-    p!("masterauth", ""),
+    Param { name: "masterauth", alias: None, get: |c| c.masterauth.clone(), set: Some(|c, v| { c.masterauth = v.to_string(); Ok(()) }) },
+    Param { name: "masteruser", alias: None, get: |c| c.masteruser.clone(), set: Some(|c, v| { c.masteruser = v.to_string(); Ok(()) }) },
     // Hidden: only an exact CONFIG GET name finds these.
     p!("rdb-key-save-delay", rdb_key_save_delay, num, i32::MIN as i64, i32::MAX as i64),
     p!("key-load-delay", key_load_delay, num, i32::MIN as i64, i32::MAX as i64),

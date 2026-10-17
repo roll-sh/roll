@@ -48,7 +48,12 @@ pub(crate) fn raw_fd(sock: &tokio::net::TcpStream) -> i64 {
 
 /// Start a single-database server on an ephemeral port (tests, embedding). Returns its address.
 pub async fn start_single(db: Arc<Database>, password: Option<String>) -> anyhow::Result<SocketAddr> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    start_single_at(db, password, SocketAddr::from(([127, 0, 0, 1], 0))).await
+}
+
+/// [`start_single`] on a given address.
+pub async fn start_single_at(db: Arc<Database>, password: Option<String>, at: SocketAddr) -> anyhow::Result<SocketAddr> {
+    let listener = TcpListener::bind(at).await?;
     let addr = listener.local_addr()?;
     let dir: Arc<dyn Directory> = Arc::new(Single::new(db, password));
     tokio::spawn(async move { serve_tcp(listener, dir).await });
