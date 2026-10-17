@@ -15,6 +15,7 @@
 //! @conn 2                 switch to connection 2 (opened on first use)
 //! @resp 3                 HELLO 3 on the current connection (both sides)
 //! @sleep 100              pause (ms)
+//! RPUSH l {9000*x}        `{N*text}` expands to `text` repeated N times (long values, many args)
 //! ```
 //!
 //! `ROLL_COMPAT_REDIS=host:port` uses an existing reference server; otherwise a private Docker
@@ -206,7 +207,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             }
             (cmp, send, l)
         };
-        let args = redis_server::client::args(cmdline);
+        let args = redis_server::client::args(&expand(cmdline));
         let p = conns.get_mut(&cur).unwrap();
         if send_only {
             p.redis.send(&args).await.unwrap();
@@ -243,6 +244,32 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
         }
     }
     fails
+}
+
+/// Expand `{N*text}` into `text` repeated N times.
+fn expand(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('{') {
+        let tail = &rest[open + 1..];
+        let parsed = tail.find('}').and_then(|close| {
+            let (n, text) = tail[..close].split_once('*')?;
+            Some((n.parse::<usize>().ok()?, text, close))
+        });
+        match parsed {
+            Some((n, text, close)) => {
+                out.push_str(&rest[..open]);
+                out.push_str(&text.repeat(n));
+                rest = &tail[close + 1..];
+            }
+            None => {
+                out.push_str(&rest[..=open]);
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 trait SendRead {
