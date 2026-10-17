@@ -618,6 +618,8 @@ fn script_client(caller: &Client) -> Client {
     c.addr = "lua".into();
     // The script's client has no output buffer limit (it is not a connection).
     c.reply_budget = u64::MAX;
+    // HIMPORT fieldsets are scoped to one script run.
+    c.himport = None;
     c
 }
 

@@ -192,6 +192,7 @@ pub fn mem(v: &View, d: &Derived, stats: Option<&crate::client::ConnStats>, curr
         + 8 * argc
         + multi
         + d.watch as u64 * 80
+        + v.himport_mem as u64
         + pubsub
         + prefixes
         + omem;

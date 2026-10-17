@@ -7,6 +7,7 @@ pub mod hash;
 pub mod list;
 pub mod set;
 pub mod stream;
+pub mod template;
 pub mod zset;
 
 pub use array::Array;

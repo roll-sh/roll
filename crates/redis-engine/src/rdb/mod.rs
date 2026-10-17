@@ -21,9 +21,12 @@ pub use encode::{Lru, RdbWriter};
 
 use crate::config::Config;
 use crate::db::Db;
+use crate::types::template::Registry;
 use crate::value::{Entry, Str, Value};
 use decode::{Dec, IoSrc, SliceSrc};
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::sync::Arc;
 
 /// The RDB version written (`RDB_VERSION` of Redis 8).
 pub const RDB_VERSION: u16 = 15;
@@ -60,6 +63,8 @@ pub(crate) mod ty {
     pub const STREAM_LISTPACKS_5: u8 = 27;
     pub const ARRAY: u8 = 28;
     pub const HASH_TMPL_LP: u8 = 29;
+    pub const HASH_TMPL_LP_REF: u8 = 30;
+    pub const HASH_TMPL_ARRAY: u8 = 31;
     pub const HASH_TMPL_ARRAY_REF: u8 = 32;
     pub const GCRA: u8 = 33;
 }
@@ -136,6 +141,7 @@ impl From<io::Error> for RdbError {
 /// `now_ms` decides which IDMP entries of a stream have expired (they are not written).
 pub fn dump(value: &Value, now_ms: i64) -> Vec<u8> {
     let mut e = encode::Encoder::new(now_ms);
+    e.dump = true;
     e.object(value);
     let mut out = e.out;
     out.extend_from_slice(&RDB_VERSION.to_le_bytes());
@@ -152,10 +158,17 @@ pub fn restore(payload: &[u8], cfg: &Config) -> Result<Value, RdbError> {
 
 /// [`restore`] at a given time (which IDMP entries of a stream have expired).
 pub fn restore_at(payload: &[u8], cfg: &Config, now_ms: i64) -> Result<Value, RdbError> {
+    restore_with(payload, cfg, &Registry::new(), now_ms)
+}
+
+/// [`restore_at`] with template hashes using `reg`.
+pub fn restore_with(payload: &[u8], cfg: &Config, reg: &Arc<Registry>, now_ms: i64) -> Result<Value, RdbError> {
     verify_payload(payload)?;
     // Like Redis, the object is read from the whole buffer: one that overruns into the footer
     // is not rejected.
     let mut d = Dec::new(SliceSrc::new(payload), cfg, now_ms, RDB_VERSION);
+    d.tmpl = Some(reg.clone());
+    d.dump = true;
     let t = d.byte()?;
     if t == op::KEY_META {
         return Err(RdbError::Unsupported("key metadata"));
@@ -256,6 +269,18 @@ pub fn save<'a>(
     for f in functions {
         out.function(f)?;
     }
+    // The templates of the hashes saved.
+    let mut tmpls = std::collections::BTreeMap::new();
+    for (_, db) in &dbs {
+        for (_, e) in db.keys.iter() {
+            if let Value::Hash(h) = &e.value
+                && let Some(t) = h.template()
+            {
+                tmpls.entry(t.id()).or_insert_with(|| t.template().clone());
+            }
+        }
+    }
+    out.template_records(tmpls.values().map(|t| &**t))?;
     for (i, db) in dbs {
         if db.is_empty() {
             continue;
@@ -283,6 +308,61 @@ pub enum LoadItem<'a> {
     /// A key. Its LRU/LFU field comes from the `IDLE` / `FREQ` opcodes (or is fresh). Keys whose
     /// expiry has passed are delivered too (counted in [`LoadInfo::expired`]): the sink decides.
     Entry { db: usize, key: Str, entry: Entry },
+    /// After the last key: make the template hash at `key` a plain hash again (its template
+    /// stayed under `hash-rdb-load-template-disassembly-threshold` keys).
+    Untemplate { db: usize, key: Str },
+}
+
+/// Load-time conversion of plain hashes to template hashes (`rdbLoadTemplateCtx`), for files
+/// without template records when `hash-rdb-load-min-template-entries` is set.
+struct Conv {
+    min: usize,
+    max: usize,
+    threshold: u64,
+    created: usize,
+    stop: bool,
+    /// Templates still under the threshold, by id, and their keys.
+    few: HashMap<u64, Vec<(usize, Str)>>,
+}
+
+/// `MIN_REVERSE_LOOKUP`: few-key templates needed before creation can be throttled.
+const MIN_FEW_KEY: usize = 1000;
+
+impl Conv {
+    fn convert(&mut self, reg: &Arc<Registry>, h: &mut crate::types::Hash) {
+        if self.threshold == 0 {
+            h.try_template(reg, self.min, self.max);
+            return;
+        }
+        h.try_template_with(self.min, self.max, |fields| {
+            if let Some(t) = reg.find(fields) {
+                return Some(reg.key_ref_to(&t));
+            }
+            let few = self.few.len();
+            if !self.stop && few > MIN_FEW_KEY && few * 2 > self.created {
+                self.stop = true;
+            }
+            if self.stop {
+                return None;
+            }
+            self.created += 1;
+            Some(reg.key_ref(fields))
+        });
+    }
+
+    /// `rdbLoadTemplateCtxRecord`.
+    fn record(&mut self, reg: &Registry, db: usize, key: &Str, h: &crate::types::Hash) {
+        let Some(t) = h.template() else { return };
+        if self.threshold == 0 {
+            return;
+        }
+        let n = reg.keys_of(t);
+        if n == self.threshold {
+            self.few.remove(&t.id());
+        } else if n < self.threshold {
+            self.few.entry(t.id()).or_default().push((db, key.clone()));
+        }
+    }
 }
 
 /// What [`load`] read.
@@ -300,9 +380,29 @@ pub struct LoadInfo {
 /// Read an RDB file (versions 1 to 15), handing each item to `sink`. The CRC64 trailer is
 /// verified unless it is zero. Module AUX data is skipped; module values, hash templates and
 /// arrays are [`RdbError::Unsupported`]. `SELECTDB` beyond `cfg.databases` is an error.
-pub fn load(data: impl Read, cfg: &Config, mut sink: impl FnMut(LoadItem) -> Result<(), RdbError>) -> Result<LoadInfo, RdbError> {
+pub fn load(data: impl Read, cfg: &Config, sink: impl FnMut(LoadItem) -> Result<(), RdbError>) -> Result<LoadInfo, RdbError> {
+    load_with(data, cfg, None, sink)
+}
+
+/// [`load`] with template hashes (template records, and the load-time conversion of
+/// `hash-rdb-load-*-template-*`) using `reg`.
+pub fn load_with(
+    data: impl Read,
+    cfg: &Config,
+    reg: Option<&Arc<Registry>>,
+    mut sink: impl FnMut(LoadItem) -> Result<(), RdbError>,
+) -> Result<LoadInfo, RdbError> {
     let now = crate::util::now_ms();
     let mut d = Dec::new(IoSrc::new(data), cfg, now, RDB_VERSION);
+    d.tmpl = reg.cloned();
+    let mut conv = reg.filter(|_| cfg.hash_rdb_load_min_template_entries > 0).map(|_| Conv {
+        min: cfg.hash_rdb_load_min_template_entries,
+        max: cfg.hash_rdb_load_max_template_entries,
+        threshold: cfg.hash_rdb_load_template_disassembly_threshold as u64,
+        created: 0,
+        stop: false,
+        few: HashMap::new(),
+    });
     let mut magic = [0u8; 9];
     d.fill(&mut magic)?;
     if &magic[..5] != b"REDIS" {
@@ -357,12 +457,22 @@ pub fn load(data: impl Read, cfg: &Config, mut sink: impl FnMut(LoadItem) -> Res
                 info.functions += 1;
                 sink(LoadItem::Function(code))?;
             }
-            op::HASH_TEMPLATE => return Err(RdbError::Unsupported("hash templates")),
+            op::HASH_TEMPLATE => {
+                // A file with templates is loaded as is.
+                conv = None;
+                d.template_record()?;
+            }
             op::KEY_META => return Err(RdbError::Unsupported("key metadata")),
             _ => {
                 d.string(&mut a)?;
                 match d.object(t) {
-                    Ok(value) => {
+                    Ok(mut value) => {
+                        if let (Some(c), Some(reg), Value::Hash(h)) = (conv.as_mut(), reg, &mut value) {
+                            if matches!(t, ty::HASH | ty::HASH_ZIPMAP | ty::HASH_ZIPLIST | ty::HASH_LISTPACK) {
+                                c.convert(reg, h);
+                            }
+                            c.record(reg, db, &Str::from_slice(&a), h);
+                        }
                         // -1 is Redis' "no expiry" sentinel; other times <= 0 are long past.
                         let at = if expire == -1 { 0 } else { expire.max(1) };
                         info.keys += 1;
@@ -378,6 +488,11 @@ pub fn load(data: impl Read, cfg: &Config, mut sink: impl FnMut(LoadItem) -> Res
                 }
                 (expire, idle, freq) = (-1, None, None);
             }
+        }
+    }
+    if let Some(c) = conv {
+        for (db, key) in c.few.into_values().flatten() {
+            sink(LoadItem::Untemplate { db, key })?;
         }
     }
     if ver >= 5 {

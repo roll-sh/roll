@@ -480,8 +480,12 @@ fn rejects_bad_payloads() {
     p[n - 8..].fill(0);
     assert!(restore(&p, &c).is_ok());
     // Modules and other things this engine can't hold.
-    for t in [ty::MODULE_2, 30, ty::GCRA] {
+    for t in [ty::MODULE_2, ty::GCRA] {
         assert!(matches!(restore(&payload(&[t, 0]), &c), Err(RdbError::Unsupported(_))), "type {t}");
+    }
+    // Template hashes referencing a file's template record can't be in a DUMP payload.
+    for t in [ty::HASH_TMPL_LP_REF, ty::HASH_TMPL_ARRAY_REF] {
+        assert!(matches!(restore(&payload(&[t, 0]), &c), Err(RdbError::Corrupt(_))), "type {t}");
     }
     assert!(matches!(restore(&payload(&[8, 0]), &c), Err(RdbError::Corrupt(_))));
     // An empty array is corrupt (not an empty key), as is a bad cursor flag or element tag.
@@ -571,7 +575,7 @@ fn save_and_load_multiple_dbs() {
             LoadItem::Entry { db, key, entry } => got.push((db, key.to_vec(), entry.expire, dump(&entry.value, 0))),
             LoadItem::Aux { key, value } => aux.push((String::from_utf8_lossy(key).into_owned(), String::from_utf8_lossy(value).into_owned())),
             LoadItem::Function(f) => fns.push(f),
-            LoadItem::ResizeDb { .. } => {}
+            LoadItem::ResizeDb { .. } | LoadItem::Untemplate { .. } => {}
         }
         Ok(())
     })

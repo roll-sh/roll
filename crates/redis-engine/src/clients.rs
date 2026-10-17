@@ -27,6 +27,8 @@ pub struct View {
     /// Queued commands in MULTI, -1 outside.
     pub multi: i64,
     pub multi_mem: usize,
+    /// Memory of the HIMPORT fieldsets.
+    pub himport_mem: usize,
     pub readonly: bool,
     pub no_evict: bool,
     pub no_touch: bool,
@@ -60,6 +62,7 @@ impl View {
             ssub: c.ssubs.len(),
             multi: multi_of(c).0,
             multi_mem: multi_of(c).1,
+            himport_mem: c.himport.as_ref().map_or(0, |f| f.mem()),
             readonly: c.readonly,
             no_evict: c.no_evict,
             no_touch: c.no_touch,
@@ -85,6 +88,7 @@ impl View {
         self.psub = c.psubs.len();
         self.ssub = c.ssubs.len();
         (self.multi, self.multi_mem) = multi_of(c);
+        self.himport_mem = c.himport.as_ref().map_or(0, |f| f.mem());
         self.readonly = c.readonly;
         self.no_evict = c.no_evict;
         self.no_touch = c.no_touch;

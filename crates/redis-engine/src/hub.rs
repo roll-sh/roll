@@ -74,6 +74,8 @@ pub struct Hub {
     /// Clients closed for overcoming their output or query buffer limit (INFO).
     pub obuf_disconnections: std::sync::atomic::AtomicU64,
     pub qbuf_disconnections: std::sync::atomic::AtomicU64,
+    /// The hash template registry, shared by every shard.
+    pub templates: Arc<crate::types::template::Registry>,
 }
 
 /// Encode a push lazily, once per protocol version.
@@ -107,6 +109,10 @@ impl Hub {
 
     pub fn set_limits(&self, cfg: &crate::Config) {
         *self.limits.lock() = ConnLimits::of(cfg);
+        self.templates.set_limits(crate::types::template::LpLimits {
+            entries: cfg.hash_max_listpack_entries,
+            value: cfg.hash_max_listpack_value,
+        });
     }
 
     pub fn limits(&self) -> ConnLimits {

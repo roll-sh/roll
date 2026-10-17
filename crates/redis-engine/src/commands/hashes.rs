@@ -56,6 +56,14 @@ pub static COMMANDS: &[Command] = &[
     cmd!("hgetdel", -5, WRITE | FAST, 1, 1, 1, hgetdel, Hash),
     cmd!("hgetex", -5, WRITE | FAST, 1, 1, 1, hgetex, Hash),
     cmd!("hsetex", -6, WRITE | DENYOOM | FAST, 1, 1, 1, hsetex, Hash),
+    Command { since: "8.10.0", ..crate::container!("himport", 0, Hash, HIMPORT) },
+];
+
+static HIMPORT: &[Command] = &[
+    Command { since: "8.10.0", ..cmd!("prepare", -4, DENYOOM, 0, 0, 0, himport_prepare, Hash) },
+    Command { since: "8.10.0", ..cmd!("set", -5, WRITE | DENYOOM, 2, 2, 1, himport_set, Hash) },
+    Command { since: "8.10.0", ..cmd!("discard", 3, 0, 0, 0, 0, himport_discard, Hash) },
+    Command { since: "8.10.0", ..cmd!("discardall", 2, 0, 0, 0, 0, himport_discardall, Hash) },
 ];
 
 /// `EB_EXPIRE_TIME_INVALID`: how Redis represents "no expiry" in min-expiry arithmetic.
@@ -113,6 +121,17 @@ fn already_expired(cx: &Cx, at: i64) -> bool {
 
 fn limits(cx: &Cx) -> Limits {
     Limits::of(cx.cfg())
+}
+
+/// `hashTypeTryConvertToTemplate` with `hash-min-template-entries` /
+/// `hash-max-template-entries`, after a write.
+fn try_template(cx: &mut Cx, key: &[u8]) {
+    let (min, max) = (cx.cfg().hash_min_template_entries, cx.cfg().hash_max_template_entries);
+    if min == 0 {
+        return;
+    }
+    let reg = cx.eng.hub.templates.clone();
+    with_hash(cx, key, |h| h.try_template(&reg, min, max));
 }
 
 /// The hash at `key` in the current database, without any lookup side effects.
@@ -355,6 +374,7 @@ pub fn hset(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         args[2..].chunks(2).filter(|kv| h.set(&kv[0], &kv[1], false, lim)).count()
     })
     .unwrap_or(0);
+    try_template(cx, key);
     cx.touch(key);
     cx.changes(pairs);
     cx.notify_fields(notify::HASH, "hset", key, args[2..].iter().step_by(2));
@@ -374,6 +394,7 @@ pub fn hsetnx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         h.prepare(1, [field.len(), value.len()], lim);
         h.set(field, value, false, lim);
     });
+    try_template(cx, key);
     cx.touch(key);
     cx.notify_fields(notify::HASH, "hset", key, [field]);
     Ok(Reply::Int(1))
@@ -541,6 +562,7 @@ pub fn hincrby(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         h.prepare(1, [field.len(), s.len()], lim);
         h.set(field, &s, true, lim);
     });
+    try_template(cx, key);
     cx.touch(key);
     cx.notify_fields(notify::HASH, "hincrby", key, [field]);
     Ok(Reply::Int(new))
@@ -587,12 +609,70 @@ pub fn hincrbyfloat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         h.prepare(1, [field.len(), new.len()], lim);
         h.set(field, new.as_bytes(), true, lim);
     });
+    try_template(cx, key);
     cx.touch(key);
     cx.notify_fields(notify::HASH, "hincrbyfloat", key, [field]);
     // Replicated as the final value, keeping the field's TTL.
     let nb = Bytes::from(new);
     cx.propagate_as(vec![b("HSETEX"), key.clone(), b("KEEPTTL"), b("FIELDS"), b("1"), field.clone(), nb.clone()]);
     Ok(Reply::Bulk(nb))
+}
+
+// ---- HIMPORT ----
+
+/// HIMPORT PREPARE fieldset field [field ...]
+pub fn himport_prepare(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let fields = &args[3..];
+    // Template order (`sdscmplen`), remembering where each field was given.
+    let mut order: Vec<u32> = (0..fields.len() as u32).collect();
+    order.sort_by(|&a, &b| crate::types::template::field_cmp(&fields[a as usize], &fields[b as usize]));
+    if order.windows(2).any(|w| fields[w[0] as usize] == fields[w[1] as usize]) {
+        return Err(Error::new("ERR duplicate field name in fieldset"));
+    }
+    let sorted: Vec<Str> = order.iter().map(|&i| Str::from_slice(&fields[i as usize])).collect();
+    let t = cx.eng.hub.templates.hold_ref(&sorted);
+    cx.client.himport.get_or_insert_with(Box::default).insert(&args[2], t, order.into());
+    Ok(Reply::Ok)
+}
+
+/// HIMPORT SET key fieldset value [value ...]
+pub fn himport_set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let key = &args[2];
+    write_hash(cx, key)?;
+    let Some(fs) = cx.client.himport.as_ref().and_then(|f| f.get(&args[3])) else {
+        return Err(Error::new("ERR no such fieldset"));
+    };
+    let vals = &args[4..];
+    if vals.len() != fs.t.len() {
+        return Err(Error::new("ERR value count does not match fieldset field count"));
+    }
+    let ordered: Vec<&[u8]> = fs.order.iter().map(|&i| &vals[i as usize][..]).collect();
+    let t = cx.eng.hub.templates.key_ref_to(fs.t.template());
+    let h = Hash::from_template(t, &ordered, limits(cx));
+    let fields: Vec<Str> = fs.t.fields().to_vec();
+    cx.set(key, Value::Hash(Box::new(h)), false);
+    // Replicated as a RESTORE of the new hash (field names and values in one payload).
+    let db = cx.client.db;
+    let payload = crate::rdb::dump(&cx.eng.dbs[db].keys.get(key).expect("just set").value, cx.now);
+    cx.propagate_as(vec![b("RESTORE"), key.clone(), b("0"), Bytes::from(payload), b("REPLACE")]);
+    cx.notify_fields(notify::HASH, "hset", key, fields.iter());
+    cx.changes(1);
+    Ok(Reply::Ok)
+}
+
+/// HIMPORT DISCARD fieldset
+pub fn himport_discard(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let Some(f) = cx.client.himport.as_mut() else { return Ok(Reply::Int(0)) };
+    let removed = f.remove(&args[2]);
+    if f.is_empty() {
+        cx.client.himport = None;
+    }
+    Ok(Reply::Int(removed as i64))
+}
+
+/// HIMPORT DISCARDALL
+pub fn himport_discardall(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Ok(Reply::Int(cx.client.himport.take().map_or(0, |f| f.len()) as i64))
 }
 
 // ---- HRANDFIELD ----
@@ -679,6 +759,17 @@ fn hrandfield_count(cx: &mut Cx, key: &[u8], l: i64, withvalues: bool) -> CmdRes
         for (f, v, _) in h.iter() {
             emit(f, v);
         }
+    } else if h.is_template() {
+        // CASE 2.5b: distinct random indexes (partial Fisher-Yates).
+        let mut idx: Vec<usize> = (0..size as usize).collect();
+        for i in 0..count as usize {
+            let j = i + rng.below(size as usize - i);
+            idx.swap(i, j);
+        }
+        for &i in &idx[..count as usize] {
+            let (f, v) = h.pack_pair(i).expect("in range");
+            emit(f, v);
+        }
     } else if h.is_listpack() {
         // CASE 2.5: a uniform subset in listpack order (selection sampling).
         let mut need = count;
@@ -737,7 +828,7 @@ pub fn hscan(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             items.push(Reply::bulk(v));
         }
     };
-    if h.is_listpack() {
+    if h.is_listpack() || h.is_template() {
         for (f, v, at) in h.iter() {
             push(f, v, at);
         }
@@ -817,8 +908,9 @@ struct SetEx {
 
 /// `hashTypeSetExInit`: makes a listpack hash `listpackex`.
 fn setex_init(cx: &mut Cx, key: &[u8], cond: Cond) -> SetEx {
+    let lim = limits(cx);
     let reg = with_hash(cx, key, |h| {
-        h.enable_ttl();
+        h.enable_ttl(lim);
         h.subexpiry()
     })
     .unwrap_or(0);
@@ -1339,6 +1431,7 @@ pub fn hsetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         if let Some(ex) = &ex {
             setex_done(cx, key, ex);
         }
+        try_template(cx, key);
         if !deleted.is_empty() {
             // The fields' HDELs were propagated already.
             cx.no_propagate();

@@ -32,6 +32,7 @@ impl SnapshotCodec for RdbCodec {
         for code in engine.scripting.library_codes() {
             w.function(&code)?;
         }
+        w.templates(&engine.hub.templates)?;
         for (i, db) in engine.dbs.iter().enumerate() {
             if db.is_empty() {
                 continue;
@@ -60,8 +61,14 @@ impl SnapshotCodec for RdbCodec {
         let mut eng = db.engine(0);
         let cfg = eng.cfg.clone();
         let mut functions = Vec::new();
-        rdb::load(data, &cfg, |it| {
-            if let LoadItem::Function(code) = it {
+        let reg = eng.hub.templates.clone();
+        let lim = redis_engine::types::hash::Limits::of(&cfg);
+        rdb::load_with(data, &cfg, Some(&reg), |it| {
+            if let LoadItem::Untemplate { db, key } = &it {
+                if let Some(d) = eng.dbs.get_mut(*db) {
+                    d.untemplate(key, lim);
+                }
+            } else if let LoadItem::Function(code) = it {
                 functions.push(code);
             } else if let LoadItem::Entry { db, key, entry } = it {
                 let Some(d) = eng.dbs.get_mut(db) else { return Err(RdbError::Corrupt("database index out of range")) };

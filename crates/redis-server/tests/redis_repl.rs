@@ -137,6 +137,10 @@ async fn redis_replication_protocol() {
     cmd(&mut r, &["HSET", "h", "f", "v"]).await;
     cmd(&mut r, &["RPUSH", "l", "x", "y"]).await;
     cmd(&mut r, &["SET", "exp", "v", "EX", "1000"]).await;
+    // Template hashes: the snapshot has template records and keys referencing them.
+    cmd(&mut r, &["HIMPORT", "PREPARE", "fs", "b", "a", "ccc"]).await;
+    cmd(&mut r, &["HIMPORT", "SET", "t1", "fs", "1", "2", "3"]).await;
+    cmd(&mut r, &["HIMPORT", "SET", "t2", "fs", "1", &"v".repeat(100), "3"]).await;
     cmd(&mut r, &["FUNCTION", "LOAD", "#!lua name=rlib\nredis.register_function('rf', function() return 1 end)"]).await;
     cmd(&mut r, &["SELECT", "2"]).await;
     cmd(&mut r, &["SET", "b", "2"]).await;
@@ -149,7 +153,12 @@ async fn redis_replication_protocol() {
     assert_eq!(ctr.cli(&["-p", "6390", "-n", "2", "GET", "b"]), "2");
     assert!(ctr.cli(&["-p", "6390", "TTL", "exp"]).parse::<i64>().unwrap() > 900);
     assert!(ctr.cli(&["-p", "6390", "FUNCTION", "LIST"]).contains("rlib"));
-    // The stream after the snapshot.
+    assert_eq!(ctr.cli(&["-p", "6390", "OBJECT", "ENCODING", "t1"]), "template-listpack");
+    assert_eq!(ctr.cli(&["-p", "6390", "HGETALL", "t1"]), "a\n2\nb\n1\nccc\n3");
+    assert_eq!(ctr.cli(&["-p", "6390", "OBJECT", "ENCODING", "t2"]), "template-array");
+    assert_eq!(field(&ctr.cli(&["-p", "6390", "INFO", "stats"]), "hash_template_keys").as_deref(), Some("2"));
+    // The stream after the snapshot (HIMPORT SET goes as a RESTORE).
+    cmd(&mut r, &["HIMPORT", "SET", "t3", "fs", "4", "5", "6"]).await;
     cmd(&mut r, &["SET", "c", "3"]).await;
     cmd(&mut r, &["DEL", "a"]).await;
     cmd(&mut r, &["INCR", "n"]).await;
@@ -159,6 +168,8 @@ async fn redis_replication_protocol() {
     cmd(&mut r, &["SELECT", "0"]).await;
     eventually("writes to reach the Redis replica", || ctr.cli(&["-p", "6390", "GET", "n"]) == "2").await;
     assert_eq!(ctr.cli(&["-p", "6390", "GET", "c"]), "3");
+    assert_eq!(ctr.cli(&["-p", "6390", "OBJECT", "ENCODING", "t3"]), "template-listpack");
+    assert_eq!(ctr.cli(&["-p", "6390", "HGETALL", "t3"]), "a\n5\nb\n4\nccc\n6");
     assert_eq!(ctr.cli(&["-p", "6390", "EXISTS", "a"]), "0");
     assert_eq!(ctr.cli(&["-p", "6390", "-n", "2", "EXISTS", "b"]), "0");
     // The primary's view of it.
@@ -201,6 +212,8 @@ async fn redis_replication_protocol() {
     cmd(&mut m, &["ZADD", "mz", "1", "a", "2", "b"]).await;
     cmd(&mut m, &["XADD", "ms", "1-1", "f", "v"]).await;
     cmd(&mut m, &["SET", "mexp", "v", "EX", "1000"]).await;
+    cmd(&mut m, &["HIMPORT", "PREPARE", "fs", "y", "x"]).await;
+    cmd(&mut m, &["HIMPORT", "SET", "mt", "fs", "1", "2"]).await;
     cmd(&mut m, &["FUNCTION", "LOAD", "REPLACE", "#!lua name=mlib\nredis.register_function{function_name='mf', callback=function() return 2 end, flags={'no-writes'}}"]).await;
     let (r2_addr, mut r2) = roll_server().await;
     let mport = master_addr.rsplit(':').next().unwrap().to_string();
@@ -220,6 +233,8 @@ async fn redis_replication_protocol() {
     assert_eq!(text(&cmd(&mut r2, &["HGET", "mh", "b"]).await), "2");
     assert_eq!(text(&cmd(&mut r2, &["ZSCORE", "mz", "b"]).await), "2");
     assert_eq!(cmd(&mut r2, &["XLEN", "ms"]).await, Reply::Int(1));
+    assert_eq!(text(&cmd(&mut r2, &["OBJECT", "ENCODING", "mt"]).await), "template-listpack");
+    assert_eq!(text(&cmd(&mut r2, &["HGET", "mt", "y"]).await), "1");
     assert_eq!(cmd(&mut r2, &["FCALL_RO", "mf", "0"]).await, Reply::Int(2));
     assert!(text(&cmd(&mut r2, &["SET", "x", "1"]).await).starts_with("READONLY"));
     let i = info(&mut r2, "replication").await;
@@ -230,6 +245,7 @@ async fn redis_replication_protocol() {
     assert_eq!(field(&i, "master_replid"), field(&mi, "master_replid"));
     // The stream: plain writes, a transaction, a script's effects, expiry.
     cmd(&mut m, &["SET", "m2", "w"]).await;
+    cmd(&mut m, &["HIMPORT", "SET", "mt2", "fs", "3", "4"]).await;
     cmd(&mut m, &["DEL", "m1"]).await;
     cmd(&mut m, &["MULTI"]).await;
     cmd(&mut m, &["INCR", "tx"]).await;
@@ -246,6 +262,8 @@ async fn redis_replication_protocol() {
     })
     .await;
     assert_eq!(text(&cmd(&mut r2, &["GET", "m2"]).await), "w");
+    assert_eq!(text(&cmd(&mut r2, &["OBJECT", "ENCODING", "mt2"]).await), "template-listpack");
+    assert_eq!(text(&cmd(&mut r2, &["HGET", "mt2", "x"]).await), "4");
     assert_eq!(cmd(&mut r2, &["EXISTS", "m1"]).await, Reply::Int(0));
     assert_eq!(text(&cmd(&mut r2, &["GET", "tx"]).await), "2");
     let role = format!("{:?}", cmd(&mut r2, &["ROLE"]).await);

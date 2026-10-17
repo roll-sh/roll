@@ -86,6 +86,15 @@ impl Db {
         self.keys.insert_new(k, entry)
     }
 
+    /// Make the template hash at `key` a plain hash (`LoadItem::Untemplate`).
+    pub fn untemplate(&mut self, key: &[u8], lim: crate::types::hash::Limits) {
+        if let Some(Entry { value: crate::value::Value::Hash(h), .. }) = self.keys.get_mut(key) {
+            let old = h.mem();
+            h.untemplate(false, lim);
+            self.mem = (self.mem + h.mem()).saturating_sub(old);
+        }
+    }
+
     /// Remove a key, returning its entry.
     pub fn remove(&mut self, key: &[u8]) -> Option<Entry> {
         let (k, e) = self.keys.remove_entry(key)?;

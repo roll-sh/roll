@@ -195,3 +195,23 @@ async fn idle_reply_buffers_shrink_and_grow_back() {
     assert_eq!(field(&list, "rbs"), "2048");
     assert!(stat(&mut c, "reply_buffer_expands").await >= 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn himport_fieldsets_count_in_client_memory() {
+    let (_addr, mut c) = start().await;
+    let tot = |r: Reply| -> u64 {
+        let s = text(r);
+        s.split(' ').find_map(|t| t.strip_prefix("tot-mem=")).unwrap().trim().parse().unwrap()
+    };
+    let base = tot(c.cmd(["CLIENT", "INFO"]).await.unwrap());
+    c.cmd(["HIMPORT", "PREPARE", "fs", "b", "a", "ccc", "dd"]).await.unwrap();
+    let one = tot(c.cmd(["CLIENT", "INFO"]).await.unwrap());
+    c.cmd(["HIMPORT", "PREPARE", "fs2", "x"]).await.unwrap();
+    let two = tot(c.cmd(["CLIENT", "INFO"]).await.unwrap());
+    c.cmd(["HIMPORT", "PREPARE", "fs2", "xyz"]).await.unwrap();
+    let replaced = tot(c.cmd(["CLIENT", "INFO"]).await.unwrap());
+    c.cmd(["HIMPORT", "DISCARDALL"]).await.unwrap();
+    let none = tot(c.cmd(["CLIENT", "INFO"]).await.unwrap());
+    // Redis 8.10's figures: the fieldset container and dict, each fieldset and its template.
+    assert_eq!((one - base, two - one, replaced, none), (272, 160, two, base));
+}

@@ -225,13 +225,29 @@ fn flush_mode(args: &[Bytes]) -> Result<(), Error> {
     }
 }
 
+/// Does this flush free the data in Redis' lazyfree thread (ASYNC, or a SYNC flush run as a
+/// blocking async one outside MULTI and scripts)? Hash template references are then
+/// released by the next cron.
+fn flush_in_background(cx: &Cx, args: &[Bytes]) -> bool {
+    let sync = match args.get(1) {
+        Some(a) => eq(a, "sync"),
+        None => !cx.cfg().lazyfree_lazy_user_flush,
+    };
+    !sync || cx.can_block()
+}
+
 pub fn flushdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     flush_mode(args)?;
     let db = cx.db_index();
     cx.eng.touch_all_watched(Some(db as u16));
     cx.eng.clients.flushed();
     let removed = cx.eng.dbs[db].len() as u64;
-    cx.eng.dbs[db].clear();
+    let reg = cx.eng.hub.templates.clone();
+    if flush_in_background(cx, args) {
+        reg.deferred(|| cx.eng.dbs[db].clear());
+    } else {
+        cx.eng.dbs[db].clear();
+    }
     cx.eng.sig.dirty += removed;
     cx.force_propagate();
     Ok(Reply::Ok)
@@ -240,7 +256,12 @@ pub fn flushdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn flushall(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     flush_mode(args)?;
     let removed: u64 = cx.eng.dbs.iter().map(|d| d.len() as u64).sum();
-    cx.eng.flush_all();
+    let reg = cx.eng.hub.templates.clone();
+    if flush_in_background(cx, args) {
+        reg.deferred(|| cx.eng.flush_all());
+    } else {
+        cx.eng.flush_all();
+    }
     cx.eng.sig.dirty += removed;
     cx.eng.persist.kill_rdb(cx.now);
     // With save points configured the empty dataset is saved right away (`rdbSave`).
@@ -359,6 +380,7 @@ pub fn hello(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 
 pub fn reset(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     cx.client.multi = None;
+    cx.client.himport = None;
     let id = cx.client.id;
     cx.eng.unwatch_all(id);
     super::pubsub::unsubscribe_all(cx);
@@ -660,7 +682,17 @@ pub fn memory_usage(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let key = &args[2];
     Ok(match cx.peek(key) {
-        Some(e) => Reply::Int((crate::value::KEY_OVERHEAD + key.len().saturating_sub(22) + e.value.mem()) as i64),
+        Some(e) => {
+            // A template hash also carries its share of the template.
+            let share = match &e.value {
+                crate::value::Value::Hash(h) => h.template().map_or(0, |t| {
+                    let keys = t.registry().map_or(1, |r| r.keys_of(t).max(1));
+                    t.mem() / keys as usize
+                }),
+                _ => 0,
+            };
+            Reply::Int((crate::value::KEY_OVERHEAD + key.len().saturating_sub(22) + e.value.mem() + share) as i64)
+        }
         None => Reply::Nil,
     })
 }

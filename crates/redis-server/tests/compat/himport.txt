@@ -1,0 +1,210 @@
+# HIMPORT and hash templates (Redis 8.10): hashes sharing a field set keep only their values,
+# the names live once in a shared template (sorted by length, then bytes).
+# Keys flushed before this file release their templates in the next cron.
+@sleep 300
+HIMPORT
+HIMPORT HELP
+HIMPORT PREPARE fs
+HIMPORT PREPARE fs a b a
+HIMPORT SET k fs 1 2
+HIMPORT DISCARD
+HIMPORT PREPARE fs b a ccc dd
+HIMPORT SET k fs 1 2
+SET str x
+HIMPORT SET str fs 1 2 3 4
+HIMPORT SET str nofs 1
+HIMPORT SET k1 fs 1 2 3 4
+OBJECT ENCODING k1
+HGETALL k1
+HLEN k1
+HGET k1 ccc
+HMGET k1 a dd zz
+HEXISTS k1 b
+HEXISTS k1 zz
+HSTRLEN k1 ccc
+HKEYS k1
+HVALS k1
+HSCAN k1 0
+HSCAN k1 0 MATCH c* NOVALUES
+HRANDFIELD k1 10 WITHVALUES
+TYPE k1
+# DUMP builds (and caches) the field names as one listpack.
+DUMP k1
+!info hash_template* INFO stats
+!info used_memory_hash_templates INFO memory
+# Keys from the same fieldset share the template; an existing key is replaced.
+HIMPORT SET k2 fs x y z w
+EXPIRE k2 100
+HIMPORT SET k2 fs w x y z
+TTL k2
+HGETALL k2
+!info hash_template* INFO stats
+!info used_memory_hash_templates INFO memory
+# HSET of an existing field updates in place, a new one moves the hash to another template.
+HSET k1 a 100
+HGETALL k1
+OBJECT ENCODING k1
+HSET k1 e 5
+HGETALL k1
+OBJECT ENCODING k1
+!info hash_template* INFO stats
+!info used_memory_hash_templates INFO memory
+# A long value: template-array.
+HSET k1 a {100*v}
+OBJECT ENCODING k1
+HGETALL k1
+DUMP k1
+HSET k1 a short
+OBJECT ENCODING k1
+# HDEL moves to the template without the fields; the last field deletes the key.
+HDEL k2 a b ccc zz
+HGETALL k2
+OBJECT ENCODING k2
+HDEL k2 dd
+EXISTS k2
+!info hash_template* INFO stats
+# Increments and HSETNX.
+HINCRBY k1 b 10
+HINCRBYFLOAT k1 dd 1.5
+HSETNX k1 b 0
+HSETNX k1 f 0
+HGETALL k1
+OBJECT ENCODING k1
+# Field TTL commands: reads keep the template, setting a TTL makes a plain hash.
+HIMPORT SET k3 fs 1 2 3 4
+HTTL k3 FIELDS 2 a zz
+HPERSIST k3 FIELDS 2 a zz
+HEXPIRETIME k3 FIELDS 1 b
+OBJECT ENCODING k3
+HEXPIRE k3 100 FIELDS 1 a
+OBJECT ENCODING k3
+HGETALL k3
+HIMPORT SET k3b fs 1 2 3 4
+HSETEX k3b EX 100 FIELDS 1 a 9
+OBJECT ENCODING k3b
+HIMPORT SET k3c fs 1 2 3 4
+HGETEX k3c PX 100000 FIELDS 1 b
+OBJECT ENCODING k3c
+HIMPORT SET k3d fs 1 2 3 4
+HSETEX k3d KEEPTTL FIELDS 1 zzz 1
+OBJECT ENCODING k3d
+HGETALL k3d
+HGETDEL k3d FIELDS 2 a zzz
+HGETALL k3d
+# COPY shares the template too; RESTORE of a template payload.
+HIMPORT SET k4 fs 1 2 3 4
+COPY k4 k6
+OBJECT ENCODING k6
+HGETALL k6
+DUMP k4
+RESTORE r1 0 "\x1d\x00\x19\x19\x00\x00\x00\x05\x00\x81a\x02\x81b\x02\x81e\x02\x82dd\x03\x83ccc\x04\xff\x13\x13\x00\x00\x00\x06\x00\x01\x01\x02\x01\x01\x01\x05\x01\x04\x01\x03\x01\xff\x0f\x00\x1b\"a\xae\n\x03\xe6\xfc"
+OBJECT ENCODING r1
+HGETALL r1
+!info hash_template* INFO stats
+# Unsorted fields or a reference type in a payload are rejected.
+RESTORE r2 0 "\x1d\x00\x19\x19\x00\x00\x00\x05\x00\x81b\x02\x81a\x02\x81e\x02\x82dd\x03\x83ccc\x04\xff\x13\x13\x00\x00\x00\x06\x00\x01\x01\x02\x01\x01\x01\x05\x01\x04\x01\x03\x01\xff\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+RESTORE r3 0 "\x1e\x13\x13\x00\x00\x00\x06\x00\x01\x01\x02\x01\x01\x01\x05\x01\x04\x01\x03\x01\xff\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+EXISTS r2 r3
+# Field names that don't fit a listpack are written one by one.
+CONFIG SET hash-max-listpack-value 4
+HIMPORT PREPARE big alpha beta
+HIMPORT SET kb big 1 2
+OBJECT ENCODING kb
+DUMP kb
+HIMPORT SET kc big 1 {10*x}
+OBJECT ENCODING kc
+DUMP kc
+CONFIG SET hash-max-listpack-value 64
+# Many fields: template-array once past hash-max-listpack-entries.
+CONFIG SET hash-max-listpack-entries 4
+HIMPORT PREPARE five a b c d e
+HIMPORT SET k5 five 1 2 3 4 5
+OBJECT ENCODING k5
+HSET k1 g 1
+OBJECT ENCODING k1
+CONFIG SET hash-max-listpack-entries 512
+# Automatic conversion: hash-min-template-entries / hash-max-template-entries.
+CONFIG SET hash-min-template-entries 3
+HSET p a 1 b 2
+OBJECT ENCODING p
+HSET p c 3
+OBJECT ENCODING p
+HGETALL p
+HSETNX p2 x 1
+HSET p2 y 2 z 3
+OBJECT ENCODING p2
+HINCRBY p3 a 1
+HINCRBY p3 b 1
+HINCRBY p3 c 1
+OBJECT ENCODING p3
+HSET p4 a 1 b 2
+HEXPIRE p4 100 FIELDS 1 a
+HSET p4 c 3
+OBJECT ENCODING p4
+CONFIG SET hash-max-template-entries 3
+HSET q a 1 b 2 c 3 d 4
+OBJECT ENCODING q
+HSET q2 a 1 b 2 c 3
+OBJECT ENCODING q2
+!info hash_template* INFO stats
+CONFIG SET hash-min-template-entries 0
+CONFIG SET hash-max-template-entries 0
+# Keyspace events: HIMPORT SET is an hset of every field.
+CONFIG SET notify-keyspace-events KEhgSTIV
+@conn 2
+PSUBSCRIBE __*
+@conn 1
+HIMPORT SET ev fs 1 2 3 4
+HIMPORT SET ev fs 1 2 3 4
+CONFIG SET notify-keyspace-events ""
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+# Scripts: fieldsets last for one run.
+EVAL "redis.call('himport','prepare','sfs','a','b') return redis.call('himport','set',KEYS[1],'sfs','1','2')" 1 sk
+HGETALL sk
+EVAL "return redis.call('himport','set',KEYS[1],'sfs','1','2')" 1 sk
+# MULTI.
+MULTI
+HIMPORT PREPARE m a
+HIMPORT SET mk m 1
+HIMPORT DISCARD m
+EXEC
+HGETALL mk
+# Fieldsets belong to their connection; RESET drops them.
+@conn 3
+HIMPORT SET k1 fs 1 2 3 4
+HIMPORT PREPARE c3 a
+RESET
+HIMPORT SET k1 c3 1
+@conn 1
+HIMPORT DISCARD fs
+HIMPORT DISCARD fs
+HIMPORT PREPARE f1 x
+HIMPORT PREPARE f2 y
+HIMPORT PREPARE f2 z
+HIMPORT DISCARDALL
+HIMPORT DISCARDALL
+# FLUSHALL frees in the background: the template references go at the next cron.
+FLUSHALL
+!info hash_template* INFO stats
+@sleep 300
+!info hash_template* INFO stats
+!info used_memory_hash_templates INFO memory
+# Inside MULTI the flush is synchronous.
+HIMPORT PREPARE fs b a ccc dd
+HIMPORT SET k1 fs 1 2 3 4
+MULTI
+FLUSHALL
+EXEC
+!info hash_template* INFO stats
+HIMPORT DISCARDALL
+!info hash_template* INFO stats
+!info used_memory_hash_templates INFO memory

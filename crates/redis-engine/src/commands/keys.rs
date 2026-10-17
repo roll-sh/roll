@@ -503,7 +503,8 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(Error::new("ERR Invalid TTL value, must be >= 0"));
     }
     let now = cx.now;
-    let value = match crate::rdb::restore_at(&args[3], cx.cfg(), now) {
+    let reg = cx.eng.hub.templates.clone();
+    let value = match crate::rdb::restore_with(&args[3], cx.cfg(), &reg, now) {
         Ok(v) => v,
         Err(crate::rdb::RdbError::Version(_) | crate::rdb::RdbError::Checksum) => {
             return Err(Error::new("ERR DUMP payload version or checksum are wrong"));

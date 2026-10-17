@@ -10,13 +10,15 @@ use super::{RdbError, crc64, lzf, ty};
 use crate::config::Config;
 use crate::types::stream::{Group, Stream, StreamId};
 use crate::types::array::{self, Array};
+use crate::types::template::{HoldRef, Registry, Template, valid_fields};
 use crate::types::{Hash, List, Set, ZSet, hash, set, zset};
 use crate::value::{Str, Value};
 use foldhash::fast::RandomState;
 use redis_proto::parse_double;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 use std::mem::take;
+use std::sync::Arc;
 
 type R<T> = Result<T, RdbError>;
 
@@ -135,6 +137,20 @@ pub(crate) struct Dec<'c, S: Src> {
     arena: Vec<u8>,
     spans: Vec<Span>,
     scores: Vec<(usize, usize, f64)>,
+    /// The template registry: template hashes are unsupported without one.
+    pub tmpl: Option<Arc<Registry>>,
+    /// Reading a `DUMP` payload, where template hashes must be self-contained.
+    pub dump: bool,
+    /// The file's template records by saved id, held until the load ends.
+    pub tmpl_ids: HashMap<u64, HoldRef>,
+}
+
+/// A template's field names in a `DUMP` payload.
+enum TmplFields {
+    /// The registry template whose cached field listpack matched.
+    Found(Arc<Template>),
+    /// Parsed names, and the listpack they came in (to cache).
+    Parsed(Vec<Str>, Option<Vec<u8>>),
 }
 
 impl<'c, S: Src> Dec<'c, S> {
@@ -150,6 +166,9 @@ impl<'c, S: Src> Dec<'c, S> {
             arena: Vec::new(),
             spans: Vec::new(),
             scores: Vec::new(),
+            tmpl: None,
+            dump: false,
+            tmpl_ids: HashMap::new(),
         }
     }
 
@@ -359,10 +378,146 @@ impl<'c, S: Src> Dec<'c, S> {
             | ty::STREAM_LISTPACKS_5 => Value::Stream(Box::new(self.stream(t)?)),
             ty::MODULE_PRE_GA | ty::MODULE_2 => return Err(RdbError::Unsupported("module values")),
             ty::ARRAY => Value::Array(Box::new(self.array()?)),
-            ty::HASH_TMPL_LP..=ty::HASH_TMPL_ARRAY_REF => return Err(RdbError::Unsupported("template-encoded hashes")),
+            ty::HASH_TMPL_LP..=ty::HASH_TMPL_ARRAY_REF => Value::Hash(Box::new(self.template_hash(t)?)),
             ty::GCRA => return Err(RdbError::Unsupported("GCRA values")),
             _ => return Err(bad("unknown object type")),
         })
+    }
+
+    /// `count` strings (no allocation sized by the count alone).
+    fn strings(&mut self, count: u64) -> R<Vec<Str>> {
+        let mut out = Vec::new();
+        let mut a = take(&mut self.a);
+        for _ in 0..count {
+            self.string(&mut a)?;
+            out.push(Str::from_slice(&a));
+        }
+        self.a = a;
+        Ok(out)
+    }
+
+    /// A file's `HASH_TEMPLATE` record: saved id, field count, sorted field names.
+    pub fn template_record(&mut self) -> R<()> {
+        let reg = self.tmpl.clone().ok_or(RdbError::Unsupported("hash templates"))?;
+        let id = self.len()?;
+        let n = self.len()?;
+        if n == 0 {
+            return Err(bad("hash template with zero fields"));
+        }
+        if self.tmpl_ids.contains_key(&id) {
+            return Err(bad("duplicate hash template id"));
+        }
+        let fields = self.strings(n)?;
+        if !valid_fields(&fields) {
+            return Err(bad("hash template fields not strictly sorted"));
+        }
+        self.tmpl_ids.insert(id, reg.hold_ref(&fields));
+        Ok(())
+    }
+
+    /// `rdbLoadTemplateFields`: the field names of a self-contained template hash, as one
+    /// listpack (looked up in the registry's cache first) or counted strings.
+    fn template_fields(&mut self, reg: &Registry) -> R<TmplFields> {
+        match self.len()? {
+            0 => {
+                let mut blob = Vec::new();
+                self.string(&mut blob)?;
+                if let Some(t) = reg.by_fields_lp(&blob, self.now) {
+                    return Ok(TmplFields::Found(t));
+                }
+                let lp = Listpack::parse(&blob).ok_or(bad("template field blob integrity check failed"))?;
+                if lp.is_empty() {
+                    return Err(bad("template with zero fields"));
+                }
+                let mut buf = itoa::Buffer::new();
+                let fields: Vec<Str> = lp.iter().map(|it| Str::from_slice(it.bytes(&mut buf))).collect();
+                if !valid_fields(&fields) {
+                    return Err(bad("template fields not strictly sorted"));
+                }
+                Ok(TmplFields::Parsed(fields, Some(blob)))
+            }
+            1 => {
+                let n = self.len()?;
+                if n == 0 {
+                    return Err(bad("template with zero fields"));
+                }
+                let fields = self.strings(n)?;
+                if !valid_fields(&fields) {
+                    return Err(bad("template fields not strictly sorted"));
+                }
+                Ok(TmplFields::Parsed(fields, None))
+            }
+            _ => Err(bad("unknown template fields format")),
+        }
+    }
+
+    /// A template-listpack values blob: its leading template id and the values.
+    fn template_values_lp(&mut self) -> R<(i64, Vec<Str>)> {
+        let mut a = take(&mut self.a);
+        self.string(&mut a)?;
+        let lp = Listpack::parse(&a).ok_or(bad("template-listpack integrity check failed"))?;
+        let mut it = lp.iter();
+        let id = match it.next() {
+            None => return Err(bad("template-listpack is empty")),
+            Some(Item::Int(v)) => v,
+            Some(Item::Str(_)) => return Err(bad("template-listpack first entry is not an integer")),
+        };
+        let mut buf = itoa::Buffer::new();
+        let vals = it.map(|x| Str::from_slice(x.bytes(&mut buf))).collect();
+        self.a = a;
+        Ok((id, vals))
+    }
+
+    /// RDB_TYPE_HASH_TMPL_*: self-contained (`DUMP`) or referencing a template record (file).
+    fn template_hash(&mut self, t: u8) -> R<Hash> {
+        let reg = self.tmpl.clone().ok_or(RdbError::Unsupported("template-encoded hashes"))?;
+        let lim = hash::Limits::of(self.cfg);
+        let lp = matches!(t, ty::HASH_TMPL_LP | ty::HASH_TMPL_LP_REF);
+        if matches!(t, ty::HASH_TMPL_LP | ty::HASH_TMPL_ARRAY) {
+            let fields = self.template_fields(&reg)?;
+            let n = match &fields {
+                TmplFields::Found(t) => t.len(),
+                TmplFields::Parsed(f, _) => f.len(),
+            };
+            let vals = if lp {
+                let (_, vals) = self.template_values_lp()?;
+                if vals.len() != n {
+                    return Err(bad("template-listpack entry count does not match its fields"));
+                }
+                vals
+            } else {
+                self.strings(n as u64)?
+            };
+            // The template is only made once the values are read.
+            let k = match fields {
+                TmplFields::Found(t) => reg.key_ref_to(&t),
+                TmplFields::Parsed(f, blob) => {
+                    let k = reg.key_ref(&f);
+                    if let Some(b) = blob {
+                        reg.index_fields_lp(&k, &b, self.now);
+                    }
+                    k
+                }
+            };
+            return Ok(if lp { Hash::from_template_pack(k, &vals, lim) } else { Hash::from_template(k, &vals, lim) });
+        }
+        if self.dump {
+            return Err(bad("template reference in a DUMP payload"));
+        }
+        let (id, vals) = if lp {
+            let (id, vals) = self.template_values_lp()?;
+            (u64::try_from(id).map_err(|_| bad("negative hash template id"))?, Some(vals))
+        } else {
+            (self.len()?, None)
+        };
+        let tmpl = self.tmpl_ids.get(&id).ok_or(bad("invalid hash template id"))?.template().clone();
+        let vals = match vals {
+            Some(v) if v.len() != tmpl.len() => return Err(bad("template-listpack entry count does not match its fields")),
+            Some(v) => v,
+            None => self.strings(tmpl.len() as u64)?,
+        };
+        let k = reg.key_ref_to(&tmpl);
+        Ok(if lp { Hash::from_template_pack(k, &vals, lim) } else { Hash::from_template(k, &vals, lim) })
     }
 
     /// RDB_TYPE_ARRAY: rebuilt with the current `array-slice-size`, element by element.
@@ -612,7 +767,7 @@ impl<'c, S: Src> Dec<'c, S> {
         if n > lim.entries as u64 {
             h.prepare(lim.entries.saturating_add(1), std::iter::empty(), lim);
         } else if t != ty::HASH {
-            h.enable_ttl();
+            h.enable_ttl(lim);
         }
         let (mut a, mut b) = (take(&mut self.a), take(&mut self.b));
         for _ in 0..n {

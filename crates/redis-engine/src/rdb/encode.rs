@@ -67,9 +67,16 @@ fn double2ll(d: f64) -> Option<i64> {
     (l as f64 == d).then_some(l)
 }
 
-/// `rdbSaveObjectType`: the type byte, which depends on the encoding.
-pub(crate) fn type_of(v: &Value) -> u8 {
+/// `rdbSaveObjectType`: the type byte, which depends on the encoding. Template hashes are
+/// self-contained in a `dump` payload and reference their template record in a file.
+pub(crate) fn type_of(v: &Value, dump: bool) -> u8 {
     match v {
+        Value::Hash(h) if h.is_template() => match (h.is_template_listpack(), dump) {
+            (true, true) => ty::HASH_TMPL_LP,
+            (true, false) => ty::HASH_TMPL_LP_REF,
+            (false, true) => ty::HASH_TMPL_ARRAY,
+            (false, false) => ty::HASH_TMPL_ARRAY_REF,
+        },
         Value::Str(_) => ty::STRING,
         Value::List(_) => ty::LIST_QUICKLIST_2,
         Value::Set(s) if s.is_intset() => ty::SET_INTSET,
@@ -92,11 +99,13 @@ pub(crate) struct Encoder {
     lp: Vec<u8>,
     z: Vec<u8>,
     now: i64,
+    /// Writing a `DUMP` payload (self-contained) rather than a file.
+    pub dump: bool,
 }
 
 impl Encoder {
     pub fn new(now: i64) -> Self {
-        Encoder { out: Vec::new(), lp: Vec::new(), z: Vec::new(), now }
+        Encoder { out: Vec::new(), lp: Vec::new(), z: Vec::new(), now, dump: false }
     }
 
     #[inline]
@@ -127,7 +136,7 @@ impl Encoder {
 
     /// `rdbSaveObjectType` + `rdbSaveObject`.
     pub fn object(&mut self, v: &Value) {
-        self.out.push(type_of(v));
+        self.out.push(type_of(v, self.dump));
         self.body(v);
     }
 
@@ -247,6 +256,9 @@ impl Encoder {
     }
 
     fn hash(&mut self, h: &Hash) {
+        if let Some(t) = h.template() {
+            return self.template_hash(h, t);
+        }
         if h.is_listpack_ex() {
             // The registered next expiry (`ExpireMeta`), 0 when not registered.
             self.ms(h.subexpiry());
@@ -278,6 +290,52 @@ impl Encoder {
                     self.len(if at == 0 { 0 } else { (at - min) as u64 + 1 });
                 }
                 self.string(f);
+                self.string(v);
+            }
+        }
+    }
+
+    /// A template hash. In a file: the values, after the template id. In a `DUMP` payload: the
+    /// field names (one listpack when they fit, else counted strings), then the values.
+    fn template_hash(&mut self, h: &Hash, t: &crate::types::template::KeyRef) {
+        if self.dump {
+            if t.fits_lp() {
+                self.len(0);
+                let build = |fields: &[crate::value::Str]| {
+                    let mut buf = Vec::new();
+                    let mut w = LpWriter::new(&mut buf);
+                    for f in fields {
+                        w.str(f);
+                    }
+                    w.finish();
+                    buf
+                };
+                let blob = match t.registry() {
+                    Some(r) => r.fields_lp(t, self.now, true, build),
+                    None => build(t.fields()),
+                };
+                put_string(&mut self.out, &blob, &mut self.z);
+            } else {
+                self.len(1);
+                self.len(t.len() as u64);
+                for f in t.fields() {
+                    self.string(f);
+                }
+            }
+        }
+        if h.is_template_listpack() {
+            let mut w = LpWriter::new(&mut self.lp);
+            w.int(t.id() as i64);
+            for (_, v, _) in h.iter() {
+                w.str(v);
+            }
+            w.finish();
+            self.flush_lp();
+        } else {
+            if !self.dump {
+                self.len(t.id());
+            }
+            for (_, v, _) in h.iter() {
                 self.string(v);
             }
         }
@@ -417,6 +475,25 @@ impl<W: Write> RdbWriter<W> {
         Ok(())
     }
 
+    /// The templates of the hashes that follow (`rdbSaveHashTemplates`), written before the
+    /// databases: one `HASH_TEMPLATE` record (id, field count, fields) each.
+    pub fn templates(&mut self, reg: &crate::types::template::Registry) -> io::Result<()> {
+        self.template_records(reg.with_keys().iter().map(|t| &**t))
+    }
+
+    /// One `HASH_TEMPLATE` record per template.
+    pub fn template_records<'t>(&mut self, tmpls: impl Iterator<Item = &'t crate::types::template::Template>) -> io::Result<()> {
+        for t in tmpls {
+            self.enc.out.push(op::HASH_TEMPLATE);
+            self.enc.len(t.id());
+            self.enc.len(t.len() as u64);
+            for f in t.fields() {
+                self.enc.string(f);
+            }
+        }
+        self.flush()
+    }
+
     /// A function library (`FUNCTION2`): its source code.
     pub fn function(&mut self, code: &[u8]) -> io::Result<()> {
         self.enc.out.push(op::FUNCTION2);
@@ -448,7 +525,7 @@ impl<W: Write> RdbWriter<W> {
             }
             Lru::Freq(f) => self.enc.out.extend_from_slice(&[op::FREQ, f]),
         }
-        self.enc.out.push(type_of(&e.value));
+        self.enc.out.push(type_of(&e.value, false));
         self.enc.string(key);
         self.enc.body(&e.value);
         self.flush()

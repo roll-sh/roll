@@ -408,10 +408,13 @@ fn load_full(db: &Database, data: &[u8]) -> anyhow::Result<()> {
     // Parse first: a broken transfer leaves the current data in place.
     let mut entries = Vec::new();
     let mut functions = Vec::new();
-    rdb::load(data, &cfg, |it| {
+    let mut untemplate = Vec::new();
+    let reg = eng.hub.templates.clone();
+    rdb::load_with(data, &cfg, Some(&reg), |it| {
         match it {
             LoadItem::Function(code) => functions.push(code),
             LoadItem::Entry { db, key, entry } if !entry.expired(now) => entries.push((db, key, entry)),
+            LoadItem::Untemplate { db, key } => untemplate.push((db, key)),
             _ => {}
         }
         Ok::<(), RdbError>(())
@@ -425,6 +428,12 @@ fn load_full(db: &Database, data: &[u8]) -> anyhow::Result<()> {
         let Some(d) = eng.dbs.get_mut(i) else { anyhow::bail!("MASTER sent database {i}, beyond `databases`") };
         if !d.keys.contains_key(&key[..]) {
             d.insert_new(&key, entry);
+        }
+    }
+    let lim = redis_engine::types::hash::Limits::of(&cfg);
+    for (i, key) in untemplate {
+        if let Some(d) = eng.dbs.get_mut(i) {
+            d.untemplate(&key, lim);
         }
     }
     Ok(())

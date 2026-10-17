@@ -110,6 +110,8 @@ pub struct Client {
     /// (`u64::MAX`: no limit). Commands with unbounded replies (KEYS, *RANDMEMBER with a
     /// negative count) stop producing once past it, like Redis stops on `CLIENT_CLOSE_ASAP`.
     pub reply_budget: u64,
+    /// `HIMPORT PREPARE` fieldsets.
+    pub himport: Option<Box<crate::types::template::Fieldsets>>,
 }
 
 impl std::fmt::Debug for Client {
@@ -148,6 +150,7 @@ impl Client {
             defer_pushes: false,
             executing: None,
             reply_budget: u64::MAX,
+            himport: None,
         }
     }
 

@@ -10,21 +10,29 @@
 //! - `hashtable`: a [`Dict`] (Redis-exact HSCAN cursors) plus, once any field got a TTL, an index
 //!   of the expiring fields (by field, and ordered by time for expiry).
 //!
+//! - `template-listpack` / `template-array` (Redis 8.10): the field names live in a shared
+//!   template (sorted, see [`super::template`]) and the hash keeps only its values, in
+//!   template order: a [`Pack`] while they fit the listpack limits, else an array.
+//!
 //! A hash starts as `listpack`, becomes `listpackex` the first time a field-expiration command
 //! touches it, and becomes `hashtable` once it outgrows `hash-max-listpack-entries` /
-//! `hash-max-listpack-value`. It never converts back.
+//! `hash-max-listpack-value`. It never converts back. Template hashes are created by
+//! `HIMPORT SET`, `RESTORE` and the `hash-*-template-entries` conversions; adding or removing a
+//! field moves them to another template, and a field TTL turns them into plain hashes.
 //!
 //! Expiry times are absolute Unix milliseconds; 0 means "no TTL". The type itself never looks at
 //! the clock: readers that care pass `now` ([`Hash::get_live`], [`Hash::iter_live`]) and the
 //! command layer decides when expired fields are deleted (lazily, or by active expiry through
 //! [`Hash::expire_due`]).
 
+use super::template::{KeyRef, LP_SAFETY, Registry, field_cmp};
 use crate::config::Config;
 use crate::dict::Dict;
 use crate::pack::Pack;
 use crate::util::Rng;
 use crate::value::Str;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// Listpack size limits (`hash-max-listpack-entries`, `hash-max-listpack-value`).
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +61,71 @@ enum Enc {
     Pack(Pack),
     PackEx(PackEx),
     Table(Box<Table>),
+    Tmpl(Box<Tmpl>),
+}
+
+/// A template hash: the values of `t`'s fields, in its order.
+#[derive(Clone, Debug)]
+struct Tmpl {
+    t: KeyRef,
+    vals: Vals,
+}
+
+#[derive(Clone, Debug)]
+enum Vals {
+    /// `template-listpack`.
+    Pack(Pack),
+    /// `template-array`.
+    Array(Vec<Str>),
+}
+
+impl Vals {
+    fn get(&self, i: usize) -> Option<&[u8]> {
+        match self {
+            Vals::Pack(p) => p.get(i),
+            Vals::Array(a) => a.get(i).map(|v| v.as_slice()),
+        }
+    }
+
+    fn set(&mut self, i: usize, v: &[u8]) {
+        match self {
+            Vals::Pack(p) => {
+                p.set(i, v);
+            }
+            Vals::Array(a) => a[i] = Str::from_slice(v),
+        }
+    }
+
+    fn insert(&mut self, i: usize, v: &[u8]) {
+        match self {
+            Vals::Pack(p) => p.insert(i, v),
+            Vals::Array(a) => a.insert(i, Str::from_slice(v)),
+        }
+    }
+
+    fn remove(&mut self, i: usize) {
+        match self {
+            Vals::Pack(p) => {
+                p.remove(i);
+            }
+            Vals::Array(a) => {
+                a.remove(i);
+            }
+        }
+    }
+
+    fn make_array(&mut self) {
+        if let Vals::Pack(p) = self {
+            *self = Vals::Array(p.iter().map(Str::from_slice).collect());
+        }
+    }
+
+    fn mem(&self) -> usize {
+        match self {
+            Vals::Pack(p) => p.mem(),
+            Vals::Array(a) => a.capacity() * std::mem::size_of::<Str>() + a.iter().map(spill).sum::<usize>(),
+        }
+    }
 }
 
 /// `listpackex`: pair `i` expires at `ttl[i]` for `i < ttl.len()`; later pairs have no TTL.
@@ -240,8 +313,47 @@ impl Hash {
                     x.ttl.push(at);
                 }
             }
-            Enc::Table(_) => {}
+            Enc::Table(_) | Enc::Tmpl(_) => {}
         }
+    }
+
+    /// A template hash with `vals` (in `t`'s order), `template-listpack` when the values fit
+    /// the listpack limits (`createHashObjectFromTemplate`).
+    pub fn from_template<V: AsRef<[u8]>>(t: KeyRef, vals: &[V], lim: Limits) -> Self {
+        let lp = super::template::LpLimits { entries: lim.entries, value: lim.value };
+        let vals = if lp.fits(vals) {
+            Vals::Pack(Pack::from_items(vals))
+        } else {
+            Vals::Array(vals.iter().map(|v| Str::from_slice(v.as_ref())).collect())
+        };
+        Hash { enc: Enc::Tmpl(Box::new(Tmpl { t, vals })), reg: 0 }
+    }
+
+    /// A `template-listpack` read from RDB: kept packed whatever the value sizes, a
+    /// `template-array` past `hash-max-listpack-entries`.
+    pub fn from_template_pack<V: AsRef<[u8]>>(t: KeyRef, vals: &[V], lim: Limits) -> Self {
+        let mut vals = Vals::Pack(Pack::from_items(vals));
+        if t.len() > lim.entries {
+            vals.make_array();
+        }
+        Hash { enc: Enc::Tmpl(Box::new(Tmpl { t, vals })), reg: 0 }
+    }
+
+    /// The template of a template hash.
+    pub fn template(&self) -> Option<&KeyRef> {
+        match &self.enc {
+            Enc::Tmpl(x) => Some(&x.t),
+            _ => None,
+        }
+    }
+
+    pub fn is_template(&self) -> bool {
+        matches!(self.enc, Enc::Tmpl(_))
+    }
+
+    /// `template-listpack` (as opposed to `template-array`).
+    pub fn is_template_listpack(&self) -> bool {
+        matches!(&self.enc, Enc::Tmpl(x) if matches!(x.vals, Vals::Pack(_)))
     }
 
     pub fn is_listpack_ex(&self) -> bool {
@@ -254,6 +366,7 @@ impl Hash {
             Enc::Pack(p) => p.pairs(),
             Enc::PackEx(x) => x.pack.pairs(),
             Enc::Table(t) => t.map.len(),
+            Enc::Tmpl(x) => x.t.len(),
         }
     }
 
@@ -267,6 +380,7 @@ impl Hash {
             Enc::Pack(p) => p.mem(),
             Enc::PackEx(x) => x.pack.mem() + x.ttl.capacity() * 8,
             Enc::Table(t) => std::mem::size_of::<Table>() + t.mem(),
+            Enc::Tmpl(x) => std::mem::size_of::<Tmpl>() + x.vals.mem(),
         }
     }
 
@@ -275,11 +389,16 @@ impl Hash {
             Enc::Pack(_) => "listpack",
             Enc::PackEx(_) => "listpackex",
             Enc::Table(_) => "hashtable",
+            Enc::Tmpl(x) => match x.vals {
+                Vals::Pack(_) => "template-listpack",
+                Vals::Array(_) => "template-array",
+            },
         }
     }
 
+    /// `listpack` or `listpackex`.
     pub fn is_listpack(&self) -> bool {
-        !matches!(self.enc, Enc::Table(_))
+        matches!(self.enc, Enc::Pack(_) | Enc::PackEx(_))
     }
 
     // ---- reads ----
@@ -300,6 +419,7 @@ impl Hash {
                 None
             }
             Enc::Table(t) => t.map.get(field).map(|v| (v.as_slice(), t.ttl_of(field))),
+            Enc::Tmpl(x) => x.t.index(field).ok().and_then(|i| x.vals.get(i)).map(|v| (v, 0)),
         }
     }
 
@@ -325,7 +445,7 @@ impl Hash {
     /// The earliest field expiry (0 if no field has a TTL). O(1).
     pub fn min_expire(&self) -> i64 {
         match &self.enc {
-            Enc::Pack(_) => 0,
+            Enc::Pack(_) | Enc::Tmpl(_) => 0,
             Enc::PackEx(x) => x.ttl.first().copied().unwrap_or(0),
             Enc::Table(t) => t.ttl.as_ref().and_then(|t| t.order.first()).map_or(0, |(at, _)| *at),
         }
@@ -338,12 +458,16 @@ impl Hash {
 
     /// Every stored field as `(field, value, expire)` (expire 0 = no TTL), including expired ones.
     /// Order: insertion order for `listpack`, expiry order for `listpackex`, table order for
-    /// `hashtable` (what HGETALL returns).
+    /// `hashtable`, template order for templates (what HGETALL returns).
     pub fn iter(&self) -> Iter<'_> {
         match &self.enc {
             Enc::Pack(p) => Iter(Inner::Pack(p.iter())),
             Enc::PackEx(x) => Iter(Inner::PackEx(x.pack.iter(), &x.ttl, 0)),
             Enc::Table(t) => Iter(Inner::Table(t.map.iter(), t.ttl.as_deref())),
+            Enc::Tmpl(x) => match &x.vals {
+                Vals::Pack(p) => Iter(Inner::TmplPack(x.t.fields().iter(), p.iter())),
+                Vals::Array(a) => Iter(Inner::TmplArray(x.t.fields().iter(), a.iter())),
+            },
         }
     }
 
@@ -359,6 +483,7 @@ impl Hash {
         }
         match &self.enc {
             Enc::Pack(p) => p.pairs(),
+            Enc::Tmpl(x) => x.t.len(),
             Enc::PackEx(x) => x.pack.pairs() - x.ttl.iter().take_while(|&&t| t < now).count(),
             Enc::Table(t) => {
                 let gone = t.ttl.as_ref().map_or(0, |t| t.order.iter().take_while(|(at, _)| *at < now).count());
@@ -367,12 +492,14 @@ impl Hash {
         }
     }
 
-    /// The pair at position `i` of a listpack encoding (`None` for a hashtable or out of range).
+    /// The pair at position `i` of a listpack or template encoding (`None` for a hashtable or
+    /// out of range).
     pub fn pack_pair(&self, i: usize) -> Option<(&[u8], &[u8])> {
         let p = match &self.enc {
             Enc::Pack(p) => p,
             Enc::PackEx(x) => &x.pack,
             Enc::Table(_) => return None,
+            Enc::Tmpl(x) => return Some((x.t.fields().get(i)?, x.vals.get(i)?)),
         };
         Some((p.get(2 * i)?, p.get(2 * i + 1)?))
     }
@@ -422,7 +549,24 @@ impl Hash {
 
     /// Convert to `hashtable` ahead of a write of `pairs` field/value pairs whose argument lengths
     /// are `lens`, like Redis' `hashTypeTryConversion`.
+    /// A `template-listpack` only checks the values, and becomes a `template-array`.
     pub fn prepare(&mut self, pairs: usize, lens: impl IntoIterator<Item = usize>, lim: Limits) {
+        if let Enc::Tmpl(x) = &mut self.enc {
+            if let Vals::Pack(p) = &x.vals {
+                let mut sum = 0usize;
+                for l in lens.into_iter().skip(1).step_by(2) {
+                    if l > lim.value {
+                        x.vals.make_array();
+                        return;
+                    }
+                    sum += l;
+                }
+                if p.bytes() + sum > LP_SAFETY {
+                    x.vals.make_array();
+                }
+            }
+            return;
+        }
         if !self.is_listpack() {
             return;
         }
@@ -435,11 +579,121 @@ impl Hash {
         }
     }
 
-    /// Start using field TTLs: `listpack` becomes `listpackex` (`hashTypeSetExInit`).
-    pub fn enable_ttl(&mut self) {
-        if let Enc::Pack(p) = &mut self.enc {
-            let pack = std::mem::take(p);
-            self.enc = Enc::PackEx(PackEx { pack, ttl: Vec::new() });
+    /// Start using field TTLs (`hashTypeSetExInit`): `listpack` becomes `listpackex`, a template
+    /// hash becomes `listpackex` if it fits the listpack limits, else `hashtable`, and a
+    /// `hashtable` gets its (empty) TTL index.
+    pub fn enable_ttl(&mut self, lim: Limits) {
+        match &mut self.enc {
+            Enc::Pack(p) => {
+                let pack = std::mem::take(p);
+                self.enc = Enc::PackEx(PackEx { pack, ttl: Vec::new() });
+            }
+            Enc::Tmpl(_) => self.untemplate(true, lim),
+            Enc::Table(t) => {
+                t.ttl.get_or_insert_with(Box::default);
+            }
+            Enc::PackEx(_) => {}
+        }
+    }
+
+    /// `hashTypeCanConvertTmplToListpack`.
+    fn template_fits_listpack(x: &Tmpl, lim: Limits) -> bool {
+        if x.t.len() > lim.entries {
+            return false;
+        }
+        let mut sum = 0usize;
+        for f in x.t.fields() {
+            if f.len() > lim.value {
+                return false;
+            }
+            sum += f.len();
+        }
+        match &x.vals {
+            Vals::Array(a) => {
+                for v in a {
+                    if v.len() > lim.value {
+                        return false;
+                    }
+                    sum += v.len();
+                }
+                sum <= LP_SAFETY
+            }
+            Vals::Pack(p) => p.bytes() + sum <= LP_SAFETY,
+        }
+    }
+
+    /// `hashTypeConvertTmplToListpackOrHT`: a template hash becomes a plain `listpack` (or
+    /// `listpackex` when `ex`) in template order, or a `hashtable` if it doesn't fit.
+    pub fn untemplate(&mut self, ex: bool, lim: Limits) {
+        let Enc::Tmpl(x) = &self.enc else { return };
+        let enc = if Self::template_fits_listpack(x, lim) {
+            let mut pack = Pack::new();
+            for (f, v, _) in self.iter() {
+                pack.push_back(f);
+                pack.push_back(v);
+            }
+            if ex { Enc::PackEx(PackEx { pack, ttl: Vec::new() }) } else { Enc::Pack(pack) }
+        } else {
+            let mut t = Table::with_capacity(self.len());
+            for (f, v, _) in self.iter() {
+                t.insert_new(Str::from_slice(f), Str::from_slice(v));
+            }
+            if ex {
+                t.ttl = Some(Box::default());
+            }
+            Enc::Table(Box::new(t))
+        };
+        self.enc = enc;
+    }
+
+    /// Does this hash use field expiration (a `listpackex`, or a `hashtable` with a TTL index)?
+    fn uses_ttl(&self) -> bool {
+        match &self.enc {
+            Enc::PackEx(_) => true,
+            Enc::Table(t) => t.ttl.is_some(),
+            _ => false,
+        }
+    }
+
+    /// `hashTypeTryConvertToTemplate`: with `min` to `max` fields (`min` 0: never, `max` 0: no
+    /// upper bound), a `listpack` becomes a `template-listpack` and a `hashtable` without field
+    /// expiration a `template-array`. Returns whether it converted.
+    pub fn try_template(&mut self, reg: &Arc<Registry>, min: usize, max: usize) -> bool {
+        self.try_template_with(min, max, |fields| Some(reg.key_ref(fields)))
+    }
+
+    /// [`Hash::try_template`] taking the template from `get` (which may refuse).
+    pub fn try_template_with(&mut self, min: usize, max: usize, get: impl FnOnce(&[Str]) -> Option<KeyRef>) -> bool {
+        if min == 0 || self.is_template() || self.uses_ttl() {
+            return false;
+        }
+        let n = self.len();
+        if n < min || (max > 0 && n > max) {
+            return false;
+        }
+        let mut pairs: Vec<(&[u8], &[u8])> = self.iter().map(|(f, v, _)| (f, v)).collect();
+        pairs.sort_by(|a, b| field_cmp(a.0, b.0));
+        let fields: Vec<Str> = pairs.iter().map(|(f, _)| Str::from_slice(f)).collect();
+        let Some(t) = get(&fields) else { return false };
+        let vals = match &self.enc {
+            Enc::Pack(_) => Vals::Pack(Pack::from_items(pairs.iter().map(|(_, v)| v))),
+            _ => Vals::Array(pairs.iter().map(|(_, v)| Str::from_slice(v)).collect()),
+        };
+        drop(pairs);
+        self.enc = Enc::Tmpl(Box::new(Tmpl { t, vals }));
+        true
+    }
+
+    /// Move a template hash to the template of `fields` (`hashTemplateForInsertedField` /
+    /// `ForDeletedField`), or make it plain if the registry is gone.
+    fn retemplate(x: &mut Tmpl, fields: &[Str]) -> bool {
+        match x.t.registry() {
+            Some(r) => {
+                // The new reference is taken before the old one is dropped, like Redis.
+                x.t = r.key_ref(fields);
+                true
+            }
+            None => false,
         }
     }
 
@@ -460,6 +714,11 @@ impl Hash {
                 }
             }
             Enc::Table(old) => t = *old,
+            Enc::Tmpl(x) => {
+                for (f, v) in x.t.fields().iter().zip((0..).map_while(|i| x.vals.get(i))) {
+                    t.insert_new(f.clone(), Str::from_slice(v));
+                }
+            }
         }
         self.enc = Enc::Table(Box::new(t));
     }
@@ -469,6 +728,31 @@ impl Hash {
     /// the end). Converts to `hashtable` when the entry count exceeds `lim.entries`; value
     /// lengths are checked by [`Hash::prepare`].
     pub fn set(&mut self, field: &[u8], value: &[u8], keep_ttl: bool, lim: Limits) -> bool {
+        if let Enc::Tmpl(x) = &mut self.enc {
+            let idx = x.t.index(field);
+            if let Vals::Pack(p) = &x.vals
+                && (value.len() > lim.value
+                    || p.bytes() + value.len() > LP_SAFETY
+                    || (idx.is_err() && x.t.len() + 1 > lim.entries))
+            {
+                x.vals.make_array();
+            }
+            match idx {
+                Ok(i) => {
+                    x.vals.set(i, value);
+                    return false;
+                }
+                Err(pos) => {
+                    let mut fields = x.t.fields().to_vec();
+                    fields.insert(pos, Str::from_slice(field));
+                    if Self::retemplate(x, &fields) {
+                        x.vals.insert(pos, value);
+                        return true;
+                    }
+                    self.untemplate(false, lim);
+                }
+            }
+        }
         let new = match &mut self.enc {
             Enc::Pack(p) => p.pair_set(field, value),
             Enc::PackEx(x) => match x.index(field) {
@@ -503,6 +787,7 @@ impl Hash {
                     }
                 }
             }
+            Enc::Tmpl(_) => unreachable!("handled above"),
         };
         if new && self.is_listpack() && self.len() > lim.entries {
             self.convert_to_table(0);
@@ -525,6 +810,23 @@ impl Hash {
                 None => false,
             },
             Enc::Table(t) => t.remove(field),
+            Enc::Tmpl(x) => {
+                let Ok(i) = x.t.index(field) else { return false };
+                if x.t.len() == 1 {
+                    // The last field: an empty listpack (the key is deleted by the caller).
+                    self.enc = Enc::Pack(Pack::new());
+                    return true;
+                }
+                let mut fields = x.t.fields().to_vec();
+                fields.remove(i);
+                if !Self::retemplate(x, &fields) {
+                    let lim = Limits { entries: usize::MAX, value: usize::MAX };
+                    self.untemplate(false, lim);
+                    return self.remove(field);
+                }
+                x.vals.remove(i);
+                true
+            }
         }
     }
 
@@ -532,9 +834,15 @@ impl Hash {
     /// `listpackex`. In `listpackex` the field is re-inserted at its place by expiry time.
     /// Returns false if the field doesn't exist.
     pub fn set_expire(&mut self, field: &[u8], at: i64) -> bool {
-        self.enable_ttl();
+        if !self.uses_ttl() {
+            let lim = self.template().and_then(|t| t.registry()).map_or(
+                Limits { entries: usize::MAX, value: usize::MAX },
+                |r| Limits { entries: r.limits().entries, value: r.limits().value },
+            );
+            self.enable_ttl(lim);
+        }
         match &mut self.enc {
-            Enc::Pack(_) => unreachable!("converted above"),
+            Enc::Pack(_) | Enc::Tmpl(_) => unreachable!("converted above"),
             Enc::PackEx(x) => {
                 let Some(i) = x.index(field) else { return false };
                 let v = x.take(i);
@@ -555,7 +863,7 @@ impl Hash {
     pub fn expire_due(&mut self, now: i64) -> Vec<Str> {
         let mut out = Vec::new();
         match &mut self.enc {
-            Enc::Pack(_) => {}
+            Enc::Pack(_) | Enc::Tmpl(_) => {}
             Enc::PackEx(x) => {
                 let n = x.ttl.iter().take_while(|&&t| t <= now).count();
                 if n > 0 {
@@ -586,6 +894,11 @@ impl Hash {
                 x.ttl.shrink_to_fit();
             }
             Enc::Table(_) => {}
+            Enc::Tmpl(x) => {
+                if let Vals::Pack(p) = &mut x.vals {
+                    p.shrink_to_fit();
+                }
+            }
         }
     }
 }
@@ -603,6 +916,8 @@ enum Inner<'a> {
     Pack(crate::pack::PackIter<'a>),
     PackEx(crate::pack::PackIter<'a>, &'a [i64], usize),
     Table(crate::dict::Iter<'a, Str, Str>, Option<&'a Ttls>),
+    TmplPack(std::slice::Iter<'a, Str>, crate::pack::PackIter<'a>),
+    TmplArray(std::slice::Iter<'a, Str>, std::slice::Iter<'a, Str>),
 }
 
 impl<'a> Iterator for Iter<'a> {
@@ -621,6 +936,8 @@ impl<'a> Iterator for Iter<'a> {
                 let (f, v) = it.next()?;
                 Some((f.as_slice(), v.as_slice(), ttl.map_or(0, |t| t.get(f))))
             }
+            Inner::TmplPack(f, v) => Some((f.next()?.as_slice(), v.next()?, 0)),
+            Inner::TmplArray(f, v) => Some((f.next()?.as_slice(), v.next()?.as_slice(), 0)),
         }
     }
 
@@ -628,6 +945,7 @@ impl<'a> Iterator for Iter<'a> {
         let n = match &self.0 {
             Inner::Pack(it) | Inner::PackEx(it, _, _) => it.len() / 2,
             Inner::Table(it, _) => it.size_hint().0,
+            Inner::TmplPack(it, _) | Inner::TmplArray(it, _) => it.len(),
         };
         (n, Some(n))
     }
@@ -712,6 +1030,43 @@ mod tests {
         assert_eq!(h.min_expire(), 0);
         assert!(h.remove(b"a"));
         assert!(h.is_empty());
+    }
+
+    #[test]
+    fn templates_move_between_field_sets() {
+        let reg = Registry::new();
+        let lim = Limits { entries: 4, value: 8 };
+        let mut h = Hash::new();
+        for (f, v) in [("b", "1"), ("a", "2"), ("ccc", "3")] {
+            h.set(f.as_bytes(), v.as_bytes(), false, lim);
+        }
+        assert!(!h.try_template(&reg, 4, 0));
+        assert!(h.try_template(&reg, 3, 3));
+        assert_eq!((h.encoding(), fields(&h)), ("template-listpack", vec!["a".into(), "b".into(), "ccc".into()]));
+        let mut h2 = h.clone();
+        assert_eq!((reg.stats().templates, reg.stats().keys), (1, 2));
+        // A new field: another template (the old one stays for the clone).
+        assert!(h.set(b"dd", b"4", false, lim));
+        assert_eq!(fields(&h), ["a", "b", "dd", "ccc"]);
+        assert_eq!((reg.stats().templates, reg.stats().keys), (2, 2));
+        // Past the entry limit, or a long value: template-array.
+        assert!(h.set(b"e", b"5", false, lim));
+        assert_eq!(h.encoding(), "template-array");
+        assert!(!h2.set(b"a", b"123456789", false, lim));
+        assert_eq!((h2.encoding(), h2.get(b"a")), ("template-array", Some(&b"123456789"[..])));
+        // Removing fields; the last one leaves an empty listpack.
+        assert!(h2.remove(b"b") && !h2.remove(b"zz"));
+        assert_eq!(fields(&h2), ["a", "ccc"]);
+        assert!(h2.remove(b"a") && h2.remove(b"ccc"));
+        assert_eq!((h2.encoding(), h2.len()), ("listpack", 0));
+        // A field TTL makes it plain: listpackex if it fits, else hashtable.
+        let mut small = Hash::from_template(reg.key_ref(&[Str::from_slice(b"x")]), &[b"1"], lim);
+        small.enable_ttl(lim);
+        assert_eq!((small.encoding(), small.get(b"x")), ("listpackex", Some(&b"1"[..])));
+        h.enable_ttl(lim);
+        assert_eq!((h.encoding(), h.len()), ("hashtable", 5));
+        drop((h, h2, small));
+        assert_eq!((reg.stats().templates, reg.stats().keys), (0, 0));
     }
 
     #[test]

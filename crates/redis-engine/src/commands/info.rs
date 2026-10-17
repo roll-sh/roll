@@ -513,6 +513,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
         let (vm_eval, vm_functions) = (sc.memory() as u64, sc.functions_memory() as u64);
         let (scripts_eval, functions) = (sc.scripts_memory() as u64, sc.libraries_memory() as u64);
         let clients_mem = eng.clients_memory();
+        let tmpl_mem = eng.hub.templates.stats().mem;
         let startup = eng.startup_memory as u64;
         let keys_overhead: u64 = eng.dbs.iter().map(|d| (d.len() * crate::value::KEY_OVERHEAD + d.keys.table_bytes() + d.volatile.table_bytes()) as u64).sum();
         let overhead = (startup + clients_mem + eng.overhead as u64 + keys_overhead + scripts_eval + functions).min(used.max(startup));
@@ -528,7 +529,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
              used_memory_dataset_perc:{:.2}%\r\nallocator_allocated:{used}\r\nallocator_active:{used}\r\nallocator_resident:{rss}\r\nallocator_muzzy:0\r\n\
              total_system_memory:{total}\r\ntotal_system_memory_human:{}\r\nused_memory_lua:{vm_eval}\r\nused_memory_vm_eval:{vm_eval}\r\nused_memory_lua_human:{}\r\n\
              used_memory_scripts_eval:{scripts_eval}\r\nnumber_of_cached_scripts:{}\r\nnumber_of_functions:{}\r\nnumber_of_libraries:{}\r\nused_memory_vm_functions:{vm_functions}\r\n\
-             used_memory_vm_total:{}\r\nused_memory_vm_total_human:{}\r\nused_memory_functions:{functions}\r\nused_memory_hash_templates:0\r\nused_memory_scripts:{}\r\n\
+             used_memory_vm_total:{}\r\nused_memory_vm_total_human:{}\r\nused_memory_functions:{functions}\r\nused_memory_hash_templates:{tmpl_mem}\r\nused_memory_scripts:{}\r\n\
              used_memory_scripts_human:{}\r\nmaxmemory:{}\r\nmaxmemory_human:{}\r\nmaxmemory_policy:{}\r\nallocator_frag_ratio:1.00\r\nallocator_frag_bytes:0\r\n\
              allocator_rss_ratio:{:.2}\r\nallocator_rss_bytes:{}\r\nrss_overhead_ratio:1.00\r\nrss_overhead_bytes:0\r\nmem_fragmentation_ratio:{:.2}\r\nmem_fragmentation_bytes:{}\r\n\
              mem_not_counted_for_evict:0\r\nmem_replication_backlog:{}\r\nmem_total_replication_buffers:0\r\nmem_replica_full_sync_buffer:0\r\nmem_clients_slaves:0\r\n\
@@ -626,7 +627,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
              client_query_buffer_limit_disconnections:{qbuf_disconnections}\r\nclient_output_buffer_limit_disconnections:{obuf_disconnections}\r\nreply_buffer_shrinks:{}\r\nreply_buffer_expands:{}\r\n\
              eventloop_cycles:{}\r\neventloop_duration_sum:{}\r\neventloop_duration_cmd_sum:{}\r\ninstantaneous_eventloop_cycles_per_sec:{}\r\ninstantaneous_eventloop_duration_usec:{}\r\n\
              eventloop_cycles_with_clients_processing:{}\r\ntotal_client_processing_events:{}\r\navg_pipeline_length_sum:{}\r\navg_pipeline_length_cnt:{}\r\navg_pipeline_length:{:.2}\r\n\
-             slowlog_commands_count:{}\r\nslowlog_commands_time_ms_max:{:.2}\r\nslowlog_commands_time_ms_sum:{:.2}\r\nhash_templates:0\r\nhash_template_keys:0\r\n\
+             slowlog_commands_count:{}\r\nslowlog_commands_time_ms_max:{:.2}\r\nslowlog_commands_time_ms_sum:{:.2}\r\nhash_templates:{}\r\nhash_template_keys:{}\r\n\
              acl_access_denied_auth:{}\r\nacl_access_denied_cmd:{}\r\nacl_access_denied_key:{}\r\nacl_access_denied_channel:{}\r\nacl_access_denied_tls_cert:0\r\n",
             counters.connections,
             st.commands,
@@ -684,6 +685,8 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
             st.slowlog_count,
             st.slowlog_us_max as f64 / 1000.0,
             st.slowlog_us_sum as f64 / 1000.0,
+            eng.hub.templates.stats().templates,
+            eng.hub.templates.stats().keys,
             acl[0],
             acl[1],
             acl[2],
