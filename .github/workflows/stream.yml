@@ -32,8 +32,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # librdkafka is built from source for the client tests.
-      - run: sudo apt-get update && sudo apt-get install -y cmake
+      # librdkafka is built from source for the client tests; it includes the curl headers on Linux.
+      - run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libsasl2-dev
       - run: scripts/test-stream.sh --force --unit
 
   e2e:
@@ -48,7 +48,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y cmake
+      - run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libsasl2-dev
       - name: Pull the Kafka image
         run: docker pull -q apache/kafka:4.1.0
       - name: Java clients and tools

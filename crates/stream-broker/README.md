@@ -287,7 +287,8 @@ These are planned work, not design limits:
 ## Tests
 
 `pnpm test:stream` runs clippy and every suite. It skips itself when no stream crate changed since the
-last green run.
+last green run. The librdkafka tests build librdkafka from source, which needs `cmake` and, on Linux,
+the curl and SASL headers (`apt-get install cmake libcurl4-openssl-dev libsasl2-dev`).
 
 - `tests/protocol.rs`: every API at every version, malformed frames, SASL, tenancy, quotas.
 - `tests/rdkafka.rs`: librdkafka produce and consume, codecs, idempotence, groups, transactions, admin.
