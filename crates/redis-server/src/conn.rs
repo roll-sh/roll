@@ -4,7 +4,7 @@
 use crate::database::Database;
 use crate::directory::{AuthRequest, Directory, Session};
 use crate::repl::psync;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use redis_engine::client::{ConnStats, ReplyBuf, ReplyMode};
 use redis_engine::commands::eq;
 use redis_engine::{Client, Outcome, Reply, Sink};
@@ -60,6 +60,8 @@ impl Sink for ConnSink {
 
 /// Most commands executed per lock acquisition, so one pipelining client can't starve others.
 const MAX_BATCH: usize = 512;
+/// Most bytes taken off the socket per read (Redis reads `PROTO_IOBUF_LEN` at a time).
+const READ_CHUNK: usize = 64 * 1024;
 
 pub struct Conn<'a> {
     dir: &'a dyn Directory,
@@ -85,6 +87,10 @@ pub struct Conn<'a> {
     obuf_closed: bool,
     /// Protocol bytes of the parsed commands in `pending`.
     pending_bytes: u64,
+    /// What Redis has parsed off the front of the input still buffered (see `publish_qbuf`).
+    qb_skip: usize,
+    /// The rest of a big argument being read.
+    qb_want: usize,
 }
 
 pub async fn serve<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, fd: i64)
@@ -145,6 +151,8 @@ where
         soft_since: 0,
         obuf_closed: false,
         pending_bytes: 0,
+        qb_skip: 0,
+        qb_want: 0,
     };
     let mut inbuf = BytesMut::with_capacity(16 * 1024);
     'conn: loop {
@@ -194,7 +202,7 @@ where
                     db.io.pipeline_sum.fetch_add(parsed, Ordering::Relaxed);
                 }
             }
-            conn.publish_qbuf(&inbuf);
+            conn.publish_qbuf(&inbuf, false);
             if !conn.pending.is_empty() {
                 conn.run_pending().await;
             }
@@ -220,6 +228,9 @@ where
             _ => None,
         };
         let db = conn.db().cloned();
+        // Read a little at a time like Redis (more only for the rest of a big argument), so the
+        // query buffer limit sees what a read adds to the unparsed input.
+        let mut room = (&mut inbuf).limit(conn.qb_want.max(READ_CHUNK));
         let kicked = async {
             match &db {
                 Some(db) => {
@@ -234,7 +245,7 @@ where
         };
         tokio::select! {
             _ = kicked => break,
-            r = rd.read_buf(&mut inbuf) => match r {
+            r = rd.read_buf(&mut room) => match r {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     conn.stats.net_in.fetch_add(n as u64, Ordering::Relaxed);
@@ -244,10 +255,10 @@ where
                         db.io.reads.fetch_add(1, Ordering::Relaxed);
                         db.net_in.fetch_add(n as u64, Ordering::Relaxed);
                     }
-                    if conn.query_buffer_exceeded(inbuf.len()) {
+                    if conn.query_buffer_exceeded(inbuf.len().saturating_sub(conn.qb_skip)) {
                         break;
                     }
-                    conn.publish_qbuf(&inbuf);
+                    conn.publish_qbuf(&inbuf, true);
                     if conn.evict_clients() {
                         break;
                     }
@@ -303,16 +314,27 @@ impl Conn<'_> {
         self.session.as_ref().map(|s| &s.db)
     }
 
-    /// The query buffer as Redis would hold it: waiting on a big argument, only that argument
-    /// in a buffer of its size.
-    fn publish_qbuf(&self, inbuf: &BytesMut) {
-        let big = if inbuf.len() >= redis_proto::BIG_ARG { redis_proto::pending_big_arg(inbuf) } else { None };
-        let (len, cap) = match big {
-            Some((start, n)) => (inbuf.len() - start, n + 2),
-            None => (inbuf.len(), inbuf.capacity()),
-        };
+    /// The query buffer as Redis would hold it: the header lines and arguments of a command
+    /// still being read are parsed out of it (into argv); waiting on a big argument, only that
+    /// argument in a buffer of its size.
+    /// Input left over once parsed keeps the buffer the client read into as its own; a read
+    /// sizes it (at least PROTO_IOBUF_LEN), the cron may shrink it in between.
+    fn publish_qbuf(&mut self, inbuf: &BytesMut, read: bool) {
+        let p = redis_proto::partial(inbuf);
+        let len = inbuf.len() - p.skip;
+        self.qb_skip = p.skip;
+        self.qb_want = p.big.map_or(0, |n| (n + 2).saturating_sub(len));
+        if let Some(n) = p.big {
+            self.stats.qbuf_cap.store(n as u64 + 2, Ordering::Relaxed);
+        } else if read {
+            self.stats.qbuf_cap.store(inbuf.capacity().max(16 * 1024) as u64, Ordering::Relaxed);
+        }
+        // Decided once the input is parsed (a read is published before that).
+        if len > 0 && !read {
+            self.stats.qbuf_owned.store(true, Ordering::Relaxed);
+        }
         self.stats.qbuf.store(len as u64, Ordering::Relaxed);
-        self.stats.qbuf_cap.store(cap as u64, Ordering::Relaxed);
+        self.stats.partial_argv.store(p.argv as u64, Ordering::Relaxed);
     }
 
     /// Take the next command to run; until the next one, CLIENT LIST counts it in the query

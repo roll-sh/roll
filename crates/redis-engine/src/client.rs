@@ -31,12 +31,17 @@ pub struct ConnStats {
     pub fd: AtomicI64,
     pub net_in: AtomicU64,
     pub net_out: AtomicU64,
-    /// Unparsed input buffered, and the buffer's capacity.
+    /// Unparsed input buffered, and the buffer's capacity (Redis' sds allocation).
     pub qbuf: AtomicU64,
     pub qbuf_cap: AtomicU64,
+    /// The client has a query buffer of its own: Redis' clients read into a shared one and keep
+    /// it only when input is left over, then until the cron frees it (`qbuf-free` while empty).
+    pub qbuf_owned: AtomicBool,
     /// Parsed commands waiting to run (and the one running), as their protocol bytes: still
     /// part of Redis' query buffer.
     pub pending_input: AtomicU64,
+    /// Arguments parsed so far of a command still being read (argv in Redis).
+    pub partial_argv: AtomicU64,
     /// Memory last measured by the cron, which is how Redis tracks clients that can't be
     /// evicted (CLIENT NO-EVICT).
     pub cron_mem: AtomicU64,
@@ -267,7 +272,38 @@ impl ReplyBuf {
     }
 }
 
+/// An sds string for `len` bytes with room for `cap`: the allocator's size class, and the free
+/// space past its header and contents.
+pub fn sds_room(len: u64, cap: u64) -> (u64, u64) {
+    let cap = cap.max(len);
+    let header = if cap < 256 {
+        3
+    } else if cap < 65536 {
+        5
+    } else {
+        9
+    };
+    let usable = jemalloc_size((cap + header + 1) as usize) as u64;
+    (usable - header - 1 - len, usable)
+}
+
 impl ConnStats {
+    /// `clientsCronResizeQueryBuffer`: a query buffer idle for over 2 seconds that wastes more
+    /// than 4KB is freed when empty (the next read uses the shared one again), otherwise shrunk
+    /// to its contents.
+    pub fn resize_query_buffer(&self, idle_secs: i64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let len = self.qbuf.load(Relaxed);
+        if !self.qbuf_owned.load(Relaxed) || idle_secs <= 2 || sds_room(len, self.qbuf_cap.load(Relaxed)).0 <= 4096 {
+            return;
+        }
+        if len == 0 {
+            self.qbuf_owned.store(false, Relaxed);
+        } else {
+            self.qbuf_cap.store(len, Relaxed);
+        }
+    }
+
     /// The static reply buffer's size (`rbs`).
     pub fn reply_buffer_size(&self) -> u64 {
         match self.rbs.load(std::sync::atomic::Ordering::Relaxed) {

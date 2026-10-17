@@ -157,23 +157,17 @@ pub fn mem(v: &View, d: &Derived, stats: Option<&crate::client::ConnStats>, curr
     let (cur_qbuf, argv_mem, argc) = current.map_or((0, 0, 0), |a| {
         (redis_proto::command_len(a) as u64, a.iter().map(|x| x.len() as u64).sum::<u64>(), a.len() as u64)
     });
+    // The arguments of a command still being read have left the query buffer for argv.
+    let argv_mem = argv_mem + load(|s| s.partial_argv.load(Ordering::Relaxed));
     let qbuf = unparsed + if parsed > 0 { parsed } else { cur_qbuf };
-    // An sds string sized for `cap` (at least the 16KB Redis starts with) takes the allocator's
-    // size class; the rest past its header is free.
-    let (qbuf_free, qbuf_alloc) = if qbuf == 0 {
+    // The query buffer while there's input or the client keeps its own (see `qbuf_owned`).
+    let owned = load(|s| u64::from(s.qbuf_owned.load(Ordering::Relaxed))) == 1;
+    let (qbuf_free, qbuf_alloc) = if qbuf == 0 && !owned {
         (0, 0)
     } else {
-        // PROTO_IOBUF_LEN at least.
-        let cap = load(|s| s.qbuf_cap.load(Ordering::Relaxed)).max(16 * 1024).max(qbuf);
-        let header = if cap < 256 {
-            3
-        } else if cap < 65536 {
-            5
-        } else {
-            9
-        };
-        let usable = crate::client::jemalloc_size((cap + header + 1) as usize) as u64;
-        (usable - header - 1 - qbuf, usable)
+        // PROTO_IOBUF_LEN at least, for the shared buffer a running command is read from.
+        let cap = load(|s| s.qbuf_cap.load(Ordering::Relaxed));
+        crate::client::sds_room(qbuf, if owned { cap } else { cap.max(16 * 1024) })
     };
     let multi = if v.multi >= 0 {
         let count = v.multi as u64;
@@ -774,6 +768,7 @@ impl Engine {
                 }
                 continue;
             }
+            e.stats.resize_query_buffer(idle);
             let (shrunk, expanded) = e.stats.resize_reply_buffer(now_ms);
             self.stats.reply_buffer_shrinks += shrunk as u64;
             self.stats.reply_buffer_expands += expanded as u64;

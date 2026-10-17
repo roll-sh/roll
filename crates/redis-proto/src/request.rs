@@ -34,31 +34,49 @@ impl std::error::Error for ProtoError {}
 /// Arguments from this size on are read into a buffer of their own size (`PROTO_MBULK_BIG_ARG`).
 pub const BIG_ARG: usize = 32 * 1024;
 
-/// When `buf` holds an incomplete multibulk command waiting on a big argument: where the
-/// argument's data starts in `buf`, and its length. Redis then keeps only that argument in its
-/// query buffer, sized for it.
-pub fn pending_big_arg(buf: &[u8]) -> Option<(usize, usize)> {
+/// How Redis holds an incomplete multibulk command at the front of `buf`: the header lines and
+/// arguments it has parsed already leave the query buffer (`skip` bytes), the arguments going
+/// to argv (`argv`, their total length). Waiting on a big argument (`big`, its length), the
+/// query buffer keeps only that argument, sized for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Partial {
+    pub skip: usize,
+    pub argv: usize,
+    pub big: Option<usize>,
+}
+
+pub fn partial(buf: &[u8]) -> Partial {
+    let mut p = Partial::default();
     if buf.first() != Some(&b'*') {
-        return None;
+        return p;
     }
     let line = |from: usize| -> Option<(i64, usize)> {
         let end = from + memchr::memchr(b'\r', buf.get(from..)?)?;
         let n = std::str::from_utf8(&buf[from..end]).ok()?.parse().ok()?;
         (buf.get(end + 1) == Some(&b'\n')).then_some((n, end + 2))
     };
-    let (count, mut pos) = line(1)?;
+    let Some((count, mut pos)) = line(1) else { return p };
+    if count <= 0 {
+        return p;
+    }
+    p.skip = pos;
     for _ in 0..count {
         if buf.get(pos) != Some(&b'$') {
-            return None;
+            return p;
         }
-        let (len, data) = line(pos + 1)?;
-        let len = usize::try_from(len).ok()?;
+        let Some((len, data)) = line(pos + 1) else { return p };
+        let Ok(len) = usize::try_from(len) else { return p };
+        p.skip = data;
         if buf.len() < data + len + 2 {
-            return (len >= BIG_ARG).then_some((data, len));
+            p.big = (len >= BIG_ARG).then_some(len);
+            return p;
         }
+        p.argv += len;
         pos = data + len + 2;
+        p.skip = pos;
     }
-    None
+    // A complete command.
+    Partial::default()
 }
 
 /// Take one complete command off the front of `buf`.
@@ -314,13 +332,19 @@ mod tests {
     }
 
     #[test]
-    fn big_arg_pending() {
+    fn partial_commands() {
+        use super::{Partial, partial};
+        let p = |skip, argv, big| Partial { skip, argv, big };
         let mut req = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$40000\r\n".to_vec();
         let data = req.len();
         req.extend_from_slice(&[b'x'; 100]);
-        assert_eq!(super::pending_big_arg(&req), Some((data, 40000)));
-        assert_eq!(super::pending_big_arg(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$4000\r\nxx"), None);
-        assert_eq!(super::pending_big_arg(b"*3\r\n$3\r\nSE"), None);
-        assert_eq!(super::pending_big_arg(b"PING\r\n"), None);
+        assert_eq!(partial(&req), p(data, 4, Some(40000)));
+        assert_eq!(partial(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$4000\r\nxx"), p(27, 4, None));
+        assert_eq!(partial(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$5"), p(20, 4, None));
+        assert_eq!(partial(b"*3\r\n$3\r\nSE"), p(8, 0, None));
+        assert_eq!(partial(b"*3\r\n"), p(4, 0, None));
+        assert_eq!(partial(b"*3"), p(0, 0, None));
+        assert_eq!(partial(b"*1\r\n$4\r\nPING\r\n"), p(0, 0, None));
+        assert_eq!(partial(b"PING"), p(0, 0, None));
     }
 }

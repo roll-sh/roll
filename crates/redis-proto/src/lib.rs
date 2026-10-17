@@ -12,7 +12,7 @@ mod request;
 
 pub use decode::{DecodeError, decode};
 pub use double::{fmt_double, fmt_long_double, parse_double};
-pub use request::{BIG_ARG, Limits, ProtoError, parse_request, pending_big_arg, split_args};
+pub use request::{BIG_ARG, Limits, ProtoError, Partial, parse_request, partial, split_args};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
