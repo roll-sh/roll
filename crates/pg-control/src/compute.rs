@@ -89,6 +89,9 @@ pub struct DockerDriver {
     init_dir: PathBuf,
     /// `roll.home=<dir>` on every container, so one daemon's computes can be found (and cleaned up).
     home_label: String,
+    /// `uid:gid` that owns the home directory. Computes and helpers run as this user so data
+    /// directories stay readable and removable by the daemon (on Linux; Docker Desktop maps it).
+    user: String,
     pub host_cpus: f64,
 }
 
@@ -121,11 +124,19 @@ impl DockerDriver {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
         }
-        if docker(&["network", "inspect", NETWORK]).await.is_err() {
-            docker(&["network", "create", NETWORK]).await?;
+        if docker(&["network", "inspect", NETWORK]).await.is_err()
+            && let Err(e) = docker(&["network", "create", NETWORK]).await
+            && !e.to_string().contains("already exists")
+        {
+            return Err(e); // losing a creation race to another daemon is fine
         }
         let host_cpus = docker(&["info", "--format", "{{.NCPU}}"]).await?.parse().unwrap_or(1.0);
-        Ok(Self { init_dir, home_label: format!("roll.home={}", home.display()), host_cpus })
+        let user = {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(home)?;
+            format!("{}:{}", meta.uid(), meta.gid())
+        };
+        Ok(Self { init_dir, home_label: format!("roll.home={}", home.display()), user, host_cpus })
     }
 
     fn cpus(&self, cu: f64) -> String {
@@ -165,7 +176,7 @@ impl DockerDriver {
         let memory = format!("{}m", spec.mem_mb.max(64));
         let cpus = self.cpus(spec.cpus);
         let mut args = vec![
-            "run", "-d", "--name", &name, "--network", NETWORK, "--label", "roll.endpoint", "--label", &self.home_label,
+            "run", "-d", "--user", &self.user, "--name", &name, "--network", NETWORK, "--label", "roll.endpoint", "--label", &self.home_label,
             "--add-host", "host.docker.internal:host-gateway",
             "-p", "127.0.0.1::5432", "--cpus", &cpus, "--memory", &memory, "--memory-swap", &memory,
             "--shm-size", "256m", "--stop-signal", "SIGINT", "--stop-timeout", "60", "-v", &volume, "-v", &init,
@@ -301,7 +312,7 @@ impl DockerDriver {
         let pw = format!("PGPASSWORD={password}");
         let host = container_name(source_endpoint);
         docker(&[
-            "run", "--rm", "--network", NETWORK, "-v", &volume, "-e", &pw, image,
+            "run", "--rm", "--user", &self.user, "--network", NETWORK, "-v", &volume, "-e", &pw, image,
             "pg_basebackup", "-h", &host, "-U", "roll", "-D", &pgdata, "-X", "stream", "-c", "fast",
         ])
         .await
@@ -344,7 +355,7 @@ impl DockerDriver {
         let log = err_task.await.unwrap_or_default();
         if !status.success() || uploaded.is_err() {
             let _ = objects.delete(key).await;
-            bail!("pg_basebackup failed: {} {:?}", log.trim(), uploaded.err());
+            bail!("pg_basebackup failed ({status}): {} {:?}", log.trim(), uploaded.err());
         }
         let (_, bytes) = uploaded?;
         // "START WAL LOCATION: 0/2000028 (file 000000010000000000000002)" / "START TIMELINE: 1"
@@ -376,7 +387,7 @@ impl DockerDriver {
         let env = format!("PGDATA={pgdata}");
         let script = r#"set -eo pipefail; pg_controldata -D "$PGDATA" >&2; cd "$PGDATA"; tar -cf - . | zstd -1 -q -T0"#;
         let mut child = Command::new("docker")
-            .args(["run", "--rm", "-v", &volume, "-e", &env, image, "sh", "-c", script])
+            .args(["run", "--rm", "--user", &self.user, "-v", &volume, "-e", &env, image, "sh", "-c", script])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -437,7 +448,7 @@ if [ -n "$ROLL_CONF" ]; then printf '\n# roll restore\n%s\n' "$ROLL_CONF" >> pos
 if [ -n "$ROLL_SIGNAL" ]; then touch "$ROLL_SIGNAL"; fi
 chmod 700 "$PGDATA""#;
         let mut child = Command::new("docker")
-            .args(["run", "--rm", "-i", "-v", &volume, "-e", &env[0], "-e", &env[1], "-e", &env[2], image, "sh", "-c", script])
+            .args(["run", "--rm", "-i", "--user", &self.user, "-v", &volume, "-e", &env[0], "-e", &env[1], "-e", &env[2], image, "sh", "-c", script])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
