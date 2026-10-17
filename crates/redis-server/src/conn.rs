@@ -24,6 +24,8 @@ pub fn next_client_id() -> u64 {
 pub enum Msg {
     Push(Bytes),
     Unblock(Bytes),
+    /// The client's ACL user changed: disconnect if it was deleted or lost channel access.
+    AclChanged,
 }
 
 /// Delivers out-of-band data to the connection task.
@@ -37,6 +39,9 @@ impl Sink for ConnSink {
     }
     fn unblock(&self, reply: Bytes) {
         let _ = self.tx.send(Msg::Unblock(reply));
+    }
+    fn acl_changed(&self) {
+        let _ = self.tx.send(Msg::AclChanged);
     }
 }
 
@@ -71,6 +76,7 @@ where
     client.authenticated = session.is_some();
     if let Some(s) = &session {
         client.user = s.user.clone();
+        s.user.watch(client.id, client.sink.as_ref().unwrap());
         s.db.connections.fetch_add(1, Ordering::Relaxed);
     }
     let mut conn = Conn {
@@ -134,21 +140,21 @@ where
                 Ok(_) => {}
             },
             Some(msg) = rx.recv() => {
-                match msg {
-                    Msg::Push(b) => conn.out.extend_from_slice(&b),
-                    Msg::Unblock(b) => {
-                        conn.write_reply_bytes(&b);
-                        conn.blocked = None;
-                    }
-                }
-                while let Ok(msg) = rx.try_recv() {
+                let mut kill = false;
+                let mut next = Some(msg);
+                while let Some(msg) = next {
                     match msg {
                         Msg::Push(b) => conn.out.extend_from_slice(&b),
                         Msg::Unblock(b) => {
                             conn.write_reply_bytes(&b);
                             conn.blocked = None;
                         }
+                        Msg::AclChanged => kill |= redis_engine::acl::must_disconnect(&conn.client),
                     }
+                    next = rx.try_recv().ok();
+                }
+                if kill {
+                    break;
                 }
             }
             _ = sleep_until_ms(deadline.unwrap_or(0)), if deadline.is_some() => {
@@ -208,6 +214,12 @@ impl Conn<'_> {
 
     async fn run_pending(&mut self) {
         while !self.pending.is_empty() && self.blocked.is_none() && !self.close_after {
+            // A connection whose ACL user was deleted is closed (like Redis does right away).
+            if self.client.user.is_deleted() {
+                self.pending.clear();
+                self.close_after = true;
+                break;
+            }
             // Connection-level commands first (they may need to await).
             let args = self.pending.front().unwrap();
             if let Some(r) = self.intercept(args.clone()).await {
@@ -233,7 +245,7 @@ impl Conn<'_> {
                         Outcome::Reply(r) => {
                             let quit = eq(&args[0], "quit");
                             self.emit(&args, r);
-                            if quit {
+                            if quit || self.client.user.is_deleted() {
                                 self.close_after = true;
                                 break;
                             }
@@ -296,7 +308,10 @@ impl Conn<'_> {
                 Outcome::Blocked => Reply::Nil,
             });
         }
-        self.session.as_ref()?;
+        let db = self.db()?.clone();
+        if let Err(r) = redis_engine::acl::check_command(&db.acl, &self.client, &args) {
+            return Some(r);
+        }
         if eq(name, "monitor") {
             let db = self.db().cloned().unwrap();
             let sink = self.client.sink.clone().unwrap();
@@ -322,7 +337,8 @@ impl Conn<'_> {
             3 => (Some(&args[1]), &args[2]),
             _ => return Reply::Error("ERR syntax error".into()),
         };
-        match self.dir.authenticate(AuthRequest { user: user.map(|u| &u[..]), password: pass, sni: None }).await {
+        let req = AuthRequest { user: user.map(|u| &u[..]), password: pass, sni: None, client: Some(&self.client), command: &args[0] };
+        match self.dir.authenticate(req).await {
             Ok(s) => {
                 if let Some(old) = &self.session {
                     if !Arc::ptr_eq(&old.db, &s.db) {
@@ -332,6 +348,10 @@ impl Conn<'_> {
                 } else {
                     s.db.connections.fetch_add(1, Ordering::Relaxed);
                 }
+                if let Some(old) = &self.session {
+                    old.user.unwatch(self.client.id);
+                }
+                s.user.watch(self.client.id, self.client.sink.as_ref().unwrap());
                 self.client.user = s.user.clone();
                 self.client.authenticated = true;
                 self.session = Some(s);
@@ -343,6 +363,7 @@ impl Conn<'_> {
 
     fn cleanup(&mut self) {
         if let Some(s) = self.session.take() {
+            s.user.unwatch(self.client.id);
             s.db.connections.fetch_sub(1, Ordering::Relaxed);
             s.db.hub.remove_client(self.client.id);
             for shard in &s.db.shards {

@@ -183,6 +183,8 @@ pub struct Engine {
     pub overhead: usize,
     /// Shard index within its database, for INFO and SCAN cursors.
     pub shard: u16,
+    /// The database's ACL users and log, shared by all of its shards.
+    pub acl: Arc<parking_lot::RwLock<crate::acl::Acl>>,
 }
 
 impl Engine {
@@ -211,6 +213,7 @@ impl Engine {
             evict_pool: Vec::new(),
             overhead: 0,
             shard: 0,
+            acl: Default::default(),
         }
     }
 
@@ -325,21 +328,34 @@ impl Engine {
             }
         };
 
+        if top && !cmd.has(commands::TXN_CONTROL) && cmd.has(commands::NO_MULTI) && let Some(m) = client.multi.as_mut() {
+            m.error = true;
+            return Outcome::Reply(self.reject(&full_name, Reply::error("ERR Command not allowed inside a transaction")));
+        }
+
+        if client.user.is_placeholder() {
+            client.user = self.acl.read().default_user();
+        }
         if mode != Mode::Replay
-            && let Err(e) = client.user.check(cmd, args) {
+            && let Err(d) = client.user.check(cmd, args) {
                 if top && let Some(m) = client.multi.as_mut() {
                     m.error = true;
                 }
-                return Outcome::Reply(self.reject(&full_name, Reply::Error(e)));
+                let mut e = crate::acl::deny(&self.acl, client, &full_name, args, d, mode);
+                if top && full_name == "exec" {
+                    // A rejected EXEC discards the transaction (Redis' execCommandAbort).
+                    client.multi = None;
+                    self.unwatch_all(client.id);
+                    if let Reply::Error(msg) = &e {
+                        e = Reply::Error(format!("EXECABORT Transaction discarded because of: {msg}"));
+                    }
+                }
+                return Outcome::Reply(self.reject(&full_name, e));
             }
 
         if top && !cmd.has(commands::TXN_CONTROL) && client.multi.is_some() {
             let deny_oom = cmd.has(commands::DENYOOM) && !self.evict_to_fit(now);
             let Some(m) = client.multi.as_mut() else { unreachable!() };
-            if cmd.has(commands::NO_MULTI) {
-                m.error = true;
-                return Outcome::Reply(self.reject(&full_name, Reply::error("ERR Command not allowed inside a transaction")));
-            }
             if deny_oom {
                 m.error = true;
                 return Outcome::Reply(self.reject(&full_name, commands::OOM.into()));

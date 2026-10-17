@@ -14,6 +14,9 @@ pub trait Sink: Send + Sync {
     fn push(&self, msg: Bytes);
     /// The reply to a command the client was blocked on.
     fn unblock(&self, reply: Bytes);
+    /// The client's ACL user was deleted or lost channel permissions: the connection should
+    /// check [`crate::acl::must_disconnect`].
+    fn acl_changed(&self) {}
 }
 
 #[derive(Clone)]

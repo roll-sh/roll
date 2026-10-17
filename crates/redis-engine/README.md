@@ -21,6 +21,7 @@ ask a real Redis (see Testing).
 | `pack.rs` | `Pack`, a listpack-like compact encoding for small aggregates |
 | `value.rs` | `Value`, `Entry`, `Kind`, `Str` (`SmallVec<[u8; 22]>`) |
 | `hub.rs` | pub/sub and MONITOR (`Sink` is how out-of-band data reaches a client) |
+| `acl/` | users, selectors, permission bitmaps (`index.rs`; `spec.rs` is generated from Redis' commands.def), ACL LOG; `commands/acl.rs` is the `ACL` command |
 | `config.rs` | `CONFIG GET/SET` parameters |
 | `notify.rs` | keyspace notification classes |
 | `decimal.rs` | INCRBYFLOAT arithmetic (quad-precision behaviour of Redis on arm64) |
