@@ -287,10 +287,6 @@ impl ScanOpts {
 
 /// One SCAN step over the current database: `(next cursor, keys)`.
 pub fn scan_db(cx: &mut Cx, cursor: u64, o: &ScanOpts) -> (u64, Vec<Str>) {
-    // An unknown TYPE can't match anything: Redis finishes the scan right away.
-    if o.bad_type {
-        return (0, Vec::new());
-    }
     let now = cx.now;
     let db = cx.db();
     let mut found: Vec<(Str, bool, Kind)> = Vec::new();
