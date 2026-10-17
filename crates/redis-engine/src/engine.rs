@@ -197,6 +197,63 @@ pub struct Engine {
     /// Over maxmemory when the current top-level command started (`pre_command_oom_state`):
     /// scripts check it before their first write.
     pub(crate) pre_oom: bool,
+    /// MIGRATE's cached target connections.
+    pub(crate) migrate_sockets: crate::commands::migrate::Sockets,
+}
+
+/// The arguments as SLOWLOG and MONITOR show them: secrets replaced by `(redacted)`, like Redis'
+/// `redactClientCommandArgument` (passwords, ACL rules, sensitive configs).
+pub(crate) fn redacted<'a>(full: &str, args: &'a [Bytes]) -> std::borrow::Cow<'a, [Bytes]> {
+    const SENSITIVE: [&str; 5] = ["masteruser", "masterauth", "requirepass", "tls-key-file-pass", "tls-client-key-file-pass"];
+    let hide: Vec<usize> = match full {
+        "auth" => (1..args.len().min(3)).collect(),
+        "acl|setuser" | "acl|deluser" => (2..args.len()).collect(),
+        "acl|getuser" => vec![2],
+        "config|set" => (2..args.len())
+            .step_by(2)
+            .filter(|&i| SENSITIVE.iter().any(|c| c.as_bytes().eq_ignore_ascii_case(&args[i])))
+            .map(|i| i + 1)
+            .collect(),
+        "hello" => {
+            let mut v = Vec::new();
+            let mut j = 2;
+            while j < args.len() {
+                if args[j].eq_ignore_ascii_case(b"auth") && j + 2 < args.len() {
+                    v.extend([j + 1, j + 2]);
+                    j += 3;
+                } else {
+                    j += 1;
+                }
+            }
+            v
+        }
+        "migrate" => {
+            let mut v = Vec::new();
+            let mut j = 6;
+            while j < args.len() {
+                if args[j].eq_ignore_ascii_case(b"auth") {
+                    v.push(j + 1);
+                    j += 2;
+                } else if args[j].eq_ignore_ascii_case(b"auth2") {
+                    v.extend([j + 1, j + 2]);
+                    j += 3;
+                } else if args[j].eq_ignore_ascii_case(b"keys") {
+                    break;
+                } else {
+                    j += 1;
+                }
+            }
+            v
+        }
+        _ => return std::borrow::Cow::Borrowed(args),
+    };
+    let mut out = args.to_vec();
+    for i in hide {
+        if let Some(a) = out.get_mut(i) {
+            *a = Bytes::from_static(b"(redacted)");
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 impl Engine {
@@ -227,6 +284,7 @@ impl Engine {
             shard: 0,
             acl: Default::default(),
             pre_oom: false,
+            migrate_sockets: Default::default(),
         }
     }
 
@@ -309,6 +367,9 @@ impl Engine {
             return Ok((cmd, cmd.name.to_string()));
         }
         if args.len() < 2 {
+            if cmd.check_arity(args.len()) {
+                return Ok((cmd, cmd.name.to_string()));
+            }
             return Err(commands::arity_error(cmd.name).into());
         }
         let Some(sub) = commands::lookup_sub(cmd, &args[1]) else {
@@ -427,7 +488,7 @@ impl Engine {
 
         let monitored = top || matches!(mode, Mode::Script { .. });
         if monitored && !cmd.has(commands::SKIP_MONITOR) && !cmd.has(commands::ADMIN) && self.hub.has_monitors() {
-            self.feed_monitor(client, args, now);
+            self.feed_monitor(client, &redacted(&full_name, args), now);
         }
 
         // ---- execute ----
@@ -462,7 +523,7 @@ impl Engine {
         stat.usec += micros;
         self.stats.commands += 1;
         if mode != Mode::Replay && !cmd.has(commands::SKIP_SLOWLOG) {
-            self.slowlog_push(client, args, micros, now);
+            self.slowlog_push(client, &redacted(&full_name, args), micros, now);
         }
 
         if let Some(b) = block {
@@ -496,6 +557,30 @@ impl Engine {
             }
         };
         Outcome::Reply(reply)
+    }
+
+    /// Account for a command the server layer executed itself (AUTH, WAIT…): MONITOR, SLOWLOG
+    /// and command/error stats see it as if it had been dispatched here.
+    pub fn record_external(&mut self, client: &Client, args: &[Bytes], micros: u64, reply: &Reply) {
+        let Ok((cmd, full)) = Self::resolve(args) else { return };
+        let now = now_ms();
+        let shown = redacted(&full, args);
+        if !cmd.has(commands::SKIP_MONITOR) && !cmd.has(commands::ADMIN) && self.hub.has_monitors() {
+            self.feed_monitor(client, &shown, now);
+        }
+        let failed = reply.is_error();
+        let stat = self.cmdstats.entry(full).or_default();
+        stat.calls += 1;
+        stat.usec += micros;
+        if failed {
+            stat.failed += 1;
+            self.stats.failed_calls += 1;
+            self.count_error(reply);
+        }
+        self.stats.commands += 1;
+        if !cmd.has(commands::SKIP_SLOWLOG) {
+            self.slowlog_push(client, &shown, micros, now);
+        }
     }
 
     pub(crate) fn reject(&mut self, name: &str, r: Reply) -> Reply {

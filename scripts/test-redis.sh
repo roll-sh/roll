@@ -33,7 +33,7 @@ cargo build "${CRATES[@]}" -p rolld -p roll-cli
 cargo clippy "${CRATES[@]}" -p rolld -p roll-cli --all-targets -- -D warnings
 # Everything except the Docker compat suite.
 cargo test "${CRATES[@]}" --lib --bins
-cargo test -p redis-server --test http --test persist --test node --test repl
+cargo test -p redis-server --test http --test persist --test node --test repl --test migrate
 cargo test -p redis-control --tests
 
 if [[ $unit_only == 0 ]]; then

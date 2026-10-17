@@ -15,7 +15,7 @@ const CONN_FLAGS: u64 = NOSCRIPT | LOADING | STALE | FAST | NO_AUTH | ALLOW_BUSY
 
 pub static COMMANDS: &[Command] = &[
     cmd!("ping", -1, FAST | SUBSCRIBED_OK, 0, 0, 0, ping, Connection),
-    cmd!("echo", 2, FAST, 0, 0, 0, echo, Connection),
+    cmd!("echo", 2, FAST | LOADING | STALE, 0, 0, 0, echo, Connection),
     cmd!("select", 2, LOADING | STALE | FAST, 0, 0, 0, select, Connection),
     cmd!("swapdb", 3, WRITE | FAST, 0, 0, 0, swapdb, Server),
     cmd!("dbsize", 1, READONLY | FAST | ALL_SHARDS, 0, 0, 0, dbsize, Server),
@@ -28,10 +28,10 @@ pub static COMMANDS: &[Command] = &[
     cmd!("hello", -1, CONN_FLAGS, 0, 0, 0, hello, Connection),
     cmd!("reset", 1, CONN_FLAGS | SUBSCRIBED_OK | TXN_CONTROL, 0, 0, 0, reset, Connection),
     cmd!("quit", -1, CONN_FLAGS | SUBSCRIBED_OK | TXN_CONTROL, 0, 0, 0, quit, Connection),
-    cmd!("auth", -2, CONN_FLAGS | SKIP_SLOWLOG, 0, 0, 0, server_only, Connection),
+    cmd!("auth", -2, CONN_FLAGS, 0, 0, 0, server_only, Connection),
     cmd!("monitor", 1, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("wait", 3, 0, 0, 0, 0, server_only, Generic),
-    cmd!("waitaof", 4, NOSCRIPT, 0, 0, 0, server_only, Generic),
+    cmd!("wait", 3, BLOCKING, 0, 0, 0, server_only, Generic),
+    cmd!("waitaof", 4, BLOCKING, 0, 0, 0, server_only, Generic),
     cmd!("save", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING | NO_MULTI, 0, 0, 0, server_only, Server),
     cmd!("bgsave", -1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, server_only, Server),
     cmd!("bgrewriteaof", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, server_only, Server),
@@ -49,7 +49,8 @@ pub static COMMANDS: &[Command] = &[
     container!("cluster", 0, Cluster, CLUSTER),
     container!("client", 0, Connection, CLIENT),
     container!("config", 0, Server, CONFIG),
-    container!("command", LOADING | STALE, Server, COMMAND),
+    // Bare COMMAND lists every command (arity -1, unlike other containers).
+    Command { arity: -1, handler: command_all, ..container!("command", LOADING | STALE, Server, COMMAND) },
     container!("memory", 0, Server, MEMORY),
     container!("slowlog", 0, Server, SLOWLOG),
     container!("latency", 0, Server, LATENCY),
@@ -57,20 +58,39 @@ pub static COMMANDS: &[Command] = &[
     cmd!("debug", -2, ADMIN | NOSCRIPT | LOADING | STALE | DANGEROUS, 0, 0, 0, debug, Server),
 ];
 
+/// Cluster mode is disabled (as on a standalone Redis): every subcommand answers so.
 static CLUSTER: &[Command] = &[
-    cmd!("info", 2, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("slots", 2, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("shards", 2, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("nodes", 2, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("myid", 2, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("myshardid", 2, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("keyslot", 3, LOADING | STALE, 0, 0, 0, cluster_keyslot, Cluster),
-    cmd!("countkeysinslot", 3, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("getkeysinslot", 4, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("links", 2, LOADING | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("replicas", 3, ADMIN | NOSCRIPT | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("slaves", 3, ADMIN | NOSCRIPT | STALE, 0, 0, 0, server_only, Cluster),
-    cmd!("help", 2, LOADING | STALE, 0, 0, 0, server_only, Cluster),
+    cmd!("addslots", -3, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("addslotsrange", -4, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("bumpepoch", 2, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("count-failure-reports", 3, ADMIN | LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("countkeysinslot", 3, STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("delslots", -3, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("delslotsrange", -4, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("failover", -2, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("flushslots", 2, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("forget", 3, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("getkeysinslot", 4, STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("help", 2, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("info", 2, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("keyslot", 3, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("links", 2, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("meet", -4, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("migration", -4, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("myid", 2, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("myshardid", 2, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("nodes", 2, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("replicas", 3, ADMIN | LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("replicate", 3, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("reset", -2, ADMIN | NOSCRIPT | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("saveconfig", 2, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("set-config-epoch", 3, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("setslot", -4, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("shards", 2, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("slaves", 3, ADMIN | LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("slot-stats", -4, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("slots", 2, LOADING | STALE, 0, 0, 0, cluster_disabled, Cluster),
+    cmd!("syncslots", -3, ADMIN | STALE | NO_ASYNC_LOADING, 0, 0, 0, cluster_disabled, Cluster),
 ];
 
 static CLIENT: &[Command] = &[
@@ -288,8 +308,8 @@ pub fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-pub fn cluster_keyslot(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Int(key_slot(&args[2]) as i64))
+pub fn cluster_disabled(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Err(Error::new("ERR This instance has cluster support disabled"))
 }
 
 /// HELLO [protover [AUTH username password] [SETNAME clientname]]. Authentication is checked by
@@ -604,18 +624,23 @@ pub fn command_list(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 fn info_entry(c: &Command, full: &str) -> Reply {
+    let meta = super::meta::get(full);
     Reply::Array(vec![
         Reply::bulk_str(full.to_string()),
         Reply::Int(c.arity as i64),
         Reply::Set(c.flag_names().into_iter().map(Reply::status).collect()),
-        Reply::Int(if c.keys_fn.is_some() { 0 } else { c.first_key as i64 }),
-        Reply::Int(if c.keys_fn.is_some() { 0 } else { c.last_key as i64 }),
-        Reply::Int(if c.keys_fn.is_some() { 0 } else { c.key_step as i64 }),
+        Reply::Int(c.first_key as i64),
+        Reply::Int(c.last_key as i64),
+        Reply::Int(c.key_step as i64),
         Reply::Set(c.categories().into_iter().map(|s| Reply::status(format!("@{s}"))).collect()),
-        Reply::Array(vec![]),
-        Reply::Array(vec![]),
+        meta.map_or(Reply::Array(vec![]), |m| m.tips()),
+        meta.map_or(Reply::Array(vec![]), |m| m.key_specs()),
         Reply::Array(c.subs.iter().map(|s| info_entry(s, &format!("{}|{}", c.name, s.name))).collect()),
     ])
+}
+
+pub fn command_all(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Ok(Reply::Array(table().all.iter().map(|c| info_entry(c, c.name)).collect()))
 }
 
 pub fn command_info(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
@@ -633,7 +658,24 @@ pub fn command_info(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     ))
 }
 
-fn docs_entry(c: &Command) -> Reply {
+/// Redis' own docs for the command, with only the subcommands roll has.
+fn docs_entry(c: &Command, full: &str) -> Reply {
+    if let Some(Reply::Map(fields)) = super::meta::get(full).and_then(|m| m.docs.as_ref()) {
+        let fields = fields
+            .iter()
+            .map(|(k, v)| match (k, v) {
+                (Reply::Bulk(name), Reply::Map(_)) if &name[..] == b"subcommands" => (
+                    k.clone(),
+                    Reply::Map(c.subs.iter().map(|s| {
+                        let sub = format!("{}|{}", c.name, s.name);
+                        (Reply::bulk_str(sub.clone()), docs_entry(s, &sub))
+                    }).collect()),
+                ),
+                _ => (k.clone(), v.clone()),
+            })
+            .collect();
+        return Reply::Map(fields);
+    }
     let mut m = vec![
         (Reply::bulk("summary"), Reply::bulk(c.summary)),
         (Reply::bulk("since"), Reply::bulk(c.since)),
@@ -642,7 +684,10 @@ fn docs_entry(c: &Command) -> Reply {
     if !c.subs.is_empty() {
         m.push((
             Reply::bulk("subcommands"),
-            Reply::Map(c.subs.iter().map(|s| (Reply::bulk_str(format!("{}|{}", c.name, s.name)), docs_entry(s))).collect()),
+            Reply::Map(c.subs.iter().map(|s| {
+                let sub = format!("{}|{}", c.name, s.name);
+                (Reply::bulk_str(sub.clone()), docs_entry(s, &sub))
+            }).collect()),
         ));
     }
     Reply::Map(m)
@@ -650,7 +695,7 @@ fn docs_entry(c: &Command) -> Reply {
 
 pub fn command_docs(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let list: Vec<&Command> = if args.len() == 2 { table().all.clone() } else { args[2..].iter().filter_map(|n| lookup(n)).collect() };
-    Ok(Reply::Map(list.into_iter().map(|c| (Reply::bulk(c.name), docs_entry(c))).collect()))
+    Ok(Reply::Map(list.into_iter().map(|c| (Reply::bulk(c.name), docs_entry(c, c.name))).collect()))
 }
 
 fn getkeys_cmd(args: &[Bytes]) -> Result<(&'static Command, Vec<usize>), Error> {

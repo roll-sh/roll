@@ -22,12 +22,12 @@ use std::time::Instant;
 use vm::{FnDef, Flavor, Vm};
 
 pub static COMMANDS: &[Command] = &[
-    Command { since: "2.6.0", ..cmd!("eval", -3, NOSCRIPT | SKIP_MONITOR | MAY_REPLICATE | NO_MANDATORY_KEYS | STALE, keys = script_keys, eval, Scripting) },
-    Command { since: "2.6.0", ..cmd!("evalsha", -3, NOSCRIPT | SKIP_MONITOR | MAY_REPLICATE | NO_MANDATORY_KEYS | STALE, keys = script_keys, evalsha, Scripting) },
-    Command { since: "7.0.0", ..cmd!("eval_ro", -3, NOSCRIPT | SKIP_MONITOR | NO_MANDATORY_KEYS | STALE | READONLY, keys = script_keys, eval_ro, Scripting) },
-    Command { since: "7.0.0", ..cmd!("evalsha_ro", -3, NOSCRIPT | SKIP_MONITOR | NO_MANDATORY_KEYS | STALE | READONLY, keys = script_keys, evalsha_ro, Scripting) },
-    Command { since: "7.0.0", ..cmd!("fcall", -3, NOSCRIPT | SKIP_MONITOR | MAY_REPLICATE | NO_MANDATORY_KEYS | STALE, keys = script_keys, fcall, Scripting) },
-    Command { since: "7.0.0", ..cmd!("fcall_ro", -3, NOSCRIPT | SKIP_MONITOR | NO_MANDATORY_KEYS | STALE | READONLY, keys = script_keys, fcall_ro, Scripting) },
+    Command { since: "2.6.0", ..cmd!("eval", -3, NOSCRIPT | SKIP_MONITOR | SCRIPT_RUNNER | MAY_REPLICATE | NO_MANDATORY_KEYS | STALE, keys = script_keys, eval, Scripting) },
+    Command { since: "2.6.0", ..cmd!("evalsha", -3, NOSCRIPT | SKIP_MONITOR | SCRIPT_RUNNER | MAY_REPLICATE | NO_MANDATORY_KEYS | STALE, keys = script_keys, evalsha, Scripting) },
+    Command { since: "7.0.0", ..cmd!("eval_ro", -3, NOSCRIPT | SKIP_MONITOR | SCRIPT_RUNNER | NO_MANDATORY_KEYS | STALE | READONLY, keys = script_keys, eval_ro, Scripting) },
+    Command { since: "7.0.0", ..cmd!("evalsha_ro", -3, NOSCRIPT | SKIP_MONITOR | SCRIPT_RUNNER | NO_MANDATORY_KEYS | STALE | READONLY, keys = script_keys, evalsha_ro, Scripting) },
+    Command { since: "7.0.0", ..cmd!("fcall", -3, NOSCRIPT | SKIP_MONITOR | SCRIPT_RUNNER | MAY_REPLICATE | NO_MANDATORY_KEYS | STALE, keys = script_keys, fcall, Scripting) },
+    Command { since: "7.0.0", ..cmd!("fcall_ro", -3, NOSCRIPT | SKIP_MONITOR | SCRIPT_RUNNER | NO_MANDATORY_KEYS | STALE | READONLY, keys = script_keys, fcall_ro, Scripting) },
     Command { since: "2.6.0", ..container!("script", 0, Scripting, SCRIPT) },
     Command { since: "7.0.0", ..container!("function", 0, Scripting, FUNCTION) },
 ];

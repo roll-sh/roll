@@ -10,6 +10,8 @@ pub mod geo;
 pub mod hashes;
 pub mod hll;
 pub mod keys;
+pub mod meta;
+pub mod migrate;
 pub mod lists;
 pub mod multi;
 pub mod pubsub;
@@ -99,6 +101,12 @@ pub const ALL_SHARDS: u64 = 1 << 22;
 /// Queued normally inside MULTI is not allowed: EXEC, DISCARD, MULTI, WATCH, QUIT, RESET run
 /// immediately.
 pub const TXN_CONTROL: u64 = 1 << 23;
+/// Runs scripts or functions (EVAL, FCALL…).
+pub const SCRIPT_RUNNER: u64 = 1 << 24;
+/// Allowed on a cluster node that is importing the slot (`ASKING`).
+pub const ASKING: u64 = 1 << 25;
+/// Implemented by a module in Redis (JSON, Bloom, Search…).
+pub const MODULE: u64 = 1 << 26;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
@@ -210,10 +218,12 @@ impl Command {
 
     /// `COMMAND INFO`-style flag names.
     pub fn flag_names(&self) -> Vec<&'static str> {
+        // Redis' order; may_replicate is hidden on purpose, as there.
         let names = [
             (WRITE, "write"),
             (READONLY, "readonly"),
             (DENYOOM, "denyoom"),
+            (MODULE, "module"),
             (ADMIN, "admin"),
             (PUBSUB, "pubsub"),
             (NOSCRIPT, "noscript"),
@@ -222,19 +232,17 @@ impl Command {
             (STALE, "stale"),
             (SKIP_MONITOR, "skip_monitor"),
             (SKIP_SLOWLOG, "skip_slowlog"),
+            (ASKING, "asking"),
             (FAST, "fast"),
             (NO_AUTH, "no_auth"),
-            (MAY_REPLICATE, "may_replicate"),
-            (NO_MULTI, "no_multi"),
-            (ALLOW_BUSY, "allow_busy"),
             (NO_MANDATORY_KEYS, "no_mandatory_keys"),
             (NO_ASYNC_LOADING, "no_async_loading"),
+            (NO_MULTI, "no_multi"),
+            (MOVABLE_KEYS, "movablekeys"),
+            (ALLOW_BUSY, "allow_busy"),
+            (SCRIPT_RUNNER, "script_runner"),
         ];
-        let mut out: Vec<_> = names.iter().filter(|(f, _)| self.has(*f)).map(|(_, n)| *n).collect();
-        if self.keys_fn.is_some() {
-            out.push("movablekeys");
-        }
-        out
+        names.iter().filter(|(f, _)| self.has(*f)).map(|(_, n)| *n).collect()
     }
 }
 
@@ -256,6 +264,14 @@ macro_rules! cmd {
             since: "1.0.0",
             summary: "",
             subs: &[],
+        }
+    };
+    ($name:literal, $arity:expr, $flags:expr, $first:expr, $last:expr, $step:expr, keys = $kf:expr, $handler:expr, $group:ident) => {
+        $crate::commands::Command {
+            first_key: $first,
+            last_key: $last,
+            key_step: $step,
+            ..$crate::cmd!($name, $arity, $flags, keys = $kf, $handler, $group)
         }
     };
     ($name:literal, $arity:expr, $flags:expr, keys = $kf:expr, $handler:expr, $group:ident) => {
@@ -335,6 +351,7 @@ pub fn table() -> &'static Table {
             hll::COMMANDS,
             geo::COMMANDS,
             scripting::COMMANDS,
+            migrate::COMMANDS,
         ] {
             for c in family {
                 assert!(by_name.insert(c.name, c).is_none(), "duplicate command {}", c.name);

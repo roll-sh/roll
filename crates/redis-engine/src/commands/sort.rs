@@ -10,11 +10,16 @@ use crate::value::Value;
 use std::cmp::Ordering;
 
 pub static COMMANDS: &[Command] = &[
-    cmd!("sort", -2, WRITE | DENYOOM, keys = sort_keys, sort, Generic),
-    Command { since: "7.0.0", ..cmd!("sort_ro", -2, READONLY, 1, 1, 1, sort_ro, Generic) },
+    cmd!("sort", -2, WRITE | DENYOOM, 1, 1, 1, keys = sort_keys, sort, Generic),
+    Command { since: "7.0.0", ..cmd!("sort_ro", -2, READONLY, 1, 1, 1, keys = sort_ro_keys, sort_ro, Generic) },
 ];
 
 /// `sortGetKeys`: the sorted key and the last `STORE` destination.
+/// SORT_RO reads only its key (BY / GET patterns name no keys Redis reports).
+fn sort_ro_keys(_args: &[Bytes]) -> Vec<usize> {
+    vec![1]
+}
+
 fn sort_keys(args: &[Bytes]) -> Vec<usize> {
     let mut keys = vec![1];
     let mut store = None;

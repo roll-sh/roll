@@ -7,15 +7,15 @@ use crate::{cmd, container};
 const PS: u64 = PUBSUB | NOSCRIPT | LOADING | STALE | SUBSCRIBED_OK;
 
 pub static COMMANDS: &[Command] = &[
-    cmd!("subscribe", -2, PS, 0, 0, 0, subscribe, PubSub),
-    cmd!("psubscribe", -2, PS, 0, 0, 0, psubscribe, PubSub),
-    cmd!("ssubscribe", -2, PS, 1, -1, 1, ssubscribe, PubSub),
+    cmd!("subscribe", -2, PS | DENYOOM, 0, 0, 0, subscribe, PubSub),
+    cmd!("psubscribe", -2, PS | DENYOOM, 0, 0, 0, psubscribe, PubSub),
+    cmd!("ssubscribe", -2, PS | DENYOOM, 1, -1, 1, ssubscribe, PubSub),
     cmd!("unsubscribe", -1, PS, 0, 0, 0, unsubscribe, PubSub),
     cmd!("punsubscribe", -1, PS, 0, 0, 0, punsubscribe, PubSub),
     cmd!("sunsubscribe", -1, PS, 1, -1, 1, sunsubscribe, PubSub),
     cmd!("publish", 3, PUBSUB | LOADING | STALE | FAST | MAY_REPLICATE, 0, 0, 0, publish, PubSub),
     cmd!("spublish", 3, PUBSUB | LOADING | STALE | FAST | MAY_REPLICATE, 1, 1, 1, spublish, PubSub),
-    container!("pubsub", PUBSUB, PubSub, PUBSUB_SUBS),
+    container!("pubsub", 0, PubSub, PUBSUB_SUBS),
 ];
 
 static PUBSUB_SUBS: &[Command] = &[

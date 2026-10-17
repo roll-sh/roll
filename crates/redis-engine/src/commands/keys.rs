@@ -31,7 +31,9 @@ pub static COMMANDS: &[Command] = &[
     cmd!("touch", -2, READONLY | FAST, 1, -1, 1, touch, Generic),
     cmd!("dump", 2, READONLY, 1, 1, 1, dump, Generic),
     cmd!("restore", -4, WRITE | DENYOOM, 1, 1, 1, restore, Generic),
-    container!("object", READONLY, Generic, OBJECT),
+    Command { since: "3.0.0", ..cmd!("restore-asking", -4, WRITE | DENYOOM | ASKING, 1, 1, 1, restore, Generic) },
+    Command { since: "8.0.0", ..cmd!("trimslots", -5, WRITE, 0, 0, 0, super::server::cluster_disabled, Generic) },
+    container!("object", 0, Generic, OBJECT),
 ];
 
 static OBJECT: &[Command] = &[
@@ -39,7 +41,7 @@ static OBJECT: &[Command] = &[
     cmd!("freq", 3, READONLY, 2, 2, 1, object_freq, Generic),
     cmd!("idletime", 3, READONLY, 2, 2, 1, object_idletime, Generic),
     cmd!("refcount", 3, READONLY, 2, 2, 1, object_refcount, Generic),
-    cmd!("help", 2, READONLY | STALE | LOADING, 0, 0, 0, object_help, Generic),
+    cmd!("help", 2, STALE | LOADING, 0, 0, 0, object_help, Generic),
 ];
 
 fn b(s: &'static str) -> Bytes {

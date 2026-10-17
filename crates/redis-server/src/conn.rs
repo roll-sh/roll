@@ -259,8 +259,16 @@ impl Conn<'_> {
             }
             // Connection-level commands first (they may need to await).
             let args = self.pending.front().unwrap();
+            let started = std::time::Instant::now();
             if let Some(r) = self.intercept(args.clone()).await {
                 let args = self.pending.pop_front().unwrap();
+                // HELLO went through the engine already; the rest is accounted here.
+                if !eq(&args[0], "hello")
+                    && let Some(db) = self.db().cloned()
+                {
+                    let micros = started.elapsed().as_micros() as u64;
+                    db.engine(0).record_external(&self.client, &args, micros, &r);
+                }
                 self.emit(&args, r);
                 continue;
             }
@@ -507,9 +515,9 @@ fn parse_timeout(b: &[u8]) -> Result<Duration, Reply> {
 
 /// Run `f` for `args`, letting the runtime move this worker's other tasks elsewhere first if the
 /// command can run for long (a script: until it ends or is killed from another connection, which
-/// must get scheduled meanwhile).
+/// must get scheduled meanwhile; MIGRATE: waits on the target over the network).
 pub(crate) fn long_running<R>(args: &[Bytes], f: impl FnOnce() -> R) -> R {
-    let script = [&b"eval"[..], b"evalsha", b"eval_ro", b"evalsha_ro", b"fcall", b"fcall_ro"].iter().any(|n| args[0].eq_ignore_ascii_case(n));
+    let script = [&b"eval"[..], b"evalsha", b"eval_ro", b"evalsha_ro", b"fcall", b"fcall_ro", b"migrate"].iter().any(|n| args[0].eq_ignore_ascii_case(n));
     let multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
     if script && multi_thread { tokio::task::block_in_place(f) } else { f() }
 }
