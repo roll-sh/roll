@@ -17,3 +17,4 @@ sha2.workspace = true
 smallvec.workspace = true
 xxhash-rust.workspace = true
 libm.workspace = true
+rustc_apfloat.workspace = true

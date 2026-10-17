@@ -553,7 +553,7 @@ fn is_inf(s: &[u8]) -> bool {
 
 /// Would `string2ld` accept this (finite, or an infinity literal)?
 fn long_double_ok(s: &[u8]) -> bool {
-    decimal::valid(s) && (is_inf(s) || decimal::incr_by_float(s, b"0").is_ok())
+    decimal::valid(s)
 }
 
 pub fn hincrbyfloat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {

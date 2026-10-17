@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::cmd;
-use crate::decimal::{self, IncrError};
+use crate::decimal::{self, IncrError, Ld};
 use crate::notify;
 use crate::util::{fmt_i64, parse_i64};
 use crate::value::{Kind, Str, Value};
@@ -27,6 +27,7 @@ pub static COMMANDS: &[Command] = &[
     cmd!("incrby", 3, WRITE | DENYOOM | FAST, 1, 1, 1, incrby, String),
     cmd!("decrby", 3, WRITE | DENYOOM | FAST, 1, 1, 1, decrby, String),
     cmd!("incrbyfloat", 3, WRITE | DENYOOM | FAST, 1, 1, 1, incrbyfloat, String),
+    Command { since: "8.8.0", ..cmd!("increx", -2, WRITE | DENYOOM | FAST, 1, 1, 1, increx, String) },
     cmd!("getrange", 4, READONLY, 1, 1, 1, getrange, String),
     cmd!("substr", 4, READONLY, 1, 1, 1, getrange, String),
     cmd!("setrange", 4, WRITE | DENYOOM, 1, 1, 1, setrange, String),
@@ -460,6 +461,187 @@ pub fn incrbyfloat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let nb = Bytes::from(new);
     cx.propagate_as(vec![b("SET"), key.clone(), nb.clone(), b("KEEPTTL")]);
     Ok(Reply::Bulk(nb))
+}
+
+enum Incr {
+    Int(i64),
+    Float(Ld),
+}
+
+enum IncrExpire {
+    Keep,
+    Persist,
+    At(i64),
+}
+
+/// INCREX key [BYINT n | BYFLOAT f] [LBOUND l] [UBOUND u] [SATURATE]
+/// [EX s | PX ms | EXAT s | PXAT ms | PERSIST] [ENX]
+pub fn increx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let msg = |m: &str| Error::msg(format!("ERR {m}"));
+    let (mut by, mut lb, mut ub): (Option<Incr>, Option<&Bytes>, Option<&Bytes>) = (None, None, None);
+    let (mut saturate, mut enx) = (false, false);
+    let mut expire: Option<(&Bytes, &Bytes)> = None;
+    let mut persist = false;
+    let mut j = 2;
+    while j < args.len() {
+        let next = args.get(j + 1);
+        let a = &args[j];
+        let expiry_set = expire.is_some() || persist;
+        if let Some(n) = next
+            && eq(a, "byint")
+            && by.is_none()
+        {
+            by = Some(Incr::Int(parse_i64(n).ok_or_else(|| msg("Increment is not an integer or out of range"))?));
+            j += 1;
+        } else if let Some(n) = next
+            && eq(a, "byfloat")
+            && by.is_none()
+        {
+            let v = Ld::parse(n).ok_or_else(|| msg("Increment is not a valid float"))?;
+            if v.is_inf() {
+                return Err(msg("BYFLOAT increment cannot be Infinity"));
+            }
+            by = Some(Incr::Float(v));
+            j += 1;
+        } else if eq(a, "lbound") && next.is_some() && lb.is_none() {
+            lb = next;
+            j += 1;
+        } else if eq(a, "ubound") && next.is_some() && ub.is_none() {
+            ub = next;
+            j += 1;
+        } else if eq(a, "saturate") && !saturate {
+            saturate = true;
+        } else if eq(a, "enx") && !enx && !persist {
+            enx = true;
+        } else if eq(a, "persist") && !expiry_set && !enx {
+            persist = true;
+        } else if let Some(n) = next
+            && is_expire_opt(a)
+            && !expiry_set
+        {
+            expire = Some((a, n));
+            j += 1;
+        } else {
+            return Err(SYNTAX);
+        }
+        j += 1;
+    }
+    let by = by.unwrap_or(Incr::Int(1));
+    // Bounds take the increment's type, known only after the loop.
+    enum Bounds {
+        Int(i64, i64),
+        Float(Ld, Ld),
+    }
+    let bounds = match &by {
+        Incr::Float(_) => {
+            let lo = lb.map(|v| Ld::parse(v).ok_or_else(|| msg("LBOUND is not a valid float"))).transpose()?.unwrap_or_else(Ld::min);
+            let hi = ub.map(|v| Ld::parse(v).ok_or_else(|| msg("UBOUND is not a valid float"))).transpose()?.unwrap_or_else(Ld::max);
+            if lo.compare(&hi) == std::cmp::Ordering::Greater {
+                return Err(msg("LBOUND can't be greater than UBOUND"));
+            }
+            Bounds::Float(lo, hi)
+        }
+        Incr::Int(_) => {
+            let p = |v: Option<&Bytes>, m: &str, d: i64| v.map_or(Ok(d), |v| parse_i64(v).ok_or_else(|| msg(m)));
+            let lo = p(lb, "LBOUND is not an integer or out of range", i64::MIN)?;
+            let hi = p(ub, "UBOUND is not an integer or out of range", i64::MAX)?;
+            if lo > hi {
+                return Err(msg("LBOUND can't be greater than UBOUND"));
+            }
+            Bounds::Int(lo, hi)
+        }
+    };
+    if enx && expire.is_none() && !persist {
+        return Err(msg("ENX flag requires an expiration"));
+    }
+    let expire_at = expire.map(|(o, v)| expire_value(o, v, cx.now, "increx")).transpose()?;
+
+    let key = &args[1];
+    let cur = cx.get_str(key)?.map(|s| s.to_vec());
+    let exists = cur.is_some();
+    let resp3 = cx.resp() == 3;
+    let human = |v: &Ld| if resp3 { Reply::Raw(Bytes::from(format!(",{}\r\n", v.human()))) } else { Reply::bulk(v.human()) };
+    let (new, reply) = match (by, bounds) {
+        (Incr::Float(incr), Bounds::Float(lo, hi)) => {
+            let old = match &cur {
+                Some(s) => Ld::parse(s).ok_or(NOT_FLOAT)?,
+                None => Ld::ZERO,
+            };
+            if old.is_inf() {
+                return Err(msg("value cannot be Infinity"));
+            }
+            let mut v = old.add(&incr);
+            let overflow = v.is_inf();
+            if overflow || v.compare(&hi).is_gt() || v.compare(&lo).is_lt() {
+                if !saturate {
+                    return Ok(Reply::Array(vec![human(&old), human(&Ld::ZERO)]));
+                }
+                v = if overflow { if incr.is_neg() { lo } else { hi } } else if v.compare(&hi).is_gt() { hi } else { lo };
+            }
+            let delta = v.sub(&old);
+            if delta.is_inf() {
+                return Err(msg("applied increment would be Infinity"));
+            }
+            (v.human(), Reply::Array(vec![human(&v), human(&delta)]))
+        }
+        (Incr::Int(incr), Bounds::Int(lo, hi)) => {
+            let old = match &cur {
+                Some(s) => parse_i64(s).ok_or(NOT_INT)?,
+                None => 0,
+            };
+            let (mut v, overflow) = old.overflowing_add(incr);
+            if overflow || v > hi || v < lo {
+                if !saturate {
+                    return Ok(Reply::Array(vec![Reply::Int(old), Reply::Int(0)]));
+                }
+                v = if overflow { if incr >= 0 { hi } else { lo } } else if v > hi { hi } else { lo };
+            }
+            let delta = v.checked_sub(old).ok_or_else(|| msg("applied increment would overflow"))?;
+            (v.to_string(), Reply::Array(vec![Reply::Int(v), Reply::Int(delta)]))
+        }
+        _ => unreachable!("bounds follow the increment type"),
+    };
+    let float = matches!(reply, Reply::Array(ref r) if !matches!(r[0], Reply::Int(_)));
+    let had_ttl = cx.expire_of(key).is_some_and(|at| at != 0);
+    let new_ttl = expire_at.filter(|_| !enx || !had_ttl);
+    if let Some(at) = new_ttl
+        && at <= cx.now
+    {
+        // Already expired: the key goes away (replicated as DEL).
+        if exists && cx.delete(key) {
+            cx.notify(notify::GENERIC, "del", key);
+            cx.propagate_as(vec![b("DEL"), key.clone()]);
+        } else {
+            cx.no_propagate();
+        }
+        return Ok(reply);
+    }
+    let what = if persist {
+        IncrExpire::Persist
+    } else if let Some(at) = new_ttl {
+        IncrExpire::At(at)
+    } else {
+        IncrExpire::Keep
+    };
+    cx.set(key, Value::str(new.as_bytes()), true);
+    let nb = Bytes::from(new);
+    cx.notify(notify::STRING, if float { "incrbyfloat" } else { "incrby" }, key);
+    match what {
+        IncrExpire::Persist => {
+            if had_ttl {
+                cx.set_expire(key, 0);
+                cx.notify(notify::GENERIC, "persist", key);
+            }
+            cx.propagate_as(vec![b("SET"), key.clone(), nb]);
+        }
+        IncrExpire::At(at) => {
+            cx.set_expire(key, at);
+            cx.notify(notify::GENERIC, "expire", key);
+            cx.propagate_as(vec![b("SET"), key.clone(), nb, b("PXAT"), Bytes::from(at.to_string())]);
+        }
+        IncrExpire::Keep => cx.propagate_as(vec![b("SET"), key.clone(), nb, b("KEEPTTL")]),
+    }
+    Ok(reply)
 }
 
 pub fn getrange(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
