@@ -486,20 +486,42 @@ pub fn quit(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     Ok(Reply::Ok)
 }
 
+/// `configGetCommand`: the matches gathered in a dict of their own (case-insensitive, first
+/// name wins), exact names looked up (a rehash step of `configs`), patterns matched against
+/// every visible config in the `configs` dict's order; answered in the matches' order.
 pub fn config_get(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
     // The primary this server follows with REPLICAOF (platform replicas follow no Redis primary).
     let master = cx.eng.host.as_ref().and_then(|h| h.replication().master).filter(|m| !m.managed).map(|m| format!("{} {}", m.host, m.port));
+    let known = |name: &[u8]| std::str::from_utf8(name).ok().and_then(crate::config::find);
+    let mut matches = crate::sdict::ServerDict::new(true);
     for pat in &args[2..] {
-        for (k, mut v) in cx.eng.cfg.get(pat) {
-            if seen.insert(k.to_ascii_lowercase()) {
-                if k.eq_ignore_ascii_case("replicaof") || k.eq_ignore_ascii_case("slaveof") {
-                    v = master.clone().unwrap_or_default();
-                }
-                out.push((Reply::bulk_str(k), Reply::bulk_str(v)));
+        if !pat.iter().any(|c| b"[*?".contains(c)) {
+            if matches.find(pat).is_some() {
+                continue;
+            }
+            if cx.eng.config_dict.0.find(pat).is_some() && known(pat).is_some() {
+                matches.add(pat);
+            }
+            continue;
+        }
+        for key in cx.eng.config_dict.0.keys() {
+            let Some(p) = known(&key) else { continue };
+            if p.flags & crate::config::HIDDEN != 0 || matches.find(&key).is_some() {
+                continue;
+            }
+            if crate::util::glob_match(pat, &key, true) {
+                matches.add(&key);
             }
         }
+    }
+    let mut out = Vec::new();
+    for name in matches.keys() {
+        let name = String::from_utf8_lossy(&name).into_owned();
+        let Some((_, mut v)) = cx.eng.cfg.get(name.as_bytes()).into_iter().next() else { continue };
+        if name.eq_ignore_ascii_case("replicaof") || name.eq_ignore_ascii_case("slaveof") {
+            v = master.clone().unwrap_or_default();
+        }
+        out.push((Reply::bulk_str(name), Reply::bulk_str(v)));
     }
     Ok(Reply::Map(out))
 }
@@ -514,6 +536,10 @@ pub(crate) fn protected_allowed(setting: u8, client: &crate::client::Client) -> 
 pub fn config_set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if !(args.len() - 2).is_multiple_of(2) {
         return Err(SYNTAX);
+    }
+    // `lookupConfig` for every name (rehash steps), as Redis finds them all first.
+    for kv in args[2..].chunks(2) {
+        cx.eng.config_dict.0.find(&kv[0]);
     }
     let pairs: Vec<(String, String)> =
         args[2..].chunks(2).map(|kv| (String::from_utf8_lossy(&kv[0]).into_owned(), String::from_utf8_lossy(&kv[1]).into_owned())).collect();

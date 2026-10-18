@@ -289,3 +289,9 @@ PING
 ACL GETUSER default
 CONFIG REWRITE
 CONFIG REWRITE extra
+
+# CONFIG GET collects its matches in a dict: names as the caller wrote them, the first spelling
+# of a name only, aliases separately (the order follows the dict and varies per process).
+!sort CONFIG GET MAXMEMORY Hz maxmemory
+!sort CONFIG GET slaveof replicaof REPLICAOF
+!sort CONFIG GET hz *hz* nosuch

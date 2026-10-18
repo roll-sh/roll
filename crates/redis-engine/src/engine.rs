@@ -306,6 +306,8 @@ pub struct Engine {
     pub server_actions: Vec<crate::commands::replication::ServerAction>,
     /// A copy made for a debugging session (Redis' forked child): it runs the session itself.
     pub ldb_child: bool,
+    /// The `configs` dict's order and rehashing (CONFIG GET).
+    pub config_dict: crate::config::ConfigDict,
     /// The last command a script called was refused before running (`scriptCall`'s errors).
     pub(crate) last_rejected: bool,
     /// INFO memory: the peak of `used_memory` and when it was reached (Unix s), and the usage
@@ -421,6 +423,7 @@ impl Engine {
             host: None,
             server_actions: Vec::new(),
             ldb_child: false,
+            config_dict: Default::default(),
             last_rejected: false,
             peak_memory: 0,
             peak_time: now / 1000,

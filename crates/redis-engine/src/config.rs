@@ -1583,6 +1583,46 @@ fn set_percentiles(c: &mut Config, argv: &[&str]) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Redis' `configs` dict: CONFIG GET walks it, and its lookups take rehash steps. Built as
+/// Redis builds it: sized for the core table and filled in its order (each alias after its
+/// primary), then each module's configs as it loads (a lookup checking the name is free before
+/// each, and one per config when it loads their defaults), the last of which starts a rehash.
+#[derive(Clone, Debug)]
+pub struct ConfigDict(pub crate::sdict::ServerDict);
+
+impl Default for ConfigDict {
+    fn default() -> Self {
+        let mut d = crate::sdict::ServerDict::new(true);
+        let mut module: Vec<&str> = Vec::new();
+        let mut in_core = true;
+        let load = |d: &mut crate::sdict::ServerDict, names: &mut Vec<&str>| {
+            for n in names.drain(..) {
+                d.find(n.as_bytes());
+            }
+        };
+        for line in include_str!("config_order.txt").lines() {
+            if let Some(section) = line.strip_prefix("# ") {
+                load(&mut d, &mut module);
+                if section.starts_with("the core") {
+                    // `dictExpand(configs, sizeof(static_configs) / sizeof(standardConfig))`: the
+                    // 217 entries of this build and the terminator.
+                    d.expand(218);
+                } else {
+                    in_core = false;
+                }
+                continue;
+            }
+            if !in_core {
+                d.find(line.as_bytes());
+                module.push(line);
+            }
+            d.add(line.as_bytes());
+        }
+        load(&mut d, &mut module);
+        ConfigDict(d)
+    }
+}
+
 /// The parameter named `name` (or one of its aliases), case-insensitively.
 pub fn find(name: &str) -> Option<&'static Param> {
     PARAMS.iter().find(|p| p.name.eq_ignore_ascii_case(name) || p.alias.is_some_and(|a| a.eq_ignore_ascii_case(name)))
@@ -1727,6 +1767,19 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_dict_holds_every_config_once() {
+        let d = ConfigDict::default();
+        let keys = d.0.keys();
+        assert_eq!(keys.len(), 316);
+        for k in &keys {
+            assert!(find(std::str::from_utf8(k).unwrap()).is_some(), "{}", String::from_utf8_lossy(k));
+        }
+        for p in PARAMS {
+            assert!(keys.iter().any(|k| k.eq_ignore_ascii_case(p.name.as_bytes())), "{}", p.name);
+        }
+    }
 
     #[test]
     fn get_and_set() {

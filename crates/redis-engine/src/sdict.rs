@@ -147,6 +147,14 @@ impl ServerDict {
         }
     }
 
+    /// `dictExpand`: room for `n` (a fresh dict gets its table at once).
+    pub fn expand(&mut self, n: usize) {
+        if self.rehashidx.is_some() || self.used[0] > n || self.t[0].len() >= n {
+            return;
+        }
+        self.resize(n);
+    }
+
     /// `dictAdd`: false (with the rehash step and expansion taken) when the key exists.
     pub fn add(&mut self, key: &[u8]) -> bool {
         let h = self.hash(key);
