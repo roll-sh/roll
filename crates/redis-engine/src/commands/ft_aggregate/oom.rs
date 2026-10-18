@@ -62,7 +62,7 @@ pub(in crate::commands) fn query(cx: &mut Cx, o: Oom, argv: &[Bytes], profile: O
             None => return Err(QErr::new(Code::BadVal, "Need an argument for FORMAT").into()),
             Some(f) if f.eq_ignore_ascii_case(b"EXPAND") => expand = true,
             Some(f) if f.eq_ignore_ascii_case(b"STRING") => {}
-            Some(f) => return Err(QErr::user(Code::ParseArgs, "FORMAT", format!(" {} is not supported", String::from_utf8_lossy(f))).into()),
+            Some(f) => return Err(QErr::user(Code::ParseArgs, "FORMAT", format!(" {} is not supported", redis_proto::escape(f))).into()),
         }
     }
     // `sendChunk_ReplyOnly_EmptyResults`: the warning counted (no query is).

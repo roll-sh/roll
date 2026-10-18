@@ -247,8 +247,8 @@ pub fn to_json(r: &Reply, b64: bool) -> Json {
     };
     match r {
         Reply::Ok => s(b"OK"),
-        Reply::Status(x) => s(x.as_bytes()),
-        Reply::Error(e) => json!({ "error": e }),
+        Reply::Status(x) => s(&redis_proto::unescape(x)),
+        Reply::Error(e) => json!({ "error": shown(e) }),
         Reply::Int(i) => json!(i),
         Reply::Bulk(b) => s(b),
         Reply::Nil | Reply::NilArray => Json::Null,
@@ -272,11 +272,16 @@ fn result_obj(r: &Reply, b64: bool) -> Json {
     }
 }
 
+/// An error or status text as JSON shows it: its bytes, read as UTF-8.
+fn shown(e: &str) -> String {
+    String::from_utf8_lossy(&redis_proto::unescape(e)).into_owned()
+}
+
 fn error_text(r: &Reply) -> Option<String> {
     match r {
-        Reply::Error(e) => Some(e.clone()),
+        Reply::Error(e) => Some(shown(e)),
         Reply::Raw(b) if b.first() == Some(&b'-') => match redis_proto::decode(b) {
-            Ok(Some((Reply::Error(e), _))) => Some(e),
+            Ok(Some((Reply::Error(e), _))) => Some(shown(&e)),
             _ => None,
         },
         _ => None,
@@ -387,7 +392,7 @@ fn sse_line(r: &Reply) -> String {
             .collect::<Vec<_>>()
             .join(",")
         }
-        Reply::Status(s) => s.clone(),
+        Reply::Status(s) => shown(s),
         r => match to_json(r, false) {
             Json::String(s) => s,
             j => j.to_string(),

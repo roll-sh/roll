@@ -299,7 +299,7 @@ pub(super) fn profile_with(cx: &mut Cx, args: &[Bytes], debug: bool, clock: Inst
         v.extend_from_slice(&args[at + 1..]);
         let (c, p) = debug::split(&v)?;
         if c.len() < 2 {
-            return Err(arity_error(&format!("_FT.DEBUG|{}", String::from_utf8_lossy(&args[0]).to_ascii_uppercase())));
+            return Err(arity_error(&format!("_FT.DEBUG|{}", redis_proto::escape(&args[0]).to_ascii_uppercase())));
         }
         (c[2..].to_vec(), Some(p.to_vec()))
     } else {
@@ -2432,7 +2432,7 @@ impl RedOpts<'_, '_> {
 
     /// `ReducerOpts_ResolveKey`.
     fn resolve(&mut self, name: &[u8]) -> Result<KRef, QErr> {
-        let missing = || QErr::user(Code::NoPropKey, "Property not loaded nor in pipeline", format!(": `{}`", String::from_utf8_lossy(name)));
+        let missing = || QErr::user(Code::NoPropKey, "Property not loaded nor in pipeline", format!(": `{}`", redis_proto::escape(name)));
         if let Some(i) = self.lk.get_read(self.spec, name, K_HIDDEN) {
             return Ok(KRef::of(&self.lk.keys[i]));
         }
@@ -2631,7 +2631,7 @@ impl<'a> Builder<'_, 'a> {
                                 load.push(copy_key(&lk.keys[i]));
                                 i
                             }
-                            _ => return Err(QErr::user(Code::NoPropKey, "Property", format!(" `{}` not loaded nor in schema", String::from_utf8_lossy(k)))),
+                            _ => return Err(QErr::user(Code::NoPropKey, "Property", format!(" `{}` not loaded nor in schema", redis_proto::escape(k)))),
                         },
                     };
                     krefs.push(KRef::of(&cx.lookups[li].keys[i]));
@@ -2696,13 +2696,13 @@ impl<'a> Builder<'_, 'a> {
                             load_keys.push(copy_key(&lk.keys[i]));
                             i
                         }
-                        _ => return Err(QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", String::from_utf8_lossy(name)))),
+                        _ => return Err(QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", redis_proto::escape(name)))),
                     }
                 }
             };
             src.push(KRef::of(&cx.lookups[li].keys[i]));
             let Some(d) = cx.lookups[gi].get_write(name, 0) else {
-                return Err(QErr::user(Code::DupField, "Property", format!(" `{}` specified more than once", String::from_utf8_lossy(name))));
+                return Err(QErr::user(Code::DupField, "Property", format!(" `{}` specified more than once", redis_proto::escape(name))));
             };
             dst.push(KRef::of(&cx.lookups[gi].keys[d]));
         }
@@ -2725,7 +2725,7 @@ impl<'a> Builder<'_, 'a> {
                 Some(r) => r?,
             };
             let Some(d) = cx.lookups[gi].get_write(cstr(&pr.alias), 0) else {
-                return Err(QErr::user(Code::DupField, "Property", format!(" `{}` specified more than once", String::from_utf8_lossy(cstr(&pr.alias)))));
+                return Err(QErr::user(Code::DupField, "Property", format!(" `{}` specified more than once", redis_proto::escape(cstr(&pr.alias)))));
             };
             reds.push(Reducer { kind, src, dst: KRef::of(&cx.lookups[gi].keys[d]) });
         }
@@ -2821,9 +2821,9 @@ impl<'a> Builder<'_, 'a> {
                 let name = cstr(&ff.name);
                 let lk = &mut cx.lookups[li];
                 match lk.get_read(Some(spec), name, 0) {
-                    None => return Err(QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", String::from_utf8_lossy(name)))),
+                    None => return Err(QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", redis_proto::escape(name)))),
                     Some(k) if lk.keys[k].flags & K_SCHEMA_SRC == 0 => {
-                        return Err(QErr::user(Code::Inval, "Property", format!(" `{}` is not in schema", String::from_utf8_lossy(name))));
+                        return Err(QErr::user(Code::Inval, "Property", format!(" `{}` is not in schema", redis_proto::escape(name))));
                     }
                     Some(k) => {
                         let ft_id = spec.field(name).filter(|f| f.is(crate::search::spec::T_TEXT)).and_then(|f| f.ft_id);
@@ -3671,7 +3671,7 @@ mod collect {
     }
 
     fn lossy(b: &[u8]) -> String {
-        String::from_utf8_lossy(cstr(b)).into_owned()
+        redis_proto::escape(cstr(b))
     }
 
     /// `CollectArgs_Parse` (the `ArgParser` run with FIELDS at position 1, SORTBY and LIMIT

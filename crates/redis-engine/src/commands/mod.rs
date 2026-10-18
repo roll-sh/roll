@@ -352,7 +352,7 @@ pub fn no_handler(_: &mut Cx, _: &[Bytes]) -> CmdResult {
 /// Handler for commands the server layer intercepts; reached only when the engine is embedded
 /// without a server.
 pub fn server_only(_: &mut Cx, args: &[Bytes]) -> CmdResult {
-    Err(Error::msg(format!("ERR '{}' is not available in this context", String::from_utf8_lossy(&args[0]).to_lowercase())))
+    Err(Error::msg(format!("ERR '{}' is not available in this context", redis_proto::escape(&args[0]).to_lowercase())))
 }
 
 pub struct Table {
@@ -515,7 +515,7 @@ pub fn range(start: i64, end: i64, len: usize) -> Option<(usize, usize)> {
 pub fn unknown_sub(cmd: &str, sub: &[u8]) -> Error {
     Error::msg(format!(
         "ERR unknown subcommand '{}'. Try {} HELP.",
-        String::from_utf8_lossy(sub),
+        redis_proto::escape_prefix(sub, 128),
         cmd.to_uppercase()
     ))
 }

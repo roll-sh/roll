@@ -87,7 +87,7 @@ fn expire_generic(cx: &mut Cx, args: &[Bytes], secs: bool, absolute: bool) -> Cm
         } else if eq(a, "lt") {
             lt = true;
         } else {
-            return Err(Error::msg(format!("ERR Unsupported option {}", String::from_utf8_lossy(crate::util::cstr(a)))));
+            return Err(Error::msg(format!("ERR Unsupported option {}", redis_proto::escape(crate::util::cstr(a)))));
         }
     }
     if nx && (xx || gt || lt) {

@@ -190,7 +190,7 @@ const HELP: &[&str] = &[
 /// `addReplySubcommandSyntaxError`.
 fn syntax(args: &[Bytes]) -> Error {
     let sub = &args[1][..args[1].len().min(128)];
-    Error::msg(format!("ERR unknown subcommand or wrong number of arguments for '{}'. Try DEBUG HELP.", String::from_utf8_lossy(sub)))
+    Error::msg(format!("ERR unknown subcommand or wrong number of arguments for '{}'. Try DEBUG HELP.", redis_proto::escape(sub)))
 }
 
 /// `atoi`: leading whitespace, a sign and digits; anything else ends the number.

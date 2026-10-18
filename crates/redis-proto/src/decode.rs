@@ -41,8 +41,9 @@ fn int(s: &[u8]) -> Result<i64, DecodeError> {
         .ok_or_else(|| DecodeError(format!("bad integer {:?}", String::from_utf8_lossy(s))))
 }
 
+/// Status and error lines, byte-exact (see [`crate::escape`]).
 fn text(s: &[u8]) -> String {
-    String::from_utf8_lossy(s).into_owned()
+    crate::escape(s)
 }
 
 fn blob(buf: &[u8], p: &mut usize, len: i64) -> R<Bytes> {

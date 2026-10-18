@@ -671,7 +671,7 @@ impl Acl {
         let mut rules = existing.as_ref().map_or_else(Rules::new, |u| u.rules());
         for op in &ops {
             if let Err(e) = rules.apply(op) {
-                return Err(format!("Error in ACL SETUSER modifier '{}': {}", String::from_utf8_lossy(cstr(op)), e.message()));
+                return Err(format!("Error in ACL SETUSER modifier '{}': {}", redis_proto::escape(cstr(op)), e.message()));
             }
         }
         match existing {
@@ -745,7 +745,7 @@ fn merge_selectors(ops: &[Bytes]) -> Result<Vec<Vec<u8>>, String> {
         out.push(op.to_vec());
     }
     if let Some((i, _)) = open {
-        return Err(format!("Unmatched parenthesis in acl selector starting at '{}'.", String::from_utf8_lossy(cstr(&ops[i]))));
+        return Err(format!("Unmatched parenthesis in acl selector starting at '{}'.", redis_proto::escape(cstr(&ops[i]))));
     }
     Ok(out)
 }

@@ -619,7 +619,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
                             sort_load.push(i);
                             sort_lk.push(i);
                         }
-                        _ => return Err(plan_err(eng, req, QErr::user(Code::NoPropKey, "Property", format!(" `{}` not loaded nor in schema", String::from_utf8_lossy(k))))),
+                        _ => return Err(plan_err(eng, req, QErr::user(Code::NoPropKey, "Property", format!(" `{}` not loaded nor in schema", redis_proto::escape(k))))),
                     }
                 }
             }
@@ -658,9 +658,9 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
                 }
                 let name = crate::util::cstr(&ff.name);
                 match lk.get_read(Some(spec), name, 0) {
-                    None => return Err(plan_err(eng, req, QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", String::from_utf8_lossy(name))))),
+                    None => return Err(plan_err(eng, req, QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", redis_proto::escape(name))))),
                     Some(k) if lk.keys[k].flags & K_SCHEMA_SRC == 0 => {
-                        return Err(plan_err(eng, req, QErr::user(Code::Inval, "Property", format!(" `{}` is not in schema", String::from_utf8_lossy(name)))));
+                        return Err(plan_err(eng, req, QErr::user(Code::Inval, "Property", format!(" `{}` is not in schema", redis_proto::escape(name)))));
                     }
                     Some(k) => hl_keys.push((k, fi)),
                 }

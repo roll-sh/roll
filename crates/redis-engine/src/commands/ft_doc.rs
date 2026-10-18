@@ -140,7 +140,7 @@ fn parse_add<'a>(ac: &mut Ac<'a>) -> Result<AddOpts<'a>, QErr> {
                         found = true;
                         break;
                     }
-                    return Err(QErr::user(Code::AddArgs, "Unknown keyword", format!(" `{}` provided", String::from_utf8_lossy(s))));
+                    return Err(QErr::user(Code::AddArgs, "Unknown keyword", format!(" `{}` provided", redis_proto::escape(s))));
                 };
                 let v = ac.get().map_err(|e| add_err(format!("Parsing error for document option {name}: {}", e.strerror())))?;
                 match name {

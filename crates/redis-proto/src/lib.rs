@@ -9,9 +9,11 @@
 mod decode;
 mod double;
 mod request;
+mod text;
 
 pub use decode::{DecodeError, decode};
 pub use double::{fmt_double, fmt_long_double, fpconv_dtoa, parse_double};
+pub use text::{escape, escape_prefix, unescape};
 pub use request::{BIG_ARG, Limits, ProtoError, Partial, parse_request, partial, split_args};
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -79,8 +81,8 @@ impl Reply {
         let v3 = resp >= 3;
         match self {
             Reply::Ok => out.put_slice(b"+OK\r\n"),
-            Reply::Status(s) => line(out, b'+', s.as_bytes()),
-            Reply::Error(e) => line(out, b'-', e.as_bytes()),
+            Reply::Status(s) => line(out, b'+', &unescape(s)),
+            Reply::Error(e) => line(out, b'-', &unescape(e)),
             Reply::Int(i) => int(out, b':', *i),
             Reply::Bulk(b) => bulk(out, b),
             Reply::Nil if v3 => out.put_slice(b"_\r\n"),

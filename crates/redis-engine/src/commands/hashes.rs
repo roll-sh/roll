@@ -1040,7 +1040,7 @@ fn hexpire_generic(cx: &mut Cx, args: &[Bytes], secs: bool, relative: bool) -> C
         } else if eq(a, "lt") {
             Cond::Lt
         } else {
-            return Err(Error::msg(format!("ERR unknown argument: {}", String::from_utf8_lossy(a))));
+            return Err(Error::msg(format!("ERR unknown argument: {}", redis_proto::escape(a))));
         };
         if !flags.contains(&f) {
             flags.push(f);
@@ -1329,7 +1329,7 @@ fn parse_ex_args(cx: &Cx, args: &[Bytes], set: bool) -> Result<ExArgs, Error> {
                 o.fnx = true;
             }
         } else {
-            return Err(Error::msg(format!("ERR unknown argument: {}", String::from_utf8_lossy(a))));
+            return Err(Error::msg(format!("ERR unknown argument: {}", redis_proto::escape(a))));
         }
         i += 1;
     }

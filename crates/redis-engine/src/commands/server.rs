@@ -444,7 +444,7 @@ pub fn hello(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 name = Some(args[i + 1].clone());
                 i += 2;
             } else {
-                return Err(Error::msg(format!("ERR Syntax error in HELLO option '{}'", String::from_utf8_lossy(&args[i]))));
+                return Err(Error::msg(format!("ERR Syntax error in HELLO option '{}'", redis_proto::escape(&args[i]))));
             }
         }
     }
@@ -1018,7 +1018,7 @@ pub fn latency_graph(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let now = crate::util::now_ms() / 1000;
     match cx.eng.latency_monitor.graph(&args[2], now) {
         Some(g) => Ok(Reply::Verbatim("txt", Bytes::from(g))),
-        None => Err(Error::msg(format!("ERR No samples available for event '{}'", String::from_utf8_lossy(&args[2])))),
+        None => Err(Error::msg(format!("ERR No samples available for event '{}'", redis_proto::escape(&args[2])))),
     }
 }
 

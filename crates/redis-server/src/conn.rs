@@ -1142,7 +1142,7 @@ impl Conn<'_> {
             2 => (None, &args[1]),
             3 => (Some(&args[1]), &args[2]),
             // Arity -2, checked before the command runs.
-            1 => return Reply::Error(format!("ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&args[0]).to_ascii_lowercase())),
+            1 => return Reply::Error(format!("ERR wrong number of arguments for '{}' command", redis_proto::escape(&args[0]).to_ascii_lowercase())),
             _ => return Reply::Error("ERR syntax error".into()),
         };
         let req = AuthRequest { user: user.map(|u| &u[..]), password: pass, sni: self.sni.as_deref(), client: Some(&self.client), command: &args[0] };

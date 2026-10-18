@@ -49,7 +49,7 @@ pub(super) fn sugadd(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 Err(e) => return Err(Error::msg(format!("Invalid payload: {}", e.strerror()))),
             }
         } else {
-            return Err(Error::msg(format!("Unknown argument `{}`", String::from_utf8_lossy(name))));
+            return Err(Error::msg(format!("Unknown argument `{}`", redis_proto::escape(name))));
         }
     }
     cx.changes(0);
@@ -133,7 +133,7 @@ pub(super) fn sugget(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             b"WITHPAYLOADS" => Some(&mut with_payloads),
             b"MAX" => None,
             _ => {
-                let arg = String::from_utf8_lossy(crate::util::cstr(s)).into_owned();
+                let arg = redis_proto::escape(crate::util::cstr(s));
                 return Err(QErr::user(Code::ParseArgs, "Unrecognized argument", format!(": {arg}")).into());
             }
         };

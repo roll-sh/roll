@@ -376,11 +376,11 @@ pub(crate) unsafe fn push_reply(l: *mut lua_State, r: &Reply, resp3: bool) {
         lua_checkstack(l, 4);
         match r {
             Reply::Ok => push_single(l, b"ok", |l| push_bytes(l, b"OK")),
-            Reply::Status(s) => push_single(l, b"ok", |l| push_bytes(l, s.as_bytes())),
+            Reply::Status(s) => push_single(l, b"ok", |l| push_bytes(l, &redis_proto::unescape(s))),
             Reply::Error(e) => {
                 let mut v = Vec::with_capacity(e.len() + 1);
                 v.push(b'-');
-                v.extend_from_slice(e.as_bytes());
+                v.extend_from_slice(&redis_proto::unescape(e));
                 push_error(l, &v);
                 mark_counted(l);
             }
@@ -524,8 +524,9 @@ unsafe fn raw_get(l: *mut lua_State, name: &[u8]) -> c_int {
     }
 }
 
+/// A status or error text from a script, byte-exact, with CR/LF as spaces.
 fn sanitize(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).replace(['\r', '\n'], " ")
+    redis_proto::escape(b).replace(['\r', '\n'], " ")
 }
 
 unsafe fn table_reply(l: *mut lua_State, s3: bool, c3: bool, depth: usize) -> Reply {

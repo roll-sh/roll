@@ -729,7 +729,7 @@ pub fn pfmerge(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 /// PFDEBUG GETREG|DECODE|ENCODING|TODENSE key
 pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let (sub, key) = (&args[1], &args[2]);
-    let arity = || Error::msg(format!("ERR Wrong number of arguments for the '{}' subcommand", String::from_utf8_lossy(crate::util::cstr(sub))));
+    let arity = || Error::msg(format!("ERR Wrong number of arguments for the '{}' subcommand", redis_proto::escape(crate::util::cstr(sub))));
     if eq(sub, "simd") {
         if args.len() != 3 {
             return Err(arity());
@@ -787,7 +787,7 @@ pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let getreg = eq(sub, "getreg");
     if !getreg && !eq(sub, "todense") {
-        return Err(Error::msg(format!("ERR Unknown PFDEBUG subcommand '{}'", String::from_utf8_lossy(crate::util::cstr(sub)))));
+        return Err(Error::msg(format!("ERR Unknown PFDEBUG subcommand '{}'", redis_proto::escape(crate::util::cstr(sub)))));
     }
     let mut e = cx.get_mut(key).expect("looked up above");
     e.unshare();

@@ -269,7 +269,7 @@ pub fn lookup_keys(expr: &Expr, has_key: &dyn Fn(&[u8]) -> bool) -> Result<(), Q
     match expr {
         Expr::Property(p) => {
             if !has_key(p) {
-                return Err(QErr::user(Code::NoPropKey, "Property not loaded nor in pipeline", format!(": `{}`", String::from_utf8_lossy(p))));
+                return Err(QErr::user(Code::NoPropKey, "Property not loaded nor in pipeline", format!(": `{}`", redis_proto::escape(p))));
             }
         }
         Expr::Func { args, .. } => {

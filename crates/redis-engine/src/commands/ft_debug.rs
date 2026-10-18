@@ -630,7 +630,7 @@ pub(super) fn ft_debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             }
             Ok(Reply::Ok)
         }
-        _ => Err(Error::msg(format!("ERR unknown subcommand '{}'. Try _FT.DEBUG HELP.", String::from_utf8_lossy(&args[1])))),
+        _ => Err(Error::msg(format!("ERR unknown subcommand '{}'. Try _FT.DEBUG HELP.", redis_proto::escape(&args[1])))),
     }
 }
 

@@ -567,21 +567,24 @@ impl Engine {
         std::mem::take(&mut self.effects)
     }
 
+    /// `rejectCommand`'s unknown command error: the name (`%.128s`) and the args while their
+    /// text is under 128 bytes (`'%.*s' `), byte-exact.
     fn unknown_command(args: &[Bytes]) -> Reply {
-        let mut tail = String::new();
+        let mut tail: Vec<u8> = Vec::new();
         for a in &args[1..] {
             if tail.len() >= 128 {
                 break;
             }
-            let s = String::from_utf8_lossy(a);
             let room = 128 - tail.len();
-            tail.push_str(&format!("'{}' ", s.chars().take(room).collect::<String>()));
+            tail.push(b'\'');
+            tail.extend_from_slice(&a[..a.len().min(room)]);
+            tail.extend_from_slice(b"' ");
         }
-        let name = String::from_utf8_lossy(&args[0]).chars().take(128).collect::<String>();
+        let name = redis_proto::escape_prefix(&args[0], 128);
         if args.len() == 1 {
             return Reply::Error(format!("ERR unknown command '{name}'"));
         }
-        Reply::Error(format!("ERR unknown command '{name}', with args beginning with: {tail}"))
+        Reply::Error(format!("ERR unknown command '{name}', with args beginning with: {}", redis_proto::escape(&tail)))
     }
 
     /// Resolve the command (and subcommand) for `args`, checking arity.
@@ -607,7 +610,7 @@ impl Engine {
             let Some(sub) = commands::lookup_sub(cmd, &args[1]) else {
                 return Err(Reply::Error(format!(
                     "ERR unknown subcommand '{}'. Try {name} HELP.",
-                    String::from_utf8_lossy(&args[1]).chars().take(128).collect::<String>()
+                    redis_proto::escape_prefix(&args[1], 128)
                 )));
             };
             let full = format!("{}|{}", cmd.name, sub.name);
@@ -631,7 +634,7 @@ impl Engine {
         let Some(sub) = commands::lookup_sub(cmd, &args[1]) else {
             return Err(Reply::Error(format!(
                 "ERR unknown subcommand '{}'. Try {} HELP.",
-                String::from_utf8_lossy(&args[1]).chars().take(128).collect::<String>(),
+                redis_proto::escape_prefix(&args[1], 128),
                 cmd.name.to_uppercase()
             )));
         };

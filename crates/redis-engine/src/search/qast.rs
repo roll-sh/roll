@@ -685,7 +685,8 @@ pub fn shard_k_ratio(v: &[u8]) -> Result<f64, QErr> {
 }
 
 pub fn lossy(b: &[u8]) -> String {
-    String::from_utf8_lossy(cstr(b)).into_owned()
+    // Error texts: the C string's bytes, exactly (see `redis_proto::escape`).
+    redis_proto::escape(cstr(b))
 }
 
 /// Query parameters (`PARAMS`): name → value. Names are C strings.

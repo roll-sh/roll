@@ -200,7 +200,7 @@ impl QErr {
 
     /// `QueryError_FmtUnknownArg`: the argument at the cursor (not consumed).
     pub fn unknown_arg(ac: &super::args::Ac, name: &str) -> Self {
-        let s = ac.peek().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_else(|| "Unknown (FIXME)".into());
+        let s = ac.peek().map(|b| redis_proto::escape(b)).unwrap_or_else(|| "Unknown (FIXME)".into());
         let s = s.split('\0').next().unwrap_or("").to_string();
         QErr::user(Code::ArgUnrecognized, "Unknown argument", format!(" `{s}` at position {} for {name}", ac.offset))
     }

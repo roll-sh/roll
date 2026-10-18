@@ -163,11 +163,11 @@ pub fn acl_log(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn acl_dryrun(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let acl = cx.eng.acl.read();
     let Some(user) = acl.user(&args[2]).cloned() else {
-        return Err(Error::msg(format!("ERR User '{}' not found", String::from_utf8_lossy(&args[2]))));
+        return Err(Error::msg(format!("ERR User '{}' not found", redis_proto::escape(&args[2]))));
     };
     drop(acl);
     let sub = &args[3..];
-    let not_found = || Error::msg(format!("ERR Command '{}' not found", String::from_utf8_lossy(&sub[0])));
+    let not_found = || Error::msg(format!("ERR Command '{}' not found", redis_proto::escape(&sub[0])));
     let mut cmd = lookup(&sub[0]).ok_or_else(not_found)?;
     if !cmd.subs.is_empty() && sub.len() > 1 {
         cmd = lookup_sub(cmd, &sub[1]).ok_or_else(not_found)?;

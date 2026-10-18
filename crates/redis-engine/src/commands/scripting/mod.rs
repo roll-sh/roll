@@ -110,12 +110,12 @@ fn shebang_flags(body: &[u8]) -> Result<(u64, usize), String> {
         _ => return Err("Invalid engine in script shebang".into()),
     };
     if parts[0] != b"#!lua" {
-        return Err(format!("Unexpected engine in script shebang: {}", String::from_utf8_lossy(&parts[0])));
+        return Err(format!("Unexpected engine in script shebang: {}", redis_proto::escape(&parts[0])));
     }
     let mut flags = 0;
     for p in &parts[1..] {
         let Some(list) = p.strip_prefix(b"flags=") else {
-            return Err(format!("Unknown lua shebang option: {}", String::from_utf8_lossy(p)));
+            return Err(format!("Unknown lua shebang option: {}", redis_proto::escape(p)));
         };
         if list.is_empty() {
             continue;
@@ -293,7 +293,7 @@ impl Scripting {
         unsafe {
             let code = &body[skip..];
             if luaL_loadbuffer(l, code.as_ptr().cast(), code.len(), c"@user_script".as_ptr()) != 0 {
-                let msg = vm::to_bytes(l, -1).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+                let msg = vm::to_bytes(l, -1).map(redis_proto::escape).unwrap_or_default();
                 lua_pop(l, 1);
                 self.eval_vm().gc_tick();
                 return Err(Error::msg(format!("ERR Error compiling script (new function): {}", msg.replace(['\r', '\n'], " "))));
@@ -470,7 +470,7 @@ fn library_metadata(code: &[u8]) -> Result<(String, String, &[u8]), String> {
             name = Some(String::from_utf8_lossy(&p[5..]).into_owned());
             continue;
         }
-        return Err(format!("Invalid metadata value given: {}", String::from_utf8_lossy(p)));
+        return Err(format!("Invalid metadata value given: {}", redis_proto::escape(p)));
     }
     let name = name.ok_or("Library name was not given")?;
     Ok((engine, name, &code[end..]))
@@ -496,7 +496,7 @@ unsafe fn run_library(vm: &mut Vm, body: &[u8], timeout_ms: u64) -> Result<Vec<F
         vm.set_load_globals(true);
         let result;
         if luaL_loadbuffer(l, body.as_ptr().cast(), body.len(), c"@user_function".as_ptr()) != 0 {
-            let msg = vm::to_bytes(l, -1).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+            let msg = vm::to_bytes(l, -1).map(redis_proto::escape).unwrap_or_default();
             lua_pop(l, 1);
             result = Err(format!("Error compiling function: {msg}"));
         } else {
@@ -509,7 +509,7 @@ unsafe fn run_library(vm: &mut Vm, body: &[u8], timeout_ms: u64) -> Result<Vec<F
                 for f in &load.functions {
                     luaL_unref(l, LUA_REGISTRYINDEX, f.lua_ref);
                 }
-                result = Err(format!("Error registering functions: {}", String::from_utf8_lossy(&info.msg)));
+                result = Err(format!("Error registering functions: {}", redis_proto::escape(&info.msg)));
             } else {
                 result = Ok(std::mem::take(&mut load.functions));
             }
@@ -739,14 +739,14 @@ unsafe fn invoke(cx: &mut Cx, l: *mut lua_State, cmd: &[Bytes], nkeys: usize, na
         let rc = if eval { lua_pcall(l, 0, 1, -2) } else { lua_pcall(l, 2, 1, -4) };
         let reply = if rc != 0 {
             let r = if lua_type(l, -1) != LUA_TTABLE {
-                let msg = vm::to_bytes(l, -1).map(|b| String::from_utf8_lossy(&b[..b.len().min(100)]).into_owned()).unwrap_or_else(|| "execution failure".into());
+                let msg = vm::to_bytes(l, -1).map(|b| redis_proto::escape_prefix(b, 100)).unwrap_or_else(|| "execution failure".into());
                 Reply::Error(format!("ERR Error running script {name}, {msg}").replace(['\r', '\n'], " ").trim_end().to_string())
             } else {
                 let info = vm::error_info(l);
                 run.error_counted = info.counted;
-                let mut msg = String::from_utf8_lossy(&info.msg).into_owned();
+                let mut msg = redis_proto::escape(&info.msg);
                 if let (Some(line), Some(source)) = (&info.line, &info.source) {
-                    msg.push_str(&format!(" script: {name}, on {}:{}.", String::from_utf8_lossy(source), String::from_utf8_lossy(line)));
+                    msg.push_str(&format!(" script: {name}, on {}:{}.", redis_proto::escape(source), redis_proto::escape(line)));
                 }
                 Reply::Error(msg.replace(['\r', '\n'], " "))
             };
@@ -1008,7 +1008,7 @@ fn function_load(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             pos += 1;
             continue;
         }
-        return Err(Error::msg(format!("ERR Unknown option given: {}", String::from_utf8_lossy(&args[pos]))));
+        return Err(Error::msg(format!("ERR Unknown option given: {}", redis_proto::escape(&args[pos]))));
     }
     let timeout = if cx.client.internal || cx.mode == Mode::Replay { 0 } else { LOAD_TIMEOUT_MS };
     let name = cx.eng.scripting.load_library(&args[pos], replace, timeout).map_err(|e| Error::msg(format!("ERR {e}")))?;
@@ -1101,7 +1101,7 @@ fn function_list(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             i += 1;
             pattern = Some(&args[i]);
         } else {
-            return Err(Error::msg(format!("ERR Unknown argument {}", String::from_utf8_lossy(&args[i]))));
+            return Err(Error::msg(format!("ERR Unknown argument {}", redis_proto::escape(&args[i]))));
         }
         i += 1;
     }

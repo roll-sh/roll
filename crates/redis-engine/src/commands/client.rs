@@ -65,7 +65,7 @@ fn setinfo(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let v = &args[3];
     let lib_name = eq(&args[2], "lib-name");
     if !lib_name && !eq(&args[2], "lib-ver") {
-        return Err(Error::msg(format!("ERR Unrecognized option '{}'", String::from_utf8_lossy(&args[2]))));
+        return Err(Error::msg(format!("ERR Unrecognized option '{}'", redis_proto::escape(&args[2]))));
     }
     if v.iter().any(|&c| !(b'!'..=b'~').contains(&c)) {
         return Err(Error::msg(format!(
@@ -112,7 +112,7 @@ fn type_by_name(name: &[u8]) -> Result<u8, Error> {
         "slave" | "replica" => 1,
         "pubsub" => 2,
         "master" => 3,
-        _ => return Err(Error::msg(format!("ERR Unknown client type '{}'", String::from_utf8_lossy(name)))),
+        _ => return Err(Error::msg(format!("ERR Unknown client type '{}'", redis_proto::escape(name)))),
     })
 }
 
@@ -376,7 +376,7 @@ fn kill(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 laddr = Some(v.clone());
             } else if eq(o, "user") {
                 let u = cx.eng.acl.read().user(v).cloned();
-                user = Some(u.ok_or_else(|| Error::msg(format!("ERR No such user '{}'", String::from_utf8_lossy(v))))?);
+                user = Some(u.ok_or_else(|| Error::msg(format!("ERR No such user '{}'", redis_proto::escape(v))))?);
             } else if eq(o, "skipme") {
                 skipme = if eq(v, "yes") {
                     true
