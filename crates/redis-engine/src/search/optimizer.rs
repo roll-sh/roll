@@ -118,7 +118,8 @@ impl<'a> Optimizer<'a> {
     fn build(plan: &Plan, mode: &'static str, child: BoxIt<'a>, ix: &'a Index, q: &'a Qcx<'a>, min_heap: usize) -> BoxIt<'a> {
         let Some(field) = plan.field else { return child };
         let asc = plan.asc;
-        let num_docs = ix.docs.size;
+        // `docs.size`: the module's table counts from 1 (doc id 0 is reserved).
+        let num_docs = ix.docs.size + 1;
         let child_estimate = child.num_estimated();
         let mut nf = match &plan.nf {
             Some(n) => NumericFilter { ascending: asc, ..n.filter() },
