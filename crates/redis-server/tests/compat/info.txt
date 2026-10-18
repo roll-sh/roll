@@ -67,8 +67,8 @@ PUBLISH ch m
 
 # ---- expiry counters ----
 CONFIG RESETSTAT
-SET e1 v PX 1
-SET e2 v PX 1
+SET e1 v PX 20
+SET e2 v PX 20
 HSET h f1 v f2 v f3 v
 HPEXPIRE h 1 FIELDS 2 f1 f2
 @sleep 300
