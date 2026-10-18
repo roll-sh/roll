@@ -44,3 +44,649 @@ pub(super) fn ft_explain(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub(super) fn ft_explaincli(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     explain_common(cx, args, "FT.EXPLAINCLI", true)
 }
+
+// ---------------------------------------------------------------------------------------------
+// FT.SEARCH (`AREQ_Execute` over the search pipeline: query, scorer, sorter, pager, loader)
+
+use crate::engine::Engine;
+use crate::search::areq::{
+    F_IS_SEARCH, F_NOROWS, F_SEND_HIGHLIGHT, F_SEND_NOFIELDS, F_SEND_PAYLOADS, F_SEND_SCOREEXPLAIN, F_SEND_SCORES, F_SEND_SORTKEYS, F_TYPED, FORMAT_EXPAND, Step,
+};
+use crate::search::doctable::{DOC_DELETED, DOC_HAS_PAYLOAD, Dmd, SortVal};
+use crate::search::eval::RsValue;
+use crate::search::index::Index;
+use crate::search::iters::{IxResult, Qcx};
+use crate::search::qeval::EvalCx;
+use crate::search::scorers::{self, Expl, Scorer};
+use crate::search::spec::{self as sspec, DocType, Spec};
+use std::cmp::Ordering;
+
+const K_DOC_SRC: u32 = 0x01;
+const K_SCHEMA_SRC: u32 = 0x02;
+const K_SV_SRC: u32 = 0x04;
+const K_QUERY_SRC: u32 = 0x08;
+const K_OVERRIDE: u32 = 0x20;
+const K_FORCE_LOAD: u32 = 0x40;
+const K_HIDDEN: u32 = 0x100;
+const K_EXPLICIT_RETURN: u32 = 0x200;
+const K_VAL_AVAILABLE: u32 = 0x400;
+const K_IS_LOADED: u32 = 0x800;
+const K_NUMERIC: u32 = 0x1000;
+const K_TRANSIENT: u32 = K_OVERRIDE | K_FORCE_LOAD | 0x10;
+
+/// `RLookupKey`.
+struct LKey {
+    name: Bytes,
+    path: Bytes,
+    flags: u32,
+    svidx: usize,
+    dst: usize,
+    dead: bool,
+}
+
+/// `RLookup`: keys in creation order (an override replaces its key in place).
+#[derive(Default)]
+struct Lookup {
+    keys: Vec<LKey>,
+    ndst: usize,
+    all_loaded: bool,
+}
+
+impl Lookup {
+    fn find(&self, name: &[u8]) -> Option<usize> {
+        self.keys.iter().position(|k| !k.dead && k.name[..] == *name)
+    }
+
+    fn push(&mut self, name: &[u8], flags: u32) -> usize {
+        self.keys.push(LKey { name: Bytes::copy_from_slice(name), path: Bytes::copy_from_slice(name), flags, svidx: 0, dst: self.ndst, dead: false });
+        self.ndst += 1;
+        self.keys.len() - 1
+    }
+
+    fn override_key(&mut self, i: usize, flags: u32) -> usize {
+        self.keys[i].dead = true;
+        let k = &self.keys[i];
+        let nk = LKey { name: k.name.clone(), path: k.name.clone(), flags, svidx: 0, dst: k.dst, dead: false };
+        self.keys.insert(i + 1, nk);
+        i + 1
+    }
+
+    /// `updateKeyFromFieldSpec`.
+    fn set_spec(&mut self, i: usize, fs: &sspec::Field) {
+        let k = &mut self.keys[i];
+        k.flags |= K_DOC_SRC | K_SCHEMA_SRC;
+        k.path = fs.path().clone();
+        if fs.sortable() {
+            k.flags |= K_SV_SRC;
+            k.svidx = fs.sort_idx.max(0) as usize;
+            if fs.has(sspec::F_UNF) {
+                k.flags |= K_VAL_AVAILABLE;
+            }
+        }
+        if fs.is(sspec::T_NUMERIC) {
+            k.flags |= K_NUMERIC;
+        }
+    }
+
+    /// `RLookup_GetKey_Read`.
+    fn get_read(&mut self, spec: &Spec, name: &[u8], flags: u32) -> Option<usize> {
+        if let Some(i) = self.find(name) {
+            return Some(i);
+        }
+        let fs = spec.field(name)?;
+        if !fs.sortable() && !self.all_loaded {
+            return None;
+        }
+        let i = self.push(name, flags & !K_TRANSIENT);
+        self.set_spec(i, fs);
+        Some(i)
+    }
+
+    /// `RLookup_GetKey_Load`.
+    fn get_load(&mut self, spec: &Spec, name: &[u8], field: &[u8], flags: u32) -> Option<usize> {
+        let base = (flags & !K_TRANSIENT) | K_DOC_SRC | K_IS_LOADED;
+        let i = match self.find(name) {
+            Some(i) => {
+                let kf = self.keys[i].flags;
+                if (kf & K_VAL_AVAILABLE != 0 && kf & K_IS_LOADED == 0 && flags & (K_OVERRIDE | K_FORCE_LOAD) == 0)
+                    || (kf & K_IS_LOADED != 0 && flags & K_OVERRIDE == 0)
+                    || (kf & K_QUERY_SRC != 0 && flags & K_OVERRIDE == 0)
+                {
+                    self.keys[i].flags |= flags & K_EXPLICIT_RETURN;
+                    return None;
+                }
+                self.override_key(i, base)
+            }
+            None => self.push(name, base),
+        };
+        match spec.field(field) {
+            Some(fs) => {
+                self.set_spec(i, fs);
+                if self.keys[i].flags & K_VAL_AVAILABLE != 0 && flags & K_FORCE_LOAD == 0 {
+                    return None;
+                }
+            }
+            None => self.keys[i].path = Bytes::copy_from_slice(field),
+        }
+        Some(i)
+    }
+}
+
+/// `RLookupRow`: values written by the pipeline, then the document's sorting vector.
+struct Row<'d> {
+    dyn_vals: Vec<Option<RsValue>>,
+    sv: &'d [SortVal],
+}
+
+fn sort_val(v: &SortVal) -> Option<RsValue> {
+    match v {
+        SortVal::Null => None,
+        SortVal::Num(n) => Some(RsValue::Number(*n)),
+        SortVal::Str(s) => Some(RsValue::String(s.to_vec())),
+        SortVal::Multi(m) => Some(RsValue::Array(m.iter().map(|v| sort_val(v).unwrap_or(RsValue::Null)).collect())),
+    }
+}
+
+impl Row<'_> {
+    fn get(&self, k: &LKey) -> Option<RsValue> {
+        if let Some(Some(v)) = self.dyn_vals.get(k.dst) {
+            return Some(v.clone());
+        }
+        if k.flags & K_SV_SRC != 0 {
+            return self.sv.get(k.svidx).and_then(sort_val);
+        }
+        None
+    }
+
+    fn set(&mut self, k: &LKey, v: RsValue) {
+        if self.dyn_vals.len() <= k.dst {
+            self.dyn_vals.resize(k.dst + 1, None);
+        }
+        self.dyn_vals[k.dst] = Some(v);
+    }
+}
+
+/// A result moving down the pipeline (`SearchResult`).
+struct Res<'d> {
+    dmd: &'d Dmd,
+    score: f64,
+    expl: Option<Expl>,
+    row: Row<'d>,
+}
+
+/// The document a result loads from.
+enum Doc<'e> {
+    Hash(&'e crate::types::Hash),
+    Json(&'e crate::json::value::J),
+}
+
+fn open_doc<'e>(eng: &'e Engine, db: usize, d: &Dmd) -> Option<Doc<'e>> {
+    match (&super::ft::live(eng, db, &d.key)?.value, d.doc_type) {
+        (crate::value::Value::Hash(h), DocType::Hash) => Some(Doc::Hash(h)),
+        (crate::value::Value::Json(j), DocType::Json) => Some(Doc::Json(j.root())),
+        _ => None,
+    }
+}
+
+fn json_value(nodes: &[crate::json::Node], dialect: u32) -> Option<RsValue> {
+    let first = nodes.first()?;
+    if dialect < 3 {
+        return Some(super::ft::json_rs_value(first));
+    }
+    let left = match first.ty() {
+        crate::json::path::Ty::Array => first.values().first().map_or(RsValue::Null, super::ft::json_rs_value),
+        _ => super::ft::json_rs_value(first),
+    };
+    let all: Vec<crate::json::value::J> = nodes.iter().map(|n| crate::json::ser::plain(*n)).collect();
+    let mid = RsValue::String(crate::json::ser::compact(&all).into_bytes());
+    let right = RsValue::Array(nodes.iter().map(json_expanded).collect());
+    Some(RsValue::Trio(Box::new([left, mid, right])))
+}
+
+/// `jsonValToValueExpanded`: objects as maps and arrays as arrays, recursively.
+fn json_expanded(n: &crate::json::Node) -> RsValue {
+    if let Some(o) = n.obj() {
+        return RsValue::Map(o.iter().map(|(k, v)| (RsValue::RedisString(k.as_bytes().to_vec()), json_expanded(&crate::json::Node::Ref(v)))).collect());
+    }
+    if let Some(a) = n.arr() {
+        return RsValue::Array(a.iter().map(|v| json_expanded(&v)).collect());
+    }
+    super::ft::json_rs_value(n)
+}
+
+/// `RLookup_LoadDocument` for the keys given, or every field (LOAD ALL).
+#[allow(clippy::too_many_arguments)]
+fn load(eng: &Engine, db: usize, lk: &mut Lookup, spec: &Spec, keys: Option<&[usize]>, r: &mut Res<'_>, force: bool, dialect: u32) -> bool {
+    let Some(doc) = open_doc(eng, db, r.dmd) else { return false };
+    match keys {
+        Some(keys) => {
+            for &i in keys {
+                let k = &lk.keys[i];
+                if !force && (k.flags & K_VAL_AVAILABLE != 0 || (k.flags & K_SV_SRC != 0 && r.row.get(k).is_none())) {
+                    continue;
+                }
+                let path = crate::util::cstr(&k.path);
+                let v = match &doc {
+                    Doc::Hash(h) => match h.get(path) {
+                        Some(v) if k.flags & K_NUMERIC != 0 => Some(RsValue::Number(crate::search::index::string_to_double(v).unwrap_or(0.0))),
+                        Some(v) => Some(RsValue::RedisString(v.to_vec())),
+                        None if path == b"__key" => Some(RsValue::RedisString(crate::util::cstr(&r.dmd.key).to_vec())),
+                        None => None,
+                    },
+                    Doc::Json(j) => {
+                        if path.first() == Some(&b'$') {
+                            super::ft::json_get(j, path).and_then(|n| json_value(&n, dialect))
+                        } else if path == b"__key" {
+                            Some(RsValue::String(crate::util::cstr(&r.dmd.key).to_vec()))
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(v) = v {
+                    let k = &lk.keys[i];
+                    r.row.set(k, v);
+                }
+            }
+        }
+        None => match &doc {
+            Doc::Hash(h) => {
+                let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                let mut cursor = 0;
+                loop {
+                    match h.scan_table(cursor, |f, v, _| pairs.push((f.to_vec(), v.to_vec()))) {
+                        Some(0) => break,
+                        Some(c) => cursor = c,
+                        None => {
+                            pairs.extend(h.iter().map(|(f, v, _)| (f.to_vec(), v.to_vec())));
+                            break;
+                        }
+                    }
+                }
+                for (f, v) in pairs {
+                    let i = match lk.find(&f) {
+                        Some(i) if lk.keys[i].flags & K_QUERY_SRC != 0 => continue,
+                        Some(i) => i,
+                        None => match lk.get_load(spec, &f, &f, K_FORCE_LOAD) {
+                            Some(i) => i,
+                            None => continue,
+                        },
+                    };
+                    let k = &lk.keys[i];
+                    r.row.set(k, RsValue::RedisString(v));
+                }
+            }
+            Doc::Json(j) => {
+                let i = lk.find(b"$").or_else(|| lk.get_load(spec, b"$", b"$", K_FORCE_LOAD));
+                if let Some(i) = i {
+                    let v = if dialect >= 3 {
+                        json_value(&super::ft::json_get(j, b"$").unwrap_or_default(), dialect)
+                    } else {
+                        Some(RsValue::RedisString(crate::json::ser::compact(&crate::json::ser::plain(crate::json::Node::Ref(j))).into_bytes()))
+                    };
+                    if let Some(v) = v {
+                        let k = &lk.keys[i];
+                        r.row.set(k, v);
+                    }
+                }
+            }
+        },
+    }
+    true
+}
+
+/// `SearchResult_CmpByFields` (descending unless a key's ascending bit is set; the doc id
+/// breaks ties).
+fn cmp_fields(lk: &Lookup, keys: &[usize], asc: u64, a: &Res<'_>, b: &Res<'_>) -> Ordering {
+    for (i, &k) in keys.iter().enumerate() {
+        let ascending = asc & (1u64 << i) != 0;
+        let k = &lk.keys[k];
+        match (a.row.get(k), b.row.get(k)) {
+            (Some(x), Some(y)) => {
+                let o = match (&x, &y) {
+                    (RsValue::String(s1), RsValue::String(s2)) => s1.cmp(s2),
+                    _ => x.cmp_with(&y, None),
+                };
+                if o != Ordering::Equal {
+                    return if ascending { o.reverse() } else { o };
+                }
+            }
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => {}
+        }
+    }
+    let ascending = !keys.is_empty() && asc & (1u64 << (keys.len() - 1)) != 0;
+    let o = if a.dmd.id < b.dmd.id { Ordering::Less } else { Ordering::Greater };
+    if ascending { o.reverse() } else { o }
+}
+
+/// `cmpByScore`.
+fn cmp_score(a: &Res<'_>, b: &Res<'_>) -> Ordering {
+    match a.score.partial_cmp(&b.score) {
+        Some(Ordering::Equal) | None => {
+            if a.dmd.id > b.dmd.id {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        Some(o) => o,
+    }
+}
+
+fn fmt_17g(v: f64) -> String {
+    crate::util::fmt_g_prec(v, 17)
+}
+
+/// `reeval_key`: a sort key as `#number` or `$string`.
+fn sortkey_reply(v: Option<RsValue>) -> Reply {
+    let v = match v {
+        Some(RsValue::Trio(t)) => t[0].clone(),
+        Some(v) => v,
+        None => return Reply::Nil,
+    };
+    match v {
+        RsValue::Number(n) => Reply::Bulk(Bytes::from(format!("#{}", fmt_17g(n)))),
+        RsValue::String(s) | RsValue::RedisString(s) => {
+            let mut out = b"$".to_vec();
+            out.extend_from_slice(crate::util::cstr(&s));
+            Reply::Bulk(Bytes::from(out))
+        }
+        _ => Reply::Nil,
+    }
+}
+
+/// `SEReply`.
+fn explain_reply(e: &Expl) -> Reply {
+    if e.children.is_empty() {
+        return Reply::Status(e.s.clone());
+    }
+    Reply::Array(vec![Reply::Status(e.s.clone()), Reply::Array(e.children.iter().map(explain_reply).collect())])
+}
+
+/// FT.SEARCH index query [options].
+pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if args.len() < 3 {
+        return Err(arity_error("FT.SEARCH"));
+    }
+    verify_acl(cx, &args[1])?;
+    let mut req = areq::compile(Command::Search, &cx.eng.cfg, &args[2..])?;
+    let Some(name) = cx.eng.search.load(crate::util::cstr(&args[1]), false) else {
+        return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(&args[1]))).into());
+    };
+    let resp3 = cx.client.resp >= 3;
+    {
+        let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
+        req.apply_context(ix, resp3)?;
+    }
+    if req.flags & F_SEND_HIGHLIGHT != 0 {
+        return Err(QErr::new(Code::Generic, "HIGHLIGHT and SUMMARIZE are not supported yet").into());
+    }
+    let db = cx.client.db;
+    let eng: &Engine = cx.eng;
+    let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
+    let reply = run_search(eng, ix, &req, db, resp3)?;
+    if let Some(ix) = cx.eng.search.indexes.get_mut(&name) {
+        ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
+    }
+    Ok(reply)
+}
+
+fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool) -> Result<Reply, Error> {
+    let cfg = &eng.cfg;
+    let spec = &ix.spec;
+    let flags = req.flags;
+    let now = crate::util::now_ms();
+    let mut ft_to_field = Vec::new();
+    for (i, f) in spec.fields.iter().enumerate() {
+        if let Some(id) = f.ft_id {
+            if ft_to_field.len() <= id {
+                ft_to_field.resize(id + 1, 0);
+            }
+            ft_to_field[id] = i as u16;
+        }
+    }
+    let q = Qcx { docs: &ix.docs, now_ms: now, ft_to_field };
+    let mut ecx = EvalCx {
+        ix,
+        q: &q,
+        req_mask: req.opts.field_mask,
+        slop: req.opts.slop as i64,
+        in_order: req.opts.flags & qast::S_IN_ORDER != 0,
+        dialect: req.dialect,
+        max_expansions: cfg.num("search-max-prefix-expansions").max(0) as usize,
+        min_prefix: cfg.num("search-min-prefix").max(0) as usize,
+        min_heap: cfg.num("search-union-iterator-heap").max(0) as usize,
+        prioritize: cfg.flag("search-_prioritize-intersect-union-children"),
+        in_not: false,
+        expansions_warning: false,
+    };
+    let root = req.root.as_ref().expect("a parsed query");
+    let mut it = ecx.iterate(root)?;
+    let warn_expansions = ecx.expansions_warning;
+
+    let arrange = req.steps.iter().rev().find_map(|s| if let Step::Arrange(a) = s { Some(a) } else { None });
+    let (offset, limit) = arrange.map_or((0, 10), |a| (a.offset as usize, if a.is_limited { a.limit as usize } else { 10 }));
+    let mut max_results = offset + limit;
+    if max_results == 0 {
+        max_results = 10;
+    }
+    max_results = max_results.min(req.max_search_results as usize);
+    let norows = flags & F_NOROWS != 0 || max_results == 0;
+    let sort_keys = arrange.and_then(|a| a.sort_keys.as_ref()).filter(|k| !k.is_empty());
+    let scoring = flags & F_SEND_SCORES != 0 || (flags & F_IS_SEARCH != 0 && flags & F_NOROWS == 0 && !req.has_query_sortby());
+    let scorer_name = req.opts.scorer.as_ref().map(|s| crate::util::cstr(s).to_vec()).unwrap_or_else(|| {
+        let s = cfg.text("search-default-scorer:value");
+        if s.is_empty() { b"BM25STD".to_vec() } else { s.into_bytes() }
+    });
+    let scorer = Scorer::find(&scorer_name).unwrap_or(Scorer::Bm25Std);
+    let avg = if ix.stats.num_documents != 0 { ix.stats.total_docs_len as f64 / ix.stats.num_documents as f64 } else { 0.0 };
+    let sargs = scorers::Args { avg_doc_len: avg, tanh_factor: req.bm25std_tanh as i64, payload: req.payload.as_deref() };
+    let explain = flags & F_SEND_SCOREEXPLAIN != 0;
+
+    let mut lk = Lookup::default();
+    // the sort keys: read from the sorting vector, else loaded
+    let mut sort_lk: Vec<usize> = Vec::new();
+    let mut sort_load: Vec<usize> = Vec::new();
+    if let Some(keys) = sort_keys
+        && !norows
+    {
+        for k in keys {
+            let k = crate::util::cstr(k);
+            match lk.get_read(spec, k, 0) {
+                Some(i) => sort_lk.push(i),
+                None => {
+                    let i = lk.get_load(spec, k, k, 0);
+                    match i {
+                        Some(i) if lk.keys[i].flags & K_SCHEMA_SRC != 0 => {
+                            sort_load.push(i);
+                            sort_lk.push(i);
+                        }
+                        _ => return Err(QErr::user(Code::NoPropKey, "Property", format!(" `{}` not loaded nor in schema", String::from_utf8_lossy(k))).into()),
+                    }
+                }
+            }
+        }
+    }
+    let force = spec.is_json() && req.dialect < 3;
+
+    // the query and scorer processors
+    let mut total: i64 = 0;
+    let mut results: Vec<Res<'_>> = Vec::new();
+    let mut scores: Vec<f64> = Vec::new();
+    while it.read() {
+        let Some(r) = it.current() else { break };
+        let r: IxResult = r.clone();
+        let Some(dmd) = ix.docs.get(r.doc_id) else { continue };
+        if dmd.flags & DOC_DELETED != 0 || (dmd.expire_at != 0 && dmd.expire_at <= now) {
+            continue;
+        }
+        total += 1;
+        if norows {
+            continue;
+        }
+        let mut res = Res { dmd, score: 0.0, expl: None, row: Row { dyn_vals: Vec::new(), sv: &dmd.sort } };
+        if scoring {
+            let (s, e) = scorer.score(&sargs, &r, dmd, 0.0, explain);
+            if s == scorers::FILTEROUT {
+                total -= 1;
+                continue;
+            }
+            res.score = s;
+            res.expl = e;
+        }
+        if !sort_load.is_empty() {
+            let keys = sort_load.clone();
+            load(eng, db, &mut lk, spec, Some(&keys), &mut res, force, req.dialect);
+        }
+        scores.push(res.score);
+        results.push(res);
+    }
+    if scoring && scorer == Scorer::Bm25StdNorm {
+        let max = scores.iter().fold(0.0f64, |m, &s| m.max(s));
+        for r in &mut results {
+            let old = r.score;
+            if max != 0.0 {
+                r.score /= max;
+            }
+            if let Some(e) = &mut r.expl {
+                e.s = format!("Final BM25STD.NORM: {:.2} = Original Score: {:.2} / Max Score: {:.2}", r.score, old, max);
+            }
+        }
+    }
+
+    // the sorter (top `max_results`) and the pager
+    if !norows {
+        if !sort_lk.is_empty() {
+            let asc = arrange.map_or(0, |a| a.asc_map);
+            results.sort_by(|a, b| cmp_fields(&lk, &sort_lk, asc, b, a));
+        } else {
+            results.sort_by(|a, b| cmp_score(b, a));
+        }
+        results.truncate(max_results);
+        if offset > 0 {
+            results.drain(..offset.min(results.len()));
+        }
+    }
+
+    // the output loader
+    let mut skipped = 0;
+    if !norows && flags & F_SEND_NOFIELDS == 0 {
+        let mut keys: Vec<usize> = Vec::new();
+        let explicit = req.out_fields.explicit_return;
+        if explicit {
+            for rf in &req.out_fields.fields {
+                let lf = K_EXPLICIT_RETURN | if force { K_FORCE_LOAD } else { 0 };
+                if let Some(i) = lk.get_load(spec, crate::util::cstr(&rf.name), crate::util::cstr(&rf.path), lf) {
+                    keys.push(i);
+                }
+            }
+        }
+        if !keys.is_empty() || !explicit {
+            if !explicit {
+                lk.all_loaded = !spec.is_json();
+            }
+            let mut kept = Vec::with_capacity(results.len());
+            for mut r in results {
+                let ok = if explicit { load(eng, db, &mut lk, spec, Some(&keys), &mut r, force, req.dialect) } else { load(eng, db, &mut lk, spec, None, &mut r, force, req.dialect) };
+                if ok {
+                    kept.push(r);
+                } else {
+                    skipped += 1;
+                }
+            }
+            results = kept;
+        }
+    }
+
+    // the reply
+    let reported = total - skipped;
+    let rule = &spec.rule;
+    let special = |n: &[u8]| [&rule.lang_field, &rule.score_field, &rule.payload_field].iter().any(|f| f.as_deref().is_some_and(|f| f.as_bytes() == n));
+    let explicit = req.out_fields.explicit_return;
+    let typed = flags & F_TYPED != 0;
+    let expand = flags & FORMAT_EXPAND != 0;
+    let mut out_rows = Vec::with_capacity(results.len());
+    for r in &results {
+        let mut parts: Vec<(&'static str, Reply)> = Vec::new();
+        if flags & F_IS_SEARCH != 0 {
+            parts.push(("id", Reply::Bulk(r.dmd.key.clone())));
+        }
+        if flags & F_SEND_SCORES != 0 {
+            let s = if explain {
+                Reply::Array(vec![Reply::Double(r.score), r.expl.as_ref().map_or(Reply::Nil, explain_reply)])
+            } else {
+                Reply::Double(r.score)
+            };
+            parts.push(("score", s));
+        }
+        if flags & F_SEND_PAYLOADS != 0 {
+            let p = match &r.dmd.payload {
+                Some(p) if r.dmd.flags & DOC_HAS_PAYLOAD != 0 => Reply::Bulk(p.clone()),
+                _ => Reply::Nil,
+            };
+            parts.push(("payload", p));
+        }
+        if flags & F_SEND_SORTKEYS != 0 {
+            // `getReplyKey`: the sorting vector's slot when the key has one, else the row.
+            let v = sort_lk.first().and_then(|&k| {
+                let k = &lk.keys[k];
+                if k.flags & K_SV_SRC != 0 && r.row.sv.len() > k.svidx { sort_val(&r.row.sv[k.svidx]) } else { r.row.get(k) }
+            });
+            parts.push(("sortkey", sortkey_reply(v)));
+        }
+        if flags & F_SEND_NOFIELDS == 0 {
+            let mut fields = Vec::new();
+            for k in &lk.keys {
+                if k.dead || k.flags & K_HIDDEN != 0 || (explicit && k.flags & K_EXPLICIT_RETURN == 0) || special(&k.name) {
+                    continue;
+                }
+                let Some(mut v) = r.row.get(k) else { continue };
+                if let RsValue::Trio(t) = &v {
+                    v = if expand {
+                        t[2].clone()
+                    } else if req.dialect >= 3 {
+                        t[1].clone()
+                    } else {
+                        t[0].clone()
+                    };
+                }
+                fields.push((Reply::Bulk(k.name.clone()), v.reply(resp3, typed, expand)));
+            }
+            parts.push(("extra_attributes", Reply::Map(fields)));
+        }
+        out_rows.push(parts);
+    }
+    if resp3 {
+        let results: Vec<Reply> = out_rows
+            .into_iter()
+            .map(|parts| {
+                let mut m: Vec<(Reply, Reply)> = parts.into_iter().map(|(k, v)| (Reply::Status(k.into()), v)).collect();
+                m.push((Reply::Status("values".into()), Reply::Array(Vec::new())));
+                Reply::Map(m)
+            })
+            .collect();
+        let mut warnings = Vec::new();
+        if warn_expansions {
+            warnings.push(Reply::Status("Max prefix expansions limit was reached".into()));
+        }
+        return Ok(Reply::Map(vec![
+            (Reply::Status("attributes".into()), Reply::Array(Vec::new())),
+            (Reply::Status("format".into()), Reply::Status(if expand { "EXPAND" } else { "STRING" }.into())),
+            (Reply::Status("results".into()), Reply::Array(results)),
+            (Reply::Status("total_results".into()), Reply::Int(reported)),
+            (Reply::Status("warning".into()), Reply::Array(warnings)),
+        ]));
+    }
+    let mut out = vec![Reply::Int(reported)];
+    for parts in out_rows {
+        for (k, v) in parts {
+            match (k, v) {
+                ("extra_attributes", Reply::Map(m)) => out.push(Reply::Array(m.into_iter().flat_map(|(a, b)| [a, b]).collect())),
+                (_, v) => out.push(v),
+            }
+        }
+    }
+    Ok(Reply::Array(out))
+}

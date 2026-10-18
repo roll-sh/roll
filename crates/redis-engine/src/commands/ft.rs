@@ -164,7 +164,7 @@ pub(crate) fn resolve_probes(eng: &mut Engine) {
 }
 
 /// The key's live entry in a database, without side effects.
-fn live<'e>(eng: &'e Engine, db: usize, key: &[u8]) -> Option<&'e crate::value::Entry> {
+pub(super) fn live<'e>(eng: &'e Engine, db: usize, key: &[u8]) -> Option<&'e crate::value::Entry> {
     let now = crate::util::now_ms();
     eng.dbs.get(db)?.keys.get(key).filter(|e| e.expire == 0 || e.expire > now)
 }
@@ -272,7 +272,7 @@ impl crate::search::eval::Lookup for Row {
 }
 
 /// `jsonValToValue`: strings, numbers (booleans as 0/1), null, and arrays/objects serialized.
-fn json_rs_value(n: &Node) -> RsValue {
+pub(super) fn json_rs_value(n: &Node) -> RsValue {
     match n.ty() {
         Ty::String => RsValue::String(n.as_str().unwrap_or("").as_bytes().to_vec()),
         Ty::Long | Ty::Double => RsValue::Number(n.double().unwrap_or(0.0)),
@@ -481,7 +481,7 @@ fn load_hash(eng: &Engine, ix: &Index, db: usize, key: &[u8]) -> Result<Document
 }
 
 /// The first value a JSONPath selects (`japi->get` + `japi->next`), if the path compiles.
-fn json_get<'j>(root: &'j crate::json::value::J, path: &[u8]) -> Option<Vec<Node<'j>>> {
+pub(super) fn json_get<'j>(root: &'j crate::json::value::J, path: &[u8]) -> Option<Vec<Node<'j>>> {
     let p = std::str::from_utf8(crate::util::cstr(path)).ok()?;
     let q = jpath::compile(p).ok()?;
     if q.is_projection() {

@@ -37,7 +37,7 @@ pub static COMMANDS: &[Command] = &[
     cmd!("FT.MGET", -1, READONLY | MODULE, 0, 0, 0, not_yet, Module),
     cmd!("FT.PROFILE", -5, READONLY | MODULE, 0, 0, 0, not_yet, Module),
     cmd!("FT.SAFEADD", -1, WRITE | DENYOOM | MODULE, 2, 2, 1, not_yet, Module),
-    cmd!("FT.SEARCH", -3, READONLY | MODULE, 0, 0, 0, not_yet, Module),
+    cmd!("FT.SEARCH", -3, READONLY | MODULE, 0, 0, 0, super::ft_query::ft_search, Module),
     cmd!("FT.SPELLCHECK", -3, READONLY | MODULE, 0, 0, 0, not_yet, Module),
     cmd!("FT.SUGADD", -4, WRITE | DENYOOM | MODULE, 1, 1, 1, super::ft_sug::sugadd, Module),
     cmd!("FT.SUGDEL", 3, WRITE | MODULE, 1, 1, 1, super::ft_sug::sugdel, Module),

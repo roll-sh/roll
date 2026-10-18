@@ -10,7 +10,7 @@ use super::spec::{self, DocType, Field, Spec};
 use super::tokenize::{self, StopWords, Tokenizer};
 use super::triemap::TrieMap;
 use bytes::Bytes;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 /// `TrieType_MemUsage` per term: a node, its parent's pointer and key rune, and two runes.
 const TERM_TRIE_ENTRY: usize = 43;
@@ -278,7 +278,7 @@ pub struct Index {
     /// `keysDict`: a term's inverted index.
     pub terms: HashMap<Bytes, InvertedIndex>,
     /// The term trie (`sp->terms`).
-    pub term_trie: BTreeSet<Bytes>,
+    pub term_trie: super::trie::Trie,
     /// The text suffix trie (`sp->suffix`), when a text field has WITHSUFFIXTRIE.
     pub suffix: Option<TrieMap<Suffix>>,
     pub fields: Vec<FieldIndex>,
@@ -314,7 +314,7 @@ impl Index {
             id,
             docs: DocTable::new(cfg.num("search-max-doctablesize") as u64),
             terms: HashMap::new(),
-            term_trie: BTreeSet::new(),
+            term_trie: super::trie::Trie::new(super::trie::SortMode::Lex),
             suffix,
             fields,
             missing: HashMap::new(),
@@ -349,7 +349,7 @@ impl Index {
 
     /// `IndexSpec_collect_text_overhead`.
     pub fn text_overhead(&self) -> usize {
-        self.term_trie.len() * TERM_TRIE_ENTRY
+        self.term_trie.size() * TERM_TRIE_ENTRY
     }
 
     /// `IndexSpec_collect_tags_overhead`.
@@ -383,7 +383,7 @@ impl Index {
 
     /// `IndexSpec_AddTerm`.
     fn add_term(&mut self, term: &[u8]) {
-        if self.term_trie.insert(Bytes::copy_from_slice(term)) {
+        if self.term_trie.insert(term, 1.0, true, None, 1) == super::trie::TRIE_OK_NEW {
             self.stats.num_terms += 1;
             self.stats.terms_size += term.len() as u64;
         }
@@ -845,7 +845,7 @@ pub fn parse_geo(s: &[u8]) -> Result<(f64, f64), QErr> {
 
 /// `encodeGeo`: the point's 52-bit geohash, or the invalid coordinates error.
 pub fn encode_geo(lon: f64, lat: f64) -> Result<f64, QErr> {
-    crate::commands::geo::score_of(lon, lat)
+    super::geo::encode_geo(lon, lat)
         .map(|b| b as f64)
         .ok_or_else(|| QErr::user(Code::GeoCoordinatesInvalid, "Invalid geo coordinates", format!(": {lon:.6}, {lat:.6}")))
 }
