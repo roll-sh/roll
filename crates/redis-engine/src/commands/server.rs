@@ -823,7 +823,7 @@ pub fn memory_stats(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
         (Reply::bulk("overhead.total"), int(mh.overhead)),
         (Reply::bulk("db.dict.rehashing.count"), int(0)),
         (Reply::bulk("keys.count"), int(mh.keys)),
-        (Reply::bulk("keys.bytes-per-key"), int(if mh.keys > 0 { mh.dataset / mh.keys } else { 0 })),
+        (Reply::bulk("keys.bytes-per-key"), int(mh.dataset.checked_div(mh.keys).unwrap_or(0))),
         (Reply::bulk("dataset.bytes"), int(mh.dataset)),
         (Reply::bulk("dataset.percentage"), f32d(mh.dataset as f32 * 100.0 / net as f32)),
         (Reply::bulk("peak.percentage"), f32d(if mh.peak > 0 { mh.used as f32 * 100.0 / mh.peak as f32 } else { 0.0 })),
