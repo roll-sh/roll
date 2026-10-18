@@ -20,18 +20,32 @@
 //! like the module's live readers (new entries show, deleted documents are skipped), with
 //! wildcard ranges ending at the first chunk's max id; they open the readers the first chunk
 //! opened, with its IDFs, and expand prefixes, fuzzy terms and tag patterns to its terms
-//! (`Memo`), as the module's kept iterators do.
+//! (`Memo`), as the module's kept iterators do. FT.SEARCH WITHCURSOR reads the search pipeline
+//! (scorer, sorter, pager, output loader, highlighter) the same way. A profiled cursor's
+//! rebuilt iterators read their way back to where the earlier chunks stopped, read for read,
+//! and count from there, so every iterator's counters add up as the kept ones' do.
 //!
 //! Timeouts (`search-timeout`, TIMEOUT): the query reader checks the clock every 100 reads, and
-//! `_FT.DEBUG`'s `TIMEOUT_AFTER_N` times it out after that many results. Downstream, ON_TIMEOUT
-//! RETURN yields what the processors hold (sorters their heap, loaders their buffer; groupers
-//! keep accumulating on a cursor's next read) with a warning, FAIL replies with the timeout
-//! error (FT.PROFILE: no results, the warning), and a timed-out cursor stays open under RETURN.
+//! `_FT.DEBUG`'s `TIMEOUT_AFTER_N` times it out after that many results; NOT iterators check
+//! every 5000 documents they skip, against the deadline they were built with (a cursor's later
+//! reads keep it); under ON_TIMEOUT FAIL a query whose iterators took its time fails before its
+//! pipeline is built, and on the workers the blocked client's timer fails a chunk that ran past
+//! its timeout. Downstream, ON_TIMEOUT RETURN yields what the processors hold (sorters their
+//! heap, loaders their buffer; groupers keep accumulating on a cursor's next read) with a
+//! warning, FAIL replies with the timeout error (FT.PROFILE: no results, the warning), and a
+//! timed-out cursor stays open under RETURN. The term expansions' own clock checks (the tries'
+//! range, contains and wildcard walks) are not modelled: they only cut an expansion short once
+//! real time ran out.
 //!
 //! FT.PROFILE runs the same pipeline with every iterator and processor counted
 //! (`Profile_AddIters`, `Profile_AddRPs`). An FT.SEARCH's pipeline is built the way the module
 //! builds it (scorer, arrange, output loader and highlighter) for the counters; its reply is
 //! still FT.SEARCH's own.
+//!
+//! The memory guard (`oom`) stops queries before they run once used memory reaches
+//! `maxmemory`. The debug parameters that pause a query on the workers (`PAUSE_BEFORE_RP_N`,
+//! `PAUSE_AFTER_RP_N`, resumed by `_FT.DEBUG QUERY_CONTROLLER`) would hold the request while
+//! other clients run; queries run to completion here, so those parameters are refused.
 //!
 //! Groups come out in the order they were first seen (the module's order follows its
 //! per-process hash seed), and TOLIST keeps its values in insertion order for the same
@@ -71,6 +85,8 @@ use std::time::Instant;
 
 mod debug;
 mod hybrid;
+mod oom;
+pub(super) use oom::{guard as oom_guard, query as oom_query};
 pub(super) use hybrid::{debug_hybrid, debug_internal_hybrid, ft_hybrid, profile_hybrid};
 
 /// `_FT.DEBUG FT.SEARCH|FT.AGGREGATE|FT.PROFILE|_FT.SEARCH|_FT.AGGREGATE|_FT.PROFILE …
@@ -108,6 +124,10 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if args.len() < 3 {
         return Err(arity_error("FT.AGGREGATE"));
     }
+    // `DistAggregateCommandImp`'s memory guard.
+    if let Some(o) = oom::guard(cx) {
+        return oom::query(cx, o, args, None);
+    }
     verify_acl(cx, &args[1])?;
     aggregate_with(cx, args, None)
 }
@@ -129,11 +149,7 @@ pub(super) fn aggregate_with(cx: &mut Cx, args: &[Bytes], dbg: Option<&[Bytes]>)
     }
     let is_cursor = req.flags & F_IS_CURSOR != 0;
     if is_cursor {
-        // `parseCursorSettings`: MAXIDLE is at most `search-cursor-max-idle`.
-        let max = cx.eng.cfg.num("search-cursor-max-idle") as i64;
-        if req.cursor.max_idle == 0 || req.cursor.max_idle as i64 > max {
-            req.cursor.max_idle = max as u32;
-        }
+        req.cap_max_idle(&cx.eng.cfg);
     }
     // `IsNeededDepleter`: WITHCOUNT without a sort, a group or a count drains the query first.
     let f = req.flags;
@@ -153,6 +169,11 @@ pub(super) fn aggregate_with(cx: &mut Cx, args: &[Bytes], dbg: Option<&[Bytes]>)
         return Ok(reply);
     }
 
+    start_cursor(cx, name, req, db, resp3, background, None)
+}
+
+/// FT.SEARCH WITHCURSOR: the search pipeline's first chunk, the cursor left for the rest.
+pub(super) fn start_search_cursor(cx: &mut Cx, name: Bytes, req: areq::Request, db: usize, resp3: bool, background: bool) -> CmdResult {
     start_cursor(cx, name, req, db, resp3, background, None)
 }
 
@@ -257,6 +278,13 @@ pub(super) fn profile_with(cx: &mut Cx, args: &[Bytes], debug: bool, clock: Inst
         return Err(Error::msg("The QUERY keyword is expected"));
     }
     let internal = args[0].first() == Some(&b'_');
+    // `execCommandCommon`'s memory guard (the debug wrappers' `DEBUG_execCommandCommon` has
+    // none), over `argv[0], argv[1]` and the query's arguments.
+    if !debug && let Some(o) = oom::guard(cx) {
+        let mut v = vec![args[0].clone(), args[1].clone()];
+        v.extend_from_slice(&args[at + 1..]);
+        return oom::query(cx, o, &v, Some((limited, clock)));
+    }
     // `DEBUG_execCommandCommon` over `argv[0], argv[1]` and the query's arguments.
     let (rest, params): (Vec<Bytes>, Option<Vec<Bytes>>) = if debug {
         let mut v = vec![args[0].clone(), args[1].clone()];
@@ -293,11 +321,8 @@ pub(super) fn profile_with(cx: &mut Cx, args: &[Bytes], debug: bool, clock: Inst
     }
     let db = cx.client.db;
     // An internal profile may open a cursor (`_FT.CURSOR PROFILE` ends it with the profile).
-    if !search && req.flags & F_IS_CURSOR != 0 {
-        let max = cx.eng.cfg.num("search-cursor-max-idle") as i64;
-        if req.cursor.max_idle == 0 || req.cursor.max_idle as i64 > max {
-            req.cursor.max_idle = max as u32;
-        }
+    if req.flags & F_IS_CURSOR != 0 {
+        req.cap_max_idle(&cx.eng.cfg);
         let pc = ProfCur { limited, background, internal, clock: Some(clock), parse_ns, ..ProfCur::default() };
         return start_cursor(cx, name, req, db, resp3, background, Some(Box::new(pc)));
     }
@@ -342,6 +367,8 @@ struct ProfCur {
     iters: Option<Reply>,
     timed_out: bool,
     expansions: bool,
+    /// The memory guard's empty reply (ON_OOM RETURN).
+    oom: bool,
 }
 
 impl ProfCur {
@@ -392,6 +419,9 @@ impl ProfCur {
             shard.push(kv("Coordinator dispatch time [ms]", ms(0)));
         }
         let mut w = Vec::new();
+        if self.oom {
+            w.push(Reply::Status(oom::SHARD_WARNING.into()));
+        }
         if self.timed_out {
             w.push(Reply::Status(TIMEOUT_WARNING.into()));
         }
@@ -431,6 +461,27 @@ fn rps_reply(names: &[(String, bool)], counts: &[(u64, u64)]) -> Vec<Reply> {
         upstream = total;
     }
     out
+}
+
+/// An iterator profile less an earlier one of the same tree: what was counted since.
+fn sub_iters(now: Reply, base: &Reply) -> Reply {
+    match (now, base) {
+        (Reply::Map(a), Reply::Map(b)) if a.len() == b.len() => Reply::Map(
+            a.into_iter()
+                .zip(b)
+                .map(|((k, v), (_, w))| {
+                    let v = match (&k, v, w) {
+                        (Reply::Status(n), Reply::Int(x), Reply::Int(y)) if n == "Number of reading operations" => Reply::Int(x - y),
+                        (Reply::Status(n), Reply::Double(x), Reply::Double(y)) if n == "Time" => Reply::Double((x - y).max(0.0)),
+                        (_, v, w) => sub_iters(v, w),
+                    };
+                    (k, v)
+                })
+                .collect(),
+        ),
+        (Reply::Array(a), Reply::Array(b)) if a.len() == b.len() => Reply::Array(a.into_iter().zip(b).map(|(v, w)| sub_iters(v, w)).collect()),
+        (a, _) => a,
+    }
 }
 
 /// Two reads' iterator profiles (the same tree) as one: their counters and times summed.
@@ -810,6 +861,17 @@ impl Tmo {
         self.deadline = Instant::now().checked_add(std::time::Duration::from_millis(ms.max(0) as u64));
     }
 
+    /// `AREQ_ShouldCheckTimeout` (the debug timeout aside) and `TimedOut`: the check once the
+    /// query's iterators are built.
+    pub(super) fn plan_timed_out(&self) -> bool {
+        self.limiter.is_some() && self.passed()
+    }
+
+    /// The deadline the query's iterators check (`None`: `skipTimeoutChecks`).
+    pub(super) fn iter_deadline(&self) -> Option<Instant> {
+        self.limiter.and(self.deadline)
+    }
+
     /// `!skipTimeoutChecks`.
     pub(super) fn checks(&self) -> bool {
         self.checks
@@ -875,6 +937,8 @@ struct Pcx<'a> {
     policy: Policy,
     /// The query's clock.
     tmo: Tmo,
+    /// The query iterators' (NOT iterators' timeouts).
+    iclock: Option<&'a iters::IterClock>,
 }
 
 impl Pcx<'_> {
@@ -1026,6 +1090,9 @@ struct QueryIt<'a> {
     knn: bool,
     /// Those results, when the cursor resumes.
     rest: Option<VecDeque<IxResult>>,
+    /// A profiled cursor's resumed iterators, as their counters were once back where the
+    /// earlier chunks left them: what this chunk counts starts there.
+    base: Option<Pairs>,
 }
 
 impl<'a> Proc<'a> for QueryIt<'a> {
@@ -1034,7 +1101,14 @@ impl<'a> Proc<'a> for QueryIt<'a> {
     }
 
     fn profile_iters(&self, pc: &PCtx) -> Option<Pairs> {
-        Some(self.it.print(pc, None))
+        let now = self.it.print(pc, None);
+        Some(match &self.base {
+            Some(base) => match sub_iters(Reply::Map(now), &Reply::Map(base.clone())) {
+                Reply::Map(m) => m,
+                _ => unreachable!("a map"),
+            },
+            None => now,
+        })
     }
 
     fn next(&mut self, _up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
@@ -1089,9 +1163,33 @@ impl<'a> QueryIt<'a> {
                 ixr
             } else {
                 let more = match self.resume.take() {
+                    // Profiled, the rebuilt iterators read their way back to the last document,
+                    // read for read as the earlier chunks did, which leaves every one of them
+                    // where the module's kept iterators are; their counters start there.
+                    Some(last) if cx.prof.is_some() => {
+                        if let Some(c) = cx.iclock {
+                            c.paused.set(true);
+                        }
+                        let mut more = self.it.read();
+                        let at = |it: &mut BoxIt<'a>| it.current().map_or(u64::MAX, |c| c.doc_id);
+                        while more && at(&mut self.it) < last {
+                            more = self.it.read();
+                        }
+                        if let Some(c) = cx.iclock {
+                            c.paused.set(false);
+                        }
+                        self.base = Some(self.it.print(&PCtx { limited: false, clock: true }, None));
+                        if more && at(&mut self.it) == last { self.it.read() } else { more }
+                    }
                     Some(last) => self.it.skip_to(last + 1) != Skip::Eof,
                     None => self.it.read(),
                 };
+                // `ITERATOR_TIMEOUT`: a cursor's next read goes on from where the iterators
+                // stopped.
+                if cx.iclock.is_some_and(|c| c.timed_out.take()) {
+                    self.last = self.last.max(self.it.last_doc_id());
+                    return St::TimedOut;
+                }
                 if !more {
                     return St::Eof;
                 }
@@ -1449,9 +1547,37 @@ impl<'a> Proc<'a> for Counter {
     }
 }
 
-/// `RPHighlighter`'s place in a profiled FT.SEARCH pipeline (the reply's highlighting is
-/// FT.SEARCH's own).
-struct Highlighter;
+/// `RPHighlighter`: HIGHLIGHT and SUMMARIZE over the loaded fields (FT.SEARCH).
+struct Highlighter {
+    /// The fields SUMMARIZE/HIGHLIGHT name, with their combined settings and text field ids;
+    /// `None`: every visible key of the lookup, with the defaults.
+    jobs: Option<Vec<(KRef, crate::search::highlight::Settings, Option<usize>)>>,
+    def: crate::search::highlight::Settings,
+    li: usize,
+    options: u32,
+}
+
+impl Highlighter {
+    /// `processField`: the field's value summarized in place.
+    fn process(spec: &Spec, st: &crate::search::highlight::Settings, k: KRef, ft_id: Option<usize>, r: &mut Res<'_>, options: u32) {
+        let Some(v) = rget(&r.row, k) else { return };
+        if spec.is_json() && fq::json_skips(&v) {
+            return;
+        }
+        let s = match &v {
+            RsValue::String(s) | RsValue::RedisString(s) => s,
+            RsValue::Trio(t) => match &t[0] {
+                RsValue::String(s) | RsValue::RedisString(s) => s,
+                _ => return,
+            },
+            _ => return,
+        };
+        let (Some(ir), Some(dmd)) = (r.ixr.as_ref(), r.dmd) else { return };
+        if let Some(out) = crate::search::highlight::summarize_field(st, ft_id, s, ir, dmd.byte_offsets.as_ref(), options) {
+            rset(&mut r.row, k, RsValue::String(out));
+        }
+    }
+}
 
 impl<'a> Proc<'a> for Highlighter {
     fn name(&self) -> String {
@@ -1459,7 +1585,30 @@ impl<'a> Proc<'a> for Highlighter {
     }
 
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
-        pull(up, cx, r)
+        let st = pull(up, cx, r);
+        if st != St::Ok || r.ixr.is_none() || r.dmd.is_none() {
+            return st;
+        }
+        let spec = cx.spec;
+        match &self.jobs {
+            Some(jobs) => {
+                for (k, s, ft_id) in jobs {
+                    Highlighter::process(spec, s, *k, *ft_id, r, self.options);
+                }
+            }
+            None => {
+                let keys: Vec<(KRef, Option<usize>)> = cx.lookups[self.li]
+                    .keys
+                    .iter()
+                    .filter(|k| !k.dead && k.flags & K_HIDDEN == 0)
+                    .map(|k| (KRef::of(k), spec.field(cstr(&k.name)).filter(|f| f.is(crate::search::spec::T_TEXT)).and_then(|f| f.ft_id)))
+                    .collect();
+                for (k, ft_id) in keys {
+                    Highlighter::process(spec, &self.def, k, ft_id, r, self.options);
+                }
+            }
+        }
+        St::Ok
     }
 }
 
@@ -2572,7 +2721,7 @@ impl<'a> Builder<'_, 'a> {
 
     /// `buildOutputPipeline` (FT.SEARCH): RETURN's keys or the whole document loaded, then the
     /// highlighter.
-    fn output(&mut self, cx: &mut Pcx<'a>) {
+    fn output(&mut self, cx: &mut Pcx<'a>) -> Result<(), QErr> {
         let spec = cx.spec;
         let explicit = self.req.out_fields.explicit_return;
         let mut keys = Vec::new();
@@ -2592,8 +2741,34 @@ impl<'a> Builder<'_, 'a> {
             self.push(Loader::new(Load::All(0), safe));
         }
         if self.has(F_SEND_HIGHLIGHT) {
-            self.push(Highlighter);
+            use crate::search::highlight;
+            let li = cx.lookups.len() - 1;
+            let fl = &self.req.out_fields;
+            let def = &fl.default_field;
+            let mut jobs = Vec::new();
+            for ff in &fl.fields {
+                if def.mode == 0 && ff.mode == 0 {
+                    continue;
+                }
+                let name = cstr(&ff.name);
+                let lk = &mut cx.lookups[li];
+                match lk.get_read(Some(spec), name, 0) {
+                    None => return Err(QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", String::from_utf8_lossy(name)))),
+                    Some(k) if lk.keys[k].flags & K_SCHEMA_SRC == 0 => {
+                        return Err(QErr::user(Code::Inval, "Property", format!(" `{}` is not in schema", String::from_utf8_lossy(name))));
+                    }
+                    Some(k) => {
+                        let ft_id = spec.field(name).filter(|f| f.is(crate::search::spec::T_TEXT)).and_then(|f| f.ft_id);
+                        jobs.push((KRef::of(&lk.keys[k]), highlight::normalize(Some(ff), def), ft_id));
+                    }
+                }
+            }
+            let chinese = matches!(self.req.opts.language, areq::Lang::Is(l) if crate::search::spec::LANGUAGES.get(l) == Some(&"chinese"));
+            let options = if chinese { highlight::TOKLEN_EXACT } else { 0 };
+            let jobs = (!fl.fields.is_empty() || def.mode == 0).then_some(jobs);
+            self.push(Highlighter { jobs, def: highlight::normalize(None, def), li, options });
         }
+        Ok(())
     }
 
     /// `processLoadStep`.
@@ -2638,7 +2813,7 @@ fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'
     let mut b = Builder { req, chain: Vec::new(), opt, safe, max_groups, sortkey: None };
     cx.lookups.push(Lookup::default());
     let knn = matches!(req.root.as_ref().map(|n| &n.kind), Some(qast::Kind::Vector(vq)) if vq.knn);
-    b.push(QueryIt { it, ix, now, last: 0, resume: None, knn, rest: None });
+    b.push(QueryIt { it, ix, now, last: 0, resume: None, knn, rest: None, base: None });
     // `getAdditionalMetricsRP`
     if !metrics.is_empty() {
         let lk = &mut cx.lookups[0];
@@ -2722,7 +2897,7 @@ impl<'a> Builder<'_, 'a> {
         return Err(QErr::code(Code::Generic));
     }
     if b.has(F_IS_SEARCH) && !b.has(F_SEND_NOFIELDS) {
-        b.output(cx);
+        b.output(cx)?;
     }
     Ok(())
     }
@@ -2769,6 +2944,10 @@ struct CursorSt {
     prof: Option<Box<ProfCur>>,
     /// The readers and expansions the first chunk's iterators were built from.
     memo: Memo,
+    /// The deadline the first chunk's iterators were built with, and the NOT iterators a
+    /// timeout ended (the module's kept iterators keep both).
+    iter_deadline: Option<Instant>,
+    not_eofs: Vec<bool>,
 }
 
 /// `RSGlobalConfig.cursorReadSize`.
@@ -2857,7 +3036,7 @@ fn run(
             d.flags |= DOC_DELETED;
         }
     }
-    let q = Qcx { docs: &ix.docs, now_ms: now, ft_to_field };
+    let q = Qcx::new(&ix.docs, now, ft_to_field);
     let mut ecx = EvalCx {
         ix,
         q: &q,
@@ -2882,6 +3061,18 @@ fn run(
     if let Some(s) = cur.as_ref() {
         ecx.memo = Some(RefCell::new(if s.started { s.memo.replaying() } else { Memo::default() }));
     }
+    // The cursor's policy and clock are its request's (`SearchCtx_UpdateTime` before the
+    // iterators are built); a read restarts the clock.
+    let policy = Policy::of(req.on_timeout);
+    let fresh = (!reading).then(|| Tmo::new(req.timeout, policy, background, req.timeout_after));
+    match (fresh.as_ref(), cur.as_ref()) {
+        (Some(t), _) => q.clock.deadline.set(t.iter_deadline()),
+        (None, Some(s)) => {
+            q.clock.deadline.set(s.iter_deadline);
+            *q.clock.eofs.borrow_mut() = s.not_eofs.clone();
+        }
+        (None, None) => {}
+    }
     let root = req.root.as_ref().expect("a parsed query");
     let mut it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };
     if let Some(s) = cur.as_deref_mut()
@@ -2894,6 +3085,15 @@ fn run(
     if let Some(plan) = req.optimizer.as_ref().filter(|_| req.flags & OPTIMIZE != 0 && pending.is_none()) {
         it = qopt::apply(plan, root, it, ix, &q, ecx.min_heap);
     }
+    // `prepareExecutionPlan`: under ON_TIMEOUT FAIL (FT.PROFILE aside) a query whose
+    // iterators took up its time fails before its pipeline is built.
+    if policy == Policy::Fail
+        && prof.is_none()
+        && fresh.as_ref().is_some_and(Tmo::plan_timed_out)
+    {
+        eng.search.query_stats.timeout(true, req.internal);
+        return Err(QErr::code(Code::TimedOut).into());
+    }
     // `Profile_AddIters`.
     let it = if prof.is_some() { iters::profiled(it) } else { it };
     // The warning is the first chunk's (later ones start with a fresh error).
@@ -2905,15 +3105,14 @@ fn run(
         _ => 0.0,
     };
     let sargs = scorers::Args { avg_doc_len: avg, tanh_factor: req.bm25std_tanh as i64, payload: req.payload.as_deref() };
-    // The cursor's policy and clock are its request's; a read restarts the clock.
-    let policy = Policy::of(req.on_timeout);
-    let tmo = match cur.as_ref() {
-        Some(s) if s.started => {
+    let tmo = match (cur.as_ref(), fresh) {
+        (_, Some(t)) => t,
+        (Some(s), None) => {
             let mut t = s.tmo;
             t.refresh(req.timeout);
             t
         }
-        _ => Tmo::new(req.timeout, policy, background, req.timeout_after),
+        (None, None) => unreachable!("a fresh run"),
     };
     let mut cx = Pcx {
         eng,
@@ -2930,6 +3129,7 @@ fn run(
         prof: None,
         policy,
         tmo,
+        iclock: Some(&q.clock),
     };
     let mut metric_requests = std::mem::take(&mut ecx.metric_requests);
     // A replaying cursor builds no query iterator: its yielded distances keep their keys.
@@ -3010,8 +3210,14 @@ fn run(
     if let Some(e) = &cx.err {
         return Err(e.clone().into());
     }
-    // FT.SEARCH's own run counts its timeouts (this one only profiles it).
-    let counted = flags & F_IS_SEARCH == 0;
+    // FT.SEARCH's own run counts its timeouts (this one only profiles it), but for a cursor's.
+    let counted = flags & F_IS_SEARCH == 0 || cur.is_some();
+    // `QueryTimeoutFailCallback` / `CursorReadTimeoutFailCallback`: on the workers, ON_TIMEOUT
+    // FAIL leaves the clock to the blocked client's timer, which fires with the timeout
+    // error once the timeout passed before the chunk was replied.
+    if background && policy == Policy::Fail && req.timeout > 0 && prof.is_none() && cx.tmo.passed() {
+        rc = St::TimedOut;
+    }
     if rc == St::TimedOut && policy == Policy::Fail && prof.is_none() {
         if counted {
             eng.search.query_stats.timeout(true, req.internal);
@@ -3126,6 +3332,8 @@ fn run(
             None => saved.extend(chain.iter_mut().map(|p| p.save())),
         }
         s.saved = saved;
+        s.iter_deadline = q.clock.deadline.get();
+        s.not_eofs = q.clock.eofs.borrow().clone();
         s.lookups = std::mem::take(&mut cx.lookups);
         s.min_score = cx.min_score;
         s.top = top;
@@ -3186,6 +3394,10 @@ fn reply_key(k: KRef, r: &Res<'_>) -> Option<RsValue> {
 fn serialize(req: &areq::Request, cx: &mut Pcx<'_>, li: usize, sortkey: Option<KRef>, r: &Res<'_>, resp3: bool) -> Vec<(&'static str, Reply)> {
     let flags = req.flags;
     let mut parts: Vec<(&'static str, Reply)> = Vec::new();
+    if flags & F_IS_SEARCH != 0 {
+        // FT.SEARCH's document key (a cursor's rows always reference their metadata).
+        parts.push(("id", r.dmd.map_or(Reply::Nil, |d| Reply::Bulk(d.key.clone()))));
+    }
     if flags & F_SEND_SCORES != 0 {
         let s = if flags & F_SEND_SCOREEXPLAIN != 0 {
             Reply::Array(vec![Reply::Double(r.score), r.expl.as_ref().map_or(Reply::Nil, fq::explain_reply)])
@@ -3238,9 +3450,10 @@ fn serialize(req: &areq::Request, cx: &mut Pcx<'_>, li: usize, sortkey: Option<K
         let special = |n: &[u8]| [&rule.lang_field, &rule.score_field, &rule.payload_field].iter().any(|f| f.as_deref().is_some_and(|f| f.as_bytes() == n));
         let typed = flags & F_TYPED != 0;
         let expand = flags & FORMAT_EXPAND != 0;
+        let explicit = req.out_fields.explicit_return;
         let mut fields = Vec::new();
         for k in &cx.lookups[li].keys {
-            if k.dead || k.flags & K_HIDDEN != 0 || special(&k.name) {
+            if k.dead || k.flags & K_HIDDEN != 0 || (explicit && k.flags & fq::K_EXPLICIT_RETURN == 0) || special(&k.name) {
                 continue;
             }
             let Some(mut v) = rget(&r.row, KRef::of(k)) else { continue };

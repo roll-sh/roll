@@ -470,6 +470,72 @@ pub struct Qcx<'a> {
     pub docs: &'a DocTable,
     pub now_ms: i64,
     pub ft_to_field: Vec<u16>,
+    /// The NOT iterators' timeout checks.
+    pub clock: IterClock,
+}
+
+impl<'a> Qcx<'a> {
+    pub fn new(docs: &'a DocTable, now_ms: i64, ft_to_field: Vec<u16>) -> Qcx<'a> {
+        Qcx { docs, now_ms, ft_to_field, clock: IterClock::default() }
+    }
+}
+
+/// `TIMEOUT_CHECK_GRANULARITY` (`not_reducer`): a NOT iterator consults the clock once per this
+/// many checks.
+const ITER_TIMEOUT_GRANULARITY: u32 = 5_000;
+
+/// The iterators' timeout context (`AnyTimeoutContext`, the NOT iterators'
+/// `TimeoutContextClock`): the deadline the query's iterators were built with (`None`:
+/// `skipTimeoutChecks`, no checks), which a cursor's later chunks keep (the module's kept
+/// iterators hold their copy of it while the request's clock restarts on every read). A NOT
+/// iterator that times out (`ITERATOR_TIMEOUT`) raises `timed_out` for the query reader; the
+/// non-optimized one is then at EOF for good (kept over a cursor's chunks by creation order).
+#[derive(Debug, Default)]
+pub struct IterClock {
+    pub deadline: std::cell::Cell<Option<Instant>>,
+    /// An iterator timed out since the reader last looked.
+    pub timed_out: std::cell::Cell<bool>,
+    /// The checks are off (a cursor's rebuilt iterators reading their way back).
+    pub paused: std::cell::Cell<bool>,
+    /// The NOT iterators forced to EOF by a timeout, by creation order.
+    pub eofs: std::cell::RefCell<Vec<bool>>,
+    next: std::cell::Cell<usize>,
+}
+
+impl IterClock {
+    /// A new NOT iterator's slot, and whether an earlier chunk's timed out.
+    fn register(&self) -> (usize, bool) {
+        let i = self.next.get();
+        self.next.set(i + 1);
+        (i, self.eofs.borrow().get(i).copied().unwrap_or(false))
+    }
+
+    /// `TimeoutContextClock::check_timeout`: whether the deadline passed (every 5000th call).
+    fn check(&self, counter: &mut u32) -> bool {
+        let Some(deadline) = self.deadline.get() else { return false };
+        if self.paused.get() {
+            return false;
+        }
+        *counter += 1;
+        if *counter < ITER_TIMEOUT_GRANULARITY {
+            return false;
+        }
+        *counter = 0;
+        if Instant::now() < deadline {
+            return false;
+        }
+        self.timed_out.set(true);
+        true
+    }
+
+    /// A NOT iterator forced to EOF.
+    fn set_eof(&self, slot: usize) {
+        let mut e = self.eofs.borrow_mut();
+        if e.len() <= slot {
+            e.resize(slot + 1, false);
+        }
+        e[slot] = true;
+    }
 }
 
 /// `FieldExpirationPredicate`.
@@ -1756,6 +1822,24 @@ pub struct Not<'a> {
     child: BoxIt<'a>,
     max: DocId,
     res: IxResult,
+    /// The query's iterator clock, this iterator's slot in it and its check counter.
+    clock: &'a IterClock,
+    slot: usize,
+    counter: u32,
+    /// A timeout ended it.
+    forced_eof: bool,
+}
+
+impl Not<'_> {
+    /// `check_timeout`: a timeout forces EOF.
+    fn timed_out(&mut self) -> bool {
+        if !self.clock.check(&mut self.counter) {
+            return false;
+        }
+        self.forced_eof = true;
+        self.clock.set_eof(self.slot);
+        true
+    }
 }
 
 impl Iter for Not<'_> {
@@ -1770,7 +1854,12 @@ impl Iter for Not<'_> {
             self.res.doc_id += 1;
             let child_eof = self.res.doc_id > self.child.last_doc_id() && !self.child.read();
             if child_eof || self.res.doc_id != self.child.last_doc_id() {
+                self.counter = 0;
                 return true;
+            }
+            // One check per document skipped.
+            if self.timed_out() {
+                return false;
             }
         }
         false
@@ -1785,11 +1874,14 @@ impl Iter for Not<'_> {
         }
         if self.child.last_doc_id() > id || (self.child.at_eof() && id > self.child.last_doc_id()) {
             self.res.doc_id = id;
-            return Skip::Found;
+            return if self.timed_out() { Skip::Eof } else { Skip::Found };
         }
         if self.child.last_doc_id() < id && self.child.skip_to(id) != Skip::Found {
             self.res.doc_id = id;
-            return Skip::Found;
+            return if self.timed_out() { Skip::Eof } else { Skip::Found };
+        }
+        if self.timed_out() {
+            return Skip::Eof;
         }
         self.res.doc_id = id;
         if self.read() { Skip::NotFound } else { Skip::Eof }
@@ -1801,13 +1893,14 @@ impl Iter for Not<'_> {
         self.res.doc_id
     }
     fn at_eof(&self) -> bool {
-        self.res.doc_id >= self.max
+        self.forced_eof || self.res.doc_id >= self.max
     }
     fn num_estimated(&self) -> usize {
         self.max as usize
     }
     fn rewind(&mut self) {
         self.res.doc_id = 0;
+        self.forced_eof = false;
         self.child.rewind();
     }
 }
@@ -1819,6 +1912,10 @@ pub struct NotOptimized<'a> {
     max: DocId,
     forced_eof: bool,
     res: IxResult,
+    /// The query's iterator clock and this iterator's check counter (a timeout does not end
+    /// it).
+    clock: &'a IterClock,
+    counter: u32,
 }
 
 impl NotOptimized<'_> {
@@ -1856,6 +1953,12 @@ impl NotOptimized<'_> {
                 while !self.child.at_eof() && self.child.last_doc_id() < w {
                     self.child.read();
                 }
+            }
+            // A timeout leaves the wildcard reader where it is: the next read moves on from
+            // there (the document it stands on unexamined).
+            if self.clock.check(&mut self.counter) {
+                self.res.doc_id = self.wcii.last_doc_id();
+                return false;
             }
         }
     }
@@ -2111,11 +2214,13 @@ pub fn not<'a>(child: BoxIt<'a>, existing: Option<&'a InvertedIndex>, index_all:
         _ => {}
     }
     let res = IxResult { weight, field_mask: MASK_ALL, ..IxResult::virt() };
+    let clock = &cx.clock;
     if index_all {
         let wcii = wildcard(existing, true, max, weight, cx);
-        Box::new(NotOptimized { wcii, child, max, forced_eof: false, res })
+        Box::new(NotOptimized { wcii, child, max, forced_eof: false, res, clock, counter: 0 })
     } else {
-        Box::new(Not { child, max, res })
+        let (slot, forced_eof) = clock.register();
+        Box::new(Not { child, max, res, clock, slot, counter: 0, forced_eof })
     }
 }
 
@@ -2179,7 +2284,7 @@ mod tests {
                 assert_eq!(drain(union(vec![ids(&[1, 5]), ids(&[2, 5, 8]), ids(&[9])], quick, min_heap, 1.0)), [1, 2, 5, 8, 9]);
             }
         }
-        let cx = Qcx { docs: Box::leak(Box::new(DocTable::new(0))), now_ms: 0, ft_to_field: vec![] };
+        let cx = Qcx::new(Box::leak(Box::new(DocTable::new(0))), 0, vec![]);
         let cx: &'static Qcx<'static> = Box::leak(Box::new(cx));
         assert_eq!(drain(not(ids(&[2, 3]), None, false, 5, 1.0, cx)), [1, 4, 5]);
         assert_eq!(drain(optional(ids(&[2]), None, false, 3, 1.0, cx)), [1, 2, 3]);

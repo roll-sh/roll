@@ -341,6 +341,14 @@ impl Request {
         true
     }
 
+    /// `parseCursorSettings`: MAXIDLE is at most `search-cursor-max-idle` (0: that).
+    pub fn cap_max_idle(&mut self, cfg: &Config) {
+        let max = cfg.num("search-cursor-max-idle") as i64;
+        if self.cursor.max_idle == 0 || self.cursor.max_idle as i64 > max {
+            self.cursor.max_idle = max as u32;
+        }
+    }
+
     /// `AREQ_New` for FT.HYBRID: no command flags, the given dialect.
     pub fn hybrid(cfg: &Config, flags: u64, dialect: u32) -> Request {
         let mut r = Request::new(Command::Explain, cfg, &[]);

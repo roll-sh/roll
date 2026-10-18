@@ -41,7 +41,7 @@ pub struct Global {
     pub dicts: RsDict<Dict>,
     /// `maxIndexes_g` when FT.DEBUG SET_MAX_INDEXES changed it.
     pub max_indexes: Option<usize>,
-    /// `g_CursorsList`: FT.AGGREGATE WITHCURSOR's cursors (they outlive their index).
+    /// `g_CursorsList`: FT.AGGREGATE and FT.SEARCH WITHCURSOR's cursors (they outlive their index).
     pub cursors: super::cursor::Cursors,
     /// The shared SVS thread pool (`VecSimSVSThreadPoolImpl`) had an index attached: an SVS
     /// index was built (its first vector arrived) at some point. Process-wide and sticky.
@@ -62,6 +62,12 @@ pub struct QueryStats {
     pub coord_warnings_timeout: AtomicU64,
     pub shard_errors_timeout: AtomicU64,
     pub shard_warnings_timeout: AtomicU64,
+    /// `…_errors_oom` / `…_warnings_oom`: the memory guard's error (ON_OOM FAIL) and its
+    /// empty reply's warning (ON_OOM RETURN).
+    pub coord_errors_oom: AtomicU64,
+    pub coord_warnings_oom: AtomicU64,
+    pub shard_errors_oom: AtomicU64,
+    pub shard_warnings_oom: AtomicU64,
 }
 
 impl QueryStats {
@@ -73,6 +79,17 @@ impl QueryStats {
             (false, false) => &self.coord_warnings_timeout,
             (true, true) => &self.shard_errors_timeout,
             (false, true) => &self.shard_warnings_timeout,
+        };
+        c.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// … with an out-of-memory error or warning.
+    pub fn oom(&self, error: bool, internal: bool) {
+        let c = match (error, internal) {
+            (true, false) => &self.coord_errors_oom,
+            (false, false) => &self.coord_warnings_oom,
+            (true, true) => &self.shard_errors_oom,
+            (false, true) => &self.shard_warnings_oom,
         };
         c.fetch_add(1, Ordering::Relaxed);
     }

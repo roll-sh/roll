@@ -66,7 +66,7 @@ use std::cmp::Ordering;
 
 /// `shouldSkipJsonFieldValue`: a JSON value the highlighter leaves alone (an array or object
 /// at the path, which was indexed value by value).
-fn json_skips(v: &RsValue) -> bool {
+pub(super) fn json_skips(v: &RsValue) -> bool {
     match v {
         RsValue::RedisString(_) => true,
         RsValue::Trio(t) => match &t[2] {
@@ -448,6 +448,10 @@ pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if args.len() < 3 {
         return Err(arity_error("FT.SEARCH"));
     }
+    // `DistSearchCommandImp`'s memory guard.
+    if let Some(o) = super::ft_aggregate::oom_guard(cx) {
+        return super::ft_aggregate::oom_query(cx, o, args, None);
+    }
     verify_acl(cx, &args[1])?;
     search_with(cx, args, None)
 }
@@ -471,6 +475,11 @@ pub(super) fn search_with(cx: &mut Cx, args: &[Bytes], dbg: Option<&[Bytes]>) ->
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
     if let Some(p) = dbg {
         req.set_debug(super::ft_aggregate::debug_parse(p, &req, background));
+    }
+    if req.flags & areq::F_IS_CURSOR != 0 {
+        // `AREQ_StartCursor`: the search pipeline read chunk by chunk.
+        req.cap_max_idle(&cx.eng.cfg);
+        return super::ft_aggregate::start_search_cursor(cx, name, req, db, resp3, background);
     }
     let eng: &Engine = cx.eng;
     let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
@@ -515,7 +524,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
             ft_to_field[id] = i as u16;
         }
     }
-    let q = Qcx { docs: &ix.docs, now_ms: now, ft_to_field };
+    let q = Qcx::new(&ix.docs, now, ft_to_field);
     let mut ecx = EvalCx {
         ix,
         q: &q,
@@ -536,6 +545,10 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
         hybrid: false,
         memo: None,
     };
+    // The query's clock starts before its iterators are built (`SearchCtx_UpdateTime`).
+    let policy = Policy::of(req.on_timeout);
+    let mut tmo = Tmo::new(req.timeout, policy, background, req.timeout_after);
+    q.clock.deadline.set(tmo.iter_deadline());
     let root = req.root.as_ref().expect("a parsed query");
     let mut it = ecx.iterate(root)?;
     let warn_expansions = ecx.expansions_warning;
@@ -544,6 +557,12 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     let plan = req.optimizer.as_ref().filter(|_| flags & OPTIMIZE != 0);
     if let Some(p) = plan {
         it = qopt::apply(p, root, it, ix, &q, ecx.min_heap);
+    }
+    // `prepareExecutionPlan`: under ON_TIMEOUT FAIL (FT.PROFILE aside) a query whose
+    // iterators took up its time fails before its pipeline is built.
+    if policy == Policy::Fail && !profile && tmo.plan_timed_out() {
+        eng.search.query_stats.timeout(true, req.internal);
+        return Err(QErr::code(Code::TimedOut).into());
     }
 
     let arrange = req.steps.iter().rev().find_map(|s| if let Step::Arrange(a) = s { Some(a) } else { None });
@@ -642,8 +661,6 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
         return Err(e.clone().into());
     }
     // The query reader's clock and `TIMEOUT_AFTER_N` (`RPTimeoutAfterCount`).
-    let policy = Policy::of(req.on_timeout);
-    let mut tmo = Tmo::new(req.timeout, policy, background, req.timeout_after);
     let mut timed_out = false;
 
     // the query and scorer processors
@@ -664,7 +681,13 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
                 timed_out = true;
                 break;
             }
-            if !it.read() {
+            let more = it.read();
+            // `ITERATOR_TIMEOUT`.
+            if q.clock.timed_out.take() {
+                timed_out = true;
+                break;
+            }
+            if !more {
                 break;
             }
             let Some(r) = it.current() else { break };
@@ -755,6 +778,11 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     // `startPipelineCommon`'s check after a buffered run, then `handleSendChunkError`: under
     // ON_TIMEOUT FAIL a timeout is the reply (FT.PROFILE's results are empty instead).
     if policy != Policy::Return && tmo.checks() && tmo.passed() {
+        timed_out = true;
+    }
+    // `QueryTimeoutFailCallback`: on the workers, ON_TIMEOUT FAIL leaves the clock to the
+    // blocked client's timer, which fires once the timeout passed before the reply.
+    if background && policy == Policy::Fail && req.timeout > 0 && !profile && tmo.passed() {
         timed_out = true;
     }
     if timed_out && policy == Policy::Fail {

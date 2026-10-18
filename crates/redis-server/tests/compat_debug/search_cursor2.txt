@@ -1,0 +1,112 @@
+# Search cursors under the module's debug wrappers: FT.SEARCH WITHCURSOR timing out chunk by
+# chunk (TIMEOUT_AFTER_N), internal profiled search cursors (_FT.PROFILE SEARCH … WITHCURSOR,
+# _FT.CURSOR PROFILE), and profiled cursors over combined queries, whose iterators' counters
+# add up over the reads as the module's kept iterators count them. Indexes are created on an
+# empty keyspace and dropped at the end; configs are put back.
+FLUSHALL
+FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t TEXT n NUMERIC SORTABLE tg TAG
+HSET d:01 t "hello world" n 1 tg a
+HSET d:02 t "hello there" n 2 tg b
+HSET d:03 t "hello hello" n 3 tg a
+HSET d:04 t "goodbye world" n 4 tg b
+HSET d:05 t "hello again" n 5 tg c
+HSET d:06 t "world peace" n 6 tg a
+HSET d:07 t "hello kitty" n 7 tg b
+HSET d:08 t "say hello" n 8 tg c
+HSET d:09 t "nothing here" n 9 tg a
+HSET d:10 t "hello hello hello" n 10 tg b
+HSET d:11 t "help me" n 11 tg a
+HSET d:12 t "world of hello" n 12 tg c
+
+# FT.SEARCH cursors timing out: the sorter's page so far, the cursor left open (RETURN).
+!capture c _FT.DEBUG FT.SEARCH i hello WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c} COUNT 10
+FT.CURSOR READ i {$c}
+!capture c _FT.DEBUG FT.SEARCH i * WITHCURSOR COUNT 2 SORTBY n NOCONTENT TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c} COUNT 10
+FT.CURSOR READ i {$c}
+!capture c _FT.DEBUG FT.SEARCH i * WITHCURSOR COUNT 2 DIALECT 4 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c} COUNT 20
+FT.CURSOR READ i {$c}
+@resp 3
+!capture c _FT.DEBUG FT.SEARCH i hello WITHCURSOR COUNT 2 NOCONTENT TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c} COUNT 10
+@resp 2
+FT.CONFIG SET WORKERS 0
+FT.CONFIG SET ON_TIMEOUT fail
+_FT.DEBUG FT.SEARCH i hello WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!capture c _FT.DEBUG FT.SEARCH i * WITHCURSOR COUNT 2 DIALECT 4 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c}
+FT.CONFIG SET ON_TIMEOUT return
+FT.CONFIG SET WORKERS 16
+
+# Profiled search cursors (internal only).
+!capture c _FT.DEBUG _FT.PROFILE i SEARCH QUERY hello WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i SEARCH QUERY * WITHCURSOR COUNT 2 DIALECT 4 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i SEARCH LIMITED QUERY "hel*" WITHCURSOR COUNT 3 SORTBY n NOCONTENT TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i SEARCH QUERY hello WITHCURSOR COUNT 2 HIGHLIGHT TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+@resp 3
+!capture c _FT.DEBUG _FT.PROFILE i SEARCH QUERY hello WITHCURSOR COUNT 2 NOCONTENT TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+@resp 2
+
+# Profiled cursors over combined queries, a result a read: every iterator's reads add up.
+!capture c _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY "(hello|world) @tg:{a}" LOAD 1 @n WITHCURSOR COUNT 1 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY "hello|world|peace" LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY "hello -world" LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY "@n:[2 11] (hello|peace)" LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY "hel* ~world" LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY "\"hello world\"|@tg:{b|c}" LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY "-@tg:{a}" LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY "hello world" LOAD 1 @n WITHCURSOR COUNT 1 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+!capture c _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY "hello|world" LOAD 1 @n WITHCURSOR COUNT 3 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing FT.CURSOR READ i {$c}
+!timing _FT.CURSOR PROFILE i {$c}
+FT.CONFIG GET WORKERS
+FT.CONFIG GET ON_TIMEOUT
+FT.DROPINDEX i
+FLUSHALL

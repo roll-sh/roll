@@ -1,0 +1,178 @@
+# FT.SEARCH WITHCURSOR and FT.CURSOR READ of a search cursor: the search pipeline (scorer,
+# sorter, pager, loader, highlighter) read chunk by chunk, the first chunk's total (later ones
+# count nothing, the sorter drained the query), FT.SEARCH's row shapes (ids, scores, payloads,
+# sort keys, RETURN, NOCONTENT, HIGHLIGHT/SUMMARIZE), RESP3, JSON, the optimizer's streaming
+# pager (DIALECT 4) and the cursor limits. Every cursor is drained or deleted.
+
+FLUSHALL
+FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t TEXT n NUMERIC SORTABLE tg TAG
+HSET d:1 t "hello world" n 1 tg a
+HSET d:2 t "hello there" n 2 tg b
+HSET d:3 t "hello you" n 3 tg a
+HSET d:4 t "hello again" n 4 tg b
+HSET d:5 t "hello hello" n 5 tg a
+HSET d:6 t "goodbye world" n 6 tg b
+HSET d:7 t "world peace" n 7 tg a
+
+# WITHCURSOR's arguments on FT.SEARCH.
+FT.SEARCH i hello WITHCURSOR COUNT 0
+FT.SEARCH i hello WITHCURSOR COUNT x
+FT.SEARCH i hello WITHCURSOR MAXIDLE 0
+FT.SEARCH i hello WITHCURSOR COUNT
+FT.SEARCH nosuch hello WITHCURSOR
+FT.SEARCH i hello WITHCURSOR FOO
+
+# The default page (LIMIT 0 10) sorted by score, two rows a chunk.
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c} COUNT 1
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c}
+!capture c FT.SEARCH i world|hello WITHCURSOR COUNT 3 WITHSCORES
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c}
+
+# A page past the chunk: LIMIT and SORTBY.
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 LIMIT 1 3 SORTBY n DESC WITHSCORES
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c}
+!capture c FT.SEARCH i * WITHCURSOR COUNT 4 SORTBY n ASC LIMIT 0 6 WITHSORTKEYS
+FT.CURSOR READ i {$c}
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 LIMIT 0 3
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c}
+!capture c FT.SEARCH i hello WITHCURSOR LIMIT 0 3
+
+# Only the count; no rows.
+FT.SEARCH i hello WITHCURSOR COUNT 2 LIMIT 0 0
+FT.SEARCH i hello WITHCURSOR COUNT 2 NOCONTENT LIMIT 0 0
+
+# Row shapes.
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 NOCONTENT
+FT.CURSOR READ i {$c}
+FT.CURSOR DEL i {$c}
+FT.CURSOR READ i {$c}
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 WITHSCORES WITHPAYLOADS WITHSORTKEYS SORTBY n
+FT.CURSOR READ i {$c} COUNT 5
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 RETURN 2 n tg SORTBY n
+FT.CURSOR READ i {$c} COUNT 5
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 RETURN 3 n AS num SORTBY n DESC
+FT.CURSOR READ i {$c} COUNT 5
+!capture c FT.SEARCH i @tg:{a} WITHCURSOR COUNT 1 RETURN 1 t SORTBY n
+FT.CURSOR READ i {$c} COUNT 5
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 EXPLAINSCORE WITHSCORES SORTBY n
+FT.CURSOR READ i {$c} COUNT 5
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SCORER TFIDF WITHSCORES
+FT.CURSOR READ i {$c} COUNT 5
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SCORER BM25STD.NORM WITHSCORES
+FT.CURSOR READ i {$c} COUNT 5
+
+# The highlighter under a cursor.
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 1 HIGHLIGHT FIELDS 1 t SORTBY n
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c} COUNT 10
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SUMMARIZE FIELDS 1 t LEN 1 SORTBY n
+FT.CURSOR READ i {$c} COUNT 10
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 HIGHLIGHT TAGS [ ] SORTBY n
+FT.CURSOR READ i {$c} COUNT 10
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 RETURN 1 n HIGHLIGHT FIELDS 1 t SORTBY n
+FT.CURSOR READ i {$c} COUNT 10
+FT.SEARCH i hello WITHCURSOR HIGHLIGHT FIELDS 1 nosuch
+FT.SEARCH i hello WITHCURSOR SUMMARIZE FIELDS 1 n
+
+# The optimizer: a wildcard or filter page streams through its pager (no sorter).
+!capture c FT.SEARCH i * WITHCURSOR COUNT 2 DIALECT 4
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c} COUNT 10
+FT.CURSOR READ i {$c}
+!capture c FT.SEARCH i "@n:[2 6]" WITHCURSOR COUNT 2 DIALECT 4 LIMIT 0 3
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c}
+!capture c FT.SEARCH i "@n:[2 6]" WITHCURSOR COUNT 2 DIALECT 4 LIMIT 1 3 SORTBY n DESC
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c}
+
+# Documents added after the first chunk: the sorter already holds its page.
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SORTBY n
+HSET d:8 t "hello late" n 0 tg a
+FT.CURSOR READ i {$c} COUNT 10
+DEL d:8
+
+# A sort key loaded before the sorter (not sortable), held over the reads.
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SORTBY tg DESC WITHSORTKEYS
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c} COUNT 10
+
+# Inside MULTI (no workers: the loader loads row by row).
+MULTI
+FT.SEARCH i hello WITHCURSOR COUNT 10 SORTBY n
+FT.SEARCH i * WITHCURSOR COUNT 10 DIALECT 4
+FT.SEARCH i hello WITHCURSOR LIMIT 0 0
+EXEC
+
+# A dropped index ends its cursors.
+FT.CREATE tmp ON HASH PREFIX 1 t: SCHEMA t TEXT
+HSET t:1 t hello
+HSET t:2 t hello
+!capture c FT.SEARCH tmp hello WITHCURSOR COUNT 1
+FT.DROPINDEX tmp
+FT.CURSOR READ tmp {$c}
+FT.CREATE tmp ON HASH PREFIX 1 nothing: SCHEMA t TEXT
+FT.CURSOR READ tmp {$c}
+FT.CURSOR READ tmp {$c}
+FT.DROPINDEX tmp
+DEL t:1 t:2
+
+# KNN under a cursor: the results by distance.
+FT.CREATE hv ON HASH PREFIX 1 h: SCHEMA t TEXT v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2
+HSET h:1 t hello v "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+HSET h:2 t world v "\x00\x00\x00\x40\x00\x00\x00\x40"
+HSET h:3 t hello v "\x00\x00\x40\x40\x00\x00\x40\x40"
+!capture c FT.SEARCH hv "*=>[KNN 3 @v $b]" WITHCURSOR COUNT 1 PARAMS 2 b "\x00\x00\x00\x00\x00\x00\x00\x00" DIALECT 2
+FT.CURSOR READ hv {$c}
+FT.CURSOR READ hv {$c} COUNT 5
+!capture c FT.SEARCH hv "hello=>[KNN 3 @v $b AS d]" WITHCURSOR COUNT 1 RETURN 1 d SORTBY d PARAMS 2 b "\x00\x00\x00\x00\x00\x00\x00\x00" DIALECT 2
+FT.CURSOR READ hv {$c} COUNT 5
+FT.DROPINDEX hv
+
+# The cursor counts in FT.INFO and the index's cursor limit.
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 1
+!mask total_indexing_time FT.INFO i
+FT.CURSOR DEL i {$c}
+CONFIG SET search-index-cursor-limit 1
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 1
+FT.SEARCH i hello WITHCURSOR COUNT 1
+FT.AGGREGATE i hello WITHCURSOR COUNT 1
+FT.CURSOR DEL i {$c}
+CONFIG SET search-index-cursor-limit 128
+
+# RESP3.
+@resp 3
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 WITHSCORES WITHPAYLOADS WITHSORTKEYS SORTBY n
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i {$c} COUNT 10
+FT.SEARCH i hello WITHCURSOR COUNT 2 LIMIT 0 0
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 NOCONTENT
+FT.CURSOR READ i {$c} COUNT 10
+!capture c FT.SEARCH i hello WITHCURSOR COUNT 2 HIGHLIGHT SORTBY n DESC
+FT.CURSOR READ i {$c} COUNT 10
+@resp 2
+FT.DROPINDEX i
+
+# JSON documents.
+FT.CREATE j ON JSON PREFIX 1 j: SCHEMA $.t AS t TEXT $.n AS n NUMERIC SORTABLE $.tags[*] AS tags TAG
+JSON.SET j:1 $ "{\"t\":\"hello world\",\"n\":1,\"tags\":[\"a\",\"b\"]}"
+JSON.SET j:2 $ "{\"t\":\"hello there\",\"n\":2,\"tags\":[\"b\"]}"
+JSON.SET j:3 $ "{\"t\":\"hello you\",\"n\":3,\"tags\":[\"a\"]}"
+!capture c FT.SEARCH j hello WITHCURSOR COUNT 2 SORTBY n
+FT.CURSOR READ j {$c}
+!capture c FT.SEARCH j hello WITHCURSOR COUNT 2 RETURN 2 t tags SORTBY n DIALECT 3
+FT.CURSOR READ j {$c}
+!capture c FT.SEARCH j hello WITHCURSOR COUNT 1 RETURN 1 t HIGHLIGHT FIELDS 1 t SORTBY n
+FT.CURSOR READ j {$c} COUNT 5
+@resp 3
+!capture c FT.SEARCH j hello WITHCURSOR COUNT 2 RETURN 1 $.tags FORMAT EXPAND DIALECT 3 SORTBY n
+FT.CURSOR READ j {$c}
+@resp 2
+FT.DROPINDEX j
+FLUSHALL

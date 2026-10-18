@@ -1,0 +1,57 @@
+# The NOT iterators' own timeout checks (`TimeoutContextClock`, every 5000 documents they
+# skip): a cursor keeps its iterators, and with them the deadline they were built with, while
+# every read restarts the request's clock. A read after that deadline passed times out in
+# the NOT iterator once it skipped 5000 documents (ON_TIMEOUT RETURN: an empty chunk with the
+# warning, the cursor kept); the plain NOT is then at EOF for good, the optimized one (INDEXALL)
+# reads on from where it stopped. Under ON_TIMEOUT FAIL without workers the read fails and the
+# cursor is gone. Indexes are created on an empty keyspace; configs are put back.
+FLUSHALL
+FT.CREATE nt ON HASH PREFIX 1 n: SCHEMA t TEXT
+FT.CREATE na ON HASH PREFIX 1 n: INDEXALL ENABLE SCHEMA t TEXT
+EVAL "redis.call('HSET','n:00000','t','x') for i=1,5100 do redis.call('HSET',string.format('n:%05d',i),'t','hello') end redis.call('HSET','n:99999','t','y') redis.call('HSET','n:99998','t','hello') redis.call('HSET','n:99997','t','z') return 1" 0
+FT.SEARCH nt -hello NOCONTENT
+FT.SEARCH na -hello NOCONTENT
+
+# ON_TIMEOUT RETURN: the plain NOT ends.
+!capture c FT.AGGREGATE nt -hello TIMEOUT 1 LOAD 1 @__key WITHCURSOR COUNT 1
+@sleep 20
+FT.CURSOR READ nt {$c}
+FT.CURSOR READ nt {$c}
+FT.CURSOR READ nt {$c}
+@resp 3
+!capture c FT.AGGREGATE nt -hello TIMEOUT 1 LOAD 1 @__key WITHCURSOR COUNT 1
+@sleep 20
+FT.CURSOR READ nt {$c}
+FT.CURSOR READ nt {$c}
+@resp 2
+# … under an intersection.
+!capture c FT.AGGREGATE nt "-hello -nothing" TIMEOUT 1 LOAD 1 @__key WITHCURSOR COUNT 1
+@sleep 20
+FT.CURSOR READ nt {$c}
+FT.CURSOR READ nt {$c}
+# The optimized NOT reads on.
+!capture c FT.AGGREGATE na -hello TIMEOUT 1 LOAD 1 @__key WITHCURSOR COUNT 1
+@sleep 20
+FT.CURSOR READ na {$c}
+FT.CURSOR READ na {$c}
+FT.CURSOR READ na {$c}
+FT.CURSOR READ na {$c}
+# Read in time, the NOT iterator does not time out.
+!capture c FT.AGGREGATE nt -hello TIMEOUT 100000 LOAD 1 @__key WITHCURSOR COUNT 1
+@sleep 20
+FT.CURSOR READ nt {$c}
+FT.CURSOR READ nt {$c} COUNT 5
+
+# ON_TIMEOUT FAIL without workers: the read fails, the cursor is gone.
+FT.CONFIG SET WORKERS 0
+FT.CONFIG SET ON_TIMEOUT fail
+!capture c FT.AGGREGATE nt -hello TIMEOUT 1 LOAD 1 @__key WITHCURSOR COUNT 1
+@sleep 20
+FT.CURSOR READ nt {$c}
+FT.CURSOR READ nt {$c}
+FT.CONFIG SET ON_TIMEOUT return
+FT.CONFIG SET WORKERS 16
+FT.CONFIG GET ON_TIMEOUT
+FT.DROPINDEX nt
+FT.DROPINDEX na
+FLUSHALL

@@ -1267,7 +1267,7 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
             ft_to_field[id] = i as u16;
         }
     }
-    let q = Qcx { docs: &ix.docs, now_ms: now, ft_to_field };
+    let q = Qcx::new(&ix.docs, now, ft_to_field);
     let profile = prof.is_some();
     let subs = build_subs(eng, ix, &q, h, db, background, profile, now)?;
     run_tail(eng, ix, h, db, resp3, background, clock, prof, subs)
@@ -1302,12 +1302,14 @@ fn build_subs<'a>(eng: &'a Engine, ix: &'a Index, q: &'a Qcx<'a>, h: &'a Hyb, db
             hybrid: true,
             memo: None,
         };
+        let policy = Policy::of(req.on_timeout);
+        let tmo = Tmo::new(req.timeout, policy, background, (h.debug[i] > 0).then_some(h.debug[i]));
+        q.clock.deadline.set(tmo.iter_deadline());
         let root = req.root.as_ref().expect("a parsed query");
         let it = ecx.iterate(root)?;
         let it = if profile { iters::profiled(it) } else { it };
         let parse_ns = sub_clock.elapsed().as_nanos() as u64;
         let sargs = scorers::Args { avg_doc_len: avg, tanh_factor: req.bm25std_tanh as i64, payload: req.payload.as_deref() };
-        let policy = Policy::of(req.on_timeout);
         let mut cx = Pcx {
             eng,
             db,
@@ -1322,7 +1324,8 @@ fn build_subs<'a>(eng: &'a Engine, ix: &'a Index, q: &'a Qcx<'a>, h: &'a Hyb, db
             dialect: req.dialect,
             prof: None,
             policy,
-            tmo: Tmo::new(req.timeout, policy, background, (h.debug[i] > 0).then_some(h.debug[i])),
+            tmo,
+            iclock: Some(&q.clock),
         };
         let metrics = std::mem::take(&mut ecx.metric_requests);
         let Builder { mut chain, .. } = build(req, &mut cx, it, ix, now, background, sargs, &metrics)?;
@@ -1385,6 +1388,7 @@ fn run_tail<'a>(
         prof: None,
         policy,
         tmo: Tmo::new(tail_req.timeout, policy, background, (h.debug[2] > 0).then_some(h.debug[2])),
+        iclock: None,
     };
     if !load_all {
         // `HybridRequest_SynchronizeLookupKeys`.
@@ -1596,6 +1600,12 @@ enum Dbg<'p> {
 
 /// `hybridCommandHandler`.
 fn hybrid(cx: &mut Cx, index: &Bytes, args: &[Bytes], mut prof: Option<HProf>, dbg: Dbg<'_>) -> CmdResult {
+    // `hybridCommandHandler`'s memory guard (`DEBUG_hybridCommandHandler` has none).
+    if !matches!(dbg, Dbg::User(_))
+        && let Some(o) = super::oom::guard(cx)
+    {
+        return super::oom::hybrid(cx, o, matches!(dbg, Dbg::Internal(_)), prof.is_some());
+    }
     let clock = prof.as_ref().map_or_else(Instant::now, |p| p.clock);
     let Some(name) = cx.eng.search.load(cstr(index), false) else {
         return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(index))).into());
@@ -1739,7 +1749,7 @@ fn start_cursors(cx: &mut Cx, name: Bytes, h: Hyb, db: usize, resp3: bool, backg
                 ft_to_field[id] = i as u16;
             }
         }
-        let q = Qcx { docs: &ix.docs, now_ms: now, ft_to_field };
+        let q = Qcx::new(&ix.docs, now, ft_to_field);
         let subs = build_subs(eng, ix, &q, &h, db, background, false, now);
         subs.and_then(|subs| {
             // `Cursors_Reserve`, once per subquery.
@@ -1857,6 +1867,7 @@ pub(in crate::commands) fn read_cursor(cx: &mut Cx, mut c: crate::search::cursor
             prof: None,
             policy,
             tmo: Tmo::default(),
+            iclock: None,
         };
         let mut warnings = Vec::new();
         if resp3 {

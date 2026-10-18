@@ -1,5 +1,5 @@
-//! Cursors (`cursor.c`): the user cursor list FT.AGGREGATE WITHCURSOR reserves into and
-//! FT.CURSOR reads, deletes and collects. A cursor holds its request's execution state (opaque
+//! Cursors (`cursor.c`): the user cursor list FT.AGGREGATE and FT.SEARCH WITHCURSOR reserve
+//! into and FT.CURSOR reads, deletes and collects. A cursor holds its request's execution state (opaque
 //! here), the index it was opened on (a weak reference: the spec's id, so a dropped and
 //! recreated index is not the same one) and its idle deadline.
 //!
