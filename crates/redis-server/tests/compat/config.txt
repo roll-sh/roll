@@ -287,3 +287,5 @@ CONFIG SET requirepass ""
 PING
 @conn 1
 ACL GETUSER default
+CONFIG REWRITE
+CONFIG REWRITE extra

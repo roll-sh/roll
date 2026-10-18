@@ -521,9 +521,10 @@ pub fn config_resetstat(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     Ok(Reply::Ok)
 }
 
+/// CONFIG REWRITE: like a Redis started without a config file (INFO's `config_file` is empty);
+/// CONFIG SET values persist with the database anyway.
 pub fn config_rewrite(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    // Configuration is persisted by the platform with the database itself.
-    Ok(Reply::Ok)
+    Err(Error::new("ERR The server is running without a config file"))
 }
 
 pub fn config_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
