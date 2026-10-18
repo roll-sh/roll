@@ -25,6 +25,9 @@ pub struct Term {
     pub s: Vec<u8>,
     pub idf: f64,
     pub bm25_idf: f64,
+    /// The query's token id (`q->tokenId++` per reader opened), which the highlighter's
+    /// fragments count distinct terms by.
+    pub id: u32,
 }
 
 /// `RSIndexResult` (aggregates own copies of their children's results).

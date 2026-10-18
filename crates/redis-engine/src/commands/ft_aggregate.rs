@@ -2055,6 +2055,7 @@ fn run(
         in_not: false,
         expansions_warning: false,
         top: reading.then_some(top),
+        token_id: std::cell::Cell::new(0),
     };
     let root = req.root.as_ref().expect("a parsed query");
     let it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };

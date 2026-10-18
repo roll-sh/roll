@@ -57,7 +57,7 @@ mod compile;
 mod ctype;
 mod exec;
 mod parse;
-mod qsort;
+pub(crate) mod qsort;
 
 #[cfg(test)]
 mod reference_table;

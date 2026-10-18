@@ -789,7 +789,7 @@ fn reducer_alias(name: &[u8], args: &[Bytes]) -> Bytes {
 }
 
 /// `parseParams`.
-fn parse_params(dst: &mut Option<Params>, ac: &mut Ac) -> Result<(), QErr> {
+pub(crate) fn parse_params(dst: &mut Option<Params>, ac: &mut Ac) -> Result<(), QErr> {
     let args = ac.get_varargs().map_err(|e| QErr::user(Code::ParseArgs, "Bad arguments", format!(" for PARAMS: {}", e.strerror())))?;
     if dst.is_some() {
         return Err(QErr::new(Code::AddArgs, "Multiple PARAMS are not allowed. Parameters can be defined only once"));

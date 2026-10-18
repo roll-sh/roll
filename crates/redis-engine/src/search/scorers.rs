@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn tfidf_explains() {
-        let t = IxResult { kind: K_TERM, freq: 2, weight: 1.0, term: Some(Rc::new(super::super::iters::Term { s: b"hello".to_vec(), idf: 1.0, bm25_idf: 0.5 })), ..Default::default() };
+        let t = IxResult { kind: K_TERM, freq: 2, weight: 1.0, term: Some(Rc::new(super::super::iters::Term { s: b"hello".to_vec(), idf: 1.0, bm25_idf: 0.5, id: 0 })), ..Default::default() };
         let mut dt = super::super::doctable::DocTable::new(0);
         let id = dt.put(b"k", 1.0, 0, None, super::super::spec::DocType::Hash);
         let d = dt.get_mut(id).unwrap();

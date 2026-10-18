@@ -58,8 +58,22 @@ use crate::search::index::Index;
 use crate::search::iters::{IxResult, Qcx};
 use crate::search::qeval::EvalCx;
 use crate::search::scorers::{self, Expl, Scorer};
+use crate::search::highlight;
 use crate::search::spec::{self as sspec, DocType, Spec};
 use std::cmp::Ordering;
+
+/// `shouldSkipJsonFieldValue`: a JSON value the highlighter leaves alone (an array or object
+/// at the path, which was indexed value by value).
+fn json_skips(v: &RsValue) -> bool {
+    match v {
+        RsValue::RedisString(_) => true,
+        RsValue::Trio(t) => match &t[2] {
+            RsValue::Array(a) => a.first().is_none_or(|f| !matches!(f, RsValue::String(_))),
+            _ => false,
+        },
+        _ => false,
+    }
+}
 
 pub(super) const K_DOC_SRC: u32 = 0x01;
 pub(super) const K_SCHEMA_SRC: u32 = 0x02;
@@ -232,6 +246,8 @@ struct Res<'d> {
     score: f64,
     expl: Option<Expl>,
     row: Row<'d>,
+    /// The query's result for the doc, kept for the highlighter.
+    ixr: Option<IxResult>,
 }
 
 /// The document a result loads from.
@@ -440,9 +456,6 @@ pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
         req.apply_context(ix, resp3)?;
     }
-    if req.flags & F_SEND_HIGHLIGHT != 0 {
-        return Err(QErr::new(Code::Generic, "HIGHLIGHT and SUMMARIZE are not supported yet").into());
-    }
     let db = cx.client.db;
     let eng: &Engine = cx.eng;
     let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
@@ -482,6 +495,7 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
         in_not: false,
         expansions_warning: false,
         top: None,
+        token_id: std::cell::Cell::new(0),
     };
     let root = req.root.as_ref().expect("a parsed query");
     let mut it = ecx.iterate(root)?;
@@ -532,6 +546,47 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
     }
     let force = spec.is_json() && req.dialect < 3;
 
+    // the output pipeline (`buildOutputPipeline`): RETURN's keys, the loader, the highlighter's
+    // keys, built before anything runs
+    let explicit = req.out_fields.explicit_return;
+    let output = flags & F_IS_SEARCH != 0 && flags & F_SEND_NOFIELDS == 0;
+    let mut out_keys: Vec<usize> = Vec::new();
+    let mut run_loader = false;
+    let mut hl_keys: Vec<(usize, usize)> = Vec::new();
+    let highlight = output && flags & F_SEND_HIGHLIGHT != 0;
+    if output {
+        if explicit {
+            for rf in &req.out_fields.fields {
+                let lf = K_EXPLICIT_RETURN | if force { K_FORCE_LOAD } else { 0 };
+                if let Some(i) = lk.get_load(Some(spec), crate::util::cstr(&rf.name), crate::util::cstr(&rf.path), lf) {
+                    out_keys.push(i);
+                }
+            }
+        }
+        if !out_keys.is_empty() || !explicit {
+            run_loader = true;
+            if !explicit {
+                lk.all_loaded = !spec.is_json();
+            }
+        }
+        if highlight {
+            let def = &req.out_fields.default_field;
+            for (fi, ff) in req.out_fields.fields.iter().enumerate() {
+                if def.mode == 0 && ff.mode == 0 {
+                    continue;
+                }
+                let name = crate::util::cstr(&ff.name);
+                match lk.get_read(Some(spec), name, 0) {
+                    None => return Err(QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", String::from_utf8_lossy(name))).into()),
+                    Some(k) if lk.keys[k].flags & K_SCHEMA_SRC == 0 => {
+                        return Err(QErr::user(Code::Inval, "Property", format!(" `{}` is not in schema", String::from_utf8_lossy(name))).into());
+                    }
+                    Some(k) => hl_keys.push((k, fi)),
+                }
+            }
+        }
+    }
+
     // the query and scorer processors
     let mut total: i64 = 0;
     let mut results: Vec<Res<'_>> = Vec::new();
@@ -547,7 +602,7 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
         if norows {
             continue;
         }
-        let mut res = Res { dmd, score: 0.0, expl: None, row: Row { dyn_vals: Vec::new(), sv: &dmd.sort } };
+        let mut res = Res { dmd, score: 0.0, expl: None, row: Row { dyn_vals: Vec::new(), sv: &dmd.sort }, ixr: None };
         if scoring {
             let (s, e) = scorer.score(&sargs, &r, dmd, 0.0, explain);
             if s == scorers::FILTEROUT {
@@ -560,6 +615,9 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
         if !sort_load.is_empty() {
             let keys = sort_load.clone();
             load(eng, db, &mut lk, Some(spec), Some(&keys), res.dmd, &mut res.row, force, req.dialect);
+        }
+        if highlight {
+            res.ixr = Some(r);
         }
         scores.push(res.score);
         results.push(res);
@@ -593,31 +651,59 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
 
     // the output loader
     let mut skipped = 0;
-    if !norows && flags & F_SEND_NOFIELDS == 0 {
-        let mut keys: Vec<usize> = Vec::new();
-        let explicit = req.out_fields.explicit_return;
-        if explicit {
-            for rf in &req.out_fields.fields {
-                let lf = K_EXPLICIT_RETURN | if force { K_FORCE_LOAD } else { 0 };
-                if let Some(i) = lk.get_load(Some(spec), crate::util::cstr(&rf.name), crate::util::cstr(&rf.path), lf) {
-                    keys.push(i);
-                }
+    if !norows && run_loader {
+        let mut kept = Vec::with_capacity(results.len());
+        for mut r in results {
+            let ok = if explicit { load(eng, db, &mut lk, Some(spec), Some(&out_keys), r.dmd, &mut r.row, force, req.dialect) } else { load(eng, db, &mut lk, Some(spec), None, r.dmd, &mut r.row, force, req.dialect) };
+            if ok {
+                kept.push(r);
+            } else {
+                skipped += 1;
             }
         }
-        if !keys.is_empty() || !explicit {
-            if !explicit {
-                lk.all_loaded = !spec.is_json();
+        results = kept;
+    }
+
+    // the highlighter
+    if highlight && !norows {
+        let chinese = matches!(req.opts.language, areq::Lang::Is(l) if sspec::LANGUAGES.get(l) == Some(&"chinese"));
+        let options = if chinese { highlight::TOKLEN_EXACT } else { 0 };
+        let def = &req.out_fields.default_field;
+        let mut jobs: Vec<(usize, highlight::Settings, Bytes)> = Vec::new();
+        if !req.out_fields.fields.is_empty() {
+            for &(k, fi) in &hl_keys {
+                let ff = &req.out_fields.fields[fi];
+                jobs.push((k, highlight::normalize(Some(ff), def), ff.name.clone()));
             }
-            let mut kept = Vec::with_capacity(results.len());
-            for mut r in results {
-                let ok = if explicit { load(eng, db, &mut lk, Some(spec), Some(&keys), r.dmd, &mut r.row, force, req.dialect) } else { load(eng, db, &mut lk, Some(spec), None, r.dmd, &mut r.row, force, req.dialect) };
-                if ok {
-                    kept.push(r);
-                } else {
-                    skipped += 1;
+        } else if def.mode != 0 {
+            for (k, key) in lk.keys.iter().enumerate() {
+                if key.dead || key.flags & K_HIDDEN != 0 {
+                    continue;
+                }
+                jobs.push((k, highlight::normalize(None, def), key.name.clone()));
+            }
+        }
+        for r in &mut results {
+            let Some(ir) = r.ixr.take() else { continue };
+            for (k, st, name) in &jobs {
+                let key = &lk.keys[*k];
+                let Some(v) = r.row.get(key) else { continue };
+                if spec.is_json() && json_skips(&v) {
+                    continue;
+                }
+                let s = match &v {
+                    RsValue::String(s) | RsValue::RedisString(s) => s,
+                    RsValue::Trio(t) => match &t[0] {
+                        RsValue::String(s) | RsValue::RedisString(s) => s,
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                let ft_id = spec.field(crate::util::cstr(name)).filter(|f| f.is(sspec::T_TEXT)).and_then(|f| f.ft_id);
+                if let Some(out) = highlight::summarize_field(st, ft_id, s, &ir, r.dmd.byte_offsets.as_ref(), options) {
+                    r.row.set(key, RsValue::String(out));
                 }
             }
-            results = kept;
         }
     }
 
@@ -625,7 +711,6 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
     let reported = total - skipped;
     let rule = &spec.rule;
     let special = |n: &[u8]| [&rule.lang_field, &rule.score_field, &rule.payload_field].iter().any(|f| f.as_deref().is_some_and(|f| f.as_bytes() == n));
-    let explicit = req.out_fields.explicit_return;
     let typed = flags & F_TYPED != 0;
     let expand = flags & FORMAT_EXPAND != 0;
     let mut out_rows = Vec::with_capacity(results.len());

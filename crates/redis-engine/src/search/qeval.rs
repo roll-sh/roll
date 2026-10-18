@@ -31,6 +31,8 @@ pub struct EvalCx<'a> {
     /// The doc table's max id when a cursor's iterators were first built: a cursor's later
     /// chunks rebuild them, and the module's wildcard ranges end where they started.
     pub top: Option<u64>,
+    /// `tokenId`: bumped for every term reader the evaluation tries to open.
+    pub token_id: std::cell::Cell<u32>,
 }
 
 const TOO_LONG: &str = "query string is too long. Maximum allowed length is 1024";
@@ -56,13 +58,15 @@ impl<'a> EvalCx<'a> {
 
     /// `Redis_OpenReader`: a text term's reader, none when the term has no docs in the fields.
     fn open_term(&self, term: &[u8], mask: u128, weight: f64) -> Option<BoxIt<'a>> {
+        let id = self.token_id.get();
+        self.token_id.set(id.wrapping_add(1));
         let ii = self.ix.terms.get(term)?;
         if ii.unique_docs() == 0 || (self.ix.spec.flags & spec::I_FIELD_FLAGS != 0 && ii.field_mask() & mask == 0) {
             return None;
         }
         let total = self.ix.stats.num_documents;
         let unique = ii.unique_docs() as u64;
-        let t = Term { s: term.to_vec(), idf: iters::idf(total, unique), bm25_idf: iters::bm25_idf(total, unique) };
+        let t = Term { s: term.to_vec(), idf: iters::idf(total, unique), bm25_idf: iters::bm25_idf(total, unique), id };
         let res = IxResult { kind: K_TERM, freq: 1, field_mask: MASK_ALL, weight, term: Some(Rc::new(t)), ..Default::default() };
         let stores_fields = ii.flags() & super::invidx::flags::STORE_FIELD_FLAGS != 0;
         let filter = if stores_fields { RFilter::Mask(mask) } else { RFilter::None };
@@ -79,7 +83,7 @@ impl<'a> EvalCx<'a> {
         }
         let total = self.ix.stats.num_documents;
         let unique = ii.unique_docs() as u64;
-        let t = Term { s: value.to_vec(), idf: iters::idf(total, unique), bm25_idf: iters::bm25_idf(total, unique) };
+        let t = Term { s: value.to_vec(), idf: iters::idf(total, unique), bm25_idf: iters::bm25_idf(total, unique), id: 0 };
         let res = IxResult { kind: K_TERM, freq: 1, field_mask: MASK_ALL, weight, term: Some(Rc::new(t)), ..Default::default() };
         Some(Box::new(InvIt::new(ii, res, RFilter::None, Some(Checker::Field(fi, Predicate::Default)), self.q)))
     }

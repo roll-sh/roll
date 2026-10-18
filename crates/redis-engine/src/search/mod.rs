@@ -14,6 +14,7 @@ pub mod eval;
 pub mod expr;
 pub mod geo;
 pub mod global;
+pub mod highlight;
 pub mod hll;
 pub mod index;
 pub mod info;
