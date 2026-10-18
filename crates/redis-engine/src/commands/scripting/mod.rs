@@ -22,6 +22,7 @@ use std::ffi::c_int;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
+use crate::sdict::ServerDict;
 use vm::{FnDef, Flavor, Vm};
 
 pub static COMMANDS: &[Command] = &[
@@ -165,6 +166,18 @@ pub struct Library {
     /// The whole code, shebang included.
     pub code: Bytes,
     functions: Vec<FnDef>,
+    /// The library's functions dict (registration order, case-sensitive): FUNCTION LIST's order
+    /// and the order they are linked and unlinked in.
+    fdict: ServerDict,
+}
+
+/// The functions of all libraries by name, case-insensitively (`functionDictType`).
+pub struct FnDict(ServerDict);
+
+impl Default for FnDict {
+    fn default() -> Self {
+        FnDict(ServerDict::new(true))
+    }
 }
 
 /// Only EVAL scripts count towards this; the oldest are dropped first.
@@ -181,6 +194,9 @@ pub struct Scripting {
     scripts_mem: usize,
     fn_vm: Option<Vm>,
     libs: Vec<Library>,
+    /// The libraries dict (case-sensitive): FUNCTION LIST's, DUMP's and the snapshot's order.
+    lib_dict: ServerDict,
+    fn_dict: FnDict,
     /// Lowercase function name -> (library, function) index.
     fn_index: HashMap<String, (usize, usize)>,
     pub(crate) running: Option<Running>,
@@ -259,7 +275,7 @@ impl Scripting {
 
     /// The commands that recreate every library (FUNCTION LOAD each), for snapshots.
     pub fn library_codes(&self) -> Vec<Bytes> {
-        self.libs.iter().map(|l| l.code.clone()).collect()
+        self.ordered_libs().into_iter().map(|l| l.code.clone()).collect()
     }
 
     fn eval_vm(&mut self) -> &mut Vm {
@@ -282,7 +298,32 @@ impl Scripting {
     pub fn flush_functions(&mut self) {
         self.fn_vm = None;
         self.libs.clear();
+        self.lib_dict = ServerDict::default();
+        self.fn_dict = FnDict::default();
         self.reindex();
+    }
+
+    /// The libraries in the libraries dict's order.
+    fn ordered_libs(&self) -> Vec<&Library> {
+        self.lib_dict.keys().iter().filter_map(|k| self.libs.iter().find(|l| l.name.as_bytes() == &k[..])).collect()
+    }
+
+    /// `libraryLink`: its functions into the functions dict, then the library.
+    fn link(&mut self, name: &str) {
+        let Some(lib) = self.libs.iter().find(|l| l.name == name) else { return };
+        for f in lib.fdict.keys() {
+            self.fn_dict.0.add(&f);
+        }
+        self.lib_dict.add(name.as_bytes());
+    }
+
+    /// `libraryUnlink`.
+    fn unlink(&mut self, name: &str) {
+        let Some(lib) = self.libs.iter().find(|l| l.name == name) else { return };
+        for f in lib.fdict.keys() {
+            self.fn_dict.0.delete(&f, false);
+        }
+        self.lib_dict.delete(name.as_bytes(), false);
     }
 
     fn reindex(&mut self) {
@@ -359,7 +400,8 @@ impl Scripting {
         }
     }
 
-    /// FUNCTION LOAD. Returns the library name; errors are the message without its code.
+    /// FUNCTION LOAD (`functionsCreateWithLibraryCtx`). Returns the library name; errors are
+    /// the message without its code.
     pub fn load_library(&mut self, code: &Bytes, replace: bool, timeout_ms: u64) -> Result<String, String> {
         let (engine, name, body) = library_metadata(code)?;
         if !valid_name(name.as_bytes()) {
@@ -368,38 +410,63 @@ impl Scripting {
         if !engine.eq_ignore_ascii_case("lua") {
             return Err(format!("Engine '{engine}' not found"));
         }
-        let old = self.libs.iter().position(|l| l.name == name);
-        if old.is_some() && !replace {
+        let old = self.lib_dict.find(name.as_bytes()).is_some();
+        if old && !replace {
             return Err(format!("Library '{name}' already exists"));
         }
-        let vm = self.fn_vm();
-        let l = vm.l;
-        let functions = unsafe { run_library(vm, body, timeout_ms)? };
-        let unref = |fs: &[FnDef]| {
-            for f in fs {
-                unsafe { luaL_unref(l, LUA_REGISTRYINDEX, f.lua_ref) };
+        if old {
+            self.unlink(&name);
+        }
+        let failed = |s: &mut Self, e: String| {
+            if old {
+                s.link(&name);
             }
+            Err(e)
         };
-        if functions.is_empty() {
-            return Err("No functions registered".into());
-        }
-        for f in &functions {
-            let taken = self.fn_index.get(&f.name.to_ascii_lowercase()).is_some_and(|(li, _)| Some(*li) != old);
-            if taken {
-                unref(&functions);
-                return Err(format!("Function {} already exists", f.name));
+        let lib = match self.compile_library(&name, code, body, timeout_ms) {
+            Ok(lib) => lib,
+            Err(e) => return failed(self, e),
+        };
+        // Verify no duplicate functions, in the new library's own order.
+        for f in lib.fdict.keys() {
+            if self.fn_dict.0.find(&f).is_some() {
+                self.release(&lib);
+                return failed(self, format!("Function {} already exists", String::from_utf8_lossy(&f)));
             }
         }
-        let lib = Library { name: name.clone(), code: code.clone(), functions };
-        match old {
-            Some(i) => {
-                let prev = std::mem::replace(&mut self.libs[i], lib);
-                unref(&prev.functions);
-            }
-            None => self.libs.push(lib),
+        if let Some(i) = self.libs.iter().position(|l| l.name == name) {
+            let prev = self.libs.remove(i);
+            self.release(&prev);
         }
+        self.libs.push(lib);
+        self.link(&name);
         self.reindex();
         Ok(name)
+    }
+
+    /// Run the library's code so it registers its functions (into its own functions dict).
+    fn compile_library(&mut self, name: &str, code: &Bytes, body: &[u8], timeout_ms: u64) -> Result<Library, String> {
+        let vm = self.fn_vm();
+        let functions = unsafe { run_library(vm, body, timeout_ms)? };
+        let mut fdict = ServerDict::default();
+        for f in &functions {
+            fdict.find(f.name.as_bytes());
+            fdict.add(f.name.as_bytes());
+        }
+        let lib = Library { name: name.to_string(), code: code.clone(), functions, fdict };
+        if lib.functions.is_empty() {
+            return Err("No functions registered".into());
+        }
+        Ok(lib)
+    }
+
+    /// Drop a library's compiled functions.
+    fn release(&self, lib: &Library) {
+        if let Some(vm) = &self.fn_vm {
+            for f in &lib.functions {
+                unsafe { luaL_unref(vm.l, LUA_REGISTRYINDEX, f.lua_ref) };
+            }
+        }
     }
 
     /// FUNCTION RESTORE (and snapshot load): add these libraries, all or none. Errors are the
@@ -415,44 +482,80 @@ impl Scripting {
     }
 
     pub fn restore_libraries(&mut self, codes: &[Vec<u8>], policy: RestorePolicy) -> Result<(), String> {
-        // Compiled apart first, so a bad payload changes nothing.
+        // Compiled into a context of their own first, so a bad payload changes nothing.
         let mut staged = Scripting::default();
         for code in codes {
             staged.load_library(&Bytes::copy_from_slice(code), false, 0)?;
         }
+        let order: Vec<String> = staged.ordered_libs().iter().map(|l| l.name.clone()).collect();
         if policy == RestorePolicy::Flush {
+            // `functionsLibCtxSwapWithCurrent`: the new context, dicts and all.
             self.flush_functions();
-        } else {
-            let replaced = |name: &str| staged.libs.iter().any(|l| l.name == name);
-            if policy == RestorePolicy::Append
-                && let Some(lib) = staged.libs.iter().find(|l| self.libs.iter().any(|o| o.name == l.name))
-            {
-                return Err(format!("Library {} already exists", lib.name));
+            self.adopt(&staged, &order);
+            self.lib_dict = staged.lib_dict.clone();
+            self.fn_dict = FnDict(staged.fn_dict.0.clone());
+            self.reindex();
+            return Ok(());
+        }
+        // `libraryJoin`.
+        let mut replaced = Vec::new();
+        let revert = |s: &mut Self, replaced: &[String]| {
+            for name in replaced {
+                s.link(name);
             }
-            for f in staged.libs.iter().flat_map(|l| &l.functions) {
-                if let Some(&(li, _)) = self.fn_index.get(&f.name.to_ascii_lowercase())
-                    && !replaced(&self.libs[li].name)
-                {
-                    return Err(format!("Function {} already exists", f.name));
+        };
+        for name in &order {
+            if self.lib_dict.find(name.as_bytes()).is_some() {
+                if policy == RestorePolicy::Append {
+                    revert(self, &replaced);
+                    return Err(format!("Library {name} already exists"));
                 }
-            }
-            for lib in &staged.libs {
-                self.delete_library(lib.name.as_bytes());
+                self.unlink(name);
+                replaced.push(name.clone());
             }
         }
-        for lib in &staged.libs {
-            self.load_library(&lib.code, false, 0)?;
+        for f in staged.fn_dict.0.keys() {
+            if self.fn_dict.0.find(&f).is_some() {
+                revert(self, &replaced);
+                return Err(format!("Function {} already exists", String::from_utf8_lossy(&f)));
+            }
         }
+        for name in &replaced {
+            if let Some(i) = self.libs.iter().position(|l| &l.name == name) {
+                let prev = self.libs.remove(i);
+                self.release(&prev);
+            }
+        }
+        self.adopt(&staged, &order);
+        for name in &order {
+            self.link(name);
+        }
+        self.reindex();
         Ok(())
     }
 
-    pub fn delete_library(&mut self, name: &[u8]) -> bool {
-        let Some(i) = self.libs.iter().position(|l| l.name.as_bytes() == name) else { return false };
-        let lib = self.libs.remove(i);
-        if let Some(vm) = &self.fn_vm {
-            for f in &lib.functions {
-                unsafe { luaL_unref(vm.l, LUA_REGISTRYINDEX, f.lua_ref) };
+    /// The staged libraries compiled into this context (no dict changes), keeping their
+    /// functions dicts.
+    fn adopt(&mut self, staged: &Scripting, order: &[String]) {
+        for name in order {
+            let Some(src) = staged.libs.iter().find(|l| &l.name == name) else { continue };
+            let Ok((_, _, body)) = library_metadata(&src.code) else { continue };
+            if let Ok(mut lib) = self.compile_library(name, &src.code, body, 0) {
+                lib.fdict = src.fdict.clone();
+                self.libs.push(lib);
             }
+        }
+    }
+
+    pub fn delete_library(&mut self, name: &[u8]) -> bool {
+        if self.lib_dict.find(name).is_none() {
+            return false;
+        }
+        let name = String::from_utf8_lossy(name).into_owned();
+        self.unlink(&name);
+        if let Some(i) = self.libs.iter().position(|l| l.name == name) {
+            let lib = self.libs.remove(i);
+            self.release(&lib);
         }
         self.reindex();
         true
@@ -1001,6 +1104,7 @@ fn fcall_ro(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 
 fn fcall_generic(cx: &mut Cx, args: &[Bytes], ro: bool) -> CmdResult {
     feed_monitor(cx, args);
+    cx.eng.scripting.fn_dict.0.find(&args[1]);
     let s = &cx.eng.scripting;
     let Some(&(li, fi)) = s.fn_index.get(&String::from_utf8_lossy(&args[1]).to_ascii_lowercase()) else {
         return Err(Error::new("ERR Function not found"));
@@ -1110,7 +1214,7 @@ fn function_flush(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 fn function_dump(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Bulk(crate::rdb::dump_functions(cx.eng.scripting.libs.iter().map(|l| &l.code[..])).into()))
+    Ok(Reply::Bulk(crate::rdb::dump_functions(cx.eng.scripting.ordered_libs().into_iter().map(|l| &l.code[..])).into()))
 }
 
 fn function_restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
@@ -1178,13 +1282,15 @@ fn function_list(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         i += 1;
     }
     let mut out = Vec::new();
-    for lib in &cx.eng.scripting.libs {
+    for lib in cx.eng.scripting.ordered_libs() {
         if pattern.is_some_and(|p| !crate::util::glob_match(p, lib.name.as_bytes(), true)) {
             continue;
         }
         let functions = lib
-            .functions
+            .fdict
+            .keys()
             .iter()
+            .filter_map(|k| lib.functions.iter().find(|f| f.name.as_bytes() == &k[..]))
             .map(|f| {
                 Reply::Map(vec![
                     (Reply::bulk("name"), Reply::bulk(&f.name)),
