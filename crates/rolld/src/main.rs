@@ -15,7 +15,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
-/// roll daemon: serverless Postgres, Kafka-compatible streams and tasks on your machine (or an EC2 host).
+mod queues;
+
+/// roll daemon: serverless Postgres, Kafka-compatible streams, tasks and RabbitMQ-compatible queues on
+/// your machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -85,6 +88,11 @@ struct Args {
     /// Token for the tasks API (`/v1/tasks`); without one it's open, like the rest of the local API.
     #[arg(long, env = "ROLL_TASKS_TOKEN")]
     tasks_token: Option<String>,
+    /// Run only roll queues (no Postgres control plane or proxy): broker nodes on AWS.
+    #[arg(long, env = "ROLL_QUEUES_ONLY", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    queues_only: bool,
+    #[command(flatten)]
+    queues: queues::QueuesArgs,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -104,11 +112,25 @@ async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,stream_broker=info,tasks=info".into()),
+                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info".into()),
         )
         .init();
     let args = Args::parse();
     let home = std::path::absolute(&args.home)?;
+
+    let queues = if args.queues.disabled { None } else { Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host).await?) };
+    if args.queues_only {
+        let q = queues.ok_or_else(|| anyhow::anyhow!("--queues-only with --no-queues leaves nothing to run"))?;
+        let listener = tokio::net::TcpListener::bind(args.api).await?;
+        info!(addr = %args.api, "queues control API listening");
+        tokio::select! {
+            r = axum::serve(listener, q.router()) => r?,
+            r = q.serve() => r?,
+            _ = shutdown_signal() => info!("shutting down"),
+        }
+        q.shutdown().await;
+        return Ok(());
+    }
 
     let tasks_store = std::sync::Arc::new(tasks::store::sqlite::SqliteStore::open(&home.join("tasks.db"), 4)?);
     let tasks = tasks::Tasks::new(
@@ -165,19 +187,46 @@ async fn run() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
-    let router = api::router(control.clone())
+    let mut router = api::router(control.clone())
         .merge(stream_broker::http::router(broker.clone()))
         .merge(tasks::api::router(tasks.clone()));
+    if let Some(q) = &queues {
+        router = router.merge(q.router());
+    }
+    let queues_serve = async {
+        match &queues {
+            Some(q) => q.serve().await,
+            None => std::future::pending().await,
+        }
+    };
 
     tokio::select! {
         r = proxy.serve() => r?,
         r = axum::serve(listener, router) => r?,
+        r = queues_serve => r?,
         r = stream_broker::server::serve_on(broker.clone(), kafka) => r?,
         _ = reconciler::run(control.clone()) => {}
         _ = broker.clone().run() => {}
-        _ = tokio::signal::ctrl_c() => info!("shutting down; computes keep running and are adopted on next start"),
+        _ = shutdown_signal() => info!("shutting down; computes keep running and are adopted on next start"),
+    }
+    if let Some(q) = &queues {
+        q.shutdown().await;
     }
     tasks_worker.shutdown().await;
     broker.sync_all().await;
     Ok(())
+}
+
+/// Ctrl-C, or SIGTERM from a supervisor (systemd, ECS, Kubernetes) during a rolling upgrade.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }

@@ -5,6 +5,8 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
+mod queues;
+
 /// roll — serverless infrastructure.
 #[derive(Parser)]
 #[command(version)]
@@ -39,6 +41,9 @@ enum Cmd {
     /// Kafka-compatible streams.
     #[command(subcommand, alias = "kafka")]
     Stream(stream::Stream),
+    /// RabbitMQ-compatible message queues.
+    #[command(alias = "q")]
+    Queues(queues::Queues),
 }
 
 #[derive(Subcommand)]
@@ -282,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
             let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()) };
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
+        Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
     };
     let out = match cmd {
         Db::List => {

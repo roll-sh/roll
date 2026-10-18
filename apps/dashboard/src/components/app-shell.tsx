@@ -6,6 +6,7 @@ import {
   ChevronsUpDown,
   Database,
   Globe,
+  Inbox,
   LayoutGrid,
   Rocket,
   ScrollText,
@@ -25,6 +26,7 @@ import { useMarkState } from "./mark-state";
 const nav = [
   { label: "Overview", icon: LayoutGrid, href: "/dashboard" },
   { label: "Databases", icon: Database, href: "/dashboard/databases" },
+  { label: "Queues", icon: Inbox, href: "/dashboard/queues" },
   { label: "Tasks", icon: Workflow, href: "/dashboard/tasks" },
   { label: "Streams", icon: Waves, href: "/dashboard/streams" },
   { label: "Functions", icon: SquareFunction },
@@ -66,7 +68,7 @@ export function AppShell({ crumb, actions, children }: { crumb: string; actions?
         </button>
         <nav className="mt-5 space-y-0.5">
           {nav.map(({ label, icon: Icon, href }) => {
-            const active = href === pathname;
+            const active = href === pathname || (!!href && href !== "/dashboard" && pathname.startsWith(`${href}/`));
             const cls = `flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition ${
               active ? "bg-panel-2 text-fg" : "text-muted hover:bg-panel-2 hover:text-fg"
             }`;

@@ -8,3 +8,5 @@ packages
 **/.next
 **/.test-build
 .env*
+*.pem
+*.key
