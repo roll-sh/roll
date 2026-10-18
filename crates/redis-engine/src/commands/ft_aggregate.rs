@@ -494,6 +494,8 @@ trait Proc<'a> {
 enum Saved {
     /// The query iterator's last document.
     Query(u64),
+    /// What a KNN query (read by distance, not by id) had not yet given.
+    QueryRest(VecDeque<IxResult>),
     Pager { offset: u32, remaining: u32, skipping: bool },
     /// What the last accumulating processor had left, then its final status.
     Replay(VecDeque<Pend>, St),
@@ -594,6 +596,11 @@ struct QueryIt<'a> {
     last: u64,
     /// A cursor's earlier chunks read up to this document.
     resume: Option<u64>,
+    /// The query is a KNN one: its results come by distance, all known once it ran, so a
+    /// cursor keeps those it has not given yet.
+    knn: bool,
+    /// Those results, when the cursor resumes.
+    rest: Option<VecDeque<IxResult>>,
 }
 
 impl<'a> Proc<'a> for QueryIt<'a> {
@@ -607,15 +614,20 @@ impl<'a> Proc<'a> for QueryIt<'a> {
 
     fn next(&mut self, _up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         loop {
-            let more = match self.resume.take() {
-                Some(last) => self.it.skip_to(last + 1) != Skip::Eof,
-                None => self.it.read(),
+            let ixr = if let Some(rest) = self.rest.as_mut() {
+                let Some(ixr) = rest.pop_front() else { return St::Eof };
+                ixr
+            } else {
+                let more = match self.resume.take() {
+                    Some(last) => self.it.skip_to(last + 1) != Skip::Eof,
+                    None => self.it.read(),
+                };
+                if !more {
+                    return St::Eof;
+                }
+                let Some(cur) = self.it.current() else { return St::Eof };
+                cur.clone()
             };
-            if !more {
-                return St::Eof;
-            }
-            let Some(cur) = self.it.current() else { return St::Eof };
-            let ixr = cur.clone();
             self.last = ixr.doc_id;
             let ix: &'a Index = self.ix;
             let Some(dmd) = ix.docs.get(ixr.doc_id) else { continue };
@@ -633,16 +645,57 @@ impl<'a> Proc<'a> for QueryIt<'a> {
     }
 
     fn save(&mut self) -> Option<Saved> {
-        Some(Saved::Query(self.last))
+        if !self.knn {
+            return Some(Saved::Query(self.last));
+        }
+        if let Some(rest) = self.rest.take() {
+            return Some(Saved::QueryRest(rest));
+        }
+        if self.last == 0 {
+            // not read yet
+            return None;
+        }
+        let mut rest = VecDeque::new();
+        while self.it.read() {
+            if let Some(cur) = self.it.current() {
+                rest.push_back(cur.clone());
+            }
+        }
+        Some(Saved::QueryRest(rest))
     }
 
     fn restore(&mut self, s: Saved) {
-        if let Saved::Query(last) = s
-            && last > 0
-        {
-            self.last = last;
-            self.resume = Some(last);
+        match s {
+            Saved::Query(last) if last > 0 => {
+                self.last = last;
+                self.resume = Some(last);
+            }
+            Saved::QueryRest(rest) => self.rest = Some(rest),
+            _ => {}
         }
+    }
+}
+
+/// `RPMetricsLoader`: the query's yielded distances into their keys.
+struct MetricsRp {
+    keys: Vec<KRef>,
+}
+
+impl<'a> Proc<'a> for MetricsRp {
+    fn name(&self) -> String {
+        "Metrics Applier".into()
+    }
+
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        let st = pull(up, cx, r);
+        if st != St::Ok {
+            return st;
+        }
+        let metrics = r.ixr.as_ref().map(|x| x.metrics.clone()).unwrap_or_default();
+        for (m, v) in metrics {
+            rset(&mut r.row, self.keys[m], RsValue::Number(v));
+        }
+        St::Ok
     }
 }
 
@@ -2088,13 +2141,21 @@ impl<'a> Builder<'_, 'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'a Index, now: i64, safe: bool, args: scorers::Args<'a>) -> Result<Builder<'r, 'a>, QErr> {
+fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'a Index, now: i64, safe: bool, args: scorers::Args<'a>, metrics: &[Vec<u8>]) -> Result<Builder<'r, 'a>, QErr> {
     let cfg = &cx.eng.cfg;
     let opt = optimizer(req);
     let max_groups = cfg.num("search-max-aggregate-groups").max(1) as usize;
     let mut b = Builder { req, chain: Vec::new(), opt, safe, max_groups, sortkey: None };
     cx.lookups.push(Lookup::default());
-    b.push(QueryIt { it, ix, now, last: 0, resume: None });
+    let knn = matches!(req.root.as_ref().map(|n| &n.kind), Some(qast::Kind::Vector(vq)) if vq.knn);
+    b.push(QueryIt { it, ix, now, last: 0, resume: None, knn, rest: None });
+    // `getAdditionalMetricsRP`
+    if !metrics.is_empty() {
+        let lk = &mut cx.lookups[0];
+        let keys = fq::metric_keys(lk, cx.spec, metrics)?;
+        let keys = keys.into_iter().map(|i| KRef::of(&lk.keys[i])).collect();
+        b.push(MetricsRp { keys });
+    }
 
     // `Pipeline_BuildQueryPart`: a scorer when scores are asked for, or when a search returning
     // rows sorts by them.
@@ -2184,6 +2245,8 @@ struct CursorSt {
     avg_doc_len: f64,
     /// `cursorConfig.chunkSize`.
     chunk: u32,
+    /// The query's metric requests (yielded distances).
+    metrics: Vec<Vec<u8>>,
 }
 
 /// `RSGlobalConfig.cursorReadSize`.
@@ -2267,6 +2330,8 @@ fn run(
         expansions_warning: false,
         top: reading.then_some(top),
         token_id: std::cell::Cell::new(0),
+        can_skip_rich: req.opts.flags & qast::S_CAN_SKIP_RICH_RESULTS != 0,
+        metric_requests: Vec::new(),
     };
     let root = req.root.as_ref().expect("a parsed query");
     let mut it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };
@@ -2299,7 +2364,16 @@ fn run(
         dialect: req.dialect,
         prof: None,
     };
-    let Builder { mut chain, sortkey, .. } = build(req, &mut cx, it, ix, now, background, sargs)?;
+    let mut metric_requests = std::mem::take(&mut ecx.metric_requests);
+    // A replaying cursor builds no query iterator: its yielded distances keep their keys.
+    if let Some(s) = cur.as_mut() {
+        if pending.is_some() {
+            metric_requests = s.metrics.clone();
+        } else {
+            s.metrics = metric_requests.clone();
+        }
+    }
+    let Builder { mut chain, sortkey, .. } = build(req, &mut cx, it, ix, now, background, sargs, &metric_requests)?;
     if let Some(p) = prof.as_deref_mut() {
         cx.prof = Some(vec![(0, 0); chain.len()]);
         p.build_ns = p.clock.elapsed().as_nanos() as u64;

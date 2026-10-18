@@ -162,6 +162,59 @@ impl<T> MmHeap<T> {
         old
     }
 
+    /// `mmh_peek_max`.
+    pub fn peek_max(&self, c: &mut Cmp<'_, T>) -> Option<&T> {
+        match self.count() {
+            0 => None,
+            1 => Some(self.at(1)),
+            2 => Some(self.at(2)),
+            _ => Some(if self.gt(c, 2, 3) { self.at(2) } else { self.at(3) }),
+        }
+    }
+
+    /// `mmh_exchange_max`: the old maximum, replaced by `v` (none when empty).
+    pub fn exchange_max(&mut self, c: &mut Cmp<'_, T>, v: T) -> Option<T> {
+        match self.count() {
+            0 => None,
+            1 => self.data[1].replace(v),
+            2 => {
+                let old = self.data[2].replace(v);
+                if self.lt(c, 2, 1) {
+                    self.data.swap(2, 1);
+                }
+                old
+            }
+            _ => {
+                let idx = if self.lt(c, 2, 3) { 3 } else { 2 };
+                let old = self.data[idx].replace(v);
+                if self.lt(c, idx, 1) {
+                    self.data.swap(idx, 1);
+                }
+                self.trickledown(c, true, idx);
+                old
+            }
+        }
+    }
+
+    /// `mmh_pop_min`.
+    pub fn pop_min(&mut self, c: &mut Cmp<'_, T>) -> Option<T> {
+        match self.count() {
+            0 => None,
+            1 => self.data.pop().flatten(),
+            _ => {
+                let last = self.data.pop().flatten();
+                let d = std::mem::replace(&mut self.data[1], last);
+                self.trickledown(c, false, 1);
+                d
+            }
+        }
+    }
+
+    /// `mmh_clear`.
+    pub fn clear(&mut self) {
+        self.data.truncate(1);
+    }
+
     /// `mmh_pop_max`.
     pub fn pop_max(&mut self, c: &mut Cmp<'_, T>) -> Option<T> {
         let n = self.count();

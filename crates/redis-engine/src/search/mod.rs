@@ -40,6 +40,8 @@ pub mod strconv;
 pub mod tokenize;
 pub mod trie;
 pub mod triemap;
+pub mod vec_iters;
+pub mod vecsim;
 pub mod vector;
 
 /// `MODULE LIST`'s version (8.10.1).

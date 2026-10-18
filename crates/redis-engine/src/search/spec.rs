@@ -238,6 +238,15 @@ impl Quant {
         }
     }
 
+    /// `VecSimSvsCompression_ToString`: LVQ and LeanVec need an Intel CPU; elsewhere (as on the
+    /// reference's aarch64) the index falls back to scalar quantization.
+    pub fn display(self) -> &'static str {
+        match self {
+            Quant::None => "NO_COMPRESSION",
+            _ => "GlobalSQ8",
+        }
+    }
+
     pub fn leanvec(self) -> bool {
         matches!(self, Quant::LeanVec4x8 | Quant::LeanVec8x8)
     }
@@ -265,7 +274,7 @@ pub struct VectorParams {
 }
 
 impl VectorParams {
-    fn new(algo: Algo, multi: bool) -> Self {
+    pub fn new(algo: Algo, multi: bool) -> Self {
         VectorParams {
             algo,
             ty: VecType::Float32,

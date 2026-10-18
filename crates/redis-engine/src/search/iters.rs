@@ -18,6 +18,7 @@ pub const K_TERM: u8 = 4;
 pub const K_VIRTUAL: u8 = 8;
 pub const K_NUMERIC: u8 = 16;
 pub const K_METRIC: u8 = 32;
+pub const K_HYBRID_METRIC: u8 = 64;
 
 pub const MASK_ALL: u128 = u128::MAX;
 
@@ -45,6 +46,9 @@ pub struct IxResult {
     pub offsets: Vec<u8>,
     pub num: f64,
     pub children: Vec<IxResult>,
+    /// `metrics`: yielded values (vector distances) by metric request, which aggregates
+    /// collect from their children.
+    pub metrics: Vec<(usize, f64)>,
 }
 
 impl IxResult {
@@ -57,7 +61,7 @@ impl IxResult {
     }
 
     pub fn is_aggregate(&self) -> bool {
-        self.kind & (K_UNION | K_INTERSECT) != 0
+        self.kind & (K_UNION | K_INTERSECT | K_HYBRID_METRIC) != 0
     }
 
     /// `reset_aggregate`.
@@ -67,6 +71,7 @@ impl IxResult {
         self.field_mask = 0;
         self.kind_mask = 0;
         self.children.clear();
+        self.metrics.clear();
     }
 
     /// `push_borrowed`.
@@ -75,7 +80,9 @@ impl IxResult {
         self.freq += child.freq;
         self.field_mask |= child.field_mask;
         self.kind_mask |= child.kind;
-        self.children.push(child.clone());
+        let mut c = child.clone();
+        self.metrics.append(&mut c.metrics);
+        self.children.push(c);
     }
 
     /// `has_offsets`.
@@ -91,8 +98,8 @@ impl IxResult {
     pub fn offsets(&self) -> Offsets<'_> {
         match self.kind {
             K_TERM => Offsets::Term(offsets_iter(&self.offsets)),
-            K_UNION | K_INTERSECT if self.children.len() == 1 => self.children[0].offsets(),
-            K_UNION | K_INTERSECT => {
+            K_UNION | K_INTERSECT | K_HYBRID_METRIC if self.children.len() == 1 => self.children[0].offsets(),
+            K_UNION | K_INTERSECT | K_HYBRID_METRIC => {
                 let mut children: Vec<Offsets<'_>> = self.children.iter().map(|c| c.offsets()).collect();
                 let positions = children.iter_mut().map(|c| c.next()).collect();
                 Offsets::Merge { children, positions }
@@ -485,7 +492,7 @@ fn did_expire(point: i64, now: i64) -> bool {
 
 impl Checker {
     /// `is_expired`.
-    fn is_expired(&self, cx: &Qcx<'_>, res: &IxResult) -> bool {
+    pub(super) fn is_expired(&self, cx: &Qcx<'_>, res: &IxResult) -> bool {
         let Some(d) = cx.docs.get(res.doc_id) else { return false };
         let fe = &d.field_expirations;
         if fe.is_empty() {
@@ -852,9 +859,9 @@ impl Iter for Wildcard {
 
 /// `IdListSorted`.
 pub struct IdList {
-    ids: Vec<DocId>,
-    offset: usize,
-    res: IxResult,
+    pub(super) ids: Vec<DocId>,
+    pub(super) offset: usize,
+    pub(super) res: IxResult,
 }
 
 impl IdList {

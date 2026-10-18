@@ -1,7 +1,7 @@
 //! The built-in scorers (`ext/default.c`) and their EXPLAINSCORE trees (`RSScoreExplain`).
 
 use super::doctable::{DOC_HAS_PAYLOAD, Dmd};
-use super::iters::{IxResult, K_INTERSECT, K_METRIC, K_NUMERIC, K_TERM, K_UNION, K_VIRTUAL};
+use super::iters::{IxResult, K_HYBRID_METRIC, K_INTERSECT, K_METRIC, K_NUMERIC, K_TERM, K_UNION, K_VIRTUAL};
 
 /// `RSScoreExplain`.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -96,7 +96,7 @@ fn parent(e: &mut Option<Expl>) {
 }
 
 fn is_agg(r: &IxResult) -> bool {
-    r.kind & (K_INTERSECT | K_UNION) != 0
+    r.kind & (K_INTERSECT | K_UNION | K_HYBRID_METRIC) != 0
 }
 
 /// Child explanations for an aggregate, when explaining.
@@ -278,6 +278,8 @@ fn dismax(r: &IxResult, mut e: Option<&mut Expl>) -> f64 {
             }
             set_at(e, format!("{:.2} = Weight {:.2} * children DISMAX {:.2}", r.weight * ret, r.weight, ret));
         }
+        // the filter's score: the vector result aside
+        K_HYBRID_METRIC => return r.children.get(1).map_or(0.0, |c| dismax(c, e)),
         _ => {}
     }
     r.weight * ret

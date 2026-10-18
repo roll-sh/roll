@@ -7,7 +7,7 @@
 use super::areq::{MODE_HIGHLIGHT, MODE_SYNOPSIS, ReturnedField};
 use super::doctable::ByteOffsets;
 use super::invidx::OffsetsIter;
-use super::iters::{IxResult, K_INTERSECT, K_TERM, K_UNION, Term};
+use super::iters::{IxResult, K_HYBRID_METRIC, K_INTERSECT, K_TERM, K_UNION, Term};
 use crate::util::cstr;
 
 const EOF: u32 = u32::MAX;
@@ -78,8 +78,8 @@ impl<'a> TermOffsets<'a> {
                 Some(t) => TermOffsets::Term(super::invidx::offsets(&r.offsets), t),
                 None => TermOffsets::Empty,
             },
-            K_UNION | K_INTERSECT if r.children.len() == 1 => Self::of(&r.children[0]),
-            K_UNION | K_INTERSECT => {
+            K_UNION | K_INTERSECT | K_HYBRID_METRIC if r.children.len() == 1 => Self::of(&r.children[0]),
+            K_UNION | K_INTERSECT | K_HYBRID_METRIC => {
                 let mut children: Vec<TermOffsets<'a>> = r.children.iter().map(Self::of).collect();
                 let mut terms = vec![None; children.len()];
                 let offsets = children.iter_mut().zip(terms.iter_mut()).map(|(c, t)| c.next(t)).collect();

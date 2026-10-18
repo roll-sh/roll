@@ -6,6 +6,8 @@ use crate::commands::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Code {
+    /// `QUERY_ERROR_CODE_OK`: a failure that set no error.
+    Ok,
     Generic,
     Syntax,
     ParseArgs,
@@ -76,6 +78,7 @@ impl Code {
     pub const fn strings(self) -> (&'static str, &'static str) {
         use Code::*;
         match self {
+            Ok => ("", "Success (not an error)"),
             Generic => ("SEARCH_GENERIC ", "Generic error evaluating the query"),
             Syntax => ("SEARCH_SYNTAX ", "Parsing/Syntax error for query string"),
             ParseArgs => ("SEARCH_PARSE_ARGS ", "Error parsing query/aggregation arguments"),

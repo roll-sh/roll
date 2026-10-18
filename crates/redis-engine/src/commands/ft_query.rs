@@ -469,6 +469,24 @@ pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 /// FT.SEARCH's pipeline; `background` runs it in a worker (its loader buffers the page).
+/// `getAdditionalMetricsRP`: a key per metric request, which may neither name a schema
+/// field nor repeat one.
+pub(super) fn metric_keys(lk: &mut Lookup, spec: &Spec, requests: &[Vec<u8>]) -> Result<Vec<usize>, QErr> {
+    let mut keys = Vec::with_capacity(requests.len());
+    for name in requests {
+        let name = crate::util::cstr(name);
+        let lossy = String::from_utf8_lossy(name);
+        if spec.field(name).is_some() {
+            return Err(QErr::user(Code::IndexExists, "Property", format!(" `{lossy}` already exists in schema")));
+        }
+        match lk.get_write(name, 0) {
+            Some(k) => keys.push(k),
+            None => return Err(QErr::user(Code::DupField, "Property", format!(" `{lossy}` specified more than once"))),
+        }
+    }
+    Ok(keys)
+}
+
 pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, background: bool) -> Result<Reply, Error> {
     let cfg = &eng.cfg;
     let spec = &ix.spec;
@@ -499,10 +517,13 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
         expansions_warning: false,
         top: None,
         token_id: std::cell::Cell::new(0),
+        can_skip_rich: req.opts.flags & qast::S_CAN_SKIP_RICH_RESULTS != 0,
+        metric_requests: Vec::new(),
     };
     let root = req.root.as_ref().expect("a parsed query");
     let mut it = ecx.iterate(root)?;
     let warn_expansions = ecx.expansions_warning;
+    let metric_requests = std::mem::take(&mut ecx.metric_requests);
     // `QOptimizer_Iterators`.
     let plan = req.optimizer.as_ref().filter(|_| flags & OPTIMIZE != 0);
     if let Some(p) = plan {
@@ -533,6 +554,8 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     let explain = flags & F_SEND_SCOREEXPLAIN != 0;
 
     let mut lk = Lookup::default();
+    // `getAdditionalMetricsRP`: the yielded distances' keys
+    let metric_keys = metric_keys(&mut lk, spec, &metric_requests)?;
     // the sort keys: read from the sorting vector, else loaded
     let mut sort_lk: Vec<usize> = Vec::new();
     let mut sort_load: Vec<usize> = Vec::new();
@@ -620,6 +643,9 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
             continue;
         }
         let mut res = Res { dmd, score: 0.0, expl: None, row: Row { dyn_vals: Vec::new(), sv: &dmd.sort }, ixr: None };
+        for &(m, v) in &r.metrics {
+            res.row.set(&lk.keys[metric_keys[m]], RsValue::Number(v));
+        }
         if scoring {
             let (s, e) = scorer.score(&sargs, &r, dmd, 0.0, explain);
             if s == scorers::FILTEROUT {

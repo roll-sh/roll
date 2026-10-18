@@ -575,9 +575,9 @@ fn json_single_vector(fs: &spec::Field, arr: &[Node]) -> Result<DocValue, QErr> 
 }
 
 /// `JSON_StoreMultiVectorInDocField`: arrays of the right dimension, nulls skipped (failures
-/// carry no message).
+/// set no error: "Success (not an error)").
 fn json_multi_vector(fs: &spec::Field, items: &[Node]) -> Result<DocValue, QErr> {
-    let fail = || QErr::code(Code::Generic);
+    let fail = || QErr::code(Code::Ok);
     let v = fs.vector.as_ref().filter(|v| v.multi).ok_or_else(fail)?;
     let size = v.blob_size();
     let mut data = Vec::with_capacity(size * items.len());
@@ -617,7 +617,7 @@ fn json_store(fs: &spec::Field, n: &Node) -> Result<DocValue, QErr> {
                     match elems[0].ty() {
                         Ty::Long | Ty::Double => json_single_vector(fs, &elems)?,
                         Ty::Array => json_multi_vector(fs, &elems)?,
-                        _ => return Err(QErr::code(Code::Generic)),
+                        _ => return Err(QErr::code(Code::Ok)),
                     }
                 }
                 spec::T_GEOMETRY => return Err(QErr::new(Code::Generic, "GEOMETRY field does not support array type")),
@@ -1154,7 +1154,7 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
                 spec::Algo::Svs => {
                     m.push((st("graph_max_degree"), Reply::Int(v.graph_max_degree as i64)));
                     m.push((st("construction_window_size"), Reply::Int(v.construction_window_size as i64)));
-                    m.push((st("compression"), st(v.quant.name())));
+                    m.push((st("compression"), st(v.quant.display())));
                     if v.quant != spec::Quant::None {
                         m.push((st("training_threshold"), Reply::Int(v.training_threshold as i64)));
                     }
@@ -1193,14 +1193,14 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
 
     let s = &ix.stats;
     let num_records = s.num_records;
-    let vectors = 0i64;
-    let total = ix.total_mem(0);
+    let vectors: usize = ix.fields.iter().filter_map(|f| f.vectors.as_ref()).map(|v| v.memory()).sum();
+    let total = ix.total_mem(vectors);
     top.push((st("num_docs"), Reply::Int(s.num_documents as i64)));
     top.push((st("max_doc_id"), Reply::Int(ix.docs.max_doc_id as i64)));
     top.push((st("num_terms"), Reply::Int(s.num_terms as i64)));
     top.push((st("num_records"), Reply::Int(num_records)));
     top.push((st("inverted_sz_mb"), mb(s.inverted_size)));
-    top.push((st("vector_index_sz_mb"), mb(vectors)));
+    top.push((st("vector_index_sz_mb"), mb(vectors as i64)));
     top.push((st("total_inverted_index_blocks"), Reply::Int(s.total_blocks)));
     top.push((st("offset_vectors_sz_mb"), mb(s.offset_vecs_size as i64)));
     top.push((st("doc_table_size_mb"), mb(ix.docs.memsize as i64)));
@@ -1257,10 +1257,11 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
     for (fs, fi) in sp.fields.iter().zip(&ix.fields) {
         let mut m = vec![(st("identifier"), simple(fs.path())), (st("attribute"), simple(&fs.name)), (st("Index Errors"), index_error(&fi.error, with_times, false))];
         if fs.is(spec::T_VECTOR) {
-            m.push((st("memory"), Reply::Int(0)));
-            m.push((st("marked_deleted"), Reply::Int(0)));
+            let v = fi.vectors.as_ref();
+            m.push((st("memory"), Reply::Int(v.map_or(0, |v| v.memory()) as i64)));
+            m.push((st("marked_deleted"), Reply::Int(v.map_or(0, |v| v.marked) as i64)));
             m.push((st("direct_hnsw_insertions"), Reply::Int(0)));
-            m.push((st("flat_buffer_size"), Reply::Int(0)));
+            m.push((st("flat_buffer_size"), Reply::Int(v.map_or(0, |v| v.flat_buffer()) as i64)));
         }
         fields.push(Reply::Map(m));
     }

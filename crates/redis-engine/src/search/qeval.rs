@@ -33,6 +33,10 @@ pub struct EvalCx<'a> {
     pub top: Option<u64>,
     /// `tokenId`: bumped for every term reader the evaluation tries to open.
     pub token_id: std::cell::Cell<u32>,
+    /// `Search_CanSkipRichResults`: hybrid KNN results need not keep the filter's results.
+    pub can_skip_rich: bool,
+    /// `metricRequests`: the vector distance fields the query yields, in evaluation order.
+    pub metric_requests: Vec<Vec<u8>>,
 }
 
 const TOO_LONG: &str = "query string is too long. Maximum allowed length is 1024";
@@ -290,8 +294,76 @@ impl<'a> EvalCx<'a> {
                 let quick = self.in_not || weight == 0.0;
                 self.union(its, quick, weight, "TAG", None)
             }
-            Kind::Vector(_) | Kind::Geometry { .. } => return Err(QErr::new(Code::Generic, "Vector and geometry queries are not supported yet")),
+            Kind::Vector(vq) => return self.vector(n, vq, mask),
+            Kind::Geometry { .. } => return Err(QErr::new(Code::Generic, "Vector and geometry queries are not supported yet")),
         }))
+    }
+
+    /// `Query_EvalVectorNode` and `NewVectorIterator`.
+    fn vector(&mut self, n: &Node, vq: &super::qast::VectorQuery, mask: u128) -> Result<Option<BoxIt<'a>>, QErr> {
+        use super::vec_iters::{HybridIt, QType, RangeIt, resolve_params};
+        let Some(fi) = vq.field else { return Ok(None) };
+        let fs = &self.ix.spec.fields[fi];
+        let mut score_field = vq.score_field.clone();
+        if let Some(df) = &n.opts.dist_field {
+            if let Some(sf) = &score_field {
+                let mut def = b"__".to_vec();
+                def.extend_from_slice(&fs.name);
+                def.extend_from_slice(b"_score");
+                if !sf.eq_ignore_ascii_case(&def) {
+                    return Err(QErr::user(
+                        Code::DupField,
+                        "Distance field was specified twice for vector query",
+                        format!(": {} and {}", String::from_utf8_lossy(sf), String::from_utf8_lossy(df)),
+                    ));
+                }
+            }
+            score_field = Some(df.clone());
+        }
+        let key = score_field.map(|s| {
+            self.metric_requests.push(s);
+            self.metric_requests.len() - 1
+        });
+        let mut child = None;
+        if let Some(c) = n.children.first() {
+            match self.eval(c, mask)? {
+                None => return Ok(None),
+                Some(c) => child = Some(c),
+            }
+        }
+        let Some(vi) = self.ix.fields[fi].vectors.as_ref() else { return Ok(None) };
+        let expected = vi.dim * vi.ty.size();
+        if vq.blob.len() != expected {
+            return Err(QErr::user(
+                Code::Inval,
+                "Error parsing vector similarity query: query vector blob size",
+                format!(" ({}) does not match index's expected size ({expected}).", vq.blob.len()),
+            ));
+        }
+        if vq.knn {
+            let qt = if child.is_some() { QType::Hybrid } else { QType::Knn };
+            let mut params = resolve_params(vi.algo, &vq.params, qt)?;
+            if vq.k > 1 << 58 {
+                return Err(QErr::new(Code::Inval, format!("Error parsing vector similarity query: query KNN K parameter is too large, must not exceed {}", 1u64 << 58)));
+            }
+            // `HybridIteratorReducer`
+            if let Some(c) = &child {
+                match c.kind() {
+                    iters::IKind::Empty => return Ok(child),
+                    iters::IKind::Wildcard => {
+                        child = None;
+                        params.mode = None;
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(Some(Box::new(HybridIt::new(vi, self.q, fi, &vq.blob, vq.k as usize, params, child, self.can_skip_rich, key))));
+        }
+        if vq.radius < 0.0 {
+            return Err(QErr::new(Code::Inval, format!("Error parsing vector similarity query: negative radius ({}) given in a range query", crate::util::fmt_g_prec(vq.radius, 6))));
+        }
+        resolve_params(vi.algo, &vq.params, QType::Range)?;
+        Ok(Some(Box::new(RangeIt::new(vi, &vq.blob, vq.radius, key.is_some(), key))))
     }
 
     /// `query_EvalSingleTagNode`.

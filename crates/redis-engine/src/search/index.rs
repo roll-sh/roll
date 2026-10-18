@@ -114,8 +114,8 @@ impl TagIndex {
 pub struct FieldIndex {
     pub tag: Option<TagIndex>,
     pub numeric: Option<super::numtree::NumericRangeTree>,
-    /// Vectors by document id (until the vector index proper).
-    pub vectors: Option<HashMap<u64, Vec<Vec<u8>>>>,
+    /// The vector index (`openVectorIndex`'s), created by the first vector indexed.
+    pub vectors: Option<super::vecsim::VecIndex>,
     /// Geometries (WKT) by document id.
     pub geometry: Option<HashMap<u64, Bytes>>,
     pub error: IndexError,
@@ -399,9 +399,11 @@ impl Index {
     }
 
     fn remove_vectors(&mut self, id: u64) {
-        for f in &mut self.fields {
-            if let Some(v) = &mut f.vectors {
-                v.remove(&id);
+        for (fs, f) in self.spec.fields.iter().zip(&mut self.fields) {
+            if fs.types == spec::T_VECTOR
+                && let Some(v) = &mut f.vectors
+            {
+                v.delete(id);
             }
             if let Some(g) = &mut f.geometry {
                 g.remove(&id);
@@ -686,7 +688,11 @@ impl Index {
                     }
                 }
                 spec::T_VECTOR => {
-                    self.fields[fi].vectors.get_or_insert_with(HashMap::new).insert(id, fd.vectors.clone());
+                    let Some(p) = self.spec.fields[fi].vector.as_ref() else { continue };
+                    let vi = self.fields[fi].vectors.get_or_insert_with(|| super::vecsim::VecIndex::new(p));
+                    for v in &fd.vectors {
+                        vi.add(v, id);
+                    }
                 }
                 spec::T_GEOMETRY => {
                     if let Some(g) = &fd.geometry {
