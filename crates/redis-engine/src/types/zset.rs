@@ -238,7 +238,6 @@ fn random_level() -> usize {
     })
 }
 
-#[derive(Clone)]
 pub struct SkipList {
     nodes: Vec<Node>,
     /// Free node slots, chained through `next`.
@@ -259,6 +258,31 @@ pub struct SkipList {
     heap: usize,
     /// What Redis allocates for the nodes (each with its levels and member).
     node_alloc: usize,
+}
+
+/// A copy (COPY, RESTORE of a cached value…): the members' clones may hold other capacities
+/// than the originals, so the heap count is taken again (freeing a node subtracts its own).
+impl Clone for SkipList {
+    fn clone(&self) -> Self {
+        let nodes = self.nodes.clone();
+        let heap = nodes.iter().filter(|n| n.ele.spilled()).map(|n| n.ele.capacity()).sum();
+        SkipList {
+            nodes,
+            free: self.free,
+            levels: self.levels.clone(),
+            free_levels: self.free_levels,
+            head: self.head,
+            tail: self.tail,
+            len: self.len,
+            level: self.level,
+            t0: self.t0.clone(),
+            t1: self.t1.clone(),
+            rehash_idx: self.rehash_idx,
+            hasher: self.hasher.clone(),
+            heap,
+            node_alloc: self.node_alloc,
+        }
+    }
 }
 
 impl std::fmt::Debug for SkipList {

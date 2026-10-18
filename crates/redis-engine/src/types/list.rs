@@ -486,12 +486,26 @@ enum Nodes {
     Quick(VecDeque<Node>, Fill),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct List {
     nodes: Nodes,
     len: usize,
     /// Heap bytes: node buffers plus the node deque.
     mem: usize,
+}
+
+/// A copy's buffers and deque may have other capacities than the original's: `mem` is
+/// counted again for it.
+impl Clone for List {
+    fn clone(&self) -> Self {
+        let mut l = List { nodes: self.nodes.clone(), len: self.len, mem: 0 };
+        let mut mem: usize = l.node_iter().map(|n| n.buf.capacity()).sum();
+        if let Nodes::Quick(q, _) = &l.nodes {
+            mem += q.capacity() * NODE_SIZE;
+        }
+        l.mem = mem;
+        l
+    }
 }
 
 impl Default for List {

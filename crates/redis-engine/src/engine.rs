@@ -201,8 +201,9 @@ impl Signals {
 #[derive(Default)]
 pub(crate) struct Watches {
     pub keys: HashMap<(u16, Str), HashSet<u64>>,
-    /// Per client: watched keys and whether each was missing/expired when watched.
-    pub by_client: HashMap<u64, Vec<(u16, Str, bool)>>,
+    /// Per client: watched keys, whether each was missing (absent or expired) when watched, and
+    /// whether it was there but already expired (`wk->expired`).
+    pub by_client: HashMap<u64, Vec<(u16, Str, bool, bool)>>,
     pub dirty: HashSet<u64>,
 }
 
@@ -662,6 +663,11 @@ impl Engine {
         if !self.sig.search_events.is_empty() {
             crate::commands::ft::drain(self);
         }
+        // Keys those lookups (or anything before) changed belong before this command: a WATCH
+        // must not see them as changes made after it.
+        if top {
+            self.process_touched();
+        }
         if matches!(mode, Mode::Top | Mode::Script { .. } | Mode::Replay) {
             crate::commands::ft::command_filter(self, args);
         }
@@ -676,6 +682,15 @@ impl Engine {
                     && let Some(name) = t.strip_prefix("ERR wrong number of arguments for '").and_then(|r| r.strip_suffix("' command"))
                 {
                     let name = name.to_string();
+                    if top && name == "exec" {
+                        // A rejected EXEC discards the transaction (and the watches) even
+                        // outside MULTI (execCommandAbort).
+                        client.multi = None;
+                        self.unwatch_all(client.id);
+                        let msg = t.strip_prefix("ERR ").unwrap_or(t);
+                        let e = Reply::Error(format!("EXECABORT Transaction discarded because of: {msg}"));
+                        return Outcome::Reply(self.reject(&name, e));
+                    }
                     return Outcome::Reply(self.reject(&name, e));
                 }
                 self.count_error(&e);
@@ -1111,11 +1126,26 @@ impl Engine {
         if self.sig.touched.is_empty() {
             return;
         }
+        // A key touched twice by one command (an expired key's lazy delete and its write) is
+        // one change for WATCH.
+        let mut seen: HashSet<(u16, Str)> = HashSet::new();
         for (db, key) in std::mem::take(&mut self.sig.touched) {
             self.dbs[db as usize].resize(&key);
             let k = (db, key);
-            if let Some(ids) = self.watches.keys.get(&k) {
-                self.watches.dirty.extend(ids.iter().copied());
+            if let Some(ids) = self.watches.keys.get(&k).filter(|_| seen.insert(k.clone())) {
+                // A key already expired when watched and now deleted is logically unchanged,
+                // once (touchWatchedKey's `wk->expired` case clears the flag).
+                let gone = !self.dbs[db as usize].keys.contains_key(&k.1);
+                let ids: Vec<u64> = ids.iter().copied().collect();
+                for id in ids {
+                    let entry = self.watches.by_client.get_mut(&id).and_then(|l| l.iter_mut().find(|(d, key, ..)| *d == db && *key == k.1));
+                    match entry {
+                        Some(w) if gone && w.3 => w.3 = false,
+                        _ => {
+                            self.watches.dirty.insert(id);
+                        }
+                    }
+                }
             }
             self.clients.invalidate(&k.1, true);
             if self.blocking.by_key.contains_key(&k) && self.blocking.ready_set.insert(k.clone()) {
@@ -1213,17 +1243,18 @@ impl Engine {
         let now = self.expiry_clock(now);
         let db = client.db as u16;
         let list = self.watches.by_client.entry(client.id).or_default();
-        if list.iter().any(|(d, k, _)| *d == db && k.as_slice() == key) {
+        if list.iter().any(|(d, k, ..)| *d == db && k.as_slice() == key) {
             return;
         }
         let missing = self.dbs[db as usize].keys.get(key).is_none_or(|e| e.expired(now));
-        list.push((db, Str::from_slice(key), missing));
+        let expired = self.dbs[db as usize].keys.get(key).is_some_and(|e| e.expired(now));
+        list.push((db, Str::from_slice(key), missing, expired));
         self.watches.keys.entry((db, Str::from_slice(key))).or_default().insert(client.id);
     }
 
     pub(crate) fn unwatch_all(&mut self, client_id: u64) {
         if let Some(list) = self.watches.by_client.remove(&client_id) {
-            for (db, key, _) in list {
+            for (db, key, ..) in list {
                 let k = (db, key);
                 if let Some(ids) = self.watches.keys.get_mut(&k) {
                     ids.remove(&client_id);
@@ -1243,7 +1274,7 @@ impl Engine {
         }
         let now = self.expiry_clock(now);
         self.watches.by_client.get(&client_id).is_some_and(|list| {
-            list.iter().any(|(db, key, missing)| {
+            list.iter().any(|(db, key, missing, _)| {
                 !missing && self.dbs[*db as usize].keys.get(key).is_some_and(|e| e.expired(now))
             })
         })
@@ -1611,7 +1642,8 @@ impl Engine {
                             if e.expired(now) {
                                 expired.push(k.clone());
                             } else if e.expire != 0 {
-                                ttl_sum += e.expire - now;
+                                // Wraps like the C sum does with far-off expiries.
+                                ttl_sum = ttl_sum.wrapping_add(e.expire - now);
                                 ttl_n += 1;
                             }
                         }

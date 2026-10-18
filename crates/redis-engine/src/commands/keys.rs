@@ -73,44 +73,28 @@ pub fn type_(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     Ok(Reply::status(cx.get_notouch(&args[1]).map_or("none", |e| e.value.kind().name())))
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum ExpireFlag {
-    None,
-    Nx,
-    Xx,
-    Gt,
-    Lt,
-}
-
 /// EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT key value [NX | XX | GT | LT]
 fn expire_generic(cx: &mut Cx, args: &[Bytes], secs: bool, absolute: bool) -> CmdResult {
-    let mut flag = ExpireFlag::None;
+    // All options first, then their compatibility (parseExtendedExpireArgumentsOrReply).
+    let (mut nx, mut xx, mut gt, mut lt) = (false, false, false, false);
     for a in &args[3..] {
-        let f = if eq(a, "nx") {
-            ExpireFlag::Nx
+        if eq(a, "nx") {
+            nx = true;
         } else if eq(a, "xx") {
-            ExpireFlag::Xx
+            xx = true;
         } else if eq(a, "gt") {
-            ExpireFlag::Gt
+            gt = true;
         } else if eq(a, "lt") {
-            ExpireFlag::Lt
+            lt = true;
         } else {
-            return Err(Error::msg(format!("ERR Unsupported option {}", String::from_utf8_lossy(a))));
-        };
-        if flag != ExpireFlag::None && flag != f {
-            let both = |x, y| (flag == x && f == y) || (flag == y && f == x);
-            if both(ExpireFlag::Nx, ExpireFlag::Xx) || both(ExpireFlag::Nx, ExpireFlag::Gt) || both(ExpireFlag::Nx, ExpireFlag::Lt) {
-                return Err(Error::new("ERR NX and XX, GT or LT options at the same time are not compatible"));
-            }
-            if both(ExpireFlag::Gt, ExpireFlag::Lt) {
-                return Err(Error::new("ERR GT and LT options at the same time are not compatible"));
-            }
-            // XX combined with GT/LT is allowed: keep the comparison flag, XX is implied.
-            if f == ExpireFlag::Xx {
-                continue;
-            }
+            return Err(Error::msg(format!("ERR Unsupported option {}", String::from_utf8_lossy(crate::util::cstr(a)))));
         }
-        flag = f;
+    }
+    if nx && (xx || gt || lt) {
+        return Err(Error::new("ERR NX and XX, GT or LT options at the same time are not compatible"));
+    }
+    if gt && lt {
+        return Err(Error::new("ERR GT and LT options at the same time are not compatible"));
     }
     let name = String::from_utf8_lossy(&args[0]).to_lowercase();
     let invalid = || Error::msg(format!("ERR invalid expire time in '{name}' command"));
@@ -124,14 +108,8 @@ fn expire_generic(cx: &mut Cx, args: &[Bytes], secs: bool, absolute: bool) -> Cm
     }
     let key = &args[1];
     let Some(cur) = cx.expire_of(key) else { return Ok(Reply::Int(0)) };
-    let ok = match flag {
-        ExpireFlag::None => true,
-        ExpireFlag::Nx => cur == 0,
-        ExpireFlag::Xx => cur != 0,
-        // A key without TTL counts as an infinite TTL.
-        ExpireFlag::Gt => cur != 0 && when > cur,
-        ExpireFlag::Lt => cur == 0 || when < cur,
-    };
+    // A key without TTL counts as an infinite TTL; XX also applies with GT/LT.
+    let ok = !(nx && cur != 0) && !(xx && cur == 0) && !(gt && (cur == 0 || when <= cur)) && !(lt && cur != 0 && when >= cur);
     if !ok {
         return Ok(Reply::Int(0));
     }
@@ -234,7 +212,32 @@ pub fn scan(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 pub fn parse_cursor(a: &[u8]) -> Result<u64, Error> {
-    crate::util::parse_u64(a).ok_or(Error::new("ERR invalid cursor"))
+    string2ull(a).ok_or(Error::new("ERR invalid cursor"))
+}
+
+/// `string2ull` (on the C string): a strict non-negative `long long`, or else whatever
+/// `strtoull` reads in full (leading spaces, a sign: ` -1` wraps around).
+fn string2ull(a: &[u8]) -> Option<u64> {
+    let s = crate::util::cstr(a);
+    if let Some(v) = crate::util::parse_i64(s) {
+        return (v >= 0).then_some(v as u64);
+    }
+    let mut i = s.iter().position(|c| !matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))?;
+    let neg = s[i] == b'-';
+    if matches!(s[i], b'+' | b'-') {
+        i += 1;
+    }
+    if i >= s.len() {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for &c in &s[i..] {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add((c - b'0') as u64)?;
+    }
+    Some(if neg { v.wrapping_neg() } else { v })
 }
 
 pub fn scan_reply(cursor: u64, items: Vec<Reply>) -> Reply {
@@ -370,7 +373,8 @@ pub fn renamenx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 fn db_index(cx: &Cx, a: &[u8]) -> Result<usize, Error> {
-    let n = crate::util::parse_i64(a).ok_or(Error::new("ERR value is not an integer or out of range"))?;
+    // getIntFromObjectOrReply: an `int`.
+    let n = super::lists::long_in(a, i32::MIN as i64, i32::MAX as i64, None)?;
     if n < 0 || n as usize >= cx.eng.dbs.len() {
         return Err(Error::new("ERR DB index is out of range"));
     }

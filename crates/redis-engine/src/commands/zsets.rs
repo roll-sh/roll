@@ -911,10 +911,13 @@ pub fn zscan(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
     }
     let mut items = Vec::new();
+    // A listpack holds the scores as written (d2string); a skiplist's are printed with
+    // ld2string's `%.17Lg`.
+    let packed = z.is_listpack();
     let next = z.scan(cursor, count, |m, s| {
         if pattern.is_none_or(|p| glob_match(p, m, false)) {
             items.push(Reply::bulk(m));
-            items.push(Reply::bulk_str(redis_proto::fmt_double(s)));
+            items.push(Reply::bulk_str(if packed { redis_proto::fmt_double(s) } else { crate::util::fmt_g_prec(s, 17) }));
         }
     });
     Ok(scan_reply(next, items))

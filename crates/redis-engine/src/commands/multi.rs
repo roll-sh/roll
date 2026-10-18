@@ -83,3 +83,39 @@ pub fn wrap_effects(cx: &mut Cx, start: usize) {
         cx.eng.effects.push(Effect { db, args: vec![Bytes::from_static(b"EXEC")] });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::client::Client;
+    use crate::{Engine, Outcome, Reply};
+    use bytes::Bytes;
+
+    fn run(eng: &mut Engine, c: &mut Client, line: &str) -> Reply {
+        let args: Vec<Bytes> = line.split(' ').map(|s| Bytes::copy_from_slice(s.as_bytes())).collect();
+        match eng.call(c, &args) {
+            Outcome::Reply(r) => r,
+            Outcome::Blocked => panic!("blocked"),
+        }
+    }
+
+    /// A key stored already expired, watched, then removed: logically unchanged, EXEC runs
+    /// (touchWatchedKey's `wk->expired`).
+    #[test]
+    fn watched_expired_key_deleted_later() {
+        let mut eng = Engine::standalone();
+        let mut c = Client::new(1);
+        // With RediSearch subscribed to keyspace events, as the compat suites run.
+        run(&mut eng, &mut c, "FT.CREATE sub ON HASH PREFIX 1 sub: SCHEMA t TEXT");
+        run(&mut eng, &mut c, "FT.DROPINDEX sub");
+        assert_eq!(run(&mut eng, &mut c, "MSETEX 1 w 1e3 EXAT 1"), Reply::Int(1));
+        assert_eq!(run(&mut eng, &mut c, "WATCH w"), Reply::Ok);
+        eng.active_expire(1_000_000);
+        assert_eq!(run(&mut eng, &mut c, "MULTI"), Reply::Ok);
+        assert_eq!(run(&mut eng, &mut c, "EXEC"), Reply::Array(vec![]));
+        // Without the cycle in between too.
+        assert_eq!(run(&mut eng, &mut c, "MSETEX 1 w 1e3 EXAT 1"), Reply::Int(1));
+        assert_eq!(run(&mut eng, &mut c, "WATCH w"), Reply::Ok);
+        assert_eq!(run(&mut eng, &mut c, "MULTI"), Reply::Ok);
+        assert_eq!(run(&mut eng, &mut c, "EXEC"), Reply::Array(vec![]));
+    }
+}

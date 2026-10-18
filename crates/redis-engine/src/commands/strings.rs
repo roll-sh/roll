@@ -112,30 +112,96 @@ fn cond_holds(cond: Cond, cur: Option<&[u8]>) -> bool {
 /// SET key value [NX | XX | IFEQ v | IFNE v | IFDEQ d | IFDNE d] [GET]
 ///     [EX s | PX ms | EXAT ts | PXAT ms | KEEPTTL]
 pub fn set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let mut cond = Cond::Any;
-    let mut get = false;
-    let mut exp = Expiry::None;
-    let mut exp_seen = false;
-    let mut i = 3;
+    let o = parse_ext(args, 3, ExtFor::Set)?;
+    let cond = o.cond;
+    let get = o.get;
+    let exp = o.expiry(cx.now, "set")?;
+    let key = &args[1];
+    // GET replies first (`getGenericCommand`): a WRONGTYPE ends the command there.
+    let current: Option<Str> = if get { cx.get_str(key)?.cloned() } else { None };
+    let exists = if get { current.is_some() } else { cx.peek(key).is_some() };
+    let old_reply = |current: &Option<Str>| if get { Reply::opt_bulk(current.as_deref()) } else { Reply::Nil };
+    if (cond == Cond::Nx && exists) || (matches!(cond, Cond::Xx | Cond::IfEq(_) | Cond::IfDeq(_)) && !exists) {
+        return Ok(old_reply(&current));
+    }
+    // IFNE / IFDNE hold for a missing key; IF* compare an existing one (a string).
+    if exists && matches!(cond, Cond::IfEq(_) | Cond::IfNe(_) | Cond::IfDeq(_) | Cond::IfDne(_)) {
+        let cur = match &current {
+            Some(c) => c.clone(),
+            None => cx.get_str(key)?.cloned().unwrap_or_default(),
+        };
+        if let Cond::IfDeq(d) | Cond::IfDne(d) = cond
+            && d.len() != 16
+        {
+            // After GET's reply Redis still adds the error: two replies.
+            return if get { Ok(Reply::Seq(vec![old_reply(&current), Reply::Error(DIGEST_LEN.0.to_string())])) } else { Err(DIGEST_LEN) };
+        }
+        if !cond_holds(cond, Some(&cur)) {
+            return Ok(old_reply(&current));
+        }
+    }
+    write_string(cx, key, &args[2], exp);
+    Ok(if get { old_reply(&current) } else { Reply::Ok })
+}
+
+const DIGEST_LEN: Error = Error::new("ERR must be exactly 16 hexadecimal characters");
+
+#[derive(Clone, Copy, PartialEq)]
+enum ExtFor {
+    Set,
+    Get,
+    Msetex,
+}
+
+/// SET / GETEX / MSETEX options, as `parseExtendedStringArgumentsOrReply` reads them: one
+/// condition (repeating the same one is fine, the last value counts), one kind of expiry (the
+/// same option again replaces the time), values checked only later.
+struct Ext<'a> {
+    cond: Cond<'a>,
+    get: bool,
+    keepttl: bool,
+    persist: bool,
+    /// The option (`ex`, `px`, `exat`, `pxat`) and its value.
+    expire: Option<(&'a [u8], &'a [u8])>,
+}
+
+impl Ext<'_> {
+    /// The expiry, with the time checked (`getExpireMillisecondsOrReply`).
+    fn expiry(&self, now: i64, cmd: &str) -> Result<Expiry, Error> {
+        Ok(match self.expire {
+            Some((opt, v)) => Expiry::At(expire_value(opt, v, now, cmd)?),
+            None if self.keepttl => Expiry::KeepTtl,
+            None if self.persist => Expiry::Persist,
+            None => Expiry::None,
+        })
+    }
+}
+
+fn parse_ext(args: &[Bytes], start: usize, what: ExtFor) -> Result<Ext<'_>, Error> {
+    let mut o = Ext { cond: Cond::Any, get: false, keepttl: false, persist: false, expire: None };
+    let set_like = what != ExtFor::Get;
+    let mut i = start;
     while i < args.len() {
-        let a = &args[i];
-        let next = args.get(i + 1);
-        if eq(a, "nx") && cond == Cond::Any {
-            cond = Cond::Nx;
-        } else if eq(a, "xx") && cond == Cond::Any {
-            cond = Cond::Xx;
-        } else if eq(a, "get") {
-            get = true;
-        } else if eq(a, "keepttl") && !exp_seen {
-            exp = Expiry::KeepTtl;
-            exp_seen = true;
-        } else if let Some(v) = next.filter(|_| is_expire_opt(a) && !exp_seen) {
-            exp = Expiry::At(expire_value(a, v, cx.now, "set")?);
-            exp_seen = true;
+        let a = &args[i][..];
+        let next = args.get(i + 1).map(|v| &v[..]);
+        let exp_kind = o.expire.map(|(k, _)| k);
+        let other_exp = |k: &str| exp_kind.is_some_and(|e| !eq(e, k));
+        let cond_ok = |c: &Cond| o.cond == Cond::Any || std::mem::discriminant(&o.cond) == std::mem::discriminant(c);
+        if eq(a, "nx") && set_like && cond_ok(&Cond::Nx) {
+            o.cond = Cond::Nx;
+        } else if eq(a, "xx") && set_like && cond_ok(&Cond::Xx) {
+            o.cond = Cond::Xx;
+        } else if eq(a, "get") && what == ExtFor::Set {
+            o.get = true;
+        } else if eq(a, "keepttl") && set_like && !o.persist && exp_kind.is_none() {
+            o.keepttl = true;
+        } else if eq(a, "persist") && what == ExtFor::Get && exp_kind.is_none() && !o.keepttl {
+            o.persist = true;
+        } else if let Some(v) = next.filter(|_| is_expire_opt(a) && !o.keepttl && !o.persist && !other_exp(&String::from_utf8_lossy(a))) {
+            o.expire = Some((a, v));
             i += 1;
-        } else if let Some(v) = next.filter(|_| cond == Cond::Any && (eq(a, "ifeq") || eq(a, "ifne") || eq(a, "ifdeq") || eq(a, "ifdne"))) {
-            let v = &v[..];
-            cond = if eq(a, "ifeq") {
+        } else if let Some(v) = next.filter(|_| what == ExtFor::Set && (eq(a, "ifeq") || eq(a, "ifne") || eq(a, "ifdeq") || eq(a, "ifdne"))) {
+            let c = if eq(a, "ifeq") {
                 Cond::IfEq(v)
             } else if eq(a, "ifne") {
                 Cond::IfNe(v)
@@ -144,31 +210,17 @@ pub fn set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             } else {
                 Cond::IfDne(v)
             };
+            if !cond_ok(&c) {
+                return Err(SYNTAX);
+            }
+            o.cond = c;
             i += 1;
         } else {
             return Err(SYNTAX);
         }
         i += 1;
     }
-    let key = &args[1];
-    let needs_value = get || matches!(cond, Cond::IfEq(_) | Cond::IfNe(_) | Cond::IfDeq(_) | Cond::IfDne(_));
-    let current: Option<Str> = if needs_value {
-        cx.get_str(key)?.cloned()
-    } else {
-        cx.peek(key).map(|_| Str::new())
-    };
-    let exists = current.is_some();
-    let holds = match cond {
-        Cond::Nx => !exists,
-        Cond::Xx => exists,
-        c => cond_holds(c, current.as_deref()),
-    };
-    let old_reply = || if get { Reply::opt_bulk(current.as_deref()) } else { Reply::Nil };
-    if !holds {
-        return Ok(old_reply());
-    }
-    write_string(cx, key, &args[2], exp);
-    Ok(if get { old_reply() } else { Reply::Ok })
+    Ok(o)
 }
 
 /// Store a string with SET semantics (notifications, propagation with absolute expiry).
@@ -243,22 +295,11 @@ pub fn getdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 
 /// GETEX key [EX s | PX ms | EXAT ts | PXAT ms | PERSIST]
 pub fn getex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let mut exp = Expiry::None;
-    let mut i = 2;
-    while i < args.len() {
-        let a = &args[i];
-        if is_expire_opt(a) && exp == Expiry::None && i + 1 < args.len() {
-            exp = Expiry::At(expire_value(a, &args[i + 1], cx.now, "getex")?);
-            i += 2;
-        } else if eq(a, "persist") && exp == Expiry::None {
-            exp = Expiry::Persist;
-            i += 1;
-        } else {
-            return Err(SYNTAX);
-        }
-    }
+    let o = parse_ext(args, 2, ExtFor::Get)?;
     let key = &args[1];
     let Some(v) = cx.get_str(key)?.cloned() else { return Ok(Reply::Nil) };
+    // The time is checked once the key is known to be a string.
+    let exp = o.expiry(cx.now, "getex")?;
     match exp {
         Expiry::At(at) if at <= cx.now => {
             cx.delete(key);
@@ -326,34 +367,18 @@ fn msetex_keys(args: &[Bytes]) -> Vec<usize> {
 
 /// MSETEX numkeys key value [key value …] [NX | XX] [EX s | PX ms | EXAT ts | PXAT ms | KEEPTTL]
 pub fn msetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let n = int(&args[1])?;
-    if n <= 0 {
-        return Err(Error::new("ERR invalid numkeys value"));
-    }
-    let n = n as usize;
+    let n = match parse_i64(&args[1]) {
+        Some(n) if (1..=i32::MAX as i64).contains(&n) => n as usize,
+        _ => return Err(Error::new("ERR invalid numkeys value")),
+    };
     let data_end = 2 + 2 * n;
     if args.len() < data_end {
-        return Err(arity_error("msetex"));
+        return Err(Error::new("ERR wrong number of key-value pairs"));
     }
-    let (mut nx, mut xx) = (false, false);
-    let mut exp = Expiry::None;
-    let mut i = data_end;
-    while i < args.len() {
-        let a = &args[i];
-        if eq(a, "nx") && !nx && !xx {
-            nx = true;
-        } else if eq(a, "xx") && !nx && !xx {
-            xx = true;
-        } else if eq(a, "keepttl") && exp == Expiry::None {
-            exp = Expiry::KeepTtl;
-        } else if is_expire_opt(a) && exp == Expiry::None && i + 1 < args.len() {
-            exp = Expiry::At(expire_value(a, &args[i + 1], cx.now, "msetex")?);
-            i += 1;
-        } else {
-            return Err(SYNTAX);
-        }
-        i += 1;
-    }
+    let o = parse_ext(args, data_end, ExtFor::Msetex)?;
+    let (nx, xx) = (o.cond == Cond::Nx, o.cond == Cond::Xx);
+    // KEEPTTL with an expiry can't parse, so either applies alone.
+    let exp = o.expiry(cx.now, "msetex")?;
     let pairs: Vec<(&Bytes, &Bytes)> = (0..n).map(|j| (&args[2 + 2 * j], &args[3 + 2 * j])).collect();
     if nx || xx {
         for (k, _) in &pairs {
@@ -643,7 +668,12 @@ pub fn increx(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     } else {
         IncrExpire::Keep
     };
-    cx.replace(key, Value::str(new.as_bytes()), true);
+    if float {
+        // createStringObjectFromLongDouble: a string object, never int-encoded.
+        cx.set_encoded(key, Value::str(new.as_bytes()), true, false, crate::object::ENC_STR);
+    } else {
+        cx.replace(key, Value::str(new.as_bytes()), true);
+    }
     cx.changes(1);
     let nb = Bytes::from(new);
     cx.notify(notify::STRING, if float { "incrbyfloat" } else { "incrby" }, key);
@@ -717,6 +747,18 @@ pub fn setrange(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 
 /// LCS key1 key2 [LEN] [IDX] [MINMATCHLEN len] [WITHMATCHLEN]
 pub fn lcs(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    // The keys' types first, then the options (lcsCommand).
+    let type_err = Error::new("ERR The specified keys must contain string values");
+    let a = match cx.get(&args[1]) {
+        None => Vec::new(),
+        Some(Value::Str(s)) => s.to_vec(),
+        Some(_) => return Err(type_err),
+    };
+    let bv = match cx.get(&args[2]) {
+        None => Vec::new(),
+        Some(Value::Str(s)) => s.to_vec(),
+        Some(_) => return Err(type_err),
+    };
     let (mut want_len, mut want_idx, mut with_len) = (false, false, false);
     let mut min_len: i64 = 0;
     let mut i = 3;
@@ -736,22 +778,12 @@ pub fn lcs(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
         i += 1;
     }
-    let type_err = Error::new("ERR The specified keys must contain string values");
-    let a = match cx.get(&args[1]) {
-        None => Vec::new(),
-        Some(Value::Str(s)) => s.to_vec(),
-        Some(_) => return Err(type_err),
-    };
-    let bv = match cx.get(&args[2]) {
-        None => Vec::new(),
-        Some(Value::Str(s)) => s.to_vec(),
-        Some(_) => return Err(type_err),
-    };
     if want_len && want_idx {
         return Err(Error::new("ERR If you want both the length and indexes, please just use IDX."));
     }
     let (n, m) = (a.len(), bv.len());
-    if (n + 1).saturating_mul(m + 1) > 512 * 1024 * 1024 {
+    // The table of u32 cells against proto-max-bulk-len.
+    if ((n + 1) as u64).saturating_mul((m + 1) as u64).saturating_mul(4) > cx.cfg().proto_max_bulk_len {
         return Err(Error::new("ERR Insufficient memory, transient memory for LCS exceeds proto-max-bulk-len"));
     }
     // dp[i][j] = LCS length of a[..i], b[..j]
@@ -834,12 +866,18 @@ pub fn digest(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 /// DELEX key [IFEQ v | IFNE v | IFDEQ d | IFDNE d]
 pub fn delex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let key = &args[1];
-    let cond = match args.len() {
-        2 => Cond::Any,
+    match args.len() {
+        2 => {}
         4 => {
+            // A missing key first, then its type, then the condition (`delexCommand`).
+            let cur = match cx.get(key) {
+                None => return Ok(Reply::Int(0)),
+                Some(Value::Str(s)) => s.clone(),
+                Some(_) => return Err(Error::new("ERR Key should be of string type if conditions are specified")),
+            };
             let v = &args[3][..];
             let a = &args[2];
-            if eq(a, "ifeq") {
+            let cond = if eq(a, "ifeq") {
                 Cond::IfEq(v)
             } else if eq(a, "ifne") {
                 Cond::IfNe(v)
@@ -848,16 +886,16 @@ pub fn delex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             } else if eq(a, "ifdne") {
                 Cond::IfDne(v)
             } else {
-                return Err(SYNTAX);
+                return Err(Error::new("ERR Invalid condition. Use IFEQ, IFNE, IFDEQ, or IFDNE"));
+            };
+            if matches!(cond, Cond::IfDeq(_) | Cond::IfDne(_)) && v.len() != 16 {
+                return Err(DIGEST_LEN);
+            }
+            if !cond_holds(cond, Some(&cur)) {
+                return Ok(Reply::Int(0));
             }
         }
-        _ => return Err(SYNTAX),
-    };
-    if cond != Cond::Any {
-        let cur = cx.get_str(key)?.cloned();
-        if !cond_holds(cond, cur.as_deref()) {
-            return Ok(Reply::Int(0));
-        }
+        _ => return Err(arity_error("delex")),
     }
     if cx.delete(key) {
         cx.notify(notify::GENERIC, "del", key);

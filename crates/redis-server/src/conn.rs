@@ -1023,9 +1023,15 @@ impl Conn<'_> {
         if args.len() != 4 {
             return Reply::error("ERR wrong number of arguments for 'waitaof' command");
         }
-        let (Some(local), Some(replicas)) = (parse_int(&args[1]), parse_int(&args[2])) else {
-            return Reply::error("ERR value is not an integer or out of range");
-        };
+        // numlocal 0 or 1, numreplicas not negative, each checked in turn.
+        let Some(local) = parse_int(&args[1]) else { return Reply::error("ERR value is not an integer or out of range") };
+        if !(0..=1).contains(&local) {
+            return Reply::error("ERR value is out of range, value must between 0 and 1");
+        }
+        let Some(replicas) = parse_int(&args[2]) else { return Reply::error("ERR value is not an integer or out of range") };
+        if replicas < 0 {
+            return Reply::error("ERR value is out of range, must be positive");
+        }
         let timeout = match parse_timeout(&args[3]) {
             Ok(t) => t,
             Err(e) => return e,
@@ -1059,6 +1065,8 @@ impl Conn<'_> {
         let (user, pass) = match args.len() {
             2 => (None, &args[1]),
             3 => (Some(&args[1]), &args[2]),
+            // Arity -2, checked before the command runs.
+            1 => return Reply::Error(format!("ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&args[0]).to_ascii_lowercase())),
             _ => return Reply::Error("ERR syntax error".into()),
         };
         let req = AuthRequest { user: user.map(|u| &u[..]), password: pass, sni: self.sni.as_deref(), client: Some(&self.client), command: &args[0] };
@@ -1114,6 +1122,8 @@ fn parse_timeout(b: &[u8]) -> Result<Duration, Reply> {
     match parse_int(b) {
         None => Err(Reply::error("ERR timeout is not an integer or out of range")),
         Some(t) if t < 0 => Err(Reply::error("ERR timeout is negative")),
+        // The deadline (now + timeout) would overflow.
+        Some(t) if t > i64::MAX - redis_engine::util::now_ms() => Err(Reply::error("ERR timeout is out of range")),
         Some(t) => Ok(Duration::from_millis(t as u64)),
     }
 }
@@ -1130,9 +1140,9 @@ pub(crate) fn long_running<R>(args: &[Bytes], f: impl FnOnce() -> R) -> R {
 
 fn is_intercepted(args: &[Bytes], client: &Client) -> bool {
     let n = &args[0];
-    if eq(n, "auth") || eq(n, "hello") || eq(n, "monitor") || eq(n, "wait") || eq(n, "waitaof") {
+    if eq(n, "auth") || eq(n, "hello") || eq(n, "monitor") {
         return true;
     }
     // Inside MULTI these are queued (or refused) by the engine like any command.
-    client.multi.is_none() && (eq(n, "replconf") || eq(n, "sync") || eq(n, "psync") || eq(n, "shutdown"))
+    client.multi.is_none() && (eq(n, "replconf") || eq(n, "sync") || eq(n, "psync") || eq(n, "shutdown") || eq(n, "wait") || eq(n, "waitaof"))
 }

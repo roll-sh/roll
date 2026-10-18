@@ -213,16 +213,23 @@ pub fn sparse_to_dense(s: &mut Str) -> bool {
     let (mut idx, mut p) = (0usize, HDR);
     while p < s.len() {
         let op = s[p];
+        // Overflowing opcodes make it invalid (hllSparseToDense).
         if is_zero(op) {
+            if zero_len(op) + idx > REGISTERS {
+                return false;
+            }
             idx += zero_len(op);
             p += 1;
         } else if is_xzero(op) {
+            if xzero_len(s, p) + idx > REGISTERS {
+                return false;
+            }
             idx += xzero_len(s, p);
             p += 2;
         } else {
             let (runlen, val) = (val_len(op), val_value(op));
             if runlen + idx > REGISTERS {
-                break;
+                return false;
             }
             for _ in 0..runlen {
                 dense_put(regs, idx, val);
@@ -505,19 +512,27 @@ impl Registers {
             }
             return true;
         }
+        // Any opcode running past the last register makes it corrupt, even when the
+        // registers already add up (trailing garbage).
         let (mut i, mut p) = (0usize, HDR);
         while p < s.len() {
             let op = s[p];
             if is_zero(op) {
+                if zero_len(op) + i > REGISTERS {
+                    return false;
+                }
                 i += zero_len(op);
                 p += 1;
             } else if is_xzero(op) {
+                if xzero_len(s, p) + i > REGISTERS {
+                    return false;
+                }
                 i += xzero_len(s, p);
                 p += 2;
             } else {
                 let (n, v) = (val_len(op), val_value(op));
                 if n + i > REGISTERS {
-                    break;
+                    return false;
                 }
                 for m in &mut max[i..i + n] {
                     if v > *m {
@@ -541,6 +556,9 @@ impl Registers {
 }
 
 /// Validate a looked-up value as an HLL.
+/// PFDEBUG SIMD ON|OFF (server-wide in Redis; the vectorised paths are on by default).
+static SIMD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 fn check(v: &Value) -> Result<&Str, Error> {
     match v {
         Value::Str(s) if is_valid(s) => Ok(s),
@@ -711,8 +729,38 @@ pub fn pfmerge(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 /// PFDEBUG GETREG|DECODE|ENCODING|TODENSE key
 pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let (sub, key) = (&args[1], &args[2]);
+    let arity = || Error::msg(format!("ERR Wrong number of arguments for the '{}' subcommand", String::from_utf8_lossy(crate::util::cstr(sub))));
+    if eq(sub, "simd") {
+        if args.len() != 3 {
+            return Err(arity());
+        }
+        let status = || Reply::status(if SIMD.load(std::sync::atomic::Ordering::Relaxed) { "enabled" } else { "disabled" });
+        return Ok(if eq(key, "on") || eq(key, "off") {
+            SIMD.store(eq(key, "on"), std::sync::atomic::Ordering::Relaxed);
+            status()
+        } else {
+            // The error, then the status anyway: two replies.
+            Reply::Seq(vec![Reply::error("ERR Argument must be ON or OFF"), status()])
+        });
+    }
     let Some(entry) = cx.peek(key) else { return Err(Error::new("ERR The specified key does not exist")) };
-    let s = check(&entry.value)?;
+    check(&entry.value)?;
+    // Made raw before the subcommand is even known (`dbUnshareStringValue`).
+    {
+        let mut e = cx.get_mut(key).expect("looked up above");
+        if e.encoding() == "embstr" {
+            e.unshare();
+        }
+        e.unchanged();
+    }
+    let known = ["getreg", "decode", "encoding", "todense"].iter().any(|n| eq(sub, n));
+    if known && args.len() != 3 {
+        return Err(arity());
+    }
+    let s = match &cx.peek(key).expect("looked up above").value {
+        Value::Str(s) => s.clone(),
+        _ => unreachable!("checked above"),
+    };
     if eq(sub, "decode") {
         if s[4] != SPARSE {
             return Err(Error::new("ERR HLL encoding is not sparse"));
@@ -725,7 +773,7 @@ pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 out.push(format!("z:{}", zero_len(op)));
                 p += 1;
             } else if is_xzero(op) {
-                out.push(format!("Z:{}", xzero_len(s, p)));
+                out.push(format!("Z:{}", xzero_len(&s, p)));
                 p += 2;
             } else {
                 out.push(format!("v:{},{}", val_value(op), val_len(op)));
@@ -739,7 +787,7 @@ pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let getreg = eq(sub, "getreg");
     if !getreg && !eq(sub, "todense") {
-        return Err(Error::msg(format!("ERR Unknown PFDEBUG subcommand '{}'", String::from_utf8_lossy(sub))));
+        return Err(Error::msg(format!("ERR Unknown PFDEBUG subcommand '{}'", String::from_utf8_lossy(crate::util::cstr(sub)))));
     }
     let mut e = cx.get_mut(key).expect("looked up above");
     e.unshare();

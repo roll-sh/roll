@@ -58,15 +58,10 @@ fn cstr(s: &[u8]) -> &[u8] {
     s.iter().position(|&c| c == 0).map_or(s, |i| &s[..i])
 }
 
-/// `strtod` with Redis' checks: the whole (C) string must parse, NaN and ERANGE fail.
+/// `string2d` over the whole value: the empty string, surrounding spaces, NaN and overflow or
+/// underflow fail.
 fn sort_score(s: &[u8]) -> Option<f64> {
-    let s = cstr(s);
-    if s.is_empty() {
-        return Some(0.0);
-    }
-    let start = s.iter().position(|c| !matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))?;
-    let v = redis_proto::parse_double(&s[start..])?;
-    (!v.is_nan()).then_some(v)
+    super::zsets::zfloat(s)
 }
 
 /// `lookupKeyByPattern`: `#` is the element itself; otherwise the first `*` is replaced by the

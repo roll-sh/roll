@@ -70,7 +70,7 @@ fn side(a: &[u8]) -> Result<bool, Error> {
 }
 
 /// `getRangeLongFromObjectOrReply`: `msg` replaces both the parse and the range error.
-fn long_in(a: &[u8], min: i64, max: i64, msg: Option<&'static str>) -> Result<i64, Error> {
+pub(crate) fn long_in(a: &[u8], min: i64, max: i64, msg: Option<&'static str>) -> Result<i64, Error> {
     let Some(v) = parse_i64(a) else { return Err(msg.map_or(NOT_INT, Error::new)) };
     if v < min || v > max {
         return Err(match msg {

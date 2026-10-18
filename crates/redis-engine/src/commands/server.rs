@@ -29,8 +29,8 @@ pub static COMMANDS: &[Command] = &[
     cmd!("quit", -1, CONN_FLAGS | SUBSCRIBED_OK | TXN_CONTROL, 0, 0, 0, quit, Connection),
     cmd!("auth", -2, CONN_FLAGS, 0, 0, 0, server_only, Connection),
     cmd!("monitor", 1, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
-    cmd!("wait", 3, BLOCKING, 0, 0, 0, server_only, Generic),
-    cmd!("waitaof", 4, BLOCKING, 0, 0, 0, server_only, Generic),
+    cmd!("wait", 3, BLOCKING, 0, 0, 0, wait_queued, Generic),
+    cmd!("waitaof", 4, BLOCKING, 0, 0, 0, waitaof_queued, Generic),
     cmd!("save", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING | NO_MULTI, 0, 0, 0, super::persist::save, Server),
     cmd!("bgsave", -1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, super::persist::bgsave, Server),
     cmd!("bgrewriteaof", 1, ADMIN | NOSCRIPT | NO_ASYNC_LOADING, 0, 0, 0, super::persist::bgrewriteaof, Server),
@@ -173,22 +173,32 @@ pub fn echo(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     Ok(Reply::Bulk(args[1].clone()))
 }
 
-fn db_arg(cx: &Cx, a: &[u8], not_int: &'static str) -> Result<usize, Error> {
-    let n = crate::util::parse_i64(a).ok_or(Error::new(not_int))?;
+/// A DB index: an `int` (`getIntFromObjectOrReply`), then in range.
+fn db_int(a: &[u8], msg: Option<&'static str>) -> Result<i64, Error> {
+    super::lists::long_in(a, i32::MIN as i64, i32::MAX as i64, msg)
+}
+
+fn db_range(cx: &Cx, n: i64) -> Result<usize, Error> {
     if n < 0 || n as usize >= cx.eng.dbs.len() {
         return Err(Error::new("ERR DB index is out of range"));
     }
     Ok(n as usize)
 }
 
+fn db_arg(cx: &Cx, a: &[u8], msg: Option<&'static str>) -> Result<usize, Error> {
+    db_range(cx, db_int(a, msg)?)
+}
+
 pub fn select(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    cx.client.db = db_arg(cx, &args[1], "ERR value is not an integer or out of range")?;
+    cx.client.db = db_arg(cx, &args[1], None)?;
     Ok(Reply::Ok)
 }
 
 pub fn swapdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let a = db_arg(cx, &args[1], "ERR invalid first DB index")?;
-    let b = db_arg(cx, &args[2], "ERR invalid second DB index")?;
+    // Both parsed before either is range-checked.
+    let a = db_int(&args[1], Some("ERR invalid first DB index"))?;
+    let b = db_int(&args[2], Some("ERR invalid second DB index"))?;
+    let (a, b) = (db_range(cx, a)?, db_range(cx, b)?);
     if a != b {
         cx.eng.touch_all_watched(Some(a as u16));
         cx.eng.touch_all_watched(Some(b as u16));
@@ -210,6 +220,52 @@ pub fn swapdb(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     cx.eng.sig.dirty += 1;
     Ok(Reply::Ok)
+}
+
+/// `getTimeoutFromObjectOrReply` in milliseconds (WAIT, WAITAOF).
+fn wait_timeout(a: &[u8], now: i64) -> Result<(), Error> {
+    match crate::util::parse_i64(a) {
+        None => Err(Error::new("ERR timeout is not an integer or out of range")),
+        Some(t) if t < 0 => Err(Error::new("ERR timeout is negative")),
+        Some(t) if t > i64::MAX - now => Err(Error::new("ERR timeout is out of range")),
+        Some(_) => Ok(()),
+    }
+}
+
+/// Replicas that acknowledged everything written so far.
+fn acked_replicas(cx: &Cx) -> i64 {
+    let r = cx.eng.host.as_ref().map(|h| h.replication()).unwrap_or_default();
+    r.replicas.iter().filter(|rep| rep.offset >= r.offset).count() as i64
+}
+
+/// WAIT inside a transaction (the connection runs it otherwise): it can't block, so it
+/// answers with the replicas already caught up.
+pub fn wait_queued(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if cx.eng.replica {
+        return Err(Error::new(
+            "ERR WAIT cannot be used with replica instances. Please also note that since Redis 4.0 if a replica is configured to be writable (which is not the default) writes to replicas are just local and are not propagated.",
+        ));
+    }
+    int(&args[1])?;
+    wait_timeout(&args[2], cx.now)?;
+    Ok(Reply::Int(acked_replicas(cx)))
+}
+
+/// WAITAOF inside a transaction: no blocking either.
+pub fn waitaof_queued(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let local = super::lists::long_in(&args[1], 0, 1, None)?;
+    if int(&args[2])? < 0 {
+        return Err(Error::new("ERR value is out of range, must be positive"));
+    }
+    wait_timeout(&args[3], cx.now)?;
+    if cx.eng.replica {
+        return Err(Error::new("ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated."));
+    }
+    let aof = cx.eng.host.as_ref().is_some_and(|h| h.aof_enabled());
+    if local > 0 && !aof {
+        return Err(Error::new("ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled."));
+    }
+    Ok(Reply::Array(vec![Reply::Int(aof as i64), Reply::Int(acked_replicas(cx))]))
 }
 
 pub fn dbsize(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
@@ -505,17 +561,18 @@ pub fn command_list(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     };
     let mut out = Vec::new();
     for c in &table().all {
-        let names: Vec<String> = std::iter::once(c.name.to_string())
+        let names: Vec<(String, &Command)> = std::iter::once((c.name.to_string(), *c))
             .filter(|_| visible(cx, c))
-            .chain(c.subs.iter().map(|s| format!("{}|{}", c.name, s.name)))
+            .chain(c.subs.iter().map(|s| (format!("{}|{}", c.name, s.name), s)))
             .collect();
-        for n in names {
+        for (n, cmd) in names {
             let keep = match &filter {
                 None => true,
                 Some((by, v)) if eq(by, "pattern") => crate::util::glob_match(v, n.as_bytes(), true),
                 Some((by, v)) if eq(by, "aclcat") => {
+                    // The subcommand's own categories.
                     let cat = String::from_utf8_lossy(v).to_lowercase();
-                    c.categories().contains(&cat.as_str())
+                    cmd.categories().contains(&cat.as_str())
                 }
                 Some((by, v)) if eq(by, "module") => super::module_of(c).is_some_and(|m| m.as_bytes().eq_ignore_ascii_case(v)),
                 Some(_) => return Err(SYNTAX),
@@ -677,8 +734,12 @@ pub fn command_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
         "    Return a list of all commands in this Redis server.",
         "INFO [<command-name> ...]",
         "    Return details about multiple Redis commands.",
+        "    If no command names are given, documentation details for all",
+        "    commands are returned.",
         "DOCS [<command-name> ...]",
         "    Return documentation details about multiple Redis commands.",
+        "    If no command names are given, documentation details for all",
+        "    commands are returned.",
         "GETKEYS <full-command>",
         "    Return the keys from a full Redis command.",
         "GETKEYSANDFLAGS <full-command>",
