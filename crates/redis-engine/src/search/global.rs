@@ -221,6 +221,15 @@ fn has_svs(ix: &Index) -> bool {
 }
 
 impl Global {
+    /// `VecSim_UpdateThreadPoolSize`: no worker threads writes vectors in place, workers
+    /// ingest them in the background.
+    pub fn set_vec_mode(&mut self, workers: i128) {
+        let mode = if workers > 0 { super::hnsw::WriteMode::Async } else { super::hnsw::WriteMode::InPlace };
+        for ix in self.indexes.values_mut() {
+            ix.vec_mode = mode;
+        }
+    }
+
     pub fn get(&self, name: &[u8]) -> Option<&Index> {
         self.indexes.get(name)
     }

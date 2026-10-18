@@ -383,7 +383,7 @@ impl<'a> HybridIt<'a> {
     fn prepare(&mut self) {
         match self.mode {
             Mode::StandardKnn => {
-                self.reply = self.vi.top_k(&self.blob, self.k);
+                self.reply = self.vi.top_k(&self.blob, self.k, self.params.ef_runtime);
                 self.pos = 0;
                 return;
             }
@@ -398,7 +398,7 @@ impl<'a> HybridIt<'a> {
             self.child = Some(child);
             return;
         }
-        let mut batches: Batches = self.vi.batches(&self.blob);
+        let mut batches: Batches = self.vi.batches(&self.blob, self.params.ef_runtime);
         let mut upper = f64::INFINITY;
         let mut child_est = child.num_estimated().min(self.vi.size());
         let child_upper = child_est;
@@ -555,6 +555,7 @@ pub struct RangeIt<'a> {
     vi: &'a VecIndex,
     blob: Vec<u8>,
     radius: f64,
+    epsilon: f64,
     key: Option<usize>,
     yields: bool,
     by_score: bool,
@@ -564,9 +565,9 @@ pub struct RangeIt<'a> {
 }
 
 impl<'a> RangeIt<'a> {
-    pub fn new(vi: &'a VecIndex, blob: &[u8], radius: f64, yields: bool, key: Option<usize>, by_score: bool) -> Self {
+    pub fn new(vi: &'a VecIndex, blob: &[u8], radius: f64, epsilon: f64, yields: bool, key: Option<usize>, by_score: bool) -> Self {
         let res = if yields { metric_result(0, 0.0) } else { IxResult { kind: K_VIRTUAL, weight: 1.0, ..Default::default() } };
-        RangeIt { vi, blob: blob.to_vec(), radius, key, yields, by_score, produced: false, list: IdList::new(Vec::new(), res), dists: Vec::new() }
+        RangeIt { vi, blob: blob.to_vec(), radius, epsilon, key, yields, by_score, produced: false, list: IdList::new(Vec::new(), res), dists: Vec::new() }
     }
 
     fn ensure(&mut self) {
@@ -574,11 +575,11 @@ impl<'a> RangeIt<'a> {
             self.produced = true;
             let r = if self.by_score {
                 // `BY_SCORE`: the scan's results through `std::sort` on the score alone.
-                let mut r = self.vi.range_unsorted(&self.blob, self.radius);
+                let mut r = self.vi.range_unsorted(&self.blob, self.radius, self.epsilon);
                 std_sort(&mut r, |a, b| a.1 < b.1);
                 r
             } else {
-                self.vi.range(&self.blob, self.radius)
+                self.vi.range(&self.blob, self.radius, self.epsilon)
             };
             self.list.ids = r.iter().map(|x| x.0).collect();
             self.dists = r.iter().map(|x| x.1).collect();

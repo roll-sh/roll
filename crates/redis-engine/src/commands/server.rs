@@ -449,6 +449,10 @@ pub fn config_set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             }
             "acllog-max-len" => cx.eng.acl.read().log.lock().max_len = cx.eng.cfg.acllog_max_len as usize,
             "appendonly" if cx.eng.cfg.appendonly != before.appendonly => cx.eng.set_appendonly(cx.eng.cfg.appendonly, cx.now, cx.mode == crate::engine::Mode::Exec),
+            "search-workers" => {
+                let n = cx.eng.cfg.num("search-workers");
+                cx.eng.search.set_vec_mode(n);
+            }
             _ => {}
         }
     }

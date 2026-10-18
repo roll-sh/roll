@@ -4,6 +4,7 @@
 
 pub mod algo;
 mod flatmap;
+pub mod geographic;
 mod rtree;
 pub mod valid;
 pub mod wkt;
@@ -139,6 +140,20 @@ impl GeometryIndex {
         true
     }
 
+    /// `RTree::dump`'s documents in the tree's order: the id, the geometry's WKT (when the
+    /// lookup has it) and the bounding box's, as `bg::wkt` streams them.
+    pub fn dump(&self) -> Vec<(u64, Option<String>, String)> {
+        self.tree
+            .values()
+            .into_iter()
+            .map(|(r, id)| {
+                let g = self.geoms.get(&id).map(wkt_of);
+                let corners = [r.min, Pt { x: r.min.x, y: r.max.y }, r.max, Pt { x: r.max.x, y: r.min.y }, r.min];
+                (id, g, format!("POLYGON(({}))", ring_wkt(&corners)))
+            })
+            .collect()
+    }
+
     /// The documents matching the query geometry, unsorted; the WKT's error on failure.
     pub fn query(&self, query_type: i32, wkt: &[u8]) -> Result<Vec<u64>, Vec<u8>> {
         let cs = self.cs;
@@ -167,6 +182,35 @@ impl GeometryIndex {
             }
         }
         Ok(out)
+    }
+}
+
+/// A coordinate as `std::ostream` writes a double (`%g`, precision 6).
+fn coord(v: f64) -> String {
+    crate::util::fmt_g_prec(v, 6)
+}
+
+fn ring_wkt(pts: &[Pt]) -> String {
+    pts.iter().map(|p| format!("{} {}", coord(p.x), coord(p.y))).collect::<Vec<_>>().join(",")
+}
+
+/// `bg::wkt(geometry)`.
+fn wkt_of(g: &Geom) -> String {
+    match g {
+        Geom::Point(p) => format!("POINT({} {})", coord(p.x), coord(p.y)),
+        Geom::Poly(p) => {
+            let mut s = String::from("POLYGON(");
+            for (i, r) in std::iter::once(&p.outer).chain(p.inners.iter()).enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push('(');
+                s.push_str(&ring_wkt(&r.pts));
+                s.push(')');
+            }
+            s.push(')');
+            s
+        }
     }
 }
 

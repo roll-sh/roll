@@ -576,6 +576,10 @@ pub struct Index {
     pub gc: Option<super::gc::Gc>,
     /// `timerId` while `isTimerSet`: when a TEMPORARY index expires (Unix ms).
     pub expires_at: Option<i64>,
+    /// VecSim's write mode (in place without worker threads) and the tiered HNSW buffer limit
+    /// the index's vector fields were created with.
+    pub vec_mode: super::hnsw::WriteMode,
+    pub vec_buffer_limit: usize,
 }
 
 impl Index {
@@ -607,6 +611,8 @@ impl Index {
             synonyms: None,
             gc: (spec.flags & spec::I_TEMPORARY == 0 && !cfg.flag("search-no-gc")).then(|| super::gc::Gc::new(cfg.num("search-fork-gc-run-interval") as i64)),
             expires_at: None,
+            vec_mode: if cfg.num("search-workers") > 0 { super::hnsw::WriteMode::Async } else { super::hnsw::WriteMode::InPlace },
+            vec_buffer_limit: cfg.num("search-tiered-hnsw-buffer-limit").max(0) as usize,
             spec,
         }
     }
@@ -700,11 +706,12 @@ impl Index {
     }
 
     fn remove_vectors(&mut self, id: u64) {
+        let mode = self.vec_mode;
         for (fs, f) in self.spec.fields.iter().zip(&mut self.fields) {
             if fs.types == spec::T_VECTOR
                 && let Some(v) = &mut f.vectors
             {
-                v.delete(id);
+                v.delete(id, mode);
             }
         }
         // `GeometryIndex_RemoveId`: every geometry field's index, created if missing.
@@ -1044,9 +1051,10 @@ impl Index {
                 }
                 spec::T_VECTOR => {
                     let Some(p) = self.spec.fields[fi].vector.as_ref() else { continue };
-                    let vi = self.fields[fi].vectors.get_or_insert_with(|| super::vecsim::VecIndex::new(p));
+                    let (mode, limit) = (self.vec_mode, self.vec_buffer_limit);
+                    let vi = self.fields[fi].vectors.get_or_insert_with(|| super::vecsim::VecIndex::with_limit(p, limit));
                     for v in &fd.vectors {
-                        vi.add(v, id);
+                        vi.add(v, id, mode);
                     }
                 }
                 spec::T_GEOMETRY => {

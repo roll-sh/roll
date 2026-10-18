@@ -1312,8 +1312,8 @@ pub(super) fn info_reply(cx: &mut Cx, real: &Bytes, with_times: bool, obfuscate:
         if fs.is(spec::T_VECTOR) {
             let v = fi.vectors.as_ref();
             m.push((st("memory"), Reply::Int(v.map_or(0, |v| v.memory()) as i64)));
-            m.push((st("marked_deleted"), Reply::Int(v.map_or(0, |v| v.marked) as i64)));
-            m.push((st("direct_hnsw_insertions"), Reply::Int(0)));
+            m.push((st("marked_deleted"), Reply::Int(v.map_or(0, |v| v.marked()) as i64)));
+            m.push((st("direct_hnsw_insertions"), Reply::Int(v.map_or(0, |v| v.direct_insertions()) as i64)));
             m.push((st("flat_buffer_size"), Reply::Int(v.map_or(0, |v| v.flat_buffer()) as i64)));
         }
         fields.push(Reply::Map(m));

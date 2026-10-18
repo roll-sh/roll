@@ -290,7 +290,9 @@ fn ft_config(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         let mut ac = Ac { objs: args, offset: 3, sds: false };
         let mut cfg = cx.eng.cfg.clone();
         set(&mut cfg, &mut ac).map_err(Error::from)?;
+        let workers = cfg.num("search-workers");
         cx.eng.cfg = cfg;
+        cx.eng.search.set_vec_mode(workers);
         if ac.offset != args.len() {
             Ok(Reply::status("EXCESSARGS"))
         } else {

@@ -487,8 +487,8 @@ impl<'a> EvalCx<'a> {
         if vq.radius < 0.0 {
             return Err(QErr::new(Code::Inval, format!("Error parsing vector similarity query: negative radius ({}) given in a range query", crate::util::fmt_g_prec(vq.radius, 6))));
         }
-        resolve_params(vi.algo, &vq.params, QType::Range)?;
-        Ok(Some(Box::new(RangeIt::new(vi, &vq.blob, vq.radius, key.is_some(), key, vq.by_score))))
+        let rp = resolve_params(vi.algo, &vq.params, QType::Range)?;
+        Ok(Some(Box::new(RangeIt::new(vi, &vq.blob, vq.radius, rp.epsilon, key.is_some(), key, vq.by_score))))
     }
 
     /// `query_EvalSingleTagNode`.

@@ -607,6 +607,9 @@ struct Inter {
 }
 
 fn intersect(cs: Cs, p: &Sub, q: &Sub) -> Option<Inter> {
+    if cs == Cs::Sphere {
+        return intersect_geographic(p, q);
+    }
     let (p1, p2, q1, q2) = (p.i, p.j, q.i, q.j);
     let p_point = equals(cs, p1, p2);
     let q_point = equals(cs, q1, q2);
@@ -756,6 +759,24 @@ fn position_value(ca: f64, cb1: f64, cb2: f64) -> i32 {
     }
 }
 
+/// `geographic_segments` (the SPHERICAL coordinate system's intersection strategy): the
+/// relation of `p` and `q` with Sjöberg's intersection point.
+fn intersect_geographic(p: &Sub, q: &Sub) -> Option<Inter> {
+    use super::geographic::{Relation, relate};
+    let ratio = |r: (f64, f64)| -> f64 { if r.1 == 0.0 { 0.0 } else { r.0 / r.1 } };
+    match relate(p.i, p.j, q.i, q.j) {
+        Relation::Disjoint | Relation::Degenerate => None,
+        Relation::Crosses { sides, ip, ra, rb } => {
+            let (how, arrival) = crosses_how(&sides);
+            let fr = (ratio(ra), ratio(rb));
+            Some(Inter { how, opposite: false, arrival, sides, count: 1, ips: [ip, ip], fr: [fr, fr] })
+        }
+        Relation::Collinear { opposite, pos, ra_from, ra_to, rb_from, rb_to } => {
+            collinear_tail(p.i, p.j, q.i, q.j, opposite, pos, [ratio(ra_from), ratio(ra_to), ratio(rb_from), ratio(rb_to)], [[0, 0], [0, 0]])
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collinear_relate(a1: Pt, a2: Pt, b1: Pt, b2: Pt, oa1: f64, oa2: f64, ob1: f64, ob2: f64, sides: [[i32; 2]; 2]) -> Option<Inter> {
     let len_a = oa2 - oa1;
@@ -786,6 +807,15 @@ fn collinear_relate(a1: Pt, a2: Pt, b1: Pt, b2: Pt, oa1: f64, oa2: f64, ob1: f64
         return None;
     }
     let opposite = sign(len_a) != sign(len_b);
+    collinear_tail(a1, a2, b1, b2, opposite, [a1b, a2b, b1a, b2a], [ra_from, ra_to, rb_from, rb_to], sides)
+}
+
+/// `segments_collinear` of the intersection points and direction policies: the overlap's
+/// points (along `a`) and the turn's "how".
+#[allow(clippy::too_many_arguments)]
+fn collinear_tail(a1: Pt, a2: Pt, b1: Pt, b2: Pt, opposite: bool, pos: [i32; 4], ratios: [f64; 4], sides: [[i32; 2]; 2]) -> Option<Inter> {
+    let [a1b, a2b, b1a, b2a] = pos;
+    let [ra_from, ra_to, rb_from, rb_to] = ratios;
     // The intersection points (`segments_intersection_points::segments_collinear`).
     let mut ips = [a1, a1];
     let mut fr = [(0.0, 0.0); 2];

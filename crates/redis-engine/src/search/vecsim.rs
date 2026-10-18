@@ -6,9 +6,10 @@
 //! round-to-odd BFDOT arithmetic, the scalar fallbacks for short vectors), cosine
 //! normalization, top-k, range and batch queries, and the hybrid policy heuristics.
 //!
-//! Every algorithm searches exactly: FLAT is brute force by definition, and the HNSW and
-//! SVS-VAMANA graphs of the small indexes queries see return the exact neighbours, so their
-//! vectors are searched the same way (the documented gap: large graphs' approximate results).
+//! FLAT is brute force by definition. HNSW fields are tiered HNSW graphs built and searched as
+//! VecSim does (see [`super::hnsw`]), approximately. SVS-VAMANA indexes are searched exactly
+//! (none of the reference's tests give them vectors: their shared thread pool's memory would show
+//! in every later FT.INFO).
 
 use super::spec::{Algo, Metric, VecType, VectorParams};
 use std::collections::{BTreeSet, HashMap};
@@ -439,7 +440,7 @@ fn bf16_neon(a: &[u16], b: &[u16], l2: bool) -> f32 {
 }
 
 /// A field's distance function (`spaces::GetDistFunc` on the reference's CPU).
-fn distance(ty: VecType, metric: Metric, dim: usize, a: &[u8], b: &[u8]) -> f64 {
+pub(super) fn distance(ty: VecType, metric: Metric, dim: usize, a: &[u8], b: &[u8]) -> f64 {
     let l2 = metric == Metric::L2;
     match ty {
         VecType::Float32 => {
@@ -569,7 +570,7 @@ fn normalize(ty: VecType, dim: usize, v: &mut Vec<u8>) {
 
 /// A score as an ordered key: C++'s `<` on non-NaN values (zeros alike).
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-struct Score(f64);
+pub(super) struct Score(pub(super) f64);
 
 impl Eq for Score {}
 
@@ -580,7 +581,7 @@ impl Ord for Score {
     }
 }
 
-fn key(s: f64) -> Score {
+pub(super) fn key(s: f64) -> Score {
     Score(if s == 0.0 { 0.0 } else { s })
 }
 
@@ -624,8 +625,10 @@ pub struct VecIndex {
     data: Vec<u8>,
     labels: Vec<u64>,
     lookup: HashMap<u64, Vec<u32>>,
-    /// HNSW vectors deleted but still counted: the graph only marks them.
-    pub marked: usize,
+    /// An HNSW field's graph and tiered layer.
+    pub hnsw: Option<super::hnsw::Hnsw>,
+    /// `flatBufferLimit` (`search-tiered-hnsw-buffer-limit` when the index was created).
+    pub buffer_limit: usize,
     /// SVS-VAMANA's training threshold, and whether its flat buffer ever reached it.
     svs_threshold: usize,
     trained: bool,
@@ -633,26 +636,30 @@ pub struct VecIndex {
     alloc: Alloc,
     /// `lastMode`: the last search mode (FT.DEBUG VECSIM_INFO), None for `EMPTY_MODE`.
     last_mode: std::cell::Cell<Option<Mode>>,
-    /// HNSW's `maxLevel` and `entrypointNode`'s label (None while the graph is empty).
-    pub max_level: Option<(usize, u64)>,
+    /// A tiered index's flat buffer's own `lastMode`.
+    front_mode: std::cell::Cell<Option<Mode>>,
 }
 
-/// What the index's allocator holds besides the vectors: FLAT's `idToLabelMapping` capacity,
-/// its label lookup's bucket count and its data blocks vector's capacity; for HNSW the
-/// elements ever inserted, their graph bytes, the level generator and the visited-nodes pool.
+/// What a FLAT index's allocator holds besides the vectors: `idToLabelMapping`'s capacity, its
+/// label lookup's bucket count and its data blocks vector's capacity.
 #[derive(Clone, Debug)]
 struct Alloc {
     cap: usize,
     buckets: usize,
     blocks_cap: usize,
-    elems: usize,
-    graph: usize,
-    rng: u64,
-    visited: std::cell::Cell<bool>,
 }
 
 impl VecIndex {
     pub fn new(p: &VectorParams) -> VecIndex {
+        VecIndex::with_limit(p, 1024)
+    }
+
+    /// A field's index, the tiered buffer limit given.
+    pub fn with_limit(p: &VectorParams, buffer_limit: usize) -> VecIndex {
+        let stored = super::vector::stored_data_size(p);
+        // `min(DEFAULT_BLOCK_SIZE, limit / element size)` (BLOCK_SIZE itself is ignored)
+        let block_size = if p.block_size == 0 { 1024 } else { p.block_size };
+        let hnsw = (p.algo == Algo::Hnsw).then(|| super::hnsw::Hnsw::new(p.ty, p.metric, p.dim, stored, p.multi, p.m, p.ef_construction, p.ef_runtime, p.epsilon, block_size));
         VecIndex {
             algo: p.algo,
             ty: p.ty,
@@ -660,24 +667,42 @@ impl VecIndex {
             metric: p.metric,
             multi: p.multi,
             m: if p.m == 0 { 16 } else { p.m },
-            // BLOCK_SIZE is ignored: `min(DEFAULT_BLOCK_SIZE, limit / element size)`
-            block_size: 1024,
-            stored: super::vector::stored_data_size(p),
+            block_size,
+            stored,
             data: Vec::new(),
             labels: Vec::new(),
             lookup: HashMap::new(),
-            marked: 0,
+            hnsw,
+            buffer_limit,
             svs_threshold: if p.training_threshold == 0 { 10 * 1024 } else { p.training_threshold },
             trained: false,
-            alloc: Alloc { cap: 0, buckets: 1, blocks_cap: 0, elems: 0, graph: 0, rng: 100, visited: std::cell::Cell::new(false) },
+            alloc: Alloc { cap: 0, buckets: 1, blocks_cap: 0 },
             last_mode: std::cell::Cell::new(None),
-            max_level: None,
+            front_mode: std::cell::Cell::new(None),
         }
     }
 
     /// `indexSize`: the vectors stored (an HNSW graph's marked deleted ones too).
     pub fn size(&self) -> usize {
-        self.labels.len() + self.marked
+        match &self.hnsw {
+            Some(h) => h.size(),
+            None => self.labels.len(),
+        }
+    }
+
+    /// HNSW's elements marked deleted (`numMarkedDeleted`).
+    pub fn marked(&self) -> usize {
+        self.hnsw.as_ref().map_or(0, |h| h.marked)
+    }
+
+    /// HNSW's vectors inserted straight into the graph (`directHNSWInsertions`).
+    pub fn direct_insertions(&self) -> usize {
+        self.hnsw.as_ref().map_or(0, |h| h.direct)
+    }
+
+    /// HNSW's `maxLevel` and entry point's label (None while the graph is empty).
+    pub fn entry_point(&self) -> Option<(usize, u64)> {
+        self.hnsw.as_ref().and_then(|h| h.entry_point())
     }
 
     /// The vectors searchable.
@@ -687,7 +712,10 @@ impl VecIndex {
 
     /// `indexLabelCount`.
     pub fn label_count(&self) -> usize {
-        self.lookup.len()
+        match &self.hnsw {
+            Some(h) => h.label_count(),
+            None => self.lookup.len(),
+        }
     }
 
     fn vector(&self, id: usize) -> &[u8] {
@@ -709,8 +737,17 @@ impl VecIndex {
         distance(self.ty, self.metric, self.dim, stored, q)
     }
 
-    /// `addVector`: a single-value index overwrites a label's vector (as given).
-    pub fn add(&mut self, blob: &[u8], label: u64) {
+    /// `addVector`: a single-value index overwrites a label's vector (as given); a tiered HNSW
+    /// index writes as the worker pool's mode says.
+    pub fn add(&mut self, blob: &[u8], label: u64, mode: super::hnsw::WriteMode) {
+        if self.hnsw.is_some() {
+            let v = self.preprocess(blob);
+            let limit = self.buffer_limit;
+            if let Some(h) = &mut self.hnsw {
+                h.add(&v, label, mode, limit);
+            }
+            return;
+        }
         if !self.multi
             && let Some(ids) = self.lookup.get(&label)
         {
@@ -721,7 +758,7 @@ impl VecIndex {
         }
         let v = self.preprocess(blob);
         let id = self.labels.len() as u32;
-        self.grow(label);
+        self.grow();
         self.data.extend_from_slice(&v);
         if self.algo == Algo::Svs && self.labels.len() + 1 >= self.svs_threshold {
             self.trained = true;
@@ -751,11 +788,11 @@ impl VecIndex {
 
     /// `deleteVector`: the label's vectors, each removed in turn (a moved vector of the same
     /// label is seen at its new id).
-    pub fn delete(&mut self, label: u64) -> usize {
-        let Some(n) = self.lookup.get(&label).map(|v| v.len()) else { return 0 };
-        if self.algo == Algo::Hnsw {
-            self.marked += n;
+    pub fn delete(&mut self, label: u64, mode: super::hnsw::WriteMode) -> usize {
+        if let Some(h) = &mut self.hnsw {
+            return h.delete(label, mode);
         }
+        let Some(n) = self.lookup.get(&label).map(|v| v.len()) else { return 0 };
         for i in 0..n {
             let id = self.lookup[&label][i];
             self.remove_id(id);
@@ -766,6 +803,9 @@ impl VecIndex {
 
     /// `getDistanceFrom_Unsafe`: a label's (closest) distance, NaN without one.
     pub fn distance_from(&self, label: u64, q: &[u8]) -> f64 {
+        if let Some(h) = &self.hnsw {
+            return h.distance_from(label, q);
+        }
         let Some(ids) = self.lookup.get(&label) else { return f64::NAN };
         let mut dist = f64::INFINITY;
         for &id in ids {
@@ -781,12 +821,14 @@ impl VecIndex {
     }
 
     /// `topKQuery` (sorted by score, then label).
-    pub fn top_k(&self, blob: &[u8], k: usize) -> Vec<VecRes> {
+    pub fn top_k(&self, blob: &[u8], k: usize, ef_runtime: usize) -> Vec<VecRes> {
         self.last_mode.set(Some(Mode::StandardKnn));
+        if let Some(h) = &self.hnsw {
+            return h.top_k(&self.preprocess(blob), k, ef_runtime);
+        }
         if k == 0 {
             return Vec::new();
         }
-        self.searched();
         let q = self.preprocess(blob);
         // the max priority queue of (score, label); multi keeps a label's best score
         let mut heap: BTreeSet<(Score, u64)> = BTreeSet::new();
@@ -822,16 +864,18 @@ impl VecIndex {
     }
 
     /// `rangeQuery`, sorted by label (`BY_ID`).
-    pub fn range(&self, blob: &[u8], radius: f64) -> Vec<VecRes> {
-        let mut out = self.range_unsorted(blob, radius);
+    pub fn range(&self, blob: &[u8], radius: f64, epsilon: f64) -> Vec<VecRes> {
+        let mut out = self.range_unsorted(blob, radius, epsilon);
         out.sort_by_key(|r| r.0);
         out
     }
 
     /// `rangeQuery`'s results in the order the scan found them.
-    pub fn range_unsorted(&self, blob: &[u8], radius: f64) -> Vec<VecRes> {
+    pub fn range_unsorted(&self, blob: &[u8], radius: f64, epsilon: f64) -> Vec<VecRes> {
         self.last_mode.set(Some(Mode::RangeQuery));
-        self.searched();
+        if let Some(h) = &self.hnsw {
+            return h.range(&self.preprocess(blob), radius, epsilon);
+        }
         let q = self.preprocess(blob);
         let radius = if self.ty == VecType::Float64 { radius } else { radius as f32 as f64 };
         let mut out: Vec<VecRes> = Vec::new();
@@ -867,6 +911,11 @@ impl VecIndex {
     /// `preferAdHocSearch` with its mode: ad hoc on the first check, batches switching to ad
     /// hoc on a later one, else batches.
     pub fn prefer_adhoc_check(&self, subset: usize, k: usize, initial: bool) -> bool {
+        if self.hnsw.is_some() && self.size() == 0 {
+            // the tiered index asks its flat buffer (as empty, so ad hoc)
+            self.front_mode.set(Some(if initial { Mode::HybridAdhocBf } else { Mode::HybridBatchesToAdhocBf }));
+            return true;
+        }
         let res = self.prefer_adhoc_tree(subset, k);
         self.last_mode.set(Some(match (res, initial) {
             (true, true) => Mode::HybridAdhocBf,
@@ -884,6 +933,11 @@ impl VecIndex {
     /// `VecSimSearchMode_ToString(lastMode)`.
     pub fn last_mode_name(&self) -> &'static str {
         self.last_mode.get().map_or("EMPTY_MODE", Mode::name)
+    }
+
+    /// The tiered flat buffer's `lastMode`.
+    pub fn front_mode_name(&self) -> &'static str {
+        self.front_mode.get().map_or("EMPTY_MODE", Mode::name)
     }
 
     fn prefer_adhoc_tree(&self, subset: usize, k: usize) -> bool {
@@ -945,16 +999,46 @@ impl VecIndex {
     }
 
     /// `newBatchIterator`.
-    pub fn batches(&self, blob: &[u8]) -> Batches {
-        self.searched();
-        Batches { q: self.preprocess(blob), scores: Vec::new(), start: 0, returned: 0, label_count: self.label_count(), computed: false }
+    pub fn batches(&self, blob: &[u8], ef_runtime: usize) -> Batches {
+        if self.hnsw.is_some() {
+            return Batches::Tiered(Box::new(super::hnsw::TieredBatch::new(self.preprocess(blob), ef_runtime)));
+        }
+        Batches::Flat(FlatBatches { q: self.preprocess(blob), scores: Vec::new(), start: 0, returned: 0, label_count: self.label_count(), computed: false })
     }
 
 }
 
+/// A batch iterator: brute force, or the tiered HNSW index's.
+#[derive(Clone, Debug)]
+pub enum Batches {
+    Flat(FlatBatches),
+    Tiered(Box<super::hnsw::TieredBatch>),
+}
+
+impl Batches {
+    /// `isDepleted`'s negation.
+    pub fn has_next(&self) -> bool {
+        match self {
+            Batches::Flat(b) => b.has_next(),
+            Batches::Tiered(b) => b.has_next(),
+        }
+    }
+
+    /// `getNextResults(n, BY_ID)`.
+    pub fn next(&mut self, ix: &VecIndex, n: usize) -> Vec<VecRes> {
+        match self {
+            Batches::Flat(b) => b.next(ix, n),
+            Batches::Tiered(b) => match &ix.hnsw {
+                Some(h) => b.next(h, n),
+                None => Vec::new(),
+            },
+        }
+    }
+}
+
 /// A brute force batch iterator (`BF_BatchIterator`).
 #[derive(Clone, Debug)]
-pub struct Batches {
+pub struct FlatBatches {
     q: Vec<u8>,
     scores: Vec<(f64, u64)>,
     start: usize,
@@ -963,7 +1047,7 @@ pub struct Batches {
     computed: bool,
 }
 
-impl Batches {
+impl FlatBatches {
     /// `isDepleted`'s negation.
     pub fn has_next(&self) -> bool {
         self.returned != self.label_count
@@ -1073,7 +1157,7 @@ const PRIMES: &[u32] = &[
 ];
 
 /// `_Prime_rehash_policy::_M_next_bkt`.
-fn next_bkt(n: usize) -> usize {
+pub(super) fn next_bkt(n: usize) -> usize {
     const FAST: [usize; 14] = [2, 2, 2, 3, 5, 5, 7, 7, 11, 11, 11, 11, 13, 13];
     match n {
         0 => 1,
@@ -1083,12 +1167,12 @@ fn next_bkt(n: usize) -> usize {
 }
 
 /// An allocation the allocator counts: the size plus its 8-byte header.
-fn hdr(n: usize) -> usize {
+pub(super) fn hdr(n: usize) -> usize {
     if n == 0 { 0 } else { n + 8 }
 }
 
 /// A bucket array's allocation (a single bucket lives in the table).
-fn bucket_bytes(b: usize) -> usize {
+pub(super) fn bucket_bytes(b: usize) -> usize {
     if b <= 1 { 0 } else { hdr(b * 8) }
 }
 
@@ -1106,31 +1190,9 @@ impl VecIndex {
 
     /// A new vector's bookkeeping before it is stored under `label`: FLAT's `growByBlock`
     /// and a new data block; an HNSW element and its random level.
-    fn grow(&mut self, label: u64) {
+    fn grow(&mut self) {
         let count = self.count();
         let b = self.block_size;
-        if self.algo == Algo::Hnsw {
-            let a = &mut self.alloc;
-            a.elems += 1;
-            if a.elems >= 2 {
-                a.visited.set(true);
-            }
-            let level = hnsw_level(&mut a.rng, self.m);
-            if self.max_level.is_none_or(|(l, _)| level > l) {
-                self.max_level = Some((level, label));
-            }
-            a.graph += 72;
-            if level > 0 {
-                a.graph += hdr(level * (16 + 4 * self.m)) + 72 * level;
-            }
-            a.graph += match self.lookup.get(&label) {
-                None if self.multi => multi_entry(1),
-                None => 32,
-                Some(ids) if ids.len().is_power_of_two() => 4 * ids.len(),
-                Some(_) => 0,
-            };
-            return;
-        }
         if count >= self.alloc.cap {
             self.alloc.cap += b;
             let (e, c) = (self.lookup.len(), self.alloc.cap);
@@ -1143,9 +1205,6 @@ impl VecIndex {
 
     /// FLAT's `shrinkByBlock` after a vector left (its label still counted in a multi index).
     fn shrink(&mut self) {
-        if self.algo == Algo::Hnsw {
-            return;
-        }
         let (count, b) = (self.count(), self.block_size);
         if !count.is_multiple_of(b) {
             return;
@@ -1167,40 +1226,20 @@ impl VecIndex {
         if self.algo == Algo::Svs && !self.trained { self.count() } else { 0 }
     }
 
-    /// A graph search ran (it takes a visited-nodes handler from the pool, kept from then on).
-    pub fn searched(&self) {
-        if self.algo == Algo::Hnsw && self.size() > 0 {
-            self.alloc.visited.set(true);
-        }
-    }
-
     /// FT.INFO's `memory` (`VecSimIndex_StatsInfo`): what the index's allocator counts. FLAT
     /// is exact: the index (488 bytes, a cosine preprocessor 64 more), the data blocks vector
-    /// (48 per block), the blocks, `idToLabelMapping`, the lookup's buckets and entries. HNSW
-    /// (tiered) follows the graph once background ingestion settled, assuming no pruned
-    /// (one-way) edges and one visited-nodes handler: the fixed part with the first block's
-    /// metadata and lookup buckets, the vector and graph blocks, each element's lookup entry,
-    /// incoming-edges vector and upper levels. SVS-VAMANA holds its vectors in the tiered
-    /// flat buffer until trained.
+    /// (48 per block), the blocks, `idToLabelMapping`, the lookup's buckets and entries. A
+    /// tiered HNSW index adds its layer, its flat buffer and the graph (`Hnsw::memory`).
+    /// SVS-VAMANA holds its vectors in the tiered flat buffer until trained.
     pub fn memory(&self) -> usize {
+        if self.hnsw.is_some() {
+            let (layer, buffer, graph) = self.tiered_parts();
+            return layer + buffer + graph;
+        }
         let b = self.block_size;
         let cos = if self.metric == Metric::Cosine { 64 } else { 0 };
         let a = &self.alloc;
         let blocks = |n: usize| n.div_ceil(b) * hdr(b * self.stored);
-        if self.algo == Algo::Hnsw {
-            if a.elems == 0 {
-                // nothing inserted yet (FT.DEBUG VECSIM_INFO created it): the tiered index's
-                // management layer, its flat buffer and the empty graph
-                return 600 + 488 + cos + 896;
-            }
-            let nb = a.elems.div_ceil(b).max(1);
-            let graph_block = hdr(b * (32 + 8 * self.m));
-            return 20800 + cos + nb * (hdr(b * self.stored) + graph_block) + (nb - 1) * 12384
-                + bucket_bytes(next_bkt(nb * b))
-                - bucket_bytes(next_bkt(b))
-                + a.graph
-                + if a.visited.get() { 2128 } else { 0 };
-        }
         let entries: usize = if self.multi { self.lookup.values().map(|v| multi_entry(v.len())).sum() } else { 32 * self.lookup.len() };
         let flat = 488 + cos + hdr(a.blocks_cap * 48) + blocks(self.count()) + hdr(a.cap * 8) + bucket_bytes(a.buckets) + entries;
         if self.algo == Algo::Svs { flat + 984 } else { flat }
@@ -1209,25 +1248,19 @@ impl VecIndex {
 
 impl VecIndex {
     /// A tiered HNSW index's parts (`MANAGEMENT_LAYER_MEMORY`, the flat buffer's and the graph's
-    /// `MEMORY`) once background ingestion settled: the layer and the buffer grow once a vector
-    /// came through them, the layer again with pending swap jobs for marked deleted vectors.
+    /// `MEMORY`) once background ingestion settled: the buffer keeps a block's bookkeeping once
+    /// a vector came through it (with workers).
     pub fn tiered_parts(&self) -> (usize, usize, usize) {
         let cos = if self.metric == Metric::Cosine { 64 } else { 0 };
-        let used = self.alloc.elems > 0;
-        let layer = match self.marked {
-            0 if used => 712,
-            0 => 600,
-            n => 1008 + 72 * (n - 1),
-        };
-        let buffer = 488 + cos + if used { 80 } else { 0 };
-        let total = self.memory();
-        (layer, buffer, total.saturating_sub(layer + buffer))
+        let Some(h) = &self.hnsw else { return (0, 0, self.memory()) };
+        let buffer = 488 + cos + if h.flat_used { 80 } else { 0 };
+        (h.layer_memory(), buffer, h.memory())
     }
 }
 
 /// `HNSWIndex::getRandomLevel`: `-ln(u) / ln(M)` truncated, `u` libstdc++'s
 /// `generate_canonical<double, 53>` over two `minstd_rand0` draws (seeded with 100).
-fn hnsw_level(state: &mut u64, m: usize) -> usize {
+pub(super) fn hnsw_level(state: &mut u64, m: usize) -> usize {
     let mut draw = || {
         *state = *state * 16807 % 2147483647;
         (*state - 1) as f64
@@ -1276,36 +1309,44 @@ mod tests {
 
     #[test]
     fn allocator_view() {
+        use super::super::hnsw::WriteMode::{Async, InPlace};
         assert_eq!((next_bkt(0), next_bkt(1), next_bkt(1024), next_bkt(2048)), (1, 2, 1031, 2179));
         let p = VectorParams { dim: 3, ..VectorParams::new(Algo::Flat, false) };
         let mut ix = VecIndex::new(&p);
-        ix.add(&[0; 12], 1);
+        ix.add(&[0; 12], 1, InPlace);
         assert_eq!(ix.memory(), 29328);
-        ix.add(&[0; 12], 2);
+        ix.add(&[0; 12], 2, InPlace);
         assert_eq!(ix.memory(), 29360);
-        ix.delete(1);
-        ix.delete(2);
+        ix.delete(1, InPlace);
+        ix.delete(2, InPlace);
         assert_eq!(ix.memory(), 568);
-        // HNSW, M 2: the first element's level is 2, the fifth's 1
+        // HNSW, M 2, through the flat buffer: the first element's level is 2
         let p = VectorParams { dim: 3, m: 2, ..VectorParams::new(Algo::Hnsw, false) };
         let mut ix = VecIndex::new(&p);
-        ix.add(&[0; 12], 1);
+        ix.add(&[0; 12], 1, Async);
         assert_eq!(ix.memory(), 82560);
-        for l in 2..=5 {
-            ix.add(&[0; 12], l);
+        assert_eq!(ix.entry_point(), Some((2, 1)));
+        // in place, M 16, DIM 2: four elements on level 0
+        let p = VectorParams { dim: 2, ..VectorParams::new(Algo::Hnsw, false) };
+        let mut ix = VecIndex::new(&p);
+        for (l, x) in [1.0f32, 2.0, 3.0, 4.0].iter().enumerate() {
+            let mut b = x.to_le_bytes().to_vec();
+            b.extend_from_slice(&2f32.to_le_bytes());
+            ix.add(&b, l as u64 + 1, InPlace);
         }
-        assert_eq!(ix.memory(), 82560 + 2128 + 3 * 104 + 208);
+        assert_eq!(ix.tiered_parts(), (600, 488, 194112));
     }
 
     #[test]
     fn index_deletes_swap() {
+        use super::super::hnsw::WriteMode::InPlace;
         let p = VectorParams { dim: 1, ..VectorParams::new(Algo::Flat, false) };
         let mut ix = VecIndex::new(&p);
         for (i, v) in [1.0f32, 2.0, 3.0].iter().enumerate() {
-            ix.add(&v.to_le_bytes(), i as u64 + 1);
+            ix.add(&v.to_le_bytes(), i as u64 + 1, InPlace);
         }
-        ix.delete(1);
+        ix.delete(1, InPlace);
         assert_eq!(ix.labels, vec![3, 2]);
-        assert_eq!(ix.top_k(&0f32.to_le_bytes(), 1), vec![(2, 4.0)]);
+        assert_eq!(ix.top_k(&0f32.to_le_bytes(), 1, 0), vec![(2, 4.0)]);
     }
 }

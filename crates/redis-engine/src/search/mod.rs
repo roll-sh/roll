@@ -18,6 +18,7 @@ pub mod geo;
 pub mod geometry;
 pub mod global;
 pub mod highlight;
+pub mod hnsw;
 pub mod hll;
 pub mod index;
 pub mod info;

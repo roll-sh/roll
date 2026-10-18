@@ -258,6 +258,24 @@ impl RTree {
         }
     }
 
+    /// Every value in the tree's iteration order (`begin()`: depth first, children in order).
+    pub fn values(&self) -> Vec<(Rect, u64)> {
+        let mut out = Vec::new();
+        let Some(root) = self.root else { return out };
+        let mut stack = vec![root];
+        while let Some(n) = stack.pop() {
+            match self.node(n) {
+                Node::Leaf(v) => out.extend(v.iter().copied()),
+                Node::Internal(v) => {
+                    for (_, c) in v.iter().rev() {
+                        stack.push(*c);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The values whose boxes satisfy `pred`.
     pub fn query(&self, mut pred: impl FnMut(&Rect) -> bool) -> Vec<u64> {
         let mut out = Vec::new();

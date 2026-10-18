@@ -259,7 +259,13 @@ pub fn direction_code(cs: Cs, a: Pt, b: Pt, p: Pt) -> i32 {
 
 /// `point_is_spike_or_equal(last, a, b)`: `last` back on the segment `a`→`b`'s line, not past `b`.
 pub fn is_spike_or_equal(cs: Cs, next: Pt, cur: Pt, prev: Pt) -> bool {
-    side(cs, next, cur, prev) == 0 && direction_code(cs, next, cur, prev) < 1
+    if side(cs, next, cur, prev) != 0 {
+        return false;
+    }
+    match cs {
+        Cs::Flat => direction_code(cs, next, cur, prev) < 1,
+        Cs::Sphere => super::geographic::direction_code(next, cur, prev) < 1,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -278,25 +284,7 @@ pub fn ring_area(cs: Cs, r: &[Pt]) -> f64 {
             }
             sum / 2.0
         }
-        Cs::Sphere => {
-            // The signed spherical excess, by the segments' trapezoids towards the equator.
-            let mut sum = 0.0;
-            for w in r.windows(2) {
-                let (l1, l2) = (w[0].x.to_radians(), w[1].x.to_radians());
-                let (p1, p2) = (w[0].y.to_radians(), w[1].y.to_radians());
-                let mut dl = l2 - l1;
-                if dl > std::f64::consts::PI {
-                    dl -= 2.0 * std::f64::consts::PI;
-                } else if dl < -std::f64::consts::PI {
-                    dl += 2.0 * std::f64::consts::PI;
-                }
-                // The trapezoid between the segment and the equator (its spherical excess).
-                let (t1, t2) = ((p1 / 2.0).tan(), (p2 / 2.0).tan());
-                sum += 2.0 * ((dl / 2.0).tan() * (t1 + t2) / (1.0 + t1 * t2)).atan();
-            }
-            // Clockwise rings (eastward on top) come out positive, like boost's.
-            sum
-        }
+        Cs::Sphere => super::geographic::ring_area(r),
     }
 }
 
@@ -338,31 +326,67 @@ fn longitude_distance_unsigned(a: f64, b: f64) -> f64 {
     if d < 0.0 { d + 360.0 } else { d }
 }
 
-/// `spherical_box` normalization: longitudes into [-180, 180) with max ≥ min, whole-circle boxes
-/// [-180, 180].
+/// `strategy::normalize::spherical_box` (`normalize_spheroidal_box_coordinates`): the corners'
+/// longitudes into (-180, 180] (poles kept), a box on a pole collapsed to longitude 0, a band
+/// (a full turn) made [-180, 180], else the max moved a turn up when below the min.
 pub fn normalize_box(b: &Rect) -> Rect {
-    let mut r = *b;
-    let diff = b.max.x - b.min.x;
-    if diff >= 360.0 {
-        r.min.x = -180.0;
-        r.max.x = 180.0;
-        return r;
-    }
-    let mut lo = norm_lon(b.min.x);
-    let mut hi = norm_lon(b.max.x);
-    if lo == 180.0 {
-        lo = -180.0;
-    }
-    if hi < lo || (hi == lo && diff > 0.0) {
-        hi += 360.0;
-    }
-    if b.min.y.abs() == 90.0 && b.max.y == b.min.y {
+    let span = (b.min.x - b.max.x).abs();
+    let band = span > 360.0 || feq(span, 360.0);
+    let (mut lo, mut hi) = (b.min.x, b.max.x);
+    super::geographic::normalize_lon_deg(&mut lo);
+    super::geographic::normalize_lon_deg(&mut hi);
+    if (feq(b.min.y, -90.0) && feq(b.max.y, -90.0)) || (feq(b.min.y, 90.0) && feq(b.max.y, 90.0)) {
         lo = 0.0;
         hi = 0.0;
+    } else if band {
+        lo = -180.0;
+        hi = 180.0;
+    } else if lo > hi {
+        hi += 360.0;
     }
-    r.min.x = lo;
-    r.max.x = hi;
-    r
+    Rect { min: Pt { x: lo, y: b.min.y }, max: Pt { x: hi, y: b.max.y } }
+}
+
+/// `sweep_event::operator<`: by time (equal within the epsilon: starts first).
+fn event_less(a: &(f64, bool, usize), b: &(f64, bool, usize)) -> bool {
+    if !feq(a.0, b.0) { a.0 < b.0 } else { a.1 && !b.1 }
+}
+
+fn event_after(a: &(f64, bool, usize), b: &(f64, bool, usize)) -> bool {
+    event_less(b, a)
+}
+
+/// `maximum_gap`: the sweep over the intervals' start and end events (times equal within the
+/// epsilon ordered starts first), the widest gap where nothing overlaps.
+fn maximum_gap(intervals: &[(f64, f64)]) -> (f64, f64, f64) {
+    // `event_greater` over (time, is_start, interval): the earliest event on top
+    let mut queue = super::super::hnsw::StdHeap::new(event_after);
+    for (i, iv) in intervals.iter().enumerate() {
+        queue.push((iv.0, true, i));
+    }
+    let (mut count, mut gl, mut gr) = (0usize, 0.0f64, 0.0f64);
+    while !queue.is_empty() {
+        let ev = queue.pop();
+        if ev.1 {
+            count += 1;
+            queue.push((intervals[ev.2].1, false, ev.2));
+        } else {
+            count -= 1;
+            if count == 0 && !queue.is_empty() {
+                let next = intervals[queue.top().2].0;
+                let gap = next - ev.0;
+                if gap > gr - gl {
+                    gl = ev.0;
+                    gr = next;
+                }
+            }
+        }
+    }
+    (gr - gl, gl, gr)
+}
+
+fn flarger(a: f64, b: f64) -> bool {
+    a > b && !feq(a, b)
 }
 
 /// `envelope_range_of_boxes` (two boxes): the smallest longitude interval covering both.
@@ -370,10 +394,14 @@ fn range_of_boxes(a: &Rect, b: &Rect) -> Rect {
     let boxes = [*a, *b];
     let mut intervals: Vec<(f64, f64)> = Vec::new();
     for bx in &boxes {
-        if bx.min.y == 90.0 || bx.max.y == -90.0 {
+        // `is_inverse_spheroidal_coordinates`
+        if bx.min.x == f64::MAX && bx.max.x == f64::MIN {
             continue;
         }
-        if bx.max.x > 180.0 {
+        if feq(bx.min.y, 90.0) || feq(bx.max.y, -90.0) {
+            continue;
+        }
+        if flarger(bx.max.x, 180.0) {
             intervals.push((bx.min.x, 180.0));
             intervals.push((-180.0, bx.max.x - 360.0));
         } else {
@@ -382,33 +410,32 @@ fn range_of_boxes(a: &Rect, b: &Rect) -> Rect {
     }
     let (mut lo, mut hi) = (0.0, 0.0);
     if !intervals.is_empty() {
-        lo = intervals.iter().map(|i| i.0).fold(f64::INFINITY, f64::min);
-        hi = intervals.iter().map(|i| i.1).fold(f64::NEG_INFINITY, f64::max);
-        if hi - lo > 180.0 {
-            // `maximum_gap` between the sorted intervals.
-            let mut iv = intervals.clone();
-            iv.sort_by(|x, y| x.0.total_cmp(&y.0));
-            let (mut gap, mut gl, mut gr) = (0.0, 0.0, 0.0);
-            let mut reach = iv[0].1;
-            for w in iv.iter().skip(1) {
-                if w.0 > reach && w.0 - reach > gap {
-                    gap = w.0 - reach;
-                    gl = reach;
-                    gr = w.0;
-                }
-                reach = reach.max(w.1);
+        // `min_element` / `max_element` with `math::smaller`
+        lo = intervals[0].0;
+        for iv in &intervals[1..] {
+            if fsmaller(iv.0, lo) {
+                lo = iv.0;
             }
-            if gap > 0.0 {
+        }
+        hi = intervals[0].1;
+        for iv in &intervals[1..] {
+            if fsmaller(hi, iv.1) {
+                hi = iv.1;
+            }
+        }
+        if flarger(hi - lo, 180.0) {
+            let (gap, gl, gr) = maximum_gap(&intervals);
+            if flarger(gap, 0.0) {
                 let wrapped = 360.0 + lo - hi;
-                if gap > wrapped {
+                if flarger(gap, wrapped) {
                     lo = gr;
                     hi = gl + 360.0;
                 }
             }
         }
     }
-    let min_lat = a.min.y.min(b.min.y);
-    let max_lat = a.max.y.max(b.max.y);
+    let min_lat = if fsmaller(b.min.y, a.min.y) { b.min.y } else { a.min.y };
+    let max_lat = if fsmaller(a.max.y, b.max.y) { b.max.y } else { a.max.y };
     Rect { min: Pt { x: lo, y: min_lat }, max: Pt { x: hi, y: max_lat } }
 }
 
@@ -528,57 +555,14 @@ fn envelope(cs: Cs, r: &[Pt]) -> Rect {
             }
             b
         }
-        Cs::Sphere => {
-            let mut acc: Option<Rect> = None;
-            for w in r.windows(2) {
-                let sb = segment_envelope(w[0], w[1]);
-                match &mut acc {
-                    None => acc = Some(sb),
-                    Some(a) => expand(cs, a, &sb),
-                }
-            }
-            acc.unwrap_or(Rect { min: r[0], max: r[0] })
-        }
+        Cs::Sphere => super::geographic::ring_envelope(r),
     }
 }
 
 /// A great-circle segment's box: the endpoints' longitudes (the short way round) and the
 /// latitudes, extended to the circle's vertex when it lies inside the segment.
 pub fn segment_envelope(a: Pt, b: Pt) -> Rect {
-    let (mut lon1, mut lon2) = (norm_lon(a.x), norm_lon(b.x));
-    let (lat1, lat2) = (a.y, b.y);
-    let mut lo = lat1.min(lat2);
-    let mut hi = lat1.max(lat2);
-    if lon2 < lon1 {
-        std::mem::swap(&mut lon1, &mut lon2);
-    }
-    if lon2 - lon1 > 180.0 {
-        let t = lon1 + 360.0;
-        lon1 = lon2;
-        lon2 = t;
-    }
-    if lat1.abs() != 90.0 && lat2.abs() != 90.0 && a.x != b.x {
-        let (a3, b3) = (unit(a), unit(b));
-        let n = cross(a3, b3);
-        let nn = dot(n, n).sqrt();
-        if nn > 0.0 {
-            // The circle's vertex latitude: 90° less the normal's angle from the axis.
-            let vlat = (n[2].abs() / nn).acos().to_degrees();
-            for (sgn, v) in [(1.0, [-n[0] * n[2], -n[1] * n[2], n[0] * n[0] + n[1] * n[1]]), (-1.0, [n[0] * n[2], n[1] * n[2], -(n[0] * n[0] + n[1] * n[1])])] {
-                // The vertex is inside the segment when it is between a and b along the circle.
-                let s1 = dot(cross(a3, v), n);
-                let s2 = dot(cross(v, b3), n);
-                if s1 > 0.0 && s2 > 0.0 {
-                    if sgn > 0.0 {
-                        hi = hi.max(vlat);
-                    } else {
-                        lo = lo.min(-vlat);
-                    }
-                }
-            }
-        }
-    }
-    Rect { min: Pt { x: lon1, y: lo }, max: Pt { x: lon2, y: hi } }
+    super::geographic::segment_envelope(a, b)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -609,6 +593,14 @@ fn on_segment(cs: Cs, a: Pt, b: Pt, p: Pt) -> bool {
 /// spheroid the ray goes north along `p`'s meridian (great-circle segments are monotone in
 /// longitude), in the plane along +x.
 pub fn ring_loc(cs: Cs, r: &[Pt], p: Pt) -> Loc {
+    if cs == Cs::Sphere {
+        // `geographic_winding`
+        return match super::geographic::point_in_ring(r, p) {
+            1 => Loc::Inside,
+            0 => Loc::Boundary,
+            _ => Loc::Outside,
+        };
+    }
     if r.len() < 2 {
         return Loc::Outside;
     }
@@ -743,8 +735,88 @@ fn piece_midpoints(cs: Cs, a: Pt, b: Pt, other: &Poly) -> Vec<Pt> {
     out
 }
 
+/// A point a fraction `t` along the great circle from `a` to `b`.
+fn sphere_lerp(a: Pt, b: Pt, t: f64) -> Pt {
+    let (ua, ub) = (unit(a), unit(b));
+    let v = [ua[0] * (1.0 - t) + ub[0] * t, ua[1] * (1.0 - t) + ub[1] * t, ua[2] * (1.0 - t) + ub[2] * t];
+    let n = dot(v, v).sqrt();
+    let lat = (v[2] / n).clamp(-1.0, 1.0).asin().to_degrees();
+    let lon = v[1].atan2(v[0]).to_degrees();
+    Pt { x: lon, y: lat }
+}
+
+/// `covered_by(a, b)` for polygons on the spheroid: no boundary of `a` crossing out of `b` (the
+/// geographic segments' relations), every piece of it between the meetings on `b`'s boundary
+/// or inside, no hole of `b` inside `a`.
+fn poly_covered_by_sphere(a: &Poly, b: &Poly) -> bool {
+    use super::geographic::{Relation, relate};
+    let ratio = |r: (f64, f64)| -> f64 { if r.1 == 0.0 { 0.0 } else { r.0 / r.1 } };
+    // a piece of `a`'s boundary running along `b`'s the same way: the interiors (on the rings'
+    // right) meet there
+    let mut along = false;
+    let mut any_inside = false;
+    for (p0, p1) in edges(a) {
+        if equals(Cs::Sphere, p0, p1) {
+            continue;
+        }
+        let mut ts = vec![0.0, 1.0];
+        let mut spans: Vec<(f64, f64, bool)> = Vec::new();
+        for (q0, q1) in edges(b) {
+            if equals(Cs::Sphere, q0, q1) {
+                continue;
+            }
+            match relate(p0, p1, q0, q1) {
+                Relation::Crosses { sides, ra, .. } => {
+                    let proper = sides[0][0] * sides[0][1] == -1 && sides[1][0] * sides[1][1] == -1;
+                    if proper {
+                        return false;
+                    }
+                    ts.push(ratio(ra));
+                }
+                Relation::Collinear { opposite, rb_from, rb_to, .. } => {
+                    let (t1, t2) = (ratio(rb_from).clamp(0.0, 1.0), ratio(rb_to).clamp(0.0, 1.0));
+                    spans.push((t1.min(t2), t1.max(t2), opposite));
+                    ts.push(t1);
+                    ts.push(t2);
+                }
+                _ => {}
+            }
+        }
+        ts.retain(|t| (0.0..=1.0).contains(t));
+        ts.sort_by(f64::total_cmp);
+        ts.dedup();
+        for w in ts.windows(2) {
+            if w[1] - w[0] <= 0.0 {
+                continue;
+            }
+            let t = (w[0] + w[1]) / 2.0;
+            if let Some(&(_, _, opposite)) = spans.iter().find(|&&(lo, hi, _)| lo <= t && t <= hi) {
+                along |= !opposite;
+                continue;
+            }
+            match poly_loc(Cs::Sphere, b, sphere_lerp(p0, p1, t)) {
+                Loc::Outside => return false,
+                Loc::Inside => any_inside = true,
+                Loc::Boundary => {}
+            }
+        }
+    }
+    for h in &b.inners {
+        if let Some(&f) = h.pts.first()
+            && poly_loc(Cs::Sphere, a, f) == Loc::Inside
+        {
+            return false;
+        }
+    }
+    // the boundaries coincide: the interiors meet unless `a` fills a hole of `b`
+    any_inside || along
+}
+
 /// `covered_by(a, b)` for polygons: `a`'s boundary in `b`, and no hole of `b` inside `a`.
 fn poly_covered_by(cs: Cs, a: &Poly, b: &Poly) -> bool {
+    if cs == Cs::Sphere {
+        return poly_covered_by_sphere(a, b);
+    }
     for (p, q) in edges(a) {
         for m in piece_midpoints(cs, p, q, b) {
             if poly_loc(cs, b, m) == Loc::Outside {
@@ -769,6 +841,20 @@ pub fn intersects(cs: Cs, a: &Geom, b: &Geom) -> bool {
     match (a, b) {
         (Geom::Point(p), Geom::Point(q)) => equals(cs, *p, *q),
         (Geom::Point(p), Geom::Poly(q)) | (Geom::Poly(q), Geom::Point(p)) => poly_loc(cs, q, *p) != Loc::Outside,
+        (Geom::Poly(p), Geom::Poly(q)) if cs == Cs::Sphere => {
+            // `disjoint::areal_areal`: a segment relation, or a ring's first point covered by
+            // the other polygon
+            use super::geographic::{Relation, relate};
+            for (a1, a2) in edges(p) {
+                for (b1, b2) in edges(q) {
+                    if !matches!(relate(a1, a2, b1, b2), Relation::Disjoint | Relation::Degenerate) {
+                        return true;
+                    }
+                }
+            }
+            let containing = |g1: &Poly, g2: &Poly| rings(g2).any(|r| r.pts.first().is_some_and(|&f| poly_loc(cs, g1, f) != Loc::Outside));
+            containing(p, q) || containing(q, p)
+        }
         (Geom::Poly(p), Geom::Poly(q)) => {
             for (a1, a2) in edges(p) {
                 for (b1, b2) in edges(q) {

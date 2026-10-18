@@ -68,6 +68,12 @@ pub fn run_cycle(ix: &mut Index, force: bool, set: Settings) -> bool {
     let started = std::time::Instant::now();
     gc.pending = 0;
     collect(ix, set);
+    // `VecSim_CallTieredIndexesGC`: ready swap jobs run
+    for f in &mut ix.fields {
+        if let Some(h) = f.vectors.as_mut().and_then(|v| v.hnsw.as_mut()) {
+            h.run_gc();
+        }
+    }
     let ms = started.elapsed().as_millis() as u64;
     let gc = ix.gc.as_mut().expect("checked above");
     gc.num_cycles += 1;

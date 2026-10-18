@@ -209,8 +209,27 @@ pub(super) fn ft_debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 return Err(arity());
             }
             let ix = sctx(cx, &args[2])?;
-            field_of(ix, &args[3], spec::T_GEOMETRY)?;
-            Err(err("ERR _FT.DEBUG DUMP_GEOMIDX is not supported yet"))
+            let fi = field_of(ix, &args[3], spec::T_GEOMETRY)?;
+            // `OpenGeometryIndex(fs, CREATE_INDEX)`, then `RTree::dump`
+            let g = ix.geometry_index(fi);
+            let docs = g.dump();
+            let mut out = vec![bulk("type"), bulk("boost_rtree"), bulk("ptr"), bulk(&format!("{:p}", g)), bulk("num_docs"), int(docs.len())];
+            out.push(bulk("docs"));
+            out.push(Reply::Array(
+                docs.into_iter()
+                    .map(|(id, wkt, rect)| {
+                        let mut d = vec![bulk("id"), int(id)];
+                        if let Some(w) = wkt {
+                            d.push(bulk("geoshape"));
+                            d.push(bulk(&w));
+                        }
+                        d.push(bulk("rect"));
+                        d.push(bulk(&rect));
+                        Reply::Array(d)
+                    })
+                    .collect(),
+            ));
+            Ok(Reply::Array(out))
         }
         "DUMP_PREFIX_TRIE" => {
             let p = &cx.eng.search.prefixes;
@@ -359,15 +378,15 @@ pub(super) fn ft_debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             if argc != 4 {
                 return Err(arity());
             }
-            let workers_limit = cx.cfg().num("search-tiered-hnsw-buffer-limit") as i64;
             let shared = cx.eng.search.vecsim_shared_memory(cx.cfg().num("search-workers") as usize);
             let ix = sctx_mut(cx, &args[2])?;
             let Some(fi) = ix.spec.field(&args[3]).filter(|f| f.is(spec::T_VECTOR)).map(|f| f.index) else {
                 return Err(err("Vector index not found"));
             };
             let Some(p) = ix.spec.fields[fi].vector.clone() else { return Err(err("Can't open vector index")) };
-            let vi = ix.fields[fi].vectors.get_or_insert_with(|| VecIndex::new(&p));
-            vecsim_info(vi, &p, workers_limit, shared)
+            let limit = ix.vec_buffer_limit;
+            let vi = ix.fields[fi].vectors.get_or_insert_with(|| VecIndex::with_limit(&p, limit));
+            vecsim_info(vi, &p, shared)
         }
         "DUMP_HNSW" => {
             if !(4..=5).contains(&argc) {
@@ -379,19 +398,36 @@ pub(super) fn ft_debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             };
             let Some(p) = ix.spec.fields[fi].vector.clone() else { return Err(err("Can't open vector index")) };
             let multi = p.multi;
+            let limit = ix.vec_buffer_limit;
+            ix.fields[fi].vectors.get_or_insert_with(|| VecIndex::with_limit(&p, limit));
             if p.algo != spec::Algo::Hnsw {
-                ix.fields[fi].vectors.get_or_insert_with(|| VecIndex::new(&p));
                 return Err(err("Vector index is not an HNSW index"));
             }
-            ix.fields[fi].vectors.get_or_insert_with(|| VecIndex::new(&p));
             if multi {
                 return Err(err("Command not supported for HNSW multi-value index"));
             }
-            if argc == 5 && ix.docs.get_id(&args[4]) == 0 {
-                return Err(err("The given key does not exist in index"));
+            let Some(h) = ix.fields[fi].vectors.as_ref().and_then(|v| v.hnsw.as_ref()) else { return Err(err("Can't open vector index")) };
+            // `replyDumpHNSW`
+            let dump = |id: u64| -> Reply {
+                let Some(levels) = h.neighbors(id) else { return Reply::bulk(format!("Doc id {id} doesn't contain the given field").as_bytes()) };
+                let mut out = vec![bulk("Doc id"), int(id)];
+                for (l, ns) in levels.iter().enumerate() {
+                    let mut lv = vec![Reply::bulk(format!("Neighbors in level {l}").as_bytes())];
+                    lv.extend(ns.iter().map(|&n| Reply::Int(n as i32 as i64)));
+                    out.push(Reply::Array(lv));
+                }
+                Reply::Array(out)
+            };
+            if argc == 5 {
+                let id = ix.docs.get_id(&args[4]);
+                if id == 0 {
+                    return Err(err("The given key does not exist in index"));
+                }
+                return Ok(dump(id));
             }
-            // the graph's neighbour lists aren't modelled
-            Err(err("ERR _FT.DEBUG DUMP_HNSW is not supported yet"))
+            let mut ids: Vec<u64> = ix.docs.iter().filter(|d| ix.docs.get(d.id).is_some()).map(|d| d.id).collect();
+            ids.sort_unstable();
+            Ok(Reply::Array(ids.into_iter().map(dump).collect()))
         }
         "DELETE_LOCAL_CURSORS" => {
             if argc != 2 {
@@ -1037,7 +1073,7 @@ fn bg_scan_controller(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 
 /// `VecSim_Reply_Info_Iterator` over `VecSimIndex_DebugInfoIterator`: FLAT's fields, or the
 /// tiered HNSW index's with its flat buffer's and graph's.
-fn vecsim_info(vi: &VecIndex, p: &spec::VectorParams, buffer_limit: i64, shared: usize) -> CmdResult {
+fn vecsim_info(vi: &VecIndex, p: &spec::VectorParams, shared: usize) -> CmdResult {
     let common = |out: &mut Vec<Reply>, algo: &str, size: usize, labels: usize, memory: usize, mode: &str| {
         out.extend([
             bulk("ALGORITHM"),
@@ -1071,13 +1107,13 @@ fn vecsim_info(vi: &VecIndex, p: &spec::VectorParams, buffer_limit: i64, shared:
         spec::Algo::Hnsw => {
             let (layer, buffer, graph) = vi.tiered_parts();
             common(&mut out, "TIERED", vi.size(), vi.label_count(), vi.memory(), vi.last_mode_name());
-            out.extend([bulk("MANAGEMENT_LAYER_MEMORY"), int(layer), bulk("BACKGROUND_INDEXING"), Reply::Int(0), bulk("TIERED_BUFFER_LIMIT"), int(buffer_limit)]);
+            out.extend([bulk("MANAGEMENT_LAYER_MEMORY"), int(layer), bulk("BACKGROUND_INDEXING"), Reply::Int(0), bulk("TIERED_BUFFER_LIMIT"), int(vi.buffer_limit)]);
             let mut front = Vec::new();
-            common(&mut front, "FLAT", 0, 0, buffer, "EMPTY_MODE");
+            common(&mut front, "FLAT", 0, 0, buffer, vi.front_mode_name());
             front.extend([bulk("BLOCK_SIZE"), int(vi.block_size)]);
             let mut back = Vec::new();
             common(&mut back, "HNSW", vi.size(), vi.label_count(), graph, vi.last_mode_name());
-            let (level, entry) = match vi.max_level {
+            let (level, entry) = match vi.entry_point() {
                 Some((l, e)) => (l as i64, e as i64),
                 None => (-1, -1),
             };
@@ -1087,17 +1123,17 @@ fn vecsim_info(vi: &VecIndex, p: &spec::VectorParams, buffer_limit: i64, shared:
                 bulk("M"),
                 int(vi.m),
                 bulk("EF_CONSTRUCTION"),
-                int(if p.ef_construction == 0 { 200 } else { p.ef_construction }),
+                int(vi.hnsw.as_ref().map_or(200, |h| h.ef_c)),
                 bulk("EF_RUNTIME"),
-                int(if p.ef_runtime == 0 { 10 } else { p.ef_runtime }),
+                int(vi.hnsw.as_ref().map_or(10, |h| h.ef)),
                 bulk("MAX_LEVEL"),
                 Reply::Int(level),
                 bulk("ENTRYPOINT"),
                 Reply::Int(entry),
                 bulk("EPSILON"),
-                Reply::Double(if p.epsilon == 0.0 { 0.01 } else { p.epsilon }),
+                Reply::Double(vi.hnsw.as_ref().map_or(0.01, |h| h.eps)),
                 bulk("NUMBER_OF_MARKED_DELETED"),
-                int(vi.marked),
+                int(vi.marked()),
             ]);
             out.extend([bulk("FRONTEND_INDEX"), Reply::Array(front), bulk("BACKEND_INDEX"), Reply::Array(back), bulk("TIERED_HNSW_SWAP_JOBS_THRESHOLD"), Reply::Int(1024)]);
         }
