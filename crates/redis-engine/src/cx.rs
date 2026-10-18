@@ -425,7 +425,7 @@ impl<'a> Cx<'a> {
                 }
                 if events {
                     self.eng.sig.notify(notify::OVERWRITTEN, "overwritten", db as u16, key);
-                    if old_kind != new_kind {
+                    if old_kind.obj_type_changed(new_kind) {
                         self.eng.sig.notify(notify::TYPE_CHANGED, "type_changed", db as u16, key);
                     }
                 }

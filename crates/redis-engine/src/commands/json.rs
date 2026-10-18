@@ -1045,7 +1045,7 @@ impl NumOp {
         match self {
             NumOp::Incr => a + b,
             NumOp::Mult => a * b,
-            NumOp::Pow => a.powf(b),
+            NumOp::Pow => crate::musl_math::pow(a, b),
         }
     }
 
@@ -1631,11 +1631,12 @@ fn arrpop(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         None => (Path::new("."), i64::MAX),
         Some(s) => (Path::new(utf8(s)?), a.next_i64().unwrap_or(-1)),
     };
-    let k = open(cx, key)?;
+    // `open_key_write` doesn't check the type: a wrong one shows after the format check.
+    let k = open(cx, key);
     if path.is_legacy() && f.format != ReplyFormat::Strings {
         return Err(Error::new("Legacy paths are supported only with FORMAT STRINGS"));
     }
-    let mut k = k.ok_or(NO_KEY)?;
+    let mut k = k?.ok_or(NO_KEY)?;
     if path.is_legacy() {
         let mut paths = find(k.json().root(), path.get(), is(Ty::Array))?;
         if paths.is_empty() {

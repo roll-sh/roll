@@ -92,7 +92,7 @@ impl TopK {
         }
         let mut lookup = Box::new([0.0; DECAY_TABLE]);
         for (i, v) in lookup.iter_mut().enumerate() {
-            *v = libm::pow(decay, i as f64);
+            *v = crate::musl_math::pow(decay, i as f64);
         }
         Some(TopK {
             k,
@@ -116,7 +116,9 @@ impl TopK {
         let fp = murmur2(item, GA);
         (0..self.heap.len()).rev().find(|&i| {
             let h = &self.heap[i];
-            h.fp == fp && h.itemlen as usize == item.len() && h.item.as_deref() == Some(item)
+            // `memcmp(NULL, item, 0)`: a slot loaded without its item (an empty one, `""` once
+            // restored) matches the empty item.
+            h.fp == fp && h.itemlen as usize == item.len() && h.item.as_deref().unwrap_or_default() == item
         })
     }
 
@@ -142,7 +144,7 @@ impl TopK {
                     let decay = if c < DECAY_TABLE {
                         self.lookup[c]
                     } else {
-                        libm::pow(self.lookup[DECAY_TABLE - 1], (c / (DECAY_TABLE - 1)) as f64)
+                        crate::musl_math::pow(self.lookup[DECAY_TABLE - 1], (c / (DECAY_TABLE - 1)) as f64)
                             * self.lookup[c % (DECAY_TABLE - 1)]
                     };
                     let chance = crand::rand() as f64 / crand::RAND_MAX as f64;

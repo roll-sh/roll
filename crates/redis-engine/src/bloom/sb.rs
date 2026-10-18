@@ -50,7 +50,7 @@ struct Hash {
 
 fn calc_bpe(error: f64) -> f64 {
     const DENOM: f64 = 0.480453013918201; // ln(2)^2
-    (-(libm::log(error) / DENOM)).abs()
+    (-(crate::musl_math::log(error) / DENOM)).abs()
 }
 
 /// `logb`: the binary exponent of `x` as a double.

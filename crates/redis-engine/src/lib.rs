@@ -18,6 +18,7 @@ pub mod engine;
 pub mod hub;
 pub mod json;
 pub mod modules;
+pub mod musl_math;
 pub mod notify;
 pub mod object;
 pub mod pack;

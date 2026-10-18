@@ -1,0 +1,120 @@
+# Module gaps found by the differential fuzzer (tests/fuzz_modules.rs): one block per finding.
+FLUSHALL
+
+# ---- COPY of a module type without a copy callback: the error comes before REPLACE deletes
+# the destination ----
+BF.ADD b2 1
+CF.ADDNX c1 x
+COPY c1 b2 REPLACE
+TYPE b2
+BF.MADD b2 1 2
+CMS.INITBYDIM m2 10 1
+TS.ADD t 1 1
+COPY m2 t REPLACE
+TYPE t
+TS.RANGE t - +
+TOPK.RESERVE k 1
+VADD v VALUES 1 1 e
+COPY k b2 REPLACE
+COPY v b2 REPLACE
+TYPE b2
+COPY k nx REPLACE
+EXISTS nx
+FLUSHALL
+
+# ---- A series replaced by another module type keeps its label index entry: RESTORE/COPY
+# REPLACE fire no type_changed between module types (all OBJ_MODULE) ----
+TS.ADD t1 139 10.842 LABELS name 2
+CF.ADD k1 1
+EVAL "local d = redis.call('DUMP', KEYS[1]); return redis.call('RESTORE', KEYS[2], 0, d, 'REPLACE')" 2 k1 t1
+TYPE t1
+TS.QUERYINDEX name=2
+TS.MGET FILTER name=2
+TS.MRANGE - + FILTER name=2
+!sort TS.QUERYLABELS LABELS
+TS.ADD t4 125 14.635 LABELS name 2
+TS.INFO t4
+!sort TS.QUERYINDEX name=2
+DEL t1
+TS.QUERYINDEX name=2
+TS.CREATE t5 LABELS name 2
+JSON.SET j $ 1
+COPY j t5 REPLACE
+TYPE t5
+!sort TS.QUERYINDEX name=2
+SET t4 x
+TS.QUERYINDEX name=2
+FLUSHALL
+
+# ---- musl's log/pow (Arm optimized-routines), not fdlibm's: a Bloom filter's bits per entry
+# at the default error rate, NUMPOWBY, vector set filters' ** ----
+BF.RESERVE x 0.01 5 NONSCALING
+DUMP x
+BF.INSERT y CAPACITY 5 EXPANSION 0 ITEMS 3 i13 i3
+DUMP y
+BF.SCANDUMP y 0
+BF.RESERVE z 0.001 100
+DUMP z
+JSON.SET j $ "[0.17189446737834335,0.9,1.1987965201860247,1.5]"
+JSON.NUMPOWBY j $[0] -10.373479994918998
+JSON.NUMPOWBY j $[1] 112
+JSON.NUMPOWBY j $[2] 237
+JSON.NUMPOWBY j $[3] 2.5
+JSON.GET j
+FLUSHALL
+
+# ---- A vector set loaded from RDB: its elements and attributes are embedded string objects
+# (raw only when stored compressed), sized like command arguments in MEMORY USAGE ----
+VADD v VALUES 2 -3 0.45 日本 q8
+VADD v VALUES 2 1 2 abcde SETATTR "{\"year\":1}"
+EVAL "local d = redis.call('DUMP', KEYS[1]); return redis.call('RESTORE', KEYS[2], 0, d)" 2 v v2
+MEMORY USAGE v
+MEMORY USAGE v2
+VADD w VALUES 2 1 1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa SETATTR "{\"name\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}"
+EVAL "local d = redis.call('DUMP', KEYS[1]); return redis.call('RESTORE', KEYS[2], 0, d)" 2 w w2
+MEMORY USAGE w
+MEMORY USAGE w2
+FLUSHALL
+
+# ---- A TopK heap slot holding the empty item loads without one (NULL): TOPK.LIST answers
+# a null for it, and the empty item still matches it (memcmp of 0 bytes) ----
+TOPK.RESERVE k 3 50 3 1
+TOPK.ADD k "a b" i110 "" i60 "" i48 "" b
+TOPK.LIST k WITHCOUNT
+EVAL "local d = redis.call('DUMP', KEYS[1]); return redis.call('RESTORE', KEYS[2], 0, d)" 2 k k2
+TOPK.LIST k2 WITHCOUNT
+TOPK.LIST k2
+TOPK.QUERY k2 "" i48 x
+TOPK.COUNT k2 "" i48
+TOPK.ADD k2 "" ""
+TOPK.LIST k2 WITHCOUNT
+@resp 3
+TOPK.LIST k2 WITHCOUNT
+@resp 2
+FLUSHALL
+
+# ---- A copied JSON document allocates its containers to fit (MEMORY USAGE of the copy) ----
+JSON.SET a $ "{\"$\":{},\"arr\":[\t],\"a\":\r\ntrue}"
+COPY a b
+MEMORY USAGE a
+MEMORY USAGE b
+JSON.DEBUG MEMORY b
+JSON.SET c $ "[[{\"a\":-77.183},{},{\"0\":1.0},false],{\"n\":{\"0\":false,\"x\":20},\"x\":0,\"é\":{}},-4]"
+JSON.ARRAPPEND c $ 1 2
+COPY c d
+MEMORY USAGE c
+MEMORY USAGE d
+COPY d e
+MEMORY USAGE e
+FLUSHALL
+
+# ---- JSON.ARRPOP checks FORMAT against a legacy path before the key's type ----
+@resp 3
+SET s hello
+JSON.ARRPOP s FORMAT EXPAND1
+JSON.ARRPOP s FORMAT EXPAND .a
+JSON.ARRPOP s FORMAT EXPAND $.a
+JSON.ARRPOP nx FORMAT EXPAND
+JSON.ARRPOP s FORMAT STRINGS
+@resp 2
+FLUSHALL

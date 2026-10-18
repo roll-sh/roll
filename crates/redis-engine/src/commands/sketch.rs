@@ -294,7 +294,8 @@ fn topk_list(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         if b.count == 0 {
             break;
         }
-        out.push(Reply::Bulk(c_str(b.item.as_deref().unwrap_or_default())));
+        // `RedisModule_ReplyWithCString(NULL)` (an item loaded empty) is a null.
+        out.push(b.item.as_deref().map_or(Reply::Nil, |i| Reply::Bulk(c_str(i))));
         if counts {
             out.push(Reply::Int(b.count as i64));
         }

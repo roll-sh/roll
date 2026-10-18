@@ -36,6 +36,13 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// Whether Redis' object types (`o->type`) differ: `type_changed` fires on that, and every
+    /// module type is `OBJ_MODULE` (a TS key replaced by a JSON document doesn't fire it).
+    pub fn obj_type_changed(self, other: Kind) -> bool {
+        let module = |k: Kind| matches!(k, Kind::Json | Kind::Sketch(_) | Kind::VSet | Kind::Ts | Kind::Sug);
+        if module(self) && module(other) { false } else { self != other }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Kind::String => "string",

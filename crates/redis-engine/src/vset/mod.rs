@@ -284,12 +284,13 @@ impl VSet {
         let has_attribs = flags & SAVE_FLAG_HAS_ATTRIBS != 0;
         let mut pending = Vec::new();
         for _ in 0..elements {
-            let item: Box<[u8]> = r.buffer()?.into();
-            let attrib = if has_attribs {
-                let a = r.buffer()?;
-                (!a.is_empty()).then(|| a.into_boxed_slice())
+            let (item, item_lzf) = r.string()?;
+            let item: Box<[u8]> = item.into();
+            let (attrib, attrib_lzf) = if has_attribs {
+                let (a, lzf) = r.string()?;
+                ((!a.is_empty()).then(|| a.into_boxed_slice()), lzf)
             } else {
-                None
+                (None, false)
             };
             let vector = r.buffer()?;
             if vector.len() != v.hnsw.quants_bytes() {
@@ -303,9 +304,11 @@ impl VSet {
             let has = attrib.is_some();
             let node = v.hnsw.insert_serialized(&vector, &params, item.clone(), attrib, &mut pending)?;
             {
+                // `RM_LoadString`: an embedded object up to 44 bytes (`tryCreateStringObject`,
+                // sized like a command argument's), a raw one when stored compressed.
                 let n = v.hnsw.g.nodes[node as usize].as_mut().expect("inserted");
-                n.item_raw = true;
-                n.attrib_raw = true;
+                n.item_raw = item_lzf;
+                n.attrib_raw = attrib_lzf;
             }
             if has {
                 v.numattribs += 1;

@@ -165,7 +165,7 @@ fn min(a: f64, b: f64) -> f64 {
 }
 
 fn overflows(unmerged: f64, total: f64) -> bool {
-    unmerged == f64::INFINITY || total == f64::INFINITY || 2.0 * PI * total * libm::log(total) == f64::INFINITY
+    unmerged == f64::INFINITY || total == f64::INFINITY || 2.0 * PI * total * crate::musl_math::log(total) == f64::INFINITY
 }
 
 /// `a + b` fits a `long long` (`_tdigest_long_long_add_safe`).
@@ -278,7 +278,7 @@ impl TDigest {
             self.total_compressions += 1;
             return Ok(());
         }
-        let denom = 2.0 * PI * total * libm::log(total);
+        let denom = 2.0 * PI * total * crate::musl_math::log(total);
         if denom == f64::INFINITY {
             return Err(Overflow);
         }

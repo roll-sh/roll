@@ -436,12 +436,14 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Ok(Reply::Int(0));
     }
     let old_kind = cx.eng.dbs[to].keys.get(dst).map(|e| e.value.kind());
-    if old_kind.is_some() {
+    // Module types without a copy callback: the error comes before REPLACE deletes the
+    // destination (an expired one is gone already, by `lookupKeyWrite`).
+    let uncopyable = matches!(entry.value, crate::value::Value::Sketch(_) | crate::value::Value::VSet(_) | crate::value::Value::Sug(_));
+    if old_kind.is_some() && !(uncopyable && exists) {
         cx.eng.dbs[to].remove(dst);
         cx.eng.sig.touch(to as u16, dst);
     }
-    // Module types without a copy callback.
-    if matches!(entry.value, crate::value::Value::Sketch(_) | crate::value::Value::VSet(_) | crate::value::Value::Sug(_)) {
+    if uncopyable {
         return Err(Error::new("ERR not supported for this module key"));
     }
     let mut entry = entry;
@@ -577,7 +579,7 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 /// The `overwritten` (and on a type change `type_changed`) events of a replaced key.
 fn overwritten(cx: &mut Cx, db: usize, key: &[u8], old: crate::value::Kind, new: crate::value::Kind) {
     cx.eng.sig.notify(notify::OVERWRITTEN, "overwritten", db as u16, key);
-    if old != new {
+    if old.obj_type_changed(new) {
         cx.eng.sig.notify(notify::TYPE_CHANGED, "type_changed", db as u16, key);
     }
 }

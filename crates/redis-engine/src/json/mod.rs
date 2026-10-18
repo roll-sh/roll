@@ -34,11 +34,18 @@ pub const TYPE_ID: u64 = {
 
 /// A document in the keyspace: its root value, and what the value allocates (measured again
 /// only after the document was handed out for changing, so memory accounting stays cheap).
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct Json {
     root: J,
     mem: usize,
     stale: bool,
+}
+
+/// A copy (COPY, the module's copy callback) allocates its containers to fit: measured anew.
+impl Clone for Json {
+    fn clone(&self) -> Json {
+        Json::new(self.root.clone())
+    }
 }
 
 impl Json {

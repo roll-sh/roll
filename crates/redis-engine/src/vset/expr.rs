@@ -294,7 +294,7 @@ impl Expr {
                     let a = a.as_ref().unwrap_or(&Tok::Null);
                     let r = match op {
                         Op::Not => b2f(to_bool(&b) == 0.0),
-                        Op::Pow => libm::pow(to_num(a), to_num(&b)),
+                        Op::Pow => crate::musl_math::pow(to_num(a), to_num(&b)),
                         Op::Mult => to_num(a) * to_num(&b),
                         Op::Div => to_num(a) / to_num(&b),
                         Op::Mod => libm::fmod(to_num(a), to_num(&b)),
