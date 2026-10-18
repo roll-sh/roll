@@ -47,9 +47,9 @@
 //! `PAUSE_AFTER_RP_N`, resumed by `_FT.DEBUG QUERY_CONTROLLER`) would hold the request while
 //! other clients run; queries run to completion here, so those parameters are refused.
 //!
-//! Groups come out in the order they were first seen (the module's order follows its
-//! per-process hash seed), and TOLIST keeps its values in insertion order for the same
-//! reason.
+//! Values hash with a per-process key as the module's do, and groups come out in the order of
+//! the `khash` table holding them, TOLIST's values in the order of its `dict`: the same layouts,
+//! so the orders vary between processes the way Redis' do.
 
 use super::ft::verify_acl;
 use super::ft_query::{self as fq, K_FORCE_LOAD, K_HIDDEN, K_NUMERIC, K_SCHEMA_SRC, K_SV_SRC, LKey, Lookup, Row};
@@ -68,6 +68,8 @@ use crate::search::eval::{self, EvalState, Mode, RsValue};
 use crate::search::expr::{self, Expr};
 use crate::search::hll::Hll;
 use crate::search::index::Index;
+use crate::search::hashdict::HashDict;
+use crate::search::khash::KhU64;
 use crate::search::iters::{self, BoxIt, Empty, IxResult, K_INTERSECT, K_TERM, K_UNION, PCtx, Pairs, Qcx, Skip};
 use crate::search::mmheap::MmHeap;
 use crate::search::optimizer::{self as qopt, OptType};
@@ -81,7 +83,8 @@ use crate::util::cstr;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher, RandomState};
+use std::sync::LazyLock;
 use std::time::Instant;
 
 mod debug;
@@ -1982,7 +1985,18 @@ fn hash_into<H: Hasher>(v: &RsValue, h: &mut H) {
     }
 }
 
+/// `RSValue_Hash`: keyed per process (`RandomState`), so the orders that follow it (GROUPBY's
+/// groups, TOLIST's values) differ between processes as Redis' do.
 fn hash_value(v: &RsValue, seed: u64) -> u64 {
+    static KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+    let mut h = KEY.build_hasher();
+    h.write_u64(seed);
+    hash_into(v, &mut h);
+    h.finish()
+}
+
+/// The same walk unkeyed, for the HyperLogLogs whose registers are returned and merged.
+fn hash_stable(v: &RsValue, seed: u64) -> u64 {
     let mut h = DefaultHasher::new();
     h.write_u64(seed);
     hash_into(v, &mut h);
@@ -2025,7 +2039,7 @@ enum Acc {
     HllSum(Option<Hll>),
     Quantile(QuantStream),
     Dev { n: u64, m: f64, s: f64 },
-    List { vals: Vec<RsValue>, idx: HashMap<u64, Vec<usize>> },
+    List { vals: Vec<RsValue>, idx: HashMap<u64, Vec<usize>>, dict: HashDict },
     First { value: Option<RsValue>, sortval: Option<RsValue> },
     Sample { seen: usize, vals: Vec<RsValue>, rng: crate::util::Rng },
     Collect(collect::Acc),
@@ -2043,7 +2057,7 @@ impl Reducer {
             RKind::HllSum => Acc::HllSum(None),
             RKind::Quantile { resolution, .. } => Acc::Quantile(QuantStream::new(*resolution)),
             RKind::StdDev => Acc::Dev { n: 0, m: 0.0, s: 0.0 },
-            RKind::ToList => Acc::List { vals: Vec::new(), idx: HashMap::new() },
+            RKind::ToList => Acc::List { vals: Vec::new(), idx: HashMap::new(), dict: HashDict::default() },
             RKind::FirstValue { .. } => Acc::First { value: None, sortval: None },
             RKind::Sample { len } => Acc::Sample { seen: 0, vals: Vec::with_capacity((*len).min(1000)), rng: crate::util::Rng::new() },
             RKind::Collect(spec) => Acc::Collect(spec.instance()),
@@ -2081,7 +2095,7 @@ impl Reducer {
                 if let Some(v) = src()
                     && v != RsValue::Null
                 {
-                    let hv = hash_value(&v, STABLE_SEED);
+                    let hv = hash_stable(&v, STABLE_SEED);
                     h.add_hash((hv as u32) ^ ((hv >> 32) as u32));
                 }
             }
@@ -2143,13 +2157,15 @@ impl Reducer {
                     }
                 }
             }
-            (RKind::ToList, Acc::List { vals, idx }) => {
+            (RKind::ToList, Acc::List { vals, idx, dict }) => {
                 let mut add = |v: RsValue| {
                     let h = hash_value(&v, 0);
                     let bucket = idx.entry(h).or_default();
                     if bucket.iter().any(|&i| vals[i].equal(&v)) {
+                        dict.add(h, None);
                         return;
                     }
+                    dict.add(h, Some(vals.len()));
                     bucket.push(vals.len());
                     vals.push(v);
                 };
@@ -2222,7 +2238,7 @@ impl Reducer {
                 let variance = if *n > 1 { *s / (*n - 1) as f64 } else { 0.0 };
                 RsValue::Number(variance.sqrt())
             }
-            (RKind::ToList, Acc::List { vals, .. }) => RsValue::Array(vals.clone()),
+            (RKind::ToList, Acc::List { vals, dict, .. }) => RsValue::Array(dict.ids().map(|i| vals[i].clone()).collect()),
             (RKind::FirstValue { .. }, Acc::First { value, .. }) => value.clone().unwrap_or(RsValue::Null),
             (RKind::Sample { .. }, Acc::Sample { vals, .. }) => RsValue::Array(vals.clone()),
             (RKind::Collect(spec), Acc::Collect(c)) => spec.finalize(c, all),
@@ -2244,6 +2260,8 @@ struct Grouper {
     reducers: Vec<Reducer>,
     groups: Vec<Group>,
     index: HashMap<u64, usize>,
+    /// The groups in the order `khash` holds them (bucket order), set once all rows are in.
+    order: Vec<usize>,
     max_groups: usize,
     yielding: bool,
     pos: usize,
@@ -2374,11 +2392,21 @@ impl<'a> Proc<'a> for Grouper {
             }
             cx.total = self.groups.len() as i64;
             cx.skipped = 0;
+            // The groups' table, rebuilt by the same puts in the same order (nothing is deleted).
+            let mut hashes = vec![0; self.groups.len()];
+            for (&h, &gi) in &self.index {
+                hashes[gi] = h;
+            }
+            let mut kh = KhU64::default();
+            for &h in &hashes {
+                kh.put(h);
+            }
+            self.order = kh.keys().map(|h| self.index[&h]).collect();
         }
-        if self.pos >= self.groups.len() {
+        if self.pos >= self.order.len() {
             return St::Eof;
         }
-        let gi = self.pos;
+        let gi = self.order[self.pos];
         self.pos += 1;
         for (i, &k) in self.dst.iter().enumerate() {
             rset(&mut r.row, k, self.groups[gi].vals[i].clone());
@@ -2740,6 +2768,7 @@ impl<'a> Builder<'_, 'a> {
             reducers: reds,
             groups: Vec::new(),
             index: HashMap::new(),
+            order: Vec::new(),
             max_groups,
             yielding: false,
             pos: 0,
