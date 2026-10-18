@@ -25,6 +25,9 @@ pub type lua_Integer = isize;
 pub type lua_CFunction = unsafe extern "C" fn(*mut lua_State) -> c_int;
 /// A Rust callback: returns the number of results, or [`RAISE`] / [`RAISE_WHERE`].
 pub type roll_fn = unsafe extern "C" fn(*mut lua_State) -> c_int;
+/// The debugger's callback for each line (and every 100k instructions, `count` set) of the
+/// current frame: non-zero raises the error object it pushed.
+pub type roll_ldb_fn = unsafe extern "C" fn(l: *mut lua_State, count: c_int, line: c_int, src: *const c_char) -> c_int;
 
 pub const RAISE: c_int = -1;
 pub const RAISE_WHERE: c_int = -2;
@@ -134,6 +137,14 @@ unsafe extern "C" {
     /// Instruction-count hook: `check` returns non-zero (with an error object pushed) to stop
     /// the script. `None` removes the hook.
     pub fn roll_sethook(l: *mut lua_State, check: Option<roll_fn>);
+    /// The debugger hook (lines and every 100k instructions); [`roll_sethook`] with `None`
+    /// removes it.
+    pub fn roll_setldbhook(l: *mut lua_State, line: roll_ldb_fn);
+    /// Stack frame `level`: 0 when there is none, else 1 with its current line, short source and
+    /// name (null when unknown), valid until the next call.
+    pub fn roll_frame(l: *mut lua_State, level: c_int, line: *mut c_int, src: *mut *const c_char, name: *mut *const c_char) -> c_int;
+    /// Local `n` (from 1) of frame `level`: its value pushed and its name returned, or null.
+    pub fn roll_getlocal(l: *mut lua_State, level: c_int, n: c_int) -> *const c_char;
 }
 
 #[inline]

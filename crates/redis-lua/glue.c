@@ -22,6 +22,8 @@
 #define ROLL_RAISE_WHERE (-2)
 
 typedef int (*roll_fn)(lua_State *L);
+/* The debugger's line callback: non-zero (with an error object pushed) raises it. */
+typedef int (*roll_ldb_fn)(lua_State *L, int count, int line, const char *src);
 
 /* ---- state ---- */
 
@@ -302,4 +304,42 @@ void roll_sethook(lua_State *L, roll_fn check) {
     } else {
         lua_sethook(L, NULL, 0, 0);
     }
+}
+
+/* ---- the Lua debugger ---- */
+
+static roll_ldb_fn ldb_line;
+
+/* Every line and every 100k instructions: hand the current frame to Rust, which may stop there
+ * for the debugging client and asks for an error (pushed) to end the script. */
+static void ldb_hook(lua_State *L, lua_Debug *ar) {
+    int count = ar->event == LUA_HOOKCOUNT;
+    lua_getstack(L, 0, ar);
+    lua_getinfo(L, "Sl", ar);
+    if (ldb_line != NULL && ldb_line(L, count, ar->currentline, ar->short_src)) lua_error(L);
+}
+
+void roll_setldbhook(lua_State *L, roll_ldb_fn line) {
+    ldb_line = line;
+    lua_sethook(L, ldb_hook, LUA_MASKLINE | LUA_MASKCOUNT, 100000);
+}
+
+/* Stack frame `level`: 0 when there is none, else 1 with its current line, short source and
+ * name (NULL when unknown). The strings stay valid until the next call. */
+int roll_frame(lua_State *L, int level, int *line, const char **src, const char **name) {
+    static lua_Debug ar;
+    if (!lua_getstack(L, level, &ar)) return 0;
+    lua_getinfo(L, "Snl", &ar);
+    *line = ar.currentline;
+    *src = ar.short_src;
+    *name = ar.name;
+    return 1;
+}
+
+/* Local `n` (from 1) of frame `level`: its value pushed and its name returned, or NULL (nothing
+ * pushed) past the last one. */
+const char *roll_getlocal(lua_State *L, int level, int n) {
+    lua_Debug ar;
+    if (!lua_getstack(L, level, &ar)) return NULL;
+    return lua_getlocal(L, &ar, n);
 }

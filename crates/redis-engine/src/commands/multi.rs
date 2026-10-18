@@ -66,12 +66,40 @@ pub fn exec(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     let mut replies = Vec::with_capacity(m.queued.len());
     cx.eng.exec_out_bytes = format!("*{}\r\n", m.queued.len()).len() as u64;
     cx.client.executing = Some((m.queued.len() as i64, m.queued.iter().flatten().map(|a| a.len()).sum()));
+    // A debugging session ending inside the transaction closes the client after its reply:
+    // the rest still runs, but its replies are dropped (a forked session's child has only the
+    // ones before it).
+    let mut cut = None;
     for args in &m.queued {
-        replies.push(cx.call(args, Mode::Exec));
+        let actions = cx.eng.server_actions.len();
+        let r = cx.call(args, Mode::Exec);
+        if cut.is_some() {
+            continue;
+        }
+        if let Some(crate::commands::replication::ServerAction::LdbFork { prefix, .. }) = cx.eng.server_actions.get_mut(actions) {
+            *prefix = partial_exec_reply(m.queued.len(), &replies, cx.client.resp);
+            cut = Some(replies.len());
+        }
+        replies.push(r);
+        if cut.is_none() && cx.client.ldb_ended {
+            cut = Some(replies.len());
+        }
     }
     cx.client.executing = None;
     wrap_effects(cx, start);
-    Ok(Reply::Array(replies))
+    match cut {
+        Some(n) => Ok(Reply::Raw(partial_exec_reply(m.queued.len(), &replies[..n], cx.client.resp))),
+        None => Ok(Reply::Array(replies)),
+    }
+}
+
+/// EXEC's reply as far as it got: the full count, then the replies there are.
+fn partial_exec_reply(count: usize, replies: &[Reply], resp: u8) -> Bytes {
+    let mut out = bytes::BytesMut::from(format!("*{count}\r\n").as_bytes());
+    for r in replies {
+        r.encode(resp, &mut out);
+    }
+    out.freeze()
 }
 
 /// Wrap the effects produced since `start` in MULTI/EXEC so replicas apply them atomically.

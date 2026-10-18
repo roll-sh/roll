@@ -249,6 +249,7 @@ unsafe fn raw_field(l: *mut lua_State, name: &[u8]) {
 /// Push a Redis error table (`{err = "CODE message"}`). `e` is either `-CODE message` (the code
 /// is split off at the first space) or a bare message, which gets the `ERR` code.
 pub(crate) unsafe fn push_error(l: *mut lua_State, e: &[u8]) {
+    unsafe { super::ldb::log_error(l, e) };
     let (code, msg): (&[u8], &[u8]) = match e.strip_prefix(b"-") {
         Some(rest) => match rest.iter().position(|&c| c == b' ') {
             Some(i) => (&rest[..i], &rest[i + 1..]),
@@ -696,8 +697,41 @@ unsafe fn command(l: *mut lua_State, raise: bool) -> c_int {
         let Some(args) = take_args(l) else {
             return if raise { RAISE } else { 1 };
         };
+        let logging = run.cx().eng.scripting.ldb.logging();
+        if logging {
+            // `<redis>` and the arguments, ten at most.
+            let mut s = b"<redis>".to_vec();
+            for (j, a) in args.iter().enumerate() {
+                if j == 10 {
+                    s.extend_from_slice(format!(" ... ({} more)", args.len() - j - 1).as_bytes());
+                    break;
+                }
+                s.push(b' ');
+                s.extend_from_slice(a);
+            }
+            run.cx().eng.scripting.ldb.log(s);
+        }
+        run.cx().eng.last_rejected = false;
         let reply = run.call(&args);
-        push_reply(l, &reply, run.client.resp == 3);
+        let resp = run.client.resp;
+        match &reply {
+            // Refused before running (`scriptCall`'s error): the error as Redis words it there.
+            Reply::Error(e) if run.cx().eng.last_rejected => {
+                let raw = redis_proto::unescape(e);
+                let text = match raw.strip_prefix(b"ERR ") {
+                    Some(rest) => rest.to_vec(),
+                    None => [&b"-"[..], &raw, b"\r\n"].concat(),
+                };
+                push_error(l, &text);
+                mark_counted(l);
+            }
+            _ => {
+                push_reply(l, &reply, resp == 3);
+                if logging {
+                    run.cx().eng.scripting.ldb.log_reply(&reply, resp);
+                }
+            }
+        }
         if raise && matches!(reply, Reply::Error(_)) { RAISE } else { 1 }
     }
 }
@@ -840,12 +874,14 @@ unsafe extern "C" fn log(l: *mut lua_State) -> c_int {
 
 unsafe extern "C" fn breakpoint(l: *mut lua_State) -> c_int {
     unsafe {
-        lua_pushboolean(l, 0);
+        let stop = super::ldb::breakpoint(l);
+        lua_pushboolean(l, stop as c_int);
         1
     }
 }
 
-unsafe extern "C" fn debug(_l: *mut lua_State) -> c_int {
+unsafe extern "C" fn debug(l: *mut lua_State) -> c_int {
+    unsafe { super::ldb::debug_log(l) };
     0
 }
 

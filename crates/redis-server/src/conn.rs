@@ -8,6 +8,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use redis_engine::client::{ConnStats, ReplyBuf, ReplyMode};
 use redis_engine::commands::eq;
 use redis_engine::commands::replication::ServerAction;
+use redis_engine::commands::scripting::{LdbIo, LdbMode};
 use redis_engine::{Client, Outcome, Reply, Sink};
 use redis_proto::{Limits, parse_request};
 use std::collections::VecDeque;
@@ -205,7 +206,7 @@ where
             }
             conn.publish_qbuf(&inbuf, false);
             if !conn.pending.is_empty() {
-                conn.run_pending().await;
+                conn.run_pending(&mut rd, &mut wr).await;
             }
         }
         if !conn.out.is_empty() && !conn.flush(&mut wr, &mut rx).await {
@@ -542,7 +543,11 @@ impl Conn<'_> {
         self.write_reply(&r);
     }
 
-    async fn run_pending(&mut self) {
+    async fn run_pending<R, W>(&mut self, rd: &mut R, wr: &mut W)
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
         while !self.pending.is_empty() && self.blocked.is_none() && !self.close_after && self.sync.is_none() {
             // A connection whose ACL user was deleted is closed (like Redis does right away).
             if self.client.user.is_deleted() {
@@ -583,8 +588,16 @@ impl Conn<'_> {
             let mut n = 0u64;
             let before = db.stream_offset();
             let mut actions = Vec::new();
+            // A synchronous debugging session holds the server: wait for it like Redis' clients do
+            // (without tying up a worker), rather than answer BUSY.
+            while db.shard(0).scripts.debugging.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
             {
                 let Some(mut eng) = db.engine_unless_busy(0) else {
+                    if db.shard(0).scripts.debugging.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     let args = self.pop_pending();
                     let r = redis_engine::commands::scripting::while_busy(&db.shard(0).scripts, &args);
                     self.emit(&args, r);
@@ -611,10 +624,23 @@ impl Conn<'_> {
                     let args = self.pop_pending();
                     n += 1;
                     self.client.reply_budget = self.reply_budget(&db);
+                    self.client.pending_replies = !self.out.is_empty();
                     let client = &mut self.client;
-                    let out = long_running(&args, || eng.call(client, &args));
+                    let out = if client.ldb != LdbMode::Off {
+                        // A debugging session talks to this socket from inside the call.
+                        let mut io = SockIo { rd: &mut *rd, wr: &mut *wr, rt: ldb_runtime() };
+                        blocking(true, || eng.with_ldb_io(&mut io, |eng| eng.call(client, &args)))
+                    } else {
+                        long_running(&args, || eng.call(client, &args))
+                    };
                     let pushes = eng.take_after_reply();
                     actions.extend(eng.take_server_actions());
+                    if actions.iter().any(|a| matches!(a, ServerAction::LdbFork { .. })) {
+                        // Redis forked for a debugging session: this client is done here.
+                        self.pending.clear();
+                        self.pending_bytes = 0;
+                        break;
+                    }
                     if actions.iter().any(|a| matches!(a, ServerAction::Restart { .. })) {
                         // Like a crashed or restarting server: no reply, nothing more runs.
                         self.pending.clear();
@@ -653,6 +679,12 @@ impl Conn<'_> {
                         }
                     }
                 }
+            }
+            if let Some(i) = actions.iter().position(|a| matches!(a, ServerAction::LdbFork { .. })) {
+                let ServerAction::LdbFork { child, client, args, prefix } = actions.remove(i) else { unreachable!() };
+                self.out.extend_from_slice(&prefix);
+                self.ldb_fork_session(rd, wr, child, client, args);
+                return;
             }
             let restart = actions.iter().find_map(|a| match a {
                 ServerAction::Restart { delay_ms } => Some(*delay_ms),
@@ -806,7 +838,7 @@ impl Conn<'_> {
     fn server_actions(&mut self, db: &Arc<Database>, actions: Vec<ServerAction>) {
         for action in actions {
             match &action {
-                ServerAction::Restart { .. } => continue,
+                ServerAction::Restart { .. } | ServerAction::LdbFork { .. } => continue,
                 ServerAction::ChangeReplId => {
                     *db.replid.lock() = crate::database::new_replid();
                     *db.replid2.lock() = None;
@@ -1177,6 +1209,23 @@ impl Conn<'_> {
         }
     }
 
+    /// SCRIPT DEBUG YES's EVAL: the parent lets the client go, and the session runs on the copy
+    /// of the server (Redis' forked child) over this connection, which then writes what was
+    /// still pending (already in `out`), the EVAL's reply, and closes.
+    fn ldb_fork_session<R, W>(&mut self, rd: &mut R, wr: &mut W, mut child: Box<redis_engine::Engine>, mut client: Box<Client>, args: Vec<Bytes>)
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        self.cleanup();
+        let mut io = SockIo { rd, wr, rt: ldb_runtime() };
+        let out = blocking(true, || child.with_ldb_io(&mut io, |eng| eng.call(&mut client, &args)));
+        if let Outcome::Reply(r) = out {
+            r.encode(client.resp, &mut self.out);
+        }
+        self.close_after = true;
+    }
+
     fn cleanup(&mut self) {
         if let Some(s) = self.session.take() {
             s.db.io.clients.fetch_sub(1, Ordering::Relaxed);
@@ -1210,8 +1259,41 @@ fn parse_timeout(b: &[u8]) -> Result<Duration, Reply> {
 /// RELOAD, POPULATE).
 pub(crate) fn long_running<R>(args: &[Bytes], f: impl FnOnce() -> R) -> R {
     let long = [&b"eval"[..], b"evalsha", b"eval_ro", b"evalsha_ro", b"fcall", b"fcall_ro", b"migrate", b"debug"].iter().any(|n| args[0].eq_ignore_ascii_case(n));
-    let multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
-    if long && multi_thread { tokio::task::block_in_place(f) } else { f() }
+    blocking(long, f)
+}
+
+fn blocking<R>(long: bool, f: impl FnOnce() -> R) -> R {
+    if long && ldb_runtime().is_some() { tokio::task::block_in_place(f) } else { f() }
+}
+
+/// The multi-thread runtime, where a call may block in place (and do blocking socket I/O).
+fn ldb_runtime() -> Option<tokio::runtime::Handle> {
+    tokio::runtime::Handle::try_current().ok().filter(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+}
+
+/// The debugging client's socket, used blocking from inside the call while the script waits for
+/// its next debugger command (Redis reads and writes the socket from the Lua hook). Without a
+/// multi-thread runtime it reads as closed.
+struct SockIo<'a, R, W> {
+    rd: &'a mut R,
+    wr: &'a mut W,
+    rt: Option<tokio::runtime::Handle>,
+}
+
+impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> LdbIo for SockIo<'_, R, W> {
+    fn read(&mut self, buf: &mut [u8]) -> usize {
+        let Some(rt) = &self.rt else { return 0 };
+        rt.block_on(self.rd.read(buf)).unwrap_or(0)
+    }
+
+    fn write(&mut self, data: &[u8]) {
+        let Some(rt) = &self.rt else { return };
+        // `connSendTimeout(5000)`.
+        let _ = rt.block_on(tokio::time::timeout(Duration::from_secs(5), async {
+            self.wr.write_all(data).await?;
+            self.wr.flush().await
+        }));
+    }
 }
 
 fn is_intercepted(args: &[Bytes], client: &Client) -> bool {

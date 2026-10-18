@@ -93,8 +93,12 @@ pub fn replconf(conf: &mut ReplicaConf, args: &[Bytes]) -> Option<Reply> {
 }
 
 /// What the server does after a command, outside the engine.
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerAction {
+    /// EVAL under SCRIPT DEBUG YES: the debugging session runs on `child`, a copy of this
+    /// engine (Redis forks), as `client`; this connection is the child's from now on, and closes
+    /// when the session ends.
+    /// `prefix`: what the client had pending in the child at the fork (EXEC's reply so far).
+    LdbFork { child: Box<crate::engine::Engine>, client: Box<crate::client::Client>, args: Vec<Bytes>, prefix: Bytes },
     /// Follow a Redis primary.
     ReplicaOf { host: String, port: u16 },
     /// Stop following and become writable.

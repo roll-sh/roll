@@ -103,6 +103,12 @@ pub struct Client {
     pub last_cmd: &'static str,
     /// The connection is a replication link or the log replayer (bypasses limits).
     pub internal: bool,
+    /// SCRIPT DEBUG: the next EVAL is a debugging session.
+    pub ldb: crate::commands::scripting::LdbMode,
+    /// Replies to earlier commands are still waiting to be written (`clientHasPendingReplies`).
+    pub pending_replies: bool,
+    /// A debugging session ended: the connection closes after this reply.
+    pub ldb_ended: bool,
     /// The connection's live counters, when it is a registered network client.
     pub conn: Option<Arc<ConnStats>>,
     /// Pushes for this client produced after its reply (its own tracking invalidations) are
@@ -151,6 +157,9 @@ impl Client {
             created_ms: crate::util::now_ms(),
             last_cmd: "NULL",
             internal: false,
+            ldb: Default::default(),
+            pending_replies: false,
+            ldb_ended: false,
             conn: None,
             defer_pushes: false,
             executing: None,

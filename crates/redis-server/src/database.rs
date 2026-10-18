@@ -358,7 +358,7 @@ impl Database {
             if let Some(eng) = shard.engine.try_lock_for(std::time::Duration::from_millis(10)) {
                 return Some(EngineGuard::new(self, eng));
             }
-            if shard.scripts.busy.load(Ordering::SeqCst) {
+            if shard.scripts.busy.load(Ordering::SeqCst) || shard.scripts.debugging.load(Ordering::SeqCst) {
                 return None;
             }
         }

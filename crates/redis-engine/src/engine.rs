@@ -304,6 +304,10 @@ pub struct Engine {
     /// Work for the server after the current command (REPLICAOF), taken with
     /// [`Engine::take_server_actions`].
     pub server_actions: Vec<crate::commands::replication::ServerAction>,
+    /// A copy made for a debugging session (Redis' forked child): it runs the session itself.
+    pub ldb_child: bool,
+    /// The last command a script called was refused before running (`scriptCall`'s errors).
+    pub(crate) last_rejected: bool,
     /// INFO memory: the peak of `used_memory` and when it was reached (Unix s), and the usage
     /// right after startup.
     pub peak_memory: usize,
@@ -416,6 +420,8 @@ impl Engine {
             exec_out_bytes: 0,
             host: None,
             server_actions: Vec::new(),
+            ldb_child: false,
+            last_rejected: false,
             peak_memory: 0,
             peak_time: now / 1000,
             startup_memory: 0,
@@ -955,7 +961,30 @@ impl Engine {
         }
     }
 
+    /// A copy of the data, functions and configuration for a debugging session (what Redis'
+    /// fork gives the child): through an RDB image, with a hub of its own.
+    pub fn fork_child(&mut self, now: i64) -> Engine {
+        let mut image = Vec::new();
+        let _ = self.write_rdb(&mut image, now);
+        let mut child = Engine::new(self.cfg.clone(), crate::hub::Hub::new());
+        let _ = child.read_rdb(&image, false, now);
+        child.ldb_child = true;
+        child.scripting.ldb_from(&self.scripting);
+        child
+    }
+
+    /// Run `f` with `io` as the connection debugging sessions talk to.
+    pub fn with_ldb_io<R>(&mut self, io: &mut dyn crate::commands::scripting::LdbIo, f: impl FnOnce(&mut Engine) -> R) -> R {
+        // SAFETY: the pointer only lives in `self` for the duration of `f`.
+        let io: &mut (dyn crate::commands::scripting::LdbIo + 'static) = unsafe { std::mem::transmute(io) };
+        self.scripting.set_ldb_io(Some(io));
+        let r = f(self);
+        self.scripting.set_ldb_io(None);
+        r
+    }
+
     pub(crate) fn reject(&mut self, name: &str, r: Reply) -> Reply {
+        self.last_rejected = true;
         self.cmdstats.entry(name.to_string()).or_default().rejected += 1;
         self.stats.rejected_calls += 1;
         self.count_error(&r);

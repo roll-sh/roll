@@ -7,7 +7,10 @@
 //! script itself. Functions are data: FUNCTION LOAD / DELETE / FLUSH replicate as themselves.
 //! The script cache is not (EVALSHA after a restart answers NOSCRIPT, as in Redis).
 
+mod ldb;
 mod vm;
+
+pub use ldb::{LdbIo, LdbMode};
 
 use super::*;
 use crate::{cmd, container};
@@ -144,6 +147,8 @@ pub struct ScriptCtl {
     /// Library and function counts, for FUNCTION STATS while busy.
     pub libraries: AtomicUsize,
     pub functions: AtomicUsize,
+    /// A synchronous debugging session holds the server: other clients wait, without BUSY.
+    pub debugging: AtomicBool,
     /// Name and command of the running script, and when it started (FUNCTION STATS).
     pub info: parking_lot::Mutex<Option<(String, Vec<Bytes>, Instant)>>,
 }
@@ -180,6 +185,8 @@ pub struct Scripting {
     fn_index: HashMap<String, (usize, usize)>,
     pub(crate) running: Option<Running>,
     pub ctl: Arc<ScriptCtl>,
+    /// The Lua debugger.
+    pub(crate) ldb: ldb::Ldb,
 }
 
 /// The running script, as command dispatch needs to see it.
@@ -191,6 +198,15 @@ pub(crate) struct Running {
 }
 
 impl Scripting {
+    /// The debugger as SCRIPT DEBUG left it, for a forked session.
+    pub(crate) fn ldb_from(&mut self, parent: &Scripting) {
+        self.ldb = parent.ldb.copy_settings();
+    }
+
+    pub(crate) fn set_ldb_io(&mut self, io: Option<&mut (dyn LdbIo + 'static)>) {
+        self.ldb.io = io.map(|io| ldb::IoPtr(io as *mut _));
+    }
+
     /// Bytes used by the EVAL VM (`used_memory_lua` / `used_memory_vm_eval`).
     pub fn memory(&self) -> usize {
         self.eval_vm.as_ref().map_or(0, Vm::memory)
@@ -530,7 +546,7 @@ pub(crate) struct Run {
     /// The client the script's commands run as.
     pub client: Client,
     read_only: bool,
-    start: Instant,
+    pub(crate) start: Instant,
     threshold_ms: u64,
     timed_out: bool,
     ctl: Arc<ScriptCtl>,
@@ -539,7 +555,7 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    fn cx(&mut self) -> &mut Cx<'static> {
+    pub(crate) fn cx(&mut self) -> &mut Cx<'static> {
         // SAFETY: the Cx outlives the run (it's the caller's frame) and isn't otherwise used while
         // Lua runs.
         unsafe { &mut *self.cx }
@@ -552,6 +568,7 @@ impl Run {
             Err(e) => {
                 let r = Reply::error(e);
                 self.cx().eng.count_error(&r);
+                self.cx().eng.last_rejected = true;
                 return r;
             }
         };
@@ -625,6 +642,7 @@ fn script_client(caller: &Client) -> Client {
     c.ssubs.clear();
     c.monitor = false;
     c.reply_mode = ReplyMode::On;
+    c.ldb = LdbMode::Off;
     c.addr = "lua".into();
     // The script's client has no output buffer limit (it is not a connection).
     c.reply_budget = u64::MAX;
@@ -721,7 +739,11 @@ unsafe fn invoke(cx: &mut Cx, l: *mut lua_State, cmd: &[Bytes], nkeys: usize, na
     };
     let reply = unsafe {
         vm::set_registry_ptr(l, vm::RUN_CTX, Some(&mut run as *mut Run));
-        if threshold_ms > 0 {
+        // A debugging session's hook instead of the busy one (`luaCallFunction`).
+        let debugging = eval && cx.eng.scripting.ldb.active;
+        if debugging {
+            roll_setldbhook(l, ldb::line_hook);
+        } else if threshold_ms > 0 {
             roll_sethook(l, Some(vm::hook_check));
         }
         push_array(l, keys);
@@ -756,7 +778,7 @@ unsafe fn invoke(cx: &mut Cx, l: *mut lua_State, cmd: &[Bytes], nkeys: usize, na
             vm::pop_reply(l, run.client.resp == 3, caller_resp3)
         };
         lua_pop(l, 1); // the error handler
-        if threshold_ms > 0 {
+        if debugging || threshold_ms > 0 {
             roll_sethook(l, None);
         }
         vm::set_registry_ptr::<Run>(l, vm::RUN_CTX, None);
@@ -809,6 +831,47 @@ fn eval_generic(cx: &mut Cx, args: &[Bytes], by_sha: bool, ro: bool) -> CmdResul
     if by_sha && args[1].len() != 40 {
         return Err(NOSCRIPT_ERR);
     }
+    if cx.client.ldb != LdbMode::Off {
+        if by_sha {
+            return Err(Error::new("ERR Please use EVAL instead of EVALSHA for debugging"));
+        }
+        return eval_debugging(cx, args, ro);
+    }
+    eval_script(cx, args, by_sha, ro)
+}
+
+/// `evalGenericCommandWithDebugging`: in YES mode the session is handed to a copy of the server
+/// (Redis forks; this client is done here), in SYNC mode (or in that copy) it runs now, and the
+/// connection closes after the reply.
+fn eval_debugging(cx: &mut Cx, args: &[Bytes], ro: bool) -> CmdResult {
+    let forked = cx.client.ldb == LdbMode::Fork;
+    if forked && !cx.eng.ldb_child {
+        let child = cx.eng.fork_child(cx.now);
+        let mut client = cx.client.clone();
+        client.multi = None;
+        cx.client.ldb = LdbMode::Off;
+        cx.eng.server_actions.push(crate::commands::replication::ServerAction::LdbFork {
+            child: Box::new(child),
+            client: Box::new(client),
+            args: args.to_vec(),
+            prefix: Bytes::new(),
+        });
+        return Ok(Reply::Raw(Bytes::new()));
+    }
+    let ctl = cx.eng.scripting.ctl.clone();
+    ctl.debugging.store(!forked, Ordering::SeqCst);
+    cx.eng.scripting.ldb.start(forked, &args[1]);
+    let reply = eval_script(cx, args, false, ro);
+    cx.eng.scripting.ldb.end();
+    ctl.debugging.store(false, Ordering::SeqCst);
+    cx.client.ldb_ended = true;
+    if let Some(conn) = &cx.client.conn {
+        conn.killed.store(true, Ordering::SeqCst);
+    }
+    reply
+}
+
+fn eval_script(cx: &mut Cx, args: &[Bytes], by_sha: bool, ro: bool) -> CmdResult {
     let nkeys = numkeys(args, NOT_INT)?;
     let sha = if by_sha { String::from_utf8_lossy(&args[1]).to_ascii_lowercase() } else { sha1_hex(&args[1]) };
     let flags = match cx.eng.scripting.scripts.get(&sha) {
@@ -907,14 +970,23 @@ fn script_kill(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     Err(Error::new("NOTBUSY No scripts in execution right now."))
 }
 
-fn script_debug(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    if eq(&args[2], "no") {
-        Ok(Reply::Ok)
-    } else if eq(&args[2], "yes") || eq(&args[2], "sync") {
-        Err(Error::new("ERR The Lua debugger is not available on roll"))
-    } else {
-        Err(Error::new("ERR Use SCRIPT DEBUG YES/SYNC/NO"))
+fn script_debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    // Replies still to be written (a pipeline, a transaction) would mix with the session's.
+    if cx.client.pending_replies || cx.mode == Mode::Exec {
+        return Err(Error::new("ERR SCRIPT DEBUG must be called outside a pipeline"));
     }
+    if eq(&args[2], "no") {
+        cx.client.ldb = LdbMode::Off;
+    } else if eq(&args[2], "yes") {
+        cx.eng.scripting.ldb.enable();
+        cx.client.ldb = LdbMode::Fork;
+    } else if eq(&args[2], "sync") {
+        cx.eng.scripting.ldb.enable();
+        cx.client.ldb = LdbMode::Sync;
+    } else {
+        return Err(Error::new("ERR Use SCRIPT DEBUG YES/SYNC/NO"));
+    }
+    Ok(Reply::Ok)
 }
 
 // ---- FCALL ----
