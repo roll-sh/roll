@@ -99,7 +99,7 @@ static FT_CURSOR: &[Command] = &[
 
 static FT_CURSOR_LOCAL: &[Command] = &[
     cmd!("GC", -2, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_gc, Module),
-    cmd!("PROFILE", -2, READONLY | MODULE, 0, 0, 0, not_yet, Module),
+    cmd!("PROFILE", -2, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_profile, Module),
     cmd!("DEL", -4, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_del, Module),
     cmd!("READ", -4, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_read, Module),
 ];
@@ -195,10 +195,6 @@ pub fn acl_categories(c: &Command) -> Option<&'static [&'static str]> {
         _ if n.starts_with("ft.") || n.starts_with("search.") => &["search"],
         _ => return None,
     })
-}
-
-fn not_yet(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    Err(Error::msg(format!("ERR {} is not supported yet", String::from_utf8_lossy(&args[0]))))
 }
 
 /// FT.CONFIG GET|SET|HELP (`ConfigCommand`).

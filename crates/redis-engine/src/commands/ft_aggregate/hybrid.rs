@@ -8,7 +8,10 @@
 //! them (named arguments in any order, COMBINE also as the first one, callbacks that may read
 //! on from the main cursor, callback errors before parser errors).
 //!
-//! WITHCURSOR (the subqueries' cursor pair) is not supported.
+//! WITHCURSOR drains both subqueries and leaves a cursor on each (`HybridRequest_StartCursors`),
+//! which FT.CURSOR READ reads like an FT.AGGREGATE's. Timeouts: each subquery's reader and the
+//! merger check the clock (`_FT.DEBUG FT.HYBRID`'s TIMEOUT_AFTER_N_SEARCH, _VSIM and _TAIL time
+//! them out after that many results); the warnings name where it happened.
 
 use super::*;
 use crate::search::areq::{AGG_LOAD_ALL, CursorConfig, F_IS_HYBRID_TAIL, F_IS_HYBRID_VECTOR, F_NO_SORT, HybridVec, Request};
@@ -180,6 +183,10 @@ struct Hyb {
     /// The VSIM range, for the explanation.
     radius: f64,
     epsilon: Option<String>,
+    /// WITHCURSOR's settings.
+    cursor: Option<CursorConfig>,
+    /// `_FT.DEBUG`'s TIMEOUT_AFTER_N_SEARCH, _VSIM and _TAIL (0: none).
+    debug: [u32; 3],
 }
 
 const S_LIMIT: u32 = 1;
@@ -817,9 +824,7 @@ fn parse(cfg: &Config, args: &[Bytes]) -> Result<Hyb, QErr> {
     if o.specified & S_EXPLAINSCORE != 0 && o.specified & S_GROUPBY != 0 {
         return Err(QErr::new(Code::ParseArgs, "EXPLAINSCORE is not supported with GROUPBY"));
     }
-    if o.flags & F_IS_CURSOR != 0 {
-        return Err(QErr::new(Code::ParseArgs, "FT.HYBRID WITHCURSOR is not supported"));
-    }
+    let cursor = (o.flags & F_IS_CURSOR != 0).then_some(o.cursor);
 
     // The vector distance's key, normalized into the vector score.
     let hide = alias.is_none();
@@ -881,7 +886,7 @@ fn parse(cfg: &Config, args: &[Bytes]) -> Result<Hyb, QErr> {
     tail.max_aggregate_results = max_results;
     tail.strict_prefix = true;
     tail.timeout = o.timeout;
-    Ok(Hyb { search, vector, tail, scoring: o.scoring, vec_score, hide, dialect, explain: None, capped, radius, epsilon })
+    Ok(Hyb { search, vector, tail, scoring: o.scoring, vec_score, hide, dialect, explain: None, capped, radius, epsilon, cursor, debug: [0; 3] })
 }
 
 /// `AREQ_ApplyContext` for both subqueries (`AddValidationErrorContext`).
@@ -961,8 +966,8 @@ impl<'a> Proc<'a> for SafeDepleter<'a> {
         "Threadsafe-Depleter".into()
     }
 
-    fn accumulates(&self) -> bool {
-        true
+    fn drained(&self) -> bool {
+        self.0.done
     }
 
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
@@ -1053,9 +1058,14 @@ impl<'a> Merger<'a> {
             sub.rc = rc;
             failed |= rc == St::Error;
         }
+        let timed_out = subs.iter().any(|s| s.rc == St::TimedOut);
         drop(subs);
         if failed {
             return Some(St::Error);
+        }
+        // ON_TIMEOUT FAIL: a timed-out subquery yields nothing.
+        if timed_out && cx.policy == Policy::Fail {
+            return Some(St::TimedOut);
         }
         cx.total = dict.len() as i64;
         cx.skipped = 0;
@@ -1069,17 +1079,34 @@ impl<'a> Proc<'a> for Merger<'a> {
         "Hybrid Merger".into()
     }
 
-    fn accumulates(&self) -> bool {
-        true
+    fn drained(&self) -> bool {
+        self.entries.is_some()
     }
 
     fn next(&mut self, _up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        // Behind the tail's `RPTimeoutAfterCount`.
+        cx.tmo.begin();
+        let st = self.merge(cx, r);
+        cx.tmo.end(st == St::TimedOut);
+        st
+    }
+}
+
+impl<'a> Merger<'a> {
+    /// `RPHybridMerger_Accum`, then `RPHybridMerger_Yield` (which checks the clock every 100
+    /// results; a timed-out subquery's timeout comes last).
+    fn merge(&mut self, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         if self.entries.is_none()
             && let Some(st) = self.accumulate(cx)
         {
             return st;
         }
-        let Some((_, mut e)) = self.entries.as_mut().and_then(|it| it.next()) else { return St::Eof };
+        let Some((_, mut e)) = self.entries.as_mut().and_then(|it| it.next()) else {
+            return if self.subs.borrow().iter().any(|s| s.rc == St::TimedOut) { St::TimedOut } else { St::Eof };
+        };
+        if cx.tmo.tick() {
+            return St::TimedOut;
+        }
         let has = [e[0].is_some(), e[1].is_some()];
         let v = [e[0].as_ref().map_or(0.0, |x| x.score), e[1].as_ref().map_or(0.0, |x| x.score)];
         let score = match self.scoring {
@@ -1229,7 +1256,6 @@ fn rp_profile(chain: &Chain<'_>, counts: &[(u64, u64)]) -> Reply {
 /// building it.
 #[allow(clippy::too_many_arguments)]
 fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, background: bool, clock: Instant, prof: Option<&mut HProf>) -> Result<Result<Reply, Error>, Error> {
-    let cfg = &eng.cfg;
     let spec = &ix.spec;
     let now = crate::util::now_ms();
     let mut ft_to_field = Vec::new();
@@ -1243,15 +1269,22 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
     }
     let q = Qcx { docs: &ix.docs, now_ms: now, ft_to_field };
     let profile = prof.is_some();
-    let avg = if ix.stats.num_documents != 0 { ix.stats.total_docs_len as f64 / ix.stats.num_documents as f64 } else { 0.0 };
+    let subs = build_subs(eng, ix, &q, h, db, background, profile, now)?;
+    run_tail(eng, ix, h, db, resp3, background, clock, prof, subs)
+}
 
-    // `HybridRequest_BuildDepletionPipeline`.
+/// `HybridRequest_BuildDepletionPipeline`: each subquery's pipeline, ending in its depleter.
+#[allow(clippy::too_many_arguments)]
+fn build_subs<'a>(eng: &'a Engine, ix: &'a Index, q: &'a Qcx<'a>, h: &'a Hyb, db: usize, background: bool, profile: bool, now: i64) -> Result<Vec<Sub<'a>>, Error> {
+    let cfg = &eng.cfg;
+    let spec = &ix.spec;
+    let avg = if ix.stats.num_documents != 0 { ix.stats.total_docs_len as f64 / ix.stats.num_documents as f64 } else { 0.0 };
     let mut subs = Vec::new();
     for (i, req) in [&h.search, &h.vector].into_iter().enumerate() {
         let sub_clock = Instant::now();
         let mut ecx = EvalCx {
             ix,
-            q: &q,
+            q,
             req_mask: req.opts.field_mask,
             slop: req.opts.slop as i64,
             in_order: req.opts.flags & qast::S_IN_ORDER != 0,
@@ -1267,12 +1300,14 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
             can_skip_rich: false,
             metric_requests: Vec::new(),
             hybrid: true,
+            memo: None,
         };
         let root = req.root.as_ref().expect("a parsed query");
         let it = ecx.iterate(root)?;
         let it = if profile { iters::profiled(it) } else { it };
         let parse_ns = sub_clock.elapsed().as_nanos() as u64;
         let sargs = scorers::Args { avg_doc_len: avg, tanh_factor: req.bm25std_tanh as i64, payload: req.payload.as_deref() };
+        let policy = Policy::of(req.on_timeout);
         let mut cx = Pcx {
             eng,
             db,
@@ -1286,6 +1321,8 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
             force: spec.is_json() && req.dialect < 3,
             dialect: req.dialect,
             prof: None,
+            policy,
+            tmo: Tmo::new(req.timeout, policy, background, (h.debug[i] > 0).then_some(h.debug[i])),
         };
         let metrics = std::mem::take(&mut ecx.metric_requests);
         let Builder { mut chain, .. } = build(req, &mut cx, it, ix, now, background, sargs, &metrics)?;
@@ -1307,11 +1344,31 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
         let build_ns = (sub_clock.elapsed().as_nanos() as u64).saturating_sub(parse_ns);
         subs.push(Sub { chain, cx, rc: St::Ok, expansions: ecx.expansions_warning, clock: sub_clock, parse_ns, build_ns });
     }
+    Ok(subs)
+}
+
+/// `HybridRequest_BuildMergePipeline` and `sendChunk_hybrid`.
+#[allow(clippy::too_many_arguments)]
+fn run_tail<'a>(
+    eng: &'a Engine,
+    ix: &'a Index,
+    h: &'a Hyb,
+    db: usize,
+    resp3: bool,
+    background: bool,
+    clock: Instant,
+    prof: Option<&mut HProf>,
+    subs: Vec<Sub<'a>>,
+) -> Result<Result<Reply, Error>, Error> {
+    let cfg = &eng.cfg;
+    let spec = &ix.spec;
+    let profile = prof.is_some();
 
     // `HybridRequest_BuildMergePipeline`.
     let tail_clock = Instant::now();
     let tail_req = &h.tail;
     let load_all = tail_req.flags & AGG_LOAD_ALL != 0;
+    let policy = Policy::of(tail_req.on_timeout);
     let mut cx = Pcx {
         eng,
         db,
@@ -1326,6 +1383,8 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
         force: spec.is_json(),
         dialect: 1,
         prof: None,
+        policy,
+        tmo: Tmo::new(tail_req.timeout, policy, background, (h.debug[2] > 0).then_some(h.debug[2])),
     };
     if !load_all {
         // `HybridRequest_SynchronizeLookupKeys`.
@@ -1363,7 +1422,7 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
     let tail_build_ns = tail_clock.elapsed().as_nanos() as u64;
 
     // `sendChunk_hybrid`.
-    let collect = cfg.num("search-on-timeout") != 0 || cfg.num("search-on-oom") == 1;
+    let collect = policy != Policy::Return || cfg.num("search-on-oom") == 1;
     let mut rows: Vec<Res<'_>> = Vec::new();
     let mut rc;
     let mut r = Res::new();
@@ -1376,6 +1435,9 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
             }
             rows.push(x);
         }
+        if cx.tmo.checks() && cx.tmo.passed() {
+            rc = St::TimedOut;
+        }
     } else {
         rc = pull(&mut chain, &mut cx, &mut r);
     }
@@ -1386,6 +1448,11 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
     }
     if let Some(e) = subs.borrow().iter().find_map(|s| s.cx.err.clone()) {
         return Ok(Err(e.into()));
+    }
+    // `handleSendChunkError_hybrid`: ON_TIMEOUT FAIL's timeout (FT.PROFILE warns instead).
+    if rc == St::TimedOut && policy == Policy::Fail && prof.is_none() {
+        eng.search.query_stats.timeout(true, false);
+        return Ok(Err(QErr::code(Code::TimedOut).into()));
     }
     if !collect && rc == St::Ok {
         rows.push(std::mem::replace(&mut r, Res::new()));
@@ -1439,9 +1506,14 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
             "Query TIMEOUT exceeded the configured maximum (search-_max-foreground-timeout-limit) while search-workers is disabled; effective timeout was capped".into(),
         ));
     }
+    // `replyWarningsWithSuffixes`: a subquery's timeout hides the tail's.
+    let mut sub_timed_out = false;
     for (i, s) in subs.borrow().iter().enumerate() {
         let suffix = if i == 0 { "(SEARCH)" } else { "(VSIM)" };
-        if s.rc == St::Error
+        if s.rc == St::TimedOut {
+            warnings.push(Reply::Status(format!("{TIMEOUT_WARNING} {suffix}")));
+            sub_timed_out = true;
+        } else if s.rc == St::Error
             && let Some(e) = &s.cx.err
         {
             warnings.push(Reply::Status(format!("{} {suffix}", e.text())));
@@ -1449,7 +1521,13 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
             warnings.push(Reply::Status(format!("Max prefix expansions limit was reached {suffix}")));
         }
     }
-    if rc == St::Error
+    // `updateHybridWarningMetrics`.
+    if sub_timed_out || rc == St::TimedOut {
+        eng.search.query_stats.timeout(false, false);
+    }
+    if rc == St::TimedOut && !sub_timed_out {
+        warnings.push(Reply::Status(format!("{TIMEOUT_WARNING} (POST PROCESSING)")));
+    } else if rc == St::Error
         && let Some(e) = &cx.err
     {
         warnings.push(Reply::Status(format!("{} (POST PROCESSING)", e.text())));
@@ -1506,8 +1584,18 @@ fn run_hybrid(eng: &Engine, ix: &Index, h: &Hyb, db: usize, resp3: bool, backgro
     Ok(Ok(Reply::Array(flat)))
 }
 
+/// `_FT.DEBUG`'s FT.HYBRID: `User` (`DEBUG_hybridCommandHandler`) holds the arguments with the
+/// debug parameters, parsed once the pipeline is built, and runs the query without a cursor;
+/// `Internal` (`_FT.HYBRID`) has them parsed already.
+#[derive(Clone, Copy)]
+enum Dbg<'p> {
+    None,
+    User(&'p [Bytes]),
+    Internal([u32; 3]),
+}
+
 /// `hybridCommandHandler`.
-fn hybrid(cx: &mut Cx, index: &Bytes, args: &[Bytes], mut prof: Option<HProf>) -> CmdResult {
+fn hybrid(cx: &mut Cx, index: &Bytes, args: &[Bytes], mut prof: Option<HProf>, dbg: Dbg<'_>) -> CmdResult {
     let clock = prof.as_ref().map_or_else(Instant::now, |p| p.clock);
     let Some(name) = cx.eng.search.load(cstr(index), false) else {
         return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(index))).into());
@@ -1516,11 +1604,22 @@ fn hybrid(cx: &mut Cx, index: &Bytes, args: &[Bytes], mut prof: Option<HProf>) -
     if let Some(ix) = cx.eng.search.indexes.get_mut(&name) {
         ix.counter += 2;
     }
-    if prof.is_none() {
+    let (args, params) = match dbg {
+        Dbg::User(argv) => {
+            let (c, p) = debug::split(argv)?;
+            if c.len() < 2 {
+                return Err(arity_error("_FT.DEBUG|FT.HYBRID"));
+            }
+            (&c[2..], Some(p))
+        }
+        _ => (args, None),
+    };
+    if prof.is_none() && matches!(dbg, Dbg::None) {
         verify_acl(cx, index)?;
     }
     let resp3 = cx.client.resp >= 3;
-    let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    // The debug wrapper runs in the foreground.
+    let background = params.is_none() && cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
     let db = cx.client.db;
     let mut h = parse(&cx.eng.cfg, args)?;
     {
@@ -1528,30 +1627,262 @@ fn hybrid(cx: &mut Cx, index: &Bytes, args: &[Bytes], mut prof: Option<HProf>) -
         let ix = eng.search.indexes.get_mut(&name).expect("loaded");
         apply(&mut h, ix, resp3, &eng.cfg)?;
     }
+    match (dbg, params) {
+        (Dbg::Internal(d), _) => h.debug = d,
+        (_, Some(p)) => {
+            let strict = Policy::of(cx.eng.cfg.num("search-on-timeout") as i64) == Policy::Strict;
+            h.debug = debug::parse_hybrid(p, strict)?;
+            // `HybridRequest_Execute`: the debug wrapper replies without a cursor.
+            h.cursor = None;
+        }
+        _ => {}
+    }
     if let Some(p) = prof.as_mut() {
         p.parse_ns = p.clock.elapsed().as_nanos() as u64;
+    }
+    if h.cursor.is_some() {
+        return start_cursors(cx, name, h, db, resp3, background);
     }
     let res = {
         let eng: &Engine = cx.eng;
         let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
         run_hybrid(eng, ix, &h, db, resp3, background, clock, prof.as_mut())
     };
-    // The dialect counts once the pipeline is built (queued, in the background).
-    if (res.is_ok() || background)
-        && let Some(ix) = cx.eng.search.indexes.get_mut(&name)
-    {
-        ix.used_dialects |= 1 << (h.dialect.clamp(1, 8) - 1);
+    // The dialect counts once the pipeline is built (queued, in the background); the debug
+    // wrapper never counts it.
+    if (res.is_ok() || background) && !matches!(dbg, Dbg::User(_)) {
+        count_hybrid_dialect(cx, &name, &h);
     }
     res?
+}
+
+fn count_hybrid_dialect(cx: &mut Cx, name: &[u8], h: &Hyb) {
+    if let Some(ix) = cx.eng.search.indexes.get_mut(name) {
+        ix.used_dialects |= 1 << (h.dialect.clamp(1, 8) - 1);
+    }
 }
 
 /// FT.HYBRID index [count] SEARCH query [SCORER s] [YIELD_SCORE_AS a] VSIM @field $vector
 /// [KNN n … | RANGE n …] [FILTER …] [YIELD_SCORE_AS a] [COMBINE …] [options].
 pub(crate) fn ft_hybrid(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    hybrid(cx, &args[1], &args[2..], None)
+    hybrid(cx, &args[1], &args[2..], None, Dbg::None)
 }
 
 /// FT.PROFILE index HYBRID [LIMITED] QUERY …: FT.HYBRID's reply with the profile appended.
 pub(crate) fn profile_hybrid(cx: &mut Cx, index: &Bytes, args: &[Bytes], limited: bool, clock: Instant) -> CmdResult {
-    hybrid(cx, index, args, Some(HProf { limited, clock, parse_ns: 0 }))
+    hybrid(cx, index, args, Some(HProf { limited, clock, parse_ns: 0 }), Dbg::None)
+}
+
+/// `_FT.DEBUG FT.HYBRID index … DEBUG_PARAMS_COUNT <count>` (`argv` from FT.HYBRID on).
+pub(crate) fn debug_hybrid(cx: &mut Cx, argv: &[Bytes]) -> CmdResult {
+    hybrid(cx, &argv[1], &argv[2..], None, Dbg::User(argv))
+}
+
+/// `_FT.DEBUG _FT.HYBRID index … DEBUG_PARAMS_COUNT <count>`: the shard's command, its debug
+/// parameters parsed first.
+pub(crate) fn debug_internal_hybrid(cx: &mut Cx, argv: &[Bytes]) -> CmdResult {
+    let (c, p) = debug::split(argv)?;
+    let strict = Policy::of(cx.eng.cfg.num("search-on-timeout") as i64) == Policy::Strict;
+    let d = debug::parse_hybrid(p, strict)?;
+    if c.len() < 2 {
+        return Err(arity_error("_FT.DEBUG|_FT.HYBRID"));
+    }
+    hybrid(cx, &c[1], &c[2..], None, Dbg::Internal(d))
+}
+
+// ---------------------------------------------------------------------------------------------
+// WITHCURSOR
+
+/// A subquery's cursor (FT.HYBRID WITHCURSOR): what its depleter held, read chunk by chunk
+/// like an FT.AGGREGATE's (`RPDepleter_Next_Yield`).
+pub(in crate::commands) struct HybCursor {
+    req: Request,
+    lookups: Vec<Lookup>,
+    items: VecDeque<Pend>,
+    dmds: Vec<Dmd>,
+    /// The depletion's last status, returned once the results are out.
+    tail: St,
+    /// The depletion's total, which the first read reports (`finishSendChunk` resets it).
+    total: i64,
+    chunk: u32,
+    db: usize,
+}
+
+/// What draining a subquery left.
+struct Drained {
+    lookups: Vec<Lookup>,
+    items: VecDeque<Pend>,
+    dmds: Vec<Dmd>,
+    tail: St,
+    total: i64,
+    expansions: bool,
+}
+
+/// `HybridRequest_StartCursors`: both subqueries drained (`RPDepleter_DepleteAll`), a cursor
+/// left on each; the reply maps SEARCH and VSIM to their ids, with the warnings.
+fn start_cursors(cx: &mut Cx, name: Bytes, h: Hyb, db: usize, resp3: bool, background: bool) -> CmdResult {
+    let conf = h.cursor.unwrap_or_default();
+    let cap = cx.eng.cfg.num("search-index-cursor-limit") as i64;
+    let spec_id = cx.eng.search.indexes.get(&name).expect("loaded").id;
+    cx.eng.search.cursors.collect_expired();
+    let open = cx.eng.search.cursors.index_total(spec_id) as i64;
+    let drained: Result<Vec<Drained>, Error> = {
+        let eng: &Engine = cx.eng;
+        let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
+        let now = crate::util::now_ms();
+        let mut ft_to_field = Vec::new();
+        for (i, f) in ix.spec.fields.iter().enumerate() {
+            if let Some(id) = f.ft_id {
+                if ft_to_field.len() <= id {
+                    ft_to_field.resize(id + 1, 0);
+                }
+                ft_to_field[id] = i as u16;
+            }
+        }
+        let q = Qcx { docs: &ix.docs, now_ms: now, ft_to_field };
+        let subs = build_subs(eng, ix, &q, &h, db, background, false, now);
+        subs.and_then(|subs| {
+            // `Cursors_Reserve`, once per subquery.
+            if open + 2 > cap {
+                return Err(QErr::new(Code::Limit, format!("INDEX_CURSOR_LIMIT of {cap} has been reached for an index")).into());
+            }
+            let mut out = Vec::new();
+            for mut sub in subs {
+                let mut dmds = Vec::new();
+                let mut items = VecDeque::new();
+                let tail = loop {
+                    let mut x = Res::new();
+                    let st = pull(&mut sub.chain, &mut sub.cx, &mut x);
+                    if st != St::Ok {
+                        break st;
+                    }
+                    items.push_back(Pend::of(x, &mut dmds));
+                };
+                let total = reported(sub.cx.total - sub.cx.skipped);
+                if tail == St::Error {
+                    let e = sub.cx.err.clone().unwrap_or_else(|| QErr::new(Code::Generic, "Failed to deplete set of results, rc=2"));
+                    return Err(e.into());
+                }
+                out.push(Drained { lookups: std::mem::take(&mut sub.cx.lookups), items, dmds, tail, total, expansions: sub.expansions });
+            }
+            Ok(out)
+        })
+    };
+    let drained = drained?;
+    count_hybrid_dialect(cx, &name, &h);
+    let timed_out = drained.iter().any(|d| d.tail == St::TimedOut);
+    if timed_out && Policy::of(h.tail.on_timeout) != Policy::Return {
+        return Err(QErr::new(Code::TimedOut, "Depleting timed out").into());
+    }
+    let Hyb { search, vector, .. } = h;
+    let mut ids = Vec::new();
+    let mut expansions = Vec::new();
+    for (req, d) in [search, vector].into_iter().zip(drained) {
+        let cursors = &mut cx.eng.search.cursors;
+        let id = cursors.reserve(spec_id, name.clone(), conf.max_idle, cap).expect("under the index's cursor limit");
+        let mut c = cursors.take_running(id).expect("reserved");
+        expansions.push(d.expansions);
+        let hc = HybCursor { req, lookups: d.lookups, items: d.items, dmds: d.dmds, tail: d.tail, total: d.total, chunk: conf.chunk_size, db };
+        c.exec = Some(Exec(Box::new(hc)));
+        cursors.pause(c);
+        ids.push(id);
+    }
+    // `replyWithCursors`.
+    let mut warnings = Vec::new();
+    if timed_out {
+        cx.eng.search.query_stats.timeout(false, true);
+        warnings.push(Reply::Status(TIMEOUT_WARNING.into()));
+    }
+    for (i, e) in expansions.into_iter().enumerate() {
+        if e {
+            warnings.push(Reply::Status(format!("Max prefix expansions limit was reached {}", if i == 0 { "(SEARCH)" } else { "(VSIM)" })));
+        }
+    }
+    let pairs = vec![kv("SEARCH", Reply::Int(ids[0] as i64)), kv("VSIM", Reply::Int(ids[1] as i64)), kv("warnings", Reply::Array(warnings))];
+    Ok(if resp3 { Reply::Map(pairs) } else { Reply::Array(pairs.into_iter().flat_map(|(k, v)| [k, v]).collect()) })
+}
+
+/// FT.CURSOR READ of a subquery's cursor (`runCursor` over its depleter): `num` results (the
+/// chunk size sticks), the cursor done once they are out.
+pub(in crate::commands) fn read_cursor(cx: &mut Cx, mut c: crate::search::cursor::Cursor, mut hc: Box<HybCursor>, count: u64) -> CmdResult {
+    let mut num = count;
+    if num == 0 {
+        num = hc.chunk as u64;
+        if num == 0 {
+            num = CURSOR_READ_SIZE as u64;
+        }
+    }
+    hc.chunk = num as u32;
+    if hc.req.cap_timeout(&cx.eng.cfg) {
+        hc.req.capped = true;
+    }
+    let resp3 = cx.client.resp >= 3;
+    let (reply, done) = {
+        let eng: &Engine = cx.eng;
+        let ix: &Index = eng.search.indexes.get(&c.index).expect("alive");
+        let HybCursor { req, lookups, items, dmds, tail, total, db, .. } = &mut *hc;
+        // The documents gone since read as deleted.
+        for d in dmds.iter_mut() {
+            if ix.docs.get(d.id).is_none() {
+                d.flags |= DOC_DELETED;
+            }
+        }
+        let mut rows = Vec::new();
+        let mut rc = St::Ok;
+        while (rows.len() as u64) < num {
+            let Some(p) = items.pop_front() else {
+                rc = std::mem::replace(tail, St::Eof);
+                break;
+            };
+            let dmd = p.dmd.map(|i| &dmds[i]);
+            let sv: &[_] = match dmd {
+                Some(d) if p.has_sv => &d.sort,
+                _ => &[],
+            };
+            rows.push(Res { doc_id: p.doc_id, score: p.score, expl: p.expl, dmd, row: Row { dyn_vals: p.vals, sv }, ixr: p.ixr });
+        }
+        let policy = Policy::of(req.on_timeout);
+        let mut pcx = Pcx {
+            eng,
+            db: *db,
+            spec: &ix.spec,
+            lookups: std::mem::take(lookups),
+            total: 0,
+            skipped: 0,
+            result_limit: 0,
+            min_score: 0.0,
+            err: None,
+            force: ix.spec.is_json() && req.dialect < 3,
+            dialect: req.dialect,
+            prof: None,
+            policy,
+            tmo: Tmo::default(),
+        };
+        let mut warnings = Vec::new();
+        if resp3 {
+            if rc == St::TimedOut {
+                warnings.push(Reply::Status(TIMEOUT_WARNING.into()));
+            }
+            if req.capped {
+                warnings.push(Reply::Status(CAPPED_WARNING.into()));
+            }
+        }
+        let shown = std::mem::take(total);
+        let li = pcx.lookups.len() - 1;
+        let reply = chunk_reply(req, &mut pcx, li, None, &rows, resp3, (shown, shown), warnings);
+        drop(rows);
+        *lookups = std::mem::take(&mut pcx.lookups);
+        let done = match rc {
+            St::Ok => false,
+            St::TimedOut => policy != Policy::Return,
+            _ => true,
+        };
+        (reply, done)
+    };
+    let id = c.id;
+    if !done {
+        c.exec = Some(Exec(hc));
+        cx.eng.search.cursors.pause(c);
+    }
+    Ok(Reply::Array(vec![reply, Reply::Int(if done { 0 } else { id as i64 })]))
 }

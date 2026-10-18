@@ -20,9 +20,11 @@
 //! !ids CMD                in the reply, integers and `id=`/`redir=` tokens equal to a
 //!                         connection's client id become `id:N` (ids differ between servers)
 //! CLIENT KILL ID {id:2}   `{id:N}` expands to connection N's client id on each server
-//! !capture c CMD          the reply's last element, an integer (a cursor id), is kept as `c`
+//! !capture c CMD          the reply's last integer element (a cursor id) is kept as `c`
 //!                         on each side: from then on that value reads `{$c}` in every reply,
 //!                         and `{$c}` in a command expands to the side's own value
+//!                         (`!capture c=F CMD`: the integer after the field `F`, in a map or a
+//!                         flat key/value array)
 //! !send BLPOP l 5         send without reading the reply (read it later with @recv)
 //! @recv                   read one reply on the current connection and compare
 //! @recv ids               … with `!ids` applied
@@ -467,9 +469,17 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
         let a = p.redis.cmd(&args_r).await.map(shown);
         let b = p.roll.read_timeout_after_send(&args).await.map(|r| r.map(shown));
         let (a, b) = if by_id { (a.map(|r| name_ids(&r, &ids_r)), b.map(|r| r.map(|r| name_ids(&r, &ids_o)))) } else { (a, b) };
-        if let Some(name) = &capture {
+        if let Some(spec) = &capture {
+            let (name, field) = match spec.split_once('=') {
+                Some((n, f)) => (n.to_string(), Some(f)),
+                None => (spec.clone(), None),
+            };
+            let name = &name;
             for (side, r) in [(&mut vars.0, a.as_ref().ok()), (&mut vars.1, b.as_ref().ok().and_then(|r| r.as_ref()))] {
-                if let Some(v) = r.and_then(last_int) {
+                if let Some(v) = r.and_then(|r| match field {
+                    Some(f) => field_int(r, f),
+                    None => last_int(r),
+                }) {
                     side.retain(|(n, _)| n != name);
                     side.push((name.clone(), v));
                 }
@@ -535,13 +545,23 @@ fn name_vars(r: &Reply, vars: &[(String, i64)]) -> Reply {
     }
 }
 
-/// `!capture`'s value: the last element of an array reply, when it is an integer.
+/// `!capture`'s value: the last integer element of an array reply.
 fn last_int(r: &Reply) -> Option<i64> {
     match r {
-        Reply::Array(items) => match items.last() {
-            Some(Reply::Int(v)) => Some(*v),
+        Reply::Array(items) => items.iter().rev().find_map(|x| match x {
+            Reply::Int(v) => Some(*v),
             _ => None,
-        },
+        }),
+        _ => None,
+    }
+}
+
+/// `!capture c=F`'s value: the integer after the field `F` (a map's, or a flat array's).
+fn field_int(r: &Reply, f: &str) -> Option<i64> {
+    let is = |k: &Reply| matches!(k, Reply::Status(s) if s == f) || matches!(k, Reply::Bulk(b) if b[..] == *f.as_bytes());
+    match r {
+        Reply::Map(pairs) => pairs.iter().find(|(k, _)| is(k)).and_then(|(_, v)| if let Reply::Int(v) = v { Some(*v) } else { None }),
+        Reply::Array(items) => items.windows(2).find(|w| is(&w[0])).and_then(|w| if let Reply::Int(v) = w[1] { Some(v) } else { None }),
         _ => None,
     }
 }

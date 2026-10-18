@@ -7,6 +7,7 @@ use super::rsdict::RsDict;
 use super::error::{Code, QErr};
 use super::triemap::TrieMap;
 use bytes::Bytes;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// `maxIndexes_g`.
 pub const MAX_INDEXES: usize = 200_000;
@@ -47,6 +48,34 @@ pub struct Global {
     pub svs_pool: bool,
     /// The process-wide switches FT.DEBUG sets.
     pub debug: DebugState,
+    /// The queries' timeout counters.
+    pub query_stats: QueryStats,
+}
+
+/// `RSGlobalStats.totalStats.queries`' timeout counters, INFO search's
+/// `search_{coord,shard}_total_query_{errors,warnings}_timeout`: a reply's timeout warning
+/// (every chunk's) and ON_TIMEOUT FAIL's timeout error, by user-facing (`coord`) and internal
+/// (`_FT.*`, shard) requests. Counted through a shared engine reference, hence atomics.
+#[derive(Debug, Default)]
+pub struct QueryStats {
+    pub coord_errors_timeout: AtomicU64,
+    pub coord_warnings_timeout: AtomicU64,
+    pub shard_errors_timeout: AtomicU64,
+    pub shard_warnings_timeout: AtomicU64,
+}
+
+impl QueryStats {
+    /// `QueryErrorsGlobalStats_UpdateError` / `QueryWarningsGlobalStats_UpdateWarning` with
+    /// a timeout.
+    pub fn timeout(&self, error: bool, internal: bool) {
+        let c = match (error, internal) {
+            (true, false) => &self.coord_errors_timeout,
+            (false, false) => &self.coord_warnings_timeout,
+            (true, true) => &self.shard_errors_timeout,
+            (false, true) => &self.shard_warnings_timeout,
+        };
+        c.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// What `_FT.DEBUG` toggles outside any index: the thread pools' pause states, the test

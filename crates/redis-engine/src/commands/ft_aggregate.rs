@@ -18,8 +18,15 @@
 //! query, what it still holds is replayed, with the metadata of the documents it references, as
 //! the module's buffered results hold theirs. Rebuilt iterators read the index as it is then,
 //! like the module's live readers (new entries show, deleted documents are skipped), with
-//! wildcard ranges ending at the first chunk's max id; prefix and fuzzy expansions and term
-//! IDFs are recomputed, where the module keeps the first chunk's.
+//! wildcard ranges ending at the first chunk's max id; they open the readers the first chunk
+//! opened, with its IDFs, and expand prefixes, fuzzy terms and tag patterns to its terms
+//! (`Memo`), as the module's kept iterators do.
+//!
+//! Timeouts (`search-timeout`, TIMEOUT): the query reader checks the clock every 100 reads, and
+//! `_FT.DEBUG`'s `TIMEOUT_AFTER_N` times it out after that many results. Downstream, ON_TIMEOUT
+//! RETURN yields what the processors hold (sorters their heap, loaders their buffer; groupers
+//! keep accumulating on a cursor's next read) with a warning, FAIL replies with the timeout
+//! error (FT.PROFILE: no results, the warning), and a timed-out cursor stays open under RETURN.
 //!
 //! FT.PROFILE runs the same pipeline with every iterator and processor counted
 //! (`Profile_AddIters`, `Profile_AddRPs`). An FT.SEARCH's pipeline is built the way the module
@@ -51,7 +58,7 @@ use crate::search::iters::{self, BoxIt, Empty, IxResult, K_INTERSECT, K_TERM, K_
 use crate::search::mmheap::MmHeap;
 use crate::search::optimizer::{self as qopt, OptType};
 use crate::search::qast;
-use crate::search::qeval::EvalCx;
+use crate::search::qeval::{EvalCx, Memo};
 use crate::search::quantile::QuantStream;
 use crate::search::scorers::{self, Expl, Scorer};
 use crate::search::spec::Spec;
@@ -62,8 +69,39 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Instant;
 
+mod debug;
 mod hybrid;
-pub(super) use hybrid::{ft_hybrid, profile_hybrid};
+pub(super) use hybrid::{debug_hybrid, debug_internal_hybrid, ft_hybrid, profile_hybrid};
+
+/// `_FT.DEBUG FT.SEARCH|FT.AGGREGATE|FT.PROFILE|_FT.SEARCH|_FT.AGGREGATE|_FT.PROFILE …
+/// DEBUG_PARAMS_COUNT <count>` (`argv` from the command's name on).
+pub(super) fn debug_query(cx: &mut Cx, argv: &[Bytes]) -> CmdResult {
+    let clock = Instant::now();
+    let name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
+    match name.as_str() {
+        "FT.PROFILE" => {
+            // `ProfileCommandHandlerImp`.
+            if argv[3..].iter().any(|a| a.eq_ignore_ascii_case(b"WITHCURSOR")) {
+                return Err(Error::msg("FT.PROFILE does not support cursor"));
+            }
+            verify_acl(cx, &argv[1])?;
+            profile_with(cx, argv, true, clock)
+        }
+        "_FT.PROFILE" => profile_with(cx, argv, true, clock),
+        _ => {
+            let (c, p) = debug::split(argv)?;
+            if c.len() < 2 {
+                return Err(arity_error(&format!("_FT.DEBUG|{name}")));
+            }
+            if name.ends_with("SEARCH") { fq::search_with(cx, c, Some(p)) } else { aggregate_with(cx, c, Some(p)) }
+        }
+    }
+}
+
+/// `parseAndCompileDebug` for a request run with `background` workers.
+pub(super) fn debug_parse(params: &[Bytes], req: &areq::Request, background: bool) -> Result<Option<u32>, QErr> {
+    debug::parse(params, Policy::of(req.on_timeout), background)
+}
 
 /// FT.AGGREGATE index query [options].
 pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
@@ -71,7 +109,14 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(arity_error("FT.AGGREGATE"));
     }
     verify_acl(cx, &args[1])?;
+    aggregate_with(cx, args, None)
+}
+
+/// FT.AGGREGATE's request, built and run; `_FT.DEBUG FT.AGGREGATE` gives its debug parameters
+/// (`args` without them; `_FT.AGGREGATE` marks an internal request).
+pub(super) fn aggregate_with(cx: &mut Cx, args: &[Bytes], dbg: Option<&[Bytes]>) -> CmdResult {
     let mut req = areq::compile(Command::Aggregate, &cx.eng.cfg, &args[2..])?;
+    req.internal = args[0].first() == Some(&b'_');
     let Some(name) = cx.eng.search.load(cstr(&args[1]), false) else {
         return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(&args[1]))).into());
     };
@@ -96,6 +141,9 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         req.flags |= F_HAS_DEPLETER;
     }
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    if let Some(p) = dbg {
+        req.set_debug(debug_parse(p, &req, background));
+    }
     let db = cx.client.db;
     if !is_cursor {
         let eng: &Engine = cx.eng;
@@ -105,8 +153,13 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Ok(reply);
     }
 
-    // `AREQ_StartCursor`: the cursor is reserved once the pipeline is built, then its first
-    // chunk runs (`runCursor`).
+    start_cursor(cx, name, req, db, resp3, background, None)
+}
+
+/// `AREQ_StartCursor`: the cursor is reserved once the pipeline is built, then its first
+/// chunk runs (`runCursor`); `prof` profiles it (an internal FT.PROFILE).
+#[allow(clippy::too_many_arguments)]
+fn start_cursor(cx: &mut Cx, name: Bytes, req: areq::Request, db: usize, resp3: bool, background: bool, mut prof: Option<Box<ProfCur>>) -> CmdResult {
     let cap = cx.eng.cfg.num("search-index-cursor-limit") as i64;
     let spec_id = cx.eng.search.indexes.get(&name).expect("loaded").id;
     cx.eng.search.cursors.collect_expired();
@@ -115,10 +168,11 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let chunk = if req.cursor.chunk_size != 0 { req.cursor.chunk_size } else { CURSOR_READ_SIZE };
     let mut st = CursorSt { chunk, db, ..CursorSt::default() };
     let mut started = false;
+    let mut out = prof.as_ref().map(|p| p.chunk_out());
     let res = {
         let eng: &Engine = cx.eng;
         let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
-        run(eng, ix, &req, db, resp3, background, chunk, Some(&mut st), gate, &mut started, None)
+        run(eng, ix, &req, db, resp3, background, chunk, Some(&mut st), gate, &mut started, out.as_mut())
     };
     if !started {
         return res.map(|(r, _)| r);
@@ -128,11 +182,34 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let mut c = cursors.take_running(id).expect("reserved");
     let (reply, done) = res?;
     count_dialect(cx, &name, &req);
+    if let (Some(p), Some(o)) = (prof.as_mut(), out.as_ref()) {
+        p.merge(o);
+    }
+    let reply = cursor_reply(reply, id, done, prof.as_deref(), resp3);
     if !done {
+        st.prof = prof;
         c.exec = Some(Exec(Box::new(CursorExec { req, st })));
         cx.eng.search.cursors.pause(c);
     }
-    Ok(Reply::Array(vec![reply, Reply::Int(if done { 0 } else { id as i64 })]))
+    Ok(reply)
+}
+
+/// A cursor's chunk reply: the results and the cursor's id (0 once done); a profiled
+/// cursor's has the profile (RESP2: last, a null until done; RESP3: in a map with the
+/// results, once done).
+fn cursor_reply(reply: Reply, id: u64, done: bool, prof: Option<&ProfCur>, resp3: bool) -> Reply {
+    let id = Reply::Int(if done { 0 } else { id as i64 });
+    let Some(p) = prof else { return Reply::Array(vec![reply, id]) };
+    let profile = done.then(|| p.reply());
+    if resp3 {
+        let mut m = vec![(Reply::Status("Results".into()), reply)];
+        if let Some(pr) = profile {
+            m.push((Reply::Status("Profile".into()), pr));
+        }
+        Reply::Array(vec![Reply::Map(m), id])
+    } else {
+        Reply::Array(vec![reply, id, profile.unwrap_or(Reply::Nil)])
+    }
 }
 
 /// FT.PROFILE index SEARCH|AGGREGATE|HYBRID [LIMITED] QUERY query [options]
@@ -148,6 +225,12 @@ pub(super) fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(Error::msg("FT.PROFILE does not support cursor"));
     }
     verify_acl(cx, &args[1])?;
+    profile_with(cx, args, false, clock)
+}
+
+/// `RSProfileCommandImp`: `debug` (`_FT.DEBUG FT.PROFILE`) strips the debug parameters off a
+/// SEARCH or AGGREGATE (HYBRID takes them as its own arguments); `_FT.PROFILE` is internal.
+pub(super) fn profile_with(cx: &mut Cx, args: &[Bytes], debug: bool, clock: Instant) -> CmdResult {
     let cmd = if c_eq(&args[2], "SEARCH") {
         Command::Search
     } else if c_eq(&args[2], "AGGREGATE") {
@@ -173,9 +256,22 @@ pub(super) fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if !c_eq(&args[at], "QUERY") {
         return Err(Error::msg("The QUERY keyword is expected"));
     }
-    let rest = &args[at + 1..];
+    let internal = args[0].first() == Some(&b'_');
+    // `DEBUG_execCommandCommon` over `argv[0], argv[1]` and the query's arguments.
+    let (rest, params): (Vec<Bytes>, Option<Vec<Bytes>>) = if debug {
+        let mut v = vec![args[0].clone(), args[1].clone()];
+        v.extend_from_slice(&args[at + 1..]);
+        let (c, p) = debug::split(&v)?;
+        if c.len() < 2 {
+            return Err(arity_error(&format!("_FT.DEBUG|{}", String::from_utf8_lossy(&args[0]).to_ascii_uppercase())));
+        }
+        (c[2..].to_vec(), Some(p.to_vec()))
+    } else {
+        (args[at + 1..].to_vec(), None)
+    };
     let search = cmd == Command::Search;
-    let mut req = areq::compile(cmd, &cx.eng.cfg, rest)?;
+    let mut req = areq::compile(cmd, &cx.eng.cfg, &rest)?;
+    req.internal = internal;
     let Some(name) = cx.eng.search.load(cstr(&args[1]), false) else {
         return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(&args[1]))).into());
     };
@@ -192,14 +288,26 @@ pub(super) fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         req.flags |= F_HAS_DEPLETER;
     }
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    if let Some(p) = &params {
+        req.set_debug(debug_parse(p, &req, background));
+    }
     let db = cx.client.db;
-    let mut prof = ProfOut { limited, clock, build_ns: 0, iters: None, rps: Vec::new(), expansions: false };
+    // An internal profile may open a cursor (`_FT.CURSOR PROFILE` ends it with the profile).
+    if !search && req.flags & F_IS_CURSOR != 0 {
+        let max = cx.eng.cfg.num("search-cursor-max-idle") as i64;
+        if req.cursor.max_idle == 0 || req.cursor.max_idle as i64 > max {
+            req.cursor.max_idle = max as u32;
+        }
+        let pc = ProfCur { limited, background, internal, clock: Some(clock), parse_ns, ..ProfCur::default() };
+        return start_cursor(cx, name, req, db, resp3, background, Some(Box::new(pc)));
+    }
+    let mut prof = ProfOut::new(limited, clock);
     let results = {
         let eng: &Engine = cx.eng;
         let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
         if search {
             // FT.SEARCH's reply, then its pipeline run again for the counters.
-            let reply = fq::run_search(eng, ix, &req, db, resp3, background)?;
+            let reply = fq::run_search(eng, ix, &req, db, resp3, background, true)?;
             run(eng, ix, &req, db, resp3, background, u32::MAX, None, None, &mut false, Some(&mut prof))?;
             reply
         } else {
@@ -207,25 +315,143 @@ pub(super) fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
     };
     count_dialect(cx, &name, &req);
-    let ms = |ns: u64| Reply::Double(ns as f64 / 1_000_000.0);
+    let mut pc = ProfCur { limited, background, internal, clock: Some(clock), parse_ns, ..ProfCur::default() };
+    pc.merge(&prof);
+    pc.reads = 0;
+    let profile = pc.reply();
     let kv = |k: &str, v: Reply| (Reply::Status(k.into()), v);
-    let mut shard = vec![
-        kv("Total profile time", ms(clock.elapsed().as_nanos() as u64)),
-        kv("Parsing time", ms(parse_ns)),
-        kv("Workers queue time", ms(0)),
-        kv("Pipeline creation time", ms(prof.build_ns.saturating_sub(parse_ns))),
-    ];
-    if background {
-        shard.push(kv("Total GIL time", ms(0)));
-    }
-    let warning = if prof.expansions { "Max prefix expansions limit was reached" } else { "None" };
-    shard.push(kv("Warning", Reply::Array(vec![Reply::Status(warning.into())])));
-    if let Some(it) = prof.iters.take() {
-        shard.push(kv("Iterators profile", it));
-    }
-    shard.push(kv("Result processors profile", Reply::Array(std::mem::take(&mut prof.rps))));
-    let profile = Reply::Map(vec![kv("Shards", Reply::Array(vec![Reply::Map(shard)])), kv("Coordinator", Reply::Map(Vec::new()))]);
     Ok(if resp3 { Reply::Map(vec![kv("Results", results), kv("Profile", profile)]) } else { Reply::Array(vec![results, profile]) })
+}
+
+/// A profile's counters (`ProfilePrinterCtx`, the processors' `RPProfile`s, the iterators'),
+/// summed over a cursor's reads.
+#[derive(Default)]
+struct ProfCur {
+    limited: bool,
+    background: bool,
+    internal: bool,
+    /// When the command started.
+    clock: Option<Instant>,
+    parse_ns: u64,
+    build_ns: u64,
+    /// `cursor_reads` (0: not a cursor).
+    reads: u64,
+    /// The processors (as the first chunk built them) and their calls and time.
+    names: Vec<(String, bool)>,
+    counts: Vec<(u64, u64)>,
+    iters: Option<Reply>,
+    timed_out: bool,
+    expansions: bool,
+}
+
+impl ProfCur {
+    /// A chunk's profile collector.
+    fn chunk_out(&self) -> ProfOut {
+        ProfOut::new(self.limited, self.clock.unwrap_or_else(Instant::now))
+    }
+
+    /// A chunk's counters, added.
+    fn merge(&mut self, o: &ProfOut) {
+        if self.names.is_empty() {
+            self.names = o.names.clone();
+            self.counts = o.counts.clone();
+            self.build_ns = o.build_ns.saturating_sub(self.parse_ns);
+        } else {
+            for (i, &(n, ns)) in o.counts.iter().enumerate() {
+                if let Some(c) = self.counts.get_mut(o.base + i) {
+                    c.0 += n;
+                    c.1 += ns;
+                }
+            }
+        }
+        if let Some(it) = &o.iters {
+            self.iters = Some(match self.iters.take() {
+                Some(acc) => merge_iters(acc, it),
+                None => it.clone(),
+            });
+        }
+        self.timed_out |= o.timed_out;
+        self.expansions |= o.expansions;
+        self.reads += 1;
+    }
+
+    /// `Profile_PrintInFormat` with `Profile_PrintCommon`: the single shard, no coordinator.
+    fn reply(&self) -> Reply {
+        let ms = |ns: u64| Reply::Double(ns as f64 / 1_000_000.0);
+        let kv = |k: &str, v: Reply| (Reply::Status(k.into()), v);
+        let mut shard = vec![
+            kv("Total profile time", ms(self.clock.map_or(0, |c| c.elapsed().as_nanos() as u64))),
+            kv("Parsing time", ms(self.parse_ns)),
+            kv("Workers queue time", ms(0)),
+            kv("Pipeline creation time", ms(self.build_ns)),
+        ];
+        if self.background {
+            shard.push(kv("Total GIL time", ms(0)));
+        }
+        if self.internal {
+            shard.push(kv("Coordinator dispatch time [ms]", ms(0)));
+        }
+        let mut w = Vec::new();
+        if self.timed_out {
+            w.push(Reply::Status(TIMEOUT_WARNING.into()));
+        }
+        if self.expansions {
+            w.push(Reply::Status("Max prefix expansions limit was reached".into()));
+        }
+        if w.is_empty() {
+            w.push(Reply::Status("None".into()));
+        }
+        shard.push(kv("Warning", Reply::Array(w)));
+        if self.reads > 0 {
+            shard.push(kv("Internal cursor reads", Reply::Int(self.reads as i64)));
+        }
+        if let Some(it) = &self.iters {
+            shard.push(kv("Iterators profile", it.clone()));
+        }
+        shard.push(kv("Result processors profile", Reply::Array(rps_reply(&self.names, &self.counts))));
+        Reply::Map(vec![kv("Shards", Reply::Array(vec![Reply::Map(shard)])), kv("Coordinator", Reply::Map(Vec::new()))])
+    }
+}
+
+/// `printProfileRP`: each processor's type, its own time (its upstream's taken off) and the
+/// results it gave (its calls but the last).
+fn rps_reply(names: &[(String, bool)], counts: &[(u64, u64)]) -> Vec<Reply> {
+    let mut out = Vec::with_capacity(names.len());
+    let mut upstream = 0.0;
+    for (i, (name, gil)) in names.iter().enumerate() {
+        let (n, ns) = counts.get(i).copied().unwrap_or((0, 0));
+        let total = ns as f64 / 1_000_000.0;
+        let mut m = vec![(Reply::Status("Type".into()), Reply::Status(name.clone()))];
+        if *gil {
+            m.push((Reply::Status("GIL-Time".into()), Reply::Double(0.0)));
+        }
+        m.push((Reply::Status("Time".into()), Reply::Double(total - upstream)));
+        m.push((Reply::Status("Results processed".into()), Reply::Int(n as i64 - 1)));
+        out.push(Reply::Map(m));
+        upstream = total;
+    }
+    out
+}
+
+/// Two reads' iterator profiles (the same tree) as one: their counters and times summed.
+fn merge_iters(acc: Reply, new: &Reply) -> Reply {
+    match (acc, new) {
+        (Reply::Map(a), Reply::Map(b)) if a.len() == b.len() => Reply::Map(
+            a.into_iter()
+                .zip(b)
+                .map(|((k, v), (_, w))| {
+                    let v = match (&k, v, w) {
+                        (Reply::Status(n), Reply::Int(x), Reply::Int(y)) if n == "Number of reading operations" => Reply::Int(x + y),
+                        (Reply::Status(n), Reply::Double(x), Reply::Double(y)) if n == "Time" => Reply::Double(x + y),
+                        (_, v, w) => merge_iters(v, w),
+                    };
+                    (k, v)
+                })
+                .collect(),
+        ),
+        (Reply::Array(a), Reply::Array(b)) if a.len() == b.len() => Reply::Array(a.into_iter().zip(b).map(|(v, w)| merge_iters(v, w)).collect()),
+        (a, _) => a,
+    }
 }
 
 /// `Document_EvalExpression`: FT.ADD's IF condition on the indexed document's schema fields.
@@ -300,10 +526,17 @@ pub(super) fn ft_cursor_read(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if !alive {
         return Err(QErr::new(Code::DroppedBackground, "The index was dropped while the cursor was idle").into());
     }
-    let Some(mut exec) = c.exec.take().and_then(|e| e.0.downcast::<CursorExec>().ok()) else {
+    let Some(any) = c.exec.take() else {
         return Err(Error::msg(format!("Cursor not found, id: {cid}")));
     };
-    // `runCursor`: COUNT sticks for the reads after.
+    let mut exec = match any.0.downcast::<CursorExec>() {
+        Ok(e) => e,
+        Err(any) => match any.downcast::<hybrid::HybCursor>() {
+            Ok(hc) => return hybrid::read_cursor(cx, c, hc, count as u64),
+            Err(_) => return Err(Error::msg(format!("Cursor not found, id: {cid}"))),
+        },
+    };
+    // `runCursor`: COUNT sticks for the reads after; the foreground cap applies again.
     let mut num = count as u64;
     if num == 0 {
         num = exec.st.chunk as u64;
@@ -312,22 +545,87 @@ pub(super) fn ft_cursor_read(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
     }
     exec.st.chunk = num as u32;
+    if exec.req.cap_timeout(&cx.eng.cfg) {
+        exec.req.capped = true;
+    }
     let resp3 = cx.client.resp >= 3;
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    let mut prof = exec.st.prof.take();
+    let mut out = prof.as_ref().map(|p| p.chunk_out());
     let (reply, done) = {
         let eng: &Engine = cx.eng;
         let ix: &Index = eng.search.indexes.get(&c.index).expect("alive");
         let CursorExec { req, st } = &mut *exec;
         // The documents load from the database the cursor was opened in.
         let db = st.db;
-        run(eng, ix, req, db, resp3, background, num as u32, Some(st), None, &mut false, None)?
+        run(eng, ix, req, db, resp3, background, num as u32, Some(st), None, &mut false, out.as_mut())?
     };
+    if let (Some(p), Some(o)) = (prof.as_mut(), out.as_ref()) {
+        p.merge(o);
+    }
     let id = c.id;
+    let reply = cursor_reply(reply, id, done, prof.as_deref(), resp3);
     if !done {
+        exec.st.prof = prof;
         c.exec = Some(Exec(exec));
         cx.eng.search.cursors.pause(c);
     }
-    Ok(Reply::Array(vec![reply, Reply::Int(if done { 0 } else { id as i64 })]))
+    Ok(reply)
+}
+
+/// `RSCursorProfileCommand`: _FT.CURSOR PROFILE index cursor_id — a profiled (internal)
+/// cursor's profile so far, after an empty chunk; the cursor ends.
+pub(super) fn ft_cursor_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if args.len() < 4 {
+        return Err(arity_error("_FT.CURSOR|PROFILE"));
+    }
+    let Some(cid) = crate::util::parse_i64(&args[3]) else {
+        return Err(Error::msg("Bad cursor ID"));
+    };
+    // `%d` of the id.
+    let shown = cid as i32;
+    let Some(mut c) = cx.eng.search.cursors.take(cid as u64) else {
+        return Err(Error::msg(format!("Cursor not found, id: {shown}")));
+    };
+    let Some(any) = c.exec.take() else {
+        return Err(Error::msg(format!("Cursor not found, id: {shown}")));
+    };
+    let mut exec = match any.0.downcast::<CursorExec>() {
+        Ok(e) => e,
+        Err(any) => {
+            c.exec = Some(Exec(any));
+            cx.eng.search.cursors.pause(c);
+            return Err(Error::msg(format!("cursor request is not profile, id: {shown}")));
+        }
+    };
+    let Some(prof) = exec.st.prof.take() else {
+        c.exec = Some(Exec(exec));
+        cx.eng.search.cursors.pause(c);
+        return Err(Error::msg(format!("cursor request is not profile, id: {shown}")));
+    };
+    let alive = cx.eng.search.indexes.get(&c.index).is_some_and(|ix| ix.id == c.spec_id);
+    if !alive {
+        return Err(Error::msg("The index was dropped while the cursor was idle"));
+    }
+    // `sendChunk_ReplyOnly_EmptyResults`.
+    let resp3 = cx.client.resp >= 3;
+    let req = &exec.req;
+    let empty = if resp3 {
+        let mut warnings = Vec::new();
+        if req.capped {
+            warnings.push(Reply::Status(CAPPED_WARNING.into()));
+        }
+        Reply::Map(vec![
+            (Reply::Status("attributes".into()), Reply::Array(Vec::new())),
+            (Reply::Status("format".into()), Reply::Status(if req.flags & FORMAT_EXPAND != 0 { "EXPAND" } else { "STRING" }.into())),
+            (Reply::Status("results".into()), Reply::Array(Vec::new())),
+            (Reply::Status("total_results".into()), Reply::Int(0)),
+            (Reply::Status("warning".into()), Reply::Array(warnings)),
+        ])
+    } else {
+        Reply::Array(vec![Reply::Int(0)])
+    };
+    Ok(cursor_reply(empty, 0, true, Some(&prof), resp3))
 }
 
 /// `RSCursorDelCommand`: FT.CURSOR DEL index cursor_id.
@@ -447,12 +745,114 @@ impl<'a> Res<'a> {
     }
 }
 
-/// `RS_RESULT_*` (timeouts aside).
+/// `RS_RESULT_*`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum St {
     Ok,
     Eof,
     Error,
+    TimedOut,
+}
+
+/// `RSTimeoutPolicy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(super) enum Policy {
+    #[default]
+    Return,
+    Fail,
+    Strict,
+}
+
+impl Policy {
+    /// From `search-on-timeout`'s index.
+    pub(super) fn of(v: i64) -> Policy {
+        match v {
+            1 => Policy::Fail,
+            2 => Policy::Strict,
+            _ => Policy::Return,
+        }
+    }
+}
+
+/// `TIMEOUT_COUNTER_LIMIT`: the query reader consults the clock once per this many reads.
+const TIMEOUT_COUNTER_LIMIT: u32 = 100;
+
+/// A request's clock (`SearchTime`) as its query reader checks it, and `_FT.DEBUG`'s
+/// `RPTimeoutAfterCount` just downstream of the reader.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Tmo {
+    /// `sctx->time.timeout`: now plus the query's timeout (0: `INT32_MAX` ms).
+    deadline: Option<Instant>,
+    /// `RPQueryIterator.timeoutLimiter`; `None` (`REDISEARCH_UNINITIALIZED`) skips the checks.
+    limiter: Option<u32>,
+    /// `!skipTimeoutChecks`: the check after a buffered run.
+    checks: bool,
+    /// `TIMEOUT_AFTER_N`'s count and what is left of it.
+    after: Option<(u32, u32)>,
+    /// `RPTimeoutAfterCount_SimulateTimeout`: the clock reads as timed out until the call
+    /// returns.
+    sim: bool,
+}
+
+impl Tmo {
+    /// `SearchCtx_UpdateTime`, `shouldCheckInPipelineTimeout` (the limiter is set when the
+    /// reader is built) and the debug timeout, which turns the checks on.
+    pub(super) fn new(timeout_ms: i64, policy: Policy, background: bool, after: Option<u32>) -> Tmo {
+        let skip = !(timeout_ms > 0 && (policy == Policy::Return || !background));
+        let mut t = Tmo { deadline: None, limiter: (!skip).then_some(0), checks: !skip || after.is_some(), after: after.map(|n| (n, n)), sim: false };
+        t.refresh(timeout_ms);
+        t
+    }
+
+    /// `SearchCtx_UpdateTime` (a cursor's every read).
+    pub(super) fn refresh(&mut self, timeout_ms: i64) {
+        let ms = if timeout_ms == 0 { i32::MAX as i64 } else { timeout_ms as i32 as i64 };
+        self.deadline = Instant::now().checked_add(std::time::Duration::from_millis(ms.max(0) as u64));
+    }
+
+    /// `!skipTimeoutChecks`.
+    pub(super) fn checks(&self) -> bool {
+        self.checks
+    }
+
+    /// `TimedOut`.
+    pub(super) fn passed(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
+    /// `TimedOut_WithCounter`.
+    pub(super) fn tick(&mut self) -> bool {
+        let Some(c) = self.limiter.as_mut() else { return false };
+        *c += 1;
+        if *c != TIMEOUT_COUNTER_LIMIT {
+            return false;
+        }
+        *c = 0;
+        self.sim || self.passed()
+    }
+
+    /// `RPTimeoutAfterCount_Next`, before it calls its upstream (the root processor): past its
+    /// count it makes the root's next check time out.
+    pub(super) fn begin(&mut self) {
+        let Some((_, rem)) = self.after.as_mut() else { return };
+        if *rem == 0 {
+            self.limiter = Some(TIMEOUT_COUNTER_LIMIT - 1);
+            self.sim = true;
+        } else {
+            *rem -= 1;
+        }
+    }
+
+    /// … and once it returned: the clock is back, and a timeout restarts the count (a
+    /// cursor's next read).
+    pub(super) fn end(&mut self, timed_out: bool) {
+        if std::mem::take(&mut self.sim)
+            && timed_out
+            && let Some((count, rem)) = self.after.as_mut()
+        {
+            *rem = *count;
+        }
+    }
 }
 
 /// `QueryProcessingCtx` and what the processors read from the request.
@@ -471,6 +871,10 @@ struct Pcx<'a> {
     /// FT.PROFILE's per-processor counters (`RPProfile`): calls and their time, upstream's
     /// included, by chain position.
     prof: Option<Vec<(u64, u64)>>,
+    /// `timeoutPolicy`.
+    policy: Policy,
+    /// The query's clock.
+    tmo: Tmo,
 }
 
 impl Pcx<'_> {
@@ -493,9 +897,9 @@ trait Proc<'a> {
     fn profile_iters(&self, _pc: &PCtx) -> Option<Pairs> {
         None
     }
-    /// Drains its upstream before it yields (sorters, groupers, depleters, normalizers): once
-    /// a cursor's first chunk ran, what it still holds is all that is left upstream.
-    fn accumulates(&self) -> bool {
+    /// Drained its upstream and now yields what it holds (sorters, groupers, depleters,
+    /// normalizers): what it still holds is all a cursor's later chunks read from upstream.
+    fn drained(&self) -> bool {
         false
     }
     /// What a cursor keeps between chunks.
@@ -514,6 +918,8 @@ enum Saved {
     Pager { offset: u32, remaining: u32, skipping: bool },
     /// What the last accumulating processor had left, then its final status.
     Replay(VecDeque<Pend>, St),
+    /// A grouper's groups so far (a timeout stopped it).
+    Groups(Vec<Group>, HashMap<u64, usize>),
 }
 
 /// A result an accumulating processor still held when its cursor paused (the module's
@@ -549,6 +955,10 @@ struct Replay<'a> {
 impl<'a> Proc<'a> for Replay<'a> {
     fn name(&self) -> String {
         "Index".into()
+    }
+
+    fn drained(&self) -> bool {
+        true
     }
 
     fn next(&mut self, _up: &mut Chain<'a>, _cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
@@ -628,35 +1038,11 @@ impl<'a> Proc<'a> for QueryIt<'a> {
     }
 
     fn next(&mut self, _up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
-        loop {
-            let ixr = if let Some(rest) = self.rest.as_mut() {
-                let Some(ixr) = rest.pop_front() else { return St::Eof };
-                ixr
-            } else {
-                let more = match self.resume.take() {
-                    Some(last) => self.it.skip_to(last + 1) != Skip::Eof,
-                    None => self.it.read(),
-                };
-                if !more {
-                    return St::Eof;
-                }
-                let Some(cur) = self.it.current() else { return St::Eof };
-                cur.clone()
-            };
-            self.last = ixr.doc_id;
-            let ix: &'a Index = self.ix;
-            let Some(dmd) = ix.docs.get(ixr.doc_id) else { continue };
-            if dmd.flags & DOC_DELETED != 0 || (dmd.expire_at != 0 && dmd.expire_at <= self.now) {
-                continue;
-            }
-            cx.total += 1;
-            r.doc_id = dmd.id;
-            r.ixr = Some(ixr);
-            r.score = 0.0;
-            r.dmd = Some(dmd);
-            r.row.sv = &dmd.sort;
-            return St::Ok;
-        }
+        // Behind `RPTimeoutAfterCount`.
+        cx.tmo.begin();
+        let st = self.read(cx, r);
+        cx.tmo.end(st == St::TimedOut);
+        st
     }
 
     fn save(&mut self) -> Option<Saved> {
@@ -687,6 +1073,44 @@ impl<'a> Proc<'a> for QueryIt<'a> {
             }
             Saved::QueryRest(rest) => self.rest = Some(rest),
             _ => {}
+        }
+    }
+}
+
+impl<'a> QueryIt<'a> {
+    /// `rpQueryItNext`: the clock checked every 100 reads.
+    fn read(&mut self, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        loop {
+            if cx.tmo.tick() {
+                return St::TimedOut;
+            }
+            let ixr = if let Some(rest) = self.rest.as_mut() {
+                let Some(ixr) = rest.pop_front() else { return St::Eof };
+                ixr
+            } else {
+                let more = match self.resume.take() {
+                    Some(last) => self.it.skip_to(last + 1) != Skip::Eof,
+                    None => self.it.read(),
+                };
+                if !more {
+                    return St::Eof;
+                }
+                let Some(cur) = self.it.current() else { return St::Eof };
+                cur.clone()
+            };
+            self.last = ixr.doc_id;
+            let ix: &'a Index = self.ix;
+            let Some(dmd) = ix.docs.get(ixr.doc_id) else { continue };
+            if dmd.flags & DOC_DELETED != 0 || (dmd.expire_at != 0 && dmd.expire_at <= self.now) {
+                continue;
+            }
+            cx.total += 1;
+            r.doc_id = dmd.id;
+            r.ixr = Some(ixr);
+            r.score = 0.0;
+            r.dmd = Some(dmd);
+            r.row.sv = &dmd.sort;
+            return St::Ok;
         }
     }
 }
@@ -759,6 +1183,8 @@ struct MaxNorm<'a> {
     max: f64,
     key: Option<KRef>,
     yielding: bool,
+    /// The query timed out (ON_TIMEOUT RETURN): what the pool held, then the timeout.
+    timed_out: bool,
 }
 
 impl<'a> Proc<'a> for MaxNorm<'a> {
@@ -766,8 +1192,8 @@ impl<'a> Proc<'a> for MaxNorm<'a> {
         "Score Max Normalizer".into()
     }
 
-    fn accumulates(&self) -> bool {
-        true
+    fn drained(&self) -> bool {
+        self.yielding
     }
 
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
@@ -779,6 +1205,10 @@ impl<'a> Proc<'a> for MaxNorm<'a> {
                 match pull(up, cx, &mut p) {
                     St::Ok => {}
                     St::Eof => break,
+                    St::TimedOut if cx.policy == Policy::Return => {
+                        self.timed_out = true;
+                        break;
+                    }
                     st => {
                         cx.result_limit = saved;
                         return st;
@@ -790,7 +1220,7 @@ impl<'a> Proc<'a> for MaxNorm<'a> {
             cx.result_limit = saved;
             self.yielding = true;
         }
-        let Some(p) = self.pool.pop() else { return St::Eof };
+        let Some(p) = self.pool.pop() else { return if std::mem::take(&mut self.timed_out) { St::TimedOut } else { St::Eof } };
         *r = p;
         let old = r.score;
         if self.max != 0.0 {
@@ -852,6 +1282,14 @@ struct Sorter<'a> {
     by: SortBy,
     pooled: Res<'a>,
     yielding: bool,
+    /// The query timed out (ON_TIMEOUT RETURN): the heap, then the timeout.
+    timed_out: bool,
+}
+
+impl Sorter<'_> {
+    fn new(size: usize, by: SortBy) -> Self {
+        Sorter { heap: MmHeap::new(size), by, pooled: Res::new(), yielding: false, timed_out: false }
+    }
 }
 
 impl<'a> Sorter<'a> {
@@ -868,8 +1306,8 @@ impl<'a> Proc<'a> for Sorter<'a> {
         "Sorter".into()
     }
 
-    fn accumulates(&self) -> bool {
-        true
+    fn drained(&self) -> bool {
+        self.yielding
     }
 
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
@@ -880,6 +1318,16 @@ impl<'a> Proc<'a> for Sorter<'a> {
                 match pull(up, cx, &mut self.pooled) {
                     St::Ok => {}
                     St::Eof => break,
+                    // RETURN yields the sorted prefix, RETURN-STRICT leaves it to the drain.
+                    St::TimedOut if cx.policy != Policy::Fail => {
+                        cx.result_limit = saved;
+                        self.yielding = true;
+                        if cx.policy == Policy::Strict {
+                            return St::TimedOut;
+                        }
+                        self.timed_out = true;
+                        break;
+                    }
                     st => {
                         cx.result_limit = saved;
                         return st;
@@ -920,6 +1368,7 @@ impl<'a> Proc<'a> for Sorter<'a> {
                 *r = best;
                 St::Ok
             }
+            None if std::mem::take(&mut self.timed_out) => St::TimedOut,
             None => St::Eof,
         }
     }
@@ -987,7 +1436,7 @@ impl<'a> Proc<'a> for Counter {
         loop {
             match pull(up, cx, r) {
                 St::Ok => r.clear(),
-                St::Error => return St::Error,
+                st @ (St::Error | St::TimedOut) => return st,
                 St::Eof => {
                     // Profiled, the module's counter also counts a call of the last processor.
                     if let Some(last) = cx.prof.as_mut().and_then(|p| p.last_mut()) {
@@ -1026,8 +1475,8 @@ impl<'a> Proc<'a> for Depleter<'a> {
         "Depleter".into()
     }
 
-    fn accumulates(&self) -> bool {
-        true
+    fn drained(&self) -> bool {
+        self.done
     }
 
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
@@ -1040,6 +1489,12 @@ impl<'a> Proc<'a> for Depleter<'a> {
                     break;
                 }
                 self.buf.push_back(p);
+            }
+            // Only RETURN yields what was depleted before a timeout (the next call depletes
+            // on).
+            if self.last == St::TimedOut && cx.policy != Policy::Return {
+                self.last = St::Eof;
+                return St::TimedOut;
             }
             self.done = true;
         }
@@ -1153,7 +1608,7 @@ impl<'a> Proc<'a> for Loader<'a> {
                 self.buf.push(p);
             }
             cx.result_limit = limit;
-            if (st != St::Eof && st != St::Ok) || self.buf.is_empty() {
+            if (st != St::Eof && st != St::Ok && !(st == St::TimedOut && cx.policy == Policy::Return)) || self.buf.is_empty() {
                 return st;
             }
             self.last = st;
@@ -1655,8 +2110,19 @@ impl<'a> Proc<'a> for Grouper {
         "Grouper".into()
     }
 
-    fn accumulates(&self) -> bool {
-        true
+    fn drained(&self) -> bool {
+        self.yielding
+    }
+
+    /// A grouper a timeout stopped keeps its groups for the next chunk.
+    fn save(&mut self) -> Option<Saved> {
+        (!self.yielding).then(|| Saved::Groups(std::mem::take(&mut self.groups), std::mem::take(&mut self.index)))
+    }
+
+    fn restore(&mut self, s: Saved) {
+        if let Saved::Groups(groups, index) = s {
+            (self.groups, self.index) = (groups, index);
+        }
     }
 
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
@@ -1959,10 +2425,10 @@ impl<'a> Builder<'_, 'a> {
                 if is_last {
                     self.sortkey = krefs.first().copied();
                 }
-                self.push(Sorter { heap: MmHeap::new(max as usize), by: SortBy::Fields { keys: krefs, asc: a.asc_map }, pooled: Res::new(), yielding: false });
+                self.push(Sorter::new(max as usize, SortBy::Fields { keys: krefs, asc: a.asc_map }));
                 added = true;
             } else if self.has(F_IS_HYBRID) || (search && !optimized) || self.opt.scorer {
-                self.push(Sorter { heap: MmHeap::new(max as usize), by: SortBy::Score, pooled: Res::new(), yielding: false });
+                self.push(Sorter::new(max as usize, SortBy::Score));
                 added = true;
             }
         }
@@ -2207,7 +2673,7 @@ fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'
         let scorer = Scorer::find(&name).unwrap_or(Scorer::Bm25Std);
         b.push(ScoreRp { scorer, args, explain: b.has(F_SEND_SCOREEXPLAIN), key });
         if explicit.as_deref() == Some(b"BM25STD.NORM") {
-            b.push(MaxNorm { pool: Vec::new(), max: 0.0, key, yielding: false });
+            b.push(MaxNorm { pool: Vec::new(), max: 0.0, key, yielding: false, timed_out: false });
         }
     }
 
@@ -2297,6 +2763,12 @@ struct CursorSt {
     chunk: u32,
     /// The query's metric requests (yielded distances).
     metrics: Vec<Vec<u8>>,
+    /// The query reader's timeout checks and `TIMEOUT_AFTER_N`'s count.
+    tmo: Tmo,
+    /// A profiled cursor's counters.
+    prof: Option<Box<ProfCur>>,
+    /// The readers and expansions the first chunk's iterators were built from.
+    memo: Memo,
 }
 
 /// `RSGlobalConfig.cursorReadSize`.
@@ -2313,7 +2785,28 @@ pub(super) struct ProfOut {
     pub iters: Option<Reply>,
     pub rps: Vec<Reply>,
     pub expansions: bool,
+    /// The query timed out.
+    pub timed_out: bool,
+    /// The processors run (their types, whether they hold the GIL) and their counters.
+    names: Vec<(String, bool)>,
+    counts: Vec<(u64, u64)>,
+    /// The first processor's position in the chain as first built (a cursor's later reads
+    /// replay what a drained processor held).
+    base: usize,
 }
+
+impl ProfOut {
+    pub(super) fn new(limited: bool, clock: Instant) -> ProfOut {
+        ProfOut { limited, clock, build_ns: 0, iters: None, rps: Vec::new(), expansions: false, timed_out: false, names: Vec::new(), counts: Vec::new(), base: 0 }
+    }
+}
+
+/// `QueryWarning_Strwarning(QUERY_WARNING_CODE_TIMED_OUT)`.
+pub(super) const TIMEOUT_WARNING: &str = "Timeout limit was reached";
+
+/// `QUERY_WARNING_CODE_MAX_TIMEOUT_CAPPED`.
+pub(super) const CAPPED_WARNING: &str =
+    "Query TIMEOUT exceeded the configured maximum (search-_max-foreground-timeout-limit) while search-workers is disabled; effective timeout was capped";
 
 /// `QITR_ReportedTotal`: an unsigned 32-bit count.
 fn reported(total: i64) -> i64 {
@@ -2383,9 +2876,20 @@ fn run(
         can_skip_rich: req.opts.flags & qast::S_CAN_SKIP_RICH_RESULTS != 0,
         metric_requests: Vec::new(),
         hybrid: false,
+        memo: None,
     };
+    // A cursor's later chunks rebuild its iterators from what the first chunk opened.
+    if let Some(s) = cur.as_ref() {
+        ecx.memo = Some(RefCell::new(if s.started { s.memo.replaying() } else { Memo::default() }));
+    }
     let root = req.root.as_ref().expect("a parsed query");
     let mut it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };
+    if let Some(s) = cur.as_deref_mut()
+        && !s.started
+        && let Some(m) = ecx.memo.take()
+    {
+        s.memo = m.into_inner();
+    }
     // `QOptimizer_Iterators`.
     if let Some(plan) = req.optimizer.as_ref().filter(|_| req.flags & OPTIMIZE != 0 && pending.is_none()) {
         it = qopt::apply(plan, root, it, ix, &q, ecx.min_heap);
@@ -2401,6 +2905,16 @@ fn run(
         _ => 0.0,
     };
     let sargs = scorers::Args { avg_doc_len: avg, tanh_factor: req.bm25std_tanh as i64, payload: req.payload.as_deref() };
+    // The cursor's policy and clock are its request's; a read restarts the clock.
+    let policy = Policy::of(req.on_timeout);
+    let tmo = match cur.as_ref() {
+        Some(s) if s.started => {
+            let mut t = s.tmo;
+            t.refresh(req.timeout);
+            t
+        }
+        _ => Tmo::new(req.timeout, policy, background, req.timeout_after),
+    };
     let mut cx = Pcx {
         eng,
         db,
@@ -2414,6 +2928,8 @@ fn run(
         force: spec.is_json() && req.dialect < 3,
         dialect: req.dialect,
         prof: None,
+        policy,
+        tmo,
     };
     let mut metric_requests = std::mem::take(&mut ecx.metric_requests);
     // A replaying cursor builds no query iterator: its yielded distances keep their keys.
@@ -2425,6 +2941,10 @@ fn run(
         }
     }
     let Builder { mut chain, sortkey, .. } = build(req, &mut cx, it, ix, now, background, sargs, &metric_requests)?;
+    // `parseAndCompileDebug`, once the pipeline is built.
+    if let Some(e) = &req.debug_err {
+        return Err(e.clone().into());
+    }
     if let Some(p) = prof.as_deref_mut() {
         cx.prof = Some(vec![(0, 0); chain.len()]);
         p.build_ns = p.clock.elapsed().as_nanos() as u64;
@@ -2454,8 +2974,10 @@ fn run(
     }
 
     cx.result_limit = limit;
-    let collect = cfg.num("search-on-timeout") != 0 || cfg.num("search-on-oom") == 1;
-    let strict = cfg.num("search-on-timeout") == 2;
+    // `startPipelineCommon`: anything but ON_TIMEOUT RETURN (or ON_OOM FAIL) buffers the
+    // chunk before replying.
+    let collect = policy != Policy::Return || cfg.num("search-on-oom") == 1;
+    let strict = policy == Policy::Strict;
     let mut rows: Vec<Res<'_>> = Vec::new();
     let mut r = Res::new();
     let mut rc;
@@ -2474,11 +2996,27 @@ fn run(
             v.push(x);
         }
         collected = Some(v);
+        if cx.tmo.checks && cx.tmo.passed() {
+            rc = St::TimedOut;
+        }
     } else {
         rc = pull(&mut chain, &mut cx, &mut r);
     }
+    if let Some(s) = cur.as_deref_mut() {
+        s.tmo = cx.tmo;
+    }
+    // `handleSendChunkError`: an error, or a timeout under ON_TIMEOUT FAIL (FT.PROFILE warns
+    // instead); either ends a cursor.
     if let Some(e) = &cx.err {
         return Err(e.clone().into());
+    }
+    // FT.SEARCH's own run counts its timeouts (this one only profiles it).
+    let counted = flags & F_IS_SEARCH == 0;
+    if rc == St::TimedOut && policy == Policy::Fail && prof.is_none() {
+        if counted {
+            eng.search.query_stats.timeout(true, req.internal);
+        }
+        return Err(QErr::code(Code::TimedOut).into());
     }
     if optimized {
         // `QOptimizer_UpdateTotalResults`.
@@ -2511,47 +3049,38 @@ fn run(
             }
         }
     }
-    // `shouldSetCursorDone`.
-    let done = rc != St::Ok;
+    // `shouldSetCursorDone`: a timeout under ON_TIMEOUT RETURN leaves the cursor for the next
+    // read.
+    let done = match rc {
+        St::Ok => false,
+        St::TimedOut => policy != Policy::Return,
+        _ => true,
+    };
+    if let Some(s) = cur.as_deref_mut() {
+        s.tmo = cx.tmo;
+    }
+    if rc == St::TimedOut && counted {
+        eng.search.query_stats.timeout(false, req.internal);
+    }
     if let Some(p) = prof {
         p.expansions = warn_expansions;
+        p.timed_out = rc == St::TimedOut;
         let pc = PCtx { limited: p.limited, clock: true };
         p.iters = chain.first().and_then(|q| q.profile_iters(&pc)).map(Reply::Map);
-        let counts = cx.prof.take().unwrap_or_default();
-        let mut upstream = 0.0;
-        for (i, rp) in chain.iter().enumerate() {
-            let (n, ns) = counts.get(i).copied().unwrap_or((0, 0));
-            let total = ns as f64 / 1_000_000.0;
-            let mut m = vec![(Reply::Status("Type".into()), Reply::Status(rp.name()))];
-            if rp.gil() {
-                m.push((Reply::Status("GIL-Time".into()), Reply::Double(0.0)));
-            }
-            m.push((Reply::Status("Time".into()), Reply::Double(total - upstream)));
-            m.push((Reply::Status("Results processed".into()), Reply::Int(n as i64 - 1)));
-            p.rps.push(Reply::Map(m));
-            upstream = total;
-        }
+        p.counts = cx.prof.take().unwrap_or_default();
+        p.names = chain.iter().map(|rp| (rp.name(), rp.gil())).collect();
+        p.base = pending.unwrap_or(0);
+        p.rps = rps_reply(&p.names, &p.counts);
     }
 
     // The reply.
     let li = cx.lookups.len() - 1;
-    let mut out_rows = Vec::with_capacity(rows.len());
-    for row in &rows {
-        out_rows.push(serialize(req, &mut cx, li, sortkey, row, resp3));
-    }
-    drop(rows);
-    let typed_expand = flags & FORMAT_EXPAND != 0;
-    let reply = if resp3 {
-        let results: Vec<Reply> = out_rows
-            .into_iter()
-            .map(|parts| {
-                let mut m: Vec<(Reply, Reply)> = parts.into_iter().map(|(k, v)| (Reply::Status(k.into()), v)).collect();
-                m.push((Reply::Status("values".into()), Reply::Array(Vec::new())));
-                Reply::Map(m)
-            })
-            .collect();
-        let mut warnings = Vec::new();
-        if rc == St::Error
+    let mut warnings = Vec::new();
+    if resp3 {
+        // `_replyWarnings`.
+        if rc == St::TimedOut {
+            warnings.push(Reply::Status(TIMEOUT_WARNING.into()));
+        } else if rc == St::Error
             && let Some(e) = &cx.err
         {
             warnings.push(Reply::Status(e.text()));
@@ -2559,26 +3088,13 @@ fn run(
         if warn_expansions {
             warnings.push(Reply::Status("Max prefix expansions limit was reached".into()));
         }
-        Reply::Map(vec![
-            (Reply::Status("attributes".into()), Reply::Array(Vec::new())),
-            (Reply::Status("format".into()), Reply::Status(if typed_expand { "EXPAND" } else { "STRING" }.into())),
-            (Reply::Status("results".into()), Reply::Array(results)),
-            (Reply::Status("total_results".into()), Reply::Int(reported(cx.total - cx.skipped))),
-            (Reply::Status("warning".into()), Reply::Array(warnings)),
-        ])
-    } else {
-        let mut out = vec![Reply::Int(reported(first_total))];
-        for parts in out_rows {
-            for (k, v) in parts {
-                match (k, v) {
-                    ("extra_attributes", Reply::Map(m)) => out.push(Reply::Array(m.into_iter().flat_map(|(a, b)| [a, b]).collect())),
-                    ("required_fields", Reply::Map(m)) => out.extend(m.into_iter().map(|(_, b)| b)),
-                    (_, v) => out.push(v),
-                }
-            }
+        if req.capped {
+            warnings.push(Reply::Status(CAPPED_WARNING.into()));
         }
-        Reply::Array(out)
-    };
+    }
+    let totals = (reported(first_total), reported(cx.total - cx.skipped));
+    let reply = chunk_reply(req, &mut cx, li, sortkey, &rows, resp3, totals, warnings);
+    drop(rows);
 
     // A cursor keeps the pipeline's state for its next chunk (`finishSendChunk` resets the
     // totals, WITHCOUNT's aside).
@@ -2588,7 +3104,8 @@ fn run(
     {
         s.total = if flags & F_HAS_WITHCOUNT != 0 { cx.total - cx.skipped } else { 0 };
         let mut saved = Vec::with_capacity(chain.len());
-        match chain.iter().rposition(|p| p.accumulates()).filter(|_| s.pending_at.is_none()) {
+        // The last processor that drained its upstream (beyond a replay already in place).
+        match chain.iter().rposition(|p| p.drained()).filter(|&at| s.pending_at.is_none() || at > 0) {
             Some(at) => {
                 let mut kept = Vec::new();
                 let mut items = VecDeque::new();
@@ -2603,7 +3120,7 @@ fn run(
                 };
                 saved.push(Some(Saved::Replay(items, tail)));
                 saved.extend(rest[1..].iter_mut().map(|p| p.save()));
-                s.pending_at = Some(at);
+                s.pending_at = Some(s.pending_at.map_or(at, |pa| pa + at));
                 held = Some(kept);
             }
             None => saved.extend(chain.iter_mut().map(|p| p.save())),
@@ -2620,6 +3137,44 @@ fn run(
         s.dmds = held.unwrap_or(dmds);
     }
     Ok((reply, done))
+}
+
+/// `sendChunk`'s reply: RESP2's total (`totals.0`) and rows, flat; RESP3's map with the
+/// total (`totals.1`) and the warnings.
+#[allow(clippy::too_many_arguments)]
+fn chunk_reply(req: &areq::Request, cx: &mut Pcx<'_>, li: usize, sortkey: Option<KRef>, rows: &[Res<'_>], resp3: bool, totals: (i64, i64), warnings: Vec<Reply>) -> Reply {
+    let mut out_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        out_rows.push(serialize(req, cx, li, sortkey, row, resp3));
+    }
+    if resp3 {
+        let results: Vec<Reply> = out_rows
+            .into_iter()
+            .map(|parts| {
+                let mut m: Vec<(Reply, Reply)> = parts.into_iter().map(|(k, v)| (Reply::Status(k.into()), v)).collect();
+                m.push((Reply::Status("values".into()), Reply::Array(Vec::new())));
+                Reply::Map(m)
+            })
+            .collect();
+        return Reply::Map(vec![
+            (Reply::Status("attributes".into()), Reply::Array(Vec::new())),
+            (Reply::Status("format".into()), Reply::Status(if req.flags & FORMAT_EXPAND != 0 { "EXPAND" } else { "STRING" }.into())),
+            (Reply::Status("results".into()), Reply::Array(results)),
+            (Reply::Status("total_results".into()), Reply::Int(totals.1)),
+            (Reply::Status("warning".into()), Reply::Array(warnings)),
+        ]);
+    }
+    let mut out = vec![Reply::Int(totals.0)];
+    for parts in out_rows {
+        for (k, v) in parts {
+            match (k, v) {
+                ("extra_attributes", Reply::Map(m)) => out.push(Reply::Array(m.into_iter().flat_map(|(a, b)| [a, b]).collect())),
+                ("required_fields", Reply::Map(m)) => out.extend(m.into_iter().map(|(_, b)| b)),
+                (_, v) => out.push(v),
+            }
+        }
+    }
+    Reply::Array(out)
 }
 
 /// `getReplyKey`: the sorting vector's slot when the key has one, else the row.

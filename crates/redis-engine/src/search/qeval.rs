@@ -10,6 +10,7 @@ use super::qast::{Kind, Node};
 use super::spec;
 use super::trie::{self, Rune};
 use crate::util::cstr;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// `QueryEvalCtx`.
@@ -39,6 +40,31 @@ pub struct EvalCx<'a> {
     pub metric_requests: Vec<Vec<u8>>,
     /// A FT.HYBRID subquery: tag readers weigh nothing.
     pub hybrid: bool,
+    /// A cursor's readers and expansions: recorded by its first chunk, replayed by the later
+    /// ones, which rebuild the iterators.
+    pub memo: Option<RefCell<Memo>>,
+}
+
+/// What a cursor's iterators were built from (the module keeps the iterators themselves): the
+/// readers opened, each with its term record's IDFs (none for a term without one), and the
+/// terms each expansion walked, in evaluation order. Replayed, an expansion takes its terms
+/// from here (terms the trie gained since never show), a reader opens only if it did then
+/// (its new documents do show) and keeps its IDFs.
+#[derive(Clone, Debug, Default)]
+pub struct Memo {
+    /// Replaying (a later chunk), else recording.
+    pub replay: bool,
+    opens: Vec<Option<(f64, f64)>>,
+    walks: Vec<Vec<Vec<u8>>>,
+    at_open: usize,
+    at_walk: usize,
+}
+
+impl Memo {
+    /// The recording, ready to replay from the start.
+    pub fn replaying(&self) -> Memo {
+        Memo { replay: true, opens: self.opens.clone(), walks: self.walks.clone(), at_open: 0, at_walk: 0 }
+    }
 }
 
 const TOO_LONG: &str = "query string is too long. Maximum allowed length is 1024";
@@ -62,17 +88,66 @@ impl<'a> EvalCx<'a> {
         Ok(self.eval(n, mask)?.unwrap_or_else(|| Box::new(Empty)))
     }
 
+    /// A reader's IDFs as a cursor's first chunk computed them: `Err` when replaying (`None`:
+    /// no reader then), `Ok` when they are to be computed (and recorded).
+    fn replayed_open(&self) -> Result<Option<(f64, f64)>, ()> {
+        let Some(m) = &self.memo else { return Err(()) };
+        let mut m = m.borrow_mut();
+        if !m.replay {
+            return Err(());
+        }
+        let i = m.at_open;
+        m.at_open += 1;
+        Ok(m.opens.get(i).copied().flatten())
+    }
+
+    fn record_open(&self, idfs: Option<(f64, f64)>) {
+        if let Some(m) = &self.memo {
+            let mut m = m.borrow_mut();
+            if !m.replay {
+                m.opens.push(idfs);
+            }
+        }
+    }
+
+    /// An expansion's terms: walked (and recorded), or replayed.
+    fn walk_terms(&self, walk: impl FnOnce() -> Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        if let Some(m) = &self.memo {
+            let mut m = m.borrow_mut();
+            if m.replay {
+                let i = m.at_walk;
+                m.at_walk += 1;
+                return m.walks.get(i).cloned().unwrap_or_default();
+            }
+            drop(m);
+            let terms = walk();
+            self.memo.as_ref().expect("a memo").borrow_mut().walks.push(terms.clone());
+            return terms;
+        }
+        walk()
+    }
+
     /// `Redis_OpenReader`: a text term's reader, none when the term has no docs in the fields.
     fn open_term(&self, term: &[u8], mask: u128, weight: f64) -> Option<BoxIt<'a>> {
         let id = self.token_id.get();
         self.token_id.set(id.wrapping_add(1));
-        let ii = self.ix.terms.get(term)?;
-        if ii.unique_docs() == 0 || (self.ix.spec.flags & spec::I_FIELD_FLAGS != 0 && ii.field_mask() & mask == 0) {
-            return None;
-        }
-        let total = self.ix.stats.num_documents;
-        let unique = ii.unique_docs() as u64;
-        let t = Term { s: term.to_vec(), idf: iters::idf(total, unique), bm25_idf: iters::bm25_idf(total, unique), id };
+        let (idf, bm25_idf, ii) = match self.replayed_open() {
+            Ok(None) => return None,
+            Ok(Some((idf, bm25))) => (idf, bm25, self.ix.terms.get(term)?),
+            Err(()) => {
+                let found = self.ix.terms.get(term).filter(|ii| !(ii.unique_docs() == 0 || (self.ix.spec.flags & spec::I_FIELD_FLAGS != 0 && ii.field_mask() & mask == 0)));
+                let Some(ii) = found else {
+                    self.record_open(None);
+                    return None;
+                };
+                let total = self.ix.stats.num_documents;
+                let unique = ii.unique_docs() as u64;
+                let (idf, bm25) = (iters::idf(total, unique), iters::bm25_idf(total, unique));
+                self.record_open(Some((idf, bm25)));
+                (idf, bm25, ii)
+            }
+        };
+        let t = Term { s: term.to_vec(), idf, bm25_idf, id };
         let res = IxResult { kind: K_TERM, freq: 1, field_mask: MASK_ALL, weight, term: Some(Rc::new(t)), ..Default::default() };
         let stores_fields = ii.flags() & super::invidx::flags::STORE_FIELD_FLAGS != 0;
         let filter = if stores_fields { RFilter::Mask(mask) } else { RFilter::None };
@@ -83,13 +158,22 @@ impl<'a> EvalCx<'a> {
     /// `TagIndex_OpenReader`.
     fn open_tag(&self, fi: usize, value: &[u8], weight: f64) -> Option<BoxIt<'a>> {
         let tag = self.ix.fields.get(fi)?.tag.as_ref()?;
-        let ii = tag.values.get(value)?;
-        if ii.unique_docs() == 0 {
-            return None;
-        }
-        let total = self.ix.stats.num_documents;
-        let unique = ii.unique_docs() as u64;
-        let t = Term { s: value.to_vec(), idf: iters::idf(total, unique), bm25_idf: iters::bm25_idf(total, unique), id: 0 };
+        let (idf, bm25_idf, ii) = match self.replayed_open() {
+            Ok(None) => return None,
+            Ok(Some((idf, bm25))) => (idf, bm25, tag.values.get(value)?),
+            Err(()) => {
+                let Some(ii) = tag.values.get(value).filter(|ii| ii.unique_docs() != 0) else {
+                    self.record_open(None);
+                    return None;
+                };
+                let total = self.ix.stats.num_documents;
+                let unique = ii.unique_docs() as u64;
+                let (idf, bm25) = (iters::idf(total, unique), iters::bm25_idf(total, unique));
+                self.record_open(Some((idf, bm25)));
+                (idf, bm25, ii)
+            }
+        };
+        let t = Term { s: value.to_vec(), idf, bm25_idf, id: 0 };
         let res = IxResult { kind: K_TERM, freq: 1, field_mask: MASK_ALL, weight, term: Some(Rc::new(t)), ..Default::default() };
         Some(Box::new(InvIt::new(ii, res, RFilter::None, Some(Checker::Field(fi, Predicate::Default)), self.q).profile_as(PKind::Tag)))
     }
@@ -105,6 +189,15 @@ impl<'a> EvalCx<'a> {
         let mut warned = false;
         let max = self.max_expansions;
         let this = &*self;
+        if this.memo.as_ref().is_some_and(|m| m.borrow().replay) {
+            for s in this.walk_terms(Vec::new) {
+                if let Some(it) = this.open_term(&s, mask, 1.0) {
+                    its.push(it);
+                }
+            }
+            return its;
+        }
+        let mut walked = Vec::new();
         walk(&mut |r: &[Rune]| {
             if its.len() >= max {
                 warned = true;
@@ -114,8 +207,10 @@ impl<'a> EvalCx<'a> {
             if let Some(it) = this.open_term(&s, mask, 1.0) {
                 its.push(it);
             }
+            walked.push(s);
             true
         });
+        this.walk_terms(|| walked);
         self.expansions_warning |= warned;
         its
     }
@@ -259,23 +354,34 @@ impl<'a> EvalCx<'a> {
             Kind::Fuzzy { tok, max_dist } => {
                 let s = cstr(&tok.s);
                 let mask = self.req_mask & n.opts.field_mask;
-                let Some(mut it) = self.ix.term_trie.iterate_fuzzy(s, *max_dist as i32, super::levenshtein::MatchMode::EditDistance) else { return Ok(None) };
                 let mut its = Vec::new();
-                let mut has_next;
-                loop {
-                    let e = it.next_entry();
-                    has_next = e.is_some();
-                    let Some(e) = e else { break };
-                    if its.len() >= self.max_expansions {
-                        break;
+                if self.memo.as_ref().is_some_and(|m| m.borrow().replay) {
+                    for term in self.walk_terms(Vec::new) {
+                        if let Some(r) = self.open_term(&term, mask, 1.0) {
+                            its.push(r);
+                        }
                     }
-                    let term = trie::runes_to_str(e.runes).unwrap_or_default();
-                    if let Some(r) = self.open_term(&term, mask, 1.0) {
-                        its.push(r);
+                } else {
+                    let Some(mut it) = self.ix.term_trie.iterate_fuzzy(s, *max_dist as i32, super::levenshtein::MatchMode::EditDistance) else { return Ok(None) };
+                    let mut has_next;
+                    let mut walked = Vec::new();
+                    loop {
+                        let e = it.next_entry();
+                        has_next = e.is_some();
+                        let Some(e) = e else { break };
+                        if its.len() >= self.max_expansions {
+                            break;
+                        }
+                        let term = trie::runes_to_str(e.runes).unwrap_or_default();
+                        if let Some(r) = self.open_term(&term, mask, 1.0) {
+                            its.push(r);
+                        }
+                        walked.push(term);
                     }
-                }
-                if has_next && its.len() == self.max_expansions {
-                    self.expansions_warning = true;
+                    self.walk_terms(|| walked);
+                    if has_next && its.len() == self.max_expansions {
+                        self.expansions_warning = true;
+                    }
                 }
                 if self.dialect >= 2 && s.len() <= *max_dist as usize
                     && let Some(r) = self.open_term(b"", mask, 1.0)
@@ -414,29 +520,35 @@ impl<'a> EvalCx<'a> {
                 if s.len() < self.min_prefix {
                     return None;
                 }
-                let mut keys = Vec::new();
-                idx.values.for_each(|k, _| {
-                    let ok = match (*prefix, *suffix) {
-                        (_, false) => k.starts_with(&s),
-                        (true, true) => s.is_empty() || k.windows(s.len()).any(|w| w == &s[..]),
-                        (false, true) => k.ends_with(&s),
-                    };
-                    if ok {
-                        keys.push(k.to_vec());
-                    }
-                    true
+                let keys = self.walk_terms(|| {
+                    let mut keys = Vec::new();
+                    idx.values.for_each(|k, _| {
+                        let ok = match (*prefix, *suffix) {
+                            (_, false) => k.starts_with(&s),
+                            (true, true) => s.is_empty() || k.windows(s.len()).any(|w| w == &s[..]),
+                            (false, true) => k.ends_with(&s),
+                        };
+                        if ok {
+                            keys.push(k.to_vec());
+                        }
+                        true
+                    });
+                    keys
                 });
                 let its = open_all(self, keys);
                 Some(self.union(its, true, weight, "PREFIX", Some(&s)))
             }
             Kind::WildcardQuery(tok) => {
                 let pat = remove_escape(&tag_lower(&tok.s, cs));
-                let mut keys = Vec::new();
-                idx.values.for_each(|k, _| {
-                    if wildcard_match(&pat, k) {
-                        keys.push(k.to_vec());
-                    }
-                    true
+                let keys = self.walk_terms(|| {
+                    let mut keys = Vec::new();
+                    idx.values.for_each(|k, _| {
+                        if wildcard_match(&pat, k) {
+                            keys.push(k.to_vec());
+                        }
+                        true
+                    });
+                    keys
                 });
                 let its = open_all(self, keys);
                 Some(self.union(its, true, weight, "WILDCARD", Some(&pat)))
@@ -445,14 +557,17 @@ impl<'a> EvalCx<'a> {
                 let b = begin.as_ref().map(|s| tag_lower(cstr(s), cs));
                 let e = end.as_ref().map(|s| tag_lower(cstr(s), cs));
                 let mut its = Vec::new();
-                let mut keys = Vec::new();
-                idx.values.for_each(|k, _| {
-                    let lo = b.as_ref().is_none_or(|b| if *include_begin { k >= &b[..] } else { k > &b[..] });
-                    let hi = e.as_ref().is_none_or(|e| if *include_end { k <= &e[..] } else { k < &e[..] });
-                    if lo && hi {
-                        keys.push(k.to_vec());
-                    }
-                    true
+                let keys = self.walk_terms(|| {
+                    let mut keys = Vec::new();
+                    idx.values.for_each(|k, _| {
+                        let lo = b.as_ref().is_none_or(|b| if *include_begin { k >= &b[..] } else { k > &b[..] });
+                        let hi = e.as_ref().is_none_or(|e| if *include_end { k <= &e[..] } else { k < &e[..] });
+                        if lo && hi {
+                            keys.push(k.to_vec());
+                        }
+                        true
+                    });
+                    keys
                 });
                 for k in keys {
                     if let Some(it) = self.open_tag(fi, &k, weight) {

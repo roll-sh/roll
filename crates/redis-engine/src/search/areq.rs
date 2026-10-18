@@ -236,6 +236,18 @@ pub struct Request {
     pub hybrid_vec: Option<Box<HybridVec>>,
     /// LOAD and GROUPBY names need their `@` (`strictPrefix`).
     pub strict_prefix: bool,
+    /// `reqConfig.timeoutPolicy` (`search-on-timeout` when the request was made: 0 RETURN,
+    /// 1 FAIL, 2 RETURN-STRICT).
+    pub on_timeout: i64,
+    /// `QEXEC_S_MAX_TIMEOUT_CAPPED`: the timeout was capped to
+    /// `search-_max-foreground-timeout-limit` (no workers).
+    pub capped: bool,
+    /// `_FT.DEBUG`'s `TIMEOUT_AFTER_N` (`RPTimeoutAfterCount`).
+    pub timeout_after: Option<u32>,
+    /// `_FT.DEBUG`'s parameters failed to parse: reported once the pipeline is built.
+    pub debug_err: Option<QErr>,
+    /// An internal (`_FT.*`) request (`QEXEC_F_INTERNAL`).
+    pub internal: bool,
 }
 
 /// `ParsedVectorData` with its `VectorQuery`.
@@ -302,7 +314,31 @@ impl Request {
             validation: 0,
             hybrid_vec: None,
             strict_prefix: false,
+            on_timeout: cfg.num("search-on-timeout") as i64,
+            capped: false,
+            timeout_after: None,
+            debug_err: None,
+            internal: false,
         }
+    }
+
+    /// `parseAndCompileDebug`'s outcome.
+    pub fn set_debug(&mut self, d: Result<Option<u32>, QErr>) {
+        match d {
+            Ok(n) => self.timeout_after = n,
+            Err(e) => self.debug_err = Some(e),
+        }
+    }
+
+    /// `RSConfig_CapQueryTimeoutToForegroundLimit`: without workers a timeout over the limit
+    /// (or none) is capped to it; whether it was.
+    pub fn cap_timeout(&mut self, cfg: &Config) -> bool {
+        let limit = cfg.num("search-_max-foreground-timeout-limit") as i64;
+        if limit <= 0 || cfg.num("search-workers") != 0 || (self.timeout > 0 && self.timeout <= limit) {
+            return false;
+        }
+        self.timeout = limit;
+        true
     }
 
     /// `AREQ_New` for FT.HYBRID: no command flags, the given dialect.
@@ -977,6 +1013,9 @@ pub fn compile(cmd: Command, cfg: &Config, args: &[Bytes]) -> Result<Request, QE
     req.query = q.clone();
     req.query_args(&mut ac)?;
     req.agg_plan(&mut ac)?;
+    if req.cap_timeout(cfg) {
+        req.capped = true;
+    }
     Ok(req)
 }
 

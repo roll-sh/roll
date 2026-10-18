@@ -61,6 +61,7 @@ use crate::search::qeval::EvalCx;
 use crate::search::scorers::{self, Expl, Scorer};
 use crate::search::highlight;
 use crate::search::spec::{self as sspec, DocType, Spec};
+use super::ft_aggregate::{CAPPED_WARNING, Policy, TIMEOUT_WARNING, Tmo};
 use std::cmp::Ordering;
 
 /// `shouldSkipJsonFieldValue`: a JSON value the highlighter leaves alone (an array or object
@@ -448,7 +449,14 @@ pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(arity_error("FT.SEARCH"));
     }
     verify_acl(cx, &args[1])?;
+    search_with(cx, args, None)
+}
+
+/// FT.SEARCH's request, built and run; `_FT.DEBUG FT.SEARCH` gives its debug parameters
+/// (`args` without them; `_FT.SEARCH` marks an internal request).
+pub(super) fn search_with(cx: &mut Cx, args: &[Bytes], dbg: Option<&[Bytes]>) -> CmdResult {
     let mut req = areq::compile(Command::Search, &cx.eng.cfg, &args[2..])?;
+    req.internal = args[0].first() == Some(&b'_');
     let Some(name) = cx.eng.search.load(crate::util::cstr(&args[1]), false) else {
         return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(&args[1]))).into());
     };
@@ -461,9 +469,12 @@ pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let db = cx.client.db;
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    if let Some(p) = dbg {
+        req.set_debug(super::ft_aggregate::debug_parse(p, &req, background));
+    }
     let eng: &Engine = cx.eng;
     let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
-    let reply = run_search(eng, ix, &req, db, resp3, background)?;
+    let reply = run_search(eng, ix, &req, db, resp3, background, false)?;
     if let Some(ix) = cx.eng.search.indexes.get_mut(&name) {
         ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
     }
@@ -489,7 +500,8 @@ pub(super) fn metric_keys(lk: &mut Lookup, spec: &Spec, requests: &[Vec<u8>]) ->
     Ok(keys)
 }
 
-pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, background: bool) -> Result<Reply, Error> {
+/// `profile`: FT.PROFILE's run (a timeout is a warning, whatever the policy).
+pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, background: bool, profile: bool) -> Result<Reply, Error> {
     let cfg = &eng.cfg;
     let spec = &ix.spec;
     let flags = req.flags;
@@ -522,6 +534,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
         can_skip_rich: req.opts.flags & qast::S_CAN_SKIP_RICH_RESULTS != 0,
         metric_requests: Vec::new(),
         hybrid: false,
+        memo: None,
     };
     let root = req.root.as_ref().expect("a parsed query");
     let mut it = ecx.iterate(root)?;
@@ -624,6 +637,14 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
             }
         }
     }
+    // `parseAndCompileDebug`, once the pipeline is built.
+    if let Some(e) = &req.debug_err {
+        return Err(e.clone().into());
+    }
+    // The query reader's clock and `TIMEOUT_AFTER_N` (`RPTimeoutAfterCount`).
+    let policy = Policy::of(req.on_timeout);
+    let mut tmo = Tmo::new(req.timeout, policy, background, req.timeout_after);
+    let mut timed_out = false;
 
     // the query and scorer processors
     let mut total: i64 = 0;
@@ -634,13 +655,29 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     let stream = !sorted && !norows && !(scoring && scorer == Scorer::Bm25StdNorm);
     let mut passed = 0usize;
     let mut first_total: Option<i64> = None;
-    while !(stream && passed >= offset + limit) && it.read() {
-        let Some(r) = it.current() else { break };
-        let r: IxResult = r.clone();
-        let Some(dmd) = ix.docs.get(r.doc_id) else { continue };
-        if dmd.flags & DOC_DELETED != 0 || (dmd.expire_at != 0 && dmd.expire_at <= now) {
-            continue;
+    while !(stream && passed >= offset + limit) {
+        // `rpQueryItNext`, behind `RPTimeoutAfterCount`.
+        tmo.begin();
+        let mut got = None;
+        loop {
+            if tmo.tick() {
+                timed_out = true;
+                break;
+            }
+            if !it.read() {
+                break;
+            }
+            let Some(r) = it.current() else { break };
+            let r: IxResult = r.clone();
+            let Some(dmd) = ix.docs.get(r.doc_id) else { continue };
+            if dmd.flags & DOC_DELETED != 0 || (dmd.expire_at != 0 && dmd.expire_at <= now) {
+                continue;
+            }
+            got = Some((r, dmd));
+            break;
         }
+        tmo.end(timed_out);
+        let Some((r, dmd)) = got else { break };
         total += 1;
         if norows {
             continue;
@@ -700,9 +737,35 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
             results.sort_by(|a, b| cmp_score(b, a));
         }
         results.truncate(max_results);
+        // A timeout surfaces once the pager (`getArrangeRP`'s, past a sorter only with an
+        // offset) asks for more than the sorter (or normalizer) holds.
+        let (a_off, a_lim) = arrange.map_or((0, 0), |a| (a.offset as usize, a.limit as usize));
+        let need = if a_off != 0 || (a_lim != 0 && !sorted) {
+            a_off.saturating_add(a_lim)
+        } else if plan.is_some() && !sorted {
+            max_results
+        } else {
+            usize::MAX
+        };
+        timed_out &= results.len() < need;
         if offset > 0 {
             results.drain(..offset.min(results.len()));
         }
+    }
+    // `startPipelineCommon`'s check after a buffered run, then `handleSendChunkError`: under
+    // ON_TIMEOUT FAIL a timeout is the reply (FT.PROFILE's results are empty instead).
+    if policy != Policy::Return && tmo.checks() && tmo.passed() {
+        timed_out = true;
+    }
+    if timed_out && policy == Policy::Fail {
+        if !profile {
+            eng.search.query_stats.timeout(true, req.internal);
+            return Err(QErr::code(Code::TimedOut).into());
+        }
+        results.clear();
+    }
+    if timed_out {
+        eng.search.query_stats.timeout(false, req.internal);
     }
 
     // the output loader
@@ -840,9 +903,16 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
                 Reply::Map(m)
             })
             .collect();
+        // `_replyWarnings`.
         let mut warnings = Vec::new();
+        if timed_out {
+            warnings.push(Reply::Status(TIMEOUT_WARNING.into()));
+        }
         if warn_expansions {
             warnings.push(Reply::Status("Max prefix expansions limit was reached".into()));
+        }
+        if req.capped {
+            warnings.push(Reply::Status(CAPPED_WARNING.into()));
         }
         return Ok(Reply::Map(vec![
             (Reply::Status("attributes".into()), Reply::Array(Vec::new())),

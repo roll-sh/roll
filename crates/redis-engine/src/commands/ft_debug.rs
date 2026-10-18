@@ -549,18 +549,26 @@ pub(super) fn ft_debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             Ok(Reply::Ok)
         }
         "FT.SEARCH" | "FT.AGGREGATE" | "FT.PROFILE" => {
+            // The query, at least one debug parameter and DEBUG_PARAMS_COUNT <count>.
             if argc < 7 {
                 return Err(arity());
             }
-            Err(Error::msg(format!("ERR _FT.DEBUG {sub} is not supported yet")))
+            super::ft_aggregate::debug_query(cx, &args[1..])
         }
         "FT.HYBRID" | "_FT.HYBRID" => {
+            // FT.HYBRID index SEARCH query VSIM field vector DEBUG_PARAMS_COUNT count.
             if argc < 9 {
                 return Err(arity());
             }
-            Err(Error::msg(format!("ERR _FT.DEBUG {sub} is not supported yet")))
+            if sub == "FT.HYBRID" { super::ft_aggregate::debug_hybrid(cx, &args[1..]) } else { super::ft_aggregate::debug_internal_hybrid(cx, &args[1..]) }
         }
-        "_FT.SEARCH" | "_FT.AGGREGATE" | "_FT.PROFILE" => Err(Error::msg(format!("ERR _FT.DEBUG {sub} is not supported yet"))),
+        "_FT.SEARCH" | "_FT.AGGREGATE" | "_FT.PROFILE" => {
+            // `DEBUG_execCommandCommon` (the index), `RSProfileCommandImp` (SEARCH QUERY …).
+            if argc < if sub == "_FT.PROFILE" { 6 } else { 3 } {
+                return Err(arity());
+            }
+            super::ft_aggregate::debug_query(cx, &args[1..])
+        }
         "SHARD_CONNECTION_STATES" => {
             if argc != 2 {
                 return Err(arity());
