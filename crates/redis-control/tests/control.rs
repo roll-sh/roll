@@ -74,6 +74,17 @@ async fn lifecycle() {
     assert_eq!((s, v["error"].as_str().unwrap()), (409, "a database named cache already exists"));
     let (s, _) = e.call(reqwest::Method::POST, "/v1/redis/databases", Some(json!({"name": "x", "eviction_policy": "nope"}))).await;
     assert_eq!(s, 400);
+    // The dashboard calls the API from another origin.
+    let pre = e
+        .http
+        .request(reqwest::Method::OPTIONS, format!("{}/v1/redis/databases/{id}", e.api))
+        .header("origin", "http://localhost:3000")
+        .header("access-control-request-method", "PATCH")
+        .send()
+        .await
+        .unwrap();
+    assert!(pre.status().is_success());
+    assert!(pre.headers().contains_key("access-control-allow-origin"));
 
     let mut c = e.connect(&token(&db)).await;
     assert_eq!(c.cmd(["SET", "k", "v"]).await.unwrap(), Reply::Ok);
@@ -153,6 +164,13 @@ async fn branches_restore_and_replicas() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(seen, "replica catches up");
+    let (_, shown) = e.call(reqwest::Method::GET, &format!("/v1/redis/databases/{id}"), None).await;
+    let st = &shown["replicas"][0]["status"];
+    assert_eq!(st["state"], "active");
+    assert!(st["offset"].as_u64().unwrap() > 0);
+    assert!(st["lag_bytes"].is_u64(), "{st}");
+    let (_, listed) = e.call(reqwest::Method::GET, &format!("/v1/redis/databases/{id}/replicas"), None).await;
+    assert_eq!(listed[0]["status"]["state"], "active");
     assert!(r.cmd(["SET", "a", "b"]).await.unwrap().is_error());
 
     // Restore in place to t1: clients are disconnected and come back to the old state.

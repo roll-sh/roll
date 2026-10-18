@@ -494,6 +494,25 @@ impl Control {
         Ok(self.node.evict(&d.id).await?)
     }
 
+    /// Live state of a read replica: loaded or not, its stream offset, and how far (in bytes of
+    /// the write stream) it is behind its loaded primary.
+    pub fn replica_status(&self, r: &Replica) -> serde_json::Value {
+        match self.node.get_loaded(&r.id) {
+            Some(db) => {
+                let offset = db.repl_offset();
+                let lag = self.node.get_loaded(&r.db_id).map(|p| p.repl_offset().saturating_sub(offset));
+                serde_json::json!({
+                    "state": "active",
+                    "used_memory": db.used_memory(),
+                    "connections": db.connections.load(Ordering::Relaxed),
+                    "offset": offset,
+                    "lag_bytes": lag,
+                })
+            }
+            None => serde_json::json!({ "state": "idle" }),
+        }
+    }
+
     /// Live state of a database: loaded or not, memory, keys, clients.
     pub fn status(&self, id: &str) -> Result<serde_json::Value> {
         let d = self.get(id)?;
