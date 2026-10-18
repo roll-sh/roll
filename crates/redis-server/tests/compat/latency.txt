@@ -49,6 +49,15 @@ CONFIG GET maxmemory
 !mask histogram_usec LATENCY HISTOGRAM config|nosuch
 !mask histogram_usec LATENCY HISTOGRAM get|sub
 !mask histogram_usec LATENCY HISTOGRAM latency
+# Module commands answer under their declared names; a container lists its subcommands.
+FT.CREATE lhidx SCHEMA t TEXT
+FT.SEARCH lhidx foo
+VADD lhvs VALUES 2 1 2 a
+!mask histogram_usec LATENCY HISTOGRAM ft.search FT.CREATE vadd
+OBJECT ENCODING k
+!mask histogram_usec LATENCY HISTOGRAM object
+FT.DROPINDEX lhidx
+DEL lhvs
 @resp 3
 !mask histogram_usec LATENCY HISTOGRAM set get
 @resp 2

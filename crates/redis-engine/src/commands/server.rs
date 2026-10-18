@@ -1055,22 +1055,25 @@ pub fn latency_doctor(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
 /// its command dict), or each named command (`lookupCommandBySds`: `name` or `container|sub`;
 /// unknown names skipped) and a container's subcommands, in argument order.
 pub fn latency_histogram(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let stats = &cx.eng.cmdstats;
+    let stats: std::collections::HashMap<String, &crate::engine::CmdStat> =
+        cx.eng.cmdstats.iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
+    // `fillCommandCDF` under the command's declared full name.
     let cdf = |name: &str| -> Option<(Reply, Reply)> {
-        let h = stats.get(name)?.latency.as_ref()?;
+        let h = stats.get(&name.to_ascii_lowercase())?.latency.as_ref()?;
         let buckets = h.log_cdf().into_iter().map(|(us, n)| (Reply::Int(us), Reply::Int(n as i64))).collect();
         Some((
-            Reply::bulk(name),
+            Reply::bulk_str(name.to_string()),
             Reply::Map(vec![(Reply::bulk("calls"), Reply::Int(h.total() as i64)), (Reply::bulk("histogram_usec"), Reply::Map(buckets))]),
         ))
     };
+    let names = super::order::names();
     let mut out = Vec::new();
     if args.len() == 2 {
-        let mut names: Vec<&String> = stats.keys().collect();
-        names.sort();
-        out.extend(names.into_iter().filter_map(|n| cdf(n)));
+        // `latencyAllCommandsFillCDF`: the command table's order.
+        out.extend(names.iter().filter_map(|n| cdf(n)));
         return Ok(Reply::Map(out));
     }
+    // `latencySpecificCommandsFillCDF`: each command found, then its subcommands.
     for a in &args[2..] {
         let mut parts = a.split(|&b| b == b'|');
         let (Some(base), sub, None) = (parts.next(), parts.next(), parts.next()) else { continue };
@@ -1079,11 +1082,12 @@ pub fn latency_histogram(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             let Some(s) = super::lookup_sub(cmd, sub) else { continue };
             cmd = s;
         }
-        let full = crate::acl::full_name(cmd).unwrap_or(cmd.name).to_ascii_lowercase();
-        out.extend(cdf(&full));
-        for s in cmd.subs {
-            let full = crate::acl::full_name(s).unwrap_or(s.name).to_ascii_lowercase();
-            out.extend(cdf(&full));
+        let full = crate::acl::full_name(cmd).unwrap_or(cmd.name);
+        let Some(at) = names.iter().position(|n| n.eq_ignore_ascii_case(full)) else { continue };
+        out.extend(cdf(&names[at]));
+        if !cmd.subs.is_empty() {
+            let prefix = format!("{}|", names[at]);
+            out.extend(names[at + 1..].iter().take_while(|n| n.starts_with(&prefix)).filter_map(|n| cdf(n)));
         }
     }
     Ok(Reply::Map(out))
