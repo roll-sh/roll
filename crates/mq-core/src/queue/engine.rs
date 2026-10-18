@@ -283,6 +283,7 @@ impl Engine {
                 }
             }
         }
+        tracing::debug!(queue = %self.meta.name, first, next, live = live.len(), lowest = ?live.keys().next(), highest = ?live.keys().next_back(), "recovered queue");
         for (seq, (mut e, idx)) in live {
             // We don't log deliveries, so anything recovered may have been seen before.
             e.redelivered = true;

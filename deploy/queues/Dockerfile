@@ -7,6 +7,8 @@
 FROM rust:1-bookworm AS build
 # `dev` builds faster for tests; images you deploy use `release`.
 ARG PROFILE=release
+# rolld also links roll tasks, whose SQLite session support runs bindgen (libclang) at build time.
+RUN apt-get update && apt-get install -y --no-install-recommends libclang-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

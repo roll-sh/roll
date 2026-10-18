@@ -82,7 +82,8 @@ impl Node {
 }
 
 fn shared() -> (Arc<dyn MetaStore>, Arc<dyn LogStore>) {
-    let _ = tracing_subscriber::fmt().with_env_filter("mq_cluster=info,mq_core=warn").with_test_writer().try_init();
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "mq_cluster=info,mq_core=warn".into());
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_test_writer().try_init();
     (MemMeta::new(), MemStore::new())
 }
 
@@ -423,8 +424,14 @@ fn queues_follow_their_clients_to_their_az() {
         wait_until("a owns the queue", Duration::from_secs(5), async || a.cluster.owned_keys().contains(&key)).await;
         assert_eq!(a.cluster.home_az(&key).as_deref(), Some("az-a"));
 
-        // Every client is in AZ b from now on.
+        // Every client is in AZ b from now on. Until b has the queue from the change feed, a
+        // publish there is unroutable, and confirmed as such: wait for it.
         let (_cb, chb) = channel(&b.url).await;
+        wait_until("queue on b", Duration::from_secs(5), async || {
+            let (_x, ch) = channel(&b.url).await;
+            ch.queue_declare("follow".into(), QueueDeclareOptions { passive: true, ..Default::default() }, FieldTable::default()).await.is_ok()
+        })
+        .await;
         chb.confirm_select(ConfirmSelectOptions::default()).await.unwrap();
         let mut sent = Vec::new();
         let mut next = 0u32;
