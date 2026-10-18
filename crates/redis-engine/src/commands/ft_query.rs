@@ -123,13 +123,15 @@ impl Lookup {
     }
 
     /// `override_current`: the key becomes a tombstone and a new one (same row slot and
-    /// path) follows it.
+    /// path) takes its place in the list. The new key keeps the index (the tombstone moves to the
+    /// end), so the indices callers hold never shift.
     fn override_key(&mut self, i: usize, flags: u32) -> usize {
-        self.keys[i].dead = true;
         let k = &self.keys[i];
         let nk = LKey { name: k.name.clone(), path: k.path.clone(), flags, svidx: 0, dst: k.dst, dead: false };
-        self.keys.insert(i + 1, nk);
-        i + 1
+        let mut old = std::mem::replace(&mut self.keys[i], nk);
+        old.dead = true;
+        self.keys.push(old);
+        i
     }
 
     /// `updateKeyFromFieldSpec`.
@@ -683,6 +685,9 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     let stream = !sorted && !norows && !(scoring && scorer == Scorer::Bm25StdNorm);
     let mut passed = 0usize;
     let mut first_total: Option<i64> = None;
+    // `rp->parent->minScore` and the sorter's heap (only a sorter keeps one).
+    let mut min_score = 0.0f64;
+    let mut heap: Option<crate::search::mmheap::MmHeap<usize>> = (scoring && sorted && !norows && !stream).then(|| crate::search::mmheap::MmHeap::new(max_results));
     while !(stream && passed >= offset + limit) {
         // `rpQueryItNext`, behind `RPTimeoutAfterCount`.
         tmo.begin();
@@ -721,7 +726,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
             res.row.set(&lk.keys[metric_keys[m]], RsValue::Number(v));
         }
         if scoring {
-            let (s, e) = scorer.score(&sargs, &r, dmd, 0.0, explain);
+            let (s, e) = scorer.score(&sargs, &r, dmd, min_score, explain);
             if s == scorers::FILTEROUT {
                 total -= 1;
                 continue;
@@ -745,6 +750,32 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
         }
         scores.push(res.score);
         results.push(res);
+        // The sorter's heap (`rpsortNext`) raises the scorers' minimum score as it fills: to the
+        // score of whichever result ranks lowest once full, even when sorting by fields.
+        if let Some(h) = heap.as_mut() {
+            let idx = results.len() - 1;
+            let asc = arrange.map_or(0, |a| a.asc_map);
+            let mut c = |a: &usize, b: &usize| -> i32 {
+                let (a, b) = (&results[*a], &results[*b]);
+                let o = if sort_lk.is_empty() { cmp_score(a, b) } else { cmp_fields(&lk, &sort_lk, asc, a, b) };
+                o as i32
+            };
+            if h.count() < h.size {
+                let sc = results[idx].score;
+                h.insert(&mut c, idx);
+                if sc < min_score {
+                    min_score = sc;
+                }
+            } else {
+                let m = *h.peek_min().expect("a full heap");
+                if results[m].score > min_score {
+                    min_score = results[m].score;
+                }
+                if c(&idx, &m) > 0 {
+                    h.exchange_min(&mut c, idx);
+                }
+            }
+        }
     }
     if scoring && scorer == Scorer::Bm25StdNorm {
         let max = scores.iter().fold(0.0f64, |m, &s| m.max(s));
