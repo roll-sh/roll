@@ -877,7 +877,9 @@ impl Hash {
             }
             Enc::Tmpl(_) => unreachable!("handled above"),
         };
-        if new && self.is_listpack() && self.len() > lim.entries {
+        // `hashTypeSet`: an update converts as well as an insert, once the hash is past the
+        // limit (lowered since it was built).
+        if self.is_listpack() && self.len() > lim.entries {
             self.convert_to_table(0);
         }
         new

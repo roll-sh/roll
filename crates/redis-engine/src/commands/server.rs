@@ -27,7 +27,7 @@ pub static COMMANDS: &[Command] = &[
     cmd!("hello", -1, CONN_FLAGS, 0, 0, 0, hello, Connection),
     cmd!("reset", 1, CONN_FLAGS | SUBSCRIBED_OK | TXN_CONTROL, 0, 0, 0, reset, Connection),
     cmd!("quit", -1, CONN_FLAGS | SUBSCRIBED_OK | TXN_CONTROL, 0, 0, 0, quit, Connection),
-    cmd!("auth", -2, CONN_FLAGS, 0, 0, 0, server_only, Connection),
+    cmd!("auth", -2, CONN_FLAGS, 0, 0, 0, auth_in_exec, Connection),
     cmd!("monitor", 1, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, server_only, Server),
     cmd!("wait", 3, BLOCKING, 0, 0, 0, wait_queued, Generic),
     cmd!("waitaof", 4, BLOCKING, 0, 0, 0, waitaof_queued, Generic),
@@ -336,6 +336,31 @@ pub fn flushall(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn time(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     let us = now_us();
     Ok(Reply::Array(vec![Reply::bulk_str((us / 1_000_000).to_string()), Reply::bulk_str((us % 1_000_000).to_string())]))
+}
+
+/// AUTH queued in a transaction, as EXEC runs it (outside one the connection layer handles it):
+/// the database's users are checked and the client continues as the one authenticated.
+pub fn auth_in_exec(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let (user, pass) = match args.len() {
+        2 => (None, &args[1]),
+        3 => (Some(&args[1][..]), &args[2]),
+        _ => return Err(SYNTAX),
+    };
+    let acl = cx.eng.acl.clone();
+    let acl = acl.read();
+    match acl.authenticate(user, pass) {
+        Ok(u) => {
+            cx.client.user = u;
+            cx.client.authenticated = true;
+            Ok(Reply::Ok)
+        }
+        Err(e) => {
+            if e == crate::acl::AuthFailure::WrongPass {
+                acl.log_auth_failure(cx.client, &args[0], user.unwrap_or(b"default"));
+            }
+            Err(Error::msg(e.to_string()))
+        }
+    }
 }
 
 pub fn lastsave(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {

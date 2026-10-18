@@ -622,6 +622,16 @@ impl Conn<'_> {
                         self.close_after = true;
                         break;
                     }
+                    // AUTH inside EXEC switched users: the session follows (ACL changes to the
+                    // new user now reach this connection).
+                    if let Some(s) = self.session.as_mut()
+                        && !Arc::ptr_eq(&s.user, &self.client.user)
+                        && let Some(sink) = self.client.sink.as_ref()
+                    {
+                        s.user.unwatch(self.client.id);
+                        self.client.user.watch(self.client.id, sink);
+                        s.user = self.client.user.clone();
+                    }
                     match out {
                         Outcome::Reply(r) => {
                             let quit = eq(&args[0], "quit");
@@ -1206,8 +1216,12 @@ pub(crate) fn long_running<R>(args: &[Bytes], f: impl FnOnce() -> R) -> R {
 
 fn is_intercepted(args: &[Bytes], client: &Client) -> bool {
     let n = &args[0];
-    if eq(n, "auth") || eq(n, "hello") || eq(n, "monitor") {
+    if eq(n, "hello") || eq(n, "monitor") {
         return true;
+    }
+    // AUTH inside MULTI is queued, and EXEC authenticates (`auth_in_exec`).
+    if eq(n, "auth") {
+        return client.multi.is_none();
     }
     // Inside MULTI these are queued (or refused) by the engine like any command.
     client.multi.is_none() && (eq(n, "replconf") || eq(n, "sync") || eq(n, "psync") || eq(n, "shutdown") || eq(n, "wait") || eq(n, "waitaof") || eq(n, "failover"))
