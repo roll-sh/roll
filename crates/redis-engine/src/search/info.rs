@@ -104,7 +104,7 @@ pub fn sections(eng: &Engine) -> Vec<(&'static str, String)> {
         let mut vec_mem = 0u64;
         for f in ix.fields.iter().filter_map(|f| f.vectors.as_ref()) {
             vec_mem += f.memory() as u64;
-            t.vec_marked += f.marked as u64;
+            t.vec_marked += f.marked() as u64;
             t.vec_flat_buffer += f.flat_buffer() as u64;
         }
         t.vec_mem += vec_mem;
