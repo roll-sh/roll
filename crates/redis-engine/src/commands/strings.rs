@@ -395,10 +395,11 @@ pub fn msetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             Expiry::KeepTtl => cx.set(k, Value::str(v), true),
             _ => cx.set(k, Value::str(v), false),
         }
-        cx.notify(notify::STRING, "set", k);
+        // `expire` first, then `set` (msetexCommand).
         if matches!(exp, Expiry::At(_)) {
             cx.notify(notify::GENERIC, "expire", k);
         }
+        cx.notify(notify::STRING, "set", k);
         prop.push((*k).clone());
         prop.push((*v).clone());
     }

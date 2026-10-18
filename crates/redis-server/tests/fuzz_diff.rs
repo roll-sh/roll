@@ -23,6 +23,7 @@
 //! ROLL_FUZZ_ORDER=1           also report replies that differ only in element order
 //! ROLL_FUZZ_MAX=30            stop after this many distinct failures (default 50)
 //! ROLL_FUZZ_SKIP=SINTERCARD,LPOS   don't report differences of these commands (known gaps)
+//! ROLL_FUZZ_NOTIFY=1          also compare the keyspace events each command fires
 //! ```
 //!
 //! Without `ROLL_FUZZ_REDIS` the test returns at once. Failures are printed as compat script
@@ -1506,10 +1507,12 @@ impl<'a> Gen<'a> {
 struct Side {
     addr: String,
     conns: Vec<Conn>,
+    /// ROLL_FUZZ_NOTIFY=1: subscribed to every keyspace and keyevent channel.
+    sub: Option<Conn>,
 }
 
 impl Side {
-    async fn open(addr: &str, resp3: bool) -> Side {
+    async fn open(addr: &str, resp3: bool, notify: bool) -> Side {
         let mut conns = Vec::new();
         for _ in 0..2 {
             let mut c = Conn::open(addr).await.unwrap();
@@ -1518,7 +1521,43 @@ impl Side {
             }
             conns.push(c);
         }
-        Side { addr: addr.to_string(), conns }
+        let sub = if notify {
+            let mut c = Conn::open(addr).await.unwrap();
+            c.cmd(&["HELLO", "3"]).await;
+            c.cmd(&["PSUBSCRIBE", "__key*__:*"]).await;
+            Some(c)
+        } else {
+            None
+        };
+        Side { addr: addr.to_string(), conns, sub }
+    }
+
+    /// The events published since the last call (up to a PING's reply), without the ones whose
+    /// timing is the server's own (expiry, eviction).
+    async fn events(&mut self) -> Vec<Vec<u8>> {
+        let Some(sub) = self.sub.as_mut() else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut ping = BytesMut::new();
+        encode_command([b"PING".to_vec()].iter(), &mut ping);
+        if sub.s.write_all(&ping).await.is_err() {
+            return vec![b"<sub closed>".to_vec()];
+        }
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(3000), sub.read()).await {
+                Ok(Ok((_, Reply::Status(s)))) if s == "PONG" => break,
+                Ok(Ok((raw, _))) => {
+                    let t = String::from_utf8_lossy(&raw);
+                    if !(t.contains("expired") || t.contains("evicted")) {
+                        out.push(raw);
+                    }
+                }
+                _ => {
+                    out.push(b"<no PONG>".to_vec());
+                    break;
+                }
+            }
+        }
+        out
     }
 
     async fn exec(&mut self, cmd: &Cmd, args: &[Vec<u8>]) -> Res {
@@ -1711,6 +1750,8 @@ struct Env {
     report_order: bool,
     /// ROLL_FUZZ_TRACE=1: print every command and the reference's reply.
     trace: bool,
+    /// ROLL_FUZZ_NOTIFY=1: compare the keyspace events each command fires.
+    notify: bool,
 }
 
 /// What the side's FLUSHALL… setup and a sequence produced: the first differing command.
@@ -1720,7 +1761,7 @@ struct Outcome {
     ran: usize,
 }
 
-async fn setup(addr: &str, t: &Table) {
+async fn setup(addr: &str, t: &Table, notify: bool) {
     let mut c = Conn::open(addr).await.unwrap();
     c.cmd(&["FLUSHALL"]).await;
     c.cmd(&["SCRIPT", "FLUSH"]).await;
@@ -1728,11 +1769,14 @@ async fn setup(addr: &str, t: &Table) {
     for (k, v) in &t.config_defaults {
         c.cmd(&["CONFIG", "SET", k, v]).await;
     }
+    if notify {
+        c.cmd(&["CONFIG", "SET", "notify-keyspace-events", "KEA"]).await;
+    }
 }
 
 async fn run(env: &Env, cmds: &[Cmd], resp3: bool) -> Outcome {
-    let (_, _) = tokio::join!(setup(&env.ref_addr, &env.table), setup(&env.roll_addr, &env.table));
-    let (mut r, mut o) = tokio::join!(Side::open(&env.ref_addr, resp3), Side::open(&env.roll_addr, resp3));
+    let (_, _) = tokio::join!(setup(&env.ref_addr, &env.table, env.notify), setup(&env.roll_addr, &env.table, env.notify));
+    let (mut r, mut o) = tokio::join!(Side::open(&env.ref_addr, resp3, env.notify), Side::open(&env.roll_addr, resp3, env.notify));
     let mut ran = 0;
     for (i, cmd) in cmds.iter().enumerate() {
         ran = i + 1;
@@ -1761,7 +1805,24 @@ async fn run(env: &Env, cmds: &[Cmd], resp3: bool) -> Outcome {
             }
             _ => tokio::join!(r.exec(cmd, &cmd.args), o.exec(cmd, &cmd.args)),
         };
-        let v = compare(&cmd.check, &a, &bb);
+        let mut v = compare(&cmd.check, &a, &bb);
+        let (mut a, mut bb) = (a, bb);
+        if env.notify {
+            let (ea, eb) = tokio::join!(r.events(), o.events());
+            if ea != eb && v == Verdict::Same {
+                // Shown as the reply followed by the events.
+                let with = |res: &Res, ev: Vec<Vec<u8>>| {
+                    let reply = match res {
+                        Res::Reply(_, x) => x.clone(),
+                        other => Reply::Error(format!("{other:?}")),
+                    };
+                    Res::Reply(Vec::new(), Reply::Array(vec![reply, Reply::Array(ev.into_iter().map(|e| Reply::Bulk(e.into())).collect())]))
+                };
+                a = with(&a, ea);
+                bb = with(&bb, eb);
+                v = Verdict::Diff;
+            }
+        }
         if env.trace {
             eprintln!("{}\n    -> {}", truncate(&cmd.line(), 300), truncate(&show(&a), 300));
         }
@@ -1907,7 +1968,7 @@ async fn fuzz_diff() {
         c.cmd(&["TS.CREATE", "fuzz-subscribe"]).await;
         c.cmd(&["DEL", "fuzz-subscribe"]).await;
     }
-    let env = Env { ref_addr, roll_addr: roll.to_string(), table: Table { specs, by_family, by_name, shas, config_defaults }, report_order, trace: std::env::var("ROLL_FUZZ_TRACE").is_ok() };
+    let env = Env { ref_addr, roll_addr: roll.to_string(), table: Table { specs, by_family, by_name, shas, config_defaults }, report_order, trace: std::env::var("ROLL_FUZZ_TRACE").is_ok(), notify: std::env::var("ROLL_FUZZ_NOTIFY").is_ok_and(|v| v == "1") };
 
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut total_cmds = 0usize;

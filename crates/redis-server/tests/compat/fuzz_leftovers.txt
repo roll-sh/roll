@@ -88,3 +88,24 @@ RPUSH l1 z
 OBJECT ENCODING l1
 CONFIG SET list-max-listpack-size -2
 FLUSHALL
+
+# MSETEX with an expiry fires each key's expire event before its set event (event order found
+# by the notification fuzzer).
+FLUSHALL
+CONFIG SET notify-keyspace-events KEA
+@conn 2
+!send PSUBSCRIBE __keyevent@0__:*
+@recv
+@conn 1
+MSETEX 2 mk1 a mk2 b PXAT 4102444800500
+MSETEX 1 mk3 c KEEPTTL
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+FLUSHALL
