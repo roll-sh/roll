@@ -903,16 +903,40 @@ pub fn latency_doctor(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     Ok(Reply::Verbatim("txt", Bytes::from_static(b"Dave, no latency spike was observed during the lifetime of this Redis instance, not in the slightest bit. I honestly think you ought to sleep better.\n")))
 }
 
+/// `LATENCY HISTOGRAM [command ...]`: every command with a latency histogram (Redis walks
+/// its command dict), or each named command (`lookupCommandBySds`: `name` or `container|sub`;
+/// unknown names skipped) and a container's subcommands, in argument order.
 pub fn latency_histogram(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let mut out = Vec::new();
-    for (name, s) in &cx.eng.cmdstats {
-        if args.len() > 2 && !args[2..].iter().any(|a| eq(a, name)) {
-            continue;
-        }
-        out.push((
+    let stats = &cx.eng.cmdstats;
+    let cdf = |name: &str| -> Option<(Reply, Reply)> {
+        let h = stats.get(name)?.latency.as_ref()?;
+        let buckets = h.log_cdf().into_iter().map(|(us, n)| (Reply::Int(us), Reply::Int(n as i64))).collect();
+        Some((
             Reply::bulk(name),
-            Reply::Map(vec![(Reply::bulk("calls"), Reply::Int(s.calls as i64)), (Reply::bulk("histogram_usec"), Reply::Map(vec![]))]),
-        ));
+            Reply::Map(vec![(Reply::bulk("calls"), Reply::Int(h.total() as i64)), (Reply::bulk("histogram_usec"), Reply::Map(buckets))]),
+        ))
+    };
+    let mut out = Vec::new();
+    if args.len() == 2 {
+        let mut names: Vec<&String> = stats.keys().collect();
+        names.sort();
+        out.extend(names.into_iter().filter_map(|n| cdf(n)));
+        return Ok(Reply::Map(out));
+    }
+    for a in &args[2..] {
+        let mut parts = a.split(|&b| b == b'|');
+        let (Some(base), sub, None) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let Some(mut cmd) = super::lookup(base) else { continue };
+        if let Some(sub) = sub {
+            let Some(s) = super::lookup_sub(cmd, sub) else { continue };
+            cmd = s;
+        }
+        let full = crate::acl::full_name(cmd).unwrap_or(cmd.name).to_ascii_lowercase();
+        out.extend(cdf(&full));
+        for s in cmd.subs {
+            let full = crate::acl::full_name(s).unwrap_or(s.name).to_ascii_lowercase();
+            out.extend(cdf(&full));
+        }
     }
     Ok(Reply::Map(out))
 }
@@ -921,12 +945,21 @@ pub fn latency_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     Ok(help(&[
         "LATENCY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
         "DOCTOR",
+        "    Return a human readable latency analysis report.",
         "GRAPH <event>",
+        "    Return an ASCII latency graph for the <event> class.",
         "HISTORY <event>",
+        "    Return time-latency samples for the <event> class.",
         "LATEST",
+        "    Return the latest latency samples for all events.",
         "RESET [<event> ...]",
+        "    Reset latency data of one or more <event> classes.",
+        "    (default: reset all data for all event classes)",
         "HISTOGRAM [COMMAND ...]",
+        "    Return a cumulative distribution of latencies in the format of a histogram for the specified command names.",
+        "    If no commands are specified then all histograms are replied.",
         "HELP",
+        "    Print this help.",
     ]))
 }
 
@@ -956,6 +989,18 @@ pub fn module_denied(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
 }
 
 pub fn module_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(help(&["MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:", "LIST", "HELP"]))
+    Ok(help(&[
+        "MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "LIST",
+        "    Return a list of loaded modules.",
+        "LOAD <path> [<arg> ...]",
+        "    Load a module library from <path>, passing to it any optional arguments.",
+        "LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]",
+        "    Load a module library from <path>, while passing it module configurations and optional arguments.",
+        "UNLOAD <name>",
+        "    Unload a module.",
+        "HELP",
+        "    Print this help.",
+    ]))
 }
 

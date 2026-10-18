@@ -173,6 +173,49 @@ impl Histogram {
         }
         if percentile == 0.0 { lowest_equivalent(v) } else { highest_equivalent(v) }
     }
+
+    /// `fillCommandCDF`: `hdr_iter_log_init(1024, 2)` walked over every count index — at each
+    /// reporting level (1024ns, doubling) the cumulative count and the highest equivalent
+    /// value (µs) of the index the walk stopped at, kept only where samples were added.
+    pub fn log_cdf(&self) -> Vec<(i64, u64)> {
+        // counts_len: (bucket_count + 1) * sub_bucket_half_count, 23 buckets reach 10^9.
+        const COUNTS_LEN: i32 = 24 * SUB_HALF as i32;
+        let mut out = Vec::new();
+        let (mut idx, mut cum, mut value, mut highest) = (-1i32, 0u64, 0i64, 0i64);
+        let mut level: i64 = 1024;
+        let mut level_low = lowest_equivalent(level);
+        let mut prev = 0u64;
+        loop {
+            let has_next = cum < self.total;
+            let beyond = idx < COUNTS_LEN && value_at_index(idx + 1) > level_low;
+            if !(has_next || beyond) {
+                break;
+            }
+            loop {
+                if value >= level_low {
+                    level *= 2;
+                    level_low = lowest_equivalent(level);
+                    break;
+                }
+                idx += 1;
+                if idx >= COUNTS_LEN {
+                    break;
+                }
+                cum += self.counts.get(&idx).copied().unwrap_or(0);
+                value = value_at_index(idx);
+                highest = highest_equivalent(value);
+            }
+            if cum > prev {
+                out.push((highest / 1000, cum));
+            }
+            prev = cum;
+        }
+        out
+    }
+
+    pub fn total(&self) -> u64 {
+        self.total
+    }
 }
 
 /// `%f` trimmed of trailing zeros (and the dot), like Redis' `trimDoubleString`.
@@ -941,5 +984,35 @@ mod tests {
         assert_eq!(human(1536), "1.50K");
         assert_eq!(human(5 << 20), "5.00M");
         assert_eq!(human(3 << 40), "3.00T");
+    }
+}
+
+#[cfg(test)]
+mod hdr_cdf_tests {
+    /// `LATENCY HISTOGRAM`'s buckets for recorded nanosecond values, as Redis' bundled
+    /// hdr_histogram computes them (`hdr_iter_log_init(1024, 2)`, levels that added samples).
+    #[test]
+    fn log_cdf_matches_hdr_histogram() {
+        let cases = [
+            ("17543 2030", "2:1 33:2"),
+            ("1479", "2:1"),
+            ("35189 159314", "66:1 264:2"),
+            ("190062 41625", "66:1 264:2"),
+            ("4095 2720 96863 134021 353", "1:1 4:3 132:4 264:5"),
+        ];
+        for (vals, want) in cases {
+            let mut h = super::Histogram::default();
+            for v in vals.split_whitespace() {
+                h.record(v.parse().unwrap());
+            }
+            let want: Vec<(i64, u64)> = want
+                .split_whitespace()
+                .map(|p| {
+                    let (a, b) = p.split_once(':').unwrap();
+                    (a.parse().unwrap(), b.parse().unwrap())
+                })
+                .collect();
+            assert_eq!(h.log_cdf(), want, "{vals}");
+        }
     }
 }
