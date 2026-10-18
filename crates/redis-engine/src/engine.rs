@@ -934,6 +934,7 @@ impl Engine {
             self.feed_monitor(client, &shown, now);
         }
         let failed = reply.is_error();
+        self.record_latency(&full, cmd.has(commands::FAST), micros);
         let stat = self.cmdstats.entry(full).or_default();
         stat.calls += 1;
         stat.usec += micros;
@@ -1013,6 +1014,17 @@ impl Engine {
             stat.slowlog_count += 1;
             stat.slowlog_us_sum += micros;
             stat.slowlog_us_max = stat.slowlog_us_max.max(micros);
+        }
+    }
+
+    /// `call()`'s latency accounting for a command that ran `micros`: its latency histogram
+    /// (while `latency-tracking` is on) and the monitor's command / fast-command spike.
+    pub(crate) fn record_latency(&mut self, full: &str, fast: bool, micros: u64) {
+        let event = if fast { "fast-command" } else { "command" };
+        self.latency_monitor.add_if_needed(self.cfg.latency_monitor_threshold, event, micros / 1000, now_ms() / 1000);
+        if self.cfg.latency_tracking {
+            let stat = self.cmdstats.entry(full.to_string()).or_default();
+            stat.latency.get_or_insert_with(Default::default).record(micros as i64 * 1000);
         }
     }
 

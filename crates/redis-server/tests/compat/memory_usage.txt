@@ -244,3 +244,13 @@ MEMORY USAGE sh2
 RPUSH {130*k} a
 MEMORY USAGE {130*k}
 FLUSHALL
+# MEMORY DOCTOR (its report depends on the server's peak and RSS history, so only checked to
+# run) and MEMORY STATS' fields (values are allocator-specific).
+!skip MEMORY DOCTOR
+MEMORY DOCTOR extra
+!type MEMORY STATS
+MEMORY STATS extra
+MEMORY MALLOC-STATS extra
+MEMORY PURGE
+MEMORY nosuch
+FLUSHALL

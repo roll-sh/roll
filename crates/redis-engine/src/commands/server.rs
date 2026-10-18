@@ -776,19 +776,36 @@ pub fn memory_usage(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     Ok(Reply::Int((crate::object::usage(e, key.len()) + share) as i64))
 }
 
+/// MEMORY STATS: `getMemoryOverheadData` in Redis' order. roll's allocator reports exactly
+/// what it holds, so the allocator's own fragmentation stays at 1 / 0 and the RSS overhead
+/// shows as the allocator-rss and total fragmentation; ratios are C floats.
 pub fn memory_stats(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    let used = cx.eng.used_memory() as i64;
-    let keys = cx.eng.total_keys() as i64;
+    let now = crate::util::now_ms();
+    let mh = super::info::mem_overhead(cx.eng, now);
+    let int = |n: u64| Reply::Int(n as i64);
+    let f32d = |v: f32| Reply::Double(v as f64);
+    let net = if mh.used > mh.startup { mh.used - mh.startup } else { 1 };
+    let ratio = |a: u64, b: u64| if b > 0 { a as f32 / b as f32 } else { 0.0 };
     let mut m = vec![
-        (Reply::bulk("peak.allocated"), Reply::Int(used)),
-        (Reply::bulk("total.allocated"), Reply::Int(used)),
-        (Reply::bulk("startup.allocated"), Reply::Int(0)),
-        (Reply::bulk("overhead.total"), Reply::Int(cx.eng.overhead as i64)),
-        (Reply::bulk("keys.count"), Reply::Int(keys)),
-        (Reply::bulk("keys.bytes-per-key"), Reply::Int(if keys > 0 { used / keys } else { 0 })),
-        (Reply::bulk("dataset.bytes"), Reply::Int(used)),
+        (Reply::bulk("peak.allocated"), int(mh.peak)),
+        (Reply::bulk("total.allocated"), int(mh.used)),
+        (Reply::bulk("startup.allocated"), int(mh.startup)),
+        (Reply::bulk("replication.backlog"), int(mh.repl_backlog)),
+        (Reply::bulk("replica.fullsync.buffer"), int(0)),
+        (Reply::bulk("clients.slaves"), int(0)),
+        (Reply::bulk("clients.normal"), int(mh.clients_mem)),
+        (Reply::bulk("clients.normal.shared"), int(0)),
+        (Reply::bulk("clients.normal.unshared"), int(mh.clients_mem)),
+        (Reply::bulk("cluster.links"), int(0)),
+        (Reply::bulk("aof.buffer"), int(0)),
+        (Reply::bulk("lua.caches"), int(mh.scripts_eval)),
+        (Reply::bulk("functions.caches"), int(mh.functions)),
+        (Reply::bulk("script.VMs"), int(mh.vm_eval + mh.vm_functions)),
+        (Reply::bulk("hash.templates"), int(mh.tmpl_mem)),
     ];
+    let mut lut = 0u64;
     for (i, d) in cx.eng.dbs.iter().enumerate() {
+        lut += (d.keys.table_bytes() + d.volatile.table_bytes()) as u64;
         if !d.is_empty() {
             m.push((
                 Reply::bulk_str(format!("db.{i}")),
@@ -799,11 +816,71 @@ pub fn memory_stats(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
             ));
         }
     }
+    let rss_bytes = mh.rss as i64 - mh.used as i64;
+    m.extend([
+        (Reply::bulk("overhead.db.hashtable.lut"), int(lut)),
+        (Reply::bulk("overhead.db.hashtable.rehashing"), int(0)),
+        (Reply::bulk("overhead.total"), int(mh.overhead)),
+        (Reply::bulk("db.dict.rehashing.count"), int(0)),
+        (Reply::bulk("keys.count"), int(mh.keys)),
+        (Reply::bulk("keys.bytes-per-key"), int(if mh.keys > 0 { mh.dataset / mh.keys } else { 0 })),
+        (Reply::bulk("dataset.bytes"), int(mh.dataset)),
+        (Reply::bulk("dataset.percentage"), f32d(mh.dataset as f32 * 100.0 / net as f32)),
+        (Reply::bulk("peak.percentage"), f32d(if mh.peak > 0 { mh.used as f32 * 100.0 / mh.peak as f32 } else { 0.0 })),
+        (Reply::bulk("allocator.allocated"), int(mh.used)),
+        (Reply::bulk("allocator.active"), int(mh.used)),
+        (Reply::bulk("allocator.resident"), int(mh.rss)),
+        (Reply::bulk("allocator.muzzy"), int(0)),
+        (Reply::bulk("allocator-fragmentation.ratio"), f32d(1.0)),
+        (Reply::bulk("allocator-fragmentation.bytes"), int(0)),
+        (Reply::bulk("allocator-rss.ratio"), f32d(ratio(mh.rss, mh.used))),
+        (Reply::bulk("allocator-rss.bytes"), Reply::Int(rss_bytes)),
+        (Reply::bulk("rss-overhead.ratio"), f32d(1.0)),
+        (Reply::bulk("rss-overhead.bytes"), int(0)),
+        (Reply::bulk("fragmentation"), f32d(ratio(mh.rss, mh.used))),
+        (Reply::bulk("fragmentation.bytes"), Reply::Int(rss_bytes)),
+    ]);
     Ok(Reply::Map(m))
 }
 
-pub fn memory_doctor(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Verbatim("txt", Bytes::from_static(b"Hi Sam, I can't find any memory issue in your instance. I can only account for what occurs on this base.")))
+/// MEMORY DOCTOR (`getMemoryDoctorReport`).
+pub fn memory_doctor(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    let now = crate::util::now_ms();
+    let mh = super::info::mem_overhead(cx.eng, now);
+    const MB: u64 = 1024 * 1024;
+    let mut issues: Vec<&str> = Vec::new();
+    let empty = mh.used < 5 * MB;
+    if !empty {
+        if mh.peak as f32 / mh.used as f32 > 1.5 {
+            issues.push(" * Peak memory: In the past this instance used more than 150% the memory that is currently using. The allocator is normally not able to release memory after a peak, so you can expect to see a big fragmentation ratio, however this is actually harmless and is only due to the memory peak, and if the Redis instance Resident Set Size (RSS) is currently bigger than expected, the memory will be used as soon as you fill the Redis instance with more data. If the memory peak was only occasional and you want to try to reclaim memory, please try the MEMORY PURGE command, otherwise the only other option is to shutdown and restart the instance.\n\n");
+        }
+        let (frag, frag_bytes) = (mh.rss as f32 / mh.used as f32, mh.rss as i64 - mh.used as i64);
+        if frag > 1.4 && frag_bytes > 10 << 20 {
+            issues.push(" * High total RSS: This instance has a memory fragmentation and RSS overhead greater than 1.4 (this means that the Resident Set Size of the Redis process is much larger than the sum of the logical allocations Redis performed). This problem is usually due either to a large peak memory (check if there is a peak memory entry above in the report) or may result from a workload that causes the allocator to fragment memory a lot. If the problem is a large peak memory, then there is no issue. Otherwise, make sure you are using the Jemalloc allocator and not the default libc malloc. Note: The currently used allocator is \"libc\".\n\n");
+        }
+        // The allocator's own fragmentation is 1 / 0 here; its RSS overhead is the total one.
+        if frag > 1.1 && frag_bytes > 10 << 20 {
+            issues.push(" * High allocator RSS overhead: This instance has an RSS memory overhead is greater than 1.1 (this means that the Resident Set Size of the allocator is much larger than the sum what the allocator actually holds). This problem is usually due to a large peak memory (check if there is a peak memory entry above in the report), you can try the MEMORY PURGE command to reclaim it.\n\n");
+        }
+        let clients = cx.eng.clients.by_id.len().max(1) as u64;
+        if mh.clients_mem / clients > 1024 * 200 {
+            issues.push(" * Big client buffers: The clients output buffers in this instance are greater than 200K per client (on average). This may result from different causes, like Pub/Sub clients subscribed to channels bot not receiving data fast enough, so that data piles on the Redis instance output buffer, or clients sending commands with large replies or very large sequences of commands in the same pipeline. Please use the CLIENT LIST command in order to investigate the issue if it causes problems in your instance, or to understand better why certain clients are using a big amount of memory.\n\n");
+        }
+        if cx.eng.scripting.cached_scripts() > 1000 {
+            issues.push(" * Many scripts: There seem to be many cached scripts in this instance (more than 1000). This may be because scripts are generated and `EVAL`ed, instead of being parameterized (with KEYS and ARGV), `SCRIPT LOAD`ed and `EVALSHA`ed. Unless `SCRIPT FLUSH` is called periodically, the scripts' caches may end up consuming most of your memory.\n\n");
+        }
+    }
+    let report = if empty {
+        "Hi Sam, this instance is empty or is using very little memory, my issues detector can't be used in these conditions. Please, leave for your mission on Earth and fill it with some data. The new Sam and I will be back to our programming as soon as I finished rebooting.\n".to_string()
+    } else if issues.is_empty() {
+        "Hi Sam, I can't find any memory issue in your instance. I can only account for what occurs on this base.\n".to_string()
+    } else {
+        let mut s = String::from("Sam, I detected a few issues in this Redis instance memory implants:\n\n");
+        issues.iter().for_each(|i| s.push_str(i));
+        s.push_str("I'm here to keep you safe, Sam. I want to help you.\n");
+        s
+    };
+    Ok(Reply::Verbatim("txt", Bytes::from(report)))
 }
 
 pub fn memory_malloc_stats(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {

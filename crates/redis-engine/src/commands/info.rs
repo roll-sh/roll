@@ -429,6 +429,73 @@ fn rusage(who: libc::c_int) -> (String, String) {
 }
 
 /// Resident set size of the process.
+/// `getMemoryOverheadData`: what INFO memory, MEMORY STATS and MEMORY DOCTOR report.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemOverhead {
+    pub used: u64,
+    pub rss: u64,
+    pub peak: u64,
+    pub startup: u64,
+    pub overhead: u64,
+    pub dataset: u64,
+    pub clients_mem: u64,
+    pub tmpl_mem: u64,
+    pub vm_eval: u64,
+    pub vm_functions: u64,
+    pub scripts_eval: u64,
+    pub functions: u64,
+    pub repl_backlog: u64,
+    pub keys: u64,
+}
+
+impl MemOverhead {
+    /// `dataset_perc`: the dataset's share of the memory above startup.
+    pub fn dataset_perc(&self) -> f64 {
+        let net = self.used.saturating_sub(self.startup);
+        if net > 0 { self.dataset as f64 * 100.0 / net as f64 } else { 0.0 }
+    }
+
+    /// `peak_perc`.
+    pub fn peak_perc(&self) -> f64 {
+        if self.peak > 0 { self.used as f64 * 100.0 / self.peak as f64 } else { 0.0 }
+    }
+
+    /// `total_frag` (rss / used) and its bytes; roll's allocator reports what it holds, so the
+    /// allocator and process shares stay 1 / 0 and the whole overhead is the RSS one.
+    pub fn frag(&self) -> (f64, i64) {
+        let ratio = if self.used > 0 { self.rss as f64 / self.used as f64 } else { 0.0 };
+        (ratio, self.rss as i64 - self.used as i64)
+    }
+}
+
+pub fn mem_overhead(eng: &mut Engine, now: i64) -> MemOverhead {
+    eng.update_peak(now);
+    let used = eng.used_memory() as u64;
+    let sc = &eng.scripting;
+    let (vm_eval, vm_functions) = (sc.memory() as u64, sc.functions_memory() as u64);
+    let (scripts_eval, functions) = (sc.scripts_memory() as u64, sc.libraries_memory() as u64);
+    let clients_mem = eng.clients_memory();
+    let startup = eng.startup_memory as u64;
+    let keys_overhead: u64 = eng.dbs.iter().map(|d| (d.len() * crate::value::KEY_OVERHEAD + d.keys.table_bytes() + d.volatile.table_bytes()) as u64).sum();
+    let overhead = (startup + clients_mem + eng.overhead as u64 + keys_overhead + scripts_eval + functions).min(used.max(startup));
+    MemOverhead {
+        used,
+        rss: process_rss(),
+        peak: eng.peak_memory as u64,
+        startup,
+        overhead,
+        dataset: used.saturating_sub(overhead),
+        clients_mem,
+        tmpl_mem: eng.hub.templates.stats().mem as u64,
+        vm_eval,
+        vm_functions,
+        scripts_eval,
+        functions,
+        repl_backlog: eng.host.as_ref().and_then(|h| h.replication().backlog).map_or(0, |b| b.2),
+        keys: eng.total_keys() as u64,
+    }
+}
+
 fn process_rss() -> u64 {
     #[cfg(target_os = "linux")]
     if let Ok(s) = std::fs::read_to_string("/proc/self/statm")
@@ -548,19 +615,9 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
 
     if want.has("memory") {
         begin(&mut s, "# Memory");
-        eng.update_peak(now);
-        let used = eng.used_memory() as u64;
-        let rss = process_rss();
-        let peak = eng.peak_memory as u64;
+        let mh = mem_overhead(eng, now);
+        let MemOverhead { used, rss, peak, startup, overhead, dataset, clients_mem, tmpl_mem, vm_eval, vm_functions, scripts_eval, functions, .. } = mh;
         let sc = &eng.scripting;
-        let (vm_eval, vm_functions) = (sc.memory() as u64, sc.functions_memory() as u64);
-        let (scripts_eval, functions) = (sc.scripts_memory() as u64, sc.libraries_memory() as u64);
-        let clients_mem = eng.clients_memory();
-        let tmpl_mem = eng.hub.templates.stats().mem;
-        let startup = eng.startup_memory as u64;
-        let keys_overhead: u64 = eng.dbs.iter().map(|d| (d.len() * crate::value::KEY_OVERHEAD + d.keys.table_bytes() + d.volatile.table_bytes()) as u64).sum();
-        let overhead = (startup + clients_mem + eng.overhead as u64 + keys_overhead + scripts_eval + functions).min(used.max(startup));
-        let dataset = used.saturating_sub(overhead);
         let net = used.saturating_sub(startup);
         let pct = |a: u64, b: u64| if b > 0 { a as f64 * 100.0 / b as f64 } else { 0.0 };
         let ratio = |a: u64, b: u64| if b > 0 { a as f64 / b as f64 } else { 0.0 };
@@ -601,7 +658,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
             rss as i64 - used as i64,
             ratio(rss, used),
             rss as i64 - used as i64,
-            eng.host.as_ref().and_then(|h| h.replication().backlog).map_or(0, |b| b.2),
+            mh.repl_backlog,
         );
     }
 
