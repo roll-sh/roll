@@ -32,7 +32,7 @@ pub static COMMANDS: &[Command] = &[
     cmd!("FT.EXPLAIN", -3, READONLY | MODULE, 0, 0, 0, super::ft_query::ft_explain, Module),
     cmd!("FT.EXPLAINCLI", -3, READONLY | MODULE, 0, 0, 0, super::ft_query::ft_explaincli, Module),
     cmd!("FT.GET", -1, READONLY | MODULE, 2, 2, 1, super::ft_doc::ft_get, Module),
-    cmd!("FT.HYBRID", -7, READONLY | MODULE, 0, 0, 0, not_yet, Module),
+    cmd!("FT.HYBRID", -7, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_hybrid, Module),
     cmd!("FT.INFO", 2, READONLY | MODULE, 0, 0, 0, super::ft::ft_info, Module),
     cmd!("FT.MGET", -1, READONLY | MODULE, 0, 0, 0, super::ft_doc::ft_mget, Module),
     cmd!("FT.PROFILE", -5, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_profile, Module),

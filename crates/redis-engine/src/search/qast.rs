@@ -674,7 +674,7 @@ fn vector_attribute(vq: &mut VectorQuery, a: &Attr) -> Result<bool, QErr> {
 }
 
 /// `validateShardKRatio`: a double in (0, 1].
-fn shard_k_ratio(v: &[u8]) -> Result<f64, QErr> {
+pub fn shard_k_ratio(v: &[u8]) -> Result<f64, QErr> {
     match strconv::parse_double(v, 1) {
         None => Err(QErr::user(Code::Inval, "Invalid shard k ratio value", format!(" '{}'", lossy(v)))),
         Some(r) if r <= 0.0 || r > 1.0 => {

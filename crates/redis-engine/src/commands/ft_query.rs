@@ -456,6 +456,8 @@ pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     {
         let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
         req.apply_context(ix, resp3)?;
+        // `prepareRequest`: the dialect counts once the request is built, whatever the run.
+        ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
     }
     let db = cx.client.db;
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
@@ -519,6 +521,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
         token_id: std::cell::Cell::new(0),
         can_skip_rich: req.opts.flags & qast::S_CAN_SKIP_RICH_RESULTS != 0,
         metric_requests: Vec::new(),
+        hybrid: false,
     };
     let root = req.root.as_ref().expect("a parsed query");
     let mut it = ecx.iterate(root)?;

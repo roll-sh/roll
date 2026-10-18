@@ -857,6 +857,80 @@ impl Iter for Wildcard {
     }
 }
 
+/// The GEOSHAPE query iterator (`GeoShape`): the matching ids sorted, results checked
+/// against the field's expiration.
+pub struct GeoShapeIt<'a> {
+    ids: Vec<DocId>,
+    offset: usize,
+    last: DocId,
+    res: IxResult,
+    checker: Checker,
+    cx: &'a Qcx<'a>,
+}
+
+impl<'a> GeoShapeIt<'a> {
+    pub fn new(mut ids: Vec<DocId>, field: usize, cx: &'a Qcx<'a>) -> Self {
+        ids.sort_unstable();
+        GeoShapeIt { ids, offset: 0, last: 0, res: IxResult { field_mask: MASK_ALL, ..IxResult::virt() }, checker: Checker::Field(field, Predicate::Default), cx }
+    }
+}
+
+impl Iter for GeoShapeIt<'_> {
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        print_leaf("GEO-SHAPE", pc, c)
+    }
+    fn read(&mut self) -> bool {
+        loop {
+            let Some(&id) = self.ids.get(self.offset) else {
+                self.res.doc_id = self.last;
+                return false;
+            };
+            self.offset += 1;
+            self.res.doc_id = id;
+            if self.checker.is_expired(self.cx, &self.res) {
+                continue;
+            }
+            self.last = id;
+            return true;
+        }
+    }
+    fn skip_to(&mut self, target: DocId) -> Skip {
+        if self.offset >= self.ids.len() {
+            return Skip::Eof;
+        }
+        if target > *self.ids.last().expect("ids") {
+            self.offset = self.ids.len();
+            return Skip::Eof;
+        }
+        let idx = self.offset + self.ids[self.offset..].partition_point(|&d| d < target);
+        let found = self.ids[idx];
+        self.offset = idx + 1;
+        self.res.doc_id = found;
+        if self.checker.is_expired(self.cx, &self.res) {
+            return if self.read() { Skip::NotFound } else { Skip::Eof };
+        }
+        self.last = found;
+        if found == target { Skip::Found } else { Skip::NotFound }
+    }
+    fn current(&mut self) -> Option<&mut IxResult> {
+        Some(&mut self.res)
+    }
+    fn last_doc_id(&self) -> DocId {
+        self.last
+    }
+    fn at_eof(&self) -> bool {
+        self.offset >= self.ids.len()
+    }
+    fn num_estimated(&self) -> usize {
+        self.ids.len()
+    }
+    fn rewind(&mut self) {
+        self.offset = 0;
+        self.last = 0;
+        self.res.doc_id = 0;
+    }
+}
+
 /// `IdListSorted`.
 pub struct IdList {
     pub(super) ids: Vec<DocId>,

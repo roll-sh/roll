@@ -24,6 +24,7 @@ HSET d:1 t hello n 5 tg a,b
 HSET d:2 t world n 6 tg b,c
 !mask total_indexing_time FT.INFO idx
 FT.ALTER idx SCHEMA ADD n NUMERIC SORTABLE
+@sleep 200
 !mask total_indexing_time FT.INFO idx
 FT.ALTER idx SKIPINITIALSCAN SCHEMA ADD tg TAG
 !mask total_indexing_time FT.INFO idx

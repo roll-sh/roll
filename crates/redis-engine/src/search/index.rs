@@ -116,8 +116,8 @@ pub struct FieldIndex {
     pub numeric: Option<super::numtree::NumericRangeTree>,
     /// The vector index (`openVectorIndex`'s), created by the first vector indexed.
     pub vectors: Option<super::vecsim::VecIndex>,
-    /// Geometries (WKT) by document id.
-    pub geometry: Option<HashMap<u64, Bytes>>,
+    /// The GEOSHAPE index (`OpenGeometryIndex`'s), created on first use, queries included.
+    pub geometry: std::sync::OnceLock<super::geometry::GeometryIndex>,
     pub error: IndexError,
 }
 
@@ -405,10 +405,27 @@ impl Index {
             {
                 v.delete(id);
             }
-            if let Some(g) = &mut f.geometry {
-                g.remove(&id);
+        }
+        // `GeometryIndex_RemoveId`: every geometry field's index, created if missing.
+        if self.spec.fields.iter().any(|fs| fs.types & spec::T_GEOMETRY != 0) {
+            for fi in 0..self.fields.len() {
+                if self.spec.fields[fi].types & spec::T_GEOMETRY != 0 {
+                    self.geometry_index(fi);
+                    if let Some(g) = self.fields[fi].geometry.get_mut() {
+                        g.remove(id);
+                    }
+                }
             }
         }
+    }
+
+    /// `OpenGeometryIndex(fs, CREATE_INDEX)`.
+    pub fn geometry_index(&self, fi: usize) -> &super::geometry::GeometryIndex {
+        let cs = match self.spec.fields[fi].coords {
+            spec::Coords::Flat => super::geometry::Cs::Flat,
+            spec::Coords::Spherical => super::geometry::Cs::Sphere,
+        };
+        self.fields[fi].geometry.get_or_init(|| super::geometry::GeometryIndex::new(cs))
     }
 
     fn record_error(&mut self, field: Option<usize>, e: &QErr, key: &[u8]) {
@@ -695,8 +712,13 @@ impl Index {
                     }
                 }
                 spec::T_GEOMETRY => {
+                    self.geometry_index(fi);
                     if let Some(g) = &fd.geometry {
-                        self.fields[fi].geometry.get_or_insert_with(HashMap::new).insert(id, g.clone());
+                        let ix = self.fields[fi].geometry.get_mut().expect("geometry index");
+                        if let Err(m) = ix.insert_wkt(g, id) {
+                            let m = String::from_utf8_lossy(&m).into_owned();
+                            return Err(QErr::user(Code::BadVal, "Error indexing geoshape", format!(": {m}")));
+                        }
                     }
                 }
                 _ => {}

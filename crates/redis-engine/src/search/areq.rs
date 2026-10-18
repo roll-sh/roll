@@ -39,6 +39,16 @@ pub const AGG_LOAD_ALL: u64 = 1 << 18;
 pub const OPTIMIZE: u64 = 1 << 19;
 pub const FORMAT_DEFAULT: u64 = 1 << 20;
 pub const FORMAT_EXPAND: u64 = 1 << 21;
+/// `QEXEC_F_IS_HYBRID_TAIL`: FT.HYBRID's merging pipeline.
+pub const F_IS_HYBRID_TAIL: u64 = 1 << 22;
+/// `QEXEC_F_IS_HYBRID_SEARCH_SUBQUERY`.
+pub const F_IS_HYBRID_SEARCH: u64 = 1 << 23;
+/// `QEXEC_F_IS_HYBRID_VECTOR_AGGREGATE_SUBQUERY`.
+pub const F_IS_HYBRID_VECTOR: u64 = 1 << 24;
+/// `QEXEC_F_NO_SORT` (FT.HYBRID's NOSORT).
+pub const F_NO_SORT: u64 = 1 << 25;
+/// `IsHybrid`.
+pub const F_IS_HYBRID: u64 = F_IS_HYBRID_TAIL | F_IS_HYBRID_SEARCH | F_IS_HYBRID_VECTOR;
 
 const MAX_DIALECT: u32 = 4;
 /// `APIVERSION_RETURN_MULTI_CMP_FIRST`.
@@ -164,6 +174,8 @@ pub enum Step {
     Apply { expr: Bytes, alias: Bytes },
     Filter { expr: Bytes },
     Load { args: Vec<Bytes>, all: bool },
+    /// `PLN_VectorNormalizerStep`: FT.HYBRID's vector distances into scores.
+    Normalize { field: Bytes, alias: Bytes },
 }
 
 /// `PLN_ArrangeStep`.
@@ -216,6 +228,35 @@ pub struct Request {
     pub num_tokens: usize,
     /// The query optimizer's decisions (with OPTIMIZE, once the index is applied).
     pub optimizer: Option<Plan>,
+    /// `searchopts.scoreAlias` (FT.HYBRID's YIELD_SCORE_AS).
+    pub score_alias: Option<Bytes>,
+    /// `ast.validationFlags` (`QAST_NO_WEIGHT`, `QAST_NO_VECTOR`).
+    pub validation: u32,
+    /// `parsedVectorData`: FT.HYBRID's VSIM, made the root when the index is applied.
+    pub hybrid_vec: Option<Box<HybridVec>>,
+    /// LOAD and GROUPBY names need their `@` (`strictPrefix`).
+    pub strict_prefix: bool,
+}
+
+/// `ParsedVectorData` with its `VectorQuery`.
+#[derive(Clone, Debug)]
+pub struct HybridVec {
+    /// Without its `@`.
+    pub field: Bytes,
+    /// The vector's parameter, without its `$`.
+    pub param: Bytes,
+    pub knn: bool,
+    pub k: u64,
+    pub radius: f64,
+    /// The raw parameters (EF_RUNTIME, EPSILON).
+    pub params: Vec<(Vec<u8>, Vec<u8>)>,
+    pub attrs: Vec<qast::Attr>,
+    /// `QueryNode_HideVectorDistanceField`: no YIELD_SCORE_AS.
+    pub hide: bool,
+    /// RANGE without FILTER: the vector node is the root.
+    pub skip_filter: bool,
+    /// The range's results come by score (no FILTER).
+    pub by_score: bool,
 }
 
 /// `ARG_HANDLED` / `ARG_UNKNOWN` (errors are `Err`).
@@ -257,7 +298,19 @@ impl Request {
             root: None,
             num_tokens: 0,
             optimizer: None,
+            score_alias: None,
+            validation: 0,
+            hybrid_vec: None,
+            strict_prefix: false,
         }
+    }
+
+    /// `AREQ_New` for FT.HYBRID: no command flags, the given dialect.
+    pub fn hybrid(cfg: &Config, flags: u64, dialect: u32) -> Request {
+        let mut r = Request::new(Command::Explain, cfg, &[]);
+        r.flags = flags;
+        r.dialect = dialect;
+        r
     }
 
     /// `ensureSimpleMode`.
@@ -282,7 +335,7 @@ impl Request {
     }
 
     /// `AGPLN_GetOrCreateArrangeStep`.
-    fn arrange_or_create(&mut self) -> &mut Arrange {
+    pub fn arrange_or_create(&mut self) -> &mut Arrange {
         let i = match self.arrange_index() {
             Some(i) => i,
             None => {
@@ -774,7 +827,7 @@ impl Request {
 
 /// `getReducerAlias`: `__generated_alias<name><args without leading @s, comma separated>`,
 /// lowercased.
-fn reducer_alias(name: &[u8], args: &[Bytes]) -> Bytes {
+pub fn reducer_alias(name: &[u8], args: &[Bytes]) -> Bytes {
     let mut out = b"__generated_alias".to_vec();
     out.extend_from_slice(cstr(name));
     for (i, a) in args.iter().enumerate() {
@@ -958,6 +1011,45 @@ fn set_filter_node(root: &mut Option<Node>, num_tokens: &mut usize, filter: Node
     }
 }
 
+/// `applyVectorQuery`: FT.HYBRID's VSIM as the root, its FILTER (the parsed query) under or
+/// beside it.
+fn hybrid_vector_root(hv: &HybridVec, sp: &spec::Spec, filter: Option<Node>, num_tokens: &mut usize, num_params: &mut usize) -> Result<Node, QErr> {
+    let name = cstr(&hv.field);
+    let Some(fi) = sp.fields.iter().position(|f| f.name.as_ref() == name) else {
+        return Err(QErr::user(Code::Syntax, "Unknown field", format!(" `{}`", qast::lossy(name))));
+    };
+    if !sp.fields[fi].is(spec::T_VECTOR) {
+        return Err(QErr::user(Code::Syntax, "Expected a VECTOR field", format!(" `{}`", qast::lossy(name))));
+    }
+    let mut score = b"__".to_vec();
+    score.extend_from_slice(name);
+    score.extend_from_slice(b"_score");
+    let vq = qast::VectorQuery {
+        knn: hv.knn,
+        field: Some(fi),
+        k: hv.k,
+        radius: hv.radius,
+        blob: Bytes::new(),
+        by_score: hv.by_score,
+        shard_window_ratio: 1.0,
+        score_field: Some(score),
+        need_resolve: vec![false; hv.params.len()],
+        params: hv.params.clone(),
+    };
+    let mut n = Node::new(Kind::Vector(Box::new(vq)));
+    n.opts.flags |= qast::N_YIELDS_DISTANCE | qast::N_HYBRID_VECTOR_SUBQUERY;
+    n.params.push(qast::Param { name: cstr(&hv.param).to_vec(), ty: qast::PType::Vec, target: qast::Target::VecBlob, sign: 0 });
+    *num_params += 1;
+    qast::apply_attributes(&mut n, &hv.attrs)?;
+    let mut root = Some(n);
+    if !hv.skip_filter
+        && let Some(f) = filter
+    {
+        set_filter_node(&mut root, num_tokens, f);
+    }
+    Ok(root.expect("the vector node"))
+}
+
 /// `strtol(s, NULL, 10)`: the leading number, if any (0 otherwise).
 fn strtol(s: &[u8]) -> i64 {
     let s = cstr(s);
@@ -1046,10 +1138,18 @@ impl Request {
         }
         let stopwords = (self.opts.flags & qast::S_NO_STOPWORDS == 0).then_some(&ix.stopwords);
         let popts = ParseOpts { stopwords, params: self.opts.params.as_ref() };
-        let parsed = qparse::parse(&self.query, self.dialect, &ix.spec, &popts)?;
-        let mut root = Some(parsed.root.unwrap_or_else(|| Node::new(Kind::Null)));
-        let mut num_tokens = parsed.num_tokens;
-        if parsed.num_params > 0
+        // A hybrid RANGE without FILTER parses nothing: its vector node is the root.
+        let skip_parse = self.hybrid_vec.as_ref().is_some_and(|h| h.skip_filter);
+        let (mut root, mut num_tokens, mut num_params) = if skip_parse {
+            (None, 0, 0)
+        } else {
+            let parsed = qparse::parse(&self.query, self.dialect, &ix.spec, &popts)?;
+            (Some(parsed.root.unwrap_or_else(|| Node::new(Kind::Null))), parsed.num_tokens, parsed.num_params)
+        };
+        if let Some(hv) = self.hybrid_vec.as_deref() {
+            root = Some(hybrid_vector_root(hv, &ix.spec, root, &mut num_tokens, &mut num_params)?);
+        }
+        if num_params > 0
             && let Some(r) = root.as_mut()
         {
             qast::eval_params(r, self.opts.params.as_ref(), self.dialect)?;
@@ -1057,7 +1157,7 @@ impl Request {
         self.global_filters(ix, &mut root, &mut num_tokens)?;
         let mut sopts = qast::SearchOpts { flags: self.opts.flags, slop: self.opts.slop as i64, language };
         if let Some(r) = &root {
-            qast::check_is_valid(r, &ix.spec, &mut sopts, 0)?;
+            qast::check_is_valid(r, &ix.spec, &mut sopts, self.validation)?;
         }
         self.opts.flags = sopts.flags;
         if self.opts.flags & qast::S_VERBATIM == 0

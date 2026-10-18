@@ -364,11 +364,12 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                 }
                 "sleep" => tokio::time::sleep(std::time::Duration::from_millis(arg.trim().parse().unwrap())).await,
                 // `@until <ms> <text> <command>`: repeat the command on each side (every 50ms, at
-                // most <ms>) until its reply mentions <text>. For states a busy host reaches late;
-                // the lines after it compare what each side then answers.
+                // most <ms>) until its reply mentions <text> (`\s` in <text> stands for a space). For
+                // states a busy host reaches late; the lines after it compare what each side then answers.
                 "until" => {
                     let mut it = arg.trim().splitn(3, ' ');
                     let (ms, want, cmdline) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+                    let want = &want.replace("\\s", " ");
                     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms.parse().unwrap());
                     let args = redis_server::client::args(&expand(cmdline));
                     let p = conns.get_mut(&cur).unwrap();

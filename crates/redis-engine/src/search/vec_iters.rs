@@ -545,29 +545,38 @@ impl Iter for HybridIt<'_> {
     }
 }
 
-/// A range query's lazy iterator: the ids within the radius (by id), with their distances
-/// as metrics when the query yields them (`MetricLazy` / `IdListLazy`).
+/// A range query's lazy iterator: the ids within the radius (by id, or by score for
+/// FT.HYBRID's unfiltered RANGE), with their distances as metrics when the query yields them
+/// (`MetricLazy` / `IdListLazy`).
 pub struct RangeIt<'a> {
     vi: &'a VecIndex,
     blob: Vec<u8>,
     radius: f64,
     key: Option<usize>,
     yields: bool,
+    by_score: bool,
     produced: bool,
     list: IdList,
     dists: Vec<f64>,
 }
 
 impl<'a> RangeIt<'a> {
-    pub fn new(vi: &'a VecIndex, blob: &[u8], radius: f64, yields: bool, key: Option<usize>) -> Self {
+    pub fn new(vi: &'a VecIndex, blob: &[u8], radius: f64, yields: bool, key: Option<usize>, by_score: bool) -> Self {
         let res = if yields { metric_result(0, 0.0) } else { IxResult { kind: K_VIRTUAL, weight: 1.0, ..Default::default() } };
-        RangeIt { vi, blob: blob.to_vec(), radius, key, yields, produced: false, list: IdList::new(Vec::new(), res), dists: Vec::new() }
+        RangeIt { vi, blob: blob.to_vec(), radius, key, yields, by_score, produced: false, list: IdList::new(Vec::new(), res), dists: Vec::new() }
     }
 
     fn ensure(&mut self) {
         if !self.produced {
             self.produced = true;
-            let r = self.vi.range(&self.blob, self.radius);
+            let r = if self.by_score {
+                // `BY_SCORE`: the scan's results through `std::sort` on the score alone.
+                let mut r = self.vi.range_unsorted(&self.blob, self.radius);
+                std_sort(&mut r, |a, b| a.1 < b.1);
+                r
+            } else {
+                self.vi.range(&self.blob, self.radius)
+            };
             self.list.ids = r.iter().map(|x| x.0).collect();
             self.dists = r.iter().map(|x| x.1).collect();
         }
@@ -626,16 +635,175 @@ impl Iter for RangeIt<'_> {
             return self.list.print(pc, c);
         }
         let mut m = Vec::new();
-        kv(&mut m, "Type", Reply::Status("METRIC SORTED BY ID - VECTOR DISTANCE".into()));
+        let ty = if self.by_score { "METRIC SORTED BY SCORE - VECTOR DISTANCE" } else { "METRIC SORTED BY ID - VECTOR DISTANCE" };
+        kv(&mut m, "Type", Reply::Status(ty.into()));
         print_counters(&mut m, pc, c);
         kv(&mut m, "Vector search mode", Reply::Status("RANGE_QUERY".into()));
         m
     }
 }
 
+/// libstdc++'s `std::sort` (introsort: median-of-three unguarded partitions down to runs of
+/// 16, heapsort past `2 * lg n` levels, then a final insertion sort), so equal elements end up
+/// where the module's do.
+pub fn std_sort<T>(v: &mut [T], less: impl Fn(&T, &T) -> bool + Copy) {
+    let n = v.len();
+    if n < 2 {
+        return;
+    }
+    let depth = 2 * (usize::BITS - 1 - n.leading_zeros()) as usize;
+    introsort_loop(v, depth, less);
+    // `__final_insertion_sort`
+    if n > 16 {
+        insertion_sort(&mut v[..16], less);
+        for i in 16..n {
+            unguarded_linear_insert(v, i, less);
+        }
+    } else {
+        insertion_sort(v, less);
+    }
+}
+
+fn introsort_loop<T>(v: &mut [T], mut depth: usize, less: impl Fn(&T, &T) -> bool + Copy) {
+    let mut last = v.len();
+    while last > 16 {
+        if depth == 0 {
+            heap_sort(&mut v[..last], less);
+            return;
+        }
+        depth -= 1;
+        // `__unguarded_partition_pivot`
+        let mid = last / 2;
+        move_median_to_first(v, 0, 1, mid, last - 1, less);
+        let (mut lo, mut hi) = (1, last);
+        let cut = loop {
+            while less(&v[lo], &v[0]) {
+                lo += 1;
+            }
+            hi -= 1;
+            while less(&v[0], &v[hi]) {
+                hi -= 1;
+            }
+            if lo >= hi {
+                break lo;
+            }
+            v.swap(lo, hi);
+            lo += 1;
+        };
+        introsort_loop(&mut v[cut..last], depth, less);
+        last = cut;
+    }
+}
+
+fn move_median_to_first<T>(v: &mut [T], result: usize, a: usize, b: usize, c: usize, less: impl Fn(&T, &T) -> bool) {
+    let m = if less(&v[a], &v[b]) {
+        if less(&v[b], &v[c]) {
+            b
+        } else if less(&v[a], &v[c]) {
+            c
+        } else {
+            a
+        }
+    } else if less(&v[a], &v[c]) {
+        a
+    } else if less(&v[b], &v[c]) {
+        c
+    } else {
+        b
+    };
+    v.swap(result, m);
+}
+
+fn insertion_sort<T>(v: &mut [T], less: impl Fn(&T, &T) -> bool + Copy) {
+    for i in 1..v.len() {
+        if less(&v[i], &v[0]) {
+            v[..=i].rotate_right(1);
+        } else {
+            unguarded_linear_insert(v, i, less);
+        }
+    }
+}
+
+fn unguarded_linear_insert<T>(v: &mut [T], mut i: usize, less: impl Fn(&T, &T) -> bool) {
+    while less(&v[i], &v[i - 1]) {
+        v.swap(i, i - 1);
+        i -= 1;
+    }
+}
+
+/// `__partial_sort(first, last, last)`: `__make_heap`, then `__sort_heap`.
+fn heap_sort<T>(v: &mut [T], less: impl Fn(&T, &T) -> bool + Copy) {
+    let len = v.len();
+    if len < 2 {
+        return;
+    }
+    let mut parent = (len - 2) / 2;
+    loop {
+        adjust_heap(v, parent, len, less);
+        if parent == 0 {
+            break;
+        }
+        parent -= 1;
+    }
+    let mut last = len;
+    while last > 1 {
+        last -= 1;
+        // `__pop_heap(first, last, last)`: the top goes to `last`, its value re-sifted.
+        v.swap(0, last);
+        adjust_heap(v, 0, last, less);
+    }
+}
+
+/// `__adjust_heap` with the value at `hole` (moves are swaps along the hole's path, so the
+/// value travels with it).
+fn adjust_heap<T>(v: &mut [T], mut hole: usize, len: usize, less: impl Fn(&T, &T) -> bool) {
+    let top = hole;
+    let mut child = hole;
+    while child < (len - 1) / 2 {
+        child = 2 * (child + 1);
+        if less(&v[child], &v[child - 1]) {
+            child -= 1;
+        }
+        v.swap(hole, child);
+        hole = child;
+    }
+    if len & 1 == 0 && child == (len - 2) / 2 {
+        child = 2 * (child + 1);
+        v.swap(hole, child - 1);
+        hole = child - 1;
+    }
+    // `__push_heap`
+    while hole > top {
+        let parent = (hole - 1) / 2;
+        if !less(&v[parent], &v[hole]) {
+            break;
+        }
+        v.swap(hole, parent);
+        hole = parent;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn std_sort_sorts() {
+        let mut seed = 12345u64;
+        for n in [0usize, 1, 2, 5, 16, 17, 40, 300, 2000] {
+            let mut v: Vec<(u32, usize)> = (0..n)
+                .map(|i| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    (((seed >> 33) % 7) as u32, i)
+                })
+                .collect();
+            std_sort(&mut v, |a, b| a.0 < b.0);
+            assert!(v.windows(2).all(|w| w[0].0 <= w[1].0));
+            let mut ids: Vec<usize> = v.iter().map(|x| x.1).collect();
+            ids.sort();
+            assert_eq!(ids, (0..n).collect::<Vec<_>>());
+        }
+    }
 
     #[test]
     fn strtoll_base0() {

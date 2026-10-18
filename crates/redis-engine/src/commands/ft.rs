@@ -1209,7 +1209,8 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
     top.push((st("tag_overhead_sz_mb"), mb(ix.tags_overhead() as i64)));
     top.push((st("text_overhead_sz_mb"), mb(ix.text_overhead() as i64)));
     top.push((st("total_index_memory_sz_mb"), mb(total)));
-    top.push((st("geoshapes_sz_mb"), mb(0)));
+    let geoms = ix.fields.iter().filter_map(|f| f.geometry.get()).fold(0u64, |a, g| a.wrapping_add(g.report()));
+    top.push((st("geoshapes_sz_mb"), Reply::Double((geoms as f32 / 0x100000 as f32) as f64)));
     top.push((st("records_per_doc_avg"), Reply::Double((num_records as f32 / s.num_documents as f32) as f64)));
     let bytes_per_record = if num_records != 0 { (s.inverted_size as f32 / num_records as f32) as f64 } else { f64::NAN };
     top.push((st("bytes_per_record_avg"), Reply::Double(bytes_per_record)));

@@ -136,7 +136,7 @@ impl<V> RsDict<V> {
     }
 
     /// `dictExpand`.
-    fn expand(&mut self, size: usize) {
+    pub fn expand(&mut self, size: usize) {
         if self.rehash.is_some() || self.ht[0].used > size {
             return;
         }
@@ -273,6 +273,11 @@ impl<V> RsDict<V> {
 
     pub fn keys(&self) -> impl Iterator<Item = &Bytes> {
         self.iter().map(|(k, _)| k)
+    }
+
+    /// The entries in `dictNext` order.
+    pub fn into_entries(self) -> Vec<(Bytes, V)> {
+        self.ht.into_iter().flat_map(|t| t.buckets).flatten().collect()
     }
 }
 

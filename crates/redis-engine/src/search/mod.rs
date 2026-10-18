@@ -13,6 +13,7 @@ pub mod error;
 pub mod eval;
 pub mod expr;
 pub mod geo;
+pub mod geometry;
 pub mod global;
 pub mod highlight;
 pub mod hll;

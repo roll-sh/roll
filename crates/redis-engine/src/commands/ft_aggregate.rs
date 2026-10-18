@@ -35,7 +35,7 @@ use super::ft_query::{self as fq, K_FORCE_LOAD, K_HIDDEN, K_NUMERIC, K_SCHEMA_SR
 use super::*;
 use crate::engine::Engine;
 use crate::search::areq::{
-    self, Arrange, Command, F_HAS_DEPLETER, F_HAS_GROUPBY, F_HAS_SORTBY, F_HAS_WITHCOUNT, F_IS_AGGREGATE, F_IS_CURSOR, F_IS_SEARCH, F_NOROWS,
+    self, Arrange, Command, F_HAS_DEPLETER, F_HAS_GROUPBY, F_HAS_SORTBY, F_HAS_WITHCOUNT, F_IS_AGGREGATE, F_IS_CURSOR, F_IS_HYBRID, F_IS_HYBRID_SEARCH, F_IS_SEARCH, F_NOROWS,
     F_REQUIRED_FIELDS, F_SEND_HIGHLIGHT, F_SEND_NOFIELDS, F_SEND_PAYLOADS, F_SEND_SCOREEXPLAIN, F_SEND_SCORES, F_SEND_SCORES_AS_FIELD, F_SEND_SORTKEYS, F_SENDRAWIDS,
     F_TYPED, FORMAT_EXPAND, OPTIMIZE, Step,
 };
@@ -62,6 +62,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Instant;
 
+mod hybrid;
+pub(super) use hybrid::{ft_hybrid, profile_hybrid};
+
 /// FT.AGGREGATE index query [options].
 pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if args.len() < 3 {
@@ -76,6 +79,8 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     {
         let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
         req.apply_context(ix, resp3)?;
+        // `prepareRequest`: the dialect counts once the request is built, whatever the run.
+        ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
     }
     let is_cursor = req.flags & F_IS_CURSOR != 0;
     if is_cursor {
@@ -148,7 +153,15 @@ pub(super) fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     } else if c_eq(&args[2], "AGGREGATE") {
         Command::Aggregate
     } else if c_eq(&args[2], "HYBRID") {
-        return Err(Error::msg("ERR FT.PROFILE HYBRID is not supported yet"));
+        let mut at = 3;
+        let limited = c_eq(&args[at], "LIMITED");
+        if limited {
+            at += 1;
+        }
+        if !c_eq(&args[at], "QUERY") {
+            return Err(Error::msg("The QUERY keyword is expected"));
+        }
+        return profile_hybrid(cx, &args[1], &args[at + 1..], limited, clock);
     } else {
         return Err(Error::msg("No `SEARCH`, `AGGREGATE`, or `HYBRID` provided"));
     };
@@ -170,6 +183,8 @@ pub(super) fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     {
         let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
         req.apply_context(ix, resp3)?;
+        // `prepareRequest`: the dialect counts once the request is built, whatever the run.
+        ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
     }
     let parse_ns = clock.elapsed().as_nanos() as u64;
     let f = req.flags;
@@ -1694,12 +1709,18 @@ impl<'a> Proc<'a> for Grouper {
     }
 }
 
-/// `ExtractKeyName` (no strict prefix in FT.AGGREGATE): one `@` comes off.
-fn key_name(s: &[u8]) -> &[u8] {
+/// `ExtractKeyName` with `strictPrefix` (FT.HYBRID): a name needs its `@`, a path its `$`.
+fn strict_key_name<'s>(s: &'s [u8], strict: bool, context: &str) -> Result<&'s [u8], QErr> {
     let s = cstr(s);
     match s.first() {
-        Some(b'@') => &s[1..],
-        _ => s,
+        Some(b'@') => Ok(&s[1..]),
+        Some(b'$') => Ok(s),
+        _ if strict => Err(QErr::user(
+            Code::ParseArgs,
+            "Missing prefix: name requires '@' prefix, JSON path require '$' prefix",
+            format!(", got: {} in {context}", String::from_utf8_lossy(s)),
+        )),
+        _ => Ok(s),
     }
 }
 
@@ -1712,6 +1733,8 @@ struct RedOpts<'o, 'b> {
     load_keys: Option<&'o mut Vec<LKey>>,
     /// `RSGlobalConfig.maxAggregateResults`.
     max_results: u64,
+    /// `strictPrefix`.
+    strict: bool,
 }
 
 impl RedOpts<'_, '_> {
@@ -1720,7 +1743,7 @@ impl RedOpts<'_, '_> {
         let Ok(s) = self.ac.get() else {
             return Err(QErr::user(Code::ParseArgs, "Missing arguments", format!(" for {}", self.name)));
         };
-        let name = key_name(s).to_vec();
+        let name = strict_key_name(s, self.strict, self.name)?.to_vec();
         self.resolve(&name)
     }
 
@@ -1938,7 +1961,7 @@ impl<'a> Builder<'_, 'a> {
                 }
                 self.push(Sorter { heap: MmHeap::new(max as usize), by: SortBy::Fields { keys: krefs, asc: a.asc_map }, pooled: Res::new(), yielding: false });
                 added = true;
-            } else if (search && !optimized) || self.opt.scorer {
+            } else if self.has(F_IS_HYBRID) || (search && !optimized) || self.opt.scorer {
                 self.push(Sorter { heap: MmHeap::new(max as usize), by: SortBy::Score, pooled: Res::new(), yielding: false });
                 added = true;
             }
@@ -2012,6 +2035,7 @@ impl<'a> Builder<'_, 'a> {
                 spec,
                 load_keys: if can_load { Some(&mut load_keys) } else { None },
                 max_results: self.req.max_aggregate_results,
+                strict: self.req.strict_prefix,
             };
             let (kind, src) = match make_reducer(&mut o) {
                 None => return Err(QErr::user(Code::NoReducer, "No such reducer", format!(": {name}"))),
@@ -2113,7 +2137,7 @@ impl<'a> Builder<'_, 'a> {
         let mut ac = Ac::new_sds(args);
         let mut keys = Vec::new();
         while let Some(s) = ac.take() {
-            let path = key_name(s);
+            let path = strict_key_name(s, self.req.strict_prefix, "LOAD")?;
             let name = if ac.advance_if("AS") {
                 match ac.get() {
                     Err(_) => return Err(QErr::new(Code::ParseArgs, "LOAD path AS name - must be accompanied with NAME")),
@@ -2159,12 +2183,19 @@ fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'
 
     // `Pipeline_BuildQueryPart`: a scorer when scores are asked for, or when a search returning
     // rows sorts by them.
-    let search_rows = b.has(F_IS_SEARCH) && !b.has(F_NOROWS);
+    let search_rows = b.has(F_IS_SEARCH | F_IS_HYBRID_SEARCH) && !b.has(F_NOROWS);
     let scoring = if b.has(OPTIMIZE) { b.opt.scorer } else { !req.has_query_sortby() };
     if b.has(F_SEND_SCORES | F_SEND_SCORES_AS_FIELD) || (search_rows && scoring) {
         let key = if b.has(F_SEND_SCORES_AS_FIELD) {
             let lk = &mut cx.lookups[0];
-            lk.get_write(b"__score", fq::K_OVERRIDE).map(|i| KRef::of(&lk.keys[i]))
+            match &req.score_alias {
+                // FT.HYBRID's YIELD_SCORE_AS.
+                Some(a) => match lk.get_write(cstr(a), 0) {
+                    Some(i) => Some(KRef::of(&lk.keys[i])),
+                    None => return Err(QErr::user(Code::DupField, "Could not create score alias, name already exists in query", qast::lossy(a))),
+                },
+                None => lk.get_write(b"__score", fq::K_OVERRIDE).map(|i| KRef::of(&lk.keys[i])),
+            }
         } else {
             None
         };
@@ -2180,7 +2211,15 @@ fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'
         }
     }
 
-    // `Pipeline_BuildAggregationPart`.
+    b.aggregation(cx)?;
+    Ok(b)
+}
+
+impl<'a> Builder<'_, 'a> {
+    /// `Pipeline_BuildAggregationPart`.
+    fn aggregation(&mut self, cx: &mut Pcx<'a>) -> Result<(), QErr> {
+    let b = self;
+    let req = b.req;
     let last = last_arrange(req);
     let mut li = 0;
     let mut has_arrange = false;
@@ -2201,15 +2240,26 @@ fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'
                 }
                 b.load(cx, args, *all)?;
             }
+            Step::Normalize { field, alias } => {
+                let fs = cx.spec.field(cstr(field)).filter(|f| f.is(crate::search::spec::T_VECTOR));
+                let Some(metric) = fs.and_then(|f| f.vector.as_ref()).map(|v| v.metric) else {
+                    return Err(QErr::new(Code::Syntax, "Invalid vector field for normalization"));
+                };
+                let spec = if li == 0 { Some(cx.spec) } else { None };
+                let lk = &mut cx.lookups[li];
+                let key = lk.get_read(spec, cstr(alias), 0).map(|i| KRef::of(&lk.keys[i]));
+                b.push(hybrid::VecNorm { metric, key });
+            }
         }
     }
-    if !has_arrange && (b.has(F_IS_SEARCH) || b.has(F_HAS_DEPLETER)) && !b.arrange(cx, None, li, false)? {
+    if !has_arrange && (b.has(F_IS_SEARCH | F_IS_HYBRID_SEARCH) || b.has(F_HAS_DEPLETER)) && !b.arrange(cx, None, li, false)? {
         return Err(QErr::code(Code::Generic));
     }
     if b.has(F_IS_SEARCH) && !b.has(F_SEND_NOFIELDS) {
         b.output(cx);
     }
-    Ok(b)
+    Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2332,6 +2382,7 @@ fn run(
         token_id: std::cell::Cell::new(0),
         can_skip_rich: req.opts.flags & qast::S_CAN_SKIP_RICH_RESULTS != 0,
         metric_requests: Vec::new(),
+        hybrid: false,
     };
     let root = req.root.as_ref().expect("a parsed query");
     let mut it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };

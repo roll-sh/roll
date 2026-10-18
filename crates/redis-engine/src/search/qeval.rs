@@ -37,6 +37,8 @@ pub struct EvalCx<'a> {
     pub can_skip_rich: bool,
     /// `metricRequests`: the vector distance fields the query yields, in evaluation order.
     pub metric_requests: Vec<Vec<u8>>,
+    /// A FT.HYBRID subquery: tag readers weigh nothing.
+    pub hybrid: bool,
 }
 
 const TOO_LONG: &str = "query string is too long. Maximum allowed length is 1024";
@@ -295,7 +297,18 @@ impl<'a> EvalCx<'a> {
                 self.union(its, quick, weight, "TAG", None)
             }
             Kind::Vector(vq) => return self.vector(n, vq, mask),
-            Kind::Geometry { .. } => return Err(QErr::new(Code::Generic, "Vector and geometry queries are not supported yet")),
+            Kind::Geometry { query_type, wkt, field } => {
+                let Some(fi) = *field else { return Ok(None) };
+                // `Query_EvalGeometryNode`: the index opened (created) even for a bad query.
+                let ix = self.ix.geometry_index(fi);
+                match ix.query(*query_type, wkt) {
+                    Ok(ids) => Box::new(iters::GeoShapeIt::new(ids, fi, self.q)),
+                    Err(m) => {
+                        let m = String::from_utf8_lossy(&m).into_owned();
+                        return Err(QErr::user(Code::BadVal, "Error querying geoshape index", format!(": {m}")));
+                    }
+                }
+            }
         }))
     }
 
@@ -363,11 +376,13 @@ impl<'a> EvalCx<'a> {
             return Err(QErr::new(Code::Inval, format!("Error parsing vector similarity query: negative radius ({}) given in a range query", crate::util::fmt_g_prec(vq.radius, 6))));
         }
         resolve_params(vi.algo, &vq.params, QType::Range)?;
-        Ok(Some(Box::new(RangeIt::new(vi, &vq.blob, vq.radius, key.is_some(), key))))
+        Ok(Some(Box::new(RangeIt::new(vi, &vq.blob, vq.radius, key.is_some(), key, vq.by_score))))
     }
 
     /// `query_EvalSingleTagNode`.
     fn single_tag(&mut self, fi: usize, n: &Node, weight: f64) -> Option<BoxIt<'a>> {
+        // Hybrid subqueries don't score tags.
+        let weight = if self.hybrid { 0.0 } else { weight };
         let fs = &self.ix.spec.fields[fi];
         let cs = fs.tag_case_sensitive;
         let idx = self.ix.fields[fi].tag.as_ref()?;

@@ -816,6 +816,13 @@ impl VecIndex {
 
     /// `rangeQuery`, sorted by label (`BY_ID`).
     pub fn range(&self, blob: &[u8], radius: f64) -> Vec<VecRes> {
+        let mut out = self.range_unsorted(blob, radius);
+        out.sort_by_key(|r| r.0);
+        out
+    }
+
+    /// `rangeQuery`'s results in the order the scan found them.
+    pub fn range_unsorted(&self, blob: &[u8], radius: f64) -> Vec<VecRes> {
         self.searched();
         let q = self.preprocess(blob);
         let radius = if self.ty == VecType::Float64 { radius } else { radius as f32 as f64 };
@@ -840,7 +847,6 @@ impl VecIndex {
                 }
             }
         }
-        out.sort_by_key(|r| r.0);
         out
     }
 
