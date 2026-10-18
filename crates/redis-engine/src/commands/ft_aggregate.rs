@@ -3091,13 +3091,16 @@ fn run(
         && prof.is_none()
         && fresh.as_ref().is_some_and(Tmo::plan_timed_out)
     {
-        eng.search.query_stats.timeout(true, req.internal);
+        eng.search.stats.timeout(true, req.internal);
         return Err(QErr::code(Code::TimedOut).into());
     }
     // `Profile_AddIters`.
     let it = if prof.is_some() { iters::profiled(it) } else { it };
     // The warning is the first chunk's (later ones start with a fresh error).
     let warn_expansions = ecx.expansions_warning && !reading;
+    if warn_expansions {
+        eng.search.stats.warning(crate::search::global::QueryWarning::MaxPrefixExpansions, true);
+    }
 
     let avg = match cur.as_ref() {
         Some(s) if s.started => s.avg_doc_len,
@@ -3220,7 +3223,7 @@ fn run(
     }
     if rc == St::TimedOut && policy == Policy::Fail && prof.is_none() {
         if counted {
-            eng.search.query_stats.timeout(true, req.internal);
+            eng.search.stats.timeout(true, req.internal);
         }
         return Err(QErr::code(Code::TimedOut).into());
     }
@@ -3266,7 +3269,7 @@ fn run(
         s.tmo = cx.tmo;
     }
     if rc == St::TimedOut && counted {
-        eng.search.query_stats.timeout(false, req.internal);
+        eng.search.stats.timeout(false, req.internal);
     }
     if let Some(p) = prof {
         p.expansions = warn_expansions;

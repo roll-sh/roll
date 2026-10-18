@@ -994,11 +994,13 @@ struct ExpandCtx<'a> {
     language: usize,
     stemmer: Option<Option<&'static str>>,
     num_tokens: usize,
+    /// The Chinese expander's tokenizer (`expandCn`), made by its first token.
+    cn: Option<Box<super::tokenize::CnTokenizer>>,
 }
 
 /// `QAST_Expand`.
 pub fn expand(root: &mut Node, ix: &mut Index, expander: Expander, language: usize, num_tokens: &mut usize) -> Result<(), QErr> {
-    let mut cx = ExpandCtx { ix, expander, language, stemmer: None, num_tokens: *num_tokens };
+    let mut cx = ExpandCtx { ix, expander, language, stemmer: None, num_tokens: *num_tokens, cn: None };
     let r = expand_node(&mut cx, root);
     *num_tokens = cx.num_tokens;
     r
@@ -1129,8 +1131,10 @@ fn phonetic_expand(cx: &mut ExpandCtx, n: &mut Node, tok: &Tok) {
 /// `StemmerExpander`: `+stem` (fields that don't stem left out of its mask), and the stem
 /// itself when it differs from the token.
 fn stem_expand(cx: &mut ExpandCtx, n: &mut Node, tok: &Tok) {
+    if spec::LANGUAGES.get(cx.language) == Some(&"chinese") {
+        return cn_expand(cx, n, tok);
+    }
     let stemmer = *cx.stemmer.get_or_insert_with(|| super::tokenize::stemmer_for(cx.language));
-    // Chinese queries go through the Chinese tokenizer instead (not reproduced: no stemmer).
     let Some(lang) = stemmer else { return };
     let Some(stemmed) = snowball_stem(lang, &tok.s) else { return };
     let orig = n.opts.field_mask;
@@ -1162,10 +1166,27 @@ fn stem_expand(cx: &mut ExpandCtx, n: &mut Node, tok: &Tok) {
     n.opts.field_mask = orig;
 }
 
+/// `expandCn` / `Ext_ExpandTokenWithPhrase`: the token's Chinese segmentation, as a (loose)
+/// phrase beside it in a union; the new nodes keep the default field mask.
+fn cn_expand(cx: &mut ExpandCtx, n: &mut Node, tok: &Tok) {
+    let t = cx.cn.get_or_insert_with(|| Box::new(super::tokenize::CnTokenizer::with(super::friso::global())));
+    t.start(&tok.s);
+    let mut ph = Node::phrase(false);
+    while let Some(x) = t.next_token() {
+        cx.num_tokens += 1;
+        ph.add_child(Node::expanded(cstr(&x.tok).to_vec(), tok.flags));
+    }
+    if !n.is_union() {
+        let old = std::mem::replace(n, Node::new(Kind::Union));
+        n.add_child(old);
+    }
+    n.add_child(ph);
+}
+
 /// `sb_stemmer_stem` over the token's bytes (C string): `None` when Snowball rejects them.
 fn snowball_stem(lang: &str, s: &[u8]) -> Option<Vec<u8>> {
     let w = std::str::from_utf8(cstr(s)).ok()?;
-    snowball::stem(lang, w).map(String::into_bytes)
+    super::tokenize::snowball_stem(lang, w).map(String::into_bytes)
 }
 
 /// `QAST_DumpExplain`.

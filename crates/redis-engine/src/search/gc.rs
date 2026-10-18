@@ -85,8 +85,8 @@ fn update_stats(ix: &mut Index, records_removed: usize, freed: usize, allocated:
     }
 }
 
-/// `deleteSuffixTrie` (text) and `deleteSuffixTrieMap` (tags): the term leaves every suffix
-/// entry listing it; entries left listing nothing go. Returns the entries deleted.
+/// `deleteSuffixTrieMap` (tags): the value leaves every suffix entry listing it; entries left
+/// listing nothing go. Returns the entries deleted.
 pub fn delete_suffix(trie: &mut TrieMap<Suffix>, s: &[u8]) -> usize {
     let mut deleted = 0;
     for j in 0..s.len() {
@@ -133,7 +133,7 @@ fn collect_terms(ix: &mut Index) {
             if !term.is_empty()
                 && let Some(s) = ix.suffix.as_mut()
             {
-                ix.suffix_size = ix.suffix_size.wrapping_sub(delete_suffix(s, &term));
+                ix.suffix_size = ix.suffix_size.wrapping_sub(s.delete(&term));
             }
         }
         update_stats(ix, info.entries_removed, info.bytes_freed, info.bytes_allocated);

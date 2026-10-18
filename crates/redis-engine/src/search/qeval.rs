@@ -8,7 +8,7 @@ use super::iters::{self, BoxIt, Checker, Empty, IdList, InvIt, IxResult, K_NUMER
 use super::numtree::NumericFilter;
 use super::qast::{Kind, Node};
 use super::spec;
-use super::trie::{self, Rune};
+use super::trie;
 use crate::util::cstr;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -184,7 +184,7 @@ impl<'a> EvalCx<'a> {
 
     /// The text term expansions a trie walk yields (`runeIterCb`): capped at the max prefix
     /// expansions, with the warning.
-    fn expansions(&mut self, mask: u128, walk: impl FnOnce(&mut dyn FnMut(&[Rune]) -> bool)) -> Vec<BoxIt<'a>> {
+    fn expansions(&mut self, mask: u128, walk: impl FnOnce(&mut dyn FnMut(&[u8]) -> bool)) -> Vec<BoxIt<'a>> {
         let mut its = Vec::new();
         let mut warned = false;
         let max = self.max_expansions;
@@ -198,16 +198,15 @@ impl<'a> EvalCx<'a> {
             return its;
         }
         let mut walked = Vec::new();
-        walk(&mut |r: &[Rune]| {
+        walk(&mut |s: &[u8]| {
             if its.len() >= max {
                 warned = true;
                 return false;
             }
-            let s = trie::runes_to_str(r).unwrap_or_default();
-            if let Some(it) = this.open_term(&s, mask, 1.0) {
+            if let Some(it) = this.open_term(s, mask, 1.0) {
                 its.push(it);
             }
-            walked.push(s);
+            walked.push(s.to_vec());
             true
         });
         this.walk_terms(|| walked);
@@ -322,8 +321,11 @@ impl<'a> EvalCx<'a> {
                 }
                 let terms = &self.ix.term_trie;
                 let (p, s) = (*prefix, *suffix);
-                let its = self.expansions(self.req_mask & n.opts.field_mask, |cb| {
-                    terms.iterate_contains(&runes, p, s, &mut |r, _, _| cb(r), None);
+                // With a suffix trie, contains and suffix queries walk it (`Suffix_IterateContains`).
+                let sx = self.ix.suffix.as_ref().filter(|_| s);
+                let its = self.expansions(self.req_mask & n.opts.field_mask, |cb| match sx {
+                    Some(sx) => sx.iterate_contains(&runes, p, cb),
+                    None => terms.iterate_contains(&runes, p, s, &mut |r, _, _| cb(&trie::runes_to_str(r).unwrap_or_default()), None),
                 });
                 self.union(its, true, weight, "PREFIX", Some(&tok.s))
             }
@@ -336,8 +338,12 @@ impl<'a> EvalCx<'a> {
                     return Err(QErr::new(Code::Generic, "Contains query on fields without WITHSUFFIXTRIE support"));
                 }
                 let terms = &self.ix.term_trie;
+                let sx = self.ix.suffix.as_ref();
                 let its = self.expansions(self.req_mask & n.opts.field_mask, |cb| {
-                    terms.iterate_wildcard(&runes, &mut |r, _, _| cb(r), None);
+                    // `Suffix_IterateWildcard`, brute force when the pattern has no literal run.
+                    if !sx.is_some_and(|sx| sx.iterate_wildcard(&runes, cb)) {
+                        terms.iterate_wildcard(&runes, &mut |r, _, _| cb(&trie::runes_to_str(r).unwrap_or_default()), None);
+                    }
                 });
                 self.union(its, true, weight, "WILDCARD", Some(&pat))
             }
@@ -347,7 +353,7 @@ impl<'a> EvalCx<'a> {
                 let terms = &self.ix.term_trie;
                 let (ib, ie) = (*include_begin, *include_end);
                 let its = self.expansions(self.req_mask & n.opts.field_mask, |cb| {
-                    terms.iterate_range(b.as_deref(), ib, e.as_deref(), ie, &mut |r, _, _| cb(r));
+                    terms.iterate_range(b.as_deref(), ib, e.as_deref(), ie, &mut |r, _, _| cb(&trie::runes_to_str(r).unwrap_or_default()));
                 });
                 self.union(its, true, weight, "LEXRANGE", None)
             }
@@ -520,6 +526,61 @@ impl<'a> EvalCx<'a> {
                 if s.len() < self.min_prefix {
                     return None;
                 }
+                if *suffix && let Some(sx) = idx.suffix.as_ref() {
+                    // `GetList_SuffixTrieMap`: the lists of the keys the string prefixes (contains)
+                    // or of the string itself (suffix); none: no iterator. A cursor's later chunk
+                    // opens the terms its first chunk tried.
+                    let max = self.max_expansions;
+                    let mut its = Vec::new();
+                    if self.memo.as_ref().is_some_and(|m| m.borrow().replay) {
+                        let tried = self.walk_terms(Vec::new);
+                        if tried.is_empty() {
+                            return None;
+                        }
+                        for t in tried {
+                            if its.len() >= max {
+                                self.expansions_warning = true;
+                                break;
+                            }
+                            if let Some(it) = self.open_tag(fi, &t, 1.0) {
+                                its.push(it);
+                            }
+                        }
+                        return Some(self.union(its, true, weight, "PREFIX", Some(&s)));
+                    }
+                    let mut lists: Vec<&[bytes::Bytes]> = Vec::new();
+                    if *prefix {
+                        sx.for_each_prefix(&s, |_, d| {
+                            lists.push(&d.terms);
+                            true
+                        });
+                    } else if let Some(d) = sx.get(&s) {
+                        lists.push(&d.terms);
+                    }
+                    if lists.is_empty() {
+                        self.walk_terms(Vec::new);
+                        return None;
+                    }
+                    let lists: Vec<Vec<bytes::Bytes>> = lists.into_iter().map(<[bytes::Bytes]>::to_vec).collect();
+                    let mut tried = Vec::new();
+                    'lists: for list in lists {
+                        if its.len() >= max {
+                            break;
+                        }
+                        for t in list {
+                            tried.push(t.to_vec());
+                            if its.len() >= max {
+                                self.expansions_warning = true;
+                                break 'lists;
+                            }
+                            if let Some(it) = self.open_tag(fi, &t, 1.0) {
+                                its.push(it);
+                            }
+                        }
+                    }
+                    self.walk_terms(|| tried);
+                    return Some(self.union(its, true, weight, "PREFIX", Some(&s)));
+                }
                 let keys = self.walk_terms(|| {
                     let mut keys = Vec::new();
                     idx.values.for_each(|k, _| {
@@ -540,6 +601,62 @@ impl<'a> EvalCx<'a> {
             }
             Kind::WildcardQuery(tok) => {
                 let pat = remove_escape(&tag_lower(&tok.s, cs));
+                if let Some(sx) = idx.suffix.as_ref()
+                    && let Some((at, len)) = super::index::choose_token(&pat, 0)
+                {
+                    // `GetList_SuffixTrieMap_Wildcard`: the keys the best literal run (and a `*`
+                    // after it) matches, their terms matching the pattern, at most one past the
+                    // expansion limit; none: no iterator. A cursor's later chunk opens the terms
+                    // its first chunk tried.
+                    let max = self.max_expansions;
+                    let replay = self.memo.as_ref().is_some_and(|m| m.borrow().replay);
+                    let terms: Vec<Vec<u8>> = if replay {
+                        self.walk_terms(Vec::new)
+                    } else {
+                        let mut tokpat = pat[at..at + len].to_vec();
+                        if pat.get(at + len) == Some(&b'*') {
+                            tokpat.push(b'*');
+                        }
+                        let mut terms: Vec<Vec<u8>> = Vec::new();
+                        sx.for_each(|k, d| {
+                            if !wildcard_match(&tokpat, k) {
+                                return true;
+                            }
+                            for t in &d.terms {
+                                if terms.len() > max {
+                                    return false;
+                                }
+                                if wildcard_match(&pat, t) {
+                                    terms.push(t.to_vec());
+                                }
+                            }
+                            true
+                        });
+                        terms
+                    };
+                    if terms.is_empty() {
+                        if !replay {
+                            self.walk_terms(Vec::new);
+                        }
+                        return None;
+                    }
+                    let mut its = Vec::new();
+                    let mut tried = Vec::new();
+                    for t in terms {
+                        tried.push(t.clone());
+                        if its.len() >= max {
+                            self.expansions_warning = true;
+                            break;
+                        }
+                        if let Some(it) = self.open_tag(fi, &t, 1.0) {
+                            its.push(it);
+                        }
+                    }
+                    if !replay {
+                        self.walk_terms(|| tried);
+                    }
+                    return Some(self.union(its, true, weight, "WILDCARD", Some(&pat)));
+                }
                 let keys = self.walk_terms(|| {
                     let mut keys = Vec::new();
                     idx.values.for_each(|k, _| {

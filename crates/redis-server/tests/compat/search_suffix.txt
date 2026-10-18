@@ -1,0 +1,98 @@
+# WITHSUFFIXTRIE: contains (`*abc*`), suffix (`*abc`) and wildcard (`w'...'`) queries walk the
+# suffix trie (text: a rune trie; tags: a trie map), expanding terms in its order: a term once
+# per suffix key it is listed under, lists in insertion order (deletes move the last entry into
+# the hole), up to MAXPREFIXEXPANSIONS (the warning when more were left).
+FLUSHALL
+FT.CREATE sx ON HASH PREFIX 1 s: SCHEMA t TEXT WITHSUFFIXTRIE u TEXT WITHSUFFIXTRIE g TAG WITHSUFFIXTRIE h TAG
+# One text term per document: a document's terms reach the trie in its forward index's
+# hash order, which depends on the table size the server's past documents left.
+HSET s:1 t banana
+HSET s:2 t bandana
+HSET s:3 t cabana
+HSET s:4 t ananas
+HSET s:5 t abracadabra
+HSET s:6 t cadabra
+HSET s:7 t abra
+HSET s:8 t zebra
+HSET s:9 t nana
+HSET s:10 t anna
+HSET s:11 t hannah
+HSET s:12 t savannah
+HSET s:13 t café
+HSET s:14 t naïve
+HSET s:15 t façade
+HSET s:16 t résumé
+HSET s:17 t aaaa
+HSET s:18 t aaa
+HSET s:19 t aa
+HSET s:g1 g "banana,bandana,cabana,ananas" h "banana,bandana"
+HSET s:g2 g "abracadabra,cadabra,abra,zebra" h "abra"
+HSET s:g3 g "nana,anna,hannah,savannah"
+HSET s:g4 g "café,naïve,façade,résumé"
+HSET s:g9 u pajama
+HSET s:g5 u panorama g "panorama,pajama,llama,drama"
+HSET s:g6 u "llama"
+HSET s:g7 u "drama"
+HSET s:g8 g "aaaa,aaa,aa"
+!timing FT.PROFILE sx SEARCH QUERY "*ana*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*na" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*bra*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*bra" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*aa*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*aa" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*am*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@u:*am*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*fé" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*ï*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*ume*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*ANA*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "w'*an?a*'" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "w'*a*a*'" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "w'b*a'" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "w'*bra'" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "w'?a*'" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "w'*'" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "w'*?*'" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "ana*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*ana*}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*na}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*bra*}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*aa*}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*zzz*}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*zzz}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{w'*an?a*'}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{w'*a*a'}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{w'zz*'}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{w'*'}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@h:{*ana*}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@h:{*ra}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@h:{w'*a?a*'}" LIMIT 0 0
+FT.SEARCH sx "*ana*" NOCONTENT SORTBY t
+FT.SEARCH sx "@g:{*ana*}" NOCONTENT
+# The expansion limit, and its warning (RESP3).
+FT.CONFIG SET MAXPREFIXEXPANSIONS 3
+!timing FT.PROFILE sx SEARCH QUERY "*ana*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*a*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*ana*}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*a*}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "w'*an*'" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{w'*an*'}" LIMIT 0 0
+@resp 3
+FT.SEARCH sx "*ana*" NOCONTENT LIMIT 0 0
+FT.SEARCH sx "*a*" NOCONTENT LIMIT 0 0
+FT.SEARCH sx "*bra" NOCONTENT LIMIT 0 0
+FT.SEARCH sx "@g:{*ana*}" NOCONTENT LIMIT 0 0
+FT.SEARCH sx "@g:{*a*}" NOCONTENT LIMIT 0 0
+FT.SEARCH sx "@g:{w'*a*'}" NOCONTENT LIMIT 0 0
+FT.SEARCH sx "w'*a*'" NOCONTENT LIMIT 0 0
+FT.AGGREGATE sx "*ana*" LIMIT 0 0
+FT.CONFIG SET MAXPREFIXEXPANSIONS 4
+FT.SEARCH sx "@g:{*ana*}" NOCONTENT LIMIT 0 0
+FT.SEARCH sx "*ana*" NOCONTENT LIMIT 0 0
+FT.CONFIG SET MAXPREFIXEXPANSIONS 1
+FT.SEARCH sx "@g:{*aa*}" NOCONTENT LIMIT 0 0
+FT.SEARCH sx "*aa" NOCONTENT LIMIT 0 0
+@resp 2
+FT.CONFIG SET MAXPREFIXEXPANSIONS 200
+FT.DROPINDEX sx
+FLUSHALL

@@ -170,17 +170,26 @@ pub struct Tokenizer<'a> {
     min_phonetic_len: usize,
 }
 
-/// The Snowball algorithm a language stems with (`RSLanguage_ToSnowballStemmer`).
+/// The Snowball algorithm a language stems with (`RSLanguage_ToSnowballStemmer`): libstemmer's,
+/// and the Tagalog one RediSearch adds.
 pub fn stemmer_for(lang: usize) -> Option<&'static str> {
     let name = super::spec::LANGUAGES.get(lang)?;
     let name = if *name == "malay" { "indonesian" } else { name };
-    snowball::has(name).then_some(name)
+    (snowball::has(name) || name == "tagalog").then_some(name)
+}
+
+/// `sb_stemmer_stem` with a [`stemmer_for`] algorithm.
+pub fn snowball_stem(lang: &str, word: &str) -> Option<String> {
+    if lang == "tagalog" {
+        return Some(super::tagalog::stem(word));
+    }
+    snowball::stem(lang, word)
 }
 
 /// `__sbstemmer_Stem`: `+stem`, unless it equals the word (ignoring ASCII case).
 pub fn stem(lang: &str, word: &[u8]) -> Option<Vec<u8>> {
     let w = std::str::from_utf8(word).ok()?;
-    let s = snowball::stem(lang, w)?;
+    let s = snowball_stem(lang, w)?;
     if s.len() == word.len() && s.as_bytes().eq_ignore_ascii_case(word) {
         return None;
     }
@@ -262,6 +271,160 @@ impl<'a> Tokenizer<'a> {
             return Some(t);
         }
         None
+    }
+}
+
+/// `CNTOKENIZE_BUF_MAX`.
+const CN_ESCBUF_MAX: usize = 256;
+
+/// `cnTokenizer` (`tokenize_cn.c`): friso's words as they come (no lowercasing beyond
+/// friso's own, no stemming, phonetics or stopwords — its stopword list is never set), its
+/// punctuation, unknown characters, synonyms and English-punctuation words skipped, and
+/// backslash escapes joining words (up to 256 bytes).
+pub struct CnTokenizer {
+    friso: &'static super::friso::Friso,
+    task: super::friso::Task<'static>,
+    text: Vec<u8>,
+    escbuf: Vec<u8>,
+    pub last_offset: u32,
+}
+
+impl CnTokenizer {
+    pub fn new(cfg: &crate::config::Config) -> Self {
+        super::friso::configure(cfg);
+        Self::with(super::friso::global())
+    }
+
+    pub fn with(friso: &'static super::friso::Friso) -> Self {
+        CnTokenizer { friso, task: Default::default(), text: Vec::new(), escbuf: Vec::new(), last_offset: 0 }
+    }
+
+    /// `cnTokenizer_Start`.
+    pub fn start(&mut self, text: &[u8]) {
+        self.text = text.to_vec();
+        self.task.set_text(text);
+        self.escbuf.clear();
+    }
+
+    fn at(&self, i: usize) -> u8 {
+        self.text.get(i).copied().unwrap_or(0)
+    }
+
+    /// `appendToEscbuf`: whether all of `s` fit.
+    fn append(&mut self, s: &[u8]) -> bool {
+        let n = s.len().min(CN_ESCBUF_MAX - self.escbuf.len());
+        self.escbuf.extend_from_slice(&s[..n]);
+        n == s.len()
+    }
+
+    /// `appendEscapedChars`: the escaped character goes in; whether the word goes on.
+    fn append_escaped(&mut self, tok_end: usize, next: bool) -> bool {
+        let (at, skip) = if next { (tok_end + 1, 2) } else { (tok_end, 1) };
+        let c = self.at(at);
+        if self.append(&[c]) {
+            self.task.idx = self.task.idx.wrapping_add(skip);
+            if (self.task.idx as usize) < self.text.len() && !is_sep(self.at(self.task.idx as usize)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `cnTokenizer_Next`.
+    pub fn next_token(&mut self) -> Option<Token> {
+        use super::friso::{CJK_UNITS, ENPUN_WORDS, NCSYN_WORDS, PUNC_WORDS, STOPWORDS};
+        let mut use_esc = false;
+        let mut tok: Option<Token> = None;
+        self.escbuf.clear();
+        let done = |t: Option<Token>, s: &Self, esc: bool, word: &[u8]| -> Option<Token> {
+            let mut t = t?;
+            t.tok = if esc { s.escbuf.clone() } else { word.to_vec() };
+            Some(t)
+        };
+        loop {
+            if self.friso.next_token(&mut self.task).is_none() {
+                return if use_esc { done(tok, self, true, &[]) } else { None };
+            }
+            let ft = self.task.token.clone();
+            let offset = ft.offset as u32 as usize;
+            match ft.ty {
+                STOPWORDS | ENPUN_WORDS | CJK_UNITS | NCSYN_WORDS => continue,
+                PUNC_WORDS => {
+                    if ft.word.first() != Some(&b'\\') || !is_sep(self.at(offset + 1)) {
+                        continue;
+                    }
+                    // An escaped separator: it joins the word (when more follows), else the
+                    // backslash is a word of its own.
+                    if self.append_escaped(offset + ft.length as usize, false) {
+                        if tok.is_none() {
+                            tok = Some(self.init_token(&ft));
+                        }
+                        use_esc = true;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            match tok.as_mut() {
+                None => tok = Some(self.init_token(&ft)),
+                Some(t) => t.raw_len = self.text.len() - t.raw_start,
+            }
+            let end = offset + ft.rlen as usize;
+            if self.at(end) == b'\\' && is_sep(self.at(end + 1)) {
+                // A trailing escape: the word goes on past the separator.
+                use_esc = true;
+                if !self.append(&ft.word) || !self.append_escaped(offset + ft.length as usize, true) {
+                    return done(tok, self, true, &[]);
+                }
+                continue;
+            }
+            if use_esc {
+                self.append(&ft.word);
+            }
+            return done(tok, self, use_esc, &ft.word);
+        }
+    }
+
+    /// `initToken`.
+    fn init_token(&mut self, ft: &super::friso::Token) -> Token {
+        self.last_offset += 1;
+        Token { tok: Vec::new(), raw_start: ft.offset as u32 as usize, raw_len: ft.rlen as usize, pos: self.last_offset, copied: true, ..Default::default() }
+    }
+}
+
+/// The tokenizer a document's (or a query's) language picks (`GetTokenizer`).
+pub enum AnyTokenizer<'a> {
+    Simple(Tokenizer<'a>),
+    Chinese(Box<CnTokenizer>),
+}
+
+impl AnyTokenizer<'_> {
+    pub fn start(&mut self, text: &[u8], options: u32) {
+        match self {
+            AnyTokenizer::Simple(t) => t.start(text, options),
+            AnyTokenizer::Chinese(t) => t.start(text),
+        }
+    }
+
+    pub fn next_token(&mut self) -> Option<Token> {
+        match self {
+            AnyTokenizer::Simple(t) => t.next_token(),
+            AnyTokenizer::Chinese(t) => t.next_token(),
+        }
+    }
+
+    pub fn last_offset(&self) -> u32 {
+        match self {
+            AnyTokenizer::Simple(t) => t.last_offset,
+            AnyTokenizer::Chinese(t) => t.last_offset,
+        }
+    }
+
+    pub fn last_offset_mut(&mut self) -> &mut u32 {
+        match self {
+            AnyTokenizer::Simple(t) => &mut t.last_offset,
+            AnyTokenizer::Chinese(t) => &mut t.last_offset,
+        }
     }
 }
 

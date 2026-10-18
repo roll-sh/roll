@@ -870,7 +870,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
     // Given for "everything" and "modules", else for the sections named (or the module's name).
     let pick = want.everything || want.names.contains("modules");
     if pick || want.names.iter().any(|n| n.starts_with("search")) {
-        for (name, body) in crate::search::info::sections(&eng.cfg) {
+        for (name, body) in crate::search::info::sections(eng) {
             if pick || want.names.contains(name) || want.names.contains("search") {
                 begin(&mut s, &format!("# {name}"));
                 s.push_str(&body);

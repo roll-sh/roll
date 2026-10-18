@@ -719,9 +719,10 @@ fn update_doc(eng: &mut Engine, name: &Bytes, db: usize, key: &[u8], ty: DocType
         DocType::Json => load_json(eng, ix, db, key),
     };
     let set = Settings::from(&eng.cfg);
-    let Some(ix) = eng.search.indexes.get_mut(name) else { return };
+    let g = &mut eng.search;
+    let Some(ix) = g.indexes.get_mut(name) else { return };
     match loaded {
-        Ok(doc) => ix.add_document(doc, &set),
+        Ok(doc) => ix.add_document(doc, &set, &mut g.indexing),
         Err((e, field)) => {
             // `FieldSpec_AddError`, then the document's own failure.
             if let Some(i) = field {

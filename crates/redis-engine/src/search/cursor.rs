@@ -134,6 +134,11 @@ impl Cursors {
     }
 
     /// `Cursors_RenderStats`: (global idle, global total).
+    /// `Cursors_GetInfoStats` (INFO): idle and all cursors, as they stand (nothing collected).
+    pub fn counts(&self) -> (usize, usize) {
+        (self.lookup.values().filter(|c| c.deadline.is_some()).count(), self.lookup.len())
+    }
+
     pub fn stats(&mut self) -> (usize, usize) {
         self.collect_expired();
         let idle = self.lookup.values().filter(|c| c.deadline.is_some()).count();

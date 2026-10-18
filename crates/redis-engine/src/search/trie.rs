@@ -1245,7 +1245,8 @@ impl Trie {
             return 0;
         }
         let rc = self.root.delete(&runes[..len], self.sort);
-        self.size -= rc as usize;
+        // (`size_t`: keys put in with `Trie_InsertRuneNoSize` count out too.)
+        self.size = self.size.wrapping_sub(rc as usize);
         rc
     }
 

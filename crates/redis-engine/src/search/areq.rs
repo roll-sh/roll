@@ -1013,6 +1013,7 @@ fn legacy_geo(ac: &mut Ac, has_empty: &mut bool) -> Result<LegacyGeo, QErr> {
 
 /// `AREQ_Compile`: `args` start at the query.
 pub fn compile(cmd: Command, cfg: &Config, args: &[Bytes]) -> Result<Request, QErr> {
+    super::friso::configure(cfg);
     let mut req = Request::new(cmd, cfg, args);
     let mut ac = Ac::new_sds(args);
     let Some(q) = ac.take() else {

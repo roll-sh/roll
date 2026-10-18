@@ -14,7 +14,7 @@ const INTERNAL_FLAG: u64 = INTERNAL | NOSCRIPT;
 
 pub static COMMANDS: &[Command] = &[
     cmd!("FT.ADD", -1, WRITE | DENYOOM | MODULE, 2, 2, 1, super::ft_doc::ft_add, Module),
-    cmd!("FT.AGGREGATE", -3, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_aggregate, Module),
+    cmd!("FT.AGGREGATE", -3, READONLY | MODULE, 0, 0, 0, ft_aggregate, Module),
     cmd!("FT.ALIASADD", 3, WRITE | DENYOOM | MODULE, 0, 0, 0, super::ft_admin::ft_aliasadd, Module),
     cmd!("FT.ALIASDEL", 2, WRITE | MODULE, 0, 0, 0, super::ft_admin::ft_aliasdel, Module),
     cmd!("FT.ALIASLIST", 2, READONLY | MODULE, 0, 0, 0, super::ft_admin::ft_aliaslist, Module),
@@ -32,12 +32,12 @@ pub static COMMANDS: &[Command] = &[
     cmd!("FT.EXPLAIN", -3, READONLY | MODULE, 0, 0, 0, super::ft_query::ft_explain, Module),
     cmd!("FT.EXPLAINCLI", -3, READONLY | MODULE, 0, 0, 0, super::ft_query::ft_explaincli, Module),
     cmd!("FT.GET", -1, READONLY | MODULE, 2, 2, 1, super::ft_doc::ft_get, Module),
-    cmd!("FT.HYBRID", -7, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_hybrid, Module),
+    cmd!("FT.HYBRID", -7, READONLY | MODULE, 0, 0, 0, ft_hybrid, Module),
     cmd!("FT.INFO", 2, READONLY | MODULE, 0, 0, 0, super::ft::ft_info, Module),
     cmd!("FT.MGET", -1, READONLY | MODULE, 0, 0, 0, super::ft_doc::ft_mget, Module),
-    cmd!("FT.PROFILE", -5, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_profile, Module),
+    cmd!("FT.PROFILE", -5, READONLY | MODULE, 0, 0, 0, ft_profile, Module),
     cmd!("FT.SAFEADD", -1, WRITE | DENYOOM | MODULE, 2, 2, 1, super::ft_doc::ft_add, Module),
-    cmd!("FT.SEARCH", -3, READONLY | MODULE, 0, 0, 0, super::ft_query::ft_search, Module),
+    cmd!("FT.SEARCH", -3, READONLY | MODULE, 0, 0, 0, ft_search, Module),
     cmd!("FT.SPELLCHECK", -3, READONLY | MODULE, 0, 0, 0, super::ft_spell::ft_spellcheck, Module),
     cmd!("FT.SUGADD", -4, WRITE | DENYOOM | MODULE, 1, 1, 1, super::ft_sug::sugadd, Module),
     cmd!("FT.SUGDEL", 3, WRITE | MODULE, 1, 1, 1, super::ft_sug::sugdel, Module),
@@ -94,7 +94,7 @@ static FT_CONFIG_LOCAL: &[Command] = &[
 static FT_CURSOR: &[Command] = &[
     cmd!("GC", -2, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_gc, Module),
     cmd!("DEL", -4, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_del, Module),
-    cmd!("READ", -4, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_read, Module),
+    cmd!("READ", -4, READONLY | MODULE, 0, 0, 0, ft_cursor_read, Module),
 ];
 
 static FT_CURSOR_LOCAL: &[Command] = &[
@@ -195,6 +195,40 @@ pub fn acl_categories(c: &Command) -> Option<&'static [&'static str]> {
         _ if n.starts_with("ft.") || n.starts_with("search.") => &["search"],
         _ => return None,
     })
+}
+
+/// The query commands' INFO counters (`RSGlobalStats.totalStats.queries`): a reply sent counts
+/// (`TotalGlobalStats_CountQuery`), an error replied counts by its code on the coordinator side
+/// (`QueryErrorsGlobalStats_UpdateError`; a standalone server is its own coordinator). The
+/// warnings a reply carries are counted where the query runs.
+fn counted(cx: &mut Cx, args: &[Bytes], cursor_read: bool, run: fn(&mut Cx, &[Bytes]) -> CmdResult) -> CmdResult {
+    let started = std::time::Instant::now();
+    let r = run(cx, args);
+    match &r {
+        Ok(_) => cx.eng.search.stats.count_query(cursor_read, started.elapsed()),
+        Err(e) => cx.eng.search.stats.error_reply(&e.0, true),
+    }
+    r
+}
+
+fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    counted(cx, args, false, super::ft_query::ft_search)
+}
+
+fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    counted(cx, args, false, super::ft_aggregate::ft_aggregate)
+}
+
+fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    counted(cx, args, false, super::ft_aggregate::ft_profile)
+}
+
+fn ft_hybrid(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    counted(cx, args, false, super::ft_aggregate::ft_hybrid)
+}
+
+fn ft_cursor_read(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    counted(cx, args, true, super::ft_aggregate::ft_cursor_read)
 }
 
 /// FT.CONFIG GET|SET|HELP (`ConfigCommand`).

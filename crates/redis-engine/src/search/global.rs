@@ -7,7 +7,6 @@ use super::rsdict::RsDict;
 use super::error::{Code, QErr};
 use super::triemap::TrieMap;
 use bytes::Bytes;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// `maxIndexes_g`.
 pub const MAX_INDEXES: usize = 200_000;
@@ -48,50 +47,155 @@ pub struct Global {
     pub svs_pool: bool,
     /// The process-wide switches FT.DEBUG sets.
     pub debug: DebugState,
-    /// The queries' timeout counters.
-    pub query_stats: QueryStats,
+    /// What indexing keeps outside any index.
+    pub indexing: super::index::Indexing,
+    /// `RSGlobalStats.totalStats.queries`: the query counters INFO reports.
+    pub stats: QueryStats,
+    /// `RSGlobalStats.totalStats.used_dialects` is set with each index's bits; here the bits of
+    /// the indexes dropped since the last flush (the live ones are or-ed in).
+    pub dropped_dialects: u8,
+    /// Dropped indexes' GCs still counting their documents not collected
+    /// (`IndexsGlobalStats_*LogicallyDeleted`): a GC goes (`onTerminateCb`) at its next run,
+    /// when it finds its index gone; (due, Unix ms; count).
+    pub gc_orphans: Vec<(i64, u64)>,
 }
 
-/// `RSGlobalStats.totalStats.queries`' timeout counters, INFO search's
-/// `search_{coord,shard}_total_query_{errors,warnings}_timeout`: a reply's timeout warning
-/// (every chunk's) and ON_TIMEOUT FAIL's timeout error, by user-facing (`coord`) and internal
-/// (`_FT.*`, shard) requests. Counted through a shared engine reference, hence atomics.
+/// A query error INFO counts (`QueryErrorsGlobalStats_UpdateError`'s codes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryError {
+    Syntax,
+    /// `QUERY_ERROR_CODE_PARSE_ARGS` and `QUERY_ERROR_CODE_ARG_UNRECOGNIZED`.
+    Arguments,
+    Timeout,
+    Oom,
+    UnavailableSlots,
+}
+
+impl QueryError {
+    /// The counted code an error reply starts with (other codes aren't counted).
+    pub fn of_reply(msg: &str) -> Option<QueryError> {
+        let code = msg.split(' ').next().unwrap_or("");
+        Some(match code {
+            "SEARCH_SYNTAX" => QueryError::Syntax,
+            "SEARCH_PARSE_ARGS" | "SEARCH_ARG_UNRECOGNIZED" => QueryError::Arguments,
+            "SEARCH_TIMEOUT" => QueryError::Timeout,
+            "SEARCH_OOM" => QueryError::Oom,
+            "SEARCH_SLOTS_UNAVAIL" => QueryError::UnavailableSlots,
+            _ => return None,
+        })
+    }
+}
+
+/// A query warning INFO counts (`QueryWarningsGlobalStats_UpdateWarning`'s codes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryWarning {
+    Timeout,
+    /// The shard's and the coordinator's OOM warnings alike.
+    Oom,
+    MaxPrefixExpansions,
+    AsmInaccurateResults,
+}
+
+/// One side's (`shard_*` or `coord_*`) error and warning counters.
+#[derive(Debug, Default)]
+pub struct ErrorCounters {
+    pub syntax: AtomicU64,
+    pub arguments: AtomicU64,
+    pub timeout: AtomicU64,
+    pub oom: AtomicU64,
+    pub unavailable_slots: AtomicU64,
+    pub warn_timeout: AtomicU64,
+    pub warn_oom: AtomicU64,
+    pub warn_max_prefix_expansions: AtomicU64,
+    pub warn_asm_inaccurate: AtomicU64,
+}
+
+/// The process-wide query counters (`QueriesGlobalStats`); atomics, so query execution (which
+/// sees the engine read-only) can count. A standalone server counts its own queries' errors and
+/// warnings as the coordinator's (`COORD_ERR_WARN`); the shard side only gets what a shard
+/// reply carries.
+///
+/// The hooks for query execution: [`QueryStats::count_query`] once per reply chunk sent (a
+/// query, an FT.CURSOR READ), [`QueryStats::error`] / [`QueryStats::error_reply`] for an error
+/// replied, [`QueryStats::warning`] for each warning a chunk carries (a timeout with the RETURN
+/// policy, OOM, the prefix expansion limit).
 #[derive(Debug, Default)]
 pub struct QueryStats {
-    pub coord_errors_timeout: AtomicU64,
-    pub coord_warnings_timeout: AtomicU64,
-    pub shard_errors_timeout: AtomicU64,
-    pub shard_warnings_timeout: AtomicU64,
-    /// `…_errors_oom` / `…_warnings_oom`: the memory guard's error (ON_OOM FAIL) and its
-    /// empty reply's warning (ON_OOM RETURN).
-    pub coord_errors_oom: AtomicU64,
-    pub coord_warnings_oom: AtomicU64,
-    pub shard_errors_oom: AtomicU64,
-    pub shard_warnings_oom: AtomicU64,
+    pub queries_processed: AtomicU64,
+    pub query_commands: AtomicU64,
+    pub execution_ns: AtomicU64,
+    pub shard: ErrorCounters,
+    pub coord: ErrorCounters,
 }
 
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
 impl QueryStats {
-    /// `QueryErrorsGlobalStats_UpdateError` / `QueryWarningsGlobalStats_UpdateWarning` with
-    /// a timeout.
-    pub fn timeout(&self, error: bool, internal: bool) {
-        let c = match (error, internal) {
-            (true, false) => &self.coord_errors_timeout,
-            (false, false) => &self.coord_warnings_timeout,
-            (true, true) => &self.shard_errors_timeout,
-            (false, true) => &self.shard_warnings_timeout,
-        };
-        c.fetch_add(1, Ordering::Relaxed);
+    /// `TotalGlobalStats_CountQuery`: every chunk sent counts as a command; as a query unless
+    /// it is a later read of a cursor (FT.CURSOR READ).
+    pub fn count_query(&self, cursor_read: bool, elapsed: std::time::Duration) {
+        self.query_commands.fetch_add(1, Relaxed);
+        self.execution_ns.fetch_add(elapsed.as_nanos() as u64, Relaxed);
+        if !cursor_read {
+            self.queries_processed.fetch_add(1, Relaxed);
+        }
     }
 
-    /// … with an out-of-memory error or warning.
+    fn side(&self, coord: bool) -> &ErrorCounters {
+        if coord { &self.coord } else { &self.shard }
+    }
+
+    /// `QueryErrorsGlobalStats_UpdateError`.
+    pub fn error(&self, e: QueryError, coord: bool) {
+        let c = self.side(coord);
+        match e {
+            QueryError::Syntax => &c.syntax,
+            QueryError::Arguments => &c.arguments,
+            QueryError::Timeout => &c.timeout,
+            QueryError::Oom => &c.oom,
+            QueryError::UnavailableSlots => &c.unavailable_slots,
+        }
+        .fetch_add(1, Relaxed);
+    }
+
+    /// An error reply's code, when it is one INFO counts.
+    pub fn error_reply(&self, msg: &str, coord: bool) {
+        if let Some(e) = QueryError::of_reply(msg) {
+            self.error(e, coord);
+        }
+    }
+
+    /// `QueryWarningsGlobalStats_UpdateWarning`.
+    pub fn warning(&self, w: QueryWarning, coord: bool) {
+        let c = self.side(coord);
+        match w {
+            QueryWarning::Timeout => &c.warn_timeout,
+            QueryWarning::Oom => &c.warn_oom,
+            QueryWarning::MaxPrefixExpansions => &c.warn_max_prefix_expansions,
+            QueryWarning::AsmInaccurateResults => &c.warn_asm_inaccurate,
+        }
+        .fetch_add(1, Relaxed);
+    }
+
+    /// A timeout where the query runs: ON_TIMEOUT FAIL's error or RETURN's warning, `internal`
+    /// for the `_FT.*` (shard) requests. A user-facing error goes out as an error reply, which
+    /// the command wrapper counts by its code, so only internal errors are counted here.
+    pub fn timeout(&self, error: bool, internal: bool) {
+        match (error, internal) {
+            (true, false) => {}
+            (true, true) => self.error(QueryError::Timeout, false),
+            (false, internal) => self.warning(QueryWarning::Timeout, !internal),
+        }
+    }
+
+    /// The memory guard's error (ON_OOM FAIL) or its empty reply's warning (RETURN), counted as
+    /// [`QueryStats::timeout`] counts.
     pub fn oom(&self, error: bool, internal: bool) {
-        let c = match (error, internal) {
-            (true, false) => &self.coord_errors_oom,
-            (false, false) => &self.coord_warnings_oom,
-            (true, true) => &self.shard_errors_oom,
-            (false, true) => &self.shard_warnings_oom,
-        };
-        c.fetch_add(1, Ordering::Relaxed);
+        match (error, internal) {
+            (true, false) => {}
+            (true, true) => self.error(QueryError::Oom, false),
+            (false, internal) => self.warning(QueryWarning::Oom, !internal),
+        }
     }
 }
 
@@ -139,6 +243,19 @@ impl Global {
         if self.svs_pool || self.indexes.values().any(has_svs) { 192 + 80 * workers.max(1) } else { 0 }
     }
 
+    /// `RSGlobalStats.totalStats.used_dialects`: bit `d - 1` for each dialect a query used since
+    /// the last flush.
+    pub fn used_dialects(&self) -> u8 {
+        self.indexes.values().fold(self.dropped_dialects, |a, ix| a | ix.used_dialects)
+    }
+
+    /// `IndexesGlobalStats_GetLogicallyDeletedDocs`: the live GCs' documents not collected yet,
+    /// and those of the dropped indexes' GCs that haven't run since.
+    pub fn logically_deleted(&self, now_ms: i64) -> u64 {
+        let live: u64 = self.indexes.values().filter_map(|ix| ix.gc.as_ref()).map(|g| g.pending).sum();
+        live + self.gc_orphans.iter().filter(|(due, _)| *due > now_ms).map(|(_, n)| n).sum::<u64>()
+    }
+
     /// `maxIndexes_g`.
     pub fn max_indexes(&self) -> usize {
         self.max_indexes.unwrap_or(MAX_INDEXES)
@@ -183,12 +300,14 @@ impl Global {
         }
     }
 
-    /// `onFlush` (FLUSHDB/FLUSHALL): every index, alias, dictionary and cursor goes.
+    /// `onFlush` (FLUSHDB/FLUSHALL): every index, alias, dictionary and cursor goes, and the
+    /// dialects used are forgotten.
     pub fn flush(&mut self) {
         // `Indexes_Free`: each spec is deleted from the registry, whose tables never shrink.
         for name in self.indexes.keys().cloned().collect::<Vec<_>>() {
             self.remove(&name);
         }
+        self.dropped_dialects = 0;
         self.prefixes = TrieMap::new();
         self.cursors.clear();
         self.aliases.clear();
@@ -235,6 +354,15 @@ impl Global {
     pub fn remove(&mut self, name: &[u8]) -> Option<Index> {
         let index = self.indexes.delete(name)?;
         self.svs_pool |= has_svs(&index);
+        self.dropped_dialects |= index.used_dialects;
+        let now = crate::util::now_ms();
+        self.gc_orphans.retain(|(due, _)| *due > now);
+        if let Some(gc) = &index.gc
+            && gc.pending > 0
+        {
+            // A stopped GC (FT.DEBUG GC_STOP_SCHEDULE) never runs again.
+            self.gc_orphans.push((if gc.next_run == 0 { i64::MAX } else { gc.next_run }, gc.pending));
+        }
         for p in &index.spec.rule.prefixes {
             if let Some(v) = self.prefixes.get_mut(p)
                 && let Some(i) = v.iter().position(|n| n.as_ref() == name)

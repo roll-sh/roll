@@ -39,7 +39,7 @@ pub(in crate::commands) fn guard(cx: &Cx) -> Option<Oom> {
 
 /// `QueryMemoryGuardFailure_WithReply`, the error counted.
 fn fail(cx: &Cx, internal: bool) -> Error {
-    cx.eng.search.query_stats.oom(true, internal);
+    cx.eng.search.stats.oom(true, internal);
     QErr::code(Code::OutOfMemory).into()
 }
 
@@ -63,7 +63,7 @@ pub(in crate::commands) fn query(cx: &mut Cx, o: Oom, argv: &[Bytes], profile: O
         }
     }
     // `sendChunk_ReplyOnly_EmptyResults`.
-    cx.eng.search.query_stats.oom(false, internal);
+    cx.eng.search.stats.oom(false, internal);
     let resp3 = cx.client.resp >= 3;
     let results = if resp3 {
         let warning = if internal { SHARD_WARNING } else { COORD_WARNING };
@@ -92,7 +92,7 @@ pub(in crate::commands) fn hybrid(cx: &mut Cx, o: Oom, internal: bool, profile: 
     if o == Oom::Fail {
         return Err(fail(cx, internal));
     }
-    cx.eng.search.query_stats.oom(false, internal);
+    cx.eng.search.stats.oom(false, internal);
     let kv = |k: &str, v: Reply| (Reply::Status(k.into()), v);
     if internal {
         return Ok(Reply::Map(vec![kv("SEARCH", Reply::Int(0)), kv("VSIM", Reply::Int(0)), kv("warnings", Reply::Array(vec![Reply::Status(SHARD_CODE_WARNING.into())]))]));

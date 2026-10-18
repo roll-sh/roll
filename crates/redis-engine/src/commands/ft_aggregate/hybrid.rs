@@ -1455,7 +1455,7 @@ fn run_tail<'a>(
     }
     // `handleSendChunkError_hybrid`: ON_TIMEOUT FAIL's timeout (FT.PROFILE warns instead).
     if rc == St::TimedOut && policy == Policy::Fail && prof.is_none() {
-        eng.search.query_stats.timeout(true, false);
+        eng.search.stats.timeout(true, false);
         return Ok(Err(QErr::code(Code::TimedOut).into()));
     }
     if !collect && rc == St::Ok {
@@ -1510,6 +1510,10 @@ fn run_tail<'a>(
             "Query TIMEOUT exceeded the configured maximum (search-_max-foreground-timeout-limit) while search-workers is disabled; effective timeout was capped".into(),
         ));
     }
+    // `updateHybridWarningMetrics`: once, whichever subqueries reached the limit.
+    if subs.borrow().iter().any(|s| s.rc != St::Error && s.expansions) {
+        eng.search.stats.warning(crate::search::global::QueryWarning::MaxPrefixExpansions, true);
+    }
     // `replyWarningsWithSuffixes`: a subquery's timeout hides the tail's.
     let mut sub_timed_out = false;
     for (i, s) in subs.borrow().iter().enumerate() {
@@ -1527,7 +1531,7 @@ fn run_tail<'a>(
     }
     // `updateHybridWarningMetrics`.
     if sub_timed_out || rc == St::TimedOut {
-        eng.search.query_stats.timeout(false, false);
+        eng.search.stats.timeout(false, false);
     }
     if rc == St::TimedOut && !sub_timed_out {
         warnings.push(Reply::Status(format!("{TIMEOUT_WARNING} (POST PROCESSING)")));
@@ -1800,7 +1804,7 @@ fn start_cursors(cx: &mut Cx, name: Bytes, h: Hyb, db: usize, resp3: bool, backg
     // `replyWithCursors`.
     let mut warnings = Vec::new();
     if timed_out {
-        cx.eng.search.query_stats.timeout(false, true);
+        cx.eng.search.stats.timeout(false, true);
         warnings.push(Reply::Status(TIMEOUT_WARNING.into()));
     }
     for (i, e) in expansions.into_iter().enumerate() {

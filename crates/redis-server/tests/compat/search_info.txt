@@ -1,0 +1,116 @@
+# INFO's search sections with indexes: index totals, field statistics, memory, vector indexes,
+# cursors, the GC, query counters, errors and warnings, threads, dialects. The counters a server
+# accumulates over its life (queries, errors, indexing operations) compare as changes (`!delta`).
+FLUSHALL
+FT.CONFIG SET FORK_GC_RUN_INTERVAL 3600
+INFO search
+!delta search_total_*,search_coord_*,search_shard_* INFO search_queries search_fields_statistics search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CREATE ih ON HASH PREFIX 1 h: SCHEMA t TEXT SORTABLE t2 TEXT NOINDEX n NUMERIC SORTABLE n2 NUMERIC NOINDEX g TAG CASESENSITIVE g2 TAG SORTABLE geo GEO gs GEOSHAPE FLAT v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2 vh VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC COSINE
+FT.CREATE ij ON JSON PREFIX 1 j: SCHEMA $.t AS t TEXT $.n AS n NUMERIC $.g AS g TAG $.v AS v VECTOR FLAT 6 TYPE FLOAT64 DIM 2 DISTANCE_METRIC IP
+FT.CREATE ie ON HASH PREFIX 1 e: SCHEMA x TEXT
+!info search_number_of_*,search_total_active*,search_total_num_docs*,search_total_inverted* INFO search_indexes
+!delta search_total_*,search_fields_* INFO search_fields_statistics
+INFO search_memory
+INFO search_vector_index
+INFO search_cursors
+!info search_gc_bytes*,search_gc_total_cycles,search_gc_marked* INFO search_garbage_collector
+INFO search_multi_threading
+INFO search_dialect_statistics
+INFO search_runtime_configurations
+HSET h:1 t "hello world" t2 "not indexed" n 1 n2 2 g "A,b" g2 x geo "1,2" gs "POINT (1 2)" v aaaaaaaa
+HSET h:7 t "seven" vh aaaaaaaa
+HSET h:2 t "hello there" n 2 g "c" geo "3,4" gs "POLYGON ((0 0, 1 1, 1 0, 0 0))" v bbbbbbbb
+HSET h:3 t "running runner" n notanumber
+HSET h:4 t "foo" geo "999,999"
+HSET h:5 t "bar" v short
+HSET h:6 t "baz" gs "NOT WKT"
+JSON.SET j:1 $ "{\"t\":\"json text here\",\"n\":5,\"g\":[\"x\",\"y\"],\"v\":[1,2]}"
+JSON.SET j:2 $ "{\"t\":\"more json\",\"n\":\"bad\"}"
+HSET e:1 x "lonely"
+!info search_number_of_*,search_total_active*,search_total_num_docs*,search_total_inverted* INFO search_indexes
+!delta search_total_*,search_fields_* INFO search_fields_statistics
+INFO search_memory
+INFO search_vector_index
+INFO search_warnings_and_errors
+# Queries: each reply counts (cursor reads too); syntax and argument errors count on the
+# coordinator side, other errors not at all.
+FT.SEARCH ih hello NOCONTENT
+FT.SEARCH ih "@n:[1 2]" NOCONTENT DIALECT 2
+FT.AGGREGATE ih * LOAD 1 @t DIALECT 3
+FT.SEARCH ij "@t:json" NOCONTENT DIALECT 4 LIMIT 0 10
+FT.SEARCH ih "((" NOCONTENT
+FT.SEARCH ih hello LIMIT 1
+FT.AGGREGATE ih * BADARG
+FT.SEARCH nosuch hello
+FT.SEARCH ih hello SORTBY nosuch
+FT.EXPLAIN ih "(("
+FT.SPELLCHECK ih "(("
+!timing FT.PROFILE ih SEARCH QUERY "(("
+!timing FT.PROFILE ih SEARCH QUERY hello
+!mask execution_time FT.HYBRID ih SEARCH hello VSIM @v $b PARAMS 2 b aaaaaaaa
+FT.HYBRID ih SEARCH "((" VSIM @v $b PARAMS 2 b aaaaaaaa
+FT.HYBRID ih SEARCH hello VSIM @v $b PARAMS 2 b aaaaaaaa BADARG
+!delta search_total_queries_processed,search_total_query_commands INFO search_queries
+!delta search_coord_*,search_shard_* INFO search_warnings_and_errors search_coordinator_warnings_and_errors
+INFO search_dialect_statistics
+# The prefix expansion limit's warning.
+FT.CONFIG SET MAXPREFIXEXPANSIONS 1
+FT.SEARCH ih hel* NOCONTENT
+FT.SEARCH ih "*e*" NOCONTENT
+FT.AGGREGATE ih hel*
+!timing FT.PROFILE ih SEARCH QUERY hel*
+FT.SEARCH ih he* NOCONTENT
+!mask execution_time FT.HYBRID ih SEARCH hel* VSIM @v $b PARAMS 2 b aaaaaaaa
+FT.CONFIG SET MAXPREFIXEXPANSIONS 200
+!delta search_coord_*,search_shard_* INFO search_coordinator_warnings_and_errors search_warnings_and_errors
+!delta search_total_queries_processed,search_total_query_commands INFO search_queries
+# Cursors: idle ones (between reads) and their total.
+!capture c1 FT.AGGREGATE ih * WITHCURSOR COUNT 1
+!capture c2 FT.AGGREGATE ij * WITHCURSOR COUNT 1
+FT.AGGREGATE ie * WITHCURSOR COUNT 5
+INFO search_cursors
+!mask total_indexing_time,last_run_time_ms,total_ms_run,average_cycle_time_ms FT.INFO ih
+FT.CURSOR READ ih {$c1}
+FT.CURSOR READ ih {$c1}
+INFO search_cursors
+!delta search_total_queries_processed,search_total_query_commands INFO search_queries
+FT.CURSOR DEL ij {$c2}
+FT.CURSOR DEL ij {$c2}
+INFO search_cursors
+# Deletes and updates wait for the GC (the documents not collected yet aren't compared: those
+# of indexes dropped before count until their GC's next run, a time the two servers don't share).
+DEL h:1
+HSET h:2 t "hello again"
+DEL e:1
+!mask total_indexing_time,last_run_time_ms,total_ms_run,average_cycle_time_ms FT.INFO ih
+!mask total_indexing_time,last_run_time_ms,total_ms_run,average_cycle_time_ms FT.INFO ij
+!info search_gc_bytes*,search_gc_total_cycles,search_gc_marked* INFO search_garbage_collector
+!info search_number_of_*,search_total_active*,search_total_num_docs*,search_total_inverted* INFO search_indexes
+INFO search_memory
+INFO search_vector_index
+# An alter (of an index without documents: a rescan's order is the keyspace's), a drop.
+FT.ALTER ie SCHEMA ADD extra TEXT more NUMERIC SORTABLE
+!delta search_total_*,search_fields_* INFO search_fields_statistics
+FT.DROPINDEX ij
+!delta search_total_*,search_fields_* INFO search_fields_statistics
+INFO search_warnings_and_errors
+INFO search_cursors
+INFO search_dialect_statistics
+!info search_number_of_*,search_total_active*,search_total_num_docs*,search_total_inverted* INFO search_indexes
+INFO search_memory
+# A flush forgets the dialects used.
+FLUSHALL
+FT.CREATE ih ON HASH PREFIX 1 h: SCHEMA t TEXT
+INFO search_dialect_statistics
+INFO search_cursors
+FT.SEARCH ih x DIALECT 2
+INFO search_dialect_statistics
+!delta search_total_*,search_fields_*,search_number*,search_used* INFO search_fields_statistics search_indexes search_memory
+# With search-_info-on-zero-indexes every section shows without indexes.
+FT.DROPINDEX ih
+INFO search_indexes search_dialect_statistics
+CONFIG SET search-_info-on-zero-indexes yes
+!info search_number_of_*,search_total_num_docs*,search_total_inverted*,search_used_memory*,search_dialect*,search_global* INFO search
+CONFIG SET search-_info-on-zero-indexes no
+FT.CONFIG SET FORK_GC_RUN_INTERVAL 30
+FLUSHALL

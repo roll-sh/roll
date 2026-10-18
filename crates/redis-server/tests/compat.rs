@@ -17,6 +17,9 @@
 //! !timing FT.PROFILE …   `!mask` of FT.PROFILE's clock fields (`Time`, `Total profile time`…)
 //! !info a,b* INFO …       compare INFO's sections and field names; values only for fields `a`
 //!                         and those starting with `b` (`!info - …`: names only)
+//! !delta a,b* INFO …      as `!info`, an integer value shown as its change since the field's
+//!                         last `!delta` on that side in the file (`base` the first time):
+//!                         for counters a server accumulates over its life
 //! !ids CMD                in the reply, integers and `id=`/`redir=` tokens equal to a
 //!                         connection's client id become `id:N` (ids differ between servers)
 //! CLIENT KILL ID {id:2}   `{id:N}` expands to connection N's client id on each server
@@ -31,6 +34,7 @@
 //! @conn 2                 switch to connection 2 (opened on first use)
 //! @resp 3                 HELLO 3 on the current connection (both sides)
 //! @sleep 100              pause (ms)
+//! @requires cndict        skip the file without the Chinese dictionary (`ROLL_SEARCH_CNDICT`)
 //! RPUSH l {9000*x}        `{N*text}` expands to `text` repeated N times (long values, many args)
 //! ```
 //!
@@ -223,6 +227,34 @@ fn info_fields(r: &Reply, keep: &[String], masked: &[String], sort: bool) -> Rep
     Reply::Bulk(bytes::Bytes::from(lines.join("\r\n")))
 }
 
+/// `!delta`: INFO text with the kept fields' integer values as changes since their last value
+/// (`base` the first time), the other values `*`.
+fn info_delta(r: &Reply, keep: &[String], last: &mut HashMap<String, i64>) -> Reply {
+    let (Reply::Bulk(b) | Reply::Verbatim(_, b)) = r else { return r.clone() };
+    let kept = |k: &str| keep.iter().any(|p| p.strip_suffix('*').map_or(p == k, |pre| k.starts_with(pre)));
+    let text = String::from_utf8_lossy(b);
+    let lines: Vec<String> = text
+        .split("\r\n")
+        .map(|line| match line.split_once(':') {
+            Some((k, v)) if !line.starts_with('#') => {
+                if !kept(k) {
+                    return format!("{k}:*");
+                }
+                match v.parse::<i64>() {
+                    Ok(n) => {
+                        let shown = last.get(k).map_or("base".to_string(), |p| (n - p).to_string());
+                        last.insert(k.to_string(), n);
+                        format!("{k}:{shown}")
+                    }
+                    Err(_) => line.to_string(),
+                }
+            }
+            _ => line.to_string(),
+        })
+        .collect();
+    Reply::Bulk(bytes::Bytes::from(lines.join("\r\n")))
+}
+
 /// Rewrite the values of `key=value` tokens in a text reply (CLIENT LIST lines).
 fn map_tokens(b: &[u8], f: impl Fn(&str, &str) -> String) -> bytes::Bytes {
     let text = String::from_utf8_lossy(b);
@@ -302,6 +334,8 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
     let mut cur = 1u32;
     // `!capture`d values, on the reference and on roll.
     let mut vars: (Vars, Vars) = (Vec::new(), Vec::new());
+    // `!delta`'s last values, on the reference and on roll.
+    let mut deltas: (HashMap<String, i64>, HashMap<String, i64>) = (HashMap::new(), HashMap::new());
 
     // Fresh state on both sides.
     let mut admin_r = RespClient::connect(ref_addr).await.unwrap();
@@ -364,6 +398,13 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                         e.insert(open_pair(ref_addr, roll_addr).await);
                     }
                 }
+                // `@requires cndict`: the file needs the Chinese dictionary (`ROLL_SEARCH_CNDICT`).
+                "requires" => {
+                    if arg.trim() == "cndict" && !redis_engine::search::friso::dictionary_available() {
+                        eprintln!("compat: {fname} skipped (set ROLL_SEARCH_CNDICT to the module's deps/cndict directory)");
+                        return fails;
+                    }
+                }
                 "sleep" => tokio::time::sleep(std::time::Duration::from_millis(arg.trim().parse().unwrap())).await,
                 // `@until <ms> <text> <command>`: repeat the command on each side (every 50ms, at
                 // most <ms>) until its reply mentions <text> (`\s` in <text> stands for a space). For
@@ -410,6 +451,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             continue;
         }
         let mut info_keep: Option<Vec<String>> = None;
+        let mut delta_keep: Option<Vec<String>> = None;
         let mut capture: Option<String> = None;
         let (cmp, send_only, cmdline, masked, by_id) = {
             let mut cmp = Cmp::Exact;
@@ -436,6 +478,11 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                     "capture" => {
                         let (name, t) = tail.split_once(' ').unwrap_or((tail, ""));
                         capture = Some(name.to_string());
+                        tail = t;
+                    }
+                    "delta" => {
+                        let (fields, t) = tail.split_once(' ').unwrap_or((tail, ""));
+                        delta_keep = Some(fields.split(',').map(str::to_string).collect());
                         tail = t;
                     }
                     "info" => {
@@ -466,8 +513,13 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             None if masked.is_empty() => r,
             None => mask(&r, &masked),
         };
-        let a = p.redis.cmd(&args_r).await.map(shown);
-        let b = p.roll.read_timeout_after_send(&args).await.map(|r| r.map(shown));
+        let (a, b) = match &delta_keep {
+            Some(k) => (
+                p.redis.cmd(&args_r).await.map(|r| info_delta(&r, k, &mut deltas.0)),
+                p.roll.read_timeout_after_send(&args).await.map(|r| r.map(|r| info_delta(&r, k, &mut deltas.1))),
+            ),
+            None => (p.redis.cmd(&args_r).await.map(shown), p.roll.read_timeout_after_send(&args).await.map(|r| r.map(shown))),
+        };
         let (a, b) = if by_id { (a.map(|r| name_ids(&r, &ids_r)), b.map(|r| r.map(|r| name_ids(&r, &ids_o)))) } else { (a, b) };
         if let Some(spec) = &capture {
             let (name, field) = match spec.split_once('=') {

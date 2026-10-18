@@ -552,6 +552,9 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     let root = req.root.as_ref().expect("a parsed query");
     let mut it = ecx.iterate(root)?;
     let warn_expansions = ecx.expansions_warning;
+    if warn_expansions {
+        eng.search.stats.warning(crate::search::global::QueryWarning::MaxPrefixExpansions, true);
+    }
     let metric_requests = std::mem::take(&mut ecx.metric_requests);
     // `QOptimizer_Iterators`.
     let plan = req.optimizer.as_ref().filter(|_| flags & OPTIMIZE != 0);
@@ -561,7 +564,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     // `prepareExecutionPlan`: under ON_TIMEOUT FAIL (FT.PROFILE aside) a query whose
     // iterators took up its time fails before its pipeline is built.
     if policy == Policy::Fail && !profile && tmo.plan_timed_out() {
-        eng.search.query_stats.timeout(true, req.internal);
+        eng.search.stats.timeout(true, req.internal);
         return Err(QErr::code(Code::TimedOut).into());
     }
 
@@ -787,13 +790,13 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     }
     if timed_out && policy == Policy::Fail {
         if !profile {
-            eng.search.query_stats.timeout(true, req.internal);
+            eng.search.stats.timeout(true, req.internal);
             return Err(QErr::code(Code::TimedOut).into());
         }
         results.clear();
     }
     if timed_out {
-        eng.search.query_stats.timeout(false, req.internal);
+        eng.search.stats.timeout(false, req.internal);
     }
 
     // the output loader

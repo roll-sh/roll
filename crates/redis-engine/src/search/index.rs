@@ -70,8 +70,8 @@ pub struct Suffix {
     pub terms: Vec<Bytes>,
 }
 
-/// `addSuffixTrieMap` (`addSuffixTrie` for text): the number of entries its proper suffixes
-/// created.
+/// `addSuffixTrieMap` (a TAG field's suffixes, by byte): the number of entries its proper
+/// suffixes created.
 pub fn add_suffix(trie: &mut TrieMap<Suffix>, s: &[u8]) -> usize {
     if trie.get(s).is_some_and(|d| d.term.is_some()) {
         return 0;
@@ -97,6 +97,172 @@ pub fn add_suffix(trie: &mut TrieMap<Suffix>, s: &[u8]) -> usize {
         }
     }
     created
+}
+
+/// The text suffix trie (`sp->suffix`, a lexically sorted rune `Trie` whose payloads are
+/// `suffixData`): the trie itself (its structure decides the iteration and wildcard walks) and
+/// each key's data.
+#[derive(Clone, Debug)]
+pub struct TextSuffix {
+    pub trie: super::trie::Trie,
+    pub data: HashMap<Vec<super::trie::Rune>, Suffix>,
+}
+
+impl Default for TextSuffix {
+    fn default() -> Self {
+        TextSuffix { trie: super::trie::Trie::new(super::trie::SortMode::Lex), data: HashMap::new() }
+    }
+}
+
+/// The payload the trie nodes carry (its content is the side table's).
+const SUFFIX_PAYLOAD: &[u8] = &[0];
+
+impl TextSuffix {
+    /// `addSuffixTrie`: the term under its own key and in every proper (rune) suffix's list;
+    /// the entries counted in the trie's size (the term's own key isn't). Suffixes of 256 runes
+    /// or more that have no entry yet are skipped (`Trie_InsertRune` refuses them).
+    pub fn add(&mut self, s: &[u8]) -> usize {
+        let runes = super::trie::str_to_runes(s);
+        if runes.is_empty() || self.data.get(&runes).is_some_and(|d| d.term.is_some()) {
+            return 0;
+        }
+        let term = Bytes::copy_from_slice(s);
+        match self.data.get_mut(&runes) {
+            Some(d) => {
+                d.term = Some(term.clone());
+                d.terms.push(term.clone());
+            }
+            None => {
+                self.trie.insert_runes_no_size(&runes, 1.0, false, Some(SUFFIX_PAYLOAD), 0);
+                self.data.insert(runes.clone(), Suffix { term: Some(term.clone()), terms: vec![term.clone()] });
+            }
+        }
+        let mut created = 0;
+        for j in 1..runes.len() {
+            let key = &runes[j..];
+            if let Some(d) = self.data.get_mut(key) {
+                d.terms.push(term.clone());
+                continue;
+            }
+            if key.len() >= super::trie::TRIE_INITIAL_STRING_LEN {
+                continue;
+            }
+            if self.trie.insert_runes(key, 1.0, false, Some(SUFFIX_PAYLOAD), 0) == 1 {
+                created += 1;
+            }
+            self.data.insert(key.to_vec(), Suffix { term: None, terms: vec![term.clone()] });
+        }
+        created
+    }
+
+    /// `deleteSuffixTrie`: the term leaves its key and every suffix's list; keys left listing
+    /// nothing go. Returns the trie entries deleted (the term's own key included).
+    pub fn delete(&mut self, s: &[u8]) -> usize {
+        let runes = super::trie::str_to_runes(s);
+        let mut deleted = 0;
+        for j in 0..runes.len() {
+            let key = &runes[j..];
+            let Some(d) = self.data.get_mut(key) else { continue };
+            if j == 0 {
+                d.term = None;
+            }
+            if let Some(i) = d.terms.iter().position(|t| t.as_ref() == s) {
+                d.terms.swap_remove(i);
+            }
+            if d.terms.is_empty() {
+                self.data.remove(key);
+                deleted += self.trie.delete_runes(key).max(0) as usize;
+            }
+        }
+        deleted
+    }
+
+    /// The keys in trie order (`Trie_IterateAll`).
+    pub fn keys(&self) -> Vec<Vec<u8>> {
+        self.trie.iterate_all().collect_all().into_iter().filter_map(|e| super::trie::runes_to_str(&e.0)).collect()
+    }
+
+    /// `Suffix_IterateContains`: for a contains query every term listed under the keys the
+    /// (lowercased) string prefixes, in trie order (a term once per key it is listed under);
+    /// for a suffix query the terms listed under the string itself. `cb` returns false to stop.
+    pub fn iterate_contains(&self, s: &[super::trie::Rune], contains: bool, cb: &mut dyn FnMut(&[u8]) -> bool) {
+        if !contains {
+            if let Some(d) = self.data.get(s) {
+                for t in &d.terms {
+                    if !cb(t) {
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+        self.trie.iterate_contains(
+            s,
+            true,
+            false,
+            &mut |key, _, _| {
+                let Some(d) = self.data.get(key) else { return true };
+                d.terms.iter().all(|t| cb(t))
+            },
+            None,
+        );
+    }
+
+    /// `Suffix_IterateWildcard`: the pattern's best literal run (`Suffix_ChooseToken_rune`) walks
+    /// the trie, the terms listed under the keys it matches are matched against the whole
+    /// (lowercased) pattern. False when no run can be used (the caller goes brute force).
+    pub fn iterate_wildcard(&self, pattern: &[super::trie::Rune], cb: &mut dyn FnMut(&[u8]) -> bool) -> bool {
+        let Some((idx, len)) = choose_token(pattern, 1) else { return false };
+        let mut token = pattern[idx..idx + len].to_vec();
+        if pattern.get(idx + len) == Some(&(b'*' as super::trie::Rune)) {
+            token.push(b'*' as super::trie::Rune);
+        }
+        let full = super::trie::runes_to_str(pattern).unwrap_or_default();
+        self.trie.iterate_wildcard(
+            &token,
+            &mut |key, _, _| {
+                let Some(d) = self.data.get(key) else { return true };
+                d.terms.iter().filter(|t| super::qeval::wildcard_match(&full, t)).all(|t| cb(t))
+            },
+            None,
+        );
+        true
+    }
+}
+
+/// `Suffix_ChooseToken` (`step` 0: a run's score is its length plus its position) and
+/// `Suffix_ChooseToken_rune` (`step` 1: its length plus one): the literal runs between `*`s,
+/// less 5 when a `*` follows, less one per `?`; the last best one.
+pub fn choose_token<T: Copy + Into<u32>>(s: &[T], step: u32) -> Option<(usize, usize)> {
+    let star = |c: T| c.into() == b'*' as u32;
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        let start = i;
+        while i < s.len() && !star(s[i]) {
+            i += 1;
+        }
+        if i > start {
+            runs.push((start, i - start));
+        }
+        while i < s.len() && star(s[i]) {
+            i += 1;
+        }
+    }
+    let mut best: Option<(usize, usize)> = None;
+    let mut score = i32::MIN;
+    for (k, &(at, len)) in runs.iter().enumerate() {
+        let mut cur = len as i32 + if step == 0 { k as i32 } else { 1 };
+        if s.get(at + len).is_some_and(|&c| star(c)) {
+            cur -= 5;
+        }
+        cur -= s[at..at + len].iter().filter(|&&c| c.into() == b'?' as u32).count() as i32;
+        if cur >= score {
+            score = cur;
+            best = Some((at, len));
+        }
+    }
+    best
 }
 
 /// A TAG field's index (`TagIndex`): a posting list per value.
@@ -201,6 +367,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn from(cfg: &crate::config::Config) -> Self {
+        super::friso::configure(cfg);
         Settings {
             min_stem_len: cfg.num("search-min-stem-len") as usize,
             min_phonetic_len: cfg.num("search-min-phonetic-term-len") as usize,
@@ -227,6 +394,103 @@ struct Forward {
     by_term: HashMap<Vec<u8>, usize>,
     max_freq: u32,
     total_freq: u32,
+    /// The entries' places in the hash table the module keeps them in (its iteration order is
+    /// the order terms reach the indexes).
+    table: KhTable,
+}
+
+/// What indexing keeps outside any index: the recycled forward index's hash table size (the
+/// `AddDocumentCtx` pool: set by the first document indexed, it only grows; 0 before) and
+/// `RSGlobalStats.fieldsStats`' indexing operations by field type (a text field's are the new
+/// terms its documents brought).
+#[derive(Clone, Debug, Default)]
+pub struct Indexing {
+    pub fw_buckets: usize,
+    pub ops_text: u64,
+    pub ops_tag: u64,
+    pub ops_numeric: u64,
+    pub ops_geo: u64,
+    pub ops_geoshape: u64,
+    pub ops_vector: u64,
+}
+
+/// `primes` (`khtable.c`).
+const KH_PRIMES: [usize; 26] = [
+    5, 11, 23, 47, 97, 199, 409, 823, 1741, 3469, 6949, 14033, 28411, 57557, 116731, 236897, 480881, 976369, 1982627, 4026031, 8175383, 16601593,
+    33712729, 68460391, 139022417, 282312799,
+];
+
+/// `rs_fnv_32a_buf(s, n, 0)` (`hashKey`): FNV-1a with a zero offset basis.
+fn fnv32a0(s: &[u8]) -> u32 {
+    s.iter().fold(0u32, |h, &b| (h ^ b as u32).wrapping_mul(16_777_619))
+}
+
+/// The forward index's `KHTable`: chained buckets (new entries at a chain's head), grown to the
+/// next prime past the item count when it reaches the bucket count. The module recycles its one
+/// forward index from document to document (the `AddDocumentCtx` pool), so the bucket count
+/// carries over: it is the engine's ([`super::global::Global::fw_buckets`]).
+#[derive(Default)]
+struct KhTable {
+    /// Each chain, its head last.
+    buckets: Vec<Vec<usize>>,
+    hashes: Vec<u32>,
+    num: usize,
+}
+
+impl KhTable {
+    /// `KHTable_Init` (the first document: the next prime past its estimated term count) or
+    /// `KHTable_Clear` (later ones: the size the last one left).
+    fn reset(&mut self, buckets: usize, estimate: usize) {
+        let n = if buckets != 0 { buckets } else { KH_PRIMES.iter().copied().find(|&p| p > estimate).unwrap_or(KH_PRIMES[25]) };
+        self.buckets = vec![Vec::new(); n];
+        self.hashes.clear();
+        self.num = 0;
+    }
+
+    fn rehash(&mut self) {
+        let Some(cap) = KH_PRIMES.iter().copied().find(|&p| p > self.num) else { return };
+        let mut next: Vec<Vec<usize>> = vec![Vec::new(); cap];
+        for chain in &self.buckets {
+            for &e in chain.iter().rev() {
+                next[self.hashes[e] as usize % cap].push(e);
+            }
+        }
+        self.buckets = next;
+    }
+
+    /// `KHTable_GetEntry` for a new entry (`i`, the next index).
+    fn insert(&mut self, h: u32) {
+        let i = self.hashes.len();
+        self.hashes.push(h);
+        let b = h as usize % self.buckets.len();
+        if self.buckets[b].is_empty() {
+            self.num += 1;
+            if self.num != self.buckets.len() {
+                self.buckets[b].push(i);
+                return;
+            }
+            self.rehash();
+            self.insert_new(h, i);
+            self.num -= 1;
+        } else {
+            self.insert_new(h, i);
+        }
+    }
+
+    /// `KHTable_InsertNewEntry`.
+    fn insert_new(&mut self, h: u32, i: usize) {
+        self.num += 1;
+        if self.num == self.buckets.len() {
+            self.rehash();
+        }
+        let n = self.buckets.len();
+        self.buckets[h as usize % n].push(i);
+    }
+
+    /// `ForwardIndexIterator_Next`'s order.
+    fn order(&self) -> Vec<usize> {
+        self.buckets.iter().flat_map(|c| c.iter().rev().copied()).collect()
+    }
 }
 
 impl Forward {
@@ -236,6 +500,7 @@ impl Forward {
         let i = match self.by_term.get(term) {
             Some(&i) => i,
             None => {
+                self.table.insert(fnv32a0(term));
                 self.entries.push(FwEntry { term: term.to_vec(), field_mask: 0, freq: 0, offsets: offsets.then(OffsetsWriter::new) });
                 self.by_term.insert(term.to_vec(), self.entries.len() - 1);
                 self.entries.len() - 1
@@ -284,7 +549,7 @@ pub struct Index {
     /// The term trie (`sp->terms`).
     pub term_trie: super::trie::Trie,
     /// The text suffix trie (`sp->suffix`), when a text field has WITHSUFFIXTRIE.
-    pub suffix: Option<TrieMap<Suffix>>,
+    pub suffix: Option<TextSuffix>,
     /// The suffix trie's `size`: whole terms go in with `Trie_InsertRuneNoSize`, so only the
     /// entries a term's proper suffixes created count.
     pub suffix_size: usize,
@@ -320,7 +585,7 @@ impl Index {
             None => StopWords::default_list(),
         };
         let fields = spec.fields.iter().map(|_| FieldIndex::default()).collect();
-        let suffix = (spec.flags & spec::I_SUFFIX_TRIE != 0).then(TrieMap::new);
+        let suffix = (spec.flags & spec::I_SUFFIX_TRIE != 0).then(TextSuffix::default);
         Index {
             id,
             docs: DocTable::new(cfg.num("search-max-doctablesize") as u64),
@@ -366,7 +631,7 @@ impl Index {
             self.fields.push(FieldIndex::default());
         }
         if self.spec.flags & spec::I_SUFFIX_TRIE != 0 && self.suffix.is_none() {
-            self.suffix = Some(TrieMap::new());
+            self.suffix = Some(TextSuffix::default());
         }
     }
 
@@ -479,13 +744,13 @@ impl Index {
     }
 
     /// `AddDocumentCtx_Submit(DOCUMENT_ADD_REPLACE)` for a loaded document.
-    pub fn add_document(&mut self, mut doc: Document, set: &Settings) {
+    pub fn add_document(&mut self, mut doc: Document, set: &Settings, g: &mut Indexing) {
         let started = std::time::Instant::now();
-        self.add_document_inner(&mut doc, set);
+        self.add_document_inner(&mut doc, set, g);
         self.stats.total_index_time += started.elapsed().as_nanos() as u64;
     }
 
-    fn add_document_inner(&mut self, doc: &mut Document, set: &Settings) {
+    fn add_document_inner(&mut self, doc: &mut Document, set: &Settings, g: &mut Indexing) {
         let is_hash = doc.doc_type == DocType::Hash;
         // `AddDocumentCtx_SetDocument`.
         let mut fspecs: Vec<Option<usize>> = Vec::with_capacity(doc.fields.len());
@@ -530,10 +795,26 @@ impl Index {
         // `Document_AddToIndexes`: the preprocessors.
         let stemmer = tokenize::stemmer_for(doc.language);
         let mut fw = Forward::default();
+        // `NewForwardIndex` / `ForwardIndex_Reset`: `estimtateTermCount`, the string values'
+        // bytes over 5.
+        let chars: usize = doc
+            .fields
+            .iter()
+            .map(|f| match &f.value {
+                Value::Str(s) => s.len(),
+                Value::Array(a) => a.iter().map(|s| s.len()).sum(),
+                _ => 0,
+            })
+            .sum();
+        fw.table.reset(g.fw_buckets, chars / 5);
         let offsets = self.spec.flags & spec::I_TERM_OFFSETS != 0;
         let mut fdatas: Vec<FieldData> = vec![FieldData::default(); doc.fields.len()];
         {
-            let mut tok = Tokenizer::with(&self.stopwords, stemmer, set.min_stem_len, set.min_phonetic_len);
+            let mut tok = if spec::LANGUAGES.get(doc.language) == Some(&"chinese") {
+                tokenize::AnyTokenizer::Chinese(Box::new(tokenize::CnTokenizer::with(super::friso::global())))
+            } else {
+                tokenize::AnyTokenizer::Simple(Tokenizer::with(&self.stopwords, stemmer, set.min_stem_len, set.min_phonetic_len))
+            };
             let mut total_tokens = 0u32;
             for (i, f) in doc.fields.iter_mut().enumerate() {
                 let Some(fi) = fspecs[i] else { continue };
@@ -551,6 +832,7 @@ impl Index {
                         _ => geometry(f, &mut fdatas[i]),
                     };
                     if let Err(e) = rc {
+                        g.fw_buckets = fw.table.buckets.len();
                         self.record_error(Some(fi), &e, &doc.key);
                         self.delete_doc(&doc.key);
                         return;
@@ -560,6 +842,7 @@ impl Index {
             }
         }
 
+        g.fw_buckets = fw.table.buckets.len();
         // `Indexer_Process`: nothing indexable and some sortables: the document is left as it was.
         if !has_text && !has_other && !empty {
             return;
@@ -596,7 +879,8 @@ impl Index {
         }
 
         // `indexText`.
-        for e in &fw.entries {
+        let terms_before = self.stats.num_terms;
+        for e in fw.table.order().into_iter().map(|i| &fw.entries[i]) {
             let is_new = !self.terms.contains_key(e.term.as_slice());
             if is_new {
                 let (ii, size) = invidx::new_inverted_index(super::rdb::spec_flags(self), set.raw_doc_ids, set.compress_floats)
@@ -622,10 +906,11 @@ impl Index {
                 && ![tokenize::STEM_PREFIX, tokenize::PHONETIC_PREFIX, tokenize::SYNONYM_PREFIX].contains(&e.term[0])
                 && let Some(s) = &mut self.suffix
             {
-                self.suffix_size += add_suffix(s, crate::util::cstr(&e.term));
+                self.suffix_size += s.add(crate::util::cstr(&e.term));
             }
         }
 
+        g.ops_text = g.ops_text.wrapping_add(self.stats.num_terms.wrapping_sub(terms_before));
         // `bulkIndexFields`.
         if has_other {
             for (i, f) in doc.fields.iter().enumerate() {
@@ -638,6 +923,19 @@ impl Index {
                 if let Err(e) = self.bulk_add(fi, index_as[i], &fdatas[i], id, set) {
                     self.record_error(Some(fi), &e, &doc.key);
                     break;
+                }
+                // `IndexerBulkApply`.
+                let t = index_as[i];
+                for (bit, n) in [
+                    (spec::T_TAG, &mut g.ops_tag),
+                    (spec::T_NUMERIC, &mut g.ops_numeric),
+                    (spec::T_GEO, &mut g.ops_geo),
+                    (spec::T_VECTOR, &mut g.ops_vector),
+                    (spec::T_GEOMETRY, &mut g.ops_geoshape),
+                ] {
+                    if t & bit != 0 {
+                        *n += 1;
+                    }
                 }
             }
         }
@@ -789,7 +1087,7 @@ fn fulltext(
     fs: &Field,
     f: &mut DocField,
     sv: &mut [SortVal],
-    tok: &mut Tokenizer,
+    tok: &mut tokenize::AnyTokenizer,
     fw: &mut Forward,
     offsets: bool,
     set: &Settings,
@@ -853,14 +1151,14 @@ fn fulltext(
                 fw.handle(p, t.pos, fs.weight, ft_id, false, false, offsets);
             }
         }
-        let last = tok.last_offset;
+        let last = tok.last_offset();
         if let (Some(b), Some(i)) = (byte_offsets.as_mut(), field_entry) {
             b.fields[i].2 = last;
         }
         *total_tokens = last;
-        tok.last_offset += delta;
+        *tok.last_offset_mut() += delta;
     }
-    tok.last_offset -= delta;
+    *tok.last_offset_mut() -= delta;
     Ok(())
 }
 
@@ -1121,8 +1419,9 @@ mod tests {
         let spec = Spec::parse(Bytes::from_static(b"idx"), &args, &cfg).unwrap();
         let mut ix = Index::new(spec, 0, &cfg);
         let set = Settings::from(&cfg);
-        ix.add_document(hash_doc("zzd1", &[("t", "hello world running"), ("n", "5"), ("tg", "a;B"), ("g", "1.5,2.5")]), &set);
-        ix.add_document(hash_doc("zzd2", &[("t", "foo bar"), ("n", "7")]), &set);
+        let mut g = Indexing::default();
+        ix.add_document(hash_doc("zzd1", &[("t", "hello world running"), ("n", "5"), ("tg", "a;B"), ("g", "1.5,2.5")]), &set, &mut g);
+        ix.add_document(hash_doc("zzd2", &[("t", "foo bar"), ("n", "7")]), &set, &mut g);
         let s = &ix.stats;
         assert_eq!((s.num_documents, ix.docs.max_doc_id, s.num_terms, s.num_records), (2, 2, 6, 11));
         assert_eq!((s.inverted_size, s.total_blocks, s.offset_vecs_size, s.offset_vec_records), (968, 10, 6, 6));
