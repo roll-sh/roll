@@ -9,7 +9,6 @@ import {
   formatBytes,
   formatUsd,
   maskUri,
-  ROLL_API,
   type Branch,
   type Endpoint,
   type Health,
@@ -18,6 +17,7 @@ import {
   type Usage,
 } from "@/lib/roll-api";
 import { AppShell } from "./app-shell";
+import { ago, btn, input, Offline, primary, useCopy } from "./ui";
 import { useMarkState } from "./mark-state";
 
 const POLL_MS = 2500;
@@ -30,35 +30,10 @@ const SUSPEND_OPTIONS = [
   { label: "Never", value: 0 },
 ];
 
-const btn =
-  "inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[12px] text-muted transition hover:border-line-2 hover:text-fg disabled:opacity-40";
-const primary =
-  "inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-fg px-3 py-1.5 text-[13px] font-medium text-bg transition hover:opacity-85 disabled:opacity-50";
-const input =
-  "rounded-lg border border-line bg-panel px-2.5 py-1.5 text-[13px] outline-none transition placeholder:text-subtle focus:border-line-2";
-
 function StateDot({ state }: { state: Endpoint["state"] | undefined }) {
   const cls =
-    state === "running" ? "bg-ok" : state === "starting" ? "bg-accent animate-pulse" : "border border-line-2 bg-transparent";
+    state === "running" ? "bg-ok" : state === "starting" ? "bg-accent animate-pulse motion-reduce:animate-none" : "border border-line-2 bg-transparent";
   return <span className={`inline-block size-2 shrink-0 rounded-full ${cls}`} />;
-}
-
-function ago(ts: number) {
-  const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
-function useCopy() {
-  const [copied, setCopied] = useState<string | null>(null);
-  const copy = (key: string, text: string) => {
-    navigator.clipboard?.writeText(text);
-    setCopied(key);
-    setTimeout(() => setCopied((c) => (c === key ? null : c)), 1200);
-  };
-  return { copied, copy };
 }
 
 export function Databases() {
@@ -294,23 +269,6 @@ function CreateDatabase({
         Cancel
       </button>
     </form>
-  );
-}
-
-function Offline() {
-  return (
-    <section className="relative isolate mt-6 overflow-hidden rounded-2xl border border-line bg-panel">
-      <DotField spacing={18} radius={90} className="-z-10 text-fg" />
-      <div className="flex flex-col items-start gap-3 p-8">
-        <HorizonMark state="sleep" size={40} />
-        <h2 className="text-[15px] font-medium">rolld isn&apos;t running</h2>
-        <p className="max-w-md text-[13px] text-muted">
-          The dashboard talks to the local control plane at <code className="font-mono text-fg">{ROLL_API}</code>.
-          Start it from the repo root (needs Docker):
-        </p>
-        <pre className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">cargo run -p rolld</pre>
-      </div>
-    </section>
   );
 }
 
