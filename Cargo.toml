@@ -30,6 +30,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 object_store = { version = "0.14", features = ["aws"] }
 postgres-protocol = "0.6"
 zstd = "0.14"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
+snap = "1"
 humantime = "2"
 futures = "0.3"
 async-trait = "0.1"
@@ -60,7 +63,43 @@ pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
 stream-log = { path = "crates/stream-log" }
 stream-broker = { path = "crates/stream-broker" }
+crc32fast = "1"
+hex = "0.4"
+rustls-native-certs = "0.8"
+tokio-postgres-rustls = "0.13"
+lapin = "4"
+parking_lot = "0.12"
+regex = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
+mq-core = { path = "crates/mq-core" }
+mq-amqp = { path = "crates/mq-amqp" }
+mq-storage = { path = "crates/mq-storage" }
+mq-control = { path = "crates/mq-control" }
+mq-proxy = { path = "crates/mq-proxy" }
+mq-cluster = { path = "crates/mq-cluster" }
+mq-mqtt = { path = "crates/mq-mqtt" }
+mq-stomp = { path = "crates/mq-stomp" }
+mq-amqp10 = { path = "crates/mq-amqp10" }
+mq-stream = { path = "crates/mq-stream" }
+mq-mgmt = { path = "crates/mq-mgmt" }
+mq-http = { path = "crates/mq-http" }
+mq-shovel = { path = "crates/mq-shovel" }
+futures-util = "0.3"
+rumqttc = "0.25"
+fe2o3-amqp = "0.18"
+serde_amqp = "0.18"
+rabbitmq-stream-client = "0.11"
+tokio-tungstenite = "0.30"
+percent-encoding = "2"
+urlencoding = "2"
+tempfile = "3"
+libc = "0.2"
+md-5 = "0.11"
 
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]
 kafka-protocol = { path = "vendor/kafka-protocol" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

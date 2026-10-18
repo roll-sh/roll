@@ -1,0 +1,27 @@
+[package]
+name = "mq-proxy"
+description = "roll queues front proxy: wake-on-connect, AZ-aware routing, connection draining"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mimalloc.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+hex.workspace = true
+hmac.workspace = true
+mq-cluster.workspace = true
+mq-core.workspace = true
+parking_lot.workspace = true
+reqwest = { workspace = true, features = ["rustls", "json"] }
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+lapin.workspace = true
+mq-amqp.workspace = true

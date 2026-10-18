@@ -1,0 +1,26 @@
+[package]
+name = "mq-mqtt"
+description = "roll queues MQTT 3.1.1 and 5 server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+mq-core.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+lapin.workspace = true
+mq-amqp.workspace = true
+rumqttc.workspace = true
+tracing-subscriber.workspace = true
+tempfile.workspace = true

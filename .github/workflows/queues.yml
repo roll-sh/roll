@@ -1,0 +1,52 @@
+name: queues
+
+# Runs only when roll queues code changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/mq-*/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "tests/queues/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/test-queues.sh"
+      - "scripts/test-queues-clients.sh"
+      - "deploy/queues/**"
+      - ".github/workflows/queues.yml"
+  workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
+
+concurrency:
+  group: queues-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-template:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - run: pipx run cfn-lint deploy/queues/aws/roll-queues.yaml
+
+  unit:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/test-queues.sh --force --unit
+
+  e2e:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/test-queues.sh --force

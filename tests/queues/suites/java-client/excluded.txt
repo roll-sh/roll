@@ -1,0 +1,82 @@
+# Tests excluded from the run against roll. One entry per line: "Class" (whole class) or
+# "Class#method", then "# reason". Only tests that need rabbitmqctl / node control (restart,
+# force-close connections, alarms, policies/users/permissions via CLI, a second clustered node)
+# are listed, plus tests that fail identically against real RabbitMQ 4.3.6 in this harness (marked
+# "env:"), and deliberate differences (marked "deliberate"). The summary's excluded=N counts entries.
+
+# --- functional (FunctionalTestSuite)
+DurableOnTransient#semiDurableBindingRemoval  # needs a 2nd clustered node stopped/started via rabbitmqctl (vacuous pass on one node)
+PerMessageTTL#restartingExpiry  # restarts the broker node (rabbitmqctl stop_app/start_app)
+PerQueueVsPerMessageTTL#restartingExpiry  # restarts the broker node (rabbitmqctl stop_app/start_app); its failure leaves an exclusive 'queue.ttl' that breaks the following TTL tests, on RabbitMQ too
+SaslMechanisms#anonymousShouldSucceed  # deliberate difference: roll offers PLAIN and AMQPLAIN only, never unauthenticated ANONYMOUS logins (see docs/queues/compatibility.md)
+UserIDHeader#impersonatedUserId  # rabbitmqctl set_user_tags guest impersonator
+Policies  # createResources/releaseResources set and clear policies via rabbitmqctl set_policy/clear_policy
+Metrics#checkListenersWithAutoRecoveryConnection  # force-closes the connection via rabbitmqctl close_connection
+Metrics#checkAcksWithAutomaticRecovery  # force-closes the connection via rabbitmqctl close_connection
+TopologyRecoveryFiltering  # every test force-closes the connection via rabbitmqctl close_connection
+TopologyRecoveryRetry  # rabbitmqctl close_all_connections / delete_queue during recovery
+ConnectionRecovery#basicAckAfterChannelRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#blockedListenerRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#channelRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#channelRecoveryCallback  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#channelRecoveryWithUserProvidedChannelIDs  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#clientNamedQueueBindingRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#clientNamedQueueRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#clientNamedQueueRecoveryWithNoWait  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#clientNamedTransientAutoDeleteQueueAndBindingRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#confirmListenerRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#connectionRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#connectionRecoveryRequestsCredentialsAgain  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#connectionRecoveryWithArrayOfAddresses  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#connectionRecoveryWithDisabledTopologyRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#connectionRecoveryWithListOfAddresses  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#connectionRecoveryWithServerRestart  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#consumerRecoveryWithManyConsumers  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#consumersAreRemovedFromConnectionWhenChannelIsClosed  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#declarationOfManyAutoDeleteQueuesWithTransientConsumer  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#exchangeRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#exchangeRecoveryWithNoWait  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#exchangeToExchangeBindingRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#namedConnectionRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#queueRecoveryWithManyQueues  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#recoveryWithExponentialBackoffDelayHandler  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#recoveryWithMultipleThreads  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#returnListenerRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#serverNamedQueueRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#serverNamedTransientAutoDeleteQueueAndBindingRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#shutdownHooksRecoveryOnChannel  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#shutdownHooksRecoveryOnConnection  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#subsequentRecoveriesWithClientNamedQueue  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#thatCancelledConsumerDoesNotReappearOnRecover  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#thatDeletedExchangeBindingsDontReappearOnRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#thatDeletedExchangeDoesNotReappearOnRecover  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#thatDeletedQueueBindingsDontReappearOnRecovery  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#thatDeletedQueueDoesNotReappearOnRecover  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#thatExcludedQueueDoesNotReappearOnRecover  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+ConnectionRecovery#thatShutdownHooksOnConnectionFireBeforeRecoveryStarts  # force-closes connections via rabbitmqctl close_connection (or restarts the node) to trigger recovery
+
+# --- server (ServerTestSuite)
+Permissions  # setUp/tearDown create users, vhosts and permissions via rabbitmqctl
+DurableBindingLifecycle  # restarts the node (and a 2nd clustered node) via rabbitmqctl
+DeadLetterExchangeDurable  # stops/starts the node while messages expire
+ExclusiveQueueDurability  # restarts the node abruptly
+MemoryAlarms  # sets memory/disk alarms via rabbitmqctl eval rabbit_alarm:set_alarm
+MessageRecovery  # restarts the node to check persistent message recovery
+Firehose  # rabbitmqctl trace_on/trace_off (firehose tracer)
+PersistenceGuarantees  # restarts the node to check persistence
+Shutdown  # restarts the node and expects CONNECTION_FORCED
+BlockedConnection  # blocks publishers via rabbitmqctl set_vm_memory_high_watermark / disk alarm
+ChannelLimitNegotiation#channelMaxGreaterThanServerValue  # changes channel_max via rabbitmqctl eval application:set_env
+ChannelLimitNegotiation#openingTooManyChannels  # changes channel_max via rabbitmqctl eval application:set_env
+LoopbackUsers  # creates users and changes loopback_users via rabbitmqctl
+TopicPermissions  # rabbitmqctl set_topic_permissions / clear_topic_permissions
+
+# --- client (ClientTestSuite members that talk to a broker)
+BlockedConnectionTest  # blocks the connection via rabbitmqctl set_vm_memory_high_watermark / disk alarm
+LambdaCallbackTest#blockedListener  # blocks the connection via rabbitmqctl set_vm_memory_high_watermark / disk alarm
+IoDeadlockOnConnectionClosing  # rabbitmqctl close_all_connections
+NioDeadlockOnConnectionClosing  # rabbitmqctl close_all_connections
+RpcTest#givenConsumerNotRecoveredCanCreateNewClientOnSameChannelAfterConnectionFailure  # rabbitmqctl close_connection
+RpcTest#givenConsumerIsRecoveredCanNotCreateNewClientOnSameChannelAfterConnectionFailure  # rabbitmqctl close_connection
+RpcTopologyRecordingTest  # every test force-closes the connection via rabbitmqctl close_connection
+NoAutoRecoveryWhenTcpWindowIsFullTest  # env: needs the client's TCP receive window to fill on a direct Linux socket; through the in-container forwarder it fails against RabbitMQ 4.3.6 too
