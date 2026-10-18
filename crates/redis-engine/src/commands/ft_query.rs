@@ -61,52 +61,56 @@ use crate::search::scorers::{self, Expl, Scorer};
 use crate::search::spec::{self as sspec, DocType, Spec};
 use std::cmp::Ordering;
 
-const K_DOC_SRC: u32 = 0x01;
-const K_SCHEMA_SRC: u32 = 0x02;
-const K_SV_SRC: u32 = 0x04;
-const K_QUERY_SRC: u32 = 0x08;
-const K_OVERRIDE: u32 = 0x20;
-const K_FORCE_LOAD: u32 = 0x40;
-const K_HIDDEN: u32 = 0x100;
-const K_EXPLICIT_RETURN: u32 = 0x200;
-const K_VAL_AVAILABLE: u32 = 0x400;
-const K_IS_LOADED: u32 = 0x800;
-const K_NUMERIC: u32 = 0x1000;
-const K_TRANSIENT: u32 = K_OVERRIDE | K_FORCE_LOAD | 0x10;
+pub(super) const K_DOC_SRC: u32 = 0x01;
+pub(super) const K_SCHEMA_SRC: u32 = 0x02;
+pub(super) const K_SV_SRC: u32 = 0x04;
+pub(super) const K_QUERY_SRC: u32 = 0x08;
+pub(super) const K_OVERRIDE: u32 = 0x20;
+pub(super) const K_FORCE_LOAD: u32 = 0x40;
+pub(super) const K_HIDDEN: u32 = 0x100;
+pub(super) const K_EXPLICIT_RETURN: u32 = 0x200;
+pub(super) const K_VAL_AVAILABLE: u32 = 0x400;
+pub(super) const K_IS_LOADED: u32 = 0x800;
+pub(super) const K_NUMERIC: u32 = 0x1000;
+pub(super) const K_TRANSIENT: u32 = K_OVERRIDE | K_FORCE_LOAD | 0x10;
+/// `GET_KEY_FLAGS`: what the `GetKey` functions take from their flags.
+pub(super) const K_GET_FLAGS: u32 = K_OVERRIDE | K_HIDDEN | K_EXPLICIT_RETURN | K_FORCE_LOAD;
 
 /// `RLookupKey`.
-struct LKey {
-    name: Bytes,
-    path: Bytes,
-    flags: u32,
-    svidx: usize,
-    dst: usize,
-    dead: bool,
+pub(super) struct LKey {
+    pub(super) name: Bytes,
+    pub(super) path: Bytes,
+    pub(super) flags: u32,
+    pub(super) svidx: usize,
+    pub(super) dst: usize,
+    pub(super) dead: bool,
 }
 
 /// `RLookup`: keys in creation order (an override replaces its key in place).
 #[derive(Default)]
-struct Lookup {
-    keys: Vec<LKey>,
-    ndst: usize,
-    all_loaded: bool,
+pub(super) struct Lookup {
+    pub(super) keys: Vec<LKey>,
+    pub(super) ndst: usize,
+    pub(super) all_loaded: bool,
 }
 
 impl Lookup {
-    fn find(&self, name: &[u8]) -> Option<usize> {
+    pub(super) fn find(&self, name: &[u8]) -> Option<usize> {
         self.keys.iter().position(|k| !k.dead && k.name[..] == *name)
     }
 
-    fn push(&mut self, name: &[u8], flags: u32) -> usize {
+    pub(super) fn push(&mut self, name: &[u8], flags: u32) -> usize {
         self.keys.push(LKey { name: Bytes::copy_from_slice(name), path: Bytes::copy_from_slice(name), flags, svidx: 0, dst: self.ndst, dead: false });
         self.ndst += 1;
         self.keys.len() - 1
     }
 
+    /// `override_current`: the key becomes a tombstone and a new one (same row slot and
+    /// path) follows it.
     fn override_key(&mut self, i: usize, flags: u32) -> usize {
         self.keys[i].dead = true;
         let k = &self.keys[i];
-        let nk = LKey { name: k.name.clone(), path: k.name.clone(), flags, svidx: 0, dst: k.dst, dead: false };
+        let nk = LKey { name: k.name.clone(), path: k.path.clone(), flags, svidx: 0, dst: k.dst, dead: false };
         self.keys.insert(i + 1, nk);
         i + 1
     }
@@ -128,27 +132,43 @@ impl Lookup {
         }
     }
 
-    /// `RLookup_GetKey_Read`.
-    fn get_read(&mut self, spec: &Spec, name: &[u8], flags: u32) -> Option<usize> {
+    /// `RLookup_GetKey_Read`: an existing key, else a schema field that is sortable (or any
+    /// once a LOAD-all loader runs). Lookups past a GROUPBY have no schema.
+    pub(super) fn get_read(&mut self, spec: Option<&Spec>, name: &[u8], flags: u32) -> Option<usize> {
         if let Some(i) = self.find(name) {
             return Some(i);
         }
-        let fs = spec.field(name)?;
+        let fs = spec?.field(name)?;
         if !fs.sortable() && !self.all_loaded {
             return None;
         }
-        let i = self.push(name, flags & !K_TRANSIENT);
+        let i = self.push(name, flags & K_GET_FLAGS & !K_TRANSIENT);
         self.set_spec(i, fs);
         Some(i)
     }
 
+    /// `RLookup_GetKey_Write`: a new key (or, with `K_OVERRIDE`, a replacement), marked as
+    /// created by the query; `None` when it exists and may not be overridden.
+    pub(super) fn get_write(&mut self, name: &[u8], flags: u32) -> Option<usize> {
+        let over = flags & K_OVERRIDE != 0;
+        let flags = ((flags & K_GET_FLAGS) | K_QUERY_SRC) & !K_TRANSIENT;
+        match self.find(name) {
+            Some(_) if !over => None,
+            Some(i) => Some(self.override_key(i, flags)),
+            None => Some(self.push(name, flags)),
+        }
+    }
+
     /// `RLookup_GetKey_Load`.
-    fn get_load(&mut self, spec: &Spec, name: &[u8], field: &[u8], flags: u32) -> Option<usize> {
+    pub(super) fn get_load(&mut self, spec: Option<&Spec>, name: &[u8], field: &[u8], flags: u32) -> Option<usize> {
+        let flags = flags & K_GET_FLAGS;
         let base = (flags & !K_TRANSIENT) | K_DOC_SRC | K_IS_LOADED;
         let i = match self.find(name) {
             Some(i) => {
                 let kf = self.keys[i].flags;
-                if (kf & K_VAL_AVAILABLE != 0 && kf & K_IS_LOADED == 0 && flags & (K_OVERRIDE | K_FORCE_LOAD) == 0)
+                // The key's own flags never hold the transient bits (the Rust port reads them
+                // there), so a sortable UNF key that is not loaded always stays as it is.
+                if (kf & K_VAL_AVAILABLE != 0 && kf & K_IS_LOADED == 0 && kf & (K_OVERRIDE | K_FORCE_LOAD) == 0)
                     || (kf & K_IS_LOADED != 0 && flags & K_OVERRIDE == 0)
                     || (kf & K_QUERY_SRC != 0 && flags & K_OVERRIDE == 0)
                 {
@@ -159,7 +179,7 @@ impl Lookup {
             }
             None => self.push(name, base),
         };
-        match spec.field(field) {
+        match spec.and_then(|s| s.field(field)) {
             Some(fs) => {
                 self.set_spec(i, fs);
                 if self.keys[i].flags & K_VAL_AVAILABLE != 0 && flags & K_FORCE_LOAD == 0 {
@@ -173,12 +193,12 @@ impl Lookup {
 }
 
 /// `RLookupRow`: values written by the pipeline, then the document's sorting vector.
-struct Row<'d> {
-    dyn_vals: Vec<Option<RsValue>>,
-    sv: &'d [SortVal],
+pub(super) struct Row<'d> {
+    pub(super) dyn_vals: Vec<Option<RsValue>>,
+    pub(super) sv: &'d [SortVal],
 }
 
-fn sort_val(v: &SortVal) -> Option<RsValue> {
+pub(super) fn sort_val(v: &SortVal) -> Option<RsValue> {
     match v {
         SortVal::Null => None,
         SortVal::Num(n) => Some(RsValue::Number(*n)),
@@ -188,7 +208,7 @@ fn sort_val(v: &SortVal) -> Option<RsValue> {
 }
 
 impl Row<'_> {
-    fn get(&self, k: &LKey) -> Option<RsValue> {
+    pub(super) fn get(&self, k: &LKey) -> Option<RsValue> {
         if let Some(Some(v)) = self.dyn_vals.get(k.dst) {
             return Some(v.clone());
         }
@@ -198,7 +218,7 @@ impl Row<'_> {
         None
     }
 
-    fn set(&mut self, k: &LKey, v: RsValue) {
+    pub(super) fn set(&mut self, k: &LKey, v: RsValue) {
         if self.dyn_vals.len() <= k.dst {
             self.dyn_vals.resize(k.dst + 1, None);
         }
@@ -256,13 +276,13 @@ fn json_expanded(n: &crate::json::Node) -> RsValue {
 
 /// `RLookup_LoadDocument` for the keys given, or every field (LOAD ALL).
 #[allow(clippy::too_many_arguments)]
-fn load(eng: &Engine, db: usize, lk: &mut Lookup, spec: &Spec, keys: Option<&[usize]>, r: &mut Res<'_>, force: bool, dialect: u32) -> bool {
-    let Some(doc) = open_doc(eng, db, r.dmd) else { return false };
+pub(super) fn load(eng: &Engine, db: usize, lk: &mut Lookup, spec: Option<&Spec>, keys: Option<&[usize]>, dmd: &Dmd, row: &mut Row<'_>, force: bool, dialect: u32) -> bool {
+    let Some(doc) = open_doc(eng, db, dmd) else { return false };
     match keys {
         Some(keys) => {
             for &i in keys {
                 let k = &lk.keys[i];
-                if !force && (k.flags & K_VAL_AVAILABLE != 0 || (k.flags & K_SV_SRC != 0 && r.row.get(k).is_none())) {
+                if !force && (k.flags & K_VAL_AVAILABLE != 0 || (k.flags & K_SV_SRC != 0 && row.get(k).is_none())) {
                     continue;
                 }
                 let path = crate::util::cstr(&k.path);
@@ -270,14 +290,14 @@ fn load(eng: &Engine, db: usize, lk: &mut Lookup, spec: &Spec, keys: Option<&[us
                     Doc::Hash(h) => match h.get(path) {
                         Some(v) if k.flags & K_NUMERIC != 0 => Some(RsValue::Number(crate::search::index::string_to_double(v).unwrap_or(0.0))),
                         Some(v) => Some(RsValue::RedisString(v.to_vec())),
-                        None if path == b"__key" => Some(RsValue::RedisString(crate::util::cstr(&r.dmd.key).to_vec())),
+                        None if path == b"__key" => Some(RsValue::RedisString(crate::util::cstr(&dmd.key).to_vec())),
                         None => None,
                     },
                     Doc::Json(j) => {
                         if path.first() == Some(&b'$') {
                             super::ft::json_get(j, path).and_then(|n| json_value(&n, dialect))
                         } else if path == b"__key" {
-                            Some(RsValue::String(crate::util::cstr(&r.dmd.key).to_vec()))
+                            Some(RsValue::String(crate::util::cstr(&dmd.key).to_vec()))
                         } else {
                             None
                         }
@@ -285,7 +305,7 @@ fn load(eng: &Engine, db: usize, lk: &mut Lookup, spec: &Spec, keys: Option<&[us
                 };
                 if let Some(v) = v {
                     let k = &lk.keys[i];
-                    r.row.set(k, v);
+                    row.set(k, v);
                 }
             }
         }
@@ -313,7 +333,7 @@ fn load(eng: &Engine, db: usize, lk: &mut Lookup, spec: &Spec, keys: Option<&[us
                         },
                     };
                     let k = &lk.keys[i];
-                    r.row.set(k, RsValue::RedisString(v));
+                    row.set(k, RsValue::RedisString(v));
                 }
             }
             Doc::Json(j) => {
@@ -326,7 +346,7 @@ fn load(eng: &Engine, db: usize, lk: &mut Lookup, spec: &Spec, keys: Option<&[us
                     };
                     if let Some(v) = v {
                         let k = &lk.keys[i];
-                        r.row.set(k, v);
+                        row.set(k, v);
                     }
                 }
             }
@@ -375,12 +395,12 @@ fn cmp_score(a: &Res<'_>, b: &Res<'_>) -> Ordering {
     }
 }
 
-fn fmt_17g(v: f64) -> String {
+pub(super) fn fmt_17g(v: f64) -> String {
     crate::util::fmt_g_prec(v, 17)
 }
 
 /// `reeval_key`: a sort key as `#number` or `$string`.
-fn sortkey_reply(v: Option<RsValue>) -> Reply {
+pub(super) fn sortkey_reply(v: Option<RsValue>) -> Reply {
     let v = match v {
         Some(RsValue::Trio(t)) => t[0].clone(),
         Some(v) => v,
@@ -398,7 +418,7 @@ fn sortkey_reply(v: Option<RsValue>) -> Reply {
 }
 
 /// `SEReply`.
-fn explain_reply(e: &Expl) -> Reply {
+pub(super) fn explain_reply(e: &Expl) -> Reply {
     if e.children.is_empty() {
         return Reply::Status(e.s.clone());
     }
@@ -494,10 +514,10 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
     {
         for k in keys {
             let k = crate::util::cstr(k);
-            match lk.get_read(spec, k, 0) {
+            match lk.get_read(Some(spec), k, 0) {
                 Some(i) => sort_lk.push(i),
                 None => {
-                    let i = lk.get_load(spec, k, k, 0);
+                    let i = lk.get_load(Some(spec), k, k, 0);
                     match i {
                         Some(i) if lk.keys[i].flags & K_SCHEMA_SRC != 0 => {
                             sort_load.push(i);
@@ -538,7 +558,7 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
         }
         if !sort_load.is_empty() {
             let keys = sort_load.clone();
-            load(eng, db, &mut lk, spec, Some(&keys), &mut res, force, req.dialect);
+            load(eng, db, &mut lk, Some(spec), Some(&keys), res.dmd, &mut res.row, force, req.dialect);
         }
         scores.push(res.score);
         results.push(res);
@@ -578,7 +598,7 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
         if explicit {
             for rf in &req.out_fields.fields {
                 let lf = K_EXPLICIT_RETURN | if force { K_FORCE_LOAD } else { 0 };
-                if let Some(i) = lk.get_load(spec, crate::util::cstr(&rf.name), crate::util::cstr(&rf.path), lf) {
+                if let Some(i) = lk.get_load(Some(spec), crate::util::cstr(&rf.name), crate::util::cstr(&rf.path), lf) {
                     keys.push(i);
                 }
             }
@@ -589,7 +609,7 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
             }
             let mut kept = Vec::with_capacity(results.len());
             for mut r in results {
-                let ok = if explicit { load(eng, db, &mut lk, spec, Some(&keys), &mut r, force, req.dialect) } else { load(eng, db, &mut lk, spec, None, &mut r, force, req.dialect) };
+                let ok = if explicit { load(eng, db, &mut lk, Some(spec), Some(&keys), r.dmd, &mut r.row, force, req.dialect) } else { load(eng, db, &mut lk, Some(spec), None, r.dmd, &mut r.row, force, req.dialect) };
                 if ok {
                     kept.push(r);
                 } else {

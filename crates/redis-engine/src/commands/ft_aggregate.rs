@@ -1,0 +1,2381 @@
+//! FT.AGGREGATE (`AREQ_Execute` over the aggregation pipeline): the query iterator, then the
+//! result processors the plan's steps build (`Pipeline_BuildQueryPart` and
+//! `Pipeline_BuildAggregationPart`): scorer, loaders (implicit and LOAD), groupers with their
+//! reducers, projectors and filters (APPLY/FILTER), sorters, pagers, counters and depleters.
+//! Processors pull results from their upstream one at a time, sharing the pipeline's
+//! counters (total, skipped, the chunk's result limit, the minimum score) and its error, so
+//! the reply sees the same totals as the module's `sendChunk`: RESP2 reports the total after
+//! the first result, RESP3 after the last.
+//!
+//! The module runs aggregations on its worker threads when the client can block, where the
+//! loaders buffer their upstream before loading (`RPSafeLoader`); inside MULTI or a script
+//! they load row by row.
+//!
+//! Groups come out in the order they were first seen (the module's order follows its
+//! per-process hash seed), and TOLIST keeps its values in insertion order for the same
+//! reason.
+
+use super::ft::verify_acl;
+use super::ft_query::{self as fq, K_FORCE_LOAD, K_HIDDEN, K_NUMERIC, K_SCHEMA_SRC, K_SV_SRC, LKey, Lookup, Row};
+use super::*;
+use crate::engine::Engine;
+use crate::search::areq::{
+    self, Arrange, Command, F_HAS_DEPLETER, F_HAS_GROUPBY, F_HAS_SORTBY, F_HAS_WITHCOUNT, F_IS_AGGREGATE, F_IS_CURSOR, F_NOROWS,
+    F_REQUIRED_FIELDS, F_SEND_NOFIELDS, F_SEND_PAYLOADS, F_SEND_SCOREEXPLAIN, F_SEND_SCORES, F_SEND_SCORES_AS_FIELD, F_SEND_SORTKEYS, F_SENDRAWIDS,
+    F_TYPED, FORMAT_EXPAND, OPTIMIZE, Step,
+};
+use crate::search::args::{Ac, c_eq};
+use crate::search::doctable::{DOC_DELETED, DOC_HAS_PAYLOAD, Dmd};
+use crate::search::error::{Code, QErr};
+use crate::search::eval::{self, EvalState, Mode, RsValue};
+use crate::search::expr::{self, Expr};
+use crate::search::hll::Hll;
+use crate::search::index::Index;
+use crate::search::iters::{BoxIt, IxResult, K_INTERSECT, K_TERM, K_UNION, Qcx};
+use crate::search::mmheap::MmHeap;
+use crate::search::qast::{self, Kind, Node};
+use crate::search::qeval::EvalCx;
+use crate::search::quantile::QuantStream;
+use crate::search::scorers::{self, Expl, Scorer};
+use crate::search::spec::{self as sspec, Spec};
+use crate::util::cstr;
+use std::cell::RefCell;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+/// FT.AGGREGATE index query [options].
+pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if args.len() < 3 {
+        return Err(arity_error("FT.AGGREGATE"));
+    }
+    verify_acl(cx, &args[1])?;
+    let mut req = areq::compile(Command::Aggregate, &cx.eng.cfg, &args[2..])?;
+    let Some(name) = cx.eng.search.load(cstr(&args[1]), false) else {
+        return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(&args[1]))).into());
+    };
+    let resp3 = cx.client.resp >= 3;
+    {
+        let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
+        req.apply_context(ix, resp3)?;
+    }
+    if req.flags & F_IS_CURSOR != 0 {
+        return Err(Error::msg("ERR FT.AGGREGATE WITHCURSOR is not supported yet"));
+    }
+    // `IsNeededDepleter`: WITHCOUNT without a sort, a group or a count drains the query first.
+    let f = req.flags;
+    if f & F_IS_AGGREGATE != 0 && f & F_HAS_WITHCOUNT != 0 && f & (F_HAS_SORTBY | F_HAS_GROUPBY | F_NOROWS) == 0 {
+        req.flags |= F_HAS_DEPLETER;
+    }
+    let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    let db = cx.client.db;
+    let eng: &Engine = cx.eng;
+    let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
+    let reply = run(eng, ix, &req, db, resp3, background)?;
+    if let Some(ix) = cx.eng.search.indexes.get_mut(&name) {
+        ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
+    }
+    Ok(reply)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Results and keys
+
+/// A key as a processor captured it when the pipeline was built (`const RLookupKey *`).
+#[derive(Clone, Copy, Debug)]
+struct KRef {
+    dst: usize,
+    flags: u32,
+    svidx: usize,
+}
+
+impl KRef {
+    fn of(k: &LKey) -> KRef {
+        KRef { dst: k.dst, flags: k.flags, svidx: k.svidx }
+    }
+}
+
+/// An APPLY output key: its values are `RSValue` references (`setReferenceValue`,
+/// `RSValue_MakeOwnReference`), which `RSValue_IsArray` does not look through. Every array an
+/// expression yields is such a reference.
+const K_AGG_REF_ARR: u32 = 1 << 20;
+/// An APPLY output key whose strings are references too (`RSValue_IsString` fails on them).
+const K_AGG_REF_STR: u32 = 1 << 21;
+
+/// Whether an expression's string results are references: properties, literals and the
+/// branch `case` takes when both are.
+fn yields_str_ref(e: &Expr) -> bool {
+    match e {
+        Expr::Literal(_) | Expr::Property(_) => true,
+        Expr::Func { func, args } => match expr::FUNCTIONS[*func].name {
+            "split" | "matched_terms" => true,
+            "case" => args.iter().skip(1).all(|a| a.as_ref().is_some_and(yields_str_ref)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+impl KRef {
+    /// `RSValue_IsArray` on the key's value.
+    fn array<'v>(&self, v: &'v RsValue) -> Option<&'v [RsValue]> {
+        match v {
+            RsValue::Array(a) if self.flags & K_AGG_REF_ARR == 0 => Some(a),
+            _ => None,
+        }
+    }
+}
+
+fn copy_key(k: &LKey) -> LKey {
+    LKey { name: k.name.clone(), path: k.path.clone(), flags: k.flags, svidx: k.svidx, dst: k.dst, dead: k.dead }
+}
+
+/// `RLookupRow_Get`: the row's own value, else the sorting vector's for sortable keys.
+fn rget(row: &Row<'_>, k: KRef) -> Option<RsValue> {
+    if let Some(Some(v)) = row.dyn_vals.get(k.dst) {
+        return Some(v.clone());
+    }
+    if k.flags & K_SV_SRC != 0 {
+        return row.sv.get(k.svidx).and_then(fq::sort_val);
+    }
+    None
+}
+
+fn rset(row: &mut Row<'_>, k: KRef, v: RsValue) {
+    if row.dyn_vals.len() <= k.dst {
+        row.dyn_vals.resize(k.dst + 1, None);
+    }
+    row.dyn_vals[k.dst] = Some(v);
+}
+
+/// A result moving down the pipeline (`SearchResult`).
+struct Res<'a> {
+    doc_id: u64,
+    score: f64,
+    expl: Option<Expl>,
+    dmd: Option<&'a Dmd>,
+    row: Row<'a>,
+    ixr: Option<IxResult>,
+}
+
+impl<'a> Res<'a> {
+    fn new() -> Res<'a> {
+        Res { doc_id: 0, score: 0.0, expl: None, dmd: None, row: Row { dyn_vals: Vec::new(), sv: &[] }, ixr: None }
+    }
+
+    /// `SearchResult_Clear`: everything but the doc id.
+    fn clear(&mut self) {
+        self.score = 0.0;
+        self.expl = None;
+        self.ixr = None;
+        self.row.dyn_vals.clear();
+        self.row.sv = &[];
+        self.dmd = None;
+    }
+}
+
+/// `RS_RESULT_*` (timeouts aside).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum St {
+    Ok,
+    Eof,
+    Error,
+}
+
+/// `QueryProcessingCtx` and what the processors read from the request.
+struct Pcx<'a> {
+    eng: &'a Engine,
+    db: usize,
+    spec: &'a Spec,
+    lookups: Vec<Lookup>,
+    total: i64,
+    skipped: i64,
+    result_limit: u32,
+    min_score: f64,
+    err: Option<QErr>,
+    force: bool,
+    dialect: u32,
+}
+
+impl Pcx<'_> {
+    fn set_err(&mut self, e: QErr) {
+        if self.err.is_none() {
+            self.err = Some(e);
+        }
+    }
+}
+
+trait Proc<'a> {
+    fn next(&mut self, up: &mut [Box<dyn Proc<'a> + 'a>], cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St;
+}
+
+type Chain<'a> = [Box<dyn Proc<'a> + 'a>];
+
+/// The last processor's `Next`.
+fn pull<'a>(chain: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+    match chain.split_last_mut() {
+        Some((p, up)) => p.next(up, cx, r),
+        None => St::Eof,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Processors
+
+/// `RPQueryIterator`: live documents the query matches.
+struct QueryIt<'a> {
+    it: BoxIt<'a>,
+    ix: &'a Index,
+    now: i64,
+}
+
+impl<'a> Proc<'a> for QueryIt<'a> {
+    fn next(&mut self, _up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        loop {
+            if !self.it.read() {
+                return St::Eof;
+            }
+            let Some(cur) = self.it.current() else { return St::Eof };
+            let ixr = cur.clone();
+            let ix: &'a Index = self.ix;
+            let Some(dmd) = ix.docs.get(ixr.doc_id) else { continue };
+            if dmd.flags & DOC_DELETED != 0 || (dmd.expire_at != 0 && dmd.expire_at <= self.now) {
+                continue;
+            }
+            cx.total += 1;
+            r.doc_id = dmd.id;
+            r.ixr = Some(ixr);
+            r.score = 0.0;
+            r.dmd = Some(dmd);
+            r.row.sv = &dmd.sort;
+            return St::Ok;
+        }
+    }
+}
+
+/// `RPScorer`.
+struct ScoreRp<'a> {
+    scorer: Scorer,
+    args: scorers::Args<'a>,
+    explain: bool,
+    key: Option<KRef>,
+}
+
+impl<'a> Proc<'a> for ScoreRp<'a> {
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        loop {
+            let st = pull(up, cx, r);
+            if st != St::Ok {
+                return st;
+            }
+            let default = IxResult::default();
+            let (Some(dmd), ixr) = (r.dmd, r.ixr.as_ref().unwrap_or(&default)) else { return St::Ok };
+            let (s, e) = self.scorer.score(&self.args, ixr, dmd, cx.min_score, self.explain);
+            r.score = s;
+            if self.explain {
+                r.expl = e;
+            }
+            if s == scorers::FILTEROUT {
+                cx.total -= 1;
+                r.clear();
+                continue;
+            }
+            if let Some(k) = self.key {
+                rset(&mut r.row, k, RsValue::Number(s));
+            }
+            return St::Ok;
+        }
+    }
+}
+
+/// `RPMaxScoreNormalizer`: every result, then each (last first) divided by the top score.
+struct MaxNorm<'a> {
+    pool: Vec<Res<'a>>,
+    max: f64,
+    key: Option<KRef>,
+    yielding: bool,
+}
+
+impl<'a> Proc<'a> for MaxNorm<'a> {
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        if !self.yielding {
+            let saved = cx.result_limit;
+            cx.result_limit = u32::MAX;
+            loop {
+                let mut p = Res::new();
+                match pull(up, cx, &mut p) {
+                    St::Ok => {}
+                    St::Eof => break,
+                    st => {
+                        cx.result_limit = saved;
+                        return st;
+                    }
+                }
+                self.max = if self.max > p.score { self.max } else { p.score };
+                self.pool.push(p);
+            }
+            cx.result_limit = saved;
+            self.yielding = true;
+        }
+        let Some(p) = self.pool.pop() else { return St::Eof };
+        *r = p;
+        let old = r.score;
+        if self.max != 0.0 {
+            r.score /= self.max;
+        }
+        if let Some(k) = self.key {
+            rset(&mut r.row, k, RsValue::Number(r.score));
+        }
+        if let Some(e) = &mut r.expl {
+            e.s = format!("Final BM25STD.NORM: {:.2} = Original Score: {:.2} / Max Score: {:.2}", r.score, old, self.max);
+        }
+        St::Ok
+    }
+}
+
+enum SortBy {
+    Fields { keys: Vec<KRef>, asc: u64 },
+    Score,
+}
+
+/// `SearchResult_CmpByFields`.
+fn cmp_fields(keys: &[KRef], asc: u64, a: &Res<'_>, b: &Res<'_>, err: &mut Option<QErr>) -> i32 {
+    for (i, &k) in keys.iter().enumerate() {
+        let ascending = asc & (1u64 << i) != 0;
+        match (rget(&a.row, k), rget(&b.row, k)) {
+            (Some(x), Some(y)) => {
+                let o = x.cmp_with(&y, Some(&mut *err));
+                if o != Ordering::Equal {
+                    let o = if ascending { o.reverse() } else { o };
+                    return if o == Ordering::Less { -1 } else { 1 };
+                }
+            }
+            (Some(_), None) => return 1,
+            (None, Some(_)) => return -1,
+            (None, None) => {}
+        }
+    }
+    let ascending = !keys.is_empty() && asc & (1u64 << (keys.len() - 1)) != 0;
+    let rc = if a.doc_id < b.doc_id { -1 } else { 1 };
+    if ascending { -rc } else { rc }
+}
+
+/// `cmpByScore`.
+fn cmp_score(a: &Res<'_>, b: &Res<'_>) -> i32 {
+    if a.score < b.score {
+        -1
+    } else if a.score > b.score {
+        1
+    } else if a.doc_id > b.doc_id {
+        -1
+    } else {
+        1
+    }
+}
+
+/// `RPSorter`: the top results in a min-max heap, yielded best first.
+struct Sorter<'a> {
+    heap: MmHeap<Res<'a>>,
+    by: SortBy,
+    pooled: Res<'a>,
+    yielding: bool,
+}
+
+impl<'a> Sorter<'a> {
+    fn cmp(by: &SortBy, a: &Res<'_>, b: &Res<'_>, err: &mut Option<QErr>) -> i32 {
+        match by {
+            SortBy::Fields { keys, asc } => cmp_fields(keys, *asc, a, b, err),
+            SortBy::Score => cmp_score(a, b),
+        }
+    }
+}
+
+impl<'a> Proc<'a> for Sorter<'a> {
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        if !self.yielding {
+            let saved = cx.result_limit;
+            cx.result_limit = u32::MAX;
+            loop {
+                match pull(up, cx, &mut self.pooled) {
+                    St::Ok => {}
+                    St::Eof => break,
+                    st => {
+                        cx.result_limit = saved;
+                        return st;
+                    }
+                }
+                let by = &self.by;
+                let err = &mut cx.err;
+                let mut c = |a: &Res<'a>, b: &Res<'a>| Sorter::cmp(by, a, b, err);
+                if self.heap.count() < self.heap.size {
+                    let p = std::mem::replace(&mut self.pooled, Res::new());
+                    let score = p.score;
+                    self.heap.insert(&mut c, p);
+                    if score < cx.min_score {
+                        cx.min_score = score;
+                    }
+                } else {
+                    let min = self.heap.peek_min().expect("a full heap");
+                    if min.score > cx.min_score {
+                        cx.min_score = min.score;
+                    }
+                    let err = &mut cx.err;
+                    let mut c = |a: &Res<'a>, b: &Res<'a>| Sorter::cmp(by, a, b, err);
+                    if c(&self.pooled, self.heap.peek_min().expect("a full heap")) > 0 {
+                        let p = std::mem::replace(&mut self.pooled, Res::new());
+                        self.pooled = self.heap.exchange_min(&mut c, p);
+                    }
+                    self.pooled.clear();
+                }
+            }
+            cx.result_limit = saved;
+            self.yielding = true;
+        }
+        let by = &self.by;
+        let err = &mut cx.err;
+        let mut c = |a: &Res<'a>, b: &Res<'a>| Sorter::cmp(by, a, b, err);
+        match self.heap.pop_max(&mut c) {
+            Some(best) => {
+                *r = best;
+                St::Ok
+            }
+            None => St::Eof,
+        }
+    }
+}
+
+/// `RPPager`: skips `offset` results, then passes `remaining`.
+struct Pager {
+    offset: u32,
+    remaining: u32,
+    skipping: bool,
+}
+
+impl<'a> Proc<'a> for Pager {
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        if self.skipping {
+            let limit = self.remaining.min(cx.result_limit);
+            let downstream = cx.result_limit;
+            cx.result_limit = self.offset.wrapping_add(limit);
+            while self.offset > 0 {
+                let st = pull(up, cx, r);
+                if st != St::Ok {
+                    return st;
+                }
+                cx.result_limit = cx.result_limit.wrapping_sub(1);
+                self.offset -= 1;
+                r.clear();
+            }
+            cx.result_limit = downstream;
+            self.skipping = false;
+        }
+        if self.remaining == 0 {
+            return St::Eof;
+        }
+        let st = pull(up, cx, r);
+        if st == St::Ok {
+            self.remaining -= 1;
+        }
+        st
+    }
+}
+
+/// `RPCounter`: drains its upstream (the total is all LIMIT 0 0 wants).
+struct Counter;
+
+impl<'a> Proc<'a> for Counter {
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        loop {
+            match pull(up, cx, r) {
+                St::Ok => r.clear(),
+                St::Error => return St::Error,
+                St::Eof => return St::Eof,
+            }
+        }
+    }
+}
+
+/// `RPDepleter`: drains its upstream, then yields what it got.
+struct Depleter<'a> {
+    buf: VecDeque<Res<'a>>,
+    last: St,
+    done: bool,
+}
+
+impl<'a> Proc<'a> for Depleter<'a> {
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        if !self.done {
+            loop {
+                let mut p = Res::new();
+                let st = pull(up, cx, &mut p);
+                if st != St::Ok {
+                    self.last = st;
+                    break;
+                }
+                self.buf.push_back(p);
+            }
+            self.done = true;
+        }
+        match self.buf.pop_front() {
+            Some(p) => {
+                *r = p;
+                St::Ok
+            }
+            None => {
+                let st = self.last;
+                self.last = St::Eof;
+                st
+            }
+        }
+    }
+}
+
+/// What a loader loads: its keys (as they were when it was built), or the whole document
+/// into its lookup.
+enum Load {
+    Keys(Lookup),
+    All(usize),
+}
+
+/// `RPLoader` / `RPSafeLoader`.
+struct Loader<'a> {
+    what: Load,
+    safe: bool,
+    buf: Vec<Res<'a>>,
+    pos: usize,
+    last: St,
+    yielding: bool,
+}
+
+impl<'a> Loader<'a> {
+    fn new(what: Load, safe: bool) -> Self {
+        Loader { what, safe, buf: Vec::new(), pos: 0, last: St::Ok, yielding: false }
+    }
+
+    /// `rpLoader_loadDocument`: whether the result can still be sent.
+    fn load(&mut self, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> bool {
+        let Some(dmd) = r.dmd else { return false };
+        if dmd.flags & DOC_DELETED != 0 {
+            return false;
+        }
+        r.row.sv = &dmd.sort;
+        let (force, dialect) = (cx.force, cx.dialect);
+        match &mut self.what {
+            Load::Keys(lk) => {
+                let idx: Vec<usize> = (0..lk.keys.len()).collect();
+                fq::load(cx.eng, cx.db, lk, Some(cx.spec), Some(&idx), dmd, &mut r.row, force, dialect)
+            }
+            Load::All(li) => fq::load(cx.eng, cx.db, &mut cx.lookups[*li], Some(cx.spec), None, dmd, &mut r.row, force, dialect),
+        }
+    }
+}
+
+impl<'a> Proc<'a> for Loader<'a> {
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        if !self.safe {
+            loop {
+                let st = pull(up, cx, r);
+                if st != St::Ok {
+                    return st;
+                }
+                if self.load(cx, r) {
+                    return St::Ok;
+                }
+                cx.skipped += 1;
+                *r = Res::new();
+            }
+        }
+        loop {
+            if self.yielding {
+                while self.pos < self.buf.len() {
+                    let p = std::mem::replace(&mut self.buf[self.pos], Res::new());
+                    self.pos += 1;
+                    if p.dmd.is_none() {
+                        continue;
+                    }
+                    *r = p;
+                    return St::Ok;
+                }
+                self.buf.clear();
+                self.pos = 0;
+                self.yielding = false;
+                let st = self.last;
+                self.last = St::Ok;
+                if st != St::Ok {
+                    return st;
+                }
+            }
+            // Accumulate up to the chunk's limit, then load them all.
+            let limit = cx.result_limit;
+            let mut st = St::Ok;
+            while cx.result_limit > 0 {
+                let mut p = Res::new();
+                st = pull(up, cx, &mut p);
+                if st != St::Ok {
+                    break;
+                }
+                cx.result_limit -= 1;
+                self.buf.push(p);
+            }
+            cx.result_limit = limit;
+            if (st != St::Eof && st != St::Ok) || self.buf.is_empty() {
+                return st;
+            }
+            self.last = st;
+            for i in 0..self.buf.len() {
+                let mut p = std::mem::replace(&mut self.buf[i], Res::new());
+                if self.load(cx, &mut p) {
+                    self.buf[i] = p;
+                } else {
+                    cx.skipped += 1;
+                }
+            }
+            self.pos = 0;
+            self.yielding = true;
+        }
+    }
+}
+
+/// An expression's properties, resolved when the pipeline was built.
+struct View<'v, 'a> {
+    props: &'v [(Vec<u8>, KRef)],
+    row: &'v Row<'a>,
+    ixr: Option<&'v IxResult>,
+}
+
+fn matched_terms(r: &IxResult, max: usize, out: &mut Vec<Vec<u8>>) {
+    if out.len() >= max {
+        return;
+    }
+    if r.kind & (K_UNION | K_INTERSECT) != 0 {
+        for c in &r.children {
+            matched_terms(c, max, out);
+        }
+    } else if r.kind & K_TERM != 0
+        && let Some(t) = &r.term
+    {
+        out.push(t.s.clone());
+    }
+}
+
+impl eval::Lookup for View<'_, '_> {
+    fn get(&self, name: &[u8]) -> Option<RsValue> {
+        let (_, k) = self.props.iter().find(|(n, _)| n.as_slice() == name)?;
+        rget(self.row, *k)
+    }
+
+    fn matched_terms(&self, max: usize) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        if let Some(r) = self.ixr {
+            matched_terms(r, max, &mut out);
+        }
+        out
+    }
+}
+
+/// `RPEvaluator`: a projector (APPLY) or a filter (FILTER).
+struct Evaluator {
+    expr: Expr,
+    props: Vec<(Vec<u8>, KRef)>,
+    out: Option<KRef>,
+}
+
+impl Evaluator {
+    /// `rpevalCommon`'s evaluation, with the pipeline's error.
+    fn eval(&self, cx: &mut Pcx<'_>, r: &Res<'_>) -> Option<RsValue> {
+        let mut st = EvalState { mode: Mode::Query, err: cx.err.take() };
+        let view = View { props: &self.props, row: &r.row, ixr: r.ixr.as_ref() };
+        let (rc, v) = st.run(&self.expr, &view);
+        cx.err = st.err;
+        (rc == eval::Rc::Ok).then_some(v)
+    }
+}
+
+impl<'a> Proc<'a> for Evaluator {
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        loop {
+            let st = pull(up, cx, r);
+            if st != St::Ok {
+                return st;
+            }
+            let Some(v) = self.eval(cx, r) else { return St::Error };
+            match self.out {
+                Some(k) => {
+                    rset(&mut r.row, k, v);
+                    return St::Ok;
+                }
+                None => {
+                    if v.bool_test() {
+                        return St::Ok;
+                    }
+                    cx.total -= 1;
+                    r.clear();
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Grouping and reducers
+
+/// The reducers' value hash (`RSValue_HashStable`): a tag, then the payload; trios hash as
+/// their left value. The module seeds the grouping hash per process; this one is fixed.
+#[derive(Hash)]
+enum Tag {
+    /// Never hashed here, but it keeps the other tags' discriminants.
+    #[allow(dead_code)]
+    Undefined,
+    Null,
+    Number,
+    String,
+    Array,
+    Map,
+}
+
+fn hash_into<H: Hasher>(v: &RsValue, h: &mut H) {
+    match v.leaf() {
+        RsValue::Null => Tag::Null.hash(h),
+        RsValue::Number(n) => {
+            Tag::Number.hash(h);
+            n.to_ne_bytes().hash(h);
+        }
+        RsValue::String(s) | RsValue::RedisString(s) => {
+            Tag::String.hash(h);
+            s.as_slice().hash(h);
+        }
+        RsValue::Array(a) => {
+            Tag::Array.hash(h);
+            for e in a {
+                hash_into(e, h);
+            }
+        }
+        RsValue::Map(m) => {
+            Tag::Map.hash(h);
+            for (k, v) in m {
+                hash_into(k, h);
+                hash_into(v, h);
+            }
+        }
+        RsValue::Trio(_) => unreachable!("leaf"),
+    }
+}
+
+fn hash_value(v: &RsValue, seed: u64) -> u64 {
+    let mut h = DefaultHasher::new();
+    h.write_u64(seed);
+    hash_into(v, &mut h);
+    h.finish()
+}
+
+/// `STABLE_SEED`.
+const STABLE_SEED: u64 = 0x5f61767a;
+const HLL_BITS: u8 = 8;
+
+enum RKind {
+    Count,
+    Sum { avg: bool },
+    Min,
+    Max,
+    CountDistinct,
+    Distinctish,
+    Hll,
+    HllSum,
+    Quantile { pct: f64, resolution: usize },
+    StdDev,
+    ToList,
+    FirstValue { by: Option<KRef>, asc: bool },
+    Sample { len: usize },
+    Collect(Box<collect::Spec>),
+}
+
+struct Reducer {
+    kind: RKind,
+    src: Option<KRef>,
+    dst: KRef,
+}
+
+enum Acc {
+    Count(u64),
+    Sum { n: u64, total: f64 },
+    MinMax(f64),
+    Distinct(HashSet<u64>),
+    Hll(Hll),
+    HllSum(Option<Hll>),
+    Quantile(QuantStream),
+    Dev { n: u64, m: f64, s: f64 },
+    List { vals: Vec<RsValue>, idx: HashMap<u64, Vec<usize>> },
+    First { value: Option<RsValue>, sortval: Option<RsValue> },
+    Sample { seen: usize, vals: Vec<RsValue>, rng: crate::util::Rng },
+    Collect(collect::Acc),
+}
+
+impl Reducer {
+    fn instance(&self) -> Acc {
+        match &self.kind {
+            RKind::Count => Acc::Count(0),
+            RKind::Sum { .. } => Acc::Sum { n: 0, total: 0.0 },
+            RKind::Min => Acc::MinMax(f64::INFINITY),
+            RKind::Max => Acc::MinMax(f64::NEG_INFINITY),
+            RKind::CountDistinct => Acc::Distinct(HashSet::new()),
+            RKind::Distinctish | RKind::Hll => Acc::Hll(Hll::new(HLL_BITS).expect("8 bits")),
+            RKind::HllSum => Acc::HllSum(None),
+            RKind::Quantile { resolution, .. } => Acc::Quantile(QuantStream::new(*resolution)),
+            RKind::StdDev => Acc::Dev { n: 0, m: 0.0, s: 0.0 },
+            RKind::ToList => Acc::List { vals: Vec::new(), idx: HashMap::new() },
+            RKind::FirstValue { .. } => Acc::First { value: None, sortval: None },
+            RKind::Sample { len } => Acc::Sample { seen: 0, vals: Vec::with_capacity((*len).min(1000)), rng: crate::util::Rng::new() },
+            RKind::Collect(spec) => Acc::Collect(spec.instance()),
+        }
+    }
+
+    fn add(&self, acc: &mut Acc, row: &Row<'_>, doc_id: u64, all: &[(Bytes, KRef)]) {
+        let src = || self.src.and_then(|k| rget(row, k));
+        match (&self.kind, acc) {
+            (RKind::Count, Acc::Count(c)) => *c += 1,
+            (RKind::Sum { .. }, Acc::Sum { n, total }) => {
+                if let Some(d) = src().and_then(|v| v.to_number()) {
+                    *total += d;
+                    *n += 1;
+                }
+            }
+            (RKind::Min, Acc::MinMax(m)) => {
+                if let Some(d) = src().and_then(|v| v.to_number()) {
+                    *m = if *m < d { *m } else { d };
+                }
+            }
+            (RKind::Max, Acc::MinMax(m)) => {
+                if let Some(d) = src().and_then(|v| v.to_number()) {
+                    *m = if *m > d { *m } else { d };
+                }
+            }
+            (RKind::CountDistinct, Acc::Distinct(set)) => {
+                if let Some(v) = src()
+                    && v != RsValue::Null
+                {
+                    set.insert(hash_value(&v, 0));
+                }
+            }
+            (RKind::Distinctish | RKind::Hll, Acc::Hll(h)) => {
+                if let Some(v) = src()
+                    && v != RsValue::Null
+                {
+                    let hv = hash_value(&v, STABLE_SEED);
+                    h.add_hash((hv as u32) ^ ((hv >> 32) as u32));
+                }
+            }
+            (RKind::HllSum, Acc::HllSum(h)) => {
+                let Some(v) = src() else { return };
+                if self.src.is_some_and(|k| k.flags & K_AGG_REF_STR != 0) {
+                    return;
+                }
+                let (RsValue::String(buf) | RsValue::RedisString(buf)) = &v else { return };
+                if buf.len() < 5 {
+                    return;
+                }
+                let bits = buf[4];
+                let regs = &buf[5..];
+                if bits > 64 || 1u128.checked_shl(bits as u32) != Some(regs.len() as u128) {
+                    return;
+                }
+                match h {
+                    Some(cur) => {
+                        if bits == cur.bits {
+                            cur.merge(regs);
+                        }
+                    }
+                    None => *h = Hll::load(regs),
+                }
+            }
+            (RKind::Quantile { .. }, Acc::Quantile(q)) => {
+                let Some(v) = src() else { return };
+                match self.src.and_then(|k| k.array(&v)) {
+                    Some(a) => a.iter().filter_map(RsValue::to_number).for_each(|d| q.insert(d)),
+                    None => {
+                        if let Some(d) = v.to_number() {
+                            q.insert(d);
+                        }
+                    }
+                }
+            }
+            (RKind::StdDev, Acc::Dev { n, m, s }) => {
+                let mut push = |d: f64| {
+                    *n += 1;
+                    if *n == 1 {
+                        *m = d;
+                        *s = 0.0;
+                    } else {
+                        let new_m = *m + (d - *m) / *n as f64;
+                        // `S + (d - M) * (d - newM)`, contracted.
+                        let new_s = (d - *m).mul_add(d - new_m, *s);
+                        *m = new_m;
+                        *s = new_s;
+                    }
+                };
+                let Some(v) = src() else { return };
+                match self.src.and_then(|k| k.array(&v)) {
+                    Some(a) => a.iter().filter_map(RsValue::to_number).for_each(push),
+                    None => {
+                        if let Some(d) = v.to_number() {
+                            push(d);
+                        }
+                    }
+                }
+            }
+            (RKind::ToList, Acc::List { vals, idx }) => {
+                let mut add = |v: RsValue| {
+                    let h = hash_value(&v, 0);
+                    let bucket = idx.entry(h).or_default();
+                    if bucket.iter().any(|&i| vals[i].equal(&v)) {
+                        return;
+                    }
+                    bucket.push(vals.len());
+                    vals.push(v);
+                };
+                let Some(v) = src() else { return };
+                match self.src.and_then(|k| k.array(&v)) {
+                    Some(a) => a.iter().cloned().for_each(&mut add),
+                    None => add(v),
+                }
+            }
+            (RKind::FirstValue { by: None, .. }, Acc::First { value, .. }) => {
+                if value.is_none() {
+                    *value = Some(src().unwrap_or(RsValue::Null));
+                }
+            }
+            (RKind::FirstValue { by: Some(by), asc }, Acc::First { value, sortval }) => {
+                let val = src().unwrap_or(RsValue::Null);
+                let cur = rget(row, *by).unwrap_or(RsValue::Null);
+                match sortval {
+                    None => {
+                        *value = Some(val);
+                        *sortval = Some(cur);
+                    }
+                    Some(_) if cur == RsValue::Null => {}
+                    Some(best) if *best == RsValue::Null => *best = cur,
+                    Some(best) => {
+                        let rc = cur.cmp_with(best, None);
+                        if if *asc { rc == Ordering::Less } else { rc == Ordering::Greater } {
+                            *best = cur;
+                            *value = Some(val);
+                        }
+                    }
+                }
+            }
+            (RKind::Sample { len }, Acc::Sample { seen, vals, rng }) => {
+                let Some(v) = src() else { return };
+                if *seen < *len {
+                    vals.push(v);
+                } else {
+                    let i = rng.below(*seen + 1);
+                    if i < *len {
+                        vals[i] = v;
+                    }
+                }
+                *seen += 1;
+            }
+            (RKind::Collect(spec), Acc::Collect(c)) => spec.add(c, row, doc_id, all),
+            _ => unreachable!("reducer state"),
+        }
+    }
+
+    fn finalize(&self, acc: &mut Acc, all: &[(Bytes, KRef)]) -> RsValue {
+        match (&self.kind, acc) {
+            (RKind::Count, Acc::Count(c)) => RsValue::Number(*c as f64),
+            (RKind::Sum { avg }, Acc::Sum { n, total }) => RsValue::Number(match (*n, avg) {
+                (0, _) => f64::NAN,
+                (n, true) => *total / n as f64,
+                (_, false) => *total,
+            }),
+            (RKind::Min | RKind::Max, Acc::MinMax(m)) => RsValue::Number(*m),
+            (RKind::CountDistinct, Acc::Distinct(set)) => RsValue::Number(set.len() as f64),
+            (RKind::Distinctish, Acc::Hll(h)) => RsValue::Number(h.count() as f64),
+            (RKind::Hll, Acc::Hll(h)) => {
+                let mut out = vec![0, 0, 0, 0, h.bits];
+                out.extend_from_slice(&h.registers);
+                RsValue::String(out)
+            }
+            (RKind::HllSum, Acc::HllSum(h)) => RsValue::Number(h.as_ref().map_or(0, |h| h.count()) as f64),
+            (RKind::Quantile { pct, .. }, Acc::Quantile(q)) => RsValue::Number(q.query(*pct)),
+            (RKind::StdDev, Acc::Dev { n, s, .. }) => {
+                let variance = if *n > 1 { *s / (*n - 1) as f64 } else { 0.0 };
+                RsValue::Number(variance.sqrt())
+            }
+            (RKind::ToList, Acc::List { vals, .. }) => RsValue::Array(vals.clone()),
+            (RKind::FirstValue { .. }, Acc::First { value, .. }) => value.clone().unwrap_or(RsValue::Null),
+            (RKind::Sample { .. }, Acc::Sample { vals, .. }) => RsValue::Array(vals.clone()),
+            (RKind::Collect(spec), Acc::Collect(c)) => spec.finalize(c, all),
+            _ => unreachable!("reducer state"),
+        }
+    }
+}
+
+struct Group {
+    vals: Vec<RsValue>,
+    acc: Vec<Acc>,
+}
+
+/// `Grouper`: rows grouped by their values (arrays split into a group per element), the
+/// reducers run per group, then a row per group.
+struct Grouper {
+    src: Vec<KRef>,
+    dst: Vec<KRef>,
+    reducers: Vec<Reducer>,
+    groups: Vec<Group>,
+    index: HashMap<u64, usize>,
+    max_groups: usize,
+    yielding: bool,
+    pos: usize,
+    /// The source lookup and, when a COLLECT takes `FIELDS *`, its visible keys (read per row,
+    /// as `LOAD *` adds keys while rows load).
+    src_li: usize,
+    needs_all: bool,
+    all: Vec<(Bytes, KRef)>,
+}
+
+/// The lookup's keys `FIELDS *` sees: live and not hidden, in order.
+fn visible_keys(lk: &Lookup) -> Vec<(Bytes, KRef)> {
+    lk.keys.iter().filter(|k| !k.dead && k.flags & K_HIDDEN == 0).map(|k| (k.name.clone(), KRef::of(k))).collect()
+}
+
+impl Grouper {
+    fn limit_error(&self) -> QErr {
+        QErr::new(Code::Limit, format!("Aggregate GROUPBY exceeded MAX_AGGREGATE_GROUPS limit of {} groups", self.max_groups))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn extract(&mut self, xarr: &mut [RsValue], xpos: usize, hval: u64, row: &Row<'_>, expansion: usize, doc_id: u64) -> Result<(), QErr> {
+        if xpos == xarr.len() {
+            let gi = match self.index.get(&hval) {
+                Some(&gi) => gi,
+                None => {
+                    if self.groups.len() >= self.max_groups {
+                        return Err(self.limit_error());
+                    }
+                    let acc = self.reducers.iter().map(Reducer::instance).collect();
+                    self.groups.push(Group { vals: xarr.to_vec(), acc });
+                    self.index.insert(hval, self.groups.len() - 1);
+                    self.groups.len() - 1
+                }
+            };
+            let g = &mut self.groups[gi];
+            for (r, acc) in self.reducers.iter().zip(g.acc.iter_mut()) {
+                r.add(acc, row, doc_id, &self.all);
+            }
+            return Ok(());
+        }
+        match &xarr[xpos] {
+            RsValue::Array(a) if a.is_empty() => {
+                let h = hash_value(&RsValue::Null, hval);
+                let saved = std::mem::replace(&mut xarr[xpos], RsValue::Null);
+                let rc = self.extract(xarr, xpos + 1, h, row, expansion, doc_id);
+                xarr[xpos] = saved;
+                rc
+            }
+            RsValue::Array(a) => {
+                let a = a.clone();
+                let mut expansion = expansion;
+                if a.len() > 1 {
+                    if expansion > self.max_groups / a.len() {
+                        return Err(self.limit_error());
+                    }
+                    expansion *= a.len();
+                }
+                let saved = std::mem::replace(&mut xarr[xpos], RsValue::Null);
+                for e in a {
+                    let h = hash_value(&e, hval);
+                    xarr[xpos] = e;
+                    if let Err(err) = self.extract(xarr, xpos + 1, h, row, expansion, doc_id) {
+                        xarr[xpos] = saved;
+                        return Err(err);
+                    }
+                }
+                xarr[xpos] = saved;
+                Ok(())
+            }
+            v => {
+                let h = hash_value(v, hval);
+                self.extract(xarr, xpos + 1, h, row, expansion, doc_id)
+            }
+        }
+    }
+}
+
+impl<'a> Proc<'a> for Grouper {
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        if !self.yielding {
+            let saved = cx.result_limit;
+            cx.result_limit = u32::MAX;
+            let mut st;
+            loop {
+                st = pull(up, cx, r);
+                if st != St::Ok {
+                    break;
+                }
+                if self.needs_all {
+                    self.all = visible_keys(&cx.lookups[self.src_li]);
+                }
+                let mut vals: Vec<RsValue> = self.src.iter().map(|&k| rget(&r.row, k).unwrap_or(RsValue::Null)).collect();
+                let rc = self.extract(&mut vals, 0, 0, &r.row, 1, r.doc_id);
+                r.clear();
+                if let Err(e) = rc {
+                    cx.set_err(e);
+                    st = St::Error;
+                    break;
+                }
+            }
+            cx.result_limit = saved;
+            if st != St::Eof {
+                return st;
+            }
+            self.yielding = true;
+            if self.needs_all {
+                self.all = visible_keys(&cx.lookups[self.src_li]);
+            }
+            cx.total = self.groups.len() as i64;
+            cx.skipped = 0;
+        }
+        if self.pos >= self.groups.len() {
+            return St::Eof;
+        }
+        let gi = self.pos;
+        self.pos += 1;
+        for (i, &k) in self.dst.iter().enumerate() {
+            rset(&mut r.row, k, self.groups[gi].vals[i].clone());
+        }
+        let g = &mut self.groups[gi];
+        for (red, acc) in self.reducers.iter().zip(g.acc.iter_mut()) {
+            let v = red.finalize(acc, &self.all);
+            rset(&mut r.row, red.dst, v);
+        }
+        St::Ok
+    }
+}
+
+/// `ExtractKeyName` (no strict prefix in FT.AGGREGATE): one `@` comes off.
+fn key_name(s: &[u8]) -> &[u8] {
+    let s = cstr(s);
+    match s.first() {
+        Some(b'@') => &s[1..],
+        _ => s,
+    }
+}
+
+/// `ReducerOptions`.
+struct RedOpts<'o, 'b> {
+    name: &'o str,
+    ac: Ac<'b>,
+    lk: &'o mut Lookup,
+    spec: Option<&'o Spec>,
+    load_keys: Option<&'o mut Vec<LKey>>,
+    /// `RSGlobalConfig.maxAggregateResults`.
+    max_results: u64,
+}
+
+impl RedOpts<'_, '_> {
+    /// `ReducerOpts_GetKey`.
+    fn get_key(&mut self) -> Result<KRef, QErr> {
+        let Ok(s) = self.ac.get() else {
+            return Err(QErr::user(Code::ParseArgs, "Missing arguments", format!(" for {}", self.name)));
+        };
+        let name = key_name(s).to_vec();
+        self.resolve(&name)
+    }
+
+    /// `ReducerOpts_ResolveKey`.
+    fn resolve(&mut self, name: &[u8]) -> Result<KRef, QErr> {
+        let missing = || QErr::user(Code::NoPropKey, "Property not loaded nor in pipeline", format!(": `{}`", String::from_utf8_lossy(name)));
+        if let Some(i) = self.lk.get_read(self.spec, name, K_HIDDEN) {
+            return Ok(KRef::of(&self.lk.keys[i]));
+        }
+        let Some(load_keys) = self.load_keys.as_deref_mut() else { return Err(missing()) };
+        match self.lk.get_load(self.spec, name, name, K_HIDDEN) {
+            Some(i) if self.lk.keys[i].flags & K_SCHEMA_SRC != 0 => {
+                load_keys.push(copy_key(&self.lk.keys[i]));
+                Ok(KRef::of(&self.lk.keys[i]))
+            }
+            _ => Err(missing()),
+        }
+    }
+
+    /// `ReducerOpts_EnsureArgsConsumed`.
+    fn consumed(&self) -> Result<(), QErr> {
+        if self.ac.remaining() > 0 {
+            return Err(QErr::unknown_arg(&self.ac, self.name));
+        }
+        Ok(())
+    }
+}
+
+/// `RDCR_GetFactory` and the factories: the reducer, or `None` for an unknown name.
+fn make_reducer(o: &mut RedOpts<'_, '_>) -> Option<Result<(RKind, Option<KRef>), QErr>> {
+    let up = o.name.to_ascii_uppercase();
+    let mut r = || -> Result<(RKind, Option<KRef>), QErr> {
+        Ok(match up.as_str() {
+            "COUNT" => {
+                if o.ac.argc() != 0 {
+                    return Err(QErr::new(Code::BadAttr, "Count accepts 0 values only"));
+                }
+                (RKind::Count, None)
+            }
+            "SUM" | "AVG" => (RKind::Sum { avg: up == "AVG" }, Some(o.get_key()?)),
+            "MIN" => (RKind::Min, Some(o.get_key()?)),
+            "MAX" => (RKind::Max, Some(o.get_key()?)),
+            "TOLIST" => (RKind::ToList, Some(o.get_key()?)),
+            "COUNT_DISTINCT" => (RKind::CountDistinct, Some(o.get_key()?)),
+            "COUNT_DISTINCTISH" => (RKind::Distinctish, Some(o.get_key()?)),
+            "HLL" => (RKind::Hll, Some(o.get_key()?)),
+            "HLL_SUM" => (RKind::HllSum, Some(o.get_key()?)),
+            "STDDEV" => (RKind::StdDev, Some(o.get_key()?)),
+            "QUANTILE" => {
+                let k = o.get_key()?;
+                let pct = o.ac.get_double(0).map_err(|e| QErr::bad_args(o.name, e))?;
+                if !(0.0..=1.0).contains(&pct) {
+                    return Err(QErr::new(Code::ParseArgs, "Percentage must be between 0.0 and 1.0"));
+                }
+                let mut resolution = 500;
+                if !o.ac.at_end() {
+                    resolution = o.ac.get_u32(0).map_err(|e| QErr::bad_args("<resolution>", e))?;
+                    if !(1..=1000).contains(&resolution) {
+                        return Err(QErr::new(Code::ParseArgs, "Invalid resolution"));
+                    }
+                }
+                o.consumed()?;
+                (RKind::Quantile { pct, resolution: resolution as usize }, Some(k))
+            }
+            "FIRST_VALUE" => {
+                let k = o.get_key()?;
+                let mut by = None;
+                let mut asc = true;
+                if o.ac.advance_if("BY") {
+                    by = Some(o.get_key()?);
+                    if o.ac.advance_if("ASC") {
+                        asc = true;
+                    } else if o.ac.advance_if("DESC") {
+                        asc = false;
+                    }
+                }
+                o.consumed()?;
+                (RKind::FirstValue { by, asc }, Some(k))
+            }
+            "RANDOM_SAMPLE" => {
+                let k = o.get_key()?;
+                let n = o.ac.get_u32(0).map_err(|e| QErr::bad_args("<sample size>", e))?;
+                if n > 1000 {
+                    return Err(QErr::new(Code::ParseArgs, "Sample size too large"));
+                }
+                (RKind::Sample { len: n as usize }, Some(k))
+            }
+            "COLLECT" => (RKind::Collect(Box::new(collect::parse(o)?)), None),
+            _ => unreachable!(),
+        })
+    };
+    const NAMES: [&str; 15] = [
+        "COUNT",
+        "SUM",
+        "TOLIST",
+        "MIN",
+        "MAX",
+        "AVG",
+        "COUNT_DISTINCT",
+        "COUNT_DISTINCTISH",
+        "QUANTILE",
+        "STDDEV",
+        "FIRST_VALUE",
+        "RANDOM_SAMPLE",
+        "HLL",
+        "HLL_SUM",
+        "COLLECT",
+    ];
+    if !NAMES.contains(&up.as_str()) {
+        return None;
+    }
+    Some(r())
+}
+
+// ---------------------------------------------------------------------------------------------
+// The query optimizer's decisions (`QOptimizer_Parse` / `QOptimizer_QueryNodes`)
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptType {
+    None,
+    Undecided,
+    PartialRange,
+    NoSorter,
+}
+
+struct Opt {
+    ty: OptType,
+    /// `HasScorer`: the optimizer kept a scorer.
+    scorer: bool,
+}
+
+/// `checkQueryTypes`' text-node scan.
+fn needs_score(n: &Node, req: &mut bool) {
+    match &n.kind {
+        Kind::Phrase { .. } => {
+            if n.opts.weight != 1.0 {
+                return;
+            }
+            n.children.iter().for_each(|c| needs_score(c, req));
+        }
+        Kind::Token(_) | Kind::Fuzzy { .. } | Kind::Prefix { .. } | Kind::WildcardQuery(_) | Kind::LexRange { .. } => *req = true,
+        Kind::Optional | Kind::Not | Kind::Union => n.children.iter().for_each(|c| needs_score(c, req)),
+        _ => {}
+    }
+}
+
+fn optimizer(req: &areq::Request, spec: &Spec) -> Opt {
+    if req.flags & OPTIMIZE == 0 {
+        return Opt { ty: OptType::Undecided, scorer: false };
+    }
+    let mut ty = OptType::Undecided;
+    let mut field: Option<usize> = None;
+    let arrange = last_arrange(req).map(|i| match &req.steps[i] {
+        Step::Arrange(a) => a,
+        _ => unreachable!(),
+    });
+    if let Some(a) = arrange
+        && let Some(name) = a.sort_keys.as_ref().and_then(|k| k.first())
+    {
+        match spec.fields.iter().position(|f| f.name.as_ref() == cstr(name)) {
+            Some(i) if spec.fields[i].types == sspec::T_NUMERIC => field = Some(i),
+            _ => ty = OptType::None,
+        }
+    }
+    let mut scorer = if field.is_some() {
+        false
+    } else {
+        let name = req.opts.scorer.as_deref().map(cstr);
+        matches!(name, None | Some(b"BM25STD" | b"TFIDF" | b"TFIDF.DOCNORM" | b"DISMAX" | b"BM25" | b"DOCSCORE" | b"HAMMING"))
+    };
+    let Some(root) = req.root.as_ref() else { return Opt { ty, scorer } };
+    if matches!(root.kind, Kind::Wildcard) {
+        scorer = false;
+    }
+    let mut score_req = false;
+    // A lone numeric node on the sort field: the optimizer scans a partial range.
+    if let (Some(f), Kind::Numeric(nf)) = (field, &root.kind)
+        && nf.field == Some(f)
+    {
+        if ty == OptType::Undecided {
+            ty = OptType::PartialRange;
+        }
+        return Opt { ty, scorer };
+    }
+    needs_score(root, &mut score_req);
+    let knn = matches!(&root.kind, Kind::Vector(v) if v.knn);
+    if (field.is_none() && score_req) || knn {
+        if ty == OptType::Undecided {
+            ty = OptType::None;
+        }
+        return Opt { ty, scorer };
+    }
+    if !score_req {
+        if field.is_some() {
+            if ty == OptType::Undecided {
+                ty = OptType::PartialRange;
+            }
+        } else {
+            if ty == OptType::Undecided {
+                ty = OptType::NoSorter;
+            }
+            scorer = false;
+        }
+    }
+    Opt { ty, scorer }
+}
+
+/// `AGPLN_GetArrangeStep`: the last arrange step after the last group.
+fn last_arrange(req: &areq::Request) -> Option<usize> {
+    for (i, s) in req.steps.iter().enumerate().rev() {
+        match s {
+            Step::Group { .. } => return None,
+            Step::Arrange(_) => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pipeline construction
+
+struct Builder<'r, 'a> {
+    req: &'r areq::Request,
+    chain: Vec<Box<dyn Proc<'a> + 'a>>,
+    opt: Opt,
+    safe: bool,
+    max_groups: usize,
+    /// `cv.lastAstp->sortkeysLK[0]`.
+    sortkey: Option<KRef>,
+}
+
+impl<'a> Builder<'_, 'a> {
+    fn has(&self, f: u64) -> bool {
+        self.req.flags & f != 0
+    }
+
+    fn push(&mut self, p: impl Proc<'a> + 'a) {
+        self.chain.push(Box::new(p));
+    }
+
+    /// `getLoaderRP` for keys of lookup `li`.
+    fn loader(&mut self, keys: Vec<LKey>) {
+        let lk = Lookup { keys, ..Lookup::default() };
+        let safe = self.safe;
+        self.push(Loader::new(Load::Keys(lk), safe));
+    }
+
+    /// `getArrangeRP`: false when it added nothing.
+    fn arrange(&mut self, cx: &mut Pcx<'a>, a: Option<&Arrange>, li: usize, is_last: bool) -> Result<bool, QErr> {
+        let default = Arrange::default();
+        let a = a.unwrap_or(&default);
+        let mut max = a.offset.wrapping_add(a.limit);
+        if max == 0 {
+            max = 10;
+        }
+        max = max.min(self.req.max_aggregate_results);
+        if self.has(F_NOROWS) || max == 0 {
+            self.push(Counter);
+            return Ok(true);
+        }
+        let mut added = false;
+        let mut depleter = false;
+        let mut pager = false;
+        if self.opt.ty != OptType::NoSorter {
+            if let Some(keys) = a.sort_keys.as_ref().filter(|k| !k.is_empty()) {
+                let spec = if li == 0 { Some(cx.spec) } else { None };
+                let mut krefs = Vec::new();
+                let mut load = Vec::new();
+                for k in keys {
+                    let k = cstr(k);
+                    let lk = &mut cx.lookups[li];
+                    let i = match lk.get_read(spec, k, 0) {
+                        Some(i) => i,
+                        None => match lk.get_load(spec, k, k, 0) {
+                            Some(i) if lk.keys[i].flags & K_SCHEMA_SRC != 0 => {
+                                load.push(copy_key(&lk.keys[i]));
+                                i
+                            }
+                            _ => return Err(QErr::user(Code::NoPropKey, "Property", format!(" `{}` not loaded nor in schema", String::from_utf8_lossy(k)))),
+                        },
+                    };
+                    krefs.push(KRef::of(&cx.lookups[li].keys[i]));
+                }
+                if !load.is_empty() {
+                    self.loader(load);
+                }
+                if is_last {
+                    self.sortkey = krefs.first().copied();
+                }
+                self.push(Sorter { heap: MmHeap::new(max as usize), by: SortBy::Fields { keys: krefs, asc: a.asc_map }, pooled: Res::new(), yielding: false });
+                added = true;
+            } else if self.opt.scorer {
+                self.push(Sorter { heap: MmHeap::new(max as usize), by: SortBy::Score, pooled: Res::new(), yielding: false });
+                added = true;
+            }
+        }
+        if a.offset != 0 || (a.limit != 0 && !added) {
+            if self.has(F_HAS_DEPLETER) {
+                self.push(Depleter { buf: VecDeque::new(), last: St::Eof, done: false });
+                depleter = true;
+            }
+            self.push(Pager { offset: a.offset as u32, remaining: a.limit as u32, skipping: true });
+            added = true;
+            pager = true;
+        }
+        if self.has(F_HAS_DEPLETER) {
+            if !depleter {
+                self.push(Depleter { buf: VecDeque::new(), last: St::Eof, done: false });
+                added = true;
+            }
+            if a.is_limited && (!self.has(F_HAS_SORTBY) || a.offset != 0) && !pager {
+                self.push(Pager { offset: a.offset as u32, remaining: a.limit as u32, skipping: true });
+                added = true;
+            }
+        }
+        Ok(added)
+    }
+
+    /// `getGroupRP` / `buildGroupRP`.
+    fn group(&mut self, cx: &mut Pcx<'a>, props: &[Bytes], reducers: &[areq::Reducer], li: usize) -> Result<usize, QErr> {
+        let gi = cx.lookups.len();
+        cx.lookups.push(Lookup::default());
+        let can_load = li == 0;
+        let spec = if li == 0 { Some(cx.spec) } else { None };
+        let mut load_keys: Vec<LKey> = Vec::new();
+        let mut src = Vec::new();
+        let mut dst = Vec::new();
+        for p in props {
+            let name = &cstr(p)[1.min(cstr(p).len())..];
+            let lk = &mut cx.lookups[li];
+            let i = match lk.get_read(spec, name, 0) {
+                Some(i) => i,
+                None => {
+                    let i = if can_load { lk.get_load(spec, name, name, 0) } else { None };
+                    match i {
+                        Some(i) if lk.keys[i].flags & K_SCHEMA_SRC != 0 => {
+                            load_keys.push(copy_key(&lk.keys[i]));
+                            i
+                        }
+                        _ => return Err(QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", String::from_utf8_lossy(name)))),
+                    }
+                }
+            };
+            src.push(KRef::of(&cx.lookups[li].keys[i]));
+            let Some(d) = cx.lookups[gi].get_write(name, 0) else {
+                return Err(QErr::user(Code::DupField, "Property", format!(" `{}` specified more than once", String::from_utf8_lossy(name))));
+            };
+            dst.push(KRef::of(&cx.lookups[gi].keys[d]));
+        }
+        let mut reds = Vec::new();
+        for pr in reducers {
+            let name = String::from_utf8_lossy(cstr(&pr.name)).into_owned();
+            let (lks, rest) = cx.lookups.split_at_mut(gi);
+            let _ = rest;
+            let mut o = RedOpts {
+                name: &name,
+                ac: Ac::new_sds(&pr.args),
+                lk: &mut lks[li],
+                spec,
+                load_keys: if can_load { Some(&mut load_keys) } else { None },
+                max_results: self.req.max_aggregate_results,
+            };
+            let (kind, src) = match make_reducer(&mut o) {
+                None => return Err(QErr::user(Code::NoReducer, "No such reducer", format!(": {name}"))),
+                Some(r) => r?,
+            };
+            let Some(d) = cx.lookups[gi].get_write(cstr(&pr.alias), 0) else {
+                return Err(QErr::user(Code::DupField, "Property", format!(" `{}` specified more than once", String::from_utf8_lossy(cstr(&pr.alias)))));
+            };
+            reds.push(Reducer { kind, src, dst: KRef::of(&cx.lookups[gi].keys[d]) });
+        }
+        if !load_keys.is_empty() {
+            self.loader(load_keys);
+        }
+        let max_groups = self.max_groups;
+        let needs_all = reds.iter().any(|r| matches!(&r.kind, RKind::Collect(c) if matches!(c.fields, collect::Fields::All)));
+        self.push(Grouper {
+            src,
+            dst,
+            reducers: reds,
+            groups: Vec::new(),
+            index: HashMap::new(),
+            max_groups,
+            yielding: false,
+            pos: 0,
+            src_li: li,
+            needs_all,
+            all: Vec::new(),
+        });
+        Ok(gi)
+    }
+
+    /// APPLY / FILTER.
+    fn evaluator(&mut self, cx: &mut Pcx<'a>, raw: &[u8], alias: Option<&[u8]>, li: usize) -> Result<(), QErr> {
+        let e = expr::parse(raw).map_err(|e| match e {
+            Some(m) => QErr::new(Code::Expr, m),
+            None => QErr::code(Code::Expr),
+        })?;
+        let spec = if li == 0 { Some(cx.spec) } else { None };
+        let props = {
+            let cell = RefCell::new((&mut cx.lookups[li], Vec::new()));
+            eval::lookup_keys(&e, &|p: &[u8]| {
+                let mut c = cell.borrow_mut();
+                let (lk, out) = &mut *c;
+                match lk.get_read(spec, p, 0) {
+                    Some(i) => {
+                        let k = KRef::of(&lk.keys[i]);
+                        out.push((p.to_vec(), k));
+                        true
+                    }
+                    None => false,
+                }
+            })?;
+            cell.into_inner().1
+        };
+        let out = match alias {
+            Some(a) => {
+                let a = cstr(a);
+                let lk = &mut cx.lookups[li];
+                let d = lk.get_write(a, fq::K_OVERRIDE).expect("an override");
+                lk.keys[d].flags |= K_AGG_REF_ARR | if yields_str_ref(&e) { K_AGG_REF_STR } else { 0 };
+                Some(KRef::of(&lk.keys[d]))
+            }
+            None => None,
+        };
+        self.push(Evaluator { expr: e, props, out });
+        Ok(())
+    }
+
+    /// `processLoadStep`.
+    fn load(&mut self, cx: &mut Pcx<'a>, args: &[Bytes], all: bool) -> Result<(), QErr> {
+        let spec = cx.spec;
+        let flags = if cx.force { K_FORCE_LOAD } else { 0 };
+        let mut ac = Ac::new_sds(args);
+        let mut keys = Vec::new();
+        while let Some(s) = ac.take() {
+            let path = key_name(s);
+            let name = if ac.advance_if("AS") {
+                match ac.get() {
+                    Err(_) => return Err(QErr::new(Code::ParseArgs, "LOAD path AS name - must be accompanied with NAME")),
+                    Ok(n) if c_eq(n, "AS") => return Err(QErr::new(Code::ParseArgs, "Alias for LOAD cannot be `AS`")),
+                    Ok(n) => cstr(n),
+                }
+            } else {
+                path
+            };
+            if let Some(i) = cx.lookups[0].get_load(Some(spec), name, path, flags)
+                && keys.len() < args.len()
+            {
+                keys.push(copy_key(&cx.lookups[0].keys[i]));
+            }
+        }
+        if !keys.is_empty() {
+            self.loader(keys);
+        } else if all {
+            cx.lookups[0].all_loaded = !spec.is_json();
+            let safe = self.safe;
+            self.push(Loader::new(Load::All(0), safe));
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'a Index, now: i64, safe: bool, args: scorers::Args<'a>) -> Result<Builder<'r, 'a>, QErr> {
+    let cfg = &cx.eng.cfg;
+    let opt = optimizer(req, cx.spec);
+    let max_groups = cfg.num("search-max-aggregate-groups").max(1) as usize;
+    let mut b = Builder { req, chain: Vec::new(), opt, safe, max_groups, sortkey: None };
+    cx.lookups.push(Lookup::default());
+    b.push(QueryIt { it, ix, now });
+
+    // `Pipeline_BuildQueryPart`: a scorer when scores are asked for.
+    if b.has(F_SEND_SCORES | F_SEND_SCORES_AS_FIELD) {
+        let key = if b.has(F_SEND_SCORES_AS_FIELD) {
+            let lk = &mut cx.lookups[0];
+            lk.get_write(b"__score", fq::K_OVERRIDE).map(|i| KRef::of(&lk.keys[i]))
+        } else {
+            None
+        };
+        let explicit = req.opts.scorer.as_deref().map(|s| cstr(s).to_vec());
+        let name = explicit.clone().unwrap_or_else(|| {
+            let s = cfg.text("search-default-scorer:value");
+            if s.is_empty() { b"BM25STD".to_vec() } else { s.into_bytes() }
+        });
+        let scorer = Scorer::find(&name).unwrap_or(Scorer::Bm25Std);
+        b.push(ScoreRp { scorer, args, explain: b.has(F_SEND_SCOREEXPLAIN), key });
+        if explicit.as_deref() == Some(b"BM25STD.NORM") {
+            b.push(MaxNorm { pool: Vec::new(), max: 0.0, key, yielding: false });
+        }
+    }
+
+    // `Pipeline_BuildAggregationPart`.
+    let last = last_arrange(req);
+    let mut li = 0;
+    let mut has_arrange = false;
+    for (si, s) in req.steps.iter().enumerate() {
+        match s {
+            Step::Group { properties, reducers } => li = b.group(cx, properties, reducers, li)?,
+            Step::Arrange(a) => {
+                if !b.arrange(cx, Some(a), li, last == Some(si))? {
+                    return Err(QErr::code(Code::Generic));
+                }
+                has_arrange = true;
+            }
+            Step::Apply { expr, alias } => b.evaluator(cx, expr, Some(alias), li)?,
+            Step::Filter { expr } => b.evaluator(cx, expr, None, li)?,
+            Step::Load { args, all } => {
+                if li != 0 {
+                    return Err(QErr::new(Code::Inval, "LOAD cannot be applied after projectors or reducers"));
+                }
+                b.load(cx, args, *all)?;
+            }
+        }
+    }
+    if !has_arrange && b.has(F_HAS_DEPLETER) && !b.arrange(cx, None, li, false)? {
+        return Err(QErr::code(Code::Generic));
+    }
+    Ok(b)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Execution and the reply (`sendChunk`, `serializeResult`)
+
+fn run(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, background: bool) -> Result<Reply, Error> {
+    let cfg = &eng.cfg;
+    let spec = &ix.spec;
+    let flags = req.flags;
+    let now = crate::util::now_ms();
+    let mut ft_to_field = Vec::new();
+    for (i, f) in spec.fields.iter().enumerate() {
+        if let Some(id) = f.ft_id {
+            if ft_to_field.len() <= id {
+                ft_to_field.resize(id + 1, 0);
+            }
+            ft_to_field[id] = i as u16;
+        }
+    }
+    let q = Qcx { docs: &ix.docs, now_ms: now, ft_to_field };
+    let mut ecx = EvalCx {
+        ix,
+        q: &q,
+        req_mask: req.opts.field_mask,
+        slop: req.opts.slop as i64,
+        in_order: req.opts.flags & qast::S_IN_ORDER != 0,
+        dialect: req.dialect,
+        max_expansions: cfg.num("search-max-prefix-expansions").max(0) as usize,
+        min_prefix: cfg.num("search-min-prefix").max(0) as usize,
+        min_heap: cfg.num("search-union-iterator-heap").max(0) as usize,
+        prioritize: cfg.flag("search-_prioritize-intersect-union-children"),
+        in_not: false,
+        expansions_warning: false,
+    };
+    let root = req.root.as_ref().expect("a parsed query");
+    let it = ecx.iterate(root)?;
+    let warn_expansions = ecx.expansions_warning;
+
+    let avg = if ix.stats.num_documents != 0 { ix.stats.total_docs_len as f64 / ix.stats.num_documents as f64 } else { 0.0 };
+    let sargs = scorers::Args { avg_doc_len: avg, tanh_factor: req.bm25std_tanh as i64, payload: req.payload.as_deref() };
+    let mut cx = Pcx {
+        eng,
+        db,
+        spec,
+        lookups: Vec::new(),
+        total: 0,
+        skipped: 0,
+        result_limit: 0,
+        min_score: 0.0,
+        err: None,
+        force: spec.is_json() && req.dialect < 3,
+        dialect: req.dialect,
+    };
+    let b = build(req, &mut cx, it, ix, now, background, sargs)?;
+    let optimized = flags & OPTIMIZE != 0;
+    let sortkey = b.sortkey;
+    let mut chain = b.chain;
+
+    cx.result_limit = req.max_aggregate_results as u32;
+    let collect = cfg.num("search-on-timeout") != 0 || cfg.num("search-on-oom") == 1;
+    let strict = cfg.num("search-on-timeout") == 2;
+    let mut rows: Vec<Res<'_>> = Vec::new();
+    let mut r = Res::new();
+    let mut rc;
+    let mut collected = None;
+    if collect {
+        // `AggregateResults`.
+        let mut v = Vec::new();
+        rc = St::Eof;
+        while cx.result_limit > 0 {
+            let mut x = Res::new();
+            rc = pull(&mut chain, &mut cx, &mut x);
+            if rc != St::Ok {
+                break;
+            }
+            cx.result_limit -= 1;
+            v.push(x);
+        }
+        collected = Some(v);
+    } else {
+        rc = pull(&mut chain, &mut cx, &mut r);
+    }
+    if let Some(e) = &cx.err {
+        return Err(e.clone().into());
+    }
+    if optimized {
+        // `QOptimizer_UpdateTotalResults`.
+        let (limit, offset) = match last_arrange(req).map(|i| &req.steps[i]) {
+            Some(Step::Arrange(a)) if a.is_limited => (a.limit as i64, a.offset as i64),
+            _ => (10, 0),
+        };
+        let reported = cx.total - cx.skipped;
+        cx.skipped = 0;
+        cx.total = (reported - offset).max(0).min(limit);
+    }
+    let first_total = cx.total - cx.skipped;
+    let buffered_strict = collected.is_some() && strict;
+    if flags & F_NOROWS == 0 && (buffered_strict || rc == St::Ok || rc == St::Eof) {
+        if let Some(v) = collected {
+            rows = v;
+        } else if cx.result_limit > 0 && rc == St::Ok {
+            rows.push(std::mem::replace(&mut r, Res::new()));
+            loop {
+                cx.result_limit -= 1;
+                if cx.result_limit == 0 {
+                    break;
+                }
+                let mut x = Res::new();
+                rc = pull(&mut chain, &mut cx, &mut x);
+                if rc != St::Ok {
+                    break;
+                }
+                rows.push(x);
+            }
+        }
+    }
+    drop(chain);
+
+    // The reply.
+    let li = cx.lookups.len() - 1;
+    let mut out_rows = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out_rows.push(serialize(req, &mut cx, li, sortkey, row, resp3));
+    }
+    let typed_expand = flags & FORMAT_EXPAND != 0;
+    if resp3 {
+        let results: Vec<Reply> = out_rows
+            .into_iter()
+            .map(|parts| {
+                let mut m: Vec<(Reply, Reply)> = parts.into_iter().map(|(k, v)| (Reply::Status(k.into()), v)).collect();
+                m.push((Reply::Status("values".into()), Reply::Array(Vec::new())));
+                Reply::Map(m)
+            })
+            .collect();
+        let mut warnings = Vec::new();
+        if rc == St::Error
+            && let Some(e) = &cx.err
+        {
+            warnings.push(Reply::Status(e.text()));
+        }
+        if warn_expansions {
+            warnings.push(Reply::Status("Max prefix expansions limit was reached".into()));
+        }
+        return Ok(Reply::Map(vec![
+            (Reply::Status("attributes".into()), Reply::Array(Vec::new())),
+            (Reply::Status("format".into()), Reply::Status(if typed_expand { "EXPAND" } else { "STRING" }.into())),
+            (Reply::Status("results".into()), Reply::Array(results)),
+            (Reply::Status("total_results".into()), Reply::Int(cx.total - cx.skipped)),
+            (Reply::Status("warning".into()), Reply::Array(warnings)),
+        ]));
+    }
+    let mut out = vec![Reply::Int(first_total)];
+    for parts in out_rows {
+        for (k, v) in parts {
+            match (k, v) {
+                ("extra_attributes", Reply::Map(m)) => out.push(Reply::Array(m.into_iter().flat_map(|(a, b)| [a, b]).collect())),
+                ("required_fields", Reply::Map(m)) => out.extend(m.into_iter().map(|(_, b)| b)),
+                (_, v) => out.push(v),
+            }
+        }
+    }
+    Ok(Reply::Array(out))
+}
+
+/// `getReplyKey`: the sorting vector's slot when the key has one, else the row.
+fn reply_key(k: KRef, r: &Res<'_>) -> Option<RsValue> {
+    if k.flags & K_SV_SRC != 0 && r.row.sv.len() > k.svidx { fq::sort_val(&r.row.sv[k.svidx]) } else { rget(&r.row, k) }
+}
+
+/// `serializeResult`: a row's parts by their RESP3 names.
+fn serialize(req: &areq::Request, cx: &mut Pcx<'_>, li: usize, sortkey: Option<KRef>, r: &Res<'_>, resp3: bool) -> Vec<(&'static str, Reply)> {
+    let flags = req.flags;
+    let mut parts: Vec<(&'static str, Reply)> = Vec::new();
+    if flags & F_SEND_SCORES != 0 {
+        let s = if flags & F_SEND_SCOREEXPLAIN != 0 {
+            Reply::Array(vec![Reply::Double(r.score), r.expl.as_ref().map_or(Reply::Nil, fq::explain_reply)])
+        } else {
+            Reply::Double(r.score)
+        };
+        parts.push(("score", s));
+    }
+    if flags & F_SENDRAWIDS != 0 {
+        parts.push(("id", Reply::Int(r.doc_id as i64)));
+    }
+    if flags & F_SEND_PAYLOADS != 0 {
+        let p = match r.dmd {
+            Some(d) if d.flags & DOC_HAS_PAYLOAD != 0 => d.payload.clone().map_or(Reply::Nil, Reply::Bulk),
+            _ => Reply::Nil,
+        };
+        parts.push(("payload", p));
+    }
+    if flags & F_SEND_SORTKEYS != 0 {
+        parts.push(("sortkey", fq::sortkey_reply(sortkey.and_then(|k| reply_key(k, r)))));
+    }
+    if flags & F_REQUIRED_FIELDS != 0
+        && let Some(fields) = &req.required_fields
+    {
+        let start = if flags & F_SEND_SORTKEYS != 0 { 1 } else { 0 };
+        let spec = if li == 0 { Some(cx.spec) } else { None };
+        let mut m = Vec::new();
+        for f in fields.iter().skip(start) {
+            let name = cstr(f);
+            let lk = &mut cx.lookups[li];
+            let k = lk.get_read(spec, name, 0).map(|i| KRef::of(&lk.keys[i]));
+            let mut v = k.and_then(|k| reply_key(k, r));
+            if let Some(RsValue::Trio(t)) = &v {
+                v = Some(t[0].clone());
+            }
+            if let (Some(k), Some(x)) = (k, &v)
+                && k.flags & K_NUMERIC != 0
+                && !matches!(x, RsValue::Number(_) | RsValue::Null)
+            {
+                v = Some(RsValue::Number(x.to_number().unwrap_or(0.0)));
+            }
+            m.push((Reply::bulk(name), fq::sortkey_reply(v)));
+        }
+        if !resp3 || !m.is_empty() {
+            parts.push(("required_fields", Reply::Map(m)));
+        }
+    }
+    if flags & F_SEND_NOFIELDS == 0 {
+        let rule = &cx.spec.rule;
+        let special = |n: &[u8]| [&rule.lang_field, &rule.score_field, &rule.payload_field].iter().any(|f| f.as_deref().is_some_and(|f| f.as_bytes() == n));
+        let typed = flags & F_TYPED != 0;
+        let expand = flags & FORMAT_EXPAND != 0;
+        let mut fields = Vec::new();
+        for k in &cx.lookups[li].keys {
+            if k.dead || k.flags & K_HIDDEN != 0 || special(&k.name) {
+                continue;
+            }
+            let Some(mut v) = rget(&r.row, KRef::of(k)) else { continue };
+            if let RsValue::Trio(t) = &v {
+                v = if expand {
+                    t[2].clone()
+                } else if req.dialect >= 3 {
+                    t[1].clone()
+                } else {
+                    t[0].clone()
+                };
+            }
+            fields.push((Reply::Bulk(k.name.clone()), v.reply(resp3, typed, expand)));
+        }
+        parts.push(("extra_attributes", Reply::Map(fields)));
+    }
+    parts
+}
+
+// ---------------------------------------------------------------------------------------------
+// COLLECT
+
+mod collect {
+    //! The COLLECT reducer (`reducers/collect.c` parsing, the remote collect reducer): per
+    //! group, the rows' chosen fields (or every visible one), optionally distinct, ranked by
+    //! in-group sort keys and paged.
+
+    use super::*;
+
+    const MAX_SORT_KEYS: usize = 8;
+    const MAX_SORT_TOKENS: u32 = (MAX_SORT_KEYS * 2) as u32;
+    const MAX_FIELD_ARGS: i64 = 1024 + 1;
+    /// `DEFAULT_LIMIT`: the ranked storage's count without LIMIT.
+    const DEFAULT_LIMIT: usize = 10;
+
+    pub(super) enum Fields {
+        Specific(Vec<(Bytes, KRef)>),
+        /// `FIELDS *`: the source lookup's visible keys, read as rows arrive.
+        All,
+    }
+
+    pub(super) struct Spec {
+        pub fields: Fields,
+        sort: Vec<KRef>,
+        asc_map: u64,
+        offset: usize,
+        count: usize,
+        ranked: bool,
+        distinct: bool,
+    }
+
+    /// A projected row: values by destination slot, trailing empties trimmed for equality.
+    #[derive(Clone)]
+    struct Proj(Vec<Option<RsValue>>);
+
+    impl Proj {
+        fn effective(&self) -> &[Option<RsValue>] {
+            let end = self.0.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+            &self.0[..end]
+        }
+
+        fn hash(&self) -> u64 {
+            let mut h = DefaultHasher::new();
+            for v in self.effective() {
+                match v {
+                    None => 0u8.hash(&mut h),
+                    Some(v) => {
+                        1u8.hash(&mut h);
+                        hash_into(v, &mut h);
+                    }
+                }
+            }
+            h.finish()
+        }
+
+        fn same(&self, o: &Proj) -> bool {
+            let (a, b) = (self.effective(), o.effective());
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(x, y)| match (x, y) {
+                    (None, None) => true,
+                    (Some(p), Some(q)) => p.equal(q),
+                    _ => false,
+                })
+        }
+    }
+
+    /// A ranked candidate: greater ranks better.
+    struct Entry {
+        vals: Vec<Option<RsValue>>,
+        doc: u64,
+        row: Proj,
+    }
+
+    /// `cmp_ranking`: the sort keys (`cmp_fields`, a missing value ranks worst either way),
+    /// then the lower doc id.
+    fn rank(a: &Entry, b_vals: &[Option<RsValue>], b_doc: u64, asc_map: u64) -> Ordering {
+        for (i, (x, y)) in a.vals.iter().zip(b_vals).enumerate() {
+            let o = match (x, y) {
+                (Some(x), Some(y)) => match x.cmp_with(y, None) {
+                    Ordering::Equal => continue,
+                    o if asc_map & (1 << i) != 0 => o.reverse(),
+                    o => o,
+                },
+                (Some(_), None) => Ordering::Greater,
+                (None, Some(_)) => Ordering::Less,
+                (None, None) => continue,
+            };
+            return o;
+        }
+        a.doc.cmp(&b_doc).reverse()
+    }
+
+    pub(super) struct Acc {
+        entries: Vec<Entry>,
+        buckets: HashMap<u64, Vec<usize>>,
+    }
+
+    /// `strtoll` over the whole argument, `errno` and an empty conversion rejected.
+    fn strtoll_strict(s: &[u8]) -> Option<i64> {
+        let t = s.trim_ascii_start();
+        let (neg, digits) = match t.first() {
+            Some(b'-') => (true, &t[1..]),
+            Some(b'+') => (false, &t[1..]),
+            _ => (false, t),
+        };
+        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let mut v: i128 = 0;
+        for d in digits {
+            v = v * 10 + (d - b'0') as i128;
+            if v > i64::MAX as i128 + 1 {
+                return None;
+            }
+        }
+        let v = if neg { -v } else { v };
+        i64::try_from(v).ok()
+    }
+
+    fn lossy(b: &[u8]) -> String {
+        String::from_utf8_lossy(cstr(b)).into_owned()
+    }
+
+    /// `CollectArgs_Parse` (the `ArgParser` run with FIELDS at position 1, SORTBY and LIMIT
+    /// sub-arguments, the DISTINCT flag; callback errors win over the parser's), then the
+    /// key resolution.
+    pub(super) fn parse(o: &mut RedOpts<'_, '_>) -> Result<Spec, QErr> {
+        let mut status: Option<QErr> = None;
+        let mut perr: Option<String> = None;
+        let set = |st: &mut Option<QErr>, e: QErr| {
+            if st.is_none() {
+                *st = Some(e);
+            }
+        };
+        let mut field_names: Vec<Vec<u8>> = Vec::new();
+        let mut load_all = false;
+        let mut sort_names: Vec<Vec<u8>> = Vec::new();
+        let mut asc_map = u64::MAX;
+        let mut limit: Option<(u64, u64)> = None;
+        let mut distinct = false;
+        let (mut sortby_done, mut limit_done) = (false, false);
+        let max = o.max_results;
+        let ac = &mut o.ac;
+
+        // FIELDS ( * | <n> @field ... ), only as the first argument.
+        let fields = |ac: &mut Ac<'_>, st: &mut Option<QErr>, names: &mut Vec<Vec<u8>>, all: &mut bool| {
+            let Ok(first) = ac.get() else { return Err("FIELDS: Expected an argument, but none provided".to_string()) };
+            let first = cstr(first);
+            if first == b"*" {
+                *all = true;
+                return Ok(());
+            }
+            let Some(n) = strtoll_strict(first) else {
+                set(st, QErr::new(Code::ParseArgs, "Expected number of fields or `*` after FIELDS"));
+                return Ok(());
+            };
+            if !(1..=MAX_FIELD_ARGS).contains(&n) {
+                set(st, QErr::new(Code::Limit, format!("FIELDS count must be in [1, {MAX_FIELD_ARGS}]")));
+                return Ok(());
+            }
+            let Ok(mut sub) = ac.get_slice(n as usize) else {
+                set(st, QErr::new(Code::ParseArgs, "Not enough arguments were provided based on argument count for FIELDS"));
+                return Ok(());
+            };
+            while let Some(a) = sub.take() {
+                let a = cstr(a);
+                match a.first() {
+                    Some(b'@') => names.push(a[1..].to_vec()),
+                    Some(b'$') => names.push(a.to_vec()),
+                    _ => {
+                        set(
+                            st,
+                            QErr::user(
+                                Code::ParseArgs,
+                                "Missing prefix: name requires '@' prefix, JSON path require '$' prefix",
+                                format!(", got: {} in FIELDS", lossy(a)),
+                            ),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        let mut parsed_first = false;
+        if let Some(t) = ac.peek()
+            && c_eq(t, "FIELDS")
+        {
+            let _ = ac.advance();
+            parsed_first = true;
+            if let Err(e) = fields(ac, &mut status, &mut field_names, &mut load_all) {
+                perr = Some(e);
+            }
+        }
+        if perr.is_none() && !parsed_first {
+            perr = Some("FIELDS: Required positional argument missing or out of order".into());
+        }
+        while perr.is_none() && !ac.at_end() {
+            let tok = ac.peek().expect("an argument");
+            let word = cstr(tok).to_ascii_uppercase();
+            match word.as_slice() {
+                b"FIELDS" => {
+                    // A parsed positional argument met again: only its name is skipped.
+                    let _ = ac.advance();
+                }
+                b"SORTBY" if sortby_done => perr = Some("SORTBY: Argument specified multiple times".into()),
+                b"LIMIT" if limit_done => perr = Some("LIMIT: Argument specified multiple times".into()),
+                b"DISTINCT" if distinct => perr = Some("DISTINCT: Argument specified multiple times".into()),
+                b"DISTINCT" => {
+                    let _ = ac.advance();
+                    distinct = true;
+                }
+                b"SORTBY" => {
+                    let _ = ac.advance();
+                    sortby_done = true;
+                    let Ok(n) = ac.get_u32(0) else {
+                        perr = Some("SORTBY: Failed to parse the argument count".into());
+                        break;
+                    };
+                    if !(1..=MAX_SORT_TOKENS).contains(&n) {
+                        perr = Some("SORTBY: Invalid argument count".into());
+                        break;
+                    }
+                    let Ok(mut sub) = ac.get_slice(n as usize) else {
+                        perr = Some("SORTBY: Not enough arguments were provided based on argument count".into());
+                        break;
+                    };
+                    sort_names.clear();
+                    asc_map = u64::MAX;
+                    while let Some(a) = sub.take() {
+                        let a = cstr(a);
+                        if a.first() != Some(&b'@') {
+                            set(&mut status, QErr::user(Code::ParseArgs, "Missing prefix: name requires '@' prefix", format!(" ({})", lossy(a))));
+                            break;
+                        }
+                        if sort_names.len() >= MAX_SORT_KEYS {
+                            set(&mut status, QErr::new(Code::Limit, format!("SORTBY exceeds maximum of {MAX_SORT_KEYS} fields")));
+                            break;
+                        }
+                        sort_names.push(a[1..].to_vec());
+                        let idx = sort_names.len() - 1;
+                        if sub.advance_if("ASC") {
+                        } else if sub.advance_if("DESC") {
+                            asc_map &= !(1u64 << idx);
+                        }
+                    }
+                }
+                b"LIMIT" => {
+                    let _ = ac.advance();
+                    limit_done = true;
+                    let Ok(mut sub) = ac.get_slice(2) else {
+                        perr = Some("LIMIT: Not enough arguments were provided".into());
+                        break;
+                    };
+                    let Ok(off) = sub.get_size(crate::search::args::GE0) else {
+                        set(&mut status, QErr::new(Code::ParseArgs, "LIMIT offset must be a non-negative integer"));
+                        continue;
+                    };
+                    let Ok(cnt) = sub.get_size(crate::search::args::GE1) else {
+                        set(&mut status, QErr::new(Code::ParseArgs, "LIMIT count must be a positive integer"));
+                        continue;
+                    };
+                    if off > max {
+                        set(&mut status, QErr::new(Code::Limit, format!("LIMIT offset exceeds maximum of {max}")));
+                        continue;
+                    }
+                    if cnt > max {
+                        set(&mut status, QErr::new(Code::Limit, format!("LIMIT count exceeds maximum of {max}")));
+                        continue;
+                    }
+                    limit = Some((off, cnt));
+                }
+                _ => perr = Some(format!("{}: Unknown argument", lossy(tok))),
+            }
+        }
+        if let Some(e) = status {
+            return Err(e);
+        }
+        if let Some(e) = perr {
+            return Err(QErr::user(Code::ParseArgs, "Bad arguments for COLLECT", format!(": {e}")));
+        }
+
+        let fields = if load_all {
+            Fields::All
+        } else {
+            let mut v = Vec::with_capacity(field_names.len());
+            for n in &field_names {
+                let k = o.resolve(n)?;
+                v.push((Bytes::copy_from_slice(n), k));
+            }
+            Fields::Specific(v)
+        };
+        let mut sort = Vec::with_capacity(sort_names.len());
+        for n in &sort_names {
+            sort.push(o.resolve(n)?);
+        }
+        let ranked = !sort.is_empty();
+        let (offset, count) = match (ranked, limit) {
+            (_, Some((off, cnt))) => (off as usize, cnt as usize),
+            (false, None) => (0, max as usize),
+            (true, None) => (0, DEFAULT_LIMIT),
+        };
+        Ok(Spec { fields, sort, asc_map, offset, count, ranked, distinct })
+    }
+
+    impl Spec {
+        pub fn instance(&self) -> Acc {
+            Acc { entries: Vec::new(), buckets: HashMap::new() }
+        }
+
+        fn cap(&self) -> usize {
+            self.offset.saturating_add(self.count)
+        }
+
+        fn project(&self, row: &Row<'_>, all: &[(Bytes, KRef)]) -> Proj {
+            let keys: Vec<KRef> = match &self.fields {
+                Fields::Specific(f) => f.iter().map(|(_, k)| *k).collect(),
+                Fields::All => all.iter().map(|(_, k)| *k).collect(),
+            };
+            let mut out: Vec<Option<RsValue>> = Vec::new();
+            for k in keys {
+                if let Some(v) = rget(row, k) {
+                    if out.len() <= k.dst {
+                        out.resize(k.dst + 1, None);
+                    }
+                    out[k.dst] = Some(v);
+                }
+            }
+            Proj(out)
+        }
+
+        fn find(acc: &Acc, p: &Proj, h: u64) -> Option<usize> {
+            acc.buckets.get(&h)?.iter().copied().find(|&i| acc.entries[i].row.same(p))
+        }
+
+        fn worst(&self, acc: &Acc) -> Option<usize> {
+            (0..acc.entries.len()).reduce(|w, i| {
+                let (a, b) = (&acc.entries[i], &acc.entries[w]);
+                if rank(a, &b.vals, b.doc, self.asc_map) == Ordering::Less { i } else { w }
+            })
+        }
+
+        fn reindex(acc: &mut Acc) {
+            acc.buckets.clear();
+            for (i, e) in acc.entries.iter().enumerate() {
+                acc.buckets.entry(e.row.hash()).or_default().push(i);
+            }
+        }
+
+        pub fn add(&self, acc: &mut Acc, row: &Row<'_>, doc_id: u64, all: &[(Bytes, KRef)]) {
+            let cap = self.cap();
+            if !self.ranked {
+                if acc.entries.len() >= cap {
+                    return;
+                }
+                let p = self.project(row, all);
+                if self.distinct {
+                    let h = p.hash();
+                    if Self::find(acc, &p, h).is_some() {
+                        return;
+                    }
+                    acc.buckets.entry(h).or_default().push(acc.entries.len());
+                }
+                acc.entries.push(Entry { vals: Vec::new(), doc: doc_id, row: p });
+                return;
+            }
+            let vals: Vec<Option<RsValue>> = self.sort.iter().map(|&k| rget(row, k)).collect();
+            if !self.distinct {
+                if acc.entries.len() < cap {
+                    let p = self.project(row, all);
+                    acc.entries.push(Entry { vals, doc: doc_id, row: p });
+                } else if let Some(w) = self.worst(acc)
+                    && rank(&acc.entries[w], &vals, doc_id, self.asc_map) == Ordering::Less
+                {
+                    let p = self.project(row, all);
+                    acc.entries[w] = Entry { vals, doc: doc_id, row: p };
+                }
+                return;
+            }
+            // A priority queue keyed by the projected row: a repeat keeps its best rank; a
+            // new row past the cap evicts the worst.
+            let p = self.project(row, all);
+            let h = p.hash();
+            if let Some(i) = Self::find(acc, &p, h) {
+                if rank(&acc.entries[i], &vals, doc_id, self.asc_map) == Ordering::Less {
+                    acc.entries[i].vals = vals;
+                    acc.entries[i].doc = doc_id;
+                }
+                return;
+            }
+            acc.buckets.entry(h).or_default().push(acc.entries.len());
+            acc.entries.push(Entry { vals, doc: doc_id, row: p });
+            if acc.entries.len() > cap
+                && let Some(w) = self.worst(acc)
+            {
+                acc.entries.swap_remove(w);
+                Self::reindex(acc);
+            }
+        }
+
+        pub fn finalize(&self, acc: &mut Acc, all: &[(Bytes, KRef)]) -> RsValue {
+            let template: Vec<(Bytes, usize)> = match &self.fields {
+                Fields::Specific(f) => {
+                    let mut seen = HashSet::new();
+                    f.iter().filter(|(_, k)| seen.insert(k.dst)).map(|(n, k)| (n.clone(), k.dst)).collect()
+                }
+                Fields::All => all.iter().map(|(n, k)| (n.clone(), k.dst)).collect(),
+            };
+            let mut entries = std::mem::take(&mut acc.entries);
+            acc.buckets.clear();
+            if self.ranked {
+                entries.sort_by(|a, b| rank(b, &a.vals, a.doc, self.asc_map));
+            }
+            RsValue::Array(
+                entries
+                    .into_iter()
+                    .skip(self.offset)
+                    .take(self.count)
+                    .map(|e| {
+                        RsValue::Map(
+                            template
+                                .iter()
+                                .filter_map(|(n, d)| e.row.0.get(*d).and_then(|v| v.clone()).map(|v| (RsValue::String(n.to_vec()), v)))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+    }
+}

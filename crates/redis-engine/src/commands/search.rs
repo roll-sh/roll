@@ -14,7 +14,7 @@ const INTERNAL_FLAG: u64 = INTERNAL | NOSCRIPT;
 
 pub static COMMANDS: &[Command] = &[
     cmd!("FT.ADD", -1, WRITE | DENYOOM | MODULE, 2, 2, 1, not_yet, Module),
-    cmd!("FT.AGGREGATE", -3, READONLY | MODULE, 0, 0, 0, not_yet, Module),
+    cmd!("FT.AGGREGATE", -3, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_aggregate, Module),
     cmd!("FT.ALIASADD", 3, WRITE | DENYOOM | MODULE, 0, 0, 0, super::ft_admin::ft_aliasadd, Module),
     cmd!("FT.ALIASDEL", 2, WRITE | MODULE, 0, 0, 0, super::ft_admin::ft_aliasdel, Module),
     cmd!("FT.ALIASLIST", 2, READONLY | MODULE, 0, 0, 0, super::ft_admin::ft_aliaslist, Module),
