@@ -7,6 +7,8 @@ pub mod algo;
 mod difftest;
 mod flatmap;
 pub mod geographic;
+#[cfg(test)]
+mod harnessdiff;
 mod relate;
 mod rtree;
 mod turns;

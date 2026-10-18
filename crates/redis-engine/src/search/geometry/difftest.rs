@@ -83,46 +83,46 @@ impl Client {
     }
 }
 
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
         self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
-    fn f(&mut self) -> f64 {
+    pub(super) fn f(&mut self) -> f64 {
         (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
-    fn range(&mut self, a: f64, b: f64) -> f64 {
+    pub(super) fn range(&mut self, a: f64, b: f64) -> f64 {
         a + (b - a) * self.f()
     }
-    fn below(&mut self, n: usize) -> usize {
+    pub(super) fn below(&mut self, n: usize) -> usize {
         (self.next() % n as u64) as usize
     }
-    fn chance(&mut self, p: f64) -> bool {
+    pub(super) fn chance(&mut self, p: f64) -> bool {
         self.f() < p
     }
 }
 
-type Ring = Vec<(f64, f64)>;
+pub(super) type Ring = Vec<(f64, f64)>;
 
 /// Where a seed's shapes are: around one center, at one scale, on one grid.
-struct Cluster {
-    cx: f64,
-    cy: f64,
-    scale: f64,
-    grid: f64,
-    dec: u32,
+pub(super) struct Cluster {
+    pub(super) cx: f64,
+    pub(super) cy: f64,
+    pub(super) scale: f64,
+    pub(super) grid: f64,
+    pub(super) dec: u32,
 }
 
-fn round(v: f64, dec: u32) -> f64 {
+pub(super) fn round(v: f64, dec: u32) -> f64 {
     let m = 10f64.powi(dec as i32);
     (v * m).round() / m
 }
 
-fn wrap_lon(x: f64) -> f64 {
+pub(super) fn wrap_lon(x: f64) -> f64 {
     let mut x = x;
     while x > 180.0 {
         x -= 360.0;
@@ -133,25 +133,25 @@ fn wrap_lon(x: f64) -> f64 {
     x
 }
 
-fn fix(c: &Cluster, p: (f64, f64)) -> (f64, f64) {
+pub(super) fn fix(c: &Cluster, p: (f64, f64)) -> (f64, f64) {
     let x = round(wrap_lon(p.0), c.dec);
     let y = round(p.1.clamp(-90.0, 90.0), c.dec);
     (if x == 0.0 { 0.0 } else { x }, if y == 0.0 { 0.0 } else { y })
 }
 
-fn num(v: f64) -> String {
+pub(super) fn num(v: f64) -> String {
     format!("{v}")
 }
 
-fn ring_text(r: &Ring) -> String {
+pub(super) fn ring_text(r: &Ring) -> String {
     r.iter().map(|p| format!("{} {}", num(p.0), num(p.1))).collect::<Vec<_>>().join(", ")
 }
 
-fn poly_wkt(rings: &[Ring]) -> String {
+pub(super) fn poly_wkt(rings: &[Ring]) -> String {
     format!("POLYGON({})", rings.iter().map(|r| format!("({})", ring_text(r))).collect::<Vec<_>>().join(", "))
 }
 
-fn close(mut r: Ring) -> Ring {
+pub(super) fn close(mut r: Ring) -> Ring {
     if let Some(&f) = r.first() {
         r.push(f);
     }
@@ -160,7 +160,7 @@ fn close(mut r: Ring) -> Ring {
 
 /// A star-shaped ring around (cx, cy): `n` vertices at increasing angles, radii in
 /// `[r * (1 - dent), r]`.
-fn blob(rng: &mut Rng, c: &Cluster, cx: f64, cy: f64, r: f64, n: usize, dent: f64) -> Ring {
+pub(super) fn blob(rng: &mut Rng, c: &Cluster, cx: f64, cy: f64, r: f64, n: usize, dent: f64) -> Ring {
     let mut angles: Vec<f64> = (0..n).map(|_| rng.range(0.0, std::f64::consts::TAU)).collect();
     angles.sort_by(f64::total_cmp);
     let mut out = Vec::new();
@@ -172,23 +172,23 @@ fn blob(rng: &mut Rng, c: &Cluster, cx: f64, cy: f64, r: f64, n: usize, dent: f6
     out
 }
 
-fn grid_pt(c: &Cluster, i: i64, j: i64) -> (f64, f64) {
+pub(super) fn grid_pt(c: &Cluster, i: i64, j: i64) -> (f64, f64) {
     fix(c, (c.cx + i as f64 * c.grid, c.cy + j as f64 * c.grid))
 }
 
 /// An axis-aligned grid rectangle (clockwise) from cell (i0, j0) to (i1, j1).
-fn grid_rect(c: &Cluster, i0: i64, j0: i64, i1: i64, j1: i64) -> Ring {
+pub(super) fn grid_rect(c: &Cluster, i0: i64, j0: i64, i1: i64, j1: i64) -> Ring {
     vec![grid_pt(c, i0, j0), grid_pt(c, i0, j1), grid_pt(c, i1, j1), grid_pt(c, i1, j0)]
 }
 
-fn maybe_reverse(rng: &mut Rng, mut r: Ring) -> Ring {
+pub(super) fn maybe_reverse(rng: &mut Rng, mut r: Ring) -> Ring {
     if rng.chance(0.5) {
         r.reverse();
     }
     r
 }
 
-fn rotate(rng: &mut Rng, mut r: Ring) -> Ring {
+pub(super) fn rotate(rng: &mut Rng, mut r: Ring) -> Ring {
     if !r.is_empty() {
         let k = rng.below(r.len());
         r.rotate_left(k);
@@ -197,7 +197,7 @@ fn rotate(rng: &mut Rng, mut r: Ring) -> Ring {
 }
 
 /// One random polygon (its rings, open) near the cluster.
-fn polygon(rng: &mut Rng, c: &Cluster, prev: &[Vec<Ring>]) -> Vec<Ring> {
+pub(super) fn polygon(rng: &mut Rng, c: &Cluster, prev: &[Vec<Ring>], big: bool) -> Vec<Ring> {
     let kind = rng.below(100);
     let s = c.scale;
     let jitter = |rng: &mut Rng| (c.cx + rng.range(-s, s), c.cy + rng.range(-s, s));
@@ -205,7 +205,7 @@ fn polygon(rng: &mut Rng, c: &Cluster, prev: &[Vec<Ring>]) -> Vec<Ring> {
         // convex or concave blob
         let (cx, cy) = jitter(rng);
         let r = s * rng.range(0.05, 1.0);
-        let n = if big() && rng.chance(0.5) { 20 + rng.below(80) } else { 3 + rng.below(10) };
+        let n = if big && rng.chance(0.5) { 20 + rng.below(80) } else { 3 + rng.below(10) };
         let dent = if rng.chance(0.5) { 0.0 } else { rng.range(0.1, 0.9) };
         let b = blob(rng, c, cx, cy, r, n, dent);
         vec![maybe_reverse(rng, b)]
@@ -330,7 +330,7 @@ fn polygon(rng: &mut Rng, c: &Cluster, prev: &[Vec<Ring>]) -> Vec<Ring> {
     }
 }
 
-fn point(rng: &mut Rng, c: &Cluster, polys: &[Vec<Ring>]) -> (f64, f64) {
+pub(super) fn point(rng: &mut Rng, c: &Cluster, polys: &[Vec<Ring>]) -> (f64, f64) {
     let s = c.scale;
     match rng.below(4) {
         0 if !polys.is_empty() => {
@@ -355,7 +355,7 @@ fn point(rng: &mut Rng, c: &Cluster, polys: &[Vec<Ring>]) -> (f64, f64) {
     }
 }
 
-fn cluster(rng: &mut Rng) -> Cluster {
+pub(super) fn cluster(rng: &mut Rng) -> Cluster {
     let kind = rng.below(6);
     let (cx, cy) = match kind {
         0 => (rng.range(-180.0, 180.0), rng.range(-60.0, 60.0)),
@@ -677,7 +677,7 @@ fn random_against_reference() {
         let mut polys: Vec<Vec<Ring>> = Vec::new();
         let mut shapes = Vec::new();
         for _ in 0..n {
-            let p = polygon(&mut rng, &cl, &polys);
+            let p = polygon(&mut rng, &cl, &polys, big());
             let closed: Vec<Ring> = p.iter().map(|r| if rng.chance(0.97) { close(r.clone()) } else { r.clone() }).collect();
             shapes.push(poly_wkt(&closed));
             polys.push(p);
@@ -688,11 +688,11 @@ fn random_against_reference() {
         }
         let mut extra = Vec::new();
         for _ in 0..n / 3 {
-            let p = polygon(&mut rng, &cl, &polys);
+            let p = polygon(&mut rng, &cl, &polys, big());
             extra.push(poly_wkt(&p.into_iter().map(close).collect::<Vec<_>>()));
         }
         let deletions: Vec<usize> = (0..n / 3).map(|_| rng.below(1000)).collect();
-        let more: Vec<String> = (0..n / 4).map(|_| poly_wkt(&polygon(&mut rng, &cl, &polys).into_iter().map(close).collect::<Vec<_>>())).collect();
+        let more: Vec<String> = (0..n / 4).map(|_| poly_wkt(&polygon(&mut rng, &cl, &polys, big()).into_iter().map(close).collect::<Vec<_>>())).collect();
         for cs in [Cs::Flat, Cs::Sphere] {
             let want = if cs == Cs::Flat { "flat" } else { "sphere" };
             if only.as_deref().is_some_and(|o| o != want) {

@@ -1411,14 +1411,16 @@ pub fn sectionalize(rings: &[&[Pt]], cs: Cs) -> Vec<Section> {
             out.push(s);
         }
     }
-    // `enlarge_sections`: `expand_by_epsilon` with `scaled_epsilon(1000)`
+    // `enlarge_sections`: `expand_by_epsilon` with `scaled_epsilon(1000)`, which only the
+    // first dimension gets: `corner_by_epsilon::apply(point, eps)` recurses into the next
+    // dimension through the overload without `eps`, so y moves by the plain scaled epsilon
     let eps = f64::EPSILON * 1000.0;
     for s in &mut out {
         let b = &mut s.bbox;
         b.min.x -= b.min.x.abs().max(1.0) * eps;
-        b.min.y -= b.min.y.abs().max(1.0) * eps;
+        b.min.y -= b.min.y.abs().max(1.0) * f64::EPSILON;
         b.max.x += b.max.x.abs().max(1.0) * eps;
-        b.max.y += b.max.y.abs().max(1.0) * eps;
+        b.max.y += b.max.y.abs().max(1.0) * f64::EPSILON;
     }
     out
 }
