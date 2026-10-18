@@ -3,8 +3,13 @@
 //! geodesic's vertex latitude, ring envelopes reaching a pole inside, the ellipsoidal ring area
 //! (`bg::correct`'s orientation), the direction code (spikes) and the segments' relation with
 //! Sjöberg's geodesic intersection point.
+//!
+//! The arithmetic follows the reference build, which contracts a product into the sum or
+//! difference of the same expression (`-ffp-contract=on`; the left product when both sides are
+//! products, never across statements or calls such as `math::sqr`): those spots use `mul_add`,
+//! and the trigonometry is musl's (`libm`).
 
-use super::algo::{expand, feq};
+use super::algo::feq;
 use super::{Cs, Pt, Rect};
 use std::f64::consts::PI;
 
@@ -60,14 +65,14 @@ pub fn normalize_lon_deg(l: &mut f64) {
 }
 
 /// `longitude_distance_signed<radian>`.
-fn lon_dist_rad(a: f64, b: f64) -> f64 {
+pub(super) fn lon_dist_rad(a: f64, b: f64) -> f64 {
     let mut d = b - a;
     normalize_lon_rad(&mut d);
     d
 }
 
 /// `longitude_distance_signed<degree>`.
-fn lon_dist_deg(a: f64, b: f64) -> f64 {
+pub(super) fn lon_dist_deg(a: f64, b: f64) -> f64 {
     let mut d = b - a;
     normalize_lon_deg(&mut d);
     d
@@ -113,18 +118,19 @@ fn normalize_azimuth(az: &mut f64, a: f64, da: f64) {
 
 /// `andoyer_inverse::apply` (radians) on a spheroid of radii `a` and `b`.
 pub fn andoyer(lon1: f64, lat1: f64, lon2: f64, lat2: f64, a: f64, b: f64) -> Inverse {
+    use libm::{acos, atan2, cos, sin};
     let mut r = Inverse::default();
     if feq(lon1, lon2) && feq(lat1, lat2) {
         return r;
     }
     let f = flattening(a, b);
     let dlon = lon2 - lon1;
-    let (sin_dlon, cos_dlon) = (dlon.sin(), dlon.cos());
-    let (sin_lat1, cos_lat1) = (lat1.sin(), lat1.cos());
-    let (sin_lat2, cos_lat2) = (lat2.sin(), lat2.cos());
-    let cos_d = (sin_lat1 * sin_lat2 + cos_lat1 * cos_lat2 * cos_dlon).clamp(-1.0, 1.0);
-    let d = cos_d.acos();
-    let sin_d = d.sin();
+    let (sin_dlon, cos_dlon) = (sin(dlon), cos(dlon));
+    let (sin_lat1, cos_lat1) = (sin(lat1), cos(lat1));
+    let (sin_lat2, cos_lat2) = (sin(lat2), cos(lat2));
+    let cos_d = sin_lat1.mul_add(sin_lat2, cos_lat1 * cos_lat2 * cos_dlon).clamp(-1.0, 1.0);
+    let d = acos(cos_d);
+    let sin_d = sin(d);
     {
         let k = (sin_lat1 - sin_lat2) * (sin_lat1 - sin_lat2);
         let l = (sin_lat1 + sin_lat2) * (sin_lat1 + sin_lat2);
@@ -133,7 +139,7 @@ pub fn andoyer(lon1: f64, lat1: f64, lon2: f64, lat2: f64, a: f64, b: f64) -> In
         let one_plus_cos_d = 1.0 + cos_d;
         let h = if feq(one_minus_cos_d, 0.0) { 0.0 } else { (d + three_sin_d) / one_minus_cos_d };
         let g = if feq(one_plus_cos_d, 0.0) { 0.0 } else { (d - three_sin_d) / one_plus_cos_d };
-        let dd = -(f / 4.0) * (h * k + g * l);
+        let dd = -(f / 4.0) * h.mul_add(k, g * l);
         r.distance = a * (d + dd);
     }
     if feq(sin_d, 0.0) {
@@ -156,9 +162,9 @@ pub fn andoyer(lon1: f64, lat1: f64, lon2: f64, lat2: f64, a: f64, b: f64) -> In
         }
     } else {
         let tan_lat2 = sin_lat2 / cos_lat2;
-        let m = cos_lat1 * tan_lat2 - sin_lat1 * cos_dlon;
-        aa = sin_dlon.atan2(m);
-        let sin_2a = (2.0 * aa).sin();
+        let m = cos_lat1.mul_add(tan_lat2, -(sin_lat1 * cos_dlon));
+        aa = atan2(sin_dlon, m);
+        let sin_2a = sin(2.0 * aa);
         u = (f / 2.0) * (cos_lat1 * cos_lat1) * sin_2a;
     }
     let (mut bb, mut v) = (0.0, 0.0);
@@ -168,16 +174,16 @@ pub fn andoyer(lon1: f64, lat1: f64, lon2: f64, lat2: f64, a: f64, b: f64) -> In
         }
     } else {
         let tan_lat1 = sin_lat1 / cos_lat1;
-        let n = cos_lat2 * tan_lat1 - sin_lat2 * cos_dlon;
-        bb = sin_dlon.atan2(n);
-        let sin_2b = (2.0 * bb).sin();
+        let n = cos_lat2.mul_add(tan_lat1, -(sin_lat2 * cos_dlon));
+        bb = atan2(sin_dlon, n);
+        let sin_2b = sin(2.0 * bb);
         v = (f / 2.0) * (cos_lat2 * cos_lat2) * sin_2b;
     }
     let t = d / sin_d;
-    let da = v * t - u;
+    let da = v.mul_add(t, -u);
     r.azimuth = aa - da;
     normalize_azimuth(&mut r.azimuth, aa, da);
-    let db = -u * t + v;
+    let db = (-u).mul_add(t, v);
     r.reverse_azimuth = if bb >= 0.0 { PI - bb - db } else { -PI - bb - db };
     normalize_azimuth(&mut r.reverse_azimuth, bb, db);
     r
@@ -188,16 +194,20 @@ fn inverse_wgs(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> Inverse {
     andoyer(lon1, lat1, lon2, lat2, A, B)
 }
 
+/// The forward azimuth from `p1` to `p2` (degrees) on WGS84 (`strategy::side::geographic`'s).
+pub fn azimuth(p1: Pt, p2: Pt) -> f64 {
+    inverse_wgs(p1.x * d2r(), p1.y * d2r(), p2.x * d2r(), p2.y * d2r()).azimuth
+}
+
 /// The unit spheroid's polar radius (`formula::unit_spheroid`, the intersection strategy's).
 fn unit_b() -> f64 {
     B / A
 }
 
-fn inverse_unit(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> Inverse {
+pub(super) fn inverse_unit(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> Inverse {
     andoyer(lon1, lat1, lon2, lat2, 1.0, unit_b())
 }
 
-use super::algo::azimuth_side_value;
 
 // ---------------------------------------------------------------------------------------------
 // Envelopes
@@ -206,9 +216,9 @@ use super::algo::azimuth_side_value;
 fn vertex_latitude(lat1: f64, alp1: f64) -> f64 {
     let f = flattening(A, B);
     let one_minus_f = 1.0 - f;
-    let bet1 = (one_minus_f * lat1.tan()).atan();
-    let betv = (bet1.cos() * alp1.sin()).abs().acos();
-    (betv.tan() / one_minus_f).atan()
+    let bet1 = libm::atan(one_minus_f * libm::tan(lat1));
+    let betv = libm::acos((libm::cos(bet1) * libm::sin(alp1)).abs());
+    libm::atan(libm::tan(betv) / one_minus_f)
 }
 
 /// `envelope::geographic_segment` (degrees): the endpoints' box, the short way round the
@@ -486,8 +496,7 @@ pub fn ring_envelope(r: &[Pt]) -> Rect {
     }
     let mut mbr = segment_envelope(r[0], r[1]);
     for s in r.windows(2).skip(1) {
-        let e = segment_envelope(s[0], s[1]);
-        expand(Cs::Sphere, &mut mbr, &e);
+        super::algo::expand_segment(&mut mbr, s[0], s[1]);
     }
     if mbr.max.x - mbr.min.x >= 360.0 {
         let (mut lat_min, mut lat_max) = (mbr.min.y, mbr.max.y);
@@ -522,13 +531,13 @@ fn hypot(x: f64, y: f64) -> f64 {
         return x;
     }
     let rat = y / x;
-    x * (1.0 + rat * rat).sqrt()
+    x * rat.mul_add(rat, 1.0).sqrt()
 }
 
 fn trapezoidal(lat1: f64, lat2: f64, lon21: f64) -> f64 {
-    let t1 = (lat1 / 2.0).tan();
-    let t2 = (lat2 / 2.0).tan();
-    2.0 * (((t1 + t2) / (1.0 + t1 * t2)) * (lon21 / 2.0).tan()).atan()
+    let t1 = libm::tan(lat1 / 2.0);
+    let t2 = libm::tan(lat2 / 2.0);
+    2.0 * libm::atan(((t1 + t2) / t1.mul_add(t2, 1.0)) * libm::tan(lon21 / 2.0))
 }
 
 /// `area_formulas::crosses_prime_meridian` (radians).
@@ -539,8 +548,8 @@ fn crosses_prime_meridian(lon1: f64, lon2: f64) -> bool {
     if lon12 == PI || lon12 == -PI {
         return true;
     }
-    let p1 = lon1 - (lon1 / two_pi).floor() * two_pi;
-    let p2 = lon2 - (lon2 / two_pi).floor() * two_pi;
+    let p1 = (-(lon1 / two_pi).floor()).mul_add(two_pi, lon1);
+    let p2 = (-(lon2 / two_pi).floor()).mul_add(two_pi, lon2);
     let (mx, mn) = (p1.max(p2), p1.min(p2));
     mx > PI && mn < PI && mx - mn > PI
 }
@@ -559,7 +568,7 @@ pub fn ring_area(r: &[Pt]) -> f64 {
         a2
     } else {
         let e = e2.sqrt();
-        (a2 / 2.0) * (1.0 + (1.0 - e2) * e.atanh() / e)
+        (a2 / 2.0) * (1.0 + (1.0 - e2) * libm::atanh(e) / e)
     };
     let f = flattening(A, B);
     let n = f / (2.0 - f);
@@ -583,15 +592,15 @@ pub fn ring_area(r: &[Pt]) -> f64 {
         let (alp1, alp2) = (inv.azimuth, inv.reverse_azimuth);
         let half_pi = PI / 2.0;
         let one_minus_f = 1.0 - f;
-        let tan_bet1 = lat1.tan() * one_minus_f;
-        let tan_bet2 = lat2.tan() * one_minus_f;
-        let cos_bet1 = tan_bet1.atan().cos();
-        let cos_bet2 = tan_bet2.atan().cos();
+        let tan_bet1 = libm::tan(lat1) * one_minus_f;
+        let tan_bet2 = libm::tan(lat2) * one_minus_f;
+        let cos_bet1 = libm::cos(libm::atan(tan_bet1));
+        let cos_bet2 = libm::cos(libm::atan(tan_bet2));
         let sin_bet1 = tan_bet1 * cos_bet1;
         let sin_bet2 = tan_bet2 * cos_bet2;
-        let sin_alp1 = alp1.sin();
-        let cos_alp1 = alp1.cos();
-        let cos_alp2 = alp2.cos();
+        let sin_alp1 = libm::sin(alp1);
+        let cos_alp1 = libm::cos(alp1);
+        let cos_alp2 = libm::cos(alp2);
         let sin_alp0 = sin_alp1 * cos_bet1;
         let mut lon12 = lon2 - lon1;
         normalize_lon_rad(&mut lon12);
@@ -614,18 +623,18 @@ pub fn ring_area(r: &[Pt]) -> f64 {
         let k2 = (ep * cos_alp0) * (ep * cos_alp0);
         let s = (1.0 + k2).sqrt();
         let eps = (s - 1.0) / (s + 1.0);
-        // `evaluate_coeffs_var2` (order 1)
-        let coeffs = [coeffs_var[1] * eps + coeffs_var[0], eps * coeffs_var[2]];
+        // `evaluate_coeffs_var2` (order 1): Horner's steps `result * x + c`
+        let coeffs = [coeffs_var[1].mul_add(eps, coeffs_var[0]), eps * coeffs_var[2]];
         let clenshaw = |cosx: f64| -> f64 {
             // two coefficients: the odd one, a zero step, the even one
             let (mut bk1, mut bk2) = (0.0, 0.0);
             let steps = [coeffs[1], 0.0, coeffs[0]];
             for c in steps {
-                let bk = c + 2.0 * cosx * bk1 - bk2;
+                let bk = (2.0 * cosx).mul_add(bk1, c) - bk2;
                 bk2 = bk1;
                 bk1 = bk;
             }
-            coeffs[0] + bk1 * cosx - bk2
+            bk1.mul_add(cosx, coeffs[0]) - bk2
         };
         let i12 = clenshaw(cos_sig2) - clenshaw(cos_sig1);
         excess_sum += spherical;
@@ -636,7 +645,7 @@ pub fn ring_area(r: &[Pt]) -> f64 {
     let sum = if (ellipsoidal_term / spherical_term).abs() > 0.01 { spherical_term } else { spherical_term + ellipsoidal_term };
     if crosses % 2 == 1 {
         let times = 1 + crosses / 2;
-        let mut result = 2.0 * PI * c2 * times as f64 - sum.abs();
+        let mut result = (2.0 * PI * c2).mul_add(times as f64, -sum.abs());
         if sign(sum) == 1 {
             result = -result;
         }
@@ -685,391 +694,27 @@ pub fn direction_code(a: Pt, b: Pt, p: Pt) -> i32 {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Segment relations
-
-/// What `geographic_segments::apply` decided.
-#[derive(Clone, Copy, Debug)]
-pub enum Relation {
-    Disjoint,
-    /// Endpoint degenerate cases (treated as disjoint by the caller).
-    Degenerate,
-    /// `segments_crosses`: the sides, the point (degrees) and the ratios along a and b.
-    Crosses { sides: [[i32; 2]; 2], ip: Pt, ra: (f64, f64), rb: (f64, f64) },
-    /// `segments_collinear`: the opposite flag, the positions and the ratios.
-    Collinear { opposite: bool, pos: [i32; 4], ra_from: (f64, f64), ra_to: (f64, f64), rb_from: (f64, f64), rb_to: (f64, f64) },
-}
-
-/// `strategy::within::spherical_point_point`.
-fn equals_pp(a: Pt, b: Pt) -> bool {
-    super::algo::equals(Cs::Sphere, a, b)
-}
-
-fn same_direction(az1: f64, az2: f64) -> bool {
-    lon_dist_rad(az1, az2).abs() <= PI / 2.0
-}
-
-/// `segment_ratio::on_segment` of `num / den`.
-fn on_segment(num: f64, den: f64) -> bool {
-    let (n, d) = if den < 0.0 { (-num, -den) } else { (num, den) };
-    n >= 0.0 && n <= d
-}
-
-fn is_near(d: f64) -> bool {
-    d.abs() <= 0.00000001
-}
-
-fn is_endpoint_equal(dist: f64, ai: Pt, b1: Pt) -> bool {
-    is_near(dist) && (feq(dist, 0.0) || equals_pp(ai, b1))
-}
-
-/// `calculate_collinear_data`: the distances of a's end and b1 along a.
-fn collinear_data(a1: Pt, a2: Pt, b1: Pt, r12: &Inverse, r1b1: &Inverse) -> (f64, f64, bool) {
-    let d12 = r12.distance;
-    let mut d1b1 = r1b1.distance;
-    if !same_direction(r1b1.azimuth, r12.azimuth) {
-        d1b1 = -d1b1;
-    }
-    if is_endpoint_equal(d1b1, a1, b1) {
-        return (d12, 0.0, true);
-    }
-    if is_endpoint_equal(d12 - d1b1, a2, b1) {
-        return (d12, d12, true);
-    }
-    let ok = on_segment(d1b1, d12);
-    (d12, d1b1, ok)
-}
-
-fn position_value(ca: f64, cb1: f64, cb2: f64) -> i32 {
-    if feq(ca, cb1) {
-        1
-    } else if feq(ca, cb2) {
-        3
-    } else if cb1 < cb2 {
-        if ca < cb1 {
-            0
-        } else if ca > cb2 {
-            4
-        } else {
-            2
-        }
-    } else if ca > cb1 {
-        0
-    } else if ca < cb2 {
-        4
-    } else {
-        2
-    }
-}
-
-/// Where the intersection point is (`intersection_point_flag`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IpFlag {
-    Inters,
-    AtA1,
-    AtA2,
-    AtB1,
-    AtB2,
-}
-
-/// `geographic_segments::apply` for segments `p` and `q` (degrees): each ordered south to
-/// north for the computation, the results mapped back to the original directions.
-pub fn relate(p0: Pt, p1: Pt, q0: Pt, q1: Pt) -> Relation {
-    let a_rev = p0.y > p1.y;
-    let b_rev = q0.y > q1.y;
-    let (a1, a2) = if a_rev { (p1, p0) } else { (p0, p1) };
-    let (b1, b2) = if b_rev { (q1, q0) } else { (q0, q1) };
-    let mut a_is_point = equals_pp(a1, a2);
-    let mut b_is_point = equals_pp(b1, b2);
-    if a_is_point && b_is_point {
-        return if equals_pp(a1, b2) { Relation::Degenerate } else { Relation::Disjoint };
-    }
-    let r = d2r();
-    let (a1_lon, a1_lat, a2_lon, a2_lat) = (a1.x * r, a1.y * r, a2.x * r, a2.y * r);
-    let (b1_lon, b1_lat, b2_lon, b2_lat) = (b1.x * r, b1.y * r, b2.x * r, b2.y * r);
-    let mut sides = [[0i32; 2]; 2];
-    let mut is_equal_a1_b1 = equals_pp(a1, b1);
-    let mut is_equal_a2_b1 = equals_pp(a2, b1);
-    let mut res_b1_b2 = Inverse::default();
-    let mut res_b1_a1 = Inverse::default();
-    let mut res_b1_a2 = Inverse::default();
-    if !b_is_point {
-        res_b1_b2 = inverse_unit(b1_lon, b1_lat, b2_lon, b2_lat);
-        if feq(res_b1_b2.distance, 0.0) {
-            b_is_point = true;
-        } else {
-            res_b1_a1 = inverse_unit(b1_lon, b1_lat, a1_lon, a1_lat);
-            if feq(res_b1_a1.distance, 0.0) {
-                is_equal_a1_b1 = true;
-            }
-            res_b1_a2 = inverse_unit(b1_lon, b1_lat, a2_lon, a2_lat);
-            if feq(res_b1_a2.distance, 0.0) {
-                is_equal_a2_b1 = true;
-            }
-            sides[0] = [
-                if is_equal_a1_b1 { 0 } else { azimuth_side_value(res_b1_a1.azimuth, res_b1_b2.azimuth) },
-                if is_equal_a2_b1 { 0 } else { azimuth_side_value(res_b1_a2.azimuth, res_b1_b2.azimuth) },
-            ];
-            if sides[0][0] * sides[0][1] == 1 {
-                return Relation::Disjoint;
-            }
-        }
-    }
-    let mut is_equal_a1_b2 = equals_pp(a1, b2);
-    let mut res_a1_a2 = Inverse::default();
-    let mut res_a1_b1 = Inverse::default();
-    let mut res_a1_b2 = Inverse::default();
-    if !a_is_point {
-        res_a1_a2 = inverse_unit(a1_lon, a1_lat, a2_lon, a2_lat);
-        if feq(res_a1_a2.distance, 0.0) {
-            a_is_point = true;
-        } else {
-            res_a1_b1 = inverse_unit(a1_lon, a1_lat, b1_lon, b1_lat);
-            if feq(res_a1_b1.distance, 0.0) {
-                is_equal_a1_b1 = true;
-            }
-            res_a1_b2 = inverse_unit(a1_lon, a1_lat, b2_lon, b2_lat);
-            if feq(res_a1_b2.distance, 0.0) {
-                is_equal_a1_b2 = true;
-            }
-            sides[1] = [
-                if is_equal_a1_b1 { 0 } else { azimuth_side_value(res_a1_b1.azimuth, res_a1_a2.azimuth) },
-                if is_equal_a1_b2 { 0 } else { azimuth_side_value(res_a1_b2.azimuth, res_a1_a2.azimuth) },
-            ];
-            if sides[1][0] * sides[1][1] == 1 {
-                return Relation::Disjoint;
-            }
-        }
-    }
-    if a_is_point && b_is_point {
-        return if is_equal_a1_b2 { Relation::Degenerate } else { Relation::Disjoint };
-    }
-    let mut collinear = sides[0] == [0, 0] && sides[1] == [0, 0];
-    if !collinear {
-        if sides[0] == [0, 0] {
-            collinear = true;
-            sides[1] = [0, 0];
-        } else if sides[1] == [0, 0] {
-            collinear = true;
-            sides[0] = [0, 0];
-        }
-    }
-    if collinear {
-        if a_is_point || b_is_point {
-            return Relation::Degenerate;
-        }
-        let (mut dist_a1_a2, mut dist_a1_b1, mut dist_a1_b2, dist_b1_b2, mut dist_b1_a1, mut dist_b1_a2);
-        if res_a1_a2.distance <= res_b1_b2.distance {
-            let (d12, d1b1, _) = collinear_data(a1, a2, b1, &res_a1_a2, &res_a1_b1);
-            let (_, d1b2, _) = collinear_data(a1, a2, b2, &res_a1_a2, &res_a1_b2);
-            dist_a1_a2 = d12;
-            dist_a1_b1 = d1b1;
-            dist_a1_b2 = d1b2;
-            dist_b1_b2 = dist_a1_b2 - dist_a1_b1;
-            dist_b1_a1 = -dist_a1_b1;
-            dist_b1_a2 = dist_a1_a2 - dist_a1_b1;
-        } else {
-            let (d12, d1a1, _) = collinear_data(b1, b2, a1, &res_b1_b2, &res_b1_a1);
-            let (_, d1a2, _) = collinear_data(b1, b2, a2, &res_b1_b2, &res_b1_a2);
-            dist_b1_b2 = d12;
-            dist_b1_a1 = d1a1;
-            dist_b1_a2 = d1a2;
-            dist_a1_a2 = dist_b1_a2 - dist_b1_a1;
-            dist_a1_b1 = -dist_b1_a1;
-            dist_a1_b2 = dist_b1_b2 - dist_b1_a1;
-        }
-        let mut a1_on_b = position_value(0.0, dist_a1_b1, dist_a1_b2);
-        let mut a2_on_b = position_value(dist_a1_a2, dist_a1_b1, dist_a1_b2);
-        let mut b1_on_a = position_value(0.0, dist_b1_a1, dist_b1_a2);
-        let mut b2_on_a = position_value(dist_b1_b2, dist_b1_a1, dist_b1_a2);
-        if (a1_on_b < 1 && a2_on_b < 1) || (a1_on_b > 3 && a2_on_b > 3) {
-            return Relation::Disjoint;
-        }
-        if a1_on_b == 1 {
-            dist_b1_a1 = 0.0;
-            dist_a1_b1 = 0.0;
-        } else if a1_on_b == 3 {
-            dist_b1_a1 = dist_b1_b2;
-            dist_a1_b2 = 0.0;
-        }
-        if a2_on_b == 1 {
-            dist_b1_a2 = 0.0;
-            dist_a1_b1 = dist_a1_a2;
-        } else if a2_on_b == 3 {
-            dist_b1_a2 = dist_b1_b2;
-            dist_a1_b2 = dist_a1_a2;
-        }
-        let mut opposite = !same_direction(res_a1_a2.azimuth, res_b1_b2.azimuth);
-        if a_rev {
-            opposite = !opposite;
-            std::mem::swap(&mut a1_on_b, &mut a2_on_b);
-            b1_on_a = 4 - b1_on_a;
-            b2_on_a = 4 - b2_on_a;
-            std::mem::swap(&mut dist_b1_a1, &mut dist_b1_a2);
-            dist_a1_b1 = dist_a1_a2 - dist_a1_b1;
-            dist_a1_b2 = dist_a1_a2 - dist_a1_b2;
-        }
-        if b_rev {
-            opposite = !opposite;
-            a1_on_b = 4 - a1_on_b;
-            a2_on_b = 4 - a2_on_b;
-            std::mem::swap(&mut b1_on_a, &mut b2_on_a);
-            dist_b1_a1 = dist_b1_b2 - dist_b1_a1;
-            dist_b1_a2 = dist_b1_b2 - dist_b1_a2;
-            std::mem::swap(&mut dist_a1_b1, &mut dist_a1_b2);
-        }
-        let _ = &mut dist_a1_a2;
-        return Relation::Collinear {
-            opposite,
-            pos: [a1_on_b, a2_on_b, b1_on_a, b2_on_a],
-            ra_from: (dist_b1_a1, dist_b1_b2),
-            ra_to: (dist_b1_a2, dist_b1_b2),
-            rb_from: (dist_a1_b1, dist_a1_a2),
-            rb_to: (dist_a1_b2, dist_a1_a2),
-        };
-    }
-    if a_is_point || b_is_point {
-        return Relation::Disjoint;
-    }
-    // `calculate_ip_data`
-    let dist_a1_a2 = res_a1_a2.distance;
-    let dist_b1_b2 = res_b1_b2.distance;
-    let (mut lon, mut lat) = (0.0, 0.0);
-    let (mut dist_a1_ip, mut dist_b1_ip);
-    let mut flag;
-    if equals_pp(a1, b1) {
-        (dist_a1_ip, dist_b1_ip, flag) = (0.0, 0.0, IpFlag::AtA1);
-    } else if equals_pp(a1, b2) {
-        (dist_a1_ip, dist_b1_ip, flag) = (0.0, dist_b1_b2, IpFlag::AtA1);
-    } else if equals_pp(a2, b1) {
-        (dist_a1_ip, dist_b1_ip, flag) = (dist_a1_a2, 0.0, IpFlag::AtA2);
-    } else if equals_pp(a2, b2) {
-        (dist_a1_ip, dist_b1_ip, flag) = (dist_a1_a2, dist_b1_b2, IpFlag::AtA2);
-    } else if sides[0][0] == 0 {
-        if !(res_b1_a1.distance <= res_b1_b2.distance && same_direction(res_b1_a1.azimuth, res_b1_b2.azimuth)) {
-            return Relation::Disjoint;
-        }
-        (dist_a1_ip, dist_b1_ip, flag) = (0.0, res_b1_a1.distance, IpFlag::AtA1);
-    } else if sides[0][1] == 0 {
-        if !(res_b1_a2.distance <= res_b1_b2.distance && same_direction(res_b1_a2.azimuth, res_b1_b2.azimuth)) {
-            return Relation::Disjoint;
-        }
-        (dist_a1_ip, dist_b1_ip, flag) = (res_a1_a2.distance, res_b1_a2.distance, IpFlag::AtA2);
-    } else if sides[1][0] == 0 {
-        if !(res_a1_b1.distance <= res_a1_a2.distance && same_direction(res_a1_b1.azimuth, res_a1_a2.azimuth)) {
-            return Relation::Disjoint;
-        }
-        (dist_a1_ip, dist_b1_ip, flag) = (res_a1_b1.distance, 0.0, IpFlag::AtB1);
-    } else if sides[1][1] == 0 {
-        if !(res_a1_b2.distance <= res_a1_a2.distance && same_direction(res_a1_b2.azimuth, res_a1_a2.azimuth)) {
-            return Relation::Disjoint;
-        }
-        (dist_a1_ip, dist_b1_ip, flag) = (res_a1_b2.distance, res_b1_b2.distance, IpFlag::AtB2);
-    } else {
-        let Some((ilon, ilat)) = sjoberg_intersection(a1_lon, a1_lat, a2_lon, a2_lat, res_a1_a2.azimuth, b1_lon, b1_lat, b2_lon, b2_lat, res_b1_b2.azimuth) else {
-            return Relation::Disjoint;
-        };
-        (lon, lat) = (ilon, ilat);
-        let res_a1_ip = inverse_unit(a1_lon, a1_lat, lon, lat);
-        dist_a1_ip = res_a1_ip.distance;
-        if !same_direction(res_a1_ip.azimuth, res_a1_a2.azimuth) {
-            dist_a1_ip = -dist_a1_ip;
-        }
-        let is_on_a = on_segment(dist_a1_ip, dist_a1_a2);
-        let is_on_a1 = feq(lon, a1_lon) && feq(lat, a1_lat);
-        let is_on_a2 = feq(lon, a2_lon) && feq(lat, a2_lat);
-        if !(is_on_a || is_on_a1 || is_on_a2) {
-            return Relation::Disjoint;
-        }
-        let res_b1_ip = inverse_unit(b1_lon, b1_lat, lon, lat);
-        dist_b1_ip = res_b1_ip.distance;
-        if !same_direction(res_b1_ip.azimuth, res_b1_b2.azimuth) {
-            dist_b1_ip = -dist_b1_ip;
-        }
-        let is_on_b = on_segment(dist_b1_ip, dist_b1_b2);
-        let is_on_b1 = feq(lon, b1_lon) && feq(lat, b1_lat);
-        let is_on_b2 = feq(lon, b2_lon) && feq(lat, b2_lat);
-        if !(is_on_b || is_on_b1 || is_on_b2) {
-            return Relation::Disjoint;
-        }
-        flag = IpFlag::Inters;
-        if is_on_b1 {
-            (lon, lat) = (b1_lon, b1_lat);
-            dist_a1_ip = inverse_unit(a1_lon, a1_lat, lon, lat).distance;
-            dist_b1_ip = 0.0;
-            flag = IpFlag::AtB1;
-        } else if is_on_b2 {
-            (lon, lat) = (b2_lon, b2_lat);
-            dist_a1_ip = inverse_unit(a1_lon, a1_lat, lon, lat).distance;
-            dist_b1_ip = res_b1_b2.distance;
-            flag = IpFlag::AtB2;
-        }
-        if is_on_a1 {
-            (lon, lat) = (a1_lon, a1_lat);
-            dist_a1_ip = 0.0;
-            dist_b1_ip = inverse_unit(b1_lon, b1_lat, lon, lat).distance;
-            flag = IpFlag::AtA1;
-        } else if is_on_a2 {
-            (lon, lat) = (a2_lon, a2_lat);
-            dist_a1_ip = res_a1_a2.distance;
-            dist_b1_ip = inverse_unit(b1_lon, b1_lat, lon, lat).distance;
-            flag = IpFlag::AtA2;
-        }
-    }
-    // the segments' original directions
-    let rev_sides = |sides: &mut [[i32; 2]; 2], w: usize| {
-        sides[w].swap(0, 1);
-        sides[1 - w] = [-sides[1 - w][0], -sides[1 - w][1]];
-    };
-    if a_rev {
-        rev_sides(&mut sides, 0);
-        dist_a1_ip = dist_a1_a2 - dist_a1_ip;
-        flag = match flag {
-            IpFlag::AtA1 => IpFlag::AtA2,
-            IpFlag::AtA2 => IpFlag::AtA1,
-            f => f,
-        };
-    }
-    if b_rev {
-        rev_sides(&mut sides, 1);
-        dist_b1_ip = dist_b1_b2 - dist_b1_ip;
-        flag = match flag {
-            IpFlag::AtB1 => IpFlag::AtB2,
-            IpFlag::AtB2 => IpFlag::AtB1,
-            f => f,
-        };
-    }
-    let ip = match flag {
-        IpFlag::Inters => Pt { x: lon * r2d(), y: lat * r2d() },
-        IpFlag::AtA1 => p0,
-        IpFlag::AtA2 => p1,
-        IpFlag::AtB1 => q0,
-        IpFlag::AtB2 => q1,
-    };
-    Relation::Crosses { sides, ip, ra: (dist_a1_ip, dist_a1_a2), rb: (dist_b1_ip, dist_b1_b2) }
-}
-
-// ---------------------------------------------------------------------------------------------
 // Sjöberg's intersection (order 1, Andoyer's inverse, the unit spheroid)
 
 /// `sjoberg_intersection_spherical_02::apply_alt`: the longitude and tan(latitude).
 #[allow(clippy::too_many_arguments)]
 fn sjoberg_spherical(lon1: f64, lat1: f64, lon_a2: f64, lat_a2: f64, lon2: f64, lat2: f64, lon_b2: f64, lat_b2: f64) -> Option<(f64, f64)> {
-    let (cos_lon1, sin_lon1) = (lon1.cos(), lon1.sin());
-    let (cos_lon2, sin_lon2) = (lon2.cos(), lon2.sin());
-    let (sin_lat1, sin_lat2) = (lat1.sin(), lat2.sin());
-    let (cos_lat1, cos_lat2) = (lat1.cos(), lat2.cos());
-    let tan_lat_a2 = lat_a2.tan();
-    let tan_lat_b2 = lat_b2.tan();
+    let (cos_lon1, sin_lon1) = (libm::cos(lon1), libm::sin(lon1));
+    let (cos_lon2, sin_lon2) = (libm::cos(lon2), libm::sin(lon2));
+    let (sin_lat1, sin_lat2) = (libm::sin(lat1), libm::sin(lat2));
+    let (cos_lat1, cos_lat2) = (libm::cos(lat1), libm::cos(lat2));
+    let tan_lat_a2 = libm::tan(lat_a2);
+    let tan_lat_b2 = libm::tan(lat_b2);
     let tan_lat1 = sin_lat1 / cos_lat1;
     let tan_lat2 = sin_lat2 / cos_lat2;
     let dlon1 = lon_a2 - lon1;
-    let sin_dlon1 = dlon1.sin();
+    let sin_dlon1 = libm::sin(dlon1);
     let dlon2 = lon_b2 - lon2;
-    let sin_dlon2 = dlon2.sin();
-    let cos_dlon1 = dlon1.cos();
-    let cos_dlon2 = dlon2.cos();
-    let tan_alpha1_x = cos_lat1 * tan_lat_a2 - sin_lat1 * cos_dlon1;
-    let tan_alpha2_x = cos_lat2 * tan_lat_b2 - sin_lat2 * cos_dlon2;
+    let sin_dlon2 = libm::sin(dlon2);
+    let cos_dlon1 = libm::cos(dlon1);
+    let cos_dlon2 = libm::cos(dlon2);
+    let tan_alpha1_x = cos_lat1.mul_add(tan_lat_a2, -(sin_lat1 * cos_dlon1));
+    let tan_alpha2_x = cos_lat2.mul_add(tan_lat_b2, -(sin_lat2 * cos_dlon2));
     let vertical1 = feq(sin_dlon1, 0.0) || feq(tan_alpha1_x, 0.0);
     let vertical2 = feq(sin_dlon2, 0.0) || feq(tan_alpha2_x, 0.0);
     let (mut tan_alpha1, mut tan_alpha2) = (0.0, 0.0);
@@ -1088,9 +733,9 @@ fn sjoberg_spherical(lon1: f64, lat1: f64, lon_a2: f64, lat_a2: f64, lon2: f64, 
         let t1 = tan_alpha1 * cos_lat1;
         let t2 = tan_alpha2 * cos_lat2;
         let t1t2 = t1 * t2;
-        let tan_lon_y = t1 * sin_lon2 - t2 * sin_lon1 + t1t2 * (tan_lat1 * cos_lon1 - tan_lat2 * cos_lon2);
-        let tan_lon_x = t1 * cos_lon2 - t2 * cos_lon1 - t1t2 * (tan_lat1 * sin_lon1 - tan_lat2 * sin_lon2);
-        lon = tan_lon_y.atan2(tan_lon_x);
+        let tan_lon_y = t1t2.mul_add(tan_lat1.mul_add(cos_lon1, -(tan_lat2 * cos_lon2)), t1.mul_add(sin_lon2, -(t2 * sin_lon1)));
+        let tan_lon_x = (-t1t2).mul_add(tan_lat1.mul_add(sin_lon1, -(tan_lat2 * sin_lon2)), t1.mul_add(cos_lon2, -(t2 * cos_lon1)));
+        lon = libm::atan2(tan_lon_y, tan_lon_x);
     }
     let lon_2 = if lon > 0.0 { lon - PI } else { lon + PI };
     let ld = |a: f64, b: f64| lon_dist_rad(a, b).abs();
@@ -1099,17 +744,17 @@ fn sjoberg_spherical(lon1: f64, lat1: f64, lon_a2: f64, lat_a2: f64, lon2: f64, 
     if lon_dist2 < lon_dist1 {
         lon = lon_2;
     }
-    let (sin_lon, cos_lon) = (lon.sin(), lon.cos());
+    let (sin_lon, cos_lon) = (libm::sin(lon), libm::cos(lon));
     let tan_lat = if tan_alpha1.abs() >= tan_alpha2.abs() {
-        let sin_dlon_1 = sin_lon * cos_lon1 - cos_lon * sin_lon1;
-        let cos_dlon_1 = cos_lon * cos_lon1 + sin_lon * sin_lon1;
-        let lat_y_1 = sin_dlon_1 + tan_alpha1 * sin_lat1 * cos_dlon_1;
+        let sin_dlon_1 = sin_lon.mul_add(cos_lon1, -(cos_lon * sin_lon1));
+        let cos_dlon_1 = cos_lon.mul_add(cos_lon1, sin_lon * sin_lon1);
+        let lat_y_1 = (tan_alpha1 * sin_lat1).mul_add(cos_dlon_1, sin_dlon_1);
         let lat_x_1 = tan_alpha1 * cos_lat1;
         lat_y_1 / lat_x_1
     } else {
-        let sin_dlon_2 = sin_lon * cos_lon2 - cos_lon * sin_lon2;
-        let cos_dlon_2 = cos_lon * cos_lon2 + sin_lon * sin_lon2;
-        let lat_y_2 = sin_dlon_2 + tan_alpha2 * sin_lat2 * cos_dlon_2;
+        let sin_dlon_2 = sin_lon.mul_add(cos_lon2, -(cos_lon * sin_lon2));
+        let cos_dlon_2 = cos_lon.mul_add(cos_lon2, sin_lon * sin_lon2);
+        let lat_y_2 = (tan_alpha2 * sin_lat2).mul_add(cos_dlon_2, sin_dlon_2);
         let lat_x_2 = tan_alpha2 * cos_lat2;
         lat_y_2 / lat_x_2
     };
@@ -1140,12 +785,12 @@ impl Geodesic {
     fn new(lon: f64, lat: f64, alpha: f64, f: f64) -> Self {
         let one_minus_f = 1.0 - f;
         let e_sqr = f * (2.0 - f);
-        let tan_latj = lat.tan();
+        let tan_latj = libm::tan(lat);
         let tan_betaj = one_minus_f * tan_latj;
-        let betaj = tan_betaj.atan();
-        let sin_betaj = betaj.sin();
-        let cos_betaj = betaj.cos();
-        let sin_alphaj = alpha.sin();
+        let betaj = libm::atan(tan_betaj);
+        let sin_betaj = libm::sin(betaj);
+        let cos_betaj = libm::cos(betaj);
+        let sin_alphaj = libm::sin(alpha);
         let half = PI / 2.0;
         let sign_c = if (half < alpha && alpha < PI) || (-half < alpha && alpha < 0.0) { -1.0 } else { 1.0 };
         let cj = sign_c * cos_betaj * sin_alphaj;
@@ -1154,7 +799,7 @@ impl Geodesic {
         let is_on_equator = feq(sqrt_1_cj_sqr, 0.0);
         let is_cj_zero = feq(cj, 0.0);
         let t0j = if !is_cj_zero { sqrt_1_cj_sqr / cj } else { 0.0 };
-        let asin_tj_t0j = if !is_on_equator { (tan_betaj * cj / sqrt_1_cj_sqr).asin() } else { 0.0 };
+        let asin_tj_t0j = if !is_on_equator { libm::asin(tan_betaj * cj / sqrt_1_cj_sqr) } else { 0.0 };
         Geodesic {
             lonj: lon,
             one_minus_f,
@@ -1173,8 +818,8 @@ impl Geodesic {
 
     /// `sjoberg_d_lambda_e_sqr<1>`.
     fn d_lambda(&self, sin_beta: f64) -> f64 {
-        let asin_b = (sin_beta / self.sqrt_1_cj_sqr).clamp(-1.0, 1.0).asin();
-        let asin_bj = (self.sin_betaj / self.sqrt_1_cj_sqr).asin();
+        let asin_b = libm::asin((sin_beta / self.sqrt_1_cj_sqr).clamp(-1.0, 1.0));
+        let asin_bj = libm::asin(self.sin_betaj / self.sqrt_1_cj_sqr);
         let l0 = (asin_b - asin_bj) / 2.0;
         -self.cj * self.e_sqr * l0
     }
@@ -1201,7 +846,7 @@ impl Geodesic {
         }
         let dlj = self.d_lambda(sin_beta);
         let delta_k = self.sign_lon_diff * (-self.asin_tj_t0j + dlj);
-        let asin_t_t0j = (t / self.t0j).clamp(-1.0, 1.0).asin();
+        let asin_t_t0j = libm::asin((t / self.t0j).clamp(-1.0, 1.0));
         Some(self.sign_lon_diff * asin_t_t0j + delta_k)
     }
 
@@ -1219,7 +864,7 @@ impl Geodesic {
     }
 
     fn lat(&self, t: f64) -> f64 {
-        (t / self.one_minus_f).atan()
+        libm::atan(t / self.one_minus_f)
     }
 
     fn lon_of_equator_intersection(&self) -> f64 {
@@ -1230,7 +875,7 @@ impl Geodesic {
 
 /// `sjoberg_intersection::apply` (radians): the geodesics' intersection.
 #[allow(clippy::too_many_arguments)]
-fn sjoberg_intersection(lon_a1: f64, lat_a1: f64, lon_a2: f64, lat_a2: f64, alpha_a1: f64, lon_b1: f64, lat_b1: f64, lon_b2: f64, lat_b2: f64, alpha_b1: f64) -> Option<(f64, f64)> {
+pub(super) fn sjoberg_intersection(lon_a1: f64, lat_a1: f64, lon_a2: f64, lat_a2: f64, alpha_a1: f64, lon_b1: f64, lat_b1: f64, lon_b2: f64, lat_b2: f64, alpha_b1: f64) -> Option<(f64, f64)> {
     let f = flattening(1.0, unit_b());
     let one_minus_f = 1.0 - f;
     let g1 = Geodesic::new(lon_a1, lat_a1, alpha_a1, f);
@@ -1259,10 +904,10 @@ fn sjoberg_intersection(lon_a1: f64, lat_a1: f64, lon_a2: f64, lat_a2: f64, alph
     }
     let (lon_sph, tan_lat_sph) = sjoberg_spherical(lon_a1, lat_a1, lon_a2, lat_a2, lon_b1, lat_b1, lon_b2, lat_b2).unwrap_or((0.0, 0.0));
     if feq(f, 0.0) {
-        return Some((lon_sph, tan_lat_sph.atan()));
+        return Some((lon_sph, libm::atan(tan_lat_sph)));
     }
     let t = one_minus_f * tan_lat_sph;
-    let beta = t.atan();
+    let beta = libm::atan(t);
     if let Some((lon, lat)) = newton(&g1, &g2, beta, t, lon1_minus_lon2, lon_sph)
         && lon_ok(&g1, lon_a1, lon_a2, lon)
         && lon_ok(&g2, lon_b1, lon_b2, lon)
@@ -1284,13 +929,13 @@ fn newton(g1: &Geodesic, g2: &Geodesic, mut beta: f64, mut t: f64, lon1_minus_lo
     }
     let mut abs_dbeta_last = 0.0;
     for i in 0..10 {
-        let cos_beta = beta.cos();
+        let cos_beta = libm::cos(beta);
         if feq(cos_beta, 0.0) {
             return None;
         }
-        let sin_beta = beta.sin();
+        let sin_beta = libm::sin(beta);
         let cos_beta_sqr = cos_beta * cos_beta;
-        let g = 1.0 - e_sqr * cos_beta_sqr;
+        let g = (-e_sqr).mul_add(cos_beta_sqr, 1.0);
         let (mut f1, mut f2) = (0.0, 0.0);
         if !g1.is_cj_zero {
             lon1_diff = g1.lon_diff(sin_beta, t)?;
@@ -1322,7 +967,7 @@ fn newton(g1: &Geodesic, g2: &Geodesic, mut beta: f64, mut t: f64, lon1_minus_lo
             break;
         }
         beta -= dbeta;
-        t = beta.tan();
+        t = libm::tan(beta);
     }
     let lat = g1.lat(t);
     let lon = if !g1.is_cj_zero { g1.lonj + lon1_diff } else { g2.lonj + lon2_diff };
@@ -1354,7 +999,7 @@ struct C07 {
 
 fn c07_one(sin_beta: f64, t: f64, g: &Geodesic, v: &Vertex, lon_sph: f64, check: bool) -> Option<(f64, f64)> {
     let (before, behind) = g.k_diffs(sin_beta, v, check)?;
-    let asin_t_t0j = if !g.is_cj_zero { (t / g.t0j).clamp(-1.0, 1.0).asin() } else { 0.0 };
+    let asin_t_t0j = if !g.is_cj_zero { libm::asin((t / g.t0j).clamp(-1.0, 1.0)) } else { 0.0 };
     let s = g.sign_lon_diff * asin_t_t0j;
     let lon_before = g.lonj + s + before;
     let lon_behind = g.lonj - s + behind;
@@ -1364,7 +1009,7 @@ fn c07_one(sin_beta: f64, t: f64, g: &Geodesic, v: &Vertex, lon_sph: f64, check:
 }
 
 fn calc_ts(t: f64, k: f64, g1: &Geodesic, g2: &Geodesic) -> (f64, f64) {
-    let kk = k.sin();
+    let kk = libm::sin(k);
     let (mut t1, mut t2);
     if g1.is_cj_zero {
         t1 = kk * g2.t0j;
@@ -1415,7 +1060,7 @@ fn c07_step(sin_beta: f64, t: f64, l12: f64, g1: &Geodesic, v1: &Vertex, g2: &Ge
 }
 
 fn c07_update(t: &mut f64, beta: &mut f64, t_new: f64) -> bool {
-    let beta_new = t_new.atan();
+    let beta_new = libm::atan(t_new);
     let dbeta = beta_new - *beta;
     *beta = beta_new;
     *t = t_new;
@@ -1424,7 +1069,7 @@ fn c07_update(t: &mut f64, beta: &mut f64, t_new: f64) -> bool {
 
 fn converge_07(g1: &Geodesic, g2: &Geodesic, mut beta: f64, mut t: f64, l12: f64, lon_sph: f64) -> Option<(f64, f64)> {
     let (v1, v2) = (g1.vertex(), g2.vertex());
-    let mut result = c07_step(beta.sin(), t, l12, g1, &v1, g2, &v2, lon_sph, false)?;
+    let mut result = c07_step(libm::sin(beta), t, l12, g1, &v1, g2, &v2, lon_sph, false)?;
     let mut t_direction = 0;
     let mut lon_diff_prev = lon_dist_rad(result.lon1, result.lon2).abs();
     for _ in 2..20 {
@@ -1443,7 +1088,7 @@ fn converge_07(g1: &Geodesic, g2: &Geodesic, mut beta: f64, mut t: f64, l12: f64
             break;
         }
         let mut try_t2 = false;
-        match c07_step(beta1.sin(), t1, l12, g1, &v1, g2, &v2, lon_sph, true) {
+        match c07_step(libm::sin(beta1), t1, l12, g1, &v1, g2, &v2, lon_sph, true) {
             Some(cur) => {
                 let d1 = lon_dist_rad(cur.lon1, cur.lon2).abs();
                 if lon_diff_prev > d1 {
@@ -1470,7 +1115,7 @@ fn converge_07(g1: &Geodesic, g2: &Geodesic, mut beta: f64, mut t: f64, l12: f64
             if c07_update(&mut t2, &mut beta2, c2) {
                 break;
             }
-            let cur = c07_step(beta2.sin(), t2, l12, g1, &v1, g2, &v2, lon_sph, true)?;
+            let cur = c07_step(libm::sin(beta2), t2, l12, g1, &v1, g2, &v2, lon_sph, true)?;
             let d2 = lon_dist_rad(cur.lon1, cur.lon2).abs();
             if lon_diff_prev > d2 {
                 t_direction *= -1;

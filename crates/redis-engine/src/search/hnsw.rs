@@ -48,6 +48,24 @@ impl<T: Copy> StdHeap<T> {
         StdHeap { v: Vec::new(), less }
     }
 
+    /// `priority_queue(first, last)`: the elements in order, then `std::make_heap`.
+    pub fn from_vec(v: Vec<T>, less: fn(&T, &T) -> bool) -> Self {
+        let mut h = StdHeap { v, less };
+        let len = h.v.len();
+        if len >= 2 {
+            let mut parent = (len - 2) / 2;
+            loop {
+                let value = h.v[parent];
+                h.adjust(parent, len, value);
+                if parent == 0 {
+                    break;
+                }
+                parent -= 1;
+            }
+        }
+        h
+    }
+
     pub fn len(&self) -> usize {
         self.v.len()
     }

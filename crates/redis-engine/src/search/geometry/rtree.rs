@@ -276,8 +276,9 @@ impl RTree {
         out
     }
 
-    /// The values whose boxes satisfy `pred`.
-    pub fn query(&self, mut pred: impl FnMut(&Rect) -> bool) -> Vec<u64> {
+    /// The spatial query's visitor: the children of internal nodes whose boxes satisfy
+    /// `node`, the values of the leaves reached that satisfy `value`, depth first.
+    pub fn query(&self, mut node: impl FnMut(&Rect) -> bool, mut value: impl FnMut(&Rect, u64) -> bool) -> Vec<u64> {
         let mut out = Vec::new();
         let Some(root) = self.root else { return out };
         let mut stack = vec![root];
@@ -285,14 +286,16 @@ impl RTree {
             match self.node(n) {
                 Node::Leaf(v) => {
                     for (b, id) in v {
-                        if pred(b) {
+                        if value(b, *id) {
                             out.push(*id);
                         }
                     }
                 }
                 Node::Internal(v) => {
-                    for (_, c) in v.iter().rev() {
-                        stack.push(*c);
+                    for (b, c) in v.iter().rev() {
+                        if node(b) {
+                            stack.push(*c);
+                        }
                     }
                 }
             }
@@ -432,7 +435,7 @@ mod tests {
         }
         assert_eq!(t.len(), 0);
         assert_eq!(bytes, NODE_BYTES);
-        let mut ids = t.query(|_| true);
+        let mut ids = t.query(|_| true, |_, _| true);
         ids.sort();
         assert!(ids.is_empty());
     }

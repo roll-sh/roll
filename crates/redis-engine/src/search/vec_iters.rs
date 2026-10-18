@@ -681,11 +681,11 @@ fn introsort_loop<T>(v: &mut [T], mut depth: usize, less: impl Fn(&T, &T) -> boo
         move_median_to_first(v, 0, 1, mid, last - 1, less);
         let (mut lo, mut hi) = (1, last);
         let cut = loop {
-            while less(&v[lo], &v[0]) {
+            while lo + 1 < last && less(&v[lo], &v[0]) {
                 lo += 1;
             }
             hi -= 1;
-            while less(&v[0], &v[hi]) {
+            while hi > 0 && less(&v[0], &v[hi]) {
                 hi -= 1;
             }
             if lo >= hi {
@@ -729,7 +729,8 @@ fn insertion_sort<T>(v: &mut [T], less: impl Fn(&T, &T) -> bool + Copy) {
 }
 
 fn unguarded_linear_insert<T>(v: &mut [T], mut i: usize, less: impl Fn(&T, &T) -> bool) {
-    while less(&v[i], &v[i - 1]) {
+    // (the guards only matter for comparators that aren't strict weak orders)
+    while i > 0 && less(&v[i], &v[i - 1]) {
         v.swap(i, i - 1);
         i -= 1;
     }

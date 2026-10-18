@@ -3,9 +3,13 @@
 //! the CONTAINS / WITHIN / DISJOINT / INTERSECTS queries, and the index's memory report.
 
 pub mod algo;
+#[cfg(test)]
+mod difftest;
 mod flatmap;
 pub mod geographic;
+mod relate;
 mod rtree;
+mod turns;
 pub mod valid;
 pub mod wkt;
 
@@ -165,22 +169,25 @@ impl GeometryIndex {
                 Geom::Poly(p) => algo::within(cs, a, p),
             }
         };
-        let mut out = Vec::new();
-        let ids = self.tree.query(|_| true);
-        for id in ids {
-            let Some(g) = self.geoms.get(&id) else { continue };
-            let m = algo::mbr(cs, g);
-            let hit = match query_type {
-                CONTAINS => algo::box_within(cs, &qm, &m) && within_filter(&q, g),
-                WITHIN => algo::box_within(cs, &m, &qm) && within_filter(g, &q),
-                DISJOINT => !algo::box_intersects(cs, &m, &qm) || !algo::intersects(cs, g, &q),
-                INTERSECTS => algo::box_intersects(cs, &m, &qm) && algo::intersects(cs, g, &q),
-                _ => return Err(b"unknown query".to_vec()),
-            };
-            if hit {
-                out.push(id);
-            }
-        }
+        let geoms = &self.geoms;
+        // the spatial predicate's node check (`intersects`, `covers` for CONTAINS), the value's
+        // box predicate and the geometry filter
+        let out = match query_type {
+            CONTAINS => self.tree.query(
+                |n| algo::box_covered_by(cs, &qm, n),
+                |m, id| algo::box_within(cs, &qm, m) && geoms.get(&id).is_some_and(|g| within_filter(&q, g)),
+            ),
+            WITHIN => self.tree.query(
+                |n| algo::box_intersects(cs, n, &qm),
+                |m, id| algo::box_within(cs, m, &qm) && geoms.get(&id).is_some_and(|g| within_filter(g, &q)),
+            ),
+            DISJOINT => self.tree.query(|_| true, |m, id| !algo::box_intersects(cs, m, &qm) || geoms.get(&id).is_some_and(|g| !algo::intersects(cs, g, &q))),
+            INTERSECTS => self.tree.query(
+                |n| algo::box_intersects(cs, n, &qm),
+                |m, id| algo::box_intersects(cs, m, &qm) && geoms.get(&id).is_some_and(|g| algo::intersects(cs, g, &q)),
+            ),
+            _ => return Err(b"unknown query".to_vec()),
+        };
         Ok(out)
     }
 }

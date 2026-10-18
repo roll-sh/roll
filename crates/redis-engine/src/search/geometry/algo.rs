@@ -8,9 +8,13 @@ use super::{Cs, Geom, Poly, Pt, Rect, Ring};
 
 // ---------------------------------------------------------------------------------------------
 // Sides and points
+//
+// The reference build contracts a product into the sum or difference of the same expression
+// (`-ffp-contract=on`: the left product when both sides are products, never across statements
+// or through calls): those spots use `mul_add` here, and the trigonometry is musl's (`libm`).
 
 /// The side of `p` relative to the segment `a`→`b`: 1 left, -1 right, 0 collinear. On the
-/// spheroid, relative to the great circle through `a` and `b`.
+/// spheroid, relative to the geodesic through `a` and `b`.
 pub fn side(cs: Cs, a: Pt, b: Pt, p: Pt) -> i32 {
     match cs {
         Cs::Flat => side_by_triangle(a, b, p),
@@ -19,76 +23,9 @@ pub fn side(cs: Cs, a: Pt, b: Pt, p: Pt) -> i32 {
             if equals(cs, p, a) || equals(cs, p, b) || equals(cs, a, b) {
                 return 0;
             }
-            azimuth_side_value(andoyer_azimuth(a, p), andoyer_azimuth(a, b))
+            azimuth_side_value(super::geographic::azimuth(a, p), super::geographic::azimuth(a, b))
         }
     }
-}
-
-/// WGS84's flattening, `(a - b) / a`.
-pub fn flattening() -> f64 {
-    (6378137.0 - 6_356_752.314_245_179) / 6378137.0
-}
-
-/// `andoyer_inverse`'s forward azimuth between two points in degrees.
-pub fn andoyer_azimuth(p1: Pt, p2: Pt) -> f64 {
-    use std::f64::consts::PI;
-    let (lon1, lat1, lon2, lat2) = (p1.x.to_radians(), p1.y.to_radians(), p2.x.to_radians(), p2.y.to_radians());
-    if feq(lon1, lon2) && feq(lat1, lat2) {
-        return 0.0;
-    }
-    let f = flattening();
-    let dlon = lon2 - lon1;
-    let (sin_dlon, cos_dlon) = (dlon.sin(), dlon.cos());
-    let (sin_lat1, cos_lat1) = (lat1.sin(), lat1.cos());
-    let (sin_lat2, cos_lat2) = (lat2.sin(), lat2.cos());
-    let cos_d = (sin_lat1 * sin_lat2 + cos_lat1 * cos_lat2 * cos_dlon).clamp(-1.0, 1.0);
-    let d = cos_d.acos();
-    let sin_d = d.sin();
-    if feq(sin_d, 0.0) {
-        if cos_d >= 0.0 {
-            return 0.0;
-        }
-        return if !feq(sin_lat1, 1.0) { 0.0 } else { PI };
-    }
-    let mut a = 0.0;
-    let mut u = 0.0;
-    if feq(cos_lat2, 0.0) {
-        if sin_lat2 < 0.0 {
-            a = PI;
-        }
-    } else {
-        let tan_lat2 = sin_lat2 / cos_lat2;
-        let m = cos_lat1 * tan_lat2 - sin_lat1 * cos_dlon;
-        a = sin_dlon.atan2(m);
-        u = (f / 2.0) * (cos_lat1 * cos_lat1) * (2.0 * a).sin();
-    }
-    let mut v = 0.0;
-    if !feq(cos_lat1, 0.0) {
-        let tan_lat1 = sin_lat1 / cos_lat1;
-        let n = cos_lat2 * tan_lat1 - sin_lat2 * cos_dlon;
-        let b = sin_dlon.atan2(n);
-        v = (f / 2.0) * (cos_lat2 * cos_lat2) * (2.0 * b).sin();
-    }
-    let t = d / sin_d;
-    let da = v * t - u;
-    let mut az = a - da;
-    // `normalize_azimuth`.
-    if a >= 0.0 {
-        if da >= 0.0 {
-            if az < 0.0 {
-                az = 0.0;
-            }
-        } else if az > PI {
-            az = PI;
-        }
-    } else if da <= 0.0 {
-        if az > 0.0 {
-            az = 0.0;
-        }
-    } else if az < -PI {
-        az = -PI;
-    }
-    az
 }
 
 /// `azimuth_side_value`: the turn from `a12` to `a1p`, positive azimuths on the right.
@@ -138,6 +75,11 @@ fn less_eps(a: Pt, b: Pt) -> bool {
     false
 }
 
+/// `detail::determinant`: `ux * vy - uy * vx` (the first product fused).
+pub fn determinant(ux: f64, uy: f64, vx: f64, vy: f64) -> f64 {
+    ux.mul_add(vy, -(uy * vx))
+}
+
 /// `side_by_triangle` for doubles: the points ordered so the computation does not depend on
 /// the segment's direction, zero within an epsilon scaled by the largest difference.
 fn side_by_triangle(p1: Pt, p2: Pt, p: Pt) -> i32 {
@@ -150,7 +92,7 @@ fn side_by_triangle(p1: Pt, p2: Pt, p: Pt) -> i32 {
         let dpx = q.x - s1.x;
         let dpy = q.y - s1.y;
         let factor = dx.abs().max(dy.abs()).max(dpx.abs()).max(dpy.abs()).max(1.0);
-        (dx * dpy - dy * dpx, factor)
+        (determinant(dx, dy, dpx, dpy), factor)
     };
     let (s, factor) = if less_eps(p, p1) {
         if less_eps(p, p2) { value(p, p1, p2) } else { value(p2, p, p1) }
@@ -169,85 +111,70 @@ fn side_by_triangle(p1: Pt, p2: Pt, p: Pt) -> i32 {
     }
 }
 
+/// `arithmetic::side_value` of `p` against the line `a x + b y + c = 0`.
+fn line_side_value(a: f64, b: f64, c: f64, p: Pt) -> f64 {
+    a.mul_add(p.x, b * p.y) + c
+}
+
 /// `get_distance_measure` in the plane: the side value of `p` against the infinite line through
-/// `p1` and `p2` (zero on the spheroid).
+/// `p1` and `p2` (`make_infinite_line`; zero on the spheroid).
 pub fn distance_measure(cs: Cs, p1: Pt, p2: Pt, p: Pt) -> f64 {
     match cs {
         Cs::Flat => {
             let a = p1.y - p2.y;
             let b = p2.x - p1.x;
-            let c = -a * p1.x - b * p1.y;
-            a * p.x + b * p.y + c
+            let c = (-a).mul_add(p1.x, -(b * p1.y));
+            line_side_value(a, b, c, p)
         }
         Cs::Sphere => 0.0,
     }
 }
 
-type V3 = [f64; 3];
-
-fn unit(p: Pt) -> V3 {
-    let (lon, lat) = (p.x.to_radians(), p.y.to_radians());
-    [lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()]
-}
-
-fn cross(a: V3, b: V3) -> V3 {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-
-fn dot(a: V3, b: V3) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-/// `normalize_longitude`: into (-180, 180].
-pub fn norm_lon(l: f64) -> f64 {
-    if l > -180.0 && l <= 180.0 {
-        return l;
+/// `strategy::normalize::spherical_point` with `exact = false`: the longitude into
+/// (-180, 180] (within a float epsilon of ±180 it is 180), 0 at the poles.
+fn normalize_inexact(p: Pt) -> Pt {
+    let eps = f32::EPSILON as f64;
+    let mut lon = p.x;
+    if (lon.abs() - 180.0).abs() <= eps {
+        lon = 180.0;
+    } else if lon > 180.0 {
+        lon = (lon + 180.0) % 360.0 - 180.0;
+        if (lon + 180.0).abs() <= eps {
+            lon = 180.0;
+        }
+    } else if lon < -180.0 {
+        lon = (lon - 180.0) % 360.0 + 180.0;
     }
-    let r = (l + 180.0).rem_euclid(360.0) - 180.0;
-    if r == -180.0 { 180.0 } else { r }
+    if feq(p.y.abs(), 90.0) {
+        lon = 0.0;
+    }
+    Pt { x: lon, y: p.y }
 }
 
-/// `equals_point_point`: on the spheroid, longitudes compare normalized and every point of a
-/// pole is the pole.
+/// `equals_point_point` (`cartesian_point_point`, `spherical_point_point`): the coordinates
+/// equal within the epsilon, on the spheroid after normalizing both points.
 pub fn equals(cs: Cs, a: Pt, b: Pt) -> bool {
     match cs {
         Cs::Flat => feq(a.x, b.x) && feq(a.y, b.y),
         Cs::Sphere => {
-            if a.y != b.y {
-                return false;
-            }
-            if a.y.abs() == 90.0 {
-                return true;
-            }
-            norm_lon(a.x) == norm_lon(b.x)
+            let (a, b) = (normalize_inexact(a), normalize_inexact(b));
+            feq(a.x, b.x) && feq(a.y, b.y)
         }
     }
 }
 
-/// `direction_code` for collinear `a`, `b`, `p`: 1 when `p` continues past `b` in the direction
-/// `a`→`b`, -1 when it goes back, 0 at `b`.
-pub fn direction_code(cs: Cs, a: Pt, b: Pt, p: Pt) -> i32 {
-    let v = match cs {
-        Cs::Flat => {
-            let (dx, dy) = (b.x - a.x, b.y - a.y);
-            if dx == 0.0 && dy == 0.0 {
-                return 0;
-            }
-            // `make_perpendicular_line(a, b, b)`'s side value.
-            let c = -dx * b.x - dy * b.y;
-            dx * p.x + dy * p.y + c
-        }
-        Cs::Sphere => {
-            if equals(cs, a, b) || equals(cs, b, p) {
-                return 0;
-            }
-            let (a3, b3, p3) = (unit(a), unit(b), unit(p));
-            // Along the great circle: the tangent at b pointing away from a.
-            let n = cross(a3, b3);
-            let t = cross(n, b3);
-            dot(t, p3)
-        }
-    };
+/// `direction_code_impl<cartesian_tag>` for collinear `a`, `b`, `p`: `p`'s side of the line
+/// through `b` perpendicular to `a`→`b` (1 past `b`, -1 back, 0 at it).
+fn direction_code_flat(a: Pt, b: Pt, p: Pt) -> i32 {
+    // `make_perpendicular_line(a, b, b)`
+    let la = a.y - b.y;
+    let lb = b.x - a.x;
+    let (pa, pb) = (lb, -la);
+    if feq(pa, 0.0) && feq(pb, 0.0) {
+        return 0;
+    }
+    let c = (-pa).mul_add(b.x, -(pb * b.y));
+    let v = line_side_value(pa, pb, c, p);
     if v == 0.0 {
         0
     } else if v > 0.0 {
@@ -263,7 +190,7 @@ pub fn is_spike_or_equal(cs: Cs, next: Pt, cur: Pt, prev: Pt) -> bool {
         return false;
     }
     match cs {
-        Cs::Flat => direction_code(cs, next, cur, prev) < 1,
+        Cs::Flat => direction_code_flat(next, cur, prev) < 1,
         Cs::Sphere => super::geographic::direction_code(next, cur, prev) < 1,
     }
 }
@@ -278,9 +205,16 @@ pub fn ring_area(cs: Cs, r: &[Pt]) -> f64 {
     }
     match cs {
         Cs::Flat => {
+            // `strategy::area::cartesian`: the surveyor's sum `(x1 + x2) * (y1 - y2)`.
+            // The reference's loop is vectorized four segments at a time (the products
+            // rounded, then added in order); the remaining segments run scalar, each product
+            // fused into the sum.
             let mut sum = 0.0;
-            for w in r.windows(2) {
-                sum += (w[0].x + w[1].x) * (w[0].y - w[1].y);
+            let n = r.len() - 1;
+            let vectorized = n - n % 4;
+            for (i, w) in r.windows(2).enumerate() {
+                let (a, b) = (w[0].x + w[1].x, w[0].y - w[1].y);
+                sum = if i < vectorized { sum + a * b } else { a.mul_add(b, sum) };
             }
             sum / 2.0
         }
@@ -321,9 +255,16 @@ pub fn content(b: &Rect) -> f64 {
     (b.max.x - b.min.x) * (b.max.y - b.min.y)
 }
 
-fn longitude_distance_unsigned(a: f64, b: f64) -> f64 {
-    let d = norm_lon(b - a);
+/// `longitude_distance_unsigned<degree>`: from `a` east to `b`, in [0, 360).
+pub fn longitude_distance_unsigned(a: f64, b: f64) -> f64 {
+    let mut d = b - a;
+    super::geographic::normalize_lon_deg(&mut d);
     if d < 0.0 { d + 360.0 } else { d }
+}
+
+/// `is_inverse_spheroidal_coordinates`: a box `assign_inverse` made.
+fn is_inverse(b: &Rect) -> bool {
+    b.min.x == f64::MAX && b.min.y == f64::MAX && b.max.x == f64::MIN && b.max.y == f64::MIN
 }
 
 /// `strategy::normalize::spherical_box` (`normalize_spheroidal_box_coordinates`): the corners'
@@ -360,10 +301,8 @@ fn event_after(a: &(f64, bool, usize), b: &(f64, bool, usize)) -> bool {
 /// epsilon ordered starts first), the widest gap where nothing overlaps.
 fn maximum_gap(intervals: &[(f64, f64)]) -> (f64, f64, f64) {
     // `event_greater` over (time, is_start, interval): the earliest event on top
-    let mut queue = super::super::hnsw::StdHeap::new(event_after);
-    for (i, iv) in intervals.iter().enumerate() {
-        queue.push((iv.0, true, i));
-    }
+    let starts = intervals.iter().enumerate().map(|(i, iv)| (iv.0, true, i)).collect();
+    let mut queue = super::super::hnsw::StdHeap::from_vec(starts, event_after);
     let (mut count, mut gl, mut gr) = (0usize, 0.0f64, 0.0f64);
     while !queue.is_empty() {
         let ev = queue.pop();
@@ -394,8 +333,7 @@ fn range_of_boxes(a: &Rect, b: &Rect) -> Rect {
     let boxes = [*a, *b];
     let mut intervals: Vec<(f64, f64)> = Vec::new();
     for bx in &boxes {
-        // `is_inverse_spheroidal_coordinates`
-        if bx.min.x == f64::MAX && bx.max.x == f64::MIN {
+        if is_inverse(bx) {
             continue;
         }
         if feq(bx.min.y, 90.0) || feq(bx.max.y, -90.0) {
@@ -449,10 +387,20 @@ pub fn expand(cs: Cs, b: &mut Rect, o: &Rect) {
             b.max.y = b.max.y.max(o.max.y);
         }
         Cs::Sphere => {
-            let (n1, n2) = (normalize_box(o), normalize_box(b));
+            // `envelope_box_on_spheroid`: inverse boxes are not normalized
+            let norm = |x: &Rect| if is_inverse(x) { *x } else { normalize_box(x) };
+            let (n1, n2) = (norm(o), norm(b));
             *b = range_of_boxes(&n1, &n2);
         }
     }
+}
+
+/// `expand(box, segment)` on the spheroid (`segment_on_spheroid`): the segment's envelope as it
+/// is (not normalized) with the normalized box.
+pub fn expand_segment(b: &mut Rect, p: Pt, q: Pt) {
+    let e = segment_envelope(p, q);
+    let n = if is_inverse(b) { *b } else { normalize_box(b) };
+    *b = range_of_boxes(&e, &n);
 }
 
 /// `within(box, box)`: inside the closed box with interiors (each side's extent) overlapping.
@@ -566,7 +514,7 @@ pub fn segment_envelope(a: Pt, b: Pt) -> Rect {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Point and segment relations
+// Point and polygon relations
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Loc {
@@ -575,265 +523,15 @@ pub enum Loc {
     Inside,
 }
 
-/// `p` on the segment `a`–`b` (endpoints included).
-fn on_segment(cs: Cs, a: Pt, b: Pt, p: Pt) -> bool {
-    if equals(cs, a, p) || equals(cs, b, p) {
-        return true;
-    }
-    if side(cs, a, b, p) != 0 {
-        return false;
-    }
-    match cs {
-        Cs::Flat => p.x >= a.x.min(b.x) && p.x <= a.x.max(b.x) && p.y >= a.y.min(b.y) && p.y <= a.y.max(b.y),
-        Cs::Sphere => direction_code(cs, a, p, b) > 0 && direction_code(cs, b, p, a) > 0,
-    }
-}
-
-/// The winding test of `p` against a closed ring: inside, on its boundary or outside. On the
-/// spheroid the ray goes north along `p`'s meridian (great-circle segments are monotone in
-/// longitude), in the plane along +x.
+/// The winding test of `p` against a closed ring: inside, on its boundary or outside.
 pub fn ring_loc(cs: Cs, r: &[Pt], p: Pt) -> Loc {
-    if cs == Cs::Sphere {
-        // `geographic_winding`
-        return match super::geographic::point_in_ring(r, p) {
-            1 => Loc::Inside,
-            0 => Loc::Boundary,
-            _ => Loc::Outside,
-        };
-    }
-    if r.len() < 2 {
-        return Loc::Outside;
-    }
-    let mut wn = 0i32;
-    for w in r.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        if on_segment(cs, a, b, p) {
-            return Loc::Boundary;
-        }
-        match cs {
-            Cs::Flat => {
-                if a.y <= p.y {
-                    if b.y > p.y && side(cs, a, b, p) > 0 {
-                        wn += 1;
-                    }
-                } else if b.y <= p.y && side(cs, a, b, p) < 0 {
-                    wn -= 1;
-                }
-            }
-            Cs::Sphere => {
-                let ax = p.x + norm_lon(a.x - p.x);
-                let bx = p.x + norm_lon(b.x - p.x);
-                if (bx - ax).abs() > 180.0 {
-                    continue;
-                }
-                if ax <= p.x && bx > p.x {
-                    if side(cs, a, b, p) < 0 {
-                        wn += 1;
-                    }
-                } else if bx <= p.x && ax > p.x && side(cs, a, b, p) > 0 {
-                    wn -= 1;
-                }
-            }
-        }
-    }
-    if wn != 0 { Loc::Inside } else { Loc::Outside }
+    super::relate::loc(super::relate::point_in_ring(cs, r, p))
 }
 
 /// A point against a polygon: inside the exterior and outside every hole is inside, on any
 /// ring is the boundary.
 pub fn poly_loc(cs: Cs, poly: &Poly, p: Pt) -> Loc {
-    match ring_loc(cs, &poly.outer.pts, p) {
-        Loc::Outside => return Loc::Outside,
-        Loc::Boundary => return Loc::Boundary,
-        Loc::Inside => {}
-    }
-    for h in &poly.inners {
-        match ring_loc(cs, &h.pts, p) {
-            Loc::Inside => return Loc::Outside,
-            Loc::Boundary => return Loc::Boundary,
-            Loc::Outside => {}
-        }
-    }
-    Loc::Inside
-}
-
-/// Whether the closed segments `a`–`b` and `c`–`d` share a point.
-pub fn segments_intersect(cs: Cs, a: Pt, b: Pt, c: Pt, d: Pt) -> bool {
-    let d1 = side(cs, a, b, c);
-    let d2 = side(cs, a, b, d);
-    let d3 = side(cs, c, d, a);
-    let d4 = side(cs, c, d, b);
-    if d1 * d2 < 0 && d3 * d4 < 0 {
-        return true;
-    }
-    (d1 == 0 && on_segment(cs, a, b, c)) || (d2 == 0 && on_segment(cs, a, b, d)) || (d3 == 0 && on_segment(cs, c, d, a)) || (d4 == 0 && on_segment(cs, c, d, b))
-}
-
-/// The parameters (along `a`→`b`, in (0, 1)) where `c`–`d` meets the segment: the crossing, or
-/// the ends of a collinear overlap.
-fn split_params(cs: Cs, a: Pt, b: Pt, c: Pt, d: Pt, out: &mut Vec<f64>) {
-    let d1 = side(cs, a, b, c);
-    let d2 = side(cs, a, b, d);
-    let param = |p: Pt| -> f64 {
-        let (dx, dy) = (b.x - a.x, b.y - a.y);
-        if dx.abs() >= dy.abs() { (p.x - a.x) / dx } else { (p.y - a.y) / dy }
-    };
-    if d1 == 0 && d2 == 0 {
-        for p in [c, d] {
-            if on_segment(cs, a, b, p) {
-                out.push(param(p));
-            }
-        }
-        return;
-    }
-    if !segments_intersect(cs, a, b, c, d) {
-        return;
-    }
-    if d1 == 0 {
-        out.push(param(c));
-        return;
-    }
-    if d2 == 0 {
-        out.push(param(d));
-        return;
-    }
-    let d3 = side(cs, c, d, a);
-    let d4 = side(cs, c, d, b);
-    if d3 == 0 || d4 == 0 {
-        return;
-    }
-    // A proper crossing: where the line through c and d cuts a→b.
-    let den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
-    if den != 0.0 {
-        out.push(((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den);
-    }
-}
-
-fn rings(p: &Poly) -> impl Iterator<Item = &Ring> {
-    std::iter::once(&p.outer).chain(p.inners.iter())
-}
-
-fn edges(p: &Poly) -> impl Iterator<Item = (Pt, Pt)> + '_ {
-    rings(p).flat_map(|r| r.pts.windows(2).map(|w| (w[0], w[1])))
-}
-
-/// The pieces of the segment `a`→`b` between its meetings with `other`'s boundary: each piece's
-/// midpoint, in order.
-fn piece_midpoints(cs: Cs, a: Pt, b: Pt, other: &Poly) -> Vec<Pt> {
-    let mut ts = vec![0.0, 1.0];
-    for (c, d) in edges(other) {
-        split_params(cs, a, b, c, d, &mut ts);
-    }
-    ts.retain(|t| (0.0..=1.0).contains(t));
-    ts.sort_by(f64::total_cmp);
-    ts.dedup();
-    let mut out = Vec::new();
-    for w in ts.windows(2) {
-        let t = (w[0] + w[1]) / 2.0;
-        out.push(Pt { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
-    }
-    out
-}
-
-/// A point a fraction `t` along the great circle from `a` to `b`.
-fn sphere_lerp(a: Pt, b: Pt, t: f64) -> Pt {
-    let (ua, ub) = (unit(a), unit(b));
-    let v = [ua[0] * (1.0 - t) + ub[0] * t, ua[1] * (1.0 - t) + ub[1] * t, ua[2] * (1.0 - t) + ub[2] * t];
-    let n = dot(v, v).sqrt();
-    let lat = (v[2] / n).clamp(-1.0, 1.0).asin().to_degrees();
-    let lon = v[1].atan2(v[0]).to_degrees();
-    Pt { x: lon, y: lat }
-}
-
-/// `covered_by(a, b)` for polygons on the spheroid: no boundary of `a` crossing out of `b` (the
-/// geographic segments' relations), every piece of it between the meetings on `b`'s boundary
-/// or inside, no hole of `b` inside `a`.
-fn poly_covered_by_sphere(a: &Poly, b: &Poly) -> bool {
-    use super::geographic::{Relation, relate};
-    let ratio = |r: (f64, f64)| -> f64 { if r.1 == 0.0 { 0.0 } else { r.0 / r.1 } };
-    // a piece of `a`'s boundary running along `b`'s the same way: the interiors (on the rings'
-    // right) meet there
-    let mut along = false;
-    let mut any_inside = false;
-    for (p0, p1) in edges(a) {
-        if equals(Cs::Sphere, p0, p1) {
-            continue;
-        }
-        let mut ts = vec![0.0, 1.0];
-        let mut spans: Vec<(f64, f64, bool)> = Vec::new();
-        for (q0, q1) in edges(b) {
-            if equals(Cs::Sphere, q0, q1) {
-                continue;
-            }
-            match relate(p0, p1, q0, q1) {
-                Relation::Crosses { sides, ra, .. } => {
-                    let proper = sides[0][0] * sides[0][1] == -1 && sides[1][0] * sides[1][1] == -1;
-                    if proper {
-                        return false;
-                    }
-                    ts.push(ratio(ra));
-                }
-                Relation::Collinear { opposite, rb_from, rb_to, .. } => {
-                    let (t1, t2) = (ratio(rb_from).clamp(0.0, 1.0), ratio(rb_to).clamp(0.0, 1.0));
-                    spans.push((t1.min(t2), t1.max(t2), opposite));
-                    ts.push(t1);
-                    ts.push(t2);
-                }
-                _ => {}
-            }
-        }
-        ts.retain(|t| (0.0..=1.0).contains(t));
-        ts.sort_by(f64::total_cmp);
-        ts.dedup();
-        for w in ts.windows(2) {
-            if w[1] - w[0] <= 0.0 {
-                continue;
-            }
-            let t = (w[0] + w[1]) / 2.0;
-            if let Some(&(_, _, opposite)) = spans.iter().find(|&&(lo, hi, _)| lo <= t && t <= hi) {
-                along |= !opposite;
-                continue;
-            }
-            match poly_loc(Cs::Sphere, b, sphere_lerp(p0, p1, t)) {
-                Loc::Outside => return false,
-                Loc::Inside => any_inside = true,
-                Loc::Boundary => {}
-            }
-        }
-    }
-    for h in &b.inners {
-        if let Some(&f) = h.pts.first()
-            && poly_loc(Cs::Sphere, a, f) == Loc::Inside
-        {
-            return false;
-        }
-    }
-    // the boundaries coincide: the interiors meet unless `a` fills a hole of `b`
-    any_inside || along
-}
-
-/// `covered_by(a, b)` for polygons: `a`'s boundary in `b`, and no hole of `b` inside `a`.
-fn poly_covered_by(cs: Cs, a: &Poly, b: &Poly) -> bool {
-    if cs == Cs::Sphere {
-        return poly_covered_by_sphere(a, b);
-    }
-    for (p, q) in edges(a) {
-        for m in piece_midpoints(cs, p, q, b) {
-            if poly_loc(cs, b, m) == Loc::Outside {
-                return false;
-            }
-        }
-    }
-    for h in &b.inners {
-        for w in h.pts.windows(2) {
-            for m in piece_midpoints(cs, w[0], w[1], a) {
-                if poly_loc(cs, a, m) == Loc::Inside {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    super::relate::loc(super::relate::point_in_poly(cs, poly, p))
 }
 
 /// `bg::intersects`.
@@ -841,39 +539,15 @@ pub fn intersects(cs: Cs, a: &Geom, b: &Geom) -> bool {
     match (a, b) {
         (Geom::Point(p), Geom::Point(q)) => equals(cs, *p, *q),
         (Geom::Point(p), Geom::Poly(q)) | (Geom::Poly(q), Geom::Point(p)) => poly_loc(cs, q, *p) != Loc::Outside,
-        (Geom::Poly(p), Geom::Poly(q)) if cs == Cs::Sphere => {
-            // `disjoint::areal_areal`: a segment relation, or a ring's first point covered by
-            // the other polygon
-            use super::geographic::{Relation, relate};
-            for (a1, a2) in edges(p) {
-                for (b1, b2) in edges(q) {
-                    if !matches!(relate(a1, a2, b1, b2), Relation::Disjoint | Relation::Degenerate) {
-                        return true;
-                    }
-                }
-            }
-            let containing = |g1: &Poly, g2: &Poly| rings(g2).any(|r| r.pts.first().is_some_and(|&f| poly_loc(cs, g1, f) != Loc::Outside));
-            containing(p, q) || containing(q, p)
-        }
-        (Geom::Poly(p), Geom::Poly(q)) => {
-            for (a1, a2) in edges(p) {
-                for (b1, b2) in edges(q) {
-                    if segments_intersect(cs, a1, a2, b1, b2) {
-                        return true;
-                    }
-                }
-            }
-            let inside = |x: &Poly, y: &Poly| x.outer.pts.first().is_some_and(|&f| poly_loc(cs, y, f) != Loc::Outside);
-            inside(p, q) || inside(q, p)
-        }
+        (Geom::Poly(p), Geom::Poly(q)) => super::relate::poly_intersects(cs, p, q),
     }
 }
 
-/// `bg::within(a, b)` with `b` a polygon: no point of `a` outside `b`, interiors meeting.
+/// `bg::within(a, b)` with `b` a polygon.
 pub fn within(cs: Cs, a: &Geom, b: &Poly) -> bool {
     match a {
         Geom::Point(p) => poly_loc(cs, b, *p) == Loc::Inside,
-        Geom::Poly(a) => poly_covered_by(cs, a, b),
+        Geom::Poly(a) => super::relate::poly_within(cs, a, b),
     }
 }
 
