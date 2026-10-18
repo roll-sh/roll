@@ -10,6 +10,7 @@ import { formatBytes, formatUsd } from "@/lib/roll-api";
 import {
   formatCount,
   formatDuration,
+  formatElapsed,
   formatMb,
   maskRedisUrl,
   maskToken,
@@ -264,7 +265,7 @@ function OverviewTab({ db, info }: { db: RedisDb; info: RedisInfo }) {
             hint: on
               ? db.idle_timeout_s === 0
                 ? "always on"
-                : `idle ${formatDuration(Math.floor((st.idle_ms ?? 0) / 1000))} · unloads after ${formatDuration(db.idle_timeout_s)}`
+                : `idle ${formatElapsed(Math.floor((st.idle_ms ?? 0) / 1000))} · unloads after ${formatDuration(db.idle_timeout_s)}`
               : "wakes on the first connection",
           },
           {

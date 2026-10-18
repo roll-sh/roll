@@ -179,6 +179,13 @@ export function formatDuration(s: number) {
   return `${s}s`;
 }
 
+/** Elapsed seconds, e.g. `47s`, `1m 47s`, `2h 5m`. */
+export function formatElapsed(s: number) {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
 export function formatCount(n: number | null | undefined) {
   if (n == null) return "—";
   if (n < 10_000) return n.toLocaleString("en-US");
