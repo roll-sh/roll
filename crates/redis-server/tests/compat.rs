@@ -34,7 +34,6 @@
 //! @conn 2                 switch to connection 2 (opened on first use)
 //! @resp 3                 HELLO 3 on the current connection (both sides)
 //! @sleep 100              pause (ms)
-//! @requires cndict        skip the file without the Chinese dictionary (`ROLL_SEARCH_CNDICT`)
 //! RPUSH l {9000*x}        `{N*text}` expands to `text` repeated N times (long values, many args)
 //! ```
 //!
@@ -46,6 +45,10 @@
 //! Docker the test is skipped unless `ROLL_COMPAT_REQUIRED=1`. `ROLL_COMPAT_DIR` runs scripts from
 //! another directory. `ROLL_COMPAT_TRACE=1` prints each line
 //! before running it (to find a hang).
+//!
+//! `ROLL_COMPAT_SERVE=127.0.0.1:55791 cargo test -p redis-server --test compat serve -- --ignored`
+//! runs roll alone on that address (debug commands enabled) until killed, for probing scripts
+//! such as `redis-engine/data/friso/gen_t2s.py`.
 
 use redis_engine::{Config, Reply};
 use redis_server::client::RespClient;
@@ -398,13 +401,6 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                         e.insert(open_pair(ref_addr, roll_addr).await);
                     }
                 }
-                // `@requires cndict`: the file needs the Chinese dictionary (`ROLL_SEARCH_CNDICT`).
-                "requires" => {
-                    if arg.trim() == "cndict" && !redis_engine::search::friso::dictionary_available() {
-                        eprintln!("compat: {fname} skipped (set ROLL_SEARCH_CNDICT to the module's deps/cndict directory)");
-                        return fails;
-                    }
-                }
                 "sleep" => tokio::time::sleep(std::time::Duration::from_millis(arg.trim().parse().unwrap())).await,
                 // `@until <ms> <text> <command>`: repeat the command on each side (every 50ms, at
                 // most <ms>) until its reply mentions <text> (`\s` in <text> stands for a space). For
@@ -684,6 +680,18 @@ async fn compat_with_redis() {
 async fn compat_debug_with_redis() {
     let cfg = Config { enable_debug_command: redis_engine::config::PROTECTED_YES, ..Config::default() };
     run_suite("ROLL_COMPAT_DEBUG_REDIS", &["--enable-debug-command", "yes"], "tests/compat_debug", cfg).await;
+}
+
+/// roll alone on `ROLL_COMPAT_SERVE`, debug commands enabled, until killed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn serve() {
+    let addr: std::net::SocketAddr = std::env::var("ROLL_COMPAT_SERVE").expect("ROLL_COMPAT_SERVE=host:port").parse().unwrap();
+    let cfg = Config { enable_debug_command: redis_engine::config::PROTECTED_YES, ..Config::default() };
+    let db = Database::new("compat", cfg, 1);
+    db.start_cron();
+    eprintln!("serving {}", redis_server::start_single_at(db, None, addr).await.unwrap());
+    std::future::pending::<()>().await;
 }
 
 async fn run_suite(env: &str, args: &[&str], scripts: &str, cfg: Config) {

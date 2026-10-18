@@ -1,4 +1,3 @@
-@requires cndict
 # The segmenter over random mixes of dictionary words, characters, traditional forms, mixed
 # English-Chinese words, units, numbers, full-width text and punctuation: the terms each
 # document indexes and the query expander's phrases.
@@ -206,4 +205,51 @@ FT.EXPLAIN cn "琣礂"
 FT.EXPLAIN cn "hello里港乡"
 _FT.DEBUG DUMP_TERMS cn
 FT.DROPINDEX cn
+# Traditional forms: dictionary words with their characters replaced by the traditional ones
+# that convert to them, single traditional characters, mixed words and punctuation.
+FT.CREATE tr ON HASH PREFIX 1 tr: LANGUAGE chinese SCHEMA t TEXT
+HSET tr:0 t "相当於視区郵讕"
+HSET tr:1 t "谢你从没書會奉召插话式鯊"
+HSET tr:2 t "3.14耐洗糰滿口髒話"
+HSET tr:3 t "蒸餾水睹物兴悲鄆空心架子"
+HSET tr:4 t "胶土碧水蒼天燒仡佬族语鸝赫拉克利特爬儸剔抉"
+HSET tr:5 t "、除冰nevertheless瘺"
+HSET tr:6 t "防涝鱒輻汝南月狚蜧重足而立賻邇司鐸破衣服汽車展览會"
+HSET tr:7 t "、盤卷绕一箇心眼兒 再看櫃鐉语型天花亂坠"
+HSET tr:8 t "#3.14稨、絕少分甘鈞業已"
+HSET tr:9 t "絹詬農田鰴暮思朝想"
+HSET tr:10 t "指亲托故3.14鋉輛"
+HSET tr:11 t "b成癖皆因捨身為國襾樂逸民屃。"
+HSET tr:12 t "連山縣擇铢兩悉稱"
+HSET tr:13 t "雙擋煞風景體罚墾殖通力閤作授人以鱼不如授人以渔捷安特陸灃"
+HSET tr:14 t "筆闔World紈"
+HSET tr:15 t "暘痿乔治惇去光水‥瞒哄小牝牛墾思想方法存車始興乔脑崿"
+HSET tr:16 t "举行婚礼。臕霤出診所隐居3.14"
+HSET tr:17 t "b平凉甘谷縣馬剋沁蒸汽浴组织关系可熄滅貼息貸款鱘b每克"
+HSET tr:18 t "提存昏厥多多鎖簧織合地波垹紙浆質美國政治輕罪金鼓齐鸣跳蛙"
+HSET tr:19 t "奇台縣 黑市基建穎各級領导"
+HSET tr:20 t "反光麵生吃税金这是丙丁新鄉地區米制馬尔祂语东线闇褐色贮#"
+HSET tr:21 t "平鋪先付反法西斯c#鱘死刑犯"
+HSET tr:22 t "檜。南美鹰紅衣主教社交恐惧症、#方向感"
+HSET tr:23 t "張揚亩數孱頭犬马之計"
+HSET tr:24 t " 懞蔽白发苍颜官僚主义動畫片兒災后重建栈戀洋芫荽"
+HSET tr:25 t "、水缽宜室宜家安全措施繞以具體地説100浯繫100之百#"
+HSET tr:26 t "  #銥母以子貴朱甍碧瓦ok实属不易癇扭矩"
+HSET tr:27 t "‧独唱護城c++ 或多或少呈正禮輕傴刀伤嚷声謳吟"
+HSET tr:28 t "誘。‧摻"
+HSET tr:29 t "密令辯釜中生魚恨海難填"
+FT.EXPLAIN tr "頭晌縹燙酒觔"
+FT.EXPLAIN tr "莫利達瓦达斡尔族自治旂負麵滷肉"
+FT.EXPLAIN tr "鋅軒卬氫原子"
+FT.EXPLAIN tr "電影票郎纔女貌"
+FT.EXPLAIN tr "鐶ok"
+FT.EXPLAIN tr "金星塢"
+FT.EXPLAIN tr "开店"
+FT.EXPLAIN tr "宠辱不驚動物毒素"
+FT.EXPLAIN tr "ok連續变調"
+FT.EXPLAIN tr "冈比亞之别"
+FT.EXPLAIN tr "皸鑄死有余戮"
+FT.EXPLAIN tr "包辦婚姻斷音100收监"
+_FT.DEBUG DUMP_TERMS tr
+FT.DROPINDEX tr
 FLUSHALL

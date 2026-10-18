@@ -7,10 +7,10 @@
 //! bytes as Latin-1 characters, a traditional character becomes its simplified form before any
 //! lookup (`Cn_T2S`).
 //!
-//! Dictionary data isn't part of the code: the module's built-in lexicon (`deps/cndict`: its
-//! `lex/friso.lex.ini`, the lexicon files it lists and `cn_t2s.json`) is read from the directory
-//! `ROLL_SEARCH_CNDICT` names; without it no word is known (every CJK character is skipped) and
-//! no traditional character is converted.
+//! The built-in dictionary is upstream friso's UTF-8 lexicon (`data/friso/dict`, Apache-2.0,
+//! byte-identical to the lexicon files the module bundles), embedded at build time. The
+//! traditional → simplified table (`data/friso/t2s.tsv`) was recorded from the reference
+//! server's observable behaviour (`data/friso/gen_t2s.py`).
 
 use std::collections::{HashMap, VecDeque};
 
@@ -217,13 +217,17 @@ impl Friso {
         self.get(lex, word).is_some()
     }
 
-    /// The traditional → simplified table, from `cn_t2s.json` (one character each side).
-    pub fn load_t2s(&mut self, json: &[u8]) -> Result<(), String> {
-        let map: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+    /// The traditional → simplified table (`t2s.tsv`: `#` comments, then one `TRAD\tSIMP`
+    /// hexadecimal code point pair per line, both in the BMP).
+    pub fn load_t2s(&mut self, tsv: &str) -> Result<(), String> {
         let mut pairs = Vec::new();
-        for (k, v) in &map {
-            let (Some(a), Some(b)) = (k.chars().next(), v.as_str().and_then(|s| s.chars().next())) else { continue };
-            pairs.push((a as u32, b as u32));
+        for line in tsv.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            let mut it = line.split('\t').map(|h| u32::from_str_radix(h, 16));
+            let (Some(Ok(a)), Some(Ok(b))) = (it.next(), it.next()) else { return Err(format!("t2s: bad line {line:?}")) };
+            if a > 0xffff || b > 0xffff {
+                return Err(format!("t2s: {line:?} is outside the BMP"));
+            }
+            pairs.push((a, b));
         }
         let (Some(min), Some(max)) = (pairs.iter().map(|p| p.0).min(), pairs.iter().map(|p| p.0).max()) else { return Ok(()) };
         // `uint16_t Cn_T2S_MinChr/MaxChr` and the table's values.
@@ -231,17 +235,17 @@ impl Friso {
         for (a, b) in pairs {
             self.t2s[a as usize] = b as u16;
         }
-        self.t2s_min = min & 0xffff;
-        self.t2s_max = max & 0xffff;
+        self.t2s_min = min;
+        self.t2s_max = max;
         Ok(())
     }
 
     /// The module's bundled lexicon (`bundle_friso.py` over `friso.lex.ini`, loaded by
     /// `ChineseDictLoad`): every line of every listed file is a word (`word/synonyms/frequency`),
     /// no length limit, synonyms kept.
-    pub fn load_bundle(&mut self, lexdir: &std::path::Path) -> Result<(), String> {
-        let ini = std::fs::read(lexdir.join("friso.lex.ini")).map_err(|e| format!("{}: {e}", lexdir.display()))?;
-        let ini = String::from_utf8_lossy(&ini).into_owned();
+    pub fn load_bundle(&mut self, file: impl Fn(&str) -> Option<&'static [u8]>) -> Result<(), String> {
+        let ini = file("friso.lex.ini").ok_or("friso.lex.ini: missing")?;
+        let ini = String::from_utf8_lossy(ini).into_owned();
         // `([^:]+)\w*:\w*\[([^\]]*)\]`.
         let re = regex::Regex::new(r"([^:]+)\w*:\w*\[([^\]]*)\]").expect("regex");
         let meaningful = |s: &str| -> Vec<String> { s.split('\n').map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_string).collect() };
@@ -250,7 +254,7 @@ impl Friso {
             let Some(lex) = LEX_NAMES.iter().position(|n| *n == ty) else { return Err(format!("unknown lexicon type {ty}")) };
             for f in meaningful(&c[2]) {
                 let f = f.trim_end_matches(';');
-                let data = std::fs::read(lexdir.join(f)).map_err(|e| format!("{f}: {e}"))?;
+                let data = file(f).ok_or_else(|| format!("{f}: missing"))?;
                 let mut lines: Vec<&[u8]> = data.split(|&b| b == b'\n').collect();
                 if data.last() == Some(&b'\n') {
                     lines.pop();
@@ -271,19 +275,16 @@ impl Friso {
         Ok(())
     }
 
-    /// The built-in dictionary from the module's `deps/cndict` layout (`lex/`, `cn_t2s.json`).
-    pub fn builtin(dir: &std::path::Path) -> Result<Self, String> {
+    /// The built-in dictionary (`ChineseDictLoad`, `ChineseDictConfigure`) and conversions.
+    pub fn builtin() -> Result<Self, String> {
         let mut f = Friso::empty(Config::builtin());
-        let lexdir = if dir.join("lex").is_dir() { dir.join("lex") } else { dir.to_path_buf() };
-        f.load_bundle(&lexdir)?;
-        if let Ok(j) = std::fs::read(dir.join("cn_t2s.json")) {
-            f.load_t2s(&j)?;
-        }
+        f.load_bundle(|name| DICT.iter().find(|d| d.0 == name).map(|d| d.1))?;
+        f.load_t2s(T2S)?;
         Ok(f)
     }
 
     /// `friso_init_from_ifile`: the settings and the lexicon directory a `friso.ini` names.
-    pub fn from_ini(path: &str, t2s: Option<&[u8]>) -> Result<Self, String> {
+    pub fn from_ini(path: &str) -> Result<Self, String> {
         let text = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
         let mut cfg = Config::new();
         let mut lexi: Option<Vec<u8>> = None;
@@ -347,9 +348,8 @@ impl Friso {
         let mut f = Friso::empty(cfg);
         let limit = f.cfg.max_len as usize * 3;
         f.load_lex_ini(&dir, limit);
-        if let Some(j) = t2s {
-            f.load_t2s(j)?;
-        }
+        // The conversions are compiled in (`Cn_T2S`), whichever dictionary is loaded.
+        f.load_t2s(T2S)?;
         Ok(f)
     }
 
@@ -1297,8 +1297,47 @@ impl Friso {
     }
 }
 
+/// The module's built-in lexicon: upstream friso's `vendors/dict/UTF-8` (Apache-2.0, see
+/// `data/friso/NOTICE`).
+macro_rules! dict {
+    ($($f:literal),* $(,)?) => {
+        &[$(($f, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/data/friso/dict/", $f)))),*]
+    };
+}
+static DICT: &[(&str, &[u8])] = dict![
+    "friso.lex.ini",
+    "lex-admin.lex",
+    "lex-cemixed.lex",
+    "lex-chars.lex",
+    "lex-cn-mz.lex",
+    "lex-cn-place.lex",
+    "lex-company.lex",
+    "lex-dname-1.lex",
+    "lex-dname-2.lex",
+    "lex-ecmixed.lex",
+    "lex-en-pun.lex",
+    "lex-en.lex",
+    "lex-festival.lex",
+    "lex-flname.lex",
+    "lex-food.lex",
+    "lex-lang.lex",
+    "lex-ln-adorn.lex",
+    "lex-lname.lex",
+    "lex-main.lex",
+    "lex-nation.lex",
+    "lex-net.lex",
+    "lex-org.lex",
+    "lex-sname.lex",
+    "lex-stopword.lex",
+    "lex-touris.lex",
+    "lex-units.lex",
+];
+
+/// `Cn_T2S`: the traditional → simplified conversions, recorded from the reference server.
+static T2S: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/data/friso/t2s.tsv"));
+
 /// The process-wide segmenter (`friso_g`, `config_g`), made on first use (`maybeFrisoInit`):
-/// from `search-friso-ini` when set, else the built-in dictionary (`ROLL_SEARCH_CNDICT`).
+/// from `search-friso-ini` when set, else the built-in dictionary.
 static FRISO: std::sync::OnceLock<Friso> = std::sync::OnceLock::new();
 
 /// `search-friso-ini` as the first configuration seen had it (the setting is immutable).
@@ -1315,10 +1354,8 @@ pub fn configure(cfg: &crate::config::Config) {
 pub fn global() -> &'static Friso {
     FRISO.get_or_init(|| {
         let ini = INI.get().map_or("", String::as_str);
-        let dir = std::env::var_os("ROLL_SEARCH_CNDICT").map(std::path::PathBuf::from);
-        let t2s = dir.as_ref().and_then(|d| std::fs::read(d.join("cn_t2s.json")).ok());
         let mut f = if !ini.is_empty() {
-            match Friso::from_ini(ini, t2s.as_deref()) {
+            match Friso::from_ini(ini) {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::error!("Failed to initialize friso ({e})");
@@ -1326,27 +1363,11 @@ pub fn global() -> &'static Friso {
                 }
             }
         } else {
-            match dir.as_deref().map(Friso::builtin) {
-                Some(Ok(f)) => f,
-                Some(Err(e)) => {
-                    tracing::warn!("ROLL_SEARCH_CNDICT: {e}; Chinese text is not segmented");
-                    Friso::empty(Config::builtin())
-                }
-                None => Friso::empty(Config::builtin()),
-            }
+            Friso::builtin().expect("the embedded Chinese dictionary loads")
         };
         // "Don't segment english text."
         f.cfg.en_sseg = 0;
         f
-    })
-}
-
-/// Whether the built-in dictionary can be loaded (`ROLL_SEARCH_CNDICT` names a usable
-/// directory).
-pub fn dictionary_available() -> bool {
-    std::env::var_os("ROLL_SEARCH_CNDICT").is_some_and(|d| {
-        let d = std::path::PathBuf::from(d);
-        d.join("lex").join("friso.lex.ini").is_file() || d.join("friso.lex.ini").is_file()
     })
 }
 
@@ -1400,6 +1421,15 @@ mod tests {
         let w = seg(&f, "中文");
         assert!(w.iter().all(|x| x.1 == PUNC_WORDS));
         assert_eq!(w.len(), 2);
+    }
+
+    #[test]
+    fn embedded_dictionary_and_conversions() {
+        let mut f = Friso::builtin().unwrap();
+        f.cfg.en_sseg = 0;
+        let w: Vec<String> = seg(&f, "臺灣電腦").into_iter().map(|x| x.0).collect();
+        assert_eq!(w, ["台湾", "电脑"]);
+        assert!(f.t2s.iter().filter(|&&s| s != 0).count() > 2700);
     }
 
     #[test]

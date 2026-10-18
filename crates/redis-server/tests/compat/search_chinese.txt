@@ -1,4 +1,3 @@
-@requires cndict
 # LANGUAGE chinese: the module's friso segmenter (complex mode over its bundled dictionary)
 # for documents, the query expander and highlighting.
 FLUSHALL
@@ -65,6 +64,32 @@ FT.SEARCH cn 电脑 HIGHLIGHT TAGS < >
 FT.AGGREGATE cn 生命 LOAD 1 @t
 FT.SEARCH cn 中华 LANGUAGE english NOCONTENT
 FT.SEARCH cn 中华人民共和国 LANGUAGE english NOCONTENT
+# Traditional characters become simplified before any lookup: words of their own, characters
+# only words inside longer words (古剎, 交疊, 撒手鐧), ones that become no word (唝, 鰧: "c#"
+# keeps before a non-CJK character), and ‧/‥, whose shorter replacement desynchronizes the reader.
+FT.CREATE tr ON HASH PREFIX 1 tr: LANGUAGE chinese SCHEMA t TEXT
+HSET tr:1 t "臺灣的電腦軟體與資訊網路發展"
+HSET tr:2 t "古剎裡的老和尚說交疊的撒手鐧"
+HSET tr:3 t "c#鰧 c#唝 c#丂 c++鰧 唝唝"
+HSET tr:4 t "中‧国 中‥国 a‧b 王‧明"
+HSET tr:5 t "國際貿易與經濟發展 簡體中文 繁體中文 门 們 個人"
+FT.SEARCH tr 台湾 NOCONTENT
+FT.SEARCH tr 臺灣 NOCONTENT
+FT.SEARCH tr 电脑 HIGHLIGHT
+FT.SEARCH tr 軟體 SUMMARIZE FRAGS 1 LEN 3 HIGHLIGHT
+FT.SEARCH tr 古刹 NOCONTENT
+FT.SEARCH tr 古剎 HIGHLIGHT
+FT.SEARCH tr 交叠 NOCONTENT
+FT.SEARCH tr 撒手锏 NOCONTENT
+FT.SEARCH tr c# NOCONTENT
+FT.SEARCH tr 国 NOCONTENT
+FT.SEARCH tr 國際 NOCONTENT
+FT.SEARCH tr 个人 HIGHLIGHT
+FT.EXPLAIN tr 國際貿易與經濟發展
+FT.EXPLAIN tr 古剎交疊撒手鐧
+FT.EXPLAIN tr "c#鰧唝"
+FT.EXPLAIN tr "中‧国‥王"
+FT.DROPINDEX tr
 # A document's own language.
 FT.CREATE lf ON HASH PREFIX 1 l: LANGUAGE_FIELD lang SCHEMA t TEXT
 HSET l:1 t "中华人民共和国成立了" lang chinese
