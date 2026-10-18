@@ -466,7 +466,7 @@ pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     Ok(reply)
 }
 
-fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool) -> Result<Reply, Error> {
+pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool) -> Result<Reply, Error> {
     let cfg = &eng.cfg;
     let spec = &ix.spec;
     let flags = req.flags;

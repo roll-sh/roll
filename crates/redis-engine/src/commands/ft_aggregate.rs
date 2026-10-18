@@ -21,6 +21,11 @@
 //! wildcard ranges ending at the first chunk's max id; prefix and fuzzy expansions and term
 //! IDFs are recomputed, where the module keeps the first chunk's.
 //!
+//! FT.PROFILE runs the same pipeline with every iterator and processor counted
+//! (`Profile_AddIters`, `Profile_AddRPs`). An FT.SEARCH's pipeline is built the way the module
+//! builds it (scorer, arrange, output loader and highlighter) for the counters; its reply is
+//! still FT.SEARCH's own.
+//!
 //! Groups come out in the order they were first seen (the module's order follows its
 //! per-process hash seed), and TOLIST keeps its values in insertion order for the same
 //! reason.
@@ -30,8 +35,8 @@ use super::ft_query::{self as fq, K_FORCE_LOAD, K_HIDDEN, K_NUMERIC, K_SCHEMA_SR
 use super::*;
 use crate::engine::Engine;
 use crate::search::areq::{
-    self, Arrange, Command, F_HAS_DEPLETER, F_HAS_GROUPBY, F_HAS_SORTBY, F_HAS_WITHCOUNT, F_IS_AGGREGATE, F_IS_CURSOR, F_NOROWS,
-    F_REQUIRED_FIELDS, F_SEND_NOFIELDS, F_SEND_PAYLOADS, F_SEND_SCOREEXPLAIN, F_SEND_SCORES, F_SEND_SCORES_AS_FIELD, F_SEND_SORTKEYS, F_SENDRAWIDS,
+    self, Arrange, Command, F_HAS_DEPLETER, F_HAS_GROUPBY, F_HAS_SORTBY, F_HAS_WITHCOUNT, F_IS_AGGREGATE, F_IS_CURSOR, F_IS_SEARCH, F_NOROWS,
+    F_REQUIRED_FIELDS, F_SEND_HIGHLIGHT, F_SEND_NOFIELDS, F_SEND_PAYLOADS, F_SEND_SCOREEXPLAIN, F_SEND_SCORES, F_SEND_SCORES_AS_FIELD, F_SEND_SORTKEYS, F_SENDRAWIDS,
     F_TYPED, FORMAT_EXPAND, OPTIMIZE, Step,
 };
 use crate::search::args::{Ac, c_eq};
@@ -42,7 +47,7 @@ use crate::search::eval::{self, EvalState, Mode, RsValue};
 use crate::search::expr::{self, Expr};
 use crate::search::hll::Hll;
 use crate::search::index::Index;
-use crate::search::iters::{BoxIt, Empty, IxResult, K_INTERSECT, K_TERM, K_UNION, Qcx, Skip};
+use crate::search::iters::{self, BoxIt, Empty, IxResult, K_INTERSECT, K_TERM, K_UNION, PCtx, Pairs, Qcx, Skip};
 use crate::search::mmheap::MmHeap;
 use crate::search::qast::{self, Kind, Node};
 use crate::search::qeval::EvalCx;
@@ -54,6 +59,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::time::Instant;
 
 /// FT.AGGREGATE index query [options].
 pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
@@ -88,7 +94,7 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if !is_cursor {
         let eng: &Engine = cx.eng;
         let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
-        let (reply, _) = run(eng, ix, &req, db, resp3, background, req.max_aggregate_results as u32, None, None, &mut false)?;
+        let (reply, _) = run(eng, ix, &req, db, resp3, background, req.max_aggregate_results as u32, None, None, &mut false, None)?;
         count_dialect(cx, &name, &req);
         return Ok(reply);
     }
@@ -106,7 +112,7 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let res = {
         let eng: &Engine = cx.eng;
         let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
-        run(eng, ix, &req, db, resp3, background, chunk, Some(&mut st), gate, &mut started)
+        run(eng, ix, &req, db, resp3, background, chunk, Some(&mut st), gate, &mut started, None)
     };
     if !started {
         return res.map(|(r, _)| r);
@@ -121,6 +127,128 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         cx.eng.search.cursors.pause(c);
     }
     Ok(Reply::Array(vec![reply, Reply::Int(if done { 0 } else { id as i64 })]))
+}
+
+/// FT.PROFILE index SEARCH|AGGREGATE|HYBRID [LIMITED] QUERY query [options]
+/// (`ProfileCommandHandler`, `RSProfileCommandImp`): the command's own reply, then the
+/// profile of its single shard: the clocks, the warnings, the iterator tree's and the result
+/// processors' counters.
+pub(super) fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let clock = Instant::now();
+    if args.len() < 5 {
+        return Err(arity_error("FT.PROFILE"));
+    }
+    if args[3..].iter().any(|a| a.eq_ignore_ascii_case(b"WITHCURSOR")) {
+        return Err(Error::msg("FT.PROFILE does not support cursor"));
+    }
+    verify_acl(cx, &args[1])?;
+    let cmd = if c_eq(&args[2], "SEARCH") {
+        Command::Search
+    } else if c_eq(&args[2], "AGGREGATE") {
+        Command::Aggregate
+    } else if c_eq(&args[2], "HYBRID") {
+        return Err(Error::msg("ERR FT.PROFILE HYBRID is not supported yet"));
+    } else {
+        return Err(Error::msg("No `SEARCH`, `AGGREGATE`, or `HYBRID` provided"));
+    };
+    let mut at = 3;
+    let limited = c_eq(&args[at], "LIMITED");
+    if limited {
+        at += 1;
+    }
+    if !c_eq(&args[at], "QUERY") {
+        return Err(Error::msg("The QUERY keyword is expected"));
+    }
+    let rest = &args[at + 1..];
+    let search = cmd == Command::Search;
+    let mut req = areq::compile(cmd, &cx.eng.cfg, rest)?;
+    let Some(name) = cx.eng.search.load(cstr(&args[1]), false) else {
+        return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(&args[1]))).into());
+    };
+    let resp3 = cx.client.resp >= 3;
+    {
+        let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
+        req.apply_context(ix, resp3)?;
+    }
+    let parse_ns = clock.elapsed().as_nanos() as u64;
+    let f = req.flags;
+    if !search && f & F_HAS_WITHCOUNT != 0 && f & (F_HAS_SORTBY | F_HAS_GROUPBY | F_NOROWS) == 0 {
+        req.flags |= F_HAS_DEPLETER;
+    }
+    let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    let db = cx.client.db;
+    let mut prof = ProfOut { limited, clock, build_ns: 0, iters: None, rps: Vec::new(), expansions: false };
+    let results = {
+        let eng: &Engine = cx.eng;
+        let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
+        if search {
+            // FT.SEARCH's reply, then its pipeline run again for the counters.
+            let reply = fq::run_search(eng, ix, &req, db, resp3)?;
+            run(eng, ix, &req, db, resp3, background, u32::MAX, None, None, &mut false, Some(&mut prof))?;
+            reply
+        } else {
+            run(eng, ix, &req, db, resp3, background, req.max_aggregate_results as u32, None, None, &mut false, Some(&mut prof))?.0
+        }
+    };
+    count_dialect(cx, &name, &req);
+    let ms = |ns: u64| Reply::Double(ns as f64 / 1_000_000.0);
+    let kv = |k: &str, v: Reply| (Reply::Status(k.into()), v);
+    let mut shard = vec![
+        kv("Total profile time", ms(clock.elapsed().as_nanos() as u64)),
+        kv("Parsing time", ms(parse_ns)),
+        kv("Workers queue time", ms(0)),
+        kv("Pipeline creation time", ms(prof.build_ns.saturating_sub(parse_ns))),
+    ];
+    if background {
+        shard.push(kv("Total GIL time", ms(0)));
+    }
+    let warning = if prof.expansions { "Max prefix expansions limit was reached" } else { "None" };
+    shard.push(kv("Warning", Reply::Array(vec![Reply::Status(warning.into())])));
+    if let Some(it) = prof.iters.take() {
+        shard.push(kv("Iterators profile", it));
+    }
+    shard.push(kv("Result processors profile", Reply::Array(std::mem::take(&mut prof.rps))));
+    let profile = Reply::Map(vec![kv("Shards", Reply::Array(vec![Reply::Map(shard)])), kv("Coordinator", Reply::Map(Vec::new()))]);
+    Ok(if resp3 { Reply::Map(vec![kv("Results", results), kv("Profile", profile)]) } else { Reply::Array(vec![results, profile]) })
+}
+
+/// `Document_EvalExpression`: FT.ADD's IF condition on the indexed document's schema fields.
+pub(super) fn eval_if(eng: &Engine, db: usize, ix: &Index, key: &[u8], raw: &[u8]) -> Result<bool, QErr> {
+    let id = ix.docs.get_id(key);
+    let Some(dmd) = (id != 0).then(|| ix.docs.get(id)).flatten() else { return Err(QErr::new(Code::NoDoc, "")) };
+    let e = expr::parse(cstr(raw)).map_err(|e| match e {
+        Some(m) => QErr::new(Code::Expr, m),
+        None => QErr::code(Code::Expr),
+    })?;
+    let spec = &ix.spec;
+    // `RLOOKUP_OPT_ALLLOADED`: any schema field can be read.
+    let mut lk = Lookup { all_loaded: true, ..Lookup::default() };
+    let props = {
+        let cell = RefCell::new((&mut lk, Vec::new()));
+        eval::lookup_keys(&e, &|p: &[u8]| {
+            let mut c = cell.borrow_mut();
+            let (lk, out) = &mut *c;
+            match lk.get_read(Some(spec), p, 0) {
+                Some(i) => {
+                    let k = KRef::of(&lk.keys[i]);
+                    out.push((p.to_vec(), k));
+                    true
+                }
+                None => false,
+            }
+        })?;
+        cell.into_inner().1
+    };
+    let mut row = Row { dyn_vals: Vec::new(), sv: &dmd.sort };
+    let all: Vec<usize> = (0..lk.keys.len()).collect();
+    fq::load(eng, db, &mut lk, Some(spec), Some(&all), dmd, &mut row, false, 2);
+    let mut st = EvalState { mode: Mode::Query, err: None };
+    let view = View { props: &props, row: &row, ixr: None };
+    let (rc, v) = st.run(&e, &view);
+    if rc != eval::Rc::Ok {
+        return Err(st.err.unwrap_or_else(|| QErr::code(Code::Generic)));
+    }
+    Ok(v.bool_test())
 }
 
 fn count_dialect(cx: &mut Cx, name: &[u8], req: &areq::Request) {
@@ -176,7 +304,7 @@ pub(super) fn ft_cursor_read(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         let CursorExec { req, st } = &mut *exec;
         // The documents load from the database the cursor was opened in.
         let db = st.db;
-        run(eng, ix, req, db, resp3, background, num as u32, Some(st), None, &mut false)?
+        run(eng, ix, req, db, resp3, background, num as u32, Some(st), None, &mut false, None)?
     };
     let id = c.id;
     if !done {
@@ -324,6 +452,9 @@ struct Pcx<'a> {
     err: Option<QErr>,
     force: bool,
     dialect: u32,
+    /// FT.PROFILE's per-processor counters (`RPProfile`): calls and their time, upstream's
+    /// included, by chain position.
+    prof: Option<Vec<(u64, u64)>>,
 }
 
 impl Pcx<'_> {
@@ -336,6 +467,16 @@ impl Pcx<'_> {
 
 trait Proc<'a> {
     fn next(&mut self, up: &mut [Box<dyn Proc<'a> + 'a>], cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St;
+    /// Its profile's type (`RPTypeToString`, `RPEvaluator_Reply`).
+    fn name(&self) -> String;
+    /// `RP_SAFE_LOADER`: its profile shows the time it held the GIL.
+    fn gil(&self) -> bool {
+        false
+    }
+    /// The query iterator's profile tree.
+    fn profile_iters(&self, _pc: &PCtx) -> Option<Pairs> {
+        None
+    }
     /// Drains its upstream before it yields (sorters, groupers, depleters, normalizers): once
     /// a cursor's first chunk ran, what it still holds is all that is left upstream.
     fn accumulates(&self) -> bool {
@@ -388,6 +529,10 @@ struct Replay<'a> {
 }
 
 impl<'a> Proc<'a> for Replay<'a> {
+    fn name(&self) -> String {
+        "Index".into()
+    }
+
     fn next(&mut self, _up: &mut Chain<'a>, _cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         let Some(p) = self.items.pop_front() else {
             let st = self.tail;
@@ -418,10 +563,22 @@ type Chain<'a> = [Box<dyn Proc<'a> + 'a>];
 
 /// The last processor's `Next`.
 fn pull<'a>(chain: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
-    match chain.split_last_mut() {
-        Some((p, up)) => p.next(up, cx, r),
-        None => St::Eof,
+    let Some((p, up)) = chain.split_last_mut() else { return St::Eof };
+    if cx.prof.is_none() {
+        return p.next(up, cx, r);
     }
+    let i = up.len();
+    let t = Instant::now();
+    let st = p.next(up, cx, r);
+    let ns = t.elapsed().as_nanos() as u64;
+    if let Some(pr) = &mut cx.prof {
+        if pr.len() <= i {
+            pr.resize(i + 1, (0, 0));
+        }
+        pr[i].0 += 1;
+        pr[i].1 += ns;
+    }
+    st
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -439,6 +596,14 @@ struct QueryIt<'a> {
 }
 
 impl<'a> Proc<'a> for QueryIt<'a> {
+    fn name(&self) -> String {
+        "Index".into()
+    }
+
+    fn profile_iters(&self, pc: &PCtx) -> Option<Pairs> {
+        Some(self.it.print(pc, None))
+    }
+
     fn next(&mut self, _up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         loop {
             let more = match self.resume.take() {
@@ -489,6 +654,10 @@ struct ScoreRp<'a> {
 }
 
 impl<'a> Proc<'a> for ScoreRp<'a> {
+    fn name(&self) -> String {
+        "Scorer".into()
+    }
+
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         loop {
             let st = pull(up, cx, r);
@@ -524,6 +693,10 @@ struct MaxNorm<'a> {
 }
 
 impl<'a> Proc<'a> for MaxNorm<'a> {
+    fn name(&self) -> String {
+        "Score Max Normalizer".into()
+    }
+
     fn accumulates(&self) -> bool {
         true
     }
@@ -622,6 +795,10 @@ impl<'a> Sorter<'a> {
 }
 
 impl<'a> Proc<'a> for Sorter<'a> {
+    fn name(&self) -> String {
+        "Sorter".into()
+    }
+
     fn accumulates(&self) -> bool {
         true
     }
@@ -687,6 +864,10 @@ struct Pager {
 }
 
 impl<'a> Proc<'a> for Pager {
+    fn name(&self) -> String {
+        "Pager/Limiter".into()
+    }
+
     fn save(&mut self) -> Option<Saved> {
         Some(Saved::Pager { offset: self.offset, remaining: self.remaining, skipping: self.skipping })
     }
@@ -729,14 +910,38 @@ impl<'a> Proc<'a> for Pager {
 struct Counter;
 
 impl<'a> Proc<'a> for Counter {
+    fn name(&self) -> String {
+        "Counter".into()
+    }
+
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         loop {
             match pull(up, cx, r) {
                 St::Ok => r.clear(),
                 St::Error => return St::Error,
-                St::Eof => return St::Eof,
+                St::Eof => {
+                    // Profiled, the module's counter also counts a call of the last processor.
+                    if let Some(last) = cx.prof.as_mut().and_then(|p| p.last_mut()) {
+                        last.0 += 1;
+                    }
+                    return St::Eof;
+                }
             }
         }
+    }
+}
+
+/// `RPHighlighter`'s place in a profiled FT.SEARCH pipeline (the reply's highlighting is
+/// FT.SEARCH's own).
+struct Highlighter;
+
+impl<'a> Proc<'a> for Highlighter {
+    fn name(&self) -> String {
+        "Highlighter".into()
+    }
+
+    fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        pull(up, cx, r)
     }
 }
 
@@ -748,6 +953,10 @@ struct Depleter<'a> {
 }
 
 impl<'a> Proc<'a> for Depleter<'a> {
+    fn name(&self) -> String {
+        "Depleter".into()
+    }
+
     fn accumulates(&self) -> bool {
         true
     }
@@ -820,6 +1029,14 @@ impl<'a> Loader<'a> {
 }
 
 impl<'a> Proc<'a> for Loader<'a> {
+    fn name(&self) -> String {
+        if self.safe { "Threadsafe-Loader" } else { "Loader" }.into()
+    }
+
+    fn gil(&self) -> bool {
+        self.safe
+    }
+
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         if !self.safe {
             loop {
@@ -941,6 +1158,20 @@ impl Evaluator {
 }
 
 impl<'a> Proc<'a> for Evaluator {
+    fn name(&self) -> String {
+        let ty = if self.out.is_some() { "Projector" } else { "Filter" };
+        match &self.expr {
+            Expr::Literal(expr::Literal::Str(v)) => format!("{ty} - Literal {}", String::from_utf8_lossy(cstr(v))),
+            Expr::Literal(expr::Literal::Num(n)) => format!("{ty} - Literal {}", expr::num_to_str(*n)),
+            Expr::Literal(expr::Literal::Null) => format!("{ty} - Literal "),
+            Expr::Property(p) => format!("{ty} - Property {}", String::from_utf8_lossy(p)),
+            Expr::Op { op, .. } => format!("{ty} - Operator {}", *op as char),
+            Expr::Func { func, .. } => format!("{ty} - Function {}", expr::FUNCTIONS[*func].name),
+            Expr::Pred { cond, .. } => format!("{ty} - Predicate {}", cond.as_str()),
+            Expr::Inverted(_) => format!("{ty} - Inverted"),
+        }
+    }
+
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         loop {
             let st = pull(up, cx, r);
@@ -1351,6 +1582,10 @@ impl Grouper {
 }
 
 impl<'a> Proc<'a> for Grouper {
+    fn name(&self) -> String {
+        "Grouper".into()
+    }
+
     fn accumulates(&self) -> bool {
         true
     }
@@ -1688,7 +1923,9 @@ impl<'a> Builder<'_, 'a> {
         if max == 0 {
             max = 10;
         }
-        max = max.min(self.req.max_aggregate_results);
+        let search = self.has(F_IS_SEARCH);
+        let optimized = self.has(OPTIMIZE);
+        max = max.min(if search { self.req.max_search_results } else { self.req.max_aggregate_results });
         if self.has(F_NOROWS) || max == 0 {
             self.push(Counter);
             return Ok(true);
@@ -1724,7 +1961,7 @@ impl<'a> Builder<'_, 'a> {
                 }
                 self.push(Sorter { heap: MmHeap::new(max as usize), by: SortBy::Fields { keys: krefs, asc: a.asc_map }, pooled: Res::new(), yielding: false });
                 added = true;
-            } else if self.opt.scorer {
+            } else if (search && !optimized) || self.opt.scorer {
                 self.push(Sorter { heap: MmHeap::new(max as usize), by: SortBy::Score, pooled: Res::new(), yielding: false });
                 added = true;
             }
@@ -1735,6 +1972,10 @@ impl<'a> Builder<'_, 'a> {
                 depleter = true;
             }
             self.push(Pager { offset: a.offset as u32, remaining: a.limit as u32, skipping: true });
+            added = true;
+            pager = true;
+        } else if search && optimized && !added {
+            self.push(Pager { offset: 0, remaining: max as u32, skipping: true });
             added = true;
             pager = true;
         }
@@ -1862,6 +2103,32 @@ impl<'a> Builder<'_, 'a> {
         Ok(())
     }
 
+    /// `buildOutputPipeline` (FT.SEARCH): RETURN's keys or the whole document loaded, then the
+    /// highlighter.
+    fn output(&mut self, cx: &mut Pcx<'a>) {
+        let spec = cx.spec;
+        let explicit = self.req.out_fields.explicit_return;
+        let mut keys = Vec::new();
+        if explicit {
+            let lf = fq::K_EXPLICIT_RETURN | if cx.force { K_FORCE_LOAD } else { 0 };
+            for rf in &self.req.out_fields.fields {
+                if let Some(i) = cx.lookups[0].get_load(Some(spec), cstr(&rf.name), cstr(&rf.path), lf) {
+                    keys.push(copy_key(&cx.lookups[0].keys[i]));
+                }
+            }
+        }
+        if !keys.is_empty() {
+            self.loader(keys);
+        } else if !explicit {
+            cx.lookups[0].all_loaded = !spec.is_json();
+            let safe = self.safe;
+            self.push(Loader::new(Load::All(0), safe));
+        }
+        if self.has(F_SEND_HIGHLIGHT) {
+            self.push(Highlighter);
+        }
+    }
+
     /// `processLoadStep`.
     fn load(&mut self, cx: &mut Pcx<'a>, args: &[Bytes], all: bool) -> Result<(), QErr> {
         let spec = cx.spec;
@@ -1905,8 +2172,11 @@ fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'
     cx.lookups.push(Lookup::default());
     b.push(QueryIt { it, ix, now, last: 0, resume: None });
 
-    // `Pipeline_BuildQueryPart`: a scorer when scores are asked for.
-    if b.has(F_SEND_SCORES | F_SEND_SCORES_AS_FIELD) {
+    // `Pipeline_BuildQueryPart`: a scorer when scores are asked for, or when a search returning
+    // rows sorts by them.
+    let search_rows = b.has(F_IS_SEARCH) && !b.has(F_NOROWS);
+    let scoring = if b.has(OPTIMIZE) { b.opt.scorer } else { !req.has_query_sortby() };
+    if b.has(F_SEND_SCORES | F_SEND_SCORES_AS_FIELD) || (search_rows && scoring) {
         let key = if b.has(F_SEND_SCORES_AS_FIELD) {
             let lk = &mut cx.lookups[0];
             lk.get_write(b"__score", fq::K_OVERRIDE).map(|i| KRef::of(&lk.keys[i]))
@@ -1948,8 +2218,11 @@ fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'
             }
         }
     }
-    if !has_arrange && b.has(F_HAS_DEPLETER) && !b.arrange(cx, None, li, false)? {
+    if !has_arrange && (b.has(F_IS_SEARCH) || b.has(F_HAS_DEPLETER)) && !b.arrange(cx, None, li, false)? {
         return Err(QErr::code(Code::Generic));
+    }
+    if b.has(F_IS_SEARCH) && !b.has(F_SEND_NOFIELDS) {
+        b.output(cx);
     }
     Ok(b)
 }
@@ -1992,6 +2265,19 @@ struct CursorSt {
 /// `RSGlobalConfig.cursorReadSize`.
 const CURSOR_READ_SIZE: u32 = 1000;
 
+/// What a profiled run reports (`Profile_PrintCommon`'s iterators and processors).
+pub(super) struct ProfOut {
+    /// LIMITED: big unions' children collapse into their count.
+    pub limited: bool,
+    /// Started when the command did.
+    pub clock: Instant,
+    /// When the pipeline was built.
+    pub build_ns: u64,
+    pub iters: Option<Reply>,
+    pub rps: Vec<Reply>,
+    pub expansions: bool,
+}
+
 /// `QITR_ReportedTotal`: an unsigned 32-bit count.
 fn reported(total: i64) -> i64 {
     total as u32 as i64
@@ -2013,6 +2299,7 @@ fn run(
     mut cur: Option<&mut CursorSt>,
     gate: Option<QErr>,
     started: &mut bool,
+    mut prof: Option<&mut ProfOut>,
 ) -> Result<(Reply, bool), Error> {
     let cfg = &eng.cfg;
     let spec = &ix.spec;
@@ -2059,6 +2346,8 @@ fn run(
     };
     let root = req.root.as_ref().expect("a parsed query");
     let it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };
+    // `Profile_AddIters`.
+    let it = if prof.is_some() { iters::profiled(it) } else { it };
     // The warning is the first chunk's (later ones start with a fresh error).
     let warn_expansions = ecx.expansions_warning && !reading;
 
@@ -2080,8 +2369,13 @@ fn run(
         err: None,
         force: spec.is_json() && req.dialect < 3,
         dialect: req.dialect,
+        prof: None,
     };
     let Builder { mut chain, sortkey, .. } = build(req, &mut cx, it, ix, now, background, sargs)?;
+    if let Some(p) = prof.as_deref_mut() {
+        cx.prof = Some(vec![(0, 0); chain.len()]);
+        p.build_ns = p.clock.elapsed().as_nanos() as u64;
+    }
     if let Some(e) = gate {
         return Err(e.into());
     }
@@ -2166,6 +2460,25 @@ fn run(
     }
     // `shouldSetCursorDone`.
     let done = rc != St::Ok;
+    if let Some(p) = prof {
+        p.expansions = warn_expansions;
+        let pc = PCtx { limited: p.limited, clock: true };
+        p.iters = chain.first().and_then(|q| q.profile_iters(&pc)).map(Reply::Map);
+        let counts = cx.prof.take().unwrap_or_default();
+        let mut upstream = 0.0;
+        for (i, rp) in chain.iter().enumerate() {
+            let (n, ns) = counts.get(i).copied().unwrap_or((0, 0));
+            let total = ns as f64 / 1_000_000.0;
+            let mut m = vec![(Reply::Status("Type".into()), Reply::Status(rp.name()))];
+            if rp.gil() {
+                m.push((Reply::Status("GIL-Time".into()), Reply::Double(0.0)));
+            }
+            m.push((Reply::Status("Time".into()), Reply::Double(total - upstream)));
+            m.push((Reply::Status("Results processed".into()), Reply::Int(n as i64 - 1)));
+            p.rps.push(Reply::Map(m));
+            upstream = total;
+        }
+    }
 
     // The reply.
     let li = cx.lookups.len() - 1;

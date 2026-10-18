@@ -6,7 +6,9 @@
 use super::doctable::DocTable;
 use super::invidx::{InvertedIndex, Reader, Record, flags as iflags, offsets as offsets_iter};
 use super::numtree::NumericFilter;
+use redis_proto::Reply;
 use std::rc::Rc;
+use std::time::Instant;
 
 pub type DocId = u64;
 
@@ -274,9 +276,181 @@ pub trait Iter {
     }
     /// `set_result_weight` (unions).
     fn set_weight(&mut self, _w: f64) {}
+    /// A union's query node type and string, which its profile shows (`NewUnionIterator`'s
+    /// `type` and `q_str`).
+    fn set_query(&mut self, _ty: &'static str, _s: Option<Vec<u8>>) {}
+    /// `ProfileChildren`: wrap every child (recursively) in a [`Prof`].
+    fn profile_children(&mut self) {}
+    /// `PrintProfile`: the iterator's profile map; `c` holds the counters of the [`Prof`]
+    /// wrapping it.
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs;
 }
 
 pub type BoxIt<'a> = Box<dyn Iter + 'a>;
+
+// ---------------------------------------------------------------------------------------------
+// Profiling (`Profile_AddIters`, `Profile_PrintIterators`)
+
+/// A profile map's entries.
+pub type Pairs = Vec<(Reply, Reply)>;
+
+/// `ProfilePrintCtx`'s options: LIMITED collapses union children, and the clock prints times.
+#[derive(Clone, Copy, Debug)]
+pub struct PCtx {
+    pub limited: bool,
+    pub clock: bool,
+}
+
+/// `ProfileCounters` and the wrapper's wall time.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Counters {
+    pub read: u64,
+    pub skip: u64,
+    pub eof: bool,
+    pub ns: u64,
+}
+
+impl Counters {
+    /// `num_reading_operations`: reads and skips, the final EOF one aside.
+    fn ops(&self) -> i64 {
+        (self.read + self.skip).saturating_sub(self.eof as u64) as i64
+    }
+}
+
+fn kv(m: &mut Pairs, k: &str, v: Reply) {
+    m.push((Reply::Status(k.into()), v));
+}
+
+/// `print_optional_counters`.
+fn print_counters(m: &mut Pairs, pc: &PCtx, c: Option<&Counters>) {
+    if pc.clock {
+        kv(m, "Time", Reply::Double(c.map_or(0, |c| c.ns) as f64 / 1_000_000.0));
+    }
+    if let Some(c) = c {
+        kv(m, "Number of reading operations", Reply::Int(c.ops()));
+    }
+}
+
+/// `print_leaf`.
+fn print_leaf(ty: &str, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+    let mut m = Vec::new();
+    kv(&mut m, "Type", Reply::Status(ty.into()));
+    print_counters(&mut m, pc, c);
+    m
+}
+
+/// `print_single_child`.
+fn print_single(ty: &str, child: &BoxIt<'_>, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+    let mut m = print_leaf(ty, pc, c);
+    kv(&mut m, "Child iterator", Reply::Map(child.print(pc, None)));
+    m
+}
+
+/// `Profile`: counts its child's reads and skips and times them.
+pub struct Prof<'a> {
+    child: BoxIt<'a>,
+    c: Counters,
+}
+
+impl Iter for Prof<'_> {
+    fn read(&mut self) -> bool {
+        let t = Instant::now();
+        let r = self.child.read();
+        self.c.ns += t.elapsed().as_nanos() as u64;
+        self.c.read += 1;
+        if !r {
+            self.c.eof = true;
+        }
+        r
+    }
+    fn skip_to(&mut self, id: DocId) -> Skip {
+        let t = Instant::now();
+        let r = self.child.skip_to(id);
+        self.c.ns += t.elapsed().as_nanos() as u64;
+        self.c.skip += 1;
+        if r == Skip::Eof {
+            self.c.eof = true;
+        }
+        r
+    }
+    fn current(&mut self) -> Option<&mut IxResult> {
+        self.child.current()
+    }
+    fn last_doc_id(&self) -> DocId {
+        self.child.last_doc_id()
+    }
+    fn at_eof(&self) -> bool {
+        self.child.at_eof()
+    }
+    fn num_estimated(&self) -> usize {
+        self.child.num_estimated()
+    }
+    fn kind(&self) -> IKind {
+        self.child.kind()
+    }
+    fn sort_weight(&self, p: bool) -> f64 {
+        self.child.sort_weight(p)
+    }
+    fn set_weight(&mut self, w: f64) {
+        self.child.set_weight(w);
+    }
+    fn set_query(&mut self, ty: &'static str, q: Option<Vec<u8>>) {
+        self.child.set_query(ty, q);
+    }
+    fn print(&self, pc: &PCtx, _c: Option<&Counters>) -> Pairs {
+        self.child.print(pc, Some(&self.c))
+    }
+}
+
+/// `format_g`: C's `%g`.
+fn fmt_g(v: f64) -> String {
+    crate::util::fmt_g_prec(v, 6)
+}
+
+/// A union's profile (`UnionOpaque::print_profile`): LIMITED collapses the children of all
+/// but plain, geo and lexrange unions into their count.
+fn print_union<'c, 'a: 'c>(q: &(&'static str, Option<Vec<u8>>), children: impl ExactSizeIterator<Item = &'c BoxIt<'a>>, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+    let mut m = Vec::new();
+    kv(&mut m, "Type", Reply::Status("UNION".into()));
+    let ty = q.0;
+    match &q.1 {
+        None => kv(&mut m, "Query type", Reply::Status(ty.into())),
+        Some(s) => kv(&mut m, "Query type", Reply::Bulk(format!("{ty} - {}", String::from_utf8_lossy(s)).into_bytes().into())),
+    }
+    print_counters(&mut m, pc, c);
+    if !pc.limited || matches!(ty, "UNION" | "GEO" | "LEXRANGE") {
+        kv(&mut m, "Child iterators", Reply::Array(children.map(|ch| Reply::Map(ch.print(pc, None))).collect()));
+    } else {
+        kv(&mut m, "Child iterators", Reply::Status(format!("The number of iterators in the union is {}", children.len())));
+    }
+    m
+}
+
+/// `into_profiled`: the subtree's iterators each wrapped in a [`Prof`], this one too.
+pub fn profiled<'a>(mut it: BoxIt<'a>) -> BoxIt<'a> {
+    it.profile_children();
+    Box::new(Prof { child: it, c: Counters::default() })
+}
+
+fn profile_child<'a>(c: &mut BoxIt<'a>) {
+    let old = std::mem::replace(c, Box::new(Empty));
+    *c = profiled(old);
+}
+
+/// What an inverted index iterator's profile shows it reads.
+#[derive(Clone, Debug, Default)]
+pub enum PKind {
+    #[default]
+    Text,
+    Tag,
+    /// The numeric range's min and max values.
+    Numeric(f64, f64),
+    /// The geo range's min and max (geohashes).
+    Geo(f64, f64),
+    /// The field's name.
+    Missing(Vec<u8>),
+    Wildcard,
+}
 
 /// What a query's iterators share: the index's doc table, the clock, and the text field
 /// ids' schema positions (`fieldIdToIndex`).
@@ -407,6 +581,7 @@ pub struct InvIt<'a> {
     res: IxResult,
     unique: usize,
     wildcard: bool,
+    pk: PKind,
 }
 
 impl<'a> InvIt<'a> {
@@ -423,7 +598,14 @@ impl<'a> InvIt<'a> {
             res,
             unique: ii.unique_docs() as usize,
             wildcard: false,
+            pk: PKind::Text,
         }
+    }
+
+    /// What the iterator's profile shows it reads.
+    pub fn profile_as(mut self, pk: PKind) -> Self {
+        self.pk = pk;
+        self
     }
 
     /// The existing docs' wildcard (`inverted_index::Wildcard`).
@@ -431,6 +613,7 @@ impl<'a> InvIt<'a> {
         let res = IxResult { weight, field_mask: MASK_ALL, freq: 1, ..IxResult::virt() };
         let mut it = InvIt::new(ii, res, RFilter::None, None, cx);
         it.wildcard = true;
+        it.pk = PKind::Wildcard;
         it
     }
 
@@ -477,6 +660,45 @@ impl<'a> InvIt<'a> {
 }
 
 impl Iter for InvIt<'_> {
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        let mut m = Vec::new();
+        let term = |m: &mut Pairs| {
+            if let Some(t) = &self.res.term {
+                kv(m, "Term", Reply::Bulk(t.s.clone().into()));
+            }
+        };
+        match &self.pk {
+            PKind::Wildcard => return print_leaf("WILDCARD", pc, c),
+            PKind::Text => {
+                kv(&mut m, "Type", Reply::Status("TEXT".into()));
+                term(&mut m);
+            }
+            PKind::Tag => {
+                kv(&mut m, "Type", Reply::Status("TAG".into()));
+                term(&mut m);
+            }
+            PKind::Numeric(lo, hi) => {
+                kv(&mut m, "Type", Reply::Status("NUMERIC".into()));
+                kv(&mut m, "Term", Reply::Status(format!("{} - {}", fmt_g(*lo), fmt_g(*hi))));
+            }
+            PKind::Geo(lo, hi) => {
+                let (se_lon, se_lat) = super::geo::decode_geo(*lo);
+                let (nw_lon, nw_lat) = super::geo::decode_geo(*hi);
+                kv(&mut m, "Type", Reply::Status("GEO".into()));
+                kv(&mut m, "Term", Reply::Status(format!("{},{} - {},{}", fmt_g(se_lon), fmt_g(se_lat), fmt_g(nw_lon), fmt_g(nw_lat))));
+            }
+            PKind::Missing(f) => {
+                kv(&mut m, "Type", Reply::Status("MISSING".into()));
+                if !f.is_empty() {
+                    kv(&mut m, "Field", Reply::Bulk(f.clone().into()));
+                }
+            }
+        }
+        print_counters(&mut m, pc, c);
+        kv(&mut m, "Estimated number of matches", Reply::Int(self.num_estimated() as i64));
+        m
+    }
+
     fn read(&mut self) -> bool {
         if self.at_eos {
             return false;
@@ -535,6 +757,9 @@ impl Iter for InvIt<'_> {
 pub struct Empty;
 
 impl Iter for Empty {
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        print_leaf("EMPTY", pc, c)
+    }
     fn read(&mut self) -> bool {
         false
     }
@@ -571,6 +796,9 @@ impl Wildcard {
 }
 
 impl Iter for Wildcard {
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        print_leaf("WILDCARD", pc, c)
+    }
     fn read(&mut self) -> bool {
         if self.at_eof() {
             return false;
@@ -620,6 +848,9 @@ impl IdList {
 }
 
 impl Iter for IdList {
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        print_leaf("ID-LIST-SORTED", pc, c)
+    }
     fn read(&mut self) -> bool {
         let Some(&id) = self.ids.get(self.offset) else { return false };
         self.offset += 1;
@@ -784,6 +1015,14 @@ impl<'a> Intersection<'a> {
 }
 
 impl Iter for Intersection<'_> {
+    fn profile_children(&mut self) {
+        self.children.iter_mut().for_each(profile_child);
+    }
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        let mut m = print_leaf("INTERSECT", pc, c);
+        kv(&mut m, "Child iterators", Reply::Array(self.children.iter().map(|ch| Reply::Map(ch.print(pc, None))).collect()));
+        m
+    }
     fn read(&mut self) -> bool {
         if self.eof {
             return false;
@@ -884,18 +1123,23 @@ pub struct UnionFlat<'a> {
     eof: bool,
     quick: bool,
     res: IxResult,
+    q: (&'static str, Option<Vec<u8>>),
+    /// Each child's insertion index (swap-removes reorder them; profiles print them in it).
+    orig: Vec<usize>,
 }
 
 impl<'a> UnionFlat<'a> {
     pub fn new(children: Vec<BoxIt<'a>>, quick: bool) -> Self {
         let num_estimated = children.iter().map(|c| c.num_estimated()).sum();
-        UnionFlat { num_active: children.len(), eof: children.is_empty(), children, num_estimated, quick, res: IxResult::aggregate(K_UNION) }
+        let n = children.len();
+        UnionFlat { num_active: children.len(), eof: children.is_empty(), children, num_estimated, quick, res: IxResult::aggregate(K_UNION), q: ("UNION", None), orig: (0..n).collect() }
     }
 
     fn swap_remove(&mut self, i: usize) {
         self.num_active -= 1;
         if i < self.num_active {
             self.children.swap(i, self.num_active);
+            self.orig.swap(i, self.num_active);
         }
     }
 
@@ -1043,6 +1287,17 @@ impl CurrentId for BoxIt<'_> {
 }
 
 impl Iter for UnionFlat<'_> {
+    fn set_query(&mut self, ty: &'static str, s: Option<Vec<u8>>) {
+        self.q = (ty, s);
+    }
+    fn profile_children(&mut self) {
+        self.children.iter_mut().for_each(profile_child);
+    }
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        let mut by_orig: Vec<(usize, &BoxIt<'_>)> = self.orig.iter().copied().zip(&self.children).collect();
+        by_orig.sort_by_key(|&(o, _)| o);
+        print_union(&self.q, by_orig.into_iter().map(|(_, c)| c), pc, c)
+    }
     fn read(&mut self) -> bool {
         if self.eof {
             return false;
@@ -1150,12 +1405,13 @@ pub struct UnionHeap<'a> {
     quick: bool,
     res: IxResult,
     heap: MinHeap,
+    q: (&'static str, Option<Vec<u8>>),
 }
 
 impl<'a> UnionHeap<'a> {
     pub fn new(children: Vec<BoxIt<'a>>, quick: bool) -> Self {
         let num_estimated = children.iter().map(|c| c.num_estimated()).sum();
-        UnionHeap { eof: children.is_empty(), children, num_estimated, quick, res: IxResult::aggregate(K_UNION), heap: MinHeap::default() }
+        UnionHeap { eof: children.is_empty(), children, num_estimated, quick, res: IxResult::aggregate(K_UNION), heap: MinHeap::default(), q: ("UNION", None) }
     }
 
     fn add_child(&mut self, i: usize) {
@@ -1271,6 +1527,15 @@ impl<'a> UnionHeap<'a> {
 }
 
 impl Iter for UnionHeap<'_> {
+    fn set_query(&mut self, ty: &'static str, s: Option<Vec<u8>>) {
+        self.q = (ty, s);
+    }
+    fn profile_children(&mut self) {
+        self.children.iter_mut().for_each(profile_child);
+    }
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        print_union(&self.q, self.children.iter(), pc, c)
+    }
     fn read(&mut self) -> bool {
         if self.eof {
             return false;
@@ -1339,6 +1604,11 @@ impl Iter for UnionHeap<'_> {
 /// `new_union_iterator` + `set_result_weight`: empties dropped, a quick-exit union with a
 /// wildcard is that wildcard, one child stands alone, and the heap past `min_heap` children.
 pub fn union<'a>(children: Vec<BoxIt<'a>>, quick: bool, min_heap: usize, weight: f64) -> BoxIt<'a> {
+    union_typed(children, quick, min_heap, weight, ("UNION", None))
+}
+
+/// [`union`] with the query node type and string its profile shows.
+pub fn union_typed<'a>(children: Vec<BoxIt<'a>>, quick: bool, min_heap: usize, weight: f64, q: (&'static str, Option<Vec<u8>>)) -> BoxIt<'a> {
     let mut children: Vec<BoxIt<'a>> = children.into_iter().filter(|c| c.kind() != IKind::Empty).collect();
     if quick && let Some(pos) = children.iter().position(|c| c.kind() == IKind::Wildcard) {
         return children.swap_remove(pos);
@@ -1349,6 +1619,7 @@ pub fn union<'a>(children: Vec<BoxIt<'a>>, quick: bool, min_heap: usize, weight:
         n => {
             let mut u: BoxIt<'a> = if n > min_heap { Box::new(UnionHeap::new(children, quick)) } else { Box::new(UnionFlat::new(children, quick)) };
             u.set_weight(weight);
+            u.set_query(q.0, q.1);
             u
         }
     }
@@ -1362,6 +1633,12 @@ pub struct Not<'a> {
 }
 
 impl Iter for Not<'_> {
+    fn profile_children(&mut self) {
+        profile_child(&mut self.child);
+    }
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        print_single("NOT", &self.child, pc, c)
+    }
     fn read(&mut self) -> bool {
         while !self.at_eof() {
             self.res.doc_id += 1;
@@ -1455,6 +1732,12 @@ impl NotOptimized<'_> {
 }
 
 impl Iter for NotOptimized<'_> {
+    fn profile_children(&mut self) {
+        profile_child(&mut self.child);
+    }
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        print_single("NOT", &self.child, pc, c)
+    }
     fn read(&mut self) -> bool {
         self.read_inner()
     }
@@ -1503,6 +1786,12 @@ pub struct Optional<'a> {
 }
 
 impl Iter for Optional<'_> {
+    fn profile_children(&mut self) {
+        profile_child(&mut self.child);
+    }
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        print_single("OPTIONAL", &self.child, pc, c)
+    }
     fn read(&mut self) -> bool {
         if self.at_eof() {
             return false;
@@ -1590,6 +1879,12 @@ impl OptionalOptimized<'_> {
 }
 
 impl Iter for OptionalOptimized<'_> {
+    fn profile_children(&mut self) {
+        profile_child(&mut self.child);
+    }
+    fn print(&self, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+        print_single("OPTIONAL", &self.child, pc, c)
+    }
     fn read(&mut self) -> bool {
         if self.eof {
             return false;
@@ -1744,6 +2039,32 @@ mod tests {
         let mut u = union(vec![ids(&[1, 5]), ids(&[5])], false, 20, 1.0);
         assert_eq!(u.skip_to(4), Skip::NotFound);
         assert_eq!(u.current().unwrap().children.len(), 2);
+    }
+
+    #[test]
+    fn profiles() {
+        let u = union_typed(vec![ids(&[1, 5]), ids(&[2, 5, 8])], false, 20, 1.0, ("TAG", None));
+        let it = profiled(intersect(vec![u, ids(&[5, 8])], 1.0, false, None, false));
+        let mut it = it;
+        while it.read() {}
+        let pc = PCtx { limited: false, clock: false };
+        let m = it.print(&pc, None);
+        let get = |m: &Pairs, k: &str| m.iter().find(|(a, _)| *a == Reply::Status(k.into())).map(|(_, v)| v.clone());
+        assert_eq!(get(&m, "Type"), Some(Reply::Status("INTERSECT".into())));
+        assert_eq!(get(&m, "Number of reading operations"), Some(Reply::Int(2)));
+        let Some(Reply::Array(kids)) = get(&m, "Child iterators") else { panic!("children") };
+        let Reply::Map(first) = &kids[0] else { panic!("a map") };
+        assert_eq!(get(first, "Type"), Some(Reply::Status("ID-LIST-SORTED".into())));
+        let Reply::Map(union) = &kids[1] else { panic!("a map") };
+        assert_eq!(get(union, "Query type"), Some(Reply::Status("TAG".into())));
+        let limited = PCtx { limited: true, clock: false };
+        let Reply::Map(union) = (match get(&it.print(&limited, None), "Child iterators") {
+            Some(Reply::Array(k)) => k[1].clone(),
+            _ => panic!("children"),
+        }) else {
+            panic!("a map")
+        };
+        assert_eq!(get(&union, "Child iterators"), Some(Reply::Status("The number of iterators in the union is 2".into())));
     }
 
     #[test]

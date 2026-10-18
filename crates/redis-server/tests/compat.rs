@@ -14,6 +14,7 @@
 //!                         key/value arrays, at any depth, `a=…` tokens in text replies such
 //!                         as CLIENT LIST, and `a:…` words in status replies such as DEBUG
 //!                         OBJECT) before comparing (timestamps, ids…)
+//! !timing FT.PROFILE …   `!mask` of FT.PROFILE's clock fields (`Time`, `Total profile time`…)
 //! !info a,b* INFO …       compare INFO's sections and field names; values only for fields `a`
 //!                         and those starting with `b` (`!info - …`: names only)
 //! !ids CMD                in the reply, integers and `id=`/`redir=` tokens equal to a
@@ -143,6 +144,10 @@ fn err_code(r: &Reply) -> Option<String> {
         _ => None,
     }
 }
+
+/// The FT.PROFILE fields `!timing` masks: wall-clock times.
+const TIMING_FIELDS: &[&str] =
+    &["Time", "GIL-Time", "Total profile time", "Parsing time", "Workers queue time", "Pipeline creation time", "Total GIL time", "Coordinator dispatch time [ms]"];
 
 /// Replace the value after each field named in `fields` (recursively).
 fn mask(r: &Reply, fields: &[String]) -> Reply {
@@ -417,6 +422,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                         masked.extend(fields.split(',').map(str::to_string));
                         tail = t;
                     }
+                    "timing" => masked.extend(TIMING_FIELDS.iter().map(|f| f.to_string())),
                     "sort" => cmp = Cmp::Sort,
                     "type" => cmp = Cmp::Type,
                     "err" => cmp = Cmp::Err,

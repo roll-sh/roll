@@ -4,7 +4,7 @@
 
 use super::error::{Code, QErr};
 use super::index::Index;
-use super::iters::{self, BoxIt, Checker, Empty, IdList, InvIt, IxResult, K_NUMERIC, K_TERM, MASK_ALL, Predicate, Qcx, RFilter, Term};
+use super::iters::{self, BoxIt, Checker, Empty, IdList, InvIt, IxResult, K_NUMERIC, K_TERM, MASK_ALL, PKind, Predicate, Qcx, RFilter, Term};
 use super::numtree::NumericFilter;
 use super::qast::{Kind, Node};
 use super::spec;
@@ -85,11 +85,11 @@ impl<'a> EvalCx<'a> {
         let unique = ii.unique_docs() as u64;
         let t = Term { s: value.to_vec(), idf: iters::idf(total, unique), bm25_idf: iters::bm25_idf(total, unique), id: 0 };
         let res = IxResult { kind: K_TERM, freq: 1, field_mask: MASK_ALL, weight, term: Some(Rc::new(t)), ..Default::default() };
-        Some(Box::new(InvIt::new(ii, res, RFilter::None, Some(Checker::Field(fi, Predicate::Default)), self.q)))
+        Some(Box::new(InvIt::new(ii, res, RFilter::None, Some(Checker::Field(fi, Predicate::Default)), self.q).profile_as(PKind::Tag)))
     }
 
-    fn union(&self, its: Vec<BoxIt<'a>>, quick: bool, weight: f64) -> BoxIt<'a> {
-        iters::union(its, quick, self.min_heap, weight)
+    fn union(&self, its: Vec<BoxIt<'a>>, quick: bool, weight: f64, ty: &'static str, qs: Option<&[u8]>) -> BoxIt<'a> {
+        iters::union_typed(its, quick, self.min_heap, weight, (ty, qs.map(|s| s.to_vec())))
     }
 
     /// The text term expansions a trie walk yields (`runeIterCb`): capped at the max prefix
@@ -131,7 +131,7 @@ impl<'a> EvalCx<'a> {
                 let fs = &self.ix.spec.fields[fi];
                 let Some(ii) = self.ix.missing.get(&fs.name) else { return Ok(None) };
                 let res = IxResult { kind: iters::K_VIRTUAL, freq: 1, field_mask: MASK_ALL, weight: 0.0, ..Default::default() };
-                Box::new(InvIt::new(ii, res, RFilter::None, Some(Checker::Field(fi, Predicate::Missing)), self.q))
+                Box::new(InvIt::new(ii, res, RFilter::None, Some(Checker::Field(fi, Predicate::Missing)), self.q).profile_as(PKind::Missing(fs.name.to_vec())))
             }
             Kind::Optional => {
                 let c = self.child(&n.children[0], MASK_ALL)?;
@@ -165,7 +165,7 @@ impl<'a> EvalCx<'a> {
                 for c in &n.children {
                     its.push(self.child(c, mask)?);
                 }
-                self.union(its, quick, weight)
+                self.union(its, quick, weight, "UNION", None)
             }
             Kind::Numeric(nf) => {
                 let Some(fi) = nf.field else { return Ok(None) };
@@ -181,10 +181,10 @@ impl<'a> EvalCx<'a> {
                         let contained = filter.value_in_range(r.min_val()) && filter.value_in_range(r.max_val());
                         let f = if contained { RFilter::None } else { RFilter::Numeric(filter) };
                         let res = IxResult { kind: K_NUMERIC, freq: 1, field_mask: MASK_ALL, weight: 1.0, ..Default::default() };
-                        Box::new(InvIt::new(r.entries(), res, f, Some(Checker::Field(fi, Predicate::Default)), self.q)) as BoxIt<'a>
+                        Box::new(InvIt::new(r.entries(), res, f, Some(Checker::Field(fi, Predicate::Default)), self.q).profile_as(PKind::Numeric(r.min_val(), r.max_val()))) as BoxIt<'a>
                     })
                     .collect();
-                self.union(its, true, 1.0)
+                self.union(its, true, 1.0, "NUMERIC", None)
             }
             Kind::Geo(gf) => {
                 gf.validate()?;
@@ -208,13 +208,13 @@ impl<'a> EvalCx<'a> {
                     let filter = NumericFilter::range(min as f64, max as f64);
                     for r in tree.find(&filter) {
                         let res = IxResult { kind: K_NUMERIC, freq: 1, field_mask: MASK_ALL, weight: 1.0, ..Default::default() };
-                        its.push(Box::new(InvIt::new(r.entries(), res, RFilter::Geo(gf.lon, gf.lat, radius), Some(Checker::Field(fi, Predicate::Default)), self.q)));
+                        its.push(Box::new(InvIt::new(r.entries(), res, RFilter::Geo(gf.lon, gf.lat, radius), Some(Checker::Field(fi, Predicate::Default)), self.q).profile_as(PKind::Geo(r.min_val(), r.max_val()))));
                     }
                 }
                 if its.is_empty() {
                     return Ok(None);
                 }
-                self.union(its, true, 1.0)
+                self.union(its, true, 1.0, "GEO", None)
             }
             Kind::Token(t) => return Ok(self.open_term(&t.s, mask & self.req_mask, weight)),
             Kind::Prefix { tok, prefix, suffix } => {
@@ -239,7 +239,7 @@ impl<'a> EvalCx<'a> {
                 let its = self.expansions(self.req_mask & n.opts.field_mask, |cb| {
                     terms.iterate_contains(&runes, p, s, &mut |r, _, _| cb(r), None);
                 });
-                self.union(its, true, weight)
+                self.union(its, true, weight, "PREFIX", Some(&tok.s))
             }
             Kind::WildcardQuery(tok) => {
                 let pat = remove_escape(&tok.s);
@@ -253,7 +253,7 @@ impl<'a> EvalCx<'a> {
                 let its = self.expansions(self.req_mask & n.opts.field_mask, |cb| {
                     terms.iterate_wildcard(&runes, &mut |r, _, _| cb(r), None);
                 });
-                self.union(its, true, weight)
+                self.union(its, true, weight, "WILDCARD", Some(&pat))
             }
             Kind::LexRange { begin, include_begin, end, include_end } => {
                 let b = begin.as_ref().and_then(|s| trie::str_to_lower_runes(cstr(s)));
@@ -263,7 +263,7 @@ impl<'a> EvalCx<'a> {
                 let its = self.expansions(self.req_mask & n.opts.field_mask, |cb| {
                     terms.iterate_range(b.as_deref(), ib, e.as_deref(), ie, &mut |r, _, _| cb(r));
                 });
-                self.union(its, true, weight)
+                self.union(its, true, weight, "LEXRANGE", None)
             }
             Kind::Fuzzy { tok, max_dist } => {
                 let s = cstr(&tok.s);
@@ -291,7 +291,7 @@ impl<'a> EvalCx<'a> {
                 {
                     its.push(r);
                 }
-                self.union(its, true, weight)
+                self.union(its, true, weight, "FUZZY", Some(s))
             }
             Kind::Tag { field } => {
                 let Some(fi) = *field else { return Ok(None) };
@@ -303,7 +303,7 @@ impl<'a> EvalCx<'a> {
                 }
                 let its: Vec<BoxIt<'a>> = n.children.iter().filter_map(|c| self.single_tag(fi, c, weight)).collect();
                 let quick = self.in_not || weight == 0.0;
-                self.union(its, quick, weight)
+                self.union(its, quick, weight, "TAG", None)
             }
             Kind::Vector(_) | Kind::Geometry { .. } => return Err(QErr::new(Code::Generic, "Vector and geometry queries are not supported yet")),
         }))
@@ -355,7 +355,7 @@ impl<'a> EvalCx<'a> {
                     true
                 });
                 let its = open_all(self, keys);
-                Some(self.union(its, true, weight))
+                Some(self.union(its, true, weight, "PREFIX", Some(&s)))
             }
             Kind::WildcardQuery(tok) => {
                 let pat = remove_escape(&tag_lower(&tok.s, cs));
@@ -367,7 +367,7 @@ impl<'a> EvalCx<'a> {
                     true
                 });
                 let its = open_all(self, keys);
-                Some(self.union(its, true, weight))
+                Some(self.union(its, true, weight, "WILDCARD", Some(&pat)))
             }
             Kind::LexRange { begin, include_begin, end, include_end } => {
                 let b = begin.as_ref().map(|s| tag_lower(cstr(s), cs));
@@ -387,7 +387,7 @@ impl<'a> EvalCx<'a> {
                         its.push(it);
                     }
                 }
-                Some(self.union(its, true, n.opts.weight))
+                Some(self.union(its, true, n.opts.weight, "LEXRANGE", None))
             }
             _ => None,
         }
