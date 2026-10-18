@@ -37,10 +37,12 @@ impl Series {
     }
 }
 
-/// `server.latency_events`, in insertion order (Redis' dict order depends on its hash seed).
+/// `server.latency_events`: the series, and the dict holding them (its order is LATENCY
+/// LATEST's and DOCTOR's).
 #[derive(Clone, Debug, Default)]
 pub struct Monitor {
     events: Vec<(String, Box<Series>)>,
+    dict: crate::sdict::ServerDict,
 }
 
 /// What `createLatencyReport` reads from the rest of the server.
@@ -67,8 +69,15 @@ pub fn anon_huge_pages_bytes() -> u64 {
 }
 
 impl Monitor {
-    fn get(&self, event: &str) -> Option<&Series> {
+    /// `dictFetchValue` (a rehash step).
+    fn get(&mut self, event: &str) -> Option<&Series> {
+        self.dict.find(event.as_bytes())?;
         self.events.iter().find(|(e, _)| e == event).map(|(_, s)| &**s)
+    }
+
+    /// The events in the dict's iteration order.
+    fn ordered(&self) -> impl Iterator<Item = &(String, Box<Series>)> {
+        self.dict.keys().into_iter().filter_map(|k| self.events.iter().find(|(e, _)| e.as_bytes() == k))
     }
 
     /// `latencyAddSampleIfNeeded`: record `ms` for `event` when the monitor is on and the
@@ -83,9 +92,11 @@ impl Monitor {
     pub fn add(&mut self, event: &str, ms: u64, now_secs: i64) {
         let latency = ms.min(u32::MAX as u64) as u32;
         let now = now_secs as i32;
-        let ts = match self.events.iter().position(|(e, _)| e == event) {
+        let found = self.dict.find(event.as_bytes()).is_some();
+        let ts = match self.events.iter().position(|(e, _)| e == event).filter(|_| found) {
             Some(i) => &mut self.events[i].1,
             None => {
+                self.dict.add(event.as_bytes());
                 self.events.push((event.to_string(), Box::default()));
                 &mut self.events.last_mut().unwrap().1
             }
@@ -107,18 +118,14 @@ impl Monitor {
 
     /// `latencyResetEvent`: drop one event (case-insensitively) or all; how many were dropped.
     pub fn reset(&mut self, event: Option<&[u8]>) -> usize {
-        let before = self.events.len();
-        match event {
-            None => self.events.clear(),
-            Some(e) => self.events.retain(|(name, _)| !name.as_bytes().eq_ignore_ascii_case(e)),
-        }
-        before - self.events.len()
+        let pick = |name: &[u8]| event.is_none_or(|e| name.eq_ignore_ascii_case(e));
+        self.events.retain(|(name, _)| !pick(name.as_bytes()));
+        self.dict.delete_while_iterating(pick)
     }
 
     /// LATENCY LATEST: `(event, last time, last latency, all-time max)` per event.
     pub fn latest(&self) -> Vec<(&str, i64, u64, u64)> {
-        self.events
-            .iter()
+        self.ordered()
             .map(|(e, ts)| {
                 let last = ts.samples[(ts.idx + TS_LEN - 1) % TS_LEN];
                 (e.as_str(), last.time as i64, last.latency as u64, ts.max as u64)
@@ -127,13 +134,13 @@ impl Monitor {
     }
 
     /// LATENCY HISTORY: the event's `(time, latency)` samples, oldest first (none: empty).
-    pub fn history(&self, event: &[u8]) -> Vec<(i64, u64)> {
+    pub fn history(&mut self, event: &[u8]) -> Vec<(i64, u64)> {
         let Some(ts) = std::str::from_utf8(event).ok().and_then(|e| self.get(e)) else { return Vec::new() };
         ts.in_order().map(|s| (s.time as i64, s.latency as u64)).collect()
     }
 
     /// LATENCY GRAPH (`latencyCommandGenSparkeline`); `None` when the event has no series.
-    pub fn graph(&self, event: &[u8], now: i64) -> Option<String> {
+    pub fn graph(&mut self, event: &[u8], now: i64) -> Option<String> {
         let name = std::str::from_utf8(event).ok()?;
         let ts = self.get(name)?;
         let mut seq = Sequence::default();
@@ -211,7 +218,7 @@ impl Monitor {
         let mut a = Advice::default();
         let mut advices = 0;
         let mut report = String::new();
-        for (num, (event, ts)) in self.events.iter().enumerate() {
+        for (num, (event, ts)) in self.ordered().enumerate() {
             if num == 0 {
                 report.push_str("Dave, I have observed latency spikes in this Redis instance. You don't mind talking about it, do you Dave?\n\n");
             }

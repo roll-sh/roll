@@ -24,6 +24,7 @@ pub mod notify;
 pub mod object;
 pub mod pack;
 pub mod rdb;
+pub mod sdict;
 pub mod search;
 pub mod tre;
 pub mod ts;
