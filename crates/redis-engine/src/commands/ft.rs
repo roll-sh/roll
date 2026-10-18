@@ -62,7 +62,7 @@ pub(crate) fn command_filter(eng: &mut Engine, args: &[Bytes]) {
         return;
     };
     eng.search.hash_fields = None;
-    let now = crate::util::now_ms();
+    let now = eng.exec_time;
     let is_hash = eng.dbs[0].keys.get(crate::util::cstr(&args[1])).is_some_and(|e| (e.expire == 0 || e.expire > now) && matches!(e.value, Value::Hash(_)));
     if !is_hash {
         return;
@@ -121,7 +121,7 @@ pub(crate) fn probes_key(event: &str) -> bool {
 /// `RedisModule_OpenKey(RSDummyContext, key, REDISMODULE_READ)`: a read lookup in db 0 with its
 /// effects (no lazy expiry while loading, where keys don't expire).
 pub(crate) fn probe(eng: &mut Engine, key: &[u8], loading: bool) {
-    let now = crate::util::now_ms();
+    let now = eng.exec_time;
     if !loading {
         if !eng.sig.empty.is_empty() {
             eng.flush_empty();
@@ -165,7 +165,7 @@ pub(crate) fn resolve_probes(eng: &mut Engine) {
 
 /// The key's live entry in a database, without side effects.
 pub(super) fn live<'e>(eng: &'e Engine, db: usize, key: &[u8]) -> Option<&'e crate::value::Entry> {
-    let now = crate::util::now_ms();
+    let now = eng.exec_time;
     eng.dbs.get(db)?.keys.get(key).filter(|e| e.expire == 0 || e.expire > now)
 }
 
@@ -232,7 +232,7 @@ fn filter_passes(eng: &Engine, db: usize, ix: &Index, key: &[u8]) -> bool {
     let mut row = Row(Vec::new());
     match live(eng, db, key).map(|e| &e.value) {
         Some(Value::Hash(h)) if ix.spec.rule.doc_type == DocType::Hash => {
-            let now = crate::util::now_ms();
+            let now = eng.exec_time;
             for (name, path) in &keys {
                 let v = match h.get_live(crate::util::cstr(path), now) {
                     Some(v) => RsValue::RedisString(v.to_vec()),
@@ -443,7 +443,7 @@ fn load_hash(eng: &Engine, ix: &Index, db: usize, key: &[u8]) -> Result<Document
         }
     };
     let (h, expire) = h;
-    let now = crate::util::now_ms();
+    let now = eng.exec_time;
     let get = |f: &[u8]| h.get_live(crate::util::cstr(f), now);
     let rule = &ix.spec.rule;
     let mut doc = Document::new(key, DocType::Hash);

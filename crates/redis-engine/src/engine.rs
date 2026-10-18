@@ -251,6 +251,11 @@ pub struct Engine {
     pub dbs: Vec<Db>,
     pub cfg: Config,
     pub hub: Arc<Hub>,
+    /// `server.cmd_time_snapshot`: the time the current execution unit (the outermost command,
+    /// or a cron job like active expiry) runs at; what module keyspace handlers see as now.
+    pub(crate) exec_time: i64,
+    /// `server.execution_nesting`: dispatches in progress (nested ones keep the snapshot).
+    exec_depth: u32,
     pub stats: Stats,
     pub cmdstats: HashMap<String, CmdStat>,
     pub errorstats: HashMap<String, u64>,
@@ -375,6 +380,8 @@ impl Engine {
             dbs,
             cfg,
             hub,
+            exec_time: now,
+            exec_depth: 0,
             stats: Stats::default(),
             cmdstats: HashMap::new(),
             errorstats: HashMap::new(),
@@ -632,6 +639,17 @@ impl Engine {
     }
 
     pub(crate) fn dispatch(&mut self, client: &mut Client, args: &[Bytes], now: i64, mode: Mode) -> Outcome {
+        // `enterExecutionUnit`: the outermost call takes the time snapshot.
+        if self.exec_depth == 0 {
+            self.exec_time = now;
+        }
+        self.exec_depth += 1;
+        let out = self.dispatch_unit(client, args, now, mode);
+        self.exec_depth -= 1;
+        out
+    }
+
+    fn dispatch_unit(&mut self, client: &mut Client, args: &[Bytes], now: i64, mode: Mode) -> Outcome {
         if args.is_empty() {
             return Outcome::Reply(Reply::error("ERR empty command"));
         }
@@ -1471,6 +1489,9 @@ impl Engine {
 
     /// Evict keys until under `maxmemory`. Returns false if still over (or eviction disabled).
     pub fn evict_to_fit(&mut self, now: i64) -> bool {
+        if self.exec_depth == 0 {
+            self.exec_time = now;
+        }
         let max = self.cfg.maxmemory as usize;
         if max == 0 || self.used_memory() <= max {
             return true;
@@ -1558,6 +1579,9 @@ impl Engine {
             return 0;
         }
         let now = now_ms();
+        if self.exec_depth == 0 {
+            self.exec_time = now;
+        }
         if let Some(h) = self.hotkeys.as_mut() {
             h.expire(now);
         }
