@@ -185,6 +185,9 @@ struct Hyb {
     epsilon: Option<String>,
     /// WITHCURSOR's settings.
     cursor: Option<CursorConfig>,
+    /// `QEXEC_F_IS_CURSOR`: WITHCURSOR was given (the debug wrapper replies without a cursor,
+    /// but the query counts as a cursor's).
+    is_cursor: bool,
     /// `_FT.DEBUG`'s TIMEOUT_AFTER_N_SEARCH, _VSIM and _TAIL (0: none).
     debug: [u32; 3],
 }
@@ -886,7 +889,7 @@ fn parse(cfg: &Config, args: &[Bytes]) -> Result<Hyb, QErr> {
     tail.max_aggregate_results = max_results;
     tail.strict_prefix = true;
     tail.timeout = o.timeout;
-    Ok(Hyb { search, vector, tail, scoring: o.scoring, vec_score, hide, dialect, explain: None, capped, radius, epsilon, cursor, debug: [0; 3] })
+    Ok(Hyb { search, vector, tail, scoring: o.scoring, vec_score, hide, dialect, explain: None, capped, radius, epsilon, is_cursor: cursor.is_some(), cursor, debug: [0; 3] })
 }
 
 /// `AREQ_ApplyContext` for both subqueries (`AddValidationErrorContext`).
@@ -1446,17 +1449,25 @@ fn run_tail<'a>(
         rc = pull(&mut chain, &mut cx, &mut r);
     }
     let total = reported(cx.total - cx.skipped);
+    // `finishSendChunk_HREQ` counts the query unless an error other than a timeout was
+    // replied; `handleSendChunkError_hybrid` the error, on the coordinator's side.
+    let counted = Counted { cursor: h.is_cursor, ..Counted::default() };
+    let chunk_err = |e: QErr| {
+        if e.code == Code::TimedOut {
+            eng.search.stats.count_query(counted, clock.elapsed());
+        }
+        Ok(Err(count_error(eng, e.into(), Some(true))))
+    };
     // `HybridRequest_GetError`: the tail's error unless it is a missing value, else a subquery's.
     if let Some(e) = cx.err.as_ref().filter(|e| e.code != Code::NoPropVal) {
-        return Ok(Err(e.clone().into()));
+        return chunk_err(e.clone());
     }
     if let Some(e) = subs.borrow().iter().find_map(|s| s.cx.err.clone()) {
-        return Ok(Err(e.into()));
+        return chunk_err(e);
     }
     // `handleSendChunkError_hybrid`: ON_TIMEOUT FAIL's timeout (FT.PROFILE warns instead).
     if rc == St::TimedOut && policy == Policy::Fail && prof.is_none() {
-        eng.search.stats.timeout(true, false);
-        return Ok(Err(QErr::code(Code::TimedOut).into()));
+        return chunk_err(QErr::code(Code::TimedOut));
     }
     if !collect && rc == St::Ok {
         rows.push(std::mem::replace(&mut r, Res::new()));
@@ -1510,29 +1521,32 @@ fn run_tail<'a>(
             "Query TIMEOUT exceeded the configured maximum (search-_max-foreground-timeout-limit) while search-workers is disabled; effective timeout was capped".into(),
         ));
     }
-    // `updateHybridWarningMetrics`: once, whichever subqueries reached the limit.
-    if subs.borrow().iter().any(|s| s.rc != St::Error && s.expansions) {
-        eng.search.stats.warning(crate::search::global::QueryWarning::MaxPrefixExpansions, true);
-    }
     // `replyWarningsWithSuffixes`: a subquery's timeout hides the tail's.
     let mut sub_timed_out = false;
+    let mut expansions = false;
     for (i, s) in subs.borrow().iter().enumerate() {
         let suffix = if i == 0 { "(SEARCH)" } else { "(VSIM)" };
         if s.rc == St::TimedOut {
             warnings.push(Reply::Status(format!("{TIMEOUT_WARNING} {suffix}")));
             sub_timed_out = true;
-        } else if s.rc == St::Error
-            && let Some(e) = &s.cx.err
-        {
-            warnings.push(Reply::Status(format!("{} {suffix}", e.text())));
+        } else if s.rc == St::Error {
+            if let Some(e) = &s.cx.err {
+                warnings.push(Reply::Status(format!("{} {suffix}", e.text())));
+            }
         } else if s.expansions {
             warnings.push(Reply::Status(format!("Max prefix expansions limit was reached {suffix}")));
+            expansions = true;
         }
     }
-    // `updateHybridWarningMetrics`.
+    // `updateHybridWarningMetrics`: each kind once, on the coordinator's side; then the query
+    // (`finishSendChunk_HREQ`).
     if sub_timed_out || rc == St::TimedOut {
-        eng.search.stats.timeout(false, false);
+        eng.search.stats.warning(QueryWarning::Timeout, true);
     }
+    if expansions {
+        eng.search.stats.warning(QueryWarning::MaxPrefixExpansions, true);
+    }
+    eng.search.stats.count_query(counted, clock.elapsed());
     if rc == St::TimedOut && !sub_timed_out {
         warnings.push(Reply::Status(format!("{TIMEOUT_WARNING} (POST PROCESSING)")));
     } else if rc == St::Error
@@ -1561,8 +1575,9 @@ fn run_tail<'a>(
         if background {
             m.push(kv("Total GIL time", ms(0)));
         }
-        let warning = if s.expansions { "Max prefix expansions limit was reached" } else { "None" };
-        m.push(kv("Warning", Reply::Array(vec![Reply::Status(warning.into())])));
+        // A subquery's profile warnings are added only where a chunk is replied
+        // (`ProfileWarnings_Add` in `sendChunk`), which its depleter never is.
+        m.push(kv("Warning", Reply::Array(vec![Reply::Status("None".into())])));
         if let Some(it) = s.chain.first().and_then(|q| q.profile_iters(&pc)) {
             m.push(kv("Iterators profile", Reply::Map(it)));
         }
@@ -1635,11 +1650,17 @@ fn hybrid(cx: &mut Cx, index: &Bytes, args: &[Bytes], mut prof: Option<HProf>, d
     // The debug wrapper runs in the foreground.
     let background = params.is_none() && cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
     let db = cx.client.db;
-    let mut h = parse(&cx.eng.cfg, args)?;
+    // `CleanupAndReplyStatus` (and the workers' callbacks) count an error building or
+    // running the request by the request: `_FT.HYBRID`'s on the shard's side;
+    // `DEBUG_hybridCommandHandler` replies its own uncounted.
+    let side = (!matches!(dbg, Dbg::User(_))).then_some(!matches!(dbg, Dbg::Internal(_)));
+    let mut h = parse(&cx.eng.cfg, args).map_err(|e| count_error(cx.eng, e.into(), side))?;
     {
         let eng = &mut *cx.eng;
         let ix = eng.search.indexes.get_mut(&name).expect("loaded");
-        apply(&mut h, ix, resp3, &eng.cfg)?;
+        if let Err(e) = apply(&mut h, ix, resp3, &eng.cfg) {
+            return Err(count_error(eng, e.into(), side));
+        }
     }
     match (dbg, params) {
         (Dbg::Internal(d), _) => h.debug = d,
@@ -1655,7 +1676,7 @@ fn hybrid(cx: &mut Cx, index: &Bytes, args: &[Bytes], mut prof: Option<HProf>, d
         p.parse_ns = p.clock.elapsed().as_nanos() as u64;
     }
     if h.cursor.is_some() {
-        return start_cursors(cx, name, h, db, resp3, background);
+        return start_cursors(cx, name, h, db, resp3, background, matches!(dbg, Dbg::Internal(_)));
     }
     let res = {
         let eng: &Engine = cx.eng;
@@ -1667,7 +1688,7 @@ fn hybrid(cx: &mut Cx, index: &Bytes, args: &[Bytes], mut prof: Option<HProf>, d
     if (res.is_ok() || background) && !matches!(dbg, Dbg::User(_)) {
         count_hybrid_dialect(cx, &name, &h);
     }
-    res?
+    res.map_err(|e| count_error(cx.eng, e, side))?
 }
 
 fn count_hybrid_dialect(cx: &mut Cx, name: &[u8], h: &Hyb) {
@@ -1734,7 +1755,8 @@ struct Drained {
 
 /// `HybridRequest_StartCursors`: both subqueries drained (`RPDepleter_DepleteAll`), a cursor
 /// left on each; the reply maps SEARCH and VSIM to their ids, with the warnings.
-fn start_cursors(cx: &mut Cx, name: Bytes, h: Hyb, db: usize, resp3: bool, background: bool) -> CmdResult {
+fn start_cursors(cx: &mut Cx, name: Bytes, h: Hyb, db: usize, resp3: bool, background: bool, internal: bool) -> CmdResult {
+    let side = Some(!internal);
     let conf = h.cursor.unwrap_or_default();
     let cap = cx.eng.cfg.num("search-index-cursor-limit") as i64;
     let spec_id = cx.eng.search.indexes.get(&name).expect("loaded").id;
@@ -1782,16 +1804,18 @@ fn start_cursors(cx: &mut Cx, name: Bytes, h: Hyb, db: usize, resp3: bool, backg
             Ok(out)
         })
     };
-    let drained = drained?;
+    let drained = drained.map_err(|e| count_error(cx.eng, e, side))?;
     count_hybrid_dialect(cx, &name, &h);
     let timed_out = drained.iter().any(|d| d.tail == St::TimedOut);
     if timed_out && Policy::of(h.tail.on_timeout) != Policy::Return {
-        return Err(QErr::new(Code::TimedOut, "Depleting timed out").into());
+        return Err(count_error(cx.eng, QErr::new(Code::TimedOut, "Depleting timed out").into(), side));
     }
     let Hyb { search, vector, .. } = h;
     let mut ids = Vec::new();
     let mut expansions = Vec::new();
-    for (req, d) in [search, vector].into_iter().zip(drained) {
+    for (mut req, d) in [search, vector].into_iter().zip(drained) {
+        // The subquery's request is internal as the command is (its cursor's reads count so).
+        req.internal = internal;
         let cursors = &mut cx.eng.search.cursors;
         let id = cursors.reserve(spec_id, name.clone(), conf.max_idle, cap).expect("under the index's cursor limit");
         let mut c = cursors.take_running(id).expect("reserved");
@@ -1801,14 +1825,15 @@ fn start_cursors(cx: &mut Cx, name: Bytes, h: Hyb, db: usize, resp3: bool, backg
         cursors.pause(c);
         ids.push(id);
     }
-    // `replyWithCursors`.
+    // `replyWithCursors`: its warnings counted on the shard's side.
     let mut warnings = Vec::new();
     if timed_out {
-        cx.eng.search.stats.timeout(false, true);
+        cx.eng.search.stats.warning(QueryWarning::Timeout, false);
         warnings.push(Reply::Status(TIMEOUT_WARNING.into()));
     }
     for (i, e) in expansions.into_iter().enumerate() {
         if e {
+            cx.eng.search.stats.warning(QueryWarning::MaxPrefixExpansions, false);
             warnings.push(Reply::Status(format!("Max prefix expansions limit was reached {}", if i == 0 { "(SEARCH)" } else { "(VSIM)" })));
         }
     }
@@ -1874,6 +1899,12 @@ pub(in crate::commands) fn read_cursor(cx: &mut Cx, mut c: crate::search::cursor
             iclock: None,
         };
         let mut warnings = Vec::new();
+        // `trackWarnings_Resp2` / `_replyWarnings` and `finishSendChunk` of the subquery's
+        // request (`_FT.HYBRID`'s internal: no query counted, its warnings the shard's).
+        if rc == St::TimedOut {
+            eng.search.stats.warning(QueryWarning::Timeout, !req.internal);
+        }
+        eng.search.stats.count_query(Counted { internal: req.internal, cursor: true, aggregate: false }, std::time::Duration::ZERO);
         if resp3 {
             if rc == St::TimedOut {
                 warnings.push(Reply::Status(TIMEOUT_WARNING.into()));

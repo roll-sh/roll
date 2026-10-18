@@ -75,6 +75,7 @@ use crate::search::qast;
 use crate::search::qeval::{EvalCx, Memo};
 use crate::search::quantile::QuantStream;
 use crate::search::scorers::{self, Expl, Scorer};
+use crate::search::global::{Counted, QueryError, QueryWarning};
 use crate::search::spec::Spec;
 use crate::util::cstr;
 use std::cell::RefCell;
@@ -135,15 +136,21 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 /// FT.AGGREGATE's request, built and run; `_FT.DEBUG FT.AGGREGATE` gives its debug parameters
 /// (`args` without them; `_FT.AGGREGATE` marks an internal request).
 pub(super) fn aggregate_with(cx: &mut Cx, args: &[Bytes], dbg: Option<&[Bytes]>) -> CmdResult {
-    let mut req = areq::compile(Command::Aggregate, &cx.eng.cfg, &args[2..])?;
+    // `execCommandCommon` counts an error building the request (a standalone server's as the
+    // coordinator's); `DEBUG_execCommandCommon` does not.
+    let pre = dbg.is_none().then_some(true);
+    let mut req = areq::compile(Command::Aggregate, &cx.eng.cfg, &args[2..]).map_err(|e| count_error(cx.eng, e.into(), pre))?;
     req.internal = args[0].first() == Some(&b'_');
     let Some(name) = cx.eng.search.load(cstr(&args[1]), false) else {
         return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(&args[1]))).into());
     };
     let resp3 = cx.client.resp >= 3;
     {
-        let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
-        req.apply_context(ix, resp3)?;
+        let eng = &mut *cx.eng;
+        let ix = eng.search.indexes.get_mut(&name).expect("loaded");
+        if let Err(e) = req.apply_context(ix, resp3) {
+            return Err(count_error(eng, e.into(), pre));
+        }
         // `prepareRequest`: the dialect counts once the request is built, whatever the run.
         ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
     }
@@ -157,6 +164,7 @@ pub(super) fn aggregate_with(cx: &mut Cx, args: &[Bytes], dbg: Option<&[Bytes]>)
         req.flags |= F_HAS_DEPLETER;
     }
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    req.plan_errors = plan_side(req.internal, background, dbg.is_some());
     if let Some(p) = dbg {
         req.set_debug(debug_parse(p, &req, background));
     }
@@ -298,15 +306,21 @@ pub(super) fn profile_with(cx: &mut Cx, args: &[Bytes], debug: bool, clock: Inst
         (args[at + 1..].to_vec(), None)
     };
     let search = cmd == Command::Search;
-    let mut req = areq::compile(cmd, &cx.eng.cfg, &rest)?;
+    // `execCommandCommon` counts an error building the request (a standalone server's as the
+    // coordinator's); `DEBUG_execCommandCommon` does not.
+    let pre = (!debug).then_some(true);
+    let mut req = areq::compile(cmd, &cx.eng.cfg, &rest).map_err(|e| count_error(cx.eng, e.into(), pre))?;
     req.internal = internal;
     let Some(name) = cx.eng.search.load(cstr(&args[1]), false) else {
         return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(&args[1]))).into());
     };
     let resp3 = cx.client.resp >= 3;
     {
-        let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
-        req.apply_context(ix, resp3)?;
+        let eng = &mut *cx.eng;
+        let ix = eng.search.indexes.get_mut(&name).expect("loaded");
+        if let Err(e) = req.apply_context(ix, resp3) {
+            return Err(count_error(eng, e.into(), pre));
+        }
         // `prepareRequest`: the dialect counts once the request is built, whatever the run.
         ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
     }
@@ -316,6 +330,7 @@ pub(super) fn profile_with(cx: &mut Cx, args: &[Bytes], debug: bool, clock: Inst
         req.flags |= F_HAS_DEPLETER;
     }
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    req.plan_errors = plan_side(internal, background, debug);
     if let Some(p) = &params {
         req.set_debug(debug_parse(p, &req, background));
     }
@@ -542,6 +557,59 @@ pub(super) fn eval_if(eng: &Engine, db: usize, ix: &Index, key: &[u8], raw: &[u8
         return Err(st.err.unwrap_or_else(|| QErr::code(Code::Generic)));
     }
     Ok(v.bool_test())
+}
+
+/// An error replied, counted by its code on the coordinator's side or the shard's (`None`:
+/// not counted).
+pub(super) fn count_error(eng: &Engine, e: Error, side: Option<bool>) -> Error {
+    if let Some(coord) = side {
+        eng.search.stats.error_reply(&e.0, coord);
+    }
+    e
+}
+
+/// Where a request's errors before its pipeline runs count ([`areq::Request::plan_errors`]):
+/// on the workers by the request; in the foreground on the coordinator's side, but for a
+/// debug wrapper's.
+pub(super) fn plan_side(internal: bool, background: bool, debug: bool) -> Option<bool> {
+    if background {
+        Some(!internal)
+    } else if debug {
+        None
+    } else {
+        Some(true)
+    }
+}
+
+/// An error building the request's plan or pipeline, counted where the request says.
+pub(super) fn plan_err(eng: &Engine, req: &areq::Request, e: impl Into<Error>) -> Error {
+    count_error(eng, e.into(), req.plan_errors)
+}
+
+/// A chunk replied: its warnings (`trackWarnings_Resp2`, `_replyWarnings`: the timeout's and
+/// the prefix expansions', by the request), and the query (`finishSendChunk`; `None`: an error
+/// after the first results left it uncounted).
+pub(super) fn count_chunk(eng: &Engine, req: &areq::Request, f: Option<Counted>, elapsed: std::time::Duration, timed_out: bool, expansions: bool) {
+    let stats = &eng.search.stats;
+    if timed_out {
+        stats.warning(QueryWarning::Timeout, !req.internal);
+    }
+    if expansions {
+        stats.warning(QueryWarning::MaxPrefixExpansions, !req.internal);
+    }
+    if let Some(f) = f {
+        stats.count_query(f, elapsed);
+    }
+}
+
+/// ON_TIMEOUT FAIL's timeout replied as an error: by the chunk (`handleSendChunkError`, the
+/// query counted too), or by the blocked client's timer on the workers
+/// (`QueryTimeoutFailCallback`, `CursorReadTimeoutFailCallback`: only the error).
+pub(super) fn count_timeout_error(eng: &Engine, req: &areq::Request, f: Counted, elapsed: std::time::Duration, timer: bool) {
+    eng.search.stats.error(QueryError::Timeout, !req.internal);
+    if !timer {
+        eng.search.stats.count_query(f, elapsed);
+    }
 }
 
 fn count_dialect(cx: &mut Cx, name: &[u8], req: &areq::Request) {
@@ -3010,11 +3078,17 @@ fn run(
     started: &mut bool,
     mut prof: Option<&mut ProfOut>,
 ) -> Result<(Reply, bool), Error> {
+    let started_at = Instant::now();
     let cfg = &eng.cfg;
     let spec = &ix.spec;
     let flags = req.flags;
     let now = crate::util::now_ms();
     let reading = cur.as_ref().is_some_and(|s| s.started);
+    // FT.SEARCH's own run counts it (this one only profiles it), but for a cursor's.
+    let count = flags & F_IS_SEARCH == 0 || cur.is_some();
+    let plan_err = |e: Error| if count { count_error(eng, e, req.plan_errors) } else { e };
+    // `TotalGlobalStats_CountQuery`'s flags: a cursor's reads are no FT.AGGREGATE's.
+    let counted = Counted { internal: req.internal, cursor: flags & F_IS_CURSOR != 0, aggregate: flags & F_IS_AGGREGATE != 0 && !reading };
     let pending = cur.as_ref().and_then(|s| s.pending_at);
     let top = match cur.as_ref() {
         Some(s) if s.started => s.top,
@@ -3074,7 +3148,7 @@ fn run(
         (None, None) => {}
     }
     let root = req.root.as_ref().expect("a parsed query");
-    let mut it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };
+    let mut it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root).map_err(|e| plan_err(e.into()))? };
     if let Some(s) = cur.as_deref_mut()
         && !s.started
         && let Some(m) = ecx.memo.take()
@@ -3091,16 +3165,12 @@ fn run(
         && prof.is_none()
         && fresh.as_ref().is_some_and(Tmo::plan_timed_out)
     {
-        eng.search.stats.timeout(true, req.internal);
-        return Err(QErr::code(Code::TimedOut).into());
+        return Err(plan_err(QErr::code(Code::TimedOut).into()));
     }
     // `Profile_AddIters`.
     let it = if prof.is_some() { iters::profiled(it) } else { it };
     // The warning is the first chunk's (later ones start with a fresh error).
     let warn_expansions = ecx.expansions_warning && !reading;
-    if warn_expansions {
-        eng.search.stats.warning(crate::search::global::QueryWarning::MaxPrefixExpansions, true);
-    }
 
     let avg = match cur.as_ref() {
         Some(s) if s.started => s.avg_doc_len,
@@ -3143,17 +3213,17 @@ fn run(
             s.metrics = metric_requests.clone();
         }
     }
-    let Builder { mut chain, sortkey, .. } = build(req, &mut cx, it, ix, now, background, sargs, &metric_requests)?;
+    let Builder { mut chain, sortkey, .. } = build(req, &mut cx, it, ix, now, background, sargs, &metric_requests).map_err(|e| plan_err(e.into()))?;
     // `parseAndCompileDebug`, once the pipeline is built.
     if let Some(e) = &req.debug_err {
-        return Err(e.clone().into());
+        return Err(plan_err(e.clone().into()));
     }
     if let Some(p) = prof.as_deref_mut() {
         cx.prof = Some(vec![(0, 0); chain.len()]);
         p.build_ns = p.clock.elapsed().as_nanos() as u64;
     }
     if let Some(e) = gate {
-        return Err(e.into());
+        return Err(plan_err(e.into()));
     }
     *started = true;
     let optimized = flags & OPTIMIZE != 0;
@@ -3211,19 +3281,21 @@ fn run(
     // `handleSendChunkError`: an error, or a timeout under ON_TIMEOUT FAIL (FT.PROFILE warns
     // instead); either ends a cursor.
     if let Some(e) = &cx.err {
-        return Err(e.clone().into());
+        let e: Error = e.clone().into();
+        return Err(if count { count_error(eng, e, Some(!req.internal)) } else { e });
     }
-    // FT.SEARCH's own run counts its timeouts (this one only profiles it), but for a cursor's.
-    let counted = flags & F_IS_SEARCH == 0 || cur.is_some();
     // `QueryTimeoutFailCallback` / `CursorReadTimeoutFailCallback`: on the workers, ON_TIMEOUT
     // FAIL leaves the clock to the blocked client's timer, which fires with the timeout
     // error once the timeout passed before the chunk was replied.
     if background && policy == Policy::Fail && req.timeout > 0 && prof.is_none() && cx.tmo.passed() {
-        rc = St::TimedOut;
+        if count {
+            count_timeout_error(eng, req, counted, started_at.elapsed(), true);
+        }
+        return Err(QErr::code(Code::TimedOut).into());
     }
     if rc == St::TimedOut && policy == Policy::Fail && prof.is_none() {
-        if counted {
-            eng.search.stats.timeout(true, req.internal);
+        if count {
+            count_timeout_error(eng, req, counted, started_at.elapsed(), false);
         }
         return Err(QErr::code(Code::TimedOut).into());
     }
@@ -3268,8 +3340,10 @@ fn run(
     if let Some(s) = cur.as_deref_mut() {
         s.tmo = cx.tmo;
     }
-    if rc == St::TimedOut && counted {
-        eng.search.stats.timeout(false, req.internal);
+    if count {
+        // A pipeline's error after the chunk's first results (RESP3's warning) leaves the
+        // query uncounted.
+        count_chunk(eng, req, cx.err.is_none().then_some(counted), started_at.elapsed(), rc == St::TimedOut, warn_expansions);
     }
     if let Some(p) = prof {
         p.expansions = warn_expansions;

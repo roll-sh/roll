@@ -37,9 +37,10 @@ pub(in crate::commands) fn guard(cx: &Cx) -> Option<Oom> {
     Some(if policy == 1 { Oom::Fail } else { Oom::Return })
 }
 
-/// `QueryMemoryGuardFailure_WithReply`, the error counted.
-fn fail(cx: &Cx, internal: bool) -> Error {
-    cx.eng.search.stats.oom(true, internal);
+/// `QueryMemoryGuardFailure_WithReply`, the error counted (on the coordinator's side or the
+/// shard's).
+fn fail(cx: &Cx, coord: bool) -> Error {
+    cx.eng.search.stats.error(QueryError::Oom, coord);
     QErr::code(Code::OutOfMemory).into()
 }
 
@@ -48,8 +49,10 @@ fn fail(cx: &Cx, internal: bool) -> Error {
 /// the index, the query's arguments).
 pub(in crate::commands) fn query(cx: &mut Cx, o: Oom, argv: &[Bytes], profile: Option<(bool, Instant)>) -> CmdResult {
     let internal = argv[0].first() == Some(&b'_');
+    // A standalone server's guards count the error as the coordinator's (`COORD_ERR_WARN`,
+    // `GetNumShards_UnSafe() == 1`), whatever the command.
     if o == Oom::Fail {
-        return Err(fail(cx, internal));
+        return Err(fail(cx, true));
     }
     // `shallow_parse_query_args`.
     let cursor = argv.iter().any(|a| a.eq_ignore_ascii_case(b"WITHCURSOR"));
@@ -62,8 +65,8 @@ pub(in crate::commands) fn query(cx: &mut Cx, o: Oom, argv: &[Bytes], profile: O
             Some(f) => return Err(QErr::user(Code::ParseArgs, "FORMAT", format!(" {} is not supported", String::from_utf8_lossy(f))).into()),
         }
     }
-    // `sendChunk_ReplyOnly_EmptyResults`.
-    cx.eng.search.stats.oom(false, internal);
+    // `sendChunk_ReplyOnly_EmptyResults`: the warning counted (no query is).
+    cx.eng.search.stats.warning(QueryWarning::Oom, !internal);
     let resp3 = cx.client.resp >= 3;
     let results = if resp3 {
         let warning = if internal { SHARD_WARNING } else { COORD_WARNING };
@@ -90,9 +93,11 @@ pub(in crate::commands) fn query(cx: &mut Cx, o: Oom, argv: &[Bytes], profile: O
 /// internal `_FT.HYBRID`: its subqueries' cursor ids, none).
 pub(in crate::commands) fn hybrid(cx: &mut Cx, o: Oom, internal: bool, profile: bool) -> CmdResult {
     if o == Oom::Fail {
-        return Err(fail(cx, internal));
+        return Err(fail(cx, !internal));
     }
-    cx.eng.search.stats.oom(false, internal);
+    // `common_hybrid_query_reply_empty`: the shard's warning for `_FT.HYBRID`'s cursor reply,
+    // `sendChunk_ReplyOnly_HybridEmptyResults`'s coordinator's otherwise.
+    cx.eng.search.stats.warning(QueryWarning::Oom, !internal);
     let kv = |k: &str, v: Reply| (Reply::Status(k.into()), v);
     if internal {
         return Ok(Reply::Map(vec![kv("SEARCH", Reply::Int(0)), kv("VSIM", Reply::Int(0)), kv("warnings", Reply::Array(vec![Reply::Status(SHARD_CODE_WARNING.into())]))]));

@@ -111,14 +111,16 @@ pub struct ErrorCounters {
 }
 
 /// The process-wide query counters (`QueriesGlobalStats`); atomics, so query execution (which
-/// sees the engine read-only) can count. A standalone server counts its own queries' errors and
-/// warnings as the coordinator's (`COORD_ERR_WARN`); the shard side only gets what a shard
-/// reply carries.
+/// sees the engine read-only) can count. A standalone server counts a user's queries' errors
+/// and warnings as the coordinator's (`COORD_ERR_WARN`, `!IsInternal`), an internal (`_FT.*`)
+/// request's mostly as the shard's.
 ///
-/// The hooks for query execution: [`QueryStats::count_query`] once per reply chunk sent (a
-/// query, an FT.CURSOR READ), [`QueryStats::error`] / [`QueryStats::error_reply`] for an error
-/// replied, [`QueryStats::warning`] for each warning a chunk carries (a timeout with the RETURN
-/// policy, OOM, the prefix expansion limit).
+/// The hooks are called where the module calls its own: [`QueryStats::count_query`] once a
+/// chunk is replied (`finishSendChunk`: not after an error reply, but after a timeout's),
+/// [`QueryStats::error`] / [`QueryStats::error_reply`] where an error is replied
+/// (`QueryErrorsGlobalStats_UpdateError`, which counts only some codes),
+/// [`QueryStats::warning`] for each warning a chunk carries
+/// (`QueryWarningsGlobalStats_UpdateWarning`, RESP2's chunks too).
 #[derive(Debug, Default)]
 pub struct QueryStats {
     pub queries_processed: AtomicU64,
@@ -130,13 +132,28 @@ pub struct QueryStats {
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
+/// The request flags `TotalGlobalStats_CountQuery` looks at.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Counted {
+    /// `QEXEC_F_INTERNAL`: not counted.
+    pub internal: bool,
+    /// `QEXEC_F_IS_CURSOR`.
+    pub cursor: bool,
+    /// `QEXEC_F_IS_AGGREGATE`, which a cursor's reads drop (`prepareForCursorRead`).
+    pub aggregate: bool,
+}
+
 impl QueryStats {
-    /// `TotalGlobalStats_CountQuery`: every chunk sent counts as a command; as a query unless
-    /// it is a later read of a cursor (FT.CURSOR READ).
-    pub fn count_query(&self, cursor_read: bool, elapsed: std::time::Duration) {
+    /// `TotalGlobalStats_CountQuery`: a chunk replied counts as a command, and as a query
+    /// unless it is a cursor's other than an FT.AGGREGATE's first (FT.SEARCH WITHCURSOR's
+    /// chunks, FT.CURSOR READ's); an internal request's not at all.
+    pub fn count_query(&self, f: Counted, elapsed: std::time::Duration) {
+        if f.internal {
+            return;
+        }
         self.query_commands.fetch_add(1, Relaxed);
         self.execution_ns.fetch_add(elapsed.as_nanos() as u64, Relaxed);
-        if !cursor_read {
+        if !f.cursor || f.aggregate {
             self.queries_processed.fetch_add(1, Relaxed);
         }
     }
@@ -175,27 +192,6 @@ impl QueryStats {
             QueryWarning::AsmInaccurateResults => &c.warn_asm_inaccurate,
         }
         .fetch_add(1, Relaxed);
-    }
-
-    /// A timeout where the query runs: ON_TIMEOUT FAIL's error or RETURN's warning, `internal`
-    /// for the `_FT.*` (shard) requests. A user-facing error goes out as an error reply, which
-    /// the command wrapper counts by its code, so only internal errors are counted here.
-    pub fn timeout(&self, error: bool, internal: bool) {
-        match (error, internal) {
-            (true, false) => {}
-            (true, true) => self.error(QueryError::Timeout, false),
-            (false, internal) => self.warning(QueryWarning::Timeout, !internal),
-        }
-    }
-
-    /// The memory guard's error (ON_OOM FAIL) or its empty reply's warning (RETURN), counted as
-    /// [`QueryStats::timeout`] counts.
-    pub fn oom(&self, error: bool, internal: bool) {
-        match (error, internal) {
-            (true, false) => {}
-            (true, true) => self.error(QueryError::Oom, false),
-            (false, internal) => self.warning(QueryWarning::Oom, !internal),
-        }
     }
 }
 

@@ -59,6 +59,7 @@ use crate::search::iters::{IxResult, Qcx};
 use crate::search::optimizer::{self as qopt, OptType};
 use crate::search::qeval::EvalCx;
 use crate::search::scorers::{self, Expl, Scorer};
+use crate::search::global::Counted;
 use crate::search::highlight;
 use crate::search::spec::{self as sspec, DocType, Spec};
 use super::ft_aggregate::{CAPPED_WARNING, Policy, TIMEOUT_WARNING, Tmo};
@@ -459,20 +460,29 @@ pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 /// FT.SEARCH's request, built and run; `_FT.DEBUG FT.SEARCH` gives its debug parameters
 /// (`args` without them; `_FT.SEARCH` marks an internal request).
 pub(super) fn search_with(cx: &mut Cx, args: &[Bytes], dbg: Option<&[Bytes]>) -> CmdResult {
-    let mut req = areq::compile(Command::Search, &cx.eng.cfg, &args[2..])?;
+    use super::ft_aggregate::count_error;
+    // `execCommandCommon` counts an error building the request (a standalone server's as the
+    // coordinator's); `DEBUG_execCommandCommon` does not.
+    let pre = dbg.is_none().then_some(true);
+    let mut req = areq::compile(Command::Search, &cx.eng.cfg, &args[2..]).map_err(|e| count_error(cx.eng, e.into(), pre))?;
     req.internal = args[0].first() == Some(&b'_');
     let Some(name) = cx.eng.search.load(crate::util::cstr(&args[1]), false) else {
         return Err(QErr::user(Code::NoIndex, "Index not found", format!(": {}", qast::lossy(&args[1]))).into());
     };
     let resp3 = cx.client.resp >= 3;
     {
-        let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
-        req.apply_context(ix, resp3)?;
+        let eng = &mut *cx.eng;
+        let ix = eng.search.indexes.get_mut(&name).expect("loaded");
+        let applied = req.apply_context(ix, resp3);
+        if let Err(e) = applied {
+            return Err(count_error(eng, e.into(), pre));
+        }
         // `prepareRequest`: the dialect counts once the request is built, whatever the run.
         ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
     }
     let db = cx.client.db;
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    req.plan_errors = super::ft_aggregate::plan_side(req.internal, background, dbg.is_some());
     if let Some(p) = dbg {
         req.set_debug(super::ft_aggregate::debug_parse(p, &req, background));
     }
@@ -511,6 +521,8 @@ pub(super) fn metric_keys(lk: &mut Lookup, spec: &Spec, requests: &[Vec<u8>]) ->
 
 /// `profile`: FT.PROFILE's run (a timeout is a warning, whatever the policy).
 pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, background: bool, profile: bool) -> Result<Reply, Error> {
+    use super::ft_aggregate::plan_err;
+    let started = std::time::Instant::now();
     let cfg = &eng.cfg;
     let spec = &ix.spec;
     let flags = req.flags;
@@ -550,11 +562,8 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     let mut tmo = Tmo::new(req.timeout, policy, background, req.timeout_after);
     q.clock.deadline.set(tmo.iter_deadline());
     let root = req.root.as_ref().expect("a parsed query");
-    let mut it = ecx.iterate(root)?;
+    let mut it = ecx.iterate(root).map_err(|e| plan_err(eng, req, e))?;
     let warn_expansions = ecx.expansions_warning;
-    if warn_expansions {
-        eng.search.stats.warning(crate::search::global::QueryWarning::MaxPrefixExpansions, true);
-    }
     let metric_requests = std::mem::take(&mut ecx.metric_requests);
     // `QOptimizer_Iterators`.
     let plan = req.optimizer.as_ref().filter(|_| flags & OPTIMIZE != 0);
@@ -564,8 +573,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     // `prepareExecutionPlan`: under ON_TIMEOUT FAIL (FT.PROFILE aside) a query whose
     // iterators took up its time fails before its pipeline is built.
     if policy == Policy::Fail && !profile && tmo.plan_timed_out() {
-        eng.search.stats.timeout(true, req.internal);
-        return Err(QErr::code(Code::TimedOut).into());
+        return Err(plan_err(eng, req, QErr::code(Code::TimedOut)));
     }
 
     let arrange = req.steps.iter().rev().find_map(|s| if let Step::Arrange(a) = s { Some(a) } else { None });
@@ -593,7 +601,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
 
     let mut lk = Lookup::default();
     // `getAdditionalMetricsRP`: the yielded distances' keys
-    let metric_keys = metric_keys(&mut lk, spec, &metric_requests)?;
+    let metric_keys = metric_keys(&mut lk, spec, &metric_requests).map_err(|e| plan_err(eng, req, e))?;
     // the sort keys: read from the sorting vector, else loaded
     let mut sort_lk: Vec<usize> = Vec::new();
     let mut sort_load: Vec<usize> = Vec::new();
@@ -611,7 +619,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
                             sort_load.push(i);
                             sort_lk.push(i);
                         }
-                        _ => return Err(QErr::user(Code::NoPropKey, "Property", format!(" `{}` not loaded nor in schema", String::from_utf8_lossy(k))).into()),
+                        _ => return Err(plan_err(eng, req, QErr::user(Code::NoPropKey, "Property", format!(" `{}` not loaded nor in schema", String::from_utf8_lossy(k))))),
                     }
                 }
             }
@@ -650,9 +658,9 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
                 }
                 let name = crate::util::cstr(&ff.name);
                 match lk.get_read(Some(spec), name, 0) {
-                    None => return Err(QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", String::from_utf8_lossy(name))).into()),
+                    None => return Err(plan_err(eng, req, QErr::user(Code::NoPropKey, "No such property", format!(" `{}`", String::from_utf8_lossy(name))))),
                     Some(k) if lk.keys[k].flags & K_SCHEMA_SRC == 0 => {
-                        return Err(QErr::user(Code::Inval, "Property", format!(" `{}` is not in schema", String::from_utf8_lossy(name))).into());
+                        return Err(plan_err(eng, req, QErr::user(Code::Inval, "Property", format!(" `{}` is not in schema", String::from_utf8_lossy(name)))));
                     }
                     Some(k) => hl_keys.push((k, fi)),
                 }
@@ -661,7 +669,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     }
     // `parseAndCompileDebug`, once the pipeline is built.
     if let Some(e) = &req.debug_err {
-        return Err(e.clone().into());
+        return Err(plan_err(eng, req, e.clone()));
     }
     // The query reader's clock and `TIMEOUT_AFTER_N` (`RPTimeoutAfterCount`).
     let mut timed_out = false;
@@ -785,19 +793,19 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     }
     // `QueryTimeoutFailCallback`: on the workers, ON_TIMEOUT FAIL leaves the clock to the
     // blocked client's timer, which fires once the timeout passed before the reply.
+    let counted = Counted { internal: req.internal, cursor: false, aggregate: false };
     if background && policy == Policy::Fail && req.timeout > 0 && !profile && tmo.passed() {
-        timed_out = true;
+        super::ft_aggregate::count_timeout_error(eng, req, counted, started.elapsed(), true);
+        return Err(QErr::code(Code::TimedOut).into());
     }
     if timed_out && policy == Policy::Fail {
         if !profile {
-            eng.search.stats.timeout(true, req.internal);
+            super::ft_aggregate::count_timeout_error(eng, req, counted, started.elapsed(), false);
             return Err(QErr::code(Code::TimedOut).into());
         }
         results.clear();
     }
-    if timed_out {
-        eng.search.stats.timeout(false, req.internal);
-    }
+    super::ft_aggregate::count_chunk(eng, req, Some(counted), started.elapsed(), timed_out, warn_expansions);
 
     // the output loader
     let mut skipped = 0;

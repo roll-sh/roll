@@ -5,6 +5,7 @@
 # warning), FAIL (the error, FT.PROFILE's empty results) and RETURN-STRICT, cursors timing out
 # chunk by chunk, the internal _FT.* commands and _FT.CURSOR PROFILE. Indexes are created on
 # an empty keyspace and dropped at the end; configs are put back.
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FLUSHALL
 FT.CREATE idx ON HASH PREFIX 1 d: SCHEMA t TEXT n NUMERIC SORTABLE g TAG
 HSET d:01 t "hello world" n 1 g a
@@ -23,170 +24,224 @@ HSET d:10 t "hello hello hello" n 10 g b
 _FT.DEBUG FT.SEARCH idx *
 _FT.DEBUG FT.SEARCH idx * a b c
 _FT.DEBUG FT.SEARCH idx * a b DEBUG_PARAMS_COUNT
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 D 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 debug_params_count 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 0
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT -1
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT x
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 6
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2 extra
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N x DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N -1 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * FOO DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.SEARCH idx * LIMIT DEBUG_PARAMS_COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * INTERNAL_ONLY DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.SEARCH idx * CRASH INTERNAL_ONLY DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * CRASH_IN_RUST INTERNAL_ONLY DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * PAUSE_AFTER_RP_N DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.SEARCH idx * PAUSE_BEFORE_RP_N Index DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 2 INTERNAL_ONLY DEBUG_PARAMS_COUNT 3
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * INTERNAL_ONLY TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 3
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 4 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 4
 _FT.DEBUG FT.SEARCH idx * timeout_after_n 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH nosuch * TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH nosuch * FOO DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.SEARCH idx * BADARG TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx "(" FOO DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.AGGREGATE idx * TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 7
 _FT.DEBUG FT.AGGREGATE idx * TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 6
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * FOO DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.AGGREGATE idx * CRASH INTERNAL_ONLY DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * INTERNAL_ONLY DEBUG_PARAMS_COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE nosuch * TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * GROUPBY 1 @nosuch TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.PROFILE idx SEARCH QUERY * FOO DEBUG_PARAMS_COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.PROFILE idx SEARCH QUERY * DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.PROFILE idx SEARCH QUERY * TIMEOUT_AFTER_N 1 DEBUG_PARAMS_COUNT 3
 _FT.DEBUG FT.PROFILE idx SEARCH * TIMEOUT_AFTER_N 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.PROFILE idx FOO QUERY * TIMEOUT_AFTER_N 1 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.PROFILE idx SEARCH QUERY * TIMEOUT_AFTER_N 1 DEBUG_PARAMS_COUNT 9
 _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * WITHCURSOR TIMEOUT_AFTER_N 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.PROFILE nosuch SEARCH QUERY * TIMEOUT_AFTER_N 1 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.PROFILE
 _FT.DEBUG FT.PROFILE idx SEARCH QUERY
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * a
 _FT.DEBUG _FT.SEARCH
 _FT.DEBUG _FT.SEARCH idx
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG _FT.AGGREGATE idx
 _FT.DEBUG _FT.PROFILE idx
 _FT.DEBUG _FT.PROFILE
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 # ON_TIMEOUT RETURN (the default): the results the pipeline had, a RESP3 warning.
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 0 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 10 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 11 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 4 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 4
 _FT.DEBUG FT.SEARCH idx hello TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx hello WITHSCORES NOCONTENT TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * SORTBY n DESC TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * SORTBY n DESC LIMIT 1 2 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * LIMIT 2 3 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * LIMIT 3 3 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * LIMIT 0 0 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * NOCONTENT TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * RETURN 1 n TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx hello HIGHLIGHT TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx hello SCORER BM25STD.NORM WITHSCORES NOCONTENT TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx "@n:[3 8]" TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * SORTBY n ASC DIALECT 4 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * LIMIT 0 2 DIALECT 4 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG _FT.SEARCH idx * TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * TIMEOUT_AFTER_N 0 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 2 @t @n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @t SORTBY 2 @n DESC TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * GROUPBY 1 @g REDUCE COUNT 0 AS c TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * GROUPBY 1 @g REDUCE COUNT 0 AS c SORTBY 1 @g TIMEOUT_AFTER_N 20 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * APPLY @n*2 AS d FILTER @d>4 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n LIMIT 1 2 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n LIMIT 3 2 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * WITHCOUNT LOAD 1 @n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * LIMIT 0 0 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx hello ADDSCORES SORTBY 2 @__score DESC TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG _FT.AGGREGATE idx * LOAD 1 @n TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 0 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 10 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 11 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * SORTBY n DESC LIMIT 1 2 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * LIMIT 3 3 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * LIMIT 0 0 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx hel* NOCONTENT TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * GROUPBY 1 @g REDUCE COUNT 0 AS c TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @t SORTBY 2 @n DESC TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * WITHCOUNT LOAD 1 @n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * LIMIT 0 0 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 # FT.PROFILE: the timeout shows in the profile's warnings.
 !timing _FT.DEBUG FT.PROFILE idx SEARCH QUERY * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG FT.PROFILE idx SEARCH LIMITED QUERY hello SORTBY n TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * LOAD 1 @t TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * GROUPBY 1 @g TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * TIMEOUT_AFTER_N 20 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG _FT.PROFILE idx SEARCH QUERY * TIMEOUT_AFTER_N 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !timing _FT.DEBUG _FT.PROFILE idx AGGREGATE QUERY * LOAD 1 @n TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 !timing _FT.DEBUG FT.PROFILE idx SEARCH QUERY * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * LOAD 1 @t TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * GROUPBY 1 @g TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 # Cursors: a timed-out chunk keeps its cursor (RETURN); the next read runs on.
 !capture c _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c} COUNT 5
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 !capture c _FT.DEBUG FT.AGGREGATE idx * GROUPBY 1 @g REDUCE COUNT 0 AS c SORTBY 2 @c DESC WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !capture c _FT.DEBUG FT.AGGREGATE idx * GROUPBY 0 REDUCE COUNT 0 AS c REDUCE SUM 1 @n AS s WITHCURSOR COUNT 1 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !capture c _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @t SORTBY 2 @n DESC WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 !capture c _FT.DEBUG FT.AGGREGATE idx * WITHCURSOR COUNT 5 TIMEOUT_AFTER_N 0 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR DEL idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 !capture c _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c} COUNT 10
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 # Profiled cursors (internal only): reads reply without the profile, _FT.CURSOR PROFILE ends
 # the cursor with the profile of all its reads.
 !capture c _FT.DEBUG _FT.PROFILE idx AGGREGATE QUERY * LOAD 1 @n WITHCURSOR COUNT 3 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
 !timing _FT.CURSOR PROFILE idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 !capture c _FT.DEBUG _FT.PROFILE idx AGGREGATE QUERY * WITHCURSOR COUNT 4 TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
 !timing _FT.CURSOR PROFILE idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !capture c FT.AGGREGATE idx * WITHCURSOR COUNT 4
 _FT.CURSOR PROFILE idx {$c}
 FT.CURSOR DEL idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.CURSOR PROFILE idx 12345
 _FT.CURSOR PROFILE idx x
 _FT.CURSOR PROFILE idx
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 !capture c _FT.DEBUG _FT.PROFILE idx AGGREGATE QUERY * LOAD 1 @n WITHCURSOR COUNT 3 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
 !timing _FT.CURSOR PROFILE idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 # ON_TIMEOUT FAIL without workers: the timeout is an error (FT.PROFILE keeps its warning).
 FT.CONFIG SET WORKERS 0
@@ -194,37 +249,47 @@ FT.CONFIG SET ON_TIMEOUT fail
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 20 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * SORTBY n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * GROUPBY 1 @g TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n TIMEOUT_AFTER_N 20 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !timing _FT.DEBUG FT.PROFILE idx SEARCH QUERY * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * LOAD 1 @n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !capture c _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * LOAD 1 @n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 # Without workers ON_TIMEOUT RETURN still returns, and TIMEOUT 0 is capped.
 FT.CONFIG SET ON_TIMEOUT return
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * TIMEOUT 0 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 _FT.DEBUG FT.SEARCH idx * TIMEOUT 0 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * TIMEOUT 0 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 # RETURN-STRICT never takes TIMEOUT_AFTER_N, nor FAIL with workers.
 FT.CONFIG SET ON_TIMEOUT return-strict
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.PROFILE idx SEARCH QUERY * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * FOO DEBUG_PARAMS_COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CONFIG SET WORKERS 16
 FT.CONFIG SET ON_TIMEOUT fail
 _FT.DEBUG FT.SEARCH idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CONFIG SET ON_TIMEOUT return
 FT.CONFIG GET ON_TIMEOUT
 FT.CONFIG GET WORKERS
@@ -233,40 +298,53 @@ FT.CONFIG GET WORKERS
 _FT.DEBUG FT.SEARCH idx * SORTBY n DESC WITHSORTKEYS NOCONTENT TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx hello SUMMARIZE FIELDS 1 t FRAGS 1 LEN 2 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx hello WITHSCORES SORTBY n LIMIT 0 2 TIMEOUT_AFTER_N 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx * SORTBY n LIMIT 1 3 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * SORTBY n LIMIT 1 3 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * INKEYS 3 d:02 d:05 d:09 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.SEARCH idx "-hello" NOCONTENT TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx "@g:{a|c}" NOCONTENT TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx hello ADDSCORES SCORER BM25STD.NORM LOAD 1 @__score TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n SORTBY 2 @n ASC LIMIT 0 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n SORTBY 2 @n ASC LIMIT 0 4 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n APPLY "@n%3" AS m SORTBY 4 @m DESC @n ASC TIMEOUT_AFTER_N 5 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @t APPLY "upper(@t)" AS u FILTER "@n>2" LIMIT 0 3 TIMEOUT_AFTER_N 6 DEBUG_PARAMS_COUNT 2
 !capture c _FT.DEBUG FT.AGGREGATE idx * WITHCOUNT LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
 !capture c _FT.DEBUG FT.AGGREGATE idx hello ADDSCORES SCORER BM25STD.NORM LOAD 1 @__score WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
 !capture c _FT.DEBUG _FT.AGGREGATE idx * LOAD 1 @n WITHCURSOR COUNT 3 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * LOAD 1 @n SORTBY 2 @n DESC LIMIT 0 2 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE LIMITED QUERY "hel*" LOAD 1 @t TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !timing _FT.DEBUG FT.PROFILE idx SEARCH QUERY * LIMIT 0 0 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !timing _FT.DEBUG FT.PROFILE idx AGGREGATE QUERY * WITHCOUNT LOAD 1 @n TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 _FT.DEBUG FT.SEARCH idx * SORTBY n LIMIT 1 3 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH idx * SORTBY n LIMIT 1 3 TIMEOUT_AFTER_N 4 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n SORTBY 2 @n ASC LIMIT 0 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.AGGREGATE idx * LOAD 1 @n SORTBY 2 @n ASC LIMIT 0 4 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !capture c _FT.DEBUG FT.AGGREGATE idx * WITHCOUNT LOAD 1 @n WITHCURSOR COUNT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 FT.DROPINDEX idx
 # KNN queries (results by distance, a cursor keeps those it has not given) and JSON documents.
@@ -280,12 +358,15 @@ HSET v:5 n 5 v "\x00\x00\x00\x40\x00\x00\x00\x40"
 _FT.DEBUG FT.SEARCH vx "*=>[KNN 4 @v $B]" PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" RETURN 1 n DIALECT 2 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE vx "*=>[KNN 4 @v $B AS d]" PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD 2 @n @d DIALECT 2 TIMEOUT_AFTER_N 3 DEBUG_PARAMS_COUNT 2
 !capture c _FT.DEBUG FT.AGGREGATE vx "*=>[KNN 5 @v $B AS d]" PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD 2 @n @d DIALECT 2 WITHCURSOR COUNT 1 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ vx {$c}
 FT.CURSOR READ vx {$c}
 FT.CURSOR READ vx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ vx {$c}
 FT.CURSOR READ vx {$c}
 FT.CURSOR READ vx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.DROPINDEX vx
 FT.CREATE jx ON JSON PREFIX 1 j: SCHEMA $.t AS t TEXT $.n AS n NUMERIC
 JSON.SET j:1 $ "{\"t\":\"hello\",\"n\":1}"
@@ -294,6 +375,7 @@ JSON.SET j:3 $ "{\"t\":\"world\",\"n\":3}"
 _FT.DEBUG FT.SEARCH jx * TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.SEARCH jx * RETURN 1 t DIALECT 3 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE jx * LOAD 2 @t @n SORTBY 2 @n DESC TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.DROPINDEX jx
 # FT.HYBRID: TIMEOUT_AFTER_N_SEARCH and _VSIM time a subquery out, _TAIL the merger; the
 # warning names where. (The wrapper's own parameters only: a hybrid argument error inside
@@ -308,55 +390,72 @@ HSET h:5 t "nothing" n 5 g c v "\x00\x00\x00\x40\x00\x00\x00\x40"
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v
 _FT.DEBUG FT.HYBRID nosuch 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 20
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 0
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 x 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" FOO DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N DEBUG_PARAMS_COUNT 1
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH DEBUG_PARAMS_COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH x DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_VSIM -1 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_TAIL y DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_VSIM 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_TAIL 2 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_TAIL 0 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 0 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 TIMEOUT_AFTER_N_VSIM 1 DEBUG_PARAMS_COUNT 4
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 TIMEOUT_AFTER_N_TAIL 1 DEBUG_PARAMS_COUNT 4
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 5 TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 4
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LIMIT 0 2 TIMEOUT_AFTER_N_TAIL 1 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LIMIT 0 2 TIMEOUT_AFTER_N_TAIL 2 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD 1 @t SORTBY 2 @n DESC TIMEOUT_AFTER_N_SEARCH 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" GROUPBY 1 @g REDUCE COUNT 0 AS c TIMEOUT_AFTER_N_VSIM 3 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE LINEAR 4 ALPHA 0.5 BETA 0.5 TIMEOUT_AFTER_N_VSIM 1 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 2 K 2 PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_VSIM 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS 5 PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_VSIM 2 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH "hel*" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 2 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER "@n:[1 3]" PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_VSIM 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !mask execution_time _FT.DEBUG FT.HYBRID hy SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_TAIL 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 # The internal _FT.HYBRID (a shard's, always WITHCURSOR) takes them first; a subquery's cursor
 # keeps what it got before its timeout.
 _FT.DEBUG _FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR FOO DEBUG_PARAMS_COUNT 1
 _FT.DEBUG _FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 20
 !capture s=SEARCH !mask VSIM _FT.DEBUG _FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR TIMEOUT_AFTER_N_SEARCH 2 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ hy {$s}
 FT.CURSOR READ hy {$s}
 !capture v=VSIM !mask SEARCH _FT.DEBUG _FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR COUNT 2 TIMEOUT_AFTER_N_VSIM 3 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ hy {$v}
 FT.CURSOR READ hy {$v}
 FT.CURSOR READ hy {$v}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !mask SEARCH,VSIM _FT.DEBUG _FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR TIMEOUT_AFTER_N_TAIL 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 !capture s=SEARCH !mask VSIM _FT.DEBUG _FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR TIMEOUT_AFTER_N_SEARCH 2 DEBUG_PARAMS_COUNT 2
 FT.CURSOR READ hy {$s}
 FT.CURSOR READ hy {$s}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 # ON_TIMEOUT FAIL: the timeout is an error (with workers too: the wrapper runs in the
 # foreground); RETURN-STRICT never takes the debug timeouts.
@@ -364,14 +463,18 @@ FT.CONFIG SET ON_TIMEOUT fail
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_TAIL 2 DEBUG_PARAMS_COUNT 2
 !mask execution_time _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 20 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CONFIG SET WORKERS 0
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CONFIG SET WORKERS 16
 FT.CONFIG SET ON_TIMEOUT return-strict
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" FOO DEBUG_PARAMS_COUNT 1
 _FT.DEBUG _FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR TIMEOUT_AFTER_N_SEARCH 1 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CONFIG SET ON_TIMEOUT return
 FT.CURSOR GC hy 0
 FT.DROPINDEX hy
 FLUSHALL
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors

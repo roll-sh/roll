@@ -197,38 +197,27 @@ pub fn acl_categories(c: &Command) -> Option<&'static [&'static str]> {
     })
 }
 
-/// The query commands' INFO counters (`RSGlobalStats.totalStats.queries`): a reply sent counts
-/// (`TotalGlobalStats_CountQuery`), an error replied counts by its code on the coordinator side
-/// (`QueryErrorsGlobalStats_UpdateError`; a standalone server is its own coordinator). The
-/// warnings a reply carries are counted where the query runs.
-fn counted(cx: &mut Cx, args: &[Bytes], cursor_read: bool, run: fn(&mut Cx, &[Bytes]) -> CmdResult) -> CmdResult {
-    let started = std::time::Instant::now();
-    let r = run(cx, args);
-    match &r {
-        Ok(_) => cx.eng.search.stats.count_query(cursor_read, started.elapsed()),
-        Err(e) => cx.eng.search.stats.error_reply(&e.0, true),
-    }
-    r
-}
+// The query commands' INFO counters (`RSGlobalStats.totalStats.queries`) are counted where the
+// module counts them, in the queries' execution (`QueryStats`).
 
 fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    counted(cx, args, false, super::ft_query::ft_search)
+    super::ft_query::ft_search(cx, args)
 }
 
 fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    counted(cx, args, false, super::ft_aggregate::ft_aggregate)
+    super::ft_aggregate::ft_aggregate(cx, args)
 }
 
 fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    counted(cx, args, false, super::ft_aggregate::ft_profile)
+    super::ft_aggregate::ft_profile(cx, args)
 }
 
 fn ft_hybrid(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    counted(cx, args, false, super::ft_aggregate::ft_hybrid)
+    super::ft_aggregate::ft_hybrid(cx, args)
 }
 
 fn ft_cursor_read(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    counted(cx, args, true, super::ft_aggregate::ft_cursor_read)
+    super::ft_aggregate::ft_cursor_read(cx, args)
 }
 
 /// FT.CONFIG GET|SET|HELP (`ConfigCommand`).

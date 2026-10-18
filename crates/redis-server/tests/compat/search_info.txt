@@ -31,7 +31,7 @@ HSET e:1 x "lonely"
 !delta search_total_*,search_fields_* INFO search_fields_statistics
 INFO search_memory
 INFO search_vector_index
-INFO search_warnings_and_errors
+!info search_errors_*,search_OOM_* INFO search_warnings_and_errors
 # Queries: each reply counts (cursor reads too); syntax and argument errors count on the
 # coordinator side, other errors not at all.
 FT.SEARCH ih hello NOCONTENT
@@ -93,7 +93,7 @@ FT.ALTER ie SCHEMA ADD extra TEXT more NUMERIC SORTABLE
 !delta search_total_*,search_fields_* INFO search_fields_statistics
 FT.DROPINDEX ij
 !delta search_total_*,search_fields_* INFO search_fields_statistics
-INFO search_warnings_and_errors
+!info search_errors_*,search_OOM_* INFO search_warnings_and_errors
 INFO search_cursors
 INFO search_dialect_statistics
 !info search_number_of_*,search_total_active*,search_total_num_docs*,search_total_inverted* INFO search_indexes
@@ -112,5 +112,104 @@ INFO search_indexes search_dialect_statistics
 CONFIG SET search-_info-on-zero-indexes yes
 !info search_number_of_*,search_total_num_docs*,search_total_inverted*,search_used_memory*,search_dialect*,search_global* INFO search
 CONFIG SET search-_info-on-zero-indexes no
+# Where the query counters count (`TotalGlobalStats_CountQuery` once a chunk is replied,
+# `QueryErrorsGlobalStats_UpdateError` where an error is, `QueryWarningsGlobalStats_UpdateWarning`
+# for a chunk's warnings, RESP2's too): an FT.AGGREGATE cursor's first chunk is a query, its
+# reads and FT.SEARCH WITHCURSOR's chunks commands only; FT.HYBRID WITHCURSOR's reply none, its
+# subqueries' reads commands; a pipeline's error after the first results (RESP3's warning)
+# leaves the query uncounted; the warnings are the coordinator's (FT.HYBRID WITHCURSOR's the
+# shard's); errors count the same in MULTI and scripts.
+FT.CREATE qi ON HASH PREFIX 1 qd: SCHEMA t TEXT n NUMERIC SORTABLE g TAG
+FT.CREATE qv ON HASH PREFIX 1 qh: SCHEMA t TEXT v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2
+HSET qd:1 t "hello world" n 1 g a
+HSET qd:2 t "help me" n 2 g b
+HSET qd:3 t "helium" n 3 g a
+HSET qd:4 t "1" n 4 g b
+HSET qh:1 t hello v "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+HSET qh:2 t help v "\x00\x00\x00\x40\x00\x00\x00\x40"
+HSET qh:3 t helium v "\x00\x00\x00\x40\x00\x00\x00\x40"
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CONFIG SET MAXPREFIXEXPANSIONS 1
+FT.SEARCH qi hel* NOCONTENT
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 3
+FT.SEARCH qi hel* NOCONTENT
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE qi hel* LOAD 1 @n
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 2
+!capture c FT.AGGREGATE qi hel* LOAD 1 @n WITHCURSOR COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ qi {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ qi {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!capture c FT.SEARCH qi hel* NOCONTENT WITHCURSOR COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ qi {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR DEL qi {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!timing FT.PROFILE qi AGGREGATE QUERY hel*
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!mask execution_time FT.HYBRID qv SEARCH "hel*|he*" VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!capture s=SEARCH !mask VSIM FT.HYBRID qv SEARCH hel* VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f" WITHCURSOR COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ qv {$s}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!capture v=VSIM !mask SEARCH FT.HYBRID qv SEARCH hel* VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f" WITHCURSOR COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ qv {$v}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ qv {$v}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CONFIG SET MAXPREFIXEXPANSIONS 200
+FT.SEARCH qi * LIMIT x
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.SEARCH qi * NOSUCHARG
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE qi "@t:("
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE qi * APPLY "@nosuch + 1" AS x
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE qi * LOAD 1 @t APPLY "@t + 1" AS x
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE qi * LOAD 1 @t APPLY "@t + 1" AS x WITHCURSOR COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 3
+FT.AGGREGATE qi * LOAD 1 @t APPLY "@t + 1" AS x
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 2
+FT.PROFILE qi AGGREGATE QUERY * LIMIT x
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.PROFILE qi SEARCH QUERY * WITHCURSOR
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.HYBRID qv SEARCH hello VSIM @v $b LIMIT x PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.HYBRID nosuch SEARCH hello VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ qi 12345
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ qi x
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR DEL qi 12345
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR GC qi 0
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+MULTI
+FT.SEARCH qi * LIMIT x
+FT.SEARCH qi "@t:("
+FT.SEARCH qi hello NOCONTENT
+FT.AGGREGATE qi hello WITHCURSOR COUNT 10
+FT.SEARCH qi hello NOCONTENT WITHCURSOR COUNT 10
+EXEC
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+EVAL "return redis.pcall('FT.SEARCH', 'qi', '@t:(')" 0
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+EVAL "return redis.pcall('FT.SEARCH', 'qi', 'hello', 'NOCONTENT')" 0
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.DROPINDEX qi
+FT.DROPINDEX qv
 FT.CONFIG SET FORK_GC_RUN_INTERVAL 30
 FLUSHALL

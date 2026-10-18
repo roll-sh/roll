@@ -3,6 +3,7 @@
 # count nothing, the sorter drained the query), FT.SEARCH's row shapes (ids, scores, payloads,
 # sort keys, RETURN, NOCONTENT, HIGHLIGHT/SUMMARIZE), RESP3, JSON, the optimizer's streaming
 # pager (DIALECT 4) and the cursor limits. Every cursor is drained or deleted.
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 FLUSHALL
 FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t TEXT n NUMERIC SORTABLE tg TAG
@@ -18,90 +19,115 @@ HSET d:7 t "world peace" n 7 tg a
 FT.SEARCH i hello WITHCURSOR COUNT 0
 FT.SEARCH i hello WITHCURSOR COUNT x
 FT.SEARCH i hello WITHCURSOR MAXIDLE 0
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.SEARCH i hello WITHCURSOR COUNT
 FT.SEARCH nosuch hello WITHCURSOR
 FT.SEARCH i hello WITHCURSOR FOO
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # The default page (LIMIT 0 10) sorted by score, two rows a chunk.
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2
 FT.CURSOR READ i {$c}
 FT.CURSOR READ i {$c} COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c}
 FT.CURSOR READ i {$c}
 !capture c FT.SEARCH i world|hello WITHCURSOR COUNT 3 WITHSCORES
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c}
 FT.CURSOR READ i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # A page past the chunk: LIMIT and SORTBY.
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 LIMIT 1 3 SORTBY n DESC WITHSCORES
 FT.CURSOR READ i {$c}
 FT.CURSOR READ i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !capture c FT.SEARCH i * WITHCURSOR COUNT 4 SORTBY n ASC LIMIT 0 6 WITHSORTKEYS
 FT.CURSOR READ i {$c}
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 LIMIT 0 3
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c}
 FT.CURSOR READ i {$c}
 !capture c FT.SEARCH i hello WITHCURSOR LIMIT 0 3
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # Only the count; no rows.
 FT.SEARCH i hello WITHCURSOR COUNT 2 LIMIT 0 0
 FT.SEARCH i hello WITHCURSOR COUNT 2 NOCONTENT LIMIT 0 0
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # Row shapes.
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 NOCONTENT
 FT.CURSOR READ i {$c}
 FT.CURSOR DEL i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c}
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 WITHSCORES WITHPAYLOADS WITHSORTKEYS SORTBY n
 FT.CURSOR READ i {$c} COUNT 5
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 RETURN 2 n tg SORTBY n
 FT.CURSOR READ i {$c} COUNT 5
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 RETURN 3 n AS num SORTBY n DESC
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c} COUNT 5
 !capture c FT.SEARCH i @tg:{a} WITHCURSOR COUNT 1 RETURN 1 t SORTBY n
 FT.CURSOR READ i {$c} COUNT 5
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 EXPLAINSCORE WITHSCORES SORTBY n
 FT.CURSOR READ i {$c} COUNT 5
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SCORER TFIDF WITHSCORES
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c} COUNT 5
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SCORER BM25STD.NORM WITHSCORES
 FT.CURSOR READ i {$c} COUNT 5
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # The highlighter under a cursor.
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 1 HIGHLIGHT FIELDS 1 t SORTBY n
 FT.CURSOR READ i {$c}
 FT.CURSOR READ i {$c} COUNT 10
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SUMMARIZE FIELDS 1 t LEN 1 SORTBY n
 FT.CURSOR READ i {$c} COUNT 10
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 HIGHLIGHT TAGS [ ] SORTBY n
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c} COUNT 10
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 RETURN 1 n HIGHLIGHT FIELDS 1 t SORTBY n
 FT.CURSOR READ i {$c} COUNT 10
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.SEARCH i hello WITHCURSOR HIGHLIGHT FIELDS 1 nosuch
 FT.SEARCH i hello WITHCURSOR SUMMARIZE FIELDS 1 n
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # The optimizer: a wildcard or filter page streams through its pager (no sorter).
 !capture c FT.SEARCH i * WITHCURSOR COUNT 2 DIALECT 4
 FT.CURSOR READ i {$c}
 FT.CURSOR READ i {$c} COUNT 10
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c}
 !capture c FT.SEARCH i "@n:[2 6]" WITHCURSOR COUNT 2 DIALECT 4 LIMIT 0 3
 FT.CURSOR READ i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c}
 !capture c FT.SEARCH i "@n:[2 6]" WITHCURSOR COUNT 2 DIALECT 4 LIMIT 1 3 SORTBY n DESC
 FT.CURSOR READ i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # Documents added after the first chunk: the sorter already holds its page.
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SORTBY n
 HSET d:8 t "hello late" n 0 tg a
 FT.CURSOR READ i {$c} COUNT 10
 DEL d:8
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # A sort key loaded before the sorter (not sortable), held over the reads.
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 SORTBY tg DESC WITHSORTKEYS
 FT.CURSOR READ i {$c}
 FT.CURSOR READ i {$c} COUNT 10
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # Inside MULTI (no workers: the loader loads row by row).
 MULTI
@@ -109,6 +135,7 @@ FT.SEARCH i hello WITHCURSOR COUNT 10 SORTBY n
 FT.SEARCH i * WITHCURSOR COUNT 10 DIALECT 4
 FT.SEARCH i hello WITHCURSOR LIMIT 0 0
 EXEC
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # A dropped index ends its cursors.
 FT.CREATE tmp ON HASH PREFIX 1 t: SCHEMA t TEXT
@@ -119,9 +146,11 @@ FT.DROPINDEX tmp
 FT.CURSOR READ tmp {$c}
 FT.CREATE tmp ON HASH PREFIX 1 nothing: SCHEMA t TEXT
 FT.CURSOR READ tmp {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ tmp {$c}
 FT.DROPINDEX tmp
 DEL t:1 t:2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # KNN under a cursor: the results by distance.
 FT.CREATE hv ON HASH PREFIX 1 h: SCHEMA t TEXT v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2
@@ -131,19 +160,24 @@ HSET h:3 t hello v "\x00\x00\x40\x40\x00\x00\x40\x40"
 !capture c FT.SEARCH hv "*=>[KNN 3 @v $b]" WITHCURSOR COUNT 1 PARAMS 2 b "\x00\x00\x00\x00\x00\x00\x00\x00" DIALECT 2
 FT.CURSOR READ hv {$c}
 FT.CURSOR READ hv {$c} COUNT 5
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !capture c FT.SEARCH hv "hello=>[KNN 3 @v $b AS d]" WITHCURSOR COUNT 1 RETURN 1 d SORTBY d PARAMS 2 b "\x00\x00\x00\x00\x00\x00\x00\x00" DIALECT 2
 FT.CURSOR READ hv {$c} COUNT 5
 FT.DROPINDEX hv
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 
 # The cursor counts in FT.INFO and the index's cursor limit.
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 1
 !mask total_indexing_time FT.INFO i
 FT.CURSOR DEL i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 CONFIG SET search-index-cursor-limit 1
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 1
 FT.SEARCH i hello WITHCURSOR COUNT 1
 FT.AGGREGATE i hello WITHCURSOR COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR DEL i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 CONFIG SET search-index-cursor-limit 128
 
 # RESP3.
@@ -151,11 +185,14 @@ CONFIG SET search-index-cursor-limit 128
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 WITHSCORES WITHPAYLOADS WITHSORTKEYS SORTBY n
 FT.CURSOR READ i {$c}
 FT.CURSOR READ i {$c} COUNT 10
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.SEARCH i hello WITHCURSOR COUNT 2 LIMIT 0 0
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 NOCONTENT
 FT.CURSOR READ i {$c} COUNT 10
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 !capture c FT.SEARCH i hello WITHCURSOR COUNT 2 HIGHLIGHT SORTBY n DESC
 FT.CURSOR READ i {$c} COUNT 10
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 FT.DROPINDEX i
 
@@ -167,12 +204,15 @@ JSON.SET j:3 $ "{\"t\":\"hello you\",\"n\":3,\"tags\":[\"a\"]}"
 !capture c FT.SEARCH j hello WITHCURSOR COUNT 2 SORTBY n
 FT.CURSOR READ j {$c}
 !capture c FT.SEARCH j hello WITHCURSOR COUNT 2 RETURN 2 t tags SORTBY n DIALECT 3
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.CURSOR READ j {$c}
 !capture c FT.SEARCH j hello WITHCURSOR COUNT 1 RETURN 1 t HIGHLIGHT FIELDS 1 t SORTBY n
 FT.CURSOR READ j {$c} COUNT 5
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 3
 !capture c FT.SEARCH j hello WITHCURSOR COUNT 2 RETURN 1 $.tags FORMAT EXPAND DIALECT 3 SORTBY n
 FT.CURSOR READ j {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 @resp 2
 FT.DROPINDEX j
 FLUSHALL

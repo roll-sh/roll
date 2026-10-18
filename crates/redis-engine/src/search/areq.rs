@@ -248,6 +248,13 @@ pub struct Request {
     pub debug_err: Option<QErr>,
     /// An internal (`_FT.*`) request (`QEXEC_F_INTERNAL`).
     pub internal: bool,
+    /// Where INFO counts an error building the request's plan and pipeline
+    /// (`prepareExecutionPlan`, a cursor's reservation): on the coordinator's side or the
+    /// shard's, or (`None`) nowhere. On the workers `AREQ_ReplyOrStoreError` counts it by the
+    /// request (a user's on the coordinator's side); in the foreground `execCommandCommon`
+    /// counts it on the coordinator's (a standalone server's) and the debug wrappers' own
+    /// `DEBUG_execCommandCommon` not at all.
+    pub plan_errors: Option<bool>,
 }
 
 /// `ParsedVectorData` with its `VectorQuery`.
@@ -319,6 +326,7 @@ impl Request {
             timeout_after: None,
             debug_err: None,
             internal: false,
+            plan_errors: None,
         }
     }
 
