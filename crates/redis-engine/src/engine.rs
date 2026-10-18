@@ -261,6 +261,8 @@ pub struct Engine {
     exec_depth: u32,
     pub stats: Stats,
     pub cmdstats: HashMap<String, CmdStat>,
+    /// The server's `modules` dict (MODULE LIST's order).
+    pub modules: crate::modules::ModuleDict,
     pub errorstats: HashMap<String, u64>,
     pub slowlog: VecDeque<SlowEntry>,
     pub slowlog_next_id: u64,
@@ -388,6 +390,7 @@ impl Engine {
             exec_depth: 0,
             stats: Stats::default(),
             cmdstats: HashMap::new(),
+            modules: Default::default(),
             errorstats: HashMap::new(),
             slowlog: VecDeque::new(),
             slowlog_next_id: 0,

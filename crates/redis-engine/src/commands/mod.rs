@@ -25,6 +25,7 @@ pub mod keyspec;
 pub mod migrate;
 pub mod lists;
 pub mod multi;
+pub mod order;
 pub mod pubsub;
 pub mod scripting;
 pub mod ft;

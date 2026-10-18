@@ -459,7 +459,7 @@ pub fn hello(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         (Reply::bulk("id"), Reply::Int(cx.client.id as i64)),
         (Reply::bulk("mode"), Reply::bulk("standalone")),
         (Reply::bulk("role"), Reply::bulk(if cx.eng.replica { "replica" } else { "master" })),
-        (Reply::bulk("modules"), loaded_modules()),
+        (Reply::bulk("modules"), loaded_modules(cx.eng)),
     ]))
 }
 
@@ -585,11 +585,18 @@ pub fn command_list(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     } else {
         return Err(SYNTAX);
     };
+    if let Some((by, v)) = &filter
+        && eq(by, "module")
+    {
+        // `moduleGetHandleByName`, once per listing.
+        cx.eng.modules.find(v);
+    }
     let mut out = Vec::new();
-    for c in &table().all {
-        let names: Vec<(String, &Command)> = std::iter::once((c.name.to_string(), *c))
+    for e in super::order::commands() {
+        let c = e.cmd;
+        let names: Vec<(String, &Command)> = std::iter::once((c.name.to_string(), c))
             .filter(|_| visible(cx, c))
-            .chain(c.subs.iter().map(|s| (format!("{}|{}", c.name, s.name), s)))
+            .chain(e.subs.iter().map(|s| (format!("{}|{}", c.name, s.name), *s)))
             .collect();
         for (n, cmd) in names {
             let keep = match &filter {
@@ -623,12 +630,12 @@ fn info_entry(c: &Command, full: &str) -> Reply {
         Reply::Set(c.categories().into_iter().map(|s| Reply::status(format!("@{s}"))).collect()),
         meta.map_or(Reply::Array(vec![]), |m| m.tips()),
         meta.map_or(Reply::Array(vec![]), |m| m.key_specs()),
-        Reply::Array(c.subs.iter().map(|s| info_entry(s, &format!("{}|{}", c.name, s.name))).collect()),
+        Reply::Array(super::order::subs_of(c).iter().map(|s| info_entry(s, &format!("{}|{}", c.name, s.name))).collect()),
     ])
 }
 
 pub fn command_all(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Array(table().all.iter().filter(|c| visible(cx, c)).map(|c| info_entry(c, c.name)).collect()))
+    Ok(Reply::Array(super::order::commands().iter().map(|e| e.cmd).filter(|c| visible(cx, c)).map(|c| info_entry(c, c.name)).collect()))
 }
 
 pub fn command_info(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
@@ -668,7 +675,7 @@ fn docs_entry(c: &Command, full: &str) -> Reply {
             .map(|(k, v)| match (k, v) {
                 (Reply::Bulk(name), Reply::Map(_)) if &name[..] == b"subcommands" => (
                     k.clone(),
-                    Reply::Map(c.subs.iter().map(|s| {
+                    Reply::Map(super::order::subs_of(c).iter().map(|s| {
                         let sub = format!("{}|{}", c.name, s.name);
                         (Reply::bulk_str(sub.clone()), docs_entry(s, &sub))
                     }).collect()),
@@ -686,7 +693,7 @@ fn docs_entry(c: &Command, full: &str) -> Reply {
     if !c.subs.is_empty() {
         m.push((
             Reply::bulk("subcommands"),
-            Reply::Map(c.subs.iter().map(|s| {
+            Reply::Map(super::order::subs_of(c).iter().map(|s| {
                 let sub = format!("{}|{}", c.name, s.name);
                 (Reply::bulk_str(sub.clone()), docs_entry(s, &sub))
             }).collect()),
@@ -697,7 +704,7 @@ fn docs_entry(c: &Command, full: &str) -> Reply {
 
 pub fn command_docs(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let list: Vec<(&Command, String)> = if args.len() == 2 {
-        table().all.iter().filter(|c| visible(cx, c)).map(|c| (*c, c.name.to_string())).collect()
+        super::order::commands().iter().map(|e| e.cmd).filter(|c| visible(cx, c)).map(|c| (c, c.name.to_string())).collect()
     } else {
         args[2..].iter().filter_map(|n| lookup_full(n)).filter(|(c, _)| visible(cx, c)).collect()
     };
@@ -1105,10 +1112,10 @@ pub fn latency_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
 }
 
 /// `addReplyLoadedModules`.
-fn loaded_modules() -> Reply {
+fn loaded_modules(eng: &crate::engine::Engine) -> Reply {
     Reply::Array(
-        crate::modules::LIST
-            .iter()
+        eng.modules
+            .modules()
             .map(|m| {
                 Reply::Map(vec![
                     (Reply::bulk("name"), Reply::bulk(m.name)),
@@ -1121,8 +1128,8 @@ fn loaded_modules() -> Reply {
     )
 }
 
-pub fn module_list(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(loaded_modules())
+pub fn module_list(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Ok(loaded_modules(cx.eng))
 }
 
 pub fn module_denied(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {

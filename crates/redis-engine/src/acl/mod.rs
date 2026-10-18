@@ -808,17 +808,15 @@ pub fn check_command(acl: &RwLock<Acl>, client: &Client, args: &[Bytes]) -> Resu
 
 /// `ACL CAT <category>`: commands and subcommands in a category (`aclCatWithFlags`).
 pub fn commands_in_category(bit: u32) -> Vec<&'static str> {
+    // `aclCatWithFlags`: the command table's iteration order.
     let idx = index();
     let mut out = Vec::new();
-    for &t in &idx.top {
-        let m = &idx.cmds[t as usize];
-        if m.cats & bit != 0 {
-            out.push(m.full.as_str());
-        }
-        for &s in &m.subs {
-            let sm = &idx.cmds[s as usize];
-            if sm.cats & bit != 0 {
-                out.push(sm.full.as_str());
+    for e in crate::commands::order::commands() {
+        for c in std::iter::once(e.cmd).chain(e.subs.iter().copied()) {
+            if let Some(m) = idx.meta(c)
+                && m.cats & bit != 0
+            {
+                out.push(m.full.as_str());
             }
         }
     }

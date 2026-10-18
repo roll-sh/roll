@@ -867,7 +867,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
 
     if want.has("module_list") || want.names.contains("modules") {
         begin(&mut s, "# Modules");
-        for m in crate::modules::LIST {
+        for m in eng.modules.modules() {
             let _ = write!(
                 s,
                 "module:name={},ver={},api=1,filters=0,usedby=[{}],using=[{}],options=[{}]\r\n",
@@ -882,7 +882,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
 
     if want.has("commandstats") {
         begin(&mut s, "# Commandstats");
-        for (k, v) in sorted(&eng.cmdstats) {
+        for (k, v) in in_table_order(&eng.cmdstats) {
             if v.calls == 0 && v.failed == 0 && v.rejected == 0 {
                 continue;
             }
@@ -916,7 +916,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
         begin(&mut s, "# Latencystats");
         if eng.cfg.latency_tracking {
             let ps = eng.cfg.latency_percentiles.clone();
-            for (k, v) in sorted(&eng.cmdstats) {
+            for (k, v) in in_table_order(&eng.cmdstats) {
                 let Some(h) = &v.latency else { continue };
                 let _ = write!(s, "latency_percentiles_usec_{k}:");
                 for (i, p) in ps.iter().enumerate() {
@@ -999,10 +999,12 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
     s
 }
 
-fn sorted(m: &std::collections::HashMap<String, crate::engine::CmdStat>) -> Vec<(&String, &crate::engine::CmdStat)> {
-    let mut v: Vec<_> = m.iter().collect();
-    v.sort_by(|a, b| a.0.cmp(b.0));
-    v
+/// `genRedisInfoStringCommandStats`: the command table's iteration order, each container
+/// followed by its subcommands.
+fn in_table_order(m: &std::collections::HashMap<String, crate::engine::CmdStat>) -> Vec<(&String, &crate::engine::CmdStat)> {
+    let by_name: std::collections::HashMap<String, (&String, &crate::engine::CmdStat)> =
+        m.iter().map(|(k, v)| (k.to_ascii_lowercase(), (k, v))).collect();
+    super::order::names().iter().filter_map(|n| by_name.get(&n.to_ascii_lowercase()).copied()).collect()
 }
 
 #[cfg(test)]
