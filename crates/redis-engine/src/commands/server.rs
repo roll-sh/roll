@@ -139,11 +139,11 @@ static SLOWLOG: &[Command] = &[
 ];
 
 static LATENCY: &[Command] = &[
-    cmd!("latest", 2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, latency_empty, Server),
-    cmd!("history", 3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, latency_empty, Server),
+    cmd!("latest", 2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, latency_latest, Server),
+    cmd!("history", 3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, latency_history, Server),
     cmd!("reset", -2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, latency_reset, Server),
     cmd!("doctor", 2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, latency_doctor, Server),
-    cmd!("graph", 3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, latency_empty, Server),
+    cmd!("graph", 3, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, latency_graph, Server),
     cmd!("histogram", -2, ADMIN | NOSCRIPT | LOADING | STALE, 0, 0, 0, latency_histogram, Server),
     cmd!("help", 2, LOADING | STALE, 0, 0, 0, latency_help, Server),
 ];
@@ -891,16 +891,54 @@ pub fn slowlog_help(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     ]))
 }
 
-pub fn latency_empty(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Array(vec![]))
+/// LATENCY LATEST: `[event, time, latency, max]` per event with spikes.
+pub fn latency_latest(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    Ok(Reply::Array(
+        cx.eng
+            .latency_monitor
+            .latest()
+            .into_iter()
+            .map(|(e, t, l, m)| Reply::Array(vec![Reply::bulk(e), Reply::Int(t), Reply::Int(l as i64), Reply::Int(m as i64)]))
+            .collect(),
+    ))
 }
 
-pub fn latency_reset(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Int(0))
+/// LATENCY HISTORY event: its `[time, latency]` samples, oldest first.
+pub fn latency_history(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    Ok(Reply::Array(
+        cx.eng.latency_monitor.history(&args[2]).into_iter().map(|(t, l)| Reply::Array(vec![Reply::Int(t), Reply::Int(l as i64)])).collect(),
+    ))
 }
 
-pub fn latency_doctor(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
-    Ok(Reply::Verbatim("txt", Bytes::from_static(b"Dave, no latency spike was observed during the lifetime of this Redis instance, not in the slightest bit. I honestly think you ought to sleep better.\n")))
+/// LATENCY GRAPH event: the ASCII sparkline of its samples.
+pub fn latency_graph(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let now = crate::util::now_ms() / 1000;
+    match cx.eng.latency_monitor.graph(&args[2], now) {
+        Some(g) => Ok(Reply::Verbatim("txt", Bytes::from(g))),
+        None => Err(Error::msg(format!("ERR No samples available for event '{}'", String::from_utf8_lossy(&args[2])))),
+    }
+}
+
+/// LATENCY RESET [event ...]: how many events were dropped.
+pub fn latency_reset(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    let m = &mut cx.eng.latency_monitor;
+    let n = if args.len() == 2 { m.reset(None) } else { args[2..].iter().map(|e| m.reset(Some(e))).sum() };
+    Ok(Reply::Int(n as i64))
+}
+
+/// LATENCY DOCTOR: the human readable report.
+pub fn latency_doctor(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
+    let cfg = &cx.eng.cfg;
+    let ctx = crate::latency::ReportCtx {
+        threshold_ms: cfg.latency_monitor_threshold,
+        slowlog_slower_than: cfg.slowlog_log_slower_than,
+        slowlog_max_len: cfg.slowlog_max_len,
+        fsync_always: cfg.get(b"appendfsync").first().is_some_and(|(_, v)| v == "always"),
+        hz: cfg.hz,
+        now: crate::util::now_ms() / 1000,
+        anon_huge_pages: crate::latency::anon_huge_pages_bytes() > 0,
+    };
+    Ok(Reply::Verbatim("txt", Bytes::from(cx.eng.latency_monitor.doctor(&ctx))))
 }
 
 /// `LATENCY HISTOGRAM [command ...]`: every command with a latency histogram (Redis walks

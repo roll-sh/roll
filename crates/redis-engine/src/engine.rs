@@ -252,6 +252,8 @@ pub struct Engine {
     pub dbs: Vec<Db>,
     pub cfg: Config,
     pub hub: Arc<Hub>,
+    /// `server.latency_events`: the latency monitor's spikes.
+    pub latency_monitor: crate::latency::Monitor,
     /// `server.cmd_time_snapshot`: the time the current execution unit (the outermost command,
     /// or a cron job like active expiry) runs at; what module keyspace handlers see as now.
     pub(crate) exec_time: i64,
@@ -382,6 +384,7 @@ impl Engine {
             cfg,
             hub,
             exec_time: now,
+            latency_monitor: Default::default(),
             exec_depth: 0,
             stats: Stats::default(),
             cmdstats: HashMap::new(),
@@ -986,6 +989,14 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     fn count_call(&mut self, client: &Client, full: &str, cmd: &Command, args: &[Bytes], micros: u64, now: i64, mode: Mode) {
         let tracking = self.cfg.latency_tracking;
+        // The monitor's "command"/"fast-command" spike (an unblocked command's is its reply's,
+        // "command-unblocking").
+        let event = match mode {
+            Mode::Unblock => "command-unblocking",
+            _ if cmd.has(commands::FAST) => "fast-command",
+            _ => "command",
+        };
+        self.latency_monitor.add_if_needed(self.cfg.latency_monitor_threshold, event, micros / 1000, now / 1000);
         let stat = self.cmdstats.entry(full.to_string()).or_default();
         stat.calls += 1;
         stat.usec += micros;
@@ -1548,7 +1559,9 @@ impl Engine {
             self.process_touched();
             self.flush_events();
         }
-        self.stats.total_eviction_exceeded_time_ms += start.elapsed().as_millis() as u64;
+        let ms = start.elapsed().as_millis() as u64;
+        self.stats.total_eviction_exceeded_time_ms += ms;
+        self.latency_monitor.add_if_needed(self.cfg.latency_monitor_threshold, "eviction-cycle", ms, now / 1000);
         self.used_memory() <= max
     }
 
@@ -1678,7 +1691,9 @@ impl Engine {
             self.stats.expired_subkeys_active += fields as u64;
             total += fields;
         }
-        self.stats.expire_cycle_us += start.elapsed().as_micros() as u64;
+        let us = start.elapsed().as_micros() as u64;
+        self.stats.expire_cycle_us += us;
+        self.latency_monitor.add_if_needed(self.cfg.latency_monitor_threshold, "expire-cycle", us / 1000, now / 1000);
         if total > 0 {
             self.process_touched();
             self.flush_events();

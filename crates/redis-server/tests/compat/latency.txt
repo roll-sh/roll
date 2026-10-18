@@ -1,5 +1,6 @@
-# LATENCY: the latency monitor's subcommands (no spikes recorded: the monitor is off), their
-# errors, and LATENCY HISTOGRAM's per-command distributions (bucket values are timings, masked).
+# LATENCY: the latency monitor's subcommands with the monitor off (spikes are in
+# compat_debug/latency_monitor.txt), their errors, and LATENCY HISTOGRAM's per-command
+# distributions (bucket values are timings, masked).
 
 FLUSHALL
 CONFIG RESETSTAT
@@ -15,10 +16,13 @@ LATENCY HISTORY command
 LATENCY HISTORY nosuch
 LATENCY HISTORY command extra
 LATENCY GRAPH
+LATENCY GRAPH command
+LATENCY GRAPH nosuch
 LATENCY GRAPH command extra
 LATENCY RESET
 LATENCY RESET command
 LATENCY RESET command fast-command nosuch
+LATENCY DOCTOR
 LATENCY DOCTOR extra
 CONFIG GET latency-monitor-threshold
 CONFIG GET latency-tracking
