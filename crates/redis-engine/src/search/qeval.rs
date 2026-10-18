@@ -28,6 +28,9 @@ pub struct EvalCx<'a> {
     pub in_not: bool,
     /// `QUERY_WMAXPREFIXEXPANSIONS` was raised.
     pub expansions_warning: bool,
+    /// The doc table's max id when a cursor's iterators were first built: a cursor's later
+    /// chunks rebuild them, and the module's wildcard ranges end where they started.
+    pub top: Option<u64>,
 }
 
 const TOO_LONG: &str = "query string is too long. Maximum allowed length is 1024";
@@ -38,7 +41,7 @@ impl<'a> EvalCx<'a> {
     }
 
     fn max_doc(&self) -> u64 {
-        self.ix.docs.max_doc_id
+        self.top.unwrap_or(self.ix.docs.max_doc_id)
     }
 
 

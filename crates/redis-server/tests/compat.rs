@@ -19,6 +19,9 @@
 //! !ids CMD                in the reply, integers and `id=`/`redir=` tokens equal to a
 //!                         connection's client id become `id:N` (ids differ between servers)
 //! CLIENT KILL ID {id:2}   `{id:N}` expands to connection N's client id on each server
+//! !capture c CMD          the reply's last element, an integer (a cursor id), is kept as `c`
+//!                         on each side: from then on that value reads `{$c}` in every reply,
+//!                         and `{$c}` in a command expands to the side's own value
 //! !send BLPOP l 5         send without reading the reply (read it later with @recv)
 //! @recv                   read one reply on the current connection and compare
 //! @recv ids               … with `!ids` applied
@@ -290,6 +293,8 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
     let mut fails = Vec::new();
     let mut conns: HashMap<u32, Pair> = HashMap::new();
     let mut cur = 1u32;
+    // `!capture`d values, on the reference and on roll.
+    let mut vars: (Vars, Vars) = (Vec::new(), Vec::new());
 
     // Fresh state on both sides.
     let mut admin_r = RespClient::connect(ref_addr).await.unwrap();
@@ -397,6 +402,7 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
             continue;
         }
         let mut info_keep: Option<Vec<String>> = None;
+        let mut capture: Option<String> = None;
         let (cmp, send_only, cmdline, masked, by_id) = {
             let mut cmp = Cmp::Exact;
             let mut send = false;
@@ -418,6 +424,11 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
                     "json" => cmp = Cmp::Json,
                     "send" => send = true,
                     "ids" => by_id = true,
+                    "capture" => {
+                        let (name, t) = tail.split_once(' ').unwrap_or((tail, ""));
+                        capture = Some(name.to_string());
+                        tail = t;
+                    }
                     "info" => {
                         let (fields, t) = tail.split_once(' ').unwrap_or((tail, ""));
                         info_keep = Some(fields.split(',').filter(|f| *f != "-").map(str::to_string).collect());
@@ -431,8 +442,8 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
         };
         let ids_r: HashMap<u32, i64> = conns.iter().map(|(n, p)| (*n, p.ids.0)).collect();
         let ids_o: HashMap<u32, i64> = conns.iter().map(|(n, p)| (*n, p.ids.1)).collect();
-        let args_r = redis_server::client::args(&with_ids(&expand(cmdline), &ids_r));
-        let args = redis_server::client::args(&with_ids(&expand(cmdline), &ids_o));
+        let args_r = redis_server::client::args(&with_vars(&with_ids(&expand(cmdline), &ids_r), &vars.0));
+        let args = redis_server::client::args(&with_vars(&with_ids(&expand(cmdline), &ids_o), &vars.1));
         assert!(!args.is_empty(), "{fname}:{lineno}: unbalanced quotes in {cmdline}");
         let p = conns.get_mut(&cur).unwrap();
         if send_only {
@@ -449,6 +460,15 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
         let a = p.redis.cmd(&args_r).await.map(shown);
         let b = p.roll.read_timeout_after_send(&args).await.map(|r| r.map(shown));
         let (a, b) = if by_id { (a.map(|r| name_ids(&r, &ids_r)), b.map(|r| r.map(|r| name_ids(&r, &ids_o)))) } else { (a, b) };
+        if let Some(name) = &capture {
+            for (side, r) in [(&mut vars.0, a.as_ref().ok()), (&mut vars.1, b.as_ref().ok().and_then(|r| r.as_ref()))] {
+                if let Some(v) = r.and_then(last_int) {
+                    side.retain(|(n, _)| n != name);
+                    side.push((name.clone(), v));
+                }
+            }
+        }
+        let (a, b) = (a.map(|r| name_vars(&r, &vars.0)), b.map(|r| r.map(|r| name_vars(&r, &vars.1))));
 
         match (a, b) {
             (Ok(a), Ok(Some(b))) => {
@@ -483,6 +503,49 @@ async fn run_file(path: &PathBuf, ref_addr: &str, roll_addr: std::net::SocketAdd
         }
     }
     fails
+}
+
+/// `!capture`d values by name, on one side.
+type Vars = Vec<(String, i64)>;
+
+/// Replace the values `!capture` kept (non-zero integers) with their names.
+fn name_vars(r: &Reply, vars: &[(String, i64)]) -> Reply {
+    match r {
+        Reply::Int(v) if *v != 0 => vars.iter().find(|(_, x)| x == v).map_or(Reply::Int(*v), |(n, _)| Reply::Status(format!("{{${n}}}"))),
+        Reply::Array(items) | Reply::Set(items) | Reply::Push(items) => Reply::Array(items.iter().map(|x| name_vars(x, vars)).collect()),
+        Reply::Map(pairs) => Reply::Map(pairs.iter().map(|(k, v)| (name_vars(k, vars), name_vars(v, vars))).collect()),
+        // `Cursor not found, id: N`.
+        Reply::Error(e) => Reply::Error(
+            e.split(' ')
+                .map(|w| match w.parse::<i64>() {
+                    Ok(v) if v != 0 => vars.iter().find(|(_, x)| *x == v).map_or(w.to_string(), |(n, _)| format!("{{${n}}}")),
+                    _ => w.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// `!capture`'s value: the last element of an array reply, when it is an integer.
+fn last_int(r: &Reply) -> Option<i64> {
+    match r {
+        Reply::Array(items) => match items.last() {
+            Some(Reply::Int(v)) => Some(*v),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Expand `{$name}` into a side's captured value.
+fn with_vars(line: &str, vars: &[(String, i64)]) -> String {
+    let mut out = line.to_string();
+    for (n, v) in vars {
+        out = out.replace(&format!("{{${n}}}"), &v.to_string());
+    }
+    out
 }
 
 /// Expand `{id:N}` into connection N's client id.

@@ -92,9 +92,9 @@ static FT_CONFIG_LOCAL: &[Command] = &[
 ];
 
 static FT_CURSOR: &[Command] = &[
-    cmd!("GC", -2, READONLY | MODULE, 0, 0, 0, not_yet, Module),
-    cmd!("DEL", -4, READONLY | MODULE, 0, 0, 0, not_yet, Module),
-    cmd!("READ", -4, READONLY | MODULE, 0, 0, 0, not_yet, Module),
+    cmd!("GC", -2, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_gc, Module),
+    cmd!("DEL", -4, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_del, Module),
+    cmd!("READ", -4, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_read, Module),
 ];
 
 static FT_CURSOR_LOCAL: &[Command] = &[

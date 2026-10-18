@@ -11,6 +11,16 @@
 //! loaders buffer their upstream before loading (`RPSafeLoader`); inside MULTI or a script
 //! they load row by row.
 //!
+//! WITHCURSOR replies chunk by chunk (`runCursor`): the module keeps the pipeline between
+//! FT.CURSOR READs; here each chunk rebuilds it from the request and restores what the
+//! processors carried (the query iterator's place, the pagers', the lookups with the keys LOAD *
+//! met). Once an accumulating processor (sorter, grouper, depleter, normalizer) drained the
+//! query, what it still holds is replayed, with the metadata of the documents it references, as
+//! the module's buffered results hold theirs. Rebuilt iterators read the index as it is then,
+//! like the module's live readers (new entries show, deleted documents are skipped), with
+//! wildcard ranges ending at the first chunk's max id; prefix and fuzzy expansions and term
+//! IDFs are recomputed, where the module keeps the first chunk's.
+//!
 //! Groups come out in the order they were first seen (the module's order follows its
 //! per-process hash seed), and TOLIST keeps its values in insertion order for the same
 //! reason.
@@ -25,13 +35,14 @@ use crate::search::areq::{
     F_TYPED, FORMAT_EXPAND, OPTIMIZE, Step,
 };
 use crate::search::args::{Ac, c_eq};
+use crate::search::cursor::Exec;
 use crate::search::doctable::{DOC_DELETED, DOC_HAS_PAYLOAD, Dmd};
 use crate::search::error::{Code, QErr};
 use crate::search::eval::{self, EvalState, Mode, RsValue};
 use crate::search::expr::{self, Expr};
 use crate::search::hll::Hll;
 use crate::search::index::Index;
-use crate::search::iters::{BoxIt, IxResult, K_INTERSECT, K_TERM, K_UNION, Qcx};
+use crate::search::iters::{BoxIt, Empty, IxResult, K_INTERSECT, K_TERM, K_UNION, Qcx, Skip};
 use crate::search::mmheap::MmHeap;
 use crate::search::qast::{self, Kind, Node};
 use crate::search::qeval::EvalCx;
@@ -59,8 +70,13 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         let ix = cx.eng.search.indexes.get_mut(&name).expect("loaded");
         req.apply_context(ix, resp3)?;
     }
-    if req.flags & F_IS_CURSOR != 0 {
-        return Err(Error::msg("ERR FT.AGGREGATE WITHCURSOR is not supported yet"));
+    let is_cursor = req.flags & F_IS_CURSOR != 0;
+    if is_cursor {
+        // `parseCursorSettings`: MAXIDLE is at most `search-cursor-max-idle`.
+        let max = cx.eng.cfg.num("search-cursor-max-idle") as i64;
+        if req.cursor.max_idle == 0 || req.cursor.max_idle as i64 > max {
+            req.cursor.max_idle = max as u32;
+        }
     }
     // `IsNeededDepleter`: WITHCOUNT without a sort, a group or a count drains the query first.
     let f = req.flags;
@@ -69,13 +85,126 @@ pub(super) fn ft_aggregate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
     let db = cx.client.db;
-    let eng: &Engine = cx.eng;
-    let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
-    let reply = run(eng, ix, &req, db, resp3, background)?;
-    if let Some(ix) = cx.eng.search.indexes.get_mut(&name) {
+    if !is_cursor {
+        let eng: &Engine = cx.eng;
+        let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
+        let (reply, _) = run(eng, ix, &req, db, resp3, background, req.max_aggregate_results as u32, None, None, &mut false)?;
+        count_dialect(cx, &name, &req);
+        return Ok(reply);
+    }
+
+    // `AREQ_StartCursor`: the cursor is reserved once the pipeline is built, then its first
+    // chunk runs (`runCursor`).
+    let cap = cx.eng.cfg.num("search-index-cursor-limit") as i64;
+    let spec_id = cx.eng.search.indexes.get(&name).expect("loaded").id;
+    cx.eng.search.cursors.collect_expired();
+    let gate = (cx.eng.search.cursors.index_total(spec_id) as i64 >= cap)
+        .then(|| QErr::new(Code::Limit, format!("INDEX_CURSOR_LIMIT of {cap} has been reached for an index")));
+    let chunk = if req.cursor.chunk_size != 0 { req.cursor.chunk_size } else { CURSOR_READ_SIZE };
+    let mut st = CursorSt { chunk, db, ..CursorSt::default() };
+    let mut started = false;
+    let res = {
+        let eng: &Engine = cx.eng;
+        let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
+        run(eng, ix, &req, db, resp3, background, chunk, Some(&mut st), gate, &mut started)
+    };
+    if !started {
+        return res.map(|(r, _)| r);
+    }
+    let cursors = &mut cx.eng.search.cursors;
+    let id = cursors.reserve(spec_id, name.clone(), req.cursor.max_idle, cap).expect("under the index's cursor limit");
+    let mut c = cursors.take_running(id).expect("reserved");
+    let (reply, done) = res?;
+    count_dialect(cx, &name, &req);
+    if !done {
+        c.exec = Some(Exec(Box::new(CursorExec { req, st })));
+        cx.eng.search.cursors.pause(c);
+    }
+    Ok(Reply::Array(vec![reply, Reply::Int(if done { 0 } else { id as i64 })]))
+}
+
+fn count_dialect(cx: &mut Cx, name: &[u8], req: &areq::Request) {
+    if let Some(ix) = cx.eng.search.indexes.get_mut(name) {
         ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
     }
-    Ok(reply)
+}
+
+/// `RSCursorReadCommand`: FT.CURSOR READ index cursor_id [COUNT count].
+pub(super) fn ft_cursor_read(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if args.len() < 4 {
+        return Err(arity_error("FT.CURSOR|READ"));
+    }
+    verify_acl(cx, &args[2])?;
+    let Some(cid) = crate::util::parse_i64(&args[3]) else {
+        return Err(Error::msg("Bad cursor ID"));
+    };
+    let mut count = 0i64;
+    if args.len() > 5 {
+        if !args[4].eq_ignore_ascii_case(b"count") {
+            return Err(Error::msg(format!("Unknown argument `{}`", qast::lossy(&args[4]))));
+        }
+        let Some(n) = crate::util::parse_i64(&args[5]) else {
+            return Err(Error::msg(format!("Bad value for COUNT: `{}`", qast::lossy(&args[5]))));
+        };
+        count = n;
+    }
+    let Some(mut c) = cx.eng.search.cursors.take(cid as u64) else {
+        return Err(Error::msg(format!("Cursor not found, id: {cid}")));
+    };
+    // `cursorRead`: the cursor's spec must still be there (a weak reference).
+    let alive = cx.eng.search.indexes.get(&c.index).is_some_and(|ix| ix.id == c.spec_id);
+    if !alive {
+        return Err(QErr::new(Code::DroppedBackground, "The index was dropped while the cursor was idle").into());
+    }
+    let Some(mut exec) = c.exec.take().and_then(|e| e.0.downcast::<CursorExec>().ok()) else {
+        return Err(Error::msg(format!("Cursor not found, id: {cid}")));
+    };
+    // `runCursor`: COUNT sticks for the reads after.
+    let mut num = count as u64;
+    if num == 0 {
+        num = exec.st.chunk as u64;
+        if num == 0 {
+            num = CURSOR_READ_SIZE as u64;
+        }
+    }
+    exec.st.chunk = num as u32;
+    let resp3 = cx.client.resp >= 3;
+    let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
+    let (reply, done) = {
+        let eng: &Engine = cx.eng;
+        let ix: &Index = eng.search.indexes.get(&c.index).expect("alive");
+        let CursorExec { req, st } = &mut *exec;
+        // The documents load from the database the cursor was opened in.
+        let db = st.db;
+        run(eng, ix, req, db, resp3, background, num as u32, Some(st), None, &mut false)?
+    };
+    let id = c.id;
+    if !done {
+        c.exec = Some(Exec(exec));
+        cx.eng.search.cursors.pause(c);
+    }
+    Ok(Reply::Array(vec![reply, Reply::Int(if done { 0 } else { id as i64 })]))
+}
+
+/// `RSCursorDelCommand`: FT.CURSOR DEL index cursor_id.
+pub(super) fn ft_cursor_del(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if args.len() < 4 {
+        return Err(arity_error("FT.CURSOR|DEL"));
+    }
+    verify_acl(cx, &args[2])?;
+    let Some(cid) = crate::util::parse_i64(&args[3]) else {
+        return Err(Error::msg("Bad cursor ID"));
+    };
+    if cx.eng.search.cursors.purge(cid as u64) { Ok(Reply::Ok) } else { Err(Error::msg("Cursor does not exist")) }
+}
+
+/// `RSCursorGCCommand`: FT.CURSOR GC index (the coordinator's handler wants one more argument).
+pub(super) fn ft_cursor_gc(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
+    if args.len() < 4 {
+        return Err(arity_error("FT.CURSOR|GC"));
+    }
+    verify_acl(cx, &args[2])?;
+    Ok(Reply::Int(cx.eng.search.cursors.gc()))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -207,6 +336,82 @@ impl Pcx<'_> {
 
 trait Proc<'a> {
     fn next(&mut self, up: &mut [Box<dyn Proc<'a> + 'a>], cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St;
+    /// Drains its upstream before it yields (sorters, groupers, depleters, normalizers): once
+    /// a cursor's first chunk ran, what it still holds is all that is left upstream.
+    fn accumulates(&self) -> bool {
+        false
+    }
+    /// What a cursor keeps between chunks.
+    fn save(&mut self) -> Option<Saved> {
+        None
+    }
+    fn restore(&mut self, _s: Saved) {}
+}
+
+/// A processor's state between a cursor's chunks.
+enum Saved {
+    /// The query iterator's last document.
+    Query(u64),
+    Pager { offset: u32, remaining: u32, skipping: bool },
+    /// What the last accumulating processor had left, then its final status.
+    Replay(VecDeque<Pend>, St),
+}
+
+/// A result an accumulating processor still held when its cursor paused (the module's
+/// buffered `SearchResult`, its document metadata referenced).
+struct Pend {
+    /// Into the cursor's held document metadata.
+    dmd: Option<usize>,
+    has_sv: bool,
+    doc_id: u64,
+    score: f64,
+    expl: Option<Expl>,
+    vals: Vec<Option<RsValue>>,
+    ixr: Option<IxResult>,
+}
+
+impl Pend {
+    fn of(r: Res<'_>, dmds: &mut Vec<Dmd>) -> Pend {
+        let dmd = r.dmd.map(|d| {
+            dmds.push(d.clone());
+            dmds.len() - 1
+        });
+        Pend { dmd, has_sv: !r.row.sv.is_empty(), doc_id: r.doc_id, score: r.score, expl: r.expl, vals: r.row.dyn_vals, ixr: r.ixr }
+    }
+}
+
+/// The source of a cursor's later chunks once an accumulating processor drained the query.
+struct Replay<'a> {
+    dmds: &'a [Dmd],
+    items: VecDeque<Pend>,
+    tail: St,
+}
+
+impl<'a> Proc<'a> for Replay<'a> {
+    fn next(&mut self, _up: &mut Chain<'a>, _cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
+        let Some(p) = self.items.pop_front() else {
+            let st = self.tail;
+            self.tail = St::Eof;
+            return st;
+        };
+        let dmd = p.dmd.map(|i| &self.dmds[i]);
+        let sv: &'a [_] = match dmd {
+            Some(d) if p.has_sv => &d.sort,
+            _ => &[],
+        };
+        *r = Res { doc_id: p.doc_id, score: p.score, expl: p.expl, dmd, row: Row { dyn_vals: p.vals, sv }, ixr: p.ixr };
+        St::Ok
+    }
+
+    fn save(&mut self) -> Option<Saved> {
+        Some(Saved::Replay(std::mem::take(&mut self.items), self.tail))
+    }
+
+    fn restore(&mut self, s: Saved) {
+        if let Saved::Replay(items, tail) = s {
+            (self.items, self.tail) = (items, tail);
+        }
+    }
 }
 
 type Chain<'a> = [Box<dyn Proc<'a> + 'a>];
@@ -227,16 +432,25 @@ struct QueryIt<'a> {
     it: BoxIt<'a>,
     ix: &'a Index,
     now: i64,
+    /// The last document read.
+    last: u64,
+    /// A cursor's earlier chunks read up to this document.
+    resume: Option<u64>,
 }
 
 impl<'a> Proc<'a> for QueryIt<'a> {
     fn next(&mut self, _up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         loop {
-            if !self.it.read() {
+            let more = match self.resume.take() {
+                Some(last) => self.it.skip_to(last + 1) != Skip::Eof,
+                None => self.it.read(),
+            };
+            if !more {
                 return St::Eof;
             }
             let Some(cur) = self.it.current() else { return St::Eof };
             let ixr = cur.clone();
+            self.last = ixr.doc_id;
             let ix: &'a Index = self.ix;
             let Some(dmd) = ix.docs.get(ixr.doc_id) else { continue };
             if dmd.flags & DOC_DELETED != 0 || (dmd.expire_at != 0 && dmd.expire_at <= self.now) {
@@ -249,6 +463,19 @@ impl<'a> Proc<'a> for QueryIt<'a> {
             r.dmd = Some(dmd);
             r.row.sv = &dmd.sort;
             return St::Ok;
+        }
+    }
+
+    fn save(&mut self) -> Option<Saved> {
+        Some(Saved::Query(self.last))
+    }
+
+    fn restore(&mut self, s: Saved) {
+        if let Saved::Query(last) = s
+            && last > 0
+        {
+            self.last = last;
+            self.resume = Some(last);
         }
     }
 }
@@ -297,6 +524,10 @@ struct MaxNorm<'a> {
 }
 
 impl<'a> Proc<'a> for MaxNorm<'a> {
+    fn accumulates(&self) -> bool {
+        true
+    }
+
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         if !self.yielding {
             let saved = cx.result_limit;
@@ -391,6 +622,10 @@ impl<'a> Sorter<'a> {
 }
 
 impl<'a> Proc<'a> for Sorter<'a> {
+    fn accumulates(&self) -> bool {
+        true
+    }
+
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         if !self.yielding {
             let saved = cx.result_limit;
@@ -452,6 +687,16 @@ struct Pager {
 }
 
 impl<'a> Proc<'a> for Pager {
+    fn save(&mut self) -> Option<Saved> {
+        Some(Saved::Pager { offset: self.offset, remaining: self.remaining, skipping: self.skipping })
+    }
+
+    fn restore(&mut self, s: Saved) {
+        if let Saved::Pager { offset, remaining, skipping } = s {
+            (self.offset, self.remaining, self.skipping) = (offset, remaining, skipping);
+        }
+    }
+
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         if self.skipping {
             let limit = self.remaining.min(cx.result_limit);
@@ -503,6 +748,10 @@ struct Depleter<'a> {
 }
 
 impl<'a> Proc<'a> for Depleter<'a> {
+    fn accumulates(&self) -> bool {
+        true
+    }
+
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         if !self.done {
             loop {
@@ -1102,6 +1351,10 @@ impl Grouper {
 }
 
 impl<'a> Proc<'a> for Grouper {
+    fn accumulates(&self) -> bool {
+        true
+    }
+
     fn next(&mut self, up: &mut Chain<'a>, cx: &mut Pcx<'a>, r: &mut Res<'a>) -> St {
         if !self.yielding {
             let saved = cx.result_limit;
@@ -1650,7 +1903,7 @@ fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'
     let max_groups = cfg.num("search-max-aggregate-groups").max(1) as usize;
     let mut b = Builder { req, chain: Vec::new(), opt, safe, max_groups, sortkey: None };
     cx.lookups.push(Lookup::default());
-    b.push(QueryIt { it, ix, now });
+    b.push(QueryIt { it, ix, now, last: 0, resume: None });
 
     // `Pipeline_BuildQueryPart`: a scorer when scores are asked for.
     if b.has(F_SEND_SCORES | F_SEND_SCORES_AS_FIELD) {
@@ -1704,11 +1957,73 @@ fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'
 // ---------------------------------------------------------------------------------------------
 // Execution and the reply (`sendChunk`, `serializeResult`)
 
-fn run(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, background: bool) -> Result<Reply, Error> {
+/// A cursor's request and what its pipeline keeps between chunks (the module keeps the
+/// pipeline itself; here each chunk rebuilds it and restores this).
+struct CursorExec {
+    req: areq::Request,
+    st: CursorSt,
+}
+
+#[derive(Default)]
+struct CursorSt {
+    /// The first chunk ran.
+    started: bool,
+    /// The database the cursor was opened in.
+    db: usize,
+    /// The lookups, with the keys loading added as documents came.
+    lookups: Vec<Lookup>,
+    /// Each processor's state, by position (in the chain the replay starts once `pending_at`).
+    saved: Vec<Option<Saved>>,
+    /// The last accumulating processor's position once it drained the query: later chunks
+    /// replay what it held, and keep the metadata of the documents those results reference.
+    pending_at: Option<usize>,
+    dmds: Vec<Dmd>,
+    min_score: f64,
+    /// WITHCOUNT's total, kept across chunks.
+    total: i64,
+    /// The doc table's max id when the query's iterators were first built.
+    top: u64,
+    /// The scorer's average document length, as when the pipeline was built.
+    avg_doc_len: f64,
+    /// `cursorConfig.chunkSize`.
+    chunk: u32,
+}
+
+/// `RSGlobalConfig.cursorReadSize`.
+const CURSOR_READ_SIZE: u32 = 1000;
+
+/// `QITR_ReportedTotal`: an unsigned 32-bit count.
+fn reported(total: i64) -> i64 {
+    total as u32 as i64
+}
+
+/// One chunk (`sendChunk`): its reply and whether the request is done (the cursor's id is 0).
+/// `limit` is the chunk's result limit. A cursor's state carries the pipeline from chunk to
+/// chunk; `gate` is the error a cursor's reservation fails with, once the pipeline is built,
+/// and `started` tells whether the chunk began.
+#[allow(clippy::too_many_arguments)]
+fn run(
+    eng: &Engine,
+    ix: &Index,
+    req: &areq::Request,
+    db: usize,
+    resp3: bool,
+    background: bool,
+    limit: u32,
+    mut cur: Option<&mut CursorSt>,
+    gate: Option<QErr>,
+    started: &mut bool,
+) -> Result<(Reply, bool), Error> {
     let cfg = &eng.cfg;
     let spec = &ix.spec;
     let flags = req.flags;
     let now = crate::util::now_ms();
+    let reading = cur.as_ref().is_some_and(|s| s.started);
+    let pending = cur.as_ref().and_then(|s| s.pending_at);
+    let top = match cur.as_ref() {
+        Some(s) if s.started => s.top,
+        _ => ix.docs.max_doc_id,
+    };
     let mut ft_to_field = Vec::new();
     for (i, f) in spec.fields.iter().enumerate() {
         if let Some(id) = f.ft_id {
@@ -1716,6 +2031,13 @@ fn run(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, ba
                 ft_to_field.resize(id + 1, 0);
             }
             ft_to_field[id] = i as u16;
+        }
+    }
+    // The documents a replayed result references: gone from the table, they read as deleted.
+    let mut dmds: Vec<Dmd> = cur.as_mut().map(|s| std::mem::take(&mut s.dmds)).unwrap_or_default();
+    for d in &mut dmds {
+        if ix.docs.get(d.id).is_none() {
+            d.flags |= DOC_DELETED;
         }
     }
     let q = Qcx { docs: &ix.docs, now_ms: now, ft_to_field };
@@ -1732,12 +2054,18 @@ fn run(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, ba
         prioritize: cfg.flag("search-_prioritize-intersect-union-children"),
         in_not: false,
         expansions_warning: false,
+        top: reading.then_some(top),
     };
     let root = req.root.as_ref().expect("a parsed query");
-    let it = ecx.iterate(root)?;
-    let warn_expansions = ecx.expansions_warning;
+    let it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };
+    // The warning is the first chunk's (later ones start with a fresh error).
+    let warn_expansions = ecx.expansions_warning && !reading;
 
-    let avg = if ix.stats.num_documents != 0 { ix.stats.total_docs_len as f64 / ix.stats.num_documents as f64 } else { 0.0 };
+    let avg = match cur.as_ref() {
+        Some(s) if s.started => s.avg_doc_len,
+        _ if ix.stats.num_documents != 0 => ix.stats.total_docs_len as f64 / ix.stats.num_documents as f64,
+        _ => 0.0,
+    };
     let sargs = scorers::Args { avg_doc_len: avg, tanh_factor: req.bm25std_tanh as i64, payload: req.payload.as_deref() };
     let mut cx = Pcx {
         eng,
@@ -1752,12 +2080,32 @@ fn run(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, ba
         force: spec.is_json() && req.dialect < 3,
         dialect: req.dialect,
     };
-    let b = build(req, &mut cx, it, ix, now, background, sargs)?;
+    let Builder { mut chain, sortkey, .. } = build(req, &mut cx, it, ix, now, background, sargs)?;
+    if let Some(e) = gate {
+        return Err(e.into());
+    }
+    *started = true;
     let optimized = flags & OPTIMIZE != 0;
-    let sortkey = b.sortkey;
-    let mut chain = b.chain;
+    if let Some(s) = cur.as_deref_mut()
+        && s.started
+    {
+        cx.lookups = std::mem::take(&mut s.lookups);
+        cx.min_score = s.min_score;
+        if flags & F_HAS_WITHCOUNT != 0 {
+            cx.total = s.total;
+        }
+        if let Some(at) = s.pending_at {
+            chain.drain(..=at);
+            chain.insert(0, Box::new(Replay { dmds: &dmds, items: VecDeque::new(), tail: St::Eof }));
+        }
+        for (p, saved) in chain.iter_mut().zip(std::mem::take(&mut s.saved)) {
+            if let Some(saved) = saved {
+                p.restore(saved);
+            }
+        }
+    }
 
-    cx.result_limit = req.max_aggregate_results as u32;
+    cx.result_limit = limit;
     let collect = cfg.num("search-on-timeout") != 0 || cfg.num("search-on-oom") == 1;
     let strict = cfg.num("search-on-timeout") == 2;
     let mut rows: Vec<Res<'_>> = Vec::new();
@@ -1797,7 +2145,7 @@ fn run(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, ba
     let first_total = cx.total - cx.skipped;
     let buffered_strict = collected.is_some() && strict;
     if flags & F_NOROWS == 0 && (buffered_strict || rc == St::Ok || rc == St::Eof) {
-        if let Some(v) = collected {
+        if let Some(v) = collected.take() {
             rows = v;
         } else if cx.result_limit > 0 && rc == St::Ok {
             rows.push(std::mem::replace(&mut r, Res::new()));
@@ -1815,7 +2163,8 @@ fn run(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, ba
             }
         }
     }
-    drop(chain);
+    // `shouldSetCursorDone`.
+    let done = rc != St::Ok;
 
     // The reply.
     let li = cx.lookups.len() - 1;
@@ -1823,8 +2172,9 @@ fn run(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, ba
     for row in &rows {
         out_rows.push(serialize(req, &mut cx, li, sortkey, row, resp3));
     }
+    drop(rows);
     let typed_expand = flags & FORMAT_EXPAND != 0;
-    if resp3 {
+    let reply = if resp3 {
         let results: Vec<Reply> = out_rows
             .into_iter()
             .map(|parts| {
@@ -1842,25 +2192,67 @@ fn run(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, ba
         if warn_expansions {
             warnings.push(Reply::Status("Max prefix expansions limit was reached".into()));
         }
-        return Ok(Reply::Map(vec![
+        Reply::Map(vec![
             (Reply::Status("attributes".into()), Reply::Array(Vec::new())),
             (Reply::Status("format".into()), Reply::Status(if typed_expand { "EXPAND" } else { "STRING" }.into())),
             (Reply::Status("results".into()), Reply::Array(results)),
-            (Reply::Status("total_results".into()), Reply::Int(cx.total - cx.skipped)),
+            (Reply::Status("total_results".into()), Reply::Int(reported(cx.total - cx.skipped))),
             (Reply::Status("warning".into()), Reply::Array(warnings)),
-        ]));
-    }
-    let mut out = vec![Reply::Int(first_total)];
-    for parts in out_rows {
-        for (k, v) in parts {
-            match (k, v) {
-                ("extra_attributes", Reply::Map(m)) => out.push(Reply::Array(m.into_iter().flat_map(|(a, b)| [a, b]).collect())),
-                ("required_fields", Reply::Map(m)) => out.extend(m.into_iter().map(|(_, b)| b)),
-                (_, v) => out.push(v),
+        ])
+    } else {
+        let mut out = vec![Reply::Int(reported(first_total))];
+        for parts in out_rows {
+            for (k, v) in parts {
+                match (k, v) {
+                    ("extra_attributes", Reply::Map(m)) => out.push(Reply::Array(m.into_iter().flat_map(|(a, b)| [a, b]).collect())),
+                    ("required_fields", Reply::Map(m)) => out.extend(m.into_iter().map(|(_, b)| b)),
+                    (_, v) => out.push(v),
+                }
             }
         }
+        Reply::Array(out)
+    };
+
+    // A cursor keeps the pipeline's state for its next chunk (`finishSendChunk` resets the
+    // totals, WITHCOUNT's aside).
+    let mut held = None;
+    if let Some(s) = cur.as_deref_mut()
+        && !done
+    {
+        s.total = if flags & F_HAS_WITHCOUNT != 0 { cx.total - cx.skipped } else { 0 };
+        let mut saved = Vec::with_capacity(chain.len());
+        match chain.iter().rposition(|p| p.accumulates()).filter(|_| s.pending_at.is_none()) {
+            Some(at) => {
+                let mut kept = Vec::new();
+                let mut items = VecDeque::new();
+                let (up, rest) = chain.split_at_mut(at);
+                let tail = loop {
+                    let mut x = Res::new();
+                    let st = rest[0].next(up, &mut cx, &mut x);
+                    if st != St::Ok {
+                        break st;
+                    }
+                    items.push_back(Pend::of(x, &mut kept));
+                };
+                saved.push(Some(Saved::Replay(items, tail)));
+                saved.extend(rest[1..].iter_mut().map(|p| p.save()));
+                s.pending_at = Some(at);
+                held = Some(kept);
+            }
+            None => saved.extend(chain.iter_mut().map(|p| p.save())),
+        }
+        s.saved = saved;
+        s.lookups = std::mem::take(&mut cx.lookups);
+        s.min_score = cx.min_score;
+        s.top = top;
+        s.avg_doc_len = avg;
+        s.started = true;
     }
-    Ok(Reply::Array(out))
+    drop((chain, r, collected));
+    if let Some(s) = cur {
+        s.dmds = held.unwrap_or(dmds);
+    }
+    Ok((reply, done))
 }
 
 /// `getReplyKey`: the sorting vector's slot when the key has one, else the row.

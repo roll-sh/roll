@@ -1069,7 +1069,9 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
     };
     cx.eng.search.count_use(&real);
     let cursor_limit = cx.eng.cfg.num("search-index-cursor-limit");
+    let (global_idle, global_total) = cx.eng.search.cursors.stats();
     let ix = &cx.eng.search.indexes[&real];
+    let index_total = cx.eng.search.cursors.index_total(ix.id);
     let sp = &ix.spec;
     let rule = &sp.rule;
     let mut top: Vec<(Reply, Reply)> = Vec::new();
@@ -1237,10 +1239,10 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
     top.push((
         st("cursor_stats"),
         Reply::Map(vec![
-            (st("global_idle"), Reply::Int(0)),
-            (st("global_total"), Reply::Int(0)),
+            (st("global_idle"), Reply::Int(global_idle as i64)),
+            (st("global_total"), Reply::Int(global_total as i64)),
             (st("index_capacity"), Reply::Int(cursor_limit as i64)),
-            (st("index_total"), Reply::Int(0)),
+            (st("index_total"), Reply::Int(index_total as i64)),
         ]),
     ));
     if sp.flags & spec::I_CUSTOM_STOPWORDS != 0 {

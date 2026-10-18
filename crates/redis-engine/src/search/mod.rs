@@ -7,6 +7,7 @@ pub mod args;
 pub mod casefold;
 pub mod cluster;
 pub mod config;
+pub mod cursor;
 pub mod doctable;
 pub mod error;
 pub mod eval;

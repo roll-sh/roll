@@ -481,6 +481,7 @@ fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: b
         prioritize: cfg.flag("search-_prioritize-intersect-union-children"),
         in_not: false,
         expansions_warning: false,
+        top: None,
     };
     let root = req.root.as_ref().expect("a parsed query");
     let mut it = ecx.iterate(root)?;

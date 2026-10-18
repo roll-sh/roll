@@ -36,6 +36,8 @@ pub struct Global {
     pub dicts: RsDict<std::collections::BTreeSet<Vec<u16>>>,
     /// `maxIndexes_g` when FT.DEBUG SET_MAX_INDEXES changed it.
     pub max_indexes: Option<usize>,
+    /// `g_CursorsList`: FT.AGGREGATE WITHCURSOR's cursors (they outlive their index).
+    pub cursors: super::cursor::Cursors,
 }
 
 impl Global {
@@ -78,13 +80,14 @@ impl Global {
         }
     }
 
-    /// `onFlush` (FLUSHDB/FLUSHALL): every index, alias and dictionary goes.
+    /// `onFlush` (FLUSHDB/FLUSHALL): every index, alias, dictionary and cursor goes.
     pub fn flush(&mut self) {
         // `Indexes_Free`: each spec is deleted from the registry, whose tables never shrink.
         for name in self.indexes.keys().cloned().collect::<Vec<_>>() {
             self.remove(&name);
         }
         self.prefixes = TrieMap::new();
+        self.cursors.clear();
         self.aliases.clear();
         self.dicts.clear();
     }
