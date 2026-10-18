@@ -83,10 +83,10 @@ fn lookup_by_pattern(cx: &mut Cx, pattern: &[u8], elem: &[u8]) -> Option<Vec<u8>
     key.extend_from_slice(&pattern[..star]);
     key.extend_from_slice(elem);
     key.extend_from_slice(&pattern[star + 1..key_end]);
-    let now = cx.now;
     match (cx.get(&key)?, field) {
         (Value::Str(s), None) => Some(s.to_vec()),
-        (Value::Hash(h), Some(f)) => h.get_live(&pattern[f + 2..], now).map(<[u8]>::to_vec),
+        // `hashTypeGetValueObject(HFE_LAZY_EXPIRE)`: an expired field is deleted.
+        (Value::Hash(_), Some(f)) => super::hashes::lazy_get(cx, &key, &pattern[f + 2..]).map(|v| v.to_vec()),
         _ => None,
     }
 }

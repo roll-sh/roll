@@ -476,16 +476,20 @@ impl Engine {
     /// may-replicate commands, scripts unless they declare `no-writes`, EXEC of such commands.
     pub fn may_replicate(&self, client: &Client, args: &[Bytes]) -> bool {
         let Ok((cmd, _)) = Self::resolve_as(args, client.internal) else { return false };
+        let own = cmd.is_write() || cmd.has(commands::MAY_REPLICATE);
         if cmd.has(commands::SCRIPT_RUNNER) {
+            // `evalGetCommandFlags`: a script without declared flags (or not found) keeps the
+            // command's own (EVAL may replicate, EVAL_RO doesn't); declared flags only add
+            // `write` unless `no-writes` (`scriptFlagsToCmdFlags`).
             return match self.scripting.flags_for(args) {
-                Some(f) if f & commands::scripting::COMPAT == 0 => f & commands::scripting::NO_WRITES == 0,
-                _ => true,
+                Some(f) if f & commands::scripting::COMPAT == 0 => own || f & commands::scripting::NO_WRITES == 0,
+                _ => own,
             };
         }
         if cmd.name == "exec" {
             return client.multi.as_ref().is_some_and(|m| m.queued.iter().any(|q| self.may_replicate(client, q)));
         }
-        cmd.is_write() || cmd.has(commands::MAY_REPLICATE)
+        own
     }
 
     /// CLIENT PAUSE: until when (Unix ms) this command must wait, if it is paused.
@@ -755,6 +759,7 @@ impl Engine {
         // Always: touched keys also update the keysizes histogram.
         self.sig.track = true;
         let db_at_start = client.db as u16;
+        let effects_before = self.effects.len();
         let dirty_before = self.sig.dirty;
         let outer_counted = self.sig.counted.take();
         let started = Instant::now();
@@ -782,6 +787,12 @@ impl Engine {
         let propagate = !matches!(mode, Mode::Script { .. }) || self.scripting.running.as_ref().is_none_or(|r| r.propagate);
         if (changed || force) && !no_propagate && propagate && mode != Mode::Replay {
             self.effects.push(Effect { db: db_at_start, args: rewrite.unwrap_or_else(|| args.to_vec()) });
+        }
+        // `propagatePendingCommands`: what a client's command propagated (lazily expired keys'
+        // DELs and fields' HDELs included) goes out as one MULTI/EXEC when it is more than one
+        // command, except for the commands that touch arbitrary keys.
+        if matches!(mode, Mode::Top | Mode::Unblock) && !matches!(cmd.name, "scan" | "randomkey") {
+            wrap_unit(&mut self.effects, effects_before);
         }
         self.process_touched();
         self.flush_events();
@@ -1040,12 +1051,15 @@ impl Engine {
         let Some(e) = self.dbs[db].keys.get(key) else { return false };
         if !e.expired(now) {
             // A hash whose registered field expiry is due: run its active field expiry now (Redis
-            // does it from the cron), so the command sees what it would see on Redis. True if
+            // does it from the cron), so the command sees what it would see on Redis. Not while
+            // active expiry is off (DEBUG SET-ACTIVE-EXPIRE 0) or paused, like the cron. True if
             // that deleted the whole hash.
             if let Value::Hash(h) = &e.value
                 && h.subexpiry_due(now)
                 && mode != Mode::Replay
                 && !self.replica
+                && self.debug.active_expire
+                && !self.pause_active(now)
             {
                 return commands::hashes::expire_fields(self, db, key, now);
             }
@@ -1660,6 +1674,25 @@ impl Engine {
 pub const LRU_CLOCK_MAX: u32 = (1 << 24) - 1;
 const LFU_INIT_VAL: u32 = 5;
 const EVPOOL_SIZE: usize = 16;
+
+/// Wrap the effects from `start` on (one execution unit) in MULTI/EXEC if they are more than one
+/// command; markers a command placed itself inside the unit are replaced by the unit's.
+fn wrap_unit(effects: &mut Vec<Effect>, start: usize) {
+    let marker = |e: &Effect| e.args.len() == 1 && (commands::eq(&e.args[0], "multi") || commands::eq(&e.args[0], "exec"));
+    let unit = &effects[start..];
+    let ops = unit.iter().filter(|e| !marker(e)).count();
+    if ops < 2 {
+        return;
+    }
+    if unit.len() - ops == 2 && marker(&unit[0]) && marker(&unit[unit.len() - 1]) {
+        return;
+    }
+    let mut ops: Vec<Effect> = effects.drain(start..).filter(|e| !marker(e)).collect();
+    let db = ops[0].db;
+    effects.push(Effect { db, args: vec![Bytes::from_static(b"MULTI")] });
+    effects.append(&mut ops);
+    effects.push(Effect { db, args: vec![Bytes::from_static(b"EXEC")] });
+}
 
 fn lfu_minutes(now: i64) -> u32 {
     ((now / 60_000) as u32) & 65535

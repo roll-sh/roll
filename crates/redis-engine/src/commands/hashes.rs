@@ -9,11 +9,17 @@
 //! - Active expiry deletes the due fields of registered hashes: each is propagated as
 //!   `HDEL key field`, then one `hexpired` event, and `del` if the hash became empty. Redis runs it
 //!   from its cron; here it also runs when a due hash is looked up (`Engine::expire_if_needed`),
-//!   so commands see what they would see on a Redis whose cron already ran.
-//! - Commands that access single fields delete an expired field lazily (`hashTypeGetValue`),
-//!   others (HGETALL, HSCAN…) just skip expired fields and HLEN still counts them.
-//! - Replicas never delete (they wait for the primary's HDELs) but hide expired fields from
-//!   clients; replayed effects see every field.
+//!   so commands see what they would see on a Redis whose cron already ran (not while active
+//!   expiry is off with DEBUG SET-ACTIVE-EXPIRE 0, or paused).
+//! - Commands that access single fields delete an expired field lazily (`hashTypeGetValue`):
+//!   HGET, HMGET, HEXISTS, HSTRLEN, HSETNX, HINCRBY(FLOAT), HGETDEL, HGETEX, HSETEX FNX/FXX and
+//!   SORT's `*->field`, each deletion counted in `expired_subkeys` and propagated as an HDEL in
+//!   the command's MULTI/EXEC unit; the last field takes the key with it. HRANDFIELD expires
+//!   every due field first. The others (HGETALL, HKEYS, HVALS, HSCAN, HTTL…) skip expired fields
+//!   and HLEN still counts them; HSET, HEXPIRE and HSETEX without FNX/FXX treat them as present.
+//! - Replicas, and a primary while CLIENT PAUSE holds back expiry, never delete (a replica waits
+//!   for the primary's HDELs) but hide expired fields from clients; replayed effects see every
+//!   field.
 
 use super::keys::{ScanOpts, parse_cursor, scan_reply};
 use super::*;
@@ -111,7 +117,9 @@ fn clock(cx: &Cx) -> Clock {
         // shows expired fields as they are.
         Clock { now: i64::MIN, delete: false }
     } else {
-        Clock { now: cx.now, delete: !cx.eng.replica }
+        // A replica's clients see expired fields as gone but never delete them; neither does
+        // a primary while CLIENT PAUSE holds back expiry (`isPausedActionsWithUpdate`).
+        Clock { now: cx.now, delete: !cx.eng.replica && !cx.eng.pause_active(cx.now) }
     }
 }
 
@@ -225,6 +233,21 @@ fn field_expired_effect(eng: &mut Engine, db: usize, key: &[u8], field: &[u8]) {
     eng.sig.touch_quiet(db as u16, key);
 }
 
+/// The `del` event of a hash emptied by field expiry, sent while the key still exists (Redis
+/// notifies before `dbDelete` in `hashTypeGetValue` and `hashTypeExpire`): RediSearch's handler,
+/// which opens the key, finds it.
+fn notify_del_before_delete(eng: &mut Engine, db: usize, key: &[u8]) {
+    if !eng.sig.search_hook {
+        eng.sig.notify(notify::GENERIC, "del", db as u16, key);
+        return;
+    }
+    crate::commands::ft::probe(eng, key, false);
+    eng.sig.search_hook = false;
+    eng.sig.notify(notify::GENERIC, "del", db as u16, key);
+    eng.sig.search_hook = true;
+    eng.sig.search_events.push(("del", db as u16, Str::from_slice(key)));
+}
+
 enum Got {
     Value(Bytes),
     Missing,
@@ -264,10 +287,19 @@ fn get_field(cx: &mut Cx, key: &[u8], field: &[u8], notify: bool, keep_hash: boo
         return Got::Expired;
     }
     if notify {
-        cx.notify(notify::GENERIC, "del", key);
+        notify_del_before_delete(cx.eng, db, key);
     }
     cx.eng.dbs[db].remove(key);
     Got::ExpiredHash
+}
+
+/// A field's value for other commands (SORT's `*->field`): `hashTypeGetValueObject` with
+/// `HFE_LAZY_EXPIRE`, deleting the field if it expired.
+pub(crate) fn lazy_get(cx: &mut Cx, key: &[u8], field: &[u8]) -> Option<Bytes> {
+    match get_field(cx, key, field, true, false) {
+        Got::Value(v) => Some(v),
+        _ => None,
+    }
 }
 
 // ---- active field expiry (called by the engine) ----
@@ -299,7 +331,7 @@ pub(crate) fn expire_fields(eng: &mut Engine, db: usize, key: &[u8], now: i64) -
     }
     eng.sig.notify_fields(notify::HASH, "hexpired", db as u16, key, &gone);
     if empty {
-        eng.sig.notify(notify::GENERIC, "del", db as u16, key);
+        notify_del_before_delete(eng, db, key);
         eng.dbs[db].remove(key);
     } else {
         eng.dbs[db].sync_subexpiry(key);
@@ -1128,7 +1160,8 @@ pub fn hpersist(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if !found {
         return Ok(Reply::Array(vec![Reply::Int(NO_FIELD); fields.len()]));
     }
-    let now = clock(cx).now;
+    // An expired field reads as missing even on a replica or with DEBUG SET-ALLOW-ACCESS-EXPIRED.
+    let now = cx.now;
     let mut out = Vec::with_capacity(fields.len());
     let mut persisted = Vec::new();
     for f in fields {
@@ -1586,6 +1619,96 @@ mod tests {
         assert_eq!(run(&mut r, &mut rc, "HLEN k"), Reply::Int(2));
         r.apply(&mk("HDEL k a"));
         assert_eq!(run(&mut r, &mut rc, "HLEN k"), Reply::Int(1));
+    }
+
+    /// `h` with fields `a`..: `expired` of them (from the first) expired in the past, unregistered
+    /// (so nothing but the commands themselves deletes them).
+    fn with_expired(e: &mut Engine, c: &mut Client, fields: &[&str], expired: usize) {
+        run(e, c, "DEL h");
+        let mut line = String::from("HSET h");
+        for f in fields {
+            line.push_str(&format!(" {f} v{f}"));
+        }
+        run(e, c, &line);
+        if let Some(crate::Entry { value: crate::Value::Hash(h), .. }) = e.dbs[0].keys.get_mut(&b"h"[..]) {
+            for f in &fields[..expired] {
+                h.set_expire(f.as_bytes(), 1);
+            }
+        }
+        e.take_effects();
+    }
+
+    #[test]
+    fn lazy_expiry_propagates_hdels_in_the_commands_unit() {
+        let mut e = Engine::standalone();
+        let mut c = Client::new(1);
+        // Hidden but kept: HGETALL, HLEN.
+        with_expired(&mut e, &mut c, &["a", "b", "c"], 1);
+        assert_eq!(run(&mut e, &mut c, "HGETALL h"), Reply::Map(vec![(bulk("b"), bulk("vb")), (bulk("c"), bulk("vc"))]));
+        assert_eq!(run(&mut e, &mut c, "HLEN h"), Reply::Int(3));
+        assert!(effects(&mut e).is_empty());
+        // One deleted field: a lone HDEL.
+        assert_eq!(run(&mut e, &mut c, "HGET h a"), Reply::Nil);
+        assert_eq!(effects(&mut e), vec!["HDEL h a"]);
+        assert_eq!(run(&mut e, &mut c, "HLEN h"), Reply::Int(2));
+        // Several: one transaction, with the command's own effect last.
+        with_expired(&mut e, &mut c, &["a", "b", "c"], 2);
+        run(&mut e, &mut c, "HMGET h a b c");
+        assert_eq!(effects(&mut e), vec!["MULTI", "HDEL h a", "HDEL h b", "EXEC"]);
+        with_expired(&mut e, &mut c, &["a", "b", "c"], 1);
+        assert_eq!(run(&mut e, &mut c, "HSETNX h a z"), Reply::Int(1));
+        assert_eq!(effects(&mut e), vec!["MULTI", "HDEL h a", "HSETNX h a z", "EXEC"]);
+        with_expired(&mut e, &mut c, &["a", "b", "c"], 1);
+        run(&mut e, &mut c, "HINCRBYFLOAT h a 1.5");
+        assert_eq!(effects(&mut e), vec!["MULTI", "HDEL h a", "HSETEX h KEEPTTL FIELDS 1 a 1.5", "EXEC"]);
+        with_expired(&mut e, &mut c, &["a", "b", "c"], 1);
+        run(&mut e, &mut c, "HGETDEL h FIELDS 3 a b zz");
+        assert_eq!(effects(&mut e), vec!["MULTI", "HDEL h a", "HDEL h a b zz", "EXEC"]);
+        with_expired(&mut e, &mut c, &["a", "b", "c"], 2);
+        run(&mut e, &mut c, "HRANDFIELD h");
+        // In expiry order (`b` got the same TTL later, so it sorts first).
+        assert_eq!(effects(&mut e), vec!["MULTI", "HDEL h b", "HDEL h a", "EXEC"]);
+        // HSET overwrites an expired field without expiring it (and counts it as existing).
+        with_expired(&mut e, &mut c, &["a", "b"], 1);
+        assert_eq!(run(&mut e, &mut c, "HSET h a z"), Reply::Int(0));
+        assert_eq!(effects(&mut e), vec!["HSET h a z"]);
+        assert_eq!(run(&mut e, &mut c, "HGET h a"), bulk("z"));
+        // The last field: its HDEL deletes the key on the replica too, no DEL.
+        with_expired(&mut e, &mut c, &["a"], 1);
+        assert_eq!(run(&mut e, &mut c, "HGET h a"), Reply::Nil);
+        assert_eq!(run(&mut e, &mut c, "EXISTS h"), Reply::Int(0));
+        assert_eq!(effects(&mut e), vec!["HDEL h a"]);
+        // Transactions and scripts: the unit is the whole EXEC / script.
+        with_expired(&mut e, &mut c, &["a", "b", "c"], 1);
+        run(&mut e, &mut c, "MULTI");
+        run(&mut e, &mut c, "HGET h a");
+        run(&mut e, &mut c, "HSET h d 1");
+        run(&mut e, &mut c, "EXEC");
+        assert_eq!(effects(&mut e), vec!["MULTI", "HDEL h a", "HSET h d 1", "EXEC"]);
+    }
+
+    #[test]
+    fn replicas_hide_expired_fields_without_deleting() {
+        let mut e = Engine::standalone();
+        let mut c = Client::new(1);
+        with_expired(&mut e, &mut c, &["a", "b"], 1);
+        with_expired(&mut e, &mut c, &["a"], 1);
+        e.replica = true;
+        assert_eq!(run(&mut e, &mut c, "HGET h a"), Reply::Nil);
+        assert_eq!(run(&mut e, &mut c, "HEXISTS h a"), Reply::Int(0));
+        assert_eq!(run(&mut e, &mut c, "HGETALL h"), Reply::Map(vec![]));
+        assert_eq!(run(&mut e, &mut c, "HLEN h"), Reply::Int(1));
+        // No expiry on a replica: HRANDFIELD picks among every field.
+        assert_eq!(run(&mut e, &mut c, "HRANDFIELD h"), bulk("a"));
+        assert_eq!(run(&mut e, &mut c, "HRANDFIELD h -2"), Reply::Array(vec![bulk("a"), bulk("a")]));
+        assert_eq!(run(&mut e, &mut c, "EXISTS h"), Reply::Int(1));
+        assert!(effects(&mut e).is_empty());
+        assert_eq!(e.stats.expired_subkeys, 0);
+        // Promoted: the next access deletes it.
+        e.replica = false;
+        assert_eq!(run(&mut e, &mut c, "HGET h a"), Reply::Nil);
+        assert_eq!(run(&mut e, &mut c, "EXISTS h"), Reply::Int(0));
+        assert_eq!(e.stats.expired_subkeys, 1);
     }
 
     #[test]

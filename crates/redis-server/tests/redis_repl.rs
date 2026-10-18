@@ -93,7 +93,8 @@ async fn info(c: &mut RespClient, section: &str) -> String {
 }
 
 async fn roll_server() -> (SocketAddr, RespClient) {
-    let db = Database::new("psync", Config::default(), 1);
+    let cfg = Config { enable_debug_command: redis_engine::config::PROTECTED_YES, ..Config::default() };
+    let db = Database::new("psync", cfg, 1);
     db.start_cron();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -193,6 +194,28 @@ async fn redis_replication_protocol() {
     assert_eq!(ctr.cli(&["-p", "6390", "-n", "2", "EXISTS", "b"]), "0");
     assert_eq!(ctr.cli(&["-p", "6390", "TS.RANGE", "tdst", "-", "+"]), "0\n3\n10\n3");
     assert_eq!(ctr.cli(&["-p", "6390", "TS.GET", "tsrc"]), "26\n5");
+    // Lazily expired hash fields (active expiry off): reads that only hide them propagate
+    // nothing, the ones that delete them propagate HDELs (several in one MULTI/EXEC), and the
+    // last field's HDEL takes the key on the replica too.
+    assert_eq!(text(&cmd(&mut r, &["DEBUG", "SET-ACTIVE-EXPIRE", "0"]).await), "OK");
+    cmd(&mut r, &["HSET", "hx", "a", "1", "b", "2", "c", "3", "d", "4"]).await;
+    cmd(&mut r, &["HPEXPIRE", "hx", "50", "FIELDS", "3", "a", "b", "c"]).await;
+    cmd(&mut r, &["HSET", "hy", "a", "1"]).await;
+    cmd(&mut r, &["HPEXPIRE", "hy", "50", "FIELDS", "1", "a"]).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cmd(&mut r, &["HGETALL", "hx"]).await;
+    cmd(&mut r, &["INCR", "hfe"]).await;
+    eventually("the HFE marker", || ctr.cli(&["-p", "6390", "GET", "hfe"]) == "1").await;
+    // (HLEN counts the fields a replica stores, expired or not.)
+    assert_eq!(ctr.cli(&["-p", "6390", "HLEN", "hx"]), "4");
+    cmd(&mut r, &["HGET", "hx", "a"]).await;
+    cmd(&mut r, &["HMGET", "hx", "b", "c", "d"]).await;
+    cmd(&mut r, &["HGET", "hy", "a"]).await;
+    cmd(&mut r, &["INCR", "hfe"]).await;
+    eventually("the HFE HDELs", || ctr.cli(&["-p", "6390", "GET", "hfe"]) == "2").await;
+    assert_eq!(ctr.cli(&["-p", "6390", "HLEN", "hx"]), "1");
+    assert_eq!(ctr.cli(&["-p", "6390", "EXISTS", "hy"]), "0");
+    cmd(&mut r, &["DEBUG", "SET-ACTIVE-EXPIRE", "1"]).await;
     // The primary's view of it.
     let i = info(&mut r, "replication").await;
     assert_eq!(field(&i, "connected_slaves").as_deref(), Some("1"), "{i}");
