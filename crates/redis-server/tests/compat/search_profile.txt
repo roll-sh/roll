@@ -143,8 +143,9 @@ FT.CONFIG SET UNION_ITERATOR_HEAP 1
 !timing FT.PROFILE idx AGGREGATE QUERY "@n:[1 8]"
 FT.CONFIG SET UNION_ITERATOR_HEAP 20
 
-# DIALECT 4 where the optimizer keeps the plain iterators (FT.PROFILE AGGREGATE with DIALECT 4
-# and a numeric SORTBY crashes the reference in OPT_Read).
+# DIALECT 4 where the optimizer keeps the plain iterators (the OPTIMIZER iterator's profiles are
+# in search_dialect4.txt; FT.AGGREGATE with DIALECT 4 and a numeric SORTBY but no LIMIT crashes
+# the reference in OPT_Read, its heap sized for no results).
 !timing FT.PROFILE idx SEARCH QUERY hello NOCONTENT DIALECT 4
 !timing FT.PROFILE idx AGGREGATE QUERY "@g:{a}" DIALECT 4
 

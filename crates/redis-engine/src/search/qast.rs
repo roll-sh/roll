@@ -89,6 +89,13 @@ pub struct NumFilter {
     pub max_inclusive: bool,
 }
 
+impl NumFilter {
+    /// The tree search's filter: ascending, unlimited.
+    pub fn filter(&self) -> super::numtree::NumericFilter {
+        super::numtree::NumericFilter { min: self.min, max: self.max, min_inclusive: self.min_inclusive, max_inclusive: self.max_inclusive, ..Default::default() }
+    }
+}
+
 /// `GeoDistance`: -1 invalid, then km, m, ft, mi.
 pub const GEO_INVALID: i32 = -1;
 pub const GEO_KM: i32 = 0;

@@ -9,6 +9,7 @@ use bytes::Bytes;
 use super::args::{Ac, AcErr, COALESCE, GE0, GE1, c_eq};
 use super::error::{Code, QErr};
 use super::index::Index;
+use super::optimizer::{OptType, Plan};
 use super::qast::{self, GeoFilter, Kind, Node, NumFilter, Params};
 use super::qparse::{self, ParseOpts};
 use super::spec;
@@ -213,6 +214,8 @@ pub struct Request {
     /// The parsed query, once the index is applied.
     pub root: Option<Node>,
     pub num_tokens: usize,
+    /// The query optimizer's decisions (with OPTIMIZE, once the index is applied).
+    pub optimizer: Option<Plan>,
 }
 
 /// `ARG_HANDLED` / `ARG_UNKNOWN` (errors are `Err`).
@@ -253,6 +256,7 @@ impl Request {
             payload: None,
             root: None,
             num_tokens: 0,
+            optimizer: None,
         }
     }
 
@@ -1067,7 +1071,7 @@ impl Request {
         if self.flags & OPTIMIZE != 0
             && let Some(r) = root.as_mut()
         {
-            self.optimize_nodes(&ix.spec, r);
+            self.optimizer = Some(self.optimize_nodes(&ix.spec, r));
         }
         self.root = root;
         self.num_tokens = num_tokens;
@@ -1115,32 +1119,83 @@ impl Request {
         Ok(())
     }
 
-    /// `QOptimizer_Parse` + `QOptimizer_QueryNodes`, as far as they change the tree: the
-    /// numeric filter on a numeric SORTBY field leaves the root's intersection.
-    fn optimize_nodes(&self, sp: &spec::Spec, root: &mut Node) {
-        let Some(i) = self.arrange_index() else { return };
-        let Step::Arrange(arng) = &self.steps[i] else { return };
-        let Some(name) = arng.sort_keys.as_ref().and_then(|k| k.first()) else { return };
-        let name = cstr(name);
-        let Some(field) = sp.fields.iter().position(|f| f.name.as_ref() == name) else { return };
-        if sp.fields[field].types != spec::T_NUMERIC {
-            return;
+    /// `QOptimizer_Parse` + `QOptimizer_QueryNodes`: the sort field and the scorer the request
+    /// needs, the numeric filter on a numeric SORTBY field taken out of the root's intersection,
+    /// and what the optimizer can do.
+    fn optimize_nodes(&self, sp: &spec::Spec, root: &mut Node) -> Plan {
+        let mut plan = Plan::new();
+        if let Some(i) = self.arrange_index()
+            && let Step::Arrange(arng) = &self.steps[i]
+        {
+            plan.limit = arng.limit.wrapping_add(arng.offset) as usize;
+            if self.flags & F_IS_SEARCH != 0 && plan.limit == 0 {
+                plan.limit = DEFAULT_LIMIT as usize;
+            }
+            if let Some(name) = arng.sort_keys.as_ref().and_then(|k| k.first()) {
+                let name = cstr(name);
+                match sp.fields.iter().position(|f| f.name.as_ref() == name) {
+                    Some(f) if sp.fields[f].types == spec::T_NUMERIC => {
+                        plan.field = Some(f);
+                        plan.asc = arng.asc_map & 1 != 0;
+                    }
+                    // Sorting by another field: no optimization.
+                    _ => plan.ty = OptType::None,
+                }
+            }
+        }
+        // The scorers that need the query's terms or the document (unknown ones none).
+        plan.scorer = plan.field.is_none()
+            && matches!(self.opts.scorer.as_deref().map(cstr), None | Some(b"BM25STD" | b"TFIDF" | b"TFIDF.DOCNORM" | b"DISMAX" | b"BM25" | b"DOCSCORE" | b"HAMMING"));
+
+        if matches!(root.kind, Kind::Wildcard) {
+            plan.scorer = false;
         }
         let mut parent: Option<Vec<usize>> = None;
         let mut path = Vec::new();
-        let found = check_query_types(root, Some(field), &mut parent, &mut path, true);
-        if let Found::Node(_) = found
-            && let Some(p) = parent
-        {
-            let mut n = &mut *root;
-            for &c in &p {
-                n = &mut n.children[c];
-            }
-            if let Some(pos) = n.children.iter().position(|c| matches!(&c.kind, Kind::Numeric(nf) if nf.field == Some(field))) {
-                // `array_del_fast`: the last child takes its place.
-                n.children.swap_remove(pos);
+        let mut req_score = false;
+        let found = check_query_types(root, plan.field, &mut parent, &mut path, true, &mut req_score);
+        if let Found::Node(p) = found {
+            match parent {
+                Some(pp) => {
+                    let mut n = &mut *root;
+                    for &c in &pp {
+                        n = &mut n.children[c];
+                    }
+                    // `array_del_fast`: the last child takes its place.
+                    let removed = n.children.swap_remove(p[pp.len()]);
+                    if let Kind::Numeric(nf) = removed.kind {
+                        plan.nf = Some(nf);
+                    }
+                }
+                None => {
+                    // A lone range on the sort field: a partial range is enough.
+                    if plan.ty == OptType::Undecided {
+                        plan.ty = OptType::PartialRange;
+                    }
+                    return plan;
+                }
             }
         }
+        let knn = matches!(&root.kind, Kind::Vector(v) if v.knn);
+        if (plan.field.is_none() && req_score) || knn {
+            if plan.ty == OptType::Undecided {
+                plan.ty = OptType::None;
+            }
+            return plan;
+        }
+        if !req_score {
+            if plan.field.is_some() {
+                if plan.ty == OptType::Undecided {
+                    plan.ty = OptType::PartialRange;
+                }
+            } else {
+                if plan.ty == OptType::Undecided {
+                    plan.ty = OptType::NoSorter;
+                }
+                plan.scorer = false;
+            }
+        }
+        plan
     }
 }
 
@@ -1154,8 +1209,8 @@ enum Found {
 }
 
 /// `checkQueryTypes`: the numeric node on the sort field among an intersection's direct
-/// children, with that intersection as its parent.
-fn check_query_types(n: &Node, field: Option<usize>, parent: &mut Option<Vec<usize>>, path: &mut Vec<usize>, has_parent: bool) -> Found {
+/// children, with that intersection as its parent; and whether text needs scoring.
+fn check_query_types(n: &Node, field: Option<usize>, parent: &mut Option<Vec<usize>>, path: &mut Vec<usize>, has_parent: bool, req_score: &mut bool) -> Found {
     match &n.kind {
         Kind::Numeric(nf) => {
             if field.is_some() && nf.field == field {
@@ -1170,7 +1225,7 @@ fn check_query_types(n: &Node, field: Option<usize>, parent: &mut Option<Vec<usi
             let mut ret = Found::None;
             for (i, c) in n.children.iter().enumerate() {
                 path.push(i);
-                let cur = check_query_types(c, field, parent, path, has_parent);
+                let cur = check_query_types(c, field, parent, path, has_parent, req_score);
                 path.pop();
                 match cur {
                     // The C reads the bad pointer's type here (and crashes).
@@ -1189,10 +1244,14 @@ fn check_query_types(n: &Node, field: Option<usize>, parent: &mut Option<Vec<usi
             }
             ret
         }
+        Kind::Token(_) | Kind::Fuzzy { .. } | Kind::Prefix { .. } | Kind::WildcardQuery(_) | Kind::LexRange { .. } => {
+            *req_score = true;
+            Found::None
+        }
         Kind::Optional | Kind::Not | Kind::Union => {
             for c in &n.children {
                 let mut p = None;
-                check_query_types(c, None, &mut p, path, false);
+                check_query_types(c, None, &mut p, path, false, req_score);
             }
             Found::None
         }
@@ -1200,15 +1259,3 @@ fn check_query_types(n: &Node, field: Option<usize>, parent: &mut Option<Vec<usi
     }
 }
 
-impl Request {
-    /// `QOptimizer_Parse`'s limit (for FT.SEARCH's default page).
-    pub fn optimizer_limit(&self) -> u64 {
-        match self.arrange_index().map(|i| &self.steps[i]) {
-            Some(Step::Arrange(a)) => {
-                let l = a.limit + a.offset;
-                if self.flags & F_IS_SEARCH != 0 && l == 0 { DEFAULT_LIMIT } else { l }
-            }
-            _ => 0,
-        }
-    }
-}

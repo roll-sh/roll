@@ -1,0 +1,219 @@
+# DIALECT 4's query optimizer (`QOptimizer`, the OPTIMIZER iterator): a numeric SORTBY's top-k
+# heap over a limited numeric range (rewound with more ranges when the child filters too much),
+# numeric unions trimmed to the LIMIT, quick returns without a sorter, the totals capped by
+# OFFSET/LIMIT, and FT.PROFILE's iterator tree with the optimizer's mode.
+
+FLUSHALL
+FT.CREATE idx ON HASH PREFIX 1 d SCHEMA t TEXT n NUMERIC SORTABLE m NUMERIC g TAG
+EVAL "for i=1,100 do local t = (i%2==1) and 'hello' or 'world'; if i%3==0 then t = t..' foo' end; redis.call('HSET','d'..i,'t',t,'n',i,'m',(i*37)%100,'g',({'a','b','c'})[i%3+1]) end" 0
+
+# Quick return: no sorter, the total is the results read before the reply.
+FT.SEARCH idx "@n:[7 +inf]" DIALECT 4 NOCONTENT
+FT.SEARCH idx "@n>=7" DIALECT 4 NOCONTENT
+FT.SEARCH idx "@n:[7 +inf]" DIALECT 4 NOCONTENT LIMIT 5 3
+FT.AGGREGATE idx "@n:[7 +inf]" DIALECT 4 LIMIT 0 3
+
+# Partial range: SORTBY a numeric field.
+FT.SEARCH idx "*" SORTBY n DESC DIALECT 4 NOCONTENT
+FT.SEARCH idx "@n:[7 +inf]" SORTBY n DIALECT 4 NOCONTENT
+FT.SEARCH idx "@g:{a}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 2 4
+FT.SEARCH idx "@g:{a} @n:[10 60]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 4
+FT.SEARCH idx "@n:[7 +inf]" SORTBY m DIALECT 4 NOCONTENT
+FT.AGGREGATE idx "@g:{a}" SORTBY 2 @n DESC LIMIT 0 3 DIALECT 4
+FT.AGGREGATE idx "*" SORTBY 2 @n DESC LIMIT 2 3 DIALECT 4
+FT.AGGREGATE idx "*" SORTBY 1 @n LIMIT 2 3 DIALECT 4 WITHCOUNT
+
+# Hybrid: a scored query sorted by a numeric field.
+FT.SEARCH idx "hello" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 4
+FT.AGGREGATE idx "hello" SORTBY 2 @n ASC MAX 3 DIALECT 4
+
+# Profiles.
+!timing FT.PROFILE idx SEARCH QUERY "@n:[7 +inf]" SORTBY m DIALECT 4 NOCONTENT
+!timing FT.PROFILE idx SEARCH QUERY "@g:{a} @n:[10 60]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 4
+!timing FT.PROFILE idx SEARCH QUERY "hello" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 4
+
+# More quick returns: tags, wildcards, WITHSCORES (scored, still unsorted), LIMIT 0 0, an
+# explicit scorer the optimizer doesn't know (no sorter), and WITHCOUNT turning it off.
+FT.SEARCH idx "@g:{a}" DIALECT 4 NOCONTENT LIMIT 0 2 WITHSCORES
+FT.SEARCH idx "*" DIALECT 4 NOCONTENT
+FT.SEARCH idx "*" DIALECT 4 NOCONTENT LIMIT 98 5
+FT.SEARCH idx "@n:[200 300]" DIALECT 4 NOCONTENT
+FT.SEARCH idx "-@g:{a}" DIALECT 4 NOCONTENT LIMIT 3 3
+FT.SEARCH idx "@g:{a}" DIALECT 4 LIMIT 0 2
+FT.SEARCH idx "hello" DIALECT 4 NOCONTENT LIMIT 0 0
+FT.SEARCH idx "hello" DIALECT 4 NOCONTENT SCORER BM25STD.NORM LIMIT 1 2
+FT.SEARCH idx "hello" DIALECT 4 NOCONTENT SCORER BM25STD.NORM LIMIT 1 2 WITHSCORES
+FT.SEARCH idx "hello" DIALECT 4 NOCONTENT SCORER BM25STD.TANH LIMIT 0 3 WITHSCORES
+FT.SEARCH idx "hello" DIALECT 4 NOCONTENT SCORER DOCSCORE LIMIT 0 3
+FT.SEARCH idx "@n:[7 +inf]" DIALECT 4 NOCONTENT WITHCOUNT LIMIT 0 2
+FT.SEARCH idx "@n:[7 +inf]" NOCONTENT WITHOUTCOUNT LIMIT 0 2
+FT.SEARCH idx "@n:[7 +inf]" DIALECT 4 NOCONTENT WITHOUTCOUNT WITHCOUNT LIMIT 0 2
+FT.AGGREGATE idx "@g:{b}" DIALECT 4 LOAD 1 @n LIMIT 2 3
+FT.AGGREGATE idx "*" DIALECT 4 LOAD 1 @n LIMIT 0 2
+FT.AGGREGATE idx "@n:[7 +inf]" WITHOUTCOUNT LIMIT 0 3
+
+# No optimization: scored queries, and SORTBY a field that isn't numeric.
+FT.SEARCH idx "hello" DIALECT 4 NOCONTENT
+FT.SEARCH idx "hello" DIALECT 4 NOCONTENT LIMIT 0 2 WITHSCORES
+FT.SEARCH idx "hello" DIALECT 4 NOCONTENT LIMIT 48 5
+FT.SEARCH idx "hello" SORTBY t DIALECT 4 NOCONTENT LIMIT 0 2
+FT.SEARCH idx "@g:{a}" SORTBY g DESC DIALECT 4 NOCONTENT LIMIT 1 3
+
+# Partial ranges: the heap's rewinds when the query keeps few of the ranges' documents, ranges
+# taken out of an intersection, trimmed numeric unions both ways, offsets.
+FT.SEARCH idx "@g:{a}" SORTBY n DIALECT 4 NOCONTENT
+FT.SEARCH idx "@g:{a}" SORTBY m DESC DIALECT 4 NOCONTENT LIMIT 0 7
+FT.SEARCH idx "@g:{a} @m:[0 30]" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 5
+FT.SEARCH idx "@g:{a} @m:[0 30]" SORTBY m DESC DIALECT 4 NOCONTENT LIMIT 2 5
+FT.SEARCH idx "@g:{c} @n:[(50 +inf]" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "@n:[90 +inf] @g:{c}" SORTBY n DIALECT 4 NOCONTENT
+FT.SEARCH idx "@n:[1 100]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "@n:[1 100]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 60 3
+FT.SEARCH idx "@n:[1 100]" SORTBY m DESC DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "@n:[1 100]" SORTBY m DIALECT 4 NOCONTENT LIMIT 0 40
+FT.SEARCH idx "@m:[10 20]" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "@n:[1 100] @m:[1 100]" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "-@g:{a}" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "@g:{a|b}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "*" SORTBY m DIALECT 4 NOCONTENT LIMIT 5 5
+FT.SEARCH idx "*" SORTBY n DIALECT 4 LIMIT 0 2 WITHSORTKEYS
+FT.SEARCH idx "@g:{a}" SORTBY n DESC DIALECT 4 LIMIT 0 2 RETURN 1 m
+FT.SEARCH idx "@g:{a}" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 0
+FT.SEARCH idx "@g:{a}" SORTBY n DIALECT 4 NOCONTENT WITHCOUNT LIMIT 0 3
+FT.SEARCH idx "@g:{a}" SORTBY n DIALECT 4 NOCONTENT WITHSCORES LIMIT 0 3
+FT.AGGREGATE idx "@g:{a} @m:[0 30]" SORTBY 2 @n DESC LIMIT 0 3 DIALECT 4
+FT.AGGREGATE idx "@n:[1 100]" SORTBY 2 @m DESC LIMIT 0 3 DIALECT 4
+FT.AGGREGATE idx "@g:{a}" SORTBY 4 @n DESC @m ASC LIMIT 1 3 DIALECT 4
+FT.AGGREGATE idx "@g:{a}" SORTBY 2 @n DESC MAX 2 DIALECT 4 LOAD 1 @m
+FT.AGGREGATE idx "@g:{a}" LOAD 1 @m SORTBY 2 @n DESC LIMIT 0 2 DIALECT 4 APPLY "@n*2" AS d
+
+# Hybrid: scored queries sorted by a numeric field.
+FT.SEARCH idx "hello" SORTBY n DIALECT 4 NOCONTENT
+FT.SEARCH idx "hello" SORTBY n DESC LIMIT 0 2 WITHSCORES DIALECT 4 NOCONTENT
+FT.SEARCH idx "foo" SORTBY m DESC DIALECT 4 NOCONTENT LIMIT 3 4
+FT.SEARCH idx "hello @n:[10 40]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "hello foo @m:[0 50]" SORTBY m DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "hel*" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "hello|world" SORTBY m DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "(hello @n:[1 20]) | @g:{c}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "hello" SORTBY n DESC DIALECT 4 LIMIT 0 2 HIGHLIGHT
+FT.AGGREGATE idx "world" SORTBY 2 @m DESC LIMIT 0 3 DIALECT 4
+FT.AGGREGATE idx "world" SORTBY 2 @m DESC LIMIT 0 3 DIALECT 4 ADDSCORES
+
+# Legacy filters join the root's intersection (the sort field's one is taken out again), INKEYS.
+FT.SEARCH idx "@g:{a}" FILTER n 10 60 SORTBY n DESC LIMIT 0 3 DIALECT 4 NOCONTENT
+FT.SEARCH idx "*" FILTER n 10 60 SORTBY n LIMIT 0 3 DIALECT 4 NOCONTENT
+FT.SEARCH idx "*" FILTER n 10 60 LIMIT 0 3 DIALECT 4 NOCONTENT
+FT.SEARCH idx "*" FILTER m 10 60 SORTBY n DESC LIMIT 0 3 DIALECT 4 NOCONTENT
+FT.SEARCH idx "hello" INKEYS 3 d1 d3 d5 SORTBY n DESC DIALECT 4 NOCONTENT
+FT.SEARCH idx "@n:[1 50]" INKEYS 3 d1 d3 d5 SORTBY n DESC DIALECT 4 NOCONTENT
+!timing FT.PROFILE idx SEARCH QUERY "*" FILTER n 10 60 SORTBY n LIMIT 0 3 DIALECT 4 NOCONTENT
+
+# RESP3: the totals once the results are all read.
+@resp 3
+FT.SEARCH idx "@n:[7 +inf]" DIALECT 4 NOCONTENT LIMIT 5 3
+FT.SEARCH idx "@g:{a}" DIALECT 4 NOCONTENT
+FT.SEARCH idx "*" DIALECT 4 NOCONTENT LIMIT 98 5
+FT.SEARCH idx "hello" DIALECT 4 NOCONTENT LIMIT 1 2
+FT.SEARCH idx "@g:{a}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 2 4
+FT.SEARCH idx "hello" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 4
+FT.AGGREGATE idx "@n:[7 +inf]" DIALECT 4 LIMIT 0 3
+FT.AGGREGATE idx "@g:{a}" SORTBY 2 @n DESC LIMIT 0 3 DIALECT 4
+@resp 2
+
+# Deleted documents.
+DEL d99 d96
+FT.SEARCH idx "@g:{a}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 3
+FT.SEARCH idx "hello" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 3
+
+# Profiles: quick returns, rewinds, trimmed unions (also LIMITED).
+!timing FT.PROFILE idx SEARCH QUERY "@n:[7 +inf]" DIALECT 4 NOCONTENT LIMIT 5 3
+!timing FT.PROFILE idx SEARCH QUERY "@g:{a}" DIALECT 4 NOCONTENT
+!timing FT.PROFILE idx SEARCH QUERY "hello" DIALECT 4 NOCONTENT LIMIT 0 3
+!timing FT.PROFILE idx SEARCH QUERY "*" SORTBY n DESC DIALECT 4 NOCONTENT
+!timing FT.PROFILE idx SEARCH QUERY "@g:{a} @m:[0 30]" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 5
+!timing FT.PROFILE idx SEARCH QUERY "@g:{a}" SORTBY m DESC DIALECT 4 NOCONTENT LIMIT 0 7
+!timing FT.PROFILE idx SEARCH QUERY "@n:[1 100]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 3
+!timing FT.PROFILE idx SEARCH LIMITED QUERY "@n:[1 100]" SORTBY m DIALECT 4 NOCONTENT LIMIT 0 40
+!timing FT.PROFILE idx SEARCH QUERY "foo" SORTBY m DESC DIALECT 4 NOCONTENT LIMIT 3 4
+!timing FT.PROFILE idx AGGREGATE QUERY "@g:{a}" SORTBY 2 @n DESC LIMIT 0 3 DIALECT 4
+!timing FT.PROFILE idx AGGREGATE QUERY "@n:[1 100]" SORTBY 2 @m DESC LIMIT 0 3 DIALECT 4
+!timing FT.PROFILE idx AGGREGATE QUERY "@n:[7 +inf]" DIALECT 4 LIMIT 0 3
+@resp 3
+!timing FT.PROFILE idx SEARCH QUERY "@g:{a}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 2
+@resp 2
+
+# FT.PROFILE's APPLY and FILTER steps name their expressions as the module registered them.
+!timing FT.PROFILE idx AGGREGATE QUERY "@g:{a}" LOAD 3 @n @t @m APPLY "UPPER(@t)" AS a FILTER "Exists(@n)" APPLY "TO_NUMBER(@n)" AS b FILTER "StartsWith(@t,'h')" APPLY "GeoDistance('1,1','2,2')" AS c APPLY "TimeFmt(@n)" AS d APPLY "Case(@n>1,1,2)" AS e APPLY "LOG(@n)" AS f APPLY "Matched_Terms()" AS g APPLY "SPLIT(@t)" AS h APPLY "dayOfWeek(@n)" AS i LIMIT 0 1
+!timing FT.PROFILE idx AGGREGATE QUERY "@g:{a}" LOAD 3 @n @t @m APPLY "Lower(@t)" AS a FILTER "@n||@m" FILTER "@n && @m" APPLY "!@n" AS b APPLY "@n==3" AS c APPLY "'x'" AS d APPLY "3" AS e APPLY "@n" AS f APPLY "@n%2" AS g LIMIT 0 1
+!timing FT.PROFILE idx AGGREGATE QUERY "@g:{a}" LOAD 3 @n @t @m APPLY "FLOOR(@n)" AS a APPLY "Abs(@n)" AS b APPLY "CEIL(@n)" AS c APPLY "Sqrt(@n)" AS d APPLY "LOG2(@n)" AS e APPLY "Exp(@n)" AS f APPLY "ParseTime('2020','%Y')" AS g APPLY "Hour(@n)" AS h APPLY "MINUTE(@n)" AS i APPLY "Day(@n)" AS j APPLY "MONTH(@n)" AS k APPLY "MonthOfYear(@n)" AS l APPLY "YEAR(@n)" AS o APPLY "DayOfMonth(@n)" AS p APPLY "DAYOFYEAR(@n)" AS q APPLY "SubStr(@t,0,1)" AS r APPLY "FORMAT('%s',@t)" AS s APPLY "To_Str(@n)" AS u APPLY "StrLen(@t)" AS v FILTER "Contains(@t,'h')" APPLY "!EXISTS(@n)" AS w LIMIT 0 1
+
+FT.DROPINDEX idx
+FLUSHALL
+
+# A sort field without values: no ranges, an empty iterator. (Indexes are created over an empty
+# keyspace: the module's background scan would index the keys written next once more.)
+FT.CREATE e ON HASH PREFIX 1 e SCHEMA t TEXT n NUMERIC SORTABLE g TAG
+HSET e1 t hello g a
+HSET e2 t hello g a
+FT.SEARCH e "@g:{a}" SORTBY n DIALECT 4 NOCONTENT
+FT.SEARCH e "hello" SORTBY n DIALECT 4 NOCONTENT
+!timing FT.PROFILE e SEARCH QUERY "@g:{a}" SORTBY n DIALECT 4 NOCONTENT
+FT.DROPINDEX e
+FLUSHALL
+
+# More documents, more ranges: queries that keep few documents of the first ranges make the
+# heap rewind with the ranges after them (by the success ratio, or all of the rest).
+FT.CREATE big ON HASH PREFIX 1 b SCHEMA n NUMERIC a TAG b TAG t TEXT
+EVAL "for i=1,2000 do local b = ((i%2==1) or (i%40==0) or (i>=1500)) and 'y' or 'z'; redis.call('HSET','b'..i,'n',i,'a',(i%2==0) and 'x' or 'w','b',b,'t',(i%7==0) and 'seven' or 'other') end" 0
+FT.SEARCH big "@a:{x} @b:{y}" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 10
+FT.SEARCH big "@a:{x} @b:{y}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 10
+FT.SEARCH big "@a:{x} @b:{y}" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 60
+FT.SEARCH big "@a:{x} @b:{y}" SORTBY n DIALECT 4 NOCONTENT LIMIT 40 20
+FT.SEARCH big "@a:{x} @b:{y} @n:[100 1800]" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 10
+FT.SEARCH big "@a:{x} @b:{y} @n:[100 1800]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 5 10
+FT.SEARCH big "@b:{z}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 10
+FT.SEARCH big "@b:{z} @a:{x}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 30
+FT.SEARCH big "@b:{z} @a:{x} @n:[(1000 +inf]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 30
+FT.SEARCH big "seven @a:{x}" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 5
+FT.SEARCH big "seven @b:{z}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 5
+FT.SEARCH big "seven @b:{z} @n:[1 1000]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 2 5
+FT.SEARCH big "@n:[1 2000]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 10
+FT.SEARCH big "@n:[10 1990]" SORTBY n DIALECT 4 NOCONTENT LIMIT 100 10
+FT.SEARCH big "@n:[10 1990]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 100 10
+FT.SEARCH big "@n:[10 1990]" DIALECT 4 NOCONTENT LIMIT 100 3
+FT.SEARCH big "@b:{y}" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 3
+FT.AGGREGATE big "@a:{x} @b:{y}" SORTBY 2 @n DESC LIMIT 0 5 DIALECT 4
+FT.AGGREGATE big "@b:{z} @a:{x}" SORTBY 2 @n DESC LIMIT 3 5 DIALECT 4
+FT.AGGREGATE big "seven" SORTBY 2 @n DESC LIMIT 0 4 DIALECT 4
+!capture c FT.AGGREGATE big "@a:{x} @b:{y}" SORTBY 1 @n LIMIT 0 6 DIALECT 4 WITHCURSOR COUNT 2
+FT.CURSOR READ big {$c}
+FT.CURSOR READ big {$c}
+FT.CURSOR READ big {$c}
+!capture c FT.AGGREGATE big "@n:[10 1990]" LOAD 1 @n DIALECT 4 WITHCURSOR COUNT 2 LIMIT 0 5
+FT.CURSOR READ big {$c}
+FT.CURSOR READ big {$c}
+!timing FT.PROFILE big SEARCH QUERY "@a:{x} @b:{y}" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 10
+!timing FT.PROFILE big SEARCH QUERY "@b:{z} @a:{x}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 30
+!timing FT.PROFILE big SEARCH QUERY "@a:{x} @b:{y} @n:[100 1800]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 5 10
+!timing FT.PROFILE big SEARCH QUERY "seven @b:{z}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 5
+!timing FT.PROFILE big SEARCH QUERY "@n:[1 2000]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 10
+!timing FT.PROFILE big SEARCH LIMITED QUERY "@n:[10 1990]" SORTBY n DIALECT 4 NOCONTENT LIMIT 100 10
+!timing FT.PROFILE big SEARCH QUERY "@n:[10 1990]" DIALECT 4 NOCONTENT LIMIT 100 3
+FT.DROPINDEX big
+FLUSHALL
+
+# Multi-value numeric fields: a document in several ranges.
+FT.CREATE j ON JSON PREFIX 1 j: SCHEMA $.n[*] AS n NUMERIC $.g AS g TAG
+EVAL "local q = string.char(34); for i=1,60 do redis.call('JSON.SET', 'j:'..i, '$', '{'..q..'n'..q..':['..i..','..(100-i)..'],'..q..'g'..q..':'..q..((i%2==0) and 'a' or 'b')..q..'}') end" 0
+FT.SEARCH j "@g:{a}" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 5
+FT.SEARCH j "@g:{a}" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 5
+FT.SEARCH j "@n:[1 100]" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 5
+FT.SEARCH j "@n:[1 100]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 5
+FT.SEARCH j "@g:{a} @n:[30 80]" SORTBY n DIALECT 4 NOCONTENT LIMIT 0 5
+FT.SEARCH j "@g:{a} @n:[30 80]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 5
+FT.SEARCH j "@g:{a} @n:[30 80]" SORTBY n DIALECT 2 NOCONTENT LIMIT 0 5
+FT.AGGREGATE j "@g:{b}" SORTBY 2 @n DESC LIMIT 0 4 DIALECT 4
+!timing FT.PROFILE j SEARCH QUERY "@g:{a} @n:[30 80]" SORTBY n DESC DIALECT 4 NOCONTENT LIMIT 0 5
+FT.DROPINDEX j
+FLUSHALL

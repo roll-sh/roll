@@ -25,6 +25,7 @@ pub mod lalr;
 pub mod levenshtein;
 pub mod mmheap;
 pub mod numtree;
+pub mod optimizer;
 pub mod phonetic;
 pub mod qast;
 pub mod qeval;

@@ -169,22 +169,7 @@ impl<'a> EvalCx<'a> {
             }
             Kind::Numeric(nf) => {
                 let Some(fi) = nf.field else { return Ok(None) };
-                let Some(tree) = self.ix.fields.get(fi).and_then(|f| f.numeric.as_ref()) else { return Ok(None) };
-                let filter = NumericFilter { min: nf.min, max: nf.max, min_inclusive: nf.min_inclusive, max_inclusive: nf.max_inclusive, ..NumericFilter::default() };
-                let ranges = tree.find(&filter);
-                if ranges.is_empty() {
-                    return Ok(None);
-                }
-                let its = ranges
-                    .into_iter()
-                    .map(|r| {
-                        let contained = filter.value_in_range(r.min_val()) && filter.value_in_range(r.max_val());
-                        let f = if contained { RFilter::None } else { RFilter::Numeric(filter) };
-                        let res = IxResult { kind: K_NUMERIC, freq: 1, field_mask: MASK_ALL, weight: 1.0, ..Default::default() };
-                        Box::new(InvIt::new(r.entries(), res, f, Some(Checker::Field(fi, Predicate::Default)), self.q).profile_as(PKind::Numeric(r.min_val(), r.max_val()))) as BoxIt<'a>
-                    })
-                    .collect();
-                self.union(its, true, 1.0, "NUMERIC", None)
+                return Ok(numeric_iter(self.ix, self.q, self.min_heap, fi, &nf.filter()));
             }
             Kind::Geo(gf) => {
                 gf.validate()?;
@@ -392,6 +377,31 @@ impl<'a> EvalCx<'a> {
             _ => None,
         }
     }
+}
+
+/// `NewNumericFilterIterator`: the union of the field's ranges the filter finds (in its order,
+/// up to its limit), each filtered by value unless the filter contains it; none without any.
+pub fn numeric_iter<'a>(ix: &'a Index, q: &'a Qcx<'a>, min_heap: usize, fi: usize, filter: &NumericFilter) -> Option<BoxIt<'a>> {
+    let its = numeric_ranges(ix, q, fi, filter);
+    if its.is_empty() {
+        return None;
+    }
+    Some(iters::union_typed(its, true, min_heap, 1.0, ("NUMERIC", None)))
+}
+
+/// [`numeric_iter`]'s children: a reader per range found.
+pub fn numeric_ranges<'a>(ix: &'a Index, q: &'a Qcx<'a>, fi: usize, filter: &NumericFilter) -> Vec<BoxIt<'a>> {
+    let Some(tree) = ix.fields.get(fi).and_then(|f| f.numeric.as_ref()) else { return Vec::new() };
+    let filter = *filter;
+    tree.find(&filter)
+        .into_iter()
+        .map(|r| {
+            let contained = filter.value_in_range(r.min_val()) && filter.value_in_range(r.max_val());
+            let f = if contained { RFilter::None } else { RFilter::Numeric(filter) };
+            let res = IxResult { kind: K_NUMERIC, freq: 1, field_mask: MASK_ALL, weight: 1.0, ..Default::default() };
+            Box::new(InvIt::new(r.entries(), res, f, Some(Checker::Field(fi, Predicate::Default)), q).profile_as(PKind::Numeric(r.min_val(), r.max_val()))) as BoxIt<'a>
+        })
+        .collect()
 }
 
 /// `tag_strtolower`: backslashes before punctuation and spaces dropped, then lowercased

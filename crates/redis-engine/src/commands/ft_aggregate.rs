@@ -49,11 +49,12 @@ use crate::search::hll::Hll;
 use crate::search::index::Index;
 use crate::search::iters::{self, BoxIt, Empty, IxResult, K_INTERSECT, K_TERM, K_UNION, PCtx, Pairs, Qcx, Skip};
 use crate::search::mmheap::MmHeap;
-use crate::search::qast::{self, Kind, Node};
+use crate::search::optimizer::{self as qopt, OptType};
+use crate::search::qast;
 use crate::search::qeval::EvalCx;
 use crate::search::quantile::QuantStream;
 use crate::search::scorers::{self, Expl, Scorer};
-use crate::search::spec::{self as sspec, Spec};
+use crate::search::spec::Spec;
 use crate::util::cstr;
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -183,7 +184,7 @@ pub(super) fn ft_profile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
         if search {
             // FT.SEARCH's reply, then its pipeline run again for the counters.
-            let reply = fq::run_search(eng, ix, &req, db, resp3)?;
+            let reply = fq::run_search(eng, ix, &req, db, resp3, background)?;
             run(eng, ix, &req, db, resp3, background, u32::MAX, None, None, &mut false, Some(&mut prof))?;
             reply
         } else {
@@ -1784,94 +1785,17 @@ fn make_reducer(o: &mut RedOpts<'_, '_>) -> Option<Result<(RKind, Option<KRef>),
 // ---------------------------------------------------------------------------------------------
 // The query optimizer's decisions (`QOptimizer_Parse` / `QOptimizer_QueryNodes`)
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OptType {
-    None,
-    Undecided,
-    PartialRange,
-    NoSorter,
-}
-
 struct Opt {
     ty: OptType,
     /// `HasScorer`: the optimizer kept a scorer.
     scorer: bool,
 }
 
-/// `checkQueryTypes`' text-node scan.
-fn needs_score(n: &Node, req: &mut bool) {
-    match &n.kind {
-        Kind::Phrase { .. } => {
-            if n.opts.weight != 1.0 {
-                return;
-            }
-            n.children.iter().for_each(|c| needs_score(c, req));
-        }
-        Kind::Token(_) | Kind::Fuzzy { .. } | Kind::Prefix { .. } | Kind::WildcardQuery(_) | Kind::LexRange { .. } => *req = true,
-        Kind::Optional | Kind::Not | Kind::Union => n.children.iter().for_each(|c| needs_score(c, req)),
-        _ => {}
+fn optimizer(req: &areq::Request) -> Opt {
+    match &req.optimizer {
+        Some(p) if req.flags & OPTIMIZE != 0 => Opt { ty: p.ty, scorer: p.scorer },
+        _ => Opt { ty: OptType::Undecided, scorer: false },
     }
-}
-
-fn optimizer(req: &areq::Request, spec: &Spec) -> Opt {
-    if req.flags & OPTIMIZE == 0 {
-        return Opt { ty: OptType::Undecided, scorer: false };
-    }
-    let mut ty = OptType::Undecided;
-    let mut field: Option<usize> = None;
-    let arrange = last_arrange(req).map(|i| match &req.steps[i] {
-        Step::Arrange(a) => a,
-        _ => unreachable!(),
-    });
-    if let Some(a) = arrange
-        && let Some(name) = a.sort_keys.as_ref().and_then(|k| k.first())
-    {
-        match spec.fields.iter().position(|f| f.name.as_ref() == cstr(name)) {
-            Some(i) if spec.fields[i].types == sspec::T_NUMERIC => field = Some(i),
-            _ => ty = OptType::None,
-        }
-    }
-    let mut scorer = if field.is_some() {
-        false
-    } else {
-        let name = req.opts.scorer.as_deref().map(cstr);
-        matches!(name, None | Some(b"BM25STD" | b"TFIDF" | b"TFIDF.DOCNORM" | b"DISMAX" | b"BM25" | b"DOCSCORE" | b"HAMMING"))
-    };
-    let Some(root) = req.root.as_ref() else { return Opt { ty, scorer } };
-    if matches!(root.kind, Kind::Wildcard) {
-        scorer = false;
-    }
-    let mut score_req = false;
-    // A lone numeric node on the sort field: the optimizer scans a partial range.
-    if let (Some(f), Kind::Numeric(nf)) = (field, &root.kind)
-        && nf.field == Some(f)
-    {
-        if ty == OptType::Undecided {
-            ty = OptType::PartialRange;
-        }
-        return Opt { ty, scorer };
-    }
-    needs_score(root, &mut score_req);
-    let knn = matches!(&root.kind, Kind::Vector(v) if v.knn);
-    if (field.is_none() && score_req) || knn {
-        if ty == OptType::Undecided {
-            ty = OptType::None;
-        }
-        return Opt { ty, scorer };
-    }
-    if !score_req {
-        if field.is_some() {
-            if ty == OptType::Undecided {
-                ty = OptType::PartialRange;
-            }
-        } else {
-            if ty == OptType::Undecided {
-                ty = OptType::NoSorter;
-            }
-            scorer = false;
-        }
-    }
-    Opt { ty, scorer }
 }
 
 /// `AGPLN_GetArrangeStep`: the last arrange step after the last group.
@@ -2166,7 +2090,7 @@ impl<'a> Builder<'_, 'a> {
 #[allow(clippy::too_many_arguments)]
 fn build<'r, 'a>(req: &'r areq::Request, cx: &mut Pcx<'a>, it: BoxIt<'a>, ix: &'a Index, now: i64, safe: bool, args: scorers::Args<'a>) -> Result<Builder<'r, 'a>, QErr> {
     let cfg = &cx.eng.cfg;
-    let opt = optimizer(req, cx.spec);
+    let opt = optimizer(req);
     let max_groups = cfg.num("search-max-aggregate-groups").max(1) as usize;
     let mut b = Builder { req, chain: Vec::new(), opt, safe, max_groups, sortkey: None };
     cx.lookups.push(Lookup::default());
@@ -2345,7 +2269,11 @@ fn run(
         token_id: std::cell::Cell::new(0),
     };
     let root = req.root.as_ref().expect("a parsed query");
-    let it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };
+    let mut it: BoxIt<'_> = if pending.is_some() { Box::new(Empty) } else { ecx.iterate(root)? };
+    // `QOptimizer_Iterators`.
+    if let Some(plan) = req.optimizer.as_ref().filter(|_| req.flags & OPTIMIZE != 0 && pending.is_none()) {
+        it = qopt::apply(plan, root, it, ix, &q, ecx.min_heap);
+    }
     // `Profile_AddIters`.
     let it = if prof.is_some() { iters::profiled(it) } else { it };
     // The warning is the first chunk's (later ones start with a fresh error).

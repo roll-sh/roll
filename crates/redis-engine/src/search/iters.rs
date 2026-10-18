@@ -61,7 +61,7 @@ impl IxResult {
     }
 
     /// `reset_aggregate`.
-    fn reset_aggregate(&mut self) {
+    pub(super) fn reset_aggregate(&mut self) {
         self.doc_id = 0;
         self.freq = 0;
         self.field_mask = 0;
@@ -70,7 +70,7 @@ impl IxResult {
     }
 
     /// `push_borrowed`.
-    fn push(&mut self, child: &IxResult) {
+    pub(super) fn push(&mut self, child: &IxResult) {
         self.doc_id = child.doc_id;
         self.freq += child.freq;
         self.field_mask |= child.field_mask;
@@ -268,6 +268,8 @@ pub trait Iter {
     fn last_doc_id(&self) -> DocId;
     fn at_eof(&self) -> bool;
     fn num_estimated(&self) -> usize;
+    /// `Rewind`: back to before the first read.
+    fn rewind(&mut self);
     fn kind(&self) -> IKind {
         IKind::Other
     }
@@ -317,12 +319,12 @@ impl Counters {
     }
 }
 
-fn kv(m: &mut Pairs, k: &str, v: Reply) {
+pub(super) fn kv(m: &mut Pairs, k: &str, v: Reply) {
     m.push((Reply::Status(k.into()), v));
 }
 
 /// `print_optional_counters`.
-fn print_counters(m: &mut Pairs, pc: &PCtx, c: Option<&Counters>) {
+pub(super) fn print_counters(m: &mut Pairs, pc: &PCtx, c: Option<&Counters>) {
     if pc.clock {
         kv(m, "Time", Reply::Double(c.map_or(0, |c| c.ns) as f64 / 1_000_000.0));
     }
@@ -332,7 +334,7 @@ fn print_counters(m: &mut Pairs, pc: &PCtx, c: Option<&Counters>) {
 }
 
 /// `print_leaf`.
-fn print_leaf(ty: &str, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+pub(super) fn print_leaf(ty: &str, pc: &PCtx, c: Option<&Counters>) -> Pairs {
     let mut m = Vec::new();
     kv(&mut m, "Type", Reply::Status(ty.into()));
     print_counters(&mut m, pc, c);
@@ -385,6 +387,9 @@ impl Iter for Prof<'_> {
     fn num_estimated(&self) -> usize {
         self.child.num_estimated()
     }
+    fn rewind(&mut self) {
+        self.child.rewind();
+    }
     fn kind(&self) -> IKind {
         self.child.kind()
     }
@@ -409,7 +414,7 @@ fn fmt_g(v: f64) -> String {
 
 /// A union's profile (`UnionOpaque::print_profile`): LIMITED collapses the children of all
 /// but plain, geo and lexrange unions into their count.
-fn print_union<'c, 'a: 'c>(q: &(&'static str, Option<Vec<u8>>), children: impl ExactSizeIterator<Item = &'c BoxIt<'a>>, pc: &PCtx, c: Option<&Counters>) -> Pairs {
+pub(super) fn print_union<'c, 'a: 'c>(q: &(&'static str, Option<Vec<u8>>), children: impl ExactSizeIterator<Item = &'c BoxIt<'a>>, pc: &PCtx, c: Option<&Counters>) -> Pairs {
     let mut m = Vec::new();
     kv(&mut m, "Type", Reply::Status("UNION".into()));
     let ty = q.0;
@@ -432,7 +437,7 @@ pub fn profiled<'a>(mut it: BoxIt<'a>) -> BoxIt<'a> {
     Box::new(Prof { child: it, c: Counters::default() })
 }
 
-fn profile_child<'a>(c: &mut BoxIt<'a>) {
+pub(super) fn profile_child<'a>(c: &mut BoxIt<'a>) {
     let old = std::mem::replace(c, Box::new(Empty));
     *c = profiled(old);
 }
@@ -748,6 +753,13 @@ impl Iter for InvIt<'_> {
         self.unique
     }
 
+    fn rewind(&mut self) {
+        self.at_eos = false;
+        self.last = 0;
+        self.res.doc_id = 0;
+        self.reader.reset();
+    }
+
     fn kind(&self) -> IKind {
         if self.wildcard { IKind::Wildcard } else { IKind::Other }
     }
@@ -778,6 +790,7 @@ impl Iter for Empty {
     fn num_estimated(&self) -> usize {
         0
     }
+    fn rewind(&mut self) {}
     fn kind(&self) -> IKind {
         IKind::Empty
     }
@@ -828,6 +841,9 @@ impl Iter for Wildcard {
     }
     fn num_estimated(&self) -> usize {
         self.top as usize
+    }
+    fn rewind(&mut self) {
+        self.res.doc_id = 0;
     }
     fn kind(&self) -> IKind {
         IKind::Wildcard
@@ -909,6 +925,10 @@ impl Iter for IdList {
     }
     fn num_estimated(&self) -> usize {
         self.ids.len()
+    }
+    fn rewind(&mut self) {
+        self.offset = 0;
+        self.res.doc_id = 0;
     }
 }
 
@@ -1076,6 +1096,12 @@ impl Iter for Intersection<'_> {
     }
     fn num_estimated(&self) -> usize {
         self.num_expected
+    }
+    fn rewind(&mut self) {
+        self.last = 0;
+        self.eof = self.children.is_empty();
+        self.res.reset_aggregate();
+        self.children.iter_mut().for_each(|c| c.rewind());
     }
     fn kind(&self) -> IKind {
         IKind::Intersect
@@ -1326,6 +1352,19 @@ impl Iter for UnionFlat<'_> {
     }
     fn num_estimated(&self) -> usize {
         self.num_estimated
+    }
+    fn rewind(&mut self) {
+        // The children back in their insertion order.
+        let mut all: Vec<(usize, BoxIt<'_>)> = self.orig.drain(..).zip(self.children.drain(..)).collect();
+        all.sort_by_key(|&(o, _)| o);
+        for (o, c) in all {
+            self.orig.push(o);
+            self.children.push(c);
+        }
+        self.num_active = self.children.len();
+        self.eof = self.children.is_empty();
+        self.res.reset_aggregate();
+        self.children.iter_mut().for_each(|c| c.rewind());
     }
     fn kind(&self) -> IKind {
         IKind::Union
@@ -1590,6 +1629,12 @@ impl Iter for UnionHeap<'_> {
     fn num_estimated(&self) -> usize {
         self.num_estimated
     }
+    fn rewind(&mut self) {
+        self.eof = self.children.is_empty();
+        self.res.reset_aggregate();
+        self.children.iter_mut().for_each(|c| c.rewind());
+        self.heap.data.clear();
+    }
     fn kind(&self) -> IKind {
         IKind::Union
     }
@@ -1679,6 +1724,10 @@ impl Iter for Not<'_> {
     }
     fn num_estimated(&self) -> usize {
         self.max as usize
+    }
+    fn rewind(&mut self) {
+        self.res.doc_id = 0;
+        self.child.rewind();
     }
 }
 
@@ -1775,6 +1824,12 @@ impl Iter for NotOptimized<'_> {
     fn num_estimated(&self) -> usize {
         self.wcii.num_estimated()
     }
+    fn rewind(&mut self) {
+        self.forced_eof = false;
+        self.res.doc_id = 0;
+        self.wcii.rewind();
+        self.child.rewind();
+    }
 }
 
 /// `Optional`.
@@ -1846,6 +1901,10 @@ impl Iter for Optional<'_> {
     }
     fn num_estimated(&self) -> usize {
         self.max as usize
+    }
+    fn rewind(&mut self) {
+        self.res.doc_id = 0;
+        self.child.rewind();
     }
 }
 
@@ -1935,6 +1994,13 @@ impl Iter for OptionalOptimized<'_> {
     }
     fn num_estimated(&self) -> usize {
         self.wcii.num_estimated()
+    }
+    fn rewind(&mut self) {
+        self.last = 0;
+        self.eof = false;
+        self.virt.doc_id = 0;
+        self.wcii.rewind();
+        self.child.rewind();
     }
 }
 

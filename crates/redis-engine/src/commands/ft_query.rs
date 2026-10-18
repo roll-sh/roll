@@ -50,12 +50,13 @@ pub(super) fn ft_explaincli(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 
 use crate::engine::Engine;
 use crate::search::areq::{
-    F_IS_SEARCH, F_NOROWS, F_SEND_HIGHLIGHT, F_SEND_NOFIELDS, F_SEND_PAYLOADS, F_SEND_SCOREEXPLAIN, F_SEND_SCORES, F_SEND_SORTKEYS, F_TYPED, FORMAT_EXPAND, Step,
+    F_IS_SEARCH, F_NOROWS, F_SEND_HIGHLIGHT, F_SEND_NOFIELDS, F_SEND_PAYLOADS, F_SEND_SCOREEXPLAIN, F_SEND_SCORES, F_SEND_SORTKEYS, F_TYPED, FORMAT_EXPAND, OPTIMIZE, Step,
 };
 use crate::search::doctable::{DOC_DELETED, DOC_HAS_PAYLOAD, Dmd, SortVal};
 use crate::search::eval::RsValue;
 use crate::search::index::Index;
 use crate::search::iters::{IxResult, Qcx};
+use crate::search::optimizer::{self as qopt, OptType};
 use crate::search::qeval::EvalCx;
 use crate::search::scorers::{self, Expl, Scorer};
 use crate::search::highlight;
@@ -457,16 +458,18 @@ pub(super) fn ft_search(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         req.apply_context(ix, resp3)?;
     }
     let db = cx.client.db;
+    let background = cx.can_block() && cx.eng.cfg.num("search-workers") > 0;
     let eng: &Engine = cx.eng;
     let ix: &Index = eng.search.indexes.get(&name).expect("loaded");
-    let reply = run_search(eng, ix, &req, db, resp3)?;
+    let reply = run_search(eng, ix, &req, db, resp3, background)?;
     if let Some(ix) = cx.eng.search.indexes.get_mut(&name) {
         ix.used_dialects |= 1 << (req.dialect.clamp(1, 8) - 1);
     }
     Ok(reply)
 }
 
-pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool) -> Result<Reply, Error> {
+/// FT.SEARCH's pipeline; `background` runs it in a worker (its loader buffers the page).
+pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usize, resp3: bool, background: bool) -> Result<Reply, Error> {
     let cfg = &eng.cfg;
     let spec = &ix.spec;
     let flags = req.flags;
@@ -500,6 +503,11 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     let root = req.root.as_ref().expect("a parsed query");
     let mut it = ecx.iterate(root)?;
     let warn_expansions = ecx.expansions_warning;
+    // `QOptimizer_Iterators`.
+    let plan = req.optimizer.as_ref().filter(|_| flags & OPTIMIZE != 0);
+    if let Some(p) = plan {
+        it = qopt::apply(p, root, it, ix, &q, ecx.min_heap);
+    }
 
     let arrange = req.steps.iter().rev().find_map(|s| if let Step::Arrange(a) = s { Some(a) } else { None });
     let (offset, limit) = arrange.map_or((0, 10), |a| (a.offset as usize, if a.is_limited { a.limit as usize } else { 10 }));
@@ -510,7 +518,11 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     max_results = max_results.min(req.max_search_results as usize);
     let norows = flags & F_NOROWS != 0 || max_results == 0;
     let sort_keys = arrange.and_then(|a| a.sort_keys.as_ref()).filter(|k| !k.is_empty());
-    let scoring = flags & F_SEND_SCORES != 0 || (flags & F_IS_SEARCH != 0 && flags & F_NOROWS == 0 && !req.has_query_sortby());
+    // `Pipeline_BuildQueryPart`'s scorer; with the optimizer, the plan's.
+    let scoring = flags & F_SEND_SCORES != 0 || (flags & F_IS_SEARCH != 0 && flags & F_NOROWS == 0 && plan.map_or(!req.has_query_sortby(), |p| p.scorer));
+    // `getArrangeRP`'s sorter: the optimizer drops it for a quick return, and when nothing is
+    // scored or sorted by.
+    let sorted = plan.is_none_or(|p| p.ty != OptType::NoSorter && (sort_keys.is_some() || p.scorer));
     let scorer_name = req.opts.scorer.as_ref().map(|s| crate::util::cstr(s).to_vec()).unwrap_or_else(|| {
         let s = cfg.text("search-default-scorer:value");
         if s.is_empty() { b"BM25STD".to_vec() } else { s.into_bytes() }
@@ -591,7 +603,12 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     let mut total: i64 = 0;
     let mut results: Vec<Res<'_>> = Vec::new();
     let mut scores: Vec<f64> = Vec::new();
-    while it.read() {
+    // Without a sorter (nor the normalizer, which drains the query too) the pager stops the
+    // query once its page is full; RESP2's total is what was read when the first row came.
+    let stream = !sorted && !norows && !(scoring && scorer == Scorer::Bm25StdNorm);
+    let mut passed = 0usize;
+    let mut first_total: Option<i64> = None;
+    while !(stream && passed >= offset + limit) && it.read() {
         let Some(r) = it.current() else { break };
         let r: IxResult = r.clone();
         let Some(dmd) = ix.docs.get(r.doc_id) else { continue };
@@ -619,6 +636,13 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
         if highlight {
             res.ixr = Some(r);
         }
+        if stream {
+            passed += 1;
+            if passed <= offset {
+                continue;
+            }
+            first_total.get_or_insert(total);
+        }
         scores.push(res.score);
         results.push(res);
     }
@@ -636,8 +660,11 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     }
 
     // the sorter (top `max_results`) and the pager
-    if !norows {
-        if !sort_lk.is_empty() {
+    if !norows && !stream {
+        if !sorted {
+            // The normalizer yields its last result first.
+            results.reverse();
+        } else if !sort_lk.is_empty() {
             let asc = arrange.map_or(0, |a| a.asc_map);
             results.sort_by(|a, b| cmp_fields(&lk, &sort_lk, asc, b, a));
         } else {
@@ -708,7 +735,18 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
     }
 
     // the reply
-    let reported = total - skipped;
+    let mut reported = total - skipped;
+    // The worker's loader reads the whole page before the first row comes.
+    let mut reported2 = if run_loader && background { total } else { first_total.unwrap_or(total) } - skipped;
+    if plan.is_some() {
+        // `QOptimizer_UpdateTotalResults`.
+        let (limit, offset) = match arrange {
+            Some(a) if a.is_limited => (a.limit as i64, a.offset as i64),
+            _ => (10, 0),
+        };
+        reported = (reported - offset).max(0).min(limit);
+        reported2 = (reported2 - offset).max(0).min(limit);
+    }
     let rule = &spec.rule;
     let special = |n: &[u8]| [&rule.lang_field, &rule.score_field, &rule.payload_field].iter().any(|f| f.as_deref().is_some_and(|f| f.as_bytes() == n));
     let typed = flags & F_TYPED != 0;
@@ -785,7 +823,7 @@ pub(super) fn run_search(eng: &Engine, ix: &Index, req: &areq::Request, db: usiz
             (Reply::Status("warning".into()), Reply::Array(warnings)),
         ]));
     }
-    let mut out = vec![Reply::Int(reported)];
+    let mut out = vec![Reply::Int(reported2)];
     for parts in out_rows {
         for (k, v) in parts {
             match (k, v) {

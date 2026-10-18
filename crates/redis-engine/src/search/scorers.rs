@@ -60,7 +60,7 @@ impl Scorer {
             Scorer::Bm25Std | Scorer::Bm25StdNorm => bm25std(a, r, d, &mut e),
             Scorer::Bm25StdTanh => {
                 let score = bm25std(a, r, d, &mut e);
-                let n = ((1.0 / a.tanh_factor as f64) * score).tanh();
+                let n = musl_tanh((1.0 / a.tanh_factor as f64) * score);
                 parent(&mut e);
                 set(&mut e, format!("Final Normalized BM25 : tanh(stretch factor 1/{} * Final BM25 {:.2})", a.tanh_factor as i32, score));
                 n
@@ -296,10 +296,48 @@ fn hamming(a: &Args<'_>, d: &Dmd, e: &mut Option<Expl>) -> f64 {
     result
 }
 
+/// musl's `tanh` (the reference links musl): through `expm1`, by the argument's range.
+fn musl_tanh(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let sign = bits >> 63 != 0;
+    let ax = f64::from_bits(bits & (u64::MAX >> 1));
+    let w = (ax.to_bits() >> 32) as u32;
+    let t = if w > 0x3fe1_93ea {
+        // |x| > log(3)/2 or nan
+        if w > 0x4034_0000 {
+            1.0 - 0.0 / ax
+        } else {
+            let t = (2.0 * ax).exp_m1();
+            1.0 - 2.0 / (t + 2.0)
+        }
+    } else if w > 0x3fd0_58ae {
+        // |x| > log(5/3)/2
+        let t = (2.0 * ax).exp_m1();
+        t / (t + 2.0)
+    } else if w >= 0x0010_0000 {
+        let t = (-2.0 * ax).exp_m1();
+        -t / (t + 2.0)
+    } else {
+        ax
+    };
+    if sign { -t } else { t }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::rc::Rc;
+
+    #[test]
+    fn tanh_like_musl() {
+        // The reference's BM25STD.TANH of a BM25STD score of 0.7714525121554938.
+        assert_eq!(musl_tanh(0.19286312803887345), 0.19050692100148817);
+        assert_eq!(musl_tanh(-0.19286312803887345), -0.19050692100148817);
+        assert_eq!(musl_tanh(0.0), 0.0);
+        assert_eq!(musl_tanh(30.0), 1.0);
+        assert!((musl_tanh(0.4) - 0.4f64.tanh()).abs() < 1e-15);
+        assert!((musl_tanh(1.3) - 1.3f64.tanh()).abs() < 1e-15);
+    }
 
     #[test]
     fn tfidf_explains() {
