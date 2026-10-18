@@ -37,8 +37,16 @@ pub trait FeedSink: Send + Sync {
 pub struct Feed {
     /// Logical db of the last command in the stream (`u16::MAX`: none yet, emit `SELECT`).
     last_db: u16,
-    /// Bytes of write stream produced since the database was created (`master_repl_offset`).
+    /// Bytes of write stream produced since the database was created: the position durability,
+    /// snapshots and the backlog's chunks use.
     pub offset: u64,
+    /// Redis' `master_repl_offset`: it only follows the stream while a replication backlog
+    /// exists (one past `offset - delta`); without one it stays put, but for one per propagated
+    /// command while the write log is durable (the AOF's fsync tracking).
+    pub repl: u64,
+    /// A backlog is attached: `repl` follows `offset`, `delta` apart.
+    pub attached: bool,
+    pub delta: u64,
     sinks: Vec<(u64, Arc<dyn FeedSink>)>,
     next_sink: u64,
 }
@@ -77,10 +85,24 @@ pub struct Database {
     pub replid2: Mutex<Option<(String, u64)>>,
     /// The primary this database follows, when it is a replica.
     pub upstream: Mutex<Option<Upstream>>,
+    /// A FAILOVER under way (`server.failover_state`).
+    pub failover: Mutex<Option<Failover>>,
     /// Signalled when the replication history changes (REPLICAOF): Redis replicas reconnect.
     pub replicas_reset: tokio::sync::Notify,
     /// A SHUTDOWN waiting for replicas to catch up: SHUTDOWN ABORT signals it.
     pub shutdown: Mutex<Option<Arc<tokio::sync::Notify>>>,
+}
+
+/// FAILOVER's state: waiting for a replica to catch up, or handing over to `target`.
+#[derive(Clone, Debug, Default)]
+pub struct Failover {
+    pub in_progress: bool,
+    pub target: Option<(String, u16)>,
+    /// Unix ms when it times out (0: never).
+    pub end_ms: i64,
+    pub force: bool,
+    /// The port we announce to the target once we follow it (`REPLCONF listening-port`).
+    pub listening_port: u16,
 }
 
 /// The primary a replica database follows.
@@ -152,11 +174,16 @@ impl redis_engine::commands::info::Host for DbHost {
         use redis_engine::commands::info::{MasterInfo, ReplicaInfo, Replication};
         let Some(db) = self.0.upgrade() else { return Default::default() };
         let mut r = Replication { replid: db.replid.lock().clone(), offset: db.repl_offset(), ..Default::default() };
+        r.failover_state = match &*db.failover.lock() {
+            None => "no-failover",
+            Some(f) if f.in_progress => "failover-in-progress",
+            Some(_) => "waiting-for-sync",
+        };
         r.replid2 = db.replid2.lock().clone();
         let backlog = db.backlog.lock().clone();
         if let Some(b) = backlog {
             let (start, end) = b.range();
-            r.backlog = Some((b.cap as u64, start + 1, end - start));
+            r.backlog = Some((b.cap as u64, db.stream_to_repl(start) + 1, end - start));
             let now = redis_engine::util::now_ms();
             let acks = b.acks.lock().clone();
             for (id, (addr, at)) in b.peers.lock().iter() {
@@ -295,6 +322,7 @@ impl Database {
             replid: Mutex::new(replid),
             replid2: Mutex::new(None),
             upstream: Mutex::new(None),
+            failover: Mutex::new(None),
             replicas_reset: tokio::sync::Notify::new(),
             shutdown: Mutex::new(None),
         });
@@ -370,15 +398,71 @@ impl Database {
         self.feed.lock().sinks.retain(|(i, _)| *i != id);
     }
 
+    /// Redis' `master_repl_offset` (what ROLE, INFO, PSYNC and WAIT speak).
     pub fn repl_offset(&self) -> u64 {
+        self.feed.lock().repl
+    }
+
+    /// The write stream's position (durability, snapshots, the backlog's chunks).
+    pub fn stream_offset(&self) -> u64 {
         self.feed.lock().offset
     }
 
-    /// Continue the stream at `offset` (after restoring state up to it).
+    /// A replication offset as a stream position, while a backlog is attached.
+    pub fn repl_to_stream(&self, repl: u64) -> u64 {
+        repl + self.feed.lock().delta
+    }
+
+    /// A stream position as a replication offset, while a backlog is attached.
+    pub fn stream_to_repl(&self, offset: u64) -> u64 {
+        offset.saturating_sub(self.feed.lock().delta)
+    }
+
+    /// Continue the stream at `offset` (after restoring state up to it, or a primary's stream
+    /// as a replica): the replication offset is the same.
     pub fn set_offset(&self, offset: u64) {
         let mut f = self.feed.lock();
         f.offset = offset;
+        f.repl = offset;
+        f.delta = 0;
         f.last_db = u16::MAX;
+    }
+
+    /// Subscribe a replication backlog (`createReplicationBacklog`): from now on the replication
+    /// offset follows the stream. Returns the sink id and the stream offset it starts at.
+    pub fn attach_backlog(&self, sink: Arc<dyn FeedSink>) -> (u64, u64) {
+        let (id, offset) = self.subscribe(sink);
+        let mut f = self.feed.lock();
+        f.attached = true;
+        f.delta = f.offset - f.repl;
+        (id, offset)
+    }
+
+    /// FAILOVER's write pause on every shard (`PAUSE_DURING_FAILOVER`).
+    pub fn set_failover_pause(&self, on: bool) {
+        for i in 0..self.shards.len() {
+            self.engine(i).clients.failover_pause = on;
+        }
+    }
+
+    /// `clearFailoverState`: no failover, writes resume.
+    pub fn clear_failover(&self) {
+        *self.failover.lock() = None;
+        self.set_failover_pause(false);
+    }
+
+    /// From now on the replication offset follows the stream (a promoted replica).
+    pub fn follow_stream(&self) {
+        let mut f = self.feed.lock();
+        f.attached = true;
+        f.delta = f.offset - f.repl;
+    }
+
+    /// The backlog is gone (`freeReplicationBacklog`): the replication offset stops following
+    /// the stream.
+    pub fn detach_backlog(&self, id: u64) {
+        self.unsubscribe(id);
+        self.feed.lock().attached = false;
     }
 
     /// Call with the engine locked when capturing a snapshot: returns the offset the snapshot is
@@ -396,6 +480,9 @@ impl Database {
         let mut out = BytesMut::new();
         redis_proto::encode_command(args, &mut out);
         f.offset += out.len() as u64;
+        if f.attached {
+            f.repl += out.len() as u64;
+        }
         let chunk = out.freeze();
         for (_, s) in &f.sinks {
             s.write(&chunk, f.offset);
@@ -406,6 +493,9 @@ impl Database {
     pub fn publish_bytes(&self, chunk: Bytes) {
         let mut f = self.feed.lock();
         f.offset += chunk.len() as u64;
+        if f.attached {
+            f.repl += chunk.len() as u64;
+        }
         for (_, s) in &f.sinks {
             s.write(&chunk, f.offset);
         }
@@ -423,6 +513,12 @@ impl Database {
             redis_proto::encode_command(&e.args, &mut out);
         }
         f.offset += out.len() as u64;
+        if f.attached {
+            f.repl += out.len() as u64;
+        } else if self.durability.lock().is_some() {
+            // `replicationFeedSlaves` without a backlog: one per propagated command.
+            f.repl += effects.len() as u64;
+        }
         if f.sinks.is_empty() {
             return;
         }
@@ -450,6 +546,13 @@ impl Database {
                 // Redis' replication cron: a PING in the stream every repl-ping-replica-period.
                 if ticks.is_multiple_of(crate::repl::psync::PING_PERIOD_S * 10) && db.io.redis_replicas.load(Ordering::Relaxed) > 0 {
                     db.publish_raw(&[b"PING"]);
+                }
+                crate::repl::psync::failover_cron(&db, redis_engine::util::now_ms());
+                if ticks.is_multiple_of(10) {
+                    let ttl = db.engine_unless_busy(0).and_then(|e| e.cfg.get(b"repl-backlog-ttl").first().and_then(|(_, v)| v.parse().ok()));
+                    if let Some(ttl) = ttl {
+                        crate::repl::psync::backlog_ttl_cron(&db, ttl, redis_engine::util::now_ms());
+                    }
                 }
                 for i in 0..db.shards.len() {
                     // A busy script holds the engine: skip the tick rather than tie up a worker

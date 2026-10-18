@@ -44,6 +44,15 @@ pub struct Backlog {
     next_replica: AtomicU64,
     /// Connected replicas: address and Unix ms of their last acknowledgement (INFO `slaveN`).
     pub peers: Mutex<HashMap<u64, (SocketAddr, i64)>>,
+    /// Its subscription to the database's write stream.
+    sink: AtomicU64,
+    /// Unix ms since when no replica is connected (0: some are), for `repl-backlog-ttl`.
+    pub idle_since: std::sync::atomic::AtomicI64,
+    /// The Redis-protocol replicas among `peers` (FAILOVER's candidates).
+    pub redis_peers: Mutex<std::collections::HashSet<u64>>,
+    /// Created for Redis replicas (PSYNC/SYNC), so `repl-backlog-ttl` frees it once none is
+    /// left; a node's own replication keeps its backlog.
+    pub for_redis: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -65,6 +74,10 @@ impl Backlog {
             acked: Notify::new(),
             next_replica: AtomicU64::new(1),
             peers: Mutex::new(HashMap::new()),
+            sink: AtomicU64::new(0),
+            for_redis: std::sync::atomic::AtomicBool::new(false),
+            redis_peers: Mutex::new(Default::default()),
+            idle_since: std::sync::atomic::AtomicI64::new(redis_engine::util::now_ms()),
         })
     }
 
@@ -72,7 +85,8 @@ impl Backlog {
     pub fn attach(db: &Database, cap: usize) -> Arc<Self> {
         // Subscribe first so nothing falls between the offset and the first chunk.
         let b = Self::new(cap, 0);
-        let (_, offset) = db.subscribe(b.clone());
+        let (id, offset) = db.attach_backlog(b.clone());
+        b.sink.store(id, Ordering::Relaxed);
         {
             let mut i = b.inner.lock();
             if i.chunks.is_empty() {
@@ -82,6 +96,13 @@ impl Backlog {
         }
         *db.backlog.lock() = Some(b.clone());
         b
+    }
+
+    /// Free the database's backlog (`freeReplicationBacklog`).
+    pub fn detach(db: &Database) {
+        if let Some(b) = db.backlog.lock().take() {
+            db.detach_backlog(b.sink.load(Ordering::Relaxed));
+        }
     }
 
     /// Stream bytes from `offset` (up to the current end), or `None` if `offset` is no longer
@@ -138,6 +159,7 @@ impl Backlog {
         let rid = self.next_replica.fetch_add(1, Ordering::Relaxed);
         self.acks.lock().insert(rid, offset);
         self.peers.lock().insert(rid, (addr, redis_engine::util::now_ms()));
+        self.redis_peers.lock().insert(rid);
         rid
     }
 
@@ -154,8 +176,18 @@ impl Backlog {
 
     pub fn unregister(&self, rid: u64) {
         self.acks.lock().remove(&rid);
-        self.peers.lock().remove(&rid);
+        self.forget_peer(rid);
         self.acked.notify_waiters();
+    }
+
+    /// A replica left: start the idle clock when it was the last.
+    pub fn forget_peer(&self, rid: u64) {
+        self.redis_peers.lock().remove(&rid);
+        let mut peers = self.peers.lock();
+        peers.remove(&rid);
+        if peers.is_empty() {
+            self.idle_since.store(redis_engine::util::now_ms(), Ordering::Relaxed);
+        }
     }
 }
 
@@ -251,19 +283,21 @@ async fn serve_link(
     }
     sock.write_all(format!("+CONTINUE {offset}\r\n").as_bytes()).await?;
     let rid = backlog.next_replica.fetch_add(1, Ordering::Relaxed);
-    backlog.acks.lock().insert(rid, offset);
+    // Acks are kept as replication offsets (what WAIT compares), ours speak stream positions.
+    backlog.acks.lock().insert(rid, db.stream_to_repl(offset));
     backlog.peers.lock().insert(rid, (peer, redis_engine::util::now_ms()));
     tracing::info!(db = id, %peer, offset, "replica attached");
     let (mut rd, mut wr) = sock.into_split();
     let acks = {
         let backlog = backlog.clone();
+        let db = db.clone();
         tokio::spawn(async move {
             let mut buf = inbuf;
             loop {
                 match read_command_split(&mut rd, &mut buf).await {
                     Ok(a) if a.len() == 3 && eq(&a[0], "replconf") && eq(&a[1], "ack") => {
                         if let Some(o) = std::str::from_utf8(&a[2]).ok().and_then(|s| s.parse().ok()) {
-                            backlog.acks.lock().insert(rid, o);
+                            backlog.acks.lock().insert(rid, db.stream_to_repl(o));
                             if let Some(p) = backlog.peers.lock().get_mut(&rid) {
                                 p.1 = redis_engine::util::now_ms();
                             }
@@ -301,7 +335,7 @@ async fn serve_link(
     .await;
     acks.abort();
     backlog.acks.lock().remove(&rid);
-    backlog.peers.lock().remove(&rid);
+    backlog.forget_peer(rid);
     backlog.acked.notify_waiters();
     result
 }
@@ -373,6 +407,9 @@ pub struct Follower {
     stop: Notify,
     /// For resyncs from object storage, which can start from a snapshot.
     codec: Option<Arc<dyn persist::SnapshotCodec>>,
+    /// Following a Redis primary: `applied` is a replication offset, and the stream position
+    /// moves with it as the primary's bytes are re-published.
+    pub redis: std::sync::atomic::AtomicBool,
 }
 
 impl Follower {
@@ -384,7 +421,7 @@ impl Follower {
         for s in &db.shards {
             s.engine.lock().replica = true;
         }
-        let applied = db.repl_offset();
+        let applied = db.stream_offset();
         Arc::new(Self {
             db,
             applied: AtomicU64::new(applied),
@@ -395,6 +432,7 @@ impl Follower {
             state: Default::default(),
             stop: Notify::new(),
             codec,
+            redis: Default::default(),
         })
     }
 
@@ -421,7 +459,14 @@ impl Follower {
         for s in &self.db.shards {
             s.engine.lock().replica = false;
         }
-        self.db.set_offset(self.applied());
+        // A storage follower's stream is where it applied up to; a Redis follower's moved with
+        // every re-published byte already.
+        if !self.redis.load(Ordering::Relaxed) {
+            self.db.set_offset(self.applied());
+        }
+        // A promoted replica's replication offset goes on with its stream (Redis keeps the
+        // backlog it created while syncing).
+        self.db.follow_stream();
     }
 
     /// Stop following, staying read-only (the replica is being unloaded or deleted).

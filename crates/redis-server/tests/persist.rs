@@ -36,18 +36,18 @@ async fn ships_and_restores() {
     run(&db, &mut c, "SELECT 3");
     run(&db, &mut c, "SET b in3");
     run(&db, &mut c, "GET b"); // reads don't reach the log
-    let offset = db.repl_offset();
+    let offset = db.stream_offset();
     shipper.flush().await.unwrap();
     assert_eq!(*shipper.durable("db1").unwrap().borrow(), offset);
     run(&db, &mut c, "SELECT 0");
     run(&db, &mut c, "DEL tmp");
     let m = shipper.detach(&db).await.unwrap();
-    assert_eq!(m.end, db.repl_offset());
+    assert_eq!(m.end, db.stream_offset());
 
     let db2 = Database::new("db1", Config::default(), 1);
     let m2 = persist::restore(&o, &db2, None).await.unwrap();
-    assert_eq!(m2.end, db.repl_offset());
-    assert_eq!(db2.repl_offset(), db.repl_offset());
+    assert_eq!(m2.end, db.stream_offset());
+    assert_eq!(db2.stream_offset(), db.stream_offset());
     let mut c = Client::new(1);
     assert_eq!(run(&db2, &mut c, "GET a"), Reply::bulk(b"42"));
     assert_eq!(run(&db2, &mut c, "EXISTS tmp"), Reply::Int(0));
@@ -92,7 +92,7 @@ async fn crash_recovery_uses_segments_after_the_manifest() {
     let a2 = Database::new("a", Config::default(), 1);
     persist::restore(&o, &a2, None).await.unwrap();
     assert_eq!(a2.total_keys(), 100);
-    assert_eq!(a2.repl_offset(), a.repl_offset());
+    assert_eq!(a2.stream_offset(), a.stream_offset());
     let b2 = Database::new("b", Config::default(), 1);
     persist::restore(&o, &b2, None).await.unwrap();
     assert_eq!(b2.total_keys(), 100);
@@ -130,7 +130,7 @@ async fn sync_writes_reply_after_durable() {
     // The flush interval is an hour: the write's reply forces an early flush.
     let r = tokio::time::timeout(Duration::from_secs(5), c.cmd(["SET", "k", "v"])).await.unwrap().unwrap();
     assert_eq!(r, Reply::Ok);
-    assert_eq!(*shipper.durable("s").unwrap().borrow(), db.repl_offset());
+    assert_eq!(*shipper.durable("s").unwrap().borrow(), db.stream_offset());
     // Reads don't wait.
     assert_eq!(c.cmd(["GET", "k"]).await.unwrap(), Reply::bulk(b"v"));
     // WAITAOF reports the object-storage log as local durability.
@@ -239,14 +239,14 @@ async fn snapshots_retention_and_garbage_collection() {
         run(&db, &mut c, &format!("SET k{i} {i}"));
         shipper.flush().await.unwrap();
     }
-    assert_eq!(shipper.log_stats("main").unwrap(), persist::LogStats { bytes: db.repl_offset(), segments: 5, based: false });
+    assert_eq!(shipper.log_stats("main").unwrap(), persist::LogStats { bytes: db.stream_offset(), segments: 5, based: false });
 
     // A branch made now must survive whatever the parent's retention drops later.
     node.branch("main", "dev", Until::LATEST).await.unwrap();
     run(&db, &mut c, "SET k0 changed");
     run(&db, &mut c, "SET 2 1");
     let s1 = shipper.snapshot(&db, 0).await.unwrap().unwrap();
-    assert_eq!(s1.offset, db.repl_offset());
+    assert_eq!(s1.offset, db.stream_offset());
     assert_eq!(shipper.snapshot(&db, 0).await.unwrap(), None, "nothing changed since");
     assert_eq!(shipper.log_stats("main").unwrap().segments, 0);
     run(&db, &mut c, "SET after snap");
@@ -274,7 +274,7 @@ async fn snapshots_retention_and_garbage_collection() {
     persist::restore(&o, &main2, Some(&*codec)).await.unwrap();
     let mut c2 = Client::new(2);
     assert_eq!(run(&main2, &mut c2, "MGET k0 k1 after k4"), run(&db, &mut c, "MGET k0 k1 after k4"));
-    assert_eq!(main2.repl_offset(), db.repl_offset());
+    assert_eq!(main2.stream_offset(), db.stream_offset());
     // …and the branch still has the history it was made from.
     let dev = Database::new("dev", Config::default(), 1);
     persist::restore(&o, &dev, Some(&*codec)).await.unwrap();
@@ -381,7 +381,7 @@ async fn rdb_snapshots_round_trip_every_type() {
     }
     tokio::time::sleep(Duration::from_millis(5)).await;
     let snap = shipper.snapshot(&db, 0).await.unwrap().unwrap();
-    assert_eq!(snap.offset, db.repl_offset());
+    assert_eq!(snap.offset, db.stream_offset());
     shipper.detach(&db).await.unwrap();
 
     // Loaded from the snapshot alone (no segments after it).
@@ -443,7 +443,7 @@ async fn function_libraries_survive_rdb_snapshots() {
     call(&db, &mut c, "FUNCTION LOAD \"#!lua name=second\nredis.register_function('two', function() return 2 end)\"");
     call(&db, &mut c, "SET k v");
     let snap = shipper.snapshot(&db, 0).await.unwrap().unwrap();
-    assert_eq!(snap.offset, db.repl_offset());
+    assert_eq!(snap.offset, db.stream_offset());
     shipper.detach(&db).await.unwrap();
 
     let back = Database::new("rdbf", Config::default(), 1);

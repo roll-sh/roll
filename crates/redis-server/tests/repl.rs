@@ -52,7 +52,7 @@ async fn streaming_replica_and_wait() {
     run(&primary, &mut c, "SELECT 2");
     run(&primary, &mut c, "SET b 2 PX 100000");
     run(&primary, &mut c, "INCRBYFLOAT f 1.5");
-    let end = primary.repl_offset();
+    let end = primary.stream_offset();
     // WAIT 1 returns once the replica acknowledged everything written so far.
     let n = repl::wait_acks(&backlog, end, 1, Duration::from_secs(5)).await;
     assert_eq!(n, 1);
@@ -69,7 +69,7 @@ async fn streaming_replica_and_wait() {
     // Failover: promote, and the new primary is writable and continues the stream offset.
     f.promote();
     assert_eq!(run(&replica_db, &mut rc, "SET x 1"), Reply::Ok);
-    assert!(replica_db.repl_offset() > end);
+    assert!(replica_db.stream_offset() > end);
 }
 
 #[tokio::test]
@@ -114,7 +114,7 @@ async fn resync_from_storage_when_backlog_is_outrun() {
         run(&primary, &mut c, &format!("SET k{i} {i}"));
     }
     shipper.flush().await.unwrap();
-    let durable = primary.repl_offset();
+    let durable = primary.stream_offset();
     let addr = repl_server(map, durable).await;
 
     let f = Follower::new(Database::new("p", Config::default(), 1));
@@ -122,7 +122,7 @@ async fn resync_from_storage_when_backlog_is_outrun() {
     eventually(|| f.connected.load(std::sync::atomic::Ordering::SeqCst)).await;
     assert_eq!(f.applied(), durable);
     run(&primary, &mut c, "SET after resync");
-    let end = primary.repl_offset();
+    let end = primary.stream_offset();
     eventually(|| f.applied() == end).await;
     assert_eq!(f.db.total_keys(), 201);
 }
@@ -141,11 +141,11 @@ async fn storage_tailing_replica() {
     for i in 0..50 {
         run(&primary, &mut c, &format!("SET k{i} {i}"));
     }
-    let end = primary.repl_offset();
+    let end = primary.stream_offset();
     eventually(|| f.applied() == end).await;
     assert_eq!(f.db.total_keys(), 50);
     run(&primary, &mut c, "DEL k0");
-    let end = primary.repl_offset();
+    let end = primary.stream_offset();
     eventually(|| f.applied() == end).await;
     assert_eq!(f.db.total_keys(), 49);
 }
@@ -174,7 +174,7 @@ async fn scripts_and_functions_replicate_as_their_effects() {
     let lib = "FUNCTION LOAD \"#!lua name=lib\nredis.register_function('incr2', function(keys) redis.call('INCR', keys[1]) return redis.call('INCR', keys[1]) end)\"";
     assert_eq!(run_quoted(&primary, &mut c, lib), Reply::bulk(b"lib"));
     assert_eq!(run_quoted(&primary, &mut c, "FCALL incr2 1 n"), Reply::Int(2));
-    let end = primary.repl_offset();
+    let end = primary.stream_offset();
     assert_eq!(repl::wait_acks(&backlog, end, 1, Duration::from_secs(5)).await, 1);
 
     let mut rc = Client::new(2);
@@ -187,7 +187,49 @@ async fn scripts_and_functions_replicate_as_their_effects() {
     assert_eq!(run_quoted(&replica_db, &mut rc, "FUNCTION LIST"), run_quoted(&primary, &mut c, "FUNCTION LIST"));
 
     run_quoted(&primary, &mut c, "FUNCTION DELETE lib");
-    let end = primary.repl_offset();
+    let end = primary.stream_offset();
     assert_eq!(repl::wait_acks(&backlog, end, 1, Duration::from_secs(5)).await, 1);
     assert_eq!(run_quoted(&replica_db, &mut rc, "FUNCTION LIST"), Reply::Array(vec![]));
+}
+
+/// Redis' `master_repl_offset`: nothing counts until a primary has a replication backlog
+/// (created for its first replica, under a new replication id); from then on it follows the
+/// stream, and PSYNC speaks it while the stream keeps its own positions.
+#[tokio::test]
+async fn replication_offset_starts_with_the_backlog() {
+    let db = Database::new("o", Config::default(), 1);
+    let mut c = Client::new(1);
+    run(&db, &mut c, "SET a 1");
+    run(&db, &mut c, "SET b 2");
+    assert_eq!(db.repl_offset(), 0);
+    let before = db.stream_offset();
+    assert!(before > 0);
+    let replid = db.replid.lock().clone();
+
+    let conf = redis_engine::commands::replication::ReplicaConf::default();
+    let args: Vec<Bytes> = ["PSYNC", "?", "-1"].iter().map(|s| Bytes::from_static(s.as_bytes())).collect();
+    let start = repl::psync::start(&db, &args, &conf).unwrap_or_else(|_| panic!("psync"));
+    let preamble = String::from_utf8_lossy(&start.preamble).into_owned();
+    let new_id = db.replid.lock().clone();
+    assert_ne!(new_id, replid, "a backlog created from scratch starts a new history");
+    assert!(preamble.starts_with(&format!("+FULLRESYNC {new_id} 0\r\n")), "{preamble:?}");
+    assert_eq!(start.offset, before, "the stream continues from its own position");
+
+    run(&db, &mut c, "SET c 3");
+    let grown = db.stream_offset() - before;
+    assert_eq!(db.repl_offset(), grown);
+    // A partial resync at a replication offset reads the backlog at the stream position.
+    let args: Vec<Bytes> = vec![Bytes::from_static(b"PSYNC"), Bytes::from(new_id.clone()), Bytes::from("1")];
+    let start = repl::psync::start(&db, &args, &conf).unwrap_or_else(|_| panic!("psync"));
+    assert!(String::from_utf8_lossy(&start.preamble).starts_with("+CONTINUE"));
+    assert_eq!(start.offset, before);
+
+    // Freed after repl-backlog-ttl without replicas: the offset stays, under a new id.
+    let b = db.backlog.lock().clone().unwrap();
+    b.idle_since.store(0, std::sync::atomic::Ordering::Relaxed);
+    repl::psync::backlog_ttl_cron(&db, 3600, redis_engine::util::now_ms());
+    assert!(db.backlog.lock().is_none());
+    assert_ne!(*db.replid.lock(), new_id);
+    run(&db, &mut c, "SET d 4");
+    assert_eq!(db.repl_offset(), grown);
 }

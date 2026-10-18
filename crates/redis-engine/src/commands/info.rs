@@ -74,6 +74,8 @@ pub struct Replication {
     pub master: Option<MasterInfo>,
     /// The previous replication id and the last offset it covers.
     pub replid2: Option<(String, u64)>,
+    /// `master_failover_state` (empty: no-failover).
+    pub failover_state: &'static str,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -834,8 +836,9 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
         };
         let _ = write!(
             s,
-            "master_failover_state:no-failover\r\nmaster_replid:{replid}\r\nmaster_replid2:{}\r\nmaster_repl_offset:{}\r\n\
+            "master_failover_state:{}\r\nmaster_replid:{replid}\r\nmaster_replid2:{}\r\nmaster_repl_offset:{}\r\n\
              second_repl_offset:{}\r\nrepl_backlog_active:{active}\r\nrepl_backlog_size:{size}\r\nrepl_backlog_first_byte_offset:{first}\r\nrepl_backlog_histlen:{hist}\r\n",
+            if r.failover_state.is_empty() { "no-failover" } else { r.failover_state },
             r.replid2.as_ref().map_or("0000000000000000000000000000000000000000", |(id, _)| id.as_str()),
             r.offset,
             r.replid2.as_ref().map_or(-1, |(_, o)| *o as i64),

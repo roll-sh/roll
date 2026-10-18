@@ -581,7 +581,7 @@ impl Conn<'_> {
                 continue;
             };
             let mut n = 0u64;
-            let before = db.repl_offset();
+            let before = db.stream_offset();
             let mut actions = Vec::new();
             {
                 let Some(mut eng) = db.engine_unless_busy(0) else {
@@ -666,7 +666,7 @@ impl Conn<'_> {
             }
             db.touch(n);
             if db.sync_writes.load(Ordering::Relaxed) {
-                let after = db.repl_offset();
+                let after = db.stream_offset();
                 let durability = db.durability.lock().clone();
                 if after > before
                     && let Some(d) = durability
@@ -761,6 +761,9 @@ impl Conn<'_> {
         if eq(name, "wait") {
             return Some(self.wait(&args).await);
         }
+        if eq(name, "failover") {
+            return Some(self.failover(&args));
+        }
         if eq(name, "waitaof") {
             return Some(self.waitaof(&args).await);
         }
@@ -819,15 +822,7 @@ impl Conn<'_> {
                     psync::shift_replid(db);
                 }
                 ServerAction::ReplicaOf { host, port } => {
-                    let (user, pass) = {
-                        let eng = db.engine(0);
-                        let c = &eng.cfg;
-                        (Some(c.masteruser.clone()).filter(|s| !s.is_empty()), Some(c.masterauth.clone()).filter(|s| !s.is_empty()))
-                    };
-                    let listening_port = self.client.laddr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(6379);
-                    let f = crate::repl::Follower::new(db.clone());
-                    *db.upstream.lock() = Some(crate::database::Upstream { host: host.clone(), port, follower: Arc::downgrade(&f), user: true });
-                    tokio::spawn(f.follow_redis(psync::MasterConf { host, port, user, pass, listening_port }));
+                    psync::follow(db, host, port, self.listening_port());
                 }
                 _ => {}
             }
@@ -862,7 +857,7 @@ impl Conn<'_> {
         let backlog = start.backlog;
         let ip = self.repl_conf.ip.clone().or_else(|| self.client.addr.rsplit_once(':').map(|(h, _)| h.to_string())).unwrap_or_default();
         let addr = SocketAddr::new(ip.parse().unwrap_or(std::net::Ipv4Addr::LOCALHOST.into()), self.repl_conf.listening_port.clamp(0, 65535) as u16);
-        let rid = backlog.register(addr, start.offset);
+        let rid = backlog.register(addr, db.stream_to_repl(start.offset));
         db.io.redis_replicas.fetch_add(1, Ordering::Relaxed);
         let mut offset = start.offset;
         let limits = Limits { authenticated: true, ..Limits::default() };
@@ -1019,6 +1014,76 @@ impl Conn<'_> {
     }
 
     /// `WAITAOF numlocal numreplicas timeout`. "Local" durability is the object-storage log.
+    /// The port this server listens on (what a replica announces with REPLCONF listening-port).
+    fn listening_port(&self) -> u16 {
+        self.client.laddr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(6379)
+    }
+
+    /// FAILOVER [TO host port [FORCE]] [ABORT] [TIMEOUT ms] (`failoverCommand`): pause writes
+    /// and hand over to a replica once it caught up (see [`psync::failover_cron`]).
+    fn failover(&mut self, args: &[Bytes]) -> Reply {
+        let Some(db) = self.db().cloned() else { return Reply::error("NOAUTH Authentication required.") };
+        if args.len() == 2 && eq(&args[1], "abort") {
+            if db.failover.lock().is_none() {
+                return Reply::error("ERR No failover in progress.");
+            }
+            psync::abort_failover(&db, "Failover manually aborted");
+            return Reply::Ok;
+        }
+        let not_int = || Reply::error("ERR value is not an integer or out of range");
+        let (mut timeout, mut force, mut host, mut port) = (0i64, false, None::<String>, 0i64);
+        let mut j = 1;
+        while j < args.len() {
+            if eq(&args[j], "timeout") && j + 1 < args.len() && timeout == 0 {
+                let Some(t) = redis_engine::util::parse_i64(&args[j + 1]) else { return not_int() };
+                if t <= 0 {
+                    return Reply::error("ERR FAILOVER timeout must be greater than 0");
+                }
+                timeout = t;
+                j += 2;
+            } else if eq(&args[j], "to") && j + 2 < args.len() && host.is_none() {
+                let Some(p) = redis_engine::util::parse_i64(&args[j + 2]) else { return not_int() };
+                port = p;
+                host = Some(String::from_utf8_lossy(&args[j + 1]).into_owned());
+                j += 3;
+            } else if eq(&args[j], "force") && !force {
+                force = true;
+                j += 1;
+            } else {
+                return Reply::error("ERR syntax error");
+            }
+        }
+        if db.failover.lock().is_some() {
+            return Reply::error("ERR FAILOVER already in progress.");
+        }
+        if db.upstream.lock().is_some() {
+            return Reply::error("ERR FAILOVER is not valid when server is a replica.");
+        }
+        if psync::redis_replica_count(&db) == 0 {
+            return Reply::error("ERR FAILOVER requires connected replicas.");
+        }
+        if force && (timeout == 0 || host.is_none()) {
+            return Reply::error("ERR FAILOVER with force option requires both a timeout and target HOST and IP.");
+        }
+        let target = match &host {
+            Some(h) => match psync::find_replica(&db, h, port) {
+                Some(_) => Some((h.clone(), port as u16)),
+                None => return Reply::error("ERR FAILOVER target HOST and PORT is not a replica."),
+            },
+            None => None,
+        };
+        let now = redis_engine::util::now_ms();
+        *db.failover.lock() = Some(crate::database::Failover {
+            in_progress: false,
+            target,
+            end_ms: if timeout > 0 { now + timeout } else { 0 },
+            force,
+            listening_port: self.listening_port(),
+        });
+        db.set_failover_pause(true);
+        Reply::Ok
+    }
+
     async fn waitaof(&mut self, args: &[Bytes]) -> Reply {
         if args.len() != 4 {
             return Reply::error("ERR wrong number of arguments for 'waitaof' command");
@@ -1042,11 +1107,12 @@ impl Conn<'_> {
             return Reply::error("ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled.");
         }
         let offset = db.repl_offset();
+        let at = db.stream_offset();
         let limit = (!timeout.is_zero()).then_some(timeout);
         let started = tokio::time::Instant::now();
         let local_ok = match &durability {
-            Some(d) if local > 0 => d.wait(offset, limit).await,
-            Some(d) => *d.durable.borrow() >= offset,
+            Some(d) if local > 0 => d.wait(at, limit).await,
+            Some(d) => *d.durable.borrow() >= at,
             None => false,
         };
         let backlog = db.backlog.lock().clone();
@@ -1144,5 +1210,5 @@ fn is_intercepted(args: &[Bytes], client: &Client) -> bool {
         return true;
     }
     // Inside MULTI these are queued (or refused) by the engine like any command.
-    client.multi.is_none() && (eq(n, "replconf") || eq(n, "sync") || eq(n, "psync") || eq(n, "shutdown") || eq(n, "wait") || eq(n, "waitaof"))
+    client.multi.is_none() && (eq(n, "replconf") || eq(n, "sync") || eq(n, "psync") || eq(n, "shutdown") || eq(n, "wait") || eq(n, "waitaof") || eq(n, "failover"))
 }

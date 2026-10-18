@@ -372,3 +372,105 @@ async fn redis_replication_protocol() {
     cmd(&mut m, &["REPLICAOF", "NO", "ONE"]).await;
     drop(ctr);
 }
+
+/// FAILOVER from roll to a Redis replica (`failoverCommand`): errors without replicas, writes
+/// paused while waiting for the replica to catch up, the PSYNC FAILOVER handshake making it the
+/// primary, roll following it, and the history continuing on both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn redis_failover_command() {
+    let Some((ctr, redis_addr)) = Container::start() else {
+        if std::env::var("ROLL_COMPAT_REQUIRED").is_ok() {
+            panic!("redis_repl: Docker unavailable");
+        }
+        eprintln!("redis_repl: skipped (no Docker)");
+        return;
+    };
+    let mut redis = None;
+    for _ in 0..100 {
+        if let Ok(mut c) = RespClient::connect(&redis_addr).await
+            && matches!(c.cmd(["PING"]).await, Ok(Reply::Status(s)) if s == "PONG")
+        {
+            redis = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut x = redis.expect("Redis in Docker not ready");
+    let published: SocketAddr = redis_addr.parse().unwrap();
+
+    let (roll_addr, mut r) = roll_server().await;
+    // No replicas yet.
+    assert_eq!(text(&cmd(&mut r, &["FAILOVER"]).await), "ERR FAILOVER requires connected replicas.");
+    assert_eq!(text(&cmd(&mut r, &["FAILOVER", "ABORT"]).await), "ERR No failover in progress.");
+    assert_eq!(text(&cmd(&mut r, &["FAILOVER", "TIMEOUT", "0"]).await), "ERR FAILOVER timeout must be greater than 0");
+    assert_eq!(text(&cmd(&mut r, &["FAILOVER", "TO", "h", "x"]).await), "ERR value is not an integer or out of range");
+    assert_eq!(text(&cmd(&mut r, &["FAILOVER", "FORCE", "FORCE"]).await), "ERR syntax error");
+    // No backlog yet: the replication offset hasn't moved.
+    assert_eq!(cmd(&mut r, &["ROLE"]).await, Reply::Array(vec![Reply::bulk(b"master"), Reply::Int(0), Reply::Array(vec![])]));
+
+    cmd(&mut r, &["SET", "before", "1"]).await;
+    // The Redis server replicates roll, announcing the address roll can reach it at.
+    cmd(&mut x, &["CONFIG", "SET", "replica-announce-ip", "127.0.0.1"]).await;
+    cmd(&mut x, &["CONFIG", "SET", "replica-announce-port", &published.port().to_string()]).await;
+    cmd(&mut x, &["REPLICAOF", "host.docker.internal", &roll_addr.port().to_string()]).await;
+    let mut link_up = false;
+    for _ in 0..300 {
+        if field(&info(&mut x, "replication").await, "master_link_status").as_deref() == Some("up") {
+            link_up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(link_up, "the Redis replica didn't sync");
+    cmd(&mut r, &["SET", "k", "v"]).await;
+    let mut seen = false;
+    for _ in 0..300 {
+        if text(&cmd(&mut x, &["GET", "k"]).await) == "v" {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(seen);
+    let target = ["127.0.0.1", &published.port().to_string()];
+    assert_eq!(text(&cmd(&mut r, &["FAILOVER", "TO", "10.9.9.9", "1"]).await), "ERR FAILOVER target HOST and PORT is not a replica.");
+    assert_eq!(
+        text(&cmd(&mut r, &["FAILOVER", "FORCE", "TO", target[0], target[1]]).await),
+        "ERR FAILOVER with force option requires both a timeout and target HOST and IP."
+    );
+
+    assert_eq!(text(&cmd(&mut r, &["FAILOVER", "TO", target[0], target[1], "TIMEOUT", "10000"]).await), "OK");
+    assert_eq!(text(&cmd(&mut r, &["FAILOVER"]).await), "ERR FAILOVER already in progress.");
+    assert_eq!(text(&cmd(&mut r, &["REPLICAOF", "NO", "ONE"]).await), "ERR REPLICAOF not allowed while failing over.");
+    // Roll hands over: the Redis server is the primary, roll its replica.
+    let mut done = false;
+    for _ in 0..300 {
+        let ri = info(&mut r, "replication").await;
+        let xi = info(&mut x, "replication").await;
+        if field(&xi, "role").as_deref() == Some("master")
+            && field(&ri, "role").as_deref() == Some("slave")
+            && field(&ri, "master_link_status").as_deref() == Some("up")
+            && field(&ri, "master_failover_state").as_deref() == Some("no-failover")
+        {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(done, "failover didn't complete:\n{}\n{}", info(&mut r, "replication").await, info(&mut x, "replication").await);
+    assert_eq!(field(&info(&mut r, "replication").await, "master_port").as_deref(), Some(target[1]));
+    // Writes on the new primary reach roll; roll is read-only.
+    cmd(&mut x, &["SET", "after", "2"]).await;
+    let mut got = false;
+    for _ in 0..300 {
+        if text(&cmd(&mut r, &["GET", "after"]).await) == "2" {
+            got = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(got);
+    assert_eq!(text(&cmd(&mut r, &["GET", "before"]).await), "1");
+    assert!(text(&cmd(&mut r, &["SET", "z", "1"]).await).starts_with("READONLY"));
+    drop(ctr);
+}

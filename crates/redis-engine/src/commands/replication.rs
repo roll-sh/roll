@@ -115,7 +115,11 @@ pub fn replconf_cmd(_cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 
 /// REPLICAOF host port | NO ONE.
 pub fn replicaof(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let master = cx.eng.host.as_ref().and_then(|h| h.replication().master);
+    let repl = cx.eng.host.as_ref().map(|h| h.replication()).unwrap_or_default();
+    if !repl.failover_state.is_empty() && repl.failover_state != "no-failover" {
+        return Err(Error::new("ERR REPLICAOF not allowed while failing over."));
+    }
+    let master = repl.master;
     if master.as_ref().is_some_and(|m| m.managed) {
         return Err(Error::new("ERR this replica is managed by the platform: promote or detach it from the dashboard or API"));
     }

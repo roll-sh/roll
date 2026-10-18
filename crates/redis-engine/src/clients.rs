@@ -152,6 +152,9 @@ pub struct Clients {
     limit_misses: u32,
     /// CLIENT PAUSE: until (Unix ms), and whether all commands or only writes are paused.
     pub pause: Option<(i64, bool)>,
+    /// FAILOVER's write pause (`PAUSE_DURING_FAILOVER`): until the failover ends, apart from
+    /// CLIENT PAUSE (CLIENT UNPAUSE doesn't lift it).
+    pub failover_pause: bool,
     /// Where the clients cron continues (client id).
     pub cron_cursor: u64,
 }
@@ -507,14 +510,15 @@ impl Clients {
 
     /// Is a command with these properties paused right now?
     pub fn paused(&mut self, now: i64, may_replicate: bool) -> Option<i64> {
-        match self.pause {
+        let by_client = match self.pause {
             Some((end, _)) if end <= now => {
                 self.pause = None;
                 None
             }
             Some((end, all)) if all || may_replicate => Some(end),
             _ => None,
-        }
+        };
+        by_client.or((self.failover_pause && may_replicate).then_some(i64::MAX))
     }
 
     /// Bytes of the connection's live counters, for INFO.

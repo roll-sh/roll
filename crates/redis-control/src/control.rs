@@ -499,8 +499,8 @@ impl Control {
     pub fn replica_status(&self, r: &Replica) -> serde_json::Value {
         match self.node.get_loaded(&r.id) {
             Some(db) => {
-                let offset = db.repl_offset();
-                let lag = self.node.get_loaded(&r.db_id).map(|p| p.repl_offset().saturating_sub(offset));
+                let offset = db.stream_offset();
+                let lag = self.node.get_loaded(&r.db_id).map(|p| p.stream_offset().saturating_sub(offset));
                 serde_json::json!({
                     "state": "active",
                     "used_memory": db.used_memory(),
@@ -525,7 +525,7 @@ impl Control {
                 "commands": db.commands.load(Ordering::Relaxed),
                 "idle_ms": db.idle_ms(),
                 "durable_offset": db.durability.lock().as_ref().map(|d| *d.durable.borrow()),
-                "offset": db.repl_offset(),
+                "offset": db.stream_offset(),
             }),
             None => serde_json::json!({ "state": "idle" }),
         })

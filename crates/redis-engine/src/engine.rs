@@ -506,7 +506,7 @@ impl Engine {
     /// CLIENT PAUSE: until when (Unix ms) this command must wait, if it is paused.
     /// A postponed command already shows as the client's current one.
     pub fn paused_for(&mut self, client: &mut Client, args: &[Bytes]) -> Option<i64> {
-        if client.internal || self.clients.pause.is_none() {
+        if client.internal || (self.clients.pause.is_none() && !self.clients.failover_pause) {
             return None;
         }
         let may_replicate = self.may_replicate(client, args);
@@ -518,7 +518,7 @@ impl Engine {
 
     /// Paused clients also pause expiry and eviction.
     pub(crate) fn pause_active(&self, now: i64) -> bool {
-        self.clients.pause.is_some_and(|(end, _)| end > now)
+        self.clients.failover_pause || self.clients.pause.is_some_and(|(end, _)| end > now)
     }
 
     /// Register a network client (CLIENT LIST, KILL, tracking…).

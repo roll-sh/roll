@@ -14,6 +14,7 @@ use bytes::{Bytes, BytesMut};
 use redis_engine::commands::eq;
 use redis_engine::rdb::{self, LoadItem, RdbError, RdbWriter};
 use redis_proto::Reply;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -47,12 +48,45 @@ pub struct Start {
     pub rdb_only: bool,
 }
 
-/// The database's backlog, attached on first use like Redis' `createReplicationBacklogIfNeeded`.
+/// The database's backlog, attached on first use (a replica's, as `readSyncBulkPayload`
+/// creates it: under the primary's replication id).
 pub fn ensure_backlog(db: &Database) -> Arc<Backlog> {
     if let Some(b) = db.backlog.lock().clone() {
         return b;
     }
     Backlog::attach(db, BACKLOG_SIZE)
+}
+
+/// A primary's backlog for its first replica (`createReplicationBacklogIfNeeded`): created from
+/// scratch, it starts a new replication history (a new id, no id2).
+pub fn ensure_primary_backlog(db: &Database) -> Arc<Backlog> {
+    if let Some(b) = db.backlog.lock().clone() {
+        return b;
+    }
+    if db.upstream.lock().is_none() {
+        *db.replid.lock() = new_replid();
+        *db.replid2.lock() = None;
+    }
+    let b = Backlog::attach(db, BACKLOG_SIZE);
+    b.for_redis.store(true, Ordering::Relaxed);
+    b
+}
+
+/// `replicationCron`'s backlog TTL: a primary's Redis backlog without replicas for
+/// `repl-backlog-ttl` seconds (0: never) is freed, under a new replication history.
+pub fn backlog_ttl_cron(db: &Database, ttl_s: i64, now: i64) {
+    if ttl_s <= 0 || db.upstream.lock().is_some() {
+        return;
+    }
+    let Some(b) = db.backlog.lock().clone() else { return };
+    if !b.for_redis.load(Ordering::Relaxed) || !b.peers.lock().is_empty() {
+        return;
+    }
+    if now - b.idle_since.load(Ordering::Relaxed) > ttl_s * 1000 {
+        *db.replid.lock() = new_replid();
+        *db.replid2.lock() = None;
+        Backlog::detach(db);
+    }
 }
 
 /// SYNC / PSYNC replid offset: a partial resynchronization from the backlog when it holds the
@@ -61,7 +95,17 @@ pub fn ensure_backlog(db: &Database) -> Arc<Backlog> {
 pub fn start(db: &Arc<Database>, args: &[Bytes], conf: &ReplicaConf) -> Result<Start, Reply> {
     let psync = eq(&args[0], "psync");
     if psync && args.len() > 3 && eq(&args[3], "failover") {
-        return Err(Reply::error("ERR PSYNC FAILOVER can't be sent to a master."));
+        if db.upstream.lock().is_none() {
+            return Err(Reply::error("ERR PSYNC FAILOVER can't be sent to a master."));
+        }
+        if !lossy(&args[1]).eq_ignore_ascii_case(&db.replid.lock()) {
+            return Err(Reply::error("ERR PSYNC FAILOVER replid must match my replid."));
+        }
+        tracing::info!("MASTER MODE enabled (failover request)");
+        unset_master(db);
+    }
+    if db.failover.lock().is_some() {
+        return Err(Reply::error("NOMASTERLINK Can't SYNC while failing over"));
     }
     let upstream = db.upstream.lock().clone();
     if let Some(u) = upstream
@@ -72,17 +116,19 @@ pub fn start(db: &Arc<Database>, args: &[Bytes], conf: &ReplicaConf) -> Result<S
     if conf.filter.is_some() && !conf.eof {
         return Err(Reply::error("ERR Filtered replica requires EOF capability"));
     }
-    let backlog = ensure_backlog(db);
+    let backlog = ensure_primary_backlog(db);
     if psync {
         let Some(off) = parse_i64(&args[2]) else { return Err(not_int()) };
         let asked = lossy(&args[1]);
         let mine = db.replid.lock().clone();
         let id2 = db.replid2.lock().clone();
         let same = asked.eq_ignore_ascii_case(&mine) || id2.is_some_and(|(id, upto)| asked.eq_ignore_ascii_case(&id) && off <= upto as i64);
-        if same && off >= 1 && backlog.read_from(off as u64 - 1).is_some() {
+        // The replica's offset is a replication offset; the backlog holds stream positions.
+        let at = (off >= 1).then(|| db.repl_to_stream(off as u64 - 1));
+        if same && let Some(at) = at && backlog.read_from(at).is_some() {
             db.io.sync_partial_ok.fetch_add(1, Ordering::Relaxed);
             let preamble = if conf.psync2 { format!("+CONTINUE {mine}\r\n") } else { "+CONTINUE\r\n".to_string() };
-            return Ok(Start { preamble: preamble.into_bytes(), offset: off as u64 - 1, backlog, rdb_only: conf.rdb_only });
+            return Ok(Start { preamble: preamble.into_bytes(), offset: at, backlog, rdb_only: conf.rdb_only });
         }
         if !asked.starts_with('?') {
             db.io.sync_partial_err.fetch_add(1, Ordering::Relaxed);
@@ -104,7 +150,7 @@ pub fn start(db: &Arc<Database>, args: &[Bytes], conf: &ReplicaConf) -> Result<S
     };
     let mut preamble = Vec::with_capacity(payload.len() + 64);
     if psync {
-        preamble.extend_from_slice(format!("+FULLRESYNC {} {offset}\r\n", db.replid.lock()).as_bytes());
+        preamble.extend_from_slice(format!("+FULLRESYNC {} {}\r\n", db.replid.lock(), db.stream_to_repl(offset)).as_bytes());
     }
     preamble.extend_from_slice(format!("${}\r\n", payload.len()).as_bytes());
     preamble.extend_from_slice(&payload);
@@ -162,12 +208,112 @@ pub struct MasterConf {
     pub listening_port: u16,
 }
 
+/// Follow a Redis primary (REPLICAOF host port, or FAILOVER handing over to `host`): the
+/// database becomes a read-only replica whose link reconnects until promoted or stopped.
+pub fn follow(db: &Arc<Database>, host: String, port: u16, listening_port: u16) -> Arc<Follower> {
+    let (user, pass) = {
+        let eng = db.engine(0);
+        let c = &eng.cfg;
+        (Some(c.masteruser.clone()).filter(|s| !s.is_empty()), Some(c.masterauth.clone()).filter(|s| !s.is_empty()))
+    };
+    let f = Follower::new(db.clone());
+    *db.upstream.lock() = Some(Upstream { host: host.clone(), port, follower: Arc::downgrade(&f), user: true });
+    tokio::spawn(f.clone().follow_redis(MasterConf { host, port, user, pass, listening_port }));
+    f
+}
+
+/// Stop following and become a primary again (`replicationUnsetMaster`): the old history stays
+/// valid up to here.
+pub fn unset_master(db: &Database) {
+    let upstream = db.upstream.lock().take();
+    if let Some(f) = upstream.and_then(|u| u.follower.upgrade()) {
+        f.promote();
+    }
+    shift_replid(db);
+    db.replicas_reset.notify_waiters();
+}
+
+/// `abortFailover`: a failover that reached its target goes back to being a primary.
+pub fn abort_failover(db: &Database, why: &str) {
+    let Some(f) = db.failover.lock().clone() else { return };
+    tracing::info!(reason = why, "FAILOVER aborted");
+    if f.in_progress {
+        unset_master(db);
+    }
+    db.clear_failover();
+}
+
+/// The Redis-protocol replicas attached to the backlog: (id, address, acknowledged offset).
+fn redis_replicas(b: &Backlog) -> Vec<(u64, SocketAddr, u64)> {
+    let acks = b.acks.lock().clone();
+    let redis = b.redis_peers.lock().clone();
+    let mut v: Vec<_> = b.peers.lock().iter().filter(|(id, _)| redis.contains(id)).map(|(id, (a, _))| (*id, *a, acks.get(id).copied().unwrap_or(0))).collect();
+    v.sort_by_key(|(id, ..)| *id);
+    v
+}
+
+/// `findReplica`: a connected replica by its announced address and listening port.
+pub fn find_replica(db: &Database, host: &str, port: i64) -> Option<(u64, SocketAddr, u64)> {
+    let b = db.backlog.lock().clone()?;
+    redis_replicas(&b).into_iter().find(|(_, a, _)| a.ip().to_string().eq_ignore_ascii_case(host) && a.port() as i64 == port)
+}
+
+/// How many Redis-protocol replicas are connected (`listLength(server.slaves)`).
+pub fn redis_replica_count(db: &Database) -> usize {
+    db.backlog.lock().clone().map_or(0, |b| redis_replicas(&b).len())
+}
+
+/// `updateFailoverStatus`: once a replica (the target, or any) acknowledged everything, hand
+/// over to it; on timeout, hand over anyway with FORCE, else give up.
+pub fn failover_cron(db: &Arc<Database>, now: i64) {
+    let Some(f) = db.failover.lock().clone() else { return };
+    if f.in_progress {
+        return;
+    }
+    if f.end_ms != 0 && f.end_ms <= now {
+        match (&f.target, f.force) {
+            (Some((h, p)), true) => hand_over(db, h.clone(), *p, f.listening_port),
+            _ => abort_failover(db, "Replica never caught up before timeout"),
+        }
+        return;
+    }
+    let offset = db.repl_offset();
+    let caught_up = match &f.target {
+        Some((h, p)) => find_replica(db, h, *p as i64).filter(|(.., ack)| *ack == offset).map(|_| (h.clone(), *p)),
+        None => db
+            .backlog
+            .lock()
+            .clone()
+            .and_then(|b| redis_replicas(&b).into_iter().find(|(.., ack)| *ack == offset))
+            .map(|(_, a, _)| (a.ip().to_string(), a.port())),
+    };
+    if let Some((h, p)) = caught_up {
+        hand_over(db, h, p, f.listening_port);
+    }
+}
+
+/// `replicationSetMaster` during a failover: follow the target, whose first PSYNC carries
+/// FAILOVER so it promotes itself.
+fn hand_over(db: &Arc<Database>, host: String, port: u16, listening_port: u16) {
+    if let Some(f) = db.failover.lock().as_mut() {
+        f.in_progress = true;
+        f.target = Some((host.clone(), port));
+    }
+    tracing::info!(host, port, "FAILOVER target is synced, failing over");
+    db.engine(0).unblock_all_for_role_change();
+    follow(db, host, port, listening_port);
+    db.replicas_reset.notify_waiters();
+}
+
 impl Follower {
     /// Follow a Redis primary until [`Follower::promote`] / [`Follower::stop`], reconnecting
     /// every second like Redis' replication cron, with partial resynchronization when the
     /// primary's backlog still has our offset.
     pub async fn follow_redis(self: Arc<Self>, conf: MasterConf) {
         *self.db.upstream.lock() = Some(Upstream { host: conf.host.clone(), port: conf.port, follower: Arc::downgrade(&self), user: true });
+        // A primary turned replica continues its own history (`replicationCacheMasterUsingMyself`).
+        self.applied.store(self.db.repl_offset(), Ordering::SeqCst);
+        self.redis.store(true, Ordering::Relaxed);
         self.set_state("connect");
         loop {
             let stopped = self.stop.notified();
@@ -223,7 +369,12 @@ impl Follower {
         // Continue our own history: after REPLICAOF NO ONE elsewhere, or a reconnect.
         let (replid, offset) = (self.db.replid.lock().clone(), self.applied() + 1);
         let off = offset.to_string();
-        send(&mut wr, &[b"PSYNC", replid.as_bytes(), off.as_bytes()]).await?;
+        let failing_over = self.db.failover.lock().as_ref().is_some_and(|f| f.in_progress);
+        if failing_over {
+            send(&mut wr, &[b"PSYNC", replid.as_bytes(), off.as_bytes(), b"FAILOVER"]).await?;
+        } else {
+            send(&mut wr, &[b"PSYNC", replid.as_bytes(), off.as_bytes()]).await?;
+        }
         let reply = loop {
             let l = read_line(&mut rd, &mut buf).await?;
             if !l.is_empty() {
@@ -256,7 +407,15 @@ impl Follower {
                 *self.db.replid2.lock() = Some((std::mem::replace(&mut *cur, id.to_string()), offset + 1));
             }
         } else {
+            if failing_over {
+                abort_failover(&self.db, "Failover target rejected psync request");
+                return Ok(());
+            }
             anyhow::bail!("unexpected reply to PSYNC from master: {reply}");
+        }
+        if failing_over {
+            // The target took over: the failover is complete.
+            self.db.clear_failover();
         }
         self.connected.store(true, Ordering::SeqCst);
         self.set_state("connected");
