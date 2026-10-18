@@ -69,6 +69,34 @@ pub struct AddOutcome {
     pub blocks_added: u32,
 }
 
+/// `Summary` (`IISummary`): `InvertedIndex_Summary`'s header for FT.DEBUG.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Summary {
+    pub number_of_docs: u32,
+    pub number_of_entries: usize,
+    pub last_doc_id: DocId,
+    pub flags: u32,
+    pub number_of_blocks: usize,
+    pub block_efficiency: f64,
+    pub has_efficiency: bool,
+}
+
+/// `GcApplyInfo` (`II_GCScanStats`): what a GC pass over an index changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GcInfo {
+    pub bytes_freed: usize,
+    pub bytes_allocated: usize,
+    /// Records removed, duplicates included.
+    pub entries_removed: usize,
+    pub block_count_delta: i64,
+}
+
+/// `RepairType`: a block's replacement (none: deleted) and the docs it lost.
+struct Repair {
+    blocks: Vec<IndexBlock>,
+    docs_removed: u32,
+}
+
 /// `IndexBlock`: records for a doc id range, with the capacity its buffer would have in the
 /// reference (tracked here so it never depends on the allocator).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +121,17 @@ pub const fn grown_capacity(mut cap: usize, desired: usize) -> usize {
     while cap < desired {
         let step = 1 + cap / 5;
         cap += if step < MAX_GROWTH_STEP { step } else { MAX_GROWTH_STEP };
+    }
+    cap
+}
+
+/// A repaired block's buffer capacity once the parent has read it back from the fork GC's
+/// pipe: serde's `Vec<u8>` visitor preallocates the announced length (at most 1 MiB), then
+/// doubles.
+pub const fn deserialized_capacity(len: usize) -> usize {
+    let mut cap = if len < MAX_GROWTH_STEP { len } else { MAX_GROWTH_STEP };
+    while cap < len {
+        cap *= 2;
     }
     cap
 }
@@ -284,6 +323,109 @@ impl InvertedIndex {
     /// `IndexReader`: every record in doc id order.
     pub fn reader(&self) -> Reader<'_> {
         Reader::new(self)
+    }
+
+    /// `InvertedIndex::summary` (FT.DEBUG's header): an entries-tracking index reports its
+    /// entries and blocks efficiency, the others their docs as entries.
+    pub fn summary(&self) -> Summary {
+        let tracked = self.encoding.tracking() == Tracking::Entries;
+        let number_of_blocks = self.blocks.len();
+        let number_of_entries = if tracked { self.n_entries } else { self.n_unique_docs as usize };
+        Summary {
+            number_of_docs: self.n_unique_docs,
+            number_of_entries,
+            last_doc_id: self.last_doc_id().unwrap_or(0),
+            flags: self.flags,
+            number_of_blocks,
+            block_efficiency: if tracked && number_of_blocks > 0 { number_of_entries as f64 / number_of_blocks as f64 } else { 0.0 },
+            has_efficiency: tracked,
+        }
+    }
+
+    /// The records of one block.
+    fn block_records(&self, i: usize) -> Vec<Record<'_>> {
+        let blk = &self.blocks[i];
+        let mut out = Vec::with_capacity(blk.num_entries as usize);
+        let (mut pos, mut last) = (0, blk.first_doc_id);
+        while pos < blk.buf.len() {
+            let base = if self.encoding.delta_from_first() { blk.first_doc_id } else { last };
+            let Some(rec) = self.encoding.decode(&blk.buf, &mut pos, base) else { break };
+            last = rec.doc_id;
+            out.push(rec);
+        }
+        out
+    }
+
+    /// `IndexBlock::repair`: the block's surviving records re-encoded into fresh blocks, `None`
+    /// when nothing in it is gone. `kept` sees every surviving record.
+    fn repair(&self, i: usize, exists: &dyn Fn(DocId) -> bool, kept: &mut dyn FnMut(&Record<'_>)) -> Option<Repair> {
+        let mut tmp = InvertedIndex::with_encoding(self.encoding, flags::DOC_IDS_ONLY);
+        let (mut unique_read, mut unique_write, mut changed) = (0u32, 0u32, false);
+        let mut last: Option<DocId> = None;
+        for rec in self.block_records(i) {
+            let new_doc = last != Some(rec.doc_id);
+            if exists(rec.doc_id) {
+                kept(&rec);
+                tmp.add_record(&rec);
+                if new_doc {
+                    unique_write += 1;
+                }
+            } else {
+                changed = true;
+            }
+            if new_doc {
+                unique_read += 1;
+            }
+            last = Some(rec.doc_id);
+        }
+        if tmp.blocks.is_empty() {
+            Some(Repair { blocks: Vec::new(), docs_removed: unique_read })
+        } else if changed {
+            Some(Repair { blocks: tmp.blocks, docs_removed: unique_read - unique_write })
+        } else {
+            None
+        }
+    }
+
+    /// The fork GC's `scan_gc` and the parent's `apply_gc` back to back (nothing can change in
+    /// between here): blocks holding records of documents gone are rebuilt from their surviving
+    /// records, or dropped; the block array shrinks to fit. `None` when nothing was collected.
+    /// `kept` sees every surviving record of the repaired blocks.
+    pub fn gc(&mut self, exists: &dyn Fn(DocId) -> bool, kept: &mut dyn FnMut(&Record<'_>)) -> Option<GcInfo> {
+        let repairs: Vec<(usize, Repair)> = (0..self.blocks.len()).filter_map(|i| self.repair(i, exists, kept).map(|r| (i, r))).collect();
+        if repairs.is_empty() {
+            return None;
+        }
+        let mut info = GcInfo::default();
+        let before = self.blocks.len();
+        let old = std::mem::take(&mut self.blocks);
+        let mut repairs = repairs.into_iter().peekable();
+        for (i, block) in old.into_iter().enumerate() {
+            match repairs.next_if(|(at, _)| *at == i) {
+                Some((_, r)) => {
+                    info.entries_removed += block.num_entries as usize;
+                    info.bytes_freed += block.mem_usage();
+                    self.n_unique_docs -= r.docs_removed;
+                    for mut b in r.blocks {
+                        b.cap = deserialized_capacity(b.buf.len());
+                        info.entries_removed -= b.num_entries as usize;
+                        info.bytes_allocated += b.mem_usage();
+                        self.blocks.push(b);
+                    }
+                }
+                None => self.blocks.push(block),
+            }
+        }
+        // `shrink_to_fit`; freeing the whole array also frees its header.
+        if self.blocks.is_empty() && self.blocks_cap > 0 {
+            info.bytes_freed += BLOCKS_HEADER;
+        }
+        self.blocks_cap = self.blocks.len();
+        info.block_count_delta = self.blocks.len() as i64 - before as i64;
+        if self.encoding.tracking() == Tracking::Entries {
+            self.n_entries -= info.entries_removed;
+        }
+        Some(info)
     }
 
     /// Every record, decoded.

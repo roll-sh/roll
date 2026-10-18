@@ -30,6 +30,7 @@ pub mod scripting;
 pub mod ft;
 pub mod ft_admin;
 pub mod ft_aggregate;
+pub mod ft_debug;
 pub mod ft_doc;
 pub mod ft_query;
 pub mod ft_spell;

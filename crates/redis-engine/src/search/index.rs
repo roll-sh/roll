@@ -70,11 +70,13 @@ pub struct Suffix {
     pub terms: Vec<Bytes>,
 }
 
-/// `addSuffixTrieMap`.
-pub fn add_suffix(trie: &mut TrieMap<Suffix>, s: &[u8]) {
+/// `addSuffixTrieMap` (`addSuffixTrie` for text): the number of entries its proper suffixes
+/// created.
+pub fn add_suffix(trie: &mut TrieMap<Suffix>, s: &[u8]) -> usize {
     if trie.get(s).is_some_and(|d| d.term.is_some()) {
-        return;
+        return 0;
     }
+    let mut created = 0;
     let term = Bytes::copy_from_slice(s);
     match trie.get_mut(s) {
         Some(d) => {
@@ -90,9 +92,11 @@ pub fn add_suffix(trie: &mut TrieMap<Suffix>, s: &[u8]) {
             Some(d) => d.terms.push(term.clone()),
             None => {
                 trie.insert(&s[j..], Suffix { term: None, terms: vec![term.clone()] });
+                created += 1;
             }
         }
     }
+    created
 }
 
 /// A TAG field's index (`TagIndex`): a posting list per value.
@@ -281,6 +285,9 @@ pub struct Index {
     pub term_trie: super::trie::Trie,
     /// The text suffix trie (`sp->suffix`), when a text field has WITHSUFFIXTRIE.
     pub suffix: Option<TrieMap<Suffix>>,
+    /// The suffix trie's `size`: whole terms go in with `Trie_InsertRuneNoSize`, so only the
+    /// entries a term's proper suffixes created count.
+    pub suffix_size: usize,
     pub fields: Vec<FieldIndex>,
     /// `missingFieldDict`: documents missing an INDEXMISSING field, by field name.
     pub missing: HashMap<Bytes, InvertedIndex>,
@@ -300,6 +307,10 @@ pub struct Index {
     pub aliases: Vec<Bytes>,
     /// `smap`: synonym terms → their groups (`~id`), created by the first FT.SYNUPDATE.
     pub synonyms: Option<super::rsdict::RsDict<Vec<Bytes>>>,
+    /// `gc`: the fork GC's state, unless the index is TEMPORARY or `search-no-gc` was set.
+    pub gc: Option<super::gc::Gc>,
+    /// `timerId` while `isTimerSet`: when a TEMPORARY index expires (Unix ms).
+    pub expires_at: Option<i64>,
 }
 
 impl Index {
@@ -316,6 +327,7 @@ impl Index {
             terms: HashMap::new(),
             term_trie: super::trie::Trie::new(super::trie::SortMode::Lex),
             suffix,
+            suffix_size: 0,
             fields,
             missing: HashMap::new(),
             existing: None,
@@ -328,7 +340,18 @@ impl Index {
             monitor_field_expiration: true,
             aliases: Vec::new(),
             synonyms: None,
+            gc: (spec.flags & spec::I_TEMPORARY == 0 && !cfg.flag("search-no-gc")).then(|| super::gc::Gc::new(cfg.num("search-fork-gc-run-interval") as i64)),
+            expires_at: None,
             spec,
+        }
+    }
+
+    /// `IndexSpec_SetTimeoutTimer`: a TEMPORARY index expires its timeout from now.
+    pub fn restart_timer(&mut self) {
+        if self.spec.flags & spec::I_TEMPORARY != 0
+            && let Some(t) = self.spec.timeout
+        {
+            self.expires_at = Some(crate::util::now_ms().saturating_add(t.saturating_mul(1000)));
         }
     }
 
@@ -347,9 +370,11 @@ impl Index {
         }
     }
 
-    /// `IndexSpec_collect_text_overhead`.
+    /// `IndexSpec_collect_text_overhead`: the terms trie and the suffix trie (a `Trie` of the
+    /// same entry estimate).
     pub fn text_overhead(&self) -> usize {
-        self.term_trie.size() * TERM_TRIE_ENTRY
+        // The suffix trie's size can wrap: GC deletes count the whole terms' entries too.
+        self.term_trie.size().wrapping_add(self.suffix_size).wrapping_mul(TERM_TRIE_ENTRY)
     }
 
     /// `IndexSpec_collect_tags_overhead`.
@@ -369,12 +394,19 @@ impl Index {
     }
 
     /// `IndexSpec_TotalMemUsage`.
-    pub fn total_mem(&self, vectors: usize) -> i64 {
-        (self.docs.memsize + self.docs.sortables_size + self.docs.dim.mem_usage() + self.text_overhead() + self.tags_overhead() + self.numeric_overhead()) as i64
-            + self.stats.inverted_size
-            + self.stats.offset_vecs_size as i64
-            + self.stats.terms_size as i64
-            + vectors as i64
+    /// `IndexSpec_TotalMemUsage`, in `size_t` arithmetic (a wrapped text overhead wraps it).
+    pub fn total_mem(&self, vectors: usize) -> u64 {
+        [
+            (self.docs.memsize + self.docs.sortables_size + self.docs.dim.mem_usage()) as u64,
+            self.text_overhead() as u64,
+            (self.tags_overhead() + self.numeric_overhead()) as u64,
+            self.stats.inverted_size as u64,
+            self.stats.offset_vecs_size,
+            self.stats.terms_size,
+            vectors as u64,
+        ]
+        .into_iter()
+        .fold(0u64, u64::wrapping_add)
     }
 
     fn add_inverted(&mut self, size: usize) {
@@ -392,6 +424,10 @@ impl Index {
     /// `IndexSpec_DeleteDoc`: the document leaves the table; its postings stay until GC.
     pub fn delete_doc(&mut self, key: &[u8]) -> bool {
         let Some(d) = self.docs.pop(key) else { return false };
+        // `GCContext_OnDelete`.
+        if let Some(gc) = self.gc.as_mut() {
+            gc.pending += 1;
+        }
         self.stats.total_docs_len -= d.doc_len as u64;
         self.stats.num_documents -= 1;
         self.remove_vectors(d.id);
@@ -531,6 +567,10 @@ impl Index {
 
         // `doAssignIds` / `makeDocumentId`: the old version goes, the new one gets the next id.
         if let Some(old) = self.docs.pop(&doc.key) {
+            // `GCContext_OnUpdate`.
+            if let Some(gc) = self.gc.as_mut() {
+                gc.pending += 1;
+            }
             self.stats.num_documents -= 1;
             self.stats.total_docs_len -= old.doc_len as u64;
             self.remove_vectors(old.id);
@@ -559,7 +599,7 @@ impl Index {
         for e in &fw.entries {
             let is_new = !self.terms.contains_key(e.term.as_slice());
             if is_new {
-                let (ii, size) = invidx::new_inverted_index(self.spec.flags & iflags::STORAGE_MASK, set.raw_doc_ids, set.compress_floats)
+                let (ii, size) = invidx::new_inverted_index(super::rdb::spec_flags(self), set.raw_doc_ids, set.compress_floats)
                     .expect("term index flags");
                 self.add_inverted(size);
                 self.terms.insert(Bytes::copy_from_slice(&e.term), ii);
@@ -582,7 +622,7 @@ impl Index {
                 && ![tokenize::STEM_PREFIX, tokenize::PHONETIC_PREFIX, tokenize::SYNONYM_PREFIX].contains(&e.term[0])
                 && let Some(s) = &mut self.suffix
             {
-                add_suffix(s, crate::util::cstr(&e.term));
+                self.suffix_size += add_suffix(s, crate::util::cstr(&e.term));
             }
         }
 

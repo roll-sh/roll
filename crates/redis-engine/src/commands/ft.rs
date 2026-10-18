@@ -787,6 +787,7 @@ pub(super) fn verify_acl(cx: &mut Cx, name: &[u8]) -> Result<(), Error> {
     let Some(real) = cx.eng.search.resolve(crate::util::cstr(name)).cloned() else {
         return Err(not_found(name));
     };
+    cx.eng.search.touch(&real);
     let ix = &cx.eng.search.indexes[&real];
     if !ix.spec.rule.prefixes.iter().all(|p| cx.client.user.can_access_prefix(crate::util::cstr(p))) {
         return Err(Error::msg("NOPERM User does not have the required permissions to query the index"));
@@ -841,7 +842,11 @@ fn create(cx: &mut Cx, args: &[Bytes], if_nx: bool) -> CmdResult {
     let spec = Spec::parse(name.clone(), &args[2..], &cx.eng.cfg)?;
     let id = cx.eng.search.next_spec_id;
     cx.eng.search.next_spec_id += 1;
-    let ix = Index::new(spec, id, &cx.eng.cfg);
+    let mut ix = Index::new(spec, id, &cx.eng.cfg);
+    // `IndexSpec_SetTimeoutTimer` for a TEMPORARY index, on a master.
+    if !cx.eng.replica {
+        ix.restart_timer();
+    }
     cx.eng.search.add(ix);
     // `Initialize_KeyspaceNotifications`.
     cx.eng.sig.search_hook = true;
@@ -1031,6 +1036,11 @@ fn st(s: &str) -> Reply {
     Reply::status(s)
 }
 
+/// `mb` for a `size_t` sum.
+fn mbu(bytes: u64) -> Reply {
+    Reply::Double((bytes as f32 / 0x100000 as f32) as f64)
+}
+
 /// `x / (float)0x100000`: bytes to megabytes in single precision.
 fn mb(bytes: i64) -> Reply {
     Reply::Double((bytes as f32 / 0x100000 as f32) as f64)
@@ -1044,6 +1054,27 @@ pub(super) fn ft_info(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     verify_acl(cx, &args[1])?;
     info(cx, &args[1], false)
+}
+
+/// `IndexError_Reply` obfuscated: the message without user data, the key as `Key@` and the
+/// error's time in milliseconds.
+fn index_error_obfuscated(e: &IndexError, with_times: bool, with_status: bool) -> Reply {
+    let key = match &e.key {
+        Some(_) => Reply::Bulk(Bytes::from(format!("Key@{}", e.at.0 * 1000 + e.at.1 / 1_000_000))),
+        None => Reply::Bulk(Bytes::from_static(b"N/A")),
+    };
+    let mut m = vec![
+        (st("indexing failures"), Reply::Int(e.count as i64)),
+        (st("last indexing error"), e.last.as_ref().map_or_else(|| st("N/A"), |(_, without_user)| safe(without_user.as_bytes()))),
+        (st("last indexing error key"), key),
+    ];
+    if with_times {
+        m.push((st("last indexing error time"), Reply::Array(vec![Reply::Int(e.at.0), Reply::Int(e.at.1)])));
+    }
+    if with_status {
+        m.push((st("background indexing status"), st(if e.oom { "OOM failure" } else { "OK" })));
+    }
+    Reply::Map(m)
 }
 
 /// `IndexError_Reply`.
@@ -1063,19 +1094,31 @@ fn index_error(e: &IndexError, with_times: bool, with_status: bool) -> Reply {
 }
 
 fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
-    let resp3 = cx.resp() == 3;
     let Some(real) = cx.eng.search.resolve(crate::util::cstr(name)).cloned() else {
         return Err(not_found(name));
     };
     cx.eng.search.count_use(&real);
+    Ok(info_reply(cx, &real, with_times, false))
+}
+
+/// `Obfuscate_Index`: `Index@` and the name's SHA-1.
+pub(super) fn obfuscated_name(name: &[u8]) -> String {
+    format!("Index@{}", super::scripting::sha1_hex(name))
+}
+
+/// `fillReplyWithIndexInfo`; `obfuscate` (FT.DEBUG INFO) hides the names, prefixes, filter,
+/// field paths and the indexing errors' messages and keys.
+pub(super) fn info_reply(cx: &mut Cx, real: &Bytes, with_times: bool, obfuscate: bool) -> Reply {
+    let resp3 = cx.resp() == 3;
+    let index_error = |e: &IndexError, with_times: bool, with_status: bool| if obfuscate { index_error_obfuscated(e, with_times, with_status) } else { index_error(e, with_times, with_status) };
     let cursor_limit = cx.eng.cfg.num("search-index-cursor-limit");
     let (global_idle, global_total) = cx.eng.search.cursors.stats();
-    let ix = &cx.eng.search.indexes[&real];
+    let ix = &cx.eng.search.indexes[real];
     let index_total = cx.eng.search.cursors.index_total(ix.id);
     let sp = &ix.spec;
     let rule = &sp.rule;
     let mut top: Vec<(Reply, Reply)> = Vec::new();
-    top.push((st("index_name"), safe(&sp.name)));
+    top.push((st("index_name"), if obfuscate { st(&obfuscated_name(&sp.name)) } else { safe(&sp.name) }));
 
     // `renderIndexOptions`.
     let mut opts = Vec::new();
@@ -1099,10 +1142,10 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
     // `renderIndexDefinitions`.
     let mut def = vec![(st("key_type"), st(rule.doc_type.name()))];
     if !rule.prefixes.is_empty() {
-        def.push((st("prefixes"), Reply::Array(rule.prefixes.iter().map(|p| safe(p)).collect())));
+        def.push((st("prefixes"), Reply::Array(rule.prefixes.iter().map(|p| if obfuscate { st("Text") } else { safe(p) }).collect())));
     }
     if let Some(f) = &rule.filter {
-        def.push((st("filter"), safe(f.as_bytes())));
+        def.push((st("filter"), if obfuscate { st("Text") } else { safe(f.as_bytes()) }));
     }
     if rule.lang_default != spec::ENGLISH {
         def.push((st("default_language"), st(spec::LANGUAGES[rule.lang_default])));
@@ -1124,8 +1167,11 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
 
     // The attributes.
     let mut attrs = Vec::new();
-    for fs in &sp.fields {
-        let mut m = vec![(st("identifier"), simple(fs.path())), (st("attribute"), simple(&fs.name)), (st("type"), st(spec::type_name(fs.types)))];
+    // `FieldSpec_FormatPath` / `FieldSpec_FormatName`.
+    let ident = |i: usize, fs: &spec::Field| if obfuscate { (Reply::Status(format!("FieldPath@{i}")), Reply::Status(format!("Field@{i}"))) } else { (simple(fs.path()), simple(&fs.name)) };
+    for (i, fs) in sp.fields.iter().enumerate() {
+        let (path, name) = ident(i, fs);
+        let mut m = vec![(st("identifier"), path), (st("attribute"), name), (st("type"), st(spec::type_name(fs.types)))];
         if fs.is(spec::T_TEXT) {
             m.push((st("WEIGHT"), Reply::Double(fs.weight)));
         }
@@ -1193,7 +1239,9 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
 
     let s = &ix.stats;
     let num_records = s.num_records;
-    let vectors: usize = ix.fields.iter().filter_map(|f| f.vectors.as_ref()).map(|v| v.memory()).sum();
+    // Plus the process-wide vector memory (the shared SVS thread pool).
+    let vectors: usize = ix.fields.iter().filter_map(|f| f.vectors.as_ref()).map(|v| v.memory()).sum::<usize>()
+        + cx.eng.search.vecsim_shared_memory(cx.eng.cfg.num("search-workers").max(0) as usize);
     let total = ix.total_mem(vectors);
     top.push((st("num_docs"), Reply::Int(s.num_documents as i64)));
     top.push((st("max_doc_id"), Reply::Int(ix.docs.max_doc_id as i64)));
@@ -1207,8 +1255,8 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
     top.push((st("sortable_values_size_mb"), mb(ix.docs.sortables_size as i64)));
     top.push((st("key_table_size_mb"), mb(ix.docs.dim.mem_usage() as i64)));
     top.push((st("tag_overhead_sz_mb"), mb(ix.tags_overhead() as i64)));
-    top.push((st("text_overhead_sz_mb"), mb(ix.text_overhead() as i64)));
-    top.push((st("total_index_memory_sz_mb"), mb(total)));
+    top.push((st("text_overhead_sz_mb"), mbu(ix.text_overhead() as u64)));
+    top.push((st("total_index_memory_sz_mb"), mbu(total)));
     let geoms = ix.fields.iter().filter_map(|f| f.geometry.get()).fold(0u64, |a, g| a.wrapping_add(g.report()));
     top.push((st("geoshapes_sz_mb"), Reply::Double((geoms as f32 / 0x100000 as f32) as f64)));
     top.push((st("records_per_doc_avg"), Reply::Double((num_records as f32 / s.num_documents as f32) as f64)));
@@ -1224,19 +1272,21 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
     top.push((st("percent_indexed"), Reply::Double(1.0)));
     top.push((st("number_of_uses"), Reply::Int(ix.counter as i64)));
     top.push((st("cleaning"), Reply::Int(0)));
-    // `GCContext_RenderStats` (fork GC).
-    top.push((
-        st("gc_stats"),
-        Reply::Map(vec![
-            (st("bytes_collected"), Reply::Double(0.0)),
-            (st("total_ms_run"), Reply::Double(0.0)),
-            (st("total_cycles"), Reply::Double(0.0)),
-            (st("average_cycle_time_ms"), Reply::Double(f64::NAN)),
-            (st("last_run_time_ms"), Reply::Double(0.0)),
-            (st("gc_numeric_trees_missed"), Reply::Double(0.0)),
-            (st("gc_blocks_denied"), Reply::Double(0.0)),
-        ]),
-    ));
+    // `GCContext_RenderStats` (fork GC); TEMPORARY indexes (and `search-no-gc`) have no GC.
+    if let Some(gc) = &ix.gc {
+        top.push((
+            st("gc_stats"),
+            Reply::Map(vec![
+                (st("bytes_collected"), Reply::Double(gc.total_collected as f64)),
+                (st("total_ms_run"), Reply::Double(gc.total_ms_run as f64)),
+                (st("total_cycles"), Reply::Double(gc.num_cycles as f64)),
+                (st("average_cycle_time_ms"), Reply::Double(gc.total_ms_run as f64 / gc.num_cycles as f64)),
+                (st("last_run_time_ms"), Reply::Double(gc.last_run_ms as f64)),
+                (st("gc_numeric_trees_missed"), Reply::Double(gc.numeric_nodes_missed as f64)),
+                (st("gc_blocks_denied"), Reply::Double(gc.blocks_denied as f64)),
+            ]),
+        ));
+    }
     top.push((
         st("cursor_stats"),
         Reply::Map(vec![
@@ -1255,8 +1305,9 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
     ));
     top.push((st("Index Errors"), index_error(&ix.error, with_times, true)));
     let mut fields = Vec::new();
-    for (fs, fi) in sp.fields.iter().zip(&ix.fields) {
-        let mut m = vec![(st("identifier"), simple(fs.path())), (st("attribute"), simple(&fs.name)), (st("Index Errors"), index_error(&fi.error, with_times, false))];
+    for (i, (fs, fi)) in sp.fields.iter().zip(&ix.fields).enumerate() {
+        let (path, name) = ident(i, fs);
+        let mut m = vec![(st("identifier"), path), (st("attribute"), name), (st("Index Errors"), index_error(&fi.error, with_times, false))];
         if fs.is(spec::T_VECTOR) {
             let v = fi.vectors.as_ref();
             m.push((st("memory"), Reply::Int(v.map_or(0, |v| v.memory()) as i64)));
@@ -1267,7 +1318,7 @@ fn info(cx: &mut Cx, name: &[u8], with_times: bool) -> CmdResult {
         fields.push(Reply::Map(m));
     }
     top.push((st("field statistics"), Reply::Array(fields)));
-    Ok(Reply::Map(top))
+    Reply::Map(top)
 }
 
 #[cfg(test)]

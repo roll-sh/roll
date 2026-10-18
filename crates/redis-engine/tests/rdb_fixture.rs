@@ -29,7 +29,7 @@ fn read(file: &[u8]) -> Read {
                 aux.push((String::from_utf8_lossy(key).into_owned(), String::from_utf8_lossy(value).into_owned()))
             }
             LoadItem::Function(code) => funcs.push(code),
-            LoadItem::ResizeDb { .. } | LoadItem::Untemplate { .. } => {}
+            LoadItem::ResizeDb { .. } | LoadItem::Untemplate { .. } | LoadItem::ModuleAux { .. } => {}
         }
         Ok(())
     })

@@ -122,6 +122,21 @@ impl ModuleOut for Encoder {
     }
 }
 
+/// `RM_SaveDataTypeToString`: what a module's `rdb_save` wrote, each item behind its opcode,
+/// with no EOF marker.
+pub fn module_items(items: &[crate::search::trie::RdbItem]) -> Vec<u8> {
+    use crate::search::trie::RdbItem;
+    let mut enc = Encoder::new(0);
+    for it in items {
+        match it {
+            RdbItem::Unsigned(v) => enc.uint(*v),
+            RdbItem::Double(v) => enc.double(*v),
+            RdbItem::StringBuffer(b) => enc.buffer(b),
+        }
+    }
+    enc.out
+}
+
 impl Encoder {
     pub fn new(now: i64) -> Self {
         Encoder { out: Vec::new(), lp: Vec::new(), z: Vec::new(), now, dump: false }
@@ -554,6 +569,26 @@ impl<W: Write> RdbWriter<W> {
                 self.enc.string(f);
             }
         }
+        self.flush()
+    }
+
+    /// A module's aux data (`rdbSaveSingleModuleAux`): `MODULE_AUX`, the type id, `when` behind
+    /// a UINT opcode, what the module saved, the EOF opcode.
+    pub fn module_aux(&mut self, id: u64, when: u64, items: &[crate::search::trie::RdbItem]) -> io::Result<()> {
+        use crate::bloom::ModuleOut;
+        use crate::search::trie::RdbItem;
+        self.enc.out.push(op::MODULE_AUX);
+        self.enc.len(id);
+        self.enc.len(super::MODULE_OPCODE_UINT);
+        self.enc.len(when);
+        for it in items {
+            match it {
+                RdbItem::Unsigned(v) => self.enc.uint(*v),
+                RdbItem::Double(v) => self.enc.double(*v),
+                RdbItem::StringBuffer(b) => self.enc.buffer(b),
+            }
+        }
+        self.enc.len(super::MODULE_OPCODE_EOF);
         self.flush()
     }
 

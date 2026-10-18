@@ -43,10 +43,10 @@ fn exists_in(t: &Trie, term: &[u8]) -> Option<f32> {
 }
 
 /// A dictionary's trie (`Trie_Sort_Lex`, as FT.DICTADD builds it).
-fn dict_trie(terms: &std::collections::BTreeSet<Vec<u16>>) -> Trie {
+fn dict_trie(terms: &crate::search::global::Dict) -> Trie {
     let mut t = Trie::new(SortMode::Lex);
-    for r in terms {
-        t.insert_runes(r, 1.0, true, None, 0);
+    for (r, &score) in terms {
+        t.insert_runes(r, score as f64, false, None, 0);
     }
     t
 }
@@ -55,7 +55,7 @@ struct Ctx<'a> {
     ix: &'a Index,
     include: Vec<Bytes>,
     exclude: Vec<Bytes>,
-    dicts: &'a mut crate::search::rsdict::RsDict<std::collections::BTreeSet<Vec<u16>>>,
+    dicts: &'a mut crate::search::rsdict::RsDict<crate::search::global::Dict>,
     distance: i32,
     full: bool,
     resp3: bool,

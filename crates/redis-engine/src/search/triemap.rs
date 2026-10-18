@@ -196,6 +196,14 @@ impl<D> TrieMap<D> {
         self.len
     }
 
+    /// `n_nodes`: the root and its descendants.
+    pub fn n_nodes(&self) -> usize {
+        fn count<D>(n: &Node<D>) -> usize {
+            1 + n.children.iter().map(count).sum::<usize>()
+        }
+        self.root.as_ref().map_or(0, count)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

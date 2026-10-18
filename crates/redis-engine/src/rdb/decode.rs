@@ -7,6 +7,7 @@
 use super::listpack::{Item, Listpack};
 use super::ziplist::{Ziplist, Zipmap, intset};
 use super::{RdbError, crc64, lzf, ty};
+use crate::search::trie::RdbItem as ModuleItem;
 use crate::bloom::{ModuleIn, Sketch, SketchKind};
 use crate::config::Config;
 use crate::types::stream::{Group, Stream, StreamId};
@@ -357,29 +358,35 @@ impl<'c, S: Src> Dec<'c, S> {
         })
     }
 
-    /// Skip a `MODULE_AUX` record (the module annotates every value it writes).
-    pub fn skip_module_aux(&mut self) -> R<()> {
-        self.len()?;
+    /// A `MODULE_AUX` record: the module type id, `when` (`REDISMODULE_AUX_BEFORE_RDB` /
+    /// `AFTER_RDB`) and what the module saved, up to its EOF opcode.
+    pub fn module_aux(&mut self) -> R<(u64, u64, Vec<ModuleItem>)> {
+        let id = self.len()?;
         let when_op = self.len()?;
-        self.len()?;
+        let when = self.len()?;
         if when_op != 2 {
             return Err(bad("bad module AUX when_opcode"));
         }
-        let mut a = take(&mut self.a);
+        let mut items = Vec::new();
         loop {
-            match self.len()? {
+            items.push(match self.len()? {
                 0 => break,
-                1 | 2 => {
-                    self.len_enc()?;
+                1 | 2 => ModuleItem::Unsigned(self.len_enc()?.0),
+                3 => {
+                    let mut x = [0u8; 4];
+                    self.src.fill(&mut x)?;
+                    ModuleItem::Double(f32::from_le_bytes(x) as f64)
                 }
-                3 => self.src.fill(&mut [0u8; 4])?,
-                4 => self.src.fill(&mut [0u8; 8])?,
-                5 => self.string(&mut a)?,
+                4 => ModuleItem::Double(self.f64()?),
+                5 => {
+                    let mut s = Vec::new();
+                    self.string(&mut s)?;
+                    ModuleItem::StringBuffer(s)
+                }
                 _ => return Err(bad("unknown module opcode")),
-            }
+            });
         }
-        self.a = a;
-        Ok(())
+        Ok((id, when, items))
     }
 
     // ---- objects ----

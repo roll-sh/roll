@@ -631,6 +631,10 @@ pub struct VecIndex {
     trained: bool,
     /// The allocator's view for FT.INFO (see [`VecIndex::memory`]).
     alloc: Alloc,
+    /// `lastMode`: the last search mode (FT.DEBUG VECSIM_INFO), None for `EMPTY_MODE`.
+    last_mode: std::cell::Cell<Option<Mode>>,
+    /// HNSW's `maxLevel` and `entrypointNode`'s label (None while the graph is empty).
+    pub max_level: Option<(usize, u64)>,
 }
 
 /// What the index's allocator holds besides the vectors: FLAT's `idToLabelMapping` capacity,
@@ -666,6 +670,8 @@ impl VecIndex {
             svs_threshold: if p.training_threshold == 0 { 10 * 1024 } else { p.training_threshold },
             trained: false,
             alloc: Alloc { cap: 0, buckets: 1, blocks_cap: 0, elems: 0, graph: 0, rng: 100, visited: std::cell::Cell::new(false) },
+            last_mode: std::cell::Cell::new(None),
+            max_level: None,
         }
     }
 
@@ -776,6 +782,7 @@ impl VecIndex {
 
     /// `topKQuery` (sorted by score, then label).
     pub fn top_k(&self, blob: &[u8], k: usize) -> Vec<VecRes> {
+        self.last_mode.set(Some(Mode::StandardKnn));
         if k == 0 {
             return Vec::new();
         }
@@ -823,6 +830,7 @@ impl VecIndex {
 
     /// `rangeQuery`'s results in the order the scan found them.
     pub fn range_unsorted(&self, blob: &[u8], radius: f64) -> Vec<VecRes> {
+        self.last_mode.set(Some(Mode::RangeQuery));
         self.searched();
         let q = self.preprocess(blob);
         let radius = if self.ty == VecType::Float64 { radius } else { radius as f32 as f64 };
@@ -853,6 +861,32 @@ impl VecIndex {
     /// `preferAdHocSearch` (a tiered index asks its bigger tier: the graph, or for SVS-VAMANA
     /// its flat buffer).
     pub fn prefer_adhoc(&self, subset: usize, k: usize) -> bool {
+        self.prefer_adhoc_check(subset, k, true)
+    }
+
+    /// `preferAdHocSearch` with its mode: ad hoc on the first check, batches switching to ad
+    /// hoc on a later one, else batches.
+    pub fn prefer_adhoc_check(&self, subset: usize, k: usize, initial: bool) -> bool {
+        let res = self.prefer_adhoc_tree(subset, k);
+        self.last_mode.set(Some(match (res, initial) {
+            (true, true) => Mode::HybridAdhocBf,
+            (true, false) => Mode::HybridBatchesToAdhocBf,
+            (false, _) => Mode::HybridBatches,
+        }));
+        res
+    }
+
+    /// `setLastSearchMode` (an explicit HYBRID_POLICY).
+    pub fn set_last_mode(&self, mode: Mode) {
+        self.last_mode.set(Some(mode));
+    }
+
+    /// `VecSimSearchMode_ToString(lastMode)`.
+    pub fn last_mode_name(&self) -> &'static str {
+        self.last_mode.get().map_or("EMPTY_MODE", Mode::name)
+    }
+
+    fn prefer_adhoc_tree(&self, subset: usize, k: usize) -> bool {
         let index_size = self.size();
         let subset = subset.min(index_size);
         let d = self.dim;
@@ -1082,6 +1116,9 @@ impl VecIndex {
                 a.visited.set(true);
             }
             let level = hnsw_level(&mut a.rng, self.m);
+            if self.max_level.is_none_or(|(l, _)| level > l) {
+                self.max_level = Some((level, label));
+            }
             a.graph += 72;
             if level > 0 {
                 a.graph += hdr(level * (16 + 4 * self.m)) + 72 * level;
@@ -1151,6 +1188,11 @@ impl VecIndex {
         let a = &self.alloc;
         let blocks = |n: usize| n.div_ceil(b) * hdr(b * self.stored);
         if self.algo == Algo::Hnsw {
+            if a.elems == 0 {
+                // nothing inserted yet (FT.DEBUG VECSIM_INFO created it): the tiered index's
+                // management layer, its flat buffer and the empty graph
+                return 600 + 488 + cos + 896;
+            }
             let nb = a.elems.div_ceil(b).max(1);
             let graph_block = hdr(b * (32 + 8 * self.m));
             return 20800 + cos + nb * (hdr(b * self.stored) + graph_block) + (nb - 1) * 12384
@@ -1162,6 +1204,24 @@ impl VecIndex {
         let entries: usize = if self.multi { self.lookup.values().map(|v| multi_entry(v.len())).sum() } else { 32 * self.lookup.len() };
         let flat = 488 + cos + hdr(a.blocks_cap * 48) + blocks(self.count()) + hdr(a.cap * 8) + bucket_bytes(a.buckets) + entries;
         if self.algo == Algo::Svs { flat + 984 } else { flat }
+    }
+}
+
+impl VecIndex {
+    /// A tiered HNSW index's parts (`MANAGEMENT_LAYER_MEMORY`, the flat buffer's and the graph's
+    /// `MEMORY`) once background ingestion settled: the layer and the buffer grow once a vector
+    /// came through them, the layer again with pending swap jobs for marked deleted vectors.
+    pub fn tiered_parts(&self) -> (usize, usize, usize) {
+        let cos = if self.metric == Metric::Cosine { 64 } else { 0 };
+        let used = self.alloc.elems > 0;
+        let layer = match self.marked {
+            0 if used => 712,
+            0 => 600,
+            n => 1008 + 72 * (n - 1),
+        };
+        let buffer = 488 + cos + if used { 80 } else { 0 };
+        let total = self.memory();
+        (layer, buffer, total.saturating_sub(layer + buffer))
     }
 }
 

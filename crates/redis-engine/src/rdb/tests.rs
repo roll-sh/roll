@@ -580,7 +580,7 @@ fn save_and_load_multiple_dbs() {
             LoadItem::Entry { db, key, entry } => got.push((db, key.to_vec(), entry.expire, dump(&entry.value, 0))),
             LoadItem::Aux { key, value } => aux.push((String::from_utf8_lossy(key).into_owned(), String::from_utf8_lossy(value).into_owned())),
             LoadItem::Function(f) => fns.push(f),
-            LoadItem::ResizeDb { .. } | LoadItem::Untemplate { .. } => {}
+            LoadItem::ResizeDb { .. } | LoadItem::Untemplate { .. } | LoadItem::ModuleAux { .. } => {}
         }
         Ok(())
     })

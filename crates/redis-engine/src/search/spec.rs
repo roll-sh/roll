@@ -271,6 +271,10 @@ pub struct VectorParams {
     pub quant: Quant,
     pub training_threshold: usize,
     pub reduce: usize,
+    /// EPSILON / SEARCH_WINDOW_SIZE were given: the module's params hold 0 otherwise (VecSim
+    /// applies its defaults), which is what the RDB saves.
+    pub epsilon_given: bool,
+    pub search_window_given: bool,
 }
 
 impl VectorParams {
@@ -293,6 +297,8 @@ impl VectorParams {
             quant: Quant::None,
             training_threshold: 0,
             reduce: 0,
+            epsilon_given: false,
+            search_window_given: false,
         }
     }
 
@@ -339,7 +345,7 @@ pub struct Field {
 }
 
 impl Field {
-    fn new(name: Bytes, path: Option<Bytes>, index: usize) -> Self {
+    pub(crate) fn new(name: Bytes, path: Option<Bytes>, index: usize) -> Self {
         Field {
             name,
             path,
@@ -720,6 +726,10 @@ impl Spec {
                 return Err(QErr::user(Code::Inval, "Duplicate field in schema", format!(" - {}", text(&name))));
             }
             let mut fs = Field::new(name, path, self.fields.len());
+            if self.is_json() {
+                // `TAG_FIELD_DEFAULT_JSON_SEP`: JSON tags aren't split.
+                fs.tag_sep = 0;
+            }
             self.parse_field(ac, &mut fs, cfg)?;
             if fs.is(T_TEXT) && fs.indexable() {
                 let id = self.text_ids.len();
@@ -997,6 +1007,7 @@ fn parse_hnsw(ac: &mut Ac, p: &mut VectorParams) -> QResult<()> {
             p.ef_runtime = sub.get_size(GE1).map_err(|e| bad("EF_RUNTIME", e))? as usize;
         } else if sub.advance_if("EPSILON") {
             p.epsilon = sub.get_double(GE0).map_err(|e| bad("EPSILON", e))?;
+            p.epsilon_given = true;
         } else if sub.advance_if("RERANK") {
             return Err(QErr::new(Code::Inval, "RERANK is only supported for disk-based vector indexes"));
         } else {
@@ -1123,8 +1134,10 @@ fn parse_svs(ac: &mut Ac, p: &mut VectorParams) -> QResult<()> {
             };
         } else if ac.advance_if("SEARCH_WINDOW_SIZE") {
             p.search_window_size = ac.get_size(GE1).map_err(|e| bad("SEARCH_WINDOW_SIZE", e))? as usize;
+            p.search_window_given = true;
         } else if ac.advance_if("EPSILON") {
             p.epsilon = ac.get_double(GE0).map_err(|e| bad("EPSILON", e))?;
+            p.epsilon_given = true;
         } else if ac.advance_if("REDUCE") {
             p.reduce = ac.get_size(GE1).map_err(|e| bad("REDUCE", e))? as usize;
         } else if ac.advance_if("TRAINING_THRESHOLD") {
@@ -1161,7 +1174,7 @@ fn parse_svs(ac: &mut Ac, p: &mut VectorParams) -> QResult<()> {
 }
 
 /// `VecSimIndex_validate_params`: the block size the memory limit allows.
-fn validate_vector(p: &mut VectorParams, cfg: &crate::config::Config) -> QResult<()> {
+pub(crate) fn validate_vector(p: &mut VectorParams, cfg: &crate::config::Config) -> QResult<()> {
     let element = super::vector::element_size(p);
     let limit = {
         let resize = cfg.num("search-vss-max-resize") as usize;

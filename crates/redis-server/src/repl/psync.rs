@@ -409,18 +409,24 @@ fn load_full(db: &Database, data: &[u8]) -> anyhow::Result<()> {
     let mut entries = Vec::new();
     let mut functions = Vec::new();
     let mut untemplate = Vec::new();
+    let mut aux = Vec::new();
     let reg = eng.hub.templates.clone();
     rdb::load_with(data, &cfg, Some(&reg), |it| {
         match it {
             LoadItem::Function(code) => functions.push(code),
             LoadItem::Entry { db, key, entry } if !entry.expired(now) => entries.push((db, key, entry)),
             LoadItem::Untemplate { db, key } => untemplate.push((db, key)),
+            LoadItem::ModuleAux { id, when, items } => aux.push((id, when, items)),
             _ => {}
         }
         Ok::<(), RdbError>(())
     })
     .map_err(|e| anyhow::anyhow!("MASTER sent a bad RDB: {e}"))?;
+    let search = eng.search_aux(&aux).map_err(|e| anyhow::anyhow!("MASTER sent a bad RDB: {e}"))?;
+    // `emptyData` (its FLUSHDB event clears the search module), then `LOADING` start.
+    eng.search.flush();
     eng.flush_all();
+    eng.search_loading(search.specs);
     eng.scripting
         .restore_libraries(&functions, redis_engine::commands::scripting::RestorePolicy::Flush)
         .map_err(|e| anyhow::anyhow!("MASTER sent bad functions: {e}"))?;
@@ -429,6 +435,7 @@ fn load_full(db: &Database, data: &[u8]) -> anyhow::Result<()> {
         if !d.keys.contains_key(&key[..]) {
             d.insert_new(&key, entry);
             eng.ts_loaded(i, &key);
+            eng.search_loaded(i, &key);
         }
     }
     let lim = redis_engine::types::hash::Limits::of(&cfg);
@@ -437,6 +444,7 @@ fn load_full(db: &Database, data: &[u8]) -> anyhow::Result<()> {
             d.untemplate(&key, lim);
         }
     }
+    eng.search_loaded_dicts(search.dicts);
     Ok(())
 }
 

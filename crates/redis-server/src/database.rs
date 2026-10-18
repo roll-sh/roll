@@ -466,6 +466,7 @@ impl Database {
                     eng.rehash(100);
                     eng.cron_metrics();
                     eng.persist_cron(redis_engine::util::now_ms());
+                    eng.search_cron(redis_engine::util::now_ms());
                     if i == 0 {
                         eng.clients_cron(redis_engine::util::now_ms());
                         eng.hub.templates.cron(redis_engine::util::now_ms());

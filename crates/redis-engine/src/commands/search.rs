@@ -98,15 +98,15 @@ static FT_CURSOR: &[Command] = &[
 ];
 
 static FT_CURSOR_LOCAL: &[Command] = &[
-    cmd!("GC", -2, READONLY | MODULE, 0, 0, 0, not_yet, Module),
+    cmd!("GC", -2, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_gc, Module),
     cmd!("PROFILE", -2, READONLY | MODULE, 0, 0, 0, not_yet, Module),
-    cmd!("DEL", -4, READONLY | MODULE, 0, 0, 0, not_yet, Module),
-    cmd!("READ", -4, READONLY | MODULE, 0, 0, 0, not_yet, Module),
+    cmd!("DEL", -4, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_del, Module),
+    cmd!("READ", -4, READONLY | MODULE, 0, 0, 0, super::ft_aggregate::ft_cursor_read, Module),
 ];
 
 macro_rules! debug_subs {
     ($($n:literal),* $(,)?) => {
-        &[$(cmd!($n, -2, READONLY | MODULE, 0, 0, 0, not_yet, Module)),*]
+        &[$(cmd!($n, -2, READONLY | MODULE, 0, 0, 0, super::ft_debug::ft_debug, Module)),*]
     };
 }
 

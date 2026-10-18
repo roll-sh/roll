@@ -17,7 +17,7 @@ mod lzf;
 mod ziplist;
 
 pub use crc64::crc64;
-pub use encode::{Lru, RdbWriter};
+pub use encode::{Lru, RdbWriter, module_items};
 pub(crate) use encode::double2ll;
 pub(crate) use listpack::LpWriter;
 pub(crate) use lzf::compress as lzf_compress;
@@ -71,6 +71,10 @@ pub(crate) mod ty {
     pub const HASH_TMPL_ARRAY_REF: u8 = 32;
     pub const GCRA: u8 = 33;
 }
+
+/// `REDISMODULE_AUX_BEFORE_RDB` / `REDISMODULE_AUX_AFTER_RDB`: where a module's aux data goes.
+pub const AUX_BEFORE_RDB: u64 = 1;
+pub const AUX_AFTER_RDB: u64 = 2;
 
 /// Opcodes inside a `MODULE_2` value (`RDB_MODULE_OPCODE_*`).
 pub(crate) const MODULE_OPCODE_EOF: u64 = 0;
@@ -319,6 +323,9 @@ pub fn save<'a>(
 pub enum LoadItem<'a> {
     /// An `AUX` field.
     Aux { key: &'a [u8], value: &'a [u8] },
+    /// A `MODULE_AUX` record: the module type's id (with its encoding version in the low 10
+    /// bits), `when` it was saved ([`AUX_BEFORE_RDB`] / [`AUX_AFTER_RDB`]) and what it holds.
+    ModuleAux { id: u64, when: u64, items: Vec<crate::search::trie::RdbItem> },
     /// A `FUNCTION2` record: the library source, not loaded.
     Function(Vec<u8>),
     /// `RESIZEDB`: how many keys (and keys with a TTL) database `db` is about to receive.
@@ -396,7 +403,7 @@ pub struct LoadInfo {
 }
 
 /// Read an RDB file (versions 1 to 15), handing each item to `sink`. The CRC64 trailer is
-/// verified unless it is zero. Module AUX data is skipped; module values, hash templates and
+/// verified unless it is zero. Module AUX data is delivered as read; module values, hash templates and
 /// arrays are [`RdbError::Unsupported`]. `SELECTDB` beyond `cfg.databases` is an error.
 pub fn load(data: impl Read, cfg: &Config, sink: impl FnMut(LoadItem) -> Result<(), RdbError>) -> Result<LoadInfo, RdbError> {
     load_with(data, cfg, None, sink)
@@ -467,7 +474,10 @@ pub fn load_with(
                 d.string(&mut b)?;
                 sink(LoadItem::Aux { key: &a, value: &b })?;
             }
-            op::MODULE_AUX => d.skip_module_aux()?,
+            op::MODULE_AUX => {
+                let (id, when, items) = d.module_aux()?;
+                sink(LoadItem::ModuleAux { id, when, items })?;
+            }
             op::FUNCTION_PRE_GA => return Err(RdbError::Unsupported("pre-release function format")),
             op::FUNCTION2 => {
                 let mut code = Vec::new();

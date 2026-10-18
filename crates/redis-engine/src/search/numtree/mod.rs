@@ -158,6 +158,38 @@ impl NumericRange {
     pub fn iter(&self) -> impl Iterator<Item = (DocId, f64)> + '_ {
         self.entries.reader().map(|r| (r.doc_id, r.numeric))
     }
+
+    /// A GC pass over the entries (`NumericRangeNode::scan_gc` then `apply_gc_to_node`): when
+    /// something was collected the cardinality estimate restarts from the surviving values
+    /// (`reset_cardinality_after_gc`); the bounds stay.
+    pub fn gc(&mut self, exists: &dyn Fn(DocId) -> bool) -> Option<super::invidx::GcInfo> {
+        let mut hll = Hll::new();
+        let info = self.entries.gc(exists, &mut |r| hll.add(r.numeric))?;
+        self.hll = hll;
+        Some(info)
+    }
+}
+
+/// `TrimEmptyLeavesResult`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrimResult {
+    pub size_delta: i64,
+    pub changed: bool,
+    pub num_ranges_delta: i32,
+    pub num_leaves_delta: i32,
+    pub block_count_delta: i32,
+}
+
+/// What a GC pass over a whole tree changed, summed over its ranges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TreeGc {
+    pub bytes_freed: usize,
+    pub bytes_allocated: usize,
+    /// Records removed from every range (retained inner ranges included).
+    pub entries_removed: usize,
+    pub block_count_delta: i64,
+    /// The nodes that had something collected.
+    pub nodes: usize,
 }
 
 /// `NodeIndex`: a slot of the tree's node arena.
@@ -239,21 +271,69 @@ impl Node {
     }
 }
 
-/// `NodeArena` over `generational_slab::Slab`: nodes by slot, with the capacity the slab's `Vec`
-/// would have (it only ever grows through `push`).
+/// A slab slot (`generational_slab::Entry`): a node, or a hole linking to the next free one.
+#[derive(Clone, Debug)]
+enum Slot {
+    Occupied(Node),
+    Vacant(u32),
+}
+
+/// `NodeArena` over `generational_slab::Slab`: nodes by slot, holes reused last-freed first,
+/// with the capacity the slab's `Vec` would have (doubling on push, exact after a compaction).
 #[derive(Clone, Debug, Default)]
 struct Arena {
-    nodes: Vec<Node>,
+    slots: Vec<Slot>,
     cap: usize,
+    len: usize,
+    /// The next slot an insert takes (`slots.len()` when there's no hole).
+    next: u32,
 }
 
 impl Arena {
     fn insert(&mut self, node: Node) -> NodeId {
-        if self.nodes.len() == self.cap {
-            self.cap = (self.cap * 2).max(self.nodes.len() + 1).max(MIN_ARENA_CAPACITY);
+        let pos = self.next;
+        if pos as usize == self.slots.len() {
+            if self.slots.len() == self.cap {
+                self.cap = (self.cap * 2).max(self.slots.len() + 1).max(MIN_ARENA_CAPACITY);
+            }
+            self.slots.push(Slot::Occupied(node));
+            self.next = pos + 1;
+        } else {
+            let Slot::Vacant(next) = self.slots[pos as usize] else { unreachable!("the free list points at a hole") };
+            self.next = next;
+            self.slots[pos as usize] = Slot::Occupied(node);
         }
-        self.nodes.push(node);
-        NodeId((self.nodes.len() - 1) as u32)
+        self.len += 1;
+        NodeId(pos)
+    }
+
+    /// `Slab::remove`.
+    fn remove(&mut self, id: NodeId) -> Node {
+        let slot = std::mem::replace(&mut self.slots[id.0 as usize], Slot::Vacant(self.next));
+        let Slot::Occupied(node) = slot else { panic!("removing a free slot") };
+        self.len -= 1;
+        self.next = id.0;
+        node
+    }
+
+    /// `Slab::compact`: the last occupied slots move into the first holes, trailing holes go and
+    /// the capacity shrinks to fit. Returns the moves (from, to).
+    fn compact(&mut self) -> Vec<(u32, u32)> {
+        let mut moves = Vec::new();
+        let mut first_free = 0usize;
+        while self.slots.len() > self.len {
+            if let Some(Slot::Occupied(node)) = self.slots.pop() {
+                while matches!(self.slots.get(first_free), Some(Slot::Occupied(_))) {
+                    first_free += 1;
+                }
+                moves.push((self.slots.len() as u32, first_free as u32));
+                self.slots[first_free] = Slot::Occupied(node);
+                first_free += 1;
+            }
+        }
+        self.next = self.len as u32;
+        self.cap = self.slots.len();
+        moves
     }
 
     const fn mem_usage(&self) -> usize {
@@ -265,13 +345,19 @@ impl std::ops::Index<NodeId> for Arena {
     type Output = Node;
 
     fn index(&self, id: NodeId) -> &Node {
-        &self.nodes[id.0 as usize]
+        match &self.slots[id.0 as usize] {
+            Slot::Occupied(n) => n,
+            Slot::Vacant(_) => panic!("a free slot"),
+        }
     }
 }
 
 impl std::ops::IndexMut<NodeId> for Arena {
     fn index_mut(&mut self, id: NodeId) -> &mut Node {
-        &mut self.nodes[id.0 as usize]
+        match &mut self.slots[id.0 as usize] {
+            Slot::Occupied(n) => n,
+            Slot::Vacant(_) => panic!("a free slot"),
+        }
     }
 }
 
@@ -514,6 +600,92 @@ impl NumericRangeTree {
         rv
     }
 
+    /// The fork GC over every range (`NumericGcScanner` in the child, `apply_gc_to_node` per node
+    /// in the parent): leaves that empty count as empty leaves, only leaves' removals count
+    /// against `num_entries`.
+    pub fn gc(&mut self, exists: &dyn Fn(DocId) -> bool) -> TreeGc {
+        let mut out = TreeGc::default();
+        let mut stack = vec![self.root];
+        let mut ids = Vec::new();
+        while let Some(id) = stack.pop() {
+            ids.push(id);
+            if let Node::Internal(n) = &self.nodes[id] {
+                stack.push(n.left);
+                stack.push(n.right);
+            }
+        }
+        for id in ids {
+            let node = &mut self.nodes[id];
+            let is_leaf = node.is_leaf();
+            let Some(range) = node.range_mut() else { continue };
+            let was_empty = range.num_docs() == 0;
+            let Some(info) = range.gc(exists) else { continue };
+            let became_empty = !was_empty && range.num_docs() == 0;
+            if is_leaf && became_empty {
+                self.stats.empty_leaves += 1;
+            }
+            if is_leaf {
+                self.stats.num_entries -= info.entries_removed;
+            }
+            self.stats.inverted_indexes_size = (self.stats.inverted_indexes_size + info.bytes_allocated) - info.bytes_freed;
+            out.bytes_freed += info.bytes_freed;
+            out.bytes_allocated += info.bytes_allocated;
+            out.entries_removed += info.entries_removed;
+            out.block_count_delta += info.block_count_delta;
+            out.nodes += 1;
+        }
+        out
+    }
+
+    /// `is_sparse`: at least half the leaves are empty.
+    pub const fn is_sparse(&self) -> bool {
+        self.stats.empty_leaves * 2 >= self.stats.num_leaves
+    }
+
+    /// `compact_if_sparse` (after a GC pass, with `search-_fork-gc-clean-numeric-empty-nodes`):
+    /// trims the empty leaves and compacts the node slab. Returns the trim and the slab bytes
+    /// freed.
+    pub fn compact_if_sparse(&mut self) -> (TrimResult, usize) {
+        if !self.is_sparse() {
+            return (TrimResult::default(), 0);
+        }
+        let rv = self.trim_empty_leaves();
+        let before = self.nodes.mem_usage();
+        for (from, to) in self.nodes.compact() {
+            let (from, to) = (NodeId(from), NodeId(to));
+            if self.root == from {
+                self.root = to;
+            }
+            for slot in &mut self.nodes.slots {
+                if let Slot::Occupied(Node::Internal(n)) = slot {
+                    if n.left == from {
+                        n.left = to;
+                    }
+                    if n.right == from {
+                        n.right = to;
+                    }
+                }
+            }
+        }
+        (rv, before - self.nodes.mem_usage())
+    }
+
+    /// `trim_empty_leaves` (FT.DEBUG GC_CLEAN_NUMERIC): empty subtrees go, the surviving
+    /// sibling takes its parent's slot, and nodes above rebalance.
+    pub fn trim_empty_leaves(&mut self) -> TrimResult {
+        let mut rv = TrimResult::default();
+        remove_empty_children(&mut self.nodes, self.root, &mut rv);
+        if rv.changed {
+            self.revision_id = self.revision_id.wrapping_add(1);
+            let s = &mut self.stats;
+            s.num_ranges = s.num_ranges.saturating_add_signed(rv.num_ranges_delta as isize);
+            s.empty_leaves = s.empty_leaves.saturating_add_signed(rv.num_leaves_delta as isize);
+            s.num_leaves = s.num_leaves.saturating_add_signed(rv.num_leaves_delta as isize);
+            s.inverted_indexes_size = s.inverted_indexes_size.saturating_add_signed(rv.size_delta as isize);
+        }
+        rv
+    }
+
     /// `NumericRangeTree::find` (`NumericRangeTree_Find`): the non-empty ranges a query needs,
     /// in the filter's order. A range inside `[min, max]` stands for its whole subtree; leaves
     /// that only overlap are returned too. With a limit, the walk stops once the docs counted
@@ -696,6 +868,60 @@ fn compute_median(range: &NumericRange) -> f64 {
     }
     let mid = values.len() / 2;
     *values.select_nth_unstable_by(mid, f64::total_cmp).1
+}
+
+/// `remove_empty_children`: whether the subtree is empty, trimming its empty parts.
+fn remove_empty_children(nodes: &mut Arena, id: NodeId, rv: &mut TrimResult) -> bool {
+    let Some((left, right)) = nodes[id].children() else {
+        return nodes[id].range().is_some_and(|r| r.num_docs() == 0);
+    };
+    let right_empty = remove_empty_children(nodes, right, rv);
+    let left_empty = remove_empty_children(nodes, left, rv);
+    if !right_empty && !left_empty {
+        if rv.changed {
+            let b = balance_node(nodes, id);
+            rv.size_delta += b.dropped.size_delta;
+            rv.num_ranges_delta += b.dropped.num_ranges_delta;
+            rv.block_count_delta += b.dropped.block_count_delta;
+            if let Node::Internal(n) = &mut nodes[id] {
+                n.max_depth = b.new_depth;
+            }
+        }
+        return false;
+    }
+    if nodes[id].range().is_some_and(|r| r.num_docs() != 0) {
+        return false;
+    }
+    rv.changed = true;
+    if let Node::Internal(n) = &mut nodes[id]
+        && let Some(r) = n.range.take()
+    {
+        rv.size_delta -= r.memory_usage() as i64;
+        rv.num_ranges_delta -= 1;
+        rv.block_count_delta -= r.num_blocks() as i32;
+    }
+    let (gone, kept) = if right_empty { (right, left) } else { (left, right) };
+    free_subtree(nodes, gone, rv);
+    nodes[id] = nodes.remove(kept);
+    right_empty && left_empty
+}
+
+/// `free_subtree`.
+fn free_subtree(nodes: &mut Arena, id: NodeId, rv: &mut TrimResult) {
+    let children = nodes[id].children();
+    if let Some(r) = nodes[id].range() {
+        if nodes[id].is_leaf() {
+            rv.num_leaves_delta -= 1;
+        }
+        rv.size_delta -= r.memory_usage() as i64;
+        rv.num_ranges_delta -= 1;
+        rv.block_count_delta -= r.num_blocks() as i32;
+    }
+    if let Some((l, r)) = children {
+        free_subtree(nodes, l, rv);
+        free_subtree(nodes, r, rv);
+    }
+    nodes.remove(id);
 }
 
 /// `remove_range`: an inner node stops retaining its range.

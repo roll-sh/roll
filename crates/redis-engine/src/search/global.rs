@@ -17,6 +17,9 @@ pub const MAX_INDEXES: usize = 200_000;
 pub const EVENT_CLASSES: u32 =
     crate::notify::GENERIC | crate::notify::HASH | crate::notify::STRING | crate::notify::EXPIRED | crate::notify::EVICTED | crate::notify::MODULE;
 
+/// A spelling dictionary's trie: terms (runes, in trie order) and their scores.
+pub type Dict = std::collections::BTreeMap<Vec<u16>, f32>;
+
 #[derive(Debug, Default)]
 pub struct Global {
     /// `specDict_g`: indexes by name.
@@ -32,12 +35,39 @@ pub struct Global {
     pub hash_fields: Option<Vec<Bytes>>,
     /// `global_RenameFromKey`.
     pub rename_from: Option<Bytes>,
-    /// `spellCheckDicts`: spelling dictionaries (FT.DICTADD), their terms as runes in trie order.
-    pub dicts: RsDict<std::collections::BTreeSet<Vec<u16>>>,
+    /// `spellCheckDicts`: spelling dictionaries (FT.DICTADD), their terms as runes in trie order
+    /// with their trie scores (1 per FT.DICTADD of the term).
+    pub dicts: RsDict<Dict>,
     /// `maxIndexes_g` when FT.DEBUG SET_MAX_INDEXES changed it.
     pub max_indexes: Option<usize>,
     /// `g_CursorsList`: FT.AGGREGATE WITHCURSOR's cursors (they outlive their index).
     pub cursors: super::cursor::Cursors,
+    /// The shared SVS thread pool (`VecSimSVSThreadPoolImpl`) had an index attached: an SVS
+    /// index was built (its first vector arrived) at some point. Process-wide and sticky.
+    pub svs_pool: bool,
+    /// The process-wide switches FT.DEBUG sets.
+    pub debug: DebugState,
+}
+
+/// What `_FT.DEBUG` toggles outside any index: the thread pools' pause states, the test
+/// scorers, the yield sleep and the VecSim timeout mock.
+#[derive(Debug, Default)]
+pub struct DebugState {
+    /// `workersThreadPool_pause` (search-workers' pool).
+    pub workers_paused: bool,
+    /// `ConcurrentSearch_pause` (the coordinator's pool).
+    pub coord_paused: bool,
+    /// `Ext_RegisterTestScorers` ran.
+    pub test_scorers: bool,
+    /// `indexerSleepBeforeYieldMicros`.
+    pub sleep_before_yield_us: u32,
+    /// VECSIM_MOCK_TIMEOUT enable.
+    pub vecsim_timeout: bool,
+}
+
+/// An index whose SVS-VAMANA vector index has been built.
+fn has_svs(ix: &Index) -> bool {
+    ix.fields.iter().any(|f| f.vectors.as_ref().is_some_and(|v| v.algo == super::spec::Algo::Svs))
 }
 
 impl Global {
@@ -57,14 +87,31 @@ impl Global {
         self.aliases.get(name)
     }
 
+    /// `VecSim_GetSharedMemory`: what the shared SVS thread pool's allocator holds once an index
+    /// attached, its slot vector and one `ThreadSlot` per worker (`search-workers`, at least 1).
+    pub fn vecsim_shared_memory(&self, workers: usize) -> usize {
+        if self.svs_pool || self.indexes.values().any(has_svs) { 192 + 80 * workers.max(1) } else { 0 }
+    }
+
     /// `maxIndexes_g`.
     pub fn max_indexes(&self) -> usize {
         self.max_indexes.unwrap_or(MAX_INDEXES)
     }
 
-    /// `Indexes_LoadIndexSpecUnsafeEx`: by name (or alias, unless `no_alias`), counting a use.
+    /// `Indexes_LoadIndexSpecUnsafeEx`: by name (or alias, unless `no_alias`), counting a use
+    /// and restarting a TEMPORARY index's timer (`IndexSpec_OnAcquire`).
     pub fn load(&mut self, name: &[u8], no_alias: bool) -> Option<Bytes> {
         let n = if no_alias { self.indexes.get_key_value(name).map(|(k, _)| k) } else { self.resolve(name) }.cloned()?;
+        if let Some(ix) = self.indexes.get_mut(&n) {
+            ix.counter += 1;
+            ix.restart_timer();
+        }
+        Some(n)
+    }
+
+    /// The same lookup with `INDEXSPEC_LOAD_NOTIMERUPDATE` (FT.DEBUG TTL and friends).
+    pub fn load_no_timer(&mut self, name: &[u8]) -> Option<Bytes> {
+        let n = self.resolve(name).cloned()?;
         if let Some(ix) = self.indexes.get_mut(&n) {
             ix.counter += 1;
         }
@@ -77,6 +124,16 @@ impl Global {
             && let Some(ix) = self.indexes.get_mut(&n)
         {
             ix.counter += 1;
+            ix.restart_timer();
+        }
+    }
+
+    /// `INDEXSPEC_LOAD_NOCOUNTERINC` (`VERIFY_ACL`): the timer restarts, no use is counted.
+    pub fn touch(&mut self, name: &[u8]) {
+        if let Some(n) = self.resolve(name).cloned()
+            && let Some(ix) = self.indexes.get_mut(&n)
+        {
+            ix.restart_timer();
         }
     }
 
@@ -131,6 +188,7 @@ impl Global {
     /// `Indexes_RemoveSpecFromGlobals`: the index, its prefixes and aliases go.
     pub fn remove(&mut self, name: &[u8]) -> Option<Index> {
         let index = self.indexes.delete(name)?;
+        self.svs_pool |= has_svs(&index);
         for p in &index.spec.rule.prefixes {
             if let Some(v) = self.prefixes.get_mut(p)
                 && let Some(i) = v.iter().position(|n| n.as_ref() == name)

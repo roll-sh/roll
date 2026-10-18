@@ -548,8 +548,10 @@ fn loadaof(cx: &mut Cx) -> CmdResult {
     r
 }
 
-/// `emptyData(-1, …)`: every database and the function libraries.
+/// `emptyData(-1, …)`: every database and the function libraries (its FLUSHDB event takes the
+/// search indexes and dictionaries, RediSearch's `onFlush`).
 fn empty_data(cx: &mut Cx) {
+    cx.eng.search.flush();
     cx.eng.flush_all();
     cx.eng.scripting.flush_functions();
 }

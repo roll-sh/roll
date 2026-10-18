@@ -274,7 +274,7 @@ pub(super) fn int_dictadd(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let name = Bytes::copy_from_slice(cstr(&args[1]));
     let dicts = &mut cx.eng.search.dicts;
     if !dicts.contains_key(&name) {
-        dicts.add(name.clone(), BTreeSet::new());
+        dicts.add(name.clone(), Default::default());
     }
     let d = dicts.find_mut(&name).expect("just added");
     let mut added = 0;
@@ -287,8 +287,13 @@ pub(super) fn int_dictadd(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         if r.is_empty() || r.len() >= 256 {
             continue;
         }
-        if d.insert(r) {
-            added += 1;
+        // `Trie_Insert(…, 1, incr 1, …)`: a term already there scores one more.
+        match d.get_mut(&r) {
+            Some(score) => *score += 1.0,
+            None => {
+                d.insert(r, 1.0);
+                added += 1;
+            }
         }
     }
     replicate_verbatim(cx, b"_FT.DICTADD", args);
@@ -308,7 +313,7 @@ pub(super) fn int_dictdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             if r.len() > 256 {
                 continue;
             }
-            if d.remove(&r) {
+            if d.remove(&r).is_some() {
                 deleted += 1;
             }
         }
@@ -328,7 +333,7 @@ pub(super) fn ft_dictdump(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let Some(d) = cx.eng.search.dicts.find(cstr(&args[1])) else {
         return Ok(Reply::Set(Vec::new()));
     };
-    Ok(Reply::Set(d.iter().map(|r| Reply::Bulk(Bytes::from(runes_to_str(r)))).collect()))
+    Ok(Reply::Set(d.keys().map(|r| Reply::Bulk(Bytes::from(runes_to_str(r)))).collect()))
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -237,7 +237,10 @@ impl<'a> HybridIt<'a> {
             Some(c) => {
                 let subset = c.num_estimated().min(vi.size());
                 match params.mode {
-                    Some(m) => m,
+                    Some(m) => {
+                        vi.set_last_mode(m);
+                        m
+                    }
                     None if vi.prefer_adhoc(subset, k) => Mode::HybridAdhocBf,
                     None => Mode::HybridBatches,
                 }
@@ -373,7 +376,7 @@ impl<'a> HybridIt<'a> {
         if self.params.mode == Some(Mode::HybridBatches) {
             return false;
         }
-        self.vi.prefer_adhoc(*child_est, self.k)
+        self.vi.prefer_adhoc_check(*child_est, self.k, false)
     }
 
     /// `prepareResults`.

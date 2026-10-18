@@ -13,6 +13,13 @@ pub enum ChildKind {
     Aof,
 }
 
+/// The search module's state in a loaded file ([`Engine::search_aux`]).
+#[derive(Debug, Default)]
+pub struct SearchAux {
+    pub specs: Option<Vec<crate::search::rdb::LoadedSpec>>,
+    pub dicts: Vec<(Bytes, crate::search::global::Dict)>,
+}
+
 #[derive(Debug)]
 pub struct Child {
     pub kind: ChildKind,
@@ -168,6 +175,10 @@ impl Engine {
             ("aof-base", "0"),
         ];
         let mut w = RdbWriter::new(out, &aux, now)?;
+        // Modules' BEFORE_RDB aux data: the search index definitions.
+        if let Some(items) = crate::search::rdb::save_indexes(&self.search) {
+            w.module_aux(crate::search::rdb::index_type_id(), crate::rdb::AUX_BEFORE_RDB, &items)?;
+        }
         for code in self.scripting.library_codes() {
             w.function(&code)?;
         }
@@ -191,6 +202,10 @@ impl Engine {
                 w.entry(k, e, lru)?;
             }
         }
+        // AFTER_RDB: the spelling dictionaries.
+        if let Some(items) = crate::search::rdb::save_dicts(&self.search) {
+            w.module_aux(crate::search::rdb::dict_type_id(), crate::rdb::AUX_AFTER_RDB, &items)?;
+        }
         w.finish()?;
         Ok(())
     }
@@ -204,7 +219,7 @@ impl Engine {
         use crate::rdb::{LoadItem, RdbError};
         let cfg = self.cfg.clone();
         let reg = self.hub.templates.clone();
-        let (mut entries, mut functions, mut untemplate, mut sizes) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut entries, mut functions, mut untemplate, mut sizes, mut aux) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let keep_expired = self.replica;
         crate::rdb::load_with(data, &cfg, Some(&reg), |it| {
             match it {
@@ -212,10 +227,13 @@ impl Engine {
                 LoadItem::Entry { db, key, entry } => entries.push((db, key, entry)),
                 LoadItem::Untemplate { db, key } => untemplate.push((db, key)),
                 LoadItem::ResizeDb { db, keys, expires } => sizes.push((db, keys, expires)),
+                LoadItem::ModuleAux { id, when, items } => aux.push((id, when, items)),
                 _ => {}
             }
             Ok::<(), RdbError>(())
         })?;
+        let search = self.search_aux(&aux)?;
+        self.search_loading(search.specs);
         let policy = if merge { super::scripting::RestorePolicy::Replace } else { super::scripting::RestorePolicy::Append };
         self.scripting.restore_libraries(&functions, policy).map_err(|_| RdbError::Corrupt("function library already exists"))?;
         for (i, keys, expires) in sizes {
@@ -239,19 +257,69 @@ impl Engine {
             }
             d.insert_new(&key, entry);
             self.ts_loaded(i, &key);
-            if self.sig.search_hook {
-                crate::commands::ft::probe(self, &key, true);
-                self.sig.search_events.push(("loaded", i as u16, crate::value::Str::from_slice(&key)));
-                crate::commands::ft::drain(self);
-            }
+            self.search_loaded(i, &key);
             loaded += 1;
         }
         let lim = crate::types::hash::Limits::of(&cfg);
         for (i, key) in untemplate {
             self.dbs[i].untemplate(&key, lim);
         }
+        self.search_loaded_dicts(search.dicts);
         self.persist.last_load = (loaded, expired);
         Ok(())
+    }
+
+    /// The search module's aux data in a loaded file: index definitions (`ft_index0`) and
+    /// spelling dictionaries (`scdtype00`); other modules' are ignored. Bad data fails the load.
+    pub fn search_aux(&self, aux: &[(u64, u64, Vec<crate::search::trie::RdbItem>)]) -> Result<SearchAux, crate::rdb::RdbError> {
+        use crate::search::rdb;
+        use crate::search::trie::RdbItems;
+        let mut out = SearchAux::default();
+        for (id, when, items) in aux {
+            if id >> 10 == rdb::index_type_id() >> 10 {
+                let specs = rdb::load_indexes(&mut RdbItems::new(items), id & 1023, self.search.max_indexes(), &self.cfg)
+                    .ok_or(crate::rdb::RdbError::Corrupt("bad search index aux data"))?;
+                out.specs.get_or_insert_with(Vec::new).extend(specs);
+            } else if id >> 10 == rdb::dict_type_id() >> 10 && *when == crate::rdb::AUX_AFTER_RDB {
+                let dicts = rdb::load_dicts(&mut RdbItems::new(items)).ok_or(crate::rdb::RdbError::Corrupt("bad spellcheck dictionary aux data"))?;
+                out.dicts.extend(dicts);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The module at `LOADING` start (`Indexes_StartRDBLoadingEvent`): every index goes, then the
+    /// file's are registered (empty: the keys re-index them as they load).
+    pub fn search_loading(&mut self, specs: Option<Vec<crate::search::rdb::LoadedSpec>>) {
+        let g = &mut self.search;
+        for name in g.indexes.keys().cloned().collect::<Vec<_>>() {
+            g.remove(&name);
+        }
+        g.prefixes = crate::search::triemap::TrieMap::new();
+        g.cursors.clear();
+        if let Some(specs) = specs {
+            crate::search::rdb::install(g, specs, &self.cfg);
+            // `Initialize_KeyspaceNotifications`.
+            self.sig.search_hook = true;
+        }
+    }
+
+    /// A key loaded from a file: the `loaded` keyspace event the search module indexes it on.
+    pub fn search_loaded(&mut self, db: usize, key: &[u8]) {
+        if self.sig.search_hook {
+            crate::commands::ft::probe(self, key, true);
+            self.sig.search_events.push(("loaded", db as u16, crate::value::Str::from_slice(key)));
+            crate::commands::ft::drain(self);
+        }
+    }
+
+    /// The dictionaries after the keys: a name already taken keeps its dictionary (`dictAdd`).
+    pub fn search_loaded_dicts(&mut self, dicts: Vec<(Bytes, crate::search::global::Dict)>) {
+        for (name, d) in dicts {
+            if !self.search.dicts.contains_key(&name) {
+                self.search.dicts.add(name, d);
+            }
+        }
     }
 
     fn fork(&mut self, kind: ChildKind, now_ms: i64) {
