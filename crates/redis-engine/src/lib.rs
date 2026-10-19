@@ -6,6 +6,7 @@
 
 pub mod acl;
 pub mod bloom;
+pub mod bytestr;
 pub mod client;
 pub mod clients;
 pub mod commands;

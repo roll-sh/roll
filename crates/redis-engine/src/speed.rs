@@ -58,3 +58,10 @@ fn engine_speed() {
     run("HSET", |r| vec![b("HSET"), b("myhash"), b(&format!("element:{r:012}")), b("xxx")]);
     run("ZADD", |r| vec![b("ZADD"), b("myzset"), b(&format!("{:012}", r * 7 % 100_000)), b(&format!("element:{r:012}"))]);
 }
+
+#[test]
+#[ignore]
+fn layout_sizes() {
+    use crate::value::{Entry, Str, Value};
+    eprintln!("Str {} Value {} Entry {} dict node {}", std::mem::size_of::<Str>(), std::mem::size_of::<Value>(), std::mem::size_of::<Entry>(), crate::dict::Dict::<Str, Entry>::NODE_OVERHEAD - 16);
+}

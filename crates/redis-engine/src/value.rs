@@ -5,10 +5,9 @@ use crate::json::Json;
 use crate::types::{Array, Hash, List, Set, Stream, ZSet};
 use crate::ts::Series;
 use crate::vset::VSet;
-use smallvec::SmallVec;
 
-/// A byte string with up to 22 bytes stored inline (no allocation): keys, small values, members.
-pub type Str = SmallVec<[u8; 22]>;
+/// A byte string with up to 23 bytes stored inline (no allocation): keys, small values, members.
+pub type Str = crate::bytestr::Str;
 
 #[inline]
 pub fn s(b: &[u8]) -> Str {
