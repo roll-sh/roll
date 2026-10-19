@@ -205,6 +205,8 @@ FT.CURSOR DEL idx {$d}
 !capture d FT.AGGREGATE idx * LOAD 1 @name SORTBY 2 @age DESC WITHCURSOR COUNT 2
 FT.DROPINDEX idx
 FT.CREATE idx ON HASH PREFIX 1 nothing: SCHEMA name TEXT
+# Redis scans for the index in the background: let it finish, or `indexing` races.
+@sleep 100
 !mask total_indexing_time FT.INFO idx
 FT.CURSOR READ idx {$c}
 FT.CURSOR READ idx {$c}

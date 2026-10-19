@@ -1,0 +1,80 @@
+name: ci
+
+# The one required check for pull requests and the merge queue: runs the workflows for whatever
+# changed, and passes when they all pass (or weren't needed).
+on:
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      postgres: ${{ steps.diff.outputs.postgres }}
+      queues: ${{ steps.diff.outputs.queues }}
+      redis: ${{ steps.diff.outputs.redis }}
+      stream: ${{ steps.diff.outputs.stream }}
+      tasks: ${{ steps.diff.outputs.tasks }}
+      web: ${{ steps.diff.outputs.web }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          files=$(git diff --name-only "$BASE" HEAD)
+          echo "$files"
+          match() { if grep -qE "$2" <<< "$files"; then echo "$1=true"; else echo "$1=false"; fi >> "$GITHUB_OUTPUT"; }
+          match postgres '^(crates/(pg-proxy|pg-storage|pg-control|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-postgres\.sh$|\.github/workflows/(postgres|ci)\.yml$)'
+          match queues '^(crates/(mq-[a-z0-9-]+|rolld|roll-cli)/|tests/queues/|deploy/queues/|Cargo\.(toml|lock)$|scripts/test-queues(-clients)?\.sh$|\.github/workflows/(queues|ci)\.yml$)'
+          match redis '^(crates/(redis-[a-z]+|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-redis\.sh$|\.github/workflows/(redis|ci)\.yml$)'
+          match stream '^(crates/(stream-log|stream-broker|pg-storage|rolld|roll-cli)/|vendor/kafka-protocol/|Cargo\.(toml|lock)$|scripts/test-stream\.sh$|\.github/workflows/(stream|ci)\.yml$)'
+          match tasks '^(crates/(tasks|rolld|roll-cli)/|deploy/aws/|Cargo\.(toml|lock)$|scripts/test-tasks\.sh$|\.github/workflows/(tasks|ci)\.yml$)'
+          match web '^(apps/|packages/|package\.json$|pnpm-(lock|workspace)\.yaml$|\.github/workflows/(web|ci)\.yml$)'
+
+  postgres:
+    needs: changes
+    if: needs.changes.outputs.postgres == 'true'
+    uses: ./.github/workflows/postgres.yml
+
+  queues:
+    needs: changes
+    if: needs.changes.outputs.queues == 'true'
+    uses: ./.github/workflows/queues.yml
+
+  redis:
+    needs: changes
+    if: needs.changes.outputs.redis == 'true'
+    uses: ./.github/workflows/redis.yml
+
+  stream:
+    needs: changes
+    if: needs.changes.outputs.stream == 'true'
+    uses: ./.github/workflows/stream.yml
+
+  tasks:
+    needs: changes
+    if: needs.changes.outputs.tasks == 'true'
+    uses: ./.github/workflows/tasks.yml
+
+  web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    uses: ./.github/workflows/web.yml
+
+  ci:
+    needs: [changes, postgres, queues, redis, stream, tasks, web]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null

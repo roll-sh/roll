@@ -1,0 +1,13 @@
+[package]
+name = "roll-qtest-lapin"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone: not part of the repo's Cargo workspace.
+[workspace]
+
+[dependencies]
+futures-util = "=0.3.34"
+lapin = { version = "=4.12.2", default-features = false, features = ["default-runtime"] }
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }

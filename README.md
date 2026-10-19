@@ -6,9 +6,10 @@ Serverless infrastructure for everything.
 
 ```
 apps/
-  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/databases)
+  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/databases, /dashboard/streams, /dashboard/tasks)
 packages/
   brand/            @roll/brand — logo geometry, animation engine, React components, SVG assets
+  tasks/            @roll/tasks — TypeScript SDK: client, pull consumer, signature verification, workflows
 crates/
   pg-proxy/         Postgres wire-protocol proxy (routing, wake-on-connect, cancel forwarding)
   pg-control/       Control plane: projects, branches, endpoints, autoscaling, metering, HTTP API
@@ -16,8 +17,12 @@ crates/
   redis-engine/     Redis data structures and commands (pure, synchronous, one engine per shard)
   redis-server/     Redis network layer: RESP + TLS, REST API, tenants, durability on S3, replicas
   redis-control/    Redis control plane: databases, branches, restore, replicas, metering, HTTP API
-  rolld/            Daemon: proxy + API + reconciler
+  stream-log/       Kafka-format partition log: segments, group commit, idempotence, transactions
+  stream-broker/    Kafka-compatible broker: wire protocol, coordinators, tiering, compaction, HTTP API
+  tasks/            roll tasks: messages, queues, schedules, workflows (SQLite, its own S3 log store, or DynamoDB)
+  rolld/            Daemon: proxy + API + reconciler + Redis + Kafka listener (+ roll tasks on /v1/tasks)
   roll-cli/         `roll` CLI
+deploy/aws/         roll tasks on AWS: Dockerfile + CloudFormation
 ```
 
 ## Develop
@@ -242,3 +247,280 @@ It also runs a differential compatibility suite. That suite sends the same scrip
 The script skips itself when nothing relevant changed. Pass `--force` to run anyway, or `--unit` to skip
 Docker. CI is in `.github/workflows/redis.yml`. To run the durability tests against S3, set
 `ROLL_E2E_S3_BUCKET` and `ROLL_E2E_S3_ENDPOINT` (plus AWS credentials).
+
+## Streams
+
+Kafka-compatible streams: any Kafka client, tool or framework connects to `rolld` on `:9092`. You can
+also skip the client entirely and produce and consume over plain HTTP. Storage is bottomless: data is
+fsynced locally and uploaded to object storage (local directory or S3), and idle partitions close and
+cost nothing but their objects.
+
+```sh
+cargo run -p rolld                                        # Kafka on :9092, HTTP API on :7070
+cargo run -p roll-cli -- stream create shop               # bootstrap address, SASL key, client properties
+cargo run -p roll-cli -- stream topic create shop orders -p 6
+echo '{"id":1}' | cargo run -q -p roll-cli -- stream produce shop orders -k user-1
+cargo run -p roll-cli -- stream consume shop orders --group billing --follow
+
+curl localhost:7070/v1/streams/shop/topics/orders/records -d '{"key":"user-1","value":{"id":2}}'
+curl 'localhost:7070/v1/streams/shop/topics/orders/records?from=earliest&wait_ms=10000'
+curl -N localhost:7070/v1/streams/shop/topics/orders/tail     # Server-Sent Events
+```
+
+Unauthenticated Kafka connections use the `default` stream (`--default-stream`). Other streams
+authenticate with SASL SCRAM-SHA-256/512 or PLAIN using a stream key, and each stream is its own
+isolated cluster: topics, groups, transactions and quotas. `/dashboard/streams` shows throughput, topics,
+partitions (hot vs object-storage bytes), keys, a live tail and the AWS cost next to MSK.
+
+How it works:
+
+- **Zero-copy data path.** Produce validates record batches (CRC, sequence, size, timestamps) and
+  appends them as received, patching only the offset. Fetch returns the same bytes. A recent-batch
+  cache serves tailing consumers from memory. Responses are pipelined in order, and long-polling
+  fetches wake on the high watermark.
+- **Durability.** `acks=all` waits for a group-commit fsync, and consumers only see durable data, so a
+  crash never exposes records that could be lost. On restart, torn tails are cut at the last valid batch.
+- **Tiering.** Sealed (and sufficiently old) data is uploaded as chunks of whole batches. Local copies
+  are dropped by `local.retention.*`, and reads below the local range are served from object storage
+  through a cache. `retention.*`, `DeleteRecords` and topic deletion remove the objects.
+- **Compaction.** `cleanup.policy=compact` keeps the latest record per key. It drops keyless records,
+  aborted transactional data and, after `delete.retention.ms`, tombstones. It rewrites uploaded chunks
+  into new objects and swaps them in atomically; offsets never change. The trigger is
+  `min.cleanable.dirty.ratio`, `min.compaction.lag.ms` or `max.compaction.lag.ms`.
+- **Semantics.**
+  - Idempotent producers (KIP-360 recovery).
+  - Transactions with KIP-890 verification, the LSO and read_committed.
+  - Exactly-once consume-transform-produce.
+  - Classic consumer groups, including static membership (KIP-345).
+  - Quotas with KIP-219 throttling.
+- **HTTP data plane.**
+  - Produce JSON, NDJSON or raw bodies. Partitioning uses Kafka's murmur2, so keys land where Kafka
+    clients put them.
+  - Read with stateless cursors, or through server-managed groups. The broker leases partitions per
+    consumer and commits for you (`auto`, `read` or `manual`), and the committed offsets are the same
+    ones Kafka groups see.
+  - Confluent REST v3 (`/kafka/v3/clusters/...`) for existing tooling.
+
+### Tests
+
+`pnpm test:stream` (or `scripts/test-stream.sh`) runs clippy and the suite:
+
+- `protocol.rs`: every API at every version (default and populated requests), version negotiation,
+  pipelining, malformed frames, SASL and tenancy, quotas.
+- `rdkafka.rs`: librdkafka for produce/consume across codecs, idempotence, groups, seeks and
+  timestamps, transactions and EOS, admin, SASL, restarts.
+- `java.rs`, against `apache/kafka:4.1.0` in Docker:
+  - `kafka-topics`, the console clients, `kafka-consumer-groups`, `kafka-configs`
+  - perf tools, `kafka-transactions` and the verifiable clients
+  - `kafka-delete-records`, `kafka-log-dirs`, `kafka-metadata-quorum`
+  - SASL SCRAM/PLAIN and TLS
+  - a Kafka Streams word count with `exactly_once_v2`
+- `storage.rs`: tiered reads from object storage, retention, torn writes, unclean stops, scale to zero,
+  open transactions across restarts.
+- `compaction.rs`: latest value per key, tombstones, librdkafka reading across gaps, compact+delete.
+- `http.rs`: the control plane, produce formats, cursors, managed groups, SSE, auth, Confluent v3,
+  and interop with Kafka clients.
+
+The suite only runs when a stream crate changed since the last green run (`--force`, `--unit` as for
+Postgres). CI (`.github/workflows/stream.yml`) also runs the storage, compaction, HTTP and librdkafka
+tests against S3 (SeaweedFS).
+
+Measured locally with a release build on an M-series Mac, using a single `rolld`. The Java perf tools
+run in Docker Desktop, so their bytes also cross its VM network:
+
+| what | result |
+| --- | --- |
+| librdkafka produce, 200 B records, `acks=all`, 6 partitions (`examples/bench.rs`) | 0.8–1.1M rec/s (160–225 MB/s) |
+| librdkafka produce, 1 KB records, `acks=all` | 246k rec/s (252 MB/s) |
+| librdkafka consume, 200 B / 1 KB records | 1.44M rec/s (289 MB/s) / 1.04M rec/s (1.07 GB/s) |
+| `kafka-producer-perf-test`, 200 B, `acks=all`, uncompressed / lz4 (Docker) | 321k / 300k rec/s (61 / 57 MB/s: Docker Desktop's network is the limit) |
+| `kafka-producer-perf-test` at 1,000 rec/s, `acks=all`, `linger.ms=0` (Docker) | p50 14 ms, p99 63 ms, fsync included |
+| `kafka-consumer-perf-test` (Docker) | 509k rec/s (97 MB/s) |
+| HTTP produce: 100k records (20 MB) in one NDJSON request | 158 ms until durable (630k rec/s) |
+| `rolld` memory after 5M records | 243 MB RSS |
+
+The data path doesn't decode records, so throughput follows bytes and batches, not record count.
+[`crates/stream-broker/README.md`](crates/stream-broker/README.md) covers the internals, cold start,
+idle usage, how to reproduce these numbers, and the current limits.
+
+### Compared with Kafka, Confluent and Redpanda
+
+| feature | status |
+| --- | --- |
+| Kafka protocol (produce v3–13, fetch v4–18, admin, groups, transactions, SASL, TLS, quotas) | ✅ |
+| Java clients, librdkafka (Go/Python/.NET/Node), Kafka Streams, Kafka CLI tools | ✅ tested |
+| Bottomless storage in S3, scale to zero, no disks to size | ✅ |
+| Log compaction | ✅ |
+| HTTP produce/consume without a client, SSE, Confluent REST v3 | ✅ |
+| Multi-tenant streams with per-stream keys, quotas, usage and cost | ✅ |
+| Online partition and config changes | ✅ |
+| Replication across brokers / multi-AZ | next: durability today is local fsync plus object storage (seconds of RPO for the active segment on host loss) |
+| Several brokers serving one cluster (partition leadership) | next: one `rolld` serves every partition today |
+| KIP-848 consumer protocol, share groups (KIP-932) | next: classic groups only |
+| Fetch sessions (KIP-227) | next: full fetches only (clients fall back automatically) |
+| ACLs | next: keys scope a whole stream; `DescribeAcls` reports security disabled |
+| Schema Registry, Connect | later |
+
+## Tasks
+
+roll tasks delivers HTTP messages and runs durable workflows: a Cloud Tasks / QStash / Inngest
+alternative written in Rust. On AWS it runs on its own storage engine, the **log store**, with no
+database service: SQLite on the leader node, made durable by shipping group commits to S3. A
+Lambda function URL or a Network Load Balancer fronts a small Fargate cell (a leader and a hot
+standby), which can host many tenants.
+
+```sh
+cargo run -p rolld                                          # serves /v1/tasks too (SQLite in .roll/)
+cargo run -p tasks --bin roll-tasks                         # or standalone on :7071
+roll tasks publish https://example.com/hook -b '{"hi":1}' --delay 30s --retries 5
+roll tasks schedules create '0 9 * * MON-FRI' --url https://example.com/report --tz Europe/Budapest
+roll tasks send user.signup '{"id":7}'
+roll tasks messages · dlq · queues · topics · functions · runs · usage
+```
+
+The dashboard is at `/dashboard/tasks`, the TypeScript SDK is `@roll/tasks` (`packages/tasks`), and
+the CLI is `roll tasks …` (`ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN`).
+
+What it does:
+
+- **Messages.** Publish to a URL, a topic (fan-out) or a pull queue, from JSON or raw (`/publish/<url>`
+  with `Roll-*` headers), singly or in batches.
+  - Options: delay or `not_before` (up to a year), retries with exponential/linear/fixed backoff and
+    jitter, `Retry-After` honoured, and per-attempt timeouts.
+  - Status 489 or a `roll-non-retryable` header stops retries.
+  - Success and failure callbacks.
+  - Deduplication by id or content.
+  - Labels.
+  - A dead-letter queue with retry.
+  - Full attempt history, including each response.
+- **Signing.** Deliveries are signed per Standard Webhooks with two keys, so rotation never breaks
+  receivers. The SDK verifies them.
+- **Queues.**
+  - Parallelism, GCRA rate limits, pause and resume, default retries and timeouts, and partitions
+    for throughput.
+  - Per-key flow control across messages.
+  - FIFO groups: in order, one at a time, with retries holding the line.
+  - Pull consumers: lease, ack, nack (or dead-letter), extend, long-poll.
+- **Schedules.** Cron (5 or 6 fields, `@daily`, `L`, …) in any time zone, or `@every 5m`. A schedule
+  publishes, sends an event or runs a function, fires exactly once per time across workers, and can be
+  paused or triggered now.
+- **Workflows.** Inngest-style durable functions served by your app over HTTP:
+  - Steps: memoised `run` steps (with retries and their own backoff), `sleep`, `wait_for_event`
+    (with match and `if` expressions, plus timeouts), `invoke` other functions, `send_event`, and
+    parallel steps.
+  - Triggers: events (with `if`), cron.
+  - Flow and lifecycle: concurrency (keyed), throttle, rate limit, debounce, batching, idempotency,
+    priority, `cancel_on`, start/finish timeouts, singleton, pause, cancel, rerun, wait for the result.
+  - Lifecycle events: `roll/function.finished|failed|canceled`.
+- **Ops.**
+  - Auth: an admin token plus API keys.
+  - SSRF protection: private and link-local destinations are blocked, and the check runs again on
+    DNS resolution.
+  - Usage metering with an AWS cost estimate.
+  - Graceful drain on SIGTERM: in-flight deliveries finish or go back to the queue.
+  - Workers share lanes by rendezvous hashing and take over a dead worker's lanes within seconds.
+    Leases are extended for long deliveries.
+  - Delivery is at-least-once.
+
+### Storage: the log store
+
+- **Writes.** Every write lands in SQLite on the leader. The net row changes (SQLite session
+  changesets) go to S3 as one object per **group commit**: `tasks/wal/<seq>`.
+  - API writes return once their commit is in S3, which is multi-AZ.
+  - Worker bookkeeping (leases, delivery outcomes) rides along with the next commit, or with a lazy
+    one within 5 seconds. Losing it in a crash only means a redelivery.
+  - Recovered state is always an exact prefix of history.
+- **Snapshots.** These are copied a few pages at a time while serving, then compressed and uploaded.
+  Old log objects are deleted.
+- **Recovery.** A node rebuilds from the newest snapshot plus the log after it.
+- **Fencing.** Commits are create-only (`If-None-Match`). A new leader claims the next sequence
+  number before serving, so a deposed leader can't commit and stops. Split brain can't lose
+  acknowledged writes.
+- **Failover.** Standbys health-check the leader directly. When it dies, one takes the lease (a
+  compare-and-swap on `tasks/lease`) and serves within a few seconds. On SIGTERM (deploys, Spot
+  reclaims) the leader drains, commits and hands over in about a second.
+  - The front door (Lambda proxy, or any standby behind the load balancer) holds requests during
+    the switch.
+  - A request cut off mid-switch gets a retryable 503 that the proxy retries for you.
+- **Tenants.** One cell hosts many tenants. Each has its own SQLite database, engine and API keys
+  (`/t/<tenant>/v1/tasks`), and all of them share the cell's commits, nodes and connection pool.
+  Managed with the node's token: `roll tasks tenants create|list|key|delete`.
+- **Retention.** Keeping data longer costs S3 storage ($0.023/GB-month) and local disk, nothing per
+  request. The default is 30 days.
+- **Backups.** The bucket is versioned, and overwritten or deleted objects are kept for 30 days
+  (`BackupDays`). `roll-tasks restore --at <time>` puts a stopped cell back to how it was at any
+  second in that window, and can itself be undone. See
+  [deploy/aws/README.md](deploy/aws/README.md#backups-and-point-in-time-restore).
+
+### Cost
+
+S3 bills per commit, not per message. A commit starts at most every `ROLL_TASKS_COMMIT_MS` (100 ms
+by default) and carries every write made since the last one, from every tenant. So the storage
+bill is capped at 10 PUTs a second (about $130/month), however busy the cell. Measured with a
+30 ms simulated S3:
+
+| traffic | S3 PUTs per message | storage cost / million messages |
+| --- | --- | --- |
+| 1 publisher at a time | 1.0 | $5.00 |
+| 8 concurrent | 0.13 | $0.62 |
+| 64 concurrent | 0.016 | $0.08 |
+| 200 tenants, 1 message/s each (shared cell) | 0.05 | $0.26 |
+
+- **Fixed.** An idle cell writes nothing. The default cell (one on-demand and one Spot node,
+  0.25 vCPU each) costs about **$9.40/month**. 200 idle tenants used about 2% of a laptop core.
+- **Front door.** The Lambda proxy costs about $0.40 per million requests. A Network Load Balancer
+  (`CertificateArn` in the template) costs about $16/month instead, plus about $0.02 per million
+  requests. It's cheaper above roughly 50 million requests a month.
+- **Shared platform.** A shared cell behind the load balancer costs about **$0.30 per million
+  messages** (S3 plus load balancer, before egress at $0.09/GB), plus about $26/month for the whole
+  cell. That's below Cloud Tasks' $0.40.
+- **S3 Express (optional).** The commits alone can go to an S3 Express One Zone bucket
+  (`ROLL_TASKS_WAL`, `ExpressZoneId` in the template) at $1.13 instead of $5 per million PUTs.
+  The shared cell then comes to about **$0.08 per million messages** before egress, but recent
+  commits live in one AZ. It hasn't been tried on real S3 Express yet.
+- **DynamoDB layout.** About $6.90 per million messages at any volume.
+- **Latency.** A publish waits for its commit: about 100 ms. One publisher sending one message at a
+  time gets about 10 a second, so use `/batch` or concurrency. A lower `ROLL_TASKS_COMMIT_MS`
+  trades cost for latency.
+
+`roll tasks usage` and the dashboard price your real traffic from metered S3 writes (each tenant
+pays its share of the commits it was in).
+
+The alternative DynamoDB layout (`deploy/aws/tasks-dynamodb.yaml`) has no single leader and scales
+writers horizontally. See [deploy/aws/README.md](deploy/aws/README.md).
+
+### Tests
+
+`pnpm test:tasks` (or `scripts/test-tasks.sh`) runs the following:
+
+1. Build, including the Lambda feature, and `clippy -D warnings`.
+2. Every suite on SQLite, covering:
+   - store conformance
+   - messages, queues and schedules
+   - workflows
+   - cluster behaviour: work spreading without duplicates, crash failover, drain hand-back, lease
+     extension, API-only nodes
+3. Log store tests:
+   - conformance on memory and on a directory
+   - recovery after a crash
+   - group commit and relaxed writes
+   - fencing
+   - snapshots and pruning
+   - fallback past a corrupt snapshot
+   - point-in-time restore on a versioned bucket (MinIO): the exact state at a moment, refusal
+     while the lease is held, and undoing a restore
+   - refusing to open across a gap
+   - tenants: isolation, shared commits, deletion, restore, and per-tenant cost shares
+   - the cell: crash failover, graceful hand-over, standby forwarding, a deposed leader stepping
+     down, zero idle writes, and hosted tenants (admin API, key isolation, hand-over)
+4. Every suite again on the log store in memory.
+5. In Docker, every suite again on:
+   - the log store on S3 (MinIO, versioned like production, real conditional writes)
+   - DynamoDB Local with large bodies in S3 (SeaweedFS)
+
+`cargo test -p tasks --release --test cell -- --ignored --nocapture cost_profile` prints the
+single-tenant rows of the cost table, and `multi_tenant_cost_profile` the shared-cell row.
+
+It skips itself when nothing tasks-related changed. `--force` runs anyway, and `--unit` skips Docker.
+CI is `.github/workflows/tasks.yml` (through `ci.yml` for pull requests and the merge queue). The SDK has its own suite against the real binary:
+`pnpm --filter @roll/tasks test`.

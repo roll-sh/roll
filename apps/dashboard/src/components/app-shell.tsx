@@ -6,6 +6,7 @@ import {
   ChevronsUpDown,
   Database,
   Globe,
+  Inbox,
   LayoutGrid,
   LucideProvider,
   MemoryStick,
@@ -14,6 +15,8 @@ import {
   Search,
   Settings,
   SquareFunction,
+  Waves,
+  Workflow,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -26,6 +29,9 @@ const nav = [
   { label: "Overview", icon: LayoutGrid, href: "/dashboard" },
   { label: "Databases", icon: Database, href: "/dashboard/databases" },
   { label: "Redis", icon: MemoryStick, href: "/dashboard/redis" },
+  { label: "Queues", icon: Inbox, href: "/dashboard/queues" },
+  { label: "Tasks", icon: Workflow, href: "/dashboard/tasks" },
+  { label: "Streams", icon: Waves, href: "/dashboard/streams" },
   { label: "Functions", icon: SquareFunction },
   { label: "Deployments", icon: Rocket },
   { label: "Edge", icon: Globe },

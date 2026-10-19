@@ -1,8 +1,12 @@
+mod stream;
+mod tasks;
+
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
 mod redis;
+mod queues;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -11,9 +15,18 @@ struct Cli {
     /// Control-plane API.
     #[arg(long, env = "ROLL_API_URL", default_value = "http://127.0.0.1:7070", global = true)]
     api: String,
+    /// roll tasks API (default: `<api>/v1/tasks`, served by rolld).
+    #[arg(long, env = "ROLL_TASKS_URL", global = true)]
+    tasks_url: Option<String>,
+    /// roll tasks token (admin token or API key).
+    #[arg(long, env = "ROLL_TASKS_TOKEN", global = true, hide_env_values = true)]
+    token: Option<String>,
     /// Print raw JSON.
     #[arg(long, global = true)]
     json: bool,
+    /// API key (`username:secret`) for streams that require one.
+    #[arg(long, env = "ROLL_API_KEY", global = true, hide_env_values = true)]
+    api_key: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -26,6 +39,15 @@ enum Cmd {
     /// Serverless Redis.
     #[command(subcommand, alias = "kv")]
     Redis(redis::Redis),
+    /// Messages, queues, schedules and workflows.
+    #[command(subcommand)]
+    Tasks(Box<tasks::Cmd>),
+    /// Kafka-compatible streams.
+    #[command(subcommand, alias = "kafka")]
+    Stream(stream::Stream),
+    /// RabbitMQ-compatible message queues.
+    #[command(alias = "q")]
+    Queues(queues::Queues),
 }
 
 #[derive(Subcommand)]
@@ -131,22 +153,39 @@ enum Db {
 struct Api {
     base: String,
     http: reqwest::Client,
+    key: Option<String>,
 }
 
 impl Api {
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
+        }
         if let Some(b) = body {
             req = req.json(&b);
         }
-        let res = req.send().await.with_context(|| format!("can't reach rolld at {} (is it running?)", self.base))?;
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
         let text = res.text().await?;
         let value: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text)? };
         if !status.is_success() {
-            bail!("{}", value["error"].as_str().unwrap_or(&text));
+            // Batch endpoints report per-record errors.
+            let per_record = value["offsets"].as_array().and_then(|o| o.iter().find_map(|r| r["error"].as_str()));
+            bail!("{}", value["error"].as_str().or(per_record).unwrap_or(&text));
         }
         Ok(value)
+    }
+    /// The cell's root (for `/_roll/…`), from a tasks URL that may name a tenant
+    /// (`…/t/<tenant>/v1/tasks`).
+    fn cell(&self) -> Api {
+        let mut base = self.base.trim_end_matches("/v1/tasks");
+        if let Some((root, tenant)) = base.rsplit_once("/t/")
+            && !tenant.contains('/')
+        {
+            base = root;
+        }
+        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone() }
     }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
@@ -238,10 +277,22 @@ async fn project(api: &Api, key: &str) -> anyhow::Result<Value> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new() };
+    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
+        Cmd::Stream(cmd) => {
+            if let Some(out) = stream::run(&api, cli.json, cmd).await? {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+            return Ok(());
+        }
+        Cmd::Tasks(cmd) => {
+            let base = cli.tasks_url.map(|u| u.trim_end_matches('/').to_string()).unwrap_or(format!("{}/v1/tasks", api.base));
+            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()) };
+            return tasks::run(&tasks_api, *cmd, cli.json).await;
+        }
+        Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
     };
     let out = match cmd {
         Db::List => {

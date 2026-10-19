@@ -1,0 +1,9 @@
+{
+  "name": "roll-qtest-node-amqplib",
+  "private": true,
+  "description": "roll queues compatibility scenarios for Node amqplib",
+  "main": "main.js",
+  "dependencies": {
+    "amqplib": "2.2.0"
+  }
+}

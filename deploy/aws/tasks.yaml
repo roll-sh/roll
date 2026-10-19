@@ -1,0 +1,545 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  roll tasks: durable messages, queues, schedules and workflows on its own log store in S3
+  (no database service). A cell of Fargate nodes (one leader, hot standbys) behind a Lambda
+  function URL or, with CertificateArn set, a Network Load Balancer; in its own VPC without a
+  NAT gateway.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: roll-tasks image in ECR (built from deploy/aws/Dockerfile for linux/arm64).
+  Token:
+    Type: String
+    NoEcho: true
+    MinLength: 24
+    Description: Admin API token (create narrower API keys with it later).
+  Nodes:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 5
+    Description: Nodes in the cell. One leads; the rest stand by to take over within seconds.
+  OnDemandNodes:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    Description: >-
+      Nodes kept on regular Fargate instead of Spot. 1 keeps a node up even if Spot capacity is
+      reclaimed everywhere at once; 0 is cheapest.
+  NodeCpu:
+    Type: Number
+    Default: 256
+    AllowedValues: [256, 512, 1024, 2048, 4096]
+    Description: The leader does all the work of the cell; size it for your peak.
+  NodeMemory:
+    Type: Number
+    Default: 512
+  NodeStorageGiB:
+    Type: Number
+    Default: 21
+    MinValue: 21
+    MaxValue: 200
+    Description: Local disk for the working copy of the database (what retention keeps).
+  MaxInflight:
+    Type: Number
+    Default: 1000
+    Description: Concurrent deliveries.
+  Retention:
+    Type: String
+    Default: 30d
+    Description: How long finished messages, runs and events are kept.
+  BackupDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: >-
+      How far back `roll-tasks restore` can put the data: overwritten and deleted log objects are
+      kept this long as noncurrent versions (S3 storage only, a few cents per GB).
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ACM certificate for Domain. Set it to serve the API from a Network Load Balancer (about
+      $20/month, no per-request charge) instead of Lambda (about $0.40 per million calls): cheaper
+      above roughly 50 million calls a month.
+  ExpressZoneId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^([a-z0-9]+-az[0-9]+)?$"
+    Description: >-
+      An AZ id (e.g. use1-az4) to keep the log's commits in an S3 Express One Zone bucket there:
+      about a quarter of the PUT cost, but the commits since the last snapshot live in that one
+      AZ (lost with it), and directory buckets have no versions to restore from. Snapshots and the
+      lease stay in S3 Standard. Needs a lowercase stack name.
+  Domain:
+    Type: String
+    Default: ""
+    Description: The API's host name, with CertificateArn. Point it (CNAME) at the LoadBalancer output.
+
+Rules:
+  DomainWithCertificate:
+    RuleCondition: !Not [!Equals [!Ref CertificateArn, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref Domain, ""]]
+        AssertDescription: Domain is required with CertificateArn.
+
+Conditions:
+  UseNlb: !Not [!Equals [!Ref CertificateArn, ""]]
+  UseLambda: !Equals [!Ref CertificateArn, ""]
+  UseExpress: !Not [!Equals [!Ref ExpressZoneId, ""]]
+
+Resources:
+  # --- network: public subnets, no NAT; S3 through a free gateway endpoint ---
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Ref AWS::StackName }]
+
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Gateway
+
+  Routes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref Routes
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Gateway
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+
+  SubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref Routes
+
+  SubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref Routes
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref Routes]
+
+  S3ExpressEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseExpress
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3express
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref Routes]
+
+  ProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: UseLambda
+    Properties:
+      GroupDescription: roll tasks proxy (Lambda)
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0 }
+
+  ApiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: UseNlb
+    Properties:
+      GroupDescription: roll tasks load balancer
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0" }
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: !Ref VpcCidr }
+
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: roll tasks nodes
+      VpcId: !Ref Vpc
+      # Webhooks go anywhere; S3 goes through the endpoint.
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: "-1", CidrIpv6: "::/0" }
+
+  # Only the front door reaches the nodes from outside the cell.
+  ProxyToNode:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseLambda
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref ProxySecurityGroup
+
+  ApiToNode:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseNlb
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref ApiSecurityGroup
+
+  # Standbys check the leader and forward requests to it.
+  NodeToNode:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+
+  # --- the log: commits, snapshots and the lease ---
+
+  Data:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      # Point-in-time backups: whatever the cell overwrites or deletes stays as a noncurrent
+      # version for BackupDays (see `roll-tasks restore`).
+      VersioningConfiguration: { Status: Enabled }
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+          - Id: backups
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: !Ref BackupDays }
+          - Id: delete-markers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+
+  # Optional: the commits alone, in one AZ, at about a quarter of the PUT price.
+  LogExpress:
+    Type: AWS::S3Express::DirectoryBucket
+    Condition: UseExpress
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-log--${ExpressZoneId}--x-s3
+      DataRedundancy: SingleAvailabilityZone
+      LocationName: !Ref ExpressZoneId
+
+  # --- front door, either: a Lambda function URL that forwards to the leader ---
+
+  ProxyRole:
+    Type: AWS::IAM::Role
+    Condition: UseLambda
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: read-lease
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${Data.Arn}/tasks/lease"
+
+  ProxyLogs:
+    Type: AWS::Logs::LogGroup
+    Condition: UseLambda
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-api
+      RetentionInDays: 14
+
+  Proxy:
+    Type: AWS::Lambda::Function
+    Condition: UseLambda
+    DependsOn: ProxyLogs
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-api
+      PackageType: Image
+      Code: { ImageUri: !Ref ImageUri }
+      Architectures: [arm64]
+      MemorySize: 256
+      # Long polls (pull, run waits) plus up to 25s held during a change of leader.
+      Timeout: 90
+      Role: !GetAtt ProxyRole.Arn
+      VpcConfig:
+        SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+        SecurityGroupIds: [!Ref ProxySecurityGroup]
+      Environment:
+        Variables:
+          ROLL_TASKS_ROLE: proxy
+          ROLL_TASKS_LOG: !Sub s3://${Data}/tasks
+
+  ProxyUrl:
+    Type: AWS::Lambda::Url
+    Condition: UseLambda
+    Properties:
+      TargetFunctionArn: !GetAtt Proxy.Arn
+      AuthType: NONE
+      InvokeMode: BUFFERED
+
+  ProxyUrlPermission:
+    Type: AWS::Lambda::Permission
+    Condition: UseLambda
+    Properties:
+      FunctionName: !Ref Proxy
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  ProxyInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: UseLambda
+    Properties:
+      FunctionName: !Ref Proxy
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      # Only through the URL: no direct invokes.
+      InvokedViaFunctionUrl: true
+
+  # --- … or a Network Load Balancer: TLS at the edge, any node (standbys forward) ---
+
+  Api:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: UseNlb
+    Properties:
+      Type: network
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroups: [!Ref ApiSecurityGroup]
+      LoadBalancerAttributes:
+        - { Key: load_balancing.cross_zone.enabled, Value: "true" }
+
+  NodeTargets:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: UseNlb
+    Properties:
+      VpcId: !Ref Vpc
+      TargetType: ip
+      Protocol: TCP
+      Port: 8080
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /_roll/node
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        # A stopping node hands over in seconds; don't hold its deregistration for minutes.
+        - { Key: deregistration_delay.timeout_seconds, Value: "15" }
+
+  ApiListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: UseNlb
+    Properties:
+      LoadBalancerArn: !Ref Api
+      Protocol: TLS
+      Port: 443
+      Certificates: [{ CertificateArn: !Ref CertificateArn }]
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref NodeTargets }]
+
+  # The service may only register with the target group once the listener exists.
+  FrontDoorReady:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      Listener: !If [UseNlb, !Ref ApiListener, ""]
+
+  # --- the cell: Fargate (Spot) arm64 nodes ---
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: [FARGATE, FARGATE_SPOT]
+      ClusterSettings: [{ Name: containerInsights, Value: disabled }]
+
+  NodeLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AWS::StackName}-node
+      RetentionInDays: 14
+
+  NodeTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: log
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload]
+                Resource: !Sub "${Data.Arn}/tasks/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Data.Arn
+                Condition:
+                  StringLike: { s3:prefix: ["tasks/*"] }
+              - !If
+                - UseExpress
+                - Effect: Allow
+                  Action: s3express:CreateSession
+                  Resource: !GetAtt LogExpress.Arn
+                - !Ref AWS::NoValue
+
+  NodeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy]
+
+  NodeTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AWS::StackName}-node
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref NodeCpu
+      Memory: !Ref NodeMemory
+      EphemeralStorage: { SizeInGiB: !Ref NodeStorageGiB }
+      RuntimePlatform: { CpuArchitecture: ARM64, OperatingSystemFamily: LINUX }
+      TaskRoleArn: !GetAtt NodeTaskRole.Arn
+      ExecutionRoleArn: !GetAtt NodeExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: node
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings: [{ ContainerPort: 8080, Protocol: tcp }]
+          # SIGTERM (deploys, Spot reclaims): drain deliveries, commit, hand over the lease.
+          StopTimeout: 90
+          Environment:
+            - { Name: ROLL_TASKS_ROLE, Value: node }
+            - { Name: ROLL_TASKS_LOG, Value: !Sub "s3://${Data}/tasks" }
+            - { Name: ROLL_TASKS_DATA, Value: /tmp/roll-tasks }
+            - { Name: ROLL_TASKS_LISTEN, Value: "0.0.0.0:8080" }
+            - { Name: ROLL_TASKS_TOKEN, Value: !Ref Token }
+            - { Name: ROLL_TASKS_BLOCK_PRIVATE, Value: "true" }
+            - { Name: ROLL_TASKS_RETENTION, Value: !Ref Retention }
+            - { Name: ROLL_TASKS_MAX_INFLIGHT, Value: !Ref MaxInflight }
+            - { Name: ROLL_TASKS_DRAIN_S, Value: "25" }
+            - { Name: ROLL_TASKS_FRONT_DOOR, Value: !If [UseNlb, nlb, lambda] }
+            - !If
+              - UseExpress
+              - { Name: ROLL_TASKS_WAL, Value: !Sub "s3express://${LogExpress}/tasks" }
+              - !Ref AWS::NoValue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref NodeLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: node
+
+  Cell:
+    Type: AWS::ECS::Service
+    DependsOn: FrontDoorReady
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref NodeTask
+      DesiredCount: !Ref Nodes
+      CapacityProviderStrategy:
+        - { CapacityProvider: FARGATE, Base: !Ref OnDemandNodes, Weight: 0 }
+        - { CapacityProvider: FARGATE_SPOT, Weight: 1 }
+      # New nodes join as standbys before old ones hand over: deploys don't stop the cell.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      LoadBalancers: !If
+        - UseNlb
+        - [{ ContainerName: node, ContainerPort: 8080, TargetGroupArn: !Ref NodeTargets }]
+        - !Ref AWS::NoValue
+      HealthCheckGracePeriodSeconds: !If [UseNlb, 60, !Ref AWS::NoValue]
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          # Public IPs for webhooks without a NAT gateway; nothing is reachable from outside.
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          SecurityGroups: [!Ref NodeSecurityGroup]
+
+Outputs:
+  ApiUrl:
+    Description: Base URL for the API, SDK and CLI (ROLL_TASKS_URL).
+    Value: !If [UseNlb, !Sub "https://${Domain}/v1/tasks", !Sub "${ProxyUrl.FunctionUrl}v1/tasks"]
+  LoadBalancer:
+    Condition: UseNlb
+    Description: Point Domain (CNAME) here.
+    Value: !GetAtt Api.DNSName
+  Bucket:
+    Description: Where the data lives (tasks/wal, tasks/snap, tasks/lease).
+    Value: !Ref Data
+  Cluster:
+    Value: !Ref Cluster
+  Service:
+    Description: The cell's ECS service (scale it to 0 before a restore).
+    Value: !GetAtt Cell.Name

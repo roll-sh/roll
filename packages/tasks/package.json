@@ -1,0 +1,31 @@
+{
+  "name": "@roll/tasks",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript SDK for roll tasks: durable messages, queues, schedules, events and workflows",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.build.json && tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && node --test --test-reporter=spec .test-build/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  }
+}

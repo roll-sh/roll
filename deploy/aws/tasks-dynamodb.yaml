@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  roll tasks (DynamoDB layout): durable messages, queues, schedules and workflows. API on Lambda (function URL),
+  workers on Fargate Spot (arm64), state in one on-demand DynamoDB table, large bodies in S3.
+  Idle cost is the always-on worker; everything else is per request.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: roll-tasks image in ECR (built from deploy/aws/Dockerfile for linux/arm64).
+  Token:
+    Type: String
+    NoEcho: true
+    MinLength: 24
+    Description: Admin API token (create narrower API keys with it later).
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for workers (they get public IPs, so no NAT gateway to pay for).
+  Shards:
+    Type: Number
+    Default: 16
+    Description: Shared due-index shards. Each moves ~250 messages/s; workers split them. Can be raised later, not lowered.
+  MinWorkers:
+    Type: Number
+    Default: 1
+    Description: Always-on workers. 2+ removes the short pause while a reclaimed Spot task is replaced.
+  MaxWorkers:
+    Type: Number
+    Default: 16
+  OnDemandWorkers:
+    Type: Number
+    Default: 0
+    Description: Workers to keep on regular Fargate instead of Spot.
+  WorkerCpu:
+    Type: Number
+    Default: 256
+    AllowedValues: [256, 512, 1024, 2048, 4096]
+  WorkerMemory:
+    Type: Number
+    Default: 512
+  MaxInflight:
+    Type: Number
+    Default: 1000
+    Description: Concurrent deliveries per worker.
+  Retention:
+    Type: String
+    Default: 7d
+    Description: How long finished messages, runs and events are kept.
+  PointInTimeRecovery:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+Resources:
+  Table:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !Ref PointInTimeRecovery
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: g1pk, AttributeType: S }
+        - { AttributeName: g1sk, AttributeType: S }
+        - { AttributeName: g2pk, AttributeType: S }
+        - { AttributeName: g2sk, AttributeType: S }
+        - { AttributeName: g3pk, AttributeType: S }
+        - { AttributeName: g3sk, AttributeType: S }
+        - { AttributeName: g4pk, AttributeType: S }
+        - { AttributeName: g4sk, AttributeType: S }
+      # Sparse listing indexes; must match crates/tasks/src/store/dynamo.rs.
+      GlobalSecondaryIndexes:
+        - IndexName: g1ix
+          KeySchema: [{ AttributeName: g1pk, KeyType: HASH }, { AttributeName: g1sk, KeyType: RANGE }]
+          Projection: { ProjectionType: INCLUDE, NonKeyAttributes: [k, q, tp, sch, run, lb, url, st0] }
+        - IndexName: g2ix
+          KeySchema: [{ AttributeName: g2pk, KeyType: HASH }, { AttributeName: g2sk, KeyType: RANGE }]
+          Projection: { ProjectionType: INCLUDE, NonKeyAttributes: [k, q, tp, sch, run, lb, url, st0] }
+        - IndexName: g3ix
+          KeySchema: [{ AttributeName: g3pk, KeyType: HASH }, { AttributeName: g3sk, KeyType: RANGE }]
+          Projection: { ProjectionType: INCLUDE, NonKeyAttributes: [k, q, tp, sch, run, lb, url, st0] }
+        - IndexName: g4ix
+          KeySchema: [{ AttributeName: g4pk, KeyType: HASH }, { AttributeName: g4sk, KeyType: RANGE }]
+          Projection: { ProjectionType: INCLUDE, NonKeyAttributes: [k, q, tp, sch, run, lb, url, st0] }
+
+  Bodies:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      LifecycleConfiguration:
+        Rules:
+          # Bodies of messages DynamoDB TTL already removed (the longest delay is 1 year).
+          - Id: expire-bodies
+            Status: Enabled
+            Prefix: bodies/
+            ExpirationInDays: 400
+          - Id: abort-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+
+  DataPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:BatchGetItem
+              - dynamodb:BatchWriteItem
+              - dynamodb:DescribeTable
+            Resource: [!GetAtt Table.Arn, !Sub "${Table.Arn}/index/*"]
+          - Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+            Resource: !Sub "${Bodies.Arn}/bodies/*"
+
+  # --- API: Lambda behind a function URL (bearer-token auth happens in the app) ---
+
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref DataPolicy
+
+  ApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-api
+      RetentionInDays: 14
+
+  Api:
+    Type: AWS::Lambda::Function
+    DependsOn: ApiLogs
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-api
+      PackageType: Image
+      Code: { ImageUri: !Ref ImageUri }
+      Architectures: [arm64]
+      MemorySize: 512
+      # Long enough for long-polling pulls and `wait` on runs.
+      Timeout: 60
+      Role: !GetAtt ApiRole.Arn
+      Environment:
+        Variables:
+          ROLL_TASKS_ROLE: api
+          ROLL_TASKS_STORE: dynamo
+          ROLL_TASKS_TABLE: !Ref Table
+          ROLL_TASKS_BUCKET: !Ref Bodies
+          ROLL_TASKS_SHARDS: !Ref Shards
+          ROLL_TASKS_TOKEN: !Ref Token
+          ROLL_TASKS_BLOCK_PRIVATE: "true"
+          ROLL_TASKS_RETENTION: !Ref Retention
+
+  ApiUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt Api.Arn
+      AuthType: NONE
+      InvokeMode: BUFFERED
+
+  ApiUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Api
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Api
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      # Only through the URL: no direct invokes.
+      InvokedViaFunctionUrl: true
+
+  # --- Workers: Fargate Spot, arm64, scaled on delivery-slot saturation ---
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: [FARGATE, FARGATE_SPOT]
+      ClusterSettings: [{ Name: containerInsights, Value: disabled }]
+
+  WorkerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AWS::StackName}-worker
+      RetentionInDays: 14
+
+  WorkerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+      ManagedPolicyArns: [!Ref DataPolicy]
+
+  WorkerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy]
+
+  WorkerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AWS::StackName}-worker
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref WorkerCpu
+      Memory: !Ref WorkerMemory
+      RuntimePlatform: { CpuArchitecture: ARM64, OperatingSystemFamily: LINUX }
+      TaskRoleArn: !GetAtt WorkerTaskRole.Arn
+      ExecutionRoleArn: !GetAtt WorkerExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Ref ImageUri
+          Essential: true
+          # SIGTERM drains: deliveries get 25s to finish, the rest go back to the queue.
+          StopTimeout: 30
+          Environment:
+            - { Name: ROLL_TASKS_ROLE, Value: worker }
+            - { Name: ROLL_TASKS_STORE, Value: dynamo }
+            - { Name: ROLL_TASKS_TABLE, Value: !Ref Table }
+            - { Name: ROLL_TASKS_BUCKET, Value: !Ref Bodies }
+            - { Name: ROLL_TASKS_SHARDS, Value: !Ref Shards }
+            - { Name: ROLL_TASKS_TOKEN, Value: !Ref Token }
+            - { Name: ROLL_TASKS_BLOCK_PRIVATE, Value: "true" }
+            - { Name: ROLL_TASKS_RETENTION, Value: !Ref Retention }
+            - { Name: ROLL_TASKS_MAX_INFLIGHT, Value: !Ref MaxInflight }
+            - { Name: ROLL_TASKS_DRAIN_S, Value: "25" }
+            - { Name: ROLL_TASKS_EMF_METRICS, Value: "true" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+
+  WorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: roll tasks workers (outbound only)
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: "-1", CidrIpv6: "::/0" }
+
+  Workers:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref WorkerTask
+      DesiredCount: !Ref MinWorkers
+      CapacityProviderStrategy:
+        - { CapacityProvider: FARGATE, Base: !Ref OnDemandWorkers, Weight: 0 }
+        - { CapacityProvider: FARGATE_SPOT, Weight: 1 }
+      # New workers start before old ones drain: deploys never stop delivery.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref WorkerSecurityGroup]
+
+  WorkerScaling:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub service/${Cluster}/${Workers.Name}
+      MinCapacity: !Ref MinWorkers
+      MaxCapacity: !Ref MaxWorkers
+
+  WorkerScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-saturation
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref WorkerScaling
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 50
+        ScaleOutCooldown: 60
+        ScaleInCooldown: 300
+        CustomizedMetricSpecification:
+          Namespace: roll/tasks
+          MetricName: Saturation
+          Dimensions: [{ Name: Service, Value: worker }]
+          Statistic: Average
+          Unit: Percent
+
+Outputs:
+  ApiUrl:
+    Description: Base URL for the API, SDK and CLI (ROLL_TASKS_URL).
+    Value: !Sub "${ApiUrl.FunctionUrl}v1/tasks"
+  Table:
+    Value: !Ref Table
+  Bucket:
+    Value: !Ref Bodies
+  Cluster:
+    Value: !Ref Cluster

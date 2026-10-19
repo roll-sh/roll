@@ -14,18 +14,9 @@ on:
       - "Cargo.lock"
       - "scripts/test-postgres.sh"
       - ".github/workflows/postgres.yml"
-  pull_request:
-    paths:
-      - "crates/pg-proxy/**"
-      - "crates/pg-storage/**"
-      - "crates/pg-control/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-postgres.sh"
-      - ".github/workflows/postgres.yml"
   workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
 
 concurrency:
   group: postgres-${{ github.ref }}

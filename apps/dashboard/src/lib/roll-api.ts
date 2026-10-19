@@ -1,4 +1,4 @@
-/** Client for the rolld control-plane API (Postgres: crates/pg-control/src/api.rs; Redis: redis-api.ts). */
+/** Client for the rolld control-plane API (Postgres: crates/pg-control/src/api.rs; streams: crates/stream-broker/src/http; Redis: redis-api.ts). */
 
 export const ROLL_API = process.env.NEXT_PUBLIC_ROLL_API ?? "http://127.0.0.1:7070";
 
@@ -95,6 +95,118 @@ export const api = {
   usage: (project: string, days = 30) => call<Usage>("GET", `/v1/projects/${project}/usage?days=${days}`),
   query: (endpoint: string, sql: string) =>
     call<{ results: QueryResult[]; took_ms: number }>("POST", `/v1/endpoints/${endpoint}/query`, { sql }),
+};
+
+// ── streams (Kafka-compatible) ──
+
+export interface StreamInfo {
+  id: string;
+  name: string;
+  region: string;
+  created_at: number;
+  cluster_id: string;
+  bootstrap: string;
+  http: string;
+  topics: number;
+  partitions: number;
+  throughput: { total_in_bytes: number; total_out_bytes: number };
+}
+
+export interface StreamKey {
+  username: string;
+  label: string;
+  created_at: number;
+}
+
+export interface StreamDetail extends StreamInfo {
+  topic_list: TopicSummary[];
+  keys: StreamKey[];
+}
+
+export interface Connect {
+  bootstrap: string;
+  security_protocol: string;
+  sasl_mechanism: string;
+  username: string;
+  secret: string;
+  properties: string;
+  http: { produce: string; authorization: string };
+}
+
+export interface TopicSummary {
+  id: string;
+  name: string;
+  partitions: number;
+  created_at: number;
+  configs: Record<string, string>;
+}
+
+export interface PartitionStats {
+  partition: number;
+  log_start_offset: number;
+  high_watermark: number;
+  last_stable_offset: number;
+  local_bytes: number;
+  remote_bytes: number;
+  pending_upload_bytes: number;
+  segments: number;
+  chunks: number;
+  producers: number;
+  max_timestamp: number;
+}
+
+export interface TopicDetail extends TopicSummary {
+  records: number;
+  local_bytes: number;
+  remote_bytes: number;
+  partition_stats: PartitionStats[];
+}
+
+export interface StreamRecord {
+  partition: number;
+  offset: number;
+  timestamp: number;
+  key: unknown;
+  value: unknown;
+}
+
+export interface StreamUsage {
+  hours: number;
+  estimate: {
+    monthly_usd: { s3_storage: number; local_storage: number; requests: number; transfer: number; total: number };
+    msk_monthly_usd: { brokers: number; storage: number; total: number };
+    projected: { bytes_in: number; bytes_out: number; remote_gb: number; local_gb: number };
+  };
+}
+
+export interface KafkaInfo {
+  bootstrap: string;
+  security_protocol: string;
+  default_stream: string | null;
+  storage: string;
+  streams: number;
+}
+
+const st = (id: string) => `/v1/streams/${encodeURIComponent(id)}`;
+const tp = (id: string, topic: string) => `${st(id)}/topics/${encodeURIComponent(topic)}`;
+
+export const streams = {
+  info: () => call<KafkaInfo>("GET", "/v1/kafka"),
+  list: () => call<StreamInfo[]>("GET", "/v1/streams"),
+  get: (id: string) => call<StreamDetail>("GET", st(id)),
+  create: (name: string) => call<StreamInfo & { connect: Connect }>("POST", "/v1/streams", { name }),
+  remove: (id: string) => call<null>("DELETE", st(id)),
+  createKey: (id: string, label?: string) => call<StreamKey & { connect: Connect }>("POST", `${st(id)}/keys`, { label }),
+  deleteKey: (id: string, username: string) => call<null>("DELETE", `${st(id)}/keys/${encodeURIComponent(username)}`),
+  topic: (id: string, topic: string) => call<TopicDetail>("GET", tp(id, topic)),
+  createTopic: (id: string, name: string, partitions: number, configs: Record<string, string>) =>
+    call<TopicDetail>("POST", `${st(id)}/topics`, { name, partitions, configs }),
+  deleteTopic: (id: string, topic: string) => call<null>("DELETE", tp(id, topic)),
+  produce: (id: string, topic: string, record: { key?: string; value: string }) =>
+    call<{ offsets: { partition: number; offset: number }[] }>("POST", `${tp(id, topic)}/records`, record),
+  usage: (id: string, hours = 168) => call<StreamUsage>("GET", `${st(id)}/usage?hours=${hours}`),
+  /** Server-Sent Events URL for new records (`record` events). */
+  tailUrl: (id: string, topic: string) => `${ROLL_API}${tp(id, topic)}/tail`,
 };
 
 export const CU_STEPS = [0.25, 0.5, 1, 2, 3, 4, 6, 8, 16, 32];

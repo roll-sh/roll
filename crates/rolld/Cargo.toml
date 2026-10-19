@@ -1,6 +1,6 @@
 [package]
 name = "rolld"
-description = "roll daemon: Postgres proxy, serverless Redis, control plane API, reconciler"
+description = "roll daemon: Postgres proxy, serverless Redis, Kafka-compatible streams, queues broker, control plane API and reconcilers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,11 +10,35 @@ publish.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+libc.workspace = true
+libmimalloc-sys.workspace = true
+mimalloc.workspace = true
+mq-amqp.workspace = true
+mq-amqp10.workspace = true
+mq-cluster.workspace = true
+mq-control.workspace = true
+mq-core.workspace = true
+mq-http.workspace = true
+mq-mgmt.workspace = true
+mq-mqtt.workspace = true
+mq-shovel.workspace = true
+mq-stomp.workspace = true
+mq-storage.workspace = true
+mq-stream.workspace = true
+object_store.workspace = true
 pg-control.workspace = true
 pg-proxy.workspace = true
 pg-storage.workspace = true
 redis-control.workspace = true
 redis-server.workspace = true
+stream-broker.workspace = true
+tasks.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+lapin.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true

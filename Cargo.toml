@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,7 +11,6 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1"
-base64 = "0.22"
 axum = "0.8"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -19,19 +19,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# JSON documents (RedisJSON): the JSONPath grammar runs on the pest version RedisJSON pins, so
-# syntax errors are reported identically.
-pest = "=2.8.6"
-pest_derive = "=2.8.6"
-regex = "1"
-half = "2.7"
-ryu = "1.0.23"
-indexmap = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-rcgen = "0.14"
 tokio-postgres = "0.7"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -39,29 +30,102 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 object_store = { version = "0.14", features = ["aws"] }
 postgres-protocol = "0.6"
 zstd = "0.14"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
+snap = "1"
 humantime = "2"
 futures = "0.3"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+croner = "3"
+hmac = "0.12"
+sha2 = "0.10"
+url = "2"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1"
+aws-sdk-s3 = "1"
+lambda_http = { version = "1", default-features = false, features = ["apigw_http", "apigw_rest", "alb"] }
+tasks = { path = "crates/tasks" }
+kafka-protocol = { version = "0.18", features = ["messages_enums"] }
+# mimalloc v2: lower per-key RSS than v3 for the Redis engine (measured against Valkey 9.1).
+mimalloc = { version = "0.1.52", default-features = false, features = ["v2"] }
+libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended", "v2"] }
+crc32c = "0.6"
+uuid = "1"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pemfile = "2"
+rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "zstd"] }
+rcgen = "0.14"
+pg-control = { path = "crates/pg-control" }
+pg-storage = { path = "crates/pg-storage" }
+pg-proxy = { path = "crates/pg-proxy" }
+stream-log = { path = "crates/stream-log" }
+stream-broker = { path = "crates/stream-broker" }
+crc32fast = "1"
+hex = "0.4"
+rustls-native-certs = "0.8"
+tokio-postgres-rustls = "0.13"
+lapin = "4"
+parking_lot = "0.12"
+regex = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
+mq-core = { path = "crates/mq-core" }
+mq-amqp = { path = "crates/mq-amqp" }
+mq-storage = { path = "crates/mq-storage" }
+mq-control = { path = "crates/mq-control" }
+mq-proxy = { path = "crates/mq-proxy" }
+mq-cluster = { path = "crates/mq-cluster" }
+mq-mqtt = { path = "crates/mq-mqtt" }
+mq-stomp = { path = "crates/mq-stomp" }
+mq-amqp10 = { path = "crates/mq-amqp10" }
+mq-stream = { path = "crates/mq-stream" }
+mq-mgmt = { path = "crates/mq-mgmt" }
+mq-http = { path = "crates/mq-http" }
+mq-shovel = { path = "crates/mq-shovel" }
+futures-util = "0.3"
+rumqttc = "0.25"
+fe2o3-amqp = "0.18"
+serde_amqp = "0.18"
+rabbitmq-stream-client = "0.11"
+tokio-tungstenite = "0.30"
+percent-encoding = "2"
+urlencoding = "2"
+tempfile = "3"
+libc = "0.2"
+md-5 = "0.11"
+
+# Serverless Redis.
+# JSON documents (RedisJSON): the JSONPath grammar runs on the pest version RedisJSON pins, so
+# syntax errors are reported identically.
+pest = "=2.8.6"
+pest_derive = "=2.8.6"
+half = "2.7"
+ryu = "1.0.23"
+indexmap = "2"
 itoa = "1"
 memchr = "2"
 smallvec = { version = "1", features = ["union", "const_generics", "write"] }
 foldhash = "0.2"
-parking_lot = "0.12"
 rand = "0.8"
 sha1 = "0.10"
-sha2 = "0.11"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 libm = "0.2"
-libc = "0.2"
-mimalloc = { version = "0.1.52", default-features = false, features = ["v2"] }
-libmimalloc-sys = { version = "0.1.49", features = ["extended", "v2"] }
 rustc_apfloat = "0.2"
 cc = "1"
-pg-control = { path = "crates/pg-control" }
 redis-lua = { path = "crates/redis-lua" }
 snowball = { path = "crates/snowball" }
-pg-storage = { path = "crates/pg-storage" }
-pg-proxy = { path = "crates/pg-proxy" }
 redis-proto = { path = "crates/redis-proto" }
 redis-engine = { path = "crates/redis-engine" }
 redis-server = { path = "crates/redis-server" }
 redis-control = { path = "crates/redis-control" }
+
+# kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
+[patch.crates-io]
+kafka-protocol = { path = "vendor/kafka-protocol" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

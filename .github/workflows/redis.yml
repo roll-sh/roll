@@ -16,20 +16,9 @@ on:
       - "Cargo.lock"
       - "scripts/test-redis.sh"
       - ".github/workflows/redis.yml"
-  pull_request:
-    paths:
-      - "crates/redis-proto/**"
-      - "crates/redis-lua/**"
-      - "crates/redis-engine/**"
-      - "crates/redis-server/**"
-      - "crates/redis-control/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-redis.sh"
-      - ".github/workflows/redis.yml"
   workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
 
 concurrency:
   group: redis-${{ github.ref }}

@@ -50,6 +50,10 @@
 //! runs roll alone on that address (debug commands enabled) until killed, for probing scripts
 //! such as `redis-engine/data/friso/gen_t2s.py`.
 
+/// As in rolld: mimalloc, so `serve` (the benchmark server) measures what production runs.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use redis_engine::{Config, Reply};
 use redis_server::client::RespClient;
 use redis_server::{Database, start_single};
