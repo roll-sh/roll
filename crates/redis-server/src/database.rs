@@ -64,6 +64,10 @@ pub struct Database {
     pub id: String,
     /// The core its connections and cron run on ([`crate::cores`]).
     pub home: usize,
+    /// While its home core is saturated, its connections spread over this many more cores for
+    /// their I/O (0: all on the home core).
+    pub spread: std::sync::atomic::AtomicUsize,
+    spreading: Mutex<Spreading>,
     pub shards: Vec<Shard>,
     pub hub: Arc<Hub>,
     pub feed: Mutex<Feed>,
@@ -330,6 +334,8 @@ impl Database {
         let db = Arc::new(Self {
             id: id.into(),
             home: crate::cores::pool().assign(),
+            spread: std::sync::atomic::AtomicUsize::new(0),
+            spreading: Mutex::new(Spreading::default()),
             shards,
             hub,
             feed: Mutex::new(Feed { last_db: u16::MAX, ..Feed::default() }),
@@ -436,6 +442,29 @@ impl Database {
     /// Whether a pause may hold commands back on shard `i` (else none does).
     pub fn may_be_paused(&self, i: usize) -> bool {
         self.shards[i].paused.load(Ordering::SeqCst)
+    }
+
+    /// The core a connection should run on: the home core, or while that is saturated and
+    /// spreading pays, one of up to four others ([`Spreading`]).
+    pub fn core_for(&self, client: u64) -> usize {
+        let pool = crate::cores::pool();
+        if let Some(mut st) = self.spreading.try_lock() {
+            let now = redis_engine::util::mono_us();
+            if now.saturating_sub(st.checked) >= 100_000 {
+                st.checked = now;
+                let load = pool.load(self.home);
+                let before = st.spread;
+                let spread = st.step(now, self.commands.load(Ordering::Relaxed), load, self.io.clients.load(Ordering::Relaxed), pool.len());
+                if spread != before {
+                    tracing::debug!(db = self.id, load, spread, base_rate = st.base_rate, why = st.why, "connections spread");
+                    if std::env::var_os("ROLL_SPREAD_LOG").is_some() {
+                        eprintln!("spread {before}->{spread} load {load} base_rate {} ({})", st.base_rate, st.why);
+                    }
+                }
+                self.spread.store(spread, Ordering::Relaxed);
+            }
+        }
+        pool.place_for(self.home, self.spread.load(Ordering::Relaxed), client)
     }
 
     /// Let a sleeping cron go on (the database is in use again).
@@ -724,5 +753,72 @@ pub struct VecFeed(pub Mutex<Vec<u8>>);
 impl FeedSink for VecFeed {
     fn write(&self, chunk: &Bytes, _end: u64) {
         self.0.lock().extend_from_slice(chunk);
+    }
+}
+
+/// Whether a database's connections spread over more cores: once its home core is saturated
+/// (over 90% busy) it tries, and keeps that only if commands then go through at least 15% faster
+/// (else the clients, not the core, were the limit: back home, not trying again for 10 seconds).
+/// Spread, it goes home once demand falls well below what the home core managed alone (under 60%
+/// of that rate for a third of a second).
+#[derive(Default)]
+struct Spreading {
+    /// When the state was last looked at (monotonic µs).
+    checked: u64,
+    /// The command counter and time at the start of the current measurement.
+    mark: (u64, u64),
+    /// Commands per second on the home core alone before spreading.
+    base_rate: u64,
+    /// Trying since (0: not trying).
+    trying: u64,
+    spread: usize,
+    /// No new try until then.
+    backoff_until: u64,
+    /// Consecutive looks with demand low enough to go home.
+    low: u32,
+    /// Why the last change happened (for the log).
+    pub why: &'static str,
+}
+
+impl Spreading {
+    fn rate(&self, now: u64, commands: u64) -> u64 {
+        let dt = now.saturating_sub(self.mark.1).max(1);
+        commands.saturating_sub(self.mark.0) * 1_000_000 / dt
+    }
+
+    fn step(&mut self, now: u64, commands: u64, load: u32, clients: u64, cores: usize) -> usize {
+        let rate = self.rate(now, commands);
+        if self.spread == 0 {
+            if load > 90 && clients > 1 && now >= self.backoff_until && cores > 1 {
+                self.base_rate = rate;
+                self.trying = now;
+                self.spread = 4.min(cores - 1);
+                self.low = 0;
+                self.why = "home core saturated";
+            }
+            self.mark = (commands, now);
+        } else if self.trying > 0 {
+            // Give connections half a second to move, then measure for half a second.
+            let since = now.saturating_sub(self.trying);
+            if since >= 500_000 && self.mark.1 < self.trying + 500_000 {
+                self.mark = (commands, now);
+            } else if since >= 1_000_000 {
+                if rate * 100 < self.base_rate * 115 {
+                    self.spread = 0;
+                    self.backoff_until = now + 10_000_000;
+                    self.why = "no faster spread";
+                }
+                self.trying = 0;
+                self.mark = (commands, now);
+            }
+        } else {
+            self.low = if rate * 100 < self.base_rate * 60 { self.low + 1 } else { 0 };
+            if self.low >= 3 {
+                self.spread = 0;
+                self.why = "demand fell";
+            }
+            self.mark = (commands, now);
+        }
+        self.spread
     }
 }

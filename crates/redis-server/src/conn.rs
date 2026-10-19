@@ -289,7 +289,10 @@ impl Conn {
                 }
                 self.publish_qbuf(inbuf, false);
                 if !self.pending.is_empty() {
-                    self.run_pending(rd, wr).await;
+                    match self.exec_core() {
+                        Some(home) => self.run_pending_on(home).await,
+                        None => self.run_pending(rd, wr).await,
+                    }
                 }
             }
             if !self.out.is_empty() && !self.flush(wr, rx).await {
@@ -375,8 +378,9 @@ impl Conn {
         Exit::Close
     }
 
-    /// Where this connection should run now, if not here: its database's home core, or the
-    /// multi-thread runtime while the Lua debugger may block in place.
+    /// Where this connection should run now, if not here: its database's home core (or, for a
+    /// database whose connections spread, another core), or the multi-thread runtime while the
+    /// Lua debugger may block in place.
     fn wants_move(&self) -> Option<crate::cores::Place> {
         use crate::cores::{Place, current};
         if self.unmovable || self.sync.is_some() {
@@ -385,8 +389,54 @@ impl Conn {
         if self.client.ldb != LdbMode::Off {
             return current().is_some().then_some(Place::Slow);
         }
+        let want = self.db()?.core_for(self.client.id);
+        (current() != Some(want)).then_some(Place::Core(want))
+    }
+
+    /// The home core this connection's commands run on when it is on another core thread.
+    fn exec_core(&self) -> Option<usize> {
+        let here = crate::cores::current()?;
         let home = self.db()?.home;
-        (current() != Some(home)).then_some(Place::Core(home))
+        (here != home && self.client.ldb == LdbMode::Off).then_some(home)
+    }
+
+    /// Run the parsed commands on the database's home core: the connection's state goes there
+    /// and back, its socket stays here (reads, parsing and writes go on on this core).
+    async fn run_pending_on(&mut self, home: usize) {
+        let mut conn = std::mem::replace(self, self.placeholder());
+        let handle = crate::cores::pool().handle(crate::cores::Place::Core(home)).clone();
+        let task = handle.spawn(async move {
+            conn.run_pending(&mut tokio::io::empty(), &mut tokio::io::sink()).await;
+            conn
+        });
+        *self = task.await.expect("home core task");
+    }
+
+    /// A stand-in while the connection's state is away.
+    fn placeholder(&self) -> Conn {
+        Conn {
+            dir: self.dir.clone(),
+            sni: None,
+            session: None,
+            client: Client::new(0),
+            pending: VecDeque::new(),
+            out: BytesMut::new(),
+            skip_next: false,
+            close_after: false,
+            blocked: None,
+            more: false,
+            stats: self.stats.clone(),
+            repl_conf: Default::default(),
+            sync: None,
+            rbuf: ReplyBuf::default(),
+            soft_since: 0,
+            obuf_closed: false,
+            pending_bytes: 0,
+            qb_skip: 0,
+            qb_want: 0,
+            unmovable: false,
+            limits: Default::default(),
+        }
     }
 }
 
