@@ -164,10 +164,120 @@ fn read_back(buf: &[u8], end: usize) -> (usize, usize, usize) {
     (data - k, data, n)
 }
 
+/// A node's bytes, with room kept before them as well as after: entries pushed or popped at the
+/// front move nothing (Redis' listpack moves the whole node).
+#[derive(Clone, Debug, Default)]
+struct GapBuf {
+    v: Vec<u8>,
+    /// Where the bytes start in `v`.
+    start: usize,
+}
+
+impl PartialEq for GapBuf {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for GapBuf {}
+
+impl std::ops::Deref for GapBuf {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        &self.v[self.start..]
+    }
+}
+
+impl std::ops::DerefMut for GapBuf {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.v[self.start..]
+    }
+}
+
+impl GapBuf {
+    /// Bytes allocated, both gaps included.
+    fn capacity(&self) -> usize {
+        self.v.capacity()
+    }
+
+    /// Room after the bytes.
+    fn back_room(&self) -> usize {
+        self.v.capacity() - self.v.len()
+    }
+
+    fn reserve_exact(&mut self, add: usize) {
+        self.v.reserve_exact(add);
+    }
+
+    /// Drop the room before the bytes.
+    fn compact(&mut self) {
+        if self.start > 0 {
+            self.v.drain(..self.start);
+            self.start = 0;
+        }
+    }
+
+    fn shrink_to(&mut self, n: usize) {
+        self.compact();
+        self.v.shrink_to(n);
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.compact();
+        self.v.shrink_to_fit();
+    }
+
+    fn resize(&mut self, len: usize, b: u8) {
+        self.v.resize(self.start + len, b);
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.v.truncate(self.start + len);
+    }
+
+    fn extend_from_slice(&mut self, b: &[u8]) {
+        self.v.extend_from_slice(b);
+    }
+
+    /// Remove bytes `r` (relative to the start): from the front by moving the start.
+    fn drain(&mut self, r: std::ops::Range<usize>) {
+        if r.start == 0 {
+            self.start += r.end;
+            if self.start == self.v.len() {
+                self.v.clear();
+                self.start = 0;
+            }
+        } else {
+            self.v.drain(self.start + r.start..self.start + r.end);
+        }
+    }
+
+    fn split_off(&mut self, at: usize) -> GapBuf {
+        GapBuf { v: self.v.split_off(self.start + at), start: 0 }
+    }
+
+    /// Make `n` bytes of room at the front (their content unspecified): keeps a quarter of the
+    /// length spare there when it has to move the bytes.
+    fn prepend(&mut self, n: usize) {
+        if self.start < n {
+            let len = self.len();
+            let gap = n + (len / 4).max(16);
+            let mut v = Vec::with_capacity(gap + len + self.back_room());
+            v.resize(gap, 0);
+            v.extend_from_slice(&self.v[self.start..]);
+            self.v = v;
+            self.start = gap;
+        }
+        self.start -= n;
+    }
+}
+
 /// One node: a run of entries in a single buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Node {
-    buf: Vec<u8>,
+    buf: GapBuf,
     count: u32,
     /// What Redis reports as the node size: `lpBytes` of the equivalent listpack, or the element
     /// length for a plain node.
@@ -178,7 +288,7 @@ struct Node {
 
 impl Node {
     fn packed() -> Self {
-        Node { buf: Vec::new(), count: 0, sz: LP_EMPTY, plain: false }
+        Node { buf: GapBuf::default(), count: 0, sz: LP_EMPTY, plain: false }
     }
 
     fn single(v: &[u8]) -> Self {
@@ -249,7 +359,7 @@ impl Node {
     /// Room for `add` more bytes, growing by at least a quarter to keep pushes amortised O(1)
     /// without doubling the slack.
     fn reserve(&mut self, add: usize) {
-        if self.buf.capacity() - self.buf.len() < add {
+        if self.buf.back_room() < add {
             self.buf.reserve_exact(add.max(self.buf.len() / 4).max(16));
         }
     }
@@ -264,6 +374,10 @@ impl Node {
 
     /// Open a gap of `n` bytes at `at`.
     fn open(&mut self, at: usize, n: usize) {
+        if at == 0 {
+            self.buf.prepend(n);
+            return;
+        }
         self.reserve(n);
         let old = self.buf.len();
         self.buf.resize(old + n, 0);
@@ -303,7 +417,7 @@ impl Node {
         }
         let (d, n, end) = read_fwd(&self.buf, 0);
         let v = self.buf[d..d + n].to_vec();
-        self.buf.drain(..end);
+        self.buf.drain(0..end);
         self.removed(&v, 1);
         Some(v)
     }

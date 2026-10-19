@@ -411,9 +411,27 @@ pub fn table() -> &'static Table {
 
 /// Look up a top-level command by (any-case) name.
 pub fn lookup(name: &[u8]) -> Option<&'static Command> {
+    // Pipelines repeat a command: the last name this thread resolved, as the client spelled it.
+    thread_local! {
+        static LAST: std::cell::Cell<([u8; 32], u8, Option<&'static Command>)> = const { std::cell::Cell::new(([0; 32], 0, None)) };
+    }
     if name.len() > 32 {
         return None;
     }
+    let (buf, len, cmd) = LAST.get();
+    if cmd.is_some() && usize::from(len) == name.len() && buf[..name.len()] == *name {
+        return cmd;
+    }
+    let found = lookup_uncached(name);
+    if found.is_some() {
+        let mut buf = [0; 32];
+        buf[..name.len()].copy_from_slice(name);
+        LAST.set((buf, name.len() as u8, found));
+    }
+    found
+}
+
+fn lookup_uncached(name: &[u8]) -> Option<&'static Command> {
     let mut buf = [0u8; 32];
     let lower = &mut buf[..name.len()];
     lower.copy_from_slice(name);

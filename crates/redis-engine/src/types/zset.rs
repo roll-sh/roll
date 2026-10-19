@@ -194,6 +194,18 @@ struct Level {
 
 const EMPTY_LEVEL: Level = Level { fwd: NIL, span: 0 };
 
+/// A level-2+ (or head) link: also where the forward node's own level-2+ links are, so a search
+/// step can fetch the next node and its links together instead of one after the other.
+#[derive(Clone, Copy, Debug)]
+struct Link {
+    fwd: u32,
+    span: u32,
+    /// `up` of `fwd` (0 when it is NIL).
+    fup: u32,
+}
+
+const EMPTY_LINK: Link = Link { fwd: NIL, span: 0, fup: 0 };
+
 #[derive(Clone, Debug)]
 struct Node {
     score: f64,
@@ -245,10 +257,10 @@ pub struct SkipList {
     nodes: Vec<Node>,
     /// Free node slots, chained through `next`.
     free: u32,
-    levels: Vec<Level>,
+    levels: Vec<Link>,
     /// Free level blocks by size (index = extra levels - 1), chained through the first `fwd`.
     free_levels: [u32; MAX_LEVEL - 1],
-    head: [Level; MAX_LEVEL],
+    head: [Link; MAX_LEVEL],
     tail: u32,
     len: usize,
     level: usize,
@@ -308,7 +320,7 @@ impl SkipList {
             free: NIL,
             levels: Vec::new(),
             free_levels: [NIL; MAX_LEVEL - 1],
-            head: [EMPTY_LEVEL; MAX_LEVEL],
+            head: [EMPTY_LINK; MAX_LEVEL],
             tail: NIL,
             len: 0,
             level: 1,
@@ -374,15 +386,19 @@ impl SkipList {
 
     #[inline]
     fn set_fwd(&mut self, x: u32, i: usize, v: u32) {
+        let fup = if v == NIL || v == HEAD { 0 } else { self.nodes[v as usize].up };
         if x == HEAD {
             self.head[i].fwd = v;
+            self.head[i].fup = fup;
         } else if i == 0 {
             self.nodes[x as usize].next = v;
         } else if i == 1 {
             self.nodes[x as usize].l1.fwd = v;
         } else {
             let up = self.nodes[x as usize].up as usize;
-            self.levels[up + i - 2].fwd = v;
+            let l = &mut self.levels[up + i - 2];
+            l.fwd = v;
+            l.fup = fup;
         }
     }
 
@@ -451,12 +467,12 @@ impl SkipList {
         if f != NIL {
             self.free_levels[extra - 1] = self.levels[f as usize].fwd;
             for l in &mut self.levels[f as usize..f as usize + extra] {
-                *l = EMPTY_LEVEL;
+                *l = EMPTY_LINK;
             }
             f
         } else {
             let at = self.levels.len();
-            self.levels.resize(at + extra, EMPTY_LEVEL);
+            self.levels.resize(at + extra, EMPTY_LINK);
             at as u32
         }
     }
@@ -488,23 +504,37 @@ impl SkipList {
         nf.score < score || (nf.score == score && nf.ele.as_slice() < ele)
     }
 
-    /// The last node before `(score, ele)` at every level, and their ranks.
+    /// The last node before `(score, ele)` at every level, and their ranks. Each step reads the
+    /// link it follows for where the next node's own links are, so their loads overlap.
     fn insert_path(&self, score: f64, ele: &[u8]) -> ([u32; MAX_LEVEL], [u32; MAX_LEVEL]) {
+        /// The forward node's links aren't in the link: read them from the node.
+        const FROM_NODE: u32 = u32::MAX;
         let mut update = [HEAD; MAX_LEVEL];
         let mut rank = [0u32; MAX_LEVEL];
-        let mut x = HEAD;
+        let (mut x, mut xup, mut r) = (HEAD, 0u32, 0u32);
         for i in (0..self.level).rev() {
-            rank[i] = if i == self.level - 1 { 0 } else { rank[i + 1] };
             loop {
-                let f = self.fwd(x, i);
-                if f != NIL && self.sorts_before(f, score, ele) {
-                    rank[i] += self.span(x, i);
-                    x = f;
+                let (f, span, fup) = if i == 0 {
+                    (if x == HEAD { self.head[0].fwd } else { self.nodes[x as usize].next }, 1, FROM_NODE)
+                } else if x == HEAD {
+                    let l = &self.head[i];
+                    (l.fwd, l.span, l.fup)
+                } else if i == 1 {
+                    let l = &self.nodes[x as usize].l1;
+                    (l.fwd, l.span, FROM_NODE)
                 } else {
+                    let l = &self.levels[xup as usize + i - 2];
+                    (l.fwd, l.span, l.fup)
+                };
+                if f == NIL || !self.sorts_before(f, score, ele) {
                     break;
                 }
+                r += span;
+                x = f;
+                xup = if fup == FROM_NODE { self.nodes[f as usize].up } else { fup };
             }
             update[i] = x;
+            rank[i] = r;
         }
         (update, rank)
     }
@@ -547,21 +577,9 @@ impl SkipList {
 
     /// The `update` vector for node `x` (the last node before it at every level).
     fn path_to(&self, x: u32) -> [u32; MAX_LEVEL] {
-        let mut update = [HEAD; MAX_LEVEL];
-        let mut y = HEAD;
-        let (score, ele) = (self.node(x).score, self.node(x).ele.as_slice());
-        for i in (0..self.level).rev() {
-            loop {
-                let f = self.fwd(y, i);
-                if f != NIL && self.sorts_before(f, score, ele) {
-                    y = f;
-                } else {
-                    break;
-                }
-            }
-            update[i] = y;
-        }
-        debug_assert_eq!(self.fwd(y, 0), x);
+        let n = self.node(x);
+        let (update, _) = self.insert_path(n.score, n.ele.as_slice());
+        debug_assert_eq!(self.fwd(update[0], 0), x);
         update
     }
 
@@ -958,7 +976,7 @@ impl SkipList {
 
     fn mem(&self) -> usize {
         self.nodes.capacity() * std::mem::size_of::<Node>()
-            + self.levels.capacity() * std::mem::size_of::<Level>()
+            + self.levels.capacity() * std::mem::size_of::<Link>()
             + (self.t0.capacity() + self.t1.capacity()) * 4
             + self.heap
     }
@@ -1010,7 +1028,12 @@ impl SkipList {
             let mut rank = 0usize;
             while self.fwd(x, i) != NIL {
                 rank += self.span(x, i) as usize;
+                // Links past level 1 know where their target's links are.
+                let link = if x == HEAD { Some(self.head[i]) } else if i >= 2 { Some(self.levels[self.node(x).up as usize + i - 2]) } else { None };
                 x = self.fwd(x, i);
+                if let Some(l) = link {
+                    assert_eq!(l.fup, self.node(x).up, "fup at level {i}");
+                }
                 if x != HEAD {
                     assert_eq!(self.rank_of(x), rank, "span at level {i}");
                 }
@@ -1560,6 +1583,32 @@ impl ZSet {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// `cargo test --release -p redis-engine zset_add_speed -- --ignored --nocapture`: ZADD's
+    /// workload in redis-benchmark (random scores for members of a 100k set).
+    #[test]
+    #[ignore]
+    fn zset_add_speed() {
+        let mut z = ZSet::new();
+        let mut x = 88172645463325252u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let member = |n: u64| format!("element:{:012}", n % 100_000).into_bytes();
+        for n in 0..100_000 {
+            z.add(&member(n), (n % 100_000) as f64, AddFlags::default(), Limits::default()).unwrap();
+        }
+        let ops: Vec<(Vec<u8>, f64)> = (0..4_000_000).map(|_| (member(next()), (next() % 100_000) as f64)).collect();
+        let t = std::time::Instant::now();
+        for (m, s) in &ops {
+            z.add(m, *s, AddFlags::default(), Limits::default()).unwrap();
+        }
+        let ns = t.elapsed().as_nanos() as f64 / ops.len() as f64;
+        eprintln!("zadd: {ns:.0} ns/op, node {} bytes", std::mem::size_of::<Node>());
+    }
 
     /// The naive model: members with scores, ordered by (score, member).
     fn model_sorted(m: &BTreeMap<Vec<u8>, f64>) -> Vec<(Vec<u8>, f64)> {
