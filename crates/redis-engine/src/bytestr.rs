@@ -1,37 +1,61 @@
 //! [`Str`]: a byte string in 24 bytes, holding up to 23 bytes inline (most keys, members, fields
 //! and small values need no allocation of their own) and longer ones in a heap buffer.
 //!
-//! Layout (little-endian): inline, bytes 0..23 are the data and byte 23 the length; on the heap,
-//! a pointer, the length, and the capacity whose top byte (byte 23) is [`HEAP`].
+//! Layout: bytes 0..23 hold the data inline, or a heap buffer's pointer (0..8), length (8..16)
+//! and capacity (16..23); byte 23 is the inline length (0..=23) or [`Tag::Heap`]. That last
+//! byte's unused values are a niche: an enum holding a `Str` among boxed variants (`Value`) is 24
+//! bytes, not 32.
 
 use std::alloc::{Layout, alloc, dealloc, realloc};
-use std::ptr::NonNull;
-
-#[cfg(target_endian = "big")]
-compile_error!("Str's layout assumes a little-endian target");
 
 const INLINE: usize = 23;
-/// Byte 23 of a heap string: inline lengths are at most 23.
-const HEAP: u8 = 0xFF;
-const TAG_SHIFT: u32 = 56;
+/// Capacities fit the 7 bytes they are stored in.
+const MAX_CAP: usize = (1 << 56) - 1;
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct Heap {
-    ptr: NonNull<u8>,
-    len: usize,
-    /// Capacity, with [`HEAP`] in the top byte.
-    cap: usize,
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+#[allow(dead_code)]
+enum Tag {
+    L0 = 0,
+    L1 = 1,
+    L2 = 2,
+    L3 = 3,
+    L4 = 4,
+    L5 = 5,
+    L6 = 6,
+    L7 = 7,
+    L8 = 8,
+    L9 = 9,
+    L10 = 10,
+    L11 = 11,
+    L12 = 12,
+    L13 = 13,
+    L14 = 14,
+    L15 = 15,
+    L16 = 16,
+    L17 = 17,
+    L18 = 18,
+    L19 = 19,
+    L20 = 20,
+    L21 = 21,
+    L22 = 22,
+    L23 = 23,
+    Heap = 255,
+}
+
+impl Tag {
+    #[inline]
+    fn inline(len: usize) -> Tag {
+        debug_assert!(len <= INLINE);
+        // SAFETY: 0..=23 are variants.
+        unsafe { std::mem::transmute::<u8, Tag>(len as u8) }
+    }
 }
 
 #[repr(C)]
-union Repr {
-    inline: [u8; 24],
-    heap: Heap,
-}
-
 pub struct Str {
-    r: Repr,
+    bytes: [u8; INLINE],
+    tag: Tag,
 }
 
 // SAFETY: a `Str` owns its buffer like a `Vec<u8>`.
@@ -40,35 +64,59 @@ unsafe impl Send for Str {}
 unsafe impl Sync for Str {}
 
 fn layout(cap: usize) -> Layout {
+    assert!(cap <= MAX_CAP, "Str capacity overflow");
     Layout::array::<u8>(cap).expect("Str capacity overflow")
 }
 
 impl Str {
     #[inline]
     pub const fn new() -> Self {
-        Str { r: Repr { inline: [0; 24] } }
-    }
-
-    #[inline]
-    fn tag(&self) -> u8 {
-        // SAFETY: both variants are 24 initialised bytes.
-        unsafe { self.r.inline[INLINE] }
+        Str { bytes: [0; INLINE], tag: Tag::L0 }
     }
 
     /// Whether the bytes are in a heap buffer.
     #[inline]
     pub fn spilled(&self) -> bool {
-        self.tag() == HEAP
+        self.tag == Tag::Heap
+    }
+
+    // ---- heap fields, stored as bytes (the pointer keeps its provenance: written and read as a
+    // pointer) ----
+
+    #[inline]
+    fn heap_ptr(&self) -> *mut u8 {
+        // SAFETY: bytes 0..8 hold a pointer written by `set_heap`.
+        unsafe { std::ptr::read_unaligned(self.bytes.as_ptr() as *const *mut u8) }
+    }
+
+    #[inline]
+    fn heap_len(&self) -> usize {
+        usize::from_le_bytes(self.bytes[8..16].try_into().unwrap())
+    }
+
+    #[inline]
+    fn heap_cap(&self) -> usize {
+        let mut b = [0u8; 8];
+        b[..7].copy_from_slice(&self.bytes[16..23]);
+        usize::from_le_bytes(b)
+    }
+
+    #[inline]
+    fn set_heap_len(&mut self, len: usize) {
+        self.bytes[8..16].copy_from_slice(&len.to_le_bytes());
+    }
+
+    fn set_heap(&mut self, ptr: *mut u8, len: usize, cap: usize) {
+        // SAFETY: bytes 0..8 take the pointer.
+        unsafe { std::ptr::write_unaligned(self.bytes.as_mut_ptr() as *mut *mut u8, ptr) };
+        self.set_heap_len(len);
+        self.bytes[16..23].copy_from_slice(&cap.to_le_bytes()[..7]);
+        self.tag = Tag::Heap;
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        if self.spilled() {
-            // SAFETY: spilled, so the heap variant is active.
-            unsafe { self.r.heap.len }
-        } else {
-            self.tag() as usize
-        }
+        if self.spilled() { self.heap_len() } else { self.tag as usize }
     }
 
     #[inline]
@@ -78,47 +126,35 @@ impl Str {
 
     #[inline]
     pub fn capacity(&self) -> usize {
-        if self.spilled() {
-            // SAFETY: spilled.
-            unsafe { self.r.heap.cap & ((1 << TAG_SHIFT) - 1) }
-        } else {
-            INLINE
-        }
+        if self.spilled() { self.heap_cap() } else { INLINE }
     }
 
     #[inline]
     pub fn as_slice(&self) -> &[u8] {
-        // SAFETY: the active variant's first `len` bytes are initialised.
-        unsafe {
-            if self.spilled() {
-                std::slice::from_raw_parts(self.r.heap.ptr.as_ptr(), self.r.heap.len)
-            } else {
-                std::slice::from_raw_parts(self.r.inline.as_ptr(), self.tag() as usize)
-            }
+        if self.spilled() {
+            // SAFETY: the heap buffer's first `len` bytes are initialised.
+            unsafe { std::slice::from_raw_parts(self.heap_ptr(), self.heap_len()) }
+        } else {
+            &self.bytes[..self.tag as usize]
         }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: as in `as_slice`, through a unique borrow.
-        unsafe {
-            if self.spilled() {
-                std::slice::from_raw_parts_mut(self.r.heap.ptr.as_ptr(), self.r.heap.len)
-            } else {
-                let n = self.tag() as usize;
-                std::slice::from_raw_parts_mut(self.r.inline.as_mut_ptr(), n)
-            }
+        if self.spilled() {
+            // SAFETY: as in `as_slice`, through a unique borrow.
+            unsafe { std::slice::from_raw_parts_mut(self.heap_ptr(), self.heap_len()) }
+        } else {
+            let n = self.tag as usize;
+            &mut self.bytes[..n]
         }
     }
 
     pub fn from_slice(s: &[u8]) -> Self {
         let mut out = Self::new();
         if s.len() <= INLINE {
-            // SAFETY: writing the inline variant.
-            unsafe {
-                out.r.inline[..s.len()].copy_from_slice(s);
-                out.r.inline[INLINE] = s.len() as u8;
-            }
+            out.bytes[..s.len()].copy_from_slice(s);
+            out.tag = Tag::inline(s.len());
         } else {
             out.spill_to(s.len(), s);
         }
@@ -127,15 +163,16 @@ impl Str {
 
     /// Take a vector's bytes: inline if they fit, else its own buffer (no copy).
     pub fn from_vec(v: Vec<u8>) -> Self {
-        if v.len() <= INLINE {
+        if v.len() <= INLINE || v.capacity() > MAX_CAP {
             return Str::from_slice(&v);
         }
         let mut v = std::mem::ManuallyDrop::new(v);
         let (len, cap) = (v.len(), v.capacity());
-        // SAFETY: a non-empty Vec<u8>'s buffer was allocated with `Layout::array::<u8>(cap)`,
-        // as `free` releases it; the Vec is forgotten.
-        let ptr = unsafe { NonNull::new_unchecked(v.as_mut_ptr()) };
-        Str { r: Repr { heap: Heap { ptr, len, cap: cap | ((HEAP as usize) << TAG_SHIFT) } } }
+        let mut out = Str::new();
+        // A non-empty Vec<u8>'s buffer was allocated with `Layout::array::<u8>(cap)`, as `free`
+        // releases it; the Vec is forgotten.
+        out.set_heap(v.as_mut_ptr(), len, cap);
+        out
     }
 
     /// `n` copies of `b`.
@@ -157,19 +194,21 @@ impl Str {
         // SAFETY: `cap` is non-zero; `data` is copied before the old buffer is freed.
         unsafe {
             let ptr = alloc(layout(cap));
-            let Some(ptr) = NonNull::new(ptr) else { std::alloc::handle_alloc_error(layout(cap)) };
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr(), data.len());
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(layout(cap));
+            }
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
             self.free();
-            self.r.heap = Heap { ptr, len: data.len(), cap: cap | ((HEAP as usize) << TAG_SHIFT) };
+            self.set_heap(ptr, data.len(), cap);
         }
     }
 
-    /// Release a heap buffer (the string then holds garbage until rewritten).
+    /// Release a heap buffer (the string is then empty and inline).
     fn free(&mut self) {
         if self.spilled() {
             // SAFETY: spilled: the buffer was allocated with this capacity.
-            unsafe { dealloc(self.r.heap.ptr.as_ptr(), layout(self.capacity())) };
-            self.r.inline = [0; 24];
+            unsafe { dealloc(self.heap_ptr(), layout(self.heap_cap())) };
+            self.tag = Tag::L0;
         }
     }
 
@@ -194,36 +233,37 @@ impl Str {
 
     fn grow_to(&mut self, cap: usize) {
         if self.spilled() {
-            let old = self.capacity();
+            let (old, len) = (self.heap_cap(), self.heap_len());
             // SAFETY: the buffer was allocated with `old`; `cap` > `old` > 0.
             unsafe {
-                let ptr = realloc(self.r.heap.ptr.as_ptr(), layout(old), cap);
-                let Some(ptr) = NonNull::new(ptr) else { std::alloc::handle_alloc_error(layout(cap)) };
-                self.r.heap.ptr = ptr;
-                self.r.heap.cap = cap | ((HEAP as usize) << TAG_SHIFT);
+                let ptr = realloc(self.heap_ptr(), layout(old), cap);
+                if ptr.is_null() {
+                    std::alloc::handle_alloc_error(layout(cap));
+                }
+                self.set_heap(ptr, len, cap);
             }
         } else {
-            let tmp = self.as_slice().to_owned();
-            self.spill_to(cap, &tmp);
+            let mut tmp = [0u8; INLINE];
+            let n = self.tag as usize;
+            tmp[..n].copy_from_slice(&self.bytes[..n]);
+            self.spill_to(cap, &tmp[..n]);
         }
     }
 
-    /// Set the length (bytes up to it must be initialised: callers write them first).
+    /// Set the length.
     ///
     /// # Safety
     /// `len` must not exceed the capacity, and bytes `..len` must be initialised.
     unsafe fn set_len(&mut self, len: usize) {
         if self.spilled() {
-            self.r.heap.len = len;
+            self.set_heap_len(len);
         } else {
-            // SAFETY: inline; `len` ≤ 23 by the caller's contract.
-            unsafe { self.r.inline[INLINE] = len as u8 };
+            self.tag = Tag::inline(len);
         }
     }
 
     fn data_ptr(&mut self) -> *mut u8 {
-        // SAFETY: reading the active variant's pointer.
-        unsafe { if self.spilled() { self.r.heap.ptr.as_ptr() } else { self.r.inline.as_mut_ptr() } }
+        if self.spilled() { self.heap_ptr() } else { self.bytes.as_mut_ptr() }
     }
 
     pub fn push(&mut self, b: u8) {
@@ -283,24 +323,22 @@ impl Str {
         if !self.spilled() {
             return;
         }
-        let len = self.len();
+        let len = self.heap_len();
         if len <= INLINE {
             let mut tmp = [0u8; INLINE];
             tmp[..len].copy_from_slice(self.as_slice());
             self.free();
-            // SAFETY: writing the inline variant.
-            unsafe {
-                self.r.inline[..len].copy_from_slice(&tmp[..len]);
-                self.r.inline[INLINE] = len as u8;
-            }
-        } else if len < self.capacity() {
-            let old = self.capacity();
+            self.bytes[..len].copy_from_slice(&tmp[..len]);
+            self.tag = Tag::inline(len);
+        } else if len < self.heap_cap() {
+            let old = self.heap_cap();
             // SAFETY: as in `grow_to`, to a smaller non-zero size.
             unsafe {
-                let ptr = realloc(self.r.heap.ptr.as_ptr(), layout(old), len);
-                let Some(ptr) = NonNull::new(ptr) else { std::alloc::handle_alloc_error(layout(len)) };
-                self.r.heap.ptr = ptr;
-                self.r.heap.cap = len | ((HEAP as usize) << TAG_SHIFT);
+                let ptr = realloc(self.heap_ptr(), layout(old), len);
+                if ptr.is_null() {
+                    std::alloc::handle_alloc_error(layout(len));
+                }
+                self.set_heap(ptr, len, len);
             }
         }
     }
@@ -535,8 +573,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_24_bytes() {
+    fn is_24_bytes_with_a_niche() {
         assert_eq!(std::mem::size_of::<Str>(), 24);
+        assert_eq!(std::mem::size_of::<Option<Str>>(), 24);
+        assert_eq!(std::mem::size_of::<crate::value::Value>(), 24);
     }
 
     #[test]
