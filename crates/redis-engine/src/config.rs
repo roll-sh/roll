@@ -154,6 +154,9 @@ pub struct Config {
     pub lazyfree_lazy_eviction: bool,
     pub lazyfree_lazy_expire: bool,
     pub lazyfree_lazy_server_del: bool,
+    /// RediSearch's `search-partial-indexed-docs` (checked by its command filter on every H*
+    /// write).
+    pub search_partial_indexed_docs: bool,
     pub lazyfree_lazy_user_del: bool,
     pub lazyfree_lazy_user_flush: bool,
     pub replica_lazy_flush: bool,
@@ -231,6 +234,7 @@ impl Default for Config {
             lazyfree_lazy_eviction: false,
             lazyfree_lazy_expire: false,
             lazyfree_lazy_server_del: false,
+            search_partial_indexed_docs: false,
             lazyfree_lazy_user_del: false,
             lazyfree_lazy_user_flush: false,
             replica_lazy_flush: false,
@@ -1104,7 +1108,7 @@ pub static PARAMS: &[Param] = &[
     boolean("search-_prioritize-intersect-union-children", None, MODIFIABLE, false),
     boolean("search-no-mem-pools", None, IMMUTABLE, false),
     boolean("search-no-gc", None, IMMUTABLE, false),
-    boolean("search-partial-indexed-docs", None, IMMUTABLE, false),
+    at!(boolean("search-partial-indexed-docs", None, IMMUTABLE, false), b!(search_partial_indexed_docs)),
     boolean("search-raw-docid-encoding", None, IMMUTABLE, false),
     boolean("search-enable-unstable-features", None, MODIFIABLE, false),
     boolean("search-_simulate-in-flex", None, IMMUTABLE, false),
@@ -1647,8 +1651,8 @@ impl ConfigDict {
 /// The parameter named `name` (or one of its aliases), case-insensitively.
 pub fn find(name: &str) -> Option<&'static Param> {
     /// Lowercase names and aliases, the first parameter claiming a name winning.
-    static BY_NAME: std::sync::LazyLock<(std::collections::HashMap<&'static str, &'static Param>, usize)> = std::sync::LazyLock::new(|| {
-        let mut m = std::collections::HashMap::new();
+    static BY_NAME: std::sync::LazyLock<(std::collections::HashMap<&'static str, &'static Param, foldhash::fast::RandomState>, usize)> = std::sync::LazyLock::new(|| {
+        let mut m = std::collections::HashMap::default();
         let mut longest = 0;
         for p in PARAMS {
             for n in std::iter::once(p.name).chain(p.alias) {

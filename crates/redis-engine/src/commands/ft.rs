@@ -43,7 +43,7 @@ const JSON_EVENTS: &[&str] = &[
 /// database, and a command that doesn't qualify leaves the previous fields in place.
 pub(crate) fn command_filter(eng: &mut Engine, args: &[Bytes]) {
     let Some(&c) = args.first().and_then(|a| a.first()) else { return };
-    if c | 0x20 != b'h' || args.len() < 3 || !eng.cfg.flag("search-partial-indexed-docs") {
+    if c | 0x20 != b'h' || args.len() < 3 || !eng.cfg.search_partial_indexed_docs {
         return;
     }
     let name = crate::util::cstr(&args[0]);

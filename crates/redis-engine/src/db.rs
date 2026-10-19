@@ -76,7 +76,7 @@ impl Db {
         }
         entry.sized = entry.value.size_slot();
         if entry.sized != NO_SIZE {
-            self.keysizes[entry.sized as usize] += 1;
+            self.keysizes[entry.sized as usize] = self.keysizes[entry.sized as usize].wrapping_add(1);
         }
         self.mem += Self::key_cost(&k) + entry.value.mem();
         if entry.expire != 0 {
@@ -105,7 +105,7 @@ impl Db {
         let (k, e) = self.keys.remove_entry(key)?;
         self.mem = self.mem.saturating_sub(Self::key_cost(&k) + e.value.mem());
         if e.sized != NO_SIZE {
-            self.keysizes[e.sized as usize] -= 1;
+            self.keysizes[e.sized as usize] = self.keysizes[e.sized as usize].wrapping_sub(1);
         }
         if e.expire != 0 {
             self.volatile.remove(key);
@@ -162,13 +162,30 @@ impl Db {
     /// Re-count a key whose value may have changed size (after a command touched it).
     pub fn resize(&mut self, key: &[u8]) {
         let Some(e) = self.keys.get_mut(key) else { return };
+        Self::resize_entry(&mut self.keysizes, e);
+    }
+
+    /// Redis skipped moving a string of `old_len` to `new_len` bytes in its histogram (SETBIT
+    /// and BITFIELD growing an empty string, BITFIELD growing one without changing bits): its
+    /// counts are deltas on lengths, so the miscount stays for good. Undo the move made here.
+    pub fn keysizes_skip_move(&mut self, old_len: usize, new_len: usize) {
+        let slot = |n: usize| ((usize::BITS - n.leading_zeros()) as usize).min(crate::value::SIZE_BINS - 1);
+        let (old, new) = (slot(old_len), slot(new_len));
+        if old != new {
+            self.keysizes[old] = self.keysizes[old].wrapping_add(1);
+            self.keysizes[new] = self.keysizes[new].wrapping_sub(1);
+        }
+    }
+
+    /// Move `e` to its current keysizes slot.
+    pub fn resize_entry(keysizes: &mut [u64], e: &mut Entry) {
         let slot = e.value.size_slot();
         if slot != e.sized {
             if e.sized != NO_SIZE {
-                self.keysizes[e.sized as usize] -= 1;
+                keysizes[e.sized as usize] = keysizes[e.sized as usize].wrapping_sub(1);
             }
             if slot != NO_SIZE {
-                self.keysizes[slot as usize] += 1;
+                keysizes[slot as usize] = keysizes[slot as usize].wrapping_add(1);
             }
             e.sized = slot;
         }

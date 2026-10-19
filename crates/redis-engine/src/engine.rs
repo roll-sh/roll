@@ -125,7 +125,8 @@ pub struct SlowEntry {
 pub(crate) struct Signals {
     /// Record modified keys (someone watches, blocks or tracks).
     pub track: bool,
-    pub touched: Vec<(u16, Str)>,
+    /// Keys changed (with whether their keysizes slot is already updated).
+    pub touched: Vec<(u16, Str, bool)>,
     /// Aggregates that may have become empty and must be deleted.
     pub empty: Vec<(u16, Str)>,
     /// Keyspace notifications to publish: (class, event, db, key, subkeys).
@@ -196,7 +197,16 @@ impl Signals {
     #[inline]
     pub fn touch_quiet(&mut self, db: u16, key: &[u8]) {
         if self.track {
-            self.touched.push((db, Str::from_slice(key)));
+            self.touched.push((db, Str::from_slice(key), false));
+        }
+    }
+
+    /// [`Signals::touch`] for a key whose keysizes slot is already up to date.
+    #[inline]
+    pub fn touch_sized(&mut self, db: u16, key: &[u8]) {
+        self.dirty += 1;
+        if self.track {
+            self.touched.push((db, Str::from_slice(key), true));
         }
     }
 }
@@ -828,7 +838,7 @@ impl Engine {
         let effects_before = self.effects.len();
         let dirty_before = self.sig.dirty;
         let outer_counted = self.sig.counted.take();
-        let started = (start_us == 0).then(Instant::now);
+        let started = if start_us == 0 { crate::util::now_us() } else { start_us };
         let (res, rewrite, block, no_propagate, force) = {
             // Error replies from here on (to anyone) make the command a failed call.
             self.prev_errors = self.stats.error_replies;
@@ -843,10 +853,7 @@ impl Engine {
             }
             (res, cx.rewrite.take(), cx.block.take(), cx.no_propagate, cx.force_propagate)
         };
-        let micros = match started {
-            Some(t) => t.elapsed().as_micros() as u64,
-            None => (crate::util::now_us() - start_us).max(0) as u64,
-        };
+        let micros = (crate::util::now_us() - started).max(0) as u64;
         if let Some(n) = std::mem::replace(&mut self.sig.counted, outer_counted) {
             self.sig.dirty = dirty_before + n;
         }
@@ -1220,8 +1227,10 @@ impl Engine {
         // one change for WATCH.
         let mut seen: HashSet<(u16, Str)> = HashSet::new();
         let mut touched = std::mem::take(&mut self.sig.touched);
-        for (db, key) in touched.drain(..) {
-            self.dbs[db as usize].resize(&key);
+        for (db, key, sized) in touched.drain(..) {
+            if !sized {
+                self.dbs[db as usize].resize(&key);
+            }
             let k = (db, key);
             if let Some(ids) = self.watches.keys.get(&k).filter(|_| seen.insert(k.clone())) {
                 // A key already expired when watched and now deleted is logically unchanged,

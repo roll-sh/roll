@@ -258,14 +258,14 @@ pub struct EngineGuard<'a> {
     shard: usize,
     eng: MutexGuard<'a, Engine>,
     /// When the lock was taken and the command count then (INFO's event-loop cycles).
-    since: std::time::Instant,
+    since: u64,
     commands: u64,
 }
 
 impl<'a> EngineGuard<'a> {
     fn new(db: &'a Database, shard: usize, eng: MutexGuard<'a, Engine>) -> Self {
         let commands = eng.stats.commands;
-        Self { db, shard, eng, since: std::time::Instant::now(), commands }
+        Self { db, shard, eng, since: redis_engine::util::mono_us(), commands }
     }
 }
 
@@ -288,7 +288,7 @@ impl Drop for EngineGuard<'_> {
         let paused = self.eng.clients.pause.is_some() || self.eng.clients.failover_pause;
         self.db.shards[self.shard].paused.store(paused, Ordering::SeqCst);
         let cmds = self.eng.stats.commands.saturating_sub(self.commands);
-        self.eng.cycle_done(cmds, self.since.elapsed().as_micros() as u64);
+        self.eng.cycle_done(cmds, redis_engine::util::mono_us().saturating_sub(self.since));
         if !self.eng.effects.is_empty() {
             // Published in place: the list keeps its allocation for the next batch.
             self.db.publish(&self.eng.effects);
@@ -379,12 +379,14 @@ impl Database {
     /// its thread, so their reads, parsing and replies go on meanwhile; past that, park.
     pub async fn engine_unless_busy_async(&self, i: usize) -> Option<EngineGuard<'_>> {
         let shard = &self.shards[i];
-        let start = std::time::Instant::now();
+        // Timed from the first miss.
+        let mut start = None;
         loop {
             if let Some(eng) = shard.engine.try_lock() {
                 return Some(EngineGuard::new(self, i, eng));
             }
-            if start.elapsed() > YIELD_FOR || shard.scripts.busy.load(Ordering::SeqCst) || shard.scripts.debugging.load(Ordering::SeqCst) {
+            let t = redis_engine::util::mono_us();
+            if t.saturating_sub(*start.get_or_insert(t)) > YIELD_FOR.as_micros() as u64 || shard.scripts.busy.load(Ordering::SeqCst) || shard.scripts.debugging.load(Ordering::SeqCst) {
                 return self.engine_unless_busy(i);
             }
             tokio::task::yield_now().await;

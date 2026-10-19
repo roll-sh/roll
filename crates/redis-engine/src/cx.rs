@@ -54,6 +54,8 @@ pub(crate) fn read_lookups(cmd: &Command, args: &[Bytes]) -> bool {
 pub struct KeyMut<'a> {
     pub entry: &'a mut Entry,
     mem: &'a mut usize,
+    /// The database's keysizes histogram, updated as the change ends.
+    sizes: &'a mut Vec<u64>,
     sig: &'a mut Signals,
     db: u16,
     key: Str,
@@ -205,7 +207,10 @@ impl Drop for KeyMut<'_> {
         let new = self.entry.value.mem();
         *self.mem = (*self.mem + new).saturating_sub(self.old);
         if self.changed {
-            self.sig.touch(self.db, &self.key);
+            // The keysizes slot is moved here, while the entry is at hand, rather than looked
+            // up again with the touched keys.
+            crate::db::Db::resize_entry(self.sizes, self.entry);
+            self.sig.touch_sized(self.db, &self.key);
         }
         if self.entry.value.is_empty_aggregate() {
             self.sig.empty.push((self.db, std::mem::take(&mut self.key)));
@@ -326,13 +331,44 @@ impl<'a> Cx<'a> {
         self.get_mut_checked(key)
     }
 
+    /// `lookupKeyWrite` then `checkType` in one lookup, for read-modify-write commands: the
+    /// lookup's stats, keymiss event and access time as [`Cx::get_entry`] does them, then the
+    /// key to change if it is of `kind` (`Ok(None)` if missing, WRONGTYPE otherwise).
+    pub fn get_mut_kind(&mut self, key: &[u8], kind: Kind) -> Result<Option<KeyMut<'_>>, Error> {
+        let expired = self.expire_check(key);
+        let now = self.now;
+        let no_touch = self.client.no_touch;
+        let read = self.read_stats;
+        let db = self.client.db;
+        let Engine { dbs, cfg, rng, stats, sig, .. } = &mut *self.eng;
+        let Db { keys, mem, keysizes: sizes, .. } = &mut dbs[db];
+        let Some(entry) = (if expired { None } else { keys.get_mut(key) }) else {
+            if read {
+                stats.keyspace_misses += 1;
+                sig.notify(notify::KEY_MISS, "keymiss", db as u16, key);
+            }
+            return Ok(None);
+        };
+        if read {
+            stats.keyspace_hits += 1;
+        }
+        if !no_touch {
+            Engine::touch_entry(cfg, rng, entry, now);
+        }
+        if entry.value.kind() != kind {
+            return Err(WRONGTYPE);
+        }
+        let old = entry.value.mem();
+        Ok(Some(KeyMut { entry, mem, sizes, sig, db: db as u16, key: Str::from_slice(key), old, changed: true }))
+    }
+
     /// [`Cx::get_mut`] for a key this command has just checked for expiry.
     fn get_mut_checked(&mut self, key: &[u8]) -> Option<KeyMut<'_>> {
         let now = self.now;
         let no_touch = self.client.no_touch;
         let db = self.client.db;
         let Engine { dbs, cfg, rng, sig, .. } = &mut *self.eng;
-        let Db { keys, mem, .. } = &mut dbs[db];
+        let Db { keys, mem, keysizes: sizes, .. } = &mut dbs[db];
         let entry = keys.get_mut(key)?;
         if cfg.maxmemory_policy.is_lrm() {
             entry.lru = Engine::lru_clock(now);
@@ -340,7 +376,7 @@ impl<'a> Cx<'a> {
             Engine::touch_entry(cfg, rng, entry, now);
         }
         let old = entry.value.mem();
-        Some(KeyMut { entry, mem, sig, db: db as u16, key: Str::from_slice(key), old, changed: true })
+        Some(KeyMut { entry, mem, sizes, sig, db: db as u16, key: Str::from_slice(key), old, changed: true })
     }
 
     /// Mutable access to a key a module opened for reading and then changes internally (a
@@ -351,10 +387,10 @@ impl<'a> Cx<'a> {
         }
         let db = self.client.db;
         let Engine { dbs, sig, .. } = &mut *self.eng;
-        let Db { keys, mem, .. } = &mut dbs[db];
+        let Db { keys, mem, keysizes: sizes, .. } = &mut dbs[db];
         let entry = keys.get_mut(key)?;
         let old = entry.value.mem();
-        Some(KeyMut { entry, mem, sig, db: db as u16, key: Str::from_slice(key), old, changed: false })
+        Some(KeyMut { entry, mem, sizes, sig, db: db as u16, key: Str::from_slice(key), old, changed: false })
     }
 
     /// Mutable access to an existing key of `kind` (`Ok(None)` if missing).
@@ -419,6 +455,7 @@ impl<'a> Cx<'a> {
                 e.value = value;
                 e.lru = lru;
                 e.revalue(embedded, key.len(), enc, keep_ttl, shared_ints);
+                crate::db::Db::resize_entry(&mut d.keysizes, e);
                 let had_ttl = e.expire != 0;
                 d.mem = (d.mem + new).saturating_sub(old);
                 if had_ttl && !keep_ttl {
@@ -440,7 +477,8 @@ impl<'a> Cx<'a> {
                 self.eng.sig.notify(notify::NEW, "new", db as u16, key);
             }
         }
-        self.eng.sig.touch(db as u16, key);
+        // Either way the keysizes slot is current (set above, or by the insert).
+        self.eng.sig.touch_sized(db as u16, key);
     }
 
     /// Create or overwrite a key with an absolute expiry (0 = none).

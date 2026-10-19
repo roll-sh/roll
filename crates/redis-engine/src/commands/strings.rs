@@ -444,17 +444,24 @@ pub fn strlen(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 fn incr_generic(cx: &mut Cx, key: &Bytes, by: i64) -> CmdResult {
-    let (cur, existed) = match cx.get_str(key)? {
-        Some(s) => (parse_i64(s).ok_or(NOT_INT)?, true),
-        None => (0, false),
-    };
-    let new = cur.checked_add(by).ok_or(OVERFLOW)?;
     let shared_ints = cx.cfg().shared_integers();
-    let mut e = match existed {
-        true => cx.get_mut(key).expect("just read"),
-        false => cx.get_or_create(key, Kind::String)?,
+    // One lookup for an existing key (`lookupKeyWrite`, then the value changed through it).
+    let found = cx.get_mut_kind(key, Kind::String)?;
+    let Some(mut e) = found else {
+        drop(found);
+        return incr_store(cx.get_or_create(key, Kind::String)?, by, shared_ints);
     };
-    // An int-encoded value changes in place; anything else is replaced.
+    match parse_i64(e.str()).ok_or(NOT_INT).and_then(|cur| cur.checked_add(by).ok_or(OVERFLOW)) {
+        Ok(new) => incr_store(e, new, shared_ints),
+        Err(err) => {
+            e.unchanged();
+            Err(err)
+        }
+    }
+}
+
+/// Store INCR's result: an int-encoded value changes in place; anything else is replaced.
+fn incr_store(mut e: crate::cx::KeyMut, new: i64, shared_ints: bool) -> CmdResult {
     let in_place = e.encoding() == "int";
     let embedded = e.embedded();
     let s = e.str();

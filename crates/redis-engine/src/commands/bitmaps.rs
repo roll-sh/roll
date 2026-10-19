@@ -59,15 +59,22 @@ pub fn setbit(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(BIT_ERR);
     }
     let byte = (off >> 3) as usize;
-    let existed = cx.peek(&args[1]).is_some();
+    let old_len = str_len(cx, &args[1]);
     let mut e = cx.get_or_create(&args[1], Kind::String)?;
-    let s = if existed { e.str_in_place(byte + 1) } else { e.str_new_raw() };
+    let s = if old_len.is_some() { e.str_in_place(byte + 1) } else { e.str_new_raw() };
     let grown = grow_zero(s, byte + 1);
+    let new_len = s.len();
     let bit = 7 - (off & 7) as u32;
     let old = (s[byte] >> bit) & 1;
     if grown || old as i64 != on {
         s[byte] = (s[byte] & !(1 << bit)) | ((on as u8) << bit);
         e.notify(notify::STRING, "setbit");
+        drop(e);
+        // An existing empty string grown keeps its keysizes bin in Redis (`strOldSize > 0`).
+        if old_len == Some(0) {
+            let db = cx.db_index();
+            cx.eng.dbs[db].keysizes_skip_move(0, new_len);
+        }
     } else {
         e.unchanged();
     }
@@ -551,10 +558,11 @@ fn bitfield_generic(cx: &mut Cx, args: &[Bytes], read_only_cmd: bool) -> CmdResu
     }
 
     let need = (highest >> 3) as usize + 1;
-    let existed = cx.peek(&args[1]).is_some();
+    let old_len = str_len(cx, &args[1]);
     let mut e = cx.get_or_create(&args[1], Kind::String)?;
-    let s = if existed { e.str_in_place(need) } else { e.str_new_raw() };
+    let s = if old_len.is_some() { e.str_in_place(need) } else { e.str_new_raw() };
     let grown = grow_zero(s, need);
+    let new_len = s.len();
     let mut changes = 0;
     let mut out = Vec::with_capacity(fields.len());
     for f in &fields {
@@ -604,7 +612,25 @@ fn bitfield_generic(cx: &mut Cx, args: &[Bytes], read_only_cmd: bool) -> CmdResu
         e.unchanged();
     }
     e.changes(changes);
+    drop(e);
+    // Redis moves an existing string's keysizes bin only when it had bytes and something
+    // changed (`changes && strOldSize > 0`), though the string grew either way.
+    if let Some(old_len) = old_len
+        && grown
+        && (changes == 0 || old_len == 0)
+    {
+        let db = cx.db_index();
+        cx.eng.dbs[db].keysizes_skip_move(old_len, new_len);
+    }
     Ok(Reply::Array(out))
+}
+
+/// The length of the string at `key` (`None` if missing; other types are refused after).
+fn str_len(cx: &mut Cx, key: &[u8]) -> Option<usize> {
+    cx.peek(key).map(|e| match &e.value {
+        Value::Str(s) => s.len(),
+        _ => 0,
+    })
 }
 
 /// BITFIELD key [GET type offset | [OVERFLOW WRAP|SAT|FAIL] SET type offset value |

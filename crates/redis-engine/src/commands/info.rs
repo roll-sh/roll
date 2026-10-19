@@ -5,7 +5,7 @@ use super::*;
 use super::persist::ChildKind;
 use super::server::REDIS_VERSION;
 use crate::engine::Engine;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
@@ -107,10 +107,11 @@ pub struct MasterInfo {
 // ---- latency histograms (HdrHistogram, 1ns..1s at 2 significant digits) ----
 
 /// A port of HdrHistogram's indexing with Redis' parameters (lowest 1, highest 10^9,
-/// 2 significant figures), counts kept sparse.
+/// 2 significant figures), counts kept sparse: the few indexes a command's latencies land on,
+/// in order.
 #[derive(Clone, Debug, Default)]
 pub struct Histogram {
-    counts: BTreeMap<i32, u64>,
+    counts: Vec<(i32, u64)>,
     total: u64,
 }
 
@@ -155,7 +156,10 @@ impl Histogram {
         let v = ns.clamp(1, HIST_MAX);
         let b = bucket_index(v);
         let i = ((b + 1) << SUB_HALF_MAG) + (sub_bucket_index(v, b) - SUB_HALF) as i32;
-        *self.counts.entry(i).or_default() += 1;
+        match self.counts.binary_search_by_key(&i, |&(k, _)| k) {
+            Ok(at) => self.counts[at].1 += 1,
+            Err(at) => self.counts.insert(at, (i, 1)),
+        }
         self.total += 1;
     }
 
@@ -166,7 +170,7 @@ impl Histogram {
         let want = want.max(1);
         let mut seen = 0;
         let mut v = 0;
-        for (&i, &n) in &self.counts {
+        for &(i, n) in &self.counts {
             seen += n;
             if seen >= want {
                 v = value_at_index(i);
@@ -203,7 +207,7 @@ impl Histogram {
                 if idx >= COUNTS_LEN {
                     break;
                 }
-                cum += self.counts.get(&idx).copied().unwrap_or(0);
+                cum += self.counts.binary_search_by_key(&idx, |&(k, _)| k).map_or(0, |at| self.counts[at].1);
                 value = value_at_index(idx);
                 highest = highest_equivalent(value);
             }
@@ -953,18 +957,20 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
             }
             for (t, name) in NAMES.iter().enumerate() {
                 let bins = &d.keysizes[t * crate::value::SIZE_BINS..(t + 1) * crate::value::SIZE_BINS];
-                if bins.iter().all(|&n| n == 0) {
-                    continue;
-                }
-                let _ = write!(s, "db{i}_{name}:");
-                let mut first = true;
+                // `sdscatHistograms`: bins as `%llu` (a miscounted bin can be negative), the line
+                // left out when they add up to 0 in its `int` counter.
+                let mut line = format!("db{i}_{name}:");
+                let mut cnt = 0i32;
                 for (b, &n) in bins.iter().enumerate() {
-                    if n > 0 {
-                        let _ = write!(s, "{}{}={n}", if first { "" } else { "," }, SIZE_LABELS[b]);
-                        first = false;
+                    if n != 0 {
+                        let _ = write!(line, "{}{}={n}", if cnt == 0 { "" } else { "," }, SIZE_LABELS[b]);
+                        cnt = (i64::from(cnt) + n as i64) as i32;
                     }
                 }
-                s.push_str("\r\n");
+                if cnt != 0 {
+                    s.push_str(&line);
+                    s.push_str("\r\n");
+                }
             }
         }
     }

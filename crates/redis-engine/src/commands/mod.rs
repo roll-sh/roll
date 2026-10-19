@@ -357,7 +357,7 @@ pub fn server_only(_: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 pub struct Table {
-    pub by_name: HashMap<&'static str, &'static Command>,
+    pub by_name: HashMap<&'static str, &'static Command, foldhash::fast::RandomState>,
     pub all: Vec<&'static Command>,
 }
 
@@ -365,7 +365,7 @@ static TABLE: OnceLock<Table> = OnceLock::new();
 
 pub fn table() -> &'static Table {
     TABLE.get_or_init(|| {
-        let mut by_name = HashMap::new();
+        let mut by_name = HashMap::default();
         let mut all = Vec::new();
         for family in [
             strings::COMMANDS,

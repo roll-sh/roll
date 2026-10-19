@@ -4,12 +4,96 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    now_us().div_euclid(1000)
 }
 
-/// Microseconds since the Unix epoch.
+/// Microseconds since the Unix epoch: the system clock as last read on this thread (at most
+/// [`clock::RESYNC_US`] ago), advanced by the monotonic counter. Commands read the time once or
+/// twice each, and the system clock costs far more than the counter.
 pub fn now_us() -> i64 {
+    clock::wall_us()
+}
+
+/// Monotonic microseconds (an arbitrary origin), for durations.
+pub fn mono_us() -> u64 {
+    clock::mono_us()
+}
+
+fn system_us() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros() as i64).unwrap_or(0)
+}
+
+pub mod clock {
+    use std::cell::Cell;
+
+    /// How long the wall clock is extrapolated from the counter before the system clock is read
+    /// again (its steps and slewing show within this).
+    pub const RESYNC_US: u64 = 1000;
+
+    /// The CPU's virtual counter (`CNTVCT_EL0`), readable from user space, as Valkey's
+    /// `monotonic_cntvct` reads it.
+    #[cfg(target_arch = "aarch64")]
+    mod counter {
+        use std::sync::LazyLock;
+
+        #[inline]
+        fn ticks() -> u64 {
+            let t: u64;
+            // SAFETY: reads a register the kernel makes readable from EL0.
+            unsafe { std::arch::asm!("mrs {}, cntvct_el0", out(reg) t, options(nomem, nostack, preserves_flags)) };
+            t
+        }
+
+        /// Ticks per µs as a 32.32 fixed-point factor.
+        static SCALE: LazyLock<u128> = LazyLock::new(|| {
+            let f: u64;
+            // SAFETY: as above.
+            unsafe { std::arch::asm!("mrs {}, cntfrq_el0", out(reg) f, options(nomem, nostack, preserves_flags)) };
+            ((1_000_000u128) << 32) / u128::from(f.max(1))
+        });
+
+        #[inline]
+        pub fn us() -> u64 {
+            ((u128::from(ticks()) * *SCALE) >> 32) as u64
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    mod counter {
+        use std::sync::LazyLock;
+        use std::time::Instant;
+
+        static ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+        #[inline]
+        pub fn us() -> u64 {
+            ORIGIN.elapsed().as_micros() as u64
+        }
+    }
+
+    #[inline]
+    pub fn mono_us() -> u64 {
+        counter::us()
+    }
+
+    thread_local! {
+        /// (counter µs, system µs) at the last read of the system clock.
+        static BASE: Cell<(u64, i64)> = const { Cell::new((0, i64::MIN)) };
+    }
+
+    pub fn wall_us() -> i64 {
+        let mono = counter::us();
+        BASE.with(|b| {
+            let (at, wall) = b.get();
+            let since = mono.wrapping_sub(at);
+            if wall == i64::MIN || since > RESYNC_US {
+                let now = super::system_us();
+                b.set((mono, now));
+                return now;
+            }
+            wall + since as i64
+        })
+    }
 }
 
 /// `string2ll`: an optional `-`, no `+`, no leading zeros, no spaces, at most 20 chars.
