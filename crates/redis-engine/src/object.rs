@@ -80,6 +80,16 @@ pub fn fits(key_len: usize, val_len: usize) -> bool {
     ROBJ + key_len + 3 + 4 + val_len <= CACHE_LINE
 }
 
+/// [`str_encoding`] of a value known to be a canonical integer ([`int_encodable`]): no parse.
+pub fn int_str_encoding(obj: u8, key_len: usize, len: usize) -> StrEnc {
+    match obj & ENC_MASK {
+        ENC_AUTO => StrEnc::Int,
+        ENC_RAW => StrEnc::Raw,
+        _ if len <= EMBSTR_MAX && fits(key_len, len) => StrEnc::Embstr,
+        _ => StrEnc::Raw,
+    }
+}
+
 /// The stored encoding of a string under a key of `key_len`.
 pub fn str_encoding(obj: u8, key_len: usize, s: &[u8]) -> StrEnc {
     match created(s, obj) {

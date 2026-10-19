@@ -321,7 +321,7 @@ fn list(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             }
         }
         None => {
-            let mut all: Vec<u64> = cx.eng.clients.by_id.keys().copied().collect();
+            let mut all: Vec<u64> = cx.eng.clients.ids.iter().copied().collect();
             if !all.contains(&me) {
                 all.push(me);
                 all.sort_unstable();
@@ -395,7 +395,7 @@ fn kill(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let now = cx.now;
     let mut killed = 0;
     let mut targets: Vec<(u64, View, u8)> =
-        cx.eng.clients.by_id.iter().filter(|(i, _)| **i != me).map(|(i, e)| (*i, e.view.clone(), client_type(&e.view, Some(&e.stats)))).collect();
+        cx.eng.clients.ids.iter().filter(|&&i| i != me).map(|&i| (i, &cx.eng.clients.by_id[&i])).map(|(i, e)| (i, e.view.clone(), client_type(&e.view, Some(&e.stats)))).collect();
     let mine = View::of(cx.client);
     let my_type = client_type(&mine, cx.client.conn.as_deref());
     targets.push((me, mine, my_type));
@@ -746,7 +746,7 @@ impl Engine {
         let n = self.clients.by_id.len();
         let per_tick = (n / self.cfg.hz.max(1) as usize).max(5);
         let start = self.clients.cron_cursor;
-        let ids: Vec<u64> = self.clients.by_id.range(start..).chain(self.clients.by_id.range(..start)).take(per_tick).map(|(&id, _)| id).collect();
+        let ids: Vec<u64> = self.clients.ids.range(start..).chain(self.clients.ids.range(..start)).take(per_tick).copied().collect();
         self.clients.cron_cursor = ids.last().map_or(0, |id| id + 1);
         let timeout = self.cfg.timeout;
         for id in ids {

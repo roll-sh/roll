@@ -117,6 +117,23 @@ fn walk(l: Link) -> Walk {
     Walk { l }
 }
 
+/// Start loading the cache line at `p` (a hint: no fault, no effect on results).
+#[inline(always)]
+pub fn prefetch(p: *const u8) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch never faults.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(p as *const i8, std::arch::x86_64::_MM_HINT_T0)
+    };
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: as above.
+    unsafe {
+        std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, preserves_flags, readonly))
+    };
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = p;
+}
+
 #[inline]
 fn ptr<N>(l: Link) -> NonNull<N> {
     // SAFETY: object links are non-null.
@@ -187,6 +204,29 @@ impl<N: Keyed> PtrDict<N> {
     #[inline]
     pub fn hash(&self, key: &[u8]) -> u64 {
         self.hasher.hash_one(key)
+    }
+
+    /// Prefetch the bucket(s) for hash `h` (first step of a batched lookup).
+    #[inline]
+    pub fn prefetch_bucket(&self, h: u64) {
+        for t in [&self.t0, &self.t1] {
+            if !t.is_empty() {
+                prefetch(&t[(h as usize) & (t.len() - 1)] as *const Link as *const u8);
+            }
+        }
+    }
+
+    /// Prefetch what the bucket(s) for `h` point at: the object, or the first chain entry.
+    #[inline]
+    pub fn prefetch_entry(&self, h: u64) {
+        for t in [&self.t0, &self.t1] {
+            if !t.is_empty() {
+                let l = t[(h as usize) & (t.len() - 1)];
+                if l != 0 {
+                    prefetch((l & !1) as *const u8);
+                }
+            }
+        }
     }
 
     #[inline]

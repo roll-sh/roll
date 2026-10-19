@@ -451,14 +451,19 @@ fn incr_generic(cx: &mut Cx, key: &Bytes, by: i64) -> CmdResult {
     let found = cx.get_mut_kind(key, Kind::String)?;
     let Some(mut e) = found else {
         drop(found);
-        return incr_store(cx.get_or_create(key, Kind::String)?, by, shared_ints);
+        let mut e = cx.get_or_create(key, Kind::String)?;
+        let enc = e.str_enc();
+        return incr_store(e, enc, by, shared_ints);
     };
     let cur = match e.view() {
         ValueRef::Str(s) => parse_i64(s),
         _ => unreachable!("type checked by lookup"),
     };
     match cur.ok_or(NOT_INT).and_then(|cur| cur.checked_add(by).ok_or(OVERFLOW)) {
-        Ok(new) => incr_store(e, new, shared_ints),
+        Ok(new) => {
+            let enc = e.int_str_enc();
+            incr_store(e, enc, new, shared_ints)
+        }
         Err(err) => {
             e.unchanged();
             Err(err)
@@ -466,9 +471,9 @@ fn incr_generic(cx: &mut Cx, key: &Bytes, by: i64) -> CmdResult {
     }
 }
 
-/// Store INCR's result: an int-encoded value changes in place; anything else is replaced.
-fn incr_store(mut e: crate::cx::KeyMut, new: i64, shared_ints: bool) -> CmdResult {
-    let enc = e.str_enc();
+/// Store INCR's result: an int-encoded value (`enc`, the stored encoding) changes in place;
+/// anything else is replaced.
+fn incr_store(mut e: crate::cx::KeyMut, enc: crate::object::StrEnc, new: i64, shared_ints: bool) -> CmdResult {
     e.set_str(itoa::Buffer::new().format(new).as_bytes());
     if enc != crate::object::StrEnc::Int {
         e.str_replaced(enc == crate::object::StrEnc::Embstr, crate::object::ENC_AUTO, shared_ints);

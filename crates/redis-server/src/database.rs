@@ -307,7 +307,7 @@ impl Drop for EngineGuard<'_> {
         if !self.eng.effects.is_empty() {
             // Published in place: the list keeps its allocation for the next batch.
             self.db.publish(&self.eng.effects);
-            self.eng.effects.clear();
+            self.eng.recycle_effects();
         }
         // Unlock first, then wake whoever waits for the engine.
         // SAFETY: `eng` is not used again; the field's own drop is skipped (ManuallyDrop).

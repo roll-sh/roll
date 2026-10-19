@@ -18,11 +18,14 @@ fn run(name: &str, make: impl Fn(u64) -> Vec<Bytes>) {
     };
     for n in 0..100_000 {
         eng.call(&mut c, &make(n));
+        eng.recycle_effects();
     }
     let ops: Vec<Vec<Bytes>> = (0..2_000_000).map(|_| make(next())).collect();
     let t = std::time::Instant::now();
     for a in &ops {
         eng.call(&mut c, a);
+        // The server publishes after each batch.
+        eng.recycle_effects();
     }
     let ns = t.elapsed().as_nanos() as f64 / ops.len() as f64;
     eprintln!("{name:6} {ns:5.0} ns/op  {:.2}M/s", 1000.0 / ns);
@@ -63,5 +66,12 @@ fn engine_speed() {
 #[ignore]
 fn layout_sizes() {
     use crate::value::{Entry, Str, Value};
+    eprintln!(
+        "Reply {} CmdResult {} Outcome {} Error {}",
+        std::mem::size_of::<redis_proto::Reply>(),
+        std::mem::size_of::<crate::commands::CmdResult>(),
+        std::mem::size_of::<crate::engine::Outcome>(),
+        std::mem::size_of::<crate::commands::Error>()
+    );
     eprintln!("Str {} Value {} Entry {} dict node {}", std::mem::size_of::<Str>(), std::mem::size_of::<Value>(), std::mem::size_of::<Entry>(), crate::dict::Dict::<Str, Entry>::NODE_OVERHEAD - 16);
 }

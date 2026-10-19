@@ -714,6 +714,9 @@ impl FieldsMut for KvMut<'_> {
     }
 }
 
+/// Keys prefetched at a time ([`KeySpace::prefetch`]).
+pub const PREFETCH_BATCH: usize = 16;
+
 /// The keys of one database, and the index of those with a TTL.
 #[derive(Default)]
 pub struct KeySpace {
@@ -847,6 +850,25 @@ impl KeySpace {
     pub fn for_each_mut(&mut self, mut f: impl FnMut(KvMut<'_>)) {
         let KeySpace { d, x } = self;
         d.for_each_slot(|slot| f(KvMut { slot, x: &mut *x }))
+    }
+
+    /// Start loading the buckets, then the nodes, of keys about to be looked up (a pipelined
+    /// batch, like Valkey's command-queue prefetch): their cache misses overlap instead of
+    /// following one another.
+    pub fn prefetch<'k>(&self, keys: impl Iterator<Item = &'k [u8]>) {
+        if self.d.is_empty() {
+            return;
+        }
+        let mut hs = [0u64; PREFETCH_BATCH];
+        let mut n = 0;
+        for k in keys.take(PREFETCH_BATCH) {
+            hs[n] = self.d.hash(k);
+            self.d.prefetch_bucket(hs[n]);
+            n += 1;
+        }
+        for &h in &hs[..n] {
+            self.d.prefetch_entry(h);
+        }
     }
 
     // --- the TTL index (Redis' `expires` dict) ---

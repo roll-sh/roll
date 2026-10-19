@@ -293,6 +293,10 @@ pub struct Engine {
     pub start_ms: i64,
     /// Effects of executed writes, drained by the server into the replication log.
     pub effects: Vec<Effect>,
+    /// Argument vectors of published effects, reused for the next ones ([`Engine::recycle_effects`]).
+    spare_args: Vec<Vec<Bytes>>,
+    /// [`Engine::call_lending`]'s state.
+    lending: Lending,
     pub scripting: crate::commands::scripting::Scripting,
     pub(crate) sig: Signals,
     pub(crate) watches: Watches,
@@ -426,6 +430,8 @@ impl Engine {
             persist: Default::default(),
             start_ms: now,
             effects: Vec::new(),
+            spare_args: Vec::new(),
+            lending: Lending::Off,
             scripting: Default::default(),
             sig: Signals::default(),
             watches: Watches::default(),
@@ -479,6 +485,38 @@ impl Engine {
     }
 
     /// Execute one client command.
+    /// [`Engine::call`] for a caller that is done with `args` once the reply is out: the
+    /// command's own effect takes the argument vector itself instead of a copy of it. The
+    /// caller must then give the vector to [`Engine::lend`] before anything else uses the
+    /// engine.
+    pub fn call_lending(&mut self, client: &mut Client, args: &[Bytes]) -> Outcome {
+        debug_assert_eq!(self.lending, Lending::Off);
+        self.lending = Lending::Open;
+        let out = self.call(client, args);
+        if self.lending == Lending::Open {
+            self.lending = Lending::Off;
+        }
+        out
+    }
+
+    /// The argument vector of the last [`Engine::call_lending`]: it becomes the command's
+    /// effect if it propagated one, else it is handed back.
+    pub fn lend(&mut self, args: Vec<Bytes>) -> Option<Vec<Bytes>> {
+        if self.lending != Lending::Pending {
+            return Some(args);
+        }
+        self.lending = Lending::Off;
+        let slot = self.effects.iter_mut().rev().find(|e| e.args.is_empty()).expect("the lent command's effect");
+        slot.args = args;
+        None
+    }
+
+    /// Up to `n` argument vectors of published effects, for a connection's parser.
+    pub fn take_spare_args(&mut self, n: usize) -> impl Iterator<Item = Vec<Bytes>> + '_ {
+        let keep = self.spare_args.len().saturating_sub(n);
+        self.spare_args.drain(keep..)
+    }
+
     pub fn call(&mut self, client: &mut Client, args: &[Bytes]) -> Outcome {
         let start_us = crate::util::now_us();
         let now = start_us.div_euclid(1000);
@@ -503,6 +541,27 @@ impl Engine {
         self.serve_blocked(now);
         self.clients.current = 0;
         out
+    }
+
+    /// Prefetch the keys of commands about to run in database `db` (each command's first
+    /// argument after the name, where most keys are; a wrong guess only costs the hint).
+    pub fn prefetch<'a>(&self, db: usize, cmds: impl Iterator<Item = &'a Vec<Bytes>>) {
+        if let Some(d) = self.dbs.get(db) {
+            d.keys.prefetch(cmds.filter_map(|a| a.get(1)).map(|k| &k[..]));
+        }
+    }
+
+    /// Clear the effects once published, keeping their argument vectors for the next writes
+    /// (no allocation per propagated command).
+    pub fn recycle_effects(&mut self) {
+        debug_assert_ne!(self.lending, Lending::Pending);
+        for e in self.effects.drain(..) {
+            let mut v = e.args;
+            if self.spare_args.len() < SPARE_ARGS && v.capacity() <= 16 {
+                v.clear();
+                self.spare_args.push(v);
+            }
+        }
     }
 
     /// Pushes for the client of the last [`Engine::call`] that go after its reply (when it set
@@ -695,6 +754,12 @@ impl Engine {
             return Outcome::Reply(Reply::error("ERR empty command"));
         }
         let top = matches!(mode, Mode::Top);
+        // Only the outermost command may take the caller's argument vector (one a command
+        // dispatches itself copies its arguments).
+        let may_lend = top && self.lending == Lending::Open;
+        if may_lend {
+            self.lending = Lending::Off;
+        }
         let start_us = if top { std::mem::take(&mut self.call_start_us) } else { 0 };
         // RediSearch: events from outside commands (expiry, eviction), then its command filter
         // (which runs as the command is read, so at queue time inside MULTI).
@@ -866,7 +931,21 @@ impl Engine {
         let changed = self.sig.dirty != dirty_before;
         let propagate = !matches!(mode, Mode::Script { .. }) || self.scripting.running.as_ref().is_none_or(|r| r.propagate);
         if (changed || force) && !no_propagate && propagate && mode != Mode::Replay {
-            self.effects.push(Effect { db: db_at_start, args: rewrite.unwrap_or_else(|| args.to_vec()) });
+            let args = match rewrite {
+                Some(r) => r,
+                // The caller hands its own argument vector over after the call
+                // ([`Engine::call_lending`]): a placeholder until then.
+                None if may_lend => {
+                    self.lending = Lending::Pending;
+                    Vec::new()
+                }
+                None => {
+                    let mut v = self.spare_args.pop().unwrap_or_default();
+                    v.extend_from_slice(args);
+                    v
+                }
+            };
+            self.effects.push(Effect { db: db_at_start, args });
         }
         // `propagatePendingCommands`: what a client's command propagated (lazily expired keys'
         // DELs and fields' HDELs included) goes out as one MULTI/EXEC when it is more than one
@@ -1072,7 +1151,13 @@ impl Engine {
             stat.latency.get_or_insert_with(Default::default).record(micros as i64 * 1000);
         }
         self.stats.commands += 1;
-        if mode != Mode::Replay && !cmd.has(commands::SKIP_SLOWLOG) && self.slowlog_push(client, &redacted(full, args), micros, now) {
+        let slow = self.cfg.slowlog_log_slower_than;
+        if mode != Mode::Replay
+            && !cmd.has(commands::SKIP_SLOWLOG)
+            && slow >= 0
+            && micros >= slow as u64
+            && self.slowlog_push(client, &redacted(full, args), micros, now)
+        {
             let st = &mut self.stats;
             st.slowlog_count += 1;
             st.slowlog_us_sum += micros;
@@ -1873,6 +1958,18 @@ impl Engine {
 pub const LRU_CLOCK_MAX: u32 = (1 << 24) - 1;
 const LFU_INIT_VAL: u32 = 5;
 const EVPOOL_SIZE: usize = 16;
+/// A caller's argument vector on its way into the command's effect ([`Engine::call_lending`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lending {
+    Off,
+    /// The top-level command may take the caller's vector.
+    Open,
+    /// It did: its effect waits for [`Engine::lend`].
+    Pending,
+}
+
+/// Effect argument vectors kept for reuse.
+const SPARE_ARGS: usize = 64;
 /// The touched-keys buffer kept between commands (entries); a bigger one is shrunk back.
 const TOUCHED_KEEP: usize = 256;
 

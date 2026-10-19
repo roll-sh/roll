@@ -84,14 +84,29 @@ pub fn partial(buf: &[u8]) -> Partial {
 /// `Ok(None)` means more bytes are needed. An empty vector is a no-op request (an empty inline
 /// line or `*0`) that the caller skips. Arguments are slices of the original buffer (no copy).
 pub fn parse_request(buf: &mut BytesMut, limits: Limits) -> Result<Option<Vec<Bytes>>, ProtoError> {
+    let mut args = Vec::new();
+    Ok(parse_request_into(buf, limits, &mut args)?.then_some(args))
+}
+
+/// [`parse_request`] into `args` (cleared first; a connection reuses its argument vectors):
+/// true when a command was taken (`args` empty for a no-op request), false when more bytes are
+/// needed.
+pub fn parse_request_into(buf: &mut BytesMut, limits: Limits, args: &mut Vec<Bytes>) -> Result<bool, ProtoError> {
+    args.clear();
     if buf.is_empty() {
-        return Ok(None);
+        return Ok(false);
     }
     if buf[0] != b'*' {
-        return parse_inline(buf);
+        return Ok(match parse_inline(buf)? {
+            Some(v) => {
+                *args = v;
+                true
+            }
+            None => false,
+        });
     }
     let Some((count, mut pos)) = header(buf, 1, || ProtoError("too big mbulk count string".into()))? else {
-        return Ok(None);
+        return Ok(false);
     };
     let count = parse_len(count).ok_or_else(|| ProtoError("invalid multibulk length".into()))?;
     if count > i32::MAX as i64 {
@@ -102,7 +117,7 @@ pub fn parse_request(buf: &mut BytesMut, limits: Limits) -> Result<Option<Vec<By
     }
     if count <= 0 {
         let _ = buf.split_to(pos);
-        return Ok(Some(Vec::new()));
+        return Ok(true);
     }
     let count = count as usize;
     // First pass: find where every argument is, without consuming anything (on the stack for
@@ -114,13 +129,13 @@ pub fn parse_request(buf: &mut BytesMut, limits: Limits) -> Result<Option<Vec<By
     }
     for i in 0..count {
         if pos >= buf.len() {
-            return Ok(None);
+            return Ok(false);
         }
         if buf[pos] != b'$' {
             return Err(ProtoError(expected_dollar(buf[pos])));
         }
         let Some((len, next)) = header(buf, pos + 1, || ProtoError("too big bulk count string".into()))? else {
-            return Ok(None);
+            return Ok(false);
         };
         let len = parse_len(len).ok_or_else(|| ProtoError("invalid bulk length".into()))?;
         if len < 0 || len as usize > limits.max_bulk {
@@ -131,7 +146,7 @@ pub fn parse_request(buf: &mut BytesMut, limits: Limits) -> Result<Option<Vec<By
         }
         let len = len as usize;
         if buf.len() < next + len + 2 {
-            return Ok(None);
+            return Ok(false);
         }
         if count <= few.len() {
             few[i] = (next, len);
@@ -142,7 +157,8 @@ pub fn parse_request(buf: &mut BytesMut, limits: Limits) -> Result<Option<Vec<By
     }
     let frame = buf.split_to(pos).freeze();
     let spans = if count <= few.len() { &few[..count] } else { &many[..] };
-    Ok(Some(spans.iter().map(|&(at, len)| frame.slice(at..at + len)).collect()))
+    args.extend(spans.iter().map(|&(at, len)| frame.slice(at..at + len)));
+    Ok(true)
 }
 
 fn expected_dollar(got: u8) -> String {
@@ -171,6 +187,10 @@ fn header(
 fn parse_len(s: &[u8]) -> Option<i64> {
     if s.is_empty() || s.len() > 20 {
         return None;
+    }
+    // Plain digits (every well-formed header): no UTF-8 check or general parse.
+    if s.len() <= 18 && s.iter().all(u8::is_ascii_digit) {
+        return Some(s.iter().fold(0i64, |n, &c| n * 10 + (c - b'0') as i64));
     }
     std::str::from_utf8(s).ok()?.parse().ok()
 }

@@ -62,6 +62,8 @@ impl Sink for ConnSink {
 
 /// Most commands executed per lock acquisition, so one pipelining client can't starve others.
 const MAX_BATCH: usize = 512;
+/// Argument vectors a connection keeps for reuse.
+const SPARE_ARGS: usize = 32;
 /// Most bytes taken off the socket per read (Redis reads `PROTO_IOBUF_LEN` at a time).
 const READ_CHUNK: usize = 64 * 1024;
 
@@ -71,6 +73,8 @@ pub struct Conn {
     session: Option<Session>,
     client: Client,
     pending: VecDeque<Vec<Bytes>>,
+    /// Emptied argument vectors ([`Conn::recycle_args`]).
+    spare_args: Vec<Vec<Bytes>>,
     out: BytesMut,
     skip_next: bool,
     close_after: bool,
@@ -144,6 +148,7 @@ where
         session,
         client,
         pending: VecDeque::new(),
+        spare_args: Vec::new(),
         out: BytesMut::with_capacity(16 * 1024),
         skip_next: false,
         close_after: false,
@@ -246,9 +251,10 @@ impl Conn {
                 let limits = Limits { authenticated: self.client.authenticated, max_bulk };
                 let queued = self.pending.len();
                 loop {
-                    match parse_request(inbuf, limits) {
-                        Ok(Some(args)) if args.is_empty() => {}
-                        Ok(Some(args)) => {
+                    let mut args = self.spare_args.pop().unwrap_or_default();
+                    match redis_proto::parse_request_into(inbuf, limits, &mut args) {
+                        Ok(true) if args.is_empty() => self.spare_args.push(args),
+                        Ok(true) => {
                             self.pending_bytes += redis_proto::command_len(&args) as u64;
                             self.pending.push_back(args);
                             if self.pending.len() >= MAX_BATCH {
@@ -256,7 +262,10 @@ impl Conn {
                                 break;
                             }
                         }
-                        Ok(None) => break,
+                        Ok(false) => {
+                            self.spare_args.push(args);
+                            break;
+                        }
                         Err(e) => {
                             Reply::Error(format!("ERR {e}")).encode(self.client.resp, &mut self.out);
                             let _ = wr.write_all(&self.out).await;
@@ -420,6 +429,7 @@ impl Conn {
             session: None,
             client: Client::new(0),
             pending: VecDeque::new(),
+            spare_args: Vec::new(),
             out: BytesMut::new(),
             skip_next: false,
             close_after: false,
@@ -498,6 +508,15 @@ impl Conn {
 
     /// Take the next command to run; until the next one, CLIENT LIST counts it in the query
     /// buffer (as Redis does while running it from there).
+    /// Keep a command's argument vector for the next parsed command (no allocation per
+    /// command).
+    fn recycle_args(&mut self, mut args: Vec<Bytes>) {
+        if self.spare_args.len() < SPARE_ARGS && args.capacity() <= 16 {
+            args.clear();
+            self.spare_args.push(args);
+        }
+    }
+
     fn pop_pending(&mut self) -> Vec<Bytes> {
         self.stats.pending_input.store(self.pending_bytes, Ordering::Relaxed);
         let args = self.pending.pop_front().unwrap();
@@ -788,7 +807,16 @@ impl Conn {
                     continue;
                 };
                 let evicting = db.hub.limits_cached(&self.limits).client_eviction > 0;
+                // Vectors that went out with effects come back for the parser.
+                let want = SPARE_ARGS.saturating_sub(self.spare_args.len());
+                self.spare_args.extend(eng.take_spare_args(want));
+                let mut ran = 0usize;
                 while let Some(args) = self.pending.front() {
+                    // A pipelined batch: a window's keys load together before its first command runs.
+                    if ran.is_multiple_of(redis_engine::keyspace::PREFETCH_BATCH) && self.pending.len() > 1 {
+                        eng.prefetch(self.client.db, self.pending.iter());
+                    }
+                    ran += 1;
                     // The first was checked before locking unless no pause was set then: one
                     // may have started since. A long command leaves the core's thread.
                     if is_intercepted(args, &self.client)
@@ -818,12 +846,17 @@ impl Conn {
                         let mut io = SockIo { rd: &mut *rd, wr: &mut *wr, rt: ldb_runtime() };
                         blocking(true, || eng.with_ldb_io(&mut io, |eng| eng.call(client, &args)))
                     } else {
-                        long_running(&args, || eng.call(client, &args))
+                        long_running(&args, || eng.call_lending(client, &args))
                     };
                     let pushes = eng.take_after_reply();
                     actions.extend(eng.take_server_actions());
                     let deadline = matches!(out, Outcome::Blocked).then(|| eng.block_deadline(self.client.id).unwrap_or(0));
-                    if !self.finish_call(&args, out, pushes, &actions, deadline) {
+                    let go_on = self.finish_call(&args, out, pushes, &actions, deadline);
+                    // The command's effect may keep the vector (no copy of its arguments).
+                    if let Some(args) = eng.lend(args) {
+                        self.recycle_args(args);
+                    }
+                    if !go_on {
                         break;
                     }
                 }

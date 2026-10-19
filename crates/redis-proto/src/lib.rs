@@ -14,7 +14,7 @@ mod text;
 pub use decode::{DecodeError, decode};
 pub use double::{fmt_double, fmt_long_double, fpconv_dtoa, parse_double};
 pub use text::{escape, escape_prefix, unescape};
-pub use request::{BIG_ARG, Limits, ProtoError, Partial, parse_request, partial, split_args};
+pub use request::{BIG_ARG, Limits, ProtoError, Partial, parse_request, parse_request_into, partial, split_args};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -184,12 +184,14 @@ fn line(out: &mut BytesMut, prefix: u8, s: &[u8]) {
 }
 
 fn int(out: &mut BytesMut, prefix: u8, i: i64) {
+    // Formatted on the stack and appended once: every reply and bulk header goes through here.
     let mut buf = itoa::Buffer::new();
-    let s = buf.format(i);
-    out.reserve(s.len() + 3);
-    out.put_u8(prefix);
-    out.put_slice(s.as_bytes());
-    out.put_slice(b"\r\n");
+    let s = buf.format(i).as_bytes();
+    let mut line = [0u8; 24];
+    line[0] = prefix;
+    line[1..1 + s.len()].copy_from_slice(s);
+    line[1 + s.len()..3 + s.len()].copy_from_slice(b"\r\n");
+    out.extend_from_slice(&line[..s.len() + 3]);
 }
 
 /// Write a bulk string.

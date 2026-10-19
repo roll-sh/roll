@@ -134,7 +134,10 @@ struct Bcast {
 
 #[derive(Default)]
 pub struct Clients {
-    pub by_id: BTreeMap<u64, Entry>,
+    /// Registered connections (looked up for every command: hashed, not ordered).
+    pub by_id: HashMap<u64, Entry, foldhash::fast::RandomState>,
+    /// The same ids in order (CLIENT LIST, KILL, the clients cron).
+    pub ids: BTreeSet<u64>,
     /// Tracked keys → clients that read them (Redis' TrackingTable; databases share it).
     table: HashMap<Str, HashSet<u64>>,
     /// Client ids stored in the table, summed over keys.
@@ -182,11 +185,13 @@ impl Clients {
     pub fn register(&mut self, c: &Client) {
         let Some(stats) = c.conn.clone() else { return };
         self.by_id.insert(c.id, Entry { stats, sink: c.sink.clone(), view: View::of(c), track: None });
+        self.ids.insert(c.id);
     }
 
     pub fn unregister(&mut self, id: u64) {
         self.disable_tracking(id);
         self.by_id.remove(&id);
+        self.ids.remove(&id);
     }
 
     /// Copy the client's state after a command.
@@ -356,7 +361,7 @@ impl Clients {
     /// `trackingInvalidateKeysOnFlush`: every tracking client gets a null invalidation.
     pub fn flushed(&mut self) {
         if self.tracking_clients > 0 {
-            let ids: Vec<u64> = self.by_id.iter().filter(|(_, e)| e.track.is_some()).map(|(id, _)| *id).collect();
+            let ids: Vec<u64> = self.ids.iter().copied().filter(|id| self.by_id[id].track.is_some()).collect();
             for id in ids {
                 if id == self.current {
                     self.pending.push(None);

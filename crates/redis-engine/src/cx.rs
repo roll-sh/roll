@@ -178,6 +178,17 @@ impl<'a> KeyMut<'a> {
         }
     }
 
+    /// [`KeyMut::str_enc`] for a value known to be a canonical integer (INCR parsed it).
+    pub fn int_str_enc(&mut self) -> crate::object::StrEnc {
+        let klen = self.key.len();
+        let e = self.settled();
+        let len = match e.as_ref().value() {
+            ValueRef::Str(s) => s.len(),
+            _ => unreachable!("type checked by lookup"),
+        };
+        crate::object::int_str_encoding(e.obj(), klen, len)
+    }
+
     /// Replace the string's bytes (in its node when they fit).
     pub fn set_str(&mut self, b: &[u8]) {
         self.settled().put_str(b);
