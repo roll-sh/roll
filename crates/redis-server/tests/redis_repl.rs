@@ -19,7 +19,11 @@ impl Drop for Container {
 
 impl Container {
     fn start() -> Option<(Self, String)> {
-        let name = format!("roll-psync-{}-{}", std::process::id(), redis_engine::util::now_us() % 1_000_000);
+        // The tests run in parallel: a counter keeps their names apart (two can start in the same
+        // clock tick).
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("roll-psync-{}-{}-{n}", std::process::id(), redis_engine::util::now_us() % 1_000_000);
         let image = std::env::var("ROLL_COMPAT_IMAGE").unwrap_or_else(|_| "redis:8-alpine".into());
         let out = Command::new("docker")
             .args(["run", "-d", "--rm", "--name", &name, "-p", "127.0.0.1::6379", &image, "redis-server", "--save", "", "--repl-diskless-sync-delay", "0"])

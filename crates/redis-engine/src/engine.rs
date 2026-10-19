@@ -125,6 +125,9 @@ pub struct SlowEntry {
 pub(crate) struct Signals {
     /// Record modified keys (someone watches, blocks or tracks).
     pub track: bool,
+    /// Someone watches, blocks on or tracks keys: a change whose keysizes slot is already
+    /// updated needs recording only then.
+    pub observed: bool,
     /// Keys changed (with whether their keysizes slot is already updated).
     pub touched: Vec<(u16, Str, bool)>,
     /// Aggregates that may have become empty and must be deleted.
@@ -205,7 +208,7 @@ impl Signals {
     #[inline]
     pub fn touch_sized(&mut self, db: u16, key: &[u8]) {
         self.dirty += 1;
-        if self.track {
+        if self.track && self.observed {
             self.touched.push((db, Str::from_slice(key), true));
         }
     }
@@ -834,6 +837,7 @@ impl Engine {
         self.sig.notify = self.cfg.notify;
         // Always: touched keys also update the keysizes histogram.
         self.sig.track = true;
+        self.sig.observed = self.keys_observed();
         let db_at_start = client.db as u16;
         let effects_before = self.effects.len();
         let dirty_before = self.sig.dirty;
@@ -1219,6 +1223,11 @@ impl Engine {
         self.effects.push(Effect { db: db as u16, args: vec![Bytes::from_static(b"DEL"), Bytes::copy_from_slice(key)] });
     }
 
+    /// Whether a key's change has anyone to tell: a WATCH, a client blocked on keys, tracking.
+    fn keys_observed(&self) -> bool {
+        !self.watches.keys.is_empty() || !self.blocking.by_key.is_empty() || self.clients.tracks_keys()
+    }
+
     pub(crate) fn process_touched(&mut self) {
         if self.sig.touched.is_empty() {
             return;
@@ -1252,8 +1261,10 @@ impl Engine {
                 self.blocking.ready.push(k);
             }
         }
-        // Keep the allocation for the next command (unless something touched keys meanwhile).
+        // Keep the allocation for the next command (unless something touched keys meanwhile), but
+        // not what one huge command (DEBUG POPULATE, a big MSET) grew it to.
         if self.sig.touched.is_empty() {
+            touched.shrink_to(TOUCHED_KEEP);
             self.sig.touched = touched;
         }
     }
@@ -1730,6 +1741,7 @@ impl Engine {
         let mut total = 0;
         self.sig.notify = self.cfg.notify;
         self.sig.track = true;
+        self.sig.observed = self.keys_observed();
         for db in 0..self.dbs.len() {
             loop {
                 if self.dbs[db].volatile.is_empty() {
@@ -1863,6 +1875,8 @@ impl Engine {
 pub const LRU_CLOCK_MAX: u32 = (1 << 24) - 1;
 const LFU_INIT_VAL: u32 = 5;
 const EVPOOL_SIZE: usize = 16;
+/// The touched-keys buffer kept between commands (entries); a bigger one is shrunk back.
+const TOUCHED_KEEP: usize = 256;
 
 /// Wrap the effects from `start` on (one execution unit) in MULTI/EXEC if they are more than one
 /// command; markers a command placed itself inside the unit are replaced by the unit's.

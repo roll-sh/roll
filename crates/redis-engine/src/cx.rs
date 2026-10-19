@@ -168,6 +168,21 @@ impl<'a> KeyMut<'a> {
         self.settled().encoding(klen)
     }
 
+    /// The string's stored encoding.
+    pub fn str_enc(&mut self) -> crate::object::StrEnc {
+        let klen = self.key.len();
+        let e = self.settled();
+        match e.as_ref().value() {
+            ValueRef::Str(s) => crate::object::str_encoding(e.obj(), klen, s),
+            _ => unreachable!("type checked by lookup"),
+        }
+    }
+
+    /// Replace the string's bytes (in its node when they fit).
+    pub fn set_str(&mut self, b: &[u8]) {
+        self.settled().put_str(b);
+    }
+
     /// Whether the value is an embedded string (before replacing it: [`KeyMut::str_replaced`]).
     pub fn embedded(&mut self) -> bool {
         let klen = self.key.len();

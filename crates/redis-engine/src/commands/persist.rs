@@ -561,7 +561,7 @@ pub fn save(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
         return Err(Error::new("ERR Background save already in progress"));
     }
     for d in cx.eng.dbs.iter_mut() {
-        d.keys.for_each_mut(|_, mut e| {
+        d.keys.for_each_mut(|mut e| {
             if let Some(v) = e.aggregate_mut() {
                 v.prepare_save();
             }

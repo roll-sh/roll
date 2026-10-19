@@ -200,7 +200,7 @@ impl Db {
     pub fn recount_sizes(&mut self) {
         self.keysizes.iter_mut().for_each(|n| *n = 0);
         let mut counts = std::mem::take(&mut self.keysizes);
-        self.keys.for_each_mut(|_, mut e| {
+        self.keys.for_each_mut(|mut e| {
             let slot = e.value().size_slot();
             e.set_sized(slot);
             if slot != NO_SIZE {

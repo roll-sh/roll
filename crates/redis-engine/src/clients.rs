@@ -316,6 +316,11 @@ impl Clients {
         !self.table.is_empty() || !self.prefixes.is_empty()
     }
 
+    /// Whether any client tracks keys (or remembers some to invalidate).
+    pub fn tracks_keys(&self) -> bool {
+        self.tracking_clients != 0 || !self.table.is_empty()
+    }
+
     /// `trackingInvalidateKey`: `key` was modified by the current client (if any).
     pub fn invalidate(&mut self, key: &[u8], bcast: bool) {
         if self.tracking_clients == 0 && self.table.is_empty() {

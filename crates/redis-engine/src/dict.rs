@@ -4,24 +4,27 @@
 //! present for the whole iteration is returned. That relies on chaining (an element always lives
 //! in bucket `hash & mask`) plus the reverse-binary cursor walk. Incremental rehashing also keeps
 //! resizes of multi-million-key tables from stalling the shard.
+//!
+//! [`RawDict`] holds any kind of node ([`NodePtr`]: an owning pointer that knows its key and the
+//! next node of its chain): [`Dict`] boxes a key and a value, the keyspace packs a whole entry
+//! into one allocation ([`crate::keyspace`]).
 
 use foldhash::fast::RandomState;
 use std::hash::BuildHasher;
 
 use crate::util::Rng;
 
-struct Node<K, V> {
-    key: K,
-    val: V,
-    next: Link<K, V>,
+/// An owning pointer to a node of a [`RawDict`] chain.
+pub trait NodePtr: Sized {
+    fn key(&self) -> &[u8];
+    fn next(&self) -> &Option<Self>;
+    fn next_mut(&mut self) -> &mut Option<Self>;
 }
 
-type Link<K, V> = Option<Box<Node<K, V>>>;
-
-pub struct Dict<K, V> {
-    t0: Vec<Link<K, V>>,
+pub struct RawDict<P: NodePtr> {
+    t0: Vec<Option<P>>,
     /// Non-empty only while rehashing from `t0` into it.
-    t1: Vec<Link<K, V>>,
+    t1: Vec<Option<P>>,
     /// Next bucket of `t0` to move while rehashing.
     rehash_idx: usize,
     len: usize,
@@ -34,19 +37,28 @@ const MIN_SIZE: usize = 4;
 /// Empty buckets visited per rehash step before giving up (Redis uses 10x the step count).
 const EMPTY_VISITS: usize = 10;
 
-impl<K: AsRef<[u8]>, V> Default for Dict<K, V> {
+impl<P: NodePtr> Default for RawDict<P> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K: AsRef<[u8]>, V> Dict<K, V> {
+impl<P: NodePtr> RawDict<P> {
     pub fn new() -> Self {
-        Self { t0: Vec::new(), t1: Vec::new(), rehash_idx: 0, len: 0, hasher: RandomState::default(), resize: true }
+        Self::with_hasher(RandomState::default())
+    }
+
+    /// A table hashing with `hasher` (tests compare tables seeded alike).
+    pub fn with_hasher(hasher: RandomState) -> Self {
+        Self { t0: Vec::new(), t1: Vec::new(), rehash_idx: 0, len: 0, hasher, resize: true }
+    }
+
+    pub fn hasher(&self) -> &RandomState {
+        &self.hasher
     }
 
     /// Allow or stop automatic expands and shrinks (`dictTypeResizeAllowed`). Explicit
-    /// [`Dict::expand`] still applies.
+    /// [`RawDict::expand`] still applies.
     pub fn set_resize(&mut self, on: bool) {
         self.resize = on;
     }
@@ -95,7 +107,7 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
 
     /// Bytes used by the bucket arrays (nodes are accounted by the caller).
     pub fn table_bytes(&self) -> usize {
-        (self.t0.capacity() + self.t1.capacity()) * std::mem::size_of::<Link<K, V>>()
+        (self.t0.capacity() + self.t1.capacity()) * std::mem::size_of::<Option<P>>()
     }
 
     /// Buckets of both tables (`dictBuckets`).
@@ -103,103 +115,75 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
         self.t0.len() + self.t1.len()
     }
 
-    /// Bytes per node beyond the key and value contents.
-    pub const NODE_OVERHEAD: usize = std::mem::size_of::<Node<K, V>>() + 16;
-
     #[inline]
     fn hash(&self, key: &[u8]) -> u64 {
         self.hasher.hash_one(key)
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<&V> {
-        self.get_key_value(key).map(|(_, v)| v)
-    }
-
-    pub fn get_key_value(&self, key: &[u8]) -> Option<(&K, &V)> {
+    pub fn get(&self, key: &[u8]) -> Option<&P> {
         if self.len == 0 {
             return None;
         }
         let h = self.hash(key);
         for t in self.tables() {
-            let mut cur = t[(h as usize) & (t.len() - 1)].as_deref();
+            let mut cur = t[(h as usize) & (t.len() - 1)].as_ref();
             while let Some(n) = cur {
-                if n.key.as_ref() == key {
-                    return Some((&n.key, &n.val));
+                if n.key() == key {
+                    return Some(n);
                 }
-                cur = n.next.as_deref();
+                cur = n.next().as_ref();
             }
         }
         None
     }
 
+    #[inline]
     pub fn contains_key(&self, key: &[u8]) -> bool {
-        self.get_key_value(key).is_some()
+        self.get(key).is_some()
     }
 
-    pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut V> {
+    /// The link holding `key`'s node (a rehash step first, as Redis' lookups take), so the
+    /// caller may change the node or replace it.
+    pub fn get_link(&mut self, key: &[u8]) -> Option<&mut Option<P>> {
         if self.len == 0 {
             return None;
         }
         self.rehash_step();
         let h = self.hash(key);
-        let (t0, t1) = (&mut self.t0, &mut self.t1);
-        for t in [t0, t1] {
+        for t in [&mut self.t0, &mut self.t1] {
             if t.is_empty() {
                 continue;
             }
             let mask = t.len() - 1;
-            let mut cur = t[(h as usize) & mask].as_deref_mut();
-            while let Some(n) = cur {
-                if n.key.as_ref() == key {
-                    return Some(&mut n.val);
+            let mut link: *mut Option<P> = &mut t[(h as usize) & mask];
+            // SAFETY: `link` walks the chain within the unique borrow of `self`.
+            unsafe {
+                while let Some(n) = &mut *link {
+                    if n.key() == key {
+                        return Some(&mut *link);
+                    }
+                    link = n.next_mut();
                 }
-                cur = n.next.as_deref_mut();
             }
         }
         None
     }
 
-    /// Insert or replace; returns the previous value.
-    pub fn insert(&mut self, key: K, val: V) -> Option<V> {
-        if let Some(v) = self.get_mut(key.as_ref()) {
-            return Some(std::mem::replace(v, val));
-        }
-        self.insert_new(key, val);
-        None
-    }
-
-    /// Insert a key known to be absent.
-    pub fn insert_new(&mut self, key: K, val: V) -> &mut V {
+    /// Insert a node whose key is known to be absent; returns its link.
+    pub fn insert_new(&mut self, mut node: P) -> &mut Option<P> {
         self.rehash_step();
         self.expand_if_needed();
-        let h = self.hash(key.as_ref());
+        let h = self.hash(node.key());
         let t = if self.is_rehashing() { &mut self.t1 } else { &mut self.t0 };
         let idx = (h as usize) & (t.len() - 1);
-        let next = t[idx].take();
-        t[idx] = Some(Box::new(Node { key, val, next }));
+        *node.next_mut() = t[idx].take();
+        t[idx] = Some(node);
         self.len += 1;
-        &mut t[idx].as_mut().unwrap().val
+        &mut t[idx]
     }
 
-    /// Get the value for `key`, inserting `make()` first when absent. Returns `(value, inserted)`.
-    pub fn get_or_insert_with(
-        &mut self,
-        key: &[u8],
-        make_key: impl FnOnce() -> K,
-        make: impl FnOnce() -> V,
-    ) -> (&mut V, bool) {
-        // Two lookups keep the borrow checker happy; the first is a cheap probe.
-        if self.contains_key(key) {
-            return (self.get_mut(key).unwrap(), false);
-        }
-        (self.insert_new(make_key(), make()), true)
-    }
-
-    pub fn remove(&mut self, key: &[u8]) -> Option<V> {
-        self.remove_entry(key).map(|(_, v)| v)
-    }
-
-    pub fn remove_entry(&mut self, key: &[u8]) -> Option<(K, V)> {
+    /// Unlink and return `key`'s node.
+    pub fn remove(&mut self, key: &[u8]) -> Option<P> {
         if self.len == 0 {
             return None;
         }
@@ -211,17 +195,17 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
                 continue;
             }
             let mask = t.len() - 1;
-            let mut link = &mut t[(h as usize) & mask];
-            loop {
-                match link {
-                    None => break,
-                    Some(n) if n.key.as_ref() == key => {
-                        let mut node = link.take().unwrap();
-                        *link = node.next.take();
-                        out = Some((node.key, node.val));
+            let mut link: *mut Option<P> = &mut t[(h as usize) & mask];
+            // SAFETY: as in `get_link`.
+            unsafe {
+                while let Some(n) = &mut *link {
+                    if n.key() == key {
+                        let mut node = (*link).take().unwrap();
+                        *link = node.next_mut().take();
+                        out = Some(node);
                         break 'tables;
                     }
-                    Some(n) => link = &mut n.next,
+                    link = n.next_mut();
                 }
             }
         }
@@ -238,7 +222,7 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
             for b in t.iter_mut() {
                 let mut cur = b.take();
                 while let Some(mut n) = cur {
-                    cur = n.next.take();
+                    cur = n.next_mut().take();
                 }
             }
         }
@@ -248,46 +232,41 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
         self.len = 0;
     }
 
-    fn tables(&self) -> impl Iterator<Item = &Vec<Link<K, V>>> {
+    fn tables(&self) -> impl Iterator<Item = &Vec<Option<P>>> {
         [&self.t0, &self.t1].into_iter().filter(|t| !t.is_empty())
     }
 
-    pub fn iter(&self) -> Iter<'_, K, V> {
-        Iter { tables: [&self.t0, &self.t1], table: 0, bucket: 0, node: None, remaining: self.len }
+    pub fn iter(&self) -> RawIter<'_, P> {
+        RawIter { tables: [&self.t0, &self.t1], table: 0, bucket: 0, node: None, remaining: self.len }
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &K> {
-        self.iter().map(|(k, _)| k)
-    }
-
-    pub fn values(&self) -> impl Iterator<Item = &V> {
-        self.iter().map(|(_, v)| v)
-    }
-
-    /// Visit every value mutably.
-    pub fn for_each_mut(&mut self, mut f: impl FnMut(&K, &mut V)) {
+    /// Visit every node's link (the node may be changed or replaced, not removed).
+    pub fn for_each_link(&mut self, mut f: impl FnMut(&mut Option<P>)) {
         for t in [&mut self.t0, &mut self.t1] {
             for b in t.iter_mut() {
-                let mut cur = b.as_deref_mut();
-                while let Some(n) = cur {
-                    f(&n.key, &mut n.val);
-                    cur = n.next.as_deref_mut();
+                let mut link: *mut Option<P> = b;
+                // SAFETY: as in `get_link`; the chain is followed from the node `f` left.
+                unsafe {
+                    while (*link).is_some() {
+                        f(&mut *link);
+                        link = (*link).as_mut().unwrap().next_mut();
+                    }
                 }
             }
         }
     }
 
-    /// Remove every entry for which `keep` returns false.
-    pub fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
+    /// Remove every node for which `keep` returns false.
+    pub fn retain(&mut self, mut keep: impl FnMut(&mut P) -> bool) {
         let mut removed = 0;
         for t in [&mut self.t0, &mut self.t1] {
             for b in t.iter_mut() {
                 let mut cur = b.take();
-                let mut kept: Link<K, V> = None;
+                let mut kept: Option<P> = None;
                 while let Some(mut n) = cur {
-                    cur = n.next.take();
-                    if keep(&n.key, &mut n.val) {
-                        n.next = kept;
+                    cur = n.next_mut().take();
+                    if keep(&mut n) {
+                        *n.next_mut() = kept;
                         kept = Some(n);
                     } else {
                         removed += 1;
@@ -301,14 +280,14 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
     }
 
     /// Move everything out.
-    pub fn drain(&mut self) -> Vec<(K, V)> {
+    pub fn drain(&mut self) -> Vec<P> {
         let mut out = Vec::with_capacity(self.len);
         for t in [&mut self.t0, &mut self.t1] {
             for b in t.iter_mut() {
                 let mut cur = b.take();
                 while let Some(mut n) = cur {
-                    cur = n.next.take();
-                    out.push((n.key, n.val));
+                    cur = n.next_mut().take();
+                    out.push(n);
                 }
             }
         }
@@ -318,16 +297,16 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
 
     /// One SCAN step: calls `f` for every element of the bucket(s) at `cursor` and returns the
     /// next cursor (0 when the iteration is complete).
-    pub fn scan(&self, cursor: u64, mut f: impl FnMut(&K, &V)) -> u64 {
+    pub fn scan(&self, cursor: u64, mut f: impl FnMut(&P)) -> u64 {
         if self.len == 0 {
             return 0;
         }
         let mut v = cursor;
-        let emit = |t: &Vec<Link<K, V>>, idx: u64, f: &mut dyn FnMut(&K, &V)| {
-            let mut cur = t[idx as usize].as_deref();
+        let emit = |t: &Vec<Option<P>>, idx: u64, f: &mut dyn FnMut(&P)| {
+            let mut cur = t[idx as usize].as_ref();
             while let Some(n) = cur {
-                f(&n.key, &n.val);
-                cur = n.next.as_deref();
+                f(n);
+                cur = n.next().as_ref();
             }
         };
         if !self.is_rehashing() {
@@ -354,7 +333,7 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
     }
 
     /// A random element (bucket-uniform, like `dictGetRandomKey`).
-    pub fn random(&self, rng: &mut Rng) -> Option<(&K, &V)> {
+    pub fn random(&self, rng: &mut Rng) -> Option<&P> {
         if self.len == 0 {
             return None;
         }
@@ -367,7 +346,7 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
                 rng.below(n0)
             };
             let b = if i < n0 { &self.t0[i] } else { &self.t1[i - n0] };
-            if let Some(n) = b.as_deref() {
+            if let Some(n) = b.as_ref() {
                 break n;
             }
         };
@@ -375,25 +354,25 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
         let mut cur = Some(head);
         while let Some(n) = cur {
             len += 1;
-            cur = n.next.as_deref();
+            cur = n.next().as_ref();
         }
         let mut pick = rng.below(len);
         let mut cur = head;
         while pick > 0 {
-            cur = cur.next.as_deref().unwrap();
+            cur = cur.next().as_ref().unwrap();
             pick -= 1;
         }
-        Some((&cur.key, &cur.val))
+        Some(cur)
     }
 
     /// Up to `count` elements from consecutive buckets starting at a random one
     /// (`dictGetSomeKeys`): cheap sampling for eviction and active expiry.
-    pub fn sample(&self, rng: &mut Rng, count: usize, mut f: impl FnMut(&K, &V)) {
+    pub fn sample(&self, rng: &mut Rng, count: usize, mut f: impl FnMut(&P)) {
         if self.len == 0 || count == 0 {
             return;
         }
         let count = count.min(self.len);
-        let tables: Vec<&Vec<Link<K, V>>> = self.tables().collect();
+        let tables: Vec<&Vec<Option<P>>> = self.tables().collect();
         let maxsize = tables.iter().map(|t| t.len()).max().unwrap();
         let mut i = rng.below(maxsize);
         let mut got = 0;
@@ -409,7 +388,7 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
                 if i >= t.len() {
                     continue;
                 }
-                let mut cur = t[i].as_deref();
+                let mut cur = t[i].as_ref();
                 if cur.is_none() {
                     empty += 1;
                     if empty >= 5 && empty > count {
@@ -418,12 +397,12 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
                     }
                 }
                 while let Some(n) = cur {
-                    f(&n.key, &n.val);
+                    f(n);
                     got += 1;
                     if got >= count {
                         return;
                     }
-                    cur = n.next.as_deref();
+                    cur = n.next().as_ref();
                 }
             }
             i = (i + 1) & (maxsize - 1);
@@ -459,9 +438,9 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
             let mask = self.t1.len() - 1;
             let mut cur = self.t0[self.rehash_idx].take();
             while let Some(mut node) = cur {
-                cur = node.next.take();
-                let idx = (self.hasher.hash_one(node.key.as_ref()) as usize) & mask;
-                node.next = self.t1[idx].take();
+                cur = node.next_mut().take();
+                let idx = (self.hasher.hash_one(node.key()) as usize) & mask;
+                *node.next_mut() = self.t1[idx].take();
                 self.t1[idx] = Some(node);
             }
             self.rehash_idx += 1;
@@ -519,6 +498,67 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
             self.start_resize(self.len.next_power_of_two().max(MIN_SIZE));
         }
     }
+}
+
+impl<P: NodePtr> Drop for RawDict<P> {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+pub struct RawIter<'a, P: NodePtr> {
+    tables: [&'a Vec<Option<P>>; 2],
+    table: usize,
+    bucket: usize,
+    node: Option<&'a P>,
+    remaining: usize,
+}
+
+impl<'a, P: NodePtr> Iterator for RawIter<'a, P> {
+    type Item = &'a P;
+
+    fn next(&mut self) -> Option<&'a P> {
+        loop {
+            if let Some(n) = self.node {
+                self.node = n.next().as_ref();
+                self.remaining -= 1;
+                return Some(n);
+            }
+            if self.table >= 2 {
+                return None;
+            }
+            let t = self.tables[self.table];
+            if self.bucket >= t.len() {
+                self.table += 1;
+                self.bucket = 0;
+                continue;
+            }
+            self.node = t[self.bucket].as_ref();
+            self.bucket += 1;
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+/// Each bucket's chain length.
+fn chains<P: NodePtr>(t: &[Option<P>]) -> impl Iterator<Item = usize> + '_ {
+    t.iter().map(|b| {
+        let (mut n, mut cur) = (0, b.as_ref());
+        while let Some(node) = cur {
+            n += 1;
+            cur = node.next().as_ref();
+        }
+        n
+    })
+}
+
+fn empty_table<P>(n: usize) -> Vec<Option<P>> {
+    let mut v = Vec::with_capacity(n);
+    v.resize_with(n, || None);
+    v
 }
 
 /// Chain-length histogram slots (`DICT_STATS_VECTLEN`).
@@ -592,40 +632,212 @@ impl DictStats {
     }
 }
 
-/// Each bucket's chain length.
-fn chains<K, V>(t: &[Link<K, V>]) -> impl Iterator<Item = usize> + '_ {
-    t.iter().map(|b| {
-        let (mut n, mut cur) = (0, b.as_deref());
-        while let Some(node) = cur {
-            n += 1;
-            cur = node.next.as_deref();
-        }
-        n
-    })
+// ---- a dict of boxed keys and values ----
+
+pub struct Node<K, V> {
+    key: K,
+    val: V,
+    next: Option<Box<Node<K, V>>>,
 }
 
-fn empty_table<K, V>(n: usize) -> Vec<Link<K, V>> {
-    let mut v = Vec::with_capacity(n);
-    v.resize_with(n, || None);
-    v
+impl<K: AsRef<[u8]>, V> NodePtr for Box<Node<K, V>> {
+    #[inline]
+    fn key(&self) -> &[u8] {
+        self.key.as_ref()
+    }
+    #[inline]
+    fn next(&self) -> &Option<Self> {
+        &self.next
+    }
+    #[inline]
+    fn next_mut(&mut self) -> &mut Option<Self> {
+        &mut self.next
+    }
 }
 
-impl<K, V> Drop for Dict<K, V> {
-    fn drop(&mut self) {
-        for t in [&mut self.t0, &mut self.t1] {
-            for b in t.iter_mut() {
-                let mut cur = b.take();
-                while let Some(mut n) = cur {
-                    cur = n.next.take();
-                }
-            }
+/// Keys and values each boxed in a node of its own.
+pub struct Dict<K: AsRef<[u8]>, V> {
+    raw: RawDict<Box<Node<K, V>>>,
+}
+
+impl<K: AsRef<[u8]>, V> Default for Dict<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: AsRef<[u8]>, V> Dict<K, V> {
+    pub fn new() -> Self {
+        Self { raw: RawDict::new() }
+    }
+
+    pub fn with_hasher(hasher: RandomState) -> Self {
+        Self { raw: RawDict::with_hasher(hasher) }
+    }
+
+    pub fn set_resize(&mut self, on: bool) {
+        self.raw.set_resize(on)
+    }
+
+    pub fn with_capacity(n: usize) -> Self {
+        Self { raw: RawDict::with_capacity(n) }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
+    #[inline]
+    pub fn is_rehashing(&self) -> bool {
+        self.raw.is_rehashing()
+    }
+
+    pub fn stats(&self, full: bool) -> Vec<DictStats> {
+        self.raw.stats(full)
+    }
+
+    pub fn expand(&mut self, n: usize) {
+        self.raw.expand(n)
+    }
+
+    pub fn table_bytes(&self) -> usize {
+        self.raw.table_bytes()
+    }
+
+    pub fn buckets(&self) -> usize {
+        self.raw.buckets()
+    }
+
+    /// Bytes per node beyond the key and value contents.
+    pub const NODE_OVERHEAD: usize = std::mem::size_of::<Node<K, V>>() + 16;
+
+    pub fn get(&self, key: &[u8]) -> Option<&V> {
+        self.raw.get(key).map(|n| &n.val)
+    }
+
+    pub fn get_key_value(&self, key: &[u8]) -> Option<(&K, &V)> {
+        self.raw.get(key).map(|n| (&n.key, &n.val))
+    }
+
+    pub fn contains_key(&self, key: &[u8]) -> bool {
+        self.raw.contains_key(key)
+    }
+
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut V> {
+        self.raw.get_link(key).map(|l| &mut l.as_mut().unwrap().val)
+    }
+
+    /// Insert or replace; returns the previous value.
+    pub fn insert(&mut self, key: K, val: V) -> Option<V> {
+        if let Some(v) = self.get_mut(key.as_ref()) {
+            return Some(std::mem::replace(v, val));
         }
+        self.insert_new(key, val);
+        None
+    }
+
+    /// Insert a key known to be absent.
+    pub fn insert_new(&mut self, key: K, val: V) -> &mut V {
+        &mut self.raw.insert_new(Box::new(Node { key, val, next: None })).as_mut().unwrap().val
+    }
+
+    /// Get the value for `key`, inserting `make()` first when absent. Returns `(value, inserted)`.
+    pub fn get_or_insert_with(&mut self, key: &[u8], make_key: impl FnOnce() -> K, make: impl FnOnce() -> V) -> (&mut V, bool) {
+        // Two lookups keep the borrow checker happy; the first is a cheap probe.
+        if self.contains_key(key) {
+            return (self.get_mut(key).unwrap(), false);
+        }
+        (self.insert_new(make_key(), make()), true)
+    }
+
+    pub fn remove(&mut self, key: &[u8]) -> Option<V> {
+        self.remove_entry(key).map(|(_, v)| v)
+    }
+
+    pub fn remove_entry(&mut self, key: &[u8]) -> Option<(K, V)> {
+        self.raw.remove(key).map(|n| {
+            let n = *n;
+            (n.key, n.val)
+        })
+    }
+
+    pub fn clear(&mut self) {
+        self.raw.clear()
+    }
+
+    pub fn iter(&self) -> Iter<'_, K, V> {
+        Iter { inner: self.raw.iter() }
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.iter().map(|(k, _)| k)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, v)| v)
+    }
+
+    /// Visit every value mutably.
+    pub fn for_each_mut(&mut self, mut f: impl FnMut(&K, &mut V)) {
+        self.raw.for_each_link(|l| {
+            let n = l.as_mut().unwrap();
+            f(&n.key, &mut n.val)
+        })
+    }
+
+    /// Remove every entry for which `keep` returns false.
+    pub fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
+        self.raw.retain(|n| keep(&n.key, &mut n.val))
+    }
+
+    /// Move everything out.
+    pub fn drain(&mut self) -> Vec<(K, V)> {
+        self.raw.drain().into_iter().map(|n| (n.key, n.val)).collect()
+    }
+
+    pub fn scan(&self, cursor: u64, mut f: impl FnMut(&K, &V)) -> u64 {
+        self.raw.scan(cursor, |n| f(&n.key, &n.val))
+    }
+
+    pub fn random(&self, rng: &mut Rng) -> Option<(&K, &V)> {
+        self.raw.random(rng).map(|n| (&n.key, &n.val))
+    }
+
+    pub fn sample(&self, rng: &mut Rng, count: usize, mut f: impl FnMut(&K, &V)) {
+        self.raw.sample(rng, count, |n| f(&n.key, &n.val))
+    }
+
+    pub fn rehash(&mut self, n: usize) -> bool {
+        self.raw.rehash(n)
+    }
+}
+
+pub struct Iter<'a, K: AsRef<[u8]>, V> {
+    inner: RawIter<'a, Box<Node<K, V>>>,
+}
+
+impl<'a, K: AsRef<[u8]>, V> Iterator for Iter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|n| (&n.key, &n.val))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
 impl<K: AsRef<[u8]> + Clone, V: Clone> Clone for Dict<K, V> {
     fn clone(&self) -> Self {
-        let mut d = Dict::with_capacity(self.len);
+        let mut d = Dict::with_capacity(self.len());
         for (k, v) in self.iter() {
             d.insert_new(k.clone(), v.clone());
         }
@@ -639,43 +851,6 @@ impl<K: AsRef<[u8]> + std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for D
     }
 }
 
-pub struct Iter<'a, K, V> {
-    tables: [&'a Vec<Link<K, V>>; 2],
-    table: usize,
-    bucket: usize,
-    node: Option<&'a Node<K, V>>,
-    remaining: usize,
-}
-
-impl<'a, K, V> Iterator for Iter<'a, K, V> {
-    type Item = (&'a K, &'a V);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(n) = self.node {
-                self.node = n.next.as_deref();
-                self.remaining -= 1;
-                return Some((&n.key, &n.val));
-            }
-            if self.table >= 2 {
-                return None;
-            }
-            let t = self.tables[self.table];
-            if self.bucket >= t.len() {
-                self.table += 1;
-                self.bucket = 0;
-                continue;
-            }
-            self.node = t[self.bucket].as_deref();
-            self.bucket += 1;
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.remaining, Some(self.remaining))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,7 +860,7 @@ mod tests {
     fn stats_and_expand() {
         let mut d: Dict<Vec<u8>, ()> = Dict::new();
         d.expand(100);
-        assert_eq!(d.t0.len(), 128);
+        assert_eq!(d.raw.t0.len(), 128);
         d.insert(b"a".to_vec(), ());
         let st = d.stats(true);
         assert_eq!((st.len(), st[0].size, st[0].used, st[0].buckets, st[0].max_chain), (1, 128, 1, 1, 1));
@@ -727,7 +902,7 @@ mod tests {
         }
         assert_eq!(d.len(), 10);
         while d.rehash(100) {}
-        assert!(d.t0.len() <= 16, "shrunk to {}", d.t0.len());
+        assert!(d.raw.t0.len() <= 16, "shrunk to {}", d.raw.t0.len());
         assert_eq!(d.iter().count(), 10);
     }
 
