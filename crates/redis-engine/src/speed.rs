@@ -32,6 +32,21 @@ fn b(s: &str) -> Bytes {
     Bytes::copy_from_slice(s.as_bytes())
 }
 
+/// One workload for a profiler: `ROLL_SPEED_ONLY=SET` with many rounds.
+#[test]
+#[ignore]
+fn engine_speed_one() {
+    let only = std::env::var("ROLL_SPEED_ONLY").unwrap_or_else(|_| "SET".into());
+    let key = |r: u64| b(&format!("key:{r:012}"));
+    for _ in 0..20 {
+        match only.as_str() {
+            "INCR" => run("INCR", |r| vec![b("INCR"), key(r)]),
+            "GET" => run("GET", |r| vec![b("GET"), key(r)]),
+            _ => run("SET", |r| vec![b("SET"), key(r), b("xxx")]),
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn engine_speed() {

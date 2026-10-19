@@ -119,7 +119,9 @@ pub fn set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let key = &args[1];
     // GET replies first (`getGenericCommand`): a WRONGTYPE ends the command there.
     let current: Option<Str> = if get { cx.get_str(key)?.cloned() } else { None };
-    let exists = if get { current.is_some() } else { cx.peek(key).is_some() };
+    // Without a condition only the write's own lookup is needed (it expires a stale key first,
+    // as `lookupKeyWrite` does).
+    let exists = if get { current.is_some() } else { !matches!(cond, Cond::Any) && cx.peek(key).is_some() };
     let old_reply = |current: &Option<Str>| if get { Reply::opt_bulk(current.as_deref()) } else { Reply::Nil };
     if (cond == Cond::Nx && exists) || (matches!(cond, Cond::Xx | Cond::IfEq(_) | Cond::IfDeq(_)) && !exists) {
         return Ok(old_reply(&current));

@@ -638,8 +638,21 @@ impl Conn {
             Msg(Option<Msg>),
             Tick,
         }
-        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_millis(100), Duration::from_millis(100));
         let mut total = 0u64;
+        // The socket usually takes it all at once: no timer, no select.
+        while !self.out.is_empty() {
+            match futures::FutureExt::now_or_never(wr.write(&self.out)) {
+                Some(Ok(0) | Err(_)) => return false,
+                Some(Ok(n)) => {
+                    self.out.advance(n);
+                    self.rbuf.sent(n);
+                    self.rbuf.publish(&self.stats);
+                    total += n as u64;
+                }
+                None => break,
+            }
+        }
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_millis(100), Duration::from_millis(100));
         while !self.out.is_empty() {
             let ev = tokio::select! {
                 biased;
