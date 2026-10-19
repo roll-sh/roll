@@ -70,7 +70,7 @@ impl Detached {
             tokio::select! {
                 msg = self.rx.recv() => match msg {
                     Some(Msg::Unblock(b)) => return Reply::Raw(b),
-                    Some(Msg::Push(_) | Msg::AclChanged | Msg::Kill) => {}
+                    Some(Msg::Push(_) | Msg::AclChanged | Msg::Kill | Msg::Trim) => {}
                     None => return Reply::Nil,
                 },
                 _ = timer, if deadline > 0 => {
@@ -91,7 +91,7 @@ impl Detached {
         loop {
             match self.rx.recv().await? {
                 Msg::Push(b) => return Some(b),
-                Msg::Unblock(_) => {}
+                Msg::Unblock(_) | Msg::Trim => {}
                 Msg::Kill => return None,
                 // A subscriber whose channel permissions were revoked: end the stream.
                 Msg::AclChanged => {

@@ -32,6 +32,8 @@ pub enum Msg {
     AclChanged,
     /// CLIENT KILL from another connection.
     Kill,
+    /// Idle: drop the buffers if they are empty.
+    Trim,
 }
 
 /// Delivers out-of-band data to the connection task.
@@ -58,12 +60,20 @@ impl Sink for ConnSink {
     fn kill(&self) {
         let _ = self.tx.send(Msg::Kill);
     }
+    fn trim(&self) {
+        let _ = self.tx.send(Msg::Trim);
+    }
 }
 
 /// Most commands executed per lock acquisition, so one pipelining client can't starve others.
 const MAX_BATCH: usize = 512;
 /// Argument vectors a connection keeps for reuse.
 const SPARE_ARGS: usize = 32;
+/// The input buffer grows by this much when less than [`READ_ROOM`] is free.
+const INBUF_CHUNK: usize = 16 * 1024;
+const READ_ROOM: usize = 4 * 1024;
+/// What an idle connection keeps to read into.
+const IDLE_READ: usize = 512;
 /// Most bytes taken off the socket per read (Redis reads `PROTO_IOBUF_LEN` at a time).
 const READ_CHUNK: usize = 64 * 1024;
 
@@ -73,6 +83,10 @@ pub struct Conn {
     session: Option<Session>,
     client: Client,
     pending: VecDeque<Vec<Bytes>>,
+    /// Asked to drop its buffers ([`Msg::Trim`]), done before it next waits.
+    trim: bool,
+    /// Its buffers are dropped (until the next read).
+    trimmed: bool,
     /// Emptied argument vectors ([`Conn::recycle_args`]).
     spare_args: Vec<Vec<Bytes>>,
     out: BytesMut,
@@ -148,8 +162,10 @@ where
         session,
         client,
         pending: VecDeque::new(),
+        trim: false,
+        trimmed: false,
         spare_args: Vec::new(),
-        out: BytesMut::with_capacity(16 * 1024),
+        out: BytesMut::new(),
         skip_next: false,
         close_after: false,
         blocked: None,
@@ -166,7 +182,7 @@ where
         unmovable: false,
         limits: Default::default(),
     };
-    run(Parked { conn, stream, inbuf: BytesMut::with_capacity(16 * 1024), rx }).await
+    run(Parked { conn, stream, inbuf: BytesMut::new(), rx }).await
 }
 
 /// A socket the connection can take to another event loop ([`crate::cores`]).
@@ -331,6 +347,18 @@ impl Conn {
                 Some(d) if d > 0 => Some(d),
                 _ => None,
             };
+            // Idle: buffers go back to the allocator (a read grows a new one from nothing).
+            if std::mem::take(&mut self.trim) && inbuf.is_empty() && self.out.is_empty() && self.pending.is_empty() {
+                *inbuf = BytesMut::with_capacity(IDLE_READ);
+                self.out = BytesMut::new();
+                self.spare_args = Vec::new();
+                self.trimmed = true;
+            }
+            // Room to read into (Redis' `sdsMakeRoomFor(readlen)`); a trimmed connection reads
+            // its first input into the small buffer it kept.
+            if !self.trimmed && inbuf.capacity() - inbuf.len() < READ_ROOM {
+                inbuf.reserve(INBUF_CHUNK);
+            }
             let db = self.db().cloned();
             // Read a little at a time like Redis (more only for the rest of a big argument), so the
             // query buffer limit sees what a read adds to the unparsed input.
@@ -352,6 +380,10 @@ impl Conn {
                 r = rd.read_buf(&mut room) => match r {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        self.trimmed = false;
+                        if self.stats.trimmed.load(Ordering::Relaxed) {
+                            self.stats.trimmed.store(false, Ordering::Relaxed);
+                        }
                         self.stats.net_in.fetch_add(n as u64, Ordering::Relaxed);
                         self.stats.read_events.fetch_add(1, Ordering::Relaxed);
                         self.stats.last_interaction.store(redis_engine::util::now_ms() / 1000, Ordering::Relaxed);
@@ -429,6 +461,8 @@ impl Conn {
             session: None,
             client: Client::new(0),
             pending: VecDeque::new(),
+            trim: false,
+            trimmed: false,
             spare_args: Vec::new(),
             out: BytesMut::new(),
             skip_next: false,
@@ -572,6 +606,7 @@ impl Conn {
             }
             Msg::AclChanged => return !redis_engine::acl::must_disconnect(&self.client),
             Msg::Kill => return false,
+            Msg::Trim => self.trim = true,
         }
         !self.obuf_closed
     }

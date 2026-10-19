@@ -319,6 +319,7 @@ impl Drop for EngineGuard<'_> {
 
 impl Database {
     pub fn new(id: impl Into<String>, config: Config, shards: usize) -> Arc<Self> {
+        redis_engine::util::set_memory_purge(crate::release_memory);
         let hub = Hub::new();
         let acl = Arc::new(RwLock::new(Acl::new()));
         let shards = (0..shards.max(1))
@@ -681,6 +682,7 @@ impl Database {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut ticks = 0u64;
+            let mut purged = false;
             loop {
                 tick.tick().await;
                 ticks += 1;
@@ -698,6 +700,12 @@ impl Database {
                     db.cron_parked.store(true, Ordering::SeqCst);
                     let still = db.cron_may_sleep();
                     drop(db);
+                    if still && !purged {
+                        // Going idle: what the core's allocator holds free goes back to the
+                        // system (once per idle period).
+                        crate::release_memory();
+                        purged = true;
+                    }
                     if still {
                         let _ = tokio::time::timeout(Duration::from_secs(60), woken).await;
                     }
@@ -707,6 +715,7 @@ impl Database {
                     tick.reset();
                     continue;
                 }
+                purged = false;
                 // Redis' replication cron: a PING in the stream every repl-ping-replica-period.
                 if ticks.is_multiple_of(crate::repl::psync::PING_PERIOD_S * 10) && db.io.redis_replicas.load(Ordering::Relaxed) > 0 {
                     db.publish_raw(&[b"PING"]);

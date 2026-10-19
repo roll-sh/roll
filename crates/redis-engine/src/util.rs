@@ -516,3 +516,18 @@ pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
         }
     }
 }
+
+/// How the process hands free memory back to the system (the server's allocator registers it).
+static PURGE: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Register [`purge_memory`]'s implementation (once).
+pub fn set_memory_purge(f: fn()) {
+    let _ = PURGE.set(f);
+}
+
+/// Give the calling thread's free memory back to the system (MEMORY PURGE, idle databases).
+pub fn purge_memory() {
+    if let Some(f) = PURGE.get() {
+        f();
+    }
+}

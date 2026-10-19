@@ -10,6 +10,9 @@ use crate::clients::Track;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+/// Seconds without input after which a connection drops its (empty) buffers.
+const TRIM_IDLE_SECS: i64 = 2;
+
 pub static CLIENT: &[Command] = &[
     cmd!("id", 2, NOSCRIPT | LOADING | STALE, 0, 0, 0, id, Connection),
     cmd!("getname", 2, NOSCRIPT | LOADING | STALE, 0, 0, 0, getname, Connection),
@@ -769,6 +772,14 @@ impl Engine {
                 continue;
             }
             e.stats.resize_query_buffer(idle);
+            // Idle a while: the connection can give its buffers back (once per idle period).
+            if idle >= TRIM_IDLE_SECS
+                && !e.stats.trimmed.load(Ordering::Relaxed)
+                && let Some(s) = &e.sink
+            {
+                e.stats.trimmed.store(true, Ordering::Relaxed);
+                s.trim();
+            }
             if !self.debug.reply_resizing {
                 continue;
             }

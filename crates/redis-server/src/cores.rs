@@ -11,7 +11,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::{Builder, Handle, Runtime};
 
 pub struct Cores {
-    cores: Vec<Handle>,
+    /// Started on first use: a process serving one database runs one core thread (more only
+    /// while it spreads), not one per CPU.
+    cores: Vec<OnceLock<Handle>>,
+    /// The CPU each core thread is pinned to, if pinning.
+    cpus: Vec<usize>,
     loads: Vec<Load>,
     /// Next home core to hand out.
     next: AtomicUsize,
@@ -53,36 +57,43 @@ impl Cores {
         let loads: Vec<Load> = (0..n).map(|_| Load::default()).collect();
         // Each core thread on a CPU of its own (of those the process may use), unless ROLL_PIN=0.
         let cpus = if std::env::var("ROLL_PIN").is_ok_and(|v| v == "0") { Vec::new() } else { affinity::allowed() };
-        let cores = (0..n)
-            .map(|i| {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let cpu = (!cpus.is_empty()).then(|| cpus[i % cpus.len()]);
-                std::thread::Builder::new()
-                    .name(format!("roll-core-{i}"))
-                    .spawn(move || {
-                        if let Some(cpu) = cpu {
-                            affinity::pin(cpu);
-                        }
-                        let rt = Builder::new_current_thread()
-                            .enable_all()
-                            .on_thread_park(move || pool().loads[i].parked())
-                            .on_thread_unpark(move || pool().loads[i].unparked())
-                            .build()
-                            .expect("core runtime");
-                        CURRENT.set(Some(i));
-                        let _ = tx.send(rt.handle().clone());
-                        rt.block_on(std::future::pending::<()>());
-                    })
-                    .expect("core thread");
-                rx.recv().expect("core started")
-            })
-            .collect();
-        Self { cores, loads, next: AtomicUsize::new(0), slow: OnceLock::new() }
+        Self { cores: (0..n).map(|_| OnceLock::new()).collect(), cpus, loads, next: AtomicUsize::new(0), slow: OnceLock::new() }
+    }
+
+    /// Core `i`'s runtime, its thread started now if it wasn't.
+    fn core(&self, i: usize) -> &Handle {
+        self.cores[i].get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let cpu = (!self.cpus.is_empty()).then(|| self.cpus[i % self.cpus.len()]);
+            std::thread::Builder::new()
+                .name(format!("roll-core-{i}"))
+                .spawn(move || {
+                    if let Some(cpu) = cpu {
+                        affinity::pin(cpu);
+                    }
+                    let rt = Builder::new_current_thread()
+                        .enable_all()
+                        .on_thread_park(move || pool().loads[i].parked())
+                        .on_thread_unpark(move || pool().loads[i].unparked())
+                        .build()
+                        .expect("core runtime");
+                    CURRENT.set(Some(i));
+                    let _ = tx.send(rt.handle().clone());
+                    rt.block_on(std::future::pending::<()>());
+                })
+                .expect("core thread");
+            rx.recv().expect("core started")
+        })
     }
 
     /// How busy core `i` was lately (percent, over about the last 100ms).
     pub fn load(&self, i: usize) -> u32 {
-        self.loads[i % self.loads.len()].percent()
+        let i = i % self.loads.len();
+        // A core not started yet is idle.
+        if self.cores[i].get().is_none() {
+            return 0;
+        }
+        self.loads[i].percent()
     }
 
     pub fn len(&self) -> usize {
@@ -111,7 +122,7 @@ impl Cores {
 
     pub fn handle(&self, place: Place) -> &Handle {
         match place {
-            Place::Core(i) => &self.cores[i % self.cores.len()],
+            Place::Core(i) => self.core(i % self.cores.len()),
             Place::Slow => self.slow.get_or_init(|| Builder::new_multi_thread().worker_threads(2).thread_name("roll-slow").enable_all().build().expect("slow runtime")).handle(),
         }
     }

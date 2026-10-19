@@ -19,6 +19,8 @@ pub trait Sink: Send + Sync {
     fn acl_changed(&self) {}
     /// CLIENT KILL: close the connection.
     fn kill(&self) {}
+    /// The client is idle: drop its buffers while they are empty.
+    fn trim(&self) {}
 }
 
 #[derive(Clone)]

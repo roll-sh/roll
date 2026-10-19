@@ -948,6 +948,7 @@ pub fn memory_malloc_stats(_cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
 
 pub fn memory_purge(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     cx.eng.rehash(1 << 20);
+    crate::util::purge_memory();
     Ok(Reply::Ok)
 }
 

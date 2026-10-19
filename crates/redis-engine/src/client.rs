@@ -27,6 +27,8 @@ pub enum ReplyMode {
 /// writes) and the engine (CLIENT LIST, CLIENT KILL, INFO).
 #[derive(Debug, Default)]
 pub struct ConnStats {
+    /// The connection gave its buffers back while idle (until its next read).
+    pub trimmed: AtomicBool,
     /// The socket's file descriptor (-1 for connections without one).
     pub fd: AtomicI64,
     pub net_in: AtomicU64,
