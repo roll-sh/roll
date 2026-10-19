@@ -398,6 +398,8 @@ fn admit(db: &Database) -> bool {
         return false;
     }
     db.io.clients.fetch_add(1, Ordering::Relaxed);
+    db.last_connect.store(redis_engine::util::now_ms() as u64, Ordering::Relaxed);
+    db.wake_cron();
     true
 }
 

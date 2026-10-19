@@ -102,6 +102,12 @@ pub struct Database {
     pub replicas_reset: tokio::sync::Notify,
     /// A SHUTDOWN waiting for replicas to catch up: SHUTDOWN ABORT signals it.
     pub shutdown: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// The cron sleeps while nothing can observe the database (no clients, replicas or timed
+    /// work); a connection or any use of the engine wakes it.
+    pub cron_parked: AtomicBool,
+    /// Unix ms of the last connection.
+    pub last_connect: AtomicU64,
+    pub cron_wake: Arc<tokio::sync::Notify>,
 }
 
 /// FAILOVER's state: waiting for a replica to catch up, or handing over to `target`.
@@ -303,6 +309,7 @@ impl Drop for EngineGuard<'_> {
         // SAFETY: `eng` is not used again; the field's own drop is skipped (ManuallyDrop).
         unsafe { std::mem::ManuallyDrop::drop(&mut self.eng) };
         self.db.shards[self.shard].released.notify_waiters();
+        self.db.wake_cron();
     }
 }
 
@@ -345,6 +352,9 @@ impl Database {
             failover: Mutex::new(None),
             replicas_reset: tokio::sync::Notify::new(),
             shutdown: Mutex::new(None),
+            cron_parked: AtomicBool::new(false),
+            last_connect: AtomicU64::new(0),
+            cron_wake: Arc::new(tokio::sync::Notify::new()),
         });
         let host: Arc<dyn redis_engine::commands::info::Host> = Arc::new(DbHost(Arc::downgrade(&db)));
         for s in &db.shards {
@@ -426,6 +436,33 @@ impl Database {
     /// Whether a pause may hold commands back on shard `i` (else none does).
     pub fn may_be_paused(&self, i: usize) -> bool {
         self.shards[i].paused.load(Ordering::SeqCst)
+    }
+
+    /// Let a sleeping cron go on (the database is in use again).
+    #[inline]
+    pub fn wake_cron(&self) {
+        if self.cron_parked.load(Ordering::Relaxed) && self.cron_parked.swap(false, Ordering::SeqCst) {
+            self.cron_wake.notify_one();
+        }
+    }
+
+    /// Nothing can see the cron's work now: no clients or replicas, no command for 2 seconds
+    /// (so the instantaneous metrics have settled at zero, as idle Redis shows them), and no
+    /// timed work on any shard.
+    ///
+    /// With clients connected it also waits until their buffers and the metrics have settled
+    /// (10 seconds after the last command or connection) and nothing time-based is pending.
+    fn cron_may_sleep(&self) -> bool {
+        let clients = self.io.clients.load(Ordering::Relaxed) > 0;
+        let quiet_ms = if clients { 10_000 } else { 2000 };
+        let since_connect = (redis_engine::util::now_ms() as u64).saturating_sub(self.last_connect.load(Ordering::Relaxed));
+        self.io.redis_replicas.load(Ordering::Relaxed) == 0
+            && self.idle_ms() >= quiet_ms
+            && (!clients || since_connect >= quiet_ms)
+            && self.upstream.lock().is_none()
+            && self.failover.lock().is_none()
+            && self.backlog.lock().is_none()
+            && self.shards.iter().all(|s| s.engine.try_lock().is_some_and(|e| if clients { !e.cron_needed_with_clients() } else { !e.cron_busy() }))
     }
 
     pub fn touch(&self, n: u64) {
@@ -621,6 +658,25 @@ impl Database {
                 let Some(db) = weak.upgrade() else { return };
                 if db.closed.load(Ordering::Relaxed) {
                     return;
+                }
+                if db.cron_may_sleep() {
+                    // Sleep without holding the database (it may be unloaded meanwhile): woken by
+                    // a connection or any use of the engine, and every minute to look.
+                    let wake = db.cron_wake.clone();
+                    let woken = wake.notified();
+                    tokio::pin!(woken);
+                    woken.as_mut().enable();
+                    db.cron_parked.store(true, Ordering::SeqCst);
+                    let still = db.cron_may_sleep();
+                    drop(db);
+                    if still {
+                        let _ = tokio::time::timeout(Duration::from_secs(60), woken).await;
+                    }
+                    if let Some(db) = weak.upgrade() {
+                        db.cron_parked.store(false, Ordering::SeqCst);
+                    }
+                    tick.reset();
+                    continue;
                 }
                 // Redis' replication cron: a PING in the stream every repl-ping-replica-period.
                 if ticks.is_multiple_of(crate::repl::psync::PING_PERIOD_S * 10) && db.io.redis_replicas.load(Ordering::Relaxed) > 0 {

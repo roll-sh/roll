@@ -1796,6 +1796,31 @@ impl Engine {
     }
 
     /// Incremental rehashing of the main tables (call from the cron).
+    /// Timed work the cron has besides what clients and keys need: a background save or
+    /// rewrite in progress, search indexes (their GC and expiry), a HOTKEYS session, MIGRATE's
+    /// cached sockets (closed after 10 idle seconds). While there
+    /// is, the cron keeps ticking with nobody connected.
+    pub fn cron_busy(&self) -> bool {
+        self.persist.child.is_some()
+            || self.persist.aof_rewrite_scheduled
+            || self.persist.backup.in_progress()
+            || !self.search.indexes.is_empty()
+            || self.hotkeys.as_ref().is_some_and(|h| h.active)
+            || !self.migrate_sockets.is_empty()
+            || self.debug.pause_cron
+    }
+
+    /// Whether a cron tick could change anything clients see, beyond what settles within
+    /// seconds of the last activity (metrics, idle clients' buffers): keys or fields with a TTL
+    /// (active expiry), the client `timeout`, a CLIENT PAUSE, rehashing, or timed work.
+    pub fn cron_needed_with_clients(&self) -> bool {
+        self.cron_busy()
+            || self.cfg.timeout > 0
+            || self.clients.pause.is_some()
+            || self.clients.failover_pause
+            || self.dbs.iter().any(|d| !d.volatile.is_empty() || !d.subexpires.is_empty() || d.keys.is_rehashing() || d.volatile.is_rehashing())
+    }
+
     pub fn rehash(&mut self, steps: usize) {
         for d in &mut self.dbs {
             d.keys.rehash(steps);
