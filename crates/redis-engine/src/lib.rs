@@ -25,6 +25,7 @@ pub mod musl_math;
 pub mod notify;
 pub mod object;
 pub mod pack;
+pub mod pairmap;
 pub mod ptrdict;
 pub mod rdb;
 pub mod sdict;

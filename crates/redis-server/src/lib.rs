@@ -27,6 +27,22 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Give the calling thread's free memory back to the system (and collect what other threads
 /// freed into it): an idle core calls this before it parks.
+/// For a runtime's `on_thread_park`: a thread going idle processes what other threads freed of
+/// its allocations and hands free memory back (at most once a second). Connections are set up
+/// on one runtime and end on a core thread; without this, what they freed waits on the setup
+/// thread for its next allocation.
+pub fn idle_collect() {
+    thread_local! {
+        static LAST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    let now = redis_engine::util::mono_us();
+    if now.saturating_sub(LAST.get()) >= 1_000_000 {
+        LAST.set(now);
+        // SAFETY: no preconditions.
+        unsafe { libmimalloc_sys::mi_collect(false) };
+    }
+}
+
 pub fn release_memory() {
     // SAFETY: no preconditions.
     unsafe { libmimalloc_sys::mi_collect(true) };

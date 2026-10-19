@@ -123,7 +123,7 @@ impl Cores {
     pub fn handle(&self, place: Place) -> &Handle {
         match place {
             Place::Core(i) => self.core(i % self.cores.len()),
-            Place::Slow => self.slow.get_or_init(|| Builder::new_multi_thread().worker_threads(2).thread_name("roll-slow").enable_all().build().expect("slow runtime")).handle(),
+            Place::Slow => self.slow.get_or_init(|| Builder::new_multi_thread().worker_threads(2).thread_name("roll-slow").on_thread_park(crate::idle_collect).enable_all().build().expect("slow runtime")).handle(),
         }
     }
 

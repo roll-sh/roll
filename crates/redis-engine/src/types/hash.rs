@@ -138,7 +138,7 @@ struct PackEx {
 
 #[derive(Clone, Debug)]
 struct Table {
-    map: Dict<Str, Str>,
+    map: crate::pairmap::PairMap,
     /// Expiring fields, allocated the first time a field gets a TTL.
     ttl: Option<Box<Ttls>>,
     /// Heap bytes of nodes, fields, values and TTL index entries (tables excluded).
@@ -177,7 +177,18 @@ fn spill_len(n: usize) -> usize {
 /// Bytes of one field/value node of the hashtable encoding.
 #[inline]
 fn node_cost(f: &Str, v: &Str) -> usize {
-    Dict::<Str, Str>::NODE_OVERHEAD + spill(f) + spill(v)
+    node_cost_len(f.len(), v.len())
+}
+
+/// [`node_cost`] by lengths (a `Str` spills past 23 bytes, exactly sized).
+#[inline]
+fn node_cost_len(f: usize, v: usize) -> usize {
+    Dict::<Str, Str>::NODE_OVERHEAD + str_spill(f) + str_spill(v)
+}
+
+#[inline]
+fn str_spill(n: usize) -> usize {
+    if n > 23 { n } else { 0 }
 }
 
 /// Bytes of one entry of the TTL index (dict node plus B-tree slot, field stored twice).
@@ -194,7 +205,7 @@ impl Ttls {
 
 impl Table {
     fn with_capacity(n: usize) -> Self {
-        Table { map: Dict::with_capacity(n), ttl: None, heap: 0, entries: 0, shapes: None }
+        Table { map: crate::pairmap::PairMap::with_capacity(n), ttl: None, heap: 0, entries: 0, shapes: None }
     }
 
     /// The layout of field `f` with a `vlen` byte value.
@@ -230,7 +241,7 @@ impl Table {
     /// and pointer; an embedded value keeps its allocation while it fits at least 3/4 of it).
     fn update(&mut self, f: &[u8], value: &[u8], keep_ttl: bool) {
         let Some(v) = self.map.get(f) else { return };
-        let (old_len, old_heap) = (v.len(), spill(v));
+        let (old_len, old_heap) = (v.len(), str_spill(v.len()));
         let old = self.shape(f, old_len);
         let old_mem = entry_usage(f.len(), old_len, old.meta, old.value);
         let had_ttl = self.ttl_of(f) != 0;
@@ -240,9 +251,7 @@ impl Table {
             (EntryValue::Embedded(slot), EntryValue::Embedded(req)) if old.meta == meta && req <= slot && req >= slot * 3 / 4 => old.value,
             _ => fresh,
         };
-        if let Some(v) = self.map.get_mut(f) {
-            *v = Str::from_slice(value);
-        }
+        self.map.set_value(f, value);
         self.heap = (self.heap + spill_len(value.len())).saturating_sub(old_heap);
         if !keep_ttl && had_ttl {
             self.set_ttl(f, 0);
@@ -254,7 +263,7 @@ impl Table {
     /// rebuild) and keeps it when the TTL goes.
     fn expire(&mut self, f: &[u8], at: i64) {
         // A lookup that steps a rehash, like `dictFindLink`.
-        let Some(vlen) = self.map.get_mut(f).map(|v| v.len()) else { return };
+        let Some(vlen) = self.map.value_len_mut(f) else { return };
         let old = self.shape(f, vlen);
         let old_mem = entry_usage(f.len(), vlen, old.meta, old.value);
         self.set_ttl(f, at);
@@ -269,7 +278,7 @@ impl Table {
     fn insert_new(&mut self, f: Str, v: Str) {
         self.heap += node_cost(&f, &v);
         self.entries += entry_usage(f.len(), v.len(), false, entry_layout(f.len(), v.len(), false));
-        self.map.insert_new(f, v);
+        self.map.insert_new(&f, &v);
     }
 
     /// Set or clear (0) the TTL of field `f`.
@@ -297,8 +306,8 @@ impl Table {
 
     fn remove(&mut self, f: &[u8]) -> bool {
         let mem = self.entry_mem(f, self.map.get(f).map_or(0, |v| v.len()));
-        let Some((k, v)) = self.map.remove_entry(f) else { return false };
-        self.heap = self.heap.saturating_sub(node_cost(&k, &v));
+        let Some((fl, vl)) = self.map.remove(f) else { return false };
+        self.heap = self.heap.saturating_sub(node_cost_len(fl, vl));
         self.entries -= mem;
         if let Some(m) = &mut self.shapes {
             m.remove(f);
@@ -511,7 +520,7 @@ impl Hash {
                 }
                 None
             }
-            Enc::Table(t) => t.map.get(field).map(|v| (v.as_slice(), t.ttl_of(field))),
+            Enc::Table(t) => t.map.get(field).map(|v| (v, t.ttl_of(field))),
             Enc::Tmpl(x) => x.t.index(field).ok().and_then(|i| x.vals.get(i)).map(|v| (v, 0)),
         }
     }
@@ -604,7 +613,7 @@ impl Hash {
             return None;
         }
         match &self.enc {
-            Enc::Table(t) => t.map.random(rng).map(|(f, v)| (f.as_slice(), v.as_slice())),
+            Enc::Table(t) => t.map.random(rng),
             _ => self.pack_pair(rng.below(self.len())),
         }
     }
@@ -1027,7 +1036,7 @@ pub struct Iter<'a>(Inner<'a>);
 enum Inner<'a> {
     Pack(crate::pack::PackIter<'a>),
     PackEx(crate::pack::PackIter<'a>, &'a [i64], usize),
-    Table(crate::dict::Iter<'a, Str, Str>, Option<&'a Ttls>),
+    Table(crate::pairmap::Iter<'a>, Option<&'a Ttls>),
     TmplPack(std::slice::Iter<'a, Str>, crate::pack::PackIter<'a>),
     TmplArray(std::slice::Iter<'a, Str>, std::slice::Iter<'a, Str>),
 }
@@ -1046,7 +1055,7 @@ impl<'a> Iterator for Iter<'a> {
             }
             Inner::Table(it, ttl) => {
                 let (f, v) = it.next()?;
-                Some((f.as_slice(), v.as_slice(), ttl.map_or(0, |t| t.get(f))))
+                Some((f, v, ttl.map_or(0, |t| t.get(f))))
             }
             Inner::TmplPack(f, v) => Some((f.next()?.as_slice(), v.next()?, 0)),
             Inner::TmplArray(f, v) => Some((f.next()?.as_slice(), v.next()?.as_slice(), 0)),

@@ -55,6 +55,12 @@ impl From<i64> for Fill {
     }
 }
 
+/// What a new end node allocates up front: a byte-limited fill's limit (count-limited nodes
+/// grow as they fill).
+fn node_room(fill: Fill) -> usize {
+    if fill.size < 0 { neg_fill_limit(fill.size) } else { 0 }
+}
+
 /// Elements this big get a node of their own (a "plain" node in Redis).
 fn is_large(sz: usize, fill: Fill) -> bool {
     if fill.packed_threshold != 0 {
@@ -295,6 +301,31 @@ impl Node {
         let mut n = Self::packed();
         n.push_back(v);
         n
+    }
+
+    /// A new end node with its whole room allocated now (`room` bytes; 0 grows as it fills):
+    /// filling it then never reallocates, so nothing is left behind in the allocator. At the
+    /// front the room is before the entry, for the pushes to come there.
+    fn at_end(v: &[u8], front: bool, room: usize) -> Self {
+        let mut n = Self::packed();
+        let need = encoded_len(v.len());
+        if room > need {
+            n.buf = if front { GapBuf { v: vec![0; room], start: room } } else { GapBuf { v: Vec::with_capacity(room), start: 0 } };
+        }
+        if front {
+            n.push_front(v);
+        } else {
+            n.push_back(v);
+        }
+        n
+    }
+
+    /// Done growing at this end: give back what is more than an eighth spare.
+    fn settle(&mut self) {
+        let (len, cap) = (self.buf.len(), self.buf.capacity());
+        if cap - len > len / 8 {
+            self.buf.shrink_to_fit();
+        }
     }
 
     fn plain(v: &[u8]) -> Self {
@@ -1018,7 +1049,13 @@ impl List {
         } else if Self::allow_insert(q.front(), fill, v.len()) {
             self.edit(0, |n| n.push_front(v));
         } else {
-            self.insert_node(0, Node::single(v));
+            let filled = !q.is_empty();
+            self.insert_node(0, Node::at_end(v, true, node_room(fill)));
+            // The node this end filled won't grow there again: no slack kept in it (Redis'
+            // listpacks are exactly sized), only the end nodes have room.
+            if filled {
+                self.edit(1, Node::settle);
+            }
         }
         self.len += 1;
     }
@@ -1038,7 +1075,10 @@ impl List {
             self.edit(last, |n| n.push_back(v));
         } else {
             let at = q.len();
-            self.insert_node(at, Node::single(v));
+            self.insert_node(at, Node::at_end(v, false, node_room(fill)));
+            if at > 0 {
+                self.edit(at - 1, Node::settle);
+            }
         }
         self.len += 1;
     }

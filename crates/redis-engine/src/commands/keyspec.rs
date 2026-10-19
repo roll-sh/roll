@@ -139,7 +139,7 @@ pub fn specs(full: &str) -> &'static [Spec] {
 /// Whether the command can have keys at all (`doesCommandHaveKeys`).
 pub fn has_keys(cmd: &Command, full: &str) -> bool {
     let specs = specs(full);
-    if specs.is_empty() && meta::get(full).is_none() {
+    if specs.is_empty() && !meta::exists(full) {
         return cmd.first_key > 0 || cmd.keys_fn.is_some();
     }
     proc_name(full).is_some() || specs.iter().any(|s| s.flags & NOT_KEY == 0)
@@ -422,7 +422,7 @@ fn by_proc(name: &str, args: &[Bytes]) -> Vec<(usize, u16)> {
 /// its `container|sub` name).
 pub fn keys_with_flags(cmd: &Command, full: &str, args: &[Bytes]) -> Vec<(usize, u16)> {
     let specs = specs(full);
-    if specs.is_empty() && meta::get(full).is_none() {
+    if specs.is_empty() && !meta::exists(full) {
         return cmd.key_positions(args).into_iter().map(|i| (i, 0)).collect();
     }
     let has_keyspec = specs.iter().any(|s| s.flags & NOT_KEY == 0);

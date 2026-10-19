@@ -689,7 +689,7 @@ async fn compat_debug_with_redis() {
 fn serve() {
     let addr: std::net::SocketAddr = std::env::var("ROLL_COMPAT_SERVE").expect("ROLL_COMPAT_SERVE=host:port").parse().unwrap();
     let workers = std::env::var("ROLL_SERVE_WORKERS").ok().and_then(|w| w.parse().ok()).unwrap_or(4);
-    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(workers).enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(workers).on_thread_park(redis_server::idle_collect).enable_all().build().unwrap();
     rt.block_on(async {
         let cfg = Config { enable_debug_command: redis_engine::config::PROTECTED_YES, ..Config::default() };
         let db = Database::new("compat", cfg, 1);

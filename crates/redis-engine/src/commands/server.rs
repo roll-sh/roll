@@ -654,8 +654,8 @@ fn info_entry(c: &Command, full: &str) -> Reply {
         Reply::Int(c.last_key as i64),
         Reply::Int(c.key_step as i64),
         Reply::Set(c.categories().into_iter().map(|s| Reply::status(format!("@{s}"))).collect()),
-        meta.map_or(Reply::Array(vec![]), |m| m.tips()),
-        meta.map_or(Reply::Array(vec![]), |m| m.key_specs()),
+        meta.as_ref().map_or(Reply::Array(vec![]), |m| m.tips()),
+        meta.as_ref().map_or(Reply::Array(vec![]), |m| m.key_specs()),
         Reply::Array(super::order::subs_of(c).iter().map(|s| info_entry(s, &format!("{}|{}", c.name, s.name))).collect()),
     ])
 }
@@ -695,7 +695,7 @@ fn lookup_full(name: &[u8]) -> Option<(&'static Command, String)> {
 
 /// Redis' own docs for the command, with only the subcommands roll has.
 fn docs_entry(c: &Command, full: &str) -> Reply {
-    if let Some(Reply::Map(fields)) = super::meta::get(full).and_then(|m| m.docs.as_ref()) {
+    if let Some(Reply::Map(fields)) = super::meta::get(full).and_then(|m| m.docs) {
         let fields = fields
             .iter()
             .map(|(k, v)| match (k, v) {
