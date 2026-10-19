@@ -682,16 +682,21 @@ async fn compat_debug_with_redis() {
     run_suite("ROLL_COMPAT_DEBUG_REDIS", &["--enable-debug-command", "yes"], "tests/compat_debug", cfg).await;
 }
 
-/// roll alone on `ROLL_COMPAT_SERVE`, debug commands enabled, until killed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// roll alone on `ROLL_COMPAT_SERVE`, debug commands enabled, until killed; `ROLL_SERVE_WORKERS`
+/// runtime threads (4 by default).
+#[test]
 #[ignore]
-async fn serve() {
+fn serve() {
     let addr: std::net::SocketAddr = std::env::var("ROLL_COMPAT_SERVE").expect("ROLL_COMPAT_SERVE=host:port").parse().unwrap();
-    let cfg = Config { enable_debug_command: redis_engine::config::PROTECTED_YES, ..Config::default() };
-    let db = Database::new("compat", cfg, 1);
-    db.start_cron();
-    eprintln!("serving {}", redis_server::start_single_at(db, None, addr).await.unwrap());
-    std::future::pending::<()>().await;
+    let workers = std::env::var("ROLL_SERVE_WORKERS").ok().and_then(|w| w.parse().ok()).unwrap_or(4);
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(workers).enable_all().build().unwrap();
+    rt.block_on(async {
+        let cfg = Config { enable_debug_command: redis_engine::config::PROTECTED_YES, ..Config::default() };
+        let db = Database::new("compat", cfg, 1);
+        db.start_cron();
+        eprintln!("serving {}", redis_server::start_single_at(db, None, addr).await.unwrap());
+        std::future::pending::<()>().await;
+    });
 }
 
 async fn run_suite(env: &str, args: &[&str], scripts: &str, cfg: Config) {

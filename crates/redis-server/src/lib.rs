@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod conn;
+pub mod cores;
 pub mod database;
 pub mod directory;
 pub mod exec;

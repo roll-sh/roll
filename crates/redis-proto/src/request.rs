@@ -105,9 +105,14 @@ pub fn parse_request(buf: &mut BytesMut, limits: Limits) -> Result<Option<Vec<By
         return Ok(Some(Vec::new()));
     }
     let count = count as usize;
-    // First pass: find where every argument is, without consuming anything.
-    let mut spans = Vec::with_capacity(count.min(1024));
-    for _ in 0..count {
+    // First pass: find where every argument is, without consuming anything (on the stack for
+    // the usual few arguments).
+    let mut few = [(0usize, 0usize); 16];
+    let mut many = Vec::new();
+    if count > few.len() {
+        many.reserve(count.min(1024));
+    }
+    for i in 0..count {
         if pos >= buf.len() {
             return Ok(None);
         }
@@ -128,11 +133,16 @@ pub fn parse_request(buf: &mut BytesMut, limits: Limits) -> Result<Option<Vec<By
         if buf.len() < next + len + 2 {
             return Ok(None);
         }
-        spans.push((next, len));
+        if count <= few.len() {
+            few[i] = (next, len);
+        } else {
+            many.push((next, len));
+        }
         pos = next + len + 2;
     }
     let frame = buf.split_to(pos).freeze();
-    Ok(Some(spans.into_iter().map(|(at, len)| frame.slice(at..at + len)).collect()))
+    let spans = if count <= few.len() { &few[..count] } else { &many[..] };
+    Ok(Some(spans.iter().map(|&(at, len)| frame.slice(at..at + len)).collect()))
 }
 
 fn expected_dollar(got: u8) -> String {

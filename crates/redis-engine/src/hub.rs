@@ -62,8 +62,10 @@ impl ConnLimits {
 }
 
 impl Default for ConnLimits {
+    /// The default configuration's (built once).
     fn default() -> Self {
-        Self::of(&crate::Config::default())
+        static DEFAULT: std::sync::LazyLock<ConnLimits> = std::sync::LazyLock::new(|| ConnLimits::of(&crate::Config::default()));
+        *DEFAULT
     }
 }
 
@@ -71,6 +73,8 @@ impl Default for ConnLimits {
 pub struct Hub {
     inner: Mutex<Inner>,
     limits: Mutex<ConnLimits>,
+    /// Bumped as the limits change, so connections can keep a copy.
+    limits_gen: std::sync::atomic::AtomicU64,
     /// Clients closed for overcoming their output or query buffer limit (INFO).
     pub obuf_disconnections: std::sync::atomic::AtomicU64,
     pub qbuf_disconnections: std::sync::atomic::AtomicU64,
@@ -108,7 +112,10 @@ impl Hub {
     }
 
     pub fn set_limits(&self, cfg: &crate::Config) {
-        *self.limits.lock() = ConnLimits::of(cfg);
+        let mut l = self.limits.lock();
+        *l = ConnLimits::of(cfg);
+        self.limits_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
+        drop(l);
         self.templates.set_limits(crate::types::template::LpLimits {
             entries: cfg.hash_max_listpack_entries,
             value: cfg.hash_max_listpack_value,
@@ -117,6 +124,18 @@ impl Hub {
 
     pub fn limits(&self) -> ConnLimits {
         *self.limits.lock()
+    }
+
+    /// The limits through a caller's copy, refreshed when they changed (one atomic load).
+    pub fn limits_cached(&self, cache: &std::cell::Cell<(u64, ConnLimits)>) -> ConnLimits {
+        let generation = self.limits_gen.load(std::sync::atomic::Ordering::Acquire) + 1;
+        let (have, l) = cache.get();
+        if have == generation {
+            return l;
+        }
+        let l = self.limits();
+        cache.set((generation, l));
+        l
     }
 
     fn map<'a>(inner: &'a mut Inner, kind: &Kind) -> &'a mut HashMap<Bytes, Subs> {

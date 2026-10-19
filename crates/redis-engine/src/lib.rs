@@ -25,6 +25,8 @@ pub mod object;
 pub mod pack;
 pub mod rdb;
 pub mod sdict;
+#[cfg(test)]
+mod speed;
 pub mod search;
 pub mod tre;
 pub mod ts;

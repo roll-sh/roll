@@ -65,8 +65,8 @@ const MAX_BATCH: usize = 512;
 /// Most bytes taken off the socket per read (Redis reads `PROTO_IOBUF_LEN` at a time).
 const READ_CHUNK: usize = 64 * 1024;
 
-pub struct Conn<'a> {
-    dir: &'a dyn Directory,
+pub struct Conn {
+    dir: Arc<dyn Directory>,
     sni: Option<String>,
     session: Option<Session>,
     client: Client,
@@ -93,23 +93,26 @@ pub struct Conn<'a> {
     qb_skip: usize,
     /// The rest of a big argument being read.
     qb_want: usize,
+    /// The stream can't leave the event loop it started on (TLS).
+    unmovable: bool,
+    /// The database's connection limits as last seen (generation + 1, 0: none yet).
+    limits: std::cell::Cell<(u64, redis_engine::hub::ConnLimits)>,
 }
 
 pub async fn serve<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, fd: i64)
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: Portable,
 {
     serve_with(stream, peer, local, dir, None, fd).await
 }
 
 /// Serve a connection; `sni` is the TLS server name the client asked for (database routing) and
 /// `fd` the socket's descriptor (-1 if none), shown by CLIENT LIST.
-pub async fn serve_with<S>(stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, sni: Option<String>, fd: i64)
+pub async fn serve_with<S>(mut stream: S, peer: SocketAddr, local: SocketAddr, dir: Arc<dyn Directory>, sni: Option<String>, fd: i64)
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: Portable,
 {
-    let (mut rd, mut wr) = tokio::io::split(stream);
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::unbounded_channel();
     let sink: Arc<dyn Sink> = Arc::new(ConnSink { tx });
     let mut client = Client::with_sink(next_client_id(), sink);
     client.addr = peer.to_string();
@@ -124,8 +127,8 @@ where
         && !admit(&s.db)
     {
         // Turned away before reading anything, like Redis' acceptCommonHandler.
-        let _ = wr.write_all(b"-ERR max number of clients reached\r\n").await;
-        let _ = wr.flush().await;
+        let _ = stream.write_all(b"-ERR max number of clients reached\r\n").await;
+        let _ = stream.flush().await;
         return;
     }
     client.authenticated = session.is_some();
@@ -135,8 +138,8 @@ where
         s.db.io.accepted.fetch_add(1, Ordering::Relaxed);
         register(&s.db, &client);
     }
-    let mut conn = Conn {
-        dir: dir.as_ref(),
+    let conn = Conn {
+        dir,
         sni,
         session,
         client,
@@ -155,134 +158,236 @@ where
         pending_bytes: 0,
         qb_skip: 0,
         qb_want: 0,
+        unmovable: false,
+        limits: Default::default(),
     };
-    let mut inbuf = BytesMut::with_capacity(16 * 1024);
-    'conn: loop {
-        if conn.blocked.is_none() {
-            let max_bulk = conn.db().map_or(Limits::default().max_bulk, |db| db.hub.limits().max_bulk as usize);
-            let limits = Limits { authenticated: conn.client.authenticated, max_bulk };
-            let queued = conn.pending.len();
-            loop {
-                match parse_request(&mut inbuf, limits) {
-                    Ok(Some(args)) if args.is_empty() => {}
-                    Ok(Some(args)) => {
-                        conn.pending_bytes += redis_proto::command_len(&args) as u64;
-                        conn.pending.push_back(args);
-                        if conn.pending.len() >= MAX_BATCH {
-                            conn.more = true;
+    run(Parked { conn, stream, inbuf: BytesMut::with_capacity(16 * 1024), rx }).await
+}
+
+/// A socket the connection can take to another event loop ([`crate::cores`]).
+pub trait Portable: AsyncRead + AsyncWrite + Unpin + Send + Sized + 'static {
+    type Detached: Send + 'static;
+    /// Leave the current event loop (`Err`: this kind of stream stays where it is).
+    fn detach(self) -> Result<Self::Detached, Self>;
+    /// Join the event loop this runs on.
+    fn attach(d: Self::Detached) -> std::io::Result<Self>;
+}
+
+impl Portable for tokio::net::TcpStream {
+    type Detached = std::net::TcpStream;
+    fn detach(self) -> Result<Self::Detached, Self> {
+        // `into_std` leaves the socket non-blocking, as `from_std` wants it.
+        self.into_std().map_err(|_| unreachable!("a TcpStream detaches"))
+    }
+    fn attach(d: Self::Detached) -> std::io::Result<Self> {
+        tokio::net::TcpStream::from_std(d)
+    }
+}
+
+/// TLS session state can't be rebuilt elsewhere: the connection stays on the loop it started on.
+impl Portable for tokio_rustls::server::TlsStream<tokio::net::TcpStream> {
+    type Detached = std::convert::Infallible;
+    fn detach(self) -> Result<Self::Detached, Self> {
+        Err(self)
+    }
+    fn attach(d: Self::Detached) -> std::io::Result<Self> {
+        match d {}
+    }
+}
+
+/// A connection between event loops.
+struct Parked<S> {
+    conn: Conn,
+    stream: S,
+    inbuf: BytesMut,
+    rx: mpsc::UnboundedReceiver<Msg>,
+}
+
+/// How [`Conn::drive`] ended.
+enum Exit {
+    Close,
+    /// Continue on another event loop.
+    Move(crate::cores::Place),
+}
+
+fn run<S: Portable>(p: Parked<S>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let Parked { mut conn, stream, mut inbuf, mut rx } = p;
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        match conn.drive(&mut rd, &mut wr, &mut inbuf, &mut rx).await {
+            Exit::Close => conn.cleanup(),
+            Exit::Move(place) => match rd.unsplit(wr).detach() {
+                Ok(d) => crate::cores::pool().spawn(place, async move {
+                    match S::attach(d) {
+                        Ok(stream) => run(Parked { conn, stream, inbuf, rx }).await,
+                        Err(_) => conn.cleanup(),
+                    }
+                }),
+                Err(stream) => {
+                    conn.unmovable = true;
+                    run(Parked { conn, stream, inbuf, rx }).await
+                }
+            },
+        }
+    })
+}
+
+impl Conn {
+    /// The connection's loop: read, run, reply, until it closes or should go to another event
+    /// loop.
+    async fn drive<R, W>(&mut self, rd: &mut R, wr: &mut W, inbuf: &mut BytesMut, rx: &mut mpsc::UnboundedReceiver<Msg>) -> Exit
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        'conn: loop {
+            if self.blocked.is_none() {
+                let max_bulk = self.db().map_or_else(|| Limits::default().max_bulk, |db| db.hub.limits_cached(&self.limits).max_bulk as usize);
+                let limits = Limits { authenticated: self.client.authenticated, max_bulk };
+                let queued = self.pending.len();
+                loop {
+                    match parse_request(inbuf, limits) {
+                        Ok(Some(args)) if args.is_empty() => {}
+                        Ok(Some(args)) => {
+                            self.pending_bytes += redis_proto::command_len(&args) as u64;
+                            self.pending.push_back(args);
+                            if self.pending.len() >= MAX_BATCH {
+                                self.more = true;
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            Reply::Error(format!("ERR {e}")).encode(self.client.resp, &mut self.out);
+                            let _ = wr.write_all(&self.out).await;
+                            let _ = wr.shutdown().await;
+                            // Take what the client is still sending for a moment, so closing with
+                            // unread input doesn't reset the connection before it reads the error.
+                            let drain = async {
+                                let mut sink = vec![0u8; 64 * 1024];
+                                let mut left = 64usize << 20;
+                                while left > 0 {
+                                    match rd.read(&mut sink).await {
+                                        Ok(0) | Err(_) => break,
+                                        Ok(n) => left = left.saturating_sub(n),
+                                    }
+                                }
+                            };
+                            let _ = tokio::time::timeout(Duration::from_secs(1), drain).await;
+                            break 'conn;
+                        }
+                    }
+                }
+                let parsed = self.pending.len().saturating_sub(queued) as u64;
+                if parsed > 0 {
+                    self.stats.pipeline_sum.fetch_add(parsed, Ordering::Relaxed);
+                    self.stats.pipeline_cnt.fetch_add(1, Ordering::Relaxed);
+                    if let Some(db) = self.db() {
+                        db.io.events.fetch_add(1, Ordering::Relaxed);
+                        db.io.pipeline_sum.fetch_add(parsed, Ordering::Relaxed);
+                    }
+                }
+                self.publish_qbuf(inbuf, false);
+                if !self.pending.is_empty() {
+                    self.run_pending(rd, wr).await;
+                }
+            }
+            if !self.out.is_empty() && !self.flush(wr, rx).await {
+                break;
+            }
+            // SYNC/PSYNC turned the connection into a replica link.
+            if let Some(start) = self.sync.take() {
+                self.stream_to_replica(rd, wr, inbuf, rx, start).await;
+                break;
+            }
+            if self.close_after || self.stats.killed.load(Ordering::Relaxed) {
+                break;
+            }
+            // On to the database's home core (or the debugger's runtime), with whatever input and
+            // commands are still pending.
+            if self.blocked.is_none()
+                && let Some(place) = self.wants_move()
+            {
+                return Exit::Move(place);
+            }
+            // The batch limit was hit with more commands buffered: keep going without waiting.
+            if self.blocked.is_none() && (!self.pending.is_empty() || self.more) {
+                self.more = false;
+                continue;
+            }
+            let deadline = match self.blocked {
+                Some(d) if d > 0 => Some(d),
+                _ => None,
+            };
+            let db = self.db().cloned();
+            // Read a little at a time like Redis (more only for the rest of a big argument), so the
+            // query buffer limit sees what a read adds to the unparsed input.
+            let mut room = (&mut *inbuf).limit(self.qb_want.max(READ_CHUNK));
+            let kicked = async {
+                match &db {
+                    Some(db) => {
+                        // Register before checking the flag so a kick in between isn't missed.
+                        let n = db.kicked.notified();
+                        if !db.evicting.load(Ordering::SeqCst) {
+                            n.await;
+                        }
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                _ = kicked => break,
+                r = rd.read_buf(&mut room) => match r {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        self.stats.net_in.fetch_add(n as u64, Ordering::Relaxed);
+                        self.stats.read_events.fetch_add(1, Ordering::Relaxed);
+                        self.stats.last_interaction.store(redis_engine::util::now_ms() / 1000, Ordering::Relaxed);
+                        if let Some(db) = &db {
+                            db.io.reads.fetch_add(1, Ordering::Relaxed);
+                            db.net_in.fetch_add(n as u64, Ordering::Relaxed);
+                        }
+                        if self.query_buffer_exceeded(inbuf.len().saturating_sub(self.qb_skip)) {
+                            break;
+                        }
+                        self.publish_qbuf(inbuf, true);
+                        if self.evict_clients() {
                             break;
                         }
                     }
-                    Ok(None) => break,
-                    Err(e) => {
-                        Reply::Error(format!("ERR {e}")).encode(conn.client.resp, &mut conn.out);
-                        let _ = wr.write_all(&conn.out).await;
-                        let _ = wr.shutdown().await;
-                        // Take what the client is still sending for a moment, so closing with
-                        // unread input doesn't reset the connection before it reads the error.
-                        let drain = async {
-                            let mut sink = vec![0u8; 64 * 1024];
-                            let mut left = 64usize << 20;
-                            while left > 0 {
-                                match rd.read(&mut sink).await {
-                                    Ok(0) | Err(_) => break,
-                                    Ok(n) => left = left.saturating_sub(n),
-                                }
-                            }
-                        };
-                        let _ = tokio::time::timeout(Duration::from_secs(1), drain).await;
-                        break 'conn;
+                },
+                Some(msg) = rx.recv() => {
+                    let mut alive = true;
+                    let mut next = Some(msg);
+                    while let Some(msg) = next {
+                        alive &= self.on_msg(msg);
+                        next = rx.try_recv().ok();
                     }
-                }
-            }
-            let parsed = conn.pending.len().saturating_sub(queued) as u64;
-            if parsed > 0 {
-                conn.stats.pipeline_sum.fetch_add(parsed, Ordering::Relaxed);
-                conn.stats.pipeline_cnt.fetch_add(1, Ordering::Relaxed);
-                if let Some(db) = conn.db() {
-                    db.io.events.fetch_add(1, Ordering::Relaxed);
-                    db.io.pipeline_sum.fetch_add(parsed, Ordering::Relaxed);
-                }
-            }
-            conn.publish_qbuf(&inbuf, false);
-            if !conn.pending.is_empty() {
-                conn.run_pending(&mut rd, &mut wr).await;
-            }
-        }
-        if !conn.out.is_empty() && !conn.flush(&mut wr, &mut rx).await {
-            break;
-        }
-        // SYNC/PSYNC turned the connection into a replica link.
-        if let Some(start) = conn.sync.take() {
-            conn.stream_to_replica(&mut rd, &mut wr, &mut inbuf, &mut rx, start).await;
-            break;
-        }
-        if conn.close_after || conn.stats.killed.load(Ordering::Relaxed) {
-            break;
-        }
-        // The batch limit was hit with more commands buffered: keep going without waiting.
-        if conn.blocked.is_none() && (!conn.pending.is_empty() || conn.more) {
-            conn.more = false;
-            continue;
-        }
-        let deadline = match conn.blocked {
-            Some(d) if d > 0 => Some(d),
-            _ => None,
-        };
-        let db = conn.db().cloned();
-        // Read a little at a time like Redis (more only for the rest of a big argument), so the
-        // query buffer limit sees what a read adds to the unparsed input.
-        let mut room = (&mut inbuf).limit(conn.qb_want.max(READ_CHUNK));
-        let kicked = async {
-            match &db {
-                Some(db) => {
-                    // Register before checking the flag so a kick in between isn't missed.
-                    let n = db.kicked.notified();
-                    if !db.evicting.load(Ordering::SeqCst) {
-                        n.await;
-                    }
-                }
-                None => std::future::pending().await,
-            }
-        };
-        tokio::select! {
-            _ = kicked => break,
-            r = rd.read_buf(&mut room) => match r {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    conn.stats.net_in.fetch_add(n as u64, Ordering::Relaxed);
-                    conn.stats.read_events.fetch_add(1, Ordering::Relaxed);
-                    conn.stats.last_interaction.store(redis_engine::util::now_ms() / 1000, Ordering::Relaxed);
-                    if let Some(db) = &db {
-                        db.io.reads.fetch_add(1, Ordering::Relaxed);
-                        db.net_in.fetch_add(n as u64, Ordering::Relaxed);
-                    }
-                    if conn.query_buffer_exceeded(inbuf.len().saturating_sub(conn.qb_skip)) {
-                        break;
-                    }
-                    conn.publish_qbuf(&inbuf, true);
-                    if conn.evict_clients() {
+                    if !alive {
                         break;
                     }
                 }
-            },
-            Some(msg) = rx.recv() => {
-                let mut alive = true;
-                let mut next = Some(msg);
-                while let Some(msg) = next {
-                    alive &= conn.on_msg(msg);
-                    next = rx.try_recv().ok();
+                _ = sleep_until_ms(deadline.unwrap_or(0)), if deadline.is_some() => {
+                    self.on_block_timeout().await;
                 }
-                if !alive {
-                    break;
-                }
-            }
-            _ = sleep_until_ms(deadline.unwrap_or(0)), if deadline.is_some() => {
-                conn.on_block_timeout();
             }
         }
+        Exit::Close
     }
-    conn.cleanup();
+
+    /// Where this connection should run now, if not here: its database's home core, or the
+    /// multi-thread runtime while the Lua debugger may block in place.
+    fn wants_move(&self) -> Option<crate::cores::Place> {
+        use crate::cores::{Place, current};
+        if self.unmovable || self.sync.is_some() {
+            return None;
+        }
+        if self.client.ldb != LdbMode::Off {
+            return current().is_some().then_some(Place::Slow);
+        }
+        let home = self.db()?.home;
+        (current() != Some(home)).then_some(Place::Core(home))
+    }
 }
 
 /// Attach a connection to `db` unless it already has `maxclients` of them.
@@ -311,7 +416,7 @@ async fn sleep_until_ms(at_ms: i64) {
     }
 }
 
-impl Conn<'_> {
+impl Conn {
     fn db(&self) -> Option<&Arc<Database>> {
         self.session.as_ref().map(|s| &s.db)
     }
@@ -352,7 +457,7 @@ impl Conn<'_> {
     /// included). True if this connection was evicted.
     fn evict_clients(&self) -> bool {
         let Some(db) = self.db() else { return false };
-        if db.hub.limits().client_eviction == 0 {
+        if db.hub.limits_cached(&self.limits).client_eviction == 0 {
             return false;
         }
         if let Some(mut eng) = db.engine_unless_busy(0) {
@@ -428,7 +533,7 @@ impl Conn<'_> {
             return;
         }
         let db = self.db().cloned();
-        let limit = db.as_ref().map(|db| db.hub.limits().obuf[self.obuf_class()]).unwrap_or_default();
+        let limit = db.as_ref().map(|db| db.hub.limits_cached(&self.limits).obuf[self.obuf_class()]).unwrap_or_default();
         let now = redis_engine::util::now_ms() / 1000;
         if !redis_engine::client::obuf_limit_reached(self.rbuf.mem(), &limit, !self.client.authenticated, &mut self.soft_since, now) {
             return;
@@ -451,7 +556,7 @@ impl Conn<'_> {
     fn query_buffer_exceeded(&self, qbuf: usize) -> bool {
         let queued: usize = self.client.multi.as_ref().map_or(0, |m| m.queued.iter().flatten().map(|a| a.len()).sum());
         let used = (qbuf + queued) as u64;
-        let limit = self.db().map_or(redis_engine::hub::ConnLimits::default().query_buffer, |db| db.hub.limits().query_buffer);
+        let limit = self.db().map_or_else(|| redis_engine::hub::ConnLimits::default().query_buffer, |db| db.hub.limits_cached(&self.limits).query_buffer);
         if used <= limit && (used <= 1024 * 1024 || self.client.authenticated) {
             return false;
         }
@@ -465,7 +570,7 @@ impl Conn<'_> {
     /// What the output buffer limit leaves for the next reply before it closes the connection:
     /// a reply past this is sure to break the hard limit.
     fn reply_budget(&self, db: &Database) -> u64 {
-        let hard = db.hub.limits().obuf[self.obuf_class()].hard;
+        let hard = db.hub.limits_cached(&self.limits).obuf[self.obuf_class()].hard;
         if hard == 0 {
             return u64::MAX;
         }
@@ -597,7 +702,17 @@ impl Conn<'_> {
             while db.shard(0).scripts.debugging.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            {
+            let on_core = crate::cores::current().is_some();
+            if on_core && self.client.ldb != LdbMode::Off {
+                // A debugging session blocks in place: it goes on on the multi-thread runtime.
+                break;
+            }
+            if on_core && is_long(self.pending.front().unwrap(), &self.client) {
+                if !self.run_long(&db, &mut actions).await {
+                    continue;
+                }
+                n = 1;
+            } else {
                 let Some(mut eng) = db.engine_unless_busy_async(0).await else {
                     if db.shard(0).scripts.debugging.load(Ordering::SeqCst) {
                         continue;
@@ -607,11 +722,14 @@ impl Conn<'_> {
                     self.emit(&args, r);
                     continue;
                 };
-                let evicting = db.hub.limits().client_eviction > 0;
+                let evicting = db.hub.limits_cached(&self.limits).client_eviction > 0;
                 while let Some(args) = self.pending.front() {
                     // The first was checked before locking unless no pause was set then: one
-                    // may have started since.
-                    if is_intercepted(args, &self.client) || eng.paused_for(&mut self.client, args).is_some() {
+                    // may have started since. A long command leaves the core's thread.
+                    if is_intercepted(args, &self.client)
+                        || (on_core && (self.client.ldb != LdbMode::Off || is_long(args, &self.client)))
+                        || eng.paused_for(&mut self.client, args).is_some()
+                    {
                         break;
                     }
                     // Clients past maxmemory-clients go before the command runs.
@@ -639,48 +757,9 @@ impl Conn<'_> {
                     };
                     let pushes = eng.take_after_reply();
                     actions.extend(eng.take_server_actions());
-                    if actions.iter().any(|a| matches!(a, ServerAction::LdbFork { .. })) {
-                        // Redis forked for a debugging session: this client is done here.
-                        self.pending.clear();
-                        self.pending_bytes = 0;
+                    let deadline = matches!(out, Outcome::Blocked).then(|| eng.block_deadline(self.client.id).unwrap_or(0));
+                    if !self.finish_call(&args, out, pushes, &actions, deadline) {
                         break;
-                    }
-                    if actions.iter().any(|a| matches!(a, ServerAction::Restart { .. })) {
-                        // Like a crashed or restarting server: no reply, nothing more runs.
-                        self.pending.clear();
-                        self.pending_bytes = 0;
-                        self.close_after = true;
-                        break;
-                    }
-                    // AUTH inside EXEC switched users: the session follows (ACL changes to the
-                    // new user now reach this connection).
-                    if let Some(s) = self.session.as_mut()
-                        && !Arc::ptr_eq(&s.user, &self.client.user)
-                        && let Some(sink) = self.client.sink.as_ref()
-                    {
-                        s.user.unwatch(self.client.id);
-                        self.client.user.watch(self.client.id, sink);
-                        s.user = self.client.user.clone();
-                    }
-                    match out {
-                        Outcome::Reply(r) => {
-                            let quit = eq(&args[0], "quit");
-                            self.emit(&args, r);
-                            for p in pushes {
-                                self.put(&p);
-                            }
-                            if quit || self.obuf_closed || self.client.user.is_deleted() || self.stats.killed.load(Ordering::Relaxed) {
-                                self.close_after = true;
-                                break;
-                            }
-                        }
-                        Outcome::Blocked => {
-                            for p in pushes {
-                                self.put(&p);
-                            }
-                            self.blocked = Some(eng.block_deadline(self.client.id).unwrap_or(0));
-                            break;
-                        }
                     }
                 }
             }
@@ -723,12 +802,98 @@ impl Conn<'_> {
         }
     }
 
+    /// After a command ran: its reply and pushes, and what it means for the rest of the batch
+    /// (false: stop here). `deadline` is the block's when it blocked.
+    fn finish_call(&mut self, args: &[Bytes], out: Outcome, pushes: Vec<Bytes>, actions: &[ServerAction], deadline: Option<i64>) -> bool {
+        if actions.iter().any(|a| matches!(a, ServerAction::LdbFork { .. })) {
+            // Redis forked for a debugging session: this client is done here.
+            self.pending.clear();
+            self.pending_bytes = 0;
+            return false;
+        }
+        if actions.iter().any(|a| matches!(a, ServerAction::Restart { .. })) {
+            // Like a crashed or restarting server: no reply, nothing more runs.
+            self.pending.clear();
+            self.pending_bytes = 0;
+            self.close_after = true;
+            return false;
+        }
+        // AUTH inside EXEC switched users: the session follows (ACL changes to the new user now
+        // reach this connection).
+        if let Some(s) = self.session.as_mut()
+            && !Arc::ptr_eq(&s.user, &self.client.user)
+            && let Some(sink) = self.client.sink.as_ref()
+        {
+            s.user.unwatch(self.client.id);
+            self.client.user.watch(self.client.id, sink);
+            s.user = self.client.user.clone();
+        }
+        match out {
+            Outcome::Reply(r) => {
+                let quit = eq(&args[0], "quit");
+                self.emit(args, r);
+                for p in pushes {
+                    self.put(&p);
+                }
+                if quit || self.obuf_closed || self.client.user.is_deleted() || self.stats.killed.load(Ordering::Relaxed) {
+                    self.close_after = true;
+                    return false;
+                }
+                true
+            }
+            Outcome::Blocked => {
+                for p in pushes {
+                    self.put(&p);
+                }
+                self.blocked = Some(deadline.unwrap_or(0));
+                false
+            }
+        }
+    }
+
+    /// A command that may run long (a script, MIGRATE, DEBUG) from a core thread: it runs on a
+    /// blocking thread, so the core's other connections (BUSY replies, SCRIPT KILL) and databases
+    /// go on meanwhile. False if it didn't run (the engine was busy; answered, or retried after a
+    /// debugging session).
+    async fn run_long(&mut self, db: &Arc<Database>, actions: &mut Vec<ServerAction>) -> bool {
+        let args = self.pop_pending();
+        self.client.reply_budget = self.reply_budget(db);
+        self.client.pending_replies = !self.out.is_empty();
+        let mut client = std::mem::replace(&mut self.client, Client::new(0));
+        let shard_db = db.clone();
+        let (client, args, ran) = tokio::task::spawn_blocking(move || {
+            let ran = shard_db.engine_unless_busy(0).map(|mut eng| {
+                let out = eng.call(&mut client, &args);
+                let deadline = matches!(out, Outcome::Blocked).then(|| eng.block_deadline(client.id).unwrap_or(0));
+                (out, eng.take_after_reply(), eng.take_server_actions(), deadline)
+            });
+            (client, args, ran)
+        })
+        .await
+        .expect("command thread");
+        self.client = client;
+        let Some((out, pushes, acts, deadline)) = ran else {
+            if db.shard(0).scripts.debugging.load(Ordering::SeqCst) {
+                // Run once the debugging session ends.
+                self.pending_bytes += redis_proto::command_len(&args) as u64;
+                self.pending.push_front(args);
+                return false;
+            }
+            let r = redis_engine::commands::scripting::while_busy(&db.shard(0).scripts, &args);
+            self.emit(&args, r);
+            return false;
+        };
+        actions.extend(acts);
+        self.finish_call(&args, out, pushes, actions, deadline);
+        true
+    }
+
     /// Wait while CLIENT PAUSE holds `args` back (shown as blocked in CLIENT LIST meanwhile).
     async fn wait_unpaused(&mut self, db: &Arc<Database>, args: &[Bytes]) {
         loop {
             // A busy script holds the engine: the command gets BUSY instead (checked first, as
             // in Redis).
-            let end = match db.engine_unless_busy(0) {
+            let end = match db.engine_unless_busy_async(0).await {
                 Some(mut eng) => eng.paused_for(&mut self.client, args),
                 None => None,
             };
@@ -743,10 +908,14 @@ impl Conn<'_> {
         self.stats.postponed.store(false, Ordering::Relaxed);
     }
 
-    fn on_block_timeout(&mut self) {
+    async fn on_block_timeout(&mut self) {
         let Some(db) = self.db().cloned() else { return };
         // Through the guard: a re-run (e.g. XREADGROUP CLAIM) can write, and effects must ship.
-        let mut eng = db.engine(0);
+        let Some(mut eng) = db.engine_unless_busy_async(0).await else {
+            // A busy script holds the engine: the timeout is handled once it lets go.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            return;
+        };
         let r = eng.block_timeout(self.client.id);
         match r {
             Some(r) => {
@@ -1298,6 +1467,13 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> LdbIo for SockIo<'_, R, W> {
             self.wr.flush().await
         }));
     }
+}
+
+/// Commands that may run long or block on I/O (scripts, MIGRATE, DEBUG), and an EXEC of any.
+fn is_long(args: &[Bytes], client: &Client) -> bool {
+    const LONG: [&[u8]; 8] = [b"eval", b"evalsha", b"eval_ro", b"evalsha_ro", b"fcall", b"fcall_ro", b"migrate", b"debug"];
+    let long = |a: &[Bytes]| a.first().is_some_and(|n| LONG.iter().any(|l| n.eq_ignore_ascii_case(l)));
+    long(args) || (eq(&args[0], "exec") && client.multi.as_ref().is_some_and(|m| m.queued.iter().any(|q| long(q))))
 }
 
 fn is_intercepted(args: &[Bytes], client: &Client) -> bool {

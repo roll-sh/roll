@@ -31,6 +31,9 @@ pub struct Shard {
     /// A CLIENT PAUSE (or failover's) may hold commands back: set by the guard that leaves one
     /// set, so a command can skip locking the engine to check when nothing is paused.
     pub paused: AtomicBool,
+    /// Signalled as the engine lock is released, for connections waiting on it without
+    /// blocking their thread.
+    pub released: tokio::sync::Notify,
 }
 
 /// Receives the database's write stream.
@@ -59,6 +62,8 @@ pub struct Feed {
 
 pub struct Database {
     pub id: String,
+    /// The core its connections and cron run on ([`crate::cores`]).
+    pub home: usize,
     pub shards: Vec<Shard>,
     pub hub: Arc<Hub>,
     pub feed: Mutex<Feed>,
@@ -256,7 +261,7 @@ impl Durability {
 pub struct EngineGuard<'a> {
     db: &'a Database,
     shard: usize,
-    eng: MutexGuard<'a, Engine>,
+    eng: std::mem::ManuallyDrop<MutexGuard<'a, Engine>>,
     /// When the lock was taken and the command count then (INFO's event-loop cycles).
     since: u64,
     commands: u64,
@@ -265,7 +270,7 @@ pub struct EngineGuard<'a> {
 impl<'a> EngineGuard<'a> {
     fn new(db: &'a Database, shard: usize, eng: MutexGuard<'a, Engine>) -> Self {
         let commands = eng.stats.commands;
-        Self { db, shard, eng, since: redis_engine::util::mono_us(), commands }
+        Self { db, shard, eng: std::mem::ManuallyDrop::new(eng), since: redis_engine::util::mono_us(), commands }
     }
 }
 
@@ -294,6 +299,10 @@ impl Drop for EngineGuard<'_> {
             self.db.publish(&self.eng.effects);
             self.eng.effects.clear();
         }
+        // Unlock first, then wake whoever waits for the engine.
+        // SAFETY: `eng` is not used again; the field's own drop is skipped (ManuallyDrop).
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.eng) };
+        self.db.shards[self.shard].released.notify_waiters();
     }
 }
 
@@ -307,12 +316,13 @@ impl Database {
                 e.shard = i as u16;
                 e.acl = acl.clone();
                 let scripts = e.scripting.ctl.clone();
-                Shard { engine: Mutex::new(e), scripts, paused: AtomicBool::new(false) }
+                Shard { engine: Mutex::new(e), scripts, paused: AtomicBool::new(false), released: tokio::sync::Notify::new() }
             })
             .collect();
         let replid = new_replid();
         let db = Arc::new(Self {
             id: id.into(),
+            home: crate::cores::pool().assign(),
             shards,
             hub,
             feed: Mutex::new(Feed { last_db: u16::MAX, ..Feed::default() }),
@@ -374,23 +384,43 @@ impl Database {
         }
     }
 
-    /// [`Database::engine_unless_busy`] for a connection's task: while another holds the engine
-    /// briefly (a batch of commands), yield to the worker's other connections instead of parking
-    /// its thread, so their reads, parsing and replies go on meanwhile; past that, park.
+    /// [`Database::engine_unless_busy`] for a connection's task, without blocking its thread:
+    /// while another holds the engine, a core thread's connection waits for its release (other
+    /// connections and databases on the core go on meanwhile); on the multi-thread runtime it
+    /// first yields to the worker's other connections for a moment (a batch elsewhere ends soon).
     pub async fn engine_unless_busy_async(&self, i: usize) -> Option<EngineGuard<'_>> {
         let shard = &self.shards[i];
-        // Timed from the first miss.
-        let mut start = None;
+        if let Some(eng) = shard.engine.try_lock() {
+            return Some(EngineGuard::new(self, i, eng));
+        }
+        let busy = || shard.scripts.busy.load(Ordering::SeqCst) || shard.scripts.debugging.load(Ordering::SeqCst);
+        if crate::cores::current().is_none() {
+            let start = redis_engine::util::mono_us();
+            while redis_engine::util::mono_us().saturating_sub(start) < YIELD_FOR.as_micros() as u64 && !busy() {
+                tokio::task::yield_now().await;
+                if let Some(eng) = shard.engine.try_lock() {
+                    return Some(EngineGuard::new(self, i, eng));
+                }
+            }
+        }
         loop {
+            let released = shard.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
             if let Some(eng) = shard.engine.try_lock() {
                 return Some(EngineGuard::new(self, i, eng));
             }
-            let t = redis_engine::util::mono_us();
-            if t.saturating_sub(*start.get_or_insert(t)) > YIELD_FOR.as_micros() as u64 || shard.scripts.busy.load(Ordering::SeqCst) || shard.scripts.debugging.load(Ordering::SeqCst) {
-                return self.engine_unless_busy(i);
+            if busy() {
+                return None;
             }
-            tokio::task::yield_now().await;
+            // Looked at again every 10ms for the busy flag a script's hook sets.
+            let _ = tokio::time::timeout(Duration::from_millis(10), released).await;
         }
+    }
+
+    /// The engine if nobody holds it now (the cron's ticks skip a busy engine).
+    pub fn try_engine(&self, i: usize) -> Option<EngineGuard<'_>> {
+        self.shards[i].engine.try_lock().map(|eng| EngineGuard::new(self, i, eng))
     }
 
     /// Whether a pause may hold commands back on shard `i` (else none does).
@@ -581,7 +611,7 @@ impl Database {
     /// `hz` times a second. Stops when the database is closed and dropped.
     pub fn start_cron(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
-        tokio::spawn(async move {
+        crate::cores::pool().spawn(crate::cores::Place::Core(self.home), async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut ticks = 0u64;
@@ -598,15 +628,15 @@ impl Database {
                 }
                 crate::repl::psync::failover_cron(&db, redis_engine::util::now_ms());
                 if ticks.is_multiple_of(10) {
-                    let ttl = db.engine_unless_busy(0).and_then(|e| e.cfg.get(b"repl-backlog-ttl").first().and_then(|(_, v)| v.parse().ok()));
+                    let ttl = db.try_engine(0).and_then(|e| e.cfg.get(b"repl-backlog-ttl").first().and_then(|(_, v)| v.parse().ok()));
                     if let Some(ttl) = ttl {
                         crate::repl::psync::backlog_ttl_cron(&db, ttl, redis_engine::util::now_ms());
                     }
                 }
                 for i in 0..db.shards.len() {
-                    // A busy script holds the engine: skip the tick rather than tie up a worker
-                    // that SCRIPT KILL may need.
-                    let Some(mut eng) = db.engine_unless_busy(i) else { continue };
+                    // Held (a script, a long command): skip the tick, as Redis' cron doesn't run
+                    // during one, rather than stall the core's other databases.
+                    let Some(mut eng) = db.try_engine(i) else { continue };
                     // DEBUG PAUSE-CRON.
                     if eng.debug.pause_cron {
                         continue;
