@@ -25,7 +25,7 @@ pub(crate) use lzf::compress as lzf_compress;
 use crate::config::Config;
 use crate::db::Db;
 use crate::types::template::Registry;
-use crate::value::{Entry, Str, Value};
+use crate::value::{Entry, Str, Value, ValueRef};
 use decode::{Dec, IoSrc, SliceSrc};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -152,7 +152,7 @@ impl From<io::Error> for RdbError {
 
 /// `DUMP`: the value serialized with its type, the RDB version and a CRC64 footer.
 /// `now_ms` decides which IDMP entries of a stream have expired (they are not written).
-pub fn dump(value: &Value, now_ms: i64) -> Vec<u8> {
+pub fn dump(value: crate::value::ValueRef<'_>, now_ms: i64) -> Vec<u8> {
     let mut e = encode::Encoder::new(now_ms);
     e.dump = true;
     e.object(value);
@@ -165,7 +165,7 @@ pub fn dump(value: &Value, now_ms: i64) -> Vec<u8> {
 
 /// `rdbSavedObjectLen` (DEBUG OBJECT's `serializedlength`): the value's bytes in an RDB file,
 /// without its type byte.
-pub fn saved_len(value: &Value, now_ms: i64) -> usize {
+pub fn saved_len(value: crate::value::ValueRef<'_>, now_ms: i64) -> usize {
     let mut e = encode::Encoder::new(now_ms);
     e.body(value);
     e.out.len()
@@ -295,7 +295,7 @@ pub fn save<'a>(
     let mut tmpls = std::collections::BTreeMap::new();
     for (_, db) in &dbs {
         for (_, e) in db.keys.iter() {
-            if let Value::Hash(h) = &e.value
+            if let ValueRef::Hash(h) = e.value()
                 && let Some(t) = h.template()
             {
                 tmpls.entry(t.id()).or_insert_with(|| t.template().clone());

@@ -5,7 +5,7 @@ use crate::cmd;
 use crate::decimal::{self, IncrError, Ld};
 use crate::notify;
 use crate::util::{fmt_i64, parse_i64};
-use crate::value::{Kind, Str, Value};
+use crate::value::{Kind, Str, Value, ValueRef};
 
 pub static COMMANDS: &[Command] = &[
     cmd!("get", 2, READONLY | FAST, 1, 1, 1, get, String),
@@ -118,7 +118,7 @@ pub fn set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let exp = o.expiry(cx.now, "set")?;
     let key = &args[1];
     // GET replies first (`getGenericCommand`): a WRONGTYPE ends the command there.
-    let current: Option<Str> = if get { cx.get_str(key)?.cloned() } else { None };
+    let current: Option<Str> = if get { cx.get_str(key)?.map(Str::from_slice) } else { None };
     // Without a condition only the write's own lookup is needed (it expires a stale key first,
     // as `lookupKeyWrite` does).
     let exists = if get { current.is_some() } else { !matches!(cond, Cond::Any) && cx.peek(key).is_some() };
@@ -130,7 +130,7 @@ pub fn set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if exists && matches!(cond, Cond::IfEq(_) | Cond::IfNe(_) | Cond::IfDeq(_) | Cond::IfDne(_)) {
         let cur = match &current {
             Some(c) => c.clone(),
-            None => cx.get_str(key)?.cloned().unwrap_or_default(),
+            None => cx.get_str(key)?.map(Str::from_slice).unwrap_or_default(),
         };
         if let Cond::IfDeq(d) | Cond::IfDne(d) = cond
             && d.len() != 16
@@ -282,13 +282,13 @@ pub fn psetex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 pub fn getset(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let old = cx.get_str(&args[1])?.cloned();
+    let old = cx.get_str(&args[1])?.map(Str::from_slice);
     write_string(cx, &args[1], &args[2], Expiry::None);
     Ok(Reply::opt_bulk(old))
 }
 
 pub fn getdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    let Some(v) = cx.get_str(&args[1])?.cloned() else { return Ok(Reply::Nil) };
+    let Some(v) = cx.get_str(&args[1])?.map(Str::from_slice) else { return Ok(Reply::Nil) };
     cx.delete(&args[1]);
     cx.notify(notify::GENERIC, "del", &args[1]);
     cx.propagate_as(vec![b("DEL"), args[1].clone()]);
@@ -299,7 +299,7 @@ pub fn getdel(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn getex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let o = parse_ext(args, 2, ExtFor::Get)?;
     let key = &args[1];
-    let Some(v) = cx.get_str(key)?.cloned() else { return Ok(Reply::Nil) };
+    let Some(v) = cx.get_str(key)?.map(Str::from_slice) else { return Ok(Reply::Nil) };
     // The time is checked once the key is known to be a string.
     let exp = o.expiry(cx.now, "getex")?;
     match exp {
@@ -328,7 +328,7 @@ pub fn mget(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let mut out = Vec::with_capacity(args.len() - 1);
     for k in &args[1..] {
         out.push(match cx.get(k) {
-            Some(Value::Str(s)) => Reply::bulk(s),
+            Some(ValueRef::Str(s)) => Reply::bulk(s),
             _ => Reply::Nil,
         });
     }
@@ -764,12 +764,12 @@ pub fn lcs(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let type_err = Error::new("ERR The specified keys must contain string values");
     let a = match cx.get(&args[1]) {
         None => Vec::new(),
-        Some(Value::Str(s)) => s.to_vec(),
+        Some(ValueRef::Str(s)) => s.to_vec(),
         Some(_) => return Err(type_err),
     };
     let bv = match cx.get(&args[2]) {
         None => Vec::new(),
-        Some(Value::Str(s)) => s.to_vec(),
+        Some(ValueRef::Str(s)) => s.to_vec(),
         Some(_) => return Err(type_err),
     };
     let (mut want_len, mut want_idx, mut with_len) = (false, false, false);
@@ -885,7 +885,7 @@ pub fn delex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             // A missing key first, then its type, then the condition (`delexCommand`).
             let cur = match cx.get(key) {
                 None => return Ok(Reply::Int(0)),
-                Some(Value::Str(s)) => s.clone(),
+                Some(ValueRef::Str(s)) => s,
                 Some(_) => return Err(Error::new("ERR Key should be of string type if conditions are specified")),
             };
             let v = &args[3][..];
@@ -904,7 +904,7 @@ pub fn delex(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             if matches!(cond, Cond::IfDeq(_) | Cond::IfDne(_)) && v.len() != 16 {
                 return Err(DIGEST_LEN);
             }
-            if !cond_holds(cond, Some(&cur)) {
+            if !cond_holds(cond, Some(cur)) {
                 return Ok(Reply::Int(0));
             }
         }

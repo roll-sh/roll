@@ -6,7 +6,7 @@ use crate::cmd;
 use crate::engine::{Effect, Mode};
 use crate::notify;
 use crate::types::List;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use std::cmp::Ordering;
 
 pub static COMMANDS: &[Command] = &[
@@ -79,9 +79,9 @@ fn lookup_by_pattern(cx: &mut Cx, pattern: &[u8], elem: &[u8]) -> Option<Vec<u8>
     key.extend_from_slice(elem);
     key.extend_from_slice(&pattern[star + 1..key_end]);
     match (cx.get(&key)?, field) {
-        (Value::Str(s), None) => Some(s.to_vec()),
+        (ValueRef::Str(s), None) => Some(s.to_vec()),
         // `hashTypeGetValueObject(HFE_LAZY_EXPIRE)`: an expired field is deleted.
-        (Value::Hash(_), Some(f)) => super::hashes::lazy_get(cx, &key, &pattern[f + 2..]).map(|v| v.to_vec()),
+        (ValueRef::Hash(_), Some(f)) => super::hashes::lazy_get(cx, &key, &pattern[f + 2..]).map(|v| v.to_vec()),
         _ => None,
     }
 }
@@ -133,9 +133,9 @@ fn sort_generic(cx: &mut Cx, args: &[Bytes], readonly: bool) -> CmdResult {
     let key = &args[1];
     let (mut elems, is_set, ordered) = match cx.get(key) {
         None => (Vec::new(), false, true),
-        Some(Value::List(l)) => (l.iter().map(Bytes::copy_from_slice).collect::<Vec<_>>(), false, true),
-        Some(Value::Set(s)) => (s.iter_members().map(|m| Bytes::copy_from_slice(&m)).collect(), true, false),
-        Some(Value::ZSet(z)) => (z.iter().map(|(m, _)| Bytes::copy_from_slice(m)).collect(), false, true),
+        Some(ValueRef::List(l)) => (l.iter().map(Bytes::copy_from_slice).collect::<Vec<_>>(), false, true),
+        Some(ValueRef::Set(s)) => (s.iter_members().map(|m| Bytes::copy_from_slice(&m)).collect(), true, false),
+        Some(ValueRef::ZSet(z)) => (z.iter().map(|(m, _)| Bytes::copy_from_slice(m)).collect(), false, true),
         Some(_) => return Err(WRONGTYPE),
     };
     // Sorting a set without an order must still give replicas and scripts one answer.

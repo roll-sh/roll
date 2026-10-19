@@ -14,7 +14,9 @@ use crate::db::Db;
 use crate::engine::{BlockReq, Effect, Engine, Mode, Signals};
 use crate::notify;
 use crate::types::{Array, Hash, List, Set, Stream, ZSet};
-use crate::value::{Entry, Kind, Str, Value};
+use crate::keyspace::{Fields, FieldsMut, KvMut, KvRef};
+use crate::object::{Object, ObjectMut};
+use crate::value::{Entry, Kind, Str, Value, ValueRef};
 use bytes::Bytes;
 use redis_proto::Reply;
 
@@ -51,8 +53,13 @@ pub(crate) fn read_lookups(cmd: &Command, args: &[Bytes]) -> bool {
 
 /// Mutable access to a key's entry. On drop it updates memory accounting, signals the key as
 /// modified and schedules deletion if an aggregate became empty.
+///
+/// A string being changed is taken out of the entry ([`KvMut::take_value`]) the first time
+/// [`KeyMut::str`] lends it, and put back before anything else looks at the entry.
 pub struct KeyMut<'a> {
-    pub entry: &'a mut Entry,
+    entry: KvMut<'a>,
+    /// The string lent by [`KeyMut::str`], until it goes back.
+    taken: Option<Value>,
     mem: &'a mut usize,
     /// The database's keysizes histogram, updated as the change ends.
     sizes: &'a mut Vec<u64>,
@@ -63,10 +70,35 @@ pub struct KeyMut<'a> {
     changed: bool,
 }
 
-impl KeyMut<'_> {
+impl<'a> KeyMut<'a> {
+    fn new(entry: KvMut<'a>, mem: &'a mut usize, sizes: &'a mut Vec<u64>, sig: &'a mut Signals, db: u16, key: &[u8], changed: bool) -> Self {
+        let old = entry.value_mem();
+        KeyMut { entry, taken: None, mem, sizes, sig, db, key: Str::from_slice(key), old, changed }
+    }
+
+    /// The entry with its value back in place.
     #[inline]
+    fn settled(&mut self) -> &mut KvMut<'a> {
+        if let Some(v) = self.taken.take() {
+            self.entry.put_value(v);
+        }
+        &mut self.entry
+    }
+
+    /// The value to change (any type).
     pub fn value(&mut self) -> &mut Value {
-        &mut self.entry.value
+        if self.taken.is_none() && self.settled().aggregate_mut().is_none() {
+            self.taken = Some(self.entry.take_value());
+        }
+        match &mut self.taken {
+            Some(v) => v,
+            None => self.entry.aggregate_mut().expect("an aggregate"),
+        }
+    }
+
+    /// The value as it is now.
+    pub fn view(&mut self) -> ValueRef<'_> {
+        self.settled().as_ref().value()
     }
 
     /// The operation turned out to be a no-op: don't signal or propagate.
@@ -93,7 +125,7 @@ impl KeyMut<'_> {
     }
 
     pub fn str(&mut self) -> &mut Str {
-        match &mut self.entry.value {
+        match self.value() {
             Value::Str(s) => s,
             _ => unreachable!("type checked by lookup"),
         }
@@ -102,98 +134,129 @@ impl KeyMut<'_> {
     /// An existing string about to change in place, to at least `grow_to` bytes: raw from now
     /// on (`dbUnshareStringValue`), its sds grown like Redis grows it (`sdsMakeRoomFor`).
     pub fn str_in_place(&mut self, grow_to: usize) -> &mut Str {
-        let len = self.str().len();
-        self.entry.unshare(self.key.len());
+        let klen = self.key.len();
+        let e = self.settled();
+        let len = match e.as_ref().value() {
+            ValueRef::Str(s) => s.len(),
+            _ => unreachable!("type checked by lookup"),
+        };
+        e.unshare(klen);
         if grow_to > len {
-            self.entry.sds_make_room(grow_to - len);
+            e.sds_make_room(grow_to - len);
         }
         self.str()
     }
 
     /// A string just created raw and exactly sized (SETRANGE, SETBIT on a new key).
     pub fn str_new_raw(&mut self) -> &mut Str {
-        self.entry.obj = (self.entry.obj & crate::object::SLOT) | crate::object::ENC_RAW;
-        self.entry.sds = 0;
+        let e = self.settled();
+        let obj = (e.obj() & crate::object::SLOT) | crate::object::ENC_RAW;
+        e.set_obj(obj);
+        e.set_sds(0);
         self.str()
     }
 
     /// `dbUnshareStringValue` without growing (HyperLogLog commands).
     pub fn unshare(&mut self) {
-        self.entry.unshare(self.key.len());
+        let klen = self.key.len();
+        self.settled().unshare(klen);
     }
 
     /// `OBJECT ENCODING` of the value.
-    pub fn encoding(&self) -> &'static str {
-        self.entry.encoding(self.key.len())
+    pub fn encoding(&mut self) -> &'static str {
+        let klen = self.key.len();
+        self.settled().encoding(klen)
     }
 
     /// Whether the value is an embedded string (before replacing it: [`KeyMut::str_replaced`]).
-    pub fn embedded(&self) -> bool {
-        self.entry.embedded(self.key.len())
+    pub fn embedded(&mut self) -> bool {
+        let klen = self.key.len();
+        self.settled().embedded(klen)
+    }
+
+    /// The sds behind the raw string.
+    pub fn sds(&mut self) -> crate::object::Sds {
+        self.settled().sds_now()
+    }
+
+    /// Record the raw string's sds after it was reallocated (HyperLogLog updates).
+    pub fn set_sds(&mut self, sds: crate::object::Sds) {
+        self.settled().set_sds_of(sds);
     }
 
     /// The string's content was replaced by a value created with `enc` (INCR, INCRBYFLOAT:
     /// `dbReplaceValue`, keeping the TTL; `shared_ints` from the config).
     pub fn str_replaced(&mut self, was_embedded: bool, enc: u8, shared_ints: bool) {
-        self.entry.revalue(was_embedded, self.key.len(), enc, true, shared_ints);
+        let klen = self.key.len();
+        self.settled().revalue(was_embedded, klen, enc, true, shared_ints);
     }
+
     pub fn list(&mut self) -> &mut List {
-        match &mut self.entry.value {
-            Value::List(l) => l,
+        match self.settled().aggregate_mut() {
+            Some(Value::List(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
+
     pub fn hash(&mut self) -> &mut Hash {
-        match &mut self.entry.value {
-            Value::Hash(h) => h,
+        match self.settled().aggregate_mut() {
+            Some(Value::Hash(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
+
     pub fn set(&mut self) -> &mut Set {
-        match &mut self.entry.value {
-            Value::Set(s) => s,
+        match self.settled().aggregate_mut() {
+            Some(Value::Set(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
+
     pub fn zset(&mut self) -> &mut ZSet {
-        match &mut self.entry.value {
-            Value::ZSet(z) => z,
+        match self.settled().aggregate_mut() {
+            Some(Value::ZSet(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
+
     pub fn stream(&mut self) -> &mut Stream {
-        match &mut self.entry.value {
-            Value::Stream(s) => s,
+        match self.settled().aggregate_mut() {
+            Some(Value::Stream(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
+
     pub fn array(&mut self) -> &mut Array {
-        match &mut self.entry.value {
-            Value::Array(a) => a,
+        match self.settled().aggregate_mut() {
+            Some(Value::Array(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
+
     pub fn json(&mut self) -> &mut crate::json::Json {
-        match &mut self.entry.value {
-            Value::Json(j) => j,
+        match self.settled().aggregate_mut() {
+            Some(Value::Json(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
+
     pub fn sketch(&mut self) -> &mut crate::bloom::Sketch {
-        match &mut self.entry.value {
-            Value::Sketch(x) => x,
+        match self.settled().aggregate_mut() {
+            Some(Value::Sketch(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
+
     pub fn vset(&mut self) -> &mut crate::vset::VSet {
-        match &mut self.entry.value {
-            Value::VSet(x) => x,
+        match self.settled().aggregate_mut() {
+            Some(Value::VSet(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
+
     pub fn sug(&mut self) -> &mut crate::search::trie::Trie {
-        match &mut self.entry.value {
-            Value::Sug(x) => x,
+        match self.settled().aggregate_mut() {
+            Some(Value::Sug(x)) => x,
             _ => unreachable!("type checked by lookup"),
         }
     }
@@ -201,18 +264,18 @@ impl KeyMut<'_> {
 
 impl Drop for KeyMut<'_> {
     fn drop(&mut self) {
-        if let Value::Json(j) = &mut self.entry.value {
+        if let Some(Value::Json(j)) = self.settled().aggregate_mut() {
             j.refresh();
         }
-        let new = self.entry.value.mem();
+        let new = self.entry.value_mem();
         *self.mem = (*self.mem + new).saturating_sub(self.old);
         if self.changed {
             // The keysizes slot is moved here, while the entry is at hand, rather than looked
             // up again with the touched keys.
-            crate::db::Db::resize_entry(self.sizes, self.entry);
+            crate::db::Db::resize_entry(self.sizes, &mut self.entry);
             self.sig.touch_sized(self.db, &self.key);
         }
-        if self.entry.value.is_empty_aggregate() {
+        if self.entry.as_ref().value().is_empty_aggregate() {
             self.sig.empty.push((self.db, std::mem::take(&mut self.key)));
         }
     }
@@ -224,7 +287,7 @@ macro_rules! typed_get {
         pub fn $name(&mut self, key: &[u8]) -> Result<Option<&$ty>, Error> {
             match self.get(key) {
                 None => Ok(None),
-                Some(Value::$variant(v)) => Ok(Some(v)),
+                Some(ValueRef::$variant(v)) => Ok(Some(v)),
                 Some(_) => Err(WRONGTYPE),
             }
         }
@@ -253,28 +316,28 @@ impl<'a> Cx<'a> {
     }
 
     /// Look up a key for reading. Updates LRU/LFU and hit/miss stats.
-    pub fn get(&mut self, key: &[u8]) -> Option<&Value> {
-        self.get_entry(key).map(|e| &e.value)
+    pub fn get(&mut self, key: &[u8]) -> Option<ValueRef<'_>> {
+        self.get_entry(key).map(|e| e.value())
     }
 
-    pub fn get_entry(&mut self, key: &[u8]) -> Option<&Entry> {
+    pub fn get_entry(&mut self, key: &[u8]) -> Option<KvRef<'_>> {
         self.lookup(key, true, true)
     }
 
     /// `lookupKeyReadWithFlags(LOOKUP_NOTOUCH)` (EXISTS, TYPE, TTL…): counted, no access time.
-    pub fn get_notouch(&mut self, key: &[u8]) -> Option<&Entry> {
+    pub fn get_notouch(&mut self, key: &[u8]) -> Option<KvRef<'_>> {
         self.lookup(key, false, true)
     }
 
     /// `objectCommandLookup` (`LOOKUP_NOTOUCH | LOOKUP_NONOTIFY`): counted, no access time, no
     /// `keymiss`.
-    pub fn get_object(&mut self, key: &[u8]) -> Option<&Entry> {
+    pub fn get_object(&mut self, key: &[u8]) -> Option<KvRef<'_>> {
         self.lookup(key, false, false)
     }
 
     /// `lookupKey` for reading: lazy expiry, then the hit/miss stats (read lookups only), the
     /// access time unless `NOTOUCH`, and `keymiss` unless `NONOTIFY`.
-    fn lookup(&mut self, key: &[u8], touch: bool, notify_miss: bool) -> Option<&Entry> {
+    fn lookup(&mut self, key: &[u8], touch: bool, notify_miss: bool) -> Option<KvRef<'_>> {
         let expired = self.expire_check(key);
         let now = self.now;
         let no_touch = self.client.no_touch || !touch;
@@ -282,14 +345,14 @@ impl<'a> Cx<'a> {
         let Engine { dbs, cfg, rng, stats, sig, .. } = &mut *self.eng;
         let found = if expired { None } else { dbs[self.client.db].keys.get_mut(key) };
         match found {
-            Some(e) => {
+            Some(mut e) => {
                 if read {
                     stats.keyspace_hits += 1;
                 }
                 if !no_touch {
-                    Engine::touch_entry(cfg, rng, e, now);
+                    Engine::touch_entry(cfg, rng, &mut e, now);
                 }
-                Some(&*e)
+                Some(e.into_ref())
             }
             None => {
                 if read {
@@ -304,7 +367,7 @@ impl<'a> Cx<'a> {
     }
 
     /// Look up without touching LRU or stats (TYPE-like introspection, internal checks).
-    pub fn peek(&mut self, key: &[u8]) -> Option<&Entry> {
+    pub fn peek(&mut self, key: &[u8]) -> Option<KvRef<'_>> {
         if self.expire_check(key) {
             return None;
         }
@@ -315,7 +378,7 @@ impl<'a> Cx<'a> {
         self.get(key).is_some()
     }
 
-    typed_get!(get_str, Str, Str);
+    typed_get!(get_str, Str, [u8]);
     typed_get!(get_list, List, List);
     typed_get!(get_hash, Hash, Hash);
     typed_get!(get_set, Set, Set);
@@ -342,7 +405,7 @@ impl<'a> Cx<'a> {
         let db = self.client.db;
         let Engine { dbs, cfg, rng, stats, sig, .. } = &mut *self.eng;
         let Db { keys, mem, keysizes: sizes, .. } = &mut dbs[db];
-        let Some(entry) = (if expired { None } else { keys.get_mut(key) }) else {
+        let Some(mut entry) = (if expired { None } else { keys.get_mut(key) }) else {
             if read {
                 stats.keyspace_misses += 1;
                 sig.notify(notify::KEY_MISS, "keymiss", db as u16, key);
@@ -353,13 +416,12 @@ impl<'a> Cx<'a> {
             stats.keyspace_hits += 1;
         }
         if !no_touch {
-            Engine::touch_entry(cfg, rng, entry, now);
+            Engine::touch_entry(cfg, rng, &mut entry, now);
         }
-        if entry.value.kind() != kind {
+        if entry.as_ref().value().kind() != kind {
             return Err(WRONGTYPE);
         }
-        let old = entry.value.mem();
-        Ok(Some(KeyMut { entry, mem, sizes, sig, db: db as u16, key: Str::from_slice(key), old, changed: true }))
+        Ok(Some(KeyMut::new(entry, mem, sizes, sig, db as u16, key, true)))
     }
 
     /// [`Cx::get_mut`] for a key this command has just checked for expiry.
@@ -369,14 +431,13 @@ impl<'a> Cx<'a> {
         let db = self.client.db;
         let Engine { dbs, cfg, rng, sig, .. } = &mut *self.eng;
         let Db { keys, mem, keysizes: sizes, .. } = &mut dbs[db];
-        let entry = keys.get_mut(key)?;
+        let mut entry = keys.get_mut(key)?;
         if cfg.maxmemory_policy.is_lrm() {
-            entry.lru = Engine::lru_clock(now);
+            entry.set_lru(Engine::lru_clock(now));
         } else if !no_touch {
-            Engine::touch_entry(cfg, rng, entry, now);
+            Engine::touch_entry(cfg, rng, &mut entry, now);
         }
-        let old = entry.value.mem();
-        Some(KeyMut { entry, mem, sizes, sig, db: db as u16, key: Str::from_slice(key), old, changed: true })
+        Some(KeyMut::new(entry, mem, sizes, sig, db as u16, key, true))
     }
 
     /// Mutable access to a key a module opened for reading and then changes internally (a
@@ -389,15 +450,14 @@ impl<'a> Cx<'a> {
         let Engine { dbs, sig, .. } = &mut *self.eng;
         let Db { keys, mem, keysizes: sizes, .. } = &mut dbs[db];
         let entry = keys.get_mut(key)?;
-        let old = entry.value.mem();
-        Some(KeyMut { entry, mem, sizes, sig, db: db as u16, key: Str::from_slice(key), old, changed: false })
+        Some(KeyMut::new(entry, mem, sizes, sig, db as u16, key, false))
     }
 
     /// Mutable access to an existing key of `kind` (`Ok(None)` if missing).
     pub fn get_mut_typed(&mut self, key: &[u8], kind: Kind) -> Result<Option<KeyMut<'_>>, Error> {
         match self.peek(key) {
             None => return Ok(None),
-            Some(e) if e.value.kind() != kind => return Err(WRONGTYPE),
+            Some(e) if e.value().kind() != kind => return Err(WRONGTYPE),
             _ => {}
         }
         Ok(self.get_mut(key))
@@ -407,7 +467,7 @@ impl<'a> Cx<'a> {
     pub fn check_type(&mut self, key: &[u8], kind: Kind) -> Result<bool, Error> {
         match self.peek(key) {
             None => Ok(false),
-            Some(e) if e.value.kind() == kind => Ok(true),
+            Some(e) if e.value().kind() == kind => Ok(true),
             Some(_) => Err(WRONGTYPE),
         }
     }
@@ -447,16 +507,16 @@ impl<'a> Cx<'a> {
         let shared_ints = self.eng.cfg.shared_integers();
         let d = &mut self.eng.dbs[db];
         match d.keys.get_mut(key) {
-            Some(e) => {
-                let (old, old_kind) = (e.value.mem(), e.value.kind());
+            Some(mut e) => {
+                let (old, old_kind) = (e.value_mem(), e.as_ref().value().kind());
                 let (new, new_kind) = (value.mem(), value.kind());
-                let hashes = matches!(e.value, Value::Hash(_)) || matches!(value, Value::Hash(_));
+                let hashes = old_kind == Kind::Hash || new_kind == Kind::Hash;
                 let embedded = e.embedded(key.len());
-                e.value = value;
-                e.lru = lru;
+                e.put_value(value);
+                e.set_lru(lru);
                 e.revalue(embedded, key.len(), enc, keep_ttl, shared_ints);
-                crate::db::Db::resize_entry(&mut d.keysizes, e);
-                let had_ttl = e.expire != 0;
+                crate::db::Db::resize_entry(&mut d.keysizes, &mut e);
+                let had_ttl = e.expire() != 0;
                 d.mem = (d.mem + new).saturating_sub(old);
                 if had_ttl && !keep_ttl {
                     d.set_expire(key, 0);
@@ -528,7 +588,7 @@ impl<'a> Cx<'a> {
 
     /// The key's absolute expiry: `None` if missing, `Some(0)` if it has no TTL.
     pub fn expire_of(&mut self, key: &[u8]) -> Option<i64> {
-        self.peek(key).map(|e| e.expire)
+        self.peek(key).map(|e| e.expire())
     }
 
     /// Set (or clear with 0) a key's absolute expiry. False if the key is missing.

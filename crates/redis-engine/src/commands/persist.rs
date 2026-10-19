@@ -193,9 +193,9 @@ impl Engine {
                     continue;
                 }
                 let lru = if lfu {
-                    Lru::Freq(self.lfu_counter(e, now).min(255) as u8)
+                    Lru::Freq(self.lfu_counter(&e, now).min(255) as u8)
                 } else if idle {
-                    Lru::Idle(Engine::idle_secs(e, now))
+                    Lru::Idle(Engine::idle_secs(&e, now))
                 } else {
                     Lru::None
                 };
@@ -561,7 +561,11 @@ pub fn save(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
         return Err(Error::new("ERR Background save already in progress"));
     }
     for d in cx.eng.dbs.iter_mut() {
-        d.keys.for_each_mut(|_, e| e.value.prepare_save());
+        d.keys.for_each_mut(|_, mut e| {
+            if let Some(v) = e.aggregate_mut() {
+                v.prepare_save();
+            }
+        });
     }
     cx.eng.stats.rdb_saves += 1;
     cx.eng.reset_dirty();

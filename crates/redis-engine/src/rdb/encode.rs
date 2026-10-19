@@ -7,7 +7,7 @@ use crate::types::stream::{Stream, StreamId};
 use crate::types::array::{self, Array, Decoded};
 use crate::types::{Hash, List, Set, ZSet};
 use crate::util::parse_i64;
-use crate::value::{Entry, Value};
+use crate::value::ValueRef;
 use std::io::{self, Write};
 
 /// `rdbSaveLen`.
@@ -70,28 +70,28 @@ pub(crate) fn double2ll(d: f64) -> Option<i64> {
 
 /// `rdbSaveObjectType`: the type byte, which depends on the encoding. Template hashes are
 /// self-contained in a `dump` payload and reference their template record in a file.
-pub(crate) fn type_of(v: &Value, dump: bool) -> u8 {
+pub(crate) fn type_of(v: ValueRef<'_>, dump: bool) -> u8 {
     match v {
-        Value::Hash(h) if h.is_template() => match (h.is_template_listpack(), dump) {
+        ValueRef::Hash(h) if h.is_template() => match (h.is_template_listpack(), dump) {
             (true, true) => ty::HASH_TMPL_LP,
             (true, false) => ty::HASH_TMPL_LP_REF,
             (false, true) => ty::HASH_TMPL_ARRAY,
             (false, false) => ty::HASH_TMPL_ARRAY_REF,
         },
-        Value::Str(_) => ty::STRING,
-        Value::List(_) => ty::LIST_QUICKLIST_2,
-        Value::Set(s) if s.is_intset() => ty::SET_INTSET,
-        Value::Set(s) if s.is_listpack() => ty::SET_LISTPACK,
-        Value::Set(_) => ty::SET,
-        Value::ZSet(z) if z.is_listpack() => ty::ZSET_LISTPACK,
-        Value::ZSet(_) => ty::ZSET_2,
-        Value::Hash(h) if h.is_listpack_ex() => ty::HASH_LISTPACK_EX,
-        Value::Hash(h) if h.is_listpack() => ty::HASH_LISTPACK,
-        Value::Hash(h) if h.min_expire() != 0 => ty::HASH_METADATA,
-        Value::Hash(_) => ty::HASH,
-        Value::Stream(_) => ty::STREAM_LISTPACKS_5,
-        Value::Array(_) => ty::ARRAY,
-        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) | Value::Sug(_) => ty::MODULE_2,
+        ValueRef::Str(_) => ty::STRING,
+        ValueRef::List(_) => ty::LIST_QUICKLIST_2,
+        ValueRef::Set(s) if s.is_intset() => ty::SET_INTSET,
+        ValueRef::Set(s) if s.is_listpack() => ty::SET_LISTPACK,
+        ValueRef::Set(_) => ty::SET,
+        ValueRef::ZSet(z) if z.is_listpack() => ty::ZSET_LISTPACK,
+        ValueRef::ZSet(_) => ty::ZSET_2,
+        ValueRef::Hash(h) if h.is_listpack_ex() => ty::HASH_LISTPACK_EX,
+        ValueRef::Hash(h) if h.is_listpack() => ty::HASH_LISTPACK,
+        ValueRef::Hash(h) if h.min_expire() != 0 => ty::HASH_METADATA,
+        ValueRef::Hash(_) => ty::HASH,
+        ValueRef::Stream(_) => ty::STREAM_LISTPACKS_5,
+        ValueRef::Array(_) => ty::ARRAY,
+        ValueRef::Json(_) | ValueRef::Sketch(_) | ValueRef::VSet(_) | ValueRef::Ts(_) | ValueRef::Sug(_) => ty::MODULE_2,
     }
 }
 
@@ -169,36 +169,36 @@ impl Encoder {
     }
 
     /// `rdbSaveObjectType` + `rdbSaveObject`.
-    pub fn object(&mut self, v: &Value) {
+    pub fn object(&mut self, v: ValueRef<'_>) {
         self.out.push(type_of(v, self.dump));
         self.body(v);
     }
 
     /// `rdbSaveObject`.
-    pub fn body(&mut self, v: &Value) {
+    pub fn body(&mut self, v: ValueRef<'_>) {
         match v {
-            Value::Str(s) => self.string(s),
-            Value::List(l) => self.list(l),
-            Value::Set(s) => self.set(s),
-            Value::ZSet(z) => self.zset(z),
-            Value::Hash(h) => self.hash(h),
-            Value::Stream(s) => self.stream(s),
-            Value::Array(a) => self.array(a),
-            Value::Json(j) => self.json(j),
-            Value::Sketch(x) => self.sketch(x),
-            Value::VSet(v) => {
+            ValueRef::Str(s) => self.string(s),
+            ValueRef::List(l) => self.list(l),
+            ValueRef::Set(s) => self.set(s),
+            ValueRef::ZSet(z) => self.zset(z),
+            ValueRef::Hash(h) => self.hash(h),
+            ValueRef::Stream(s) => self.stream(s),
+            ValueRef::Array(a) => self.array(a),
+            ValueRef::Json(j) => self.json(j),
+            ValueRef::Sketch(x) => self.sketch(x),
+            ValueRef::VSet(v) => {
                 self.len(crate::bloom::type_id(crate::vset::TYPE_NAME, crate::vset::ENCVER));
                 v.save(self);
                 self.len(super::MODULE_OPCODE_EOF);
             }
             // A series' links to other keys are kept by a save, not by a DUMP payload.
-            Value::Ts(t) => {
+            ValueRef::Ts(t) => {
                 self.len(crate::bloom::type_id(crate::ts::TYPE_NAME, crate::ts::ENCVER as u64));
                 let persist = !self.dump;
                 crate::ts::rdb::save(t, self, persist);
                 self.len(super::MODULE_OPCODE_EOF);
             }
-            Value::Sug(t) => {
+            ValueRef::Sug(t) => {
                 self.len(crate::bloom::type_id(crate::search::trie::TYPE_NAME, crate::search::trie::TRIE_ENCVER_CURRENT as u64));
                 t.rdb_save(&mut crate::search::trie::ModuleSink(self));
                 self.len(super::MODULE_OPCODE_EOF);
@@ -610,10 +610,10 @@ impl<W: Write> RdbWriter<W> {
     }
 
     /// A key of the current database: its expiry, LRU info, type, name and value.
-    pub fn entry(&mut self, key: &[u8], e: &Entry, lru: Lru) -> io::Result<()> {
-        if e.expire != 0 {
+    pub fn entry(&mut self, key: &[u8], e: crate::keyspace::KvRef<'_>, lru: Lru) -> io::Result<()> {
+        if e.expire() != 0 {
             self.enc.out.push(op::EXPIRETIME_MS);
-            self.enc.ms(e.expire);
+            self.enc.ms(e.expire());
         }
         match lru {
             Lru::None => {}
@@ -623,9 +623,9 @@ impl<W: Write> RdbWriter<W> {
             }
             Lru::Freq(f) => self.enc.out.extend_from_slice(&[op::FREQ, f]),
         }
-        self.enc.out.push(type_of(&e.value, false));
+        self.enc.out.push(type_of(e.value(), false));
         self.enc.string(key);
-        self.enc.body(&e.value);
+        self.enc.body(e.value());
         self.flush()
     }
 

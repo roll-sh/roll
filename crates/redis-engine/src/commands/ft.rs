@@ -15,7 +15,7 @@ use crate::json::path::{self as jpath, Ty};
 use crate::search::doctable::SortVal;
 use crate::search::eval::RsValue;
 use crate::search::spec::{self, DocType, Spec};
-use crate::value::Value;
+use crate::value::ValueRef;
 use std::time::Instant;
 
 /// RedisJSON's events the module reindexes on (`REDIS_JSON_NOTIFICATION_EVENT_LIST`).
@@ -60,7 +60,7 @@ pub(crate) fn command_filter(eng: &mut Engine, args: &[Bytes]) {
     };
     eng.search.hash_fields = None;
     let now = eng.exec_time;
-    let is_hash = eng.dbs[0].keys.get(crate::util::cstr(&args[1])).is_some_and(|e| (e.expire == 0 || e.expire > now) && matches!(e.value, Value::Hash(_)));
+    let is_hash = eng.dbs[0].keys.get(crate::util::cstr(&args[1])).is_some_and(|e| (e.expire() == 0 || e.expire() > now) && matches!(e.value(), ValueRef::Hash(_)));
     if !is_hash {
         return;
     }
@@ -131,9 +131,9 @@ pub(crate) fn probe(eng: &mut Engine, key: &[u8], loading: bool) {
     }
     let Engine { dbs, cfg, rng, stats, sig, .. } = &mut *eng;
     match dbs[0].keys.get_mut(key).filter(|e| loading || !e.expired(now)) {
-        Some(e) => {
+        Some(mut e) => {
             stats.keyspace_hits += 1;
-            Engine::touch_entry(cfg, rng, e, now);
+            Engine::touch_entry(cfg, rng, &mut e, now);
         }
         None => {
             stats.keyspace_misses += 1;
@@ -161,16 +161,16 @@ pub(crate) fn resolve_probes(eng: &mut Engine) {
 }
 
 /// The key's live entry in a database, without side effects.
-pub(super) fn live<'e>(eng: &'e Engine, db: usize, key: &[u8]) -> Option<&'e crate::value::Entry> {
+pub(super) fn live<'e>(eng: &'e Engine, db: usize, key: &[u8]) -> Option<crate::keyspace::KvRef<'e>> {
     let now = eng.exec_time;
-    eng.dbs.get(db)?.keys.get(key).filter(|e| e.expire == 0 || e.expire > now)
+    eng.dbs.get(db)?.keys.get(key).filter(|e| e.expire() == 0 || e.expire() > now)
 }
 
 /// `getDocType`: hashes and JSON documents can be indexed (`None` = `DocumentType_Unsupported`).
 fn doc_type(eng: &Engine, db: usize, key: &[u8]) -> Option<DocType> {
-    match &live(eng, db, key)?.value {
-        Value::Hash(_) => Some(DocType::Hash),
-        Value::Json(_) => Some(DocType::Json),
+    match &live(eng, db, key)?.value() {
+        ValueRef::Hash(_) => Some(DocType::Hash),
+        ValueRef::Json(_) => Some(DocType::Json),
         _ => None,
     }
 }
@@ -227,8 +227,8 @@ fn filter_passes(eng: &Engine, db: usize, ix: &Index, key: &[u8]) -> bool {
         })
         .collect();
     let mut row = Row(Vec::new());
-    match live(eng, db, key).map(|e| &e.value) {
-        Some(Value::Hash(h)) if ix.spec.rule.doc_type == DocType::Hash => {
+    match live(eng, db, key).map(|e| e.value()) {
+        Some(ValueRef::Hash(h)) if ix.spec.rule.doc_type == DocType::Hash => {
             let now = eng.exec_time;
             for (name, path) in &keys {
                 let v = match h.get_live(crate::util::cstr(path), now) {
@@ -239,7 +239,7 @@ fn filter_passes(eng: &Engine, db: usize, ix: &Index, key: &[u8]) -> bool {
                 row.0.push((name.clone(), v));
             }
         }
-        Some(Value::Json(j)) if ix.spec.rule.doc_type == DocType::Json => {
+        Some(ValueRef::Json(j)) if ix.spec.rule.doc_type == DocType::Json => {
             for (name, path) in &keys {
                 let nodes = if path.first() == Some(&b'$') { json_get(j.root(), path) } else { None };
                 let v = match nodes {
@@ -371,7 +371,7 @@ fn update_expiration(eng: &mut Engine, db: usize, key: &[u8]) {
     if ops.is_empty() {
         return;
     }
-    let ttl = live(eng, db, key).map_or(0, |e| e.expire);
+    let ttl = live(eng, db, key).map_or(0, |e| e.expire());
     for (name, _) in ops {
         if let Some(ix) = eng.search.indexes.get_mut(&name)
             && ix.monitor_expiration
@@ -418,8 +418,8 @@ fn update_field_expiration(eng: &mut Engine, db: usize, key: &[u8]) {
             }
             continue;
         }
-        let fx = match live(eng, db, key).map(|e| &e.value) {
-            Some(Value::Hash(h)) => field_expirations(ix, h),
+        let fx = match live(eng, db, key).map(|e| e.value()) {
+            Some(ValueRef::Hash(h)) => field_expirations(ix, h),
             _ => Vec::new(),
         };
         if let Some(ix) = eng.search.indexes.get_mut(&name)
@@ -433,8 +433,8 @@ fn update_field_expiration(eng: &mut Engine, db: usize, key: &[u8]) {
 /// `Document_LoadSchemaFieldHash`: the schema fields (by path, as C strings), the language,
 /// score and payload from their rule fields, and the TTLs.
 fn load_hash(eng: &Engine, ix: &Index, db: usize, key: &[u8]) -> Result<Document, QErr> {
-    let h = match live(eng, db, key).map(|e| (&e.value, e.expire)) {
-        Some((Value::Hash(h), expire)) => (h, expire),
+    let h = match live(eng, db, key).map(|e| (e.value(), e.expire())) {
+        Some((ValueRef::Hash(h), expire)) => (h, expire),
         _ => {
             return Err(QErr::user(Code::Inval, "Key does not exist or is not a hash", format!(": {}", spec::text(key))));
         }
@@ -672,14 +672,14 @@ fn load_json(eng: &Engine, ix: &Index, db: usize, key: &[u8]) -> Result<Document
     let Some(e) = live(eng, db, key) else {
         return Err((QErr::user(Code::Inval, "Key does not exist", format!(": {}", spec::text(key))), None));
     };
-    let Value::Json(json) = &e.value else {
+    let ValueRef::Json(json) = e.value() else {
         return Err((QErr::user(Code::Inval, "Key does not exist or is not a json", format!(": {}", spec::text(key))), None));
     };
     let root = json.root();
     let rule = &ix.spec.rule;
     let mut doc = Document::new(key, DocType::Json);
     if ix.monitor_expiration {
-        doc.expire_at = e.expire;
+        doc.expire_at = e.expire();
     }
     doc.language = rule.lang_default;
     if let Some(f) = &rule.lang_field
@@ -1384,7 +1384,7 @@ mod tests {
         run(&mut e, &mut c, "SELECT 1");
         run(&mut e, &mut c, "SET h 1");
         run(&mut e, &mut c, "SET k 1");
-        let Some(Value::Hash(h)) = e.dbs[0].keys.get(&b"h"[..]).map(|en| &en.value) else { panic!("h is gone") };
+        let Some(crate::value::ValueRef::Hash(h)) = e.dbs[0].keys.get(&b"h"[..]).map(|en| en.value()) else { panic!("h is gone") };
         assert_eq!(h.len(), 2);
         assert!(e.dbs[0].keys.get(&b"k"[..]).is_none());
     }

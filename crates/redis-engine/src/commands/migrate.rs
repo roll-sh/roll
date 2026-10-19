@@ -180,10 +180,12 @@ fn migrate(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let mut items: Vec<(Bytes, i64, Vec<u8>)> = Vec::new();
     for k in &args[first..first + count] {
         if cx.get_entry(k).is_some() {
-            let e = cx.eng.dbs[cx.client.db].keys.get_mut(k).expect("found");
-            e.value.prepare_save();
-            let ttl = if e.expire == 0 { 0 } else { (e.expire - now).max(1) };
-            items.push((k.clone(), ttl, crate::rdb::dump(&e.value, now)));
+            let mut e = cx.eng.dbs[cx.client.db].keys.get_mut(k).expect("found");
+            if let Some(v) = e.aggregate_mut() {
+                v.prepare_save();
+            }
+            let ttl = if e.expire() == 0 { 0 } else { (e.expire() - now).max(1) };
+            items.push((k.clone(), ttl, crate::rdb::dump(e.as_ref().value(), now)));
         }
     }
     if items.is_empty() {

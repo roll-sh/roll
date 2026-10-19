@@ -110,7 +110,7 @@ fn saves_what_it_loaded() {
         assert_eq!(e2.expire, e.expire);
         // Hashtables iterate in hash order.
         if e.value.encoding() != "hashtable" {
-            assert_eq!(rdb::dump(&e2.value, 0), rdb::dump(&e.value, 0), "{}", String::from_utf8_lossy(&k.1));
+            assert_eq!(rdb::dump(e2.value.view(), 0), rdb::dump(e.value.view(), 0), "{}", String::from_utf8_lossy(&k.1));
         }
     }
 }

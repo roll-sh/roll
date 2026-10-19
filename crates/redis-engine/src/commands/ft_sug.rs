@@ -12,7 +12,7 @@ use crate::search::args::{Ac, AcErr, COALESCE, GE1};
 use crate::search::error::{Code, QErr};
 use crate::search::levenshtein::MatchMode;
 use crate::search::trie::{SortMode, TRIE_ERR_PAYLOAD_OVERFLOW, TRIE_MAX_PREFIX, Trie};
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 
 /// What `RM_OpenKey` finds: nothing, another type, or a trie.
 enum Found {
@@ -26,7 +26,7 @@ fn open_write(cx: &mut Cx, key: &[u8]) -> Found {
     cx.touch(key);
     match cx.peek(key) {
         None => Found::Empty,
-        Some(e) if matches!(e.value, Value::Sug(_)) => Found::Trie,
+        Some(e) if matches!(e.value(), ValueRef::Sug(_)) => Found::Trie,
         Some(_) => Found::Other,
     }
 }
@@ -83,7 +83,7 @@ pub(super) fn suglen(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     match cx.get(&args[1]) {
         None => Ok(Reply::Int(0)),
-        Some(Value::Sug(t)) => Ok(Reply::Int(t.size() as i64)),
+        Some(ValueRef::Sug(t)) => Ok(Reply::Int(t.size() as i64)),
         Some(_) => Err(WRONGTYPE),
     }
 }
@@ -149,7 +149,7 @@ pub(super) fn sugget(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let max_dist = if fuzzy { 1 } else { 0 };
     let t = match cx.get(&args[1]) {
         None => return Ok(Reply::Array(Vec::new())),
-        Some(Value::Sug(t)) => t,
+        Some(ValueRef::Sug(t)) => t,
         Some(_) => return Err(WRONGTYPE),
     };
     let Some(res) = t.collect_fuzzy(prefix, num as usize, max_dist, MatchMode::Prefix, trim, optimize) else {

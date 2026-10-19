@@ -8,7 +8,7 @@ use crate::notify;
 use crate::types::Set;
 use crate::types::set::Limits;
 use crate::util::{Rng, glob_match, parse_i64};
-use crate::value::{Entry, Kind, Value};
+use crate::value::{Kind, Value, ValueRef};
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -287,8 +287,8 @@ fn srandmember_count(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 pub fn smove(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let (src, dst, m) = (&args[1], &args[2], &args[3]);
     let lim = limits(cx);
-    let src_kind = cx.peek(src).map(|e| e.value.kind());
-    let dst_kind = cx.peek(dst).map(|e| e.value.kind());
+    let src_kind = cx.peek(src).map(|e| e.value().kind());
+    let dst_kind = cx.peek(dst).map(|e| e.value().kind());
     let Some(sk) = src_kind else { return Ok(Reply::Int(0)) };
     if sk != Kind::Set || dst_kind.is_some_and(|k| k != Kind::Set) {
         return Err(WRONGTYPE);
@@ -328,8 +328,8 @@ fn borrow_sets<'a>(cx: &'a Cx, keys: &[Bytes], exists: &[bool]) -> Vec<Option<&'
     let db = &cx.eng.dbs[cx.client.db];
     keys.iter()
         .zip(exists)
-        .map(|(k, &ok)| match db.keys.get(k) {
-            Some(Entry { value: Value::Set(s), .. }) if ok => Some(&**s),
+        .map(|(k, &ok)| match db.keys.get(k).map(|e| e.value()) {
+            Some(ValueRef::Set(s)) if ok => Some(s),
             _ => None,
         })
         .collect()

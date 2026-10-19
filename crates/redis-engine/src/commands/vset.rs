@@ -9,7 +9,7 @@ use super::zsets::zfloat;
 use super::*;
 use crate::cmd;
 use crate::util::parse_i64;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vset::expr::Expr;
 use crate::vset::hnsw::{self, Node};
 use crate::vset::{self as vs, VSet};
@@ -43,7 +43,7 @@ fn wrong_arity(cx: &Cx) -> Error {
 fn open_read<'c>(cx: &'c mut Cx, key: &[u8]) -> Open<&'c VSet> {
     match cx.get(key) {
         None => Open::Empty,
-        Some(Value::VSet(v)) => Open::Found(v),
+        Some(ValueRef::VSet(v)) => Open::Found(v),
         Some(_) => Open::Other,
     }
 }
@@ -53,15 +53,15 @@ fn open_write(cx: &mut Cx, key: &[u8]) -> Open<()> {
     cx.touch(key);
     match cx.peek(key) {
         None => Open::Empty,
-        Some(e) if matches!(e.value, Value::VSet(_)) => Open::Found(()),
+        Some(e) if matches!(e.value(), ValueRef::VSet(_)) => Open::Found(()),
         Some(_) => Open::Other,
     }
 }
 
 /// The set a successful open found, for reading.
 fn set_ref<'c>(cx: &'c mut Cx, key: &[u8]) -> &'c VSet {
-    match cx.peek(key).map(|e| &e.value) {
-        Some(Value::VSet(v)) => v,
+    match cx.peek(key).map(|e| e.value()) {
+        Some(ValueRef::VSet(v)) => v,
         _ => unreachable!("opened"),
     }
 }

@@ -13,11 +13,12 @@
 //! estimator used since Redis 5.
 
 use super::*;
+use crate::object::ObjectMut;
 use crate::cmd;
 use crate::notify;
 use crate::object::Sds;
 use crate::util::Rng;
-use crate::value::{Kind, Str, Value};
+use crate::value::{Kind, Str, ValueRef};
 
 pub static COMMANDS: &[Command] = &[
     cmd!("pfadd", -2, WRITE | DENYOOM | FAST, 1, 1, 1, pfadd, HyperLogLog),
@@ -559,10 +560,10 @@ impl Registers {
 /// PFDEBUG SIMD ON|OFF (server-wide in Redis; the vectorised paths are on by default).
 static SIMD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-fn check(v: &Value) -> Result<&Str, Error> {
+fn check(v: ValueRef<'_>) -> Result<&[u8], Error> {
     match v {
-        Value::Str(s) if is_valid(s) => Ok(s),
-        Value::Str(_) => Err(HLL_WRONGTYPE),
+        ValueRef::Str(s) if is_valid(s) => Ok(s),
+        ValueRef::Str(_) => Err(HLL_WRONGTYPE),
         _ => Err(WRONGTYPE),
     }
 }
@@ -571,7 +572,7 @@ fn check(v: &Value) -> Result<&Str, Error> {
 fn check_key(cx: &mut Cx, key: &[u8]) -> Result<bool, Error> {
     match cx.peek(key) {
         None => Ok(false),
-        Some(e) => check(&e.value).map(|_| true),
+        Some(e) => check(e.value()).map(|_| true),
     }
 }
 
@@ -585,7 +586,7 @@ pub fn pfadd(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     } else {
         *e.str_new_raw() = new_sparse();
     }
-    let mut alloc = e.entry.sds();
+    let mut alloc = e.sds();
     let res = {
         let s = e.str();
         let mut updated = 0;
@@ -608,7 +609,7 @@ pub fn pfadd(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         }
         if corrupt { Err(INVALIDOBJ) } else { Ok(updated) }
     };
-    e.entry.set_sds(alloc);
+    e.set_sds(alloc);
     match res {
         Ok(n) if n > 0 => {
             e.notify(notify::STRING, "pfadd");
@@ -657,7 +658,7 @@ pub fn pfcount(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         let mut e = cx.get_mut(key).expect("looked up above");
         e.unshare();
         set_cached_card(e.str(), card);
-    } else if let Some(e) = cx.eng.dbs[cx.client.db].keys.get_mut(key) {
+    } else if let Some(mut e) = cx.eng.dbs[cx.client.db].keys.get_mut(key) {
         // The value is made raw either way (`dbUnshareStringValue`).
         e.unshare(key.len());
     }
@@ -686,7 +687,7 @@ pub fn pfmerge(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     } else {
         *e.str_new_raw() = new_sparse();
     }
-    let mut alloc = e.entry.sds();
+    let mut alloc = e.sds();
     let ok = {
         let s = e.str();
         if use_dense {
@@ -716,7 +717,7 @@ pub fn pfmerge(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             true
         }
     };
-    e.entry.set_sds(alloc);
+    e.set_sds(alloc);
     if !ok {
         e.unchanged();
         return Err(INVALIDOBJ);
@@ -744,7 +745,7 @@ pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         });
     }
     let Some(entry) = cx.peek(key) else { return Err(Error::new("ERR The specified key does not exist")) };
-    check(&entry.value)?;
+    check(entry.value())?;
     // Made raw before the subcommand is even known (`dbUnshareStringValue`).
     {
         let mut e = cx.get_mut(key).expect("looked up above");
@@ -757,8 +758,8 @@ pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if known && args.len() != 3 {
         return Err(arity());
     }
-    let s = match &cx.peek(key).expect("looked up above").value {
-        Value::Str(s) => s.clone(),
+    let s = match cx.peek(key).expect("looked up above").value() {
+        ValueRef::Str(s) => s,
         _ => unreachable!("checked above"),
     };
     if eq(sub, "decode") {
@@ -773,7 +774,7 @@ pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                 out.push(format!("z:{}", zero_len(op)));
                 p += 1;
             } else if is_xzero(op) {
-                out.push(format!("Z:{}", xzero_len(&s, p)));
+                out.push(format!("Z:{}", xzero_len(s, p)));
                 p += 2;
             } else {
                 out.push(format!("v:{},{}", val_value(op), val_len(op)));
@@ -804,7 +805,7 @@ pub fn pfdebug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         Reply::Int(converted as i64)
     };
     if converted {
-        e.entry.set_sds(Sds::new(DENSE_SIZE));
+        e.set_sds(Sds::new(DENSE_SIZE));
     }
     if !converted {
         e.unchanged();

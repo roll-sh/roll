@@ -3,11 +3,12 @@
 //! stdout go to the log.
 
 use super::*;
+use crate::object::Object;
 use crate::commands::replication::ServerAction;
 use crate::dict::DictStats;
 use crate::engine::Engine;
 use crate::types::stream::StreamId;
-use crate::value::{Entry, Str, Value};
+use crate::value::{Str, Value, ValueRef};
 use sha1::{Digest, Sha1};
 
 /// DEBUG's switches, which Redis keeps in `server` (per engine here).
@@ -258,28 +259,28 @@ pub fn debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         _ if is("keymeta-aof-dump") && n == 3 => {
             let now = cx.now;
             Ok(match cx.eng.dbs[cx.client.db].keys.get(&args[2]) {
-                Some(e) => Reply::Bulk(crate::rdb::dump(&e.value, now).into()),
+                Some(e) => Reply::Bulk(crate::rdb::dump(e.value(), now).into()),
                 None => Reply::Nil,
             })
         }
         _ if is("sdslen") && n == 3 => {
             let key = &args[2];
             let Some(e) = cx.eng.dbs[cx.client.db].keys.get(key) else { return Err(NO_KEY) };
-            match &e.value {
-                Value::Str(s) => crate::object::sdslen(e, key.len(), s).map(Reply::Status).ok_or(Error::new("ERR Not an sds encoded string.")),
+            match e.value() {
+                ValueRef::Str(s) => crate::object::sdslen(&e, key.len(), s).map(Reply::Status).ok_or(Error::new("ERR Not an sds encoded string.")),
                 _ => Err(Error::new("ERR Not an sds encoded string.")),
             }
         }
         _ if is("listpack") && n == 3 => {
             let Some(e) = cx.get_entry(&args[2]) else { return Err(NO_KEY) };
-            if !matches!(e.value.encoding(), "listpack" | "listpackex") {
+            if !matches!(e.value().encoding(), "listpack" | "listpackex") {
                 return Err(Error::new("ERR Not a listpack encoded object."));
             }
             Ok(Reply::status("Listpack structure printed on stdout"))
         }
         _ if is("quicklist") && (n == 3 || n == 4) => {
             let Some(e) = cx.get_entry(&args[2]) else { return Err(NO_KEY) };
-            if e.value.encoding() != "quicklist" {
+            if e.value().encoding() != "quicklist" {
                 return Err(Error::new("ERR Not a quicklist encoded object."));
             }
             Ok(Reply::status("Quicklist structure printed on stdout"))
@@ -295,7 +296,7 @@ pub fn debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
                     .map(|k| {
                         let mut d = [0u8; 20];
                         if let Some(e) = db.keys.get(k) {
-                            object_digest(&mut d, e);
+                            object_digest(&mut d, e.value(), e.expire());
                         }
                         Reply::Status(hex(&d))
                     })
@@ -370,10 +371,10 @@ pub fn debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         _ if is("htstats-key") && n >= 3 => {
             let full = n >= 4 && eq(&args[3], "full");
             let Some(e) = cx.get_entry(&args[2]) else { return Err(NO_KEY) };
-            let stats = match &e.value {
-                Value::Hash(h) => h.dict_stats(full),
-                Value::Set(s) => s.dict_stats(full),
-                Value::ZSet(z) => z.dict_stats(full),
+            let stats = match e.value() {
+                ValueRef::Hash(h) => h.dict_stats(full),
+                ValueRef::Set(s) => s.dict_stats(full),
+                ValueRef::ZSet(z) => z.dict_stats(full),
                 _ => None,
             };
             let Some(stats) = stats else {
@@ -450,11 +451,13 @@ fn kvstore_stats(len: usize, stats: Vec<DictStats>, full: bool) -> String {
 /// DEBUG OBJECT key
 fn object(cx: &mut Cx, key: &[u8]) -> CmdResult {
     let now = cx.now;
-    let Some(e) = cx.eng.dbs[cx.client.db].keys.get_mut(key) else { return Err(NO_KEY) };
-    e.value.prepare_save();
-    let e = &*e;
+    let Some(mut e) = cx.eng.dbs[cx.client.db].keys.get_mut(key) else { return Err(NO_KEY) };
+    if let Some(v) = e.aggregate_mut() {
+        v.prepare_save();
+    }
+    let e = e.into_ref();
     let mut extra = String::new();
-    if let Value::List(l) = &e.value
+    if let ValueRef::List(l) = e.value()
         && let Some((fill, sizes)) = l.quicklist_info()
     {
         let (nodes, size) = sizes.fold((0usize, 0usize), |(n, s), sz| (n + 1, s + sz));
@@ -467,11 +470,11 @@ fn object(cx: &mut Cx, key: &[u8]) -> CmdResult {
     }
     Ok(Reply::Status(format!(
         "Value at:{:p} refcount:1 encoding:{} serializedlength:{} lru:{} lru_seconds_idle:{}{extra}",
-        e as *const Entry,
+        e.addr(),
         e.encoding(key.len()),
-        crate::rdb::saved_len(&e.value, now),
-        e.lru & crate::engine::LRU_CLOCK_MAX,
-        Engine::idle_secs(e, now),
+        crate::rdb::saved_len(e.value(), now),
+        e.lru() & crate::engine::LRU_CLOCK_MAX,
+        Engine::idle_secs(&e, now),
     )))
 }
 
@@ -713,7 +716,7 @@ pub fn dataset_digest(eng: &Engine) -> [u8; 20] {
         for (k, e) in db.keys.iter() {
             let mut d = [0u8; 20];
             mix_digest(&mut d, k);
-            object_digest(&mut d, e);
+            object_digest(&mut d, e.value(), e.expire());
             xor_digest(&mut out, &d);
         }
     }
@@ -722,23 +725,23 @@ pub fn dataset_digest(eng: &Engine) -> [u8; 20] {
 
 /// `xorObjectDigest`: the type, the value (unordered collections xor'ed element digests) and
 /// whether the key expires.
-fn object_digest(d: &mut [u8; 20], e: &Entry) {
-    let ty: u32 = match &e.value {
-        Value::Str(_) => 0,
-        Value::List(_) => 1,
-        Value::Set(_) => 2,
-        Value::ZSet(_) => 3,
-        Value::Hash(_) => 4,
-        Value::Stream(_) => 6,
-        Value::Array(_) => 7,
-        Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) | Value::Sug(_) => 5,
+fn object_digest(d: &mut [u8; 20], v: ValueRef<'_>, expire: i64) {
+    let ty: u32 = match v {
+        ValueRef::Str(_) => 0,
+        ValueRef::List(_) => 1,
+        ValueRef::Set(_) => 2,
+        ValueRef::ZSet(_) => 3,
+        ValueRef::Hash(_) => 4,
+        ValueRef::Stream(_) => 6,
+        ValueRef::Array(_) => 7,
+        ValueRef::Json(_) | ValueRef::Sketch(_) | ValueRef::VSet(_) | ValueRef::Ts(_) | ValueRef::Sug(_) => 5,
     };
     mix_digest(d, &ty.to_be_bytes());
-    match &e.value {
-        Value::Str(s) => mix_digest(d, s),
-        Value::List(l) => l.iter().for_each(|v| mix_digest(d, v)),
-        Value::Set(s) => s.iter_members().for_each(|m| xor_digest(d, &m)),
-        Value::ZSet(z) => {
+    match v {
+        ValueRef::Str(s) => mix_digest(d, s),
+        ValueRef::List(l) => l.iter().for_each(|v| mix_digest(d, v)),
+        ValueRef::Set(s) => s.iter_members().for_each(|m| xor_digest(d, &m)),
+        ValueRef::ZSet(z) => {
             for (m, score) in z.iter() {
                 let mut ed = [0u8; 20];
                 mix_digest(&mut ed, m);
@@ -746,7 +749,7 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
                 xor_digest(d, &ed);
             }
         }
-        Value::Hash(h) => {
+        ValueRef::Hash(h) => {
             for (f, v, ttl) in h.iter() {
                 let mut ed = [0u8; 20];
                 mix_digest(&mut ed, f);
@@ -757,7 +760,7 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
                 xor_digest(d, &ed);
             }
         }
-        Value::Stream(s) => {
+        ValueRef::Stream(s) => {
             for entry in s.entries.range(StreamId::MIN, StreamId::MAX) {
                 mix_digest(d, format!("{}.{}", entry.id.ms, entry.id.seq).as_bytes());
                 for (f, v) in entry.fields() {
@@ -766,7 +769,7 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
                 }
             }
         }
-        Value::Array(a) => {
+        ValueRef::Array(a) => {
             let mut next = 0;
             for (idx, v) in a.iter() {
                 for _ in next..idx {
@@ -781,9 +784,9 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
         }
         // RedisJSON, RedisBloom, RedisTimeSeries and RediSearch's tries have no digest callback:
         // only the type counts.
-        Value::Json(_) | Value::Sketch(_) | Value::Ts(_) | Value::Sug(_) => {}
+        ValueRef::Json(_) | ValueRef::Sketch(_) | ValueRef::Ts(_) | ValueRef::Sug(_) => {}
         // A module digest: each sequence mixed from zero, the sequences xor'ed together.
-        Value::VSet(v) => {
+        ValueRef::VSet(v) => {
             let mut x = [0u8; 20];
             v.digest_sequences(|seq| {
                 let mut o = [0u8; 20];
@@ -797,7 +800,7 @@ fn object_digest(d: &mut [u8; 20], e: &Entry) {
             xor_digest(d, &x);
         }
     }
-    if e.expire != 0 {
+    if expire != 0 {
         xor_digest(d, b"!!expire!!");
     }
 }

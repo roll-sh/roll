@@ -30,7 +30,7 @@ use crate::notify;
 use crate::types::Hash;
 use crate::types::hash::{Limits, expired};
 use crate::util::{fmt_i64, parse_i64};
-use crate::value::{Entry, Kind, Str, Value};
+use crate::value::{Entry, Kind, Str, Value, ValueRef};
 use std::time::Instant;
 
 pub static COMMANDS: &[Command] = &[
@@ -145,8 +145,8 @@ fn try_template(cx: &mut Cx, key: &[u8]) {
 
 /// The hash at `key` in the current database, without any lookup side effects.
 fn hash_ref<'a>(cx: &'a Cx, key: &[u8]) -> Option<&'a Hash> {
-    match cx.eng.dbs[cx.client.db].keys.get(key).map(|e| &e.value) {
-        Some(Value::Hash(h)) => Some(h),
+    match cx.eng.dbs[cx.client.db].keys.get(key).map(|e| e.value()) {
+        Some(ValueRef::Hash(h)) => Some(h),
         _ => None,
     }
 }
@@ -156,7 +156,7 @@ fn hash_ref<'a>(cx: &'a Cx, key: &[u8]) -> Option<&'a Hash> {
 fn with_hash<R>(cx: &mut Cx, key: &[u8], f: impl FnOnce(&mut Hash) -> R) -> Option<R> {
     let db = cx.client.db;
     let d = &mut cx.eng.dbs[db];
-    let Some(Entry { value: Value::Hash(h), .. }) = d.keys.get_mut(key) else { return None };
+    let Some(Value::Hash(h)) = d.keys.get_mut(key).and_then(|e| e.into_aggregate_mut()) else { return None };
     let old = h.mem();
     let r = f(h);
     let new = h.mem();
@@ -308,7 +308,7 @@ pub(crate) fn lazy_get(cx: &mut Cx, key: &[u8], field: &[u8]) -> Option<Bytes> {
 /// next field expiry. Returns true if that deleted the whole hash.
 pub(crate) fn expire_fields(eng: &mut Engine, db: usize, key: &[u8], now: i64) -> bool {
     let d = &mut eng.dbs[db];
-    let Some(Entry { value: Value::Hash(h), .. }) = d.keys.get_mut(key) else {
+    let Some(Value::Hash(h)) = d.keys.get_mut(key).and_then(|e| e.into_aggregate_mut()) else {
         // Not a hash (any more): drop a stale index entry.
         d.sync_subexpiry(key);
         return false;
@@ -363,8 +363,8 @@ pub(crate) fn active_expire_fields(eng: &mut Engine, db: usize, now: i64, start:
     eng.dbs[db].subexpire_cursor = cursor;
     let mut total = 0;
     for k in due {
-        let before = eng.dbs[db].keys.get(&k).map(|e| match &e.value {
-            Value::Hash(h) => h.len(),
+        let before = eng.dbs[db].keys.get(&k).map(|e| match e.value() {
+            ValueRef::Hash(h) => h.len(),
             _ => 0,
         });
         match before {
@@ -385,8 +385,8 @@ pub(crate) fn active_expire_fields(eng: &mut Engine, db: usize, now: i64, start:
 }
 
 fn hash_len(eng: &Engine, db: usize, key: &[u8]) -> usize {
-    match eng.dbs[db].keys.get(key).map(|e| &e.value) {
-        Some(Value::Hash(h)) => h.len(),
+    match eng.dbs[db].keys.get(key).map(|e| e.value()) {
+        Some(ValueRef::Hash(h)) => h.len(),
         _ => 0,
     }
 }
@@ -686,7 +686,7 @@ pub fn himport_set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     cx.set(key, Value::Hash(Box::new(h)), false);
     // Replicated as a RESTORE of the new hash (field names and values in one payload).
     let db = cx.client.db;
-    let payload = crate::rdb::dump(&cx.eng.dbs[db].keys.get(key).expect("just set").value, cx.now);
+    let payload = crate::rdb::dump(cx.eng.dbs[db].keys.get(key).expect("just set").value(), cx.now);
     cx.propagate_as(vec![b("RESTORE"), key.clone(), b("0"), Bytes::from(payload), b("REPLACE")]);
     cx.notify_fields(notify::HASH, "hset", key, fields.iter());
     cx.changes(1);
@@ -745,7 +745,7 @@ pub fn hrandfield(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Ok(Reply::Nil);
     }
     let Engine { dbs, rng, .. } = &mut *cx.eng;
-    let Some(Entry { value: Value::Hash(h), .. }) = dbs[cx.client.db].keys.get(key) else { return Ok(Reply::Nil) };
+    let Some(ValueRef::Hash(h)) = dbs[cx.client.db].keys.get(key).map(|e| e.value()) else { return Ok(Reply::Nil) };
     Ok(h.random(rng).map_or(Reply::Nil, |(f, _)| Reply::bulk(f)))
 }
 
@@ -760,7 +760,7 @@ fn hrandfield_count(cx: &mut Cx, key: &[u8], l: i64, withvalues: bool) -> CmdRes
     let resp3 = cx.resp() >= 3;
     let budget = cx.reply_budget();
     let Engine { dbs, rng, .. } = &mut *cx.eng;
-    let Some(Entry { value: Value::Hash(h), .. }) = dbs[cx.client.db].keys.get(key) else {
+    let Some(ValueRef::Hash(h)) = dbs[cx.client.db].keys.get(key).map(|e| e.value()) else {
         return Ok(Reply::Array(Vec::new()));
     };
     let size = h.len() as u64;
@@ -1546,7 +1546,7 @@ mod tests {
         assert!(effects.iter().any(|x| x.args[0].as_ref() == b"HDEL"));
         assert!(effects.iter().any(|x| x.args[0].as_ref() == b"HPEXPIREAT"));
         // Active expiry deletes due fields of registered hashes.
-        if let Some(crate::Entry { value: crate::Value::Hash(h), .. }) = e.dbs[0].keys.get_mut(&b"h"[..]) {
+        if let Some(crate::Value::Hash(h)) = e.dbs[0].keys.get_mut(&b"h"[..]).and_then(|e| e.into_aggregate_mut()) {
             h.set_expire(b"a", 1);
             h.set_subexpiry(1);
         }
@@ -1630,7 +1630,7 @@ mod tests {
             line.push_str(&format!(" {f} v{f}"));
         }
         run(e, c, &line);
-        if let Some(crate::Entry { value: crate::Value::Hash(h), .. }) = e.dbs[0].keys.get_mut(&b"h"[..]) {
+        if let Some(crate::Value::Hash(h)) = e.dbs[0].keys.get_mut(&b"h"[..]).and_then(|e| e.into_aggregate_mut()) {
             for f in &fields[..expired] {
                 h.set_expire(f.as_bytes(), 1);
             }

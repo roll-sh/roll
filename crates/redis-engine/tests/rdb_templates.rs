@@ -135,8 +135,8 @@ fn converts_plain_hashes_while_loading() {
     for (_, k) in &untemplate {
         db.untemplate(k.as_bytes(), lim);
     }
-    let enc = |k: &str| match &db.keys.get(k.as_bytes()).unwrap().value {
-        Value::Hash(h) => h.encoding(),
+    let enc = |k: &str| match db.keys.get(k.as_bytes()).unwrap().value() {
+        redis_engine::value::ValueRef::Hash(h) => h.encoding(),
         _ => unreachable!(),
     };
     assert_eq!((enc("hlp"), enc("hht")), ("listpack", "hashtable"));

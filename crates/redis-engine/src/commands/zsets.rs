@@ -7,7 +7,7 @@ use crate::notify;
 use crate::types::zset::{AddFlags, AddOut, LexBound, LexRange, Limits, ScoreRange};
 use crate::types::{Set, ZSet};
 use crate::util::{Rng, glob_match, parse_i64};
-use crate::value::{Kind, Str, Value};
+use crate::value::{Kind, Str, Value, ValueRef};
 use crate::{cmd, util};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -181,8 +181,8 @@ fn push_scored(out: &mut Vec<Reply>, resp3: bool, withscores: bool, m: &[u8], s:
 pub(crate) fn zset_ref<'b>(cx: &'b Cx<'_>, key: &[u8]) -> Option<&'b ZSet> {
     let now = cx.eng.expiry_clock(cx.now);
     match cx.eng.dbs[cx.client.db].keys.get(key) {
-        Some(e) if !e.expired(now) => match &e.value {
-            Value::ZSet(z) => Some(z),
+        Some(e) if !e.expired(now) => match e.value() {
+            ValueRef::ZSet(z) => Some(z),
             _ => None,
         },
         _ => None,
@@ -471,7 +471,7 @@ fn zsetop(cx: &mut Cx, args: &[Bytes], dst: Option<&Bytes>, numkeys_idx: usize, 
     let keys = &args[numkeys_idx + 1..numkeys_idx + 1 + n];
     for k in keys {
         match cx.get(k) {
-            None | Some(Value::ZSet(_)) | Some(Value::Set(_)) => {}
+            None | Some(ValueRef::ZSet(_)) | Some(ValueRef::Set(_)) => {}
             Some(_) => return Err(WRONGTYPE),
         }
     }
@@ -523,9 +523,9 @@ fn zsetop(cx: &mut Cx, args: &[Bytes], dst: Option<&Bytes>, numkeys_idx: usize, 
         .zip(weights)
         .map(|(k, w)| {
             let src = match db.keys.get(k) {
-                Some(e) if !e.expired(now) => match &e.value {
-                    Value::ZSet(z) => Src::Z(z),
-                    Value::Set(s) => Src::S(s),
+                Some(e) if !e.expired(now) => match e.value() {
+                    ValueRef::ZSet(z) => Src::Z(z),
+                    ValueRef::Set(s) => Src::S(s),
                     _ => Src::Missing,
                 },
                 _ => Src::Missing,
@@ -944,7 +944,7 @@ fn zpop_generic<'k>(
     for k in keys {
         match cx.peek(k) {
             None => continue,
-            Some(e) if e.value.kind() != Kind::ZSet => return Err(WRONGTYPE),
+            Some(e) if e.value().kind() != Kind::ZSet => return Err(WRONGTYPE),
             Some(_) => {
                 found = Some(k);
                 break;
@@ -1013,13 +1013,13 @@ fn bzpop_generic(cx: &mut Cx, keys: &[Bytes], max: bool, timeout: i64, count: i6
     // Redis only wakes zset waiters for keys that became ready *as zsets*: a write of another
     // type to a watched key keeps the client waiting rather than failing it.
     let block = |cx: &mut Cx| cx.block_on(keys.iter().map(|k| Str::from_slice(k)).collect(), timeout, Reply::NilArray);
-    if cx.mode == Mode::Unblock && !keys.iter().any(|k| cx.peek(k).is_some_and(|e| e.value.kind() == Kind::ZSet)) {
+    if cx.mode == Mode::Unblock && !keys.iter().any(|k| cx.peek(k).is_some_and(|e| e.value().kind() == Kind::ZSet)) {
         return Ok(block(cx));
     }
     for k in keys {
         match cx.peek(k) {
             None => continue,
-            Some(e) if e.value.kind() != Kind::ZSet => return Err(WRONGTYPE),
+            Some(e) if e.value().kind() != Kind::ZSet => return Err(WRONGTYPE),
             Some(_) => {}
         }
         let (reply, popped) = zpop_generic(cx, std::slice::from_ref(k), max, true, count, nested, nested)?;
@@ -1106,8 +1106,8 @@ fn with_zset_rng<R>(cx: &mut Cx, key: &[u8], f: impl FnOnce(&ZSet, &mut Rng) -> 
     }
     let db = cx.client.db;
     let Engine { dbs, rng, .. } = &mut *cx.eng;
-    match dbs[db].keys.get(key).map(|e| &e.value) {
-        Some(Value::ZSet(z)) => Ok(Some(f(z, rng))),
+    match dbs[db].keys.get(key).map(|e| e.value()) {
+        Some(ValueRef::ZSet(z)) => Ok(Some(f(z, rng))),
         _ => Ok(None),
     }
 }

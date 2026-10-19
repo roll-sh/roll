@@ -14,7 +14,7 @@ use crate::db::Db;
 use crate::hub::Hub;
 use crate::notify;
 use crate::util::{Rng, now_ms};
-use crate::value::{Entry, Str, Value};
+use crate::value::{Str, ValueRef};
 use bytes::Bytes;
 use redis_proto::Reply;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1156,7 +1156,7 @@ impl Engine {
     pub(crate) fn flush_empty(&mut self) {
         while let Some((db, key)) = self.sig.empty.pop() {
             let d = &mut self.dbs[db as usize];
-            if d.keys.get(&key).is_some_and(|e| e.value.is_empty_aggregate()) {
+            if d.keys.get(&key).is_some_and(|e| e.value().is_empty_aggregate()) {
                 d.remove(&key);
                 self.sig.notify(notify::GENERIC, "del", db, &key);
                 self.sig.touch_quiet(db, &key);
@@ -1184,7 +1184,7 @@ impl Engine {
             // does it from the cron), so the command sees what it would see on Redis. Not while
             // active expiry is off (DEBUG SET-ACTIVE-EXPIRE 0) or paused, like the cron. True if
             // that deleted the whole hash.
-            if let Value::Hash(h) = &e.value
+            if let ValueRef::Hash(h) = e.value()
                 && h.subexpiry_due(now)
                 && mode != Mode::Replay
                 && !self.replica
@@ -1575,16 +1575,16 @@ impl Engine {
         }
     }
 
-    pub(crate) fn touch_entry(cfg: &Config, rng: &mut Rng, e: &mut Entry, now: i64) {
+    pub(crate) fn touch_entry(cfg: &Config, rng: &mut Rng, e: &mut (impl crate::keyspace::FieldsMut + ?Sized), now: i64) {
         if cfg.maxmemory_policy.is_lrm() {
             return;
         }
         if cfg.maxmemory_policy.is_lfu() {
-            let counter = lfu_decr(cfg, e.lru, now);
+            let counter = lfu_decr(cfg, e.lru(), now);
             let counter = lfu_incr(cfg, rng, counter);
-            e.lru = (lfu_minutes(now) << 8) | counter;
+            e.set_lru((lfu_minutes(now) << 8) | counter);
         } else {
-            e.lru = Self::lru_clock(now);
+            e.set_lru(Self::lru_clock(now));
         }
     }
 
@@ -1609,15 +1609,15 @@ impl Engine {
     }
 
     /// Seconds since last access (`OBJECT IDLETIME`).
-    pub fn idle_secs(e: &Entry, now: i64) -> u64 {
+    pub fn idle_secs(e: &(impl crate::keyspace::Fields + ?Sized), now: i64) -> u64 {
         let clock = Self::lru_clock(now);
-        let lru = e.lru & LRU_CLOCK_MAX;
+        let lru = e.lru() & LRU_CLOCK_MAX;
         (if clock >= lru { clock - lru } else { LRU_CLOCK_MAX - lru + clock }) as u64
     }
 
     /// `OBJECT FREQ`.
-    pub fn lfu_counter(&self, e: &Entry, now: i64) -> u32 {
-        lfu_decr(&self.cfg, e.lru, now)
+    pub fn lfu_counter(&self, e: &(impl crate::keyspace::Fields + ?Sized), now: i64) -> u32 {
+        lfu_decr(&self.cfg, e.lru(), now)
     }
 
     // ---- maxmemory ----
@@ -1667,7 +1667,7 @@ impl Engine {
             for i in 0..n {
                 let db = (off + i) % n;
                 let d = &self.dbs[db];
-                let k = if volatile { d.volatile.random(&mut self.rng).map(|(k, _)| k.clone()) } else { d.keys.random(&mut self.rng).map(|(k, _)| k.clone()) };
+                let k = if volatile { d.volatile.random(&mut self.rng).map(|(k, _)| k.clone()) } else { d.keys.random(&mut self.rng).map(|(k, _)| Str::from_slice(k)) };
                 if let Some(k) = k {
                     return Some((db as u16, k));
                 }
@@ -1682,14 +1682,14 @@ impl Engine {
             if volatile {
                 d.volatile.sample(&mut self.rng, samples, |k, _| cands.push(k.clone()));
             } else {
-                d.keys.sample(&mut self.rng, samples, |k, _| cands.push(k.clone()));
+                d.keys.sample(&mut self.rng, samples, |k, _| cands.push(Str::from_slice(k)));
             }
             for k in cands {
                 let Some(e) = d.keys.get(&k) else { continue };
                 let score = match policy {
-                    Policy::VolatileTtl => u64::MAX - e.expire.max(0) as u64,
-                    p if p.is_lfu() => 255 - lfu_decr(&self.cfg, e.lru, now) as u64,
-                    _ => Self::idle_secs(e, now) * 1000 + 1,
+                    Policy::VolatileTtl => u64::MAX - e.expire().max(0) as u64,
+                    p if p.is_lfu() => 255 - lfu_decr(&self.cfg, e.lru(), now) as u64,
+                    _ => Self::idle_secs(&e, now) * 1000 + 1,
                 };
                 if self.evict_pool.iter().any(|(_, pdb, pk)| *pdb == db as u16 && *pk == k) {
                     continue;
@@ -1747,9 +1747,9 @@ impl Engine {
                         if let Some(e) = d.keys.get(k) {
                             if e.expired(now) {
                                 expired.push(k.clone());
-                            } else if e.expire != 0 {
+                            } else if e.expire() != 0 {
                                 // Wraps like the C sum does with far-off expiries.
-                                ttl_sum = ttl_sum.wrapping_add(e.expire - now);
+                                ttl_sum = ttl_sum.wrapping_add(e.expire() - now);
                                 ttl_n += 1;
                             }
                         }
@@ -1832,8 +1832,8 @@ impl Engine {
     /// (`IndexMetricFromName`, a counted lookup once it listens).
     pub fn ts_loaded(&mut self, db: usize, key: &[u8]) {
         let Some(e) = self.dbs[db].keys.get(key) else { return };
-        let labels = match &e.value {
-            crate::value::Value::Ts(s) => {
+        let labels = match e.value() {
+            crate::value::ValueRef::Ts(s) => {
                 self.sig.ts_hook = true;
                 Some(s.labels.clone())
             }

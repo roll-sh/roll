@@ -27,7 +27,7 @@ use crate::ts::index::{self, Pred, c_str};
 use crate::ts::iter::{self, Align, Batch, BucketTs, Chain, Latest, Range};
 use crate::ts::{self, Create, OPT_COMPRESSED, OPT_UNCOMPRESSED, RStr, Rule, SKind, Series, bucket_start, normalize};
 use crate::util::parse_i64;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -132,7 +132,7 @@ fn open_key(cx: &mut Cx, db: usize, key: &[u8], write: bool) -> Found {
     cx.read_stats = !write;
     let found = match cx.get_entry(key) {
         None => Found::Empty,
-        Some(e) if matches!(e.value, Value::Ts(_)) => Found::Ts,
+        Some(e) if matches!(e.value(), ValueRef::Ts(_)) => Found::Ts,
         Some(_) => Found::Other,
     };
     (cx.client.db, cx.read_stats) = saved;
@@ -155,8 +155,8 @@ fn key_exists(cx: &mut Cx, key: &[u8]) -> bool {
 
 /// A series where it is, without any of a lookup's side effects.
 fn peek<'a>(cx: &'a Cx, db: usize, key: &[u8]) -> Option<&'a Series> {
-    match &cx.eng.dbs[db].keys.get(key)?.value {
-        Value::Ts(s) => Some(s),
+    match &cx.eng.dbs[db].keys.get(key)?.value() {
+        ValueRef::Ts(s) => Some(s),
         _ => None,
     }
 }
@@ -164,7 +164,7 @@ fn peek<'a>(cx: &'a Cx, db: usize, key: &[u8]) -> Option<&'a Series> {
 /// Change a series in place, keeping its database's memory count.
 fn with<T>(cx: &mut Cx, db: usize, key: &[u8], f: impl FnOnce(&mut Series) -> T) -> Option<T> {
     let crate::db::Db { keys, mem, .. } = &mut cx.eng.dbs[db];
-    let Value::Ts(s) = &mut keys.get_mut(key)?.value else { return None };
+    let Some(Value::Ts(s)) = keys.get_mut(key)?.into_aggregate_mut() else { return None };
     let old = s.approx_mem();
     let r = f(s);
     *mem = (*mem + s.approx_mem()).saturating_sub(old);
@@ -554,8 +554,8 @@ fn latest_for(cx: &Cx, s: &Series, range: &Range) -> Option<Latest> {
     let now = cx.eng.expiry_clock(cx.now);
     let sample = if user.can_use_key(src, false) {
         match cx.eng.dbs[0].keys.get(src.as_slice()) {
-            Some(e) if !e.expired(now) => match &e.value {
-                Value::Ts(x) => open_bucket(x, &s.key.b),
+            Some(e) if !e.expired(now) => match e.value() {
+                ValueRef::Ts(x) => open_bucket(x, &s.key.b),
                 _ => None,
             },
             _ => None,

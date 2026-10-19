@@ -262,9 +262,9 @@ enum Doc<'e> {
 }
 
 fn open_doc<'e>(eng: &'e Engine, db: usize, d: &Dmd) -> Option<Doc<'e>> {
-    match (&super::ft::live(eng, db, &d.key)?.value, d.doc_type) {
-        (crate::value::Value::Hash(h), DocType::Hash) => Some(Doc::Hash(h)),
-        (crate::value::Value::Json(j), DocType::Json) => Some(Doc::Json(j.root())),
+    match (&super::ft::live(eng, db, &d.key)?.value(), d.doc_type) {
+        (crate::value::ValueRef::Hash(h), DocType::Hash) => Some(Doc::Hash(h)),
+        (crate::value::ValueRef::Json(j), DocType::Json) => Some(Doc::Json(j.root())),
         _ => None,
     }
 }

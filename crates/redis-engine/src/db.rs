@@ -1,10 +1,11 @@
 //! One logical database (`SELECT n`): the keyspace plus the index of keys with a TTL.
 
 use crate::dict::Dict;
-use crate::value::{Entry, KEY_OVERHEAD, NO_SIZE, SIZE_BINS, SIZE_TYPES, Str, Value, key_mem};
+use crate::keyspace::{Fields, FieldsMut, KeySpace, KvMut};
+use crate::value::{Entry, KEY_OVERHEAD, NO_SIZE, SIZE_BINS, SIZE_TYPES, Str, Value, ValueRef, key_mem};
 
 pub struct Db {
-    pub keys: Dict<Str, Entry>,
+    pub keys: KeySpace,
     /// Keys that have a TTL, for active expiry and `volatile-*` eviction.
     pub volatile: Dict<Str, ()>,
     /// Approximate bytes used by this database (keys, values and overheads).
@@ -40,9 +41,9 @@ impl Default for Db {
 
 /// The subexpiry registration of a value (0 = none).
 #[inline]
-fn subexpiry_of(v: &Value) -> i64 {
+fn subexpiry_of(v: ValueRef<'_>) -> i64 {
     match v {
-        Value::Hash(h) => h.subexpiry(),
+        ValueRef::Hash(h) => h.subexpiry(),
         _ => 0,
     }
 }
@@ -67,7 +68,7 @@ impl Db {
     }
 
     /// Insert a brand-new key (caller checked it is absent).
-    pub fn insert_new(&mut self, key: &[u8], mut entry: Entry) -> &mut Entry {
+    pub fn insert_new(&mut self, key: &[u8], mut entry: Entry) -> KvMut<'_> {
         let k = Str::from_slice(key);
         // The object gets an expire slot for a TTL or a long key (`kvobjCreate`).
         entry.obj &= !crate::object::SLOT;
@@ -83,17 +84,19 @@ impl Db {
             self.volatile.insert(k.clone(), ());
             self.mem += Self::key_cost(&k);
         }
-        let sub = subexpiry_of(&entry.value);
+        let sub = subexpiry_of(entry.value.view());
         if sub != 0 {
             self.subexpires.insert(k.clone(), sub);
             self.mem += Self::key_cost(&k);
         }
-        self.keys.insert_new(k, entry)
+        self.keys.insert_new(key, entry)
     }
 
     /// Make the template hash at `key` a plain hash (`LoadItem::Untemplate`).
     pub fn untemplate(&mut self, key: &[u8], lim: crate::types::hash::Limits) {
-        if let Some(Entry { value: crate::value::Value::Hash(h), .. }) = self.keys.get_mut(key) {
+        if let Some(mut e) = self.keys.get_mut(key)
+            && let Some(Value::Hash(h)) = e.aggregate_mut()
+        {
             let old = h.mem();
             h.untemplate(false, lim);
             self.mem = (self.mem + h.mem()).saturating_sub(old);
@@ -120,12 +123,13 @@ impl Db {
     /// Set or clear (0) a key's expiry, keeping the volatile index in sync. Returns false when the
     /// key doesn't exist.
     pub fn set_expire(&mut self, key: &[u8], at: i64) -> bool {
-        let Some(e) = self.keys.get_mut(key) else { return false };
-        let had = e.expire != 0;
-        e.expire = at;
+        let Some(mut e) = self.keys.get_mut(key) else { return false };
+        let had = e.expire() != 0;
+        e.set_expire_raw(at);
         // An expire slot stays once added (PERSIST keeps it).
         if at != 0 {
-            e.obj |= crate::object::SLOT;
+            let obj = e.obj() | crate::object::SLOT;
+            e.set_obj(obj);
         }
         match (had, at != 0) {
             (false, true) => {
@@ -145,7 +149,7 @@ impl Db {
     /// Bring the `subexpires` index in line with the registration of the value at `key` (after a
     /// hash changed its registration, or the key's value was replaced).
     pub fn sync_subexpiry(&mut self, key: &[u8]) {
-        let sub = self.keys.get(key).map_or(0, |e| subexpiry_of(&e.value));
+        let sub = self.keys.get(key).map_or(0, |e| subexpiry_of(e.value()));
         if sub == 0 {
             if !self.subexpires.is_empty() && let Some((k, _)) = self.subexpires.remove_entry(key) {
                 self.mem = self.mem.saturating_sub(Self::key_cost(&k));
@@ -161,8 +165,8 @@ impl Db {
 
     /// Re-count a key whose value may have changed size (after a command touched it).
     pub fn resize(&mut self, key: &[u8]) {
-        let Some(e) = self.keys.get_mut(key) else { return };
-        Self::resize_entry(&mut self.keysizes, e);
+        let Some(mut e) = self.keys.get_mut(key) else { return };
+        Self::resize_entry(&mut self.keysizes, &mut e);
     }
 
     /// Redis skipped moving a string of `old_len` to `new_len` bytes in its histogram (SETBIT
@@ -178,16 +182,17 @@ impl Db {
     }
 
     /// Move `e` to its current keysizes slot.
-    pub fn resize_entry(keysizes: &mut [u64], e: &mut Entry) {
-        let slot = e.value.size_slot();
-        if slot != e.sized {
-            if e.sized != NO_SIZE {
-                keysizes[e.sized as usize] = keysizes[e.sized as usize].wrapping_sub(1);
+    pub fn resize_entry(keysizes: &mut [u64], e: &mut (impl FieldsMut + ?Sized)) {
+        let slot = e.value().size_slot();
+        let sized = e.sized();
+        if slot != sized {
+            if sized != NO_SIZE {
+                keysizes[sized as usize] = keysizes[sized as usize].wrapping_sub(1);
             }
             if slot != NO_SIZE {
                 keysizes[slot as usize] = keysizes[slot as usize].wrapping_add(1);
             }
-            e.sized = slot;
+            e.set_sized(slot);
         }
     }
 
@@ -195,10 +200,11 @@ impl Db {
     pub fn recount_sizes(&mut self) {
         self.keysizes.iter_mut().for_each(|n| *n = 0);
         let mut counts = std::mem::take(&mut self.keysizes);
-        self.keys.for_each_mut(|_, e| {
-            e.sized = e.value.size_slot();
-            if e.sized != NO_SIZE {
-                counts[e.sized as usize] += 1;
+        self.keys.for_each_mut(|_, mut e| {
+            let slot = e.value().size_slot();
+            e.set_sized(slot);
+            if slot != NO_SIZE {
+                counts[slot as usize] += 1;
             }
         });
         self.keysizes = counts;

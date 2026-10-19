@@ -10,7 +10,7 @@ use crate::engine::Mode;
 use crate::notify;
 use crate::types::list::Fill;
 use crate::util::{fmt_i64, parse_i64};
-use crate::value::{Kind, Str, Value};
+use crate::value::{Kind, Str, ValueRef};
 
 pub static COMMANDS: &[Command] = &[
     cmd!("lpush", -3, WRITE | DENYOOM | FAST, 1, 1, 1, lpush, List),
@@ -89,8 +89,8 @@ fn fill(cx: &Cx) -> Fill {
 fn list_len(cx: &mut Cx, key: &[u8]) -> Result<Option<usize>, Error> {
     match cx.peek(key) {
         None => Ok(None),
-        Some(e) => match &e.value {
-            Value::List(l) => Ok(Some(l.len())),
+        Some(e) => match e.value() {
+            ValueRef::List(l) => Ok(Some(l.len())),
             _ => Err(WRONGTYPE),
         },
     }
@@ -105,7 +105,7 @@ fn popped_bytes(vals: &[Vec<u8>], from_quicklist: bool) -> usize {
 /// A re-run blocked command (`Mode::Unblock`) is only served once one of its keys holds a list;
 /// otherwise Redis keeps it blocked (a key of another type doesn't wake it).
 fn still_waiting(cx: &mut Cx, keys: &[Bytes]) -> bool {
-    cx.mode == Mode::Unblock && !keys.iter().any(|k| cx.peek(k).is_some_and(|e| e.value.kind() == Kind::List))
+    cx.mode == Mode::Unblock && !keys.iter().any(|k| cx.peek(k).is_some_and(|e| e.value().kind() == Kind::List))
 }
 
 fn block(cx: &mut Cx, keys: &[Bytes], timeout_ms: i64, timeout_reply: Reply) -> Reply {
@@ -434,8 +434,8 @@ fn move_one(cx: &mut Cx, src: &[u8], dst: &[u8], from_left: bool, to_left: bool)
         return Ok(Some(v));
     }
     cx.check_type(dst, Kind::List)?;
-    let (v, quick) = match cx.peek(src).map(|e| &e.value) {
-        Some(Value::List(l)) => ((if from_left { l.first() } else { l.last() }).expect("non-empty").to_vec(), l.is_quicklist()),
+    let (v, quick) = match cx.peek(src).map(|e| e.value()) {
+        Some(ValueRef::List(l)) => ((if from_left { l.first() } else { l.last() }).expect("non-empty").to_vec(), l.is_quicklist()),
         _ => unreachable!("checked"),
     };
     {
@@ -541,8 +541,8 @@ fn move_many(cx: &mut Cx, src: &[u8], dst: &[u8], from_left: bool, to_left: bool
         e.changes(n);
         return Ok(Some(vals));
     }
-    let (mut vals, quick) = match cx.peek(src).map(|e| &e.value) {
-        Some(Value::List(l)) => {
+    let (mut vals, quick) = match cx.peek(src).map(|e| e.value()) {
+        Some(ValueRef::List(l)) => {
             let vals: Vec<Vec<u8>> =
                 if from_left { l.iter().take(n).map(<[u8]>::to_vec).collect() } else { l.iter().rev().take(n).map(<[u8]>::to_vec).collect() };
             (vals, l.is_quicklist())

@@ -1,6 +1,7 @@
 //! Generic keyspace commands.
 
 use super::*;
+use crate::object::{Object, ObjectMut};
 use crate::engine::Engine;
 use crate::notify;
 use crate::util::{fmt_i64, glob_match};
@@ -70,7 +71,7 @@ pub fn exists(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 pub fn type_(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
-    Ok(Reply::status(cx.get_notouch(&args[1]).map_or("none", |e| e.value.kind().name())))
+    Ok(Reply::status(cx.get_notouch(&args[1]).map_or("none", |e| e.value().kind().name())))
 }
 
 /// EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT key value [NX | XX | GT | LT]
@@ -142,10 +143,10 @@ pub fn pexpireat(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 fn ttl_generic(cx: &mut Cx, key: &[u8], ms: bool) -> CmdResult {
     // lookupKeyReadWithFlags(LOOKUP_NOTOUCH): counted, the access time left alone.
     let Some(e) = cx.get_notouch(key) else { return Ok(Reply::Int(-2)) };
-    if e.expire == 0 {
+    if e.expire() == 0 {
         return Ok(Reply::Int(-1));
     }
-    let left = (e.expire - cx.now).max(0);
+    let left = (e.expire() - cx.now).max(0);
     Ok(Reply::Int(if ms { left } else { (left + 500) / 1000 }))
 }
 
@@ -158,10 +159,10 @@ pub fn pttl(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 
 fn expiretime_generic(cx: &mut Cx, key: &[u8], ms: bool) -> CmdResult {
     let Some(e) = cx.get_notouch(key) else { return Ok(Reply::Int(-2)) };
-    if e.expire == 0 {
+    if e.expire() == 0 {
         return Ok(Reply::Int(-1));
     }
-    Ok(Reply::Int(if ms { e.expire } else { e.expire / 1000 }))
+    Ok(Reply::Int(if ms { e.expire() } else { e.expire() / 1000 }))
 }
 
 pub fn expiretime(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
@@ -300,7 +301,7 @@ pub fn scan_db(cx: &mut Cx, cursor: u64, o: &ScanOpts) -> (u64, Vec<Str>) {
     let mut c = cursor;
     let mut iterations = o.count * 10;
     loop {
-        c = db.keys.scan(c, |k, e| found.push((k.clone(), e.expired(now), e.value.kind())));
+        c = db.keys.scan(c, |k, e| found.push((Str::from_slice(k), e.expired(now), e.value().kind())));
         iterations -= 1;
         if c == 0 || iterations == 0 || found.len() >= o.count {
             break;
@@ -326,7 +327,7 @@ pub fn randomkey(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
         let Engine { dbs, rng, .. } = &mut *cx.eng;
         let db = &dbs[cx.client.db];
         let Some((k, e)) = db.keys.random(rng) else { return Ok(Reply::Nil) };
-        let (k, expired) = (k.clone(), e.expired(now));
+        let (k, expired) = (Str::from_slice(k), e.expired(now));
         if expired && !cx.eng.replica {
             cx.peek(&k);
             continue;
@@ -351,7 +352,7 @@ fn rename_generic(cx: &mut Cx, args: &[Bytes], nx: bool) -> CmdResult {
     entry.rekey(src.len(), dst.len(), false);
     let db = cx.db_index();
     let src_kind = entry.value.kind();
-    let dst_kind = cx.peek(dst).map(|e| e.value.kind());
+    let dst_kind = cx.peek(dst).map(|e| e.value().kind());
     if dst_kind.is_some() {
         cx.delete(dst);
     }
@@ -429,13 +430,13 @@ pub fn copy(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(Error::new("ERR source and destination objects are the same"));
     }
     // lookupKeyRead.
-    let Some(entry) = cx.get_entry(src).cloned() else { return Ok(Reply::Int(0)) };
+    let Some(entry) = cx.get_entry(src).map(|e| e.to_entry()) else { return Ok(Reply::Int(0)) };
     let now = cx.eng.expiry_clock(cx.now);
     let exists = cx.eng.dbs[to].keys.get(dst).is_some_and(|e| !e.expired(now));
     if exists && !replace {
         return Ok(Reply::Int(0));
     }
-    let old_kind = cx.eng.dbs[to].keys.get(dst).map(|e| e.value.kind());
+    let old_kind = cx.eng.dbs[to].keys.get(dst).map(|e| e.value().kind());
     // Module types without a copy callback: the error comes before REPLACE deletes the
     // destination (an expired one is gone already, by `lookupKeyWrite`).
     let uncopyable = matches!(entry.value, crate::value::Value::Sketch(_) | crate::value::Value::VSet(_) | crate::value::Value::Sug(_));
@@ -488,9 +489,11 @@ pub fn dump(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Ok(Reply::Nil);
     }
     let db = cx.db_index();
-    let e = cx.eng.dbs[db].keys.get_mut(&args[1]).expect("found");
-    e.value.prepare_save();
-    Ok(Reply::Bulk(Bytes::from(crate::rdb::dump(&e.value, now))))
+    let mut e = cx.eng.dbs[db].keys.get_mut(&args[1]).expect("found");
+    if let Some(v) = e.aggregate_mut() {
+        v.prepare_save();
+    }
+    Ok(Reply::Bulk(Bytes::from(crate::rdb::dump(e.as_ref().value(), now))))
 }
 
 /// `RESTORE key ttl payload [REPLACE] [ABSTTL] [IDLETIME s] [FREQ f]` (`restoreCommand`).
@@ -545,7 +548,7 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         cx.eng.sig.ts_hook = true;
     }
     let at = if ttl != 0 && !absttl { ttl.wrapping_add(now) } else { ttl };
-    let old_kind = cx.peek(key).map(|e| e.value.kind()).filter(|_| replace);
+    let old_kind = cx.peek(key).map(|e| e.value().kind()).filter(|_| replace);
     let deleted = replace && cx.delete(key);
     if at != 0 && at <= now && !cx.eng.replica && cx.mode != crate::engine::Mode::Replay {
         // Already expired: nothing is created; a replaced key is deleted.
@@ -570,7 +573,7 @@ pub fn restore(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     cx.notify(notify::GENERIC, "restore", key);
     if let Some(k) = old_kind {
-        let new_kind = cx.peek(key).map_or(k, |e| e.value.kind());
+        let new_kind = cx.peek(key).map_or(k, |e| e.value().kind());
         overwritten(cx, db, key, k, new_kind);
     }
     Ok(Reply::Ok)
@@ -600,12 +603,12 @@ pub fn object_freq(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         return Err(Error::new("ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."));
     }
     let e = cx.eng.dbs[cx.client.db].keys.get(&args[2]).expect("looked up");
-    Ok(Reply::Int(cx.eng.lfu_counter(e, now) as i64))
+    Ok(Reply::Int(cx.eng.lfu_counter(&e, now) as i64))
 }
 
 pub fn object_idletime(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let now = cx.now;
-    let Some(idle) = cx.get_object(&args[2]).map(|e| Engine::idle_secs(e, now)) else { return Ok(Reply::Nil) };
+    let Some(idle) = cx.get_object(&args[2]).map(|e| Engine::idle_secs(&e, now)) else { return Ok(Reply::Nil) };
     if cx.cfg().maxmemory_policy.is_lfu() {
         return Err(Error::new("ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."));
     }

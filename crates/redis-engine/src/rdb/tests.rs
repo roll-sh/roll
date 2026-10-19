@@ -164,7 +164,7 @@ fn contents(v: &Value) -> String {
         Value::Set(s) => s.iter_members().map(|m| format!("{m:?}")).collect(),
         Value::ZSet(z) => return format!("{:?}", z.iter().collect::<Vec<_>>()),
         Value::Hash(h) => h.iter().map(|(f, v, at)| format!("{f:?}={v:?}@{at}")).collect(),
-        Value::Stream(_) => return format!("{:?}", dump(v, CAPTURED_AT)),
+        Value::Stream(_) => return format!("{:?}", dump(v.view(), CAPTURED_AT)),
         Value::Array(a) => return format!("{} {:?}", a.insert_idx(), a.iter().collect::<Vec<_>>()),
         Value::Json(j) => return crate::json::ser::compact(j.root()),
         Value::Sketch(x) => return format!("{x:?}"),
@@ -187,7 +187,7 @@ fn redis_payloads_restore_and_dump_identically() {
         if !name.starts_with("s_") {
             assert_eq!(v.encoding(), enc, "{name}: encoding");
         }
-        let again = dump(&v, CAPTURED_AT);
+        let again = dump(v.view(), CAPTURED_AT);
         if UNORDERED.contains(&name) {
             let back = restore_at(&again, &cfg, CAPTURED_AT).unwrap();
             assert_eq!(contents(&back), contents(&v), "{name}");
@@ -247,7 +247,7 @@ fn streams_with_groups_nack_zone_and_idmp() {
     let Value::Stream(s) = &v else { panic!() };
     assert!(s.idmp.is_empty());
     let v = restore_at(&redis("x_idmp"), &cfg, CAPTURED_AT).unwrap();
-    let late = dump(&v, later);
+    let late = dump(v.view(), later);
     let Value::Stream(s) = restore_at(&late, &cfg, CAPTURED_AT).unwrap() else { panic!() };
     assert!(s.idmp.is_empty());
 }
@@ -528,7 +528,7 @@ fn fuzz_never_panics() {
                 o[i] = rng.next_u64() as u8;
             }
             if let Ok(v) = restore_at(&payload(&o), &c, CAPTURED_AT) {
-                let again = dump(&v, CAPTURED_AT);
+                let again = dump(v.view(), CAPTURED_AT);
                 restore_at(&again, &c, CAPTURED_AT).unwrap_or_else(|e| panic!("{name}: re-dump fails: {e}"));
             }
         }
@@ -577,7 +577,7 @@ fn save_and_load_multiple_dbs() {
     let mut fns = Vec::new();
     let info = load(&file[..], &cfg(), |it| {
         match it {
-            LoadItem::Entry { db, key, entry } => got.push((db, key.to_vec(), entry.expire, dump(&entry.value, 0))),
+            LoadItem::Entry { db, key, entry } => got.push((db, key.to_vec(), entry.expire, dump(entry.value.view(), 0))),
             LoadItem::Aux { key, value } => aux.push((String::from_utf8_lossy(key).into_owned(), String::from_utf8_lossy(value).into_owned())),
             LoadItem::Function(f) => fns.push(f),
             LoadItem::ResizeDb { .. } | LoadItem::Untemplate { .. } | LoadItem::ModuleAux { .. } => {}
@@ -593,9 +593,9 @@ fn save_and_load_multiple_dbs() {
     assert_eq!(got.len(), total - 1, "the expired key is skipped");
     for (db, key, expire, bytes) in &got {
         let entry = e.dbs[*db].keys.get(key).unwrap();
-        assert_eq!(*expire, entry.expire);
+        assert_eq!(*expire, entry.expire());
         if !UNORDERED.contains(&std::str::from_utf8(key).unwrap()) {
-            assert_eq!(*bytes, dump(&entry.value, 0), "{}", String::from_utf8_lossy(key));
+            assert_eq!(*bytes, dump(entry.value(), 0), "{}", String::from_utf8_lossy(key));
         }
     }
     assert!(got.iter().any(|(db, k, _, _)| *db == 15 && k == b"last"));
@@ -617,9 +617,9 @@ fn save_and_load_multiple_dbs() {
     let mut w = RdbWriter::new(Vec::new(), &[], 0).unwrap();
     let entry = Entry::new(Value::str(b"v"), 0);
     w.begin_db(0, 1, 0).unwrap();
-    w.entry(b"a", &entry, Lru::Idle(30)).unwrap();
+    w.entry(b"a", crate::keyspace::KvRef::from(&entry), Lru::Idle(30)).unwrap();
     w.begin_db(0, 1, 0).unwrap();
-    w.entry(b"b", &entry, Lru::Freq(9)).unwrap();
+    w.entry(b"b", crate::keyspace::KvRef::from(&entry), Lru::Freq(9)).unwrap();
     let file = w.finish().unwrap();
     let lfu = Config { maxmemory_policy: crate::config::Policy::AllKeysLfu, ..cfg() };
     let mut lrus = Vec::new();
@@ -713,12 +713,12 @@ fn vector_set_payload_from_redis() {
     let Reply::Array(links) = run(&mut e, &mut c, "VLINKS v a") else { panic!() };
     assert_eq!(links, vec![Reply::Array(vec![Reply::bulk("b"), Reply::bulk("c")])]);
     let Value::VSet(v) = restore(&p, &cfg()).unwrap() else { panic!() };
-    let again = restore(&dump(&Value::VSet(v), 0), &cfg()).unwrap();
+    let again = restore(&dump(Value::VSet(v).view(), 0), &cfg()).unwrap();
     // Element c's links were saved as ids [2, 1].
     let mut sorted = p[..p.len() - 10].to_vec();
     let at = sorted.windows(4).position(|w| w == [2, 2, 2, 1]).unwrap();
     sorted[at..at + 4].copy_from_slice(&[2, 1, 2, 2]);
-    assert_eq!(dump(&again, 0), payload(&sorted));
+    assert_eq!(dump(again.view(), 0), payload(&sorted));
 }
 
 /// A suggestion dictionary (FT.SUGADD b 1, ba 2.5, 日本 3) as Redis 8.10's RediSearch dumps it:
@@ -737,5 +737,5 @@ fn sug_trie_dump_matches_redis_bytes() {
     let v = restore(redis, &cfg()).unwrap();
     let Value::Sug(t) = &v else { panic!("not a trie") };
     assert_eq!(t.size(), 3);
-    assert_eq!(dump(&v, 0), redis);
+    assert_eq!(dump(v.view(), 0), redis);
 }

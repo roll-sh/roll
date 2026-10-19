@@ -18,7 +18,7 @@ use crate::json::ser::{Format, compact, plain, to_string};
 use crate::json::value::{Arr, MAX_DEPTH, Obj, Tag};
 use crate::json::{J, Json, N, Node};
 use crate::notify;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::cmd;
 use std::cmp::Ordering;
 
@@ -177,10 +177,10 @@ fn value_of(text: &str, format: Input, fpha: Option<Tag>) -> Result<J, Error> {
 // ---------------------------------------------------------------------------------------------
 
 /// The document of a key looked up for reading (`None` when missing).
-fn doc(v: Option<&Value>) -> Result<Option<&J>, Error> {
+fn doc(v: Option<ValueRef<'_>>) -> Result<Option<&J>, Error> {
     match v {
         None => Ok(None),
-        Some(Value::Json(j)) => Ok(Some(j.root())),
+        Some(ValueRef::Json(j)) => Ok(Some(j.root())),
         Some(_) => Err(WRONG_KEY_TYPE),
     }
 }
@@ -191,7 +191,7 @@ fn open<'c>(cx: &'c mut Cx, key: &[u8]) -> Result<Option<KeyMut<'c>>, Error> {
     cx.touch(key);
     match cx.peek(key) {
         None => return Ok(None),
-        Some(e) if !matches!(e.value, Value::Json(_)) => return Err(WRONG_KEY_TYPE),
+        Some(e) if !matches!(e.value(), ValueRef::Json(_)) => return Err(WRONG_KEY_TYPE),
         Some(_) => {}
     }
     Ok(Some(reopen(cx, key)))

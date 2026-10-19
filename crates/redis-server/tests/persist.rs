@@ -199,8 +199,8 @@ impl persist::SnapshotCodec for StringCodec {
     fn save(&self, engine: &redis_engine::Engine, out: &mut Vec<u8>) -> anyhow::Result<()> {
         for (i, db) in engine.dbs.iter().enumerate() {
             for (k, e) in db.keys.iter() {
-                let redis_engine::value::Value::Str(v) = &e.value else { anyhow::bail!("strings only") };
-                for part in [&(i as u32).to_be_bytes()[..], &(k.len() as u32).to_be_bytes(), k, &(v.len() as u32).to_be_bytes(), v, &e.expire.to_be_bytes()] {
+                let redis_engine::value::ValueRef::Str(v) = e.value() else { anyhow::bail!("strings only") };
+                for part in [&(i as u32).to_be_bytes()[..], &(k.len() as u32).to_be_bytes(), k, &(v.len() as u32).to_be_bytes(), v, &e.expire().to_be_bytes()] {
                     out.extend_from_slice(part);
                 }
             }

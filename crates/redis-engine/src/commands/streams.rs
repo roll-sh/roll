@@ -1317,8 +1317,8 @@ fn xgroup_prologue(cx: &mut Cx, args: &[Bytes], need_group: bool) -> Result<(boo
             return Err(Error::new("ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically."));
         }
         if need_group {
-            let found = cx.peek(&args[2]).is_some_and(|e| match &e.value {
-                crate::value::Value::Stream(s) => s.groups.get(&args[3]).is_some(),
+            let found = cx.peek(&args[2]).is_some_and(|e| match e.value() {
+                crate::value::ValueRef::Stream(s) => s.groups.get(&args[3]).is_some(),
                 _ => false,
             });
             if !found {
@@ -1648,8 +1648,8 @@ pub fn xnack(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let gname = &args[2];
     let exists = cx.check_type(key, Kind::Stream)?;
     let has_group = exists
-        && cx.peek(key).is_some_and(|e| match &e.value {
-            crate::value::Value::Stream(s) => s.groups.get(gname).is_some(),
+        && cx.peek(key).is_some_and(|e| match e.value() {
+            crate::value::ValueRef::Stream(s) => s.groups.get(gname).is_some(),
             _ => false,
         });
     if !has_group {

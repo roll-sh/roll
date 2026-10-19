@@ -9,7 +9,7 @@ use crate::search::args::{Ac, c_eq};
 use crate::search::error::{Code, QErr};
 use crate::search::spec;
 use crate::util::cstr;
-use crate::value::Value;
+use crate::value::ValueRef;
 
 const NOPERM: &str = "NOPERM User does not have the required permissions to query the index";
 
@@ -181,9 +181,9 @@ pub(super) fn ft_add(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let o = parse_add(&mut ac)?;
 
     let db = cx.client.db;
-    let exists = match super::ft::live(cx.eng, db, key).map(|e| &e.value) {
+    let exists = match super::ft::live(cx.eng, db, key).map(|e| e.value()) {
         None => false,
-        Some(Value::Hash(_)) => true,
+        Some(ValueRef::Hash(_)) => true,
         Some(_) => return Err(QErr::code(Code::RedisKeyType).into()),
     };
     if !exists && o.nocreate {

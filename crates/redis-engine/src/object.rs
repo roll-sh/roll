@@ -6,7 +6,8 @@
 //! OBJECT/SDSLEN report what Redis would.
 
 use crate::client::jemalloc_size;
-use crate::value::{Entry, Value};
+use crate::keyspace::{Fields, FieldsMut};
+use crate::value::ValueRef;
 
 /// A string kept as SET keeps it: `int` when it reads as one, `embstr` while it fits with its key,
 /// otherwise `raw`.
@@ -238,8 +239,8 @@ fn class_of(size: usize) -> u8 {
 }
 
 /// The sds string behind a raw value of `len` bytes.
-pub fn raw_sds(e: &Entry, len: usize) -> Sds {
-    if e.obj & GROWN != 0 { Sds::of_class(e.sds) } else { Sds::new(len) }
+pub fn raw_sds(e: &(impl Fields + ?Sized), len: usize) -> Sds {
+    if e.obj() & GROWN != 0 { Sds::of_class(e.sds()) } else { Sds::new(len) }
 }
 
 // --- whole objects ---
@@ -250,19 +251,19 @@ fn key_sds(key_len: usize) -> usize {
 }
 
 /// The object header with its expire slot and embedded key (`kvobjCreate`).
-fn header(e: &Entry, key_len: usize) -> usize {
-    ROBJ + if e.obj & SLOT != 0 { 8 } else { 0 } + 1 + key_sds(key_len)
+fn header(e: &(impl Fields + ?Sized), key_len: usize) -> usize {
+    ROBJ + if e.obj() & SLOT != 0 { 8 } else { 0 } + 1 + key_sds(key_len)
 }
 
 /// An embedded string's object: header, key and value in one allocation, the value taking what
 /// the allocator gives past them.
-fn embstr_alloc(e: &Entry, key_len: usize, val_len: usize) -> usize {
+fn embstr_alloc(e: &(impl Fields + ?Sized), key_len: usize, val_len: usize) -> usize {
     jemalloc_size(header(e, key_len) + 3 + val_len + 1)
 }
 
 /// MEMORY USAGE for a string (`kvobjAllocSize`).
-pub fn string_usage(e: &Entry, key_len: usize, s: &[u8]) -> usize {
-    match str_encoding(e.obj, key_len, s) {
+pub fn string_usage(e: &(impl Fields + ?Sized), key_len: usize, s: &[u8]) -> usize {
+    match str_encoding(e.obj(), key_len, s) {
         StrEnc::Int => header(e, key_len),
         StrEnc::Embstr => embstr_alloc(e, key_len, s.len()),
         StrEnc::Raw => header(e, key_len) + raw_sds(e, s.len()).size(),
@@ -284,16 +285,16 @@ pub const EXPIRE_META: usize = 16;
 const EMBED_VALUE_MAX: usize = 128;
 
 /// MEMORY USAGE (`kvobjAllocSize`): the object with its key, and what the value allocates.
-pub fn usage(e: &Entry, key_len: usize) -> usize {
-    match &e.value {
-        Value::Str(s) => string_usage(e, key_len, s),
+pub fn usage(e: &(impl Fields + ?Sized), key_len: usize) -> usize {
+    match e.value() {
+        ValueRef::Str(s) => string_usage(e, key_len, s),
         // kvobjComputeSize takes zmalloc_size of a module value's object.
-        Value::Json(j) => jemalloc_size(header(e, key_len)) + j.usage(),
-        Value::Sketch(x) => jemalloc_size(header(e, key_len)) + x.mem_usage() as usize,
-        Value::VSet(x) => jemalloc_size(header(e, key_len)) + x.mem_usage() as usize,
+        ValueRef::Json(j) => jemalloc_size(header(e, key_len)) + j.usage(),
+        ValueRef::Sketch(x) => jemalloc_size(header(e, key_len)) + x.mem_usage() as usize,
+        ValueRef::VSet(x) => jemalloc_size(header(e, key_len)) + x.mem_usage() as usize,
         // The series' share of the label index is added by the caller, which has the index.
-        Value::Ts(x) => jemalloc_size(header(e, key_len)) + x.mem_usage(0),
-        Value::Sug(x) => jemalloc_size(header(e, key_len)) + x.mem_usage(),
+        ValueRef::Ts(x) => jemalloc_size(header(e, key_len)) + x.mem_usage(0),
+        ValueRef::Sug(x) => jemalloc_size(header(e, key_len)) + x.mem_usage(),
         v => header(e, key_len) + v.alloc_size(),
     }
 }
@@ -365,8 +366,8 @@ pub fn entry_usage(field_len: usize, value_len: usize, meta: bool, value: EntryV
 
 /// DEBUG SDSLEN for a string that isn't `int`: the key's sds and object allocation, the value's
 /// length, free space and allocation (0 when embedded).
-pub fn sdslen(e: &Entry, key_len: usize, s: &[u8]) -> Option<String> {
-    let (obj, avail, val_alloc) = match str_encoding(e.obj, key_len, s) {
+pub fn sdslen(e: &(impl Fields + ?Sized), key_len: usize, s: &[u8]) -> Option<String> {
+    let (obj, avail, val_alloc) = match str_encoding(e.obj(), key_len, s) {
         StrEnc::Int => return None,
         StrEnc::Embstr => {
             let obj = embstr_alloc(e, key_len, s.len());
@@ -383,104 +384,118 @@ pub fn sdslen(e: &Entry, key_len: usize, s: &[u8]) -> Option<String> {
     ))
 }
 
-impl Entry {
+/// Redis' view of a stored object: its encoding and the sds behind a raw string.
+pub trait Object: Fields {
     /// The encoding OBJECT ENCODING reports, given the entry's key length.
-    pub fn encoding(&self, key_len: usize) -> &'static str {
-        match &self.value {
-            Value::Str(s) => str_encoding(self.obj, key_len, s).name(),
+    fn encoding(&self, key_len: usize) -> &'static str {
+        match self.value() {
+            ValueRef::Str(s) => str_encoding(self.obj(), key_len, s).name(),
             v => v.encoding(),
         }
     }
 
-    /// `dbUnshareStringValue`: a string about to change in place becomes raw, copied exactly
-    /// sized unless it was raw already.
-    pub fn unshare(&mut self, key_len: usize) {
-        if let Value::Str(s) = &self.value
-            && str_encoding(self.obj, key_len, s) != StrEnc::Raw
-        {
-            self.obj = (self.obj & SLOT) | ENC_RAW;
-        }
-    }
-
     /// The sds string behind this raw string.
-    pub fn sds(&self) -> Sds {
-        match &self.value {
-            Value::Str(s) => raw_sds(self, s.len()),
+    fn sds_now(&self) -> Sds {
+        match self.value() {
+            ValueRef::Str(s) => raw_sds(self, s.len()),
             _ => Sds::new(0),
         }
     }
 
+    /// Whether the value is an embedded string.
+    fn embedded(&self, key_len: usize) -> bool {
+        matches!(self.value(), ValueRef::Str(s) if str_encoding(self.obj(), key_len, s) == StrEnc::Embstr)
+    }
+}
+
+impl<T: Fields + ?Sized> Object for T {}
+
+/// Keeping Redis' view of an object up to date as it changes.
+pub trait ObjectMut: FieldsMut {
+    /// `dbUnshareStringValue`: a string about to change in place becomes raw, copied exactly
+    /// sized unless it was raw already.
+    fn unshare(&mut self, key_len: usize) {
+        if let ValueRef::Str(s) = self.value()
+            && str_encoding(self.obj(), key_len, s) != StrEnc::Raw
+        {
+            let obj = (self.obj() & SLOT) | ENC_RAW;
+            self.set_obj(obj);
+        }
+    }
+
     /// Record a raw string's sds after it was reallocated (HyperLogLog updates).
-    pub fn set_sds(&mut self, sds: Sds) {
-        let Value::Str(s) = &self.value else { return };
+    fn set_sds_of(&mut self, sds: Sds) {
+        let ValueRef::Str(s) = self.value() else { return };
         if sds == Sds::new(s.len()) {
-            self.obj &= !GROWN;
-            self.sds = 0;
+            let obj = self.obj() & !GROWN;
+            self.set_obj(obj);
+            self.set_sds(0);
         } else {
-            self.obj |= GROWN;
-            self.sds = class_of(sds.size());
+            let obj = self.obj() | GROWN;
+            self.set_obj(obj);
+            self.set_sds(class_of(sds.size()));
         }
     }
 
     /// `sdsMakeRoomFor` on a raw string about to grow by `add` bytes.
-    pub fn sds_make_room(&mut self, add: usize) {
-        let Value::Str(s) = &self.value else { return };
-        let cur = raw_sds(self, s.len());
+    fn sds_make_room(&mut self, add: usize) {
+        let ValueRef::Str(s) = self.value() else { return };
+        let len = s.len();
+        let cur = raw_sds(self, len);
         // Either a new buffer, or the current one which no longer matches an exact copy of the
         // longer content (`sdsnewlen(0)` holding three bytes).
-        let sds = cur.make_room(s.len(), add).unwrap_or(cur);
-        if sds != Sds::new(s.len() + add) {
-            self.obj |= GROWN;
-            self.sds = class_of(sds.size());
+        let sds = cur.make_room(len, add).unwrap_or(cur);
+        if sds != Sds::new(len + add) {
+            let obj = self.obj() | GROWN;
+            self.set_obj(obj);
+            self.set_sds(class_of(sds.size()));
         }
-    }
-
-    /// Whether the value is an embedded string.
-    pub fn embedded(&self, key_len: usize) -> bool {
-        matches!(&self.value, Value::Str(s) if str_encoding(self.obj, key_len, s) == StrEnc::Embstr)
     }
 
     /// After the value was replaced (`dbSetValue`; `old_embedded` from before): Redis keeps the
     /// old object, expire slot included, unless either value is embedded; otherwise it makes a
     /// new one with a slot only for a TTL that stays. `enc` is how the new value was created;
     /// `shared_ints` whether it may be a shared integer ([`shared_int`]).
-    pub fn revalue(&mut self, old_embedded: bool, key_len: usize, enc: u8, keep_ttl: bool, shared_ints: bool) {
-        let new_own = match &self.value {
-            Value::Str(s) => created(s, enc) != StrEnc::Embstr && !shared_int(s, enc, shared_ints),
+    fn revalue(&mut self, old_embedded: bool, key_len: usize, enc: u8, keep_ttl: bool, shared_ints: bool) {
+        let new_own = match self.value() {
+            ValueRef::Str(s) => created(s, enc) != StrEnc::Embstr && !shared_int(s, enc, shared_ints),
             _ => true,
         };
         let slot = if !old_embedded && new_own {
-            self.obj & SLOT != 0
+            self.obj() & SLOT != 0
         } else {
-            (keep_ttl && self.expire != 0) || key_len >= SLOT_KEY_LEN
+            (keep_ttl && self.expire() != 0) || key_len >= SLOT_KEY_LEN
         };
-        self.obj = enc | if slot { SLOT } else { 0 };
-        self.sds = 0;
+        self.set_obj(enc | if slot { SLOT } else { 0 });
+        self.set_sds(0);
     }
 
     /// The object rebuilt for another key (RENAME, MOVE, COPY): an embedded string that doesn't
     /// fit next to the new key becomes raw and stays raw; a copy is sized exactly. The expire
     /// slot follows the TTL ([`crate::db::Db::insert_new`]).
-    pub fn rekey(&mut self, old_len: usize, new_len: usize, copy: bool) {
-        let mut obj = self.obj & ENC_MASK;
-        if let Value::Str(s) = &self.value {
-            match str_encoding(self.obj, old_len, s) {
+    fn rekey(&mut self, old_len: usize, new_len: usize, copy: bool) {
+        let cur = self.obj();
+        let mut obj = cur & ENC_MASK;
+        if let ValueRef::Str(s) = self.value() {
+            match str_encoding(cur, old_len, s) {
                 StrEnc::Embstr if !fits(new_len, s.len()) => obj = ENC_RAW,
                 StrEnc::Raw => {
                     obj = ENC_RAW;
                     if !copy {
-                        obj |= self.obj & GROWN;
+                        obj |= cur & GROWN;
                     }
                 }
                 _ => {}
             }
         }
         if obj & GROWN == 0 {
-            self.sds = 0;
+            self.set_sds(0);
         }
-        self.obj = obj;
+        self.set_obj(obj);
     }
 }
+
+impl<T: FieldsMut + ?Sized> ObjectMut for T {}
 
 #[cfg(test)]
 mod tests {

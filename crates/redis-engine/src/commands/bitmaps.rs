@@ -6,7 +6,7 @@ use crate::cmd;
 use crate::engine::Mode;
 use crate::notify;
 use crate::util::parse_i64;
-use crate::value::{Entry, Kind, Str, Value};
+use crate::value::{Kind, Str, Value, ValueRef};
 
 pub static COMMANDS: &[Command] = &[
     cmd!("setbit", 4, WRITE | DENYOOM, 1, 1, 1, setbit, Bitmap),
@@ -229,7 +229,7 @@ pub fn bitpos(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     if start > end {
         return Ok(Reply::Int(-1));
     }
-    let p = &s[..];
+    let p = s;
     let mut bytes = end - start + 1;
     let pos = 'r: {
         if fm != 0 {
@@ -313,8 +313,8 @@ pub fn bitop(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
         let srcs: Vec<&[u8]> = keys
             .iter()
             .zip(&exists)
-            .map(|(k, &ok)| match db.keys.get(k) {
-                Some(Entry { value: Value::Str(s), .. }) if ok => &s[..],
+            .map(|(k, &ok)| match db.keys.get(k).map(|e| e.value()) {
+                Some(ValueRef::Str(s)) if ok => s,
                 _ => &[][..],
             })
             .collect();
@@ -548,7 +548,7 @@ fn bitfield_generic(cx: &mut Cx, args: &[Bytes], read_only_cmd: bool) -> CmdResu
     if readonly {
         let s: &[u8] = match cx.get(&args[1]) {
             None => &[],
-            Some(Value::Str(s)) => s,
+            Some(ValueRef::Str(s)) => s,
             Some(_) => return Err(WRONGTYPE),
         };
         return Ok(Reply::Array(fields.iter().map(|f| Reply::Int(read_field(s, f))).collect()));
@@ -627,8 +627,8 @@ fn bitfield_generic(cx: &mut Cx, args: &[Bytes], read_only_cmd: bool) -> CmdResu
 
 /// The length of the string at `key` (`None` if missing; other types are refused after).
 fn str_len(cx: &mut Cx, key: &[u8]) -> Option<usize> {
-    cx.peek(key).map(|e| match &e.value {
-        Value::Str(s) => s.len(),
+    cx.peek(key).map(|e| match e.value() {
+        ValueRef::Str(s) => s.len(),
         _ => 0,
     })
 }

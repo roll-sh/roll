@@ -823,16 +823,16 @@ pub fn memory_usage(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let key = &args[2];
     let Some(e) = cx.eng.dbs[cx.client.db].keys.get(key) else { return Ok(Reply::Nil) };
     // A template hash also carries its share of the template.
-    let share = match &e.value {
-        crate::value::Value::Hash(h) => h.template().map_or(0, |t| {
+    let share = match e.value() {
+        crate::value::ValueRef::Hash(h) => h.template().map_or(0, |t| {
             let keys = t.registry().map_or(1, |r| r.keys_of(t).max(1));
             t.mem() / keys as usize
         }),
         // A series also carries its share of the label index (`IndexMemUsage`).
-        crate::value::Value::Ts(t) => cx.eng.ts.index.mem_usage(&t.key.b),
+        crate::value::ValueRef::Ts(t) => cx.eng.ts.index.mem_usage(&t.key.b),
         _ => 0,
     };
-    Ok(Reply::Int((crate::object::usage(e, key.len()) + share) as i64))
+    Ok(Reply::Int((crate::object::usage(&e, key.len()) + share) as i64))
 }
 
 /// MEMORY STATS: `getMemoryOverheadData` in Redis' order. roll's allocator reports exactly

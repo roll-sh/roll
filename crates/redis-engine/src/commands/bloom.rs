@@ -16,7 +16,7 @@ use crate::cmd;
 use crate::config::{BloomOpt, bloom_error_rate, bloom_int};
 use crate::cx::KeyMut;
 use crate::util::{fmt_g, parse_i64};
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 
 pub static COMMANDS: &[Command] = &[
     cmd!("bf.reserve", -4, WRITE | DENYOOM | MODULE | ACL_FAST, 1, 1, 1, bf_reserve, Module),
@@ -62,7 +62,7 @@ pub(super) enum Open<T> {
 pub(super) fn open_read<'c>(cx: &'c mut Cx, key: &[u8], kind: SketchKind) -> Open<&'c Sketch> {
     match cx.get(key) {
         None => Open::Empty,
-        Some(Value::Sketch(x)) if x.kind() == kind => Open::Found(x),
+        Some(ValueRef::Sketch(x)) if x.kind() == kind => Open::Found(x),
         Some(_) => Open::Other,
     }
 }
@@ -73,7 +73,7 @@ pub(super) fn open_write(cx: &mut Cx, key: &[u8], kind: SketchKind) -> Open<()> 
     cx.touch(key);
     match cx.peek(key) {
         None => Open::Empty,
-        Some(e) if matches!(&e.value, Value::Sketch(x) if x.kind() == kind) => Open::Found(()),
+        Some(e) if matches!(e.value(), ValueRef::Sketch(x) if x.kind() == kind) => Open::Found(()),
         Some(_) => Open::Other,
     }
 }

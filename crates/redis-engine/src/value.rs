@@ -114,19 +114,46 @@ impl Value {
 
     #[inline]
     pub fn kind(&self) -> Kind {
+        self.view().kind()
+    }
+
+    /// What Redis allocates for an aggregate's encoding ([`ValueRef::alloc_size`]).
+    pub fn alloc_size(&self) -> usize {
+        self.view().alloc_size()
+    }
+
+    /// Aggregates are deleted when they become empty. Strings and streams never are.
+    #[inline]
+    pub fn is_empty_aggregate(&self) -> bool {
+        self.view().is_empty_aggregate()
+    }
+
+    /// `OBJECT ENCODING`.
+    pub fn encoding(&self) -> &'static str {
+        self.view().encoding()
+    }
+
+    /// The keysizes histogram slot ([`ValueRef::size_slot`]).
+    pub fn size_slot(&self) -> u16 {
+        self.view().size_slot()
+    }
+
+    /// The value seen in place.
+    #[inline]
+    pub fn view(&self) -> ValueRef<'_> {
         match self {
-            Value::Str(_) => Kind::String,
-            Value::List(_) => Kind::List,
-            Value::Hash(_) => Kind::Hash,
-            Value::Set(_) => Kind::Set,
-            Value::ZSet(_) => Kind::ZSet,
-            Value::Stream(_) => Kind::Stream,
-            Value::Array(_) => Kind::Array,
-            Value::Json(_) => Kind::Json,
-            Value::Sketch(s) => Kind::Sketch(s.kind()),
-            Value::VSet(_) => Kind::VSet,
-            Value::Ts(_) => Kind::Ts,
-            Value::Sug(_) => Kind::Sug,
+            Value::Str(s) => ValueRef::Str(s),
+            Value::List(x) => ValueRef::List(x),
+            Value::Hash(x) => ValueRef::Hash(x),
+            Value::Set(x) => ValueRef::Set(x),
+            Value::ZSet(x) => ValueRef::ZSet(x),
+            Value::Stream(x) => ValueRef::Stream(x),
+            Value::Array(x) => ValueRef::Array(x),
+            Value::Json(x) => ValueRef::Json(x),
+            Value::Sketch(x) => ValueRef::Sketch(x),
+            Value::VSet(x) => ValueRef::VSet(x),
+            Value::Ts(x) => ValueRef::Ts(x),
+            Value::Sug(x) => ValueRef::Sug(x),
         }
     }
 
@@ -168,42 +195,81 @@ impl Value {
         }
     }
 
+}
+
+/// A stored value seen in place: strings as their bytes (the keyspace may hold them packed with
+/// their key), the other types as themselves.
+#[derive(Clone, Copy, Debug)]
+pub enum ValueRef<'a> {
+    Str(&'a [u8]),
+    List(&'a List),
+    Hash(&'a Hash),
+    Set(&'a Set),
+    ZSet(&'a ZSet),
+    Stream(&'a Stream),
+    Array(&'a Array),
+    Json(&'a Json),
+    Sketch(&'a Sketch),
+    VSet(&'a VSet),
+    Ts(&'a Series),
+    Sug(&'a crate::search::trie::Trie),
+}
+
+impl<'a> ValueRef<'a> {
+    #[inline]
+    pub fn kind(self) -> Kind {
+        match self {
+            ValueRef::Str(_) => Kind::String,
+            ValueRef::List(_) => Kind::List,
+            ValueRef::Hash(_) => Kind::Hash,
+            ValueRef::Set(_) => Kind::Set,
+            ValueRef::ZSet(_) => Kind::ZSet,
+            ValueRef::Stream(_) => Kind::Stream,
+            ValueRef::Array(_) => Kind::Array,
+            ValueRef::Json(_) => Kind::Json,
+            ValueRef::Sketch(s) => Kind::Sketch(s.kind()),
+            ValueRef::VSet(_) => Kind::VSet,
+            ValueRef::Ts(_) => Kind::Ts,
+            ValueRef::Sug(_) => Kind::Sug,
+        }
+    }
+
     /// What Redis allocates for an aggregate's encoding (`kvobjAllocSize` past the object and its
     /// key; strings are measured with their object, [`crate::object::usage`]).
-    pub fn alloc_size(&self) -> usize {
+    pub fn alloc_size(self) -> usize {
         match self {
-            Value::Str(_) => 0,
-            Value::List(l) => l.alloc_size(),
-            Value::Hash(h) => h.alloc_size(),
-            Value::Set(x) => x.alloc_size(),
-            Value::ZSet(z) => z.alloc_size(),
-            Value::Stream(x) => x.alloc_size(),
-            Value::Array(x) => x.mem(),
-            Value::Json(j) => j.usage(),
-            Value::Sketch(s) => s.mem_usage() as usize,
-            Value::VSet(v) => v.mem_usage() as usize,
-            Value::Ts(t) => t.mem_usage(0),
-            Value::Sug(t) => t.mem_usage(),
+            ValueRef::Str(_) => 0,
+            ValueRef::List(l) => l.alloc_size(),
+            ValueRef::Hash(h) => h.alloc_size(),
+            ValueRef::Set(x) => x.alloc_size(),
+            ValueRef::ZSet(z) => z.alloc_size(),
+            ValueRef::Stream(x) => x.alloc_size(),
+            ValueRef::Array(x) => x.mem(),
+            ValueRef::Json(j) => j.usage(),
+            ValueRef::Sketch(s) => s.mem_usage() as usize,
+            ValueRef::VSet(v) => v.mem_usage() as usize,
+            ValueRef::Ts(t) => t.mem_usage(0),
+            ValueRef::Sug(t) => t.mem_usage(),
         }
     }
 
     /// Aggregates are deleted when they become empty. Strings and streams never are.
     #[inline]
-    pub fn is_empty_aggregate(&self) -> bool {
+    pub fn is_empty_aggregate(self) -> bool {
         match self {
-            Value::Str(_) | Value::Stream(_) | Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) | Value::Sug(_) => false,
-            Value::List(l) => l.is_empty(),
-            Value::Hash(h) => h.is_empty(),
-            Value::Set(x) => x.is_empty(),
-            Value::ZSet(z) => z.is_empty(),
-            Value::Array(a) => a.is_empty(),
+            ValueRef::Str(_) | ValueRef::Stream(_) | ValueRef::Json(_) | ValueRef::Sketch(_) | ValueRef::VSet(_) | ValueRef::Ts(_) | ValueRef::Sug(_) => false,
+            ValueRef::List(l) => l.is_empty(),
+            ValueRef::Hash(h) => h.is_empty(),
+            ValueRef::Set(x) => x.is_empty(),
+            ValueRef::ZSet(z) => z.is_empty(),
+            ValueRef::Array(a) => a.is_empty(),
         }
     }
 
     /// `OBJECT ENCODING`.
-    pub fn encoding(&self) -> &'static str {
+    pub fn encoding(self) -> &'static str {
         match self {
-            Value::Str(s) => {
+            ValueRef::Str(s) => {
                 if s.len() <= 20 && crate::util::is_int(s) {
                     "int"
                 } else if s.len() <= 44 {
@@ -212,13 +278,46 @@ impl Value {
                     "raw"
                 }
             }
-            Value::List(l) => l.encoding(),
-            Value::Hash(h) => h.encoding(),
-            Value::Set(x) => x.encoding(),
-            Value::ZSet(z) => z.encoding(),
-            Value::Stream(_) => "stream",
-            Value::Array(_) => "sliced-array",
-            Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) | Value::Sug(_) => "raw",
+            ValueRef::List(l) => l.encoding(),
+            ValueRef::Hash(h) => h.encoding(),
+            ValueRef::Set(x) => x.encoding(),
+            ValueRef::ZSet(z) => z.encoding(),
+            ValueRef::Stream(_) => "stream",
+            ValueRef::Array(_) => "sliced-array",
+            ValueRef::Json(_) | ValueRef::Sketch(_) | ValueRef::VSet(_) | ValueRef::Ts(_) | ValueRef::Sug(_) => "raw",
+        }
+    }
+
+    /// The keysizes histogram slot (`type * SIZE_BINS + bin`): bin 0 for an empty value, else
+    /// `floor(log2(len)) + 1` of the string length or element count (Redis' `getObjectLength`).
+    pub fn size_slot(self) -> u16 {
+        let (t, n) = match self {
+            ValueRef::Str(s) => (0, s.len()),
+            ValueRef::List(l) => (1, l.len()),
+            ValueRef::Set(s) => (2, s.len()),
+            ValueRef::ZSet(z) => (3, z.len()),
+            ValueRef::Hash(h) => (4, h.len()),
+            ValueRef::Stream(_) | ValueRef::Array(_) | ValueRef::Json(_) | ValueRef::Sketch(_) | ValueRef::VSet(_) | ValueRef::Ts(_) | ValueRef::Sug(_) => return NO_SIZE,
+        };
+        let bin = (usize::BITS - n.leading_zeros()) as usize;
+        (t * SIZE_BINS + bin.min(SIZE_BINS - 1)) as u16
+    }
+
+    /// An owned copy.
+    pub fn to_value(self) -> Value {
+        match self {
+            ValueRef::Str(s) => Value::str(s),
+            ValueRef::List(x) => Value::List(Box::new(x.clone())),
+            ValueRef::Hash(x) => Value::Hash(Box::new(x.clone())),
+            ValueRef::Set(x) => Value::Set(Box::new(x.clone())),
+            ValueRef::ZSet(x) => Value::ZSet(Box::new(x.clone())),
+            ValueRef::Stream(x) => Value::Stream(Box::new(x.clone())),
+            ValueRef::Array(x) => Value::Array(Box::new(x.clone())),
+            ValueRef::Json(x) => Value::Json(Box::new(x.clone())),
+            ValueRef::Sketch(x) => Value::Sketch(Box::new(x.clone())),
+            ValueRef::VSet(x) => Value::VSet(Box::new(x.clone())),
+            ValueRef::Ts(x) => Value::Ts(Box::new(x.clone())),
+            ValueRef::Sug(x) => Value::Sug(Box::new(x.clone())),
         }
     }
 }
@@ -261,23 +360,6 @@ pub const NO_SIZE: u16 = u16::MAX;
 /// Keysizes histogram dimensions: strings, lists, sets, zsets, hashes × power-of-two bins.
 pub const SIZE_TYPES: usize = 5;
 pub const SIZE_BINS: usize = 60;
-
-impl Value {
-    /// The keysizes histogram slot (`type * SIZE_BINS + bin`): bin 0 for an empty value, else
-    /// `floor(log2(len)) + 1` of the string length or element count (Redis' `getObjectLength`).
-    pub fn size_slot(&self) -> u16 {
-        let (t, n) = match self {
-            Value::Str(s) => (0, s.len()),
-            Value::List(l) => (1, l.len()),
-            Value::Set(s) => (2, s.len()),
-            Value::ZSet(z) => (3, z.len()),
-            Value::Hash(h) => (4, h.len()),
-            Value::Stream(_) | Value::Array(_) | Value::Json(_) | Value::Sketch(_) | Value::VSet(_) | Value::Ts(_) | Value::Sug(_) => return NO_SIZE,
-        };
-        let bin = (usize::BITS - n.leading_zeros()) as usize;
-        (t * SIZE_BINS + bin.min(SIZE_BINS - 1)) as u16
-    }
-}
 
 /// Fixed bytes per key: the dict node plus the entry, and allocator rounding.
 pub const KEY_OVERHEAD: usize = std::mem::size_of::<Entry>() + std::mem::size_of::<Str>() + 24;
