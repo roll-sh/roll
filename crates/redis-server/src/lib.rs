@@ -39,7 +39,20 @@ pub fn idle_collect() {
     if now.saturating_sub(LAST.get()) >= 1_000_000 {
         LAST.set(now);
         // SAFETY: no preconditions.
-        unsafe { libmimalloc_sys::mi_collect(false) };
+        unsafe { libmimalloc_sys::mi_collect(true) };
+    }
+}
+
+/// [`release_memory`], at most once a second per thread (several databases going idle at once
+/// ask the same cores).
+pub fn release_memory_throttled() {
+    thread_local! {
+        static LAST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    let now = redis_engine::util::mono_us();
+    if now.saturating_sub(LAST.get()) >= 1_000_000 {
+        LAST.set(now);
+        release_memory();
     }
 }
 

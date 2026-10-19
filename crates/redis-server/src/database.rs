@@ -701,9 +701,9 @@ impl Database {
                     let still = db.cron_may_sleep();
                     drop(db);
                     if still && !purged {
-                        // Going idle: what the core's allocator holds free goes back to the
-                        // system (once per idle period).
-                        crate::release_memory();
+                        // Going idle: what the cores' allocators hold free goes back to the
+                        // system (once per idle period; its connections may have spread).
+                        crate::cores::pool().purge_started();
                         purged = true;
                     }
                     if still {

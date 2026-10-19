@@ -130,6 +130,29 @@ impl Cores {
     pub fn spawn<F: Future<Output = ()> + Send + 'static>(&self, place: Place, f: F) {
         self.handle(place).spawn(f);
     }
+
+    /// Every started core hands its free memory back ([`crate::release_memory_throttled`]): a
+    /// database going idle may have spread its connections over cores that run nothing else.
+    pub fn purge_started(&self) {
+        for (i, c) in self.cores.iter().enumerate() {
+            if c.get().is_some() {
+                self.core(i).spawn(async { crate::release_memory_throttled() });
+            }
+        }
+    }
+
+    /// Spawn the future `f` makes, made there: its state is allocated (and later freed) by the
+    /// thread that runs it, not the one handing it over, so that thread's allocator gets it back
+    /// when it goes idle (a connection moving to its core).
+    pub fn spawn_built<F, Fut>(&self, place: Place, f: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.handle(place).spawn(async move {
+            tokio::spawn(f());
+        });
+    }
 }
 
 /// A core's idle time, from its runtime's park hooks, and the busy share last measured.

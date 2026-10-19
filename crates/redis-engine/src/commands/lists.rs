@@ -222,7 +222,7 @@ pub fn lrange(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let Some(l) = cx.get_list(&args[1])? else { return Ok(Reply::Array(Vec::new())) };
     Ok(match range(start, end, l.len()) {
         None => Reply::Array(Vec::new()),
-        Some((s, e)) => Reply::Array(l.iter_from(s).take(e - s + 1).map(Reply::bulk).collect()),
+        Some((s, e)) => Reply::bulk_array(l.iter_from(s).take(e - s + 1)),
     })
 }
 

@@ -66,11 +66,24 @@ impl Reply {
     pub fn bulk_str(s: impl Into<String>) -> Self {
         Reply::Bulk(Bytes::from(s.into()))
     }
+    /// An array of bulk strings whose bytes share one buffer (one allocation for the reply's
+    /// strings, not one each).
+    pub fn bulk_array<T: AsRef<[u8]>>(items: impl IntoIterator<Item = T>) -> Self {
+        let mut buf = BytesMut::new();
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for b in items {
+            let b = b.as_ref();
+            spans.push((buf.len(), b.len()));
+            buf.extend_from_slice(b);
+        }
+        let all = buf.freeze();
+        Reply::Array(spans.into_iter().map(|(at, n)| Reply::Bulk(all.slice(at..at + n))).collect())
+    }
     pub fn opt_bulk(b: Option<impl AsRef<[u8]>>) -> Self {
         b.map_or(Reply::Nil, Reply::bulk)
     }
     pub fn bulks<I: IntoIterator<Item = T>, T: AsRef<[u8]>>(items: I) -> Self {
-        Reply::Array(items.into_iter().map(Reply::bulk).collect())
+        Self::bulk_array(items)
     }
     pub fn is_error(&self) -> bool {
         matches!(self, Reply::Error(_))
@@ -196,6 +209,22 @@ fn int(out: &mut BytesMut, prefix: u8, i: i64) {
 
 /// Write a bulk string.
 pub fn bulk(out: &mut BytesMut, b: &[u8]) {
+    // A short string is assembled on the stack and appended once (most replies are many of these).
+    if b.len() <= 48 {
+        let mut line = [0u8; 64];
+        let mut lb = itoa::Buffer::new();
+        let h = lb.format(b.len()).as_bytes();
+        line[0] = b'$';
+        line[1..1 + h.len()].copy_from_slice(h);
+        let mut at = 1 + h.len();
+        line[at..at + 2].copy_from_slice(b"\r\n");
+        at += 2;
+        line[at..at + b.len()].copy_from_slice(b);
+        at += b.len();
+        line[at..at + 2].copy_from_slice(b"\r\n");
+        out.extend_from_slice(&line[..at + 2]);
+        return;
+    }
     int(out, b'$', b.len() as i64);
     out.reserve(b.len() + 2);
     out.put_slice(b);

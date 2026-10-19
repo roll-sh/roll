@@ -238,7 +238,7 @@ fn run<S: Portable>(p: Parked<S>) -> std::pin::Pin<Box<dyn std::future::Future<O
         match conn.drive(&mut rd, &mut wr, &mut inbuf, &mut rx).await {
             Exit::Close => conn.cleanup(),
             Exit::Move(place) => match rd.unsplit(wr).detach() {
-                Ok(d) => crate::cores::pool().spawn(place, async move {
+                Ok(d) => crate::cores::pool().spawn_built(place, move || async move {
                     match S::attach(d) {
                         Ok(stream) => run(Parked { conn, stream, inbuf, rx }).await,
                         Err(_) => conn.cleanup(),
