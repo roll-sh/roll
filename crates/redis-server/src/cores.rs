@@ -51,12 +51,18 @@ pub fn pool() -> &'static Cores {
 impl Cores {
     fn start(n: usize) -> Self {
         let loads: Vec<Load> = (0..n).map(|_| Load::default()).collect();
+        // Each core thread on a CPU of its own (of those the process may use), unless ROLL_PIN=0.
+        let cpus = if std::env::var("ROLL_PIN").is_ok_and(|v| v == "0") { Vec::new() } else { affinity::allowed() };
         let cores = (0..n)
             .map(|i| {
                 let (tx, rx) = std::sync::mpsc::channel();
+                let cpu = (!cpus.is_empty()).then(|| cpus[i % cpus.len()]);
                 std::thread::Builder::new()
                     .name(format!("roll-core-{i}"))
                     .spawn(move || {
+                        if let Some(cpu) = cpu {
+                            affinity::pin(cpu);
+                        }
                         let rt = Builder::new_current_thread()
                             .enable_all()
                             .on_thread_park(move || pool().loads[i].parked())
@@ -155,4 +161,43 @@ impl Load {
         }
         self.percent.load(Ordering::Relaxed)
     }
+}
+
+/// CPU affinity: on Linux, core threads stay on one CPU each, so their caches stay theirs and the
+/// scheduler doesn't move a busy event loop around. Elsewhere, nothing.
+mod affinity {
+    /// The CPUs this process may run on (its affinity mask: taskset, container cpusets).
+    #[cfg(target_os = "linux")]
+    pub fn allowed() -> Vec<usize> {
+        // SAFETY: `cpu_set_t` is plain data; the kernel fills it for this thread (the process's
+        // mask, inherited by the threads started after).
+        unsafe {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) != 0 {
+                return Vec::new();
+            }
+            (0..libc::CPU_SETSIZE as usize).filter(|&c| libc::CPU_ISSET(c, &set)).collect()
+        }
+    }
+
+    /// Keep the calling thread on `cpu`.
+    #[cfg(target_os = "linux")]
+    pub fn pin(cpu: usize) {
+        // SAFETY: as above; a failure leaves the thread unpinned.
+        unsafe {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            libc::CPU_SET(cpu, &mut set);
+            if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+                tracing::warn!(cpu, "could not pin a core thread");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn allowed() -> Vec<usize> {
+        Vec::new()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn pin(_cpu: usize) {}
 }
