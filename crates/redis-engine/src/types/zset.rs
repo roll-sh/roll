@@ -203,7 +203,10 @@ struct Node {
     next: u32,
     /// Hash chain.
     hnext: u32,
-    /// Offset in `SkipList::levels` of levels `1..height`.
+    /// Level 1 (if `height > 1`): inline, as the busiest one after level 0, so a step there reads
+    /// the node it is on rather than another cache line.
+    l1: Level,
+    /// Offset in `SkipList::levels` of levels `2..height`.
     up: u32,
     /// 0 marks a free slot.
     height: u8,
@@ -362,8 +365,10 @@ impl SkipList {
             self.head[i].fwd
         } else if i == 0 {
             self.nodes[x as usize].next
+        } else if i == 1 {
+            self.nodes[x as usize].l1.fwd
         } else {
-            self.levels[self.nodes[x as usize].up as usize + i - 1].fwd
+            self.levels[self.nodes[x as usize].up as usize + i - 2].fwd
         }
     }
 
@@ -373,9 +378,11 @@ impl SkipList {
             self.head[i].fwd = v;
         } else if i == 0 {
             self.nodes[x as usize].next = v;
+        } else if i == 1 {
+            self.nodes[x as usize].l1.fwd = v;
         } else {
             let up = self.nodes[x as usize].up as usize;
-            self.levels[up + i - 1].fwd = v;
+            self.levels[up + i - 2].fwd = v;
         }
     }
 
@@ -385,8 +392,10 @@ impl SkipList {
             1
         } else if x == HEAD {
             self.head[i].span
+        } else if i == 1 {
+            self.nodes[x as usize].l1.span
         } else {
-            self.levels[self.nodes[x as usize].up as usize + i - 1].span
+            self.levels[self.nodes[x as usize].up as usize + i - 2].span
         }
     }
 
@@ -397,9 +406,11 @@ impl SkipList {
         }
         if x == HEAD {
             self.head[i].span = v;
+        } else if i == 1 {
+            self.nodes[x as usize].l1.span = v;
         } else {
             let up = self.nodes[x as usize].up as usize;
-            self.levels[up + i - 1].span = v;
+            self.levels[up + i - 2].span = v;
         }
     }
 
@@ -416,14 +427,14 @@ impl SkipList {
     }
 
     fn alloc(&mut self, score: f64, ele: &[u8], height: usize) -> u32 {
-        let extra = height - 1;
+        let extra = height.saturating_sub(2);
         let up = if extra == 0 { 0 } else { self.alloc_levels(extra) };
         let ele = Str::from_slice(ele);
         if ele.spilled() {
             self.heap += ele.capacity();
         }
         self.node_alloc += node_alloc(height, ele.len());
-        let node = Node { score, ele, back: NIL, next: NIL, hnext: NIL, up, height: height as u8 };
+        let node = Node { score, ele, back: NIL, next: NIL, hnext: NIL, l1: EMPTY_LEVEL, up, height: height as u8 };
         if self.free != NIL {
             let i = self.free;
             self.free = self.nodes[i as usize].next;
@@ -457,7 +468,7 @@ impl SkipList {
         }
         self.node_alloc -= node_alloc(n.height as usize, n.ele.len());
         n.ele = Str::new();
-        let extra = n.height as usize - 1;
+        let extra = (n.height as usize).saturating_sub(2);
         let up = n.up;
         n.height = 0;
         n.next = self.free;
@@ -470,8 +481,15 @@ impl SkipList {
 
     // ---- skiplist algorithms (t_zset.c) ----
 
-    /// `zslInsertNode`: link an allocated node at its position.
-    fn link(&mut self, n: u32) {
+    /// Node `f` sorts before `(score, ele)`.
+    #[inline]
+    fn sorts_before(&self, f: u32, score: f64, ele: &[u8]) -> bool {
+        let nf = self.node(f);
+        nf.score < score || (nf.score == score && nf.ele.as_slice() < ele)
+    }
+
+    /// The last node before `(score, ele)` at every level, and their ranks.
+    fn insert_path(&self, score: f64, ele: &[u8]) -> ([u32; MAX_LEVEL], [u32; MAX_LEVEL]) {
         let mut update = [HEAD; MAX_LEVEL];
         let mut rank = [0u32; MAX_LEVEL];
         let mut x = HEAD;
@@ -479,7 +497,7 @@ impl SkipList {
             rank[i] = if i == self.level - 1 { 0 } else { rank[i + 1] };
             loop {
                 let f = self.fwd(x, i);
-                if f != NIL && self.before(f, n) {
+                if f != NIL && self.sorts_before(f, score, ele) {
                     rank[i] += self.span(x, i);
                     x = f;
                 } else {
@@ -488,6 +506,13 @@ impl SkipList {
             }
             update[i] = x;
         }
+        (update, rank)
+    }
+
+    /// `zslInsertNode`: link an allocated node at its position.
+    fn link(&mut self, n: u32) {
+        let nd = self.node(n);
+        let (mut update, mut rank) = self.insert_path(nd.score, nd.ele.as_slice());
         let height = self.node(n).height as usize;
         if height > self.level {
             for i in self.level..height {
@@ -524,10 +549,11 @@ impl SkipList {
     fn path_to(&self, x: u32) -> [u32; MAX_LEVEL] {
         let mut update = [HEAD; MAX_LEVEL];
         let mut y = HEAD;
+        let (score, ele) = (self.node(x).score, self.node(x).ele.as_slice());
         for i in (0..self.level).rev() {
             loop {
                 let f = self.fwd(y, i);
-                if f != NIL && self.before(f, x) {
+                if f != NIL && self.sorts_before(f, score, ele) {
                     y = f;
                 } else {
                     break;

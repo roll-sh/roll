@@ -557,7 +557,9 @@ impl Conn<'_> {
                 break;
             }
             // CLIENT PAUSE postpones the command until the pause ends.
-            if let Some(db) = self.db().cloned() {
+            if let Some(db) = self.db().cloned()
+                && db.may_be_paused(0)
+            {
                 let args = self.pending.front().unwrap().clone();
                 self.wait_unpaused(&db, &args).await;
                 if self.stats.killed.load(Ordering::Relaxed) {
@@ -568,7 +570,9 @@ impl Conn<'_> {
             // Connection-level commands first (they may need to await).
             let args = self.pending.front().unwrap();
             let started = std::time::Instant::now();
-            if let Some(r) = self.intercept(args.clone()).await {
+            if is_intercepted(args, &self.client)
+                && let Some(r) = self.intercept(args.clone()).await
+            {
                 let args = self.pop_pending();
                 // HELLO went through the engine already; the rest is accounted here.
                 if !eq(&args[0], "hello")
@@ -594,7 +598,7 @@ impl Conn<'_> {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             {
-                let Some(mut eng) = db.engine_unless_busy(0) else {
+                let Some(mut eng) = db.engine_unless_busy_async(0).await else {
                     if db.shard(0).scripts.debugging.load(Ordering::SeqCst) {
                         continue;
                     }
@@ -603,13 +607,13 @@ impl Conn<'_> {
                     self.emit(&args, r);
                     continue;
                 };
-                let mut first = true;
                 let evicting = db.hub.limits().client_eviction > 0;
                 while let Some(args) = self.pending.front() {
-                    if is_intercepted(args, &self.client) || (!first && eng.paused_for(&mut self.client, args).is_some()) {
+                    // The first was checked before locking unless no pause was set then: one
+                    // may have started since.
+                    if is_intercepted(args, &self.client) || eng.paused_for(&mut self.client, args).is_some() {
                         break;
                     }
-                    first = false;
                     // Clients past maxmemory-clients go before the command runs.
                     if evicting {
                         self.stats.pending_input.store(self.pending_bytes, Ordering::Relaxed);

@@ -802,7 +802,7 @@ pub fn check_command(acl: &RwLock<Acl>, client: &Client, args: &[Bytes]) -> Resu
     let (cmd, full) = crate::engine::Engine::resolve_as(args, true)?;
     match client.user.check(cmd, args) {
         Ok(()) => Ok(()),
-        Err(d) => Err(deny(acl, client, &full, args, d, Mode::Top)),
+        Err(d) => Err(deny(acl, client, full, args, d, Mode::Top)),
     }
 }
 

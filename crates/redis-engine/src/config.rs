@@ -1646,7 +1646,28 @@ impl ConfigDict {
 
 /// The parameter named `name` (or one of its aliases), case-insensitively.
 pub fn find(name: &str) -> Option<&'static Param> {
-    PARAMS.iter().find(|p| p.name.eq_ignore_ascii_case(name) || p.alias.is_some_and(|a| a.eq_ignore_ascii_case(name)))
+    /// Lowercase names and aliases, the first parameter claiming a name winning.
+    static BY_NAME: std::sync::LazyLock<(std::collections::HashMap<&'static str, &'static Param>, usize)> = std::sync::LazyLock::new(|| {
+        let mut m = std::collections::HashMap::new();
+        let mut longest = 0;
+        for p in PARAMS {
+            for n in std::iter::once(p.name).chain(p.alias) {
+                debug_assert!(!n.bytes().any(|c| c.is_ascii_uppercase()));
+                longest = longest.max(n.len());
+                m.entry(n).or_insert(p);
+            }
+        }
+        (m, longest)
+    });
+    let (by_name, longest) = &*BY_NAME;
+    if name.len() > *longest {
+        return None;
+    }
+    let mut buf = [0u8; 128];
+    let lower = buf.get_mut(..name.len())?;
+    lower.copy_from_slice(name.as_bytes());
+    lower.make_ascii_lowercase();
+    by_name.get(std::str::from_utf8(lower).ok()?).copied()
 }
 
 /// Is `name` a parameter whose value is redacted from logs (`SENSITIVE_CONFIG`)?
@@ -1788,6 +1809,19 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_matches_names_and_aliases_in_any_case() {
+        for p in PARAMS {
+            for n in std::iter::once(p.name).chain(p.alias) {
+                let first = PARAMS.iter().find(|q| q.name == n || q.alias == Some(n)).unwrap();
+                assert!(std::ptr::eq(find(n).unwrap(), first), "{n}");
+                assert!(std::ptr::eq(find(&n.to_ascii_uppercase()).unwrap(), first), "{n}");
+            }
+        }
+        assert!(find("no-such-config").is_none());
+        assert!(find(&"x".repeat(300)).is_none());
+    }
 
     #[test]
     fn config_dict_holds_every_config_once() {

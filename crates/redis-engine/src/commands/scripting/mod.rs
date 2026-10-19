@@ -677,7 +677,7 @@ impl Run {
         };
         if cmd.has(NOSCRIPT) && !self.cx().eng.debug.disable_deny_scripts {
             let name = Engine::resolve_as(args, true).map(|(_, n)| n).unwrap_or_default();
-            return self.cx().eng.reject(&name, Reply::error("ERR This Redis command is not allowed from script"));
+            return self.cx().eng.reject(name, Reply::error("ERR This Redis command is not allowed from script"));
         }
         let read_only = self.read_only;
         let mut client = std::mem::replace(&mut self.client, Client::new(0));

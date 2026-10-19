@@ -21,10 +21,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::watch;
 
+/// How long a connection waits for a busy engine by yielding before it parks.
+const YIELD_FOR: Duration = Duration::from_millis(5);
+
 pub struct Shard {
     pub engine: Mutex<Engine>,
     /// The engine's running-script state, readable while a script holds the engine.
     pub scripts: Arc<ScriptCtl>,
+    /// A CLIENT PAUSE (or failover's) may hold commands back: set by the guard that leaves one
+    /// set, so a command can skip locking the engine to check when nothing is paused.
+    pub paused: AtomicBool,
 }
 
 /// Receives the database's write stream.
@@ -249,6 +255,7 @@ impl Durability {
 /// Exclusive access to a shard's engine. Publishes the effects of whatever ran when dropped.
 pub struct EngineGuard<'a> {
     db: &'a Database,
+    shard: usize,
     eng: MutexGuard<'a, Engine>,
     /// When the lock was taken and the command count then (INFO's event-loop cycles).
     since: std::time::Instant,
@@ -256,9 +263,9 @@ pub struct EngineGuard<'a> {
 }
 
 impl<'a> EngineGuard<'a> {
-    fn new(db: &'a Database, eng: MutexGuard<'a, Engine>) -> Self {
+    fn new(db: &'a Database, shard: usize, eng: MutexGuard<'a, Engine>) -> Self {
         let commands = eng.stats.commands;
-        Self { db, eng, since: std::time::Instant::now(), commands }
+        Self { db, shard, eng, since: std::time::Instant::now(), commands }
     }
 }
 
@@ -278,11 +285,14 @@ impl DerefMut for EngineGuard<'_> {
 impl Drop for EngineGuard<'_> {
     fn drop(&mut self) {
         self.eng.before_sleep();
+        let paused = self.eng.clients.pause.is_some() || self.eng.clients.failover_pause;
+        self.db.shards[self.shard].paused.store(paused, Ordering::SeqCst);
         let cmds = self.eng.stats.commands.saturating_sub(self.commands);
         self.eng.cycle_done(cmds, self.since.elapsed().as_micros() as u64);
         if !self.eng.effects.is_empty() {
-            let effects = self.eng.take_effects();
-            self.db.publish(&effects);
+            // Published in place: the list keeps its allocation for the next batch.
+            self.db.publish(&self.eng.effects);
+            self.eng.effects.clear();
         }
     }
 }
@@ -297,7 +307,7 @@ impl Database {
                 e.shard = i as u16;
                 e.acl = acl.clone();
                 let scripts = e.scripting.ctl.clone();
-                Shard { engine: Mutex::new(e), scripts }
+                Shard { engine: Mutex::new(e), scripts, paused: AtomicBool::new(false) }
             })
             .collect();
         let replid = new_replid();
@@ -347,7 +357,7 @@ impl Database {
 
     /// Lock shard `i`'s engine.
     pub fn engine(&self, i: usize) -> EngineGuard<'_> {
-        EngineGuard::new(self, self.shards[i].engine.lock())
+        EngineGuard::new(self, i, self.shards[i].engine.lock())
     }
 
     /// Lock shard `i`'s engine, unless a script holding it runs past `busy-reply-threshold`:
@@ -356,12 +366,34 @@ impl Database {
         let shard = &self.shards[i];
         loop {
             if let Some(eng) = shard.engine.try_lock_for(std::time::Duration::from_millis(10)) {
-                return Some(EngineGuard::new(self, eng));
+                return Some(EngineGuard::new(self, i, eng));
             }
             if shard.scripts.busy.load(Ordering::SeqCst) || shard.scripts.debugging.load(Ordering::SeqCst) {
                 return None;
             }
         }
+    }
+
+    /// [`Database::engine_unless_busy`] for a connection's task: while another holds the engine
+    /// briefly (a batch of commands), yield to the worker's other connections instead of parking
+    /// its thread, so their reads, parsing and replies go on meanwhile; past that, park.
+    pub async fn engine_unless_busy_async(&self, i: usize) -> Option<EngineGuard<'_>> {
+        let shard = &self.shards[i];
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(eng) = shard.engine.try_lock() {
+                return Some(EngineGuard::new(self, i, eng));
+            }
+            if start.elapsed() > YIELD_FOR || shard.scripts.busy.load(Ordering::SeqCst) || shard.scripts.debugging.load(Ordering::SeqCst) {
+                return self.engine_unless_busy(i);
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Whether a pause may hold commands back on shard `i` (else none does).
+    pub fn may_be_paused(&self, i: usize) -> bool {
+        self.shards[i].paused.load(Ordering::SeqCst)
     }
 
     pub fn touch(&self, n: u64) {
@@ -503,18 +535,33 @@ impl Database {
 
     fn publish(&self, effects: &[Effect]) {
         let mut f = self.feed.lock();
-        let mut out = BytesMut::new();
+        // The stream's length first: without subscribers that is all that's needed, else it
+        // sizes the chunk.
+        let mut len = 0;
+        let mut last_db = f.last_db;
         for e in effects {
-            if e.db != f.last_db {
-                let db = e.db.to_string();
-                redis_proto::encode_command([b"SELECT".as_slice(), db.as_bytes()], &mut out);
-                f.last_db = e.db;
+            if e.db != last_db {
+                len += redis_proto::command_len(&[b"SELECT".as_slice(), e.db.to_string().as_bytes()]);
+                last_db = e.db;
             }
-            redis_proto::encode_command(&e.args, &mut out);
+            len += redis_proto::command_len(&e.args);
         }
-        f.offset += out.len() as u64;
+        let mut out = BytesMut::new();
+        if !f.sinks.is_empty() {
+            out.reserve(len);
+            for e in effects {
+                if e.db != f.last_db {
+                    redis_proto::encode_command([b"SELECT".as_slice(), e.db.to_string().as_bytes()], &mut out);
+                    f.last_db = e.db;
+                }
+                redis_proto::encode_command(&e.args, &mut out);
+            }
+            debug_assert_eq!(out.len(), len);
+        }
+        f.last_db = last_db;
+        f.offset += len as u64;
         if f.attached {
-            f.repl += out.len() as u64;
+            f.repl += len as u64;
         } else if self.durability.lock().is_some() {
             // `replicationFeedSlaves` without a backlog: one per propagated command.
             f.repl += effects.len() as u64;

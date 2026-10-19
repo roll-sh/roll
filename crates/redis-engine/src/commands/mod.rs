@@ -455,6 +455,11 @@ pub fn last_cmd_name(args: &[Bytes]) -> &'static str {
     crate::acl::full_name(cmd).unwrap_or(cmd.name)
 }
 
+/// A subcommand's full name (`config|get`).
+pub fn sub_full_name(sub: &'static Command) -> &'static str {
+    crate::acl::full_name(sub).unwrap_or(sub.name)
+}
+
 /// Resolve a container's subcommand.
 pub fn lookup_sub(cmd: &'static Command, sub: &[u8]) -> Option<&'static Command> {
     cmd.subs.iter().find(|s| s.name.as_bytes().eq_ignore_ascii_case(sub))
@@ -524,4 +529,30 @@ pub fn unknown_sub(cmd: &str, sub: &[u8]) -> Error {
 /// A `HELP` reply.
 pub fn help(lines: &[&str]) -> Reply {
     Reply::Array(lines.iter().map(|l| Reply::Status(l.to_string())).collect())
+}
+
+#[cfg(test)]
+mod full_name_tests {
+    #[test]
+    fn every_command_has_its_own_address() {
+        let mut seen = std::collections::HashMap::new();
+        for c in &super::table().all {
+            for (name, p) in std::iter::once((c.name.to_string(), *c as *const super::Command))
+                .chain(c.subs.iter().map(|s| (format!("{}|{}", c.name, s.name), s as *const super::Command)))
+            {
+                if let Some(other) = seen.insert(p as usize, name.clone()) {
+                    panic!("{name} shares its address with {other}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subcommands_know_their_full_names() {
+        for c in &super::table().all {
+            for s in c.subs {
+                assert_eq!(super::sub_full_name(s), format!("{}|{}", c.name, s.name));
+            }
+        }
+    }
 }

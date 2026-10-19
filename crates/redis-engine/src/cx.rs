@@ -323,6 +323,11 @@ impl<'a> Cx<'a> {
         if self.expire_check(key) {
             return None;
         }
+        self.get_mut_checked(key)
+    }
+
+    /// [`Cx::get_mut`] for a key this command has just checked for expiry.
+    fn get_mut_checked(&mut self, key: &[u8]) -> Option<KeyMut<'_>> {
         let now = self.now;
         let no_touch = self.client.no_touch;
         let db = self.client.db;
@@ -379,7 +384,7 @@ impl<'a> Cx<'a> {
             self.eng.dbs[db].insert_new(key, Entry::new(Value::new_of(kind), lru));
             self.eng.sig.notify(notify::NEW, "new", db as u16, key);
         }
-        Ok(self.get_mut(key).expect("just created"))
+        Ok(self.get_mut_checked(key).expect("just created"))
     }
 
     /// Create or overwrite a key. `keep_ttl` keeps an existing TTL (SET KEEPTTL); otherwise any

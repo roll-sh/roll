@@ -54,7 +54,7 @@ pub static COMMANDS: &[Command] = &[
     cmd!("FT._DROPIFX", -1, WRITE | MODULE, 0, 0, 0, super::ft::ft_dropifx, Module),
     cmd!("FT._DROPINDEXIFX", -2, WRITE | MODULE, 0, 0, 0, super::ft::ft_dropindexifx, Module),
     cmd!("FT._LIST", -1, READONLY | MODULE, 0, 0, 0, super::ft::ft_list, Module),
-    crate::container!("_FT.CONFIG", READONLY | MODULE, Module, FT_CONFIG_LOCAL),
+    crate::container!("_FT.CONFIG", READONLY | MODULE, Module, &FT_CONFIG_LOCAL),
     crate::container!("_FT.DEBUG", READONLY | MODULE, Module, FT_DEBUG),
     cmd!("search.CLUSTERINFO", -1, READONLY | MODULE | NOSCRIPT | LOADING, 0, 0, 0, cluster_info, Module),
     cmd!("search.CLUSTERREFRESH", -1, READONLY | MODULE | NOSCRIPT, 0, 0, 0, cluster_refresh, Module),
@@ -85,7 +85,9 @@ static FT_CONFIG: &[Command] = &[
     cmd!("HELP", -3, READONLY | MODULE, 0, 0, 0, ft_config, Module),
 ];
 
-static FT_CONFIG_LOCAL: &[Command] = &[
+/// A static of its own (not a reference to a constant like FT.CONFIG's): identical constants
+/// may share an address, and commands are told apart by address.
+static FT_CONFIG_LOCAL: [Command; 3] = [
     cmd!("GET", -3, READONLY | MODULE, 0, 0, 0, ft_config, Module),
     cmd!("SET", -3, WRITE | MODULE, 0, 0, 0, ft_config, Module),
     cmd!("HELP", -3, READONLY | MODULE, 0, 0, 0, ft_config, Module),

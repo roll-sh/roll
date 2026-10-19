@@ -197,10 +197,17 @@ impl Clients {
     }
 
     pub fn track(&self, id: u64) -> Option<&Track> {
+        // Every client with tracking state is counted (looked up after each command).
+        if self.tracking_clients == 0 {
+            return None;
+        }
         self.by_id.get(&id).and_then(|e| e.track.as_ref())
     }
 
     pub fn track_mut(&mut self, id: u64) -> Option<&mut Track> {
+        if self.tracking_clients == 0 {
+            return None;
+        }
         self.by_id.get_mut(&id).and_then(|e| e.track.as_mut())
     }
 

@@ -444,13 +444,16 @@ pub fn strlen(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 fn incr_generic(cx: &mut Cx, key: &Bytes, by: i64) -> CmdResult {
-    let cur = match cx.get_str(key)? {
-        Some(s) => parse_i64(s).ok_or(NOT_INT)?,
-        None => 0,
+    let (cur, existed) = match cx.get_str(key)? {
+        Some(s) => (parse_i64(s).ok_or(NOT_INT)?, true),
+        None => (0, false),
     };
     let new = cur.checked_add(by).ok_or(OVERFLOW)?;
     let shared_ints = cx.cfg().shared_integers();
-    let mut e = cx.get_or_create(key, Kind::String)?;
+    let mut e = match existed {
+        true => cx.get_mut(key).expect("just read"),
+        false => cx.get_or_create(key, Kind::String)?,
+    };
     // An int-encoded value changes in place; anything else is replaced.
     let in_place = e.encoding() == "int";
     let embedded = e.embedded();

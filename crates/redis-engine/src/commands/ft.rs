@@ -42,11 +42,8 @@ const JSON_EVENTS: &[&str] = &[
 /// write runs, remember the fields it names (only the first notification after it uses them). The key is looked up in db 0, whatever the client's
 /// database, and a command that doesn't qualify leaves the previous fields in place.
 pub(crate) fn command_filter(eng: &mut Engine, args: &[Bytes]) {
-    if !eng.cfg.flag("search-partial-indexed-docs") {
-        return;
-    }
     let Some(&c) = args.first().and_then(|a| a.first()) else { return };
-    if c | 0x20 != b'h' || args.len() < 3 {
+    if c | 0x20 != b'h' || args.len() < 3 || !eng.cfg.flag("search-partial-indexed-docs") {
         return;
     }
     let name = crate::util::cstr(&args[0]);

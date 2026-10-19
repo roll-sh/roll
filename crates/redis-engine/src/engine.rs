@@ -93,6 +93,9 @@ pub struct Stats {
     pub error_replies: u64,
 }
 
+/// Per-command stats by full name (looked up on every call: a fast hasher).
+pub type CmdStats = HashMap<String, CmdStat, foldhash::fast::RandomState>;
+
 #[derive(Clone, Debug, Default)]
 pub struct CmdStat {
     pub calls: u64,
@@ -260,7 +263,7 @@ pub struct Engine {
     /// `server.execution_nesting`: dispatches in progress (nested ones keep the snapshot).
     exec_depth: u32,
     pub stats: Stats,
-    pub cmdstats: HashMap<String, CmdStat>,
+    pub cmdstats: CmdStats,
     /// The server's `modules` dict (MODULE LIST's order).
     pub modules: crate::modules::ModuleDict,
     pub errorstats: HashMap<String, u64>,
@@ -319,6 +322,9 @@ pub struct Engine {
     pub metrics: crate::commands::info::Metrics,
     /// `total_error_replies` when the current command started or its last nested call ended.
     pub(crate) prev_errors: u64,
+    /// When [`Engine::call`] started (Unix µs, 0: none): the clock read that gives the command
+    /// its time also starts its duration, as `call()`'s `ustime()` does.
+    call_start_us: i64,
     /// DEBUG's switches.
     pub debug: crate::commands::debug::Switches,
     /// RedisTimeSeries' global state: the label index (over every database).
@@ -395,7 +401,7 @@ impl Engine {
             latency_monitor: Default::default(),
             exec_depth: 0,
             stats: Stats::default(),
-            cmdstats: HashMap::new(),
+            cmdstats: CmdStats::default(),
             modules: Default::default(),
             errorstats: HashMap::new(),
             slowlog: VecDeque::new(),
@@ -430,6 +436,7 @@ impl Engine {
             startup_memory: 0,
             metrics: Default::default(),
             prev_errors: 0,
+            call_start_us: 0,
             debug: Default::default(),
             ts: Default::default(),
             search: Default::default(),
@@ -460,7 +467,9 @@ impl Engine {
 
     /// Execute one client command.
     pub fn call(&mut self, client: &mut Client, args: &[Bytes]) -> Outcome {
-        let now = now_ms();
+        let start_us = crate::util::now_us();
+        let now = start_us.div_euclid(1000);
+        self.call_start_us = start_us;
         // Connections register on connect when the engine is free, else on their first command.
         if client.conn.is_some() && !self.clients.by_id.contains_key(&client.id) {
             self.clients.register(client);
@@ -600,14 +609,14 @@ impl Engine {
     }
 
     /// Resolve the command (and subcommand) for `args`, checking arity.
-    pub fn resolve(args: &[Bytes]) -> Result<(&'static Command, String), Reply> {
+    pub fn resolve(args: &[Bytes]) -> Result<(&'static Command, &'static str), Reply> {
         Self::resolve_as(args, false)
     }
 
     /// [`Engine::resolve`] for a connection that may (`internal`) or may not see internal
     /// commands. An internal container's subcommands are visible to all (as in Redis, which
     /// checks the resolved command).
-    pub fn resolve_as(args: &[Bytes], internal: bool) -> Result<(&'static Command, String), Reply> {
+    pub fn resolve_as(args: &[Bytes], internal: bool) -> Result<(&'static Command, &'static str), Reply> {
         let Some(cmd) = commands::lookup(&args[0]) else {
             return Err(Self::unknown_command(args));
         };
@@ -625,9 +634,9 @@ impl Engine {
                     redis_proto::escape_prefix(&args[1], 128)
                 )));
             };
-            let full = format!("{}|{}", cmd.name, sub.name);
+            let full = commands::sub_full_name(sub);
             if !sub.check_arity(args.len()) {
-                return Err(commands::arity_error(&full).into());
+                return Err(commands::arity_error(full).into());
             }
             return Ok((sub, full));
         }
@@ -635,11 +644,11 @@ impl Engine {
             if !cmd.check_arity(args.len()) {
                 return Err(commands::arity_error(cmd.name).into());
             }
-            return Ok((cmd, cmd.name.to_string()));
+            return Ok((cmd, cmd.name));
         }
         if args.len() < 2 {
             if cmd.check_arity(args.len()) {
-                return Ok((cmd, cmd.name.to_string()));
+                return Ok((cmd, cmd.name));
             }
             return Err(commands::arity_error(cmd.name).into());
         }
@@ -650,9 +659,9 @@ impl Engine {
                 cmd.name.to_uppercase()
             )));
         };
-        let full = format!("{}|{}", cmd.name, sub.name);
+        let full = commands::sub_full_name(sub);
         if !sub.check_arity(args.len()) {
-            return Err(commands::arity_error(&full).into());
+            return Err(commands::arity_error(full).into());
         }
         Ok((sub, full))
     }
@@ -673,9 +682,7 @@ impl Engine {
             return Outcome::Reply(Reply::error("ERR empty command"));
         }
         let top = matches!(mode, Mode::Top);
-        if top {
-            client.last_cmd = commands::last_cmd_name(args);
-        }
+        let start_us = if top { std::mem::take(&mut self.call_start_us) } else { 0 };
         // RediSearch: events from outside commands (expiry, eviction), then its command filter
         // (which runs as the command is read, so at queue time inside MULTI).
         if !self.sig.search_events.is_empty() {
@@ -689,7 +696,15 @@ impl Engine {
         if matches!(mode, Mode::Top | Mode::Script { .. } | Mode::Replay) {
             crate::commands::ft::command_filter(self, args);
         }
-        let (cmd, full_name) = match Self::resolve_as(args, client.internal || mode == Mode::Replay) {
+        let resolved = Self::resolve_as(args, client.internal || mode == Mode::Replay);
+        if top {
+            // The command as CLIENT LIST shows it (its declared full name, `NULL` if unknown).
+            client.last_cmd = match &resolved {
+                Ok((_, full)) => full,
+                Err(_) => commands::last_cmd_name(args),
+            };
+        }
+        let (cmd, full_name) = match resolved {
             Ok(c) => c,
             Err(e) => {
                 if top && let Some(m) = client.multi.as_mut() {
@@ -718,7 +733,7 @@ impl Engine {
 
         if top && !cmd.has(commands::TXN_CONTROL) && cmd.has(commands::NO_MULTI) && let Some(m) = client.multi.as_mut() {
             m.error = true;
-            return Outcome::Reply(self.reject(&full_name, Reply::error("ERR Command not allowed inside a transaction")));
+            return Outcome::Reply(self.reject(full_name, Reply::error("ERR Command not allowed inside a transaction")));
         }
 
         if client.user.is_placeholder() {
@@ -729,7 +744,7 @@ impl Engine {
                 if top && let Some(m) = client.multi.as_mut() {
                     m.error = true;
                 }
-                let mut e = crate::acl::deny(&self.acl, client, &full_name, args, d, mode);
+                let mut e = crate::acl::deny(&self.acl, client, full_name, args, d, mode);
                 if top && full_name == "exec" {
                     // A rejected EXEC discards the transaction (Redis' execCommandAbort).
                     client.multi = None;
@@ -738,7 +753,7 @@ impl Engine {
                         e = Reply::Error(format!("EXECABORT Transaction discarded because of: {msg}"));
                     }
                 }
-                return Outcome::Reply(self.reject(&full_name, e));
+                return Outcome::Reply(self.reject(full_name, e));
             }
 
         if top && !cmd.has(commands::TXN_CONTROL) && client.multi.is_some() {
@@ -746,7 +761,7 @@ impl Engine {
             let Some(m) = client.multi.as_mut() else { unreachable!() };
             if deny_oom {
                 m.error = true;
-                return Outcome::Reply(self.reject(&full_name, commands::OOM.into()));
+                return Outcome::Reply(self.reject(full_name, commands::OOM.into()));
             }
             m.queued.push(args.to_vec());
             return Outcome::Reply(Reply::status("QUEUED"));
@@ -754,7 +769,7 @@ impl Engine {
 
         if client.resp == 2 && client.subscriptions() > 0 && !cmd.has(commands::SUBSCRIBED_OK) && mode == Mode::Top {
             return Outcome::Reply(self.reject(
-                &full_name,
+                full_name,
                 Reply::Error(format!(
                     "ERR Can't execute '{full_name}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
                 )),
@@ -763,16 +778,16 @@ impl Engine {
 
         if let Mode::Script { read_only } = mode {
             if cmd.has(commands::NOSCRIPT) && !self.debug.disable_deny_scripts {
-                return Outcome::Reply(self.reject(&full_name, Reply::error("ERR This Redis command is not allowed from script")));
+                return Outcome::Reply(self.reject(full_name, Reply::error("ERR This Redis command is not allowed from script")));
             }
             // May-replicate commands count as writes here, so read-only scripts can't publish.
             if read_only && (cmd.is_write() || cmd.has(commands::MAY_REPLICATE)) {
-                return Outcome::Reply(self.reject(&full_name, Reply::error("ERR Write commands are not allowed from read-only scripts.")));
+                return Outcome::Reply(self.reject(full_name, Reply::error("ERR Write commands are not allowed from read-only scripts.")));
             }
         }
 
         if self.replica && cmd.is_write() && mode != Mode::Replay && !client.internal {
-            return Outcome::Reply(self.reject(&full_name, Reply::error("READONLY You can't write against a read only replica.")));
+            return Outcome::Reply(self.reject(full_name, Reply::error("READONLY You can't write against a read only replica.")));
         }
 
         if mode != Mode::Replay && !matches!(mode, Mode::Script { .. } | Mode::Exec) {
@@ -781,7 +796,7 @@ impl Engine {
                 let fits = self.evict_to_fit(now);
                 self.pre_oom = !fits;
                 if !fits && cmd.has(commands::DENYOOM) && !client.internal {
-                    return Outcome::Reply(self.reject(&full_name, commands::OOM.into()));
+                    return Outcome::Reply(self.reject(full_name, commands::OOM.into()));
                 }
             }
         }
@@ -792,7 +807,7 @@ impl Engine {
             // A script can't be stopped half way, so memory is only checked before its first
             // write, and only if it was over the limit when it started.
             if !run.allow_oom && self.cfg.maxmemory > 0 && !run.write_dirty && self.pre_oom && cmd.has(commands::DENYOOM) {
-                return Outcome::Reply(self.reject(&full_name, commands::OOM.into()));
+                return Outcome::Reply(self.reject(full_name, commands::OOM.into()));
             }
             if cmd.is_write() {
                 run.write_dirty = true;
@@ -802,7 +817,7 @@ impl Engine {
 
         let monitored = top || matches!(mode, Mode::Script { .. });
         if monitored && !cmd.has(commands::SKIP_MONITOR) && !cmd.has(commands::ADMIN) && self.hub.has_monitors() {
-            self.feed_monitor(client, &redacted(&full_name, args), now);
+            self.feed_monitor(client, &redacted(full_name, args), now);
         }
 
         // ---- execute ----
@@ -813,7 +828,7 @@ impl Engine {
         let effects_before = self.effects.len();
         let dirty_before = self.sig.dirty;
         let outer_counted = self.sig.counted.take();
-        let started = Instant::now();
+        let started = (start_us == 0).then(Instant::now);
         let (res, rewrite, block, no_propagate, force) = {
             // Error replies from here on (to anyone) make the command a failed call.
             self.prev_errors = self.stats.error_replies;
@@ -828,7 +843,10 @@ impl Engine {
             }
             (res, cx.rewrite.take(), cx.block.take(), cx.no_propagate, cx.force_propagate)
         };
-        let micros = started.elapsed().as_micros() as u64;
+        let micros = match started {
+            Some(t) => t.elapsed().as_micros() as u64,
+            None => (crate::util::now_us() - start_us).max(0) as u64,
+        };
         if let Some(n) = std::mem::replace(&mut self.sig.counted, outer_counted) {
             self.sig.dirty = dirty_before + n;
         }
@@ -858,13 +876,13 @@ impl Engine {
                 && !matches!(cmd.name, "eval_ro" | "evalsha_ro" | "fcall_ro")
                 && self.clients.track(current).is_some()
             {
-                let keys = commands::keyspec::keys_with_flags(cmd, &full_name, args);
+                let keys = commands::keyspec::keys_with_flags(cmd, full_name, args);
                 self.clients.remember(current, keys.into_iter().map(|(i, _)| args[i].clone()));
             }
-            if block.is_none()
-                && let Some(e) = self.clients.by_id.get(&current)
-            {
-                e.stats.cmds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // A connection's own command: its stats are the registered ones (`call` registers it).
+            let own = if top && current == client.id { client.conn.as_ref() } else { None };
+            if let Some(stats) = own.or_else(|| self.clients.by_id.get(&current).map(|e| &e.stats)) {
+                stats.cmds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if top {
                 self.clients.command_done(client.id, client.multi.is_some(), full_name == "client" || full_name.starts_with("client|"));
@@ -890,13 +908,13 @@ impl Engine {
                     return Outcome::Blocked;
                 }
                 _ => {
-                    self.count_call(client, &full_name, cmd, args, micros, now, mode);
+                    self.count_call(client, full_name, cmd, args, micros, now, mode);
                     return Outcome::Reply(b.timeout_reply);
                 }
             }
         }
         let micros = if mode == Mode::Unblock { micros + self.blocking.waiters.get(&client.id).map_or(0, |w| w.micros) } else { micros };
-        self.count_call(client, &full_name, cmd, args, micros, now, mode);
+        self.count_call(client, full_name, cmd, args, micros, now, mode);
 
         let reply = match res {
             Ok(r) => r,
@@ -908,12 +926,12 @@ impl Engine {
         };
         // `incrCommandStatsOnError`: errors since the last check (nested calls check their own).
         if self.stats.error_replies > self.prev_errors {
-            self.cmdstats.get_mut(&full_name).unwrap().failed += 1;
+            self.cmdstats.get_mut(full_name).unwrap().failed += 1;
             self.stats.failed_calls += 1;
         }
         self.prev_errors = self.stats.error_replies;
         if self.hotkeys.as_ref().is_some_and(|h| h.active) && matches!(mode, Mode::Top | Mode::Exec | Mode::Unblock) {
-            self.track_hotkeys(client, cmd, &full_name, args, micros, &reply, mode);
+            self.track_hotkeys(client, cmd, full_name, args, micros, &reply, mode);
         }
         Outcome::Reply(reply)
     }
@@ -944,13 +962,13 @@ impl Engine {
         self.clients.refresh(client);
         let Ok((cmd, full)) = Self::resolve_as(args, client.internal) else { return };
         let now = now_ms();
-        let shown = redacted(&full, args);
+        let shown = redacted(full, args);
         if !cmd.has(commands::SKIP_MONITOR) && !cmd.has(commands::ADMIN) && self.hub.has_monitors() {
             self.feed_monitor(client, &shown, now);
         }
         let failed = reply.is_error();
-        self.record_latency(&full, cmd.has(commands::FAST), micros);
-        let stat = self.cmdstats.entry(full).or_default();
+        self.record_latency(full, cmd.has(commands::FAST), micros);
+        let stat = self.cmdstat(full);
         stat.calls += 1;
         stat.usec += micros;
         if failed {
@@ -988,7 +1006,7 @@ impl Engine {
 
     pub(crate) fn reject(&mut self, name: &str, r: Reply) -> Reply {
         self.last_rejected = true;
-        self.cmdstats.entry(name.to_string()).or_default().rejected += 1;
+        self.cmdstat(name).rejected += 1;
         self.stats.rejected_calls += 1;
         self.count_error(&r);
         r
@@ -1036,7 +1054,7 @@ impl Engine {
             _ => "command",
         };
         self.latency_monitor.add_if_needed(self.cfg.latency_monitor_threshold, event, micros / 1000, now / 1000);
-        let stat = self.cmdstats.entry(full.to_string()).or_default();
+        let stat = self.cmdstat(full);
         stat.calls += 1;
         stat.usec += micros;
         if tracking {
@@ -1055,13 +1073,21 @@ impl Engine {
         }
     }
 
+    /// `full`'s command stats, created on its first call.
+    pub(crate) fn cmdstat(&mut self, full: &str) -> &mut CmdStat {
+        if !self.cmdstats.contains_key(full) {
+            self.cmdstats.insert(full.to_string(), CmdStat::default());
+        }
+        self.cmdstats.get_mut(full).unwrap()
+    }
+
     /// `call()`'s latency accounting for a command that ran `micros`: its latency histogram
     /// (while `latency-tracking` is on) and the monitor's command / fast-command spike.
     pub(crate) fn record_latency(&mut self, full: &str, fast: bool, micros: u64) {
         let event = if fast { "fast-command" } else { "command" };
         self.latency_monitor.add_if_needed(self.cfg.latency_monitor_threshold, event, micros / 1000, now_ms() / 1000);
         if self.cfg.latency_tracking {
-            let stat = self.cmdstats.entry(full.to_string()).or_default();
+            let stat = self.cmdstat(full);
             stat.latency.get_or_insert_with(Default::default).record(micros as i64 * 1000);
         }
     }
@@ -1070,9 +1096,9 @@ impl Engine {
     /// now (`updateStatsOnUnblock`).
     fn count_unblocked(&mut self, w: &Waiter, failed: bool) {
         let Ok((cmd, full)) = Self::resolve_as(&w.args, true) else { return };
-        self.count_call(&w.client, &full, cmd, &w.args, w.micros, now_ms(), Mode::Unblock);
+        self.count_call(&w.client, full, cmd, &w.args, w.micros, now_ms(), Mode::Unblock);
         if failed {
-            self.cmdstats.get_mut(&full).unwrap().failed += 1;
+            self.cmdstats.get_mut(full).unwrap().failed += 1;
             self.stats.failed_calls += 1;
         }
         if let Some(e) = self.clients.by_id.get(&w.client.id) {
@@ -1139,10 +1165,13 @@ impl Engine {
 
     /// If `key` is logically expired, delete it (on a primary) and report true.
     pub(crate) fn expire_if_needed(&mut self, db: usize, key: &[u8], now: i64, mode: Mode) -> bool {
-        if self.debug.allow_access_expired {
+        let d = &self.dbs[db];
+        // Only keys with a TTL (all in `volatile`) and hashes with field TTLs (`subexpires`) can
+        // be due.
+        if self.debug.allow_access_expired || (d.volatile.is_empty() && d.subexpires.is_empty()) {
             return false;
         }
-        let Some(e) = self.dbs[db].keys.get(key) else { return false };
+        let Some(e) = d.keys.get(key) else { return false };
         if !e.expired(now) {
             // A hash whose registered field expiry is due: run its active field expiry now (Redis
             // does it from the cron), so the command sees what it would see on Redis. Not while
@@ -1190,7 +1219,8 @@ impl Engine {
         // A key touched twice by one command (an expired key's lazy delete and its write) is
         // one change for WATCH.
         let mut seen: HashSet<(u16, Str)> = HashSet::new();
-        for (db, key) in std::mem::take(&mut self.sig.touched) {
+        let mut touched = std::mem::take(&mut self.sig.touched);
+        for (db, key) in touched.drain(..) {
             self.dbs[db as usize].resize(&key);
             let k = (db, key);
             if let Some(ids) = self.watches.keys.get(&k).filter(|_| seen.insert(k.clone())) {
@@ -1212,6 +1242,10 @@ impl Engine {
             if self.blocking.by_key.contains_key(&k) && self.blocking.ready_set.insert(k.clone()) {
                 self.blocking.ready.push(k);
             }
+        }
+        // Keep the allocation for the next command (unless something touched keys meanwhile).
+        if self.sig.touched.is_empty() {
+            self.sig.touched = touched;
         }
     }
 
