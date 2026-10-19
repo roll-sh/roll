@@ -239,7 +239,7 @@ impl Engine {
         for (i, keys, expires) in sizes {
             if let Some(d) = self.dbs.get_mut(i) {
                 d.keys.expand(keys as usize);
-                d.volatile.expand(expires as usize);
+                d.keys.expires_expand(expires as usize);
             }
         }
         let (mut loaded, mut expired) = (0, 0);

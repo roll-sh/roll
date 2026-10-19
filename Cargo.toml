@@ -52,6 +52,8 @@ sha2 = "0.11"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 libm = "0.2"
 libc = "0.2"
+mimalloc = { version = "0.1.52", default-features = false }
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 rustc_apfloat = "0.2"
 cc = "1"
 pg-control = { path = "crates/pg-control" }

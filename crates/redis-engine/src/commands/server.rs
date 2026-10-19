@@ -864,13 +864,13 @@ pub fn memory_stats(cx: &mut Cx, _args: &[Bytes]) -> CmdResult {
     ];
     let mut lut = 0u64;
     for (i, d) in cx.eng.dbs.iter().enumerate() {
-        lut += (d.keys.table_bytes() + d.volatile.table_bytes()) as u64;
+        lut += (d.keys.table_bytes() + d.keys.expires_table_bytes()) as u64;
         if !d.is_empty() {
             m.push((
                 Reply::bulk_str(format!("db.{i}")),
                 Reply::Map(vec![
                     (Reply::bulk("overhead.hashtable.main"), Reply::Int(d.keys.table_bytes() as i64)),
-                    (Reply::bulk("overhead.hashtable.expires"), Reply::Int(d.volatile.table_bytes() as i64)),
+                    (Reply::bulk("overhead.hashtable.expires"), Reply::Int(d.keys.expires_table_bytes() as i64)),
                 ]),
             ));
         }

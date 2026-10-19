@@ -86,6 +86,11 @@ impl<P: NodePtr> RawDict<P> {
         !self.t1.is_empty()
     }
 
+    #[cfg(test)]
+    pub fn rehash_index(&self) -> usize {
+        self.rehash_idx
+    }
+
     /// `dictGetStatsHt` for the main table and, while rehashing, the target table.
     pub fn stats(&self, full: bool) -> Vec<DictStats> {
         let target = chains(&self.t1).sum::<usize>();
@@ -797,6 +802,11 @@ impl<K: AsRef<[u8]>, V> Dict<K, V> {
     }
 
     /// Move everything out.
+    #[cfg(test)]
+    pub fn rehash_index(&self) -> usize {
+        self.raw.rehash_index()
+    }
+
     pub fn drain(&mut self) -> Vec<(K, V)> {
         self.raw.drain().into_iter().map(|n| (n.key, n.val)).collect()
     }

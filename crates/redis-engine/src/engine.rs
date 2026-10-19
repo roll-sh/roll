@@ -1179,7 +1179,7 @@ impl Engine {
         let d = &self.dbs[db];
         // Only keys with a TTL (all in `volatile`) and hashes with field TTLs (`subexpires`) can
         // be due.
-        if self.debug.allow_access_expired || (d.volatile.is_empty() && d.subexpires.is_empty()) {
+        if self.debug.allow_access_expired || (d.keys.expires_is_empty() && d.subexpires.is_empty()) {
             return false;
         }
         let Some(e) = d.keys.get(key) else { return false };
@@ -1678,7 +1678,7 @@ impl Engine {
             for i in 0..n {
                 let db = (off + i) % n;
                 let d = &self.dbs[db];
-                let k = if volatile { d.volatile.random(&mut self.rng).map(|(k, _)| k.clone()) } else { d.keys.random(&mut self.rng).map(|(k, _)| Str::from_slice(k)) };
+                let k = if volatile { d.keys.expires_random(&mut self.rng).map(|(k, _)| Str::from_slice(k)) } else { d.keys.random(&mut self.rng).map(|(k, _)| Str::from_slice(k)) };
                 if let Some(k) = k {
                     return Some((db as u16, k));
                 }
@@ -1691,7 +1691,7 @@ impl Engine {
             let d = &self.dbs[db];
             let mut cands: Vec<Str> = Vec::with_capacity(samples);
             if volatile {
-                d.volatile.sample(&mut self.rng, samples, |k, _| cands.push(k.clone()));
+                d.keys.expires_sample(&mut self.rng, samples, |k, _| cands.push(Str::from_slice(k)));
             } else {
                 d.keys.sample(&mut self.rng, samples, |k, _| cands.push(Str::from_slice(k)));
             }
@@ -1744,7 +1744,7 @@ impl Engine {
         self.sig.observed = self.keys_observed();
         for db in 0..self.dbs.len() {
             loop {
-                if self.dbs[db].volatile.is_empty() {
+                if self.dbs[db].keys.expires_is_empty() {
                     break;
                 }
                 let mut sampled = 0;
@@ -1754,16 +1754,14 @@ impl Engine {
                 let mut cursor = self.dbs[db].expire_cursor;
                 while sampled < per_loop {
                     let d = &self.dbs[db];
-                    cursor = d.volatile.scan(cursor, |k, _| {
+                    cursor = d.keys.expires_scan(cursor, |k, e| {
                         sampled += 1;
-                        if let Some(e) = d.keys.get(k) {
-                            if e.expired(now) {
-                                expired.push(k.clone());
-                            } else if e.expire() != 0 {
-                                // Wraps like the C sum does with far-off expiries.
-                                ttl_sum = ttl_sum.wrapping_add(e.expire() - now);
-                                ttl_n += 1;
-                            }
+                        if e.expired(now) {
+                            expired.push(Str::from_slice(k));
+                        } else {
+                            // Wraps like the C sum does with far-off expiries.
+                            ttl_sum = ttl_sum.wrapping_add(e.expire() - now);
+                            ttl_n += 1;
                         }
                     });
                     if cursor == 0 {
@@ -1830,13 +1828,13 @@ impl Engine {
             || self.cfg.timeout > 0
             || self.clients.pause.is_some()
             || self.clients.failover_pause
-            || self.dbs.iter().any(|d| !d.volatile.is_empty() || !d.subexpires.is_empty() || d.keys.is_rehashing() || d.volatile.is_rehashing())
+            || self.dbs.iter().any(|d| !d.keys.expires_is_empty() || !d.subexpires.is_empty() || d.keys.is_rehashing() || d.keys.expires_is_rehashing())
     }
 
     pub fn rehash(&mut self, steps: usize) {
         for d in &mut self.dbs {
             d.keys.rehash(steps);
-            d.volatile.rehash(steps);
+            d.keys.expires_rehash(steps);
         }
     }
 

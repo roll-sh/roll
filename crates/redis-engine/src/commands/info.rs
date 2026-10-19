@@ -482,7 +482,7 @@ pub fn mem_overhead(eng: &mut Engine, now: i64) -> MemOverhead {
     let (scripts_eval, functions) = (sc.scripts_memory() as u64, sc.libraries_memory() as u64);
     let clients_mem = eng.clients_memory();
     let startup = eng.startup_memory as u64;
-    let keys_overhead: u64 = eng.dbs.iter().map(|d| (d.len() * crate::value::KEY_OVERHEAD + d.keys.table_bytes() + d.volatile.table_bytes()) as u64).sum();
+    let keys_overhead: u64 = eng.dbs.iter().map(|d| (d.len() * crate::value::KEY_OVERHEAD + d.keys.table_bytes() + d.keys.expires_table_bytes()) as u64).sum();
     let overhead = (startup + clients_mem + eng.overhead as u64 + keys_overhead + scripts_eval + functions).min(used.max(startup));
     MemOverhead {
         used,

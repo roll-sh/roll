@@ -336,7 +336,7 @@ pub fn debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             let on = flag();
             for db in &mut cx.eng.dbs {
                 db.keys.set_resize(on);
-                db.volatile.set_resize(on);
+                db.keys.expires_set_resize(on);
             }
             Ok(Reply::Ok)
         }
@@ -365,7 +365,7 @@ pub fn debug(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             let mut s = String::from("[Dictionary HT]\n");
             s += &kvstore_stats(db.keys.len(), db.keys.stats(full), full);
             s += "[Expires HT]\n";
-            s += &kvstore_stats(db.volatile.len(), db.volatile.stats(full), full);
+            s += &kvstore_stats(db.keys.expires_len(), db.keys.expires_stats(full), full);
             Ok(Reply::Verbatim("txt", s.into()))
         }
         _ if is("htstats-key") && n >= 3 => {

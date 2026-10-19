@@ -5,12 +5,12 @@ use crate::keyspace::{Fields, FieldsMut, KeySpace, KvMut};
 use crate::value::{Entry, KEY_OVERHEAD, NO_SIZE, SIZE_BINS, SIZE_TYPES, Str, Value, ValueRef, key_mem};
 
 pub struct Db {
+    /// The keys, and the index of those with a TTL (for active expiry and `volatile-*`
+    /// eviction).
     pub keys: KeySpace,
-    /// Keys that have a TTL, for active expiry and `volatile-*` eviction.
-    pub volatile: Dict<Str, ()>,
     /// Approximate bytes used by this database (keys, values and overheads).
     pub mem: usize,
-    /// Cursor of the active-expiry scan over `volatile`.
+    /// Cursor of the active-expiry scan over the TTL index.
     pub expire_cursor: u64,
     /// Running average TTL of sampled keys (INFO keyspace `avg_ttl`).
     pub avg_ttl: i64,
@@ -28,7 +28,6 @@ impl Default for Db {
     fn default() -> Self {
         Self {
             keys: Default::default(),
-            volatile: Default::default(),
             mem: 0,
             expire_cursor: 0,
             avg_ttl: 0,
@@ -58,7 +57,7 @@ impl Db {
     }
 
     pub fn expires(&self) -> usize {
-        self.volatile.len()
+        self.keys.expires_len()
     }
 
     /// Bytes a key costs on top of its value.
@@ -81,7 +80,6 @@ impl Db {
         }
         self.mem += Self::key_cost(&k) + entry.value.mem();
         if entry.expire != 0 {
-            self.volatile.insert(k.clone(), ());
             self.mem += Self::key_cost(&k);
         }
         let sub = subexpiry_of(entry.value.view());
@@ -111,7 +109,6 @@ impl Db {
             self.keysizes[e.sized as usize] = self.keysizes[e.sized as usize].wrapping_sub(1);
         }
         if e.expire != 0 {
-            self.volatile.remove(key);
             self.mem = self.mem.saturating_sub(Self::key_cost(&k));
         }
         if matches!(e.value, Value::Hash(_)) && !self.subexpires.is_empty() && self.subexpires.remove(key).is_some() {
@@ -120,7 +117,7 @@ impl Db {
         Some(e)
     }
 
-    /// Set or clear (0) a key's expiry, keeping the volatile index in sync. Returns false when the
+    /// Set or clear (0) a key's expiry (the keyspace keeps its TTL index). Returns false when the
     /// key doesn't exist.
     pub fn set_expire(&mut self, key: &[u8], at: i64) -> bool {
         let Some(mut e) = self.keys.get_mut(key) else { return false };
@@ -133,12 +130,9 @@ impl Db {
         }
         match (had, at != 0) {
             (false, true) => {
-                let k = Str::from_slice(key);
-                self.mem += Self::key_cost(&k);
-                self.volatile.insert(k, ());
+                self.mem += Self::key_cost(&Str::from_slice(key));
             }
             (true, false) => {
-                self.volatile.remove(key);
                 self.mem = self.mem.saturating_sub(KEY_OVERHEAD + key.len().saturating_sub(22));
             }
             _ => {}
@@ -213,7 +207,6 @@ impl Db {
     pub fn clear(&mut self) {
         self.keysizes.iter_mut().for_each(|n| *n = 0);
         self.keys.clear();
-        self.volatile.clear();
         self.subexpires.clear();
         self.subexpire_cursor = 0;
         self.mem = 0;
@@ -223,6 +216,6 @@ impl Db {
 
     /// Total bytes including the hash tables themselves.
     pub fn used_bytes(&self) -> usize {
-        self.mem + self.keys.table_bytes() + self.volatile.table_bytes() + self.subexpires.table_bytes()
+        self.mem + self.keys.table_bytes() + self.keys.expires_table_bytes() + self.subexpires.table_bytes()
     }
 }

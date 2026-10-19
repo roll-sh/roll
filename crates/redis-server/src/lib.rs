@@ -18,6 +18,19 @@ pub use directory::{Directory, Session, Single};
 pub use snapshot::RdbCodec;
 
 use std::net::SocketAddr;
+
+/// mimalloc: no per-allocation header (a 32-byte keyspace node takes 32 bytes, not 48 as with
+/// glibc), size classes like jemalloc's, the same allocator on every platform, and memory handed
+/// back to the system on demand ([`release_memory`]).
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Give the calling thread's free memory back to the system (and collect what other threads
+/// freed into it): an idle core calls this before it parks.
+pub fn release_memory() {
+    // SAFETY: no preconditions.
+    unsafe { libmimalloc_sys::mi_collect(true) };
+}
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
