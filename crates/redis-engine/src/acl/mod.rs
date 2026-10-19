@@ -825,7 +825,22 @@ pub fn commands_in_category(bit: u32) -> Vec<&'static str> {
 
 /// The full name (`config|get`) of a resolved command.
 pub fn full_name(cmd: &Command) -> Option<&'static str> {
-    index().meta(cmd).map(|m| m.full.as_str())
+    // A table of its own: resolving a subcommand (CONFIG GET) mustn't build the whole ACL index,
+    // whose key specs decode Redis' command metadata; only ACL checks of restricted users,
+    // ACL commands and key-spec lookups need that.
+    static NAMES: std::sync::OnceLock<std::collections::HashMap<usize, &'static str, foldhash::fast::RandomState>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        let mut m = std::collections::HashMap::default();
+        for &c in &crate::commands::table().all {
+            m.insert(c as *const Command as usize, c.name);
+            for s in c.subs {
+                let full: &'static str = Box::leak(format!("{}|{}", c.name, s.name).into_boxed_str());
+                m.insert(s as *const Command as usize, full);
+            }
+        }
+        m
+    });
+    names.get(&(cmd as *const Command as usize)).copied()
 }
 
 #[cfg(test)]
