@@ -133,7 +133,7 @@ impl<P: NodePtr> RawDict<P> {
         for t in self.tables() {
             let mut cur = t[(h as usize) & (t.len() - 1)].as_ref();
             while let Some(n) = cur {
-                if n.key() == key {
+                if crate::util::bytes_eq(n.key(), key) {
                     return Some(n);
                 }
                 cur = n.next().as_ref();
@@ -164,7 +164,7 @@ impl<P: NodePtr> RawDict<P> {
             // SAFETY: `link` walks the chain within the unique borrow of `self`.
             unsafe {
                 while let Some(n) = &mut *link {
-                    if n.key() == key {
+                    if crate::util::bytes_eq(n.key(), key) {
                         return Some(&mut *link);
                     }
                     link = n.next_mut();
@@ -204,7 +204,7 @@ impl<P: NodePtr> RawDict<P> {
             // SAFETY: as in `get_link`.
             unsafe {
                 while let Some(n) = &mut *link {
-                    if n.key() == key {
+                    if crate::util::bytes_eq(n.key(), key) {
                         let mut node = (*link).take().unwrap();
                         *link = node.next_mut().take();
                         out = Some(node);

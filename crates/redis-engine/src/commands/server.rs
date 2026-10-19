@@ -1096,7 +1096,7 @@ pub fn latency_histogram(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let mut out = Vec::new();
     if args.len() == 2 {
         // `latencyAllCommandsFillCDF`: the command table's order, under the declared names.
-        let recorded = super::order::in_order(cx.eng.cmdstats.iter().filter(|(_, v)| v.latency.is_some()).map(|(k, _)| (k.as_str(), ())));
+        let recorded = super::order::in_order(cx.eng.cmdstats.iter().filter(|(_, v)| v.latency.is_some()).map(|(k, _)| (*k, ())));
         out.extend(recorded.into_iter().filter_map(|(n, _)| cdf(super::order::position(n).map_or(n, |i| names[i].as_str()))));
         return Ok(Reply::Map(out));
     }

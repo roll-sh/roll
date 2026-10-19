@@ -766,7 +766,7 @@ pub(super) fn rm_call(cx: &mut Cx, name: &str, f: impl FnOnce(&mut Cx) -> CmdRes
     let micros = started.elapsed().as_micros() as u64;
     let fast = super::lookup(name.as_bytes()).is_some_and(|c| c.has(super::FAST));
     cx.eng.record_latency(name, fast, micros);
-    let st = cx.eng.cmdstats.entry(name.to_string()).or_default();
+    let st = cx.eng.cmdstat(name);
     st.calls += 1;
     st.usec += micros;
     if res.is_err() {

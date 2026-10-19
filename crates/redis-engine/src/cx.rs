@@ -65,15 +65,16 @@ pub struct KeyMut<'a> {
     sizes: &'a mut Vec<u64>,
     sig: &'a mut Signals,
     db: u16,
-    key: Str,
     old: usize,
     changed: bool,
 }
 
 impl<'a> KeyMut<'a> {
+    /// (`key` is the entry's own, read from its node when needed.)
     fn new(entry: KvMut<'a>, mem: &'a mut usize, sizes: &'a mut Vec<u64>, sig: &'a mut Signals, db: u16, key: &[u8], changed: bool) -> Self {
+        debug_assert_eq!(entry.key(), key);
         let old = entry.value_mem();
-        KeyMut { entry, taken: None, mem, sizes, sig, db, key: Str::from_slice(key), old, changed }
+        KeyMut { entry, taken: None, mem, sizes, sig, db, old, changed }
     }
 
     /// The entry with its value back in place.
@@ -117,11 +118,11 @@ impl<'a> KeyMut<'a> {
     }
 
     pub fn notify(&mut self, class: u32, event: &'static str) {
-        self.sig.notify(class, event, self.db, &self.key);
+        self.sig.notify(class, event, self.db, self.entry.key());
     }
 
     pub fn key(&self) -> &[u8] {
-        &self.key
+        self.entry.key()
     }
 
     pub fn str(&mut self) -> &mut Str {
@@ -134,7 +135,7 @@ impl<'a> KeyMut<'a> {
     /// An existing string about to change in place, to at least `grow_to` bytes: raw from now
     /// on (`dbUnshareStringValue`), its sds grown like Redis grows it (`sdsMakeRoomFor`).
     pub fn str_in_place(&mut self, grow_to: usize) -> &mut Str {
-        let klen = self.key.len();
+        let klen = self.entry.key().len();
         let e = self.settled();
         let len = match e.as_ref().value() {
             ValueRef::Str(s) => s.len(),
@@ -158,19 +159,19 @@ impl<'a> KeyMut<'a> {
 
     /// `dbUnshareStringValue` without growing (HyperLogLog commands).
     pub fn unshare(&mut self) {
-        let klen = self.key.len();
+        let klen = self.entry.key().len();
         self.settled().unshare(klen);
     }
 
     /// `OBJECT ENCODING` of the value.
     pub fn encoding(&mut self) -> &'static str {
-        let klen = self.key.len();
+        let klen = self.entry.key().len();
         self.settled().encoding(klen)
     }
 
     /// The string's stored encoding.
     pub fn str_enc(&mut self) -> crate::object::StrEnc {
-        let klen = self.key.len();
+        let klen = self.entry.key().len();
         let e = self.settled();
         match e.as_ref().value() {
             ValueRef::Str(s) => crate::object::str_encoding(e.obj(), klen, s),
@@ -180,7 +181,7 @@ impl<'a> KeyMut<'a> {
 
     /// [`KeyMut::str_enc`] for a value known to be a canonical integer (INCR parsed it).
     pub fn int_str_enc(&mut self) -> crate::object::StrEnc {
-        let klen = self.key.len();
+        let klen = self.entry.key().len();
         let e = self.settled();
         let len = match e.as_ref().value() {
             ValueRef::Str(s) => s.len(),
@@ -196,7 +197,7 @@ impl<'a> KeyMut<'a> {
 
     /// Whether the value is an embedded string (before replacing it: [`KeyMut::str_replaced`]).
     pub fn embedded(&mut self) -> bool {
-        let klen = self.key.len();
+        let klen = self.entry.key().len();
         self.settled().embedded(klen)
     }
 
@@ -213,7 +214,7 @@ impl<'a> KeyMut<'a> {
     /// The string's content was replaced by a value created with `enc` (INCR, INCRBYFLOAT:
     /// `dbReplaceValue`, keeping the TTL; `shared_ints` from the config).
     pub fn str_replaced(&mut self, was_embedded: bool, enc: u8, shared_ints: bool) {
-        let klen = self.key.len();
+        let klen = self.entry.key().len();
         self.settled().revalue(was_embedded, klen, enc, true, shared_ints);
     }
 
@@ -290,7 +291,12 @@ impl<'a> KeyMut<'a> {
 
 impl Drop for KeyMut<'_> {
     fn drop(&mut self) {
-        if let Some(Value::Json(j)) = self.settled().aggregate_mut() {
+        // One look at what the change left.
+        let (json, slot, empty) = {
+            let v = self.settled().as_ref().value();
+            (matches!(v, ValueRef::Json(_)), v.size_slot(), v.is_empty_aggregate())
+        };
+        if json && let Some(Value::Json(j)) = self.entry.aggregate_mut() {
             j.refresh();
         }
         let new = self.entry.value_mem();
@@ -298,11 +304,11 @@ impl Drop for KeyMut<'_> {
         if self.changed {
             // The keysizes slot is moved here, while the entry is at hand, rather than looked
             // up again with the touched keys.
-            crate::db::Db::resize_entry(self.sizes, &mut self.entry);
-            self.sig.touch_sized(self.db, &self.key);
+            crate::db::Db::resize_entry_to(self.sizes, &mut self.entry, slot);
+            self.sig.touch_sized(self.db, self.entry.key());
         }
-        if self.entry.as_ref().value().is_empty_aggregate() {
-            self.sig.empty.push((self.db, std::mem::take(&mut self.key)));
+        if empty {
+            self.sig.empty.push((self.db, Str::from_slice(self.entry.key())));
         }
     }
 }

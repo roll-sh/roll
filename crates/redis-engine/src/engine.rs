@@ -94,7 +94,21 @@ pub struct Stats {
 }
 
 /// Per-command stats by full name (looked up on every call: a fast hasher).
-pub type CmdStats = HashMap<String, CmdStat, foldhash::fast::RandomState>;
+/// Command stats by full name (names are the command table's, or interned: [`intern_name`]).
+pub type CmdStats = HashMap<&'static str, CmdStat, foldhash::fast::RandomState>;
+
+/// A command name kept for the life of the process (stats keys outside the command table:
+/// rejected and module-internal names; a bounded set).
+pub(crate) fn intern_name(name: &str) -> &'static str {
+    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(n) = names.iter().find(|n| **n == name) {
+        return n;
+    }
+    let n: &'static str = Box::leak(name.to_string().into_boxed_str());
+    names.push(n);
+    n
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct CmdStat {
@@ -1134,7 +1148,7 @@ impl Engine {
 
     /// Command stats for one finished call: calls and time, latency histogram, slowlog.
     #[allow(clippy::too_many_arguments)]
-    fn count_call(&mut self, client: &Client, full: &str, cmd: &Command, args: &[Bytes], micros: u64, now: i64, mode: Mode) {
+    fn count_call(&mut self, client: &Client, full: &'static str, cmd: &Command, args: &[Bytes], micros: u64, now: i64, mode: Mode) {
         let tracking = self.cfg.latency_tracking;
         // The monitor's "command"/"fast-command" spike (an unblocked command's is its reply's,
         // "command-unblocking").
@@ -1144,7 +1158,7 @@ impl Engine {
             _ => "command",
         };
         self.latency_monitor.add_if_needed(self.cfg.latency_monitor_threshold, event, micros / 1000, now / 1000);
-        let stat = self.cmdstat(full);
+        let stat = self.cmdstat_static(full);
         stat.calls += 1;
         stat.usec += micros;
         if tracking {
@@ -1171,10 +1185,16 @@ impl Engine {
 
     /// `full`'s command stats, created on its first call.
     pub(crate) fn cmdstat(&mut self, full: &str) -> &mut CmdStat {
-        if !self.cmdstats.contains_key(full) {
-            self.cmdstats.insert(full.to_string(), CmdStat::default());
+        match self.cmdstats.get_key_value(full) {
+            Some((&k, _)) => self.cmdstat_static(k),
+            None => self.cmdstat_static(intern_name(full)),
         }
-        self.cmdstats.get_mut(full).unwrap()
+    }
+
+    /// [`Engine::cmdstat`] for a command table name: one lookup.
+    #[inline]
+    pub(crate) fn cmdstat_static(&mut self, full: &'static str) -> &mut CmdStat {
+        self.cmdstats.entry(full).or_default()
     }
 
     /// `call()`'s latency accounting for a command that ran `micros`: its latency histogram

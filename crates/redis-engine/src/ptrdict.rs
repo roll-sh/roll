@@ -244,7 +244,7 @@ impl<N: Keyed> PtrDict<N> {
             if t.is_empty() {
                 continue;
             }
-            if let Some(l) = walk(t[(h as usize) & (t.len() - 1)]).find(|&l| Self::key_of(l) == key) {
+            if let Some(l) = walk(t[(h as usize) & (t.len() - 1)]).find(|&l| crate::util::bytes_eq(Self::key_of(l), key)) {
                 return Some(ptr(l));
             }
         }
@@ -300,7 +300,7 @@ impl<N: Keyed> PtrDict<N> {
         }
         self.rehash_step();
         let h = self.hash(key);
-        let (holder, _) = self.find(h, |l| Self::key_of(l) == key)?;
+        let (holder, _) = self.find(h, |l| crate::util::bytes_eq(Self::key_of(l), key))?;
         // SAFETY: a link of the table, within the unique borrow of `self`.
         Some(unsafe { &mut *Self::node_slot(holder) })
     }
@@ -341,7 +341,7 @@ impl<N: Keyed> PtrDict<N> {
         }
         self.rehash_step();
         let h = self.hash(key);
-        let (holder, prev) = self.find(h, |l| Self::key_of(l) == key)?;
+        let (holder, prev) = self.find(h, |l| crate::util::bytes_eq(Self::key_of(l), key))?;
         Some(self.unlink(holder, prev))
     }
 

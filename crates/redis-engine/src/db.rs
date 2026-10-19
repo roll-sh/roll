@@ -178,6 +178,12 @@ impl Db {
     /// Move `e` to its current keysizes slot.
     pub fn resize_entry(keysizes: &mut [u64], e: &mut (impl FieldsMut + ?Sized)) {
         let slot = e.value().size_slot();
+        Self::resize_entry_to(keysizes, e, slot)
+    }
+
+    /// [`Db::resize_entry`] with the value's slot known.
+    #[inline]
+    pub fn resize_entry_to(keysizes: &mut [u64], e: &mut (impl FieldsMut + ?Sized), slot: u16) {
         let sized = e.sized();
         if slot != sized {
             if sized != NO_SIZE {

@@ -253,6 +253,16 @@ fn random_level() -> usize {
     })
 }
 
+/// A search's place ([`SkipList::descend`]).
+struct Descent {
+    i: usize,
+    x: u32,
+    xup: u32,
+    r: u32,
+    score: f64,
+    done: bool,
+}
+
 pub struct SkipList {
     nodes: Vec<Node>,
     /// Free node slots, chained through `next`.
@@ -507,42 +517,23 @@ impl SkipList {
     /// The last node before `(score, ele)` at every level, and their ranks. Each step reads the
     /// link it follows for where the next node's own links are, so their loads overlap.
     fn insert_path(&self, score: f64, ele: &[u8]) -> ([u32; MAX_LEVEL], [u32; MAX_LEVEL]) {
-        /// The forward node's links aren't in the link: read them from the node.
-        const FROM_NODE: u32 = u32::MAX;
         let mut update = [HEAD; MAX_LEVEL];
         let mut rank = [0u32; MAX_LEVEL];
-        let (mut x, mut xup, mut r) = (HEAD, 0u32, 0u32);
-        for i in (0..self.level).rev() {
-            loop {
-                let (f, span, fup) = if i == 0 {
-                    (if x == HEAD { self.head[0].fwd } else { self.nodes[x as usize].next }, 1, FROM_NODE)
-                } else if x == HEAD {
-                    let l = &self.head[i];
-                    (l.fwd, l.span, l.fup)
-                } else if i == 1 {
-                    let l = &self.nodes[x as usize].l1;
-                    (l.fwd, l.span, FROM_NODE)
-                } else {
-                    let l = &self.levels[xup as usize + i - 2];
-                    (l.fwd, l.span, l.fup)
-                };
-                if f == NIL || !self.sorts_before(f, score, ele) {
-                    break;
-                }
-                r += span;
-                x = f;
-                xup = if fup == FROM_NODE { self.nodes[f as usize].up } else { fup };
-            }
-            update[i] = x;
-            rank[i] = r;
+        let mut d = Descent { i: self.level - 1, x: HEAD, xup: 0, r: 0, score, done: false };
+        while !d.done {
+            self.descend(&mut d, ele, &mut update, &mut rank);
         }
         (update, rank)
     }
-
     /// `zslInsertNode`: link an allocated node at its position.
     fn link(&mut self, n: u32) {
         let nd = self.node(n);
-        let (mut update, mut rank) = self.insert_path(nd.score, nd.ele.as_slice());
+        let (update, rank) = self.insert_path(nd.score, nd.ele.as_slice());
+        self.link_at(n, update, rank);
+    }
+
+    /// Link node `n` after `update` (the last node before it at every level, of these ranks).
+    fn link_at(&mut self, n: u32, mut update: [u32; MAX_LEVEL], mut rank: [u32; MAX_LEVEL]) {
         let height = self.node(n).height as usize;
         if height > self.level {
             for i in self.level..height {
@@ -623,19 +614,86 @@ impl SkipList {
         self.free_node(x);
     }
 
-    /// `zslUpdateScore`.
+    /// `zslUpdateScore`. Where Redis searches the list twice (for the node, then for its new
+    /// place), both searches run interleaved, one step each in turn: their pointer chases are
+    /// independent, so their cache misses overlap.
     fn update_score(&mut self, x: u32, score: f64) {
         let n = self.node(x);
         if (n.back == NIL || self.node(n.back).score < score) && (n.next == NIL || self.node(n.next).score > score) {
             self.nodes[x as usize].score = score;
             return;
         }
-        let update = self.path_to(x);
-        self.unlink(x, &update);
+        let (old, new, rank) = self.move_paths(x, score);
+        self.unlink(x, &old);
         self.nodes[x as usize].score = score;
-        self.link(x);
+        self.link_at(x, new, rank);
     }
 
+    /// For moving node `x` to `score`: the `update` vector to unlink it, and the `update` vector
+    /// and ranks of its new place as they will be once it is unlinked.
+    fn move_paths(&self, x: u32, score: f64) -> ([u32; MAX_LEVEL], [u32; MAX_LEVEL], [u32; MAX_LEVEL]) {
+        let ele = self.node(x).ele.as_slice();
+        let (mut uo, mut ro) = ([HEAD; MAX_LEVEL], [0u32; MAX_LEVEL]);
+        let (mut un, mut rn) = ([HEAD; MAX_LEVEL], [0u32; MAX_LEVEL]);
+        let top = self.level - 1;
+        let mut a = Descent { i: top, x: HEAD, xup: 0, r: 0, score: self.node(x).score, done: false };
+        let mut b = Descent { i: top, x: HEAD, xup: 0, r: 0, score, done: false };
+        while !(a.done && b.done) {
+            if !a.done {
+                self.descend(&mut a, ele, &mut uo, &mut ro);
+            }
+            if !b.done {
+                self.descend(&mut b, ele, &mut un, &mut rn);
+            }
+        }
+        debug_assert_eq!(self.fwd(uo[0], 0), x);
+        // The new place was searched with `x` still linked: where `x` is the last node before
+        // it, its own predecessor takes its place; past `x`, ranks lose one.
+        let rank_x = ro[0] + 1;
+        for i in 0..self.level {
+            if un[i] == x {
+                un[i] = uo[i];
+                rn[i] = ro[i];
+            } else if rn[i] > rank_x {
+                rn[i] -= 1;
+            }
+        }
+        (uo, un, rn)
+    }
+
+    /// One step of a search, resumable: follow the link at the current level, or record the
+    /// level's last node and go down. (Branchy on purpose: a predicted step lets the next load
+    /// start before the comparison resolves; selects would wait for it.)
+    #[inline(always)]
+    fn descend(&self, d: &mut Descent, ele: &[u8], update: &mut [u32; MAX_LEVEL], rank: &mut [u32; MAX_LEVEL]) {
+        let (x, i) = (d.x, d.i);
+        // `fup` only matters on levels 2 and up, which only levels 2 and up lead to.
+        let (f, span, fup) = if i == 0 {
+            (if x == HEAD { self.head[0].fwd } else { self.nodes[x as usize].next }, 1, 0)
+        } else if x == HEAD {
+            let l = &self.head[i];
+            (l.fwd, l.span, l.fup)
+        } else if i == 1 {
+            let l = &self.nodes[x as usize].l1;
+            (l.fwd, l.span, 0)
+        } else {
+            let l = &self.levels[d.xup as usize + i - 2];
+            (l.fwd, l.span, l.fup)
+        };
+        if f != NIL && self.sorts_before(f, d.score, ele) {
+            d.r += span;
+            d.x = f;
+            d.xup = fup;
+        } else {
+            update[i] = x;
+            rank[i] = d.r;
+            if i == 0 {
+                d.done = true;
+            } else {
+                d.i -= 1;
+            }
+        }
+    }
     /// 1-based rank of node `x`.
     fn rank_of(&self, x: u32) -> usize {
         let mut rank = 0usize;
@@ -1738,6 +1796,33 @@ mod tests {
             }
             check(&z, &m);
         }
+    }
+
+    /// Score changes that move members (the two interleaved searches of `update_score`), on a
+    /// skiplist tall enough for every level case, against the model.
+    #[test]
+    fn moves_against_model() {
+        let lim = Limits { entries: 0, value: 64 };
+        let mut rng = Rng::seeded(7);
+        let mut z = ZSet::new();
+        let mut m: BTreeMap<Vec<u8>, f64> = BTreeMap::new();
+        for i in 0..2000 {
+            let key = format!("m{i}").into_bytes();
+            let score = rng.below(1000) as f64;
+            z.insert(&key, score, lim);
+            m.insert(key, score);
+        }
+        for step in 0..20_000 {
+            let key = format!("m{}", rng.below(2000)).into_bytes();
+            // Ties on purpose (order by member), near and far moves.
+            let score = if step % 3 == 0 { m[&key] + (rng.below(5) as f64) - 2.0 } else { rng.below(1000) as f64 };
+            z.insert(&key, score, lim);
+            m.insert(key, score);
+            if step % 500 == 0 {
+                check(&z, &m);
+            }
+        }
+        check(&z, &m);
     }
 
     #[test]

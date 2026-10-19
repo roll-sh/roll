@@ -391,6 +391,21 @@ impl Default for Rng {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bytes_eq_matches_slices() {
+        let a: Vec<u8> = (0..40u8).collect();
+        for n in 0..40 {
+            let x = &a[..n];
+            assert!(bytes_eq(x, x));
+            assert!(!bytes_eq(x, &a[..n + 1]));
+            for k in 0..n {
+                let mut y = x.to_vec();
+                y[k] ^= 1;
+                assert!(!bytes_eq(x, &y), "len {n} differing at {k}");
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -473,5 +488,31 @@ mod fmt_g_tests {
         assert_eq!(super::fmt_g_prec(0.1 + 0.2, 12), "0.3");
         assert_eq!(super::fmt_g_prec(1.0 / 3.0, 12), "0.333333333333");
         assert_eq!(super::fmt_g_prec(1e300, 12), "1e+300");
+    }
+}
+
+/// Byte-string equality for keys and members: short ones are compared inline in machine words
+/// (the usual 5-32 byte keys cost a call into `memcmp` otherwise).
+#[inline(always)]
+pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    // SAFETY: every read is within the first `n` bytes of both slices (overlapping at the end).
+    unsafe {
+        let w64 = |p: *const u8, i: usize| (p.add(i) as *const u64).read_unaligned();
+        let w32 = |p: *const u8, i: usize| (p.add(i) as *const u32).read_unaligned();
+        match n {
+            0 => true,
+            1..=3 => a == b,
+            4..=8 => w32(pa, 0) == w32(pb, 0) && w32(pa, n - 4) == w32(pb, n - 4),
+            9..=16 => w64(pa, 0) == w64(pb, 0) && w64(pa, n - 8) == w64(pb, n - 8),
+            17..=32 => {
+                w64(pa, 0) == w64(pb, 0) && w64(pa, 8) == w64(pb, 8) && w64(pa, n - 16) == w64(pb, n - 16) && w64(pa, n - 8) == w64(pb, n - 8)
+            }
+            _ => a == b,
+        }
     }
 }

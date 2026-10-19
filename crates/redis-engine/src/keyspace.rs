@@ -521,6 +521,12 @@ impl<'a> KvMut<'a> {
         KvRef::Node(self.node())
     }
 
+    /// The entry's key (kept in its node).
+    #[inline]
+    pub fn key(&self) -> &[u8] {
+        self.node().key()
+    }
+
     #[inline]
     pub fn into_ref(self) -> KvRef<'a> {
         KvRef::Node(NodeRef::at(*self.slot))

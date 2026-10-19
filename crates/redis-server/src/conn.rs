@@ -1569,6 +1569,10 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> LdbIo for SockIo<'_, R, W> {
 
 /// Commands that may run long or block on I/O (scripts, MIGRATE, DEBUG), and an EXEC of any.
 fn is_long(args: &[Bytes], client: &Client) -> bool {
+    // Most commands are ruled out by their first letter.
+    if !matches!(args.first().and_then(|n| n.first()).map(|c| c | 0x20), Some(b'e' | b'f' | b'm' | b'd')) {
+        return false;
+    }
     const LONG: [&[u8]; 8] = [b"eval", b"evalsha", b"eval_ro", b"evalsha_ro", b"fcall", b"fcall_ro", b"migrate", b"debug"];
     let long = |a: &[Bytes]| a.first().is_some_and(|n| LONG.iter().any(|l| n.eq_ignore_ascii_case(l)));
     long(args) || (eq(&args[0], "exec") && client.multi.as_ref().is_some_and(|m| m.queued.iter().any(|q| long(q))))
@@ -1576,6 +1580,10 @@ fn is_long(args: &[Bytes], client: &Client) -> bool {
 
 fn is_intercepted(args: &[Bytes], client: &Client) -> bool {
     let n = &args[0];
+    // Most commands are ruled out by their first letter.
+    if !matches!(n.first().map(|c| c | 0x20), Some(b'h' | b'm' | b'a' | b'r' | b's' | b'p' | b'w' | b'f')) {
+        return false;
+    }
     if eq(n, "hello") || eq(n, "monitor") {
         return true;
     }
