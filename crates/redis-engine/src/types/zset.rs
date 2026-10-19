@@ -1598,8 +1598,10 @@ mod tests {
             x
         };
         let member = |n: u64| format!("element:{:012}", n % 100_000).into_bytes();
+        // Built from random scores, as the server's set is (nodes not laid out in order).
         for n in 0..100_000 {
-            z.add(&member(n), (n % 100_000) as f64, AddFlags::default(), Limits::default()).unwrap();
+            let s = (next() % 100_000) as f64;
+            z.add(&member(n), s, AddFlags::default(), Limits::default()).unwrap();
         }
         let ops: Vec<(Vec<u8>, f64)> = (0..4_000_000).map(|_| (member(next()), (next() % 100_000) as f64)).collect();
         let t = std::time::Instant::now();
@@ -1608,6 +1610,33 @@ mod tests {
         }
         let ns = t.elapsed().as_nanos() as f64 / ops.len() as f64;
         eprintln!("zadd: {ns:.0} ns/op, node {} bytes", std::mem::size_of::<Node>());
+    }
+
+    /// The same workload through `Engine::call` (dispatch included, no network).
+    #[test]
+    #[ignore]
+    fn zadd_engine_speed() {
+        use bytes::Bytes;
+        let mut eng = crate::engine::Engine::standalone();
+        let mut c = crate::client::Client::new(1);
+        let mut x = 88172645463325252u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let cmd = |m: u64, s: u64| vec![Bytes::from_static(b"ZADD"), Bytes::from_static(b"myzset"), Bytes::from(format!("{:012}", s)), Bytes::from(format!("element:{:012}", m))];
+        for n in 0..100_000 {
+            let s = next() % 100_000;
+            eng.call(&mut c, &cmd(n, s));
+        }
+        let ops: Vec<Vec<Bytes>> = (0..2_000_000).map(|_| cmd(next() % 100_000, next() % 100_000)).collect();
+        let t = std::time::Instant::now();
+        for a in &ops {
+            eng.call(&mut c, a);
+        }
+        eprintln!("engine zadd: {:.0} ns/op", t.elapsed().as_nanos() as f64 / ops.len() as f64);
     }
 
     /// The naive model: members with scores, ordered by (score, member).
