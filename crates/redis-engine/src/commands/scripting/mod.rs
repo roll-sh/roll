@@ -305,7 +305,7 @@ impl Scripting {
 
     /// The libraries in the libraries dict's order.
     fn ordered_libs(&self) -> Vec<&Library> {
-        self.lib_dict.keys().iter().filter_map(|k| self.libs.iter().find(|l| l.name.as_bytes() == &k[..])).collect()
+        self.lib_dict.iter().filter_map(|k| self.libs.iter().find(|l| l.name.as_bytes() == k)).collect()
     }
 
     /// `libraryLink`: its functions into the functions dict, then the library.

@@ -1587,11 +1587,32 @@ fn set_percentiles(c: &mut Config, argv: &[&str]) -> Result<bool, String> {
 /// Redis builds it: sized for the core table and filled in its order (each alias after its
 /// primary), then each module's configs as it loads (a lookup checking the name is free before
 /// each, and one per config when it loads their defaults), the last of which starts a rehash.
-#[derive(Clone, Debug)]
-pub struct ConfigDict(pub crate::sdict::ServerDict);
+///
+/// Every server starts from the same dict, so it is built once and shared; a server gets a copy
+/// of its own only when one of its lookups takes a rehash step (idle servers never do).
+#[derive(Clone, Debug, Default)]
+pub struct ConfigDict(Option<Box<crate::sdict::ServerDict>>);
 
-impl Default for ConfigDict {
-    fn default() -> Self {
+static CONFIGS: std::sync::LazyLock<crate::sdict::ServerDict> = std::sync::LazyLock::new(ConfigDict::build);
+
+impl ConfigDict {
+    /// The dict as it stands.
+    pub fn dict(&self) -> &crate::sdict::ServerDict {
+        self.0.as_deref().unwrap_or(&CONFIGS)
+    }
+
+    /// `lookupConfig`'s `dictFind`, with its rehash step.
+    pub fn find(&mut self, name: &[u8]) -> bool {
+        if self.0.is_none() {
+            if !CONFIGS.is_rehashing() {
+                return CONFIGS.contains(name);
+            }
+            self.0 = Some(Box::new(CONFIGS.clone()));
+        }
+        self.0.as_mut().is_some_and(|d| d.find(name).is_some())
+    }
+
+    fn build() -> crate::sdict::ServerDict {
         let mut d = crate::sdict::ServerDict::new(true);
         let mut module: Vec<&str> = Vec::new();
         let mut in_core = true;
@@ -1619,7 +1640,7 @@ impl Default for ConfigDict {
             d.add(line.as_bytes());
         }
         load(&mut d, &mut module);
-        ConfigDict(d)
+        d
     }
 }
 
@@ -1771,7 +1792,7 @@ mod tests {
     #[test]
     fn config_dict_holds_every_config_once() {
         let d = ConfigDict::default();
-        let keys = d.0.keys();
+        let keys = d.dict().keys();
         assert_eq!(keys.len(), 316);
         for k in &keys {
             assert!(find(std::str::from_utf8(k).unwrap()).is_some(), "{}", String::from_utf8_lossy(k));

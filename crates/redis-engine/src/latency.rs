@@ -77,7 +77,7 @@ impl Monitor {
 
     /// The events in the dict's iteration order.
     fn ordered(&self) -> impl Iterator<Item = &(String, Box<Series>)> {
-        self.dict.keys().into_iter().filter_map(|k| self.events.iter().find(|(e, _)| e.as_bytes() == k))
+        self.dict.iter().filter_map(|k| self.events.iter().find(|(e, _)| e.as_bytes() == k))
     }
 
     /// `latencyAddSampleIfNeeded`: record `ms` for `event` when the monitor is on and the

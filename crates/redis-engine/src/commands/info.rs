@@ -1002,9 +1002,7 @@ fn generate(eng: &mut Engine, want: &Want, now: i64, port: u16) -> String {
 /// `genRedisInfoStringCommandStats`: the command table's iteration order, each container
 /// followed by its subcommands.
 fn in_table_order(m: &std::collections::HashMap<String, crate::engine::CmdStat>) -> Vec<(&String, &crate::engine::CmdStat)> {
-    let by_name: std::collections::HashMap<String, (&String, &crate::engine::CmdStat)> =
-        m.iter().map(|(k, v)| (k.to_ascii_lowercase(), (k, v))).collect();
-    super::order::names().iter().filter_map(|n| by_name.get(&n.to_ascii_lowercase()).copied()).collect()
+    super::order::in_order(m.iter().map(|(k, v)| (k.as_str(), (k, v)))).into_iter().map(|(_, kv)| kv).collect()
 }
 
 #[cfg(test)]

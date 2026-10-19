@@ -499,24 +499,24 @@ pub fn config_get(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             if matches.find(pat).is_some() {
                 continue;
             }
-            if cx.eng.config_dict.0.find(pat).is_some() && known(pat).is_some() {
+            if cx.eng.config_dict.find(pat) && known(pat).is_some() {
                 matches.add(pat);
             }
             continue;
         }
-        for key in cx.eng.config_dict.0.keys() {
-            let Some(p) = known(&key) else { continue };
-            if p.flags & crate::config::HIDDEN != 0 || matches.find(&key).is_some() {
+        for key in cx.eng.config_dict.dict().iter() {
+            let Some(p) = known(key) else { continue };
+            if p.flags & crate::config::HIDDEN != 0 || matches.find(key).is_some() {
                 continue;
             }
-            if crate::util::glob_match(pat, &key, true) {
-                matches.add(&key);
+            if crate::util::glob_match(pat, key, true) {
+                matches.add(key);
             }
         }
     }
     let mut out = Vec::new();
-    for name in matches.keys() {
-        let name = String::from_utf8_lossy(&name).into_owned();
+    for name in matches.iter() {
+        let name = String::from_utf8_lossy(name).into_owned();
         let Some((_, mut v)) = cx.eng.cfg.get(name.as_bytes()).into_iter().next() else { continue };
         if name.eq_ignore_ascii_case("replicaof") || name.eq_ignore_ascii_case("slaveof") {
             v = master.clone().unwrap_or_default();
@@ -539,7 +539,7 @@ pub fn config_set(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     }
     // `lookupConfig` for every name (rehash steps), as Redis finds them all first.
     for kv in args[2..].chunks(2) {
-        cx.eng.config_dict.0.find(&kv[0]);
+        cx.eng.config_dict.find(&kv[0]);
     }
     let pairs: Vec<(String, String)> =
         args[2..].chunks(2).map(|kv| (String::from_utf8_lossy(&kv[0]).into_owned(), String::from_utf8_lossy(&kv[1]).into_owned())).collect();
@@ -1095,8 +1095,9 @@ pub fn latency_histogram(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let names = super::order::names();
     let mut out = Vec::new();
     if args.len() == 2 {
-        // `latencyAllCommandsFillCDF`: the command table's order.
-        out.extend(names.iter().filter_map(|n| cdf(n)));
+        // `latencyAllCommandsFillCDF`: the command table's order, under the declared names.
+        let recorded = super::order::in_order(cx.eng.cmdstats.iter().filter(|(_, v)| v.latency.is_some()).map(|(k, _)| (k.as_str(), ())));
+        out.extend(recorded.into_iter().filter_map(|(n, _)| cdf(super::order::position(n).map_or(n, |i| names[i].as_str()))));
         return Ok(Reply::Map(out));
     }
     // `latencySpecificCommandsFillCDF`: each command found, then its subcommands.
@@ -1109,7 +1110,7 @@ pub fn latency_histogram(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
             cmd = s;
         }
         let full = crate::acl::full_name(cmd).unwrap_or(cmd.name);
-        let Some(at) = names.iter().position(|n| n.eq_ignore_ascii_case(full)) else { continue };
+        let Some(at) = super::order::position(full) else { continue };
         out.extend(cdf(&names[at]));
         if !cmd.subs.is_empty() {
             let prefix = format!("{}|", names[at]);

@@ -33,36 +33,46 @@ pub static LIST: &[Module] = &[
     Module { name: "ReJSON", ver: 81000, path: "/usr/local/lib/redis/modules//rejson.so", usedby: &["search"], using: &[], options: IO },
 ];
 
-/// The `modules` dict (`modulesDictType`: case-insensitive names, incremental rehashing).
-#[derive(Clone, Debug)]
-pub struct ModuleDict(ServerDict);
+/// The `modules` dict (`modulesDictType`: case-insensitive names, incremental rehashing). Every
+/// server starts from the same one, shared; a server copies it only when one of its lookups takes
+/// a rehash step.
+#[derive(Clone, Debug, Default)]
+pub struct ModuleDict(Option<Box<ServerDict>>);
 
-impl Default for ModuleDict {
-    /// The dict as module loading leaves it.
-    fn default() -> Self {
-        let mut d = ServerDict::new(true);
-        for m in LIST {
-            // `RedisModule_Init` checks the name is free first (`RM_IsModuleNameBusy`).
-            d.find(m.name.as_bytes());
-            d.add(m.name.as_bytes());
-        }
-        ModuleDict(d)
+/// The dict as module loading leaves it.
+static LOADED: std::sync::LazyLock<ServerDict> = std::sync::LazyLock::new(|| {
+    let mut d = ServerDict::new(true);
+    for m in LIST {
+        // `RedisModule_Init` checks the name is free first (`RM_IsModuleNameBusy`).
+        d.find(m.name.as_bytes());
+        d.add(m.name.as_bytes());
     }
-}
+    d
+});
 
 fn by_name(name: &[u8]) -> Option<&'static Module> {
     LIST.iter().find(|m| m.name.as_bytes().eq_ignore_ascii_case(name))
 }
 
 impl ModuleDict {
+    fn dict(&self) -> &ServerDict {
+        self.0.as_deref().unwrap_or(&LOADED)
+    }
+
     /// `dictFind` by module name, with the rehash step it takes.
     pub fn find(&mut self, name: &[u8]) -> Option<&'static Module> {
-        self.0.find(name).and_then(by_name)
+        if self.0.is_none() {
+            if !LOADED.is_rehashing() {
+                return LOADED.contains(name).then(|| by_name(name)).flatten();
+            }
+            self.0 = Some(Box::new(LOADED.clone()));
+        }
+        self.0.as_mut()?.find(name).and_then(by_name)
     }
 
     /// The modules in iteration order.
     pub fn modules(&self) -> impl Iterator<Item = &'static Module> + '_ {
-        self.0.keys().into_iter().filter_map(|k| by_name(&k))
+        self.dict().iter().filter_map(by_name)
     }
 }
 
@@ -73,7 +83,7 @@ mod tests {
     #[test]
     fn loading_leaves_the_last_module_in_the_new_table() {
         let d = ModuleDict::default();
-        assert!(d.0.is_rehashing());
+        assert!(d.dict().is_rehashing());
         assert_eq!(d.modules().count(), 5);
         assert_eq!(d.modules().last().unwrap().name, "ReJSON");
     }
@@ -84,7 +94,7 @@ mod tests {
         for _ in 0..8 {
             assert_eq!(d.find(b"SEARCH").map(|m| m.name), Some("search"));
         }
-        assert!(!d.0.is_rehashing());
+        assert!(!d.dict().is_rehashing());
         assert_eq!(d.modules().count(), 5);
         assert!(d.find(b"nope").is_none());
     }

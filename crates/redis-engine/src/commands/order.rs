@@ -92,6 +92,22 @@ pub fn names() -> &'static [String] {
     &NAMES
 }
 
+/// Each full name's place in [`names`], by lowercase name.
+static POSITION: LazyLock<std::collections::HashMap<String, usize>> =
+    LazyLock::new(|| NAMES.iter().enumerate().map(|(i, n)| (n.to_ascii_lowercase(), i)).collect());
+
+/// Where a full name (any case) comes in the table's iteration order.
+pub fn position(name: &str) -> Option<usize> {
+    POSITION.get(&name.to_ascii_lowercase()).copied()
+}
+
+/// `items` (by full name) in the table's iteration order; names it doesn't know go last.
+pub fn in_order<'a, T>(items: impl Iterator<Item = (&'a str, T)>) -> Vec<(&'a str, T)> {
+    let mut v: Vec<(usize, &'a str, T)> = items.map(|(n, t)| (position(n).unwrap_or(usize::MAX), n, t)).collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    v.into_iter().map(|(_, n, t)| (n, t)).collect()
+}
+
 /// The commands in `server.commands`' iteration order.
 pub fn commands() -> &'static [Entry] {
     &ORDER
@@ -99,7 +115,9 @@ pub fn commands() -> &'static [Entry] {
 
 /// A container's subcommands in its subcommand dict's iteration order.
 pub fn subs_of(cmd: &Command) -> &'static [&'static Command] {
-    ORDER.iter().find(|e| std::ptr::eq(e.cmd, cmd)).map_or(&[], |e| e.subs.as_slice())
+    static BY_CMD: LazyLock<std::collections::HashMap<usize, usize>> =
+        LazyLock::new(|| ORDER.iter().enumerate().map(|(i, e)| (e.cmd as *const Command as usize, i)).collect());
+    BY_CMD.get(&(cmd as *const Command as usize)).map_or(&[], |&i| ORDER[i].subs.as_slice())
 }
 
 #[cfg(test)]
