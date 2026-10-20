@@ -666,6 +666,34 @@ impl Binder<'_, '_> {
             input: Arc::new(rec),
             exprs,
         };
+        // (Over a row of constants the added columns are constants too, as
+        // eval_const_expressions folds them.)
+        let (base, base_exprs) = match &base {
+            Plan::Project { input, exprs: consts }
+                if matches!(&**input, Plan::One) && consts.iter().all(|e| matches!(e, Expr::Const(..))) =>
+            {
+                let folded: Vec<Expr> = base_exprs
+                    .iter()
+                    .map(|e| {
+                        let sub = e
+                            .clone()
+                            .transform(&mut |x| {
+                                Ok(match x {
+                                    Expr::Col(i, t) => consts.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                                    x => x,
+                                })
+                            })
+                            .unwrap_or_else(|_| e.clone());
+                        match crate::sql::expr::eval(&sub, &[], self.ctx) {
+                            Ok(v) if !matches!(e, Expr::Col(..)) => Expr::Const(v, sub.ty()),
+                            _ => e.clone(),
+                        }
+                    })
+                    .collect();
+                (base.clone(), folded)
+            }
+            _ => (base, base_exprs),
+        };
         let base = Plan::Project {
             input: Arc::new(base),
             exprs: base_exprs,
@@ -739,7 +767,9 @@ impl Binder<'_, '_> {
                 search.location,
             )?;
             let ty = if search.search_breadth_first {
-                DataType::Record
+                breadth_row_type(
+                    &by.iter().map(|&i| (cols[i].name.clone(), cols[i].ty.clone())).collect::<Vec<_>>(),
+                )
             } else {
                 record_array.clone()
             };
@@ -815,13 +845,16 @@ impl Binder<'_, '_> {
             });
         }
         if !sc.cols.is_empty() {
-            sc.append =
-                Some(crate::sql::func::resolve_binop("||", &record_array, &DataType::Record)?.def);
+            // (rewriteSearchAndCycle: array_cat(path, ARRAY[ROW(...)]) and
+            // int8inc(depth), function calls.)
+            sc.append = Some(
+                crate::sql::func::resolve_function("array_cat", &[record_array.clone(), record_array.clone()])?.def,
+            );
             sc.eq = Some(
                 crate::sql::func::resolve_binop("=", &DataType::Record, &DataType::Record)?.def,
             );
-            sc.plus =
-                Some(crate::sql::func::resolve_binop("+", &DataType::Int8, &DataType::Int8)?.def);
+            sc.plus = Some(crate::sql::func::resolve_function("int8inc", &[DataType::Int8])?.def);
+            sc.names = cols.iter().map(|c| c.name.clone()).collect();
         }
         Ok(sc)
     }
@@ -2205,6 +2238,7 @@ impl Binder<'_, '_> {
             plan = Plan::Distinct {
                 input: Arc::new(plan),
                 on: None,
+                order: 0,
             };
             if !needed.is_empty() {
                 plan = Plan::Sort {
@@ -2259,6 +2293,7 @@ impl Binder<'_, '_> {
             plan = Plan::Distinct {
                 input: Arc::new(plan),
                 on: Some(on),
+                order: sort_keys.iter().filter(|k| !constant_key(k)).count(),
             };
         } else if let Some((_, post, map)) = postponed {
             let keys = needed
@@ -3230,9 +3265,10 @@ impl Binder<'_, '_> {
                     mark_subquery_windows(&mut plan, &info);
                 }
                 // (Grouping sets: no qual goes into the subquery; its Subquery Scan checks
-                // them.)
+                // them. Set-returning or volatile outputs: is_simple_subquery keeps it a
+                // subquery, the clauses that don't read them going in.)
                 let plan = if alias.is_some()
-                    && grouping_sets_subquery(&plan)
+                    && (grouping_sets_subquery(&plan) || optimize::unsafe_outputs(&plan).iter().any(|u| *u))
                     && self.deps.is_none()
                     && self.refs.is_none()
                     && !self.unplanned
@@ -3242,6 +3278,7 @@ impl Binder<'_, '_> {
                         input: Arc::new(plan),
                         alias: name.clone(),
                         cols: cols.iter().map(|c| c.name.clone()).collect(),
+                        secure: false,
                     }
                 } else {
                     plan
@@ -3603,6 +3640,7 @@ impl Binder<'_, '_> {
                         Plan::SysScan {
                             table: st,
                             filter: None,
+                            path: None,
                         },
                         rel,
                     ));
@@ -3909,6 +3947,7 @@ impl Binder<'_, '_> {
                         input: Arc::new(plan),
                         alias: name.clone(),
                         cols: rel.cols.iter().filter(|c| !c.hidden).map(|c| c.name.clone()).collect(),
+                        secure: true,
                     }
                 } else {
                     plan
@@ -4132,7 +4171,41 @@ impl Binder<'_, '_> {
         let mut rel = derived_rel(&name, &cols, 0);
         let results: Vec<(DataType, usize)> = calls.iter().map(|c| (c.ty.clone(), c.ncols)).collect();
         self.mark_rowtype_cols(&mut rel, &results);
-        let names = cols.iter().map(|c| c.name.clone()).collect();
+        let names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+        // inline_set_returning_function: a SETOF record SQL function (its column
+        // definitions given) alone in FROM is its query, a subquery under its name.
+        if let [call] = calls.as_slice()
+            && !rf.ordinality
+            && let Some(body) = &call.body
+            && let Some(f) = self.cat.functions.get(&call.func.oid).cloned()
+            && f.language == "sql"
+            && f.returns_set
+            && matches!(f.ret, DataType::Record)
+            && f.out_cols.is_empty()
+            && self
+                .sql_fn_at(&f, &call.args, super::expr::FnPlace::FromSet)
+                .is_some_and(|c| c.inlined())
+        {
+            let mut body = (**body).clone();
+            mark_subquery_windows(&mut body, &Arc::new((name.clone(), names.clone())));
+            let args = if crate::exec::reads_enclosing(&body, 0) {
+                call.args.clone()
+            } else {
+                Vec::new()
+            };
+            let plan = Plan::Join {
+                kind: JoinKind::Inner,
+                left: Arc::new(Plan::One),
+                right: Arc::new(body),
+                cond: None,
+                hash: None,
+                params: args,
+                nleft: 0,
+                nright: call.ncols,
+                meta: Default::default(),
+            };
+            return Ok((plan, Scope { rels: vec![rel] }, params));
+        }
         Ok((
             Plan::FunctionScan {
                 calls,
@@ -4384,6 +4457,38 @@ impl Binder<'_, '_> {
                     let e = b.coerce_assign(Expr::Col(i, bc.ty.clone()), &c.ty, &c.name)?;
                     exprs.push(b.result_domain(&fdef, i, n, e)?);
                 }
+                // check_sql_fn_retval: a plain query's own target list takes the
+                // coercions (constants folded with them).
+                let mut body = body;
+                if exprs.iter().enumerate().any(|(i, e)| !matches!(e, Expr::Col(j, _) if *j == i))
+                    && let Plan::Project { input, exprs: bexprs } = &body
+                    && bexprs.len() == n
+                {
+                    let mut composed = Vec::with_capacity(n);
+                    for (i, (c, be)) in cols.iter().zip(bexprs).enumerate() {
+                        let e = b.coerce_assign(be.clone(), &c.ty, &c.name)?;
+                        composed.push(b.result_domain(&fdef, i, n, e)?);
+                    }
+                    exprs = composed.iter().enumerate().map(|(i, e)| Expr::Col(i, e.ty())).collect();
+                    body = Plan::Project {
+                        input: input.clone(),
+                        exprs: composed,
+                    };
+                }
+                // check_sql_fn_retval: a set operation's columns coerced to the result's
+                // types are a projection over it as a subquery, "*SELECT*".
+                fn setop(p: &Plan) -> bool {
+                    match p {
+                        Plan::Sort { input, .. } | Plan::Limit { input, .. } => setop(input),
+                        p => matches!(p, Plan::SetOp { .. }),
+                    }
+                }
+                if setop(&body)
+                    && exprs.iter().enumerate().any(|(i, e)| !matches!(e, Expr::Col(j, _) if *j == i))
+                {
+                    let names = unique_colnames(bcols.iter().map(|c| c.name.clone()));
+                    mark_subquery_windows(&mut body, &Arc::new(("*SELECT*".to_string(), names)));
+                }
                 Ok((
                     Plan::Project {
                         input: Arc::new(body),
@@ -4445,6 +4550,16 @@ impl Binder<'_, '_> {
                     width: 0,
                 })
             });
+            // Inlined over arguments put in its body: nothing to pass it.
+            let args = if fdef.language == "sql"
+                && fdef.returns_set
+                && at.is_some_and(|c| c.inlined())
+                && !crate::exec::reads_enclosing(&body, 0)
+            {
+                Vec::new()
+            } else {
+                args
+            };
             let plan = Plan::Join {
                 // Not SETOF: its first row, or nulls.
                 kind: if fdef.returns_set {
@@ -4469,6 +4584,44 @@ impl Binder<'_, '_> {
         let Some((mut plan, mut cols, ret)) = r else {
             return Ok(None);
         };
+        let mut params = params;
+        // eval_const_expressions: a field of a whole-row argument from the items to its
+        // left is that column (the call as the planner leaves it).
+        if let Plan::Join { meta, .. } = &mut plan
+            && let Some(fc) = &mut meta.from_call
+            && let Some(call) = fc.call.clone()
+        {
+            let call = call
+                .clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Field(r, k, t) => {
+                            let col = match (&*r, &r) {
+                                (Expr::Outer(1, j, _), _) => match params.get(*j) {
+                                    Some(w @ Expr::Row(items, _)) if super::is_whole_row(w) => {
+                                        items.get(k).filter(|c| c.ty() == t).cloned()
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            match col {
+                                Some(col) => {
+                                    let at = params.iter().position(|p| p.same_as(&col)).unwrap_or_else(|| {
+                                        params.push(col);
+                                        params.len() - 1
+                                    });
+                                    Expr::Outer(1, at, t)
+                                }
+                                None => Expr::Field(r, k, t),
+                            }
+                        }
+                        x => x,
+                    })
+                })
+                .unwrap_or(call);
+            Arc::make_mut(fc).call = Some(call);
+        }
         let alias = rf.alias.as_ref();
         let colnames = alias.map(|a| names(&a.colnames)).unwrap_or_default();
         let rel_name = alias
@@ -4500,6 +4653,16 @@ impl Binder<'_, '_> {
             fc.alias = rel_name.clone();
             fc.cols = cols.iter().map(|c| c.name.clone()).collect();
             fc.width = cols.iter().map(|c| crate::sql::costs::type_width(&c.ty)).sum();
+        }
+        // An inlined set-returning SQL function: a FROM subquery under its name.
+        if let Plan::Join {
+            left, right, meta, ..
+        } = &mut plan
+            && meta.from_call.is_none()
+            && matches!(&**left, Plan::One)
+        {
+            let info = Arc::new((rel_name.clone(), cols.iter().map(|c| c.name.clone()).collect()));
+            mark_subquery_windows(Arc::make_mut(right), &info);
         }
         let mut rel = derived_rel(&rel_name, &cols, 0);
         self.mark_rowtype_cols(&mut rel, &[(ret, cols.len())]);
@@ -6080,6 +6243,8 @@ struct SearchCycle {
     append: Option<Arc<FuncDef>>,
     eq: Option<Arc<FuncDef>>,
     plus: Option<Arc<FuncDef>>,
+    /// The query's column names (the breadth-first row's fields after its depth).
+    names: Vec<String>,
 }
 
 impl SearchCycle {
@@ -6101,9 +6266,20 @@ impl SearchCycle {
         let ty = DataType::array_of(DataType::Record);
         Expr::Call(
             self.append.clone().unwrap(),
-            vec![path.clone(), Self::row(cols, by)],
+            vec![path.clone(), Self::path_start(cols, by)],
             ty,
         )
+    }
+
+    /// The breadth-first sequence row: its depth ("*DEPTH*"), then the BY columns.
+    fn depth_row(&self, depth: Expr, cols: &[Expr], by: &[usize]) -> Expr {
+        let mut f = vec![depth];
+        f.extend(by.iter().map(|i| cols[*i].clone()));
+        let fields: Vec<(String, DataType)> = by
+            .iter()
+            .map(|i| (self.names.get(*i).cloned().unwrap_or_default(), cols[*i].ty()))
+            .collect();
+        Expr::Row(f, breadth_row_type(&fields))
     }
 
     /// The extra columns for a row of the non-recursive term.
@@ -6111,9 +6287,7 @@ impl SearchCycle {
         let mut out = Vec::new();
         if let Some((by, breadth)) = &self.search {
             out.push(if *breadth {
-                let mut f = vec![Expr::Const(Value::Int8(0), DataType::Int8)];
-                f.extend(by.iter().map(|i| cols[*i].clone()));
-                Expr::Row(f, DataType::Record)
+                self.depth_row(Expr::Const(Value::Int8(0), DataType::Int8), cols, by)
             } else {
                 Self::path_start(cols, by)
             });
@@ -6132,13 +6306,8 @@ impl SearchCycle {
         if let Some((by, breadth)) = &self.search {
             out.push(if *breadth {
                 let depth = Expr::Field(Box::new(passed[0].clone()), 0, DataType::Int8);
-                let mut f = vec![Expr::Call(
-                    self.plus.clone().unwrap(),
-                    vec![depth, Expr::Const(Value::Int8(1), DataType::Int8)],
-                    DataType::Int8,
-                )];
-                f.extend(by.iter().map(|i| cols[*i].clone()));
-                Expr::Row(f, DataType::Record)
+                let inc = Expr::Call(self.plus.clone().unwrap(), vec![depth], DataType::Int8);
+                self.depth_row(inc, cols, by)
             } else {
                 self.path_extend(&passed[0], cols, by)
             });
@@ -6173,6 +6342,13 @@ impl SearchCycle {
             DataType::Bool,
         ))
     }
+}
+
+/// A breadth-first SEARCH column's row type: "*DEPTH*", then the BY columns.
+fn breadth_row_type(by: &[(String, DataType)]) -> DataType {
+    let mut fields = vec![("*DEPTH*".to_string(), DataType::Int8)];
+    fields.extend(by.iter().cloned());
+    DataType::row(fields)
 }
 
 /// findTargetlistEntrySQL92: a constant item must be an output column position.
@@ -6431,6 +6607,22 @@ pub(super) fn grouping_sets_subquery(p: &Plan) -> bool {
     }
 }
 
+/// Column names made distinct as EXPLAIN shows a relation's (set_relation_column_names:
+/// a repeated name gets `_1`, `_2`, …).
+fn unique_colnames(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in names {
+        let mut name = n.clone();
+        let mut i = 0;
+        while out.contains(&name) {
+            i += 1;
+            name = format!("{n}_{i}");
+        }
+        out.push(name);
+    }
+    out
+}
+
 /// A FROM subquery's own windows (below its projection, sort and limit): the alias and
 /// column names of the subquery they belong to.
 fn mark_subquery_windows(p: &mut Plan, info: &Arc<(String, Vec<String>)>) {
@@ -6440,13 +6632,18 @@ fn mark_subquery_windows(p: &mut Plan, info: &Arc<(String, Vec<String>)>) {
         | Plan::Limit { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Distinct { input, .. } => mark_subquery_windows(Arc::make_mut(input), info),
+        // (Those of a subquery inside it keep theirs.)
         Plan::Window { calls, .. } => {
             for c in calls.iter_mut() {
-                c.subquery = Some(info.clone());
+                if c.subquery.is_none() {
+                    c.subquery = Some(info.clone());
+                }
             }
         }
         // (And a set operation's: a filter it can't take shows as its Subquery Scan.)
-        Plan::SetOp { sub, .. } => *sub = Some(info.clone()),
+        Plan::SetOp { sub, .. } if sub.is_none() => {
+            *sub = Some(info.clone());
+        }
         _ => {}
     }
 }

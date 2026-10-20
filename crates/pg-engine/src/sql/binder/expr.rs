@@ -639,11 +639,9 @@ impl Binder<'_, '_> {
     fn inline_arg(&self, lvl: usize, e: &Expr) -> Option<Expr> {
         let l = &self.levels[lvl];
         match e {
-            Expr::Outer(1, i, _) if l.inline_args && l.fn_args.is_some() => l
-                .params
-                .get(*i)
-                .filter(|p| matches!(p, Expr::Const(..)))
-                .cloned(),
+            Expr::Outer(1, i, _) if l.inline_args && l.fn_args.is_some() => {
+                l.params.get(*i).filter(|p| level_free(p)).cloned()
+            }
             _ => None,
         }
     }
@@ -2269,6 +2267,48 @@ impl Binder<'_, '_> {
                 })
             }
             // (The text_pattern_ops family's operators order rows too.)
+            "<" | "<=" | ">" | ">=" | "~<~" | "~<=~" | "~>=~" | "~>~" if ls.len() > 1 => {
+                // make_row_comparison_op: a RowCompareExpr, each pair compared with `op`
+                // (equal pairs pass to the next one).
+                let op: &'static str = match op {
+                    "<" => "<",
+                    "<=" => "<=",
+                    ">" => ">",
+                    ">=" => ">=",
+                    "~<~" => "~<~",
+                    "~<=~" => "~<=~",
+                    "~>=~" => "~>=~",
+                    _ => "~>~",
+                };
+                let mut cmps = Vec::with_capacity(ls.len());
+                let mut eqs = Vec::with_capacity(ls.len());
+                // (A pair of constants stays a pair: the planner doesn't fold a row
+                // comparison's columns.)
+                let pair = |b: &mut Self, op: &str, x: Expr, y: Expr| -> Result<Expr> {
+                    let c = b.binop(op, x.clone(), y.clone(), loc)?;
+                    if !matches!(c, Expr::Const(..)) {
+                        return Ok(c);
+                    }
+                    let res = resolve_binop(op, &x.ty(), &y.ty()).map_err(|e| with_pos(e, loc))?;
+                    let x = b.coerce_implicit(x, &res.arg_types[0])?;
+                    let y = b.coerce_implicit(y, &res.arg_types[1])?;
+                    let def = b.collated(res.def, &[&x, &y]);
+                    Ok(Expr::Call(def, vec![x, y], DataType::Bool))
+                };
+                for (a, b) in ls.into_iter().zip(rs) {
+                    let c = pair(self, op, a.clone(), b.clone())?;
+                    // (The `=` of the pair's family, over the operands as compared.)
+                    let e = match &c {
+                        Expr::Call(_, args, _) if args.len() == 2 => {
+                            pair(self, "=", args[0].clone(), args[1].clone())
+                        }
+                        _ => pair(self, "=", a, b),
+                    }?;
+                    cmps.push(c);
+                    eqs.push(e);
+                }
+                Ok(Expr::RowCompare(Box::new(crate::sql::expr::RowCompare { op, cmps, eqs })))
+            }
             "<" | "<=" | ">" | ">=" | "~<~" | "~<=~" | "~>=~" | "~>~" => {
                 // (a1, a2) < (b1, b2)  ≡  a1 < b1 OR (a1 = b1 AND a2 < b2) …, with <= on the last.
                 let n = ls.len();
@@ -7138,7 +7178,10 @@ impl Binder<'_, '_> {
             // Folded with the constants while inlining (in FROM, later: without the frame).
             SqlFnCall {
                 at: SqlFnAt::Inlining,
-                fold: consts && place == FnPlace::Scalar,
+                // (A set-returning one in FROM: substitute_actual_srf_parameters puts
+                // in arguments that read no row, whatever they are.)
+                fold: consts && place == FnPlace::Scalar
+                    || place == FnPlace::FromSet && args.iter().all(level_free),
                 analyze: SqlFnAt::Inlining,
             }
         } else {
@@ -7347,7 +7390,13 @@ fn inlines(
     match place {
         FnPlace::Run => false,
         FnPlace::FromSet => {
-            f.returns_set && !f.strict && f.volatility != 'v' && f.ret != DataType::Void
+            // (Arguments that are volatile or have sub-selects: evaluated once, as the
+            // function scan's.)
+            f.returns_set
+                && !f.strict
+                && f.volatility != 'v'
+                && f.ret != DataType::Void
+                && args.iter().all(|a| !a.is_volatile() && !has_subplan(a))
         }
         FnPlace::Scalar => {
             if f.returns_set || f.ret == DataType::Record {
@@ -7433,6 +7482,31 @@ fn inlines(
             })
         }
     }
+}
+
+/// Whether `e` has a sub-select (contain_subplans; an inlined function call is none).
+fn has_subplan(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| found |= matches!(x, Expr::Subquery(s) if s.func.is_none()));
+    found
+}
+
+/// Whether `e` reads nothing of the query level it is bound at (no column, no enclosing
+/// value, no aggregate): the same expression at any level below it.
+pub(crate) fn level_free(e: &Expr) -> bool {
+    let mut ok = !e.is_volatile() && !has_subplan(e);
+    e.walk(&mut |x| match x {
+        Expr::Col(..)
+        | Expr::Outer(..)
+        | Expr::Agg(..)
+        | Expr::Window(..)
+        | Expr::Srf(..)
+        | Expr::Grouping(_)
+        | Expr::CaseTest(_)
+        | Expr::Default(_) => ok = false,
+        _ => {}
+    });
+    ok
 }
 
 /// A user-defined aggregate as an overload candidate.
@@ -7906,12 +7980,63 @@ pub(crate) fn indeterminate_eq(eq: Expr) -> Expr {
 /// inputs' implicit collations conflict): hashing a value fails, as `hashtext` does.
 pub(crate) const INDETERMINATE_HASH: &str = "\u{1}hashtext";
 
+/// The call wrapping a hash join key whose `=` compares under a nondeterministic
+/// collation: its value as that collation's sort key (equal keys for the strings it finds
+/// equal).
+pub(crate) const NONDETERMINISTIC_HASH: &str = "\u{1}hashtext_nondet";
+
+fn nondeterministic_key(a: &[Value], c: &func::FnCtx) -> Result<Value> {
+    Ok(match c.coll {
+        Some(coll) => crate::types::collation::key_value(coll, &a[0]),
+        None => a[0].clone(),
+    })
+}
+
+/// A hash key's operand of its `=`: (the operand, whether hashing it fails for want of a
+/// collation, the nondeterministic collation it hashes under).
+pub(crate) fn hash_key_operand(k: &Expr) -> (Expr, bool, Option<Arc<crate::types::collation::Collation>>) {
+    match k {
+        Expr::Call(d, args, _) if d.name == INDETERMINATE_HASH => (args[0].clone(), true, None),
+        Expr::Call(d, args, _) if d.name == NONDETERMINISTIC_HASH => (args[0].clone(), false, d.coll.clone()),
+        k => (k.clone(), false, None),
+    }
+}
+
+/// `eq`, an `=` call, comparing under collation `coll` (a hash key's, rebuilt as a clause).
+pub(crate) fn eq_under(eq: Expr, coll: Option<Arc<crate::types::collation::Collation>>) -> Expr {
+    match (eq, coll) {
+        (Expr::Call(d, args, ty), Some(c)) => Expr::Call(
+            Arc::new(func::FuncDef {
+                coll: Some(c),
+                ..(*d).clone()
+            }),
+            args,
+            ty,
+        ),
+        (eq, _) => eq,
+    }
+}
+
 /// A hash join key taken from `eq`, an `=` call: wrapped so that hashing it fails when
-/// the call has no collation.
+/// the call has no collation, or hashes the collation's sort key when it is
+/// nondeterministic.
 pub(crate) fn hash_key(eq: &Expr, key: Expr) -> Expr {
     let Expr::Call(def, ..) = eq else {
         return key;
     };
+    if def.coll.as_ref().is_some_and(|c| !c.deterministic) {
+        let ty = key.ty();
+        let d = func::FuncDef {
+            name: NONDETERMINISTIC_HASH,
+            args: vec![ty.clone()],
+            ret: func::Ret::Fixed(ty.clone()),
+            strict: true,
+            imp: nondeterministic_key,
+            srf: None,
+            ..(**def).clone()
+        };
+        return Expr::Call(Arc::new(d), vec![key], ty);
+    }
     if !std::ptr::fn_addr_eq(def.imp, indeterminate::<0> as func::FnImpl) {
         return key;
     }

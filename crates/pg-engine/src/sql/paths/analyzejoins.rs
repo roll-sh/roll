@@ -209,7 +209,7 @@ fn distinct_for(ctx: &ExecCtx, p: &Plan, keys: &[Cand], base: bool) -> bool {
             sets: None,
             ..
         } => groups.is_empty() || covers(groups.len()),
-        Plan::Distinct { input, on: None } => covers(plan_width(input)),
+        Plan::Distinct { input, on: None, .. } => covers(plan_width(input)),
         Plan::Distinct {
             on: Some(on), ..
         } => on

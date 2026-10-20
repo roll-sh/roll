@@ -947,7 +947,10 @@ impl Deparser<'_, '_> {
                 self.buf.push(')');
             }
             // A hash key that can't be hashed shows as the key.
-            Expr::Call(def, args, _) if def.name == crate::sql::binder::INDETERMINATE_HASH => {
+            Expr::Call(def, args, _)
+                if def.name == crate::sql::binder::INDETERMINATE_HASH
+                    || def.name == crate::sql::binder::NONDETERMINISTIC_HASH =>
+            {
                 return self.expr(&args[0], showimplicit);
             }
             Expr::Call(def, args, ty) if crate::sql::func::sqljson::is_sqljson(def) => {
@@ -1026,6 +1029,19 @@ impl Deparser<'_, '_> {
                         }
                         self.expr(a, true)?;
                     }
+                } else if self.subplans.is_some()
+                    && !self.cat.functions.contains_key(&def.oid)
+                    && args.len() < def.args.len()
+                    && def.args.len() - args.len() <= def.defaults.len()
+                {
+                    // A plan's call has the defaults of the arguments left out
+                    // (expand_function_arguments).
+                    let from = def.defaults.len() - (def.args.len() - args.len());
+                    let mut all = args.to_vec();
+                    for (v, t) in def.defaults[from..].iter().zip(&def.args[args.len()..]) {
+                        all.push(Expr::Const(v.clone(), t.clone()));
+                    }
+                    self.list(&all)?;
                 } else {
                     self.list(args)?;
                 }
@@ -1190,6 +1206,24 @@ impl Deparser<'_, '_> {
             }
             Expr::Coalesce(..) if self.merged_column(e) => {}
             Expr::Xml(x) => self.xml_expr(x)?,
+            Expr::RowCompare(rc) => {
+                let (ls, rs) = rc.sides();
+                self.buf.push_str("(ROW(");
+                for (i, a) in ls.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push_str(", ");
+                    }
+                    self.expr(a, true)?;
+                }
+                self.buf.push_str(&format!(") {} ROW(", rc.op));
+                for (i, a) in rs.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push_str(", ");
+                    }
+                    self.expr(a, true)?;
+                }
+                self.buf.push_str("))");
+            }
             Expr::Coalesce(args, _) => {
                 self.buf.push_str("COALESCE(");
                 self.list(args)?;

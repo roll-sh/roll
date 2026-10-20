@@ -142,6 +142,12 @@ pub struct RelSize {
 /// estimate_rel_size (table_block_relation_estimate_size): the current page count, with
 /// the tuple density pg_class gives (or, never analyzed, the one the row width suggests).
 pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
+    if t.oid < crate::catalog::FIRST_USER_OID
+        && t.next_index_id == u32::MAX
+        && let Some(st) = crate::catalog::system::SysTable::by_oid(t.oid)
+    {
+        return crate::sql::paths::sys_size(st, ctx);
+    }
     let cat = ctx.catalog();
     let mut curpages = crate::exec::sizing::heap_blocks(t, ctx)
         .ok()
@@ -538,6 +544,8 @@ impl Est<'_> {
                 s
             }
             Expr::Not(x) => 1.0 - self.clause(x),
+            // rowcomparesel: the first pair's comparison.
+            Expr::RowCompare(rc) => rc.cmps.first().map_or(DEFAULT_INEQ_SEL, |c| self.clause(c)),
             Expr::Const(Value::Bool(b), _) => {
                 if *b {
                     1.0
@@ -1430,6 +1438,8 @@ pub fn qual_cost(e: &Expr) -> f64 {
     let mut n = 0.0;
     e.walk(&mut |x| match x {
         Expr::Call(..) => n += 1.0,
+        // (A row comparison checks every pair, once: its `=`s aren't calls of their own.)
+        Expr::RowCompare(rc) => n -= rc.eqs.len() as f64,
         // A user-defined function called (not inlined): its procost.
         Expr::Subquery(s) if s.call.as_ref().is_some_and(|c| !c.inline) => {
             n += s.call.as_ref().map_or(0.0, |c| c.cost)

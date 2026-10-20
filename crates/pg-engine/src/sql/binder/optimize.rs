@@ -354,7 +354,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         }
         // No rows stay no rows.
         Plan::Empty { ncols, cols } => Plan::Empty { ncols, cols },
-        Plan::SysScan { table, filter } => {
+        Plan::SysScan { table, filter, .. } => {
             let mut all = Vec::new();
             if let Some(f) = filter {
                 conjuncts(f, &mut all);
@@ -363,6 +363,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             Plan::SysScan {
                 table,
                 filter: and_all(all),
+                path: None,
             }
         }
         Plan::Filter { input, pred } => {
@@ -412,6 +413,9 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 JoinKind::Left => (true, false),
                 _ => (false, true),
             };
+            // (The keys' original orientations, kept with them below.)
+            let old_keys = hash.clone();
+            let (old_hs, old_kf) = (meta.hash_swapped.clone(), meta.key_flipped.clone());
             let mut kept = meta.kept;
             let old_pushed = meta.pushed;
             ec_constants(
@@ -442,7 +446,31 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 }
             }
             // Keep the equi-join keys the join already had.
-            if let (Some((hl, hr)), Plan::Join { hash: h, .. }) = (hash, &mut j) {
+            if let (Some((hl, hr)), Plan::Join { hash: h, meta: m, .. }) = (hash, &mut j) {
+                let n = h.as_ref().map_or(0, |(l2, _)| l2.len());
+                let flags = |old: &[bool]| -> Vec<bool> {
+                    hl.iter()
+                        .zip(&hr)
+                        .map(|(a, b)| {
+                            old_keys
+                                .as_ref()
+                                .and_then(|(ol, or)| {
+                                    ol.iter().zip(or).position(|(x, y)| x.same_as(a) && y.same_as(b))
+                                })
+                                .and_then(|i| old.get(i).copied())
+                                .unwrap_or(false)
+                        })
+                        .collect()
+                };
+                let (hs, kf) = (flags(&old_hs), flags(&old_kf));
+                if hs.iter().any(|x| *x) {
+                    m.hash_swapped.resize(n, false);
+                    m.hash_swapped.extend(hs);
+                }
+                if kf.iter().any(|x| *x) {
+                    m.key_flipped.resize(n, false);
+                    m.key_flipped.extend(kf);
+                }
                 match h {
                     Some((l2, r2)) => {
                         l2.extend(hl);
@@ -637,18 +665,28 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         }
         // A security barrier: only the clauses that can't leak its rows' values go into
         // it (leakproof, not volatile); the rest stay above.
-        Plan::Barrier { input, alias, cols } => {
-            // (A subquery grouping by grouping sets takes none.)
+        Plan::Barrier { input, alias, cols, secure } => {
+            // (A subquery grouping by grouping sets takes none; one not pulled up for its
+            // set-returning or volatile outputs, the clauses not reading them that aren't
+            // volatile themselves: subquery_is_pushdown_safe.)
             let fence = super::select::grouping_sets_subquery(&input);
-            let (down, up): (Vec<Expr>, Vec<Expr>) =
-                parts.into_iter().partition(|p| !fence && !leaks(cat, p));
+            let unsafe_out = if secure { Vec::new() } else { unsafe_outputs(&input) };
+            let (down, up): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|p| {
+                !fence
+                    && if secure {
+                        !leaks(cat, p)
+                    } else {
+                        !crate::sql::paths::expr_volatile_deep(p)
+                            && p.columns().iter().all(|c| !unsafe_out.get(*c).copied().unwrap_or(false))
+                    }
+            });
             let input = if down.is_empty() {
                 input
             } else {
                 let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
                 Arc::new(add_filter(cat, i, Expr::And(down)))
             };
-            let b = Plan::Barrier { input, alias, cols };
+            let b = Plan::Barrier { input, alias, cols, secure };
             match and_all(up) {
                 Some(p) => Plan::Filter {
                     input: Arc::new(b),
@@ -657,10 +695,79 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 None => b,
             }
         }
+        // A select list with set-returning calls: clauses not reading their results (nor
+        // anything volatile) go below it, over the values they read.
+        Plan::ProjectSet { input, exprs, srfs } => {
+            // (The calls' results are columns past the input's.)
+            let iw = width(&input);
+            let (down, up): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|p| {
+                !crate::sql::paths::expr_volatile_deep(p)
+                    && p.columns().iter().all(|&c| {
+                        exprs.get(c).is_some_and(|e| {
+                            let mut ok = !crate::sql::paths::expr_volatile_deep(e) && e.columns().iter().all(|&x| x < iw);
+                            e.walk(&mut |x| ok &= !matches!(x, Expr::Srf(..) | Expr::Subquery(_)));
+                            ok
+                        })
+                    })
+            });
+            let input = if down.is_empty() {
+                input
+            } else {
+                let mapped: Vec<Expr> = down
+                    .into_iter()
+                    .map(|p| {
+                        p.transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(c, t) => exprs.get(c).cloned().unwrap_or(Expr::Col(c, t)),
+                                x => x,
+                            })
+                        })
+                        .unwrap()
+                    })
+                    .collect();
+                let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
+                Arc::new(add_filter(cat, i, Expr::And(mapped)))
+            };
+            let ps = Plan::ProjectSet { input, exprs, srfs };
+            match and_all(up) {
+                Some(p) => Plan::Filter {
+                    input: Arc::new(ps),
+                    pred: p,
+                },
+                None => ps,
+            }
+        }
         plan => Plan::Filter {
             input: Arc::new(plan),
             pred: and_all(parts).unwrap(),
         },
+    }
+}
+
+/// The output columns of a subquery's plan whose values come from a set-returning or a
+/// volatile call (through its projections, sort and grouping): clauses reading them can't
+/// go into it (check_output_expressions).
+pub(crate) fn unsafe_outputs(p: &Plan) -> Vec<bool> {
+    let bad = |e: &Expr, below: &[bool]| -> bool {
+        let mut b = crate::sql::paths::expr_volatile_deep(e);
+        e.walk(&mut |x| match x {
+            Expr::Srf(..) => b = true,
+            Expr::Col(j, _) if below.get(*j).copied().unwrap_or(false) => b = true,
+            _ => {}
+        });
+        b
+    };
+    match p {
+        Plan::Project { input, exprs } | Plan::ProjectSet { input, exprs, .. } => {
+            let below = unsafe_outputs(input);
+            exprs.iter().map(|e| bad(e, &below)).collect()
+        }
+        Plan::Sort { input, .. } | Plan::Filter { input, .. } | Plan::Context { input, .. } => unsafe_outputs(input),
+        Plan::Agg { input, groups, aggs, sets: None } => {
+            let below = unsafe_outputs(input);
+            groups.iter().map(|g| bad(g, &below)).chain(aggs.iter().map(|_| false)).collect()
+        }
+        p => vec![false; width(p)],
     }
 }
 
@@ -1156,6 +1263,8 @@ fn qual_cost(e: &Expr) -> f64 {
                 _ => 5.0,
             }
         }
+        // (One item: an `=`, as the parser makes it.)
+        Expr::InList(_, items, _) if items.len() == 1 => cost += 1.0,
         Expr::InList(_, items, _) => cost += 0.5 * items.len() as f64,
         // (Between text types it is a relabeling.)
         Expr::Cast(_, from, to, _)
@@ -1423,7 +1532,8 @@ fn equi_key(e: &Expr, nleft: usize) -> Option<(Expr, Expr)> {
     if def.name != "=" || args.len() != 2 {
         return None;
     }
-    // Under a nondeterministic collation, equal strings needn't be equal bytes.
+    // Under a nondeterministic collation, equal strings needn't be equal bytes (the
+    // planner's hash keys hash the collation's sort keys).
     if def.coll.as_ref().is_some_and(|c| !c.deterministic) {
         return None;
     }

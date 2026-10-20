@@ -208,6 +208,36 @@ pub enum Expr {
     Collate(Box<Expr>, String, i32),
     /// XMLELEMENT, XMLFOREST, XMLPARSE, … and `IS DOCUMENT` (`XmlExpr`).
     Xml(Box<XmlExpr>),
+    /// `ROW(a, b, …) op ROW(x, y, …)` for an ordering operator (RowCompareExpr).
+    RowCompare(Box<RowCompare>),
+}
+
+/// A row comparison, column by column: the first pair that isn't equal decides it (NULL
+/// when a pair has a NULL), `op` on the last pair when all before it are equal.
+#[derive(Clone, Debug)]
+pub struct RowCompare {
+    /// `<`, `<=`, `>` or `>=` (or the pattern family's `~<~` …).
+    pub op: &'static str,
+    /// Per column: `l op r` (the operands as the comparison coerced them).
+    pub cmps: Vec<Expr>,
+    /// Per column: `l = r`.
+    pub eqs: Vec<Expr>,
+}
+
+impl RowCompare {
+    /// The left / right operands of each pair.
+    pub fn sides(&self) -> (Vec<&Expr>, Vec<&Expr>) {
+        let side = |k: usize| {
+            self.cmps
+                .iter()
+                .map(|c| match c {
+                    Expr::Call(_, a, _) if a.len() == 2 => &a[k],
+                    c => c,
+                })
+                .collect()
+        };
+        (side(0), side(1))
+    }
 }
 
 /// `XmlExprOp`.
@@ -268,6 +298,7 @@ impl Expr {
             | Expr::Window(_, t)
             | Expr::Srf(_, t) => t.clone(),
             Expr::Assign { ty, .. } => ty.clone(),
+            Expr::RowCompare(_) => DataType::Bool,
             Expr::Grouping(_) => DataType::Int4,
             Expr::Default(t) => t.clone(),
             Expr::CoerceToDomain(e, _) => e.ty(),
@@ -401,6 +432,11 @@ impl Expr {
                     a.walk(f);
                 }
             }
+            Expr::RowCompare(rc) => {
+                for a in rc.cmps.iter().chain(&rc.eqs) {
+                    a.walk(f);
+                }
+            }
             _ => {}
         }
     }
@@ -444,6 +480,17 @@ impl Expr {
                     .map(&mut *f)
                     .collect::<Result<_>>()?;
                 Expr::Xml(x)
+            }
+            Expr::RowCompare(mut rc) => {
+                rc.cmps = std::mem::take(&mut rc.cmps)
+                    .into_iter()
+                    .map(&mut *f)
+                    .collect::<Result<_>>()?;
+                rc.eqs = std::mem::take(&mut rc.eqs)
+                    .into_iter()
+                    .map(&mut *f)
+                    .collect::<Result<_>>()?;
+                Expr::RowCompare(rc)
             }
             Expr::IsNull(e, n) => Expr::IsNull(Box::new(f(*e)?), n),
             Expr::BoolTest(e, k) => Expr::BoolTest(Box::new(f(*e)?), k),
@@ -707,6 +754,7 @@ impl fmt::Debug for Expr {
                 "XML{:?}({:?}, {:?}, {:?}, {:?})",
                 x.op, x.name, x.arg_names, x.named_args, x.args
             ),
+            Expr::RowCompare(rc) => write!(f, "ROWCMP{}({:?}, {:?})", rc.op, rc.cmps, rc.eqs),
             Expr::And(a) => write!(f, "AND{a:?}"),
             Expr::Or(a) => write!(f, "OR{a:?}"),
             Expr::Not(e) => write!(f, "NOT({e:?})"),
@@ -858,6 +906,21 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
             .ok_or_else(|| crate::error::internal(format!("column #{i} out of range"))),
         Expr::Relabel(e, _) | Expr::SqlSyntax(e) | Expr::Collate(e, ..) => eval(e, row, ctx),
         Expr::Xml(x) => crate::sql::func::xml::eval_xml_expr(x, row, ctx),
+        Expr::RowCompare(rc) => {
+            // ExecEvalRowCompare: the first pair not equal decides.
+            let n = rc.cmps.len();
+            for i in 0..n {
+                if i + 1 < n {
+                    match eval(&rc.eqs[i], row, ctx)? {
+                        Value::Bool(true) => continue,
+                        Value::Bool(false) => {}
+                        _ => return Ok(Value::Null),
+                    }
+                }
+                return eval(&rc.cmps[i], row, ctx);
+            }
+            Ok(Value::Null)
+        }
         Expr::Outer(level, i, _) => ctx.outer_value(*level, *i),
         Expr::Param(i, _) => ctx.param(*i),
         Expr::Call(def, args, ty) if def.spread => eval_spread(def, args, ty, row, ctx),

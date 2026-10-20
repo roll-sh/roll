@@ -17,9 +17,17 @@ pub(crate) fn explain(
     types: Vec<DataType>,
 ) -> Result<(Vec<Row>, Vec<OutCol>)> {
     use crate::sql::explain::{Format, options};
-    let o = options(&s.options)?;
+    let mut o = options(&s.options)?;
     let Some(q) = s.query.as_deref() else {
         return Ok((Vec::new(), Vec::new()));
+    };
+    // DECLARE CURSOR: its query (a SCROLL cursor's needing to run backwards).
+    let q = match inner(q) {
+        Some(NodeEnum::DeclareCursorStmt(d)) if d.query.is_some() => {
+            o.scroll = d.options & 0x0002 != 0;
+            d.query.as_deref().unwrap()
+        }
+        _ => q,
     };
     // CREATE TABLE AS / SELECT INTO: the query is explained, and with ANALYZE the table is
     // made by running the statement.

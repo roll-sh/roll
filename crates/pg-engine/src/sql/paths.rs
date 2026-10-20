@@ -39,7 +39,9 @@ pub(crate) fn expr_volatile_deep(e: &Expr) -> bool {
     unused::volatile(e)
 }
 mod mergeappend;
-pub use mergeappend::plan_ordered_append;
+pub use mergeappend::{PartOrder, count_members, partition_order, plan_ordered_append};
+mod syscat;
+pub use syscat::{sys_index_order, sys_size, sys_table};
 
 pub const CPU_INDEX_TUPLE_COST: f64 = 0.005;
 /// DEFAULT_PAGE_CPU_MULTIPLIER.
@@ -278,6 +280,10 @@ fn cat_has_statistics(cat: &crate::catalog::Catalog, table: u32) -> bool {
 
 /// The relation's size as the planner sees it, and its all-visible fraction.
 fn rel_size(t: &Table, ctx: &ExecCtx) -> (RelSize, f64) {
+    // (A catalog's stand-in: all its rows visible.)
+    if let Some(st) = syscat::stand_in_of(t) {
+        return (syscat::sys_size(st, ctx), 1.0);
+    }
     let size = costs::rel_size(t, ctx);
     let allvis = ctx
         .catalog()
@@ -295,6 +301,9 @@ fn rel_size(t: &Table, ctx: &ExecCtx) -> (RelSize, f64) {
 }
 
 fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo> {
+    if let Some(st) = syscat::stand_in_of(t) {
+        return syscat::sys_index_infos(st, rel_tuples);
+    }
     let Ok(bound) = crate::sql::binder::bound_indexes(t, ctx) else {
         return Vec::new();
     };
@@ -760,8 +769,108 @@ fn match_clause(
             Some(mk(q.clone(), Kind::Null(!*not), None))
         }
         Expr::Or(arms) if ii.am == Am::Btree => or_to_saop(ii, col, qn, arms),
+        Expr::RowCompare(rc) if ii.am == Am::Btree && !pattern_ops => rowcompare_clause(ii, col, qn, q, rc),
         _ => None,
     }
+}
+
+/// match_rowcompare_to_indexcol / expand_indexqual_rowcompare: a row comparison whose
+/// first pair compares key column `col` with a value fixed for the scan, the index's key
+/// columns (any of them) on that side of the pairs after it as far as they go; the
+/// comparison cut to those pairs is lossy (`<` becoming `<=`). The scan reads from (or to)
+/// the first key's value.
+fn rowcompare_clause(
+    ii: &IndexInfo,
+    col: usize,
+    qn: usize,
+    q: &Expr,
+    rc: &crate::sql::expr::RowCompare,
+) -> Option<IClause> {
+    let (ls, rs) = rc.sides();
+    let key = &ii.keys[col];
+    let var_left = if matches_key(ls[0], key) && scan_const(rs[0]) {
+        true
+    } else if matches_key(rs[0], key) && scan_const(ls[0]) {
+        false
+    } else {
+        return None;
+    };
+    let ok_op = |c: &Expr| matches!(c, Expr::Call(d, a, _) if a.len() == 2 && byte_order_op(d) && matches!(d.name, "<" | "<=" | ">" | ">="));
+    if !rc.cmps.iter().all(ok_op) {
+        return None;
+    }
+    let (vars, consts) = if var_left { (&ls, &rs) } else { (&rs, &ls) };
+    if family(&vars[0].ty()) != family(&consts[0].ty()) {
+        return None;
+    }
+    let mut matching = 1;
+    while matching < rc.cmps.len() {
+        let (v, c) = (vars[matching], consts[matching]);
+        let hit = ii
+            .keys
+            .iter()
+            .enumerate()
+            .any(|(j, k)| matches_key(v, k) && ii.order.get(j).is_none_or(Option::is_none) && family(&k.ty()) == family(&c.ty()));
+        if !hit || !scan_const(c) {
+            break;
+        }
+        matching += 1;
+    }
+    // (With the key on the right: the pairs commuted.)
+    let orient = |c: &Expr| -> Expr {
+        match c {
+            Expr::Call(d, a, t) if !var_left => commuted_call(d, a[1].clone(), a[0].clone(), t.clone()),
+            c => c.clone(),
+        }
+    };
+    let op = if var_left { rc.op } else { commute(rc.op) };
+    let lossy = matching < rc.cmps.len();
+    // (Cut short, `<` / `>` take in the equal prefix: `<=` / `>=`.)
+    let op = match (lossy, op) {
+        (true, "<") => "<=",
+        (true, ">") => ">=",
+        (_, o) => o,
+    };
+    let cmps: Vec<Expr> = rc.cmps[..matching]
+        .iter()
+        .map(|c| {
+            let c = orient(c);
+            match c {
+                Expr::Call(d, a, t) if d.name != op => {
+                    let r = crate::sql::func::resolve_binop(op, &a[0].ty(), &a[1].ty()).ok();
+                    match r {
+                        Some(r) => {
+                            let mut nd = (*r.def).clone();
+                            nd.coll = d.coll.clone();
+                            Expr::Call(Arc::new(nd), a, t)
+                        }
+                        None => Expr::Call(d, a, t),
+                    }
+                }
+                c => c,
+            }
+        })
+        .collect();
+    let eqs: Vec<Expr> = rc.eqs[..matching].iter().map(orient).collect();
+    let expr = if matching == 1 {
+        cmps[0].clone()
+    } else {
+        Expr::RowCompare(Box::new(crate::sql::expr::RowCompare { op, cmps, eqs }))
+    };
+    // (The key range: from the first key's value, inclusive.)
+    let bound = match op {
+        "<" | "<=" => "<=",
+        _ => ">=",
+    };
+    Some(IClause {
+        col,
+        qual: qn,
+        expr,
+        kind: Kind::Op(bound),
+        value: Some(consts[0].clone()),
+        orig: q.clone(),
+        lossy,
+    })
 }
 
 impl Planner<'_, '_> {
@@ -2515,12 +2624,26 @@ impl Rel {
 
 /// The value a clause on column `col` equates the key to, if it is `key = const`.
 fn const_equated(rel: &Rel, key: &Expr) -> bool {
-    let boolean = key.ty() == DataType::Bool;
+    eq_const(rel, key) || bool_const(rel, key)
+}
+
+/// An equality of `key` with a constant among the relation's clauses: an equivalence class
+/// with a constant, making `key` redundant as a sort key.
+fn eq_const(rel: &Rel, key: &Expr) -> bool {
     rel.quals.iter().any(|q| match q {
         Expr::Call(d, args, _) if d.name == "=" && args.len() == 2 => {
             (matches_key(&args[0], key) && scan_const(&args[1]))
                 || (matches_key(&args[1], key) && scan_const(&args[0]))
         }
+        _ => false,
+    })
+}
+
+/// A boolean `key` the relation's clauses fix (no equivalence class).
+fn bool_const(rel: &Rel, key: &Expr) -> bool {
+    let boolean = key.ty() == DataType::Bool;
+    rel.quals.iter().any(|q| match q {
+        Expr::Call(d, args, _) if d.name == "=" && args.len() == 2 => false,
         // indexcol_is_bool_constant_for_query: `col`, `NOT col`, `col IS TRUE`, `col IS
         // FALSE` on a boolean column.
         Expr::Not(x) | Expr::BoolTest(x, crate::sql::expr::BoolTest::IsTrue | crate::sql::expr::BoolTest::IsFalse)
@@ -2541,7 +2664,7 @@ fn index_pathkeys(rel: &Rel, ii: &IndexInfo, backward: bool, w: &Want) -> Vec<Pa
     }
     let mut keys = Vec::new();
     for (i, k) in ii.keys.iter().enumerate() {
-        if const_equated(rel, k) {
+        if eq_const(rel, k) {
             continue;
         }
         let c = &ii.ix.columns[i];
@@ -2552,9 +2675,12 @@ fn index_pathkeys(rel: &Rel, ii: &IndexInfo, backward: bool, w: &Want) -> Vec<Pa
             cmp: ii.order.get(i).and_then(|o| o.as_ref()).map_or(0, |o| o.0),
         };
         // Only keys the query sorts or merges by have an equivalence class to be a
-        // pathkey of.
+        // pathkey of (a boolean one fixed by a clause has none: past it).
         if !want.iter().any(|x| same_key(&x.expr, k)) && !w.merge.iter().any(|m| same_key(m, k))
         {
+            if bool_const(rel, k) {
+                continue;
+            }
             break;
         }
         keys.push(pk);
@@ -3621,9 +3747,13 @@ fn bitmap_orig(q: &BitmapQual) -> Vec<Expr> {
 /// without loss (all of a BitmapAnd's; an Or's are its own).
 fn bitmap_exact_orig(q: &BitmapQual, out: &mut Vec<Expr>) {
     match q {
-        BitmapQual::Index { quals, .. } => {
-            out.extend(quals.iter().filter(|x| !x.lossy).map(|x| x.orig.clone()))
-        }
+        // (Not a row comparison commuted: predtest can't prove that one.)
+        BitmapQual::Index { quals, .. } => out.extend(
+            quals
+                .iter()
+                .filter(|x| !x.lossy && !(matches!(x.orig, Expr::RowCompare(_)) && !x.orig.same_as(&x.expr)))
+                .map(|x| x.orig.clone()),
+        ),
         BitmapQual::And(l) => {
             for x in l {
                 bitmap_exact_orig(x, out);
@@ -4253,7 +4383,11 @@ impl Planner<'_, '_> {
         // A Sort over a scan may read an index in order instead.
         if matches!(p, Plan::Sort { .. }) {
             let n = child_needs(p, needed).pop().unwrap_or_default();
-            if self.merge_append(p, &n, lim) || self.ordered_scan(p, &n, lim) || self.ordered_join(p, &n, lim) {
+            if self.merge_append(p, &n, lim)
+                || self.ordered_scan(p, &n, lim)
+                || self.sys_ordered_scan(p, &n, lim)
+                || self.ordered_join(p, &n, lim)
+            {
                 return;
             }
             if let Plan::Sort { input, keys } = &*p
@@ -4282,13 +4416,16 @@ impl Planner<'_, '_> {
                 return;
             }
         }
+        if self.reorder_distinct_on(p, needed, lim) || self.ordered_distinct(p, needed, lim) {
+            return;
+        }
         // A grouping or DISTINCT over a scan: index orders on its keys are useful
         // (pathkeys_useful_for_grouping / _distinct), though not required.
         let keys: Option<Vec<Expr>> = match &*p {
             Plan::Agg {
                 groups, sets: None, ..
             } if !groups.is_empty() => Some(groups.clone()),
-            Plan::Distinct { input, on: None } => {
+            Plan::Distinct { input, on: None, .. } => {
                 let w = crate::sql::binder::plan_width(input);
                 Some((0..w).map(|i| Expr::Col(i, DataType::Unknown)).collect())
             }
@@ -4351,6 +4488,19 @@ impl Planner<'_, '_> {
                 Some((limit_est(limit, true), limit_est(offset, false)))
             }
             Plan::Project { .. } | Plan::With { .. } => lim,
+            // Every DISTINCT key fixed by an equality with a constant: its first row is
+            // all it returns (a Limit 1, as EXPLAIN shows it).
+            Plan::Distinct { input, on, .. } => {
+                let fixed = match on {
+                    Some(on) => {
+                        let fixed = constant_columns(input);
+                        !on.is_empty()
+                            && on.iter().all(|e| matches!(e, Expr::Col(j, _) if fixed.get(*j).copied().unwrap_or(false)))
+                    }
+                    None => crate::sql::explain::distinct_keys_fixed(input),
+                };
+                fixed.then_some((1.0, 0.0))
+            }
             _ => None,
         };
         let mut needs = needs.into_iter();
@@ -4637,13 +4787,14 @@ impl Planner<'_, '_> {
                 let filtered = |x: Plan| -> Plan {
                     match x {
                         // (DISTINCT commutes with a filter on its columns.)
-                        Plan::Distinct { input, on: None } => Plan::Distinct {
+                        Plan::Distinct { input, on: None, .. } => Plan::Distinct {
                             input: Arc::new(crate::sql::binder::optimize::add_filter(
                                 &self.cat,
                                 Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone()),
                                 q.clone(),
                             )),
                             on: None,
+                            order: 0,
                         },
                         x => crate::sql::binder::optimize::add_filter(&self.cat, x, q.clone()),
                     }
@@ -4819,6 +4970,133 @@ impl Planner<'_, '_> {
         !want.keys.is_empty() && !matches!(path.kind, PathKind::Sort(..))
     }
 
+    /// transformDistinctClause: an ORDER BY of DISTINCT's columns leads its sort (with its
+    /// directions), the other columns after it; an index read in that order makes the
+    /// distinct rows come out in the ORDER BY's order (no sort above). Whether `p` was
+    /// planned so.
+    fn ordered_distinct(&self, p: &mut Plan, needed: &[bool], lim: Option<(f64, f64)>) -> bool {
+        let Plan::Sort { input, keys } = &*p else {
+            return false;
+        };
+        let Plan::Distinct { input: x, on: None, .. } = &**input else {
+            return false;
+        };
+        let w = crate::sql::binder::plan_width(x);
+        let mut cols = Vec::new();
+        for k in keys {
+            match &k.expr {
+                Expr::Col(j, _) if k.using.is_none() && *j < w && !cols.contains(j) => cols.push(*j),
+                _ => return false,
+            }
+        }
+        // (Only a descending order is new: an ascending one the distinct step reads
+        // already.)
+        if !keys.iter().any(|k| k.desc) {
+            return false;
+        }
+        let types = crate::sql::paths::analyzejoins::col_types(x);
+        let mut k2 = keys.clone();
+        for j in 0..w {
+            if !cols.contains(&j) {
+                k2.push(SortKey {
+                    expr: Expr::Col(j, types.get(j).cloned().unwrap_or(DataType::Unknown)),
+                    desc: false,
+                    nulls_first: false,
+                    using: None,
+                });
+            }
+        }
+        let mut tmp = Plan::Sort {
+            input: x.clone(),
+            keys: k2,
+        };
+        let n = vec![true; w];
+        let _ = needed;
+        if !(self.ordered_scan(&mut tmp, &n, lim) && !matches!(tmp, Plan::Sort { .. })) {
+            return false;
+        }
+        let d = Arc::new(Plan::Distinct {
+            input: Arc::new(tmp),
+            on: None,
+            order: 0,
+        });
+        // (Only when the distinct step reads its input in that order, keeping it: a Unique
+        // over it rather than hashing.)
+        if crate::sql::explain::distinct_order(&d, self.ctx).is_none_or(|k| !k.is_empty()) {
+            return false;
+        }
+        *p = Arc::try_unwrap(d).unwrap_or_else(|a| (*a).clone());
+        true
+    }
+
+    /// get_useful_pathkeys_for_distinct: DISTINCT ON's keys reordered to an order an
+    /// index of the scan below reads (the keys ordering the rows of a group after them),
+    /// when that index path is taken; the ORDER BY then sorts the distinct rows. Whether
+    /// `p` was planned so.
+    fn reorder_distinct_on(&self, p: &mut Plan, needed: &[bool], lim: Option<(f64, f64)>) -> bool {
+        let Plan::Distinct {
+            input,
+            on: Some(on),
+            order,
+        } = &*p
+        else {
+            return false;
+        };
+        let Plan::Sort { input: sin, keys } = &**input else {
+            return false;
+        };
+        let nd = on.len();
+        if !(2..=4).contains(&nd) || keys.len() < nd || keys.iter().any(|k| k.using.is_some()) {
+            return false;
+        }
+        let (order, on) = (*order, on.clone());
+        // (The keys the distinct step needs: its own, or all of them when the ORDER BY
+        // has more.)
+        let needed_keys: Vec<SortKey> = if order > nd { keys.clone() } else { keys[..nd].to_vec() };
+        let _ = lim;
+        // The original order planned as it is: an index already reading it needs nothing.
+        let mut orig = (**input).clone();
+        let inner_needs = child_needs(input, &child_needs(p, needed).pop().unwrap_or_default())
+            .pop()
+            .unwrap_or_default();
+        if self.ordered_scan(&mut orig, &inner_needs, None) && !matches!(orig, Plan::Sort { .. }) {
+            return false;
+        }
+        let perms = permutations(nd);
+        for perm in perms.iter().skip(1) {
+            let mut k2: Vec<SortKey> = perm.iter().map(|&i| needed_keys[i].clone()).collect();
+            k2.extend(needed_keys[nd..].iter().cloned());
+            let mut tmp = Plan::Sort {
+                input: sin.clone(),
+                keys: k2.clone(),
+            };
+            if !(self.ordered_scan(&mut tmp, &inner_needs, None) && !matches!(tmp, Plan::Sort { .. })) {
+                continue;
+            }
+            // The ORDER BY over the distinct rows, unless their order has it.
+            let wanted: Vec<SortKey> = keys[..order.min(keys.len())].to_vec();
+            let same = |a: &SortKey, b: &SortKey| {
+                a.expr.same_as(&b.expr) && a.desc == b.desc && a.nulls_first == b.nulls_first
+            };
+            let satisfied = wanted.iter().zip(&k2).all(|(a, b)| same(a, b));
+            let distinct = Plan::Distinct {
+                input: Arc::new(tmp),
+                on: Some(on),
+                order: 0,
+            };
+            *p = if satisfied || wanted.is_empty() {
+                distinct
+            } else {
+                Plan::Sort {
+                    input: Arc::new(distinct),
+                    keys: wanted,
+                }
+            };
+            return true;
+        }
+        false
+    }
+
     /// A Sort over a scan (through projections): sort the cheapest path or read an index
     /// in order. Whether the scan was planned here (the Sort removed when it reads in
     /// order).
@@ -4883,6 +5161,26 @@ impl Planner<'_, '_> {
         }
         true
     }
+}
+
+/// The permutations of 0..n, the identity first.
+fn permutations(n: usize) -> Vec<Vec<usize>> {
+    fn go(prefix: &mut Vec<usize>, n: usize, out: &mut Vec<Vec<usize>>) {
+        if prefix.len() == n {
+            out.push(prefix.clone());
+            return;
+        }
+        for i in 0..n {
+            if !prefix.contains(&i) {
+                prefix.push(i);
+                go(prefix, n, out);
+                prefix.pop();
+            }
+        }
+    }
+    let mut out = Vec::new();
+    go(&mut Vec::new(), n, &mut out);
+    out
 }
 
 /// The columns of the scan under projections a Sort's input needs.

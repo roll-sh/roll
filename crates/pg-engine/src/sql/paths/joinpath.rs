@@ -1506,7 +1506,17 @@ impl Search<'_, '_, '_> {
                         continue 'req;
                     };
                     let param = Expr::Outer(1, k, other.ty());
-                    let mine_first = key_col(&args[0]).is_some_and(|g| g == leaf.off + pcol);
+                    // (An inner join's clause from its equivalence class: the outer
+                    // side's member first; an outer join's as written.)
+                    let written = key_col(&args[0]).is_some_and(|g| g == leaf.off + pcol);
+                    let mine_first = if self.kind == JoinKind::Inner
+                        && !self.clauses[*ci].on
+                        && args[0].ty().without_typmod() == args[1].ty().without_typmod()
+                    {
+                        false
+                    } else {
+                        written
+                    };
                     let colx = colx.clone();
                     prel.quals.push(if mine_first {
                         Expr::Call(def.clone(), vec![colx, param], ty.clone())
@@ -1996,13 +2006,25 @@ impl Search<'_, '_, '_> {
         };
         let mut cols = Vec::new();
         for &c in restrict {
+            // (Equal under a nondeterministic collation the index's column doesn't have:
+            // not the index's notion of equal, IndexCollMatchesExprColl.)
+            let nondet = match &self.clauses[c].expr {
+                Expr::Call(d, ..) => d.coll.as_ref().filter(|c| !c.deterministic).map(|c| c.name.clone()),
+                _ => None,
+            };
             if let Some((a, b, al, bl)) = &self.clauses[c].eq {
                 for (x, xl, yl) in [(a, al, bl), (b, bl, al)] {
                     if *xl == inner
                         && *yl & inner == 0
                         && let Some(g) = key_col(x)
                     {
-                        cols.push(g - leaf.off);
+                        let col = g - leaf.off;
+                        if let Some(n) = &nondet
+                            && s.table.columns.get(col).and_then(|c| c.collation.as_ref()) != Some(n)
+                        {
+                            continue;
+                        }
+                        cols.push(col);
                     }
                 }
             }
@@ -3443,6 +3465,7 @@ impl Search<'_, '_, '_> {
                     Plan::Distinct {
                         input: Arc::new(proj),
                         on: None,
+                        order: 0,
                     }
                 } else {
                     let keys: Vec<SortKey> = cols
@@ -3462,6 +3485,7 @@ impl Search<'_, '_, '_> {
                             keys,
                         }),
                         on: Some(on),
+                        order: 0,
                     }
                 };
                 (plan, cols.clone())
@@ -3551,6 +3575,7 @@ impl Search<'_, '_, '_> {
                     .collect();
                 let mut hash = None;
                 let mut merge_dirs = Vec::new();
+                let mut key_flipped = Vec::new();
                 // A LATERAL inner side reads the outer row anyway: the join clauses it can
                 // check itself go into it (its parameterized path's clauses), as a filter
                 // over it.
@@ -3632,11 +3657,12 @@ impl Search<'_, '_, '_> {
                     let (mut lk, mut rk) = (Vec::new(), Vec::new());
                     for &c in keys {
                         let (a, b, al, _) = self.clauses[c].eq.as_ref().unwrap();
-                        let (oe, ie) = if *al & outer.set != 0 && *al & !outer.set == 0 {
-                            (a, b)
-                        } else {
-                            (b, a)
-                        };
+                        let a_outer = *al & outer.set != 0 && *al & !outer.set == 0;
+                        let (oe, ie) = if a_outer { (a, b) } else { (b, a) };
+                        // (The clause as the join's restriction list has it, its first
+                        // operand on the right: a nested loop planned over this join
+                        // again shows it so.)
+                        key_flipped.push(a_outer == swapped);
                         if *method == JoinMethod::Merge {
                             let ok = key_col(oe).and_then(|g| {
                                 outer_sort
@@ -3772,6 +3798,7 @@ impl Search<'_, '_, '_> {
                         },
                         from_call: None,
                         hash_swapped: Vec::new(),
+                        key_flipped: if kind == JoinKind::Inner { key_flipped } else { Vec::new() },
                     }),
                 };
                 let layout = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
@@ -3910,21 +3937,18 @@ fn gather(
             }
             for i in order {
                 let (a, b) = (&lk[i], &rk[i]);
-                // A key wrapped to fail hashing (no collation) is an `=` that fails comparing.
-                let unwrap = |k: &Expr| match k {
-                    Expr::Call(d, args, _) if d.name == crate::sql::binder::INDETERMINATE_HASH => {
-                        (args[0].clone(), true)
-                    }
-                    k => (k.clone(), false),
-                };
-                let ((a, bad), (b, _)) = (unwrap(a), unwrap(b));
+                // A key wrapped to fail hashing (no collation) is an `=` that fails comparing;
+                // one hashing a nondeterministic collation's sort keys, an `=` under it.
+                let (a, bad, coll) = crate::sql::binder::hash_key_operand(a);
+                let (b, _, _) = crate::sql::binder::hash_key_operand(b);
                 let a = a.shift_cols(off as isize);
                 let b = b.shift_cols((off + nleft) as isize);
                 // (An outer join's clause as written; an inner or semi join's comes from
-                // its equivalence class, outer side first.)
+                // its equivalence class, outer side first: as a planned one had it.)
                 let (a, b) = if !inner_only
                     && matches!(kind, JoinKind::Left | JoinKind::Right | JoinKind::Full)
                     && meta.hash_swapped.get(i) == Some(&true)
+                    || inner_only && meta.key_flipped.get(i) == Some(&true)
                 {
                     (b, a)
                 } else {
@@ -3938,7 +3962,7 @@ fn gather(
                     equality_for(&ty)
                 };
                 if let Some(eq) = eq {
-                    let e = Expr::Call(eq, vec![a, b], DataType::Bool);
+                    let e = crate::sql::binder::eq_under(Expr::Call(eq, vec![a, b], DataType::Bool), coll);
                     let e = if bad {
                         crate::sql::binder::indeterminate_eq(e)
                     } else {
@@ -4368,6 +4392,27 @@ impl Planner<'_, '_> {
                     if kind == JoinKind::Right {
                         kind = JoinKind::Left;
                     }
+                    // (An inner join's equalities come from equivalence classes, built
+                    // for the relations in that order: the target's operand first.)
+                    if kind == JoinKind::Inner {
+                        let (toff, tw) = (raw_leaves[0].1, crate::sql::binder::plan_width(&raw_leaves[0].0));
+                        let on_target = |e: &Expr| {
+                            let c = e.columns();
+                            !c.is_empty() && c.iter().all(|&i| i >= toff && i < toff + tw)
+                        };
+                        for (c, _) in raw_clauses.iter_mut() {
+                            if let Expr::Call(d, args, ty) = c
+                                && d.name == "="
+                                && args.len() == 2
+                                && args[0].ty().without_typmod() == args[1].ty().without_typmod()
+                                && !on_target(&args[0])
+                                && on_target(&args[1])
+                                && !args[0].columns().is_empty()
+                            {
+                                *c = Expr::Call(d.clone(), vec![args[1].clone(), args[0].clone()], ty.clone());
+                            }
+                        }
+                    }
                 }
                 (Vec::new(), Vec::new(), false)
             }
@@ -4482,12 +4527,11 @@ impl Planner<'_, '_> {
             let leaves_mask = s.leaves_of(&e);
             let eq = match &e {
                 // (Under a nondeterministic collation equal strings needn't hash or sort
-                // alike: no hash or merge key.)
+                // alike: a hash key of their sort keys, no merge key.)
                 Expr::Call(d, args, _)
                     if d.name == "="
                         && args.len() == 2
-                        && !e.is_volatile()
-                        && !d.coll.as_ref().is_some_and(|c| !c.deterministic) =>
+                        && !e.is_volatile() =>
                 {
                     let (al, bl) = (s.leaves_of(&args[0]), s.leaves_of(&args[1]));
                     (al != 0 && bl != 0 && al & bl == 0)
@@ -4499,7 +4543,10 @@ impl Planner<'_, '_> {
             let nondet = matches!(&e, Expr::Call(d, ..)
                 if d.coll.as_ref().is_some_and(|c| !c.deterministic));
             let (hashable, mergeable_) = match &eq {
-                Some(_) if nondet => (false, false),
+                Some((a, b, _, _)) if nondet => {
+                    let (ta, tb) = (a.ty(), b.ty());
+                    (ta.without_typmod() == tb.without_typmod() && crate::sql::binder::optimize::hashable_type(&ta), false)
+                }
                 Some((a, b, _, _)) => {
                     let (ta, tb) = (a.ty(), b.ty());
                     // (integer_ops: int2, int4 and int8 hash and sort alike.)

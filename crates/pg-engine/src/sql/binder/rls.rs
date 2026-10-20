@@ -55,8 +55,9 @@ impl Binder<'_, '_> {
         Ok(true)
     }
 
-    /// The policies on `t` for `cmd` that apply to the checking role, in name order:
-    /// (permissive, restrictive).
+    /// The policies on `t` for `cmd` that apply to the checking role: (permissive in
+    /// reverse name order, as RelationBuildRowSecurity's list has them; restrictive in name
+    /// order, sort_policies_by_name).
     fn rls_policies(&self, t: &Table, cmd: char) -> (Vec<Arc<Policy>>, Vec<Arc<Policy>>) {
         let user = self.check_as.unwrap_or_else(|| self.ctx.current_user());
         let dbo = self.ctx.db_owner();
@@ -74,7 +75,9 @@ impl Binder<'_, '_> {
             .cloned()
             .collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
-        all.into_iter().partition(|p| p.permissive)
+        let (mut perm, restr): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| p.permissive);
+        perm.reverse();
+        (perm, restr)
     }
 
     /// Whether a policy of `t` reads a system column (`USING (ctid IN ...)`): the scans

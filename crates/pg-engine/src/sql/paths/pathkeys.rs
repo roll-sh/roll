@@ -146,6 +146,48 @@ fn absorb(c: &mut Classes, pred: &Expr) {
     }
 }
 
+/// Per output column of an inheritance member (a scan, through projections): the
+/// constant its filter equates it with.
+fn member_consts(p: &Plan) -> Vec<Option<Expr>> {
+    let w = crate::sql::binder::plan_width(p);
+    match p {
+        Plan::Project { input, exprs } => {
+            let inner = member_consts(input);
+            exprs
+                .iter()
+                .map(|e| match col_of(e) {
+                    Some(i) => inner.get(i).cloned().flatten(),
+                    None => None,
+                })
+                .collect()
+        }
+        Plan::Scan(s) => {
+            let mut out = vec![None; w];
+            let mut parts = Vec::new();
+            if let Some(f) = &s.filter {
+                conjuncts(f.clone(), &mut parts);
+            }
+            for q in parts {
+                let Expr::Call(def, args, _) = &q else { continue };
+                if def.name != "=" || args.len() != 2 || q.is_volatile() || def.coll.as_ref().is_some_and(|c| !c.deterministic) {
+                    continue;
+                }
+                for (a, b) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+                    if let Some(i) = col_of(a)
+                        && b.columns().is_empty()
+                        && matches!(b, Expr::Const(..))
+                        && i < w
+                    {
+                        out[i] = Some(b.clone());
+                    }
+                }
+            }
+            out
+        }
+        _ => vec![None; w],
+    }
+}
+
 /// Copy `inner`'s classes onto `c`'s columns from `off` on.
 fn import(c: &mut Classes, inner: &mut Classes, off: usize) {
     for i in 0..inner.parent.len() {
@@ -180,6 +222,35 @@ fn classes(p: &Plan) -> Classes {
         }
         Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Barrier { input, .. } | Plan::Context { input, .. } => {
             classes(input)
+        }
+        // An inheritance tree's columns the parent's clauses (pushed into every member)
+        // equate with constants.
+        Plan::Append { inputs, inh: Some(_) } => {
+            let mut c = Classes::new(w);
+            let mut live = inputs.iter().filter(|i| !matches!(&***i, Plan::Empty { .. })).peekable();
+            if live.peek().is_none() {
+                return c;
+            }
+            // (The same constant in every member: one class with it.)
+            let mut fixed: Vec<Option<Expr>> = Vec::new();
+            for (n, i) in live.enumerate() {
+                let m = member_consts(i);
+                if n == 0 {
+                    fixed = m;
+                    continue;
+                }
+                for (k, f) in fixed.iter_mut().enumerate() {
+                    if !f.as_ref().is_some_and(|x| m.get(k).and_then(|y| y.as_ref()).is_some_and(|y| y.same_as(x))) {
+                        *f = None;
+                    }
+                }
+            }
+            for (k, f) in fixed.into_iter().enumerate() {
+                if f.is_some() && k < w {
+                    c.set_const(k);
+                }
+            }
+            c
         }
         Plan::Project { input, exprs } => {
             let mut inner = classes(input);

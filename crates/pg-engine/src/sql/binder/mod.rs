@@ -8,7 +8,7 @@
 pub mod ast;
 mod dml;
 mod expr;
-pub(crate) use expr::{INDETERMINATE_HASH, check_merge_keys, hash_key, indeterminate_eq, is_indeterminate};
+pub(crate) use expr::{INDETERMINATE_HASH, NONDETERMINISTIC_HASH, check_merge_keys, eq_under, hash_key, hash_key_operand, indeterminate_eq, is_indeterminate};
 pub(crate) use expr::{check_sql_retval, sql_fn_frame};
 pub use expr::{check_folds, is_whole_row, nullable_whole_row};
 pub mod inherit;

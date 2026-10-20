@@ -146,6 +146,16 @@ pub struct ScanPlan {
     pub phv_quals: Vec<Expr>,
 }
 
+/// A system catalog's scan as the planner chose it: `scan` reads a stand-in table of the
+/// catalog's columns and Postgres's indexes on it (`sql::paths::sys_table`), its access path
+/// planned as a table's; its rows come in that index's order when `ordered` (a sort above
+/// relies on it).
+#[derive(Clone, Debug)]
+pub struct SysPath {
+    pub scan: ScanPlan,
+    pub ordered: bool,
+}
+
 /// A join method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JoinMethod {
@@ -197,6 +207,10 @@ pub struct JoinMeta {
     pub from_call: Option<Arc<FromCall>>,
     /// Per hash key: the clause was written `right = left` (its original orientation).
     pub hash_swapped: Vec<bool>,
+    /// Per hash key of an inner join the planner built: the join clause it came from (an
+    /// equivalence class's, of the join relation) has the right side's operand first, the
+    /// sides having been put the other way round.
+    pub key_flipped: Vec<bool>,
 }
 
 /// A function called in FROM whose body runs (not inlined), as EXPLAIN shows it.
@@ -855,6 +869,9 @@ pub enum Plan {
     SysScan {
         table: SysTable,
         filter: Option<Expr>,
+        /// The access path the planner chose for it, when not a sequential scan (or
+        /// when its order matters).
+        path: Option<Arc<SysPath>>,
     },
     /// ROWS FROM (f(...), g(...)) [WITH ORDINALITY]
     FunctionScan {
@@ -879,6 +896,10 @@ pub enum Plan {
         input: Arc<Plan>,
         alias: String,
         cols: Vec<String>,
+        /// A security barrier's (leaky clauses stay above); else a subquery Postgres
+        /// doesn't pull up (grouping sets, set-returning or volatile outputs), which takes
+        /// the clauses safe to push down into it.
+        secure: bool,
     },
     /// `input` runs inside `frame` (a SQL function's statement), which errors and notices
     /// name in their CONTEXT, once it has the privileges `perms`.
@@ -932,6 +953,9 @@ pub enum Plan {
     Distinct {
         input: Arc<Plan>,
         on: Option<Vec<Expr>>,
+        /// DISTINCT ON: how many of its sorted input's leading keys the query's ORDER BY
+        /// asks for (the rest order the rows of a group, or only group them).
+        order: usize,
     },
     SetOp {
         kind: SetOpKind,

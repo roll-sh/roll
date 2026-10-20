@@ -31,9 +31,22 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             i: 0,
         }),
         Plan::Scan(s) => super::scan::open_scan(s, ctx)?,
-        Plan::SysScan { table, filter } => {
+        Plan::SysScan { table, filter, path } => {
             let rows = crate::catalog::system::rows(*table, ctx)?;
-            let deferred = crate::catalog::system::deferred_errors(*table, ctx, &rows);
+            let mut deferred = crate::catalog::system::deferred_errors(*table, ctx, &rows);
+            // An index path a sort relies on: the rows in that index's order.
+            let rows = match path.as_deref() {
+                Some(sp) if sp.ordered => {
+                    let (rows, perm) = crate::sql::paths::sys_index_order(rows, &sp.scan, ctx)?;
+                    for d in deferred.iter_mut() {
+                        if let Some(at) = perm.iter().position(|&o| o == d.0) {
+                            d.0 = at;
+                        }
+                    }
+                    rows
+                }
+                _ => rows,
+            };
             if !deferred.is_empty() {
                 let read = ctx.sys_cols.borrow().get(&table.oid()).cloned().unwrap_or_default();
                 let mut in_filter = std::collections::BTreeSet::new();
@@ -171,7 +184,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             last: None,
             drain: input.writes(),
         }),
-        Plan::Distinct { input, on } => Box::new(DistinctNode {
+        Plan::Distinct { input, on, .. } => Box::new(DistinctNode {
             input: open(input, ctx)?,
             on: on.clone(),
             seen: HashMap::new(),

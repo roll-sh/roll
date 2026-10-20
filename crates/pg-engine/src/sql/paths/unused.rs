@@ -138,7 +138,7 @@ impl Planner<'_, '_> {
         }
         let mut needs = child_needs(p, needed);
         // DISTINCT ON: its keys (the sort below has them too) and what's read.
-        if let Plan::Distinct { input, on: Some(on) } = &*p {
+        if let Plan::Distinct { input, on: Some(on), .. } = &*p {
             let mut n = vec![false; crate::sql::binder::plan_width(input)];
             for (i, x) in needed.iter().enumerate() {
                 if *x && i < n.len() {

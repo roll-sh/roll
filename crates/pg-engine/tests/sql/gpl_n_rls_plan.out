@@ -1,0 +1,156 @@
+> DROP ROLE IF EXISTS gpl_rls_u
+NOTICE 00000: role "gpl_rls_u" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE gpl_rls_u
+-- CREATE ROLE
+
+> CREATE TABLE gpl_rls_y (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO gpl_rls_y SELECT i, 'r' || i FROM generate_series(1, 12) i
+-- INSERT 0 12
+
+> CREATE POLICY p1 ON gpl_rls_y USING (a % 2 = 0)
+-- CREATE POLICY
+
+> CREATE POLICY p2 ON gpl_rls_y USING (a % 3 = 0)
+-- CREATE POLICY
+
+> CREATE POLICY p3 ON gpl_rls_y USING (a % 4 = 0)
+-- CREATE POLICY
+
+> ALTER TABLE gpl_rls_y ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> GRANT ALL ON gpl_rls_y TO gpl_rls_u
+-- GRANT
+
+> CREATE TABLE gpl_rls_p (a int, b text)
+-- CREATE TABLE
+
+> CREATE TABLE gpl_rls_c1 () INHERITS (gpl_rls_p)
+-- CREATE TABLE
+
+> CREATE TABLE gpl_rls_c2 () INHERITS (gpl_rls_p)
+-- CREATE TABLE
+
+> INSERT INTO gpl_rls_p VALUES (1, 'p1'), (2, 'p2')
+-- INSERT 0 2
+
+> INSERT INTO gpl_rls_c1 VALUES (3, 'c3'), (4, 'c4')
+-- INSERT 0 2
+
+> INSERT INTO gpl_rls_c2 VALUES (5, 'c5'), (6, 'c6')
+-- INSERT 0 2
+
+> CREATE POLICY pp ON gpl_rls_p USING (a % 2 = 0)
+-- CREATE POLICY
+
+> ALTER TABLE gpl_rls_p ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> GRANT ALL ON gpl_rls_p, gpl_rls_c1, gpl_rls_c2 TO gpl_rls_u
+-- GRANT
+
+> CREATE TABLE gpl_rls_cur (id int, payload text)
+-- CREATE TABLE
+
+> INSERT INTO gpl_rls_cur SELECT i, 'x' || i FROM generate_series(1, 6) i
+-- INSERT 0 6
+
+> CREATE POLICY pc ON gpl_rls_cur USING (id % 2 = 0)
+-- CREATE POLICY
+
+> ALTER TABLE gpl_rls_cur ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> GRANT ALL ON gpl_rls_cur TO gpl_rls_u
+-- GRANT
+
+> SET SESSION AUTHORIZATION gpl_rls_u
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gpl_rls_y WHERE b <> 'r'
+QUERY PLAN:text
+Seq Scan on gpl_rls_y
+  Filter: ((b <> 'r'::text) AND (((a % 4) = 0) OR ((a % 3) = 0) OR ((a % 2) = 0)))
+-- EXPLAIN
+
+> SELECT a FROM gpl_rls_y ORDER BY a
+a:int4
+2
+3
+4
+6
+8
+9
+10
+12
+-- SELECT 8
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gpl_rls_p FOR SHARE
+QUERY PLAN:text
+LockRows
+  ->  Append
+        ->  Seq Scan on gpl_rls_p gpl_rls_p_1
+              Filter: ((a % 2) = 0)
+        ->  Seq Scan on gpl_rls_c1 gpl_rls_p_2
+              Filter: ((a % 2) = 0)
+        ->  Seq Scan on gpl_rls_c2 gpl_rls_p_3
+              Filter: ((a % 2) = 0)
+-- EXPLAIN
+
+> SELECT * FROM gpl_rls_p ORDER BY a FOR UPDATE
+a:int4 | b:text
+2 | p2
+4 | c4
+6 | c6
+-- SELECT 3
+
+> BEGIN
+-- BEGIN
+
+> DECLARE gpl_rls_k CURSOR FOR SELECT * FROM gpl_rls_cur WHERE id > 2 ORDER BY id FOR UPDATE
+-- DECLARE CURSOR
+
+> FETCH gpl_rls_k
+id:int4 | payload:text
+4 | x4
+-- FETCH 1
+
+> EXPLAIN (COSTS OFF) UPDATE gpl_rls_cur SET payload = 'y' WHERE CURRENT OF gpl_rls_k
+QUERY PLAN:text
+Update on gpl_rls_cur
+  ->  Tid Scan on gpl_rls_cur
+        TID Cond: CURRENT OF gpl_rls_k
+        Filter: ((id % 2) = 0)
+-- EXPLAIN
+
+> UPDATE gpl_rls_cur SET payload = 'y' WHERE CURRENT OF gpl_rls_k RETURNING *
+id:int4 | payload:text
+4 | y
+-- UPDATE 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM gpl_rls_cur ORDER BY id
+id:int4 | payload:text
+2 | x2
+4 | y
+6 | x6
+-- SELECT 3
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> DROP TABLE gpl_rls_y, gpl_rls_p, gpl_rls_c1, gpl_rls_c2, gpl_rls_cur
+-- DROP TABLE
+
+> DROP OWNED BY gpl_rls_u CASCADE
+-- DROP OWNED
+
+> DROP ROLE gpl_rls_u
+-- DROP ROLE
+

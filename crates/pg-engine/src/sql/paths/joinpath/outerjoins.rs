@@ -118,13 +118,8 @@ fn walk(
         }
         if let Some((lk, rk)) = hash {
             for (i, (a, b)) in lk.iter().zip(rk).enumerate() {
-                let unwrap = |k: &Expr| match k {
-                    Expr::Call(d, args, _) if d.name == crate::sql::binder::INDETERMINATE_HASH => {
-                        (args[0].clone(), true)
-                    }
-                    k => (k.clone(), false),
-                };
-                let ((a, bad), (b, _)) = (unwrap(a), unwrap(b));
+                let (a, bad, coll) = crate::sql::binder::hash_key_operand(a);
+                let (b, _, _) = crate::sql::binder::hash_key_operand(b);
                 let (a, b) = (a.shift_cols(off as isize), b.shift_cols(roff as isize));
                 // (An outer join's clause as written; an inner or semi join's comes from
                 // its equivalence class.)
@@ -136,7 +131,7 @@ fn walk(
                     (a, b)
                 };
                 if let Some(e) = rebuild_eq(a, b, bad) {
-                    conds.push(e);
+                    conds.push(crate::sql::binder::eq_under(e, coll));
                 }
             }
         }

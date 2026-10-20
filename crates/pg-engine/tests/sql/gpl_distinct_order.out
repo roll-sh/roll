@@ -1,0 +1,118 @@
+> CREATE TABLE gpl_d (x int, y int, z int)
+-- CREATE TABLE
+
+> INSERT INTO gpl_d SELECT i % 10, i % 7, i FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> CREATE INDEX gpl_d_xy ON gpl_d (x, y)
+-- CREATE INDEX
+
+> VACUUM ANALYZE gpl_d
+-- VACUUM
+
+> SET enable_hashagg = off
+-- SET
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT ON (y, x) x, y FROM gpl_d
+QUERY PLAN:text
+Unique
+  ->  Index Only Scan using gpl_d_xy on gpl_d
+-- EXPLAIN
+
+> SELECT DISTINCT ON (y, x) x, y FROM gpl_d ORDER BY y, x LIMIT 5
+x:int4 | y:int4
+0 | 0
+1 | 0
+2 | 0
+3 | 0
+4 | 0
+-- SELECT 5
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT ON (y, x) x, y FROM gpl_d ORDER BY y
+QUERY PLAN:text
+Sort
+  Sort Key: y
+  ->  Unique
+        ->  Index Only Scan using gpl_d_xy on gpl_d
+-- EXPLAIN
+
+> SELECT DISTINCT ON (y, x) x, y FROM gpl_d ORDER BY y, x LIMIT 3
+x:int4 | y:int4
+0 | 0
+1 | 0
+2 | 0
+-- SELECT 3
+
+> RESET enable_hashagg
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT x FROM gpl_d WHERE x IN (2, 3, 5) ORDER BY x DESC
+QUERY PLAN:text
+Unique
+  ->  Index Only Scan Backward using gpl_d_xy on gpl_d
+        Index Cond: (x = ANY ('{2,3,5}'::integer[]))
+-- EXPLAIN
+
+> SELECT DISTINCT x FROM gpl_d WHERE x IN (2, 3, 5) ORDER BY x DESC
+x:int4
+5
+3
+2
+-- SELECT 3
+
+> SELECT DISTINCT x FROM gpl_d WHERE x > 6 ORDER BY x DESC
+x:int4
+9
+8
+7
+-- SELECT 3
+
+> RESET enable_seqscan
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT ON (x) x, z FROM gpl_d WHERE x = 3 ORDER BY 1, 2
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: z
+        ->  Bitmap Heap Scan on gpl_d
+              Recheck Cond: (x = 3)
+              ->  Bitmap Index Scan on gpl_d_xy
+                    Index Cond: (x = 3)
+-- EXPLAIN
+
+> SELECT DISTINCT ON (x) x, z FROM gpl_d WHERE x = 3 ORDER BY 1, 2
+x:int4 | z:int4
+3 | 3
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT x, y, count(*) FROM gpl_d WHERE x = 1 GROUP BY x, y
+QUERY PLAN:text
+GroupAggregate
+  Group Key: y
+  ->  Index Only Scan using gpl_d_xy on gpl_d
+        Index Cond: (x = 1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT y, count(*) FROM gpl_d WHERE x = 1 GROUP BY x, y ORDER BY y
+QUERY PLAN:text
+GroupAggregate
+  Group Key: y
+  ->  Index Only Scan using gpl_d_xy on gpl_d
+        Index Cond: (x = 1)
+-- EXPLAIN
+
+> SELECT y, count(*) FROM gpl_d WHERE x = 1 GROUP BY x, y ORDER BY y
+y:int4 | count:int8
+0 | 14
+1 | 15
+2 | 14
+3 | 14
+4 | 15
+5 | 14
+6 | 14
+-- SELECT 7
+

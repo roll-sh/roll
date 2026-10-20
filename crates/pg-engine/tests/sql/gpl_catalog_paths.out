@@ -1,0 +1,146 @@
+> EXPLAIN (COSTS OFF)
+> SELECT proname, proargtypes, pronamespace FROM pg_proc
+>  WHERE (proname, pronamespace) > ('abs', 0)
+>  ORDER BY proname, proargtypes, pronamespace LIMIT 1
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using pg_proc_proname_args_nsp_index on pg_proc
+        Index Cond: (ROW(proname, pronamespace) > ROW('abs'::name, '0'::oid))
+-- EXPLAIN
+
+> SELECT proname, proargtypes, pronamespace FROM pg_proc
+>  WHERE (proname, pronamespace) > ('abs', 0)
+>  ORDER BY proname, proargtypes, pronamespace LIMIT 1
+proname:name | proargtypes:30 | pronamespace:oid
+abs | 20 | 11
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT proname, proargtypes, pronamespace FROM pg_proc
+>  WHERE (proname, pronamespace) < ('abs', 1000000)
+>  ORDER BY proname DESC, proargtypes DESC, pronamespace DESC LIMIT 1
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan Backward using pg_proc_proname_args_nsp_index on pg_proc
+        Index Cond: (ROW(proname, pronamespace) < ROW('abs'::name, '1000000'::oid))
+-- EXPLAIN
+
+> SELECT proname, proargtypes, pronamespace FROM pg_proc
+>  WHERE (proname, pronamespace) < ('abs', 1000000)
+>  ORDER BY proname DESC, proargtypes DESC, pronamespace DESC LIMIT 1
+proname:name | proargtypes:30 | pronamespace:oid
+abs | 1700 | 11
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT proname, proargtypes, pronamespace FROM pg_proc
+>  WHERE (proname, proargtypes) >= ('abs', NULL) AND proname <= 'abs'
+>  ORDER BY proname, proargtypes, pronamespace
+QUERY PLAN:text
+Index Only Scan using pg_proc_proname_args_nsp_index on pg_proc
+  Index Cond: ((ROW(proname, proargtypes) >= ROW('abs'::name, NULL::oidvector)) AND (proname <= 'abs'::name))
+-- EXPLAIN
+
+> SELECT proname, proargtypes, pronamespace FROM pg_proc
+>  WHERE proname = 'abs' AND pronamespace IN (11, 2)
+>  ORDER BY proname, proargtypes, pronamespace
+proname:name | proargtypes:30 | pronamespace:oid
+abs | 20 | 11
+abs | 21 | 11
+abs | 23 | 11
+abs | 700 | 11
+abs | 701 | 11
+abs | 1700 | 11
+-- SELECT 6
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT proname FROM pg_proc WHERE proname LIKE 'RI\_FKey%del' ORDER BY 1
+QUERY PLAN:text
+Index Only Scan using pg_proc_proname_args_nsp_index on pg_proc
+  Index Cond: ((proname >= 'RI_FKey'::text) AND (proname < 'RI_FKez'::text))
+  Filter: (proname ~~ 'RI\_FKey%del'::text)
+-- EXPLAIN
+
+> SELECT proname FROM pg_proc WHERE proname LIKE 'RI\_FKey%del' ORDER BY 1
+proname:name
+RI_FKey_cascade_del
+RI_FKey_noaction_del
+RI_FKey_restrict_del
+RI_FKey_setdefault_del
+RI_FKey_setnull_del
+-- SELECT 5
+
+> SET enable_indexscan = off
+-- SET
+
+> SET enable_bitmapscan = on
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT proname FROM pg_proc WHERE proname LIKE 'RI\_FKey%del' ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: proname
+  ->  Bitmap Heap Scan on pg_proc
+        Filter: (proname ~~ 'RI\_FKey%del'::text)
+        ->  Bitmap Index Scan on pg_proc_proname_args_nsp_index
+              Index Cond: ((proname >= 'RI_FKey'::text) AND (proname < 'RI_FKez'::text))
+-- EXPLAIN
+
+> SELECT proname FROM pg_proc WHERE proname LIKE 'RI\_FKey%del' ORDER BY 1
+proname:name
+RI_FKey_cascade_del
+RI_FKey_noaction_del
+RI_FKey_restrict_del
+RI_FKey_setdefault_del
+RI_FKey_setnull_del
+-- SELECT 5
+
+> EXPLAIN (COSTS OFF) SELECT proname FROM pg_proc WHERE proname ILIKE 'ri%foo' ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: proname
+  ->  Seq Scan on pg_proc
+        Disabled: true
+        Filter: (proname ~~* 'ri%foo'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_indexscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> SELECT relname FROM pg_class WHERE relname LIKE 'pg\_class%' ORDER BY relname DESC
+relname:name
+pg_class_tblspc_relfilenode_index
+pg_class_relname_nsp_index
+pg_class_oid_index
+pg_class
+-- SELECT 4
+
+> SELECT typname FROM pg_type WHERE oid < 30 ORDER BY oid
+typname:name
+bool
+bytea
+char
+name
+int8
+int2
+int2vector
+int4
+regproc
+text
+oid
+tid
+xid
+cid
+-- SELECT 14
+

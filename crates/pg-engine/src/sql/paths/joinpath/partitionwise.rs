@@ -283,6 +283,19 @@ impl Search<'_, '_, '_> {
                 if !(c.hashable || c.mergeable) {
                     continue;
                 }
+                // (Equal under a nondeterministic collation the partition key isn't under, or
+                // the other way round: rows of different partitions may match.)
+                let ccoll = match &c.expr {
+                    Expr::Call(d, ..) => d.coll.clone(),
+                    _ => None,
+                };
+                let kcoll = parted[0].colls.get(j).cloned().flatten();
+                let nondet = |x: &Option<Arc<crate::types::collation::Collation>>| x.as_ref().is_some_and(|c| !c.deterministic);
+                if (nondet(&ccoll) || nondet(&kcoll))
+                    && ccoll.as_ref().map(|c| c.name.as_str()) != kcoll.as_ref().map(|c| c.name.as_str())
+                {
+                    continue;
+                }
                 let at = |e: &Expr| {
                     keys.iter()
                         .position(|alts| alts.iter().any(|k| key_operand(k).same_as(key_operand(e))))

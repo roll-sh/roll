@@ -182,7 +182,7 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
         return Some((corr, rhs_scan(s, and_all(local)), types, s.limit.is_some()));
     }
     // A system catalog: the same.
-    if let Plan::SysScan { table, filter } = p {
+    if let Plan::SysScan { table, filter, .. } = p {
         if filter.as_ref().is_some_and(|f| has_sublink(f) || deep_outer(f)) {
             return None;
         }
@@ -197,6 +197,7 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
             Plan::SysScan {
                 table: *table,
                 filter: and_all(local),
+                path: None,
             },
             types,
             false,
@@ -320,7 +321,7 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
                     Plan::Scan(Box::new(s.clone()))
                 })
             }
-            Plan::SysScan { table, filter } => {
+            Plan::SysScan { table, filter, .. } => {
                 let n = out.len();
                 let local = match filter {
                     Some(f) if pull => split(f, off, out)?,
@@ -331,6 +332,7 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
                 Some(Plan::SysScan {
                     table: *table,
                     filter: local,
+                    path: None,
                 })
             }
             Plan::Filter { input, pred } => {

@@ -3549,18 +3549,19 @@ impl Catalog {
                 && g.args.len() == f.args.len()
                 && g.args.iter().zip(&f.args).all(|(a, b)| a.1 == b.1)
         };
+        // (FunctionIsVisible: the temporary schema is never searched for functions.)
         let first = self
             .effective_path(search_path)
             .into_iter()
+            .filter(|s| !self.schema_name(*s).starts_with("pg_temp"))
             .find(|s| self.functions.values().any(|g| g.schema == *s && same(g)));
         if first == Some(f.schema) {
             quote_ident(&f.name)
         } else {
-            format!(
-                "{}.{}",
-                quote_ident(self.schema_name(f.schema)),
-                quote_ident(&f.name)
-            )
+            // (get_namespace_name_or_temp: a temporary schema is `pg_temp`.)
+            let schema = self.schema_name(f.schema);
+            let schema = if schema.starts_with("pg_temp_") { "pg_temp" } else { schema };
+            format!("{}.{}", quote_ident(schema), quote_ident(&f.name))
         }
     }
 

@@ -1,0 +1,265 @@
+> CREATE TABLE gpl_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO gpl_i8 VALUES (1, 2), (3, 4), (5, 6)
+-- INSERT 0 3
+
+> CREATE FUNCTION gpl_win(group_size bigint) RETURNS SETOF integer[] AS $$
+>     SELECT array_agg(s) OVER w
+>       FROM generate_series(1, 5) s
+>     WINDOW w AS (ORDER BY s ROWS BETWEEN CURRENT ROW AND group_size FOLLOWING)
+> $$ LANGUAGE sql STABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gpl_win(2)
+QUERY PLAN:text
+Subquery Scan on gpl_win
+  ->  WindowAgg
+        Window: w AS (ORDER BY s.s ROWS BETWEEN CURRENT ROW AND '2'::bigint FOLLOWING)
+        ->  Sort
+              Sort Key: s.s
+              ->  Function Scan on generate_series s
+-- EXPLAIN
+
+> SELECT * FROM gpl_win(2)
+gpl_win:int4[]
+{1,2,3}
+{2,3,4}
+{3,4,5}
+{4,5}
+{5}
+-- SELECT 5
+
+> CREATE FUNCTION gpl_series(int) RETURNS SETOF int AS $$
+>   SELECT g FROM generate_series(1, $1) g WHERE g > (SELECT $1 - 3)
+> $$ LANGUAGE sql STABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM gpl_series(5)
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: g.g
+  Function Call: generate_series(1, 5)
+  Filter: (g.g > (InitPlan 1).col1)
+  InitPlan 1
+    ->  Result
+          Output: 2
+-- EXPLAIN
+
+> SELECT * FROM gpl_series(5)
+gpl_series:int4
+3
+4
+5
+-- SELECT 3
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM gpl_i8, gpl_series(gpl_i8.q1::int) x
+QUERY PLAN:text
+Nested Loop
+  Output: gpl_i8.q1, gpl_i8.q2, g.g
+  ->  Seq Scan on public.gpl_i8
+        Output: gpl_i8.q1, gpl_i8.q2
+  ->  Function Scan on pg_catalog.generate_series g
+        Output: g.g
+        Function Call: generate_series(1, (gpl_i8.q1)::integer)
+        Filter: (g.g > (SubPlan 1))
+        SubPlan 1
+          ->  Result
+                Output: ((gpl_i8.q1)::integer - 3)
+-- EXPLAIN
+
+> SELECT * FROM gpl_i8, gpl_series(gpl_i8.q1::int) x ORDER BY 1, 3
+q1:int8 | q2:int8 | x:int4
+1 | 2 | 1
+3 | 4 | 1
+3 | 4 | 2
+3 | 4 | 3
+5 | 6 | 3
+5 | 6 | 4
+5 | 6 | 5
+-- SELECT 7
+
+> CREATE FUNCTION gpl_ats(anyarray) RETURNS SETOF record AS $$
+>   SELECT i AS "index", $1[i] AS "value" FROM generate_subscripts($1, 1) i
+> $$ LANGUAGE sql IMMUTABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM gpl_ats(array['one', 'two']) AS t(f1 numeric(4,2), f2 text)
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_subscripts i
+  Output: i.i, ('{one,two}'::text[])[i.i]
+  Function Call: generate_subscripts('{one,two}'::text[], 1)
+-- EXPLAIN
+
+> SELECT * FROM gpl_ats(array['one', 'two']) AS t(f1 numeric(4,2), f2 text)
+f1:numeric | f2:text
+1.00 | one
+2.00 | two
+-- SELECT 2
+
+> SELECT * FROM gpl_ats(array['one', 'two']) AS t(f1 point, f2 text)
+ERROR 42P13: return type mismatch in function declared to return record
+DETAIL: Final statement returns integer instead of point at column 1.
+CONTEXT: SQL function "gpl_ats" during inlining
+
+> CREATE TYPE gpl_rt AS (f1 numeric(35,6), f2 numeric(35,2))
+-- CREATE TYPE
+
+> CREATE FUNCTION gpl_consts() RETURNS SETOF gpl_rt AS $$ SELECT 7.136178319899999964, 7.136178319899999964; $$ LANGUAGE sql IMMUTABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM gpl_consts()
+QUERY PLAN:text
+Result
+  Output: 7.136178::numeric(35,6), 7.14::numeric(35,2)
+-- EXPLAIN
+
+> SELECT * FROM gpl_consts()
+f1:numeric | f2:numeric
+7.136178 | 7.14
+-- SELECT 1
+
+> CREATE FUNCTION gpl_union() RETURNS SETOF gpl_rt AS $$ SELECT 1, 2 UNION SELECT 3, 4 ORDER BY 1; $$ LANGUAGE sql IMMUTABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM gpl_union()
+QUERY PLAN:text
+Subquery Scan on "*SELECT*"
+  Output: "*SELECT*"."?column?", "*SELECT*"."?column?_1"
+  ->  Unique
+        Output: (1), (2)
+        ->  Sort
+              Output: (1), (2)
+              Sort Key: (1), (2)
+              ->  Append
+                    ->  Result
+                          Output: 1, 2
+                    ->  Result
+                          Output: 3, 4
+-- EXPLAIN
+
+> SELECT * FROM gpl_union()
+f1:numeric | f2:numeric
+1.000000 | 2.00
+3.000000 | 4.00
+-- SELECT 2
+
+> CREATE FUNCTION gpl_unionall() RETURNS SETOF text AS $$ SELECT 'foo'::varchar UNION ALL SELECT 'bar'::varchar; $$ LANGUAGE sql STABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM gpl_unionall()
+QUERY PLAN:text
+Result
+  Output: ('foo'::character varying)
+  ->  Append
+        ->  Result
+              Output: 'foo'::character varying
+        ->  Result
+              Output: 'bar'::character varying
+-- EXPLAIN
+
+> SELECT * FROM gpl_unionall()
+gpl_unionall:text
+bar
+foo
+-- SELECT 2
+
+> CREATE FUNCTION gpl_q2(t gpl_i8) RETURNS int8 AS $$ SELECT t.q2 $$ LANGUAGE sql IMMUTABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT x FROM gpl_i8, gpl_q2(gpl_i8) f(x)
+QUERY PLAN:text
+Nested Loop
+  Output: f.x
+  ->  Seq Scan on public.gpl_i8
+        Output: gpl_i8.q1, gpl_i8.q2
+  ->  Function Scan on f
+        Output: f.x
+        Function Call: gpl_i8.q2
+-- EXPLAIN
+
+> SELECT x FROM gpl_i8, gpl_q2(gpl_i8) f(x) ORDER BY 1
+x:int8
+2
+4
+6
+-- SELECT 3
+
+> CREATE FUNCTION gpl_q2b(t gpl_i8) RETURNS TABLE(ret1 int8) AS $$ SELECT gpl_q2(t) OFFSET 0 $$ LANGUAGE sql IMMUTABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT x FROM gpl_i8, gpl_q2b(gpl_i8) f(x)
+QUERY PLAN:text
+Nested Loop
+  Output: ((gpl_i8.*).q2)
+  ->  Seq Scan on public.gpl_i8
+        Output: gpl_i8.*
+  ->  Result
+        Output: (gpl_i8.*).q2
+-- EXPLAIN
+
+> SELECT x FROM gpl_i8, gpl_q2b(gpl_i8) f(x) ORDER BY 1
+x:int8
+2
+4
+6
+-- SELECT 3
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT x::text FROM (SELECT 'foo'::varchar x UNION ALL SELECT 'bar'::varchar) s
+QUERY PLAN:text
+Result
+  Output: (('foo'::character varying))::text
+  ->  Append
+        ->  Result
+              Output: 'foo'::character varying
+        ->  Result
+              Output: 'bar'::character varying
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT x::text FROM (SELECT 'foo'::varchar x UNION SELECT 'bar'::varchar) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: (s.x)::text
+  ->  Unique
+        Output: ('foo'::character varying)
+        ->  Sort
+              Output: ('foo'::character varying)
+              Sort Key: ('foo'::character varying)
+              ->  Append
+                    ->  Result
+                          Output: 'foo'::character varying
+                    ->  Result
+                          Output: 'bar'::character varying
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 1, 2 UNION SELECT 3, 4 ORDER BY 1
+QUERY PLAN:text
+Unique
+  Output: (1), (2)
+  ->  Sort
+        Output: (1), (2)
+        Sort Key: (1), (2)
+        ->  Append
+              ->  Result
+                    Output: 1, 2
+              ->  Result
+                    Output: 3, 4
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT x FROM (SELECT 1 x, 2 y UNION SELECT 3, 4) s
+QUERY PLAN:text
+Subquery Scan on s
+  ->  Unique
+        ->  Sort
+              Sort Key: (1), (2)
+              ->  Append
+                    ->  Result
+                    ->  Result
+-- EXPLAIN
+
+> SELECT x::text FROM (SELECT 'foo'::varchar x UNION SELECT 'bar'::varchar) s ORDER BY 1
+x:text
+bar
+foo
+-- SELECT 2
+
