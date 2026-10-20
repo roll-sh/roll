@@ -49,7 +49,13 @@ impl PgMeta {
             _ => Some(MakeRustlsConnect::new(tls_config(ca)?)),
         };
         let client = open(&config, tls.as_ref()).await?;
-        client.batch_execute(SCHEMA).await?;
+        // One statement per transaction. As one batch (a single transaction) the index's table
+        // lock (taken even when the index exists) would be held while the version row waits for
+        // another node's running write, and that write's insert into the table would deadlock
+        // with it.
+        for statement in SCHEMA.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            client.batch_execute(statement).await?;
+        }
         Ok(Arc::new(PgMeta { client: Mutex::new(client), config, tls, url: redact(url) }))
     }
 
