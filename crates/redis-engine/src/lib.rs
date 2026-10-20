@@ -16,6 +16,7 @@ pub mod db;
 pub mod decimal;
 pub mod dict;
 pub mod engine;
+pub mod fp;
 pub mod hub;
 pub mod keyspace;
 pub mod json;

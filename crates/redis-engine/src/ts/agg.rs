@@ -1,6 +1,7 @@
 //! Aggregations (`compaction.c`): the per-bucket contexts compaction rules keep and range
 //! queries run, with the module's arithmetic as compiled.
 
+use crate::fp::Mac;
 use crate::client::jemalloc_size;
 
 /// `TS_AGG_TYPES_T` (the numbers are saved in RDB rules).
@@ -162,7 +163,7 @@ fn variance(sum: f64, sum2: f64, count: f64) -> f64 {
         return 0.0;
     }
     let m = sum / count;
-    (m * m).mul_add(count, sum2 - 2.0 * sum * sum / count) / count
+    (m * m).mac(count, sum2 - 2.0 * sum * sum / count) / count
 }
 
 impl Agg {

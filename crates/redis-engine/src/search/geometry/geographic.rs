@@ -9,6 +9,7 @@
 //! products, never across statements or calls such as `math::sqr`): those spots use `mul_add`,
 //! and the trigonometry is musl's (`libm`).
 
+use crate::fp::Mac;
 use super::algo::feq;
 use super::{Cs, Pt, Rect};
 use std::f64::consts::PI;
@@ -128,7 +129,7 @@ pub fn andoyer(lon1: f64, lat1: f64, lon2: f64, lat2: f64, a: f64, b: f64) -> In
     let (sin_dlon, cos_dlon) = (sin(dlon), cos(dlon));
     let (sin_lat1, cos_lat1) = (sin(lat1), cos(lat1));
     let (sin_lat2, cos_lat2) = (sin(lat2), cos(lat2));
-    let cos_d = sin_lat1.mul_add(sin_lat2, cos_lat1 * cos_lat2 * cos_dlon).clamp(-1.0, 1.0);
+    let cos_d = sin_lat1.mac(sin_lat2, cos_lat1 * cos_lat2 * cos_dlon).clamp(-1.0, 1.0);
     let d = acos(cos_d);
     let sin_d = sin(d);
     {
@@ -139,7 +140,7 @@ pub fn andoyer(lon1: f64, lat1: f64, lon2: f64, lat2: f64, a: f64, b: f64) -> In
         let one_plus_cos_d = 1.0 + cos_d;
         let h = if feq(one_minus_cos_d, 0.0) { 0.0 } else { (d + three_sin_d) / one_minus_cos_d };
         let g = if feq(one_plus_cos_d, 0.0) { 0.0 } else { (d - three_sin_d) / one_plus_cos_d };
-        let dd = -(f / 4.0) * h.mul_add(k, g * l);
+        let dd = -(f / 4.0) * h.mac(k, g * l);
         r.distance = a * (d + dd);
     }
     if feq(sin_d, 0.0) {
@@ -162,7 +163,7 @@ pub fn andoyer(lon1: f64, lat1: f64, lon2: f64, lat2: f64, a: f64, b: f64) -> In
         }
     } else {
         let tan_lat2 = sin_lat2 / cos_lat2;
-        let m = cos_lat1.mul_add(tan_lat2, -(sin_lat1 * cos_dlon));
+        let m = cos_lat1.mac(tan_lat2, -(sin_lat1 * cos_dlon));
         aa = atan2(sin_dlon, m);
         let sin_2a = sin(2.0 * aa);
         u = (f / 2.0) * (cos_lat1 * cos_lat1) * sin_2a;
@@ -174,16 +175,16 @@ pub fn andoyer(lon1: f64, lat1: f64, lon2: f64, lat2: f64, a: f64, b: f64) -> In
         }
     } else {
         let tan_lat1 = sin_lat1 / cos_lat1;
-        let n = cos_lat2.mul_add(tan_lat1, -(sin_lat2 * cos_dlon));
+        let n = cos_lat2.mac(tan_lat1, -(sin_lat2 * cos_dlon));
         bb = atan2(sin_dlon, n);
         let sin_2b = sin(2.0 * bb);
         v = (f / 2.0) * (cos_lat2 * cos_lat2) * sin_2b;
     }
     let t = d / sin_d;
-    let da = v.mul_add(t, -u);
+    let da = v.mac(t, -u);
     r.azimuth = aa - da;
     normalize_azimuth(&mut r.azimuth, aa, da);
-    let db = (-u).mul_add(t, v);
+    let db = (-u).mac(t, v);
     r.reverse_azimuth = if bb >= 0.0 { PI - bb - db } else { -PI - bb - db };
     normalize_azimuth(&mut r.reverse_azimuth, bb, db);
     r
@@ -531,13 +532,13 @@ fn hypot(x: f64, y: f64) -> f64 {
         return x;
     }
     let rat = y / x;
-    x * rat.mul_add(rat, 1.0).sqrt()
+    x * rat.mac(rat, 1.0).sqrt()
 }
 
 fn trapezoidal(lat1: f64, lat2: f64, lon21: f64) -> f64 {
     let t1 = libm::tan(lat1 / 2.0);
     let t2 = libm::tan(lat2 / 2.0);
-    2.0 * libm::atan(((t1 + t2) / t1.mul_add(t2, 1.0)) * libm::tan(lon21 / 2.0))
+    2.0 * libm::atan(((t1 + t2) / t1.mac(t2, 1.0)) * libm::tan(lon21 / 2.0))
 }
 
 /// `area_formulas::crosses_prime_meridian` (radians).
@@ -548,8 +549,8 @@ fn crosses_prime_meridian(lon1: f64, lon2: f64) -> bool {
     if lon12 == PI || lon12 == -PI {
         return true;
     }
-    let p1 = (-(lon1 / two_pi).floor()).mul_add(two_pi, lon1);
-    let p2 = (-(lon2 / two_pi).floor()).mul_add(two_pi, lon2);
+    let p1 = (-(lon1 / two_pi).floor()).mac(two_pi, lon1);
+    let p2 = (-(lon2 / two_pi).floor()).mac(two_pi, lon2);
     let (mx, mn) = (p1.max(p2), p1.min(p2));
     mx > PI && mn < PI && mx - mn > PI
 }
@@ -624,17 +625,17 @@ pub fn ring_area(r: &[Pt]) -> f64 {
         let s = (1.0 + k2).sqrt();
         let eps = (s - 1.0) / (s + 1.0);
         // `evaluate_coeffs_var2` (order 1): Horner's steps `result * x + c`
-        let coeffs = [coeffs_var[1].mul_add(eps, coeffs_var[0]), eps * coeffs_var[2]];
+        let coeffs = [coeffs_var[1].mac(eps, coeffs_var[0]), eps * coeffs_var[2]];
         let clenshaw = |cosx: f64| -> f64 {
             // two coefficients: the odd one, a zero step, the even one
             let (mut bk1, mut bk2) = (0.0, 0.0);
             let steps = [coeffs[1], 0.0, coeffs[0]];
             for c in steps {
-                let bk = (2.0 * cosx).mul_add(bk1, c) - bk2;
+                let bk = (2.0 * cosx).mac(bk1, c) - bk2;
                 bk2 = bk1;
                 bk1 = bk;
             }
-            bk1.mul_add(cosx, coeffs[0]) - bk2
+            bk1.mac(cosx, coeffs[0]) - bk2
         };
         let i12 = clenshaw(cos_sig2) - clenshaw(cos_sig1);
         excess_sum += spherical;
@@ -645,7 +646,7 @@ pub fn ring_area(r: &[Pt]) -> f64 {
     let sum = if (ellipsoidal_term / spherical_term).abs() > 0.01 { spherical_term } else { spherical_term + ellipsoidal_term };
     if crosses % 2 == 1 {
         let times = 1 + crosses / 2;
-        let mut result = (2.0 * PI * c2).mul_add(times as f64, -sum.abs());
+        let mut result = (2.0 * PI * c2).mac(times as f64, -sum.abs());
         if sign(sum) == 1 {
             result = -result;
         }
@@ -713,8 +714,8 @@ fn sjoberg_spherical(lon1: f64, lat1: f64, lon_a2: f64, lat_a2: f64, lon2: f64, 
     let sin_dlon2 = libm::sin(dlon2);
     let cos_dlon1 = libm::cos(dlon1);
     let cos_dlon2 = libm::cos(dlon2);
-    let tan_alpha1_x = cos_lat1.mul_add(tan_lat_a2, -(sin_lat1 * cos_dlon1));
-    let tan_alpha2_x = cos_lat2.mul_add(tan_lat_b2, -(sin_lat2 * cos_dlon2));
+    let tan_alpha1_x = cos_lat1.mac(tan_lat_a2, -(sin_lat1 * cos_dlon1));
+    let tan_alpha2_x = cos_lat2.mac(tan_lat_b2, -(sin_lat2 * cos_dlon2));
     let vertical1 = feq(sin_dlon1, 0.0) || feq(tan_alpha1_x, 0.0);
     let vertical2 = feq(sin_dlon2, 0.0) || feq(tan_alpha2_x, 0.0);
     let (mut tan_alpha1, mut tan_alpha2) = (0.0, 0.0);
@@ -733,8 +734,8 @@ fn sjoberg_spherical(lon1: f64, lat1: f64, lon_a2: f64, lat_a2: f64, lon2: f64, 
         let t1 = tan_alpha1 * cos_lat1;
         let t2 = tan_alpha2 * cos_lat2;
         let t1t2 = t1 * t2;
-        let tan_lon_y = t1t2.mul_add(tan_lat1.mul_add(cos_lon1, -(tan_lat2 * cos_lon2)), t1.mul_add(sin_lon2, -(t2 * sin_lon1)));
-        let tan_lon_x = (-t1t2).mul_add(tan_lat1.mul_add(sin_lon1, -(tan_lat2 * sin_lon2)), t1.mul_add(cos_lon2, -(t2 * cos_lon1)));
+        let tan_lon_y = t1t2.mac(tan_lat1.mac(cos_lon1, -(tan_lat2 * cos_lon2)), t1.mac(sin_lon2, -(t2 * sin_lon1)));
+        let tan_lon_x = (-t1t2).mac(tan_lat1.mac(sin_lon1, -(tan_lat2 * sin_lon2)), t1.mac(cos_lon2, -(t2 * cos_lon1)));
         lon = libm::atan2(tan_lon_y, tan_lon_x);
     }
     let lon_2 = if lon > 0.0 { lon - PI } else { lon + PI };
@@ -746,15 +747,15 @@ fn sjoberg_spherical(lon1: f64, lat1: f64, lon_a2: f64, lat_a2: f64, lon2: f64, 
     }
     let (sin_lon, cos_lon) = (libm::sin(lon), libm::cos(lon));
     let tan_lat = if tan_alpha1.abs() >= tan_alpha2.abs() {
-        let sin_dlon_1 = sin_lon.mul_add(cos_lon1, -(cos_lon * sin_lon1));
-        let cos_dlon_1 = cos_lon.mul_add(cos_lon1, sin_lon * sin_lon1);
-        let lat_y_1 = (tan_alpha1 * sin_lat1).mul_add(cos_dlon_1, sin_dlon_1);
+        let sin_dlon_1 = sin_lon.mac(cos_lon1, -(cos_lon * sin_lon1));
+        let cos_dlon_1 = cos_lon.mac(cos_lon1, sin_lon * sin_lon1);
+        let lat_y_1 = (tan_alpha1 * sin_lat1).mac(cos_dlon_1, sin_dlon_1);
         let lat_x_1 = tan_alpha1 * cos_lat1;
         lat_y_1 / lat_x_1
     } else {
-        let sin_dlon_2 = sin_lon.mul_add(cos_lon2, -(cos_lon * sin_lon2));
-        let cos_dlon_2 = cos_lon.mul_add(cos_lon2, sin_lon * sin_lon2);
-        let lat_y_2 = (tan_alpha2 * sin_lat2).mul_add(cos_dlon_2, sin_dlon_2);
+        let sin_dlon_2 = sin_lon.mac(cos_lon2, -(cos_lon * sin_lon2));
+        let cos_dlon_2 = cos_lon.mac(cos_lon2, sin_lon * sin_lon2);
+        let lat_y_2 = (tan_alpha2 * sin_lat2).mac(cos_dlon_2, sin_dlon_2);
         let lat_x_2 = tan_alpha2 * cos_lat2;
         lat_y_2 / lat_x_2
     };
@@ -935,7 +936,7 @@ fn newton(g1: &Geodesic, g2: &Geodesic, mut beta: f64, mut t: f64, lon1_minus_lo
         }
         let sin_beta = libm::sin(beta);
         let cos_beta_sqr = cos_beta * cos_beta;
-        let g = (-e_sqr).mul_add(cos_beta_sqr, 1.0);
+        let g = (-e_sqr).mac(cos_beta_sqr, 1.0);
         let (mut f1, mut f2) = (0.0, 0.0);
         if !g1.is_cj_zero {
             lon1_diff = g1.lon_diff(sin_beta, t)?;

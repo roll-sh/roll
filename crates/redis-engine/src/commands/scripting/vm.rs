@@ -507,7 +507,8 @@ unsafe fn pop_reply_at(l: *mut lua_State, s3: bool, c3: bool, depth: usize) -> R
                 }
             }
             // C's (long long) cast; arm64 saturates and maps NaN to 0, as Rust's `as` does.
-            LUA_TNUMBER => Reply::Int(lua_tonumber(l, -1) as i64),
+            // `(long long)lua_tonumber()`: out of range it is what the CPU's conversion gives.
+            LUA_TNUMBER => Reply::Int(crate::fp::c_i64(lua_tonumber(l, -1))),
             LUA_TTABLE => return table_reply(l, s3, c3, depth),
             _ => Reply::Nil,
         };

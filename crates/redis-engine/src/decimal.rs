@@ -1,12 +1,21 @@
 //! `long double` arithmetic for INCRBYFLOAT / HINCRBYFLOAT / INCREX.
 //!
-//! Redis does these in `long double` and prints `%.17Lf` with trailing zeros removed. On arm64
-//! (Graviton) that is IEEE binary128, so `0.1 + 0.2` prints `0.3` and `1e20 + 0.3` prints
-//! `100000000000000000000.29999999999999716`. We use the same binary128 arithmetic and print the
-//! exact binary value the way `printf` does.
+//! Redis does these in `long double` and prints `%.17Lf` with trailing zeros removed. What that
+//! type is depends on the CPU Redis was built for, and so do the replies:
+//!
+//! - arm64 (Graviton): IEEE binary128, so `0.1 + 0.2` prints `0.3` and `1e20 + 0.3` prints
+//!   `100000000000000000000.29999999999999716`;
+//! - x86-64: the x87 80-bit format (64-bit mantissa), so `1e20 + 0.3` is `1e20` and `205.6`
+//!   prints `205.60000000000000001`.
+//!
+//! We use the same format as Redis on this CPU and print the exact binary value the way `printf`
+//! does.
 
-use rustc_apfloat::ieee::Quad;
 use rustc_apfloat::ieee::Double;
+#[cfg(not(target_arch = "x86_64"))]
+use rustc_apfloat::ieee::Quad as LongDouble;
+#[cfg(target_arch = "x86_64")]
+use rustc_apfloat::ieee::X87DoubleExtended as LongDouble;
 use rustc_apfloat::{Float, FloatConvert, Round};
 
 /// `MAX_LONG_DOUBLE_CHARS`: `string2ld` refuses anything this long.
@@ -201,12 +210,19 @@ fn hex_input(s: &[u8]) -> Option<String> {
     Some(format!("{}0x{mant}p{e}", if neg { "-" } else { "" }))
 }
 
-/// A `long double` (IEEE binary128), as `string2ld` reads it.
+/// A `long double` (binary128 or x87 extended, as Redis has it on this CPU), as `string2ld`
+/// reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Ld(Quad);
+pub struct Ld(LongDouble);
+
+/// Below half the smallest subnormal a decimal reads as zero (binary128 2^-16494, x87 2^-16445).
+#[cfg(not(target_arch = "x86_64"))]
+const SUBNORMAL_DIGITS: i64 = -4966;
+#[cfg(target_arch = "x86_64")]
+const SUBNORMAL_DIGITS: i64 = -4951;
 
 impl Ld {
-    pub const ZERO: Ld = Ld(Quad::ZERO);
+    pub const ZERO: Ld = Ld(LongDouble::ZERO);
 
     /// `string2ld`: decimal, hex or infinity, no surrounding spaces; NaN, overflow and underflow
     /// to zero are rejected. Rounded to nearest, ties to even.
@@ -215,14 +231,14 @@ impl Ld {
             return None;
         }
         if is_inf(s) {
-            return Some(Ld(if s[0] == b'-' { -Quad::INFINITY } else { Quad::INFINITY }));
+            return Some(Ld(if s[0] == b'-' { -LongDouble::INFINITY } else { LongDouble::INFINITY }));
         }
         let (text, nonzero) = match parse(s) {
-            Some(d) if d.digits.is_empty() => return Some(Ld(if s[0] == b'-' { -Quad::ZERO } else { Quad::ZERO })),
+            Some(d) if d.digits.is_empty() => return Some(Ld(if s[0] == b'-' { -LongDouble::ZERO } else { LongDouble::ZERO })),
             Some(d) => {
                 let top = d.digits.len() as i64 + d.exp;
-                // Beyond LDBL_MAX (1.19e4932), or below half the smallest subnormal (6.5e-4966).
-                if !(-4966..=4933).contains(&top) {
+                // Beyond LDBL_MAX (1.19e4932), or below half the smallest subnormal.
+                if !(SUBNORMAL_DIGITS..=4933).contains(&top) {
                     return None;
                 }
                 let digits: String = d.digits.iter().map(|c| (b'0' + c) as char).collect();
@@ -234,7 +250,7 @@ impl Ld {
                 (h, nonzero)
             }
         };
-        let v = Quad::from_str_r(&text, Round::NearestTiesToEven).ok()?.value;
+        let v = LongDouble::from_str_r(&text, Round::NearestTiesToEven).ok()?.value;
         if v.is_infinite() || v.is_nan() || (v.is_zero() && nonzero) {
             return None;
         }
@@ -242,11 +258,11 @@ impl Ld {
     }
 
     pub fn max() -> Ld {
-        Ld(Quad::largest())
+        Ld(LongDouble::largest())
     }
 
     pub fn min() -> Ld {
-        Ld(-Quad::largest())
+        Ld(-LongDouble::largest())
     }
 
     pub fn is_inf(&self) -> bool {
@@ -282,7 +298,7 @@ impl Ld {
     }
 
     pub fn from_i64(i: i64) -> Ld {
-        Ld(Quad::from_i128(i as i128).value)
+        Ld(LongDouble::from_i128(i as i128).value)
     }
 
     pub fn from_f64(d: f64) -> Ld {
@@ -296,7 +312,7 @@ impl Ld {
 
     /// `(int64_t)x` for a value already known to be within the i64 range (truncates).
     pub fn to_i64(&self) -> Option<i64> {
-        if self.0.is_nan() || self.0 < Quad::from_i128(i64::MIN as i128).value || self.0 > Quad::from_i128(i64::MAX as i128).value {
+        if self.0.is_nan() || self.0 < LongDouble::from_i128(i64::MIN as i128).value || self.0 > LongDouble::from_i128(i64::MAX as i128).value {
             return None;
         }
         let mut exact = false;
@@ -351,15 +367,32 @@ impl Ld {
     }
 }
 
-/// The exact decimal value of a finite quad (with `cutoff`, 0 if it is far below `%.17Lf`'s
-/// precision).
-fn exact(q: Quad, cutoff: bool) -> Dec {
-    const BASE: u64 = 1_000_000_000;
+/// Sign, integer mantissa and binary exponent of a finite value (value = m × 2^e).
+#[cfg(not(target_arch = "x86_64"))]
+fn parts(q: LongDouble) -> (bool, u128, i64) {
     let bits = q.to_bits();
     let neg = bits >> 127 == 1;
     let field = ((bits >> 112) & 0x7fff) as i64;
     let frac = bits & ((1u128 << 112) - 1);
     let (m, e) = if field == 0 { (frac, -16494) } else { (frac | 1 << 112, field - 16383 - 112) };
+    (neg, m, e)
+}
+
+/// x87 extended: 1 sign bit, 15 exponent bits, a 64-bit mantissa with an explicit integer bit.
+#[cfg(target_arch = "x86_64")]
+fn parts(q: LongDouble) -> (bool, u128, i64) {
+    let bits = q.to_bits();
+    let neg = (bits >> 79) & 1 == 1;
+    let field = ((bits >> 64) & 0x7fff) as i64;
+    let m = bits & u64::MAX as u128;
+    (neg, m, if field == 0 { 1 - 16383 - 63 } else { field - 16383 - 63 })
+}
+
+/// The exact decimal value of a finite value (with `cutoff`, 0 if it is far below `%.17Lf`'s
+/// precision).
+fn exact(q: LongDouble, cutoff: bool) -> Dec {
+    const BASE: u64 = 1_000_000_000;
+    let (neg, m, e) = parts(q);
     let width = 128 - m.leading_zeros() as i64;
     // Under 2^-60 (< 1e-18) prints as 0.
     if m == 0 || (cutoff && e + width <= -60) {

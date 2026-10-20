@@ -4,6 +4,7 @@
 //! `disjoint`, `expand` with the spheroid's longitude wrapping) and the `within` / `intersects`
 //! predicates between geometries.
 
+use crate::fp::Mac;
 use super::{Cs, Geom, Poly, Pt, Rect, Ring};
 
 // ---------------------------------------------------------------------------------------------
@@ -77,7 +78,7 @@ fn less_eps(a: Pt, b: Pt) -> bool {
 
 /// `detail::determinant`: `ux * vy - uy * vx` (the first product fused).
 pub fn determinant(ux: f64, uy: f64, vx: f64, vy: f64) -> f64 {
-    ux.mul_add(vy, -(uy * vx))
+    ux.mac(vy, -(uy * vx))
 }
 
 /// `side_by_triangle` for doubles: the points ordered so the computation does not depend on
@@ -113,7 +114,7 @@ fn side_by_triangle(p1: Pt, p2: Pt, p: Pt) -> i32 {
 
 /// `arithmetic::side_value` of `p` against the line `a x + b y + c = 0`.
 fn line_side_value(a: f64, b: f64, c: f64, p: Pt) -> f64 {
-    a.mul_add(p.x, b * p.y) + c
+    a.mac(p.x, b * p.y) + c
 }
 
 /// `get_distance_measure` in the plane: the side value of `p` against the infinite line through
@@ -123,7 +124,7 @@ pub fn distance_measure(cs: Cs, p1: Pt, p2: Pt, p: Pt) -> f64 {
         Cs::Flat => {
             let a = p1.y - p2.y;
             let b = p2.x - p1.x;
-            let c = (-a).mul_add(p1.x, -(b * p1.y));
+            let c = (-a).mac(p1.x, -(b * p1.y));
             line_side_value(a, b, c, p)
         }
         Cs::Sphere => 0.0,
@@ -173,7 +174,7 @@ fn direction_code_flat(a: Pt, b: Pt, p: Pt) -> i32 {
     if feq(pa, 0.0) && feq(pb, 0.0) {
         return 0;
     }
-    let c = (-pa).mul_add(b.x, -(pb * b.y));
+    let c = (-pa).mac(b.x, -(pb * b.y));
     let v = line_side_value(pa, pb, c, p);
     if v == 0.0 {
         0
@@ -214,7 +215,7 @@ pub fn ring_area(cs: Cs, r: &[Pt]) -> f64 {
             let vectorized = n - n % 4;
             for (i, w) in r.windows(2).enumerate() {
                 let (a, b) = (w[0].x + w[1].x, w[0].y - w[1].y);
-                sum = if i < vectorized { sum + a * b } else { a.mul_add(b, sum) };
+                sum = if i < vectorized { sum + a * b } else { a.mac(b, sum) };
             }
             sum / 2.0
         }

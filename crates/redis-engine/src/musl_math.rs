@@ -1,6 +1,7 @@
 //! musl's `log` and `pow` (Arm's optimized-routines, musl 1.2 `src/math/{log,pow}.c` and their
 //! data tables; Copyright (c) 2018, Arm Limited, MIT), as the reference's modules get them on
-//! Alpine aarch64 (`__FP_FAST_FMA`). Neither is correctly rounded, so the platform's or the
+//! Alpine: built with `__FP_FAST_FMA` on aarch64 (`fma` calls), without it on x86-64 (the
+//! operands split so the products are exact instead). Neither is correctly rounded, so the platform's or the
 //! `libm` crate's (fdlibm) results differ in the last bit now and then: a Bloom filter's
 //! bits per entry at the default error rate 0.01, a t-digest's merge thresholds, `JSON.NUMPOWBY`.
 
@@ -73,7 +74,10 @@ pub fn log(x: f64) -> f64 {
     let iz = ix.wrapping_sub(tmp & (0xfffu64 << 52));
     let (invc, logc) = LOG_T[i];
     let z = f64::from_bits(iz);
+    #[cfg(target_arch = "aarch64")]
     let r = z.mul_add(invc, -1.0);
+    #[cfg(not(target_arch = "aarch64"))]
+    let r = (z - LOG_T2[i].0 - LOG_T2[i].1) * invc;
     let kd = k as f64;
     let w = kd * LOG_LN2HI + logc;
     let hi = w + r;
@@ -94,7 +98,17 @@ fn pow_log(ix: u64) -> (f64, f64) {
     let z = f64::from_bits(iz);
     let kd = k as f64;
     let (invc, logc, logctail) = POW_T[i];
+    #[cfg(target_arch = "aarch64")]
     let r = z.mul_add(invc, -1.0);
+    #[cfg(not(target_arch = "aarch64"))]
+    let (r, rhi, rlo) = {
+        // Split z so rhi, rlo and rhi*rhi are exact and |rlo| <= |r|.
+        let zhi = f64::from_bits(iz.wrapping_add(1u64 << 31) & (u64::MAX << 32));
+        let zlo = z - zhi;
+        let rhi = zhi * invc - 1.0;
+        let rlo = zlo * invc;
+        (rhi + rlo, rhi, rlo)
+    };
     let t1 = kd * POW_LN2HI + logc;
     let t2 = t1 + r;
     let lo1 = kd * POW_LN2LO + logctail;
@@ -103,9 +117,18 @@ fn pow_log(ix: u64) -> (f64, f64) {
     let ar = a[0] * r;
     let ar2 = r * ar;
     let ar3 = r * ar2;
-    let hi = t2 + ar2;
-    let lo3 = ar.mul_add(r, -ar2);
-    let lo4 = t2 - hi + ar2;
+    #[cfg(target_arch = "aarch64")]
+    let (hi, lo3, lo4) = {
+        let hi = t2 + ar2;
+        (hi, ar.mul_add(r, -ar2), t2 - hi + ar2)
+    };
+    #[cfg(not(target_arch = "aarch64"))]
+    let (hi, lo3, lo4) = {
+        let arhi = a[0] * rhi;
+        let arhi2 = rhi * arhi;
+        let hi = t2 + arhi2;
+        (hi, rlo * (ar + arhi), t2 - hi + arhi2)
+    };
     let p = ar3 * (a[1] + r * a[2] + ar2 * (a[3] + r * a[4] + ar2 * (a[5] + r * a[6])));
     let lo = lo1 + lo2 + lo3 + lo4 + p;
     let y = hi + lo;
@@ -260,8 +283,19 @@ pub fn pow(x: f64, y: f64) -> f64 {
         }
     }
     let (hi, lo) = pow_log(ix);
-    let ehi = y * hi;
-    let elo = y * lo + y.mul_add(hi, -ehi);
+    #[cfg(target_arch = "aarch64")]
+    let (ehi, elo) = {
+        let ehi = y * hi;
+        (ehi, y * lo + y.mul_add(hi, -ehi))
+    };
+    #[cfg(not(target_arch = "aarch64"))]
+    let (ehi, elo) = {
+        let yhi = f64::from_bits(iy & (u64::MAX << 27));
+        let ylo = y - yhi;
+        let lhi = f64::from_bits(hi.to_bits() & (u64::MAX << 27));
+        let llo = hi - lhi + lo;
+        (yhi * lhi, ylo * lhi + y * llo)
+    };
     pow_exp(ehi, elo, sign_bias)
 }
 
@@ -640,3 +674,136 @@ mod tests {
         }
     }
 }
+
+/// `__log_data.tab2`: c split into chi + clo, for the `log` branch without fused multiply-add.
+#[cfg(not(target_arch = "aarch64"))]
+const LOG_T2: [(f64, f64); 128] = [
+    (f(0x3fe61000014fb66b), f(0x3c7e026c91425b3c)),
+    (f(0x3fe63000034db495), f(0x3c8dbfea48005d41)),
+    (f(0x3fe650000d94d478), f(0x3c8e7fa786d6a5b7)),
+    (f(0x3fe67000074e6fad), f(0x3c61fcea6b54254c)),
+    (f(0x3fe68ffffedf0fae), f(0xbc7c7e274c590efd)),
+    (f(0x3fe6b0000763c5bc), f(0xbc8ac16848dcda01)),
+    (f(0x3fe6d0001e5cc1f6), f(0x3c833f1c9d499311)),
+    (f(0x3fe6efffeb05f63e), f(0xbc7e80041ae22d53)),
+    (f(0x3fe710000e869780), f(0x3c7bff6671097952)),
+    (f(0x3fe72ffffc67e912), f(0x3c8c00e226bd8724)),
+    (f(0x3fe74fffdf81116a), f(0xbc6e02916ef101d2)),
+    (f(0x3fe770000f679c90), f(0xbc67fc71cd549c74)),
+    (f(0x3fe78ffffa7ec835), f(0x3c81bec19ef50483)),
+    (f(0x3fe7affffe20c2e6), f(0xbc707e1729cc6465)),
+    (f(0x3fe7cfffed3fc900), f(0xbc808072087b8b1c)),
+    (f(0x3fe7efffe9261a76), f(0x3c8dc0286d9df9ae)),
+    (f(0x3fe81000049ca3e8), f(0x3c897fd251e54c33)),
+    (f(0x3fe8300017932c8f), f(0xbc8afee9b630f381)),
+    (f(0x3fe850000633739c), f(0x3c89bfbf6b6535bc)),
+    (f(0x3fe87000204289c6), f(0xbc8bbf65f3117b75)),
+    (f(0x3fe88fffebf57904), f(0xbc89006ea23dcb57)),
+    (f(0x3fe8b00022bc04df), f(0xbc7d00df38e04b0a)),
+    (f(0x3fe8cfffe50c1b8a), f(0xbc88007146ff9f05)),
+    (f(0x3fe8effffc918e43), f(0x3c83817bd07a7038)),
+    (f(0x3fe910001efa5fc7), f(0x3c893e9176dfb403)),
+    (f(0x3fe9300013467bb9), f(0x3c7f804e4b980276)),
+    (f(0x3fe94fffe6ee076f), f(0xbc8f7ef0d9ff622e)),
+    (f(0x3fe96fffde3c12d1), f(0xbc7082aa962638ba)),
+    (f(0x3fe98ffff4458a0d), f(0xbc87801b9164a8ef)),
+    (f(0x3fe9afffdd982e3e), f(0xbc8740e08a5a9337)),
+    (f(0x3fe9cfffed49fb66), f(0x3c3fce08c19be000)),
+    (f(0x3fe9f00020f19c51), f(0xbc8a3faa27885b0a)),
+    (f(0x3fea10001145b006), f(0x3c74ff489958da56)),
+    (f(0x3fea300007bbf6fa), f(0x3c8cbeab8a2b6d18)),
+    (f(0x3fea500010971d79), f(0x3c88fecadd787930)),
+    (f(0x3fea70001df52e48), f(0xbc8f41763dd8abdb)),
+    (f(0x3fea90001c593352), f(0xbc8ebf0284c27612)),
+    (f(0x3feab0002a4f3e4b), f(0xbc69fd043cff3f5f)),
+    (f(0x3feacfffd7ae1ed1), f(0xbc823ee7129070b4)),
+    (f(0x3feaefffee510478), f(0x3c6a063ee00edea3)),
+    (f(0x3feb0fffdb650d5b), f(0x3c5a06c8381f0ab9)),
+    (f(0x3feb2ffffeaaca57), f(0xbc79011e74233c1d)),
+    (f(0x3feb4fffd995badc), f(0xbc79ff1068862a9f)),
+    (f(0x3feb7000249e659c), f(0x3c8aff45d0864f3e)),
+    (f(0x3feb8ffff9871640), f(0x3c7cfe7796c2c3f9)),
+    (f(0x3febafffd204cb4f), f(0xbc63ff27eef22bc4)),
+    (f(0x3febcfffd2415c45), f(0xbc6cffb7ee3bea21)),
+    (f(0x3febeffff86309df), f(0xbc814103972e0b5c)),
+    (f(0x3fec0fffe1b57653), f(0x3c8bc16494b76a19)),
+    (f(0x3fec2ffff1fa57e3), f(0xbc64feef8d30c6ed)),
+    (f(0x3fec4fffdcbfe424), f(0xbc843f68bcec4775)),
+    (f(0x3fec6fffed54b9f7), f(0x3c847ea3f053e0ec)),
+    (f(0x3fec8fffeb998fd5), f(0x3c7383068df992f1)),
+    (f(0x3fecb0002125219a), f(0xbc68fd8e64180e04)),
+    (f(0x3feccfffdd94469c), f(0x3c8e7ebe1cc7ea72)),
+    (f(0x3fecefffeafdc476), f(0x3c8ebe39ad9f88fe)),
+    (f(0x3fed1000169af82b), f(0x3c757d91a8b95a71)),
+    (f(0x3fed30000d0ff71d), f(0x3c89c1906970c7da)),
+    (f(0x3fed4fffea790fc4), f(0xbc580e37c558fe0c)),
+    (f(0x3fed70002edc87e5), f(0xbc7f80d64dc10f44)),
+    (f(0x3fed900021dc82aa), f(0xbc747c8f94fd5c5c)),
+    (f(0x3fedafffd86b0283), f(0x3c8c7f1dc521617e)),
+    (f(0x3fedd000296c4739), f(0x3c88019eb2ffb153)),
+    (f(0x3fedefffe54490f5), f(0x3c6e00d2c652cc89)),
+    (f(0x3fee0fffcdabf694), f(0xbc7f8340202d69d2)),
+    (f(0x3fee2fffdb52c8dd), f(0x3c7b00c1ca1b0864)),
+    (f(0x3fee4ffff24216ef), f(0x3c72ffa8b094ab51)),
+    (f(0x3fee6fffe88a5e11), f(0xbc57f673b1efbe59)),
+    (f(0x3fee9000119eff0d), f(0xbc84808d5e0bc801)),
+    (f(0x3feeafffdfa51744), f(0x3c780006d54320b5)),
+    (f(0x3feed0001a127fa1), f(0xbc5002f860565c92)),
+    (f(0x3feef00007babcc4), f(0xbc8540445d35e611)),
+    (f(0x3fef0ffff57a8d02), f(0xbc4ffb3139ef9105)),
+    (f(0x3fef30001ee58ac7), f(0x3c8a81acf2731155)),
+    (f(0x3fef4ffff5823494), f(0x3c8a3f41d4d7c743)),
+    (f(0x3fef6ffffca94c6b), f(0xbc6202f41c987875)),
+    (f(0x3fef8fffe1f9c441), f(0x3c777dd1f477e74b)),
+    (f(0x3fefafffd2e0e37e), f(0xbc6f01199a7ca331)),
+    (f(0x3fefd0001c77e49e), f(0x3c7181ee4bceacb1)),
+    (f(0x3fefeffff7e0c331), f(0xbc6e05370170875a)),
+    (f(0x3ff00ffff465606e), f(0xbc8a7ead491c0ada)),
+    (f(0x3ff02ffff3867a58), f(0xbc977f69c3fcb2e0)),
+    (f(0x3ff04ffffdfc0d17), f(0x3c97bffe34cb945b)),
+    (f(0x3ff0700003cd4d82), f(0x3c820083c0e456cb)),
+    (f(0x3ff08ffff9f2cbe8), f(0xbc6dffdfbe37751a)),
+    (f(0x3ff0b000010cda65), f(0xbc913f7faee626eb)),
+    (f(0x3ff0d00001a4d338), f(0x3c807dfa79489ff7)),
+    (f(0x3ff0effffadafdfd), f(0xbc77040570d66bc0)),
+    (f(0x3ff110000bbafd96), f(0x3c8e80d4846d0b62)),
+    (f(0x3ff12ffffae5f45d), f(0x3c9dbffa64fd36ef)),
+    (f(0x3ff150000dd59ad9), f(0x3c9a0077701250ae)),
+    (f(0x3ff170000f21559a), f(0x3c8dfdf9e2e3deee)),
+    (f(0x3ff18ffffc275426), f(0x3c910030dc3b7273)),
+    (f(0x3ff1b000123d3c59), f(0x3c997f7980030188)),
+    (f(0x3ff1cffff8299eb7), f(0xbc65f932ab9f8c67)),
+    (f(0x3ff1effff48ad400), f(0x3c937fbf9da75beb)),
+    (f(0x3ff210000c8b86a4), f(0x3c9f806b91fd5b22)),
+    (f(0x3ff2300003854303), f(0x3c93ffc2eb9fbf33)),
+    (f(0x3ff24fffffbcf684), f(0x3c7601e77e2e2e72)),
+    (f(0x3ff26ffff52921d9), f(0x3c7ffcbb767f0c61)),
+    (f(0x3ff2900014933a3c), f(0xbc7202ca3c02412b)),
+    (f(0x3ff2b00014556313), f(0xbc92808233f21f02)),
+    (f(0x3ff2cfffebfe523b), f(0xbc88ff7e384fdcf2)),
+    (f(0x3ff2f0000bb8ad96), f(0xbc85ff51503041c5)),
+    (f(0x3ff30ffffb7ae2af), f(0xbc810071885e289d)),
+    (f(0x3ff32ffffeac5f7f), f(0xbc91ff5d3fb7b715)),
+    (f(0x3ff350000ca66756), f(0x3c957f82228b82bd)),
+    (f(0x3ff3700011fbf721), f(0x3c8000bac40dd5cc)),
+    (f(0x3ff38ffff9592fb9), f(0xbc943f9d2db2a751)),
+    (f(0x3ff3b00004ddd242), f(0x3c857f6b707638e1)),
+    (f(0x3ff3cffff5b2c957), f(0x3c7a023a10bf1231)),
+    (f(0x3ff3efffeab0b418), f(0x3c987f6d66b152b0)),
+    (f(0x3ff410001532aff4), f(0x3c67f8375f198524)),
+    (f(0x3ff4300017478b29), f(0x3c8301e672dc5143)),
+    (f(0x3ff44fffe795b463), f(0x3c89ff69b8b2895a)),
+    (f(0x3ff46fffe80475e0), f(0xbc95c0b19bc2f254)),
+    (f(0x3ff48fffef6fc1e7), f(0x3c9b4009f23a2a72)),
+    (f(0x3ff4afffe5bea704), f(0xbc94ffb7bf0d7d45)),
+    (f(0x3ff4d000171027de), f(0xbc99c06471dc6a3d)),
+    (f(0x3ff4f0000ff03ee2), f(0x3c977f890b85531c)),
+    (f(0x3ff5100012dc4bd1), f(0x3c6004657166a436)),
+    (f(0x3ff530001605277a), f(0xbc96bfcece233209)),
+    (f(0x3ff54fffecdb704c), f(0xbc8902720505a1d7)),
+    (f(0x3ff56fffef5f54a9), f(0x3c9bbfe60ec96412)),
+    (f(0x3ff5900017e61012), f(0x3c887ec581afef90)),
+    (f(0x3ff5b00003c93e92), f(0xbc9f41080abf0cc0)),
+    (f(0x3ff5d0001d4919bc), f(0xbc98812afb254729)),
+    (f(0x3ff5efffe7b87a89), f(0xbc947eb780ed6904)),
+];

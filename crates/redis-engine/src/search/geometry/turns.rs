@@ -6,6 +6,7 @@
 //! `sectionalize`'s monotonic sections, `partition` over their boxes and
 //! `get_turns_in_sections` with its interrupt policy.
 
+use crate::fp::Mac;
 use super::algo::{self, feq, side};
 use super::geographic::{self, Inverse};
 use super::{Cs, Pt, Rect};
@@ -397,13 +398,13 @@ fn cartesian(p1: Pt, p2: Pt, q1: Pt, q2: Pt) -> Inter {
         return Inter::crosses(sides, p2, ra, rb);
     }
     // `segment_intersection_info::calculate`
-    let (cla, clb) = (dx_a.mul_add(dx_a, dy_a * dy_a), dx_b.mul_add(dx_b, dy_b * dy_b));
+    let (cla, clb) = (dx_a.mac(dx_a, dy_a * dy_a), dx_b.mac(dx_b, dy_b * dy_b));
     let clm = cla.max(clb);
     let use_a = if clm <= 0.0 {
         true
     } else {
         let (rcla, rclb) = (1.0 - cla / clm, 1.0 - clb / clm);
-        5.0f64.mul_add(ra.edge_value(), rcla) > 5.0f64.mul_add(rb.edge_value(), rclb)
+        5.0f64.mac(ra.edge_value(), rcla) > 5.0f64.mac(rb.edge_value(), rclb)
     };
     let mut ip = if use_a {
         Pt { x: p1.x + (ra.num * dx_a) / ra.den, y: p1.y + (ra.num * dy_a) / ra.den }
@@ -968,7 +969,7 @@ fn non_opposite_to_index(inf: &Inter) -> usize {
 /// `turn_info_verification_functions::distance_measure`: the squared distance.
 fn dist2(a: Pt, b: Pt) -> f64 {
     let (dx, dy) = (a.x - b.x, a.y - b.y);
-    dx.mul_add(dx, dy * dy)
+    dx.mac(dx, dy * dy)
 }
 
 /// `get_distance_measure`: `p`'s side value against the infinite line through `p1` and `p2`

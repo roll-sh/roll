@@ -1,5 +1,6 @@
 //! The built-in scorers (`ext/default.c`) and their EXPLAINSCORE trees (`RSScoreExplain`).
 
+use crate::fp::Mac;
 use super::doctable::{DOC_HAS_PAYLOAD, Dmd};
 use super::iters::{IxResult, K_HYBRID_METRIC, K_INTERSECT, K_METRIC, K_NUMERIC, K_TERM, K_UNION, K_VIRTUAL};
 
@@ -163,7 +164,7 @@ fn bm25_rec(a: &Args<'_>, r: &IxResult, mut e: Option<&mut Expl>) -> f64 {
     let b: f32 = 0.5;
     let f = r.freq as f64;
     // the reference's build contracts `a + b * c` into fused multiply-adds
-    let denom = |f: f64| (K1 as f64).mul_add((b as f64).mul_add(a.avg_doc_len, (1.0f32 - b) as f64), f);
+    let denom = |f: f64| (K1 as f64).mac((b as f64).mac(a.avg_doc_len, (1.0f32 - b) as f64), f);
     if r.kind == K_TERM {
         let idf = idf_of(r);
         let ret = r.weight * idf * f / denom(f);
@@ -215,7 +216,7 @@ fn bm25(a: &Args<'_>, r: &IxResult, d: &Dmd, min_score: f64, e: &mut Option<Expl
 #[allow(clippy::too_many_arguments)]
 fn bm25std_calc(idf: f64, f: f64, doc_len: u32, avg: f64, weight: f64, e: Option<&mut Expl>, term: &[u8]) -> f64 {
     let b: f32 = 0.75;
-    let ret = weight * idf * f * (K1 + 1.0) as f64 / (K1 as f64).mul_add((1.0f32 - b) as f64 + (b * doc_len as f32) as f64 / avg, f);
+    let ret = weight * idf * f * (K1 + 1.0) as f64 / (K1 as f64).mac((1.0f32 - b) as f64 + (b * doc_len as f32) as f64 / avg, f);
     set_at(
         e,
         format!(

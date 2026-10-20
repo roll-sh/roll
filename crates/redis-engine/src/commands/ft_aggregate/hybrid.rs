@@ -13,6 +13,7 @@
 //! merger check the clock (`_FT.DEBUG FT.HYBRID`'s TIMEOUT_AFTER_N_SEARCH, _VSIM and _TAIL time
 //! them out after that many results); the warnings name where it happened.
 
+use crate::fp::Mac;
 use super::*;
 use crate::search::areq::{AGG_LOAD_ALL, CursorConfig, F_IS_HYBRID_TAIL, F_IS_HYBRID_VECTOR, F_NO_SORT, HybridVec, Request};
 use crate::search::args::{AcErr, GE0, GE1};
@@ -1127,7 +1128,7 @@ impl<'a> Merger<'a> {
                 let mut s = 0.0f64;
                 for i in 0..2 {
                     if has[i] {
-                        s = w[i].mul_add(v[i], s);
+                        s = w[i].mac(v[i], s);
                     }
                 }
                 s

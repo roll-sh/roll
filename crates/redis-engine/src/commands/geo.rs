@@ -6,6 +6,7 @@
 //! where it does use `mul_add` here too, and the trigonometry goes through `libm` (a port of the
 //! reference's musl libm) rather than the platform's.
 
+use crate::fp::Mac;
 use super::zsets::{limits, refsort, store_result, zadd_generic, zfloat, zset_from_pairs, zset_ref};
 use super::*;
 use crate::cmd;
@@ -138,7 +139,8 @@ fn encode(lon_r: Range, lat_r: Range, lon: f64, lat: f64, step: u8) -> Option<Bi
     let mut long_offset = (lon - lon_r.min) / (lon_r.max - lon_r.min);
     lat_offset *= (1u64 << step) as f64;
     long_offset *= (1u64 << step) as f64;
-    Some(Bits { bits: interleave64(lat_offset as u32, long_offset as u32), step })
+    // C's implicit double → uint32_t conversion (out of range it differs by CPU).
+    Some(Bits { bits: interleave64(crate::fp::c_u32(lat_offset), crate::fp::c_u32(long_offset)), step })
 }
 
 fn encode_wgs84(lon: f64, lat: f64, step: u8) -> Option<Bits> {
@@ -156,7 +158,7 @@ fn decode(lon_r: Range, lat_r: Range, hash: Bits) -> Option<Area> {
     let ilato = sep as u32;
     let ilono = (sep >> 32) as u32;
     let d = (1u64 << hash.step) as f64;
-    let f = |min: f64, i: u32, scale: f64| (i as f64 * 1.0 / d).mul_add(scale, min);
+    let f = |min: f64, i: u32, scale: f64| (i as f64 * 1.0 / d).mac(scale, min);
     Some(Area {
         lat_min: f(lat_r.min, ilato, lat_scale),
         lat_max: f(lat_r.min, ilato.wrapping_add(1), lat_scale),
@@ -167,7 +169,8 @@ fn decode(lon_r: Range, lat_r: Range, hash: Bits) -> Option<Area> {
 
 /// `decodeGeohash`: a score to its cell's centre `[lon, lat]`.
 fn decode_score(score: f64) -> [f64; 2] {
-    let area = decode(LONG_RANGE, LAT_RANGE, Bits { bits: score as u64, step: STEP_MAX }).expect("step is non-zero");
+    // `(uint64_t)score` (a score that isn't a geohash converts the way the CPU does it).
+    let area = decode(LONG_RANGE, LAT_RANGE, Bits { bits: crate::fp::c_u64(score), step: STEP_MAX }).expect("step is non-zero");
     let x = ((area.lon_min + area.lon_max) / 2.0).clamp(LONG_MIN, LONG_MAX);
     let y = ((area.lat_min + area.lat_max) / 2.0).clamp(LAT_MIN, LAT_MAX);
     [x, y]
@@ -260,7 +263,7 @@ fn rad_deg(a: f64) -> f64 {
 /// `deg_rad(a) - deg_rad(b)` as the reference computes it: the first product is fused into the
 /// subtraction (so the difference of equal angles is the rounding error of `b * D_R`, not 0).
 fn rad_diff(a: f64, b: f64) -> f64 {
-    a.mul_add(D_R, -deg_rad(b))
+    a.mac(D_R, -deg_rad(b))
 }
 
 fn lat_distance(lat1d: f64, lat2d: f64) -> f64 {
@@ -270,14 +273,14 @@ fn lat_distance(lat1d: f64, lat2d: f64) -> f64 {
 /// Haversine (`geohashGetDistance`).
 fn distance(lon1d: f64, lat1d: f64, lon2d: f64, lat2d: f64) -> f64 {
     // `lon1r` is computed first and only feeds the subtraction, so it is the fused product.
-    let v = libm::sin((-lon1d).mul_add(D_R, deg_rad(lon2d)) / 2.0);
+    let v = libm::sin((-lon1d).mac(D_R, deg_rad(lon2d)) / 2.0);
     if v == 0.0 {
         return lat_distance(lat1d, lat2d);
     }
     let lat1r = deg_rad(lat1d);
     let lat2r = deg_rad(lat2d);
     let u = libm::sin((lat2r - lat1r) / 2.0);
-    let a = u.mul_add(u, libm::cos(lat1r) * libm::cos(lat2r) * v * v);
+    let a = u.mac(u, libm::cos(lat1r) * libm::cos(lat2r) * v * v);
     2.0 * EARTH_RADIUS_IN_METERS * libm::asin(a.sqrt())
 }
 
@@ -346,7 +349,7 @@ impl Shape {
         let [lon, lat] = self.xy;
         let radius_meters = match self.kind {
             Kind::Circle { radius } => radius,
-            Kind::Rect { width, height } => (width / 2.0).mul_add(width / 2.0, (height / 2.0) * (height / 2.0)).sqrt(),
+            Kind::Rect { width, height } => (width / 2.0).mac(width / 2.0, (height / 2.0) * (height / 2.0)).sqrt(),
         } * self.conversion;
         let mut steps = estimate_steps(radius_meters, lat);
         let mut hash = encode_wgs84(lon, lat, steps).unwrap_or_default();

@@ -51,6 +51,7 @@
 //! the `khash` table holding them, TOLIST's values in the order of its `dict`: the same layouts,
 //! so the orders vary between processes the way Redis' do.
 
+use crate::fp::Mac;
 use super::ft::verify_acl;
 use super::ft_query::{self as fq, K_FORCE_LOAD, K_HIDDEN, K_NUMERIC, K_SCHEMA_SRC, K_SV_SRC, LKey, Lookup, Row};
 use super::*;
@@ -2142,7 +2143,7 @@ impl Reducer {
                     } else {
                         let new_m = *m + (d - *m) / *n as f64;
                         // `S + (d - M) * (d - newM)`, contracted.
-                        let new_s = (d - *m).mul_add(d - new_m, *s);
+                        let new_s = (d - *m).mac(d - new_m, *s);
                         *m = new_m;
                         *s = new_s;
                     }
