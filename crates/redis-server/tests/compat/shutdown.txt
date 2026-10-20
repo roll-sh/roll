@@ -1,0 +1,18 @@
+# SHUTDOWN's argument checks, ABORT without a shutdown in progress, and where it is refused
+# (MULTI, scripts). A shutdown that succeeds would stop the reference, so that part is covered
+# by roll's own tests.
+SHUTDOWN ABORT
+SHUTDOWN NOPE
+SHUTDOWN SAVE NOSAVE
+SHUTDOWN NOSAVE SAVE NOW
+SHUTDOWN ABORT NOW
+SHUTDOWN NOW ABORT
+SHUTDOWN abort FORCE
+SHUTDOWN ABORT ABORT
+SHUTDOWN NOW NOW NOPE
+MULTI
+SHUTDOWN
+EXEC
+EVAL "return redis.call('shutdown')" 0
+EVAL "return redis.call('shutdown', 'abort')" 0
+PING

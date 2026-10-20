@@ -1,0 +1,445 @@
+# Lua scripting: EVAL / EVALSHA / *_RO, SCRIPT, reply conversion both ways, redis.* API,
+# errors, shebang flags, sandbox, libraries (cjson, cmsgpack, struct, bit), RESP3.
+
+# ---- basics ----
+EVAL "return 1" 0
+EVAL "return 'hello'" 0
+EVAL "return {1, 2, 3, 'x'}" 0
+EVAL "return {KEYS[1], KEYS[2], ARGV[1], ARGV[2]}" 2 a b c d
+EVAL "return #KEYS + #ARGV * 10" 1 k a1 a2 a3
+EVAL "return nil" 0
+EVAL "return true" 0
+EVAL "return false" 0
+EVAL "return 3.99" 0
+EVAL "return -3.99" 0
+EVAL "return 1e20" 0
+EVAL "return {1, 2, nil, 4}" 0
+EVAL "return {1, {2, {3, 'x'}}, 'y'}" 0
+EVAL "return {ok='FINE'}" 0
+EVAL "return {err='MYERR custom'}" 0
+!err EVAL "return {err='no code here'}" 0
+EVAL "return redis.status_reply('PONG')" 0
+EVAL "return redis.error_reply('WRONG thing')" 0
+EVAL "return redis.error_reply('plain')" 0
+EVAL "return redis.error_reply('-CODE with dash')" 0
+EVAL "return {double=3.5}" 0
+EVAL "return {}" 0
+EVAL "local t = {} t['a'] = 1 return t" 0
+EVAL "return 'a\0b'" 0
+EVAL "return tostring(12.0)" 0
+EVAL "return string.format('%d %s %5.2f', 7, 'x', 3.14159)" 0
+
+# ---- numkeys ----
+EVAL "return 1" 2 a
+EVAL "return 1" -1
+EVAL "return 1" abc
+EVAL "return 1"
+EVAL "return KEYS" 0 a b
+EVAL "return ARGV" 0 a b
+
+# ---- redis.call / pcall ----
+EVAL "return redis.call('SET', KEYS[1], ARGV[1])" 1 k1 v1
+EVAL "return redis.call('GET', KEYS[1])" 1 k1
+EVAL "return redis.call('GET', 'missing')" 0
+EVAL "return redis.call('INCR', 'n')" 0
+EVAL "return redis.call('INCRBY', 'n', 41)" 0
+EVAL "redis.call('RPUSH', 'l', 'a', 'b', 'c') return redis.call('LRANGE', 'l', 0, -1)" 0
+EVAL "return redis.call('HSET', 'h', 'f1', 'v1', 'f2', 'v2')" 0
+EVAL "return redis.call('HGETALL', 'h')" 0
+EVAL "return redis.call('PING')" 0
+EVAL "return redis.call('ping')" 0
+EVAL "return redis.call('TYPE', 'l')" 0
+EVAL "return type(redis.call('TYPE', 'l'))" 0
+EVAL "return redis.call('TYPE', 'l')['ok']" 0
+EVAL "return type(redis.call('GET', 'missing'))" 0
+EVAL "return redis.call('GET', 'missing') == false" 0
+EVAL "return redis.call('SET', 'k2', 3.5)" 0
+EVAL "return redis.call('GET', 'k2')" 0
+EVAL "return redis.call('SET', 'k3', 10)" 0
+EVAL "return redis.call('GET', 'k3')" 0
+EVAL "return redis.call('LPUSH', 'k1', 'x')" 0
+EVAL "return redis.pcall('LPUSH', 'k1', 'x')" 0
+EVAL "local r = redis.pcall('LPUSH', 'k1', 'x') return type(r)" 0
+EVAL "local r = redis.pcall('LPUSH', 'k1', 'x') return r['err']" 0
+EVAL "return redis.call('NOSUCHCMD')" 0
+EVAL "return redis.pcall('NOSUCHCMD')" 0
+EVAL "return redis.call('GET')" 0
+EVAL "return redis.pcall('GET', 'a', 'b')" 0
+EVAL "return redis.call()" 0
+EVAL "return redis.pcall()" 0
+EVAL "return redis.call({})" 0
+EVAL "return redis.call('GET', {})" 0
+EVAL "return redis.call('GET', nil)" 0
+EVAL "return redis.call('EVAL', 'return 1', 0)" 0
+EVAL "return redis.call('SCRIPT', 'LOAD', 'return 1')" 0
+EVAL "return redis.call('MULTI')" 0
+EVAL "return redis.call('SUBSCRIBE', 'c')" 0
+EVAL "return redis.call('BLPOP', 'nolist', 0)" 0
+EVAL "return redis.call('BLPOP', 'l', 0)" 0
+EVAL "return redis.call('CONFIG', 'GET', 'maxmemory')" 0
+EVAL "return redis.call('SELECT', 1)" 0
+EVAL "redis.call('SELECT', 1) redis.call('SET', 'indb1', 'x') return redis.call('GET', 'indb1')" 0
+GET indb1
+SELECT 1
+GET indb1
+DEL indb1
+SELECT 0
+EVAL "return redis.call('SET', 'k1', 'x', 'GET')" 0
+EVAL "local ok, err = pcall(redis.call, 'LPUSH', 'k1', 'x') return {tostring(ok), err}" 0
+EVAL "local ok, err = pcall(function() error('boom') end) return {tostring(ok), err}" 0
+EVAL "local ok, err = pcall(function() error({err='X y'}) end) return {tostring(ok), err}" 0
+EVAL "local ok, err = pcall(function() error({}) end) return {tostring(ok), type(err)}" 0
+EVAL "return pcall(error)" 0
+EVAL "return {pcall(function() return 1, 2 end)}" 0
+
+# ---- errors from scripts ----
+EVAL "error('boom')" 0
+EVAL "error('CUSTOM code first')" 0
+EVAL "error({err='CUSTOM table'})" 0
+EVAL "error({err='with\r\nnewlines'})" 0
+EVAL "error({})" 0
+EVAL "error()" 0
+EVAL "error(12)" 0
+EVAL "local t = nil return t.x" 0
+EVAL "return 1 +" 0
+EVAL "retun 1" 0
+EVAL "return redis.call('LPUSH', 'k1', 'x')" 0
+EVAL "redis.call('SET', 'k5', 'v') return redis.call('LPUSH', 'k5', 'x')" 0
+GET k5
+EVAL "return nosuchglobal" 0
+EVAL "nosuchglobal = 1" 0
+EVAL "x = 5 return x" 0
+EVAL "rawset(_G, 'x', 1)" 0
+EVAL "_G.x = 1" 0
+EVAL "redis.call = nil" 0
+EVAL "string.len = nil" 0
+EVAL "cjson.encode = nil" 0
+EVAL "local s = 'x' getmetatable(s).__index = {}" 0
+EVAL "setmetatable(_G, nil)" 0
+EVAL "return loadstring('return 1')()" 0
+EVAL "return loadfile" 0
+EVAL "return dofile" 0
+EVAL "return io" 0
+EVAL "return require" 0
+EVAL "return print" 0
+EVAL "return os.execute" 0
+EVAL "return type(os.clock())" 0
+EVAL "return os.time" 0
+EVAL "return debug.getinfo" 0
+EVAL "return type(newproxy)" 0
+EVAL "return setfenv" 0
+EVAL "return type(coroutine)" 0
+EVAL "return _VERSION" 0
+EVAL "local function f(n) return 1 + f(n + 1) end return f(1)" 0
+
+# ---- KEYS / ARGV are fresh each call ----
+EVAL "KEYS[1] = 'changed' return KEYS[1]" 1 orig
+EVAL "return KEYS[1]" 1 again
+EVAL "table.insert(ARGV, 'x') return #ARGV" 0 a
+EVAL "return #ARGV" 0 a
+
+# ---- locals and upvalues don't leak ----
+EVAL "local x = 1 return x" 0
+EVAL "return x" 0
+
+# ---- reply conversion: integers / floats / tables ----
+EVAL "return 0" 0
+EVAL "return -0" 0
+EVAL "return 2^53" 0
+EVAL "return 2^63" 0
+EVAL "return -2^63" 0
+EVAL "return 1/0" 0
+EVAL "return -1/0" 0
+EVAL "return 0/0" 0
+EVAL "return {1.5, 2.9, -0.5}" 0
+EVAL "return {true, false, 'x'}" 0
+EVAL "return {1, 2, 3, n=4}" 0
+EVAL "return {[1]=1, [2]=2, [4]=4}" 0
+EVAL "return {ok=1}" 0
+EVAL "return {err=1}" 0
+EVAL "return {ok='x', err='y'}" 0
+EVAL "return {err='E', ok='x'}" 0
+
+# ---- redis.call reply conversion (RESP2 into Lua) ----
+EVAL "return redis.call('ZADD', 'z', 1.5, 'a', 2, 'b')" 0
+EVAL "return redis.call('ZRANGE', 'z', 0, -1, 'WITHSCORES')" 0
+EVAL "return redis.call('ZSCORE', 'z', 'a')" 0
+EVAL "return type(redis.call('ZSCORE', 'z', 'a'))" 0
+EVAL "return redis.call('INCRBYFLOAT', 'fl', '1.5')" 0
+EVAL "return redis.call('EXISTS', 'z', 'nope')" 0
+EVAL "return redis.call('HGET', 'h', 'nope')" 0
+EVAL "return redis.call('HMGET', 'h', 'f1', 'nope', 'f2')" 0
+EVAL "local r = redis.call('HMGET', 'h', 'f1', 'nope', 'f2') return #r" 0
+EVAL "return redis.call('SMEMBERS', 'noset')" 0
+EVAL "return redis.call('XADD', 'st', '1-1', 'f', 'v')" 0
+EVAL "return redis.call('XRANGE', 'st', '-', '+')" 0
+EVAL "return redis.call('OBJECT', 'ENCODING', 'z')" 0
+EVAL "return redis.call('HELLO')" 0
+EVAL "return redis.call('DEBUG', 'SLEEP', 0)" 0
+EVAL "return redis.call('CLIENT', 'GETNAME')" 0
+
+# ---- RESP3 inside the script ----
+EVAL "redis.setresp(3) return redis.call('HGETALL', 'h')" 0
+EVAL "redis.setresp(3) local r = redis.call('HGETALL', 'h') return r['map']['f1']" 0
+EVAL "redis.setresp(3) return redis.call('SMEMBERS', 'noset')" 0
+EVAL "redis.setresp(3) local r = redis.call('ZSCORE', 'z', 'a') return r['double']" 0
+EVAL "redis.setresp(3) return redis.call('ZSCORE', 'z', 'a')" 0
+EVAL "redis.setresp(3) return redis.call('GET', 'missing')" 0
+EVAL "redis.setresp(3) return type(redis.call('GET', 'missing'))" 0
+EVAL "redis.setresp(3) return redis.call('EXISTS', 'z') == 1" 0
+EVAL "redis.setresp(2) return redis.call('GET', 'missing')" 0
+EVAL "redis.setresp(4)" 0
+EVAL "redis.setresp()" 0
+EVAL "redis.setresp('x')" 0
+EVAL "return {map={a=1}}" 0
+EVAL "return {set={a=true}}" 0
+EVAL "return {big_number='123456789012345678901234567890'}" 0
+EVAL "return {verbatim_string={format='txt', string='hello'}}" 0
+EVAL "return {double='abc'}" 0
+@resp 3
+EVAL "return {map={a=1}}" 0
+EVAL "return {set={a=true}}" 0
+EVAL "return {double=3.5}" 0
+EVAL "return {double=1/0}" 0
+EVAL "return {big_number='123456789012345678901234567890'}" 0
+EVAL "return {verbatim_string={format='txt', string='hello'}}" 0
+EVAL "return true" 0
+EVAL "return false" 0
+EVAL "return nil" 0
+EVAL "redis.setresp(3) return redis.call('HGETALL', 'h')" 0
+EVAL "redis.setresp(3) return redis.call('GET', 'missing')" 0
+EVAL "redis.setresp(3) return redis.call('EXISTS', 'z') == 1" 0
+EVAL "redis.setresp(3) return redis.call('ZSCORE', 'z', 'a')" 0
+EVAL "redis.setresp(3) return redis.call('HELLO')" 0
+EVAL "return redis.call('HGETALL', 'h')" 0
+@resp 2
+
+# ---- EVALSHA / SCRIPT ----
+SCRIPT LOAD "return 'loaded'"
+EVALSHA d4b0b0ff3b5bd9a3dd4cbab9e35cb6d6dde61c8f 0
+SCRIPT LOAD "return {KEYS[1], ARGV[1]}"
+EVALSHA 1b6a45ab7c40d7da1ce5e88af10b9aa4f2e6ed7e 1 k a
+EVALSHA 1B6A45AB7C40D7DA1CE5E88AF10B9AA4F2E6ED7E 1 k a
+EVALSHA ffffffffffffffffffffffffffffffffffffffff 0
+EVALSHA short 0
+EVALSHA "" 0
+SCRIPT EXISTS d4b0b0ff3b5bd9a3dd4cbab9e35cb6d6dde61c8f ffffffffffffffffffffffffffffffffffffffff D4B0B0FF3B5BD9A3DD4CBAB9E35CB6D6DDE61C8F
+EVAL "return 'via eval'" 0
+SCRIPT EXISTS 2c5c0ba49b7ad5dc9e0eff7ab9d8ab4e0b7d82ef
+SCRIPT LOAD "return 1 +"
+SCRIPT LOAD "#!lua flags=bogus\nreturn 1"
+SCRIPT LOAD
+SCRIPT EXISTS
+SCRIPT FLUSH
+SCRIPT EXISTS d4b0b0ff3b5bd9a3dd4cbab9e35cb6d6dde61c8f
+EVALSHA d4b0b0ff3b5bd9a3dd4cbab9e35cb6d6dde61c8f 0
+SCRIPT FLUSH ASYNC
+SCRIPT FLUSH SYNC
+SCRIPT FLUSH bogus
+SCRIPT FLUSH SYNC extra
+SCRIPT KILL
+SCRIPT KILL extra
+SCRIPT DEBUG NO
+SCRIPT DEBUG bogus
+SCRIPT HELP
+SCRIPT BOGUS
+SCRIPT
+
+# ---- EVAL_RO / EVALSHA_RO ----
+EVAL_RO "return redis.call('GET', 'k1')" 1 k1
+EVAL_RO "return redis.call('SET', 'k1', 'v')" 1 k1
+EVAL_RO "return redis.pcall('SET', 'k1', 'v')" 1 k1
+EVAL_RO "return redis.call('PUBLISH', 'ch', 'm')" 0
+EVAL "return redis.call('PUBLISH', 'ch', 'm')" 0
+SCRIPT LOAD "return redis.call('DEL', KEYS[1])"
+EVALSHA_RO 3d6b8e6d27c26e6f4c1ec9a8f61e4b1cd38ef82e 1 k1
+EVAL_RO "#!lua\nreturn 1" 0
+EVAL_RO "#!lua flags=no-writes\nreturn 1" 0
+EVAL_RO "return 1" 0
+
+# ---- shebang ----
+EVAL "#!lua\nreturn redis.call('SET', 'sb', 1)" 0
+EVAL "#!lua flags=no-writes\nreturn redis.call('SET', 'sb', 1)" 0
+EVAL "#!lua flags=no-writes\nreturn redis.call('GET', 'sb')" 0
+EVAL "#!lua flags=no-writes,allow-oom\nreturn 1" 0
+EVAL "#!lua flags=allow-stale,no-cluster,allow-cross-slot-keys\nreturn 1" 0
+EVAL "#!lua flags=\nreturn 1" 0
+EVAL "#!lua flags=bogus\nreturn 1" 0
+EVAL "#!lua flags=no-writes,bogus\nreturn 1" 0
+EVAL "#!lua flags=NO-WRITES\nreturn 1" 0
+EVAL "#!lua name=x\nreturn 1" 0
+EVAL "#!lua bogus\nreturn 1" 0
+EVAL "#!python\nreturn 1" 0
+EVAL "#!\nreturn 1" 0
+EVAL "#!lua" 0
+EVAL "#!lua \nreturn 1" 0
+EVAL "#!lua\nerror('line two')" 0
+EVAL "#!lua\n\nerror('line three')" 0
+EVAL "\nerror('line two no shebang')" 0
+EVAL "#!lua\nreturn KEYS[1]" 1 key
+EVAL "#!lua flags=no-writes\nreturn redis.call('PUBLISH', 'c', 'm')" 0
+EVAL "#!lua flags=no-writes\nreturn redis.call('EXPIRE', 'sb', 100)" 0
+
+# ---- set_repl / replicate_commands / misc API ----
+EVAL "return redis.replicate_commands()" 0
+EVAL "redis.set_repl(redis.REPL_ALL) return redis.call('SET', 'r1', 1)" 0
+EVAL "redis.set_repl(redis.REPL_NONE) return redis.call('SET', 'r2', 1)" 0
+EVAL "redis.set_repl(99)" 0
+EVAL "redis.set_repl()" 0
+EVAL "return {redis.REPL_NONE, redis.REPL_AOF, redis.REPL_SLAVE, redis.REPL_REPLICA, redis.REPL_ALL}" 0
+EVAL "return {redis.LOG_DEBUG, redis.LOG_VERBOSE, redis.LOG_NOTICE, redis.LOG_WARNING}" 0
+EVAL "redis.log(redis.LOG_WARNING, 'hello', 'from', 'lua') return 1" 0
+EVAL "redis.log(99, 'x')" 0
+EVAL "redis.log(redis.LOG_WARNING)" 0
+EVAL "redis.log()" 0
+EVAL "redis.log('x', 'y')" 0
+EVAL "return redis.sha1hex('')" 0
+EVAL "return redis.sha1hex('hello')" 0
+EVAL "return redis.sha1hex(123)" 0
+EVAL "return redis.sha1hex()" 0
+EVAL "return redis.sha1hex('a', 'b')" 0
+EVAL "return redis.error_reply()" 0
+EVAL "return redis.status_reply()" 0
+EVAL "return redis.error_reply(1)" 0
+EVAL "return redis.breakpoint()" 0
+EVAL "return redis.debug('x')" 0
+!type EVAL "return redis.REDIS_VERSION" 0
+EVAL "return type(redis.REDIS_VERSION_NUM)" 0
+EVAL "return redis.acl_check_cmd('GET', 'x')" 0
+EVAL "return redis.acl_check_cmd('NOSUCH')" 0
+EVAL "return redis.acl_check_cmd()" 0
+EVAL "return redis.acl_check_cmd('GET')" 0
+EVAL "return redis.register_function" 0
+EVAL "return redis.setresp" 0
+EVAL "return type(redis.setresp)" 0
+
+# ---- math.random is deterministic (one process-wide PRNG, so seed first) ----
+EVAL "math.randomseed(0) return {math.random(), math.random(10), math.random(5, 9)}" 0
+EVAL "return {math.random(), math.random(10), math.random(5, 9)}" 0
+EVAL "math.randomseed(42) return {math.random(100), math.random(100), math.random(100)}" 0
+EVAL "math.randomseed(42) return math.random(100)" 0
+EVAL "return math.random(0)" 0
+EVAL "return math.random(5, 1)" 0
+EVAL "return math.random(1, 2, 3)" 0
+EVAL "return tostring(math.random())" 0
+
+# ---- libraries ----
+EVAL "return cjson.encode({1, 2, 3})" 0
+EVAL "return cjson.encode({a=1})" 0
+EVAL "return cjson.encode({})" 0
+EVAL "return cjson.encode('str')" 0
+EVAL "return cjson.encode(1.5)" 0
+EVAL "return cjson.encode({1, 'two', {three=3}, true, false})" 0
+EVAL "return cjson.encode(cjson.null)" 0
+EVAL "return cjson.decode('[1,2,3]')" 0
+EVAL "return cjson.decode('{\"a\":[1,2,{\"b\":\"c\"}]}')['a'][3]['b']" 0
+EVAL "return cjson.decode('{\"a\":1}')['a']" 0
+EVAL "return cjson.decode('nope')" 0
+EVAL "return type(cjson.decode('null'))" 0
+EVAL "return cjson.encode(cjson.decode('[]'))" 0
+EVAL "return cjson.encode(cjson.decode_array_with_array_mt('[]'))" 0
+EVAL "return cjson.encode(cjson.decode_array_with_array_mt('{\"a\":[]}'))" 0
+EVAL "return cjson.encode(cjson.decode('{\"a\":[]}'))" 0
+EVAL "return cjson.encode({[1]=1, [3]=3})" 0
+EVAL "local t = {} t[1000] = 1 return cjson.encode(t)" 0
+EVAL "local t = {} t.self = t return cjson.encode(t)" 0
+EVAL "return cjson.encode({1e300, -1e-300, 0.1})" 0
+EVAL "return cjson.encode('\"quoted\" \\ /slash\n')" 0
+EVAL "return cjson.decode('\"\\u00e9\\u4e2d\"')" 0
+EVAL "return cmsgpack.pack({1, 2, 3})" 0
+EVAL "return cmsgpack.unpack(cmsgpack.pack({1, 'two', {3}}))" 0
+EVAL "return {cmsgpack.unpack(cmsgpack.pack(1, 2, 3))}" 0
+EVAL "return cmsgpack.pack('x', 1.5, true, -1, 300, 70000, 2^40)" 0
+EVAL "return cmsgpack.unpack(cmsgpack.pack({a=1}))['a']" 0
+EVAL "return cmsgpack.unpack('\193')" 0
+EVAL "return struct.pack('>I2', 258)" 0
+EVAL "return {struct.unpack('>I2 B', '\1\2\3')}" 0
+EVAL "return struct.size('>I4 h d')" 0
+EVAL "return struct.pack('bad')" 0
+EVAL "return bit.tohex(65535)" 0
+EVAL "return bit.band(0xff, 0x0f)" 0
+EVAL "return bit.bor(1, 2, 4)" 0
+EVAL "return bit.bxor(5, 3)" 0
+EVAL "return bit.lshift(1, 10)" 0
+EVAL "return bit.rshift(-1, 28)" 0
+EVAL "return bit.arshift(-256, 4)" 0
+EVAL "return bit.tobit(2^32 + 1)" 0
+EVAL "return bit.bnot(0)" 0
+EVAL "return string.rep('ab', 3)" 0
+EVAL "return string.upper('abc') .. string.sub('hello', 2, 3)" 0
+EVAL "return {string.find('hello world', 'o w')}" 0
+EVAL "return string.gsub('hello', 'l', 'L')" 0
+EVAL "return {string.byte('ABC', 1, 3)}" 0
+EVAL "return string.char(72, 105)" 0
+EVAL "return table.concat({1, 2, 3}, ',')" 0
+EVAL "local t = {3, 1, 2} table.sort(t) return t" 0
+EVAL "return math.floor(3.7) + math.ceil(1.2) + math.abs(-2) + math.max(1, 9, 3)" 0
+EVAL "return tostring(math.pi)" 0
+EVAL "return tostring(math.huge)" 0
+EVAL "return math.fmod(7, 3)" 0
+EVAL "return tonumber('0x10') + tonumber('  12  ') + tonumber('1e2')" 0
+EVAL "return tonumber('z', 36)" 0
+EVAL "return tostring(nil) .. tostring(true) .. tostring(1.5)" 0
+EVAL "return select('#', 1, 2, 3)" 0
+EVAL "return {unpack({1, 2, 3})}" 0
+EVAL "return {next({})}" 0
+EVAL "return type(gcinfo())" 0
+EVAL "return type(collectgarbage('count'))" 0
+EVAL "local co = coroutine.create(function(a) local b = coroutine.yield(a + 1) return b * 2 end) local _, x = coroutine.resume(co, 1) local _, y = coroutine.resume(co, 10) return {x, y}" 0
+
+# ---- table iteration order matches Redis ----
+EVAL "local t = {} for _, k in ipairs({'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'}) do t[k] = 1 end local out = {} for k in pairs(t) do table.insert(out, k) end return out" 0
+EVAL "return cjson.encode({alpha=1, beta=2, gamma=3, delta=4, epsilon=5})" 0
+EVAL "redis.setresp(3) return redis.call('HGETALL', 'h')" 0
+@resp 3
+EVAL "return {map={zeta=1, alpha=2, mid=3, other=4}}" 0
+EVAL "return {set={zeta=true, alpha=true, mid=true}}" 0
+@resp 2
+
+# ---- inner command errors and stats ----
+CONFIG RESETSTAT
+EVAL "return redis.pcall('LPUSH', 'k1', 'x')" 0
+EVAL "return redis.call('LPUSH', 'k1', 'x')" 0
+EVAL "return redis.pcall('NOSUCHCMD')" 0
+!mask cmdstat_eval,cmdstat_lpush INFO errorstats
+
+# ---- writes inside scripts are atomic and visible ----
+DEL counter
+EVAL "for i = 1, 100 do redis.call('INCR', KEYS[1]) end return redis.call('GET', KEYS[1])" 1 counter
+EVAL "redis.call('DEL', 'big') for i = 1, 1000 do redis.call('RPUSH', 'big', i) end return redis.call('LLEN', 'big')" 0
+EVAL "return redis.call('LRANGE', 'big', 0, 4)" 0
+EVAL "local n = 0 for _, v in ipairs(redis.call('LRANGE', 'big', 0, -1)) do n = n + tonumber(v) end return n" 0
+
+# ---- inside MULTI ----
+MULTI
+EVAL "return redis.call('INCR', 'mx')" 0
+EVAL "return redis.call('INCR', 'mx')" 0
+EVAL_RO "return redis.call('GET', 'mx')" 0
+EXEC
+MULTI
+EVAL "return 1 +" 0
+EXEC
+
+# ---- caller's db and client ----
+SELECT 2
+EVAL "return redis.call('SET', 'db2key', 'v')" 0
+GET db2key
+EVAL "redis.call('SELECT', 0) return redis.call('GET', 'db2key')" 0
+GET db2key
+SELECT 0
+CLIENT SETNAME caller
+EVAL "return redis.call('CLIENT', 'GETNAME')" 0
+
+# ---- big replies and args ----
+EVAL "return string.rep('x', 10000)" 0
+EVAL "local t = {} for i = 1, 1000 do t[i] = i end return t" 0
+EVAL "return #ARGV" 0 {200*a }
+EVAL "return redis.call('SET', 'longv', ARGV[1])" 0 {5000*v}
+STRLEN longv
+
+# ---- wrong types for EVAL itself ----
+EVAL
+EVAL "return 1"
+EVALSHA
+EVAL_RO
+EVALSHA_RO x

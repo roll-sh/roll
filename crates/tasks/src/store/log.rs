@@ -1611,7 +1611,16 @@ mod tests {
         for i in 0..40 {
             put(&a, "q", &format!("k{i}"), i).await;
         }
-        eventually(|| log.stats().snapshots >= 2 && log.stats().pruned > 0).await;
+        // The committer prunes as the log moves on (snapshot uploads that land after the last
+        // write wait for the next one): keep writing until it has.
+        for i in 40.. {
+            if log.stats().snapshots >= 2 && log.stats().pruned > 0 {
+                break;
+            }
+            assert!(i < 400, "never pruned");
+            put(&a, "q", &format!("k{i}"), i).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         let in_main: Vec<_> = main.list(Some(&ObjPath::from("t/wal"))).try_collect().await.unwrap();
         assert!(in_main.is_empty(), "commits went to the main bucket");
         let snaps: Vec<_> = main.list(Some(&ObjPath::from("t/snap/a"))).try_collect().await.unwrap();

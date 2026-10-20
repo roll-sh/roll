@@ -1,0 +1,83 @@
+# HOTKEYS: argument errors, the session lifecycle and the network-bytes ranking (CPU time and
+# clocks differ between runs, so they are masked).
+
+HOTKEYS STOP
+HOTKEYS RESET
+HOTKEYS
+HOTKEYS HELP
+HOTKEYS NOPE
+HOTKEYS GET
+HOTKEYS STOP
+HOTKEYS RESET
+HOTKEYS GET extra
+HOTKEYS START
+HOTKEYS START METRICS
+HOTKEYS START COUNT 1 CPU
+HOTKEYS START METRICS 0 CPU
+HOTKEYS START METRICS 3 CPU NET
+HOTKEYS START METRICS x CPU
+HOTKEYS START METRICS 2 CPU
+HOTKEYS START METRICS 1 FOO
+HOTKEYS START METRICS 2 CPU CPU
+HOTKEYS START METRICS 2 NET NET
+HOTKEYS START METRICS 1 NET COUNT 0
+HOTKEYS START METRICS 1 NET COUNT 65
+HOTKEYS START METRICS 1 NET COUNT x
+HOTKEYS START METRICS 1 NET DURATION 0
+HOTKEYS START METRICS 1 NET SAMPLE 0
+HOTKEYS START METRICS 1 NET SLOTS 1 0
+HOTKEYS START METRICS 1 NET COUNT
+HOTKEYS START METRICS 1 NET BOGUS 1
+HOTKEYS START METRICS 2 FOO NET
+
+# ---- network bytes ----
+HOTKEYS START METRICS 1 NET COUNT 3
+HOTKEYS START METRICS 1 NET
+HOTKEYS RESET
+SET a 1
+SET bb 22
+GET a
+GET a
+MSET a 1 c 333
+MGET a bb c missing
+APPEND bb xyzxyzxyz
+LPUSH list x y z
+LRANGE list 0 -1
+PING
+!mask all-commands-all-slots-us,collection-start-time-unix-ms,collection-duration-ms HOTKEYS GET
+HOTKEYS STOP
+HOTKEYS STOP
+GET a
+!mask all-commands-all-slots-us,collection-start-time-unix-ms,collection-duration-ms HOTKEYS GET
+HOTKEYS RESET
+HOTKEYS GET
+
+# ---- inside MULTI each queued command is charged EXEC's bytes and the reply so far ----
+HOTKEYS START METRICS 1 NET
+MULTI
+SET k1 v1
+GET k1
+INCR n
+GET k1
+EXEC
+EVAL "return redis.call('GET', KEYS[1])" 1 k1
+!mask all-commands-all-slots-us,collection-start-time-unix-ms,collection-duration-ms HOTKEYS GET
+HOTKEYS STOP
+HOTKEYS RESET
+
+# ---- both metrics, CPU masked ----
+HOTKEYS START METRICS 2 NET CPU COUNT 2 SAMPLE 1
+SET x 1
+GET x
+!mask all-commands-all-slots-us,collection-start-time-unix-ms,collection-duration-ms,total-cpu-time-user-ms,total-cpu-time-sys-ms,by-cpu-time-us HOTKEYS GET
+!type HOTKEYS GET
+HOTKEYS STOP
+HOTKEYS RESET
+
+# ---- DURATION stops the session on its own ----
+HOTKEYS START METRICS 1 CPU DURATION 1
+@sleep 1300
+!mask all-commands-all-slots-us,collection-start-time-unix-ms,collection-duration-ms,total-cpu-time-user-ms,total-cpu-time-sys-ms,by-cpu-time-us HOTKEYS GET
+HOTKEYS STOP
+HOTKEYS RESET
+INFO hotkeys

@@ -5,6 +5,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
+mod redis;
 mod queues;
 
 /// roll — serverless infrastructure.
@@ -35,6 +36,9 @@ enum Cmd {
     /// Serverless Postgres.
     #[command(subcommand, alias = "pg")]
     Db(Db),
+    /// Serverless Redis.
+    #[command(subcommand, alias = "kv")]
+    Redis(redis::Redis),
     /// Messages, queues, schedules and workflows.
     #[command(subcommand)]
     Tasks(Box<tasks::Cmd>),
@@ -276,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
     let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
+        Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
         Cmd::Stream(cmd) => {
             if let Some(out) = stream::run(&api, cli.json, cmd).await? {
                 println!("{}", serde_json::to_string_pretty(&out)?);

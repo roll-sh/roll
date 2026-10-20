@@ -239,10 +239,17 @@ async fn compact_and_delete_together() {
     let mut configs = COMPACT.to_vec();
     configs[0] = ("cleanup.policy", "compact,delete");
     configs.push(("retention.bytes", "4096"));
-    create(&mut c, "both", &configs).await;
+    // Compaction waits until the writes are in: passes between slow writes (fsync) would keep the
+    // log under retention.bytes, and nothing would ever be deleted.
+    let mut held = configs.clone();
+    held.push(("min.compaction.lag.ms", "3600000"));
+    create(&mut c, "both", &held).await;
     let written = write_rounds(&mut c, "both", 60).await;
     let log = || tb.broker.find_stream("test").unwrap().topic("both").unwrap().partition(0).unwrap().loaded().unwrap();
-    eventually("retention and compaction", || log().log_start() > 0 && log().cleaned_to() > log().log_start()).await;
+    eventually("retention", || log().log_start() > 0).await;
+    let topic = tb.broker.find_stream("test").unwrap().topic("both").unwrap();
+    tb.broker.set_topic_configs(&topic, configs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), false).unwrap();
+    eventually("compaction", || log().cleaned_to() > log().log_start()).await;
     let read = read_all(&mut c, "both", log().log_start()).await;
     assert_eq!(latest(&read), latest(&written), "recent values all survive");
 }

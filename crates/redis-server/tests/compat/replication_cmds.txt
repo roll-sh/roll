@@ -1,0 +1,86 @@
+# Replication commands from an ordinary client: REPLCONF options and errors, SYNC/PSYNC
+# arguments, REPLICAOF validation, ROLE. The protocol itself (against real Redis replicas and
+# primaries) is tests/redis_repl.rs.
+
+REPLCONF
+REPLCONF listening-port
+REPLCONF listening-port 6380
+REPLCONF listening-port x
+REPLCONF listening-port 6380 capa eof capa psync2
+REPLCONF capa nosuch
+REPLCONF ip-address 10.0.0.1
+REPLCONF ip-address aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+REPLCONF nope 1
+REPLCONF rdb-only 1
+REPLCONF rdb-only 0
+REPLCONF rdb-only 2
+REPLCONF rdb-only x
+REPLCONF rdb-channel 1
+REPLCONF rdb-channel 3
+REPLCONF rdb-no-compress 1
+REPLCONF rdb-no-checksum 0
+REPLCONF rdb-filter-only functions
+REPLCONF rdb-filter-only ""
+REPLCONF rdb-filter-only "functions keys"
+REPLCONF rdb-filter-only "\"unbalanced"
+REPLCONF main-ch-client-id 12345
+REPLCONF main-ch-client-id x
+REPLCONF compression 1
+REPLCONF compression x
+REPLCONF listening-port 1 nope 2
+# ACK and GETACK never reply: a PING after them shows nothing was sent.
+!send REPLCONF ACK 100
+!send REPLCONF GETACK *
+!send REPLCONF listening-port 1 ack 5
+PING
+
+SYNC x
+PSYNC
+PSYNC a
+PSYNC ? x
+PSYNC ? -1 failover
+
+REPLICAOF
+REPLICAOF a
+REPLICAOF a b c
+REPLICAOF localhost x
+REPLICAOF localhost -1
+REPLICAOF localhost 65536
+REPLICAOF no one
+REPLICAOF NO ONE
+SLAVEOF no one
+SLAVEOF localhost x
+
+MULTI
+REPLCONF listening-port 1
+REPLICAOF NO ONE
+EXEC
+MULTI
+SYNC
+DISCARD
+MULTI
+PSYNC ? -1
+DISCARD
+
+!type ROLE
+EVAL "local r = redis.call('ROLE') return {r[1], type(r[2]), #r[3]}" 0
+EVAL "return redis.call('replconf', 'listening-port', '1')" 0
+EVAL "return redis.call('replicaof', 'no', 'one')" 0
+EVAL "return redis.call('sync')" 0
+!info role,connected_slaves,master_failover_state,master_replid2,second_repl_offset INFO replication
+
+# FAILOVER without replicas (the handover itself is in tests/redis_repl.rs).
+FAILOVER
+FAILOVER ABORT
+FAILOVER TIMEOUT 0
+FAILOVER TIMEOUT -1
+FAILOVER TIMEOUT x
+FAILOVER TO h
+FAILOVER TO h x
+FAILOVER TO h 1 TO h 2
+FAILOVER FORCE FORCE
+FAILOVER FORCE
+FAILOVER TIMEOUT 10 FORCE
+FAILOVER nosuch
+FAILOVER ABORT extra
+!type ROLE

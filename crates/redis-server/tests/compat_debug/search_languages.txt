@@ -1,0 +1,406 @@
+# Every language's stemmer (libstemmer's and the Tagalog one RediSearch adds) on documents and
+# in the query expander, with double-metaphone phonetics.
+FLUSHALL
+FT.CREATE l0 ON HASH PREFIX 1 l0: LANGUAGE arabic SCHEMA t TEXT PHONETIC dm:en
+HSET l0:1 t "المكتبات الكاتبون يكتبون والمدرسة"
+_FT.DEBUG DUMP_TERMS l0
+FT.EXPLAIN l0 "المكتبات"
+FT.EXPLAIN l0 "الكاتبون"
+FT.EXPLAIN l0 "يكتبون"
+FT.EXPLAIN l0 "والمدرسة"
+FT.SEARCH l0 "الكاتبون" NOCONTENT
+FT.CREATE l1 ON HASH PREFIX 1 l1: LANGUAGE armenian SCHEMA t TEXT PHONETIC dm:en
+HSET l1:1 t "գրքերը գրողները ուսանողներ"
+_FT.DEBUG DUMP_TERMS l1
+FT.EXPLAIN l1 "գրքերը"
+FT.EXPLAIN l1 "գրողները"
+FT.EXPLAIN l1 "ուսանողներ"
+FT.SEARCH l1 "գրողները" NOCONTENT
+FT.CREATE l2 ON HASH PREFIX 1 l2: LANGUAGE basque SCHEMA t TEXT PHONETIC dm:en
+HSET l2:1 t "etxeak mendiak liburuak idazleak"
+_FT.DEBUG DUMP_TERMS l2
+FT.EXPLAIN l2 "etxeak"
+FT.EXPLAIN l2 "mendiak"
+FT.EXPLAIN l2 "liburuak"
+FT.EXPLAIN l2 "idazleak"
+FT.SEARCH l2 "mendiak" NOCONTENT
+FT.CREATE l3 ON HASH PREFIX 1 l3: LANGUAGE catalan SCHEMA t TEXT PHONETIC dm:en
+HSET l3:1 t "les cases dels escriptors cantaven"
+_FT.DEBUG DUMP_TERMS l3
+FT.EXPLAIN l3 "les"
+FT.EXPLAIN l3 "cases"
+FT.EXPLAIN l3 "dels"
+FT.EXPLAIN l3 "escriptors"
+FT.SEARCH l3 "cases" NOCONTENT
+FT.CREATE l4 ON HASH PREFIX 1 l4: LANGUAGE danish SCHEMA t TEXT PHONETIC dm:en
+HSET l4:1 t "husene bøgerne forfatterne løbende"
+_FT.DEBUG DUMP_TERMS l4
+FT.EXPLAIN l4 "husene"
+FT.EXPLAIN l4 "bøgerne"
+FT.EXPLAIN l4 "forfatterne"
+FT.EXPLAIN l4 "løbende"
+FT.SEARCH l4 "bøgerne" NOCONTENT
+FT.CREATE l5 ON HASH PREFIX 1 l5: LANGUAGE dutch SCHEMA t TEXT PHONETIC dm:en
+HSET l5:1 t "de huizen boeken schrijvers lopende"
+_FT.DEBUG DUMP_TERMS l5
+FT.EXPLAIN l5 "de"
+FT.EXPLAIN l5 "huizen"
+FT.EXPLAIN l5 "boeken"
+FT.EXPLAIN l5 "schrijvers"
+FT.SEARCH l5 "huizen" NOCONTENT
+FT.CREATE l6 ON HASH PREFIX 1 l6: LANGUAGE english SCHEMA t TEXT PHONETIC dm:en
+HSET l6:1 t "running runners houses generously the cats"
+_FT.DEBUG DUMP_TERMS l6
+FT.EXPLAIN l6 "running"
+FT.EXPLAIN l6 "runners"
+FT.EXPLAIN l6 "houses"
+FT.EXPLAIN l6 "generously"
+FT.SEARCH l6 "runners" NOCONTENT
+FT.CREATE l7 ON HASH PREFIX 1 l7: LANGUAGE finnish SCHEMA t TEXT PHONETIC dm:en
+HSET l7:1 t "talot kirjat kirjoittajat juoksemassa"
+_FT.DEBUG DUMP_TERMS l7
+FT.EXPLAIN l7 "talot"
+FT.EXPLAIN l7 "kirjat"
+FT.EXPLAIN l7 "kirjoittajat"
+FT.EXPLAIN l7 "juoksemassa"
+FT.SEARCH l7 "kirjat" NOCONTENT
+FT.CREATE l8 ON HASH PREFIX 1 l8: LANGUAGE french SCHEMA t TEXT PHONETIC dm:en
+HSET l8:1 t "les maisons écrivains couraient généreusement"
+_FT.DEBUG DUMP_TERMS l8
+FT.EXPLAIN l8 "les"
+FT.EXPLAIN l8 "maisons"
+FT.EXPLAIN l8 "écrivains"
+FT.EXPLAIN l8 "couraient"
+FT.SEARCH l8 "maisons" NOCONTENT
+FT.CREATE l9 ON HASH PREFIX 1 l9: LANGUAGE german SCHEMA t TEXT PHONETIC dm:en
+HSET l9:1 t "die Häuser Bücher Schriftsteller laufenden"
+_FT.DEBUG DUMP_TERMS l9
+FT.EXPLAIN l9 "die"
+FT.EXPLAIN l9 "Häuser"
+FT.EXPLAIN l9 "Bücher"
+FT.EXPLAIN l9 "Schriftsteller"
+FT.SEARCH l9 "Häuser" NOCONTENT
+FT.CREATE l10 ON HASH PREFIX 1 l10: LANGUAGE greek SCHEMA t TEXT PHONETIC dm:en
+HSET l10:1 t "τα σπίτια βιβλία συγγραφείς τρέχοντας"
+_FT.DEBUG DUMP_TERMS l10
+FT.EXPLAIN l10 "τα"
+FT.EXPLAIN l10 "σπίτια"
+FT.EXPLAIN l10 "βιβλία"
+FT.EXPLAIN l10 "συγγραφείς"
+FT.SEARCH l10 "σπίτια" NOCONTENT
+FT.CREATE l11 ON HASH PREFIX 1 l11: LANGUAGE hindi SCHEMA t TEXT PHONETIC dm:en
+HSET l11:1 t "किताबें लेखकों घरों दौड़ते"
+_FT.DEBUG DUMP_TERMS l11
+FT.EXPLAIN l11 "किताबें"
+FT.EXPLAIN l11 "लेखकों"
+FT.EXPLAIN l11 "घरों"
+FT.EXPLAIN l11 "दौड़ते"
+FT.SEARCH l11 "लेखकों" NOCONTENT
+FT.CREATE l12 ON HASH PREFIX 1 l12: LANGUAGE hungarian SCHEMA t TEXT PHONETIC dm:en
+HSET l12:1 t "házak könyvek írók futottak"
+_FT.DEBUG DUMP_TERMS l12
+FT.EXPLAIN l12 "házak"
+FT.EXPLAIN l12 "könyvek"
+FT.EXPLAIN l12 "írók"
+FT.EXPLAIN l12 "futottak"
+FT.SEARCH l12 "könyvek" NOCONTENT
+FT.CREATE l13 ON HASH PREFIX 1 l13: LANGUAGE indonesian SCHEMA t TEXT PHONETIC dm:en
+HSET l13:1 t "rumah-rumah buku penulis berlarian"
+_FT.DEBUG DUMP_TERMS l13
+FT.EXPLAIN l13 "rumah-rumah"
+FT.EXPLAIN l13 "buku"
+FT.EXPLAIN l13 "penulis"
+FT.EXPLAIN l13 "berlarian"
+FT.SEARCH l13 "buku" NOCONTENT
+FT.CREATE l14 ON HASH PREFIX 1 l14: LANGUAGE irish SCHEMA t TEXT PHONETIC dm:en
+HSET l14:1 t "na tithe leabhair scríbhneoirí ag rith"
+_FT.DEBUG DUMP_TERMS l14
+FT.EXPLAIN l14 "na"
+FT.EXPLAIN l14 "tithe"
+FT.EXPLAIN l14 "leabhair"
+FT.EXPLAIN l14 "scríbhneoirí"
+FT.SEARCH l14 "tithe" NOCONTENT
+FT.CREATE l15 ON HASH PREFIX 1 l15: LANGUAGE italian SCHEMA t TEXT PHONETIC dm:en
+HSET l15:1 t "le case libri scrittori correvano"
+_FT.DEBUG DUMP_TERMS l15
+FT.EXPLAIN l15 "le"
+FT.EXPLAIN l15 "case"
+FT.EXPLAIN l15 "libri"
+FT.EXPLAIN l15 "scrittori"
+FT.SEARCH l15 "case" NOCONTENT
+FT.CREATE l16 ON HASH PREFIX 1 l16: LANGUAGE lithuanian SCHEMA t TEXT PHONETIC dm:en
+HSET l16:1 t "namai knygos rašytojai bėgantys"
+_FT.DEBUG DUMP_TERMS l16
+FT.EXPLAIN l16 "namai"
+FT.EXPLAIN l16 "knygos"
+FT.EXPLAIN l16 "rašytojai"
+FT.EXPLAIN l16 "bėgantys"
+FT.SEARCH l16 "knygos" NOCONTENT
+FT.CREATE l17 ON HASH PREFIX 1 l17: LANGUAGE malay SCHEMA t TEXT PHONETIC dm:en
+HSET l17:1 t "rumah buku penulis berlari-lari"
+_FT.DEBUG DUMP_TERMS l17
+FT.EXPLAIN l17 "rumah"
+FT.EXPLAIN l17 "buku"
+FT.EXPLAIN l17 "penulis"
+FT.EXPLAIN l17 "berlari-lari"
+FT.SEARCH l17 "buku" NOCONTENT
+FT.CREATE l18 ON HASH PREFIX 1 l18: LANGUAGE nepali SCHEMA t TEXT PHONETIC dm:en
+HSET l18:1 t "किताबहरू लेखकहरू घरहरू"
+_FT.DEBUG DUMP_TERMS l18
+FT.EXPLAIN l18 "किताबहरू"
+FT.EXPLAIN l18 "लेखकहरू"
+FT.EXPLAIN l18 "घरहरू"
+FT.SEARCH l18 "लेखकहरू" NOCONTENT
+FT.CREATE l19 ON HASH PREFIX 1 l19: LANGUAGE norwegian SCHEMA t TEXT PHONETIC dm:en
+HSET l19:1 t "husene bøkene forfatterne løpende"
+_FT.DEBUG DUMP_TERMS l19
+FT.EXPLAIN l19 "husene"
+FT.EXPLAIN l19 "bøkene"
+FT.EXPLAIN l19 "forfatterne"
+FT.EXPLAIN l19 "løpende"
+FT.SEARCH l19 "bøkene" NOCONTENT
+FT.CREATE l20 ON HASH PREFIX 1 l20: LANGUAGE portuguese SCHEMA t TEXT PHONETIC dm:en
+HSET l20:1 t "as casas livros escritores correndo"
+_FT.DEBUG DUMP_TERMS l20
+FT.EXPLAIN l20 "as"
+FT.EXPLAIN l20 "casas"
+FT.EXPLAIN l20 "livros"
+FT.EXPLAIN l20 "escritores"
+FT.SEARCH l20 "casas" NOCONTENT
+FT.CREATE l21 ON HASH PREFIX 1 l21: LANGUAGE romanian SCHEMA t TEXT PHONETIC dm:en
+HSET l21:1 t "casele cărțile scriitorii alergând"
+_FT.DEBUG DUMP_TERMS l21
+FT.EXPLAIN l21 "casele"
+FT.EXPLAIN l21 "cărțile"
+FT.EXPLAIN l21 "scriitorii"
+FT.EXPLAIN l21 "alergând"
+FT.SEARCH l21 "cărțile" NOCONTENT
+FT.CREATE l22 ON HASH PREFIX 1 l22: LANGUAGE russian SCHEMA t TEXT PHONETIC dm:en
+HSET l22:1 t "дома книги писатели бегущие"
+_FT.DEBUG DUMP_TERMS l22
+FT.EXPLAIN l22 "дома"
+FT.EXPLAIN l22 "книги"
+FT.EXPLAIN l22 "писатели"
+FT.EXPLAIN l22 "бегущие"
+FT.SEARCH l22 "книги" NOCONTENT
+FT.CREATE l23 ON HASH PREFIX 1 l23: LANGUAGE serbian SCHEMA t TEXT PHONETIC dm:en
+HSET l23:1 t "куће књиге писци трчање kuće knjige"
+_FT.DEBUG DUMP_TERMS l23
+FT.EXPLAIN l23 "куће"
+FT.EXPLAIN l23 "књиге"
+FT.EXPLAIN l23 "писци"
+FT.EXPLAIN l23 "трчање"
+FT.SEARCH l23 "књиге" NOCONTENT
+FT.CREATE l24 ON HASH PREFIX 1 l24: LANGUAGE spanish SCHEMA t TEXT PHONETIC dm:en
+HSET l24:1 t "las casas libros escritores corriendo"
+_FT.DEBUG DUMP_TERMS l24
+FT.EXPLAIN l24 "las"
+FT.EXPLAIN l24 "casas"
+FT.EXPLAIN l24 "libros"
+FT.EXPLAIN l24 "escritores"
+FT.SEARCH l24 "casas" NOCONTENT
+FT.CREATE l25 ON HASH PREFIX 1 l25: LANGUAGE swedish SCHEMA t TEXT PHONETIC dm:en
+HSET l25:1 t "husen böckerna författarna springande"
+_FT.DEBUG DUMP_TERMS l25
+FT.EXPLAIN l25 "husen"
+FT.EXPLAIN l25 "böckerna"
+FT.EXPLAIN l25 "författarna"
+FT.EXPLAIN l25 "springande"
+FT.SEARCH l25 "böckerna" NOCONTENT
+FT.CREATE l26 ON HASH PREFIX 1 l26: LANGUAGE tagalog SCHEMA t TEXT PHONETIC dm:en
+HSET l26:1 t "mga bahay libro manunulat tumatakbo"
+_FT.DEBUG DUMP_TERMS l26
+FT.EXPLAIN l26 "mga"
+FT.EXPLAIN l26 "bahay"
+FT.EXPLAIN l26 "libro"
+FT.EXPLAIN l26 "manunulat"
+FT.SEARCH l26 "bahay" NOCONTENT
+FT.CREATE l27 ON HASH PREFIX 1 l27: LANGUAGE tamil SCHEMA t TEXT PHONETIC dm:en
+HSET l27:1 t "வீடுகள் புத்தகங்கள் எழுத்தாளர்கள்"
+_FT.DEBUG DUMP_TERMS l27
+FT.EXPLAIN l27 "வீடுகள்"
+FT.EXPLAIN l27 "புத்தகங்கள்"
+FT.EXPLAIN l27 "எழுத்தாளர்கள்"
+FT.SEARCH l27 "புத்தகங்கள்" NOCONTENT
+FT.CREATE l28 ON HASH PREFIX 1 l28: LANGUAGE turkish SCHEMA t TEXT PHONETIC dm:en
+HSET l28:1 t "evler kitaplar yazarlar koşuyor"
+_FT.DEBUG DUMP_TERMS l28
+FT.EXPLAIN l28 "evler"
+FT.EXPLAIN l28 "kitaplar"
+FT.EXPLAIN l28 "yazarlar"
+FT.EXPLAIN l28 "koşuyor"
+FT.SEARCH l28 "kitaplar" NOCONTENT
+FT.CREATE l29 ON HASH PREFIX 1 l29: LANGUAGE yiddish SCHEMA t TEXT PHONETIC dm:en
+HSET l29:1 t "די הייזער ביכער שרייבער"
+_FT.DEBUG DUMP_TERMS l29
+FT.EXPLAIN l29 "די"
+FT.EXPLAIN l29 "הייזער"
+FT.EXPLAIN l29 "ביכער"
+FT.EXPLAIN l29 "שרייבער"
+FT.SEARCH l29 "הייזער" NOCONTENT
+FLUSHALL
+# Tagalog: prefixes, infixes, reduplication, suffixes and the final normalizations.
+FLUSHALL
+FT.CREATE tl ON HASH PREFIX 1 t: LANGUAGE tagalog SCHEMA t TEXT
+HSET t:0 t "aaral araw-araw asian awiawitng babasahin baybayin bilhin binabasa bumigay bumuhbuhatg dadalanin dalhin gagawin guro hanapin ibigay iinom ilagay ipaasoan ipagcellphone"
+HSET t:20 t "ipaghinihilaan ipagkapehin ipagpunohan ipahumahawakon ipalapitnan ipasasagot ipasinarang ipinagasasong isinulat itanong kailangan kakain kaniyang kanyang karapatan kinakain kitag kumain kunin lalakad"
+HSET t:40 t "lumangoyan maaklat mabumulaklakin mag-aral magdadami magdinitaon magpahinga magpaisdahan magpasumabonhin magsusulatin maihanapan maiiibong maitutulogin makapagawawit makapagbibigayg makapagsasabonhan makipagarawin makipagbinilisin makipagbuhat makipagpasokan"
+HSET t:60 t "makipagtubtubignan makipagzizipperhin manggagawa mangingisda mangupo mansumulatg mapafiesta mapagasuasukalng mapaglinaroon mapagpuno mapaguruin mapaplantsanin maplplantsain maquezon marurunong mavivideonan maydyaryong mayhilanin mayininomng maytumalinong"
+HSET t:80 t "nadadagat nagasasukal nagbibilishin naghahawak nagkakainan nakahuhugashin nakapagpintoon nakapagsagotan nakapagwalis nakapagzumippernan nakapupunasin nakikipagbilishin nakikipaggabi nakikipaglakasnan nakikipaglaro nakipagbabaithin nakipagdalaan nakipaggumandahan nakokompyuterhan nambulaklakan"
+HSET t:100 t "namdaigdig namisdisdag nangasinhin nangcecellphonenan nangdinydyaryohin nangkumakapenan napakabahay napakagandaon napakakita napakatinatapong napakaulaulamon napakaululaman-napakaululaman natayoon nisapatosan niño paalishan paawithin padadagatg pagcellphune pagpapabaitng"
+HSET t:120 t "pagpapadiditas pagrelonin pagsulat pagsumasapatos pagtinalinoin pakikiamoynin pakikibalikng pakikibumigbigaynin pakikikumuhkuhanan pakikilakasng pakikipagbasaan pakikipagkapean pakikipagkapwa panbilis pandaldalanan pangalialis pangangahinawhawak pangangalakad pangangavidvideug pangbumubundok"
+HSET t:140 t "panghinahawaknin pangkinuhaun panglakad pangtumataponnin panlaro panpusahan pansayawan paño pinagkalayohin pinaglangoyhan pinagpinpintoin pinaiibon pinakaalishan pinakamadamithin pinakamaganda pinakamakainnin pinakamakakainnin pinakamalalangoyin pinakamalinanlangoy-pinakamalinanlangoy pinakamamemesang"
+HSET t:160 t "pinakatumayuhin pinamesa relu sabihin singhinahayopnan singkakapeng singulam sinusulat sulatan sumulat tagakinitain tagakuha tagapagjeepg tagapagluto tagapagsinayawhin tagapinapasok tagapunonan tagatakbo tagatumatawanin taglalakadhan"
+HSET t:180 t "tagpipinto tagtinginng tatakbo tatapon tigacinellphonean tigadamit tigafifiesta tigakompyuterg tigalumabasan tigatanongin tinalinu tingnan ttawa tumatakbo umaawit ñino"
+_FT.DEBUG DUMP_TERMS tl
+FT.EXPLAIN tl "aaral"
+FT.EXPLAIN tl "araw-araw"
+FT.EXPLAIN tl "asian"
+FT.EXPLAIN tl "awiawitng"
+FT.EXPLAIN tl "babasahin"
+FT.EXPLAIN tl "baybayin"
+FT.EXPLAIN tl "bilhin"
+FT.EXPLAIN tl "binabasa"
+FT.EXPLAIN tl "bumigay"
+FT.EXPLAIN tl "bumuhbuhatg"
+FT.EXPLAIN tl "dadalanin"
+FT.EXPLAIN tl "dalhin"
+FT.EXPLAIN tl "gagawin"
+FT.EXPLAIN tl "guro"
+FT.EXPLAIN tl "hanapin"
+FT.EXPLAIN tl "ibigay"
+FT.EXPLAIN tl "iinom"
+FT.EXPLAIN tl "ilagay"
+FT.EXPLAIN tl "ipaasoan"
+FT.EXPLAIN tl "ipagcellphone"
+FT.EXPLAIN tl "ipaghinihilaan"
+FT.EXPLAIN tl "ipagkapehin"
+FT.EXPLAIN tl "ipagpunohan"
+FT.EXPLAIN tl "ipahumahawakon"
+FT.EXPLAIN tl "ipalapitnan"
+FT.EXPLAIN tl "ipasasagot"
+FT.EXPLAIN tl "ipasinarang"
+FT.EXPLAIN tl "ipinagasasong"
+FT.EXPLAIN tl "isinulat"
+FT.EXPLAIN tl "itanong"
+FT.EXPLAIN tl "kailangan"
+FT.EXPLAIN tl "kakain"
+FT.EXPLAIN tl "kaniyang"
+FT.EXPLAIN tl "kanyang"
+FT.EXPLAIN tl "karapatan"
+FT.EXPLAIN tl "kinakain"
+FT.EXPLAIN tl "kitag"
+FT.EXPLAIN tl "kumain"
+FT.EXPLAIN tl "kunin"
+FT.EXPLAIN tl "lalakad"
+FT.EXPLAIN tl "lumangoyan"
+FT.EXPLAIN tl "maaklat"
+FT.EXPLAIN tl "mabumulaklakin"
+FT.EXPLAIN tl "mag-aral"
+FT.EXPLAIN tl "magdadami"
+FT.EXPLAIN tl "magdinitaon"
+FT.EXPLAIN tl "magpahinga"
+FT.EXPLAIN tl "magpaisdahan"
+FT.EXPLAIN tl "magpasumabonhin"
+FT.EXPLAIN tl "magsusulatin"
+FT.EXPLAIN tl "maihanapan"
+FT.EXPLAIN tl "maiiibong"
+FT.EXPLAIN tl "maitutulogin"
+FT.EXPLAIN tl "makapagawawit"
+FT.EXPLAIN tl "makapagbibigayg"
+FT.EXPLAIN tl "makapagsasabonhan"
+FT.EXPLAIN tl "makipagarawin"
+FT.EXPLAIN tl "makipagbinilisin"
+FT.EXPLAIN tl "makipagbuhat"
+FT.EXPLAIN tl "makipagpasokan"
+FT.EXPLAIN tl "makipagtubtubignan"
+FT.EXPLAIN tl "makipagzizipperhin"
+FT.EXPLAIN tl "manggagawa"
+FT.EXPLAIN tl "mangingisda"
+FT.EXPLAIN tl "mangupo"
+FT.EXPLAIN tl "mansumulatg"
+FT.EXPLAIN tl "mapafiesta"
+FT.EXPLAIN tl "mapagasuasukalng"
+FT.EXPLAIN tl "mapaglinaroon"
+FT.EXPLAIN tl "mapagpuno"
+FT.EXPLAIN tl "mapaguruin"
+FT.EXPLAIN tl "mapaplantsanin"
+FT.EXPLAIN tl "maplplantsain"
+FT.EXPLAIN tl "maquezon"
+FT.EXPLAIN tl "marurunong"
+FT.EXPLAIN tl "mavivideonan"
+FT.EXPLAIN tl "maydyaryong"
+FT.EXPLAIN tl "mayhilanin"
+FT.EXPLAIN tl "mayininomng"
+FT.EXPLAIN tl "maytumalinong"
+FT.EXPLAIN tl "nadadagat"
+FT.EXPLAIN tl "nagasasukal"
+FT.EXPLAIN tl "nagbibilishin"
+FT.EXPLAIN tl "naghahawak"
+FT.EXPLAIN tl "nagkakainan"
+FT.EXPLAIN tl "nakahuhugashin"
+FT.EXPLAIN tl "nakapagpintoon"
+FT.EXPLAIN tl "nakapagsagotan"
+FT.EXPLAIN tl "nakapagwalis"
+FT.EXPLAIN tl "nakapagzumippernan"
+FT.EXPLAIN tl "nakapupunasin"
+FT.EXPLAIN tl "nakikipagbilishin"
+FT.EXPLAIN tl "nakikipaggabi"
+FT.EXPLAIN tl "nakikipaglakasnan"
+FT.EXPLAIN tl "nakikipaglaro"
+FT.EXPLAIN tl "nakipagbabaithin"
+FT.EXPLAIN tl "nakipagdalaan"
+FT.EXPLAIN tl "nakipaggumandahan"
+FT.EXPLAIN tl "nakokompyuterhan"
+FT.EXPLAIN tl "nambulaklakan"
+FT.EXPLAIN tl "namdaigdig"
+FT.EXPLAIN tl "namisdisdag"
+FT.EXPLAIN tl "nangasinhin"
+FT.EXPLAIN tl "nangcecellphonenan"
+FT.EXPLAIN tl "nangdinydyaryohin"
+FT.EXPLAIN tl "nangkumakapenan"
+FT.EXPLAIN tl "napakabahay"
+FT.EXPLAIN tl "napakagandaon"
+FT.EXPLAIN tl "napakakita"
+FT.EXPLAIN tl "napakatinatapong"
+FT.EXPLAIN tl "napakaulaulamon"
+FT.EXPLAIN tl "napakaululaman-napakaululaman"
+FT.EXPLAIN tl "natayoon"
+FT.EXPLAIN tl "nisapatosan"
+FT.EXPLAIN tl "niño"
+FT.EXPLAIN tl "paalishan"
+FT.EXPLAIN tl "paawithin"
+FT.EXPLAIN tl "padadagatg"
+FT.EXPLAIN tl "pagcellphune"
+FT.EXPLAIN tl "pagpapabaitng"
+FT.EXPLAIN tl "pagpapadiditas"
+FT.EXPLAIN tl "pagrelonin"
+FT.EXPLAIN tl "pagsulat"
+FT.EXPLAIN tl "pagsumasapatos"
+FT.EXPLAIN tl "pagtinalinoin"
+FT.EXPLAIN tl "pakikiamoynin"
+FT.EXPLAIN tl "pakikibalikng"
+FT.EXPLAIN tl "pakikibumigbigaynin"
+FT.EXPLAIN tl "pakikikumuhkuhanan"
+FT.EXPLAIN tl "pakikilakasng"
+FT.EXPLAIN tl "pakikipagbasaan"
+FT.EXPLAIN tl "pakikipagkapean"
+FT.EXPLAIN tl "pakikipagkapwa"
+FT.EXPLAIN tl "panbilis"
+FT.EXPLAIN tl "pandaldalanan"
+FT.EXPLAIN tl "pangalialis"
+FT.EXPLAIN tl "pangangahinawhawak"
+FT.EXPLAIN tl "pangangalakad"
+FT.EXPLAIN tl "pangangavidvideug"
+FT.EXPLAIN tl "pangbumubundok"
+FT.EXPLAIN tl "panghinahawaknin"
+FT.EXPLAIN tl "pangkinuhaun"
+FT.EXPLAIN tl "panglakad"
+FT.EXPLAIN tl "pangtumataponnin"
+FT.EXPLAIN tl "panlaro"
+FT.EXPLAIN tl "panpusahan"
+FT.EXPLAIN tl "pansayawan"
+FT.EXPLAIN tl "paño"
+FT.EXPLAIN tl "pinagkalayohin"
+FT.EXPLAIN tl "pinaglangoyhan"
+FLUSHALL

@@ -1,0 +1,69 @@
+# Search execution regressions from differential fuzzing.
+
+# RETURN naming the SORTBY field alongside others (the overridden lookup key kept its place).
+FLUSHALL
+FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t1 TEXT SORTABLE n NUMERIC
+HSET d:1 t1 "b word" n 5
+HSET d:2 t1 "a word" n 7
+FT.SEARCH i word SORTBY t1 ASC RETURN 2 n t1
+FT.SEARCH i word SORTBY t1 DESC RETURN 3 n t1 n
+FT.SEARCH i word SORTBY n ASC RETURN 2 t1 n
+FT.AGGREGATE i word LOAD 2 @n @t1 SORTBY 2 @t1 ASC
+FT.DROPINDEX i
+
+# The sorter raises the scorers' minimum score to the score of the lowest-ranked result in its
+# full heap, even when sorting by a field: results scoring below it score 0.
+FLUSHALL
+FT.CREATE i ON HASH PREFIX 1 d: STOPWORDS 1 the SCHEMA t1 TEXT t2 TEXT n NUMERIC SORTABLE tg TAG
+HSET d:0 t1 "held" t2 "dogs ran run wood" n 26.98 tg "a,b"
+HSET d:1 t1 "help wood dogs word" t2 "help" n 22.23 tg "dark blue,red"
+HSET d:2 t1 "word dogs" t2 "a" n 1.52 tg "blue"
+HSET d:3 t1 "yellow yellow runner naïve" n 16.15 tg "dark blue,blue"
+HSET d:4 n -2.93 tg "Red"
+HSET d:5 t1 "über" t2 "dog app hello help" n 0.08 tg "a,b,red"
+HSET d:6 t1 "cats naïve hello yellow hello" n -1 tg "Red,blue"
+HSET d:7 t1 "held apply" t2 "hell a help ran" n 3.22 tg "x,green"
+HSET d:8 t1 "über x1" t2 "world runner running" n 10.06
+HSET d:9 t1 "wood hello naïve x1" t2 "naïve hello yellow" n 14 tg "blue"
+HSET d:10 t1 "naïve the help dogs" n 9
+HSET d:11 t1 "runner runner apple hello 2fast" n 10 tg "Red,red"
+HSET d:12 t1 "x1" n -2 tg "blue"
+HSET d:13 t1 "hello word" t2 "word runner runner naïve" n 26.99 tg "a,b"
+HSET d:14 t1 "ran über" n 8.67
+HSET d:15 t1 "hell a x1 naïve x1" t2 "x1" n 14.46 tg "x"
+FT.SEARCH i "the naï*" NOCONTENT WITHSCORES SCORER TFIDF.DOCNORM SORTBY n ASC LIMIT 1 3 RETURN 2 n t1 VERBATIM INORDER DIALECT 2
+FT.SEARCH i "naï*" NOCONTENT WITHSCORES SCORER TFIDF.DOCNORM SORTBY n ASC LIMIT 0 3
+FT.SEARCH i "naï* | x1" NOCONTENT WITHSCORES SCORER TFIDF SORTBY n DESC LIMIT 0 2
+FT.SEARCH i "naï* | x1" NOCONTENT WITHSCORES SCORER BM25 SORTBY n ASC LIMIT 0 2
+FT.SEARCH i "naï* | x1" NOCONTENT WITHSCORES SCORER BM25 SORTBY n ASC LIMIT 0 2 EXPLAINSCORE
+FT.DROPINDEX i
+FLUSHALL
+
+# The optimizer's document count is the doc table's size, which counts from 1: with stale ids
+# in the wildcard (updates, a delete) a first pass short of the limit reads again.
+FLUSHALL
+FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t TEXT n NUMERIC SORTABLE
+HSET d:0 t "x1 apply running dogs fast" n 15.9
+HSET d:1 t "apply" n 26
+HSET d:2 t "runner running faster dogs world" n 24.99
+HSET d:3 t "held hello running naïve runner"
+HSET d:4 t "cat help" n 24.56
+HSET d:5 t "cats faster dogs" n 22
+HSET d:6 t "word fast über über runner"
+HSET d:7 t "fast x1 fast naïve hell cat" n 12.56
+HSET d:8 t "fastest dog dogs" n 28
+HSET d:9 t "apple" n -0.23
+HSET d:10 t "dog app help wood x1" n 13
+HSET d:11 t "cat x1 fast" n 14
+HSET d:12 t "über hell running über apple" n 9.95
+HSET d:14 t "naïve über yellow fast running" n 16
+HSET d:16 t "held" n -5
+HSET d:17 t "yellow held world naïve dog dogs" n 11.85
+HSET d:16 t "hello apply apple held" n 18.51
+HSET d:16 t "world naïve x1 cat über yellow" n 8
+HSET d:6 t "cats x1 fast apply running fastest" n 19.91
+DEL d:3
+FT.SEARCH i "*" SORTBY n DESC NOCONTENT DIALECT 4
+FT.SEARCH i "*" SORTBY n DESC NOCONTENT
+FT.DROPINDEX i
+FLUSHALL

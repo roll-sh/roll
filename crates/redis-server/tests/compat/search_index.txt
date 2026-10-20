@@ -1,0 +1,273 @@
+# Search indexes: FT.CREATE (through _FT.CREATE), FT._CREATEIFNX, FT._LIST, FT.INFO with its memory
+# accounting, FT.DROPINDEX/FT.DROP and their IF[N]X twins, and the keyspace events that keep the
+# documents indexed (hashes from any database, deletes, renames, TTLs, flushes).
+
+FLUSHALL
+CONFIG RESETSTAT
+
+# ---- FT.CREATE errors ----
+FT.CREATE
+FT.CREATE idx
+FT.CREATE idx SCHEMA
+FT.CREATE idx SCHEMA t
+FT.CREATE idx SCHEMA t BOGUS
+FT.CREATE idx ON HASH SCHEMA t TEXT WITHSUFFIXTRIE INDEXEMPTY BOGUS
+FT.CREATE idx ON SET SCHEMA t TEXT
+FT.CREATE idx PREFIX x SCHEMA t TEXT
+FT.CREATE idx BOGUS SCHEMA t TEXT
+SELECT 1
+FT.CREATE idx SCHEMA t TEXT
+FT._CREATEIFNX idx SCHEMA t TEXT
+SELECT 0
+!sort FT._LIST
+!sort FT._LIST WITHCLUSTERSTATE
+FT._LIST x
+FT._LIST x y
+FT.INFO nosuch
+FT.INFO
+FT.DROPINDEX nosuch
+FT.DROPINDEX
+FT.DROP
+FT._DROPIFX
+FT._DROPINDEXIFX nosuch
+FT._DROPIFX nosuch
+FT._DROPINDEXIFX nosuch a b
+
+# ---- an empty index of every field type ----
+FT.CREATE every ON HASH PREFIX 2 e: f: FILTER "@n>1" LANGUAGE german LANGUAGE_FIELD lang SCORE 0.5 SCORE_FIELD sc PAYLOAD_FIELD pl NOOFFSETS NOFREQS MAXTEXTFIELDS STOPWORDS 2 foo bar INDEXALL ENABLE SCHEMA t AS tt TEXT WEIGHT 2 NOSTEM PHONETIC dm:en WITHSUFFIXTRIE INDEXEMPTY INDEXMISSING SORTABLE UNF n NUMERIC SORTABLE NOINDEX tg TAG SEPARATOR "|" WITHSUFFIXTRIE g GEO INDEXMISSING v VECTOR HNSW 6 TYPE FLOAT32 DIM 4 DISTANCE_METRIC COSINE fl VECTOR FLAT 6 TYPE FLOAT64 DIM 2 DISTANCE_METRIC IP s VECTOR SVS-VAMANA 6 TYPE FLOAT32 DIM 4 DISTANCE_METRIC L2 gs GEOSHAPE FLAT
+FT.CREATE every SCHEMA t TEXT
+FT._CREATEIFNX every SCHEMA t TEXT
+!mask total_indexing_time FT.INFO every
+FT.INFO every
+FT.CREATE plain SCHEMA t TEXT NOSTEM
+!sort FT._LIST
+!mask total_indexing_time FT.INFO plain
+FT.CREATE nofields NOFIELDS NOHL SCORE 0 LANGUAGE english SCHEMA t TEXT tg TAG CASESENSITIVE SORTABLE
+!mask total_indexing_time FT.INFO nofields
+FT.DROPINDEX every
+FT.DROPINDEX plain
+FT.DROPINDEX nofields extra
+FT.DROPINDEX nofields
+!sort FT._LIST
+
+# ---- indexing hashes ----
+FT.CREATE idx ON HASH PREFIX 1 doc: SCHEMA t TEXT SORTABLE n NUMERIC tg TAG SEPARATOR ; CASESENSITIVE g GEO
+HSET doc:1 t "hello world running" n 5 tg "a;B" g "1.5,2.5"
+HSET doc:2 t "foo bar" n 7
+HSET other:1 t "not indexed"
+!mask total_indexing_time FT.INFO idx
+# Failures: the document is dropped and the error recorded on the index and the field.
+HSET doc:3 t "x" n abc
+HSET doc:4 g "500,10"
+HSET doc:5 g "abc"
+HSET doc:6 g "12"
+!mask total_indexing_time FT.INFO idx
+# An update replaces the document (new id).
+HSET doc:1 t "hello again"
+HSET doc:2 n 8 tg "x;y;x"
+!mask total_indexing_time FT.INFO idx
+# Fields the schema doesn't know don't reindex.
+HSET doc:2 other v
+HINCRBY doc:2 n 1
+HINCRBYFLOAT doc:2 n 0.5
+HSETNX doc:2 t "ignored"
+HSETNX doc:2 newfield v
+HDEL doc:2 nosuch
+HDEL doc:2 tg
+!mask total_indexing_time FT.INFO idx
+# Deletes, renames, TTLs.
+DEL doc:1
+RENAME doc:2 doc:22
+RENAME doc:22 other:22
+RENAME other:22 doc:2
+EXPIRE doc:2 1000
+PERSIST doc:2
+COPY doc:2 doc:7
+COPY doc:2 other:8
+SET doc:7 overwritten
+!mask total_indexing_time FT.INFO idx
+# Events from other databases index the key from there.
+SELECT 1
+HSET doc:9 t "in db one"
+DEL doc:9
+HSET doc:10 t "stays"
+MOVE doc:10 0
+SELECT 0
+!mask total_indexing_time FT.INFO idx
+HDEL doc:2 t n
+DEL doc:2
+!mask total_indexing_time FT.INFO idx
+
+# ---- FILTER rules: the fields are read by name (or path), unknown properties by their own name ----
+FLUSHALL
+FT.CREATE fi ON HASH PREFIX 1 f: FILTER "@n>1 && @extra!='no'" SCHEMA num AS n NUMERIC t TEXT
+HSET f:1 num 0 t a
+HSET f:2 num 5 t b
+HSET f:3 num 5 t c extra no
+HSET f:4 t d
+!mask total_indexing_time FT.INFO fi
+HSET f:2 num 0
+HSET f:3 extra yes
+!mask total_indexing_time FT.INFO fi
+FT.CREATE fk ON HASH FILTER "startswith(@__key, 'k:a')" SCHEMA t TEXT
+HSET k:a1 t x
+HSET k:b1 t y
+HSET k:a2 __key k:b t z
+!mask total_indexing_time FT.INFO fk
+RENAME k:a1 k:b2
+RENAME k:b1 k:a3
+!mask total_indexing_time FT.INFO fk
+FT.CREATE fe ON HASH PREFIX 1 e: FILTER "exists(@t)" SCHEMA t TEXT
+HSET e:1 t a
+HSET e:2 u a
+!mask total_indexing_time FT.INFO fe
+
+# ---- created over existing data ----
+FLUSHALL
+HSET p:1 title "the quick brown fox" price 10 tags "red,blue"
+HSET q:1 title "elsewhere"
+SET p:2 "a string"
+FT.CREATE prod ON HASH PREFIX 1 p: SCHEMA title TEXT WEIGHT 3 price NUMERIC SORTABLE tags TAG
+!mask total_indexing_time FT.INFO prod
+FT.CREATE prod2 ON HASH SCHEMA title TEXT
+!mask total_indexing_time FT.INFO prod2
+!sort FT._LIST
+
+# ---- dropping ----
+FT.DROPINDEX prod DD
+EXISTS p:1 p:2 q:1
+!sort FT._LIST
+FT.DROPINDEX prod2 KEEPDOCS
+FT.DROP prod2 dd
+FT.DROP prod2 KEEPDOCS
+EXISTS q:1
+FT.CREATE prod ON HASH PREFIX 1 q: SCHEMA title TEXT
+FT.DROP prod
+EXISTS q:1
+HSET r:1 t a
+FT.CREATE r ON HASH PREFIX 1 r: SCHEMA t TEXT
+FT._DROPIFX r KEEPDOCS
+EXISTS r:1
+FT.CREATE r ON HASH PREFIX 1 r: SCHEMA t TEXT
+FT._DROPINDEXIFX r DD
+EXISTS r:1
+FT.CREATE r ON HASH PREFIX 1 r: SCHEMA t TEXT
+FT._DROPINDEXIFX r _FORCEKEEPDOCS
+!sort FT._LIST
+
+# ---- many indexes (the registry's order depends on the reference's whole history: sorted) ----
+FT.CREATE ord1 ON HASH PREFIX 1 ord1: SCHEMA t TEXT
+FT.CREATE ord2 ON HASH PREFIX 1 ord2: SCHEMA t TEXT
+FT.CREATE ord3 ON HASH PREFIX 1 ord3: SCHEMA t TEXT
+FT.CREATE ord4 ON HASH PREFIX 1 ord4: SCHEMA t TEXT
+!sort FT._LIST
+FT.CREATE ord5 ON HASH PREFIX 1 ord5: SCHEMA t TEXT
+!sort FT._LIST
+FT.CREATE ord6 ON HASH PREFIX 1 ord6: SCHEMA t TEXT
+!sort FT._LIST
+FT.CREATE ord7 ON HASH PREFIX 1 ord7: SCHEMA t TEXT
+FT.CREATE ord8 ON HASH PREFIX 1 ord8: SCHEMA t TEXT
+FT.CREATE ord9 ON HASH PREFIX 1 ord9: SCHEMA t TEXT
+!sort FT._LIST
+FT.CREATE ord10 ON HASH PREFIX 1 ord10: SCHEMA t TEXT
+FT.CREATE ord11 ON HASH PREFIX 1 ord11: SCHEMA t TEXT
+FT.CREATE ord12 ON HASH PREFIX 1 ord12: SCHEMA t TEXT
+FT.CREATE ord13 ON HASH PREFIX 1 ord13: SCHEMA t TEXT
+!sort FT._LIST
+FT.DROPINDEX ord2
+FT.DROPINDEX ord7
+FT.DROPINDEX ord11
+!sort FT._LIST
+!sort FT._LIST WITHCLUSTERSTATE
+FT.DROPINDEX ord1
+FT.DROPINDEX ord3
+FT.DROPINDEX ord4
+FT.DROPINDEX ord5
+FT.DROPINDEX ord6
+FT.DROPINDEX ord8
+FT.DROPINDEX ord9
+FT.DROPINDEX ord10
+FT.DROPINDEX ord12
+FT.DROPINDEX ord13
+!sort FT._LIST
+
+# ---- flushes drop every index ----
+FT.CREATE a SCHEMA t TEXT
+FT.CREATE b SCHEMA t TEXT
+SELECT 1
+FLUSHDB
+SELECT 0
+!sort FT._LIST
+FT.CREATE a SCHEMA t TEXT
+FLUSHALL
+!sort FT._LIST
+
+# ---- the handler's lookups in db 0 (getDocTypeFromString): keymiss and the hit/miss stats ----
+FLUSHALL
+CONFIG RESETSTAT
+CONFIG SET notify-keyspace-events KEgm$
+@conn 4
+PSUBSCRIBE __key*@*__:*
+@conn 1
+SET a 1
+SELECT 1
+SET b 1
+DEL b
+HSET h f v
+EXPIRE h 100
+PERSIST h
+SELECT 0
+DEL a
+EXPIRE nosuch 10
+PEXPIRE c 1
+SET c 1 PX 1
+@sleep 20
+EXISTS c
+!info keyspace_hits,keyspace_misses,expired_keys INFO stats
+@conn 4
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+
+# ---- RESP3 ----
+@resp 3
+FT.CREATE r3 ON HASH PREFIX 1 r3: SCORE 0.25 STOPWORDS 0 SCHEMA t TEXT WEIGHT 1.5 n NUMERIC SORTABLE tg TAG CASESENSITIVE v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2
+HSET r3:1 t hello n 1 tg X
+HSET r3:2 n nope
+!mask total_indexing_time FT.INFO r3
+!sort FT._LIST
+!sort FT._LIST WITHCLUSTERSTATE
+FLUSHALL
+
+# ---- statistics ----
+!info errorstat* INFO errorstats

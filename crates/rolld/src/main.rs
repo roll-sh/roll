@@ -17,7 +17,7 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 mod queues;
 
-/// roll daemon: serverless Postgres, Kafka-compatible streams, tasks and RabbitMQ-compatible queues on
+/// roll daemon: serverless Postgres, serverless Redis, Kafka-compatible streams, tasks and RabbitMQ-compatible queues on
 /// your machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
@@ -57,6 +57,24 @@ struct Args {
     /// Evict suspended branches to object storage after this many seconds.
     #[arg(long, env = "ROLL_EVICT_AFTER", default_value_t = 86_400)]
     evict_after: i64,
+    /// Redis (RESP) listen address.
+    #[arg(long, env = "ROLL_REDIS", default_value = "127.0.0.1:56380")]
+    redis: SocketAddr,
+    /// Redis REST API (Upstash-compatible) listen address.
+    #[arg(long, env = "ROLL_REDIS_HTTP", default_value = "127.0.0.1:58080")]
+    redis_http: SocketAddr,
+    /// TLS certificate chain and key (PEM) for Redis: clients connect with `rediss://`, and the
+    /// TLS server name can select the database.
+    #[arg(long, env = "ROLL_REDIS_TLS_CERT", requires = "redis_tls_key")]
+    redis_tls_cert: Option<PathBuf>,
+    #[arg(long, env = "ROLL_REDIS_TLS_KEY", requires = "redis_tls_cert")]
+    redis_tls_key: Option<PathBuf>,
+    /// Expect PROXY protocol headers on the Redis port (behind an AWS NLB or HAProxy).
+    #[arg(long, env = "ROLL_REDIS_PROXY_PROTOCOL")]
+    redis_proxy_protocol: bool,
+    /// This node's name in object storage (unique per host).
+    #[arg(long, env = "ROLL_NODE", default_value = "local")]
+    node: String,
     /// Kafka listener for streams.
     #[arg(long, env = "ROLL_KAFKA", default_value = "127.0.0.1:9092")]
     kafka: SocketAddr,
@@ -112,7 +130,7 @@ async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info".into()),
+                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info".into()),
         )
         .init();
     let args = Args::parse();
@@ -152,7 +170,7 @@ async fn run() -> anyhow::Result<()> {
     stream_config.evict_on_unload = !args.stream_keep_local;
 
     let mut config = Config::local(home);
-    config.public_host = args.public_host;
+    config.public_host = args.public_host.clone();
     config.public_port = args.proxy.port();
     config.mem_mb_per_cu = args.mem_per_cu;
     config.evict_after_s = args.evict_after;
@@ -167,6 +185,7 @@ async fn run() -> anyhow::Result<()> {
     }
     stream_config.storage = config.storage.clone();
 
+    let storage = config.storage.clone();
     let control = Control::new(config).await?;
     info!(storage = %control.objects.description, "durable storage");
     reconciler::recover(&control).await?;
@@ -175,6 +194,23 @@ async fn run() -> anyhow::Result<()> {
         api::proxy_router(control.clone()),
         ProxyConfig { listen: args.proxy, default_endpoint: args.default_endpoint },
     );
+    // Serverless Redis: same object storage, its own node.
+    let mut rcfg = redis_control::RedisConfig::local(std::path::absolute(&args.home)?.join("redis"));
+    rcfg.node_name = args.node;
+    rcfg.public_host = args.public_host.clone();
+    rcfg.resp_port = args.redis.port();
+    rcfg.http_port = args.redis_http.port();
+    let tls = match (&args.redis_tls_cert, &args.redis_tls_key) {
+        (Some(c), Some(k)) => Some(redis_server::net::tls_acceptor(&std::fs::read(c)?, &std::fs::read(k)?)?),
+        _ => None,
+    };
+    rcfg.tls = tls.is_some();
+    let redis = redis_control::Control::new(rcfg, redis_server::persist::Objects::new(&storage)?).await?;
+    let redis_dir: std::sync::Arc<dyn redis_server::Directory> = redis.node.clone();
+    let redis_listener = tokio::net::TcpListener::bind(args.redis).await?;
+    let redis_http = tokio::net::TcpListener::bind(args.redis_http).await?;
+    info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
+    let redis_opts = redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol };
 
     let broker = stream_broker::Broker::new(stream_config).await?;
     if let Some(name) = &broker.config.default_stream
@@ -188,6 +224,7 @@ async fn run() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
     let mut router = api::router(control.clone())
+        .merge(redis_control::api::router(redis.clone()))
         .merge(stream_broker::http::router(broker.clone()))
         .merge(tasks::api::router(tasks.clone()));
     if let Some(q) = &queues {
@@ -203,11 +240,18 @@ async fn run() -> anyhow::Result<()> {
     tokio::select! {
         r = proxy.serve() => r?,
         r = axum::serve(listener, router) => r?,
+        r = redis_server::net::serve(redis_listener, redis_dir.clone(), redis_opts) => r?,
+        r = redis_server::http::serve_http(redis_http, redis_dir) => r?,
         r = queues_serve => r?,
         r = stream_broker::server::serve_on(broker.clone(), kafka) => r?,
         _ = reconciler::run(control.clone()) => {}
         _ = broker.clone().run() => {}
-        _ = shutdown_signal() => info!("shutting down; computes keep running and are adopted on next start"),
+        _ = shutdown_signal() => {
+            info!("shutting down; computes keep running and are adopted on next start");
+            // Make every acknowledged Redis write durable before exiting.
+            redis.shipper.flush().await?;
+            redis.shipper.write_manifests(true).await?;
+        }
     }
     if let Some(q) = &queues {
         q.shutdown().await;

@@ -1,0 +1,60 @@
+# Time series through an RDB round trip: rules and source links survive (they are only dropped
+# for DUMP), the label index is rebuilt from the loaded keys, compactions continue where they
+# left off, chunks of both encodings come back sample for sample.
+
+FLUSHALL
+TS.CREATE src LABELS a 1 kind src
+TS.CREATE dst LABELS a 2
+TS.CREATE dst2 ENCODING uncompressed LABELS a 3
+TS.CREATERULE src dst AGGREGATION avg 10
+TS.CREATERULE src dst2 AGGREGATION twa 10 5
+TS.MADD src 1 1 src 5 2 src 12 3 src 14 nan src 27 8.5
+TS.CREATE many CHUNK_SIZE 48 LABELS a 4 b x
+TS.MADD many 1 1 many 2 2 many 3 3 many 4 4 many 5 5 many 6 6 many 7 7 many 8 8 many 9 9 many 10 10
+TS.MADD many 11 1.5 many 12 2.5 many 13 3.5 many 14 4.5 many 15 5.5 many 16 6.5 many 17 7.5 many 18 8.5
+TS.CREATE unc ENCODING uncompressed CHUNK_SIZE 64 DUPLICATE_POLICY max IGNORE 2 0.5 RETENTION 100000
+TS.MADD unc 1 1 unc 2 2 unc 3 3 unc 4 4 unc 5 5 unc 6 6
+SELECT 1
+TS.CREATE other LABELS a 5
+TS.ADD other 1 1
+SELECT 0
+TS.INFO src
+TS.INFO dst
+TS.INFO dst2
+TS.INFO many DEBUG
+TS.INFO unc DEBUG
+DEBUG DIGEST-VALUE src dst dst2 many unc
+DEBUG RELOAD
+TS.INFO src
+TS.INFO dst
+TS.INFO dst2
+TS.INFO many DEBUG
+TS.INFO unc DEBUG
+DEBUG DIGEST-VALUE src dst dst2 many unc
+TS.QUERYINDEX a!=x
+TS.QUERYLABELS VALUES a
+TS.MGET WITHLABELS FILTER a!=x
+TS.RANGE many - +
+TS.RANGE unc - +
+TS.RANGE dst - + LATEST
+TS.RANGE dst2 - + LATEST
+TS.ADD src 31 1
+TS.ADD src 45 2
+TS.RANGE dst - +
+TS.RANGE dst2 - +
+TS.ADD src 3 100 ON_DUPLICATE sum
+TS.RANGE dst - +
+MEMORY USAGE src
+MEMORY USAGE dst
+MEMORY USAGE many
+MEMORY USAGE unc
+SELECT 1
+TS.INFO other
+TS.GET other
+SELECT 0
+DEL src
+TS.INFO dst
+DEBUG RELOAD
+TS.INFO dst
+TS.QUERYINDEX a!=x
+FLUSHALL

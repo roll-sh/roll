@@ -1,0 +1,134 @@
+# FT.SPELLCHECK: suggestions from the index's terms and dictionaries, scores, options, errors.
+
+FLUSHALL
+FT.CREATE s ON HASH PREFIX 1 s: SCHEMA title TEXT body TEXT tag TAG n NUMERIC
+HSET s:1 title "hello world" body "help helping held hall hell" tag red n 1
+HSET s:2 title "hallo welt" body "yellow mellow fellow hello" tag blue n 2
+HSET s:3 title "jello world" body "word words wordy worldly" tag green n 3
+HSET s:4 title "hullo" body "hello hello hello the quick brown fox" n 4
+HSET s:5 title "Hellos" body "cello cellos hellos" n 5
+FT.SPELLCHECK s helo
+FT.SPELLCHECK s hello
+FT.SPELLCHECK s helo DISTANCE 1
+FT.SPELLCHECK s helo DISTANCE 2
+FT.SPELLCHECK s helo DISTANCE 3
+FT.SPELLCHECK s wrld DISTANCE 4
+FT.SPELLCHECK s helo DISTANCE 0
+FT.SPELLCHECK s helo DISTANCE 5
+FT.SPELLCHECK s helo DISTANCE -1
+FT.SPELLCHECK s helo DISTANCE abc
+FT.SPELLCHECK s helo DISTANCE 2.0
+FT.SPELLCHECK s helo DISTANCE
+FT.SPELLCHECK s helo distance 2
+FT.SPELLCHECK s "helo wrld"
+FT.SPELLCHECK s "helo wrld" DISTANCE 2
+FT.SPELLCHECK s "helo|wrld|hello"
+FT.SPELLCHECK s "helo -wrld ~yelow"
+FT.SPELLCHECK s "\"helo wrld\""
+FT.SPELLCHECK s "(helo (wrld|jelo)) mellw"
+FT.SPELLCHECK s "hel* helo"
+FT.SPELLCHECK s "%helo% fellw"
+FT.SPELLCHECK s "@title:helo"
+FT.SPELLCHECK s "@body:helo"
+FT.SPELLCHECK s "@title:(helo wrld)"
+FT.SPELLCHECK s "@nope:helo"
+FT.SPELLCHECK s "@tag:{rd}"
+FT.SPELLCHECK s "@tag:{rd | blu}"
+FT.SPELLCHECK s "@n:[1 2] helo"
+FT.SPELLCHECK s "the"
+FT.SPELLCHECK s "a"
+FT.SPELLCHECK s "1234"
+FT.SPELLCHECK s "1234" DIALECT 2
+FT.SPELLCHECK s "HELO"
+FT.SPELLCHECK s "hélo"
+FT.SPELLCHECK s "*"
+FT.SPELLCHECK s ""
+FT.SPELLCHECK s "("
+FT.SPELLCHECK s "helo" DIALECT 2
+FT.SPELLCHECK s "helo" DIALECT 3
+FT.SPELLCHECK s "helo" DIALECT 4
+FT.SPELLCHECK s "helo" DIALECT 5
+FT.SPELLCHECK s "helo" DIALECT 0
+FT.SPELLCHECK s "helo" DIALECT
+FT.SPELLCHECK s "helo" DIALECT abc
+FT.SPELLCHECK s "$w" PARAMS 2 w helo DIALECT 2
+FT.SPELLCHECK s "$w" PARAMS 2 w helo
+FT.SPELLCHECK s "$w" DIALECT 2
+FT.SPELLCHECK s "$w" PARAMS 1 w DIALECT 2
+FT.SPELLCHECK s "$w" PARAMS 4 w helo w wrld DIALECT 2
+FT.SPELLCHECK s "@title:$w" PARAMS 2 w helo DIALECT 2
+FT.SPELLCHECK s helo FULLSCOREINFO
+FT.SPELLCHECK s "helo hello" FULLSCOREINFO
+FT.SPELLCHECK s "hello world" FULLSCOREINFO
+FT.SPELLCHECK s distance
+FT.SPELLCHECK s terms
+FT.SPELLCHECK s helo TERMS
+FT.SPELLCHECK s helo TERMS INCLUDE
+FT.SPELLCHECK s helo TERMS INCLUDE nodict
+FT.SPELLCHECK s helo TERMS EXCLUDE nodict
+FT.SPELLCHECK s helo TERMS BOGUS d1
+FT.DICTADD d1 helo hela Halo HELP herlo helloo
+FT.DICTADD d2 wrld helo
+FT.SPELLCHECK s helo TERMS INCLUDE d1
+FT.SPELLCHECK s helo TERMS include d1 DISTANCE 2
+FT.SPELLCHECK s helo TERMS EXCLUDE d1
+FT.SPELLCHECK s "helo wrld" TERMS EXCLUDE d2
+FT.SPELLCHECK s "helo wrld" TERMS INCLUDE d1 TERMS EXCLUDE d2
+FT.SPELLCHECK s "heli wrld" TERMS INCLUDE d1 TERMS INCLUDE d2
+FT.SPELLCHECK s "heli wrld" TERMS INCLUDE d2 TERMS INCLUDE d1
+FT.SPELLCHECK s "heli" TERMS INCLUDE d1 TERMS INCLUDE nodict
+FT.SPELLCHECK s "heli" TERMS EXCLUDE d1 TERMS INCLUDE nodict
+FT.SPELLCHECK s "heli" TERMS INCLUDE d1 FULLSCOREINFO
+FT.SPELLCHECK s "halo" TERMS INCLUDE d1
+FT.SPELLCHECK s "help" TERMS EXCLUDE d1 FULLSCOREINFO
+FT.SPELLCHECK nosuch helo
+FT.SPELLCHECK s
+@resp 3
+FT.SPELLCHECK s "helo wrld"
+FT.SPELLCHECK s "helo hello" FULLSCOREINFO
+FT.SPELLCHECK s "heli" TERMS INCLUDE d1
+FT.SPELLCHECK s "hello"
+@resp 2
+FT.DICTDEL d1 helo hela Halo HELP herlo helloo
+FT.DICTDEL d2 wrld helo
+FT.DROPINDEX s
+
+# Ties in score, field-restricted terms and an index without documents
+FT.CREATE t ON HASH PREFIX 1 t: SCHEMA a TEXT b TEXT NOSTEM
+HSET t:1 a "cat bat rat mat hat sat fat vat pat oat" b "cot cut"
+HSET t:2 a "cart bart dart mart" b "cast"
+HSET t:3 b "cat cats catty"
+FT.SPELLCHECK t cxt
+FT.SPELLCHECK t cxt DISTANCE 2
+FT.SPELLCHECK t "@a:cxt"
+FT.SPELLCHECK t "@b:cxt"
+FT.SPELLCHECK t "@b:cxt" DISTANCE 2
+FT.SPELLCHECK t "xat" DISTANCE 2
+FT.DROPINDEX t
+FT.CREATE u ON HASH PREFIX 1 u: SCHEMA a TEXT
+HSET u:1 a "ba bb bc bd be bf bg bh bi bj bk bl bm bn"
+HSET u:2 a "bb bd bf bh bj bl bn"
+HSET u:3 a "bc bf bi bl"
+HSET u:4 a "bj bi bn bm"
+HSET u:5 a "zz"
+FT.SPELLCHECK u bx
+FT.SPELLCHECK u "bx xb" DISTANCE 2
+FT.DICTADD d4 bz bq bb Bx bxx
+FT.SPELLCHECK u bx TERMS INCLUDE d4
+FT.SPELLCHECK u bx TERMS INCLUDE d4 FULLSCOREINFO
+FT.DICTDEL d4 bz bq bb Bx bxx
+FT.DROPINDEX u
+FT.CREATE e ON HASH PREFIX 1 e: SCHEMA a TEXT
+FT.SPELLCHECK e helo
+FT.DICTADD d3 hello help
+FT.SPELLCHECK e helo TERMS INCLUDE d3
+FT.SPELLCHECK e helo TERMS INCLUDE d3 FULLSCOREINFO
+FT.DICTDEL d3 hello help
+FT.DROPINDEX e
+FLUSHALL
+FT.CREATE nf ON HASH NOFIELDS PREFIX 1 nf: SCHEMA a TEXT b TEXT
+HSET nf:1 a "hello" b "world"
+FT.SPELLCHECK nf "@a:wrld"
+FT.SPELLCHECK nf "@b:helo"
+FT.DROPINDEX nf
+FLUSHALL

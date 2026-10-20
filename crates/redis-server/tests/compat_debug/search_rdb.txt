@@ -1,0 +1,144 @@
+# RediSearch persistence (enable-debug-command yes): index definitions in the `ft_index0` aux
+# data before the keys, spelling dictionaries in `scdtype00`'s after them; DEBUG RELOAD drops
+# every index (the flush's `onFlush`), loads the definitions back with fresh statistics, and
+# re-indexes the keys as they load. Each index holds at most one document, as the reference
+# loads keys in its own hash order; the registry's order (FT._LIST) depends on the process'
+# history, so lists are sorted. SVS-VAMANA indexes never get a vector.
+FLUSHALL
+FT._LIST
+DEBUG RELOAD
+FT._LIST
+FT.DICTDUMP d1
+# Index options, every field type, rule fields, stopwords, aliases and synonyms survive.
+FT.CREATE idx ON HASH PREFIX 2 a: b: FILTER "@n>1" SCORE 0.5 SCORE_FIELD sc LANGUAGE french LANGUAGE_FIELD lang PAYLOAD_FIELD pl STOPWORDS 2 foo bar SCHEMA t TEXT WEIGHT 2 NOSTEM SORTABLE n NUMERIC SORTABLE tg TAG SEPARATOR ";" CASESENSITIVE g GEO v VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2 x AS y TEXT NOINDEX
+FT.ALIASADD al idx
+FT.ALIASADD al2 idx
+FT.SYNUPDATE idx g1 hello world
+FT.SYNUPDATE idx g2 world planet
+FT.SYNUPDATE idx g3 SKIPINITIALSCAN moon
+FT.DICTADD d1 x y z
+FT.DICTADD d1 x
+FT.DICTADD d2 hello
+HSET a:1 t "hello foo world" n 5 tg "A;b" g "1,2" v "\x00\x00\x80\x3f\x00\x00\x00\x40" sc 0.7 lang english pl payload x hidden
+HSET c:1 t hello n 5
+!mask total_indexing_time FT.INFO idx
+DEBUG RELOAD
+FT._LIST
+!mask total_indexing_time FT.INFO idx
+!mask total_indexing_time FT.INFO al
+!sort FT.ALIASLIST
+!sort FT.SYNDUMP idx
+FT.DICTDUMP d1
+FT.DICTDUMP d2
+FT.SPELLCHECK idx helo TERMS INCLUDE d1 TERMS INCLUDE d2
+FT.SPELLCHECK idx x TERMS INCLUDE d1 DISTANCE 1
+FT.SEARCH idx hello WITHSCORES WITHPAYLOADS WITHSORTKEYS
+FT.SEARCH idx planet
+FT.SEARCH idx "@tg:{A}"
+FT.SEARCH idx "@tg:{a}"
+FT.SEARCH idx "@n:[5 5]" RETURN 1 n
+FT.SEARCH idx "@g:[1 2 10 km]" NOCONTENT
+FT.SEARCH idx "*=>[KNN 1 @v $b]" PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x00\x40" DIALECT 2 RETURN 1 __v_score
+FT.SEARCH idx foo
+FT.EXPLAIN idx "hello foo"
+# New documents after the load are indexed; the filter still applies.
+HSET b:2 t world n 0
+HSET b:3 t moon n 7
+!sort FT.SEARCH idx * NOCONTENT
+FT.SEARCH idx moon NOCONTENT
+!mask total_indexing_time FT.INFO idx
+# Saving twice in a row keeps the same definitions.
+DEL b:3
+DEBUG RELOAD
+!mask total_indexing_time FT.INFO idx
+!sort FT.ALIASLIST
+FT.DROPINDEX idx
+DEBUG RELOAD
+FT._LIST
+FT.ALIASLIST
+FT.DICTDUMP d1
+FT.DICTDEL d1 x y z
+FT.DICTDEL d2 hello
+DEBUG RELOAD
+FT.DICTDUMP d1
+FT.DICTDUMP d2
+FLUSHALL
+# JSON indexes, TEMPORARY, NOOFFSETS, GEOSHAPE and suffix tries.
+FT.CREATE j1 ON JSON PREFIX 1 j: TEMPORARY 100000 NOOFFSETS SCHEMA $.t AS t TAG SORTABLE $.a TEXT g GEOSHAPE FLAT $.x AS x TEXT WITHSUFFIXTRIE SORTABLE $.n AS n NUMERIC INDEXMISSING
+JSON.SET j:1 $ "{\"t\":\"red\",\"a\":\"some words\",\"x\":\"suffixes\",\"n\":3}"
+!mask total_indexing_time FT.INFO j1
+DEBUG RELOAD
+!mask total_indexing_time FT.INFO j1
+FT.SEARCH j1 "@t:{red}" RETURN 1 n
+FT.SEARCH j1 "@x:*fix*" NOCONTENT
+FT.SEARCH j1 "@a:word" NOCONTENT
+FT.SEARCH j1 "ismissing(@n)" NOCONTENT
+FT.DROPINDEX j1
+FLUSHALL
+# Vector algorithms and their parameters (EPSILON, compression, the search window).
+FT.CREATE s1 PREFIX 1 sv: SCHEMA v VECTOR SVS-VAMANA 8 TYPE FLOAT32 DIM 4 DISTANCE_METRIC COSINE COMPRESSION LVQ8
+FT.CREATE s2 PREFIX 1 sv: SCHEMA v VECTOR SVS-VAMANA 6 TYPE FLOAT16 DIM 4 DISTANCE_METRIC IP
+FT.CREATE s3 PREFIX 1 h: SCHEMA v VECTOR HNSW 10 TYPE FLOAT64 DIM 3 DISTANCE_METRIC IP EPSILON 0.5 M 8 v2 VECTOR FLAT 8 TYPE INT8 DIM 2 DISTANCE_METRIC COSINE INITIAL_CAP 5 v3 VECTOR FLAT 8 TYPE UINT8 DIM 2 DISTANCE_METRIC L2 BLOCK_SIZE 7
+FT.CREATE s4 PREFIX 1 sv: SCHEMA v VECTOR SVS-VAMANA 10 TYPE FLOAT32 DIM 8 DISTANCE_METRIC L2 COMPRESSION LeanVec4x8 SEARCH_WINDOW_SIZE 20
+FT.CREATE s5 PREFIX 1 sv: SCHEMA v VECTOR SVS-VAMANA 14 TYPE FLOAT32 DIM 8 DISTANCE_METRIC L2 COMPRESSION LeanVec8x8 REDUCE 2 TRAINING_THRESHOLD 2048 EPSILON 0.2
+FT.CREATE s6 PREFIX 1 b: SCHEMA v VECTOR HNSW 6 TYPE BFLOAT16 DIM 2 DISTANCE_METRIC L2
+HSET h:1 v "\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\x00\x40\x00\x00\x00\x00\x00\x00\x08\x40" v2 "\x01\x02" v3 "\x03\x04"
+HSET b:1 v "\x80\x3f\x00\x40"
+!sort FT._LIST
+!mask total_indexing_time FT.INFO s1
+!mask total_indexing_time FT.INFO s3
+!mask total_indexing_time FT.INFO s5
+DEBUG RELOAD
+!sort FT._LIST
+!mask total_indexing_time FT.INFO s1
+!mask total_indexing_time FT.INFO s2
+!mask total_indexing_time FT.INFO s3
+!mask total_indexing_time FT.INFO s4
+!mask total_indexing_time FT.INFO s5
+!mask total_indexing_time FT.INFO s6
+FT.SEARCH s3 "*=>[KNN 1 @v $b]" PARAMS 2 b "\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\x00\x40\x00\x00\x00\x00\x00\x00\x08\x40" DIALECT 2 RETURN 1 __v_score
+FT.SEARCH s3 "*=>[KNN 1 @v2 $b]" PARAMS 2 b "\x01\x02" DIALECT 2 RETURN 1 __v2_score
+FT.SEARCH s6 "*=>[KNN 1 @v $b]" PARAMS 2 b "\x80\x3f\x00\x40" DIALECT 2 RETURN 1 __v_score
+FLUSHALL
+# Schema flags: NOFIELDS, NOFREQS, NOHL, MAXTEXTFIELDS, SKIPINITIALSCAN, phonetics, INDEXALL,
+# EMPTY/MISSING options, UNF and dynamic-free tag options.
+FT.CREATE f1 ON HASH MAXTEXTFIELDS NOFREQS NOHL SKIPINITIALSCAN INDEXALL ENABLE SCHEMA t TEXT PHONETIC dm:en INDEXEMPTY INDEXMISSING s TEXT SORTABLE UNF tg TAG WITHSUFFIXTRIE INDEXEMPTY n NUMERIC NOINDEX SORTABLE
+HSET k t hello s World tg ""
+!mask total_indexing_time FT.INFO f1
+DEBUG RELOAD
+!mask total_indexing_time FT.INFO f1
+FT.SEARCH f1 "@t:hallo" NOCONTENT
+FT.SEARCH f1 "@tg:{\"\"}" NOCONTENT
+FT.SEARCH f1 * SORTBY s RETURN 1 s
+FT.CREATE f2 PREFIX 1 nf: NOFIELDS NOOFFSETS SCHEMA t TEXT
+HSET nf:1 t hello
+DEBUG RELOAD
+!mask total_indexing_time FT.INFO f2
+FT.SEARCH f2 hello NOCONTENT
+FLUSHALL
+# Two indexes over one prefix, and keys in another database (indexed as db 0 reads them).
+FT.CREATE p1 PREFIX 1 p: SCHEMA t TEXT
+FT.CREATE p2 PREFIX 1 p: SCHEMA t TEXT
+HSET p:1 t one
+SELECT 1
+HSET p:2 t two
+SELECT 0
+DEBUG RELOAD
+!mask total_indexing_time FT.INFO p1
+FT.SEARCH p1 * NOCONTENT
+FT.SEARCH p2 * NOCONTENT
+SELECT 1
+DEL p:2
+SELECT 0
+# DEBUG RELOAD NOSAVE and MERGE go through the same path.
+DEBUG RELOAD NOSAVE
+FT.SEARCH p1 * NOCONTENT
+DEBUG RELOAD MERGE
+FT.SEARCH p2 * NOCONTENT
+!mask total_indexing_time FT.INFO p2
+# DEBUG LOADAOF without an AOF only empties the dataset.
+DEBUG LOADAOF
+FT._LIST
+FLUSHALL
+DEBUG RELOAD
+FT._LIST

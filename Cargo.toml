@@ -49,12 +49,13 @@ aws-sdk-s3 = "1"
 lambda_http = { version = "1", default-features = false, features = ["apigw_http", "apigw_rest", "alb"] }
 tasks = { path = "crates/tasks" }
 kafka-protocol = { version = "0.18", features = ["messages_enums"] }
-mimalloc = { version = "0.1", default-features = false }
-libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
+# mimalloc v2: lower per-key RSS than v3 for the Redis engine (measured against Valkey 9.1).
+mimalloc = { version = "0.1.52", default-features = false, features = ["v2"] }
+libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended", "v2"] }
 crc32c = "0.6"
 uuid = "1"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = "2"
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "zstd"] }
 rcgen = "0.14"
@@ -95,6 +96,31 @@ urlencoding = "2"
 tempfile = "3"
 libc = "0.2"
 md-5 = "0.11"
+
+# Serverless Redis.
+# JSON documents (RedisJSON): the JSONPath grammar runs on the pest version RedisJSON pins, so
+# syntax errors are reported identically.
+pest = "=2.8.6"
+pest_derive = "=2.8.6"
+half = "2.7"
+ryu = "1.0.23"
+indexmap = "2"
+itoa = "1"
+memchr = "2"
+smallvec = { version = "1", features = ["union", "const_generics", "write"] }
+foldhash = "0.2"
+rand = "0.8"
+sha1 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+libm = "0.2"
+rustc_apfloat = "0.2"
+cc = "1"
+redis-lua = { path = "crates/redis-lua" }
+snowball = { path = "crates/snowball" }
+redis-proto = { path = "crates/redis-proto" }
+redis-engine = { path = "crates/redis-engine" }
+redis-server = { path = "crates/redis-server" }
+redis-control = { path = "crates/redis-control" }
 
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]

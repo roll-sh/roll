@@ -1,0 +1,311 @@
+# FT.AGGREGATE WITHCURSOR and FT.CURSOR READ/DEL/GC: chunks and their totals, the cursor id
+# (random: `!capture` names it), COUNT sticking to later reads, accumulated pipelines (sort,
+# group, depleter) replayed chunk by chunk, documents changed between chunks, MAXIDLE expiry,
+# the per-index limit, dropped indexes and FT.INFO's cursor_stats. Every cursor is drained or
+# deleted, so the global counts start from zero.
+
+FLUSHALL
+FT.CREATE idx ON HASH PREFIX 1 d: SCHEMA name TEXT SORTABLE age NUMERIC SORTABLE city TAG body TEXT
+HSET d:1 name n1 age 21 city c1 body "hello world"
+HSET d:2 name n2 age 22 city c2 body "hello there"
+HSET d:3 name n3 age 23 city c0 body "world peace"
+HSET d:4 name n4 age 24 city c1 body "hello hello"
+HSET d:5 name n5 age 25 city c2 body goodbye
+HSET d:6 name n6 age 26 city c0 body "hello again"
+HSET d:7 name n7 age 27 city c1 body "world"
+
+# WITHCURSOR's arguments.
+FT.AGGREGATE idx * WITHCURSOR COUNT 0
+FT.AGGREGATE idx * WITHCURSOR COUNT -1
+FT.AGGREGATE idx * WITHCURSOR COUNT x
+FT.AGGREGATE idx * WITHCURSOR MAXIDLE 0
+FT.AGGREGATE idx * WITHCURSOR MAXIDLE x
+FT.AGGREGATE idx * WITHCURSOR COUNT
+FT.AGGREGATE nosuch * WITHCURSOR
+FT.AGGREGATE idx * WITHCURSOR FOO
+
+# FT.CURSOR's arguments.
+FT.CURSOR
+FT.CURSOR FOO
+FT.CURSOR READ
+FT.CURSOR READ idx
+FT.CURSOR READ nosuch 5
+FT.CURSOR READ idx abc
+FT.CURSOR READ idx 0
+FT.CURSOR READ idx 123
+FT.CURSOR READ idx -5
+FT.CURSOR READ idx 124 COUNT 2
+FT.CURSOR READ idx 124 COUNT x
+FT.CURSOR READ idx 124 FOO 2
+FT.CURSOR READ idx 124 COUNT
+FT.CURSOR READ idx 01
+FT.CURSOR DEL
+FT.CURSOR DEL idx
+FT.CURSOR DEL idx abc
+FT.CURSOR DEL idx 124
+FT.CURSOR DEL nosuch 124
+FT.CURSOR GC
+FT.CURSOR GC idx
+FT.CURSOR GC nosuch x
+FT.CURSOR GC idx x
+FT.CURSOR PROFILE idx 1
+!mask total_indexing_time FT.INFO idx
+
+# Streaming chunks: the total counts the chunk's matches up to its first result; COUNT on a
+# read sticks to the reads after it.
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 3
+!mask total_indexing_time FT.INFO idx
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c} COUNT 1
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c} COUNT 5
+FT.CURSOR READ idx {$c}
+!mask total_indexing_time FT.INFO idx
+
+# A chunk that ends exactly with the results: one more (empty) read finishes the cursor.
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 7
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 8
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR
+!capture c FT.AGGREGATE idx * WITHCURSOR COUNT 4
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx hello LOAD 2 @name @body WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx nosuchterm WITHCURSOR COUNT 2
+!capture c FT.AGGREGATE idx * LIMIT 0 0 WITHCURSOR COUNT 2
+
+# Paging under a cursor: the pager's place carries over.
+!capture c FT.AGGREGATE idx * LOAD 1 @name LIMIT 1 4 WITHCURSOR COUNT 3
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * LOAD 1 @name FILTER "@name != 'n2'" APPLY "upper(@name)" AS u WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c} COUNT 10
+
+# Sorted: the sorter drains the query in the first chunk; later chunks count nothing.
+!capture c FT.AGGREGATE idx * LOAD 1 @name SORTBY 2 @age DESC WITHCURSOR COUNT 3
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * SORTBY 2 @age ASC MAX 5 WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * SORTBY 2 @age DESC LIMIT 1 3 APPLY "@age * 10" AS x WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * SORTBY 2 @age DESC FILTER "@age > 22" WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx hello SORTBY 1 @name WITHCURSOR COUNT 1
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+
+# Grouped (always sorted after: the module's group order is hash-seeded per process).
+!capture c FT.AGGREGATE idx * GROUPBY 1 @city REDUCE COUNT 0 AS n REDUCE MAX 1 @age AS oldest SORTBY 2 @city ASC WITHCURSOR COUNT 1
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * GROUPBY 1 @city REDUCE SUM 1 @age AS s SORTBY 2 @s DESC APPLY "@s / 2" AS h WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c}
+
+# WITHCOUNT drains first and keeps its total on every chunk (an option before the steps).
+FT.AGGREGATE idx * LOAD 1 @name WITHCOUNT WITHCURSOR COUNT 3
+!capture c FT.AGGREGATE idx * WITHCOUNT LOAD 1 @name WITHCURSOR COUNT 3
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * WITHCOUNT LOAD 1 @name SORTBY 2 @name DESC WITHCURSOR COUNT 3
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * WITHCOUNT LOAD 1 @name FILTER "@name != 'n3'" WITHCURSOR COUNT 4
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * WITHOUTCOUNT LOAD 1 @name WITHCURSOR COUNT 3
+FT.CURSOR READ idx {$c} COUNT 10
+
+# RESP3.
+@resp 3
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 3
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * LOAD 1 @name SORTBY 2 @age DESC WITHCURSOR COUNT 4
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx * GROUPBY 1 @city REDUCE COUNT 0 AS n SORTBY 2 @city ASC WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx 123
+@resp 2
+
+# Inside a transaction (the loaders load row by row).
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 4
+MULTI
+FT.CURSOR READ idx {$c} COUNT 2
+FT.CURSOR READ idx {$c}
+EXEC
+
+# Any index name the user may read works (the cursor id is what counts).
+FT.CREATE other ON HASH PREFIX 1 o: SCHEMA t TEXT
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 4
+!mask total_indexing_time FT.INFO other
+FT.CURSOR READ other {$c}
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 4
+FT.CURSOR DEL other {$c}
+FT.CURSOR DEL idx {$c}
+FT.CURSOR READ idx {$c}
+FT.DROPINDEX other
+
+# Deleting a cursor.
+!capture c FT.AGGREGATE idx * WITHCURSOR COUNT 1
+!capture d FT.AGGREGATE idx * WITHCURSOR COUNT 1
+!mask total_indexing_time FT.INFO idx
+FT.CURSOR DEL idx {$c}
+FT.CURSOR READ idx {$c}
+FT.CURSOR DEL idx {$c}
+!mask total_indexing_time FT.INFO idx
+FT.CURSOR DEL idx {$d}
+
+# MAXIDLE: an idle cursor expires (the module's timer reaps it); GC has nothing left.
+!capture c FT.AGGREGATE idx * WITHCURSOR COUNT 1 MAXIDLE 50
+!capture d FT.AGGREGATE idx * WITHCURSOR COUNT 1 MAXIDLE 100000000
+!mask total_indexing_time FT.INFO idx
+FT.CURSOR GC idx x
+@sleep 300
+!mask total_indexing_time FT.INFO idx
+FT.CURSOR READ idx {$c}
+FT.CURSOR DEL idx {$c}
+FT.CURSOR GC idx x
+FT.CURSOR READ idx {$d}
+@sleep 50
+FT.CURSOR READ idx {$d} COUNT 10
+!capture c FT.AGGREGATE idx * WITHCURSOR COUNT 1 MAXIDLE 700
+@sleep 400
+FT.CURSOR READ idx {$c}
+@sleep 400
+FT.CURSOR READ idx {$c} COUNT 10
+
+# The per-index limit (cursors of a dropped index no longer count).
+FT.CONFIG SET INDEX_CURSOR_LIMIT 2
+!capture c FT.AGGREGATE idx * WITHCURSOR COUNT 1
+!capture d FT.AGGREGATE idx * WITHCURSOR COUNT 1
+FT.AGGREGATE idx * WITHCURSOR COUNT 1
+FT.AGGREGATE idx * WITHCURSOR COUNT 100
+FT.AGGREGATE idx nosuchfield:x WITHCURSOR COUNT 1
+FT.AGGREGATE idx * SORTBY 1 @nosuch WITHCURSOR COUNT 1
+FT.AGGREGATE idx * LOAD 1 @name
+!mask total_indexing_time FT.INFO idx
+FT.CURSOR DEL idx {$c}
+!capture c FT.AGGREGATE idx * WITHCURSOR COUNT 100
+FT.CONFIG SET INDEX_CURSOR_LIMIT 0
+FT.AGGREGATE idx * WITHCURSOR COUNT 100
+!mask total_indexing_time FT.INFO idx
+FT.CONFIG SET INDEX_CURSOR_LIMIT 128
+FT.CURSOR DEL idx {$d}
+
+# A dropped index: its idle cursors stay listed until read, which frees them.
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 2
+!capture d FT.AGGREGATE idx * LOAD 1 @name SORTBY 2 @age DESC WITHCURSOR COUNT 2
+FT.DROPINDEX idx
+FT.CREATE idx ON HASH PREFIX 1 nothing: SCHEMA name TEXT
+# Redis scans for the index in the background: let it finish, or `indexing` races.
+@sleep 100
+!mask total_indexing_time FT.INFO idx
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+FT.CURSOR DEL idx {$d}
+!mask total_indexing_time FT.INFO idx
+FT.DROPINDEX idx
+FLUSHALL
+FT.CREATE idx ON HASH PREFIX 1 d: SCHEMA name TEXT SORTABLE age NUMERIC SORTABLE city TAG body TEXT
+HSET d:1 name n1 age 21 city c1 body "hello world"
+HSET d:2 name n2 age 22 city c2 body "hello there"
+HSET d:3 name n3 age 23 city c0 body "world peace"
+HSET d:4 name n4 age 24 city c1 body "hello hello"
+HSET d:5 name n5 age 25 city c2 body goodbye
+HSET d:6 name n6 age 26 city c0 body "hello again"
+HSET d:7 name n7 age 27 city c1 body "world"
+# A flush empties the cursor list.
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 2
+FLUSHALL
+FT.CURSOR READ idx {$c}
+FT.CREATE idx ON HASH PREFIX 1 d: SCHEMA name TEXT SORTABLE age NUMERIC SORTABLE city TAG body TEXT
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+HSET d:1 name n1 age 21 city c1 body "hello world"
+HSET d:2 name n2 age 22 city c2 body "hello there"
+HSET d:3 name n3 age 23 city c0 body "world peace"
+HSET d:4 name n4 age 24 city c1 body "hello hello"
+HSET d:5 name n5 age 25 city c2 body goodbye
+HSET d:6 name n6 age 26 city c0 body "hello again"
+HSET d:7 name n7 age 27 city c1 body "world"
+
+# Documents changed between chunks. The wildcard range ends where it started; term and tag
+# readers see what was added after them; deleted and re-indexed documents are skipped.
+!capture c FT.AGGREGATE idx * LOAD 1 @name WITHCURSOR COUNT 2
+DEL d:3
+HSET d:4 name changed4
+HSET d:8 name n8 age 28 city c2
+FT.CURSOR READ idx {$c} COUNT 10
+!capture c FT.AGGREGATE idx "@city:{c1|c2}" LOAD 1 @name WITHCURSOR COUNT 2
+HSET d:5 name changed5
+HSET d:9 name n9 age 29 city c1
+DEL d:7
+FT.CURSOR READ idx {$c} COUNT 10
+!capture c FT.AGGREGATE idx hello LOAD 1 @name WITHCURSOR COUNT 1
+HSET d:10 name n10 age 30 city c0 body "hello new"
+DEL d:2
+FT.CURSOR READ idx {$c} COUNT 10
+
+# Sorted results keep their document: values read from the sorting vector survive a delete,
+# a loader after the sort skips what was deleted or re-indexed (the total counts it down).
+!capture c FT.AGGREGATE idx * SORTBY 2 @age DESC LOAD 1 @city WITHCURSOR COUNT 2
+DEL d:6
+HSET d:5 city zz
+FT.CURSOR READ idx {$c} COUNT 10
+!capture c FT.AGGREGATE idx * SORTBY 2 @age DESC WITHCURSOR COUNT 2
+DEL d:4
+FT.CURSOR READ idx {$c} COUNT 10
+!capture c FT.AGGREGATE idx * LOAD 1 @city SORTBY 2 @age DESC WITHCURSOR COUNT 2
+DEL d:1
+FT.CURSOR READ idx {$c} COUNT 10
+!capture c FT.AGGREGATE idx * LOAD 1 @name GROUPBY 1 @city REDUCE COUNT_DISTINCT 1 @name AS names REDUCE MIN 1 @age AS youngest SORTBY 2 @city ASC WITHCURSOR COUNT 1
+DEL d:9
+FT.CURSOR READ idx {$c} COUNT 10
+!mask total_indexing_time FT.INFO idx
+
+# Negations end where the doc table did; with INDEXALL the wildcard reads the existing-docs
+# index, which sees new documents (its negations still stop at the old max id). LOAD * adds
+# the keys it meets to the lookup, chunk after chunk.
+!capture c FT.AGGREGATE idx "-@name:n5" LOAD 1 @name WITHCURSOR COUNT 1
+HSET d:11 name n11 age 31 city c1
+FT.CURSOR READ idx {$c} COUNT 10
+!capture c FT.AGGREGATE idx "~@city:{c1}" LOAD 1 @name WITHCURSOR COUNT 1
+HSET d:12 name n12 age 32 city c1
+FT.CURSOR READ idx {$c} COUNT 10
+FT.CREATE ia ON HASH PREFIX 1 a: INDEXALL ENABLE SCHEMA name TEXT
+HSET a:1 name x1
+HSET a:2 name x2
+HSET a:3 name x3
+!capture c FT.AGGREGATE ia * LOAD * WITHCURSOR COUNT 2
+HSET a:4 name x4 extra e
+HSET a:1 name y1
+FT.CURSOR READ ia {$c}
+FT.CURSOR READ ia {$c}
+!capture c FT.AGGREGATE ia "-@name:x2" LOAD * WITHCURSOR COUNT 1
+HSET a:5 name x5 other o
+FT.CURSOR READ ia {$c} COUNT 10
+!capture c FT.AGGREGATE ia * LOAD * SORTBY 2 @name ASC WITHCURSOR COUNT 2
+HSET a:6 name x6 more m
+FT.CURSOR READ ia {$c} COUNT 10
+FT.DROPINDEX ia
+
+# Scores under a cursor.
+!capture c FT.AGGREGATE idx "hello|world" ADDSCORES SORTBY 2 @__score DESC WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c}
+FT.CURSOR READ idx {$c}
+!capture c FT.AGGREGATE idx "hello|world" ADDSCORES LOAD 1 @name WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c} COUNT 10
+!capture c FT.AGGREGATE idx "hello|world" SCORER BM25STD.NORM ADDSCORES LOAD 1 @name WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c} COUNT 10
+!mask total_indexing_time FT.INFO idx
+
+FT.DROPINDEX idx
+FLUSHALL

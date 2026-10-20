@@ -1,0 +1,52 @@
+# The suffix tries' contents (DUMP_SUFFIX_TRIE: the text rune trie in its order, a tag field's
+# trie map) and how deletes (through the GC) take terms out of their lists: the last entry
+# fills the hole, so the expansion order changes.
+FLUSHALL
+FT.CREATE sx ON HASH PREFIX 1 s: SCHEMA t TEXT WITHSUFFIXTRIE g TAG WITHSUFFIXTRIE
+HSET s:1 t banana
+HSET s:2 t bandana
+HSET s:3 t cabana
+HSET s:4 t ananas
+HSET s:5 t abracadabra
+HSET s:6 t cadabra
+HSET s:7 t abra
+HSET s:8 t zebra
+HSET s:9 t nana
+HSET s:10 t anna
+HSET s:11 t hannah
+HSET s:12 t savannah
+HSET s:13 t café
+HSET s:14 t naïve
+HSET s:15 t façade
+HSET s:16 t résumé
+HSET s:17 t aaaa
+HSET s:18 t aaa
+HSET s:19 t aa
+HSET s:g1 g "banana,bandana,cabana,ananas" h "banana,bandana"
+HSET s:g2 g "abracadabra,cadabra,abra,zebra" h "abra"
+HSET s:g3 g "nana,anna,hannah,savannah"
+HSET s:g4 g "café,naïve,façade,résumé"
+HSET s:g8 g "aaaa,aaa,aa"
+_FT.DEBUG DUMP_SUFFIX_TRIE sx
+_FT.DEBUG DUMP_SUFFIX_TRIE sx g
+!timing FT.PROFILE sx SEARCH QUERY "*ana*" LIMIT 0 0
+DEL s:1 s:g1
+HSET s:30 t zanana g zanana
+HSET s:31 t banana
+_FT.DEBUG GC_FORCEINVOKE sx
+_FT.DEBUG DUMP_SUFFIX_TRIE sx
+_FT.DEBUG DUMP_SUFFIX_TRIE sx g
+!timing FT.PROFILE sx SEARCH QUERY "*ana*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "*na" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*ana*}" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{*na}" LIMIT 0 0
+DEL s:4 s:13 s:17 s:g8
+_FT.DEBUG GC_FORCEINVOKE sx
+_FT.DEBUG DUMP_SUFFIX_TRIE sx
+_FT.DEBUG DUMP_SUFFIX_TRIE sx g
+!timing FT.PROFILE sx SEARCH QUERY "*a*" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "w'*a?a*'" LIMIT 0 0
+!timing FT.PROFILE sx SEARCH QUERY "@g:{w'*a?a*'}" LIMIT 0 0
+!mask total_indexing_time,last_run_time_ms,total_ms_run,average_cycle_time_ms FT.INFO sx
+FT.DROPINDEX sx
+FLUSHALL

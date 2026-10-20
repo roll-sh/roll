@@ -1,0 +1,220 @@
+# Query timeouts and cursors like Redis 8's bundled RediSearch 8.10.1, the deterministic part
+# (tests/compat_debug/search_timeout.txt times queries out with _FT.DEBUG): TIMEOUT and
+# ON_TIMEOUT's arguments, the foreground cap of a query's timeout (WORKERS 0) and its RESP3
+# warning, FT.HYBRID WITHCURSOR's cursor pair, and cursors keeping their first chunk's term
+# expansions, readers and IDFs. Indexes are created on an empty keyspace and dropped at the
+# end; configs are put back.
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FLUSHALL
+FT.CREATE idx ON HASH PREFIX 1 d: SCHEMA t TEXT n NUMERIC SORTABLE g TAG
+HSET d:1 t "hello world" n 1 g a
+HSET d:2 t "hello there" n 2 g b
+HSET d:3 t "goodbye world" n 3 g a
+# TIMEOUT's argument.
+FT.SEARCH idx * TIMEOUT
+FT.SEARCH idx * TIMEOUT x
+FT.SEARCH idx * TIMEOUT -1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.SEARCH idx * TIMEOUT 1.5
+FT.SEARCH idx * LIMIT 0 1 TIMEOUT 0
+FT.SEARCH idx * LIMIT 0 1 TIMEOUT 100000
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE idx * TIMEOUT
+FT.AGGREGATE idx * TIMEOUT x
+FT.AGGREGATE idx * LOAD 1 @n TIMEOUT 10000
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CONFIG GET TIMEOUT
+FT.CONFIG GET ON_TIMEOUT
+FT.CONFIG SET ON_TIMEOUT nope
+FT.CONFIG SET ON_TIMEOUT FAIL
+FT.CONFIG GET ON_TIMEOUT
+FT.CONFIG SET ON_TIMEOUT Return-Strict
+FT.CONFIG GET ON_TIMEOUT
+FT.CONFIG SET ON_TIMEOUT return
+CONFIG GET search-on-timeout
+FT.CONFIG SET TIMEOUT -1
+FT.CONFIG SET TIMEOUT x
+# Without workers a query's timeout over search-_max-foreground-timeout-limit (or none) is
+# capped: RESP3 warns, every chunk of a cursor too.
+FT.CONFIG SET WORKERS 0
+FT.SEARCH idx * LIMIT 0 1 TIMEOUT 0
+FT.SEARCH idx * LIMIT 0 1 TIMEOUT 70000
+FT.AGGREGATE idx * LOAD 1 @n TIMEOUT 0
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 3
+FT.SEARCH idx * LIMIT 0 1
+FT.SEARCH idx * LIMIT 0 1 TIMEOUT 0
+FT.SEARCH idx * LIMIT 0 1 TIMEOUT 70000
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.SEARCH idx * LIMIT 0 1 TIMEOUT 60000
+FT.SEARCH idx hel* NOCONTENT TIMEOUT 0
+FT.AGGREGATE idx * LOAD 1 @n TIMEOUT 0
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE idx * GROUPBY 1 @g REDUCE COUNT 0 AS c SORTBY 2 @g ASC TIMEOUT 99999999
+!capture c FT.AGGREGATE idx * LOAD 1 @n TIMEOUT 0 WITHCURSOR COUNT 2
+FT.CURSOR READ idx {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!timing FT.PROFILE idx AGGREGATE QUERY * LOAD 1 @n TIMEOUT 0
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CONFIG SET TIMEOUT 0
+FT.SEARCH idx * LIMIT 0 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CONFIG SET _MAX_FOREGROUND_TIMEOUT_LIMIT 0
+FT.SEARCH idx * LIMIT 0 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CONFIG SET _MAX_FOREGROUND_TIMEOUT_LIMIT 60000
+FT.CONFIG SET TIMEOUT 500
+FT.CONFIG SET WORKERS 16
+FT.SEARCH idx * LIMIT 0 1 TIMEOUT 0
+FT.AGGREGATE idx * LOAD 1 @n TIMEOUT 0
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 2
+# A cursor's later chunks read the readers its first chunk opened: a term the trie gained
+# since (an expansion, or a term missing then) never shows, new documents of the terms it
+# read do, and the IDFs stay the first chunk's.
+FLUSHALL
+FT.CREATE e ON HASH PREFIX 1 e: SCHEMA t TEXT g TAG n NUMERIC SORTABLE
+HSET e:1 t hello g xa1 n 1
+HSET e:2 t help g xa2 n 2
+HSET e:3 t world g b n 3
+!capture c FT.AGGREGATE e "hel*" LOAD 1 @t WITHCURSOR COUNT 1
+HSET e:4 t helium g xa3 n 4
+HSET e:5 t hello g xa1 n 5
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!capture c FT.AGGREGATE e "@g:{xa*}" LOAD 1 @g WITHCURSOR COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+HSET e:6 t x g xa4 n 6
+HSET e:7 t y g xa2 n 7
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!capture c FT.AGGREGATE e "%hellp%" LOAD 1 @t WITHCURSOR COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+HSET e:8 t hellq n 8
+HSET e:9 t help n 9
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ e {$c}
+!capture c FT.AGGREGATE e "zzz | world" LOAD 1 @t WITHCURSOR COUNT 1
+HSET e:10 t zzz n 10
+HSET e:11 t world n 11
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!capture c FT.AGGREGATE e "@t:hel*|@g:{xa*}" LOAD 1 @n WITHCURSOR COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+HSET e:12 t helmet g xa9 n 12
+HSET e:13 t hello g xa1 n 13
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!capture c FT.AGGREGATE e "hello" ADDSCORES LOAD 2 @t @__score WITHCURSOR COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+HSET e:14 t hello n 14
+HSET e:15 t "hello hello" n 15
+HSET e:16 t other n 16
+HSET e:17 t other n 17
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE e "hello" ADDSCORES LOAD 2 @t @__score SORTBY 2 @n ASC
+!capture c FT.AGGREGATE e "@g:{b}" ADDSCORES SCORER TFIDF LOAD 2 @g @__score WITHCURSOR COUNT 1
+HSET e:18 g b
+HSET e:19 g b
+HSET e:20 g c
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE e "@g:{b}" ADDSCORES SCORER TFIDF LOAD 2 @g @__score SORTBY 2 @n ASC
+!capture c FT.AGGREGATE e "@t:hel*" LOAD 1 @t SORTBY 2 @n DESC WITHCURSOR COUNT 1
+HSET e:21 t helmet n 21
+FT.CURSOR READ e {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ e {$c}
+FT.CURSOR DEL e {$c}
+FT.DROPINDEX e
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+# FT.HYBRID WITHCURSOR: both subqueries drained, a cursor left on each (SEARCH and VSIM), read
+# like FT.AGGREGATE's cursors.
+FLUSHALL
+FT.CREATE hy ON HASH PREFIX 1 h: SCHEMA t TEXT n NUMERIC SORTABLE g TAG v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2
+HSET h:1 t "hello world" n 1 g a v "\x00\x00\x00\x00\x00\x00\x00\x00"
+HSET h:2 t "hello there" n 2 g b v "\x00\x00\x80\x3f\x00\x00\x00\x00"
+HSET h:3 t "goodbye world" n 3 g a v "\x00\x00\x00\x00\x00\x00\x80\x3f"
+HSET h:4 t "hello hello" n 4 g b v "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+HSET h:5 t "nothing" n 5 g c v "\x00\x00\x00\x40\x00\x00\x00\x40"
+!capture s=SEARCH !mask VSIM FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR
+!capture v=VSIM !mask SEARCH FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR
+FT.CURSOR READ hy {$s}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ hy {$s}
+FT.CURSOR READ hy {$v}
+FT.CURSOR READ hy {$v}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!capture s=SEARCH !mask VSIM FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD 2 @t @n WITHCURSOR COUNT 2
+FT.CURSOR READ hy {$s}
+FT.CURSOR READ hy {$s}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ hy {$s}
+!capture v=VSIM !mask SEARCH FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD 1 @t WITHCURSOR COUNT 3 MAXIDLE 10000
+FT.CURSOR READ hy {$v}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ hy {$v} COUNT 1
+FT.CURSOR READ hy {$v}
+FT.CURSOR READ hy {$v}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!capture v=VSIM !mask SEARCH FT.HYBRID hy 2 SEARCH "@g:{c}" VSIM @v $B KNN 2 K 2 PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR
+FT.CURSOR READ hy {$v}
+FT.CURSOR READ hy {$v}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!capture s=SEARCH !mask VSIM FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR
+FT.CURSOR DEL hy {$s}
+FT.CURSOR READ hy {$s}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!capture s=SEARCH !mask VSIM FT.HYBRID hy 2 SEARCH nosuchterm VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR
+FT.CURSOR READ hy {$s}
+FT.CURSOR READ hy {$s}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR COUNT 0
+FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR MAXIDLE x
+FT.HYBRID nosuch 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 3
+!capture s=SEARCH !mask VSIM FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR
+FT.CURSOR READ hy {$s}
+!capture v=VSIM !mask SEARCH FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD 2 @t @n WITHCURSOR COUNT 4
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ hy {$v}
+FT.CURSOR READ hy {$v}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 2
+# The index's cursor limit counts both.
+FT.CONFIG SET INDEX_CURSOR_LIMIT 1
+FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CONFIG SET INDEX_CURSOR_LIMIT 128
+FT.CURSOR GC hy 0
+FT.DROPINDEX hy
+FLUSHALL
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors

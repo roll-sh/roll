@@ -1,0 +1,114 @@
+//! Running commands for a caller that has no RESP connection (the HTTP API, internal tools):
+//! a throwaway client that can still block (BLPOP over HTTP waits like over TCP) and receive
+//! pub/sub pushes.
+
+use crate::conn::{ConnSink, Msg, next_client_id};
+use crate::database::Database;
+use crate::directory::Session;
+use bytes::Bytes;
+use redis_engine::{Client, Outcome, Reply, Sink};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+pub struct Detached {
+    pub client: Client,
+    pub db: Arc<Database>,
+    rx: mpsc::UnboundedReceiver<Msg>,
+}
+
+impl Detached {
+    pub fn new(session: &Session, addr: &str) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn Sink> = Arc::new(ConnSink::new(tx));
+        let mut client = Client::with_sink(next_client_id(), sink);
+        client.user = session.user.clone();
+        client.authenticated = true;
+        client.addr = addr.to_string();
+        Self { client, db: session.db.clone(), rx }
+    }
+
+    /// Run `cmds` in order, waiting out any that block. Replies of blocked commands come back
+    /// as `Reply::Raw` (already RESP-encoded for the client's protocol).
+    pub async fn run(&mut self, cmds: Vec<Vec<Bytes>>) -> Vec<Reply> {
+        let mut out = Vec::with_capacity(cmds.len());
+        let mut it = cmds.into_iter().peekable();
+        while it.peek().is_some() {
+            let mut blocked = None;
+            {
+                let Some(mut eng) = self.db.engine_unless_busy(0) else {
+                    let args = it.next().unwrap();
+                    out.push(redis_engine::commands::scripting::while_busy(&self.db.shard(0).scripts, &args));
+                    continue;
+                };
+                for args in it.by_ref() {
+                    let client = &mut self.client;
+                    match crate::conn::long_running(&args, || eng.call(client, &args)) {
+                        Outcome::Reply(r) => out.push(r),
+                        Outcome::Blocked => {
+                            blocked = Some(eng.block_deadline(self.client.id).unwrap_or(0));
+                            break;
+                        }
+                    }
+                }
+            }
+            self.db.touch(1);
+            if let Some(deadline) = blocked {
+                out.push(self.wait_unblock(deadline).await);
+            }
+        }
+        out
+    }
+
+    async fn wait_unblock(&mut self, mut deadline: i64) -> Reply {
+        loop {
+            let timer = async {
+                let now = redis_engine::util::now_ms();
+                if deadline > now {
+                    tokio::time::sleep(std::time::Duration::from_millis((deadline - now) as u64)).await;
+                }
+            };
+            tokio::select! {
+                msg = self.rx.recv() => match msg {
+                    Some(Msg::Unblock(b)) => return Reply::Raw(b),
+                    Some(Msg::Push(_) | Msg::AclChanged | Msg::Kill | Msg::Trim) => {}
+                    None => return Reply::Nil,
+                },
+                _ = timer, if deadline > 0 => {
+                    let mut eng = self.db.engine(0);
+                    if let Some(r) = eng.block_timeout(self.client.id) {
+                        return r;
+                    }
+                    // Re-run and still blocked until the next deadline, or served concurrently
+                    // (the reply is already in the channel).
+                    deadline = eng.block_deadline(self.client.id).unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    /// The next pub/sub or MONITOR message (RESP-encoded).
+    pub async fn recv_push(&mut self) -> Option<Bytes> {
+        loop {
+            match self.rx.recv().await? {
+                Msg::Push(b) => return Some(b),
+                Msg::Unblock(_) | Msg::Trim => {}
+                Msg::Kill => return None,
+                // A subscriber whose channel permissions were revoked: end the stream.
+                Msg::AclChanged => {
+                    if redis_engine::acl::must_disconnect(&self.client) {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Detached {
+    fn drop(&mut self) {
+        self.db.hub.remove_client(self.client.id);
+        for shard in &self.db.shards {
+            shard.engine.lock().remove_client(self.client.id);
+        }
+    }
+}

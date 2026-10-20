@@ -1,0 +1,7 @@
+[package]
+name = "snowball"
+description = "Snowball stemmers (snowballstem.org, BSD-3-Clause): the Rust runtime and the generated algorithms"
+version.workspace = true
+edition.workspace = true
+license = "BSD-3-Clause"
+publish.workspace = true

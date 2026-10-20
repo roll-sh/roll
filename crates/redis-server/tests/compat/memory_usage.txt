@@ -1,0 +1,256 @@
+# MEMORY USAGE is kvobjAllocSize: the object header with its key, plus what the value's encoding
+# allocates (listpack bytes, intset, quicklist nodes, hashtable buckets, entries and members).
+FLUSHALL
+# Arguments.
+SET k v
+MEMORY USAGE k SAMPLES 0
+MEMORY USAGE k SAMPLES 5 SAMPLES 3
+MEMORY USAGE k SAMPLES -1
+MEMORY USAGE k SAMPLES x
+MEMORY USAGE k SAMPLES
+MEMORY USAGE k foo
+MEMORY USAGE nokey
+MEMORY USAGE nokey SAMPLES -1
+# Lists: listpack, then quicklist nodes.
+RPUSH l a b c
+MEMORY USAGE l
+RPUSH l 1 200 70000 -5 3000000000 {63*x} {64*x}
+MEMORY USAGE l
+RPUSH l2 {200*y}
+MEMORY USAGE l2
+EVAL "for i=1,200 do redis.call('RPUSH', KEYS[1], 'element-' .. i) end" 1 ql
+OBJECT ENCODING ql
+MEMORY USAGE ql
+LPOP ql 150
+MEMORY USAGE ql
+CONFIG SET list-max-listpack-size 4
+EVAL "for i=1,10 do redis.call('RPUSH', KEYS[1], i) end" 1 ql4
+MEMORY USAGE ql4
+CONFIG SET list-max-listpack-size -2
+RPUSH big {9000*z}
+RPUSH big a
+MEMORY USAGE big
+# Compressed quicklists: nodes past the depth at both ends hold LZF data.
+CONFIG SET list-compress-depth 1
+CONFIG SET list-max-listpack-size 16
+EVAL "for i=1,100 do redis.call('RPUSH', KEYS[1], 'compressible-value-' .. i) end" 1 lz
+MEMORY USAGE lz
+EVAL "for i=1,40 do redis.call('LPUSH', KEYS[1], 'head-value-' .. i) end" 1 lz
+MEMORY USAGE lz
+LPOP lz 30
+MEMORY USAGE lz
+RPOP lz 30
+MEMORY USAGE lz
+EVAL "for i=1,30 do redis.call('RPUSH', KEYS[1], i) end" 1 lzi
+MEMORY USAGE lzi
+CONFIG SET list-compress-depth 2
+EVAL "for i=1,100 do redis.call('RPUSH', KEYS[1], 'compressible-value-' .. i) end" 1 lz2
+MEMORY USAGE lz2
+RPUSH lz x
+MEMORY USAGE lz
+CONFIG SET list-compress-depth 0
+RPUSH lz2 x
+MEMORY USAGE lz2
+CONFIG SET list-max-listpack-size -2
+# Sets: intset (width grows), listpack, hashtable.
+SADD si 1 2 3
+MEMORY USAGE si
+SADD si 70000
+MEMORY USAGE si
+SADD si 5000000000
+MEMORY USAGE si
+SREM si 5000000000
+MEMORY USAGE si
+SADD sl a b c
+MEMORY USAGE sl
+SADD sl {64*q}
+MEMORY USAGE sl
+SADD sh {65*q}
+MEMORY USAGE sh
+EVAL "for i=1,200 do redis.call('SADD', KEYS[1], 'member:' .. i) end" 1 sh2
+MEMORY USAGE sh2
+EVAL "for i=1,190 do redis.call('SREM', KEYS[1], 'member:' .. i) end" 1 sh2
+MEMORY USAGE sh2
+EVAL "for i=1,600 do redis.call('SADD', KEYS[1], i) end" 1 si2
+OBJECT ENCODING si2
+MEMORY USAGE si2
+SADD sm {40*m} {32*n} {31*o}
+SADD sm {70*p}
+MEMORY USAGE sm
+# Sorted sets: listpack (scores as listpack strings or integers).
+ZADD z 1 a 2.5 b -3 c 1e20 d 0.1 e
+MEMORY USAGE z
+ZADD z 100000 f
+MEMORY USAGE z
+# Hashes: listpack, listpackex (TTLs), hashtable entries (value embedded or behind a pointer).
+HSET h a 1 b hello c {60*v}
+MEMORY USAGE h
+HEXPIRE h 1000 FIELDS 1 a
+OBJECT ENCODING h
+MEMORY USAGE h
+HPERSIST h FIELDS 1 a
+MEMORY USAGE h
+HSET hh {65*f} v
+OBJECT ENCODING hh
+MEMORY USAGE hh
+HSET hh x {100*v} y {130*v} z {300*v}
+MEMORY USAGE hh
+HEXPIRE hh 1000 FIELDS 2 x z
+MEMORY USAGE hh
+HDEL hh y
+MEMORY USAGE hh
+EVAL "for i=1,300 do redis.call('HSET', KEYS[1], 'field:' .. i, i) end" 1 hh2
+MEMORY USAGE hh2
+# Hashtable entries: an embedded value keeps its allocation while the new one fits 3/4 of it,
+# TTL metadata is added by a rebuild and stays after HPERSIST until the value changes.
+HSET hc {70*f} 1 a 100 b {20*v} c {90*v}
+MEMORY USAGE hc
+HSET hc a 9
+MEMORY USAGE hc
+HSET hc a 1000
+MEMORY USAGE hc
+HSET hc b {16*v}
+MEMORY USAGE hc
+HSET hc b {14*v}
+MEMORY USAGE hc
+HSET hc b {30*v}
+MEMORY USAGE hc
+HINCRBY hc a 1
+MEMORY USAGE hc
+HINCRBYFLOAT hc a 0.5
+MEMORY USAGE hc
+HEXPIRE hc 1000 FIELDS 2 a c
+MEMORY USAGE hc
+HPERSIST hc FIELDS 2 a c
+MEMORY USAGE hc
+HEXPIRE hc 2000 FIELDS 1 a
+MEMORY USAGE hc
+HSET hc c {91*v}
+MEMORY USAGE hc
+HSETEX hc KEEPTTL FIELDS 1 a 5
+MEMORY USAGE hc
+HSETEX hc EX 100 FIELDS 1 b x
+MEMORY USAGE hc
+HGETEX hc PERSIST FIELDS 1 b
+MEMORY USAGE hc
+HDEL hc c
+MEMORY USAGE hc
+# listpackex converted with its TTLs.
+HSET hx a 1 b 2 c 3
+HEXPIRE hx 1000 FIELDS 1 b
+CONFIG SET hash-max-listpack-entries 3
+HSET hx d 4
+OBJECT ENCODING hx
+MEMORY USAGE hx
+CONFIG SET hash-max-listpack-entries 512
+# Sets converting between encodings.
+SADD sc 1 2 3
+SADD sc x
+OBJECT ENCODING sc
+MEMORY USAGE sc
+SADD sc {70*x}
+OBJECT ENCODING sc
+MEMORY USAGE sc
+SADD si3 1 2 3
+SADD si3 {70*x}
+OBJECT ENCODING si3
+MEMORY USAGE si3
+SPOP sh 1
+SADD sd a b c d e f
+SINTERSTORE sdst sd sc
+MEMORY USAGE sdst
+SUNIONSTORE sdst sd sl
+MEMORY USAGE sdst
+SMOVE sd sc a
+MEMORY USAGE sc
+# Lists edited in place.
+RPUSH le a b c d e
+LSET le 2 {50*x}
+MEMORY USAGE le
+LINSERT le BEFORE d 12345
+MEMORY USAGE le
+LREM le 1 a
+MEMORY USAGE le
+LTRIM le 1 2
+MEMORY USAGE le
+EVAL "for i=1,500 do redis.call('RPUSH', KEYS[1], 'value-number-' .. i) end" 1 lq
+MEMORY USAGE lq
+LTRIM lq 100 300
+MEMORY USAGE lq
+LINSERT lq BEFORE value-number-200 {100*n}
+MEMORY USAGE lq
+LSET lq 50 short
+MEMORY USAGE lq
+LRANGE lq 0 0
+LMPOP 1 lq LEFT COUNT 120
+MEMORY USAGE lq
+OBJECT ENCODING lq
+# Template hashes.
+HIMPORT PREPARE fs1 FIELDS 3 name age city
+HIMPORT SET fs1 th1 VALUES 3 bob 42 paris
+MEMORY USAGE th1
+OBJECT ENCODING th1
+HIMPORT DISCARDALL
+# Streams: the stream, its tree of nodes and their listpacks, groups, pending entries, consumers.
+XADD xs 1-1 a 1
+MEMORY USAGE xs
+XADD xs 1-2 a 2 b 3
+XADD xs 2-1 field value
+MEMORY USAGE xs
+EVAL "for i=1,350 do redis.call('XADD', KEYS[1], '5-' .. i, 'f', i) end" 1 xs
+MEMORY USAGE xs
+XTRIM xs MAXLEN 200
+MEMORY USAGE xs
+XDEL xs 5-300
+MEMORY USAGE xs
+XGROUP CREATE xs g1 0
+MEMORY USAGE xs
+XREADGROUP GROUP g1 alice COUNT 3 STREAMS xs >
+MEMORY USAGE xs
+XREADGROUP GROUP g1 bob COUNT 2 STREAMS xs >
+XGROUP CREATE xs group-two $
+XGROUP CREATECONSUMER xs group-two carol
+MEMORY USAGE xs
+XACK xs g1 5-151
+MEMORY USAGE xs
+XGROUP DESTROY xs group-two
+MEMORY USAGE xs
+XACK xs g1 5-152 5-153 5-154 5-155
+MEMORY USAGE xs
+XGROUP DELCONSUMER xs g1 bob
+MEMORY USAGE xs
+!type XADD xi IDMP producer-1 iid-0001 * f v
+!type XADD xi IDMP producer-1 iid-0002 * f v
+!type XADD xi IDMP p2 a-much-longer-idempotency-identifier * f v
+MEMORY USAGE xi
+!type XADD xe MAXLEN 0 * f v
+MEMORY USAGE xe
+# Arrays.
+ARSET ar 0 x
+MEMORY USAGE ar
+ARSET ar 1 1.5 3 hello12345 100 y
+MEMORY USAGE ar
+ARSET ar 5000 z
+MEMORY USAGE ar
+EVAL "for i=0,300 do redis.call('ARSET', KEYS[1], i, 'v' .. i) end" 1 ar2
+MEMORY USAGE ar2
+ARDEL ar2 5 6 7
+MEMORY USAGE ar2
+# Keys with TTLs carry an expire slot.
+EXPIRE l 1000
+MEMORY USAGE l
+EXPIRE sh2 1000
+MEMORY USAGE sh2
+RPUSH {130*k} a
+MEMORY USAGE {130*k}
+FLUSHALL
+# MEMORY DOCTOR (its report depends on the server's peak and RSS history, so only checked to
+# run) and MEMORY STATS' fields (values are allocator-specific).
+!skip MEMORY DOCTOR
+MEMORY DOCTOR extra
+!type MEMORY STATS
+MEMORY STATS extra
+MEMORY MALLOC-STATS extra
+MEMORY PURGE
+MEMORY nosuch
+FLUSHALL

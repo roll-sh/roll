@@ -1,6 +1,6 @@
 [package]
 name = "rolld"
-description = "roll daemon: Postgres proxy, Kafka-compatible streams, queues broker, control plane API and reconcilers"
+description = "roll daemon: Postgres proxy, serverless Redis, Kafka-compatible streams, queues broker, control plane API and reconcilers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -29,6 +29,8 @@ object_store.workspace = true
 pg-control.workspace = true
 pg-proxy.workspace = true
 pg-storage.workspace = true
+redis-control.workspace = true
+redis-server.workspace = true
 stream-broker.workspace = true
 tasks.workspace = true
 tokio.workspace = true

@@ -1,0 +1,84 @@
+# client-output-buffer-limit: a reply that breaks the normal class' hard limit closes the
+# connection without sending anything it had pending (the whole pipeline), transactions still
+# run to the end, and commands with unbounded replies stop once past the limit. The pub/sub
+# class (slow subscribers) is covered by roll's own tests: Docker's port proxy buffers output.
+CONFIG RESETSTAT
+CONFIG SET client-output-buffer-limit "normal 100000 0 0"
+CONFIG GET client-output-buffer-limit
+EVAL "for i=1,150 do redis.call('lpush', 'mylist', string.rep('x', 1000)) end" 0
+SET bigkey {10000*x}
+# Under the limit: served.
+LRANGE mylist 0 50
+# One reply over it: no response, the connection is closed.
+@conn 2
+CLIENT SETNAME mybiglist
+LRANGE mylist 0 -1
+@conn 1
+!info client_output_buffer_limit_disconnections INFO stats
+# Replies of several commands that only together break the limit.
+@conn 3
+CLIENT SETNAME multicommands
+MULTI
+SET k1 v1
+GET bigkey
+GET bigkey
+GET bigkey
+GET bigkey
+GET bigkey
+GET bigkey
+GET bigkey
+GET bigkey
+GET bigkey
+GET bigkey
+GET bigkey
+GET bigkey
+SET k2 v2
+EXEC
+@conn 1
+MGET k1 k2
+# A transaction runs completely even though its reply closes the connection.
+SET t1 v1
+@conn 4
+MULTI
+SET t2 v2
+GET t2
+LRANGE mylist 0 -1
+SET t3 v3
+DEL t1
+EXEC
+@conn 1
+MGET t1 t2 t3
+!info client_output_buffer_limit_disconnections INFO stats
+# Unbounded replies stop once past the limit.
+CONFIG SET client-output-buffer-limit "normal 1000000 0 0"
+HSET myhash a b
+SADD myset a
+ZADD myzset 1 a
+@conn 5
+HRANDFIELD myhash -999999999
+@conn 6
+HRANDFIELD myhash -999999999 WITHVALUES
+@conn 7
+SRANDMEMBER myset -999999999
+@conn 8
+ZRANDMEMBER myzset -999999999 WITHSCORES
+@conn 1
+CONFIG SET client-output-buffer-limit "normal 100000 0 0"
+EVAL "for i=1,1000 do redis.call('set', string.rep('k', 150) .. i, i) end" 0
+@conn 9
+KEYS *
+@conn 1
+!info client_output_buffer_limit_disconnections INFO stats
+# Soft limit alone never closes within one reply (it has to last soft_seconds).
+CONFIG SET client-output-buffer-limit "normal 0 100000 10"
+@conn 10
+LRANGE mylist 0 -1
+@conn 1
+!info client_output_buffer_limit_disconnections INFO stats
+# Limit 0 disables the class' limit.
+CONFIG SET client-output-buffer-limit "normal 0 0 0"
+@conn 11
+LRANGE mylist 0 -1
+@conn 1
+CONFIG SET client-output-buffer-limit "normal 0 0 0 replica 256mb 64mb 60 pubsub 32mb 8mb 60"
+CONFIG GET client-output-buffer-limit

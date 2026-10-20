@@ -6,6 +6,7 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test:pg": "scripts/test-postgres.sh",
+    "test:redis": "scripts/test-redis.sh",
     "test:tasks": "scripts/test-tasks.sh",
     "test:stream": "scripts/test-stream.sh",
     "test:queues": "scripts/test-queues.sh"

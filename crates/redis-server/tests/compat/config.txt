@@ -1,0 +1,297 @@
+# CONFIG GET / SET: every parameter with its default, types, bounds, aliases, flags and errors.
+# Module parameters (bf-, cf-, search-, ts-, vset-) are left out by the patterns.
+!sort CONFIG GET [adefghijklmnopqruwxyz]* b[^f]* c[^f]* s[^e]* se[^a]* t[^s]*
+CONFIG GET maxmemory MAXMEMORY
+!sort CONFIG GET MAXMEMORY max*
+!sort CONFIG GET lua-time-limit busy*
+!sort CONFIG GET *slave*
+CONFIG GET rdb-key-save-delay
+CONFIG GET REPL-RDB-CHANNEL
+CONFIG GET nosuch
+CONFIG GET rdb-key-save-*
+
+# bool
+CONFIG SET rdbcompression no
+CONFIG GET rdbcompression
+CONFIG SET rdbcompression YES
+CONFIG GET rdbcompression
+CONFIG SET rdbcompression 1
+CONFIG SET daemonize no
+CONFIG SET slave-read-only no
+CONFIG GET replica-read-only
+CONFIG SET replica-read-only yes
+CONFIG SET activedefrag yes
+CONFIG GET activedefrag
+CONFIG SET activedefrag no
+CONFIG SET key-memory-histograms yes
+CONFIG GET key-memory-histograms
+CONFIG SET key-memory-histograms no
+CONFIG SET tls-replication yes
+CONFIG SET tls-cluster yes
+CONFIG SET tls-replication no
+CONFIG GET tls-replication
+
+# strings
+CONFIG SET replica-announce-ip 10.0.0.1
+CONFIG GET slave-announce-ip
+CONFIG SET replica-announce-ip ""
+CONFIG GET replica-announce-ip
+CONFIG SET dbfilename x.rdb
+CONFIG SET dir /tmp
+CONFIG SET logfile x
+CONFIG SET ignore-warnings ARM64-COW-BUG
+CONFIG GET ignore-warnings
+CONFIG SET ignore-warnings ""
+CONFIG SET proc-title-template "{title}"
+CONFIG SET proc-title-template "{title} {port}"
+CONFIG GET proc-title-template
+CONFIG SET proc-title-template "{nosuch}"
+CONFIG SET proc-title-template "x{"
+CONFIG SET proc-title-template "{{x"
+CONFIG GET proc-title-template
+CONFIG SET proc-title-template "{title} {listen-addr} {server-mode}"
+CONFIG SET cluster-announce-hostname "a.b-c"
+CONFIG SET cluster-announce-hostname "a_b"
+CONFIG SET cluster-announce-hostname ""
+CONFIG SET cluster-announce-ip 1.2.3.4
+CONFIG SET cluster-announce-ip ::1
+CONFIG SET cluster-announce-ip "bad host"
+CONFIG SET cluster-announce-ip ""
+CONFIG SET cluster-announce-human-nodename "node 1"
+CONFIG SET cluster-announce-human-nodename node-1
+CONFIG GET cluster-announce-human-nodename
+CONFIG SET cluster-announce-human-nodename ""
+CONFIG SET tls-cert-file /nonexistent
+CONFIG GET tls-cert-file
+CONFIG SET tls-cert-file ""
+CONFIG SET tls-expected-peer-name "a b"
+CONFIG SET tls-expected-peer-name "   "
+CONFIG SET tls-expected-peer-name ""
+CONFIG SET locale-collate C
+CONFIG GET locale-collate
+CONFIG SET locale-collate ""
+CONFIG SET masteruser u
+CONFIG GET masteruser
+CONFIG SET masteruser ""
+
+# enums
+CONFIG SET loglevel WARNING
+CONFIG GET loglevel
+CONFIG SET loglevel nope
+CONFIG SET loglevel notice
+CONFIG SET maxmemory-policy ALLKEYS-LRM
+CONFIG GET maxmemory-policy
+CONFIG SET maxmemory-policy noeviction
+CONFIG SET appendfsync always
+CONFIG GET appendfsync
+CONFIG SET appendfsync everysec
+CONFIG SET oom-score-adj yes
+CONFIG GET oom-score-adj
+CONFIG SET oom-score-adj no
+CONFIG SET acl-pubsub-default allchannels
+CONFIG GET acl-pubsub-default
+CONFIG SET acl-pubsub-default resetchannels
+CONFIG SET sanitize-dump-payload clients
+CONFIG GET sanitize-dump-payload
+CONFIG SET sanitize-dump-payload no
+CONFIG SET tls-auth-clients-user cn
+CONFIG GET tls-auth-clients-user
+CONFIG SET tls-auth-clients-user off
+CONFIG SET enable-debug-command yes
+CONFIG SET shutdown-on-sigint "nosave now"
+CONFIG GET shutdown-on-sigint
+CONFIG SET shutdown-on-sigint "save nosave"
+CONFIG SET shutdown-on-sigint "force  now"
+CONFIG SET shutdown-on-sigint ""
+CONFIG SET shutdown-on-sigint "now default"
+CONFIG GET shutdown-on-sigint
+CONFIG SET shutdown-on-sigint default
+CONFIG SET cluster-slot-stats-enabled "cpu net"
+CONFIG GET cluster-slot-stats-enabled
+CONFIG SET cluster-slot-stats-enabled "cpu net mem"
+CONFIG SET cluster-slot-stats-enabled yes
+CONFIG SET cluster-slot-stats-enabled no
+CONFIG GET cluster-slot-stats-enabled
+CONFIG SET repl-diskless-load swapdb
+CONFIG GET repl-diskless-load
+CONFIG SET repl-diskless-load disabled
+
+# numbers
+CONFIG SET hz 1000
+CONFIG GET hz
+CONFIG SET hz 0
+CONFIG GET hz
+CONFIG SET hz -1
+CONFIG SET hz 10
+CONFIG SET maxclients -1
+CONFIG SET maxclients 0
+CONFIG SET maxclients 4294967296
+CONFIG SET timeout 2147483648
+CONFIG SET timeout 1.5
+CONFIG SET timeout " 1"
+CONFIG SET timeout +1
+CONFIG SET timeout 01
+CONFIG SET timeout 0
+CONFIG SET slowlog-log-slower-than -2
+CONFIG SET slowlog-log-slower-than -1
+CONFIG GET slowlog-log-slower-than
+CONFIG SET slowlog-log-slower-than 10000
+CONFIG SET slowlog-max-len -1
+CONFIG SET hash-max-listpack-entries -1
+CONFIG SET hash-max-listpack-entries 9223372036854775808
+CONFIG SET maxmemory 1kb
+CONFIG GET maxmemory
+CONFIG SET maxmemory 1K
+CONFIG GET maxmemory
+CONFIG SET maxmemory 2GB
+CONFIG GET maxmemory
+CONFIG SET maxmemory 18446744073709551615
+CONFIG GET maxmemory
+CONFIG SET maxmemory 99999999999999999999999
+CONFIG GET maxmemory
+CONFIG SET maxmemory ""
+CONFIG SET maxmemory kb
+CONFIG SET maxmemory -1
+CONFIG SET maxmemory 1tb
+CONFIG SET maxmemory 0
+CONFIG SET proto-max-bulk-len 1000
+CONFIG SET proto-max-bulk-len 1mb
+CONFIG GET proto-max-bulk-len
+CONFIG SET proto-max-bulk-len 18446744073709551615
+CONFIG SET proto-max-bulk-len 512mb
+CONFIG SET hash-max-listpack-value 1k
+CONFIG GET hash-max-listpack-value
+CONFIG SET hash-max-listpack-value 64
+CONFIG SET maxmemory-clients 10%
+CONFIG GET maxmemory-clients
+CONFIG SET maxmemory-clients 100%
+CONFIG SET maxmemory-clients 101%
+CONFIG SET maxmemory-clients -1
+CONFIG SET maxmemory-clients %
+CONFIG SET maxmemory-clients 1mb
+CONFIG GET maxmemory-clients
+CONFIG SET maxmemory-clients 0
+CONFIG SET client-query-buffer-limit 1000
+CONFIG SET unixsocketperm 777
+CONFIG SET repl-backlog-size 0
+CONFIG SET repl-backlog-size 2mb
+CONFIG GET repl-backlog-size
+CONFIG SET repl-backlog-size 1mb
+CONFIG SET lookahead 0
+CONFIG SET slowlog-entry-max-argc 1
+CONFIG SET array-slice-size 300
+CONFIG SET stream-idmp-duration 0
+CONFIG SET auto-aof-rewrite-min-size 1g
+CONFIG GET auto-aof-rewrite-min-size
+CONFIG SET auto-aof-rewrite-min-size 64mb
+CONFIG SET tls-port 6390
+CONFIG GET tls-port
+CONFIG SET tls-port 0
+CONFIG SET port 6379
+CONFIG SET bind "* -::*"
+
+# specials
+CONFIG SET save "100 10 20 5"
+CONFIG GET save
+CONFIG SET save "100 10 20"
+CONFIG SET save "0 10"
+CONFIG SET save "10 -1"
+CONFIG SET save "10 x"
+CONFIG SET save "+10 05"
+CONFIG GET save
+CONFIG SET save "10 4294967297"
+CONFIG GET save
+CONFIG SET save ""
+CONFIG GET save
+CONFIG SET save "3600 1 300 100 60 10000"
+CONFIG SET client-output-buffer-limit "replica 1mb 2mb 30"
+CONFIG GET client-output-buffer-limit
+CONFIG SET client-output-buffer-limit "pubsub 1 2 3 normal 4 5 6"
+CONFIG GET client-output-buffer-limit
+CONFIG SET client-output-buffer-limit "master 1 2 3"
+CONFIG SET client-output-buffer-limit "normal 1 2"
+CONFIG SET client-output-buffer-limit "normal 1 2 -3"
+CONFIG SET client-output-buffer-limit "normal x 2 3"
+CONFIG SET client-output-buffer-limit ""
+CONFIG SET client-output-buffer-limit "normal 0 0 0 slave 268435456 67108864 60 pubsub 33554432 8388608 60"
+CONFIG SET oom-score-adj-values "1 2 3"
+CONFIG GET oom-score-adj-values
+CONFIG SET oom-score-adj-values "1 2"
+CONFIG SET oom-score-adj-values "1 2 3000"
+CONFIG SET oom-score-adj-values "1 2 x"
+CONFIG SET oom-score-adj-values "0 200 800"
+CONFIG SET notify-keyspace-events "KEoc"
+CONFIG GET notify-keyspace-events
+CONFIG SET notify-keyspace-events "STIV"
+CONFIG GET notify-keyspace-events
+CONFIG SET notify-keyspace-events "AKEmnocSTIV"
+CONFIG GET notify-keyspace-events
+CONFIG SET notify-keyspace-events "Q"
+CONFIG SET notify-keyspace-events ""
+CONFIG SET latency-tracking-info-percentiles "50 99.5"
+CONFIG GET latency-tracking-info-percentiles
+CONFIG SET latency-tracking-info-percentiles "50  99"
+CONFIG SET latency-tracking-info-percentiles "101"
+CONFIG SET latency-tracking-info-percentiles ""
+CONFIG GET latency-tracking-info-percentiles
+CONFIG SET latency-tracking-info-percentiles "50 99 99.9"
+CONFIG SET replicaof "no one"
+CONFIG SET slaveof "no one"
+CONFIG GET replicaof
+CONFIG SET bind "1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4 1.2.3.4"
+
+# CONFIG SET with several pairs: all or nothing, error precedence
+CONFIG SET timeout 5 maxmemory-samples 0
+CONFIG GET timeout
+CONFIG SET timeout 5 nosuch 1 daemonize yes other 2
+CONFIG SET timeout 5 daemonize yes nosuch 1
+CONFIG SET timeout 5 TIMEOUT 6
+CONFIG SET lua-time-limit 1 busy-reply-threshold 2
+CONFIG SET DAEMONIZE yes
+CONFIG SET Timeout x
+CONFIG SET timeout 5 maxmemory-samples 7
+!sort CONFIG GET timeout maxmemory-samples
+CONFIG SET timeout 0 maxmemory-samples 5
+CONFIG SET timeout
+CONFIG SET timeout 1 maxmemory
+CONFIG SET array-sparse-kmin 20 array-sparse-kmax 30
+CONFIG SET array-sparse-kmax 30 array-sparse-kmin 20
+!sort CONFIG GET array-sparse-*
+CONFIG SET array-sparse-kmin 5 array-sparse-kmax 10
+CONFIG SET array-sparse-kmax 10 array-sparse-kmin 5
+!sort CONFIG GET array-sparse-*
+
+# Effects: appendonly starts a rewrite; slowlog limits; requirepass
+CONFIG SET appendonly yes
+CONFIG GET appendonly
+!info aof_enabled INFO persistence
+CONFIG SET appendonly no
+!info aof_enabled INFO persistence
+CONFIG SET slowlog-log-slower-than 0
+CONFIG SET slowlog-entry-max-argc 3 slowlog-entry-max-string-len 4
+SLOWLOG RESET
+ECHO abcdefgh
+RPUSH sl a b c d e
+EVAL "local e = redis.call('slowlog', 'get', 2) return {e[1][4], e[1][7], e[2][4], e[2][7], #e[1]}" 0
+CONFIG SET slowlog-entry-max-argc 32 slowlog-entry-max-string-len 128 slowlog-log-slower-than 10000
+DEL sl
+CONFIG SET requirepass secret
+CONFIG GET requirepass
+@conn 2
+PING
+AUTH secret
+PING
+@conn 1
+CONFIG SET requirepass ""
+@conn 3
+PING
+@conn 1
+ACL GETUSER default
+CONFIG REWRITE
+CONFIG REWRITE extra
+
+# CONFIG GET collects its matches in a dict: names as the caller wrote them, the first spelling
+# of a name only, aliases separately (the order follows the dict and varies per process).
+!sort CONFIG GET MAXMEMORY Hz maxmemory
+!sort CONFIG GET slaveof replicaof REPLICAOF
+!sort CONFIG GET hz *hz* nosuch

@@ -301,7 +301,8 @@ async fn metadata_versions_and_auto_create() {
 async fn list_offsets_every_special_timestamp() {
     let tb = TestBroker::start("proto-offsets").await;
     let mut c = Conn::connect(&tb.addr).await;
-    create(&mut c, "o", 1, &[]).await;
+    // The timestamps are from 1970: time retention would delete them once a cleaner pass comes.
+    create(&mut c, "o", 1, &[("retention.ms", "-1")]).await;
     for i in 0..10 {
         let recs = vec![NewRecord { value: Some(Bytes::from(format!("{i}"))), timestamp: Some(1000 * (i + 1)), ..Default::default() }];
         produce(&mut c, 9, "o", 0, batch::build(&recs, BatchOptions::default(), now_ms())).await;

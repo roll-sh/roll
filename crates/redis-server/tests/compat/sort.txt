@@ -1,0 +1,151 @@
+# SORT / SORT_RO: numeric and ALPHA, LIMIT, BY and GET patterns (strings, hash fields, #),
+# BY nosort, STORE (and replication-safe set order), errors, ACL restrictions.
+
+# ---- numeric and alpha ----
+RPUSH l 3 1 2 10 -5 2.5 1e2 0x10
+SORT l
+SORT l DESC
+SORT l ASC
+SORT l ALPHA
+SORT l ALPHA DESC
+RPUSH w banana apple cherry Apple 10 9
+SORT w
+SORT w ALPHA
+SORT w ALPHA DESC
+SORT nokey
+SORT nokey ALPHA DESC LIMIT 0 5
+RPUSH ties 2 1 2 1 3
+SORT ties
+SORT ties DESC
+RPUSH inf inf -inf 1 +inf
+SORT inf
+RPUSH nan nan 1
+SORT nan
+RPUSH sp " 1" "1 " ""
+SORT sp
+
+# ---- LIMIT ----
+SORT l LIMIT 0 3
+SORT l LIMIT 2 3
+SORT l LIMIT 2 -1
+SORT l LIMIT 6 100
+SORT l LIMIT 8 1
+SORT l LIMIT 100 1
+SORT l LIMIT -5 2
+SORT l LIMIT 0 0
+SORT l DESC LIMIT 1 2
+SORT l LIMIT a 1
+SORT l LIMIT 0
+SORT l LIMIT 0 x
+
+# ---- BY ----
+MSET w_1 30 w_2 10 w_3 20 w_10 5 w_-5 0 w_2.5 7
+SORT l BY w_*
+SORT l BY w_* DESC
+SORT l BY w_* LIMIT 1 3
+SORT l BY w_* DESC LIMIT 2 2
+SORT l BY w_* ALPHA
+SORT l BY missing_*
+SORT l BY missing_* ALPHA
+SORT l BY nosort
+SORT l BY nosort DESC
+SORT l BY nosort LIMIT 2 3
+SORT l BY nosort DESC LIMIT 2 3
+SET w_bad notanumber
+RPUSH lb 1 bad
+SORT lb BY w_*
+HSET h_1 f 3 g a
+HSET h_2 f 1 g c
+HSET h_3 f 2 g b
+RPUSH hl 1 2 3
+SORT hl BY h_*->f
+SORT hl BY h_*->g ALPHA
+SORT hl BY h_*->nofield
+SORT hl BY h_*->
+SORT hl BY h_->*
+
+# ---- GET ----
+SORT hl GET #
+SORT hl GET h_*->g
+SORT hl GET # GET h_*->f GET nope_*
+SORT hl BY h_*->f GET h_*->g GET #
+SORT hl GET w_*
+SORT hl GET constant
+SORT hl LIMIT 0 1 GET # GET #
+
+# ---- sets and sorted sets ----
+SADD s 5 3 9 1
+SORT s
+SORT s DESC LIMIT 1 2
+SADD sw x b a
+SORT sw ALPHA
+SORT sw BY nosort ALPHA
+ZADD z 3 c 1 a 2 b 0 d
+SORT z ALPHA
+SORT z BY nosort
+SORT z BY nosort DESC
+SORT z BY nosort LIMIT 1 2
+SORT z BY nosort DESC LIMIT 1 2
+OBJECT ENCODING z
+ZADD zn 1 30 2 10 3 20
+SORT zn
+SORT zn BY nosort
+
+# ---- STORE ----
+SORT l STORE out
+LRANGE out 0 -1
+OBJECT ENCODING out
+SORT hl GET # GET nope_* STORE out
+LRANGE out 0 -1
+SORT nokey STORE out
+EXISTS out
+SORT nokey STORE out
+SADD big {200*}
+SORT s BY nosort STORE sout
+LRANGE sout 0 -1
+SORT sw BY nosort STORE sout
+LRANGE sout 0 -1
+SET str x
+SORT l STORE str
+TYPE str
+SORT l LIMIT 0 2 STORE out STORE out2
+EXISTS out out2
+LRANGE out2 0 -1
+
+# ---- errors ----
+SORT
+SORT str
+SET notalist x
+SORT notalist
+SORT l BADOPT
+SORT l STORE
+SORT l BY
+SORT l GET
+SORT_RO l
+SORT_RO l DESC LIMIT 0 2 ALPHA
+SORT_RO l STORE out
+SORT_RO l BY w_* GET #
+SORT_RO
+
+# ---- ACL: BY / GET patterns need access to every key ----
+ACL SETUSER sorter on >pw ~l ~hl +@all
+@conn 2
+AUTH sorter pw
+SORT l
+SORT l BY nosort
+SORT l BY w_*
+SORT l GET #
+SORT hl BY h_*->f
+SORT_RO l GET w_*
+@conn 1
+ACL SETUSER sorter2 on >pw %R~* +@all
+@conn 3
+AUTH sorter2 pw
+SORT l BY w_* GET #
+@conn 1
+ACL DELUSER sorter sorter2
+
+# ---- COMMAND GETKEYS ----
+COMMAND GETKEYS SORT k
+COMMAND GETKEYS SORT k LIMIT 0 1 STORE d1 BY x STORE d2
+COMMAND GETKEYS SORT_RO k BY x

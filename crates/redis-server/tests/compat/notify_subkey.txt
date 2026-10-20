@@ -1,0 +1,161 @@
+# Subkey keyspace events (S, T, I, V): hash commands name the fields they touched.
+CONFIG SET notify-keyspace-events KEhgSTIV
+@conn 2
+PSUBSCRIBE __*
+@conn 1
+HSET h a 1 b 2 a 3
+HSETNX h c 4
+HSETNX h c 5
+HINCRBY h n 1
+HINCRBYFLOAT h f 1.5
+HDEL h a zz b
+HSET "k|x" f v
+HSET "k\nl" f v
+HEXPIRE h 100 FIELDS 2 c n
+HPEXPIRE h 0 FIELDS 1 n
+HPERSIST h FIELDS 2 c f
+HGETEX h EX 100 FIELDS 2 c f
+HGETEX h PERSIST FIELDS 1 c
+HSETEX h EX 100 FIELDS 2 x 1 y 2
+HSETEX h FNX FIELDS 1 x 3
+HGETDEL h FIELDS 2 x zz
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+HPEXPIRE h 1 FIELDS 2 y f
+@sleep 600
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+HGETALL h
+DEL h "k|x" "k\nl"
+CONFIG SET notify-keyspace-events hT
+HSET h2 a 1
+DEL h2
+CONFIG SET notify-keyspace-events hI
+HSET h3 a 1 b 2
+CONFIG SET notify-keyspace-events KEh
+HSET h3 c 3
+DEL h3
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""

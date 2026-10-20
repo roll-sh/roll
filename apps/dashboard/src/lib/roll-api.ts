@@ -1,4 +1,4 @@
-/** Client for the rolld control-plane API (crates/pg-control/src/api.rs, crates/stream-broker/src/http). */
+/** Client for the rolld control-plane API (Postgres: crates/pg-control/src/api.rs; streams: crates/stream-broker/src/http; Redis: redis-api.ts). */
 
 export const ROLL_API = process.env.NEXT_PUBLIC_ROLL_API ?? "http://127.0.0.1:7070";
 
@@ -66,7 +66,7 @@ export interface QueryResult {
   affected: number;
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${ROLL_API}${path}`, {
     method,
     headers: body === undefined ? undefined : { "content-type": "application/json" },

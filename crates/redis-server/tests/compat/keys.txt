@@ -1,0 +1,215 @@
+# Generic key commands
+SET a 1
+SET b 2
+DEL a b c
+EXISTS a b
+SET a 1
+EXISTS a a a
+UNLINK a
+TYPE nokey
+SET s v
+TYPE s
+LPUSH l x
+TYPE l
+EXPIRE s 100
+TTL s
+PTTL nokey
+TTL nokey
+SET p v
+TTL p
+EXPIRE p 100 NX
+EXPIRE p 200 NX
+EXPIRE p 50 GT
+EXPIRE p 300 GT
+TTL p
+EXPIRE p 400 LT
+EXPIRE p 10 LT
+TTL p
+EXPIRE p 10 XX
+EXPIRE nopers 10 XX
+EXPIRE p 10 NX XX
+EXPIRE p 10 GT LT
+EXPIRE p 10 FOO
+EXPIRE p abc
+EXPIRE p 9223372036854775807
+SET q v
+EXPIRE q 10 GT
+EXPIRE q 10 LT
+PERSIST q
+PERSIST q
+PERSIST nokey
+PEXPIRE q 100000
+!type PTTL q
+EXPIREAT q 99999999999
+!type TTL q
+EXPIRETIME q
+PEXPIRETIME q
+EXPIRETIME nokey
+SET r v
+EXPIRETIME r
+PEXPIREAT r 1
+EXISTS r
+SET r v
+EXPIRE r -1
+EXISTS r
+SET r v
+EXPIRE r 0
+EXISTS r
+FLUSHALL
+MSET user:1 a user:2 b other c
+!sort KEYS user:*
+!sort KEYS *
+KEYS nomatch*
+!sort KEYS user:?
+!sort KEYS user:[12]
+!type RANDOMKEY
+FLUSHALL
+!type RANDOMKEY
+SET src v
+RENAME src dst
+GET dst
+GET src
+RENAME src dst
+RENAME dst dst
+SET other x
+RENAMENX dst other
+RENAMENX dst fresh
+GET fresh
+RENAMENX fresh fresh
+SET e1 v EX 100
+RENAME e1 e2
+TTL e2
+SET mv v
+MOVE mv 1
+EXISTS mv
+SELECT 1
+GET mv
+MOVE mv 1
+SELECT 0
+MOVE nokey 1
+MOVE mv 99
+MOVE mv abc
+SET mv2 v
+SELECT 1
+SET mv2 other
+SELECT 0
+MOVE mv2 1
+SET c1 hello
+COPY c1 c2
+GET c2
+COPY c1 c2
+COPY c1 c2 REPLACE
+COPY c1 c3 DB 2
+SELECT 2
+GET c3
+SELECT 0
+COPY nokey c4
+COPY c1 c1
+COPY c1 c5 DB 99
+COPY c1 c5 FOO
+LPUSH cl a b c
+COPY cl cl2
+LRANGE cl2 0 -1
+TOUCH c1 c2 nokey
+OBJECT ENCODING c1
+SET int 12345
+OBJECT ENCODING int
+SET big aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+OBJECT ENCODING big
+OBJECT ENCODING nokey
+OBJECT REFCOUNT c1
+OBJECT FREQ c1
+!type OBJECT IDLETIME c1
+OBJECT FOO c1
+OBJECT
+!type OBJECT HELP
+!sort SCAN 0 COUNT 1000 MATCH c*
+SCAN abc
+SCAN 0 COUNT 0
+SCAN 0 TYPE string COUNT 1000 MATCH c1
+!type SCAN 0 TYPE nosuchtype
+SCAN 0 FOO
+DBSIZE
+SELECT 99
+SELECT abc
+SELECT -1
+SWAPDB 0 1
+DBSIZE
+SWAPDB 0 1
+SWAPDB 0 99
+SWAPDB a 1
+SWAPDB 0 a
+FLUSHDB
+DBSIZE
+FLUSHDB ASYNC
+FLUSHDB FOO
+FLUSHALL SYNC
+
+# ---- read lookups' statistics: NOTOUCH (EXISTS, TYPE, TTL…) and OBJECT (NOTOUCH|NONOTIFY) still count hits and misses ----
+FLUSHALL
+CONFIG SET notify-keyspace-events KEm
+@conn 7
+PSUBSCRIBE __key*@0__:*
+@conn 1
+SET int 1
+OBJECT REFCOUNT int
+CONFIG RESETSTAT
+SET a 1
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+TYPE a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+TYPE nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT ENCODING a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT ENCODING nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+TTL a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+PTTL nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+EXPIRETIME a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+COPY a b
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT FREQ a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT IDLETIME a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT IDLETIME nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+OBJECT REFCOUNT a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+EXISTS a nosuch
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+TOUCH a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+DUMP a
+!info keyspace_hits,keyspace_misses INFO stats
+CONFIG RESETSTAT
+STRLEN a
+!info keyspace_hits,keyspace_misses INFO stats
+@conn 7
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+FLUSHALL

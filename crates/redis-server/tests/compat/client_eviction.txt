@@ -1,0 +1,39 @@
+# maxmemory-clients: when clients together use that much (query buffers, argv, output…), the
+# largest evictable ones are closed. CLIENT NO-EVICT exempts a client; a percentage is of
+# maxmemory. Sizes keep clear of the per-client accounting details.
+CONFIG RESETSTAT
+CLIENT NO-EVICT on
+CONFIG SET maxmemory-clients 1mb
+CONFIG GET maxmemory-clients
+SET small {100000*x}
+# A 2MB argument: the client is evicted while its query buffer fills, the command never runs.
+@conn 2
+SET big {2000000*x}
+@conn 1
+EXISTS big
+!info evicted_clients INFO stats
+# A percentage of maxmemory.
+CONFIG SET maxmemory 100mb
+CONFIG SET maxmemory-clients 1%
+CONFIG GET maxmemory-clients
+@conn 4
+SET big2 {2000000*x}
+@conn 1
+EXISTS big2
+!info evicted_clients INFO stats
+# Without maxmemory a percentage disables eviction.
+CONFIG SET maxmemory 0
+@conn 5
+SET big3 {2000000*x}
+@conn 1
+EXISTS big3
+!info evicted_clients INFO stats
+# Exempt (its memory is only sampled by the cron, so the count isn't compared after this).
+CONFIG SET maxmemory-clients 1mb
+@conn 3
+CLIENT NO-EVICT on
+SET big {2000000*x}
+STRLEN big
+@conn 1
+CONFIG SET maxmemory-clients 0
+CLIENT NO-EVICT off

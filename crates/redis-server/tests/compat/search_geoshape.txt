@@ -1,0 +1,343 @@
+# GEOSHAPE fields like Redis 8's bundled RediSearch 8.10.1: WKT points and polygons from hashes
+# and JSON, Boost.Geometry's parse and validity errors as indexing failures, WITHIN / CONTAINS /
+# INTERSECTS / DISJOINT queries in both coordinate systems, FT.INFO memory, profiles, errors.
+FLUSHALL
+FT.CREATE gs ON HASH PREFIX 1 gs: SCHEMA g GEOSHAPE FLAT n NUMERIC SORTABLE
+# No index before the first geometry, query or deletion.
+!mask total_indexing_time FT.INFO gs
+HSET gs:1 g "POINT(1 1)" n 1
+!mask total_indexing_time FT.INFO gs
+HSET gs:2 g "POINT(5 5)" n 2
+HSET gs:3 g "POLYGON((0 0, 0 2, 2 2, 2 0, 0 0))" n 3
+HSET gs:4 g "POLYGON((0 0, 0 10, 10 10, 10 0, 0 0),(2 2, 4 2, 4 4, 2 4, 2 2))" n 4
+HSET gs:5 g "POLYGON((20 20, 25 20, 25 25, 20 25, 20 20))" n 5
+HSET gs:6 g "POINT(3 3)" n 6
+HSET gs:7 g "POLYGON((1 1, 1 3, 3 3, 3 1, 1 1))" n 7
+!mask total_indexing_time FT.INFO gs
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POINT(1 1)" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POINT(3 3)" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((1.5 1.5, 1.5 2.5, 2.5 2.5, 2.5 1.5, 1.5 1.5))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((-1 -1, -1 30, 30 30, 30 -1, -1 -1))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[CONTAINS $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[CONTAINS $s]" PARAMS 2 s "POINT(1 1)" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[CONTAINS $s]" PARAMS 2 s "POINT(3 3)" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[CONTAINS $s]" PARAMS 2 s "POLYGON((1.5 1.5, 1.5 2.5, 2.5 2.5, 2.5 1.5, 1.5 1.5))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[CONTAINS $s]" PARAMS 2 s "POLYGON((-1 -1, -1 30, 30 30, 30 -1, -1 -1))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[INTERSECTS $s]" PARAMS 2 s "POINT(1 1)" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[INTERSECTS $s]" PARAMS 2 s "POINT(3 3)" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((1.5 1.5, 1.5 2.5, 2.5 2.5, 2.5 1.5, 1.5 1.5))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((-1 -1, -1 30, 30 30, 30 -1, -1 -1))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[DISJOINT $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[DISJOINT $s]" PARAMS 2 s "POINT(1 1)" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[DISJOINT $s]" PARAMS 2 s "POINT(3 3)" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[DISJOINT $s]" PARAMS 2 s "POLYGON((1.5 1.5, 1.5 2.5, 2.5 2.5, 2.5 1.5, 1.5 1.5))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[DISJOINT $s]" PARAMS 2 s "POLYGON((-1 -1, -1 30, 30 30, 30 -1, -1 -1))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[INTERSECTS $s] @n:[1 4]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" SORTBY n RETURN 1 n DIALECT 3
+FT.SEARCH gs "-@g:[WITHIN $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" SORTBY n NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s] | @n:[5 5]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" SORTBY n NOCONTENT DIALECT 4
+FT.SEARCH gs "@g:[within $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" NOCONTENT DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" DIALECT 3
+FT.AGGREGATE gs "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" LOAD 2 @g @n SORTBY 2 @n ASC DIALECT 3
+FT.AGGREGATE gs "@g:[DISJOINT $s]" PARAMS 2 s "POINT(5 5)" GROUPBY 0 REDUCE COUNT 0 AS c DIALECT 3
+FT.EXPLAIN gs "@g:[CONTAINS $s]" PARAMS 2 s "POINT(1 1)" DIALECT 3
+!timing FT.PROFILE gs SEARCH QUERY "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" NOCONTENT DIALECT 3
+!timing FT.PROFILE gs AGGREGATE QUERY "@g:[WITHIN $s] @n:[0 10]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" DIALECT 3
+!timing FT.PROFILE gs SEARCH LIMITED QUERY "@g:[WITHIN $s]" PARAMS 2 s "POINT(1 1)" NOCONTENT DIALECT 3
+# Query errors: the WKT's parse or validity failure.
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POINT(1 2 3)" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "point(1 2)" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POIX(1 2)" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((0 0,1 1,2 2,0 0))" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((0 0,0 4,4 4,4 2,-2 2,-2 0,0 0))" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "LINESTRING(0 0, 1 1)" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POINT(nan 1)" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN \"POINT(1 1)\"]" DIALECT 3
+FT.SEARCH gs "@g:[NEAR $s]" PARAMS 2 s "POINT(1 1)" DIALECT 3
+FT.SEARCH gs "@n:[WITHIN $s]" PARAMS 2 s "POINT(1 1)" DIALECT 3
+FT.SEARCH gs "@nope:[WITHIN $s]" PARAMS 2 s "POINT(1 1)" DIALECT 3
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POINT(1 1)" DIALECT 2
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POINT(1 1)"
+# Replacing and deleting documents.
+HSET gs:2 g "POINT(50 50)"
+FT.SEARCH gs "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" SORTBY n NOCONTENT DIALECT 3
+DEL gs:4
+!mask total_indexing_time FT.INFO gs
+HDEL gs:7 g
+FT.SEARCH gs "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((-1 -1, -1 30, 30 30, 30 -1, -1 -1))" SORTBY n NOCONTENT DIALECT 3
+!mask total_indexing_time FT.INFO gs
+# Indexing failures: Boost.Geometry's WKT reader and validity messages.
+FLUSHALL
+FT.CREATE ge ON HASH PREFIX 1 ge: SCHEMA g GEOSHAPE FLAT
+HSET ge:0 g "POINT(1 2 3)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:1 g "point(1 2)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:2 g "POIX(1 2)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:3 g "POINT( 1 , 2 )"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:4 g "POINT(nan(123) 1)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:5 g "POINT M(1 2)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:6 g "POINT()"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:7 g "POINT(inf 1)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:8 g "POINT(1e999 1)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:9 g "POLYGON EMPTY"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:10 g "POLYGON(())"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:11 g "POLYGON((0 0,1 1,2 2,0 0))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:12 g "POLYGON((0 0,2 2,2 0,0 2,0 0))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:13 g "POLYGON((0 0,0 10,10 10,10 0,0 0),(20 20,24 20,24 24,20 24,20 20))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:14 g "POLYGON((0 0,0 10,10 10,10 0,0 0),(1 1,9 1,9 9,1 9,1 1),(2 2,4 2,4 4,2 4,2 2))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:15 g "POLYGON((0 0 0, 1 0 0, 1 1 0, 0 0 0))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:16 g "	POINT(1 2)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:17 g "POINT(1 2),"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:18 g "POLYGON((0 0,0 4,4 4,4 2,-2 2,-2 0,0 0))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:19 g "POLYGON((0 0,0 4,2 4,2 -2,4 -2,4 0,0 0))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:20 g "POLYGON((0 0,0 10,10 10,10 0,0 0),(2 8,4 12,6 8,2 8))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:21 g "POLYGON((0 0,0 10,10 10,10 0,0 0),(2 2,2 5,6 5,6 2,2 2),(4 3,4 8,8 8,8 3,4 3))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:22 g "POLYGON((0 0,0 10,10 10,10 0,0 0),(0 4,2 6,2 4,0 4))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:23 g "POLYGON((0 0,0 10,10 10,10 0,0 0),(1 1,1 5,3 5,3 1,1 1),(3 1,3 5,5 5,5 1,3 1))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:24 g "POLYGON((0 0,0 10,5 5,10 10,10 0,5 5,0 0))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:25 g "POLYGON((0 0,0 10,10 10,10 0,0 0),(0 2,2 4,0 6,0 2))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:26 g "POLYGON((0 0,0 10,10 10,10 0,0 0),(9 9,5 9,9 5,9 9))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:27 g "POLYGON((0 0,0 10,10 10,10 0,0 0),(1 1,1 3,3 3,3 1,1 1),(3 3,3 5,5 5,5 3,3 3))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:28 g "POLYGON((0 0,0 1,1 1,1 0))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:29 g "POLYGON((0 0,1 0,1 1,0 1,0 0))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:30 g "GEOMETRYCOLLECTION(POINT(1 1))"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:31 g "POINT(1 2) x"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:32 g "POINT(0x10 1)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:33 g "POINT Z(1 2 3)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+HSET ge:34 g "POINT(1 2"
+!mask total_indexing_time,last_indexing_error_key FT.INFO ge
+FT.SEARCH ge * NOCONTENT SORTBY g
+FT.SEARCH ge "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((-100 -100, -100 100, 100 100, 100 -100, -100 -100))" NOCONTENT DIALECT 3
+FT.DROPINDEX ge
+# Memory: R-tree node splits and the document lookup's growth, then deletes.
+FLUSHALL
+FT.CREATE gm ON HASH PREFIX 1 gm: SCHEMA g GEOSHAPE FLAT
+HSET gm:1 g "POINT(37 53)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:2 g "POINT(74 9)"
+HSET gm:3 g "POINT(10 62)"
+HSET gm:4 g "POINT(47 18)"
+HSET gm:5 g "POINT(84 71)"
+HSET gm:6 g "POINT(20 27)"
+HSET gm:7 g "POINT(57 80)"
+HSET gm:8 g "POINT(94 36)"
+HSET gm:9 g "POINT(30 89)"
+HSET gm:10 g "POINT(67 45)"
+HSET gm:11 g "POINT(3 1)"
+HSET gm:12 g "POINT(40 54)"
+HSET gm:13 g "POINT(77 10)"
+HSET gm:14 g "POINT(13 63)"
+HSET gm:15 g "POINT(50 19)"
+HSET gm:16 g "POINT(87 72)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:17 g "POINT(23 28)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:18 g "POINT(60 81)"
+HSET gm:19 g "POINT(97 37)"
+HSET gm:20 g "POINT(33 90)"
+HSET gm:21 g "POINT(70 46)"
+HSET gm:22 g "POINT(6 2)"
+HSET gm:23 g "POINT(43 55)"
+HSET gm:24 g "POINT(80 11)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:25 g "POINT(16 64)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:26 g "POINT(53 20)"
+HSET gm:27 g "POINT(90 73)"
+HSET gm:28 g "POINT(26 29)"
+HSET gm:29 g "POINT(63 82)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:30 g "POINT(100 38)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:31 g "POINT(36 91)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:32 g "POINT(73 47)"
+HSET gm:33 g "POINT(9 3)"
+HSET gm:34 g "POINT(46 56)"
+HSET gm:35 g "POINT(83 12)"
+HSET gm:36 g "POINT(19 65)"
+HSET gm:37 g "POINT(56 21)"
+HSET gm:38 g "POINT(93 74)"
+HSET gm:39 g "POINT(29 30)"
+HSET gm:40 g "POINT(66 83)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:41 g "POINT(2 39)"
+HSET gm:42 g "POINT(39 92)"
+HSET gm:43 g "POINT(76 48)"
+HSET gm:44 g "POINT(12 4)"
+HSET gm:45 g "POINT(49 57)"
+HSET gm:46 g "POINT(86 13)"
+HSET gm:47 g "POINT(22 66)"
+HSET gm:48 g "POINT(59 22)"
+HSET gm:49 g "POINT(96 75)"
+HSET gm:50 g "POINT(32 31)"
+HSET gm:51 g "POINT(69 84)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:52 g "POINT(5 40)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:53 g "POINT(42 93)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:54 g "POINT(79 49)"
+HSET gm:55 g "POINT(15 5)"
+HSET gm:56 g "POINT(52 58)"
+HSET gm:57 g "POINT(89 14)"
+HSET gm:58 g "POINT(25 67)"
+HSET gm:59 g "POINT(62 23)"
+HSET gm:60 g "POINT(99 76)"
+HSET gm:61 g "POINT(35 32)"
+HSET gm:62 g "POINT(72 85)"
+HSET gm:63 g "POINT(8 41)"
+HSET gm:64 g "POINT(45 94)"
+!mask total_indexing_time FT.INFO gm
+HSET gm:65 g "POINT(82 50)"
+HSET gm:66 g "POINT(18 6)"
+HSET gm:67 g "POINT(55 59)"
+HSET gm:68 g "POINT(92 15)"
+HSET gm:69 g "POINT(28 68)"
+HSET gm:70 g "POINT(65 24)"
+!mask total_indexing_time FT.INFO gm
+FT.SEARCH gm "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((0 0, 0 50, 50 50, 50 0, 0 0))" NOCONTENT LIMIT 0 100 DIALECT 3
+FT.SEARCH gm "@g:[DISJOINT $s]" PARAMS 2 s "POLYGON((0 0, 0 50, 50 50, 50 0, 0 0))" NOCONTENT LIMIT 0 0 DIALECT 3
+DEL gm:1
+!mask total_indexing_time FT.INFO gm
+DEL gm:4
+DEL gm:7
+DEL gm:10
+!mask total_indexing_time FT.INFO gm
+DEL gm:13
+DEL gm:16
+DEL gm:19
+DEL gm:22
+!mask total_indexing_time FT.INFO gm
+DEL gm:25
+DEL gm:28
+DEL gm:31
+DEL gm:34
+DEL gm:37
+DEL gm:40
+!mask total_indexing_time FT.INFO gm
+DEL gm:43
+DEL gm:46
+DEL gm:49
+DEL gm:52
+DEL gm:55
+DEL gm:58
+!mask total_indexing_time FT.INFO gm
+DEL gm:61
+DEL gm:64
+DEL gm:67
+DEL gm:70
+!mask total_indexing_time FT.INFO gm
+!mask total_indexing_time FT.INFO gm
+HSET gm:71 g "POLYGON((1 77, 1 79, 4 79, 4 77, 1 77))"
+HSET gm:72 g "POLYGON((38 33, 38 35, 41 35, 41 33, 38 33))"
+HSET gm:73 g "POLYGON((75 86, 75 88, 78 88, 78 86, 75 86))"
+HSET gm:74 g "POLYGON((11 42, 11 44, 14 44, 14 42, 11 42))"
+HSET gm:75 g "POLYGON((48 95, 48 97, 51 97, 51 95, 48 95))"
+HSET gm:76 g "POLYGON((85 51, 85 53, 88 53, 88 51, 85 51))"
+HSET gm:77 g "POLYGON((21 7, 21 9, 24 9, 24 7, 21 7))"
+HSET gm:78 g "POLYGON((58 60, 58 62, 61 62, 61 60, 58 60))"
+HSET gm:79 g "POLYGON((95 16, 95 18, 98 18, 98 16, 95 16))"
+HSET gm:80 g "POLYGON((31 69, 31 71, 34 71, 34 69, 31 69))"
+HSET gm:81 g "POLYGON((68 25, 68 27, 71 27, 71 25, 68 25))"
+HSET gm:82 g "POLYGON((4 78, 4 80, 7 80, 7 78, 4 78))"
+HSET gm:83 g "POLYGON((41 34, 41 36, 44 36, 44 34, 41 34))"
+HSET gm:84 g "POLYGON((78 87, 78 89, 81 89, 81 87, 78 87))"
+HSET gm:85 g "POLYGON((14 43, 14 45, 17 45, 17 43, 14 43))"
+HSET gm:86 g "POLYGON((51 96, 51 98, 54 98, 54 96, 51 96))"
+HSET gm:87 g "POLYGON((88 52, 88 54, 91 54, 91 52, 88 52))"
+HSET gm:88 g "POLYGON((24 8, 24 10, 27 10, 27 8, 24 8))"
+HSET gm:89 g "POLYGON((61 61, 61 63, 64 63, 64 61, 61 61))"
+!mask total_indexing_time FT.INFO gm
+FT.SEARCH gm "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((0 0, 0 50, 50 50, 50 0, 0 0))" NOCONTENT LIMIT 0 100 DIALECT 3
+FT.SEARCH gm "@g:[CONTAINS $s]" PARAMS 2 s "POINT(38 54)" NOCONTENT DIALECT 3
+FT.DROPINDEX gm
+# SPHERICAL coordinates.
+FLUSHALL
+FT.CREATE gsp ON HASH PREFIX 1 gsp: SCHEMA g GEOSHAPE SPHERICAL
+HSET gsp:1 g "POINT(10 10)"
+HSET gsp:2 g "POINT(-73.98 40.75)"
+HSET gsp:3 g "POLYGON((0 0, 0 20, 20 20, 20 0, 0 0))"
+HSET gsp:4 g "POINT(170 5)"
+HSET gsp:5 g "POLYGON((100 -10, 100 10, 120 10, 120 -10, 100 -10))"
+!mask total_indexing_time FT.INFO gsp
+FT.SEARCH gsp "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((-5 -5, -5 30, 30 30, 30 -5, -5 -5))" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[WITHIN $s]" PARAMS 2 s "POINT(10 10)" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((-80 30, -80 50, -60 50, -60 30, -80 30))" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[CONTAINS $s]" PARAMS 2 s "POLYGON((-5 -5, -5 30, 30 30, 30 -5, -5 -5))" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[CONTAINS $s]" PARAMS 2 s "POINT(10 10)" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[CONTAINS $s]" PARAMS 2 s "POLYGON((-80 30, -80 50, -60 50, -60 30, -80 30))" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((-5 -5, -5 30, 30 30, 30 -5, -5 -5))" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[INTERSECTS $s]" PARAMS 2 s "POINT(10 10)" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[INTERSECTS $s]" PARAMS 2 s "POLYGON((-80 30, -80 50, -60 50, -60 30, -80 30))" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[DISJOINT $s]" PARAMS 2 s "POLYGON((-5 -5, -5 30, 30 30, 30 -5, -5 -5))" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[DISJOINT $s]" PARAMS 2 s "POINT(10 10)" NOCONTENT DIALECT 3
+FT.SEARCH gsp "@g:[DISJOINT $s]" PARAMS 2 s "POLYGON((-80 30, -80 50, -60 50, -60 30, -80 30))" NOCONTENT DIALECT 3
+HSET gsp:6 g "POLYGON((0 0, 0 1, 1 1, 1 0))"
+HSET gsp:7 g "POINT(1 2 3)"
+!mask total_indexing_time,last_indexing_error_key FT.INFO gsp
+FT.DROPINDEX gsp
+# JSON documents.
+FLUSHALL
+FT.CREATE gj ON JSON PREFIX 1 gj: SCHEMA $.g AS g GEOSHAPE FLAT $.n AS n NUMERIC
+JSON.SET gj:1 $ '{"g":"POINT(1 1)","n":1}'
+JSON.SET gj:2 $ '{"g":"POLYGON((0 0, 0 4, 4 4, 4 0, 0 0))","n":2}'
+JSON.SET gj:3 $ '{"g":"POINT(1 2 3)","n":3}'
+JSON.SET gj:4 $ '{"g":12,"n":4}'
+JSON.SET gj:5 $ '{"g":["POINT(1 1)"],"n":5}'
+JSON.SET gj:6 $ '{"g":null,"n":6}'
+JSON.SET gj:7 $ '{"g":{"a":1},"n":7}'
+JSON.SET gj:8 $ '{"g":true,"n":8}'
+!mask total_indexing_time,last_indexing_error_key FT.INFO gj
+FT.SEARCH gj "@g:[WITHIN $s]" PARAMS 2 s "POLYGON((0 0, 0 6, 6 6, 6 0, 0 0))" SORTBY n DIALECT 3
+FT.SEARCH gj "@g:[CONTAINS $s]" PARAMS 2 s "POINT(2 2)" RETURN 1 g DIALECT 3
+FT.DROPINDEX gj
+# A query or a deletion creates the index.
+FLUSHALL
+FT.CREATE gq ON HASH PREFIX 1 gq: SCHEMA g GEOSHAPE t TEXT
+FT.SEARCH gq "@g:[WITHIN $s]" PARAMS 2 s "POINT(1 x)" DIALECT 3
+!mask total_indexing_time FT.INFO gq
+FLUSHALL
+FT.CREATE gq2 ON HASH PREFIX 1 gq2: SCHEMA g GEOSHAPE t TEXT
+HSET gq2:1 t hello
+!mask total_indexing_time FT.INFO gq2
+DEL gq2:1
+!mask total_indexing_time FT.INFO gq2
+FT.DROPINDEX gq2
+FLUSHALL

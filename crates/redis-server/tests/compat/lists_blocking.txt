@@ -1,0 +1,322 @@
+# Blocking list commands across connections. Each `!send` is followed by a short sleep so the
+# server has registered the waiter before another connection writes.
+
+# ---- BLPOP served by a push ----
+@conn 1
+!send BLPOP bq 0
+@sleep 50
+@conn 2
+RPUSH bq a
+EXISTS bq
+@conn 1
+@recv
+
+# ---- LPUSH of several values: the waiter gets the new head ----
+@conn 1
+!send BLPOP lp 0
+@sleep 50
+@conn 2
+LPUSH lp a b c
+LRANGE lp 0 -1
+@conn 1
+@recv
+
+# ---- BRPOP on several keys: the key that got data ----
+@conn 1
+!send BRPOP k1 k2 k3 0
+@sleep 50
+@conn 2
+RPUSH k2 x y
+LRANGE k2 0 -1
+@conn 1
+@recv
+@conn 2
+DEL k2
+
+# ---- several keys ready at once (MULTI): keys are scanned in argument order ----
+@conn 1
+!send BLPOP m1 m2 m3 0
+@sleep 50
+@conn 2
+MULTI
+RPUSH m3 c
+RPUSH m1 a
+EXEC
+@conn 1
+@recv
+@conn 2
+LRANGE m3 0 -1
+EXISTS m1
+DEL m3
+
+# ---- a transaction that pushes and pops leaves the waiter blocked ----
+@conn 1
+!send BLPOP tx 0
+@sleep 50
+@conn 2
+MULTI
+RPUSH tx a
+LPOP tx
+EXEC
+RPUSH tx b
+@conn 1
+@recv
+
+# ---- FIFO: waiters are served in the order they blocked ----
+@conn 1
+!send BLPOP fq 0
+@sleep 50
+@conn 2
+!send BLPOP fq 0
+@sleep 50
+@conn 3
+!send BRPOP fq 0
+@sleep 50
+@conn 4
+RPUSH fq a b
+EXISTS fq
+@conn 1
+@recv
+@conn 2
+@recv
+@conn 4
+RPUSH fq c d
+@conn 3
+@recv
+@conn 4
+LRANGE fq 0 -1
+DEL fq
+
+# ---- FIFO across keys: a waiter blocked on two keys keeps its place ----
+@conn 1
+!send BLPOP x1 x2 0
+@sleep 50
+@conn 2
+!send BLPOP x2 0
+@sleep 50
+@conn 3
+RPUSH x2 v
+@conn 1
+@recv
+@conn 3
+RPUSH x2 w
+@conn 2
+@recv
+
+# ---- a second waiter that isn't served times out ----
+@conn 1
+!send BLPOP one 0
+@sleep 50
+@conn 2
+!send BLPOP one 0.3
+@sleep 50
+@conn 3
+RPUSH one only
+@conn 1
+@recv
+@conn 2
+@recv
+
+# ---- BLMOVE chain: the first move wakes the next waiter ----
+@conn 1
+!send BLMOVE c1 c2 LEFT RIGHT 0
+@sleep 50
+@conn 2
+!send BLMOVE c2 c3 RIGHT LEFT 0
+@sleep 50
+@conn 3
+RPUSH c1 x
+@conn 1
+@recv
+@conn 2
+@recv
+@conn 3
+EXISTS c1 c2
+LRANGE c3 0 -1
+DEL c3
+
+# ---- BRPOPLPUSH and BLMOVE on the same key rotate ----
+@conn 1
+!send BRPOPLPUSH r r 0
+@sleep 50
+@conn 2
+RPUSH r a b
+@conn 1
+@recv
+@conn 2
+LRANGE r 0 -1
+DEL r
+@conn 1
+!send BLMOVE ss ss LEFT RIGHT 0
+@sleep 50
+@conn 2
+RPUSH ss a b
+@conn 1
+@recv
+@conn 2
+LRANGE ss 0 -1
+DEL ss
+
+# ---- a list created by LMOVE serves a waiter ----
+@conn 1
+!send BLPOP dst2 0
+@sleep 50
+@conn 2
+RPUSH src2 v
+LMOVE src2 dst2 LEFT LEFT
+EXISTS src2 dst2
+@conn 1
+@recv
+
+# ---- BLMPOP ----
+@conn 1
+!send BLMPOP 0 2 mp1 mp2 RIGHT COUNT 2
+@sleep 50
+@conn 2
+RPUSH mp2 a b c
+@conn 1
+@recv
+@conn 2
+LRANGE mp2 0 -1
+DEL mp2
+@conn 1
+!send BLMPOP 0 2 mp1 mp2 LEFT
+@sleep 50
+@conn 2
+RPUSH mp1 a b c
+@conn 1
+@recv
+@conn 2
+LRANGE mp1 0 -1
+DEL mp1
+
+# ---- BLMOVEM: EXACTLY waits until the source has enough elements ----
+@conn 1
+!send BLMOVEM e1 e2 LEFT RIGHT 0 EXACTLY 3 BULK
+@sleep 50
+@conn 2
+RPUSH e1 a
+RPUSH e1 b
+LLEN e1
+RPUSH e1 c d
+@conn 1
+@recv
+@conn 2
+LRANGE e1 0 -1
+LRANGE e2 0 -1
+DEL e1 e2
+@conn 1
+!send BLMOVEM e3 e4 RIGHT LEFT 0 COUNT 5 OBO
+@sleep 50
+@conn 2
+RPUSH e3 a b c
+@conn 1
+@recv
+@conn 2
+LRANGE e4 0 -1
+EXISTS e3
+DEL e4
+@conn 1
+!send BLMOVEM e5 e6 LEFT LEFT 0
+@sleep 50
+@conn 2
+RPUSH e5 a b
+@conn 1
+@recv
+@conn 2
+RPUSH e7 1
+@conn 1
+BLMOVEM e7 e8 LEFT LEFT 0.05 EXACTLY 2 OBO
+LRANGE e7 0 -1
+DEL e5 e6 e7
+
+# ---- a key of another type doesn't wake list waiters ----
+@conn 1
+!send BLPOP w1 w2 0
+@sleep 50
+@conn 2
+SET w1 str
+RPUSH w2 x
+@conn 1
+@recv
+@conn 2
+LRANGE w2 0 -1
+DEL w1 w2
+@conn 1
+!send BLPOP w3 0
+@sleep 50
+@conn 2
+SET w3 str
+DEL w3
+RPUSH w3 a
+@conn 1
+@recv
+@conn 1
+!send BLMOVE w4 w5 LEFT LEFT 0
+@sleep 50
+@conn 2
+SET w5 str
+RPUSH w4 a
+@conn 1
+@recv
+@conn 2
+LRANGE w4 0 -1
+DEL w4 w5
+
+# ---- timeouts ----
+@conn 1
+BLPOP nokey 0.05
+BRPOP nokey nokey2 0.05
+BLMPOP 0.05 2 nokey nokey2 LEFT
+BLMOVE nokey d LEFT LEFT 0.05
+BRPOPLPUSH nokey d 0.05
+BLMOVEM nokey d LEFT LEFT 0.05
+BLMOVEM nokey d LEFT LEFT 0.05 EXACTLY 2 OBO
+BLPOP nokey 0.001
+!send BRPOP nokey 0.1
+@recv
+# a tiny negative timeout truncates to 0: block forever
+!send BLPOP neg -0.0001
+@sleep 150
+@conn 2
+RPUSH neg a
+@conn 1
+@recv
+@resp 3
+BLPOP nokey 0.05
+BLMPOP 0.05 1 nokey RIGHT COUNT 3
+BLMOVE nokey d LEFT LEFT 0.05
+BRPOPLPUSH nokey d 0.05
+BLMOVEM nokey d LEFT LEFT 0.05
+!send BLPOP rq 0
+@sleep 50
+@conn 2
+RPUSH rq a
+@conn 1
+@recv
+@resp 2
+
+# ---- keyspace events when a waiter is served ----
+@conn 2
+CONFIG SET notify-keyspace-events KEAn
+@conn 3
+PSUBSCRIBE __keyevent@0__:*
+@conn 1
+!send BLMOVE ev1 ev2 LEFT RIGHT 0
+@sleep 50
+@conn 2
+RPUSH ev1 a
+@conn 1
+@recv
+@conn 3
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+PING
+PUNSUBSCRIBE
+@conn 2
+CONFIG SET notify-keyspace-events ""
+DEL ev2
