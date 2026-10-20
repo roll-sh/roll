@@ -22,7 +22,7 @@
 //! vectors with libstdc++'s growth and `shrink_to_fit`, and the tiered layer's job maps.
 
 use super::spec::{Metric, VecType};
-use super::vecsim::{Score, bucket_bytes, distance, hdr, hnsw_level, key, next_bkt};
+use super::vecsim::{Score, block_bytes, bucket_bytes, distance, hdr, hnsw_level, key, next_bkt};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub type Id = u32;
@@ -1653,7 +1653,7 @@ impl Hnsw {
         let level_bytes = 16 + 4 * self.m;
         let mut total = 896;
         total += hdr(self.graph_blocks_cap * 48) + self.graph_blocks * hdr(self.block * elem_bytes);
-        total += hdr(self.data_blocks_cap * 48) + self.data_blocks * hdr(self.block * self.stored);
+        total += hdr(self.data_blocks_cap * 48) + self.data_blocks * block_bytes(self.ty, self.metric, self.dim, self.block, self.stored);
         total += hdr(self.meta_cap) + hdr(self.meta_cap * 9);
         total += self.lookup_b.bytes();
         total += if self.multi { self.lookup.values().map(|(_, cap)| 88 + hdr(cap * 4)).sum::<usize>() } else { 32 * self.lookup.len() };

@@ -75,7 +75,10 @@ fn reference(env: &str, args: &[&str]) -> Option<(String, Option<Container>)> {
     if let Ok(addr) = std::env::var(env) {
         return Some((addr, None));
     }
-    let name = format!("roll-compat-{}-{}", std::process::id(), redis_engine::util::now_us() % 1_000_000);
+    // the suites start theirs at the same moment: the sequence keeps the names apart
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("roll-compat-{}-{}-{seq}", std::process::id(), redis_engine::util::now_us() % 1_000_000);
     let image = std::env::var("ROLL_COMPAT_IMAGE").unwrap_or_else(|_| "redis:8-alpine".into());
     let out = Command::new("docker")
         .args(["run", "-d", "--rm", "--name", &name, "-p", "127.0.0.1::6379", &image])

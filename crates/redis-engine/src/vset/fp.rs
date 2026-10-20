@@ -1,11 +1,13 @@
 //! The vector arithmetic of `hnsw.c` and `vset.c`, operation for operation, so distances,
-//! norms and projections round exactly as in Redis' build (GCC, `-std=gnu11 -O3`, which fuses
-//! a multiplication into the addition using it: `a*b + c` is one `fma`).
+//! norms and projections round exactly as in Redis' build (GCC, `-std=gnu11 -O3`, whose default
+//! `-ffp-contract=fast` fuses a multiplication into the addition using it wherever the target has
+//! the instruction: always on arm64, on x86-64 only inside the AVX2/AVX-512 functions, which
+//! `hnsw.c` picks at run time by the CPU's features).
 
 use super::hnsw::{Data, Vect};
 
-/// Whether products feeding an addition are fused, as GCC's default `-ffp-contract=fast` does.
-const FMA: bool = true;
+/// Whether products feeding an addition are fused in the plain C (built for the baseline CPU).
+const FMA: bool = cfg!(target_arch = "aarch64");
 
 /// `a*b + c`, as the compiled C computes it.
 #[inline]
@@ -34,6 +36,15 @@ fn sum4(x: &[f32], y: &[f32]) -> f32 {
 /// blocks of eight.
 pub fn dot_distance(x: &[f32], y: &[f32]) -> f32 {
     let dim = x.len().min(y.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if dim >= 16 && simd::avx512() {
+            return simd::dot_avx512(&x[..dim], &y[..dim]);
+        }
+        if dim >= 16 && simd::avx2() {
+            return simd::dot_avx2(&x[..dim], &y[..dim]);
+        }
+    }
     let (mut d0, mut d1) = (0f32, 0f32);
     let mut i = 0;
     while i + 7 < dim {
@@ -55,6 +66,12 @@ pub fn q8_distance(x: &[i8], y: &[i8], ra: f32, rb: f32) -> f32 {
     }
     let scale = (ra / 127.0) * (rb / 127.0);
     let dim = x.len().min(y.len());
+    // The AVX2/AVX-512 versions only regroup the integer sum (exact, wrapping), and fuse the
+    // scaling into `1 - dot*scale`.
+    #[cfg(target_arch = "x86_64")]
+    let fused = (dim >= 64 && simd::avx512()) || (dim >= 32 && simd::avx2());
+    #[cfg(not(target_arch = "x86_64"))]
+    let fused = FMA;
     let (mut d0, mut d1) = (0i32, 0i32);
     let mut i = 0;
     let p = |k: usize| x[k] as i32 * y[k] as i32;
@@ -68,7 +85,7 @@ pub fn q8_distance(x: &[i8], y: &[i8], ra: f32, rb: f32) -> f32 {
         i += 1;
     }
     let dot = d0.wrapping_add(d1) as f32;
-    let d = if FMA { (-dot).mul_add(scale, 1.0) } else { 1.0 - dot * scale };
+    let d = if fused { (-dot).mul_add(scale, 1.0) } else { 1.0 - dot * scale };
     d.clamp(0.0, 2.0)
 }
 
@@ -168,4 +185,64 @@ pub fn project(input: &[f32], m: &[f32], output: u32) -> Vec<f32> {
             sum
         })
         .collect()
+}
+
+/// `hnsw.c`'s x86-64 kernels: what `__builtin_cpu_supports` picks, and the float dot products
+/// lane for lane (each lane a fused multiply-add, then the intrinsics' reduction order).
+#[cfg(target_arch = "x86_64")]
+mod simd {
+    /// `VSET_USE_AVX512`.
+    pub fn avx512() -> bool {
+        std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512bw")
+    }
+
+    /// `VSET_USE_AVX2`.
+    pub fn avx2() -> bool {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    }
+
+    /// `vectors_distance_float_avx512`: one 16-lane accumulator, `_mm512_reduce_add_ps` (halves,
+    /// then quarters, then pairs), the rest fused into the sum.
+    pub fn dot_avx512(x: &[f32], y: &[f32]) -> f32 {
+        let dim = x.len();
+        let mut s = [0f32; 16];
+        let mut i = 0;
+        while i + 15 < dim {
+            for k in 0..16 {
+                s[k] = x[i + k].mul_add(y[i + k], s[k]);
+            }
+            i += 16;
+        }
+        let t3: [f32; 8] = std::array::from_fn(|k| s[k + 8] + s[k]);
+        let t6: [f32; 4] = std::array::from_fn(|k| t3[k + 4] + t3[k]);
+        let mut dot = (t6[0] + t6[2]) + (t6[1] + t6[3]);
+        while i < dim {
+            dot = x[i].mul_add(y[i], dot);
+            i += 1;
+        }
+        1.0 - dot
+    }
+
+    /// `vectors_distance_float_avx2`: two 8-lane accumulators added, the high half added to the
+    /// low, two horizontal adds, the rest fused into the sum.
+    pub fn dot_avx2(x: &[f32], y: &[f32]) -> f32 {
+        let dim = x.len();
+        let (mut s1, mut s2) = ([0f32; 8], [0f32; 8]);
+        let mut i = 0;
+        while i + 15 < dim {
+            for k in 0..8 {
+                s1[k] = x[i + k].mul_add(y[i + k], s1[k]);
+                s2[k] = x[i + 8 + k].mul_add(y[i + 8 + k], s2[k]);
+            }
+            i += 16;
+        }
+        let c: [f32; 8] = std::array::from_fn(|k| s1[k] + s2[k]);
+        let q: [f32; 4] = std::array::from_fn(|k| c[k + 4] + c[k]);
+        let mut dot = (q[0] + q[1]) + (q[2] + q[3]);
+        while i < dim {
+            dot = x[i].mul_add(y[i], dot);
+            i += 1;
+        }
+        1.0 - dot
+    }
 }

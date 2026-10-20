@@ -1185,6 +1185,9 @@ mod tests {
             let tab = line.iter().position(|&c| c == b'\t').unwrap();
             let input = unhex(std::str::from_utf8(&line[..tab]).unwrap());
             let want = &line[tab + 1..];
+            // the corpus is arm64's; x86-64's default NaN has the sign bit set
+            #[cfg(target_arch = "x86_64")]
+            let want = if input == b"!+inf % 2.5" { b"OK !-nan".as_slice() } else { want };
             let mut got = Vec::new();
             match parse(&input) {
                 Ok(e) => {

@@ -1478,6 +1478,9 @@ mod tests {
         Row(vec![("n", RsValue::Number(20.0)), ("s", rs("abc"))], vec![])
     }
 
+    /// An invalid operation's NaN as printed: x86-64's default NaN has the sign bit set.
+    const NAN: &str = if cfg!(target_arch = "x86_64") { "-nan" } else { "nan" };
+
     /// The value as `redis-cli` printed it (RESP2), or the error text.
     fn show(v: &RsValue) -> String {
         match v {
@@ -1515,7 +1518,7 @@ mod tests {
             &[
                 ("1/0", "inf"),
                 ("-1/0", "-inf"),
-                ("0/0", "nan"),
+                ("0/0", NAN),
                 ("5 % 3", "2"),
                 ("5.5 % 2", "1.5"),
                 ("-5.5 % 2", "-1.5"),
@@ -1747,7 +1750,7 @@ mod tests {
                 ("hour(\"1700000000\")", "1699999200"),
                 ("hour(\"x\")", "(nil)"),
                 ("minute(1700000123.5)", "1700000100"),
-                ("minute(0/0)", "nan"),
+                ("minute(0/0)", NAN),
                 ("day(1700000000)", "1699920000"),
                 ("month(1700000000)", "1698796800"),
                 ("monthofyear(1700000000)", "10"),

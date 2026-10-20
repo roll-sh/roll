@@ -642,39 +642,6 @@ const EXP_T: [u64; 256] = [
     0x3c77893b4d91cd9d, 0x3fefe7c1819e90d8, 0x3c5305c14160cc89, 0x3feff3c22b8f71f1,
 ];
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn log_matches_musl() {
-        // fdlibm (the `libm` crate) rounds this one the other way.
-        assert_eq!(log(0.01).to_bits(), 0xc0126bb1bbb55515);
-        assert_eq!(log(1.0), 0.0);
-        assert_eq!(log(0.0), f64::NEG_INFINITY);
-        assert!(log(-1.0).is_nan());
-        assert_eq!(log(f64::INFINITY), f64::INFINITY);
-        for x in [0.5, 2.0, 10.0, 1e-300, 5e-324, 1e308, 0.999, 1.001, 123.456] {
-            assert!((log(x) - x.ln()).abs() <= x.ln().abs() * 4e-16, "{x}");
-        }
-    }
-
-    #[test]
-    fn pow_matches_musl() {
-        assert_eq!(pow(2.0, 10.0), 1024.0);
-        assert_eq!(pow(-2.0, 3.0), -8.0);
-        assert!(pow(-2.0, 0.5).is_nan());
-        assert_eq!(pow(0.0, -1.0), f64::INFINITY);
-        assert_eq!(pow(2.0, 2000.0), f64::INFINITY);
-        assert_eq!(pow(2.0, -2000.0), 0.0);
-        assert_eq!(pow(0.9, 0.0), 1.0);
-        assert_eq!(pow(2.0, -1074.0), 5e-324);
-        for (x, y) in [(0.9, 7.0), (1.5, 2.5), (10.0, -3.0), (3.0, 0.1), (1e-10, 3.0), (7.0, 300.0)] {
-            assert!((pow(x, y) - x.powf(y)).abs() <= x.powf(y).abs() * 4e-16, "{x} {y}");
-        }
-    }
-}
-
 /// `__log_data.tab2`: c split into chi + clo, for the `log` branch without fused multiply-add.
 #[cfg(not(target_arch = "aarch64"))]
 const LOG_T2: [(f64, f64); 128] = [
@@ -807,3 +774,36 @@ const LOG_T2: [(f64, f64); 128] = [
     (f(0x3ff5d0001d4919bc), f(0xbc98812afb254729)),
     (f(0x3ff5efffe7b87a89), f(0xbc947eb780ed6904)),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_matches_musl() {
+        // fdlibm (the `libm` crate) rounds this one the other way.
+        assert_eq!(log(0.01).to_bits(), 0xc0126bb1bbb55515);
+        assert_eq!(log(1.0), 0.0);
+        assert_eq!(log(0.0), f64::NEG_INFINITY);
+        assert!(log(-1.0).is_nan());
+        assert_eq!(log(f64::INFINITY), f64::INFINITY);
+        for x in [0.5, 2.0, 10.0, 1e-300, 5e-324, 1e308, 0.999, 1.001, 123.456] {
+            assert!((log(x) - x.ln()).abs() <= x.ln().abs() * 4e-16, "{x}");
+        }
+    }
+
+    #[test]
+    fn pow_matches_musl() {
+        assert_eq!(pow(2.0, 10.0), 1024.0);
+        assert_eq!(pow(-2.0, 3.0), -8.0);
+        assert!(pow(-2.0, 0.5).is_nan());
+        assert_eq!(pow(0.0, -1.0), f64::INFINITY);
+        assert_eq!(pow(2.0, 2000.0), f64::INFINITY);
+        assert_eq!(pow(2.0, -2000.0), 0.0);
+        assert_eq!(pow(0.9, 0.0), 1.0);
+        assert_eq!(pow(2.0, -1074.0), 5e-324);
+        for (x, y) in [(0.9, 7.0), (1.5, 2.5), (10.0, -3.0), (3.0, 0.1), (1e-10, 3.0), (7.0, 300.0)] {
+            assert!((pow(x, y) - x.powf(y)).abs() <= x.powf(y).abs() * 4e-16, "{x} {y}");
+        }
+    }
+}

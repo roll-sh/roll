@@ -1,10 +1,11 @@
 //! VecSim, the vector similarity library RediSearch 8.10.1 bundles, reimplemented: a field's
 //! vector index (vectors stored by internal id with the labels — doc ids — they belong to,
 //! deletes swapping the last vector into the hole), the distance functions bit for bit as the
-//! reference's aarch64 build computes them (its NEON, NEON_HP, NEON_BF16 and NEON_DOTPROD
-//! kernels with their accumulator layouts, fused multiply-adds and half precision or
-//! round-to-odd BFDOT arithmetic, the scalar fallbacks for short vectors), cosine
-//! normalization, top-k, range and batch queries, and the hybrid policy heuristics.
+//! reference computes them on the same CPU (on aarch64 its NEON, NEON_HP, NEON_BF16 and
+//! NEON_DOTPROD kernels with their accumulator layouts, fused multiply-adds and half precision or
+//! round-to-odd BFDOT arithmetic, the scalar fallbacks for short vectors; on x86-64 the kernels
+//! its runtime dispatch picks, see [`x86`]), cosine normalization, top-k, range and batch
+//! queries, and the hybrid policy heuristics.
 //!
 //! FLAT is brute force by definition. HNSW fields are tiered HNSW graphs built and searched as
 //! VecSim does (see [`super::hnsw`]), approximately. SVS-VAMANA indexes are searched exactly
@@ -12,7 +13,11 @@
 //! in every later FT.INFO).
 
 use super::spec::{Algo, Metric, VecType, VectorParams};
+use crate::fp::Mac;
 use std::collections::{BTreeSet, HashMap};
+
+#[cfg(target_arch = "x86_64")]
+mod x86;
 
 // ---------------------------------------------------------------------------------------------
 // Soft half precision (FPCR.FZ16 clear: subnormals kept, round to nearest even)
@@ -441,6 +446,10 @@ fn bf16_neon(a: &[u16], b: &[u16], l2: bool) -> f32 {
 
 /// A field's distance function (`spaces::GetDistFunc` on the reference's CPU).
 pub(super) fn distance(ty: VecType, metric: Metric, dim: usize, a: &[u8], b: &[u8]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    if !matches!(ty, VecType::Int8 | VecType::Uint8) {
+        return x86::distance(ty, metric, dim, a, b);
+    }
     let l2 = metric == Metric::L2;
     match ty {
         VecType::Float32 => {
@@ -487,7 +496,9 @@ pub(super) fn distance(ty: VecType, metric: Metric, dim: usize, a: &[u8], b: &[u
         }
         VecType::Int8 | VecType::Uint8 => {
             let val = |v: &[u8], i: usize| -> i64 { if ty == VecType::Int8 { v[i] as i8 as i64 } else { v[i] as i64 } };
-            let simd = dim >= 16;
+            // the NEON kernels (from 16 elements) subtract IP from 1 in floats; x86-64's
+            // VNNI kernels and every scalar loop in integers
+            let simd = !cfg!(target_arch = "x86_64") && dim >= 16;
             match metric {
                 Metric::L2 => {
                     let s: i64 = (0..dim).map(|i| (val(a, i) - val(b, i)).pow(2)).sum();
@@ -495,7 +506,6 @@ pub(super) fn distance(ty: VecType, metric: Metric, dim: usize, a: &[u8], b: &[u
                 }
                 Metric::Ip => {
                     let s: i64 = (0..dim).map(|i| val(a, i) * val(b, i)).sum();
-                    // the scalar subtracts in integers, the kernels in floats
                     (if simd { 1.0f32 - s as f32 } else { (1 - s) as f32 }) as f64
                 }
                 Metric::Cosine => {
@@ -524,7 +534,7 @@ fn normalize(ty: VecType, dim: usize, v: &mut Vec<u8>) {
             }
         }
         VecType::Float64 => {
-            // the compiled loop: pairs multiplied then added, the odd tail fused
+            // the compiled loop: pairs multiplied then added, the odd tail contracted
             let x = f64s(v, dim);
             let mut sum = 0f64;
             let pairs = if dim == 1 { 0 } else { dim & !1 };
@@ -532,7 +542,7 @@ fn normalize(ty: VecType, dim: usize, v: &mut Vec<u8>) {
                 sum += e * e;
             }
             for &e in &x[pairs..] {
-                sum = e.mul_add(e, sum);
+                sum = e.mac(e, sum);
             }
             let norm = sum.sqrt();
             for (i, e) in x.iter().enumerate() {
@@ -1171,6 +1181,19 @@ pub(super) fn hdr(n: usize) -> usize {
     if n == 0 { 0 } else { n + 8 }
 }
 
+/// A data block of `block` vectors of `stored` bytes: `allocate_aligned` with the alignment the
+/// distance function's dispatch asked for (none on aarch64) over-allocates by that much.
+pub(super) fn block_bytes(ty: VecType, metric: Metric, dim: usize, block: usize, stored: usize) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    let align = x86::alignment(ty, metric, dim);
+    #[cfg(not(target_arch = "x86_64"))]
+    let align = {
+        let _ = (ty, metric, dim);
+        0
+    };
+    hdr(block * stored + align)
+}
+
 /// A bucket array's allocation (a single bucket lives in the table).
 pub(super) fn bucket_bytes(b: usize) -> usize {
     if b <= 1 { 0 } else { hdr(b * 8) }
@@ -1239,7 +1262,7 @@ impl VecIndex {
         let b = self.block_size;
         let cos = if self.metric == Metric::Cosine { 64 } else { 0 };
         let a = &self.alloc;
-        let blocks = |n: usize| n.div_ceil(b) * hdr(b * self.stored);
+        let blocks = |n: usize| n.div_ceil(b) * block_bytes(self.ty, self.metric, self.dim, b, self.stored);
         let entries: usize = if self.multi { self.lookup.values().map(|v| multi_entry(v.len())).sum() } else { 32 * self.lookup.len() };
         let flat = 488 + cos + hdr(a.blocks_cap * 48) + blocks(self.count()) + hdr(a.cap * 8) + bucket_bytes(a.buckets) + entries;
         if self.algo == Algo::Svs { flat + 984 } else { flat }

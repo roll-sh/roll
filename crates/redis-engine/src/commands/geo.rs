@@ -822,9 +822,10 @@ mod tests {
 
     #[test]
     fn decode_matches_reference() {
-        // Values observed on Redis 8.
-        assert_eq!(redis_proto::fmt_double(decode_score(2163557714838307.0)[1]), "51.50720053692975");
-        assert_eq!(redis_proto::fmt_double(decode_score(4503599627286694.0)[1]), "85.04999956172352");
+        // Values observed on Redis 8 (its arm64 build fuses the decoding's multiply-adds).
+        let (london, north) = if cfg!(target_arch = "aarch64") { ("51.50720053692975", "85.04999956172352") } else { ("51.50720053692976", "85.04999956172351") };
+        assert_eq!(redis_proto::fmt_double(decode_score(2163557714838307.0)[1]), london);
+        assert_eq!(redis_proto::fmt_double(decode_score(4503599627286694.0)[1]), north);
         let [x, y] = decode_score(3479099956230698.0);
         let [x2, y2] = decode_score(3479447370796909.0);
         assert_eq!(fmt_distance(distance(x, y, x2, y2)), "166274.1516");

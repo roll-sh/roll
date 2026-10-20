@@ -458,16 +458,18 @@ pub fn incr_by_float(current: &[u8], incr: &[u8]) -> Result<String, IncrError> {
 mod tests {
     use super::*;
 
+    /// Redis' replies on this CPU: arm64's long double is binary128, x86-64's the x87 format.
     #[test]
-    fn matches_redis_on_arm64() {
+    fn matches_redis() {
         let t = |a: &str, b: &str| incr_by_float(a.as_bytes(), b.as_bytes()).unwrap();
+        let x87 = cfg!(target_arch = "x86_64");
         assert_eq!(t("0.1", "0.2"), "0.3");
         assert_eq!(t("10.50", "0.1"), "10.6");
         assert_eq!(t("5.0e3", "2.0e2"), "5200");
         assert_eq!(t("3", "1.1234567890123456789"), "4.12345678901234568");
         assert_eq!(t("1", "1e-20"), "1");
-        assert_eq!(t("123456789", "0.333333333333333333333333"), "123456789.33333333333333333");
-        assert_eq!(t("1e20", "1"), "100000000000000000001");
+        assert_eq!(t("123456789", "0.333333333333333333333333"), if x87 { "123456789.33333333333575865" } else { "123456789.33333333333333333" });
+        assert_eq!(t("1e20", "1"), if x87 { "100000000000000000000" } else { "100000000000000000001" });
         assert_eq!(t("1.5", "-1.5"), "0");
         assert_eq!(t("0", "-0.5"), "-0.5");
         assert_eq!(t("-1", "0.25"), "-0.75");
@@ -501,7 +503,7 @@ mod tests {
     fn long_double() {
         let max = Ld::max().human();
         assert_eq!(max.len(), 4933);
-        assert!(max.starts_with("118973149535723176508575932662800701"));
+        assert!(max.starts_with(if cfg!(target_arch = "x86_64") { "118973149535723176502126385303097020" } else { "118973149535723176508575932662800701" }));
         let p = |s: &str| Ld::parse(s.as_bytes()).unwrap();
         assert_eq!(p("1.5").add(&p("2")).human(), "3.5");
         assert_eq!(p("1").sub(&p("3")).human(), "-2");
@@ -511,8 +513,9 @@ mod tests {
         assert!(Ld::max().add(&Ld::max()).is_inf());
         assert!(Ld::parse(b"1e5000").is_none() && Ld::parse(b"1e-5000").is_none() && Ld::parse(b" 1").is_none());
         assert!(p("-inf").is_inf() && p("-inf").compare(&Ld::min()) == std::cmp::Ordering::Less);
-        // Binary, not decimal: what Redis prints on arm64.
-        assert_eq!(p("1e20").add(&p("0.3")).human(), "100000000000000000000.29999999999999716");
+        // Binary, not decimal: what Redis prints (x86-64's 64-bit mantissa can't hold the .3).
+        let sum = if cfg!(target_arch = "x86_64") { "100000000000000000000" } else { "100000000000000000000.29999999999999716" };
+        assert_eq!(p("1e20").add(&p("0.3")).human(), sum);
         assert_eq!(p("0x1.8p1").human(), "3");
         assert_eq!(p("0x10").human(), "16");
         assert!(Ld::parse(b"0x").is_none() && Ld::parse(b"0x1p").is_none() && Ld::parse(b"nan").is_none());

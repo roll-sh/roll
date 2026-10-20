@@ -700,7 +700,8 @@ fn vector_set_payload_from_redis() {
         run(&mut e, &mut c, "VSIM v ELE a WITHSCORES"),
         Reply::Array(vec![
             Reply::bulk("a"),
-            Reply::Double(0.999440977233462),
+            // arm64's build fuses the Q8 distance's `1 - dot * scale`
+            Reply::Double(if cfg!(target_arch = "aarch64") { 0.999440977233462 } else { 0.9994409680366516 }),
             Reply::bulk("b"),
             Reply::Double(0.7842775285243988),
             Reply::bulk("c"),
