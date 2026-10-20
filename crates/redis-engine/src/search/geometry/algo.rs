@@ -10,9 +10,10 @@ use super::{Cs, Geom, Poly, Pt, Rect, Ring};
 // ---------------------------------------------------------------------------------------------
 // Sides and points
 //
-// The reference build contracts a product into the sum or difference of the same expression
-// (`-ffp-contract=on`: the left product when both sides are products, never across statements
-// or through calls): those spots use `mul_add` here, and the trigonometry is musl's (`libm`).
+// The reference's arm64 build contracts a product into the sum or difference of the same
+// expression (`-ffp-contract=on`: the left product when both sides are products, never across
+// statements or through calls): those spots use `Mac::mac` here, and the trigonometry is musl's
+// (`libm`).
 
 /// The side of `p` relative to the segment `a`→`b`: 1 left, -1 right, 0 collinear. On the
 /// spheroid, relative to the geodesic through `a` and `b`.

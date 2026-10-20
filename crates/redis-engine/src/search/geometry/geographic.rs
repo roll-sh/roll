@@ -4,10 +4,10 @@
 //! (`bg::correct`'s orientation), the direction code (spikes) and the segments' relation with
 //! Sjöberg's geodesic intersection point.
 //!
-//! The arithmetic follows the reference build, which contracts a product into the sum or
-//! difference of the same expression (`-ffp-contract=on`; the left product when both sides are
-//! products, never across statements or calls such as `math::sqr`): those spots use `mul_add`,
-//! and the trigonometry is musl's (`libm`).
+//! The arithmetic follows the reference build, whose arm64 build contracts a product into the
+//! sum or difference of the same expression (`-ffp-contract=on`; the left product when both
+//! sides are products, never across statements or calls such as `math::sqr`): those spots use
+//! [`Mac::mac`], and the trigonometry is musl's (`libm`).
 
 use crate::fp::Mac;
 use super::algo::feq;
