@@ -1,0 +1,354 @@
+> CREATE FUNCTION lz_f(i int) RETURNS int LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE 'f(%)', i;
+>   RETURN 10 / (3 - i);
+> END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION lz_g() RETURNS void LANGUAGE plpgsql AS $$
+> DECLARE
+>   c CURSOR FOR SELECT lz_f(i) AS v FROM generate_series(1, 5) i;
+>   r record;
+> BEGIN
+>   OPEN c;
+>   RAISE NOTICE 'opened';
+>   FETCH c INTO r;
+>   RAISE NOTICE 'got %', r.v;
+>   FETCH c INTO r;
+>   RAISE NOTICE 'got %', r.v;
+>   BEGIN
+>     FETCH c INTO r;
+>   EXCEPTION WHEN division_by_zero THEN
+>     RAISE NOTICE 'caught %', sqlerrm;
+>   END;
+>   BEGIN
+>     FETCH c INTO r;
+>     RAISE NOTICE 'got %', r.v;
+>   EXCEPTION WHEN others THEN
+>     RAISE NOTICE 'caught2 % %', sqlstate, sqlerrm;
+>   END;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT lz_g()
+NOTICE 00000: opened
+CONTEXT: PL/pgSQL function lz_g() line 7 at RAISE
+NOTICE 00000: f(1)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_g() line 8 at FETCH
+NOTICE 00000: got 5
+CONTEXT: PL/pgSQL function lz_g() line 9 at RAISE
+NOTICE 00000: f(2)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_g() line 10 at FETCH
+NOTICE 00000: got 10
+CONTEXT: PL/pgSQL function lz_g() line 11 at RAISE
+NOTICE 00000: f(3)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_g() line 13 at FETCH
+NOTICE 00000: caught division by zero
+CONTEXT: PL/pgSQL function lz_g() line 15 at RAISE
+NOTICE 00000: caught2 55000 portal "<unnamed portal 1>" cannot be run
+CONTEXT: PL/pgSQL function lz_g() line 21 at RAISE
+lz_g:void
+
+-- SELECT 1
+
+> CREATE TABLE lz_t (a int PRIMARY KEY, b text)
+-- CREATE TABLE
+
+> INSERT INTO lz_t VALUES (1, 'x'), (2, 'y'), (3, 'z')
+-- INSERT 0 3
+
+> CREATE FUNCTION lz_h() RETURNS void LANGUAGE plpgsql AS $$
+> DECLARE
+>   c refcursor;
+>   r record;
+> BEGIN
+>   OPEN c FOR SELECT a, b, (SELECT count(*) FROM lz_t) AS n FROM lz_t ORDER BY a;
+>   INSERT INTO lz_t VALUES (4, 'w');
+>   UPDATE lz_t SET b = 'changed' WHERE a = 2;
+>   DELETE FROM lz_t WHERE a = 3;
+>   FETCH c INTO r;
+>   RAISE NOTICE 'r=%', r;
+>   FETCH c INTO r;
+>   RAISE NOTICE 'r=%', r;
+>   INSERT INTO lz_t VALUES (5, 'v');
+>   FETCH c INTO r;
+>   RAISE NOTICE 'r=%', r;
+>   FETCH c INTO r;
+>   RAISE NOTICE 'found=%', found;
+>   CLOSE c;
+>   OPEN c FOR SELECT a, b FROM lz_t WHERE a > 1 ORDER BY a;
+>   DELETE FROM lz_t WHERE a > 1;
+>   LOOP
+>     FETCH c INTO r;
+>     EXIT WHEN NOT found;
+>     RAISE NOTICE 'second %', r;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT lz_h()
+NOTICE 00000: r=(1,x,3)
+CONTEXT: PL/pgSQL function lz_h() line 11 at RAISE
+NOTICE 00000: r=(2,y,3)
+CONTEXT: PL/pgSQL function lz_h() line 13 at RAISE
+NOTICE 00000: r=(3,z,3)
+CONTEXT: PL/pgSQL function lz_h() line 16 at RAISE
+NOTICE 00000: found=f
+CONTEXT: PL/pgSQL function lz_h() line 18 at RAISE
+NOTICE 00000: second (2,changed)
+CONTEXT: PL/pgSQL function lz_h() line 25 at RAISE
+NOTICE 00000: second (4,w)
+CONTEXT: PL/pgSQL function lz_h() line 25 at RAISE
+NOTICE 00000: second (5,v)
+CONTEXT: PL/pgSQL function lz_h() line 25 at RAISE
+lz_h:void
+
+-- SELECT 1
+
+> SELECT * FROM lz_t ORDER BY a
+a:int4 | b:text
+1 | x
+-- SELECT 1
+
+> INSERT INTO lz_t VALUES (2, 'y'), (3, 'z')
+-- INSERT 0 2
+
+> CREATE FUNCTION lz_s() RETURNS void LANGUAGE plpgsql AS $$
+> DECLARE
+>   c CURSOR FOR SELECT a, b FROM lz_t ORDER BY a;
+>   r record;
+> BEGIN
+>   OPEN c;
+>   FETCH c INTO r;
+>   RAISE NOTICE 'r=%', r;
+>   BEGIN
+>     UPDATE lz_t SET b = 'gone' WHERE a = 2;
+>     DELETE FROM lz_t WHERE a = 3;
+>     RAISE EXCEPTION 'undo';
+>   EXCEPTION WHEN raise_exception THEN
+>     RAISE NOTICE 'undone';
+>   END;
+>   UPDATE lz_t SET b = 'later' WHERE a = 3;
+>   FETCH c INTO r;
+>   RAISE NOTICE 'r=%', r;
+>   FETCH c INTO r;
+>   RAISE NOTICE 'r=%', r;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT lz_s()
+NOTICE 00000: r=(1,x)
+CONTEXT: PL/pgSQL function lz_s() line 8 at RAISE
+NOTICE 00000: undone
+CONTEXT: PL/pgSQL function lz_s() line 14 at RAISE
+NOTICE 00000: r=(2,y)
+CONTEXT: PL/pgSQL function lz_s() line 18 at RAISE
+NOTICE 00000: r=(3,z)
+CONTEXT: PL/pgSQL function lz_s() line 20 at RAISE
+lz_s:void
+
+-- SELECT 1
+
+> SELECT * FROM lz_t ORDER BY a
+a:int4 | b:text
+1 | x
+2 | y
+3 | later
+-- SELECT 3
+
+> CREATE FUNCTION lz_k() RETURNS void LANGUAGE plpgsql AS $$
+> DECLARE
+>   c CURSOR FOR SELECT a FROM lz_t ORDER BY a;
+> BEGIN
+>   FOR r IN c LOOP
+>     RAISE NOTICE 'loop %', r.a;
+>     UPDATE lz_t SET a = a * 10 WHERE a = r.a + 1;
+>     INSERT INTO lz_t VALUES (r.a + 100, 'new');
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT lz_k()
+NOTICE 00000: loop 1
+CONTEXT: PL/pgSQL function lz_k() line 6 at RAISE
+NOTICE 00000: loop 2
+CONTEXT: PL/pgSQL function lz_k() line 6 at RAISE
+NOTICE 00000: loop 3
+CONTEXT: PL/pgSQL function lz_k() line 6 at RAISE
+lz_k:void
+
+-- SELECT 1
+
+> SELECT a FROM lz_t ORDER BY a
+a:int4
+1
+20
+30
+101
+102
+103
+-- SELECT 6
+
+> CREATE FUNCTION lz_p(lim int) RETURNS SETOF int LANGUAGE plpgsql AS $$
+> DECLARE
+>   c CURSOR (x int) FOR SELECT lz_f(i) FROM generate_series(0, x) i;
+>   v int;
+> BEGIN
+>   OPEN c(lim);
+>   lim := 0;
+>   LOOP
+>     FETCH c INTO v;
+>     EXIT WHEN NOT found;
+>     RETURN NEXT v;
+>   END LOOP;
+>   CLOSE c;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM lz_p(2)
+NOTICE 00000: f(0)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_p(integer) line 9 at FETCH
+NOTICE 00000: f(1)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_p(integer) line 9 at FETCH
+NOTICE 00000: f(2)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_p(integer) line 9 at FETCH
+lz_p:int4
+10
+3
+5
+-- SELECT 3
+
+> SELECT * FROM lz_p(4)
+NOTICE 00000: f(0)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_p(integer) line 9 at FETCH
+NOTICE 00000: f(1)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_p(integer) line 9 at FETCH
+NOTICE 00000: f(2)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_p(integer) line 9 at FETCH
+NOTICE 00000: f(3)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+CONTEXT: PL/pgSQL function lz_p(integer) line 9 at FETCH
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL function lz_f(integer) line 4 at RETURN
+CONTEXT: PL/pgSQL function lz_p(integer) line 9 at FETCH
+
+> CREATE FUNCTION lz_rc() RETURNS refcursor LANGUAGE plpgsql AS $$
+> DECLARE c refcursor := 'lz_cur';
+> BEGIN
+>   OPEN c FOR SELECT lz_f(i) AS v, (SELECT count(*) FROM lz_t) AS n FROM generate_series(0, 4) i;
+>   RAISE NOTICE 'opened rc';
+>   RETURN c;
+> END $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT lz_rc()
+NOTICE 00000: opened rc
+CONTEXT: PL/pgSQL function lz_rc() line 5 at RAISE
+lz_rc:refcursor
+lz_cur
+-- SELECT 1
+
+> INSERT INTO lz_t VALUES (1000, 'after')
+-- INSERT 0 1
+
+> FETCH 2 FROM lz_cur
+NOTICE 00000: f(0)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+NOTICE 00000: f(1)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+v:int4 | n:int8
+3 | 6
+5 | 6
+-- FETCH 2
+
+> FETCH 1 FROM lz_cur
+NOTICE 00000: f(2)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+v:int4 | n:int8
+10 | 6
+-- FETCH 1
+
+> SELECT name, statement FROM pg_cursors
+name:text | statement:text
+lz_cur | SELECT lz_f(i) AS v, (SELECT count(*) FROM lz_t) AS n FROM generate_series(0, 4) i
+-- SELECT 1
+
+> FETCH 1 FROM lz_cur
+NOTICE 00000: f(3)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL function lz_f(integer) line 4 at RETURN
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> SELECT lz_rc()
+NOTICE 00000: opened rc
+CONTEXT: PL/pgSQL function lz_rc() line 5 at RAISE
+lz_rc:refcursor
+lz_cur
+-- SELECT 1
+
+> MOVE FORWARD 2 IN lz_cur
+NOTICE 00000: f(0)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+NOTICE 00000: f(1)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+-- MOVE 2
+
+> CLOSE lz_cur
+-- CLOSE CURSOR
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> SELECT lz_rc()
+NOTICE 00000: opened rc
+CONTEXT: PL/pgSQL function lz_rc() line 5 at RAISE
+lz_rc:refcursor
+lz_cur
+-- SELECT 1
+
+> MOVE FORWARD ALL IN lz_cur
+NOTICE 00000: f(0)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+NOTICE 00000: f(1)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+NOTICE 00000: f(2)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+NOTICE 00000: f(3)
+CONTEXT: PL/pgSQL function lz_f(integer) line 3 at RAISE
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL function lz_f(integer) line 4 at RETURN
+
+> ROLLBACK
+-- ROLLBACK
+
+> DO $$
+> DECLARE c CURSOR FOR SELECT lz_f(i) FROM generate_series(1, 9) i;
+> BEGIN
+>   OPEN c;
+>   RAISE NOTICE 'not fetched';
+> END $$
+NOTICE 00000: not fetched
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+

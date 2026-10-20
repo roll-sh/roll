@@ -1,0 +1,186 @@
+> create table wr_t (a int, b text)
+-- CREATE TABLE
+
+> insert into wr_t values (1, null), (2, 'x')
+-- INSERT 0 2
+
+> select t1.* = t2.*, t1.* <> t2.*, t1 = t2 from wr_t t1, wr_t t2 order by t1.a, t2.a
+?column?:bool | ?column?:bool | ?column?:bool
+t | f | t
+f | t | f
+f | t | f
+t | f | t
+-- SELECT 4
+
+> create view wr_v1 as select t1.* <> t2.* as ne, t1 = t2 as eq, row_to_json(t1) as j,
+>   t1 as whole, (t1).a from wr_t t1, wr_t t2
+-- CREATE VIEW
+
+> select pg_get_viewdef('wr_v1')
+pg_get_viewdef:text
+ SELECT (t1.* <> t2.*) AS ne,
+    (t1.* = t2.*) AS eq,
+    row_to_json(t1.*) AS j,
+    t1.*::wr_t AS whole,
+    t1.a
+   FROM wr_t t1,
+    wr_t t2;
+-- SELECT 1
+
+> select pg_get_viewdef('wr_v1', true)
+pg_get_viewdef:text
+ SELECT t1.* <> t2.* AS ne,
+    t1.* = t2.* AS eq,
+    row_to_json(t1.*) AS j,
+    t1.*::wr_t AS whole,
+    t1.a
+   FROM wr_t t1,
+    wr_t t2;
+-- SELECT 1
+
+> select * from wr_v1 order by j::text, ne
+ne:bool | eq:bool | j:json | whole:user | a:int4
+f | t | {"a":1,"b":null} | (1,) | 1
+t | f | {"a":1,"b":null} | (1,) | 1
+f | t | {"a":2,"b":"x"} | (2,x) | 2
+t | f | {"a":2,"b":"x"} | (2,x) | 2
+-- SELECT 4
+
+> create view wr_v2 as select * from wr_t t where t.* is not null and row(t.a, t.b) <> row(1, 'x')
+-- CREATE VIEW
+
+> select pg_get_viewdef('wr_v2')
+pg_get_viewdef:text
+ SELECT a,
+    b
+   FROM wr_t t
+  WHERE ((t.* IS NOT NULL) AND ((a <> 1) OR (b <> 'x'::text)));
+-- SELECT 1
+
+> create view wr_v3 as select s.x, s from (select 1 as x, 'y'::text as y) s
+ERROR 42P16: column "s" has pseudo-type record
+
+> create view wr_v4 as select (t.*)::text as w from wr_t t
+-- CREATE VIEW
+
+> select pg_get_viewdef('wr_v4', true)
+pg_get_viewdef:text
+ SELECT t.*::text AS w
+   FROM wr_t t;
+-- SELECT 1
+
+> create view wr_v5 as select t, t.b::text from wr_t t
+-- CREATE VIEW
+
+> select pg_get_viewdef('wr_v5', true)
+pg_get_viewdef:text
+ SELECT t.*::wr_t AS t,
+    b
+   FROM wr_t t;
+-- SELECT 1
+
+> create table wr_hat_data (hat_name char(10), hat_color char(10))
+-- CREATE TABLE
+
+> create unique index wr_hat_data_unique_idx on wr_hat_data (hat_name collate "C" bpchar_pattern_ops)
+-- CREATE INDEX
+
+> create table wr_hats (hat_name char(10), hat_color char(10))
+-- CREATE TABLE
+
+> create rule wr_hat_upsert as on insert to wr_hats do instead
+>   insert into wr_hat_data values (new.hat_name, new.hat_color)
+>   on conflict (hat_name collate "C" bpchar_pattern_ops) where hat_color = 'green'
+>   do update set hat_name = wr_hat_data.hat_name, hat_color = excluded.hat_color
+>   where excluded.hat_color <> 'forbidden' and wr_hat_data.* != excluded.*
+>   returning *
+-- CREATE RULE
+
+> select definition from pg_rules where tablename = 'wr_hats'
+definition:text
+CREATE RULE wr_hat_upsert AS
+    ON INSERT TO public.wr_hats DO INSTEAD  INSERT INTO wr_hat_data (hat_name, hat_color)
+  VALUES (new.hat_name, new.hat_color) ON CONFLICT(hat_name COLLATE "C" bpchar_pattern_ops)
+  WHERE (hat_color = 'green'::bpchar) DO UPDATE SET hat_name = wr_hat_data.hat_name, hat_color = excluded.hat_color
+  WHERE ((excluded.hat_color <> 'forbidden'::bpchar) AND (wr_hat_data.* <> excluded.*))
+  RETURNING wr_hat_data.hat_name,
+    wr_hat_data.hat_color;
+-- SELECT 1
+
+> create table wr_rule_t1 (f1 int, f2 int)
+-- CREATE TABLE
+
+> create table wr_rule_dest (f1 int, f2 int[], tag text)
+-- CREATE TABLE
+
+> create rule wr_rr as on update to wr_rule_t1 do instead update wr_rule_dest trgt
+>   set (f2[1], f1, tag) = (select new.f2, new.f1, 'updated'::varchar)
+>   where trgt.f1 = new.f1 returning new.*
+-- CREATE RULE
+
+> select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'wr_rr'
+pg_get_ruledef:text
+CREATE RULE wr_rr AS
+    ON UPDATE TO wr_rule_t1 DO INSTEAD  UPDATE wr_rule_dest trgt SET (f2[1], f1, tag) = ( SELECT new.f2,
+            new.f1,
+            'updated'::character varying AS "varchar")
+  WHERE trgt.f1 = new.f1
+  RETURNING new.f1,
+    new.f2;
+-- SELECT 1
+
+> create rule wr_rr2 as on delete to wr_rule_t1 do instead update wr_rule_dest
+>   set (f1, tag) = (old.f1, 'gone'), f2[2] = old.f2 where f1 = old.f1
+-- CREATE RULE
+
+> select pg_get_ruledef(oid) from pg_rewrite where rulename = 'wr_rr2'
+pg_get_ruledef:text
+CREATE RULE wr_rr2 AS
+    ON DELETE TO public.wr_rule_t1 DO INSTEAD  UPDATE wr_rule_dest SET f1 = old.f1, tag = 'gone'::text, f2[2] = old.f2
+  WHERE (wr_rule_dest.f1 = old.f1);
+-- SELECT 1
+
+> create function wr_set_params() returns integer as 'select 1;' language sql
+>   set search_path to pg_catalog
+>   set extra_float_digits to 2
+>   set work_mem to '4MB'
+>   set datestyle to iso, mdy
+>   set local_preload_libraries to "Mixed/Case", 'c:/''a"/path', '', 'x123'
+>   immutable strict
+-- CREATE FUNCTION
+
+> select pg_get_functiondef('wr_set_params()'::regprocedure)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.wr_set_params()
+ RETURNS integer
+ LANGUAGE sql
+ IMMUTABLE STRICT
+ SET search_path TO 'pg_catalog'
+ SET extra_float_digits TO '2'
+ SET work_mem TO '4MB'
+ SET "DateStyle" TO 'iso, mdy'
+ SET local_preload_libraries TO 'Mixed/Case', 'c:/''a"/path', '', 'x123'
+AS $function$select 1;$function$
+
+-- SELECT 1
+
+> select proconfig from pg_proc where proname = 'wr_set_params'
+proconfig:text[]
+{search_path=pg_catalog,extra_float_digits=2,work_mem=4MB,"DateStyle=iso, mdy","local_preload_libraries=\"Mixed/Case\", \"c:/'a\"\"/path\", \"\", x123"}
+-- SELECT 1
+
+> drop function wr_set_params()
+-- DROP FUNCTION
+
+> drop table wr_rule_t1, wr_rule_dest
+-- DROP TABLE
+
+> drop table wr_hats, wr_hat_data
+-- DROP TABLE
+
+> drop view wr_v1, wr_v2, wr_v4, wr_v5
+-- DROP VIEW
+
+> drop table wr_t
+-- DROP TABLE
+

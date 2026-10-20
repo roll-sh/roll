@@ -1,0 +1,400 @@
+> \fcall xmlconcat2(xml,xml) x:3c613ec3a93c2f613e NULL
+result:text
+<a>é</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL
+result:text
+<a>é</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2249534f2d383835392d31223f3e3c6120623d22e9ff223ee03c2f613e NULL
+result:text
+<a b="éÿ">à</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d27312e302720656e636f64696e673d276c6174696e3127207374616e64616c6f6e653d27796573273f3e0a3c613ee93c2f613e NULL
+result:text
+<?xml version="1.0" standalone="yes"?>
+<a>é</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2257494e31323532223f3e3c613e809c3c2f613e NULL
+result:text
+<a>€œ</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2277696e646f77732d31323532223f3e3c613e813c2f613e NULL
+ERROR 22P05: character with byte sequence 0x81 in encoding "WIN1252" has no equivalent in encoding "UTF8"
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e32223f3e3c613eb1e83c2f613e NULL
+result:text
+<a>ąč</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224b4f49382d52223f3e3c613ec1d73c2f613e NULL
+result:text
+<a>ав</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2249534f2d383835392d35223f3e3c613eb03c2f613e NULL
+result:text
+<a>А</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2257494e31323531223f3e3c613e983c2f613e NULL
+ERROR 22P05: character with byte sequence 0x98 in encoding "WIN1251" has no equivalent in encoding "UTF8"
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2255544638223f3e3c613ec3a93c2f613e NULL
+result:text
+<a>é</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d225554462d38223f3e3c613ee93c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ee93c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2253514c5f4153434949223f3e3c613ec3a93c2f613e NULL
+result:text
+<a>é</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2253514c5f4153434949223f3e3c613ee93c2f613e NULL
+ERROR 22021: invalid byte sequence for encoding "UTF8": 0xe9 0x3c 0x2f
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d225554462d3136223f3e3c612f3e NULL
+ERROR 22023: invalid encoding name "UTF-16"
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d226e6f6e6573756368223f3e3c612f3e NULL
+ERROR 22023: invalid encoding name "nonesuch"
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f623e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Opening and ending tag mismatch: a line 1 and b
+DETAIL: <a>é</b>
+DETAIL:          ^
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e7465787420e9203c622f3e NULL
+result:text
+text é <b/>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e312220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL
+result:text
+<?xml version="1.1"?><a>é</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e3122203f3e3c613ee93c2f613e NULL
+result:text
+<a>é</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c20656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL
+ERROR 2200N: invalid XML content: invalid XML declaration
+DETAIL: Malformed declaration: missing version.
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223c613ee93c2f613e NULL
+ERROR 2200N: invalid XML content: invalid XML declaration
+DETAIL: Parsing XML declaration: '?>' expected.
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2257494e383734223f3e3c613ea13c2f613e NULL
+result:text
+<a>ก</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e39223f3e3c613ea43c2f613e NULL
+result:text
+<a>€</a>
+-- FASTPATH
+
+> \fcallb xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL
+result:text
+\x3c613ec3a93c2f613e
+-- FASTPATH
+
+> \fcallb xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e3122207374616e64616c6f6e653d226e6f223f3e3c613ee93c2f613e NULL
+result:text
+\x3c3f786d6c2076657273696f6e3d22312e3022207374616e64616c6f6e653d226e6f223f3e3c613ec3a93c2f613e
+-- FASTPATH
+
+> set xmloption = content
+-- SET
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e7465787420e9203c622f3e NULL
+result:text
+text é <b/>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f623e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Opening and ending tag mismatch: a line 1 and b
+DETAIL: <a>é</b>
+DETAIL:          ^
+
+> \fcall xmlconcat2(xml,xml) x:3c21444f435459504520613e3c613ee93c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <!DOCTYPE a><a>
+DETAIL:                ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ee93c2f623e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+DETAIL: line 1: Opening and ending tag mismatch: a line 1 and b
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e78e9793c632f3e3c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>x
+DETAIL:     ^
+
+> \fcall xmlconcat2(xml,xml) x:3c6120623d22e9e9222f3e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a b="
+DETAIL:       ^
+
+> \fcall xmlconcat2(xml,xml) x:3c61e92f3e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a
+DETAIL:   ^
+
+> \fcall xmlconcat2(xml,xml) x:3c212d2de92d2d3e3c612f3e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <!--
+DETAIL:     ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e26e93b3c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>&
+DETAIL:     ^
+DETAIL: line 1: Entity '�' not defined
+DETAIL: <a>&
+DETAIL:     ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ee9 NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Incomplete UTF-8 sequence starting with E9
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e3c215b43444154415be95d5d3e3c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a><![CDATA[
+DETAIL:             ^
+
+> \fcall xmlconcat2(xml,xml) x:3c3f7020e93f3e3c612f3e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <?p 
+DETAIL:     ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ec33c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ec0803c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613eeda0803c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ef49080803c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e803c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ec3a9e9206d6f726520746578742026616d703b203c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>é
+DETAIL:      ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e0a0ae93c2f613e NULL
+ERROR 2200N: invalid XML content
+DETAIL: line 3: Invalid bytes in character encoding
+DETAIL: 
+DETAIL: ^
+
+> \fcall xmlconcat2(xml,xml) x:efbbbf3c612f3e NULL
+result:text
+﻿<a/>
+-- FASTPATH
+
+> set xmloption = document
+-- SET
+
+> \fcall xmlconcat2(xml,xml) x:3c613ee93c2f623e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+DETAIL: line 1: Opening and ending tag mismatch: a line 1 and b
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e78e9793c632f3e3c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>x
+DETAIL:     ^
+
+> \fcall xmlconcat2(xml,xml) x:3c6120623d22e9e9222f3e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a b="
+DETAIL:       ^
+
+> \fcall xmlconcat2(xml,xml) x:3c61e92f3e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a
+DETAIL:   ^
+
+> \fcall xmlconcat2(xml,xml) x:3c212d2de92d2d3e3c612f3e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <!--
+DETAIL:     ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e26e93b3c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>&
+DETAIL:     ^
+DETAIL: line 1: Entity '�' not defined
+DETAIL: <a>&
+DETAIL:     ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ee9 NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Incomplete UTF-8 sequence starting with E9
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e3c215b43444154415be95d5d3e3c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a><![CDATA[
+DETAIL:             ^
+
+> \fcall xmlconcat2(xml,xml) x:3c3f7020e93f3e3c612f3e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <?p 
+DETAIL:     ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ec33c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ec0803c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613eeda0803c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ef49080803c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e803c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>
+DETAIL:    ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613ec3a9e9206d6f726520746578742026616d703b203c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Invalid bytes in character encoding
+DETAIL: <a>é
+DETAIL:      ^
+
+> \fcall xmlconcat2(xml,xml) x:3c613e0a0ae93c2f613e NULL
+ERROR 2200M: invalid XML document
+DETAIL: line 3: Invalid bytes in character encoding
+DETAIL: 
+DETAIL: ^
+
+> \fcall xmlconcat2(xml,xml) x:efbbbf3c612f3e NULL
+result:text
+﻿<a/>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL
+result:text
+<a>é</a>
+-- FASTPATH
+
+> reset xmloption
+-- RESET
+
+> select xmlparse(document E'\uFEFF<a/>'), xmlparse(document E'\uFEFF<?xml version="1.0"?><a/>')
+xmlparse:xml | xmlparse:xml
+﻿<a/> | ﻿<?xml version="1.0"?><a/>
+-- SELECT 1
+
+> select xmlparse(document E'\uFEFF<a></b>')
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Opening and ending tag mismatch: a line 1 and b
+DETAIL: ﻿<a></b>
+DETAIL:           ^
+
+> select xmlparse(content E'\uFEFF<a/>')
+xmlparse:xml
+﻿<a/>
+-- SELECT 1
+
+> select xmlparse(document E' \uFEFF<a/>')
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Start tag expected, '<' not found
+DETAIL:  ﻿<a/>
+DETAIL:  ^
+
+> select xmlserialize(document E'\uFEFF<a/>' as text indent), xpath('/', E'\uFEFF<a/>'::xml)
+xmlserialize:text | xpath:143
+<a/> | {"<a/>
+"}
+-- SELECT 1
+

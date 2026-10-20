@@ -1,0 +1,188 @@
+> CREATE TABLE fd_t (a int, b text)
+-- CREATE TABLE
+
+> CREATE VIEW fd_v1 AS SELECT a FROM fd_t
+-- CREATE VIEW
+
+> CREATE FUNCTION fd_f1(x int) RETURNS fd_t LANGUAGE sql AS 'SELECT x, ''q'''
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fd_f2(r fd_t) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fd_f3() RETURNS SETOF fd_t LANGUAGE sql AS 'SELECT * FROM fd_t'
+-- CREATE FUNCTION
+
+> CREATE VIEW fd_v2 AS SELECT a FROM fd_t
+-- CREATE VIEW
+
+> CREATE FUNCTION fd_f4(r fd_t[]) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fd_f5(OUT r fd_t, OUT n int) LANGUAGE sql AS 'SELECT NULL::fd_t, 1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fd_f6() RETURNS TABLE (r fd_t) LANGUAGE sql AS 'SELECT NULL::fd_t'
+-- CREATE FUNCTION
+
+> CREATE TABLE fd_c (p fd_t)
+-- CREATE TABLE
+
+> CREATE SCHEMA fd_s
+-- CREATE SCHEMA
+
+> CREATE PROCEDURE fd_s.fd_p(fd_t) LANGUAGE sql AS 'SELECT 1'
+-- CREATE PROCEDURE
+
+> DROP TABLE fd_t
+ERROR 2BP01: cannot drop table fd_t because other objects depend on it
+DETAIL: function fd_f4(fd_t[]) depends on type fd_t[]
+DETAIL: function fd_f1(integer) depends on type fd_t
+DETAIL: function fd_f2(fd_t) depends on type fd_t
+DETAIL: function fd_f3() depends on type fd_t
+DETAIL: function fd_f5() depends on type fd_t
+DETAIL: function fd_f6() depends on type fd_t
+DETAIL: column p of table fd_c depends on type fd_t
+DETAIL: function fd_s.fd_p(fd_t) depends on type fd_t
+DETAIL: view fd_v1 depends on table fd_t
+DETAIL: view fd_v2 depends on table fd_t
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE fd_t CASCADE
+NOTICE 00000: drop cascades to 10 other objects
+DETAIL: drop cascades to function fd_f4(fd_t[])
+DETAIL: drop cascades to function fd_f1(integer)
+DETAIL: drop cascades to function fd_f2(fd_t)
+DETAIL: drop cascades to function fd_f3()
+DETAIL: drop cascades to function fd_f5()
+DETAIL: drop cascades to function fd_f6()
+DETAIL: drop cascades to column p of table fd_c
+DETAIL: drop cascades to function fd_s.fd_p(fd_t)
+DETAIL: drop cascades to view fd_v1
+DETAIL: drop cascades to view fd_v2
+-- DROP TABLE
+
+> DROP TABLE fd_c
+-- DROP TABLE
+
+> DROP SCHEMA fd_s
+-- DROP SCHEMA
+
+> CREATE DOMAIN fd_d AS int
+-- CREATE DOMAIN
+
+> CREATE TYPE fd_e AS ENUM ('a')
+-- CREATE TYPE
+
+> CREATE TYPE fd_ty AS (x int)
+-- CREATE TYPE
+
+> CREATE FUNCTION fd_g1(fd_d) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fd_g2() RETURNS fd_e LANGUAGE sql AS 'SELECT ''a''::fd_e'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fd_g3(fd_ty) RETURNS int LANGUAGE plpgsql AS 'BEGIN RETURN 1; END'
+-- CREATE FUNCTION
+
+> CREATE PROCEDURE fd_g4(INOUT fd_d) LANGUAGE sql AS 'SELECT 1'
+-- CREATE PROCEDURE
+
+> CREATE TABLE fd_t1 (c fd_ty)
+-- CREATE TABLE
+
+> CREATE FUNCTION fd_g5(fd_ty[]) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE TABLE fd_t2 (c fd_ty[], e fd_e)
+-- CREATE TABLE
+
+> CREATE TABLE fd_t3 OF fd_ty
+-- CREATE TABLE
+
+> CREATE FUNCTION fd_g6() RETURNS fd_ty LANGUAGE sql AS 'SELECT ROW(1)::fd_ty'
+-- CREATE FUNCTION
+
+> CREATE TYPE fd_ty2 AS (y fd_ty)
+-- CREATE TYPE
+
+> CREATE FUNCTION fd_g7(fd_e[]) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE DOMAIN fd_dd AS fd_e
+-- CREATE DOMAIN
+
+> CREATE FUNCTION fd_g8(fd_dd) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> DROP DOMAIN fd_d
+ERROR 2BP01: cannot drop type fd_d because other objects depend on it
+DETAIL: function fd_g1(fd_d) depends on type fd_d
+DETAIL: function fd_g4(fd_d) depends on type fd_d
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TYPE fd_e
+ERROR 2BP01: cannot drop type fd_e because other objects depend on it
+DETAIL: function fd_g7(fd_e[]) depends on type fd_e[]
+DETAIL: function fd_g2() depends on type fd_e
+DETAIL: column e of table fd_t2 depends on type fd_e
+DETAIL: type fd_dd depends on type fd_e
+DETAIL: function fd_g8(fd_dd) depends on type fd_dd
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TYPE fd_ty
+ERROR 2BP01: cannot drop type fd_ty because other objects depend on it
+DETAIL: function fd_g5(fd_ty[]) depends on type fd_ty[]
+DETAIL: column c of table fd_t2 depends on type fd_ty[]
+DETAIL: function fd_g3(fd_ty) depends on type fd_ty
+DETAIL: column c of table fd_t1 depends on type fd_ty
+DETAIL: table fd_t3 depends on type fd_ty
+DETAIL: function fd_g6() depends on type fd_ty
+DETAIL: column y of composite type fd_ty2 depends on type fd_ty
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TYPE fd_ty, fd_e
+ERROR 2BP01: cannot drop desired object(s) because other objects depend on them
+DETAIL: function fd_g7(fd_e[]) depends on type fd_e[]
+DETAIL: function fd_g2() depends on type fd_e
+DETAIL: column e of table fd_t2 depends on type fd_e
+DETAIL: type fd_dd depends on type fd_e
+DETAIL: function fd_g8(fd_dd) depends on type fd_dd
+DETAIL: function fd_g5(fd_ty[]) depends on type fd_ty[]
+DETAIL: column c of table fd_t2 depends on type fd_ty[]
+DETAIL: function fd_g3(fd_ty) depends on type fd_ty
+DETAIL: column c of table fd_t1 depends on type fd_ty
+DETAIL: table fd_t3 depends on type fd_ty
+DETAIL: function fd_g6() depends on type fd_ty
+DETAIL: column y of composite type fd_ty2 depends on type fd_ty
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP DOMAIN fd_d CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to function fd_g1(fd_d)
+DETAIL: drop cascades to function fd_g4(fd_d)
+-- DROP DOMAIN
+
+> DROP TYPE fd_ty, fd_e CASCADE
+NOTICE 00000: drop cascades to 12 other objects
+DETAIL: drop cascades to function fd_g7(fd_e[])
+DETAIL: drop cascades to function fd_g2()
+DETAIL: drop cascades to column e of table fd_t2
+DETAIL: drop cascades to type fd_dd
+DETAIL: drop cascades to function fd_g8(fd_dd)
+DETAIL: drop cascades to function fd_g5(fd_ty[])
+DETAIL: drop cascades to column c of table fd_t2
+DETAIL: drop cascades to function fd_g3(fd_ty)
+DETAIL: drop cascades to column c of table fd_t1
+DETAIL: drop cascades to table fd_t3
+DETAIL: drop cascades to function fd_g6()
+DETAIL: drop cascades to column y of composite type fd_ty2
+-- DROP TYPE
+
+> DROP TABLE fd_t2, fd_t1
+-- DROP TABLE
+
+> DROP TYPE fd_ty2
+-- DROP TYPE
+

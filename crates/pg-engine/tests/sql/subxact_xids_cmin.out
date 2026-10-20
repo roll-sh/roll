@@ -1,0 +1,442 @@
+> create table sx_s (a int)
+-- CREATE TABLE
+
+> begin
+-- BEGIN
+
+> select txid_current() is not null as has
+has:bool
+t
+-- SELECT 1
+
+> insert into sx_s values (1)
+-- INSERT 0 1
+
+> savepoint s1
+-- SAVEPOINT
+
+> insert into sx_s values (2)
+-- INSERT 0 1
+
+> savepoint s2
+-- SAVEPOINT
+
+> insert into sx_s values (3)
+-- INSERT 0 1
+
+> rollback to s2
+-- ROLLBACK
+
+> insert into sx_s values (4)
+-- INSERT 0 1
+
+> release s1
+-- RELEASE
+
+> insert into sx_s values (5)
+-- INSERT 0 1
+
+> select a, xmin::text::int8 - (select xmin::text::int8 from sx_s where a = 1) as rel from sx_s order by a
+a:int4 | rel:int8
+1 | 0
+2 | 1
+4 | 3
+5 | 0
+-- SELECT 4
+
+> select pg_current_xact_id() = (select xmin::text::xid8 from sx_s where a = 1)
+?column?:bool
+t
+-- SELECT 1
+
+> commit
+-- COMMIT
+
+> select a, xmin::text::int8 - (select xmin::text::int8 from sx_s where a = 1) as rel from sx_s order by a
+a:int4 | rel:int8
+1 | 0
+2 | 1
+4 | 3
+5 | 0
+-- SELECT 4
+
+> select a, txid_status(xmin::text::int8) from sx_s order by a
+a:int4 | txid_status:text
+1 | committed
+2 | committed
+4 | committed
+5 | committed
+-- SELECT 4
+
+> begin
+-- BEGIN
+
+> savepoint a
+-- SAVEPOINT
+
+> select pg_current_xact_id_if_assigned() is null
+?column?:bool
+t
+-- SELECT 1
+
+> insert into sx_s values (6)
+-- INSERT 0 1
+
+> select pg_current_xact_id_if_assigned() is not null
+?column?:bool
+t
+-- SELECT 1
+
+> select (select xmin::text::int8 from sx_s where a = 6) - pg_current_xact_id()::text::int8
+?column?:int8
+1
+-- SELECT 1
+
+> rollback to a
+-- ROLLBACK
+
+> select count(*) from sx_s
+count:int8
+4
+-- SELECT 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> savepoint q
+-- SAVEPOINT
+
+> insert into sx_s values (7)
+-- INSERT 0 1
+
+> select txid_status(xmin::text::int8) from sx_s where a = 7
+txid_status:text
+in progress
+-- SELECT 1
+
+> rollback to q
+-- ROLLBACK
+
+> select txid_status(txid_current() + 1)
+txid_status:text
+aborted
+-- SELECT 1
+
+> commit
+-- COMMIT
+
+> create temp table sx_c (v int)
+-- CREATE TABLE
+
+> begin
+-- BEGIN
+
+> insert into sx_c select 1 limit 0
+-- INSERT 0 0
+
+> insert into sx_c values (1), (2)
+-- INSERT 0 2
+
+> select ctid, cmin, cmax, v from sx_c order by v
+ctid:27 | cmin:29 | cmax:29 | v:int4
+(0,1) | 1 | 1 | 1
+(0,2) | 1 | 1 | 2
+-- SELECT 2
+
+> select 1
+?column?:int4
+1
+-- SELECT 1
+
+> update sx_c set v = v * 10 where v = 1
+-- UPDATE 1
+
+> select ctid, cmin, cmax, v from sx_c order by v
+ctid:27 | cmin:29 | cmax:29 | v:int4
+(0,2) | 1 | 1 | 2
+(0,3) | 2 | 2 | 10
+-- SELECT 2
+
+> savepoint x
+-- SAVEPOINT
+
+> delete from sx_c
+-- DELETE 2
+
+> rollback to x
+-- ROLLBACK
+
+> select ctid, cmin, cmax, v from sx_c order by v
+ctid:27 | cmin:29 | cmax:29 | v:int4
+(0,2) | 1 | 1 | 2
+(0,3) | 2 | 2 | 10
+-- SELECT 2
+
+> commit
+-- COMMIT
+
+> select ctid, cmin, cmax, v from sx_c order by v
+ctid:27 | cmin:29 | cmax:29 | v:int4
+(0,2) | 1 | 1 | 2
+(0,3) | 2 | 2 | 10
+-- SELECT 2
+
+> begin
+-- BEGIN
+
+> delete from sx_c where v = 2
+-- DELETE 1
+
+> select ctid, cmin, v from sx_c order by v
+ctid:27 | cmin:29 | v:int4
+(0,3) | 2 | 10
+-- SELECT 1
+
+> rollback
+-- ROLLBACK
+
+> select ctid, cmin, cmax, v from sx_c order by v
+ctid:27 | cmin:29 | cmax:29 | v:int4
+(0,2) | 0 | 0 | 2
+(0,3) | 2 | 2 | 10
+-- SELECT 2
+
+> CREATE TEMP TABLE sx_cc (foobar int)
+-- CREATE TABLE
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc VALUES (1)
+-- INSERT 0 1
+
+> INSERT INTO sx_cc VALUES (2)
+-- INSERT 0 1
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 10 | 1
+(0,2) | 11 | 2
+-- SELECT 2
+
+> SAVEPOINT s1
+-- SAVEPOINT
+
+> UPDATE sx_cc SET foobar = foobar + 10
+-- UPDATE 2
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,3) | 12 | 11
+(0,4) | 12 | 12
+-- SELECT 2
+
+> ROLLBACK TO s1
+-- ROLLBACK
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 0 | 1
+(0,2) | 1 | 2
+-- SELECT 2
+
+> COMMIT
+-- COMMIT
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 0 | 1
+(0,2) | 1 | 2
+-- SELECT 2
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO sx_cc VALUES (333)
+-- INSERT 0 1
+
+> DECLARE c CURSOR FOR SELECT ctid,cmin,* FROM sx_cc
+-- DECLARE CURSOR
+
+> DELETE FROM sx_cc
+-- DELETE 3
+
+> FETCH ALL FROM c
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 1 | 1
+(0,2) | 1 | 2
+(0,5) | 0 | 333
+-- FETCH 3
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 1 | 1
+(0,2) | 1 | 2
+-- SELECT 2
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc SELECT 1 LIMIT 0
+-- INSERT 0 0
+
+> INSERT INTO sx_cc VALUES (444)
+-- INSERT 0 1
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 1 | 1
+(0,2) | 1 | 2
+(0,6) | 10 | 444
+-- SELECT 3
+
+> SAVEPOINT s1
+-- SAVEPOINT
+
+> SELECT ctid,cmin,* FROM sx_cc FOR UPDATE
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 1 | 1
+(0,2) | 1 | 2
+(0,6) | 10 | 444
+-- SELECT 3
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 1 | 1
+(0,2) | 1 | 2
+(0,6) | 10 | 444
+-- SELECT 3
+
+> UPDATE sx_cc SET foobar = foobar + 10
+-- UPDATE 3
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,7) | 12 | 11
+(0,8) | 12 | 12
+(0,9) | 12 | 454
+-- SELECT 3
+
+> ROLLBACK TO s1
+-- ROLLBACK
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 12 | 1
+(0,2) | 12 | 2
+(0,6) | 0 | 444
+-- SELECT 3
+
+> COMMIT
+-- COMMIT
+
+> SELECT ctid,cmin,* FROM sx_cc
+ctid:27 | cmin:29 | foobar:int4
+(0,1) | 12 | 1
+(0,2) | 12 | 2
+(0,6) | 0 | 444
+-- SELECT 3
+
+> CREATE TABLE IF NOT EXISTS sx_tc(
+> 	id int PRIMARY KEY,
+> 	balance numeric
+> )
+-- CREATE TABLE
+
+> INSERT INTO sx_tc VALUES (1, 0)
+-- INSERT 0 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT * FROM sx_tc WHERE sx_tc.id = 1 FOR UPDATE
+id:int4 | balance:numeric
+1 | 0
+-- SELECT 1
+
+> UPDATE sx_tc SET balance = balance + 400 WHERE id=1
+-- UPDATE 1
+
+> SAVEPOINT subxact
+-- SAVEPOINT
+
+> UPDATE sx_tc SET balance = balance - 100 WHERE id=1
+-- UPDATE 1
+
+> ROLLBACK TO SAVEPOINT subxact
+-- ROLLBACK
+
+> SELECT * FROM sx_tc WHERE id = 1 FOR UPDATE
+id:int4 | balance:numeric
+1 | 400
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP TABLE sx_tc
+-- DROP TABLE
+

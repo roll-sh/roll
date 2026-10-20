@@ -1,0 +1,109 @@
+> CREATE TYPE gx_jt_jsrec AS (ia int[], ia2 int[][], ta text[], i int)
+-- CREATE TYPE
+
+> SELECT ia FROM json_populate_record(NULL::gx_jt_jsrec, '{"ia": 123}') q
+ERROR 22P02: expected JSON array
+HINT: See the value of key "ia".
+
+> SELECT ia FROM json_populate_record(NULL::gx_jt_jsrec, '{"ia": [1, "2", null, 4]}') q
+ia:int4[]
+{1,2,NULL,4}
+-- SELECT 1
+
+> SELECT ia FROM json_populate_record(NULL::gx_jt_jsrec, '{"ia": [[1], 2]}') q
+ERROR 22P02: expected JSON array
+HINT: See the array element [1] of key "ia".
+
+> SELECT ia FROM json_populate_record(NULL::gx_jt_jsrec, '{"ia": [[1], [2, 3]]}') q
+ERROR 22P02: malformed JSON array
+DETAIL: Multidimensional arrays must have sub-arrays with matching dimensions.
+
+> SELECT ia FROM json_populate_record(NULL::gx_jt_jsrec, '{"ia": "{1,2,3}"}') q
+ia:int4[]
+{1,2,3}
+-- SELECT 1
+
+> SELECT ia2 FROM json_populate_record(NULL::gx_jt_jsrec, '{"ia2": [[1, 2], 3, 4]}') q
+ERROR 22P02: expected JSON array
+HINT: See the array element [1] of key "ia2".
+
+> SELECT ia2 FROM json_populate_record(NULL::gx_jt_jsrec, '{"ia2": [1, [2]]}') q
+ERROR 22P02: invalid input syntax for type integer: "[2]"
+
+> SELECT ta FROM jsonb_populate_record(NULL::gx_jt_jsrec, '{"ta": [[1, 2, 3], {"k": "v"}]}') q
+ERROR 22P02: expected JSON array
+HINT: See the array element [1] of key "ta".
+
+> SELECT ta FROM jsonb_populate_record(NULL::gx_jt_jsrec, '{"ta": {"k": "v"}}') q
+ERROR 22P02: expected JSON array
+HINT: See the value of key "ta".
+
+> SELECT ia FROM jsonb_populate_record(NULL::gx_jt_jsrec, '{"ia": [[[1]], [[2]]]}') q
+ia:int4[]
+{{{1}},{{2}}}
+-- SELECT 1
+
+> SELECT ia FROM jsonb_populate_record(NULL::gx_jt_jsrec, '{"ia": [[[1]], [2]]}') q
+ERROR 22P02: expected JSON array
+HINT: See the array element [1][0] of key "ia".
+
+> CREATE TEMP TABLE gx_jt_tt (a int)
+-- CREATE TABLE
+
+> CREATE TABLE gx_jt_bt (a int)
+-- CREATE TABLE
+
+> CREATE VIEW gx_jt_v1 AS SELECT * FROM gx_jt_tt
+NOTICE 00000: view "gx_jt_v1" will be a temporary view
+-- CREATE VIEW
+
+> CREATE VIEW gx_jt_v2 AS SELECT * FROM gx_jt_bt WHERE a IN (SELECT a FROM gx_jt_tt)
+NOTICE 00000: view "gx_jt_v2" will be a temporary view
+-- CREATE VIEW
+
+> CREATE VIEW gx_jt_v3 AS SELECT * FROM gx_jt_v1
+NOTICE 00000: view "gx_jt_v3" will be a temporary view
+-- CREATE VIEW
+
+> CREATE VIEW public.gx_jt_v4 AS SELECT * FROM gx_jt_tt
+NOTICE 00000: view "gx_jt_v4" will be a temporary view
+ERROR 42P16: cannot create temporary relation in non-temporary schema
+
+> CREATE VIEW gx_jt_v5 AS SELECT * FROM gx_jt_bt
+-- CREATE VIEW
+
+> SELECT relname, relpersistence FROM pg_class WHERE relname LIKE 'gx_jt_v%' ORDER BY 1
+relname:name | relpersistence:char
+gx_jt_v1 | t
+gx_jt_v2 | t
+gx_jt_v3 | t
+gx_jt_v5 | p
+-- SELECT 4
+
+> DROP VIEW gx_jt_v5
+-- DROP VIEW
+
+> DROP TABLE gx_jt_bt CASCADE
+NOTICE 00000: drop cascades to view gx_jt_v2
+-- DROP TABLE
+
+> DROP TYPE gx_jt_jsrec
+-- DROP TYPE
+
+> CREATE UNLOGGED TABLE gx_jt_unl (a int primary key)
+-- CREATE TABLE
+
+> CREATE TEMP TABLE gx_jt_tmp (a int primary key)
+-- CREATE TABLE
+
+> SELECT relname, relkind, relpersistence FROM pg_class WHERE relname ~ '^gx_jt_(unl|tmp)' ORDER BY relname
+relname:name | relkind:char | relpersistence:char
+gx_jt_tmp | r | t
+gx_jt_tmp_pkey | i | t
+gx_jt_unl | r | u
+gx_jt_unl_pkey | i | u
+-- SELECT 4
+
+> DROP TABLE gx_jt_unl
+-- DROP TABLE
+

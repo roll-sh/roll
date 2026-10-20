@@ -1,0 +1,261 @@
+> CREATE TABLE t1 (id int PRIMARY KEY, name text NOT NULL, score numeric(6,2) DEFAULT 0, created date)
+-- CREATE TABLE
+
+> CREATE TABLE t1 (x int)
+ERROR 42P07: relation "t1" already exists
+
+> CREATE TABLE IF NOT EXISTS t1 (x int)
+NOTICE 42P07: relation "t1" already exists, skipping
+-- CREATE TABLE
+
+> SELECT conname, contype FROM pg_constraint WHERE conrelid = 't1'::regclass ORDER BY conname
+conname:name | contype:char
+t1_id_not_null | n
+t1_name_not_null | n
+t1_pkey | p
+-- SELECT 3
+
+> SELECT attname, atttypid::regtype, attnotnull, atthasdef FROM pg_attribute WHERE attrelid = 't1'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | atttypid:regtype | attnotnull:bool | atthasdef:bool
+id | integer | t | f
+name | text | t | f
+score | numeric | f | t
+created | date | f | f
+-- SELECT 4
+
+> INSERT INTO t1 VALUES (1, 'a', 1.5, '2024-01-01')
+-- INSERT 0 1
+
+> INSERT INTO t1 (id, name) VALUES (2, 'b')
+-- INSERT 0 1
+
+> INSERT INTO t1 VALUES (1, 'dup')
+ERROR 23505: duplicate key value violates unique constraint "t1_pkey"
+DETAIL: Key (id)=(1) already exists.
+OBJECTS: schema=public table=t1 constraint=t1_pkey
+
+> INSERT INTO t1 (id) VALUES (3)
+ERROR 23502: null value in column "name" of relation "t1" violates not-null constraint
+DETAIL: Failing row contains (3, null, 0.00, null).
+OBJECTS: schema=public table=t1 column=name
+
+> SELECT * FROM t1 ORDER BY id
+id:int4 | name:text | score:numeric | created:date
+1 | a | 1.50 | 2024-01-01
+2 | b | 0.00 | NULL
+-- SELECT 2
+
+> CREATE TABLE t2 (a serial, b bigserial, c text UNIQUE, d int CHECK (d > 0), e int GENERATED ALWAYS AS (d * 2) STORED)
+-- CREATE TABLE
+
+> INSERT INTO t2 (c, d) VALUES ('x', 1), ('y', 2)
+-- INSERT 0 2
+
+> INSERT INTO t2 (c, d) VALUES ('x', 3)
+ERROR 23505: duplicate key value violates unique constraint "t2_c_key"
+DETAIL: Key (c)=(x) already exists.
+OBJECTS: schema=public table=t2 constraint=t2_c_key
+
+> INSERT INTO t2 (c, d) VALUES ('z', -1)
+ERROR 23514: new row for relation "t2" violates check constraint "t2_d_check"
+DETAIL: Failing row contains (4, 4, z, -1, -2).
+OBJECTS: schema=public table=t2 constraint=t2_d_check
+
+> INSERT INTO t2 (c, d, e) VALUES ('w', 1, 5)
+ERROR 428C9: cannot insert a non-DEFAULT value into column "e"
+DETAIL: Column "e" is a generated column.
+
+> SELECT * FROM t2 ORDER BY a
+a:int4 | b:int8 | c:text | d:int4 | e:int4
+1 | 1 | x | 1 | 2
+2 | 2 | y | 2 | 4
+-- SELECT 2
+
+> SELECT conname, contype FROM pg_constraint WHERE conrelid = 't2'::regclass ORDER BY conname
+conname:name | contype:char
+t2_a_not_null | n
+t2_b_not_null | n
+t2_c_key | u
+t2_d_check | c
+-- SELECT 4
+
+> SELECT relname, relkind FROM pg_class WHERE relname LIKE 't2%' ORDER BY relname
+relname:name | relkind:char
+t2 | r
+t2_a_seq | S
+t2_b_seq | S
+t2_c_key | i
+-- SELECT 4
+
+> CREATE TABLE t3 (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO t3 (v) VALUES ('a'), ('b') RETURNING *
+id:int4 | v:text
+1 | a
+2 | b
+-- INSERT 0 2
+
+> INSERT INTO t3 (id, v) VALUES (10, 'c')
+ERROR 428C9: cannot insert a non-DEFAULT value into column "id"
+DETAIL: Column "id" is an identity column defined as GENERATED ALWAYS.
+HINT: Use OVERRIDING SYSTEM VALUE to override.
+
+> INSERT INTO t3 (id, v) OVERRIDING SYSTEM VALUE VALUES (10, 'c')
+-- INSERT 0 1
+
+> SELECT * FROM t3 ORDER BY id
+id:int4 | v:text
+1 | a
+2 | b
+10 | c
+-- SELECT 3
+
+> CREATE TABLE parent (id int PRIMARY KEY, k text UNIQUE)
+-- CREATE TABLE
+
+> CREATE TABLE child (id int PRIMARY KEY, pid int REFERENCES parent ON DELETE CASCADE, pk text REFERENCES parent (k))
+-- CREATE TABLE
+
+> INSERT INTO parent VALUES (1, 'one'), (2, 'two')
+-- INSERT 0 2
+
+> INSERT INTO child VALUES (10, 1, 'one'), (11, 2, NULL)
+-- INSERT 0 2
+
+> INSERT INTO child VALUES (12, 3, NULL)
+ERROR 23503: insert or update on table "child" violates foreign key constraint "child_pid_fkey"
+DETAIL: Key (pid)=(3) is not present in table "parent".
+OBJECTS: schema=public table=child constraint=child_pid_fkey
+
+> DELETE FROM parent WHERE id = 1
+-- DELETE 1
+
+> SELECT * FROM child ORDER BY id
+id:int4 | pid:int4 | pk:text
+11 | 2 | NULL
+-- SELECT 1
+
+> DELETE FROM parent WHERE id = 2
+-- DELETE 1
+
+> SELECT * FROM child ORDER BY id
+id:int4 | pid:int4 | pk:text
+-- SELECT 0
+
+> CREATE TABLE bad_fk (x int REFERENCES parent (k))
+ERROR 42804: foreign key constraint "bad_fk_x_fkey" cannot be implemented
+DETAIL: Key columns "x" of the referencing table and "k" of the referenced table are of incompatible types: integer and text.
+
+> CREATE TABLE bad_fk2 (x text REFERENCES t1 (name))
+ERROR 42830: there is no unique constraint matching given keys for referenced table "t1"
+
+> CREATE TABLE multi_pk (a int, b int, c text, PRIMARY KEY (a, b), UNIQUE (c, a))
+-- CREATE TABLE
+
+> INSERT INTO multi_pk VALUES (1, 1, 'x'), (1, 2, 'x'), (1, 1, 'y')
+ERROR 23505: duplicate key value violates unique constraint "multi_pk_c_a_key"
+DETAIL: Key (c, a)=(x, 1) already exists.
+OBJECTS: schema=public table=multi_pk constraint=multi_pk_c_a_key
+
+> SELECT conname FROM pg_constraint WHERE conrelid = 'multi_pk'::regclass ORDER BY conname
+conname:name
+multi_pk_a_not_null
+multi_pk_b_not_null
+multi_pk_c_a_key
+multi_pk_pkey
+-- SELECT 4
+
+> CREATE TABLE two_pk (a int PRIMARY KEY, b int PRIMARY KEY)
+ERROR 42P16: multiple primary keys for table "two_pk" are not allowed (at 47)
+
+> CREATE TABLE dupcol (a int, a text)
+ERROR 42701: column "a" specified more than once
+
+> CREATE TABLE nn_conflict (a int NULL NOT NULL)
+ERROR 42601: conflicting NULL/NOT NULL declarations for column "a" of table "nn_conflict" (at 38)
+
+> CREATE TABLE badtype (a nosuchtype)
+ERROR 42704: type "nosuchtype" does not exist (at 25)
+
+> CREATE TEMP TABLE tmp1 (a int)
+-- CREATE TABLE
+
+> INSERT INTO tmp1 VALUES (1)
+-- INSERT 0 1
+
+> SELECT * FROM tmp1
+a:int4
+1
+-- SELECT 1
+
+> CREATE TABLE liked (LIKE t1 INCLUDING ALL)
+-- CREATE TABLE
+
+> SELECT attname, attnotnull FROM pg_attribute WHERE attrelid = 'liked'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attnotnull:bool
+id | t
+name | t
+score | f
+created | f
+-- SELECT 4
+
+> CREATE TABLE ctas AS SELECT id, name FROM t1 WHERE id < 3
+-- SELECT 2
+
+> SELECT * FROM ctas ORDER BY id
+id:int4 | name:text
+1 | a
+2 | b
+-- SELECT 2
+
+> CREATE TABLE ctas2 (x, y) AS VALUES (1, 'a'), (2, 'b')
+-- SELECT 2
+
+> SELECT * FROM ctas2 ORDER BY x
+x:int4 | y:text
+1 | a
+2 | b
+-- SELECT 2
+
+> SELECT id INTO selinto FROM t1
+-- SELECT 2
+
+> SELECT count(*) FROM selinto
+count:int8
+2
+-- SELECT 1
+
+> CREATE TABLE ctas_empty AS SELECT * FROM t1 WITH NO DATA
+-- CREATE TABLE AS
+
+> SELECT count(*) FROM ctas_empty
+count:int8
+0
+-- SELECT 1
+
+> DROP TABLE parent
+ERROR 2BP01: cannot drop table parent because other objects depend on it
+DETAIL: constraint child_pid_fkey on table child depends on table parent
+DETAIL: constraint child_pk_fkey on table child depends on table parent
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE parent CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to constraint child_pid_fkey on table child
+DETAIL: drop cascades to constraint child_pk_fkey on table child
+-- DROP TABLE
+
+> DROP TABLE nosuch
+ERROR 42P01: table "nosuch" does not exist
+
+> DROP TABLE IF EXISTS nosuch
+NOTICE 00000: table "nosuch" does not exist, skipping
+-- DROP TABLE
+
+> DROP TABLE t1, t2
+-- DROP TABLE
+
+> SELECT count(*) FROM t1
+ERROR 42P01: relation "t1" does not exist (at 22)
+

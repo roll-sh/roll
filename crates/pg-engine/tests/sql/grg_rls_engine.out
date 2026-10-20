@@ -1,0 +1,214 @@
+> DROP ROLE IF EXISTS grg_alice
+NOTICE 00000: role "grg_alice" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE grg_alice
+-- CREATE ROLE
+
+> CREATE TABLE grg_cc (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO grg_cc VALUES (1, 'Apple')
+-- INSERT 0 1
+
+> ALTER TABLE grg_cc ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> ALTER TABLE grg_cc FORCE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY p1 ON grg_cc AS PERMISSIVE USING (ctid IN ('(0,1)', '(0,2)', '(4294967295,0)'))
+-- CREATE POLICY
+
+> SELECT ctid, * FROM grg_cc
+ctid:27 | a:int4 | b:text
+(0,1) | 1 | Apple
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> DECLARE grg_cur CURSOR FOR SELECT * FROM grg_cc
+-- DECLARE CURSOR
+
+> FETCH FROM grg_cur
+a:int4 | b:text
+1 | Apple
+-- FETCH 1
+
+> UPDATE grg_cc SET b = 'Manzana' WHERE CURRENT OF grg_cur
+-- UPDATE 1
+
+> SELECT ctid, * FROM grg_cc
+ctid:27 | a:int4 | b:text
+(0,2) | 1 | Manzana
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> UPDATE grg_cc SET b = 'Pera'
+-- UPDATE 1
+
+> SELECT ctid, * FROM grg_cc
+ctid:27 | a:int4 | b:text
+(0,3) | 1 | Pera
+-- SELECT 1
+
+> DELETE FROM grg_cc RETURNING ctid, *
+ctid:27 | a:int4 | b:text
+(0,3) | 1 | Pera
+-- DELETE 1
+
+> CREATE TABLE grg_cc2 (a int)
+-- CREATE TABLE
+
+> INSERT INTO grg_cc2 VALUES (1), (2), (3)
+-- INSERT 0 3
+
+> ALTER TABLE grg_cc2 ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> ALTER TABLE grg_cc2 FORCE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY p2 ON grg_cc2 USING (ctid <> '(0,2)')
+-- CREATE POLICY
+
+> SELECT * FROM grg_cc2 ORDER BY a
+a:int4
+1
+2
+3
+-- SELECT 3
+
+> UPDATE grg_cc2 SET a = a * 10 RETURNING a
+a:int4
+10
+20
+30
+-- UPDATE 3
+
+> SELECT * FROM grg_cc2 ORDER BY a
+a:int4
+10
+20
+30
+-- SELECT 3
+
+> CREATE TABLE grg_coll (c) AS VALUES ('bar'::text)
+-- SELECT 1
+
+> CREATE POLICY coll_p ON grg_coll USING (c < ('foo'::text COLLATE "C"))
+-- CREATE POLICY
+
+> CREATE POLICY coll_q ON grg_coll FOR INSERT WITH CHECK (c = current_user AND EXISTS (SELECT 1 FROM grg_coll x WHERE x.c = grg_coll.c))
+-- CREATE POLICY
+
+> SELECT (string_to_array(polqual, ':'))[7] AS inputcollid FROM pg_policy WHERE polrelid = 'grg_coll'::regclass AND polname = 'coll_p'
+inputcollid:text
+inputcollid 950 
+-- SELECT 1
+
+> SELECT polname, polqual IS NOT NULL, polwithcheck IS NOT NULL, left(coalesce(polqual, polwithcheck), 9) FROM pg_policy WHERE polrelid = 'grg_coll'::regclass ORDER BY 1
+polname:name | ?column?:bool | ?column?:bool | left:text
+coll_p | t | f | {OPEXPR :
+coll_q | f | t | {BOOLEXPR
+-- SELECT 2
+
+> SELECT polname, pg_get_expr(polqual, polrelid), pg_get_expr(polwithcheck, polrelid) FROM pg_policy WHERE polrelid = 'grg_coll'::regclass ORDER BY 1
+polname:name | pg_get_expr:text | pg_get_expr:text
+coll_p | (c < ('foo'::text COLLATE "C")) | NULL
+coll_q | NULL | ((c = CURRENT_USER) AND (EXISTS ( SELECT 1
+   FROM grg_coll x
+  WHERE (x.c = grg_coll.c))))
+-- SELECT 2
+
+> SELECT policyname, qual, with_check FROM pg_policies WHERE tablename = 'grg_coll' ORDER BY 1
+policyname:name | qual:text | with_check:text
+coll_p | (c < ('foo'::text COLLATE "C")) | NULL
+coll_q | NULL | ((c = CURRENT_USER) AND (EXISTS ( SELECT 1
+   FROM grg_coll x
+  WHERE (x.c = grg_coll.c))))
+-- SELECT 2
+
+> CREATE TABLE grg_rls_t (c text)
+-- CREATE TABLE
+
+> CREATE TABLE grg_test_t (c text)
+-- CREATE TABLE
+
+> INSERT INTO grg_rls_t VALUES ('a'), ('b'), ('c'), ('d')
+-- INSERT 0 4
+
+> INSERT INTO grg_test_t VALUES ('a'), ('b')
+-- INSERT 0 2
+
+> ALTER TABLE grg_rls_t ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> GRANT SELECT ON grg_rls_t TO grg_alice
+-- GRANT
+
+> GRANT SELECT ON grg_test_t TO grg_alice
+-- GRANT
+
+> CREATE POLICY p1 ON grg_rls_t FOR SELECT TO grg_alice USING (c = current_setting('grg_test.blah'))
+-- CREATE POLICY
+
+> CREATE FUNCTION grg_rls_f(text) RETURNS text
+> BEGIN ATOMIC
+>  SELECT set_config('grg_test.blah', $1, true) || set_config('row_security', 'false', true) || string_agg(c, ',' ORDER BY c) FROM grg_rls_t;
+> END
+-- CREATE FUNCTION
+
+> SET plan_cache_mode TO force_custom_plan
+-- SET
+
+> SELECT grg_rls_f(c) FROM grg_test_t ORDER BY grg_rls_f
+grg_rls_f:text
+aoffa,b,c,d
+boffa,b,c,d
+-- SELECT 2
+
+> SET ROLE grg_alice
+-- SET
+
+> SELECT grg_rls_f(c) FROM grg_test_t ORDER BY grg_rls_f
+ERROR 42501: query would be affected by row-level security policy for table "grg_rls_t"
+CONTEXT: SQL function "grg_rls_f" statement 1
+
+> RESET ROLE
+-- RESET
+
+> SET plan_cache_mode TO force_generic_plan
+-- SET
+
+> SELECT grg_rls_f(c) FROM grg_test_t ORDER BY grg_rls_f
+grg_rls_f:text
+aoffa,b,c,d
+boffa,b,c,d
+-- SELECT 2
+
+> SET ROLE grg_alice
+-- SET
+
+> SELECT grg_rls_f(c) FROM grg_test_t ORDER BY grg_rls_f
+ERROR 42501: query would be affected by row-level security policy for table "grg_rls_t"
+CONTEXT: SQL function "grg_rls_f" statement 1
+
+> RESET ROLE
+-- RESET
+
+> RESET plan_cache_mode
+-- RESET
+
+> DROP FUNCTION grg_rls_f(text)
+-- DROP FUNCTION
+
+> DROP TABLE grg_cc, grg_cc2, grg_coll, grg_rls_t, grg_test_t
+-- DROP TABLE
+
+> DROP ROLE grg_alice
+-- DROP ROLE
+

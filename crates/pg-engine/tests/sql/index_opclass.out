@@ -1,0 +1,161 @@
+> CREATE TABLE ti (a text, b int, c varchar(10), d jsonb, e int[], n name, f text COLLATE "C")
+-- CREATE TABLE
+
+> CREATE INDEX ti_a ON ti (a text_pattern_ops)
+-- CREATE INDEX
+
+> CREATE INDEX ti_a2 ON ti (a COLLATE "C" DESC)
+-- CREATE INDEX
+
+> CREATE INDEX ti_lower ON ti (lower(a) varchar_pattern_ops)
+-- CREATE INDEX
+
+> CREATE INDEX ti_b ON ti (b int4_ops)
+-- CREATE INDEX
+
+> CREATE INDEX ti_c ON ti (c)
+-- CREATE INDEX
+
+> CREATE INDEX ti_c2 ON ti (c varchar_pattern_ops NULLS FIRST)
+-- CREATE INDEX
+
+> CREATE INDEX ti_d ON ti USING gin (d)
+-- CREATE INDEX
+
+> CREATE INDEX ti_d2 ON ti USING gin (d jsonb_path_ops)
+-- CREATE INDEX
+
+> CREATE INDEX ti_e ON ti USING gin (e)
+-- CREATE INDEX
+
+> CREATE INDEX ti_n ON ti (n)
+-- CREATE INDEX
+
+> CREATE INDEX ti_f ON ti (f)
+-- CREATE INDEX
+
+> CREATE INDEX ti_f2 ON ti (f COLLATE "C")
+-- CREATE INDEX
+
+> CREATE INDEX ti_f3 ON ti (f COLLATE "default")
+-- CREATE INDEX
+
+> CREATE INDEX ti_expr ON ti ((b + 1), upper(a))
+-- CREATE INDEX
+
+> CREATE INDEX ti_h ON ti USING hash (a)
+-- CREATE INDEX
+
+> CREATE INDEX ON ti (a foo_ops)
+ERROR 42704: operator class "foo_ops" does not exist for access method "btree"
+
+> CREATE INDEX ON ti (b text_ops)
+ERROR 42804: operator class "text_ops" does not accept data type integer
+
+> CREATE INDEX ON ti (a COLLATE "xx")
+ERROR 42704: collation "xx" for encoding "UTF8" does not exist
+
+> CREATE INDEX ON ti (b COLLATE "C")
+ERROR 42804: collations are not supported by type integer
+
+> CREATE INDEX ON ti USING gin (b)
+ERROR 42704: data type integer has no default operator class for access method "gin"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> SELECT c.relname, pg_get_indexdef(i.indexrelid), i.indclass::text, i.indcollation::text
+> FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'ti'::regclass ORDER BY 1
+relname:name | pg_get_indexdef:text | indclass:text | indcollation:text
+ti_a | CREATE INDEX ti_a ON public.ti USING btree (a text_pattern_ops) | 4217 | 100
+ti_a2 | CREATE INDEX ti_a2 ON public.ti USING btree (a COLLATE "C" DESC) | 3126 | 950
+ti_b | CREATE INDEX ti_b ON public.ti USING btree (b) | 1978 | 0
+ti_c | CREATE INDEX ti_c ON public.ti USING btree (c) | 3126 | 100
+ti_c2 | CREATE INDEX ti_c2 ON public.ti USING btree (c varchar_pattern_ops NULLS FIRST) | 4218 | 100
+ti_d | CREATE INDEX ti_d ON public.ti USING gin (d) | 10090 | 0
+ti_d2 | CREATE INDEX ti_d2 ON public.ti USING gin (d jsonb_path_ops) | 10091 | 0
+ti_e | CREATE INDEX ti_e ON public.ti USING gin (e) | 10064 | 0
+ti_expr | CREATE INDEX ti_expr ON public.ti USING btree (((b + 1)), upper(a)) | 1978 3126 | 0 100
+ti_f | CREATE INDEX ti_f ON public.ti USING btree (f) | 3126 | 950
+ti_f2 | CREATE INDEX ti_f2 ON public.ti USING btree (f) | 3126 | 950
+ti_f3 | CREATE INDEX ti_f3 ON public.ti USING btree (f COLLATE "default") | 3126 | 100
+ti_h | CREATE INDEX ti_h ON public.ti USING hash (a) | 10037 | 100
+ti_lower | CREATE INDEX ti_lower ON public.ti USING btree (lower(a) varchar_pattern_ops) | 4218 | 100
+ti_n | CREATE INDEX ti_n ON public.ti USING btree (n) | 10028 | 950
+-- SELECT 15
+
+> SELECT c.relname, k.n, pg_get_indexdef(i.indexrelid, k.n, true)
+> FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid, generate_series(1, i.indnatts) k(n)
+> WHERE i.indrelid = 'ti'::regclass ORDER BY 1, 2
+relname:name | n:int4 | pg_get_indexdef:text
+ti_a | 1 | a
+ti_a2 | 1 | a
+ti_b | 1 | b
+ti_c | 1 | c
+ti_c2 | 1 | c
+ti_d | 1 | d
+ti_d2 | 1 | d
+ti_e | 1 | e
+ti_expr | 1 | (b + 1)
+ti_expr | 2 | upper(a)
+ti_f | 1 | f
+ti_f2 | 1 | f
+ti_f3 | 1 | f
+ti_h | 1 | a
+ti_lower | 1 | lower(a)
+ti_n | 1 | n
+-- SELECT 16
+
+> SELECT c.relname, opc.opcname, opc.opcdefault, opf.opfname, am.amname
+> FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+> JOIN pg_opclass opc ON opc.oid = ANY(i.indclass)
+> JOIN pg_opfamily opf ON opf.oid = opc.opcfamily
+> JOIN pg_am am ON am.oid = opc.opcmethod
+> WHERE i.indrelid = 'ti'::regclass ORDER BY 1, 2
+relname:name | opcname:name | opcdefault:bool | opfname:name | amname:name
+ti_a | text_pattern_ops | f | text_pattern_ops | btree
+ti_a2 | text_ops | t | text_ops | btree
+ti_b | int4_ops | t | integer_ops | btree
+ti_c | text_ops | t | text_ops | btree
+ti_c2 | varchar_pattern_ops | f | text_pattern_ops | btree
+ti_d | jsonb_ops | t | jsonb_ops | gin
+ti_d2 | jsonb_path_ops | f | jsonb_path_ops | gin
+ti_e | array_ops | t | array_ops | gin
+ti_expr | int4_ops | t | integer_ops | btree
+ti_expr | text_ops | t | text_ops | btree
+ti_f | text_ops | t | text_ops | btree
+ti_f2 | text_ops | t | text_ops | btree
+ti_f3 | text_ops | t | text_ops | btree
+ti_h | text_ops | t | text_ops | hash
+ti_lower | varchar_pattern_ops | f | text_pattern_ops | btree
+ti_n | name_ops | t | text_ops | btree
+-- SELECT 16
+
+> SELECT attname, attcollation FROM pg_attribute WHERE attrelid = 'ti'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attcollation:oid
+a | 100
+b | 0
+c | 100
+d | 0
+e | 0
+n | 950
+f | 950
+-- SELECT 7
+
+> SELECT count(*), count(*) FILTER (WHERE opcdefault) FROM pg_opclass
+count:int8 | count:int8
+177 | 119
+-- SELECT 1
+
+> SELECT count(*) FROM pg_opfamily
+count:int8
+146
+-- SELECT 1
+
+> INSERT INTO ti (a, b) VALUES ('abc', 1), ('abd', 2)
+-- INSERT 0 2
+
+> SELECT a FROM ti WHERE a LIKE 'ab%' ORDER BY a
+a:text
+abc
+abd
+-- SELECT 2
+

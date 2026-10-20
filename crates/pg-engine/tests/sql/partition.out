@@ -1,0 +1,243 @@
+> CREATE TABLE m (id int, region text, amount numeric) PARTITION BY LIST (region)
+-- CREATE TABLE
+
+> CREATE TABLE m_eu PARTITION OF m FOR VALUES IN ('eu', 'uk')
+-- CREATE TABLE
+
+> CREATE TABLE m_us PARTITION OF m FOR VALUES IN ('us')
+-- CREATE TABLE
+
+> CREATE TABLE m_def PARTITION OF m DEFAULT
+-- CREATE TABLE
+
+> INSERT INTO m VALUES (1, 'eu', 10), (2, 'us', 20), (3, 'uk', 30), (4, 'jp', 40), (5, NULL, 50)
+-- INSERT 0 5
+
+> SELECT tableoid::regclass, * FROM m ORDER BY id
+tableoid:regclass | id:int4 | region:text | amount:numeric
+m_eu | 1 | eu | 10
+m_us | 2 | us | 20
+m_eu | 3 | uk | 30
+m_def | 4 | jp | 40
+m_def | 5 | NULL | 50
+-- SELECT 5
+
+> SELECT * FROM m_eu ORDER BY id
+id:int4 | region:text | amount:numeric
+1 | eu | 10
+3 | uk | 30
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT * FROM m WHERE region = 'us'
+QUERY PLAN:text
+Seq Scan on m_us m
+  Filter: (region = 'us'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM m WHERE region IN ('eu', 'jp')
+QUERY PLAN:text
+Append
+  ->  Seq Scan on m_eu m_1
+        Filter: (region = ANY ('{eu,jp}'::text[]))
+  ->  Seq Scan on m_def m_2
+        Filter: (region = ANY ('{eu,jp}'::text[]))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM m
+QUERY PLAN:text
+Append
+  ->  Seq Scan on m_eu m_1
+  ->  Seq Scan on m_us m_2
+  ->  Seq Scan on m_def m_3
+-- EXPLAIN
+
+> UPDATE m SET region = 'us' WHERE id = 1
+-- UPDATE 1
+
+> SELECT tableoid::regclass, * FROM m ORDER BY id
+tableoid:regclass | id:int4 | region:text | amount:numeric
+m_us | 1 | us | 10
+m_us | 2 | us | 20
+m_eu | 3 | uk | 30
+m_def | 4 | jp | 40
+m_def | 5 | NULL | 50
+-- SELECT 5
+
+> INSERT INTO m_us VALUES (9, 'eu', 0)
+ERROR 23514: new row for relation "m_us" violates partition constraint
+DETAIL: Failing row contains (9, eu, 0).
+OBJECTS: schema=public table=m_us
+
+> CREATE TABLE r (a int, b int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE r1 PARTITION OF r FOR VALUES FROM (MINVALUE) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE r2 PARTITION OF r FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> CREATE TABLE r3 PARTITION OF r FOR VALUES FROM (15) TO (30)
+ERROR 42P17: partition "r3" would overlap partition "r2" (at 49)
+
+> INSERT INTO r VALUES (5, 1), (10, 2), (19, 3)
+-- INSERT 0 3
+
+> INSERT INTO r VALUES (25, 4)
+ERROR 23514: no partition of relation "r" found for row
+DETAIL: Partition key of the failing row contains (a) = (25).
+OBJECTS: schema=public table=r
+
+> EXPLAIN (COSTS OFF) SELECT * FROM r WHERE a < 10
+QUERY PLAN:text
+Seq Scan on r1 r
+  Filter: (a < 10)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM r WHERE a = 12
+QUERY PLAN:text
+Seq Scan on r2 r
+  Filter: (a = 12)
+-- EXPLAIN
+
+> CREATE TABLE h (k int, v text) PARTITION BY HASH (k)
+-- CREATE TABLE
+
+> CREATE TABLE h0 PARTITION OF h FOR VALUES WITH (MODULUS 2, REMAINDER 0)
+-- CREATE TABLE
+
+> CREATE TABLE h1 PARTITION OF h FOR VALUES WITH (MODULUS 2, REMAINDER 1)
+-- CREATE TABLE
+
+> INSERT INTO h SELECT g, 'v' || g FROM generate_series(1, 10) g
+-- INSERT 0 10
+
+> SELECT tableoid::regclass, k FROM h ORDER BY k
+tableoid:regclass | k:int4
+h0 | 1
+h0 | 2
+h1 | 3
+h1 | 4
+h1 | 5
+h1 | 6
+h1 | 7
+h1 | 8
+h1 | 9
+h1 | 10
+-- SELECT 10
+
+> EXPLAIN (COSTS OFF) SELECT * FROM h WHERE k = 3
+QUERY PLAN:text
+Seq Scan on h1 h
+  Filter: (k = 3)
+-- EXPLAIN
+
+> SELECT relname, relkind, relispartition, pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname IN ('m','m_eu','m_us','m_def','r','r1','r2','h','h0','h1') ORDER BY relname
+relname:name | relkind:char | relispartition:bool | pg_get_expr:text
+h | p | f | NULL
+h0 | r | t | FOR VALUES WITH (modulus 2, remainder 0)
+h1 | r | t | FOR VALUES WITH (modulus 2, remainder 1)
+m | p | f | NULL
+m_def | r | t | DEFAULT
+m_eu | r | t | FOR VALUES IN ('eu', 'uk')
+m_us | r | t | FOR VALUES IN ('us')
+r | p | f | NULL
+r1 | r | t | FOR VALUES FROM (MINVALUE) TO (10)
+r2 | r | t | FOR VALUES FROM (10) TO (20)
+-- SELECT 10
+
+> SELECT partrelid::regclass, partstrat, partnatts, partattrs, partdefid::regclass FROM pg_partitioned_table ORDER BY 1
+partrelid:regclass | partstrat:char | partnatts:int2 | partattrs:22 | partdefid:regclass
+m | l | 1 | 2 | m_def
+r | r | 1 | 1 | -
+h | h | 1 | 1 | -
+-- SELECT 3
+
+> SELECT pg_get_partkeydef('m'::regclass), pg_get_partkeydef('r'::regclass), pg_get_partkeydef('h'::regclass), pg_get_partkeydef('m_eu'::regclass)
+pg_get_partkeydef:text | pg_get_partkeydef:text | pg_get_partkeydef:text | pg_get_partkeydef:text
+LIST (region) | RANGE (a) | HASH (k) | NULL
+-- SELECT 1
+
+> SELECT * FROM pg_partition_tree('m') ORDER BY relid::text
+relid:regclass | parentrelid:regclass | isleaf:bool | level:int4
+m | NULL | f | 0
+m_def | m | t | 1
+m_eu | m | t | 1
+m_us | m | t | 1
+-- SELECT 4
+
+> SELECT pg_partition_root('m_eu'), pg_partition_ancestors('m_eu')
+pg_partition_root:regclass | pg_partition_ancestors:regclass
+m | m
+m | m_eu
+-- SELECT 2
+
+> SELECT relid, parentrelid, isleaf, level FROM pg_partition_tree('r')
+relid:regclass | parentrelid:regclass | isleaf:bool | level:int4
+r | NULL | f | 0
+r1 | r | t | 1
+r2 | r | t | 1
+-- SELECT 3
+
+> ALTER TABLE r DETACH PARTITION r2
+-- ALTER TABLE
+
+> INSERT INTO r VALUES (12, 0)
+ERROR 23514: no partition of relation "r" found for row
+DETAIL: Partition key of the failing row contains (a) = (12).
+OBJECTS: schema=public table=r
+
+> ALTER TABLE r ATTACH PARTITION r2 FOR VALUES FROM (10) TO (20)
+-- ALTER TABLE
+
+> CREATE TABLE r4 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO r4 VALUES (50, 1)
+-- INSERT 0 1
+
+> ALTER TABLE r ATTACH PARTITION r4 FOR VALUES FROM (30) TO (40)
+ERROR 23514: partition constraint of relation "r4" is violated by some row
+OBJECTS: schema=public table=r4
+
+> ALTER TABLE r ATTACH PARTITION r4 FOR VALUES FROM (40) TO (60)
+-- ALTER TABLE
+
+> SELECT * FROM r ORDER BY a
+a:int4 | b:int4
+5 | 1
+10 | 2
+19 | 3
+50 | 1
+-- SELECT 4
+
+> CREATE TABLE bad PARTITION OF r FOR VALUES IN (1)
+ERROR 42P16: invalid bound specification for a range partition (at 44)
+
+> CREATE TABLE bad PARTITION OF m FOR VALUES FROM (1) TO (2)
+ERROR 42P16: invalid bound specification for a list partition (at 44)
+
+> CREATE TABLE bad PARTITION OF m FOR VALUES IN ('us')
+ERROR 42P17: partition "bad" would overlap partition "m_us" (at 48)
+
+> CREATE TABLE bad2 PARTITION OF m DEFAULT
+ERROR 42P17: partition "bad2" conflicts with existing default partition "m_def" (at 34)
+
+> INSERT INTO r VALUES (100, 1)
+ERROR 23514: no partition of relation "r" found for row
+DETAIL: Partition key of the failing row contains (a) = (100).
+OBJECTS: schema=public table=r
+
+> SELECT * FROM ONLY r
+a:int4 | b:int4
+-- SELECT 0
+
+> DROP TABLE m_us
+-- DROP TABLE
+
+> DROP TABLE m
+-- DROP TABLE
+
+> DROP TABLE r, h
+-- DROP TABLE
+

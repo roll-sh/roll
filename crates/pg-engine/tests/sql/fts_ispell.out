@@ -1,0 +1,284 @@
+> CREATE TEXT SEARCH DICTIONARY ispell (Template = ispell, DictFile = ispell_sample, AffFile = ispell_sample)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE TEXT SEARCH DICTIONARY hunspell (Template = ispell, DictFile = ispell_sample, AffFile = hunspell_sample)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE TEXT SEARCH DICTIONARY hunspell_long (Template = ispell, DictFile = hunspell_sample_long, AffFile = hunspell_sample_long)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE TEXT SEARCH DICTIONARY hunspell_num (Template = ispell, DictFile = hunspell_sample_num, AffFile = hunspell_sample_num)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE TEXT SEARCH DICTIONARY ispell_stop (Template = ispell, DictFile = ispell_sample, AffFile = ispell_sample, StopWords = english)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> SELECT d.n AS dict, w.n AS word, ts_lexize(d.d::regdictionary, w.w) FROM unnest(array['ispell', 'hunspell', 'hunspell_long', 'hunspell_num']) WITH ORDINALITY d(d, n), unnest(array['skies', 'sky', 'bookings', 'booking', 'foot', 'foots', 'rebookings', 'rebooking', 'rebook', 'unbookings', 'unbooking', 'unbook', 'booked', 'footklubber', 'footballklubber', 'ballyklubber', 'footballyklubber', 'ex-machina', 'machina', 'ex-', 'book', 'books', 'Booking', 'balls', 'bally', 'klubber', 'footballs', 'footballklubbers', 'ballklubber', 'footfoot', 'footballfootball', 'balllyklubber', 'xyz', '', 'skied', 'skys']) WITH ORDINALITY w(w, n) ORDER BY 1, 2
+dict:int8 | word:int8 | ts_lexize:text[]
+1 | 1 | {sky}
+1 | 2 | {sky}
+1 | 3 | {booking,book}
+1 | 4 | {booking,book}
+1 | 5 | {foot}
+1 | 6 | {foot}
+1 | 7 | {booking,book}
+1 | 8 | {booking,book}
+1 | 9 | NULL
+1 | 10 | {book}
+1 | 11 | {book}
+1 | 12 | {book}
+1 | 13 | NULL
+1 | 14 | {foot,klubber}
+1 | 15 | {footballklubber,foot,ball,klubber,football,klubber}
+1 | 16 | {ball,klubber}
+1 | 17 | {foot,ball,klubber}
+1 | 18 | NULL
+1 | 19 | NULL
+1 | 20 | NULL
+1 | 21 | {book}
+1 | 22 | {book}
+1 | 23 | {booking,book}
+1 | 24 | {ball}
+1 | 25 | NULL
+1 | 26 | {klubber}
+1 | 27 | {foot,ball}
+1 | 28 | NULL
+1 | 29 | {ball,klubber}
+1 | 30 | {foot,foot}
+1 | 31 | {foot,ball,foot,ball,football,foot,ball,football,football,foot,ball,football}
+1 | 32 | NULL
+1 | 33 | NULL
+1 | 34 | NULL
+1 | 35 | NULL
+1 | 36 | NULL
+2 | 1 | {sky}
+2 | 2 | {sky}
+2 | 3 | {booking,book}
+2 | 4 | {booking,book}
+2 | 5 | {foot}
+2 | 6 | {foot}
+2 | 7 | {booking,book}
+2 | 8 | {booking,book}
+2 | 9 | NULL
+2 | 10 | {book}
+2 | 11 | {book}
+2 | 12 | {book}
+2 | 13 | NULL
+2 | 14 | {foot,klubber}
+2 | 15 | {footballklubber,foot,ball,klubber,football,klubber}
+2 | 16 | {ball,klubber}
+2 | 17 | {foot,ball,klubber}
+2 | 18 | NULL
+2 | 19 | NULL
+2 | 20 | NULL
+2 | 21 | {book}
+2 | 22 | {book}
+2 | 23 | {booking,book}
+2 | 24 | {ball}
+2 | 25 | NULL
+2 | 26 | {klubber}
+2 | 27 | {foot,ball}
+2 | 28 | NULL
+2 | 29 | {ball,klubber}
+2 | 30 | {foot,foot}
+2 | 31 | {foot,ball,foot,ball,football,foot,ball,football,football,foot,ball,football}
+2 | 32 | NULL
+2 | 33 | NULL
+2 | 34 | NULL
+2 | 35 | NULL
+2 | 36 | NULL
+3 | 1 | {sky}
+3 | 2 | {sky}
+3 | 3 | {booking,book}
+3 | 4 | {booking,book}
+3 | 5 | {foot}
+3 | 6 | {foot}
+3 | 7 | {booking,book}
+3 | 8 | {booking,book}
+3 | 9 | NULL
+3 | 10 | {book}
+3 | 11 | {book}
+3 | 12 | {book}
+3 | 13 | {book}
+3 | 14 | {foot,klubber}
+3 | 15 | {footballklubber,foot,ball,klubber,football,klubber}
+3 | 16 | {ball,klubber}
+3 | 17 | {foot,ball,klubber}
+3 | 18 | {ex-,machina}
+3 | 19 | {machina}
+3 | 20 | {ex-}
+3 | 21 | {book}
+3 | 22 | {book}
+3 | 23 | {booking,book}
+3 | 24 | {ball}
+3 | 25 | NULL
+3 | 26 | {klubber}
+3 | 27 | {foot,ball}
+3 | 28 | NULL
+3 | 29 | {ball,klubber}
+3 | 30 | {foot,foot}
+3 | 31 | {foot,ball,foot,ball,football,foot,ball,football,football,foot,ball,football}
+3 | 32 | NULL
+3 | 33 | NULL
+3 | 34 | NULL
+3 | 35 | NULL
+3 | 36 | NULL
+4 | 1 | {sky}
+4 | 2 | {sky}
+4 | 3 | {booking,book}
+4 | 4 | {booking,book}
+4 | 5 | {foot}
+4 | 6 | {foot}
+4 | 7 | {booking,book}
+4 | 8 | {booking,book}
+4 | 9 | NULL
+4 | 10 | {book}
+4 | 11 | {book}
+4 | 12 | {book}
+4 | 13 | {book}
+4 | 14 | {foot,klubber}
+4 | 15 | {footballklubber,foot,ball,klubber,football,klubber}
+4 | 16 | {ball,klubber}
+4 | 17 | {foot,ball,klubber}
+4 | 18 | NULL
+4 | 19 | NULL
+4 | 20 | NULL
+4 | 21 | {book}
+4 | 22 | {book}
+4 | 23 | {booking,book}
+4 | 24 | {ball}
+4 | 25 | NULL
+4 | 26 | {klubber}
+4 | 27 | {foot,ball}
+4 | 28 | NULL
+4 | 29 | {ball,klubber}
+4 | 30 | {foot,foot}
+4 | 31 | {foot,ball,foot,ball,football,foot,ball,football,football,foot,ball,football}
+4 | 32 | NULL
+4 | 33 | NULL
+4 | 34 | NULL
+4 | 35 | NULL
+4 | 36 | NULL
+-- SELECT 144
+
+> SELECT ts_lexize('ispell_stop', 'the'), ts_lexize('ispell_stop', 'booking')
+ts_lexize:text[] | ts_lexize:text[]
+NULL | {booking,book}
+-- SELECT 1
+
+> CREATE TEXT SEARCH CONFIGURATION ispell_tst (COPY = english)
+-- CREATE TEXT SEARCH CONFIGURATION
+
+> ALTER TEXT SEARCH CONFIGURATION ispell_tst ALTER MAPPING FOR word, numword, asciiword, hword, numhword, asciihword, hword_part, hword_numpart, hword_asciipart WITH ispell, english_stem
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT to_tsvector('ispell_tst', 'Booking the skies after rebookings for footballklubber from a foot')
+to_tsvector:3614
+'ball':7 'book':1,5 'booking':1,5 'foot':7,10 'football':7 'footballklubber':7 'klubber':7 'sky':3
+-- SELECT 1
+
+> SELECT to_tsquery('ispell_tst', 'footballklubber')
+to_tsquery:3615
+'footballklubber' | 'foot' & 'ball' & 'klubber' | 'football' & 'klubber'
+-- SELECT 1
+
+> SELECT to_tsquery('ispell_tst', 'footballyklubber:b & rebookings:A & sky')
+to_tsquery:3615
+'foot':B & 'ball':B & 'klubber':B & ( 'booking':A | 'book':A ) & 'sky'
+-- SELECT 1
+
+> SELECT to_tsquery('ispell_tst', 'footballyklubber:b <-> sky')
+to_tsquery:3615
+( 'foot':B & 'ball':B & 'klubber':B ) <-> 'sky'
+-- SELECT 1
+
+> SELECT phraseto_tsquery('ispell_tst', 'footballyklubber sky')
+phraseto_tsquery:3615
+( 'foot' & 'ball' & 'klubber' ) <-> 'sky'
+-- SELECT 1
+
+> SELECT ts_debug('ispell_tst', 'footballklubber skies')
+ts_debug:record
+(asciiword,"Word, all ASCII",footballklubber,"{ispell,english_stem}",ispell,"{footballklubber,foot,ball,klubber,football,klubber}")
+(asciiword,"Word, all ASCII",skies,"{ispell,english_stem}",ispell,{sky})
+(blank,"Space symbols"," ",{},,)
+-- SELECT 3
+
+> CREATE TEXT SEARCH CONFIGURATION hunspell_tst (COPY = ispell_tst)
+-- CREATE TEXT SEARCH CONFIGURATION
+
+> ALTER TEXT SEARCH CONFIGURATION hunspell_tst ALTER MAPPING REPLACE ispell WITH hunspell
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT to_tsvector('hunspell_tst', 'Booking the skies after rebookings for footballklubber from a foot')
+to_tsvector:3614
+'ball':7 'book':1,5 'booking':1,5 'foot':7,10 'football':7 'footballklubber':7 'klubber':7 'sky':3
+-- SELECT 1
+
+> SELECT to_tsquery('hunspell_tst', 'footballyklubber:b & rebookings:A & sky')
+to_tsquery:3615
+'foot':B & 'ball':B & 'klubber':B & ( 'booking':A | 'book':A ) & 'sky'
+-- SELECT 1
+
+> ALTER TEXT SEARCH CONFIGURATION hunspell_tst ALTER MAPPING REPLACE hunspell WITH hunspell_long
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT to_tsvector('hunspell_tst', 'Booking the skies after rebookings for footballklubber from a foot ex-machina')
+to_tsvector:3614
+'ball':7 'book':1,5 'booking':1,5 'ex':12 'ex-':11 'foot':7,10 'football':7 'footballklubber':7 'klubber':7 'machina':11,13 'sky':3
+-- SELECT 1
+
+> ALTER TEXT SEARCH CONFIGURATION hunspell_tst ALTER MAPPING REPLACE hunspell_long WITH hunspell_num
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT to_tsvector('hunspell_tst', 'Booking the skies after rebookings for footballklubber from a foot booked')
+to_tsvector:3614
+'ball':7 'book':1,5,11 'booking':1,5 'foot':7,10 'football':7 'footballklubber':7 'klubber':7 'sky':3
+-- SELECT 1
+
+> SELECT ts_headline('hunspell_tst', 'Booking the skies after rebookings for footballklubber from a foot', to_tsquery('hunspell_tst', 'book & sky'))
+ts_headline:text
+<b>Booking</b> the <b>skies</b> after <b>rebookings</b> for footballklubber from a foot
+-- SELECT 1
+
+> CREATE TEXT SEARCH DICTIONARY hunspell_invalid_1 (Template = ispell, DictFile = hunspell_sample_long, AffFile = ispell_sample)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE TEXT SEARCH DICTIONARY hunspell_invalid_2 (Template = ispell, DictFile = hunspell_sample_long, AffFile = hunspell_sample_num)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE TEXT SEARCH DICTIONARY hunspell_invalid_3 (Template = ispell, DictFile = hunspell_sample_num, AffFile = ispell_sample)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE TEXT SEARCH DICTIONARY hunspell_err (Template = ispell, DictFile = hunspell_sample_num, AffFile = hunspell_sample_long)
+ERROR F0000: invalid affix alias "302,301,202,303"
+
+> CREATE TEXT SEARCH DICTIONARY hunspell_invalid_4 (Template = ispell, DictFile = hunspell_sample_long, AffFile = hunspell_sample_long)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> SELECT ts_lexize('hunspell_invalid_1', 'book'), ts_lexize('hunspell_invalid_3', 'book')
+ts_lexize:text[] | ts_lexize:text[]
+{book} | {book}
+-- SELECT 1
+
+> CREATE TEXT SEARCH DICTIONARY bad (Template = ispell, DictFile = ispell_sample)
+ERROR 22023: missing AffFile parameter
+
+> CREATE TEXT SEARCH DICTIONARY bad (Template = ispell, AffFile = ispell_sample)
+ERROR 22023: missing DictFile parameter
+
+> CREATE TEXT SEARCH DICTIONARY bad (Template = ispell, DictFile = nosuch, AffFile = ispell_sample)
+ERROR F0000: could not open dictionary file "/usr/local/share/postgresql/tsearch_data/nosuch.dict": No such file or directory
+
+> CREATE TEXT SEARCH DICTIONARY bad (Template = ispell, DictFile = ispell_sample, AffFile = nosuch)
+ERROR F0000: could not open affix file "/usr/local/share/postgresql/tsearch_data/nosuch.affix": No such file or directory
+
+> CREATE TEXT SEARCH DICTIONARY bad (Template = ispell, DictFile = ispell_sample, AffFile = ispell_sample, AffFile = ispell_sample)
+ERROR 22023: multiple AffFile parameters
+
+> CREATE TEXT SEARCH DICTIONARY bad (Template = ispell, DictFile = ispell_sample, AffFile = ispell_sample, foo = bar)
+ERROR 22023: unrecognized Ispell parameter: "foo"
+
+> CREATE TEXT SEARCH DICTIONARY bad (Template = ispell, DictFile = english, AffFile = ispell_sample)
+ERROR F0000: could not open dictionary file "/usr/local/share/postgresql/tsearch_data/english.dict": No such file or directory
+

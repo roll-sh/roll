@@ -1,0 +1,171 @@
+> CREATE TABLE gci_t (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO gci_t VALUES (0, 5), (1, 6), (2, 7)
+-- INSERT 0 3
+
+> ANALYZE gci_t
+-- ANALYZE
+
+> WITH w AS (SELECT 1 / a AS x, b AS y FROM gci_t) SELECT y FROM w ORDER BY y
+y:int4
+5
+6
+7
+-- SELECT 3
+
+> WITH w AS MATERIALIZED (SELECT 1 / a AS x, b AS y FROM gci_t) SELECT y FROM w
+ERROR 22012: division by zero
+
+> EXPLAIN (COSTS OFF) WITH w AS (SELECT a, b FROM gci_t) SELECT * FROM w WHERE a = 1
+QUERY PLAN:text
+Seq Scan on gci_t
+  Filter: (a = 1)
+-- EXPLAIN
+
+> WITH w AS (SELECT a, b FROM gci_t) SELECT * FROM w WHERE a = 1
+a:int4 | b:int4
+1 | 6
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) WITH w AS MATERIALIZED (SELECT a, b FROM gci_t) SELECT * FROM w WHERE a = 1
+QUERY PLAN:text
+CTE Scan on w
+  Filter: (a = 1)
+  CTE w
+    ->  Seq Scan on gci_t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> WITH w AS (SELECT a, b FROM gci_t) SELECT * FROM w w1, w w2 WHERE w1.a = w2.a
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (w1.a = w2.a)
+  CTE w
+    ->  Seq Scan on gci_t
+  ->  CTE Scan on w w1
+  ->  Hash
+        ->  CTE Scan on w w2
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> WITH w AS NOT MATERIALIZED (SELECT a, b FROM gci_t) SELECT * FROM w w1, w w2 WHERE w1.a = w2.a
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (gci_t.a = gci_t_1.a)
+  ->  Seq Scan on gci_t
+  ->  Hash
+        ->  Seq Scan on gci_t gci_t_1
+-- EXPLAIN
+
+> WITH w AS NOT MATERIALIZED (SELECT a, b FROM gci_t) SELECT * FROM w w1, w w2 WHERE w1.a = w2.a ORDER BY 1
+a:int4 | b:int4 | a:int4 | b:int4
+0 | 5 | 0 | 5
+1 | 6 | 1 | 6
+2 | 7 | 2 | 7
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) WITH w AS (SELECT a, random() AS r FROM gci_t) SELECT a FROM w WHERE a = 1
+QUERY PLAN:text
+CTE Scan on w
+  Filter: (a = 1)
+  CTE w
+    ->  Seq Scan on gci_t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) WITH w AS (SELECT a FROM gci_t FOR UPDATE) SELECT a FROM w WHERE a = 1
+QUERY PLAN:text
+CTE Scan on w
+  Filter: (a = 1)
+  CTE w
+    ->  LockRows
+          ->  Seq Scan on gci_t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> WITH w AS (SELECT a, b FROM gci_t), w2 AS (SELECT a + 1 AS c, b FROM w) SELECT * FROM w2 WHERE b > 5
+QUERY PLAN:text
+Seq Scan on gci_t
+  Filter: (b > 5)
+-- EXPLAIN
+
+> WITH w AS (SELECT a, b FROM gci_t), w2 AS (SELECT a + 1 AS c, b FROM w) SELECT * FROM w2 WHERE b > 5 ORDER BY 1
+c:int4 | b:int4
+2 | 6
+3 | 7
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF)
+> WITH w(x, y) AS (SELECT a, b FROM gci_t) SELECT * FROM gci_t WHERE a IN (SELECT x FROM w WHERE y > 5)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (gci_t.a = gci_t_1.a)
+  ->  Seq Scan on gci_t
+  ->  Hash
+        ->  Seq Scan on gci_t gci_t_1
+              Filter: (b > 5)
+-- EXPLAIN
+
+> WITH w(x, y) AS (SELECT a, b FROM gci_t) SELECT * FROM gci_t WHERE a IN (SELECT x FROM w WHERE y > 5) ORDER BY 1
+a:int4 | b:int4
+1 | 6
+2 | 7
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF)
+> WITH w AS (SELECT a FROM gci_t WHERE b = 6) UPDATE gci_t SET b = b + 10 FROM w WHERE gci_t.a = w.a
+QUERY PLAN:text
+Update on gci_t
+  ->  Nested Loop
+        Join Filter: (gci_t.a = gci_t_1.a)
+        ->  Seq Scan on gci_t gci_t_1
+              Filter: (b = 6)
+        ->  Seq Scan on gci_t
+-- EXPLAIN
+
+> WITH w AS (SELECT a FROM gci_t WHERE b = 6) UPDATE gci_t SET b = b + 10 FROM w WHERE gci_t.a = w.a RETURNING gci_t.*
+a:int4 | b:int4
+1 | 16
+-- UPDATE 1
+
+> EXPLAIN (COSTS OFF)
+> WITH d AS (DELETE FROM gci_t WHERE a = 2 RETURNING a) SELECT * FROM d
+QUERY PLAN:text
+CTE Scan on d
+  CTE d
+    ->  Delete on gci_t
+          ->  Seq Scan on gci_t
+                Filter: (a = 2)
+-- EXPLAIN
+
+> WITH d AS (DELETE FROM gci_t WHERE a = 2 RETURNING a) SELECT * FROM d
+a:int4
+2
+-- SELECT 1
+
+> SELECT * FROM gci_t ORDER BY a
+a:int4 | b:int4
+0 | 5
+1 | 16
+-- SELECT 2
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH a AS (SELECT id FROM (VALUES (1), (2)) AS v(id)), b AS (SELECT max((SELECT sum(id) FROM a)) AS agg)
+> SELECT agg FROM b
+QUERY PLAN:text
+Aggregate
+  Output: max((InitPlan 1).col1)
+  InitPlan 1
+    ->  Aggregate
+          Output: sum("*VALUES*".column1)
+          ->  Values Scan on "*VALUES*"
+                Output: "*VALUES*".column1
+  ->  Result
+-- EXPLAIN
+
+> WITH a AS (SELECT id FROM (VALUES (1), (2)) AS v(id)), b AS (SELECT max((SELECT sum(id) FROM a)) AS agg)
+> SELECT agg FROM b
+agg:int8
+3
+-- SELECT 1
+

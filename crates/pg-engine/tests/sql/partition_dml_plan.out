@@ -1,0 +1,487 @@
+> CREATE TABLE pr (a int, b text, c int GENERATED ALWAYS AS (a * 10) STORED) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE pr1 PARTITION OF pr FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE pr2 (b text, c int GENERATED ALWAYS AS (a * 100) STORED, a int)
+-- CREATE TABLE
+
+> ALTER TABLE pr ATTACH PARTITION pr2 FOR VALUES FROM (10) TO (20)
+-- ALTER TABLE
+
+> CREATE TABLE pr3 PARTITION OF pr FOR VALUES FROM (20) TO (40) PARTITION BY LIST (b)
+-- CREATE TABLE
+
+> CREATE TABLE pr3x PARTITION OF pr3 FOR VALUES IN ('x')
+-- CREATE TABLE
+
+> CREATE TABLE pr3d PARTITION OF pr3 DEFAULT
+-- CREATE TABLE
+
+> INSERT INTO pr (a, b) VALUES (1, 'x'), (5, 'y'), (11, 'x'), (15, 'z'), (21, 'x'), (25, 'q')
+-- INSERT 0 6
+
+> CREATE FUNCTION ptrg() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF TG_LEVEL = 'ROW' THEN
+>     RAISE NOTICE '% % % on %: % -> %', TG_WHEN, TG_OP, TG_LEVEL, TG_TABLE_NAME, OLD, NEW;
+>   ELSE
+>     RAISE NOTICE '% % % on %', TG_WHEN, TG_OP, TG_LEVEL, TG_TABLE_NAME;
+>   END IF;
+>   RETURN COALESCE(NEW, OLD);
+> END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION ptrans() RETURNS trigger LANGUAGE plpgsql AS $$
+> DECLARE r record;
+> BEGIN
+>   IF TG_OP IN ('UPDATE', 'DELETE') THEN
+>     FOR r IN SELECT * FROM oldt ORDER BY a LOOP RAISE NOTICE '% old: %', TG_OP, r; END LOOP;
+>   END IF;
+>   IF TG_OP IN ('UPDATE', 'INSERT') THEN
+>     FOR r IN SELECT * FROM newt ORDER BY a LOOP RAISE NOTICE '% new: %', TG_OP, r; END LOOP;
+>   END IF;
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER bs BEFORE UPDATE OR DELETE OR INSERT ON pr FOR EACH STATEMENT EXECUTE FUNCTION ptrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER zs AFTER UPDATE OR DELETE OR INSERT ON pr FOR EACH STATEMENT EXECUTE FUNCTION ptrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER br BEFORE UPDATE OR DELETE OR INSERT ON pr FOR EACH ROW EXECUTE FUNCTION ptrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER zr AFTER UPDATE OR DELETE OR INSERT ON pr FOR EACH ROW EXECUTE FUNCTION ptrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tu AFTER UPDATE ON pr REFERENCING OLD TABLE AS oldt NEW TABLE AS newt FOR EACH STATEMENT EXECUTE FUNCTION ptrans()
+-- CREATE TRIGGER
+
+> UPDATE pr SET a = a + 4 WHERE a < 25 RETURNING tableoid::regclass, *
+NOTICE 00000: BEFORE UPDATE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on pr1: (1,x,10) -> (5,x,)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on pr1: (5,y,50) -> (9,y,)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on pr2: (x,1100,11) -> (x,,15)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on pr2: (z,1500,15) -> (z,,19)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on pr3x: (21,x,210) -> (25,x,)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on pr1: (1,x,10) -> (5,x,50)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on pr1: (5,y,50) -> (9,y,90)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on pr2: (x,1100,11) -> (x,1500,15)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on pr2: (z,1500,15) -> (z,1900,19)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on pr3x: (21,x,210) -> (25,x,250)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: UPDATE old: (1,x,10)
+CONTEXT: PL/pgSQL function ptrans() line 5 at RAISE
+NOTICE 00000: UPDATE old: (5,y,50)
+CONTEXT: PL/pgSQL function ptrans() line 5 at RAISE
+NOTICE 00000: UPDATE old: (11,x,1100)
+CONTEXT: PL/pgSQL function ptrans() line 5 at RAISE
+NOTICE 00000: UPDATE old: (15,z,1500)
+CONTEXT: PL/pgSQL function ptrans() line 5 at RAISE
+NOTICE 00000: UPDATE old: (21,x,210)
+CONTEXT: PL/pgSQL function ptrans() line 5 at RAISE
+NOTICE 00000: UPDATE new: (5,x,50)
+CONTEXT: PL/pgSQL function ptrans() line 8 at RAISE
+NOTICE 00000: UPDATE new: (9,y,90)
+CONTEXT: PL/pgSQL function ptrans() line 8 at RAISE
+NOTICE 00000: UPDATE new: (15,x,1500)
+CONTEXT: PL/pgSQL function ptrans() line 8 at RAISE
+NOTICE 00000: UPDATE new: (19,z,1900)
+CONTEXT: PL/pgSQL function ptrans() line 8 at RAISE
+NOTICE 00000: UPDATE new: (25,x,250)
+CONTEXT: PL/pgSQL function ptrans() line 8 at RAISE
+NOTICE 00000: AFTER UPDATE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+tableoid:regclass | a:int4 | b:text | c:int4
+pr1 | 5 | x | 50
+pr1 | 9 | y | 90
+pr2 | 15 | x | 1500
+pr2 | 19 | z | 1900
+pr3x | 25 | x | 250
+-- UPDATE 5
+
+> SELECT tableoid::regclass, * FROM pr ORDER BY a
+tableoid:regclass | a:int4 | b:text | c:int4
+pr1 | 5 | x | 50
+pr1 | 9 | y | 90
+pr2 | 15 | x | 1500
+pr2 | 19 | z | 1900
+pr3x | 25 | x | 250
+pr3d | 25 | q | 250
+-- SELECT 6
+
+> UPDATE pr SET b = 'x' WHERE a = 19 RETURNING tableoid::regclass, *
+NOTICE 00000: BEFORE UPDATE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on pr2: (z,1900,19) -> (x,,19)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on pr2: (z,1900,19) -> (x,1900,19)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: UPDATE old: (19,z,1900)
+CONTEXT: PL/pgSQL function ptrans() line 5 at RAISE
+NOTICE 00000: UPDATE new: (19,x,1900)
+CONTEXT: PL/pgSQL function ptrans() line 8 at RAISE
+NOTICE 00000: AFTER UPDATE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+tableoid:regclass | a:int4 | b:text | c:int4
+pr2 | 19 | x | 1900
+-- UPDATE 1
+
+> UPDATE pr SET a = 40 WHERE a = 5
+NOTICE 00000: BEFORE UPDATE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on pr1: (5,x,50) -> (40,x,)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE DELETE ROW on pr1: (5,x,50) -> <NULL>
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+ERROR 23514: no partition of relation "pr" found for row
+DETAIL: Partition key of the failing row contains (a) = (40).
+OBJECTS: schema=public table=pr
+
+> UPDATE pr3 SET a = 5 WHERE a = 25
+NOTICE 00000: BEFORE UPDATE ROW on pr3x: (25,x,250) -> (5,x,)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE DELETE ROW on pr3x: (25,x,250) -> <NULL>
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+ERROR 23514: new row for relation "pr3" violates partition constraint
+DETAIL: Failing row contains (5, x, 50).
+OBJECTS: schema=public table=pr3
+
+> DELETE FROM pr WHERE a > 20 RETURNING tableoid::regclass, *
+NOTICE 00000: BEFORE DELETE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+NOTICE 00000: BEFORE DELETE ROW on pr3x: (25,x,250) -> <NULL>
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE DELETE ROW on pr3d: (25,q,250) -> <NULL>
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER DELETE ROW on pr3x: (25,x,250) -> <NULL>
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER DELETE ROW on pr3d: (25,q,250) -> <NULL>
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER DELETE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+tableoid:regclass | a:int4 | b:text | c:int4
+pr3d | 25 | q | 250
+pr3x | 25 | x | 250
+-- DELETE 2
+
+> SELECT tableoid::regclass, * FROM pr ORDER BY a
+tableoid:regclass | a:int4 | b:text | c:int4
+pr1 | 5 | x | 50
+pr1 | 9 | y | 90
+pr2 | 15 | x | 1500
+pr2 | 19 | x | 1900
+-- SELECT 4
+
+> DROP TRIGGER tu ON pr
+-- DROP TRIGGER
+
+> CREATE TRIGGER ti AFTER INSERT ON pr REFERENCING NEW TABLE AS newt FOR EACH STATEMENT EXECUTE FUNCTION ptrans()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER td AFTER DELETE ON pr REFERENCING OLD TABLE AS oldt FOR EACH STATEMENT EXECUTE FUNCTION ptrans()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tu AFTER UPDATE ON pr REFERENCING OLD TABLE AS oldt NEW TABLE AS newt FOR EACH STATEMENT EXECUTE FUNCTION ptrans()
+-- CREATE TRIGGER
+
+> MERGE INTO pr t USING (VALUES (9, 3), (13, 14), (15, NULL), (2, 2)) v(x, y) ON t.a = v.x
+>   WHEN MATCHED AND v.y IS NULL THEN DELETE
+>   WHEN MATCHED THEN UPDATE SET a = v.y, b = b || '>'
+>   WHEN NOT MATCHED THEN INSERT (a, b) VALUES (v.x, 'new')
+>   RETURNING merge_action(), tableoid::regclass, t.*
+NOTICE 00000: BEFORE INSERT STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+NOTICE 00000: BEFORE UPDATE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+NOTICE 00000: BEFORE DELETE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on pr1: (9,y,90) -> (3,y>,)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE DELETE ROW on pr2: (x,1500,15) -> <NULL>
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE INSERT ROW on pr1: <NULL> -> (2,new,)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: BEFORE INSERT ROW on pr2: <NULL> -> (new,,13)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on pr1: (9,y,90) -> (3,y>,30)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER DELETE ROW on pr2: (x,1500,15) -> <NULL>
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER INSERT ROW on pr1: <NULL> -> (2,new,20)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER INSERT ROW on pr2: <NULL> -> (new,1300,13)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: DELETE old: (15,x,1500)
+CONTEXT: PL/pgSQL function ptrans() line 5 at RAISE
+NOTICE 00000: AFTER DELETE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+NOTICE 00000: UPDATE old: (9,y,90)
+CONTEXT: PL/pgSQL function ptrans() line 5 at RAISE
+NOTICE 00000: UPDATE new: (3,y>,30)
+CONTEXT: PL/pgSQL function ptrans() line 8 at RAISE
+NOTICE 00000: AFTER UPDATE STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+NOTICE 00000: INSERT new: (2,new,20)
+CONTEXT: PL/pgSQL function ptrans() line 8 at RAISE
+NOTICE 00000: INSERT new: (13,new,1300)
+CONTEXT: PL/pgSQL function ptrans() line 8 at RAISE
+NOTICE 00000: AFTER INSERT STATEMENT on pr
+CONTEXT: PL/pgSQL function ptrg() line 6 at RAISE
+merge_action:text | tableoid:regclass | a:int4 | b:text | c:int4
+DELETE | pr2 | 15 | x | 1500
+INSERT | pr1 | 2 | new | 20
+INSERT | pr2 | 13 | new | 1300
+UPDATE | pr1 | 3 | y> | 30
+-- MERGE 4
+
+> SELECT tableoid::regclass, * FROM pr ORDER BY a
+tableoid:regclass | a:int4 | b:text | c:int4
+pr1 | 2 | new | 20
+pr1 | 3 | y> | 30
+pr1 | 5 | x | 50
+pr2 | 13 | new | 1300
+pr2 | 19 | x | 1900
+-- SELECT 5
+
+> DROP TRIGGER ti ON pr
+-- DROP TRIGGER
+
+> DROP TRIGGER td ON pr
+-- DROP TRIGGER
+
+> DROP TRIGGER tu ON pr
+-- DROP TRIGGER
+
+> DROP TRIGGER bs ON pr
+-- DROP TRIGGER
+
+> DROP TRIGGER zs ON pr
+-- DROP TRIGGER
+
+> DROP TRIGGER br ON pr
+-- DROP TRIGGER
+
+> DROP TRIGGER zr ON pr
+-- DROP TRIGGER
+
+> CREATE TABLE ih (a int, b text)
+-- CREATE TABLE
+
+> CREATE TABLE ihc (c int) INHERITS (ih)
+-- CREATE TABLE
+
+> INSERT INTO ih VALUES (1, 'p1'), (2, 'p2')
+-- INSERT 0 2
+
+> INSERT INTO ihc VALUES (3, 'c3', 30), (4, 'c4', 40)
+-- INSERT 0 2
+
+> CREATE TRIGGER zr AFTER UPDATE OR DELETE OR INSERT ON ih FOR EACH ROW EXECUTE FUNCTION ptrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER zr AFTER UPDATE OR DELETE ON ihc FOR EACH ROW EXECUTE FUNCTION ptrg()
+-- CREATE TRIGGER
+
+> MERGE INTO ih t USING (VALUES (1), (3), (4), (2), (9)) v(x) ON t.a = v.x
+>   WHEN MATCHED AND t.a = 4 THEN DELETE
+>   WHEN MATCHED THEN UPDATE SET b = b || '!'
+>   WHEN NOT MATCHED THEN INSERT VALUES (v.x, 'new')
+>   RETURNING merge_action(), tableoid::regclass, t.*
+NOTICE 00000: AFTER UPDATE ROW on ih: (1,p1) -> (1,p1!)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on ih: (2,p2) -> (2,p2!)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on ihc: (3,c3,30) -> (3,c3!,30)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER DELETE ROW on ihc: (4,c4,40) -> <NULL>
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+NOTICE 00000: AFTER INSERT ROW on ih: <NULL> -> (9,new)
+CONTEXT: PL/pgSQL function ptrg() line 4 at RAISE
+merge_action:text | tableoid:regclass | a:int4 | b:text
+DELETE | ihc | 4 | c4
+INSERT | ih | 9 | new
+UPDATE | ih | 1 | p1!
+UPDATE | ih | 2 | p2!
+UPDATE | ihc | 3 | c3!
+-- MERGE 5
+
+> EXPLAIN (COSTS OFF) UPDATE pr SET b = 'u' WHERE a = 12
+QUERY PLAN:text
+Update on pr
+  Update on pr2 pr_1
+  ->  Seq Scan on pr2 pr_1
+        Filter: (a = 12)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DELETE FROM pr WHERE a < 15
+QUERY PLAN:text
+Delete on pr
+  Delete on pr1 pr_1
+  Delete on pr2 pr_2
+  ->  Append
+        ->  Seq Scan on pr1 pr_1
+              Filter: (a < 15)
+        ->  Seq Scan on pr2 pr_2
+              Filter: (a < 15)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) UPDATE pr SET b = 'u' RETURNING *
+QUERY PLAN:text
+Update on public.pr
+  Output: pr_1.a, pr_1.b, pr_1.c
+  Update on public.pr1 pr_1
+  Update on public.pr2 pr_2
+  Update on public.pr3x pr_3
+  Update on public.pr3d pr_4
+  ->  Append
+        ->  Seq Scan on public.pr1 pr_1
+              Output: 'u'::text, pr_1.tableoid, pr_1.ctid
+        ->  Seq Scan on public.pr2 pr_2
+              Output: 'u'::text, pr_2.tableoid, pr_2.ctid
+        ->  Seq Scan on public.pr3x pr_3
+              Output: 'u'::text, pr_3.tableoid, pr_3.ctid
+        ->  Seq Scan on public.pr3d pr_4
+              Output: 'u'::text, pr_4.tableoid, pr_4.ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) UPDATE pr SET b = 'u' WHERE a = 12 RETURNING *
+QUERY PLAN:text
+Update on public.pr
+  Output: pr_1.a, pr_1.b, pr_1.c
+  Update on public.pr2 pr_1
+  ->  Seq Scan on public.pr2 pr_1
+        Output: 'u'::text, pr_1.tableoid, pr_1.ctid
+        Filter: (pr_1.a = 12)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) DELETE FROM pr WHERE a < 15 RETURNING a
+QUERY PLAN:text
+Delete on public.pr
+  Output: pr_1.a
+  Delete on public.pr1 pr_1
+  Delete on public.pr2 pr_2
+  ->  Append
+        ->  Seq Scan on public.pr1 pr_1
+              Output: pr_1.tableoid, pr_1.ctid
+              Filter: (pr_1.a < 15)
+        ->  Seq Scan on public.pr2 pr_2
+              Output: pr_2.tableoid, pr_2.ctid
+              Filter: (pr_2.a < 15)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) UPDATE pr SET a = 1 WHERE b = 'none' AND a > 100
+QUERY PLAN:text
+Update on pr
+  ->  Result
+        One-Time Filter: false
+-- EXPLAIN
+
+> PREPARE pq(int) AS UPDATE pr SET b = 'v' WHERE a = $1 RETURNING *
+-- PREPARE
+
+> SET plan_cache_mode = force_generic_plan
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF) EXECUTE pq(13)
+QUERY PLAN:text
+Update on public.pr
+  Output: pr_1.a, pr_1.b, pr_1.c
+  Update on public.pr2 pr_2
+  Update on public.pr3x pr
+  Update on public.pr3d pr
+  ->  Append
+        Subplans Removed: 3
+        ->  Seq Scan on public.pr2 pr_2
+              Output: 'v'::text, pr_2.tableoid, pr_2.ctid
+              Filter: (pr_2.a = $1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) EXECUTE pq(3)
+QUERY PLAN:text
+Update on public.pr
+  Output: pr_1.a, pr_1.b, pr_1.c
+  Update on public.pr1 pr_1
+  Update on public.pr3x pr
+  Update on public.pr3d pr
+  ->  Append
+        Subplans Removed: 3
+        ->  Seq Scan on public.pr1 pr_1
+              Output: 'v'::text, pr_1.tableoid, pr_1.ctid
+              Filter: (pr_1.a = $1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) EXECUTE pq(300)
+QUERY PLAN:text
+Update on public.pr
+  Output: pr_1.a, pr_1.b, pr_1.c
+  Update on public.pr3x pr
+  Update on public.pr3d pr
+  ->  Append
+        Subplans Removed: 4
+-- EXPLAIN
+
+> EXECUTE pq(13)
+a:int4 | b:text | c:int4
+13 | v | 1300
+-- UPDATE 1
+
+> PREPARE dq(int) AS DELETE FROM pr WHERE a = $1
+-- PREPARE
+
+> EXPLAIN (COSTS OFF) EXECUTE dq(13)
+QUERY PLAN:text
+Delete on pr
+  Delete on pr2 pr_1
+  Delete on pr3x pr
+  Delete on pr3d pr
+  ->  Append
+        Subplans Removed: 3
+        ->  Seq Scan on pr2 pr_1
+              Filter: (a = $1)
+-- EXPLAIN
+
+> RESET plan_cache_mode
+-- RESET
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) UPDATE pr SET b = b || '.' WHERE a > 0
+QUERY PLAN:text
+Update on pr (actual rows=0.00 loops=1)
+  Update on pr1 pr_1
+  Update on pr2 pr_2
+  Update on pr3x pr_3
+  Update on pr3d pr_4
+  ->  Append (actual rows=5.00 loops=1)
+        ->  Seq Scan on pr1 pr_1 (actual rows=3.00 loops=1)
+              Filter: (a > 0)
+        ->  Seq Scan on pr2 pr_2 (actual rows=2.00 loops=1)
+              Filter: (a > 0)
+        ->  Seq Scan on pr3x pr_3 (actual rows=0.00 loops=1)
+              Filter: (a > 0)
+        ->  Seq Scan on pr3d pr_4 (actual rows=0.00 loops=1)
+              Filter: (a > 0)
+-- EXPLAIN
+
+> SELECT tableoid::regclass, * FROM pr ORDER BY a
+tableoid:regclass | a:int4 | b:text | c:int4
+pr1 | 2 | new. | 20
+pr1 | 3 | y>. | 30
+pr1 | 5 | x. | 50
+pr2 | 13 | v. | 1300
+pr2 | 19 | x. | 1900
+-- SELECT 5
+

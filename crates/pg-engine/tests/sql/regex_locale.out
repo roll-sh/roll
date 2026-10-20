@@ -1,0 +1,254 @@
+> select regexp_matches('aé1٣Ⅷ_ ǅ€ ' collate "C", '[[:alpha:]]+', 'g')
+regexp_matches:text[]
+{a}
+-- SELECT 1
+
+> select regexp_matches('aé1٣Ⅷ_ ǅ€ ', '[[:alpha:]]+', 'g')
+regexp_matches:text[]
+{aé}
+{ǅ}
+{Ⅷ}
+-- SELECT 3
+
+> select regexp_matches('aé1٣Ⅷ_ ǅ€ ', '[[:alnum:]]+', 'g')
+regexp_matches:text[]
+{aé1}
+{ǅ}
+{Ⅷ}
+-- SELECT 3
+
+> select regexp_matches('aé1٣Ⅷ_ ǅ€ ', '[[:punct:]]+', 'g')
+regexp_matches:text[]
+{_}
+{€}
+-- SELECT 2
+
+> select regexp_matches('aé1٣Ⅷ_ ǅ€ ' collate "C", '[[:punct:]]+', 'g')
+regexp_matches:text[]
+{_}
+-- SELECT 1
+
+> select regexp_matches('a٣1', '\d+', 'g'), regexp_matches('a٣1' collate "C", '\D+', 'g')
+regexp_matches:text[] | regexp_matches:text[]
+{1} | {a٣}
+-- SELECT 1
+
+> select 'ありがとう' ~ '^\w+$', 'ありがとう' collate "C" ~ '^\w+$', 'ありがとう' ~ '^[[:alpha:]]{5}$'
+?column?:bool | ?column?:bool | ?column?:bool
+t | f | t
+-- SELECT 1
+
+> select 'ΣΑΣ' ~* 'σας', 'ΣΑΣ' collate "C" ~* 'σας', 'Straße' ~* 'STRASSE', 'É' ~* 'é', 'É' collate "C" ~* 'é'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | f | t | f
+-- SELECT 1
+
+> select 'ǅ' ~* 'ǅ', 'ǆ' ~* 'ǅ', 'Ǆ' ~* 'ǅ', 'ǅ' ~* '[ǅ]', 'ǅ' ~* 'Ǆ'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | t | f | f
+-- SELECT 1
+
+> select regexp_matches('x жж ЖЖ 漢字 ﾊﾝ', '[а-я]+', 'gi'), regexp_matches('x 一丁 漢字', '[一-龥]+', 'g')
+regexp_matches:text[] | regexp_matches:text[]
+{ЖЖ} | {漢字}
+{жж} | {一丁}
+-- SELECT 2
+
+> select regexp_matches(E'a b c　d e', '\s', 'g')
+regexp_matches:text[]
+{" "}
+{ }
+{ }
+{　}
+-- SELECT 4
+
+> select regexp_matches(E'a b c　d e' collate "C", '\S+', 'g')
+regexp_matches:text[]
+{a b c　d}
+{e}
+-- SELECT 2
+
+> select regexp_matches('A𝔄b𝔞C', '[[:upper:]]', 'g'), regexp_matches('A𝔄b𝔞C', '[[:lower:]]', 'gi')
+regexp_matches:text[] | regexp_matches:text[]
+NULL | {C}
+NULL | {𝔞}
+{A} | {A}
+{C} | {b}
+{𝔄} | {𝔄}
+-- SELECT 5
+
+> select regexp_matches(E'͸x­​y', '[[:graph:]]', 'g')
+regexp_matches:text[]
+{x}
+{y}
+{­}
+{​}
+-- SELECT 4
+
+> select regexp_matches(E'͸x­​y \t', '[[:print:]]', 'g')
+regexp_matches:text[]
+{" "}
+{x}
+{y}
+{­}
+{​}
+-- SELECT 5
+
+> select regexp_matches(E'a\u0085b\u009fc', '[[:cntrl:]]', 'g')
+regexp_matches:text[]
+{}
+{}
+-- SELECT 2
+
+> select regexp_matches('añb', '[^[:ascii:]]'), regexp_matches('añb', '[[:blank:][:xdigit:]]+', 'g')
+regexp_matches:text[] | regexp_matches:text[]
+NULL | {b}
+{ñ} | {a}
+-- SELECT 2
+
+> select regexp_matches('Ωmega ΩMEGA', '\mω\w+', 'gi'), regexp_matches('ωx ωy', '\yω', 'g')
+regexp_matches:text[] | regexp_matches:text[]
+{ΩMEGA} | {ω}
+{Ωmega} | {ω}
+-- SELECT 2
+
+> select regexp_replace('ÄÖÜäöü', '[[:upper:]]', '_', 'g'), regexp_replace('ÄÖÜäöü' collate "C", '[[:upper:]]', '_', 'g')
+regexp_replace:text | regexp_replace:text
+___äöü | ÄÖÜäöü
+-- SELECT 1
+
+> select regexp_replace('ÄÖÜäöü', '[[:lower:]]', '_', 'gi')
+regexp_replace:text
+______
+-- SELECT 1
+
+> select 'ﬀ' ~* 'FF', 'K' ~* 'k', 'k' ~* 'K', 'ſ' ~* 's', 'S' ~* 'ſ'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | t | f | t
+-- SELECT 1
+
+> select 'a' ~ '[[:foo:]]', 'a' ~ '[[.foo.]]', 'a' ~ '[[=a=]]', 'A' ~* '[[=a=]]', '-' ~ '[[.hyphen.]]', 'a' ~ '[[.space.]]'
+ERROR 2201B: invalid regular expression: invalid character class
+
+> select regexp_matches('Ḁ ḁ ḀḀ', '(ḁ)\1', 'gi')
+regexp_matches:text[]
+{Ḁ}
+-- SELECT 1
+
+> select regexp_matches('abcABC', '(?i)b'), regexp_matches('abcABC', '(?c)b', 'i'), regexp_matches('a.c', '***=.'), regexp_matches('ab', '***:(?i)B')
+regexp_matches:text[] | regexp_matches:text[] | regexp_matches:text[] | regexp_matches:text[]
+{b} | {b} | {.} | {b}
+-- SELECT 1
+
+> select regexp_matches('a+b', 'a+', 'e'), regexp_matches('a+b', '(?e)a+'), regexp_matches('a+b', 'a\+', 'b'), regexp_matches('aab', 'a\{2\}', 'b')
+regexp_matches:text[] | regexp_matches:text[] | regexp_matches:text[] | regexp_matches:text[]
+{a+} | {a} | {a+} | {aa}
+-- SELECT 1
+
+> select regexp_matches(E'ab\ncd', '^\w', 'gn'), regexp_matches(E'ab\ncd', '.$', 'gw'), regexp_matches(E'ab\ncd', 'b.c', 'p'), regexp_matches(E'ab\ncd', 'b.c', 's')
+regexp_matches:text[] | regexp_matches:text[] | regexp_matches:text[] | regexp_matches:text[]
+{a} | {b} | NULL | {"b
+c"}
+{c} | {d} | NULL | NULL
+-- SELECT 2
+
+> select regexp_matches('a b', 'a b', 'x'), regexp_matches('a b', 'a\ b', 'x'), regexp_matches('ab', 'a # comment
+> b', 'x')
+regexp_matches:text[] | regexp_matches:text[] | regexp_matches:text[]
+NULL | {"a b"} | {ab}
+-- SELECT 1
+
+> select regexp_matches('x', 'x', 'qx')
+ERROR 2201B: invalid regular expression: invalid argument to regex function
+
+> select regexp_matches('x', 'x', 'z')
+ERROR 22023: invalid regular expression option: "z"
+
+> select regexp_matches('é', 'é', 'é')
+ERROR 22023: invalid regular expression option: "é"
+
+> select 'x' ~ '(?é)x', 'x' collate "C" ~ '(?é)x'
+ERROR 2201B: invalid regular expression: invalid embedded option
+
+> select 'aaa' ~ 'a{256}', 'aaa' ~ 'a{1,256}', 'aaa' ~ 'a{3,2}', 'a' ~ 'a{', 'a{' ~ 'a{', 'a' ~ 'a{1'
+ERROR 2201B: invalid regular expression: invalid repetition count(s)
+
+> select 'a' ~ '(', 'a' ~ ')', 'a' ~ '[', 'a' ~ ']', 'a' ~ '\', 'a' ~ '*', 'a' ~ 'a**', 'a' ~ '(?<a)', 'a' ~ '***?', 'a' ~ '***x'
+ERROR 2201B: invalid regular expression: parentheses () not balanced
+
+> select 'a' ~ '[b-a]', 'a' ~ '\1', 'a' ~ '(a)\2', 'a' ~ '\q', 'a' ~ '[\y]', 'a' ~ '(?z)a', 'a' ~ '(?ia'
+ERROR 2201B: invalid regular expression: invalid character range
+
+> select regexp_count('ababab', 'ab'), regexp_instr('xyzabc', 'b(c)', 1, 1, 1, '', 1), regexp_substr('abcabc', '(a)(x)?', 1, 2, '', 2), regexp_instr('abc','b',1,1,0,'',1)
+regexp_count:int4 | regexp_instr:int4 | regexp_substr:text | regexp_instr:int4
+3 | 7 | NULL | 2
+-- SELECT 1
+
+> select substring('foobar' from 'o(.)b'), substring('foobar' from 'x'), substring('foobar' from 'o(x)?b'), substring('foobar' similar '%#"o_b#"%' escape '#')
+substring:text | substring:text | substring:text | substring:text
+o | NULL | NULL | oob
+-- SELECT 1
+
+> select 'abc' similar to 'a%', 'abc' similar to '(a|b)%c', 'abc' collate "C" similar to '[[:alpha:]]+'
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+-- SELECT 1
+
+> select jsonb_path_query('["abc","ABC","a\nb"]', '$[*] ? (@ like_regex "^a" flag "i")'), jsonb_path_query('["a\nb"]', '$[*] ? (@ like_regex "a.b")'), jsonb_path_query('["a\nb"]', '$[*] ? (@ like_regex "a.b" flag "s")')
+jsonb_path_query:jsonb | jsonb_path_query:jsonb | jsonb_path_query:jsonb
+"ABC" | NULL | NULL
+"a\nb" | NULL | NULL
+"abc" | NULL | "a\nb"
+-- SELECT 3
+
+> select jsonb_path_query('["a\nb"]', '$[*] ? (@ like_regex "^b" flag "m")'), jsonb_path_query('["a.b", "axb"]', '$[*] ? (@ like_regex "a.b" flag "q")')
+jsonb_path_query:jsonb | jsonb_path_query:jsonb
+"a\nb" | "a.b"
+-- SELECT 1
+
+> select '$ ? (@ like_regex "a" flag "x")'::jsonpath
+ERROR 0A000: XQuery "x" flag (expanded regular expressions) is not implemented (at 8)
+
+> select '$ ? (@ like_regex "(a" flag "i")'::jsonpath
+ERROR 2201B: invalid regular expression: parentheses () not balanced (at 8)
+
+> select '$ ? (@ like_regex "a(b" flag "q")'::jsonpath
+jsonpath:4072
+$?(@ like_regex "a(b" flag "q")
+-- SELECT 1
+
+> select regexp_split_to_array('aXbXc', 'x', 'i'), regexp_split_to_array('ẞaßb', 'ß', 'i')
+regexp_split_to_array:text[] | regexp_split_to_array:text[]
+{a,b,c} | {ẞa,b}
+-- SELECT 1
+
+> select length(regexp_replace(repeat('abc ', 200000), '\w+', 'x', 'g'))
+length:int4
+400000
+-- SELECT 1
+
+> select count(*) from regexp_matches(repeat('foo bar baz ', 20000), '(\w)(\w*)', 'g')
+count:int8
+60000
+-- SELECT 1
+
+> select repeat('ab', 50000) ~ '(?<=a)b$', repeat('ab', 50000) ~ '^(ab)*\1$'
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> select 'x' ~ repeat('x*y*z*', 200), 'x' ~ repeat('(x)', 300)
+?column?:bool | ?column?:bool
+t | f
+-- SELECT 1
+
+> select 'a' ~* '[\x01-\x7ffffffe]', 'a' ~* '[a-\U0010ffff]'
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> select regexp_matches(repeat('a', 30), '^(a+)+$')
+regexp_matches:text[]
+{a}
+-- SELECT 1
+

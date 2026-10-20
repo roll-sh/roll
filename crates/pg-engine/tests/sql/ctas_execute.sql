@@ -1,0 +1,15 @@
+PREPARE gx_ce_data_sel AS SELECT generate_series(1,3);
+CREATE TABLE gx_ce_t3 (a) AS EXECUTE gx_ce_data_sel WITH DATA;
+SELECT * FROM gx_ce_t3;
+CREATE TABLE gx_ce_t4 (a) AS EXECUTE gx_ce_data_sel WITH NO DATA;
+SELECT * FROM gx_ce_t4;
+PREPARE gx_ce_p2(int, text) AS SELECT $1 + 1 AS x, $2 || '!' AS y;
+CREATE TABLE gx_ce_t5 AS EXECUTE gx_ce_p2(41, 'hi');
+SELECT * FROM gx_ce_t5;
+SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'gx_ce_t5'::regclass AND attnum > 0;
+CREATE TABLE gx_ce_t5 AS EXECUTE gx_ce_p2(1, 'x');
+CREATE TABLE IF NOT EXISTS gx_ce_t5 AS EXECUTE gx_ce_p2(1, 'x');
+CREATE TABLE gx_ce_t6 AS EXECUTE gx_ce_nope;
+PREPARE gx_ce_ins AS INSERT INTO gx_ce_t3 VALUES (1);
+CREATE TABLE gx_ce_t7 AS EXECUTE gx_ce_ins;
+DROP TABLE gx_ce_t3, gx_ce_t4, gx_ce_t5;

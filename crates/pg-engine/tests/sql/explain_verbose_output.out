@@ -1,0 +1,179 @@
+> create table evo_1 (a int, b int, c text, d numeric)
+-- CREATE TABLE
+
+> create table evo_2 (x int, y int, z text)
+-- CREATE TABLE
+
+> insert into evo_1 select g, g % 10, 'c' || g, g * 1.5 from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> insert into evo_2 select g, g % 7, 'z' || g from generate_series(1, 500) g
+-- INSERT 0 500
+
+> create index on evo_1 (b)
+-- CREATE INDEX
+
+> analyze evo_1
+-- ANALYZE
+
+> analyze evo_2
+-- ANALYZE
+
+> explain (verbose, costs off) select a from evo_1
+QUERY PLAN:text
+Seq Scan on public.evo_1
+  Output: a
+-- EXPLAIN
+
+> explain (verbose, costs off) select * from evo_1
+QUERY PLAN:text
+Seq Scan on public.evo_1
+  Output: a, b, c, d
+-- EXPLAIN
+
+> explain (verbose, costs off) select a + 1, c from evo_1 where b = 3
+QUERY PLAN:text
+Bitmap Heap Scan on public.evo_1
+  Output: (a + 1), c
+  Recheck Cond: (evo_1.b = 3)
+  ->  Bitmap Index Scan on evo_1_b_idx
+        Index Cond: (evo_1.b = 3)
+-- EXPLAIN
+
+> explain (verbose, costs off) select a, z from evo_1 join evo_2 on a = x
+QUERY PLAN:text
+Hash Join
+  Output: evo_1.a, evo_2.z
+  Hash Cond: (evo_1.a = evo_2.x)
+  ->  Seq Scan on public.evo_1
+        Output: evo_1.a, evo_1.b, evo_1.c, evo_1.d
+  ->  Hash
+        Output: evo_2.z, evo_2.x
+        ->  Seq Scan on public.evo_2
+              Output: evo_2.z, evo_2.x
+-- EXPLAIN
+
+> explain (verbose, costs off) select a, z from evo_1 join evo_2 on a = x where y > 3
+QUERY PLAN:text
+Hash Join
+  Output: evo_1.a, evo_2.z
+  Hash Cond: (evo_1.a = evo_2.x)
+  ->  Seq Scan on public.evo_1
+        Output: evo_1.a, evo_1.b, evo_1.c, evo_1.d
+  ->  Hash
+        Output: evo_2.z, evo_2.x
+        ->  Seq Scan on public.evo_2
+              Output: evo_2.z, evo_2.x
+              Filter: (evo_2.y > 3)
+-- EXPLAIN
+
+> explain (verbose, costs off) select b, count(*) from evo_1 group by b
+QUERY PLAN:text
+HashAggregate
+  Output: b, count(*)
+  Group Key: evo_1.b
+  ->  Seq Scan on public.evo_1
+        Output: a, b, c, d
+-- EXPLAIN
+
+> explain (verbose, costs off) select b, sum(d) from evo_1 where a < 100 group by b order by b
+QUERY PLAN:text
+Sort
+  Output: b, (sum(d))
+  Sort Key: evo_1.b
+  ->  HashAggregate
+        Output: b, sum(d)
+        Group Key: evo_1.b
+        ->  Seq Scan on public.evo_1
+              Output: a, b, c, d
+              Filter: (evo_1.a < 100)
+-- EXPLAIN
+
+> explain (verbose, costs off) select distinct c from evo_1
+QUERY PLAN:text
+HashAggregate
+  Output: c
+  Group Key: evo_1.c
+  ->  Seq Scan on public.evo_1
+        Output: a, b, c, d
+-- EXPLAIN
+
+> explain (verbose, costs off) select a from evo_1 order by c limit 3
+QUERY PLAN:text
+Limit
+  Output: a, c
+  ->  Sort
+        Output: a, c
+        Sort Key: evo_1.c
+        ->  Seq Scan on public.evo_1
+              Output: a, c
+-- EXPLAIN
+
+> explain (verbose, costs off) select a, (select max(x) from evo_2 where y = b) from evo_1
+QUERY PLAN:text
+Seq Scan on public.evo_1
+  Output: evo_1.a, (SubPlan 1)
+  SubPlan 1
+    ->  Aggregate
+          Output: max(evo_2.x)
+          ->  Seq Scan on public.evo_2
+                Output: evo_2.x, evo_2.y, evo_2.z
+                Filter: (evo_2.y = evo_1.b)
+-- EXPLAIN
+
+> explain (verbose, costs off) select a from evo_1 union all select x from evo_2
+QUERY PLAN:text
+Append
+  ->  Seq Scan on public.evo_1
+        Output: evo_1.a
+  ->  Seq Scan on public.evo_2
+        Output: evo_2.x
+-- EXPLAIN
+
+> explain (verbose, costs off) select a from evo_1 where exists (select 1 from evo_2 where x = a)
+QUERY PLAN:text
+Hash Semi Join
+  Output: evo_1.a
+  Hash Cond: (evo_1.a = evo_2.x)
+  ->  Seq Scan on public.evo_1
+        Output: evo_1.a, evo_1.b, evo_1.c, evo_1.d
+  ->  Hash
+        Output: evo_2.x
+        ->  Seq Scan on public.evo_2
+              Output: evo_2.x
+-- EXPLAIN
+
+> explain (verbose, costs off) select v1.a, v2.z from evo_1 v1 left join evo_2 v2 on v1.b = v2.y and v2.x < 10
+QUERY PLAN:text
+Hash Left Join
+  Output: v1.a, v2.z
+  Hash Cond: (v1.b = v2.y)
+  ->  Seq Scan on public.evo_1 v1
+        Output: v1.a, v1.b, v1.c, v1.d
+  ->  Hash
+        Output: v2.z, v2.y
+        ->  Seq Scan on public.evo_2 v2
+              Output: v2.z, v2.y
+              Filter: (v2.x < 10)
+-- EXPLAIN
+
+> explain (verbose, costs off) select count(*) from evo_1
+QUERY PLAN:text
+Aggregate
+  Output: count(*)
+  ->  Seq Scan on public.evo_1
+        Output: a, b, c, d
+-- EXPLAIN
+
+> explain (verbose, costs off) select a, row_number() over (partition by b order by a) from evo_1
+QUERY PLAN:text
+WindowAgg
+  Output: a, row_number() OVER w1, b
+  Window: w1 AS (PARTITION BY evo_1.b ORDER BY evo_1.a ROWS UNBOUNDED PRECEDING)
+  ->  Sort
+        Output: a, b
+        Sort Key: evo_1.b, evo_1.a
+        ->  Seq Scan on public.evo_1
+              Output: a, b
+-- EXPLAIN
+

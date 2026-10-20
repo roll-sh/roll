@@ -1,0 +1,182 @@
+> CREATE TEMP TABLE h(x int, y text)
+-- CREATE TABLE
+
+> INSERT INTO h VALUES (1,'a'),(2,'b'),(2,'b'),(3,NULL),(NULL,'c'),(5,'e')
+-- INSERT 0 6
+
+> SELECT rank(2) WITHIN GROUP (ORDER BY x), dense_rank(2) WITHIN GROUP (ORDER BY x), percent_rank(2) WITHIN GROUP (ORDER BY x), cume_dist(2) WITHIN GROUP (ORDER BY x) FROM h
+rank:int8 | dense_rank:int8 | percent_rank:float8 | cume_dist:float8
+2 | 2 | 0.16666666666666666 | 0.5714285714285714
+-- SELECT 1
+
+> SELECT rank(2) WITHIN GROUP (ORDER BY x DESC), dense_rank(2) WITHIN GROUP (ORDER BY x DESC NULLS LAST), percent_rank(2) WITHIN GROUP (ORDER BY x DESC), cume_dist(2) WITHIN GROUP (ORDER BY x DESC) FROM h
+rank:int8 | dense_rank:int8 | percent_rank:float8 | cume_dist:float8
+4 | 3 | 0.5 | 0.8571428571428571
+-- SELECT 1
+
+> SELECT rank(NULL) WITHIN GROUP (ORDER BY x), cume_dist(NULL) WITHIN GROUP (ORDER BY x), rank(NULL::int) WITHIN GROUP (ORDER BY x NULLS FIRST) FROM h
+rank:int8 | cume_dist:float8 | rank:int8
+6 | 1 | 1
+-- SELECT 1
+
+> SELECT rank(2,'b') WITHIN GROUP (ORDER BY x, y), cume_dist(2,'b') WITHIN GROUP (ORDER BY x, y), dense_rank(6, 'z') WITHIN GROUP (ORDER BY x,y) FROM h
+rank:int8 | cume_dist:float8 | dense_rank:int8
+2 | 0.5714285714285714 | 5
+-- SELECT 1
+
+> SELECT rank(2.5) WITHIN GROUP (ORDER BY x), pg_typeof(rank(2.5) WITHIN GROUP (ORDER BY x)), pg_typeof(percent_rank(1) WITHIN GROUP (ORDER BY x)) FROM h
+rank:int8 | pg_typeof:regtype | pg_typeof:regtype
+4 | bigint | double precision
+-- SELECT 1
+
+> SELECT rank(1) WITHIN GROUP (ORDER BY x), percent_rank(1) WITHIN GROUP (ORDER BY x), cume_dist(1) WITHIN GROUP (ORDER BY x), dense_rank(1) WITHIN GROUP (ORDER BY x) FROM h WHERE false
+rank:int8 | percent_rank:float8 | cume_dist:float8 | dense_rank:int8
+1 | 0 | 1 | 1
+-- SELECT 1
+
+> SELECT rank(1,2) WITHIN GROUP (ORDER BY x) FROM h
+ERROR 42883: function rank(integer, integer, integer) does not exist (at 8)
+HINT: To use the hypothetical-set aggregate rank, the number of hypothetical direct arguments (here 2) must match the number of ordering columns (here 1).
+
+> SELECT rank('a') WITHIN GROUP (ORDER BY x) FROM h
+ERROR 22P02: invalid input syntax for type integer: "a" (at 13)
+
+> SELECT rank(1::text) WITHIN GROUP (ORDER BY x) FROM h
+ERROR 42804: WITHIN GROUP types integer and text cannot be matched (at 13)
+
+> SELECT rank() WITHIN GROUP (ORDER BY x) FROM h
+ERROR 42883: function rank(integer) does not exist (at 8)
+HINT: To use the hypothetical-set aggregate rank, the number of hypothetical direct arguments (here 0) must match the number of ordering columns (here 1).
+
+> SELECT rank(1) FROM h
+ERROR 42809: WITHIN GROUP is required for ordered-set aggregate rank (at 8)
+
+> SELECT rank(x) WITHIN GROUP (ORDER BY x) FROM h
+ERROR 42803: column "h.x" must appear in the GROUP BY clause or be used in an aggregate function (at 13)
+DETAIL: Direct arguments of an ordered-set aggregate must use only grouped columns.
+
+> SELECT y, rank(2) WITHIN GROUP (ORDER BY x) FROM h GROUP BY y ORDER BY y
+y:text | rank:int8
+a | 2
+b | 1
+c | 1
+e | 1
+NULL | 1
+-- SELECT 5
+
+> SELECT rank(2) WITHIN GROUP (ORDER BY x) FILTER (WHERE x > 1) FROM h
+rank:int8
+1
+-- SELECT 1
+
+> SELECT bit_and(b), bit_or(b), bit_xor(b) FROM (VALUES (B'1100'),(B'1010'),(NULL)) v(b)
+bit_and:bit | bit_or:bit | bit_xor:bit
+1000 | 1110 | 0110
+-- SELECT 1
+
+> SELECT bit_and(b) FROM (VALUES (B'1100'),(B'10')) v(b)
+ERROR 22026: cannot AND bit strings of different sizes
+
+> SELECT pg_typeof(bit_or(b::varbit)) FROM (VALUES (B'1100')) v(b)
+pg_typeof:regtype
+bit
+-- SELECT 1
+
+> SELECT json_object_agg_unique_strict(k, v), jsonb_object_agg_unique_strict(k, v) FROM (VALUES ('a',1),('b',NULL)) t(k,v)
+json_object_agg_unique_strict:json | jsonb_object_agg_unique_strict:jsonb
+{ "a" : 1 } | {"a": 1}
+-- SELECT 1
+
+> SELECT jsonb_object_agg_unique_strict(k, v) FROM (VALUES ('a',1),('a',2)) t(k,v)
+ERROR 22030: duplicate JSON object key value
+
+> SELECT json_object_agg_unique_strict(k, v) FROM (VALUES ('a',1),(NULL,2)) t(k,v)
+ERROR 22004: null value not allowed for object key
+
+> SELECT rank() FROM h
+ERROR 42809: window function rank requires an OVER clause (at 8)
+
+> SELECT rank(2) WITHIN GROUP (ORDER BY x) OVER () FROM h
+ERROR 0A000: OVER is not supported for ordered-set aggregate rank (at 8)
+
+> SELECT 'abc'::bytea ~~ 'a%'::bytea, 'abc'::bytea !~~ 'b%'::bytea
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> SELECT '-92233720368547758.08'::money, '92233720368547758.07'::money, '-0.005'::money, '1.005'::money, '1.015'::money
+money:money | money:money | money:money | money:money | money:money
+-$92,233,720,368,547,758.08 | $92,233,720,368,547,758.07 | -$0.01 | $1.01 | $1.02
+-- SELECT 1
+
+> SELECT '-92233720368547758.08'::money / -1
+ERROR 22003: money out of range
+
+> SELECT '92233720368547758.08'::money
+ERROR 22003: value "92233720368547758.08" is out of range for type money (at 8)
+
+> SELECT count(*) FROM pg_operator WHERE oprname = 'AND'
+count:int8
+0
+-- SELECT 1
+
+> SELECT percentile_cont(x) WITHIN GROUP (ORDER BY x) FROM h
+ERROR 42803: column "h.x" must appear in the GROUP BY clause or be used in an aggregate function (at 24)
+DETAIL: Direct arguments of an ordered-set aggregate must use only grouped columns.
+
+> SELECT '\x0 0'::bytea
+ERROR 22023: invalid hexadecimal digit: " " (at 8)
+
+> SELECT '\x 00 ff '::bytea
+bytea:bytea
+\x00ff
+-- SELECT 1
+
+> SELECT '\x0'::bytea
+ERROR 22023: invalid hexadecimal data: odd number of digits (at 8)
+
+> SELECT '\xg0'::bytea
+ERROR 22023: invalid hexadecimal digit: "g" (at 8)
+
+> SELECT x, percentile_cont(x/10.0) WITHIN GROUP (ORDER BY x), rank(x) WITHIN GROUP (ORDER BY x) FROM h GROUP BY x ORDER BY x
+x:int4 | percentile_cont:float8 | rank:int8
+1 | 1 | 1
+2 | 2 | 1
+3 | 3 | 1
+5 | 5 | 1
+NULL | NULL | 1
+-- SELECT 5
+
+> SELECT x, y, rank(x, y) WITHIN GROUP (ORDER BY x, y) FROM h GROUP BY ROLLUP(x, y) ORDER BY 1, 2
+x:int4 | y:text | rank:int8
+1 | a | 1
+1 | NULL | 2
+2 | b | 1
+2 | NULL | 3
+3 | NULL | 1
+3 | NULL | 1
+5 | e | 1
+5 | NULL | 2
+NULL | c | 1
+NULL | NULL | 2
+NULL | NULL | 7
+-- SELECT 11
+
+> SELECT row_number(1) FROM pg_class
+ERROR 42883: function row_number(integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT ntile(2) FROM pg_class
+ERROR 42809: window function ntile requires an OVER clause (at 8)
+
+> SELECT lag('a') FROM pg_class
+ERROR 42809: window function lag requires an OVER clause (at 8)
+
+> SELECT ntile(1.5) FROM pg_class
+ERROR 42883: function ntile(numeric) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT nth_value(1, 2, 3) FROM pg_class
+ERROR 42883: function nth_value(integer, integer, integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+

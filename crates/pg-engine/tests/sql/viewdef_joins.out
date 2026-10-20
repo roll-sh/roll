@@ -1,0 +1,273 @@
+> CREATE TABLE vq_a (id int, name text, v numeric)
+-- CREATE TABLE
+
+> CREATE TABLE vq_b (id int, a_id int, w int)
+-- CREATE TABLE
+
+> CREATE VIEW vq_srf AS SELECT generate_series(1, 3) AS g, unnest(ARRAY[1, 2]) AS u
+-- CREATE VIEW
+
+> CREATE VIEW vq_natural AS SELECT * FROM vq_a NATURAL JOIN vq_b
+-- CREATE VIEW
+
+> CREATE VIEW vq_join_alias AS SELECT j.id, j.w FROM (vq_a a JOIN vq_b b ON b.a_id = a.id) j
+ERROR 42702: column reference "id" is ambiguous (at 37)
+
+> CREATE VIEW vq_full_using AS SELECT id, name FROM vq_a FULL JOIN vq_b USING (id)
+-- CREATE VIEW
+
+> CREATE VIEW vq_using_alias AS SELECT x.id, w FROM vq_a JOIN vq_b USING (id) AS x
+-- CREATE VIEW
+
+> CREATE VIEW vq_rows_from AS SELECT * FROM ROWS FROM (generate_series(1, 2), generate_series(1, 3)) r(a, b)
+-- CREATE VIEW
+
+> CREATE VIEW vq_implicit_lateral AS SELECT a.id, g FROM vq_a a, generate_series(1, a.id) g
+-- CREATE VIEW
+
+> CREATE VIEW vq_cte_sublink AS WITH c AS (SELECT a_id FROM vq_b) SELECT id FROM vq_a WHERE id IN (SELECT a_id FROM c)
+-- CREATE VIEW
+
+> CREATE VIEW vq_qualified_fn AS SELECT * FROM pg_catalog.generate_series(1, 2) s
+-- CREATE VIEW
+
+> CREATE VIEW vq_partial_alias AS SELECT * FROM (SELECT id, name, v FROM vq_a) s(x)
+-- CREATE VIEW
+
+> CREATE VIEW vq_order_expr AS SELECT name FROM vq_a ORDER BY v * 2, id
+-- CREATE VIEW
+
+> CREATE VIEW vq_view_of_view AS SELECT g FROM vq_srf WHERE g > 1
+-- CREATE VIEW
+
+> CREATE VIEW vq_grouping AS SELECT a_id, grouping(a_id), sum(w) FROM vq_b GROUP BY ROLLUP (a_id)
+-- CREATE VIEW
+
+> CREATE VIEW vq_union_from AS SELECT * FROM (SELECT id FROM vq_a UNION SELECT w FROM vq_b) u WHERE id > 1
+-- CREATE VIEW
+
+> CREATE VIEW vq_values_in AS SELECT id FROM vq_a WHERE id IN (VALUES (1), (2))
+-- CREATE VIEW
+
+> CREATE VIEW vq_groups AS SELECT id, sum(v) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING), count(*) FILTER (WHERE v > 0) OVER () FROM vq_a
+-- CREATE VIEW
+
+> CREATE VIEW vq_join_lateral AS SELECT a.id, s.n FROM vq_a a JOIN LATERAL (SELECT count(*) AS n FROM vq_b b WHERE b.a_id = a.id) s ON true
+-- CREATE VIEW
+
+> CREATE VIEW vq_two_up AS SELECT id, (SELECT (SELECT max(c.w) FROM vq_b c WHERE c.w = a.id) FROM vq_b b LIMIT 1) AS x FROM vq_a a
+-- CREATE VIEW
+
+> CREATE VIEW vq_search AS WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SEARCH DEPTH FIRST BY n SET ord SELECT * FROM t
+ERROR 42P16: column "ord" has pseudo-type record[]
+
+> CREATE VIEW vq_cycle AS WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) CYCLE n SET is_cycle USING path SELECT n FROM t
+-- CREATE VIEW
+
+> CREATE VIEW vq_right_nested AS SELECT a.id FROM vq_a a LEFT JOIN (vq_b b JOIN vq_b c ON c.id = b.id) ON b.a_id = a.id
+-- CREATE VIEW
+
+> CREATE VIEW vq_distinct_order AS SELECT DISTINCT name, v FROM vq_a ORDER BY v DESC
+-- CREATE VIEW
+
+> CREATE VIEW vq_case_sub AS SELECT CASE WHEN EXISTS (SELECT 1 FROM vq_b) THEN 1 ELSE 0 END AS flag
+-- CREATE VIEW
+
+> CREATE VIEW vq_no_from AS SELECT 1 AS one, 'x' AS two
+-- CREATE VIEW
+
+> CREATE VIEW vq_star_qual AS SELECT a.*, b.w FROM vq_a a, vq_b b
+-- CREATE VIEW
+
+> CREATE VIEW vq_func_alias AS SELECT t.x FROM unnest(ARRAY[1, 2]) WITH ORDINALITY AS t(x, n)
+-- CREATE VIEW
+
+> SELECT s.x FROM (SELECT 1 AS x, 2 AS x) s
+ERROR 42702: column reference "x" is ambiguous (at 8)
+
+> CREATE TABLE vq_ctas AS SELECT row(1, 2) AS r
+ERROR 42P16: column "r" has pseudo-type record
+
+> CREATE TABLE vq_ctas AS SELECT ARRAY[row(1, 2)] AS r
+ERROR 42P16: column "r" has pseudo-type record[]
+
+> SELECT c.relname, pg_get_viewdef(c.oid) FROM pg_class c WHERE c.relkind = 'v' AND c.relname LIKE 'vq\_%' ORDER BY 1
+relname:name | pg_get_viewdef:text
+vq_case_sub |  SELECT
+        CASE
+            WHEN (EXISTS ( SELECT 1
+               FROM vq_b)) THEN 1
+            ELSE 0
+        END AS flag;
+vq_cte_sublink |  WITH c AS (
+         SELECT vq_b.a_id
+           FROM vq_b
+        )
+ SELECT id
+   FROM vq_a
+  WHERE (id IN ( SELECT c.a_id
+           FROM c));
+vq_cycle |  WITH RECURSIVE t(n) AS (
+         SELECT 1 AS "?column?"
+        UNION ALL
+         SELECT (t_1.n + 1)
+           FROM t t_1
+          WHERE (t_1.n < 3)
+        ) CYCLE n SET is_cycle USING path
+ SELECT n
+   FROM t;
+vq_distinct_order |  SELECT DISTINCT name,
+    v
+   FROM vq_a
+  ORDER BY v DESC;
+vq_full_using |  SELECT id,
+    vq_a.name
+   FROM (vq_a
+     FULL JOIN vq_b USING (id));
+vq_func_alias |  SELECT x
+   FROM unnest(ARRAY[1, 2]) WITH ORDINALITY t(x, n);
+vq_grouping |  SELECT a_id,
+    GROUPING(a_id) AS "grouping",
+    sum(w) AS sum
+   FROM vq_b
+  GROUP BY ROLLUP(a_id);
+vq_groups |  SELECT id,
+    sum(v) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sum,
+    count(*) FILTER (WHERE (v > (0)::numeric)) OVER () AS count
+   FROM vq_a;
+vq_implicit_lateral |  SELECT a.id,
+    g.g
+   FROM vq_a a,
+    LATERAL generate_series(1, a.id) g(g);
+vq_join_lateral |  SELECT a.id,
+    s.n
+   FROM (vq_a a
+     JOIN LATERAL ( SELECT count(*) AS n
+           FROM vq_b b
+          WHERE (b.a_id = a.id)) s ON (true));
+vq_natural |  SELECT vq_a.id,
+    vq_a.name,
+    vq_a.v,
+    vq_b.a_id,
+    vq_b.w
+   FROM (vq_a
+     JOIN vq_b USING (id));
+vq_no_from |  SELECT 1 AS one,
+    'x'::text AS two;
+vq_order_expr |  SELECT name
+   FROM vq_a
+  ORDER BY (v * (2)::numeric), id;
+vq_partial_alias |  SELECT x,
+    name,
+    v
+   FROM ( SELECT vq_a.id,
+            vq_a.name,
+            vq_a.v
+           FROM vq_a) s(x, name, v);
+vq_qualified_fn |  SELECT s
+   FROM generate_series(1, 2) s(s);
+vq_right_nested |  SELECT a.id
+   FROM (vq_a a
+     LEFT JOIN (vq_b b
+     JOIN vq_b c ON ((c.id = b.id))) ON ((b.a_id = a.id)));
+vq_rows_from |  SELECT a,
+    b
+   FROM ROWS FROM(generate_series(1, 2), generate_series(1, 3)) r(a, b);
+vq_srf |  SELECT generate_series(1, 3) AS g,
+    unnest(ARRAY[1, 2]) AS u;
+vq_star_qual |  SELECT a.id,
+    a.name,
+    a.v,
+    b.w
+   FROM vq_a a,
+    vq_b b;
+vq_two_up |  SELECT id,
+    ( SELECT ( SELECT max(c.w) AS max
+                   FROM vq_b c
+                  WHERE (c.w = a.id)) AS max
+           FROM vq_b b
+         LIMIT 1) AS x
+   FROM vq_a a;
+vq_union_from |  SELECT id
+   FROM ( SELECT vq_a.id
+           FROM vq_a
+        UNION
+         SELECT vq_b.w
+           FROM vq_b) u
+  WHERE (id > 1);
+vq_using_alias |  SELECT vq_a.id,
+    vq_b.w
+   FROM (vq_a
+     JOIN vq_b USING (id) AS x);
+vq_values_in |  SELECT id
+   FROM vq_a
+  WHERE (id IN ( VALUES (1), (2)));
+vq_view_of_view |  SELECT g
+   FROM vq_srf
+  WHERE (g > 1);
+-- SELECT 24
+
+> SELECT c.relname, pg_get_viewdef(c.oid, true) FROM pg_class c WHERE c.relkind = 'v' AND c.relname IN ('vq_join_alias', 'vq_right_nested', 'vq_natural') ORDER BY 1
+relname:name | pg_get_viewdef:text
+vq_natural |  SELECT vq_a.id,
+    vq_a.name,
+    vq_a.v,
+    vq_b.a_id,
+    vq_b.w
+   FROM vq_a
+     JOIN vq_b USING (id);
+vq_right_nested |  SELECT a.id
+   FROM vq_a a
+     LEFT JOIN (vq_b b
+     JOIN vq_b c ON c.id = b.id) ON b.a_id = a.id;
+-- SELECT 2
+
+> DROP TABLE vq_a, vq_b
+ERROR 2BP01: cannot drop desired object(s) because other objects depend on them
+DETAIL: view vq_grouping depends on table vq_b
+DETAIL: view vq_case_sub depends on table vq_b
+DETAIL: view vq_natural depends on table vq_a
+DETAIL: view vq_full_using depends on table vq_a
+DETAIL: view vq_using_alias depends on table vq_a
+DETAIL: view vq_implicit_lateral depends on table vq_a
+DETAIL: view vq_cte_sublink depends on table vq_a
+DETAIL: view vq_partial_alias depends on table vq_a
+DETAIL: view vq_order_expr depends on table vq_a
+DETAIL: view vq_union_from depends on table vq_a
+DETAIL: view vq_values_in depends on table vq_a
+DETAIL: view vq_groups depends on table vq_a
+DETAIL: view vq_join_lateral depends on table vq_a
+DETAIL: view vq_two_up depends on table vq_a
+DETAIL: view vq_right_nested depends on table vq_a
+DETAIL: view vq_distinct_order depends on table vq_a
+DETAIL: view vq_star_qual depends on table vq_a
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE vq_b, vq_a CASCADE
+NOTICE 00000: drop cascades to 17 other objects
+DETAIL: drop cascades to view vq_implicit_lateral
+DETAIL: drop cascades to view vq_partial_alias
+DETAIL: drop cascades to view vq_order_expr
+DETAIL: drop cascades to view vq_values_in
+DETAIL: drop cascades to view vq_groups
+DETAIL: drop cascades to view vq_distinct_order
+DETAIL: drop cascades to view vq_natural
+DETAIL: drop cascades to view vq_full_using
+DETAIL: drop cascades to view vq_using_alias
+DETAIL: drop cascades to view vq_cte_sublink
+DETAIL: drop cascades to view vq_grouping
+DETAIL: drop cascades to view vq_union_from
+DETAIL: drop cascades to view vq_join_lateral
+DETAIL: drop cascades to view vq_two_up
+DETAIL: drop cascades to view vq_right_nested
+DETAIL: drop cascades to view vq_case_sub
+DETAIL: drop cascades to view vq_star_qual
+-- DROP TABLE
+
+> DROP VIEW vq_srf CASCADE
+NOTICE 00000: drop cascades to view vq_view_of_view
+-- DROP VIEW
+
+> DROP VIEW vq_rows_from, vq_qualified_fn, vq_cycle, vq_no_from, vq_func_alias
+-- DROP VIEW
+

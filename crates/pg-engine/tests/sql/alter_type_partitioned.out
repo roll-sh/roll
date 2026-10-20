@@ -1,0 +1,649 @@
+> create table p (k int, a int, b int, constraint ck check (a > 0), primary key (k, a)) partition by range (k)
+-- CREATE TABLE
+
+> create index p_b on p (b, a)
+-- CREATE INDEX
+
+> create index p_k on p (k)
+-- CREATE INDEX
+
+> create unique index p_a_u on p (a, k)
+-- CREATE INDEX
+
+> comment on index p_b is 'b index'
+-- COMMENT
+
+> create table p1 partition of p for values from (0) to (10)
+-- CREATE TABLE
+
+> create table p2 (b int, a int not null, k int not null, constraint ck check (a > 0))
+-- CREATE TABLE
+
+> create index p2_own on p2 (a)
+-- CREATE INDEX
+
+> create index p2_b on p2 (b, a)
+-- CREATE INDEX
+
+> alter table p attach partition p2 for values from (10) to (20)
+-- ALTER TABLE
+
+> create table p3 partition of p for values from (20) to (30) partition by range (k)
+-- CREATE TABLE
+
+> create table p3a partition of p3 for values from (20) to (25)
+-- CREATE TABLE
+
+> create table r (x int, z int, foreign key (x, z) references p)
+-- CREATE TABLE
+
+> create table mk0 ()
+-- CREATE TABLE
+
+> create view objs as select 'c' k, conname::text n, conrelid::regclass::text r, oid::int8 - (select oid::int8 from pg_class where relname = 'mk0') d from pg_constraint where conrelid in (select oid from pg_class where relnamespace = 'public'::regnamespace) union all select 'i', relname, '', oid::int8 - (select oid::int8 from pg_class where relname = 'mk0') from pg_class where relkind in ('i','I') and relnamespace = 'public'::regnamespace
+-- CREATE VIEW
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> alter table p alter a type bigint
+-- ALTER TABLE
+
+> create table mk2 ()
+-- CREATE TABLE
+
+> select k, n, r, d - (select oid::int8 - (select oid::int8 from pg_class where relname = 'mk0') from pg_class where relname = 'mk1') from objs where d > 0 order by d
+k:text | n:text | r:text | ?column?:int8
+i | p_pkey |  | 3
+c | p_pkey | p | 4
+i | p1_pkey |  | 5
+c | p1_pkey | p1 | 6
+i | p2_pkey |  | 7
+c | p2_pkey | p2 | 8
+i | p3_pkey |  | 9
+c | p3_pkey | p3 | 10
+i | p3a_pkey |  | 11
+c | p3a_pkey | p3a | 12
+i | p_b |  | 13
+i | p1_b_a_idx |  | 14
+i | p2_b_a_idx |  | 15
+i | p3_b_a_idx |  | 16
+i | p3a_b_a_idx |  | 17
+i | p_a_u |  | 18
+i | p1_a_k_idx |  | 19
+i | p2_a_k_idx |  | 20
+i | p3_a_k_idx |  | 21
+i | p3a_a_k_idx |  | 22
+i | p2_own |  | 23
+c | p_a_not_null | p | 24
+c | p_a_not_null | p1 | 25
+c | p_a_not_null | p2 | 26
+c | p_a_not_null | p3 | 27
+c | p_a_not_null | p3a | 28
+c | ck | p | 29
+c | ck | p1 | 30
+c | ck | p2 | 31
+c | ck | p3 | 32
+c | ck | p3a | 33
+c | r_x_z_fkey | r | 34
+c | r_x_z_fkey_1 | r | 37
+c | r_x_z_fkey_2 | r | 40
+c | r_x_z_fkey_3 | r | 43
+c | r_x_z_fkey_4 | r | 46
+-- SELECT 36
+
+> select k, n, r from objs where d < 0 order by n, r
+k:text | n:text | r:text
+i | p1_k_idx | 
+i | p2_k_idx | 
+c | p2_k_not_null | p2
+i | p3_k_idx | 
+i | p3a_k_idx | 
+i | p_k | 
+c | p_k_not_null | p
+c | p_k_not_null | p1
+c | p_k_not_null | p3
+c | p_k_not_null | p3a
+-- SELECT 10
+
+> select (select oid from pg_class where relname = 'mk2')::int8 - (select oid from pg_class where relname = 'mk1')::int8
+?column?:int8
+73
+-- SELECT 1
+
+> select conname, conrelid::regclass, conparentid <> 0, conindid::regclass, conislocal, coninhcount from pg_constraint where conrelid::regclass::text ~ '^(p|r)' and contype in ('p','u','f','n','c') order by conrelid::regclass::text, conname
+conname:name | conrelid:regclass | ?column?:bool | conindid:regclass | conislocal:bool | coninhcount:int2
+ck | p | f | - | t | 0
+p_a_not_null | p | f | - | t | 0
+p_k_not_null | p | f | - | t | 0
+p_pkey | p | f | p_pkey | t | 0
+ck | p1 | f | - | f | 1
+p1_pkey | p1 | t | p1_pkey | f | 1
+p_a_not_null | p1 | f | - | f | 1
+p_k_not_null | p1 | f | - | f | 1
+ck | p2 | f | - | f | 1
+p2_k_not_null | p2 | f | - | f | 1
+p2_pkey | p2 | t | p2_pkey | f | 1
+p_a_not_null | p2 | f | - | f | 1
+ck | p3 | f | - | f | 1
+p3_pkey | p3 | t | p3_pkey | f | 1
+p_a_not_null | p3 | f | - | f | 1
+p_k_not_null | p3 | f | - | f | 1
+ck | p3a | f | - | f | 1
+p3a_pkey | p3a | t | p3a_pkey | f | 1
+p_a_not_null | p3a | f | - | f | 1
+p_k_not_null | p3a | f | - | f | 1
+pg_aggregate_aggfnoid_not_null | pg_aggregate | f | - | t | 0
+pg_aggregate_fnoid_index | pg_aggregate | f | pg_aggregate_fnoid_index | t | 0
+pg_am_name_index | pg_am | f | pg_am_name_index | t | 0
+pg_am_oid_index | pg_am | f | pg_am_oid_index | t | 0
+pg_am_oid_not_null | pg_am | f | - | t | 0
+pg_amop_fam_strat_index | pg_amop | f | pg_amop_fam_strat_index | t | 0
+pg_amop_oid_index | pg_amop | f | pg_amop_oid_index | t | 0
+pg_amop_oid_not_null | pg_amop | f | - | t | 0
+pg_amop_opr_fam_index | pg_amop | f | pg_amop_opr_fam_index | t | 0
+pg_amproc_fam_proc_index | pg_amproc | f | pg_amproc_fam_proc_index | t | 0
+pg_amproc_oid_index | pg_amproc | f | pg_amproc_oid_index | t | 0
+pg_amproc_oid_not_null | pg_amproc | f | - | t | 0
+pg_attrdef_adrelid_adnum_index | pg_attrdef | f | pg_attrdef_adrelid_adnum_index | t | 0
+pg_attrdef_oid_index | pg_attrdef | f | pg_attrdef_oid_index | t | 0
+pg_attrdef_oid_not_null | pg_attrdef | f | - | t | 0
+pg_attribute_attnum_not_null | pg_attribute | f | - | t | 0
+pg_attribute_attrelid_not_null | pg_attribute | f | - | t | 0
+pg_attribute_relid_attnam_index | pg_attribute | f | pg_attribute_relid_attnam_index | t | 0
+pg_attribute_relid_attnum_index | pg_attribute | f | pg_attribute_relid_attnum_index | t | 0
+pg_auth_members_member_role_index | pg_auth_members | f | pg_auth_members_member_role_index | t | 0
+pg_auth_members_oid_index | pg_auth_members | f | pg_auth_members_oid_index | t | 0
+pg_auth_members_oid_not_null | pg_auth_members | f | - | t | 0
+pg_auth_members_role_member_index | pg_auth_members | f | pg_auth_members_role_member_index | t | 0
+pg_authid_oid_index | pg_authid | f | pg_authid_oid_index | t | 0
+pg_authid_oid_not_null | pg_authid | f | - | t | 0
+pg_authid_rolname_index | pg_authid | f | pg_authid_rolname_index | t | 0
+pg_cast_oid_index | pg_cast | f | pg_cast_oid_index | t | 0
+pg_cast_oid_not_null | pg_cast | f | - | t | 0
+pg_cast_source_target_index | pg_cast | f | pg_cast_source_target_index | t | 0
+pg_class_oid_index | pg_class | f | pg_class_oid_index | t | 0
+pg_class_oid_not_null | pg_class | f | - | t | 0
+pg_class_relname_nsp_index | pg_class | f | pg_class_relname_nsp_index | t | 0
+pg_collation_name_enc_nsp_index | pg_collation | f | pg_collation_name_enc_nsp_index | t | 0
+pg_collation_oid_index | pg_collation | f | pg_collation_oid_index | t | 0
+pg_collation_oid_not_null | pg_collation | f | - | t | 0
+pg_constraint_conrelid_contypid_conname_index | pg_constraint | f | pg_constraint_conrelid_contypid_conname_index | t | 0
+pg_constraint_oid_index | pg_constraint | f | pg_constraint_oid_index | t | 0
+pg_constraint_oid_not_null | pg_constraint | f | - | t | 0
+pg_conversion_default_index | pg_conversion | f | pg_conversion_default_index | t | 0
+pg_conversion_name_nsp_index | pg_conversion | f | pg_conversion_name_nsp_index | t | 0
+pg_conversion_oid_index | pg_conversion | f | pg_conversion_oid_index | t | 0
+pg_conversion_oid_not_null | pg_conversion | f | - | t | 0
+pg_database_datname_index | pg_database | f | pg_database_datname_index | t | 0
+pg_database_oid_index | pg_database | f | pg_database_oid_index | t | 0
+pg_database_oid_not_null | pg_database | f | - | t | 0
+pg_db_role_setting_databaseid_rol_index | pg_db_role_setting | f | pg_db_role_setting_databaseid_rol_index | t | 0
+pg_db_role_setting_setdatabase_not_null | pg_db_role_setting | f | - | t | 0
+pg_db_role_setting_setrole_not_null | pg_db_role_setting | f | - | t | 0
+pg_default_acl_oid_index | pg_default_acl | f | pg_default_acl_oid_index | t | 0
+pg_default_acl_oid_not_null | pg_default_acl | f | - | t | 0
+pg_default_acl_role_nsp_obj_index | pg_default_acl | f | pg_default_acl_role_nsp_obj_index | t | 0
+pg_description_classoid_not_null | pg_description | f | - | t | 0
+pg_description_o_c_o_index | pg_description | f | pg_description_o_c_o_index | t | 0
+pg_description_objoid_not_null | pg_description | f | - | t | 0
+pg_description_objsubid_not_null | pg_description | f | - | t | 0
+pg_enum_oid_index | pg_enum | f | pg_enum_oid_index | t | 0
+pg_enum_oid_not_null | pg_enum | f | - | t | 0
+pg_enum_typid_label_index | pg_enum | f | pg_enum_typid_label_index | t | 0
+pg_enum_typid_sortorder_index | pg_enum | f | pg_enum_typid_sortorder_index | t | 0
+pg_event_trigger_evtname_index | pg_event_trigger | f | pg_event_trigger_evtname_index | t | 0
+pg_event_trigger_oid_index | pg_event_trigger | f | pg_event_trigger_oid_index | t | 0
+pg_event_trigger_oid_not_null | pg_event_trigger | f | - | t | 0
+pg_extension_name_index | pg_extension | f | pg_extension_name_index | t | 0
+pg_extension_oid_index | pg_extension | f | pg_extension_oid_index | t | 0
+pg_extension_oid_not_null | pg_extension | f | - | t | 0
+pg_foreign_data_wrapper_name_index | pg_foreign_data_wrapper | f | pg_foreign_data_wrapper_name_index | t | 0
+pg_foreign_data_wrapper_oid_index | pg_foreign_data_wrapper | f | pg_foreign_data_wrapper_oid_index | t | 0
+pg_foreign_data_wrapper_oid_not_null | pg_foreign_data_wrapper | f | - | t | 0
+pg_foreign_server_name_index | pg_foreign_server | f | pg_foreign_server_name_index | t | 0
+pg_foreign_server_oid_index | pg_foreign_server | f | pg_foreign_server_oid_index | t | 0
+pg_foreign_server_oid_not_null | pg_foreign_server | f | - | t | 0
+pg_foreign_table_ftrelid_not_null | pg_foreign_table | f | - | t | 0
+pg_foreign_table_relid_index | pg_foreign_table | f | pg_foreign_table_relid_index | t | 0
+pg_index_indexrelid_index | pg_index | f | pg_index_indexrelid_index | t | 0
+pg_index_indexrelid_not_null | pg_index | f | - | t | 0
+pg_inherits_inhrelid_not_null | pg_inherits | f | - | t | 0
+pg_inherits_inhseqno_not_null | pg_inherits | f | - | t | 0
+pg_inherits_relid_seqno_index | pg_inherits | f | pg_inherits_relid_seqno_index | t | 0
+pg_init_privs_classoid_not_null | pg_init_privs | f | - | t | 0
+pg_init_privs_o_c_o_index | pg_init_privs | f | pg_init_privs_o_c_o_index | t | 0
+pg_init_privs_objoid_not_null | pg_init_privs | f | - | t | 0
+pg_init_privs_objsubid_not_null | pg_init_privs | f | - | t | 0
+pg_language_name_index | pg_language | f | pg_language_name_index | t | 0
+pg_language_oid_index | pg_language | f | pg_language_oid_index | t | 0
+pg_language_oid_not_null | pg_language | f | - | t | 0
+pg_largeobject_loid_not_null | pg_largeobject | f | - | t | 0
+pg_largeobject_loid_pn_index | pg_largeobject | f | pg_largeobject_loid_pn_index | t | 0
+pg_largeobject_pageno_not_null | pg_largeobject | f | - | t | 0
+pg_largeobject_metadata_oid_index | pg_largeobject_metadata | f | pg_largeobject_metadata_oid_index | t | 0
+pg_largeobject_metadata_oid_not_null | pg_largeobject_metadata | f | - | t | 0
+pg_namespace_nspname_index | pg_namespace | f | pg_namespace_nspname_index | t | 0
+pg_namespace_oid_index | pg_namespace | f | pg_namespace_oid_index | t | 0
+pg_namespace_oid_not_null | pg_namespace | f | - | t | 0
+pg_opclass_am_name_nsp_index | pg_opclass | f | pg_opclass_am_name_nsp_index | t | 0
+pg_opclass_oid_index | pg_opclass | f | pg_opclass_oid_index | t | 0
+pg_opclass_oid_not_null | pg_opclass | f | - | t | 0
+pg_operator_oid_index | pg_operator | f | pg_operator_oid_index | t | 0
+pg_operator_oid_not_null | pg_operator | f | - | t | 0
+pg_operator_oprname_l_r_n_index | pg_operator | f | pg_operator_oprname_l_r_n_index | t | 0
+pg_opfamily_am_name_nsp_index | pg_opfamily | f | pg_opfamily_am_name_nsp_index | t | 0
+pg_opfamily_oid_index | pg_opfamily | f | pg_opfamily_oid_index | t | 0
+pg_opfamily_oid_not_null | pg_opfamily | f | - | t | 0
+pg_parameter_acl_oid_index | pg_parameter_acl | f | pg_parameter_acl_oid_index | t | 0
+pg_parameter_acl_oid_not_null | pg_parameter_acl | f | - | t | 0
+pg_parameter_acl_parname_index | pg_parameter_acl | f | pg_parameter_acl_parname_index | t | 0
+pg_partitioned_table_partrelid_index | pg_partitioned_table | f | pg_partitioned_table_partrelid_index | t | 0
+pg_partitioned_table_partrelid_not_null | pg_partitioned_table | f | - | t | 0
+pg_policy_oid_index | pg_policy | f | pg_policy_oid_index | t | 0
+pg_policy_oid_not_null | pg_policy | f | - | t | 0
+pg_policy_polrelid_polname_index | pg_policy | f | pg_policy_polrelid_polname_index | t | 0
+pg_proc_oid_index | pg_proc | f | pg_proc_oid_index | t | 0
+pg_proc_oid_not_null | pg_proc | f | - | t | 0
+pg_proc_proname_args_nsp_index | pg_proc | f | pg_proc_proname_args_nsp_index | t | 0
+pg_publication_oid_index | pg_publication | f | pg_publication_oid_index | t | 0
+pg_publication_oid_not_null | pg_publication | f | - | t | 0
+pg_publication_pubname_index | pg_publication | f | pg_publication_pubname_index | t | 0
+pg_publication_namespace_oid_index | pg_publication_namespace | f | pg_publication_namespace_oid_index | t | 0
+pg_publication_namespace_oid_not_null | pg_publication_namespace | f | - | t | 0
+pg_publication_namespace_pnnspid_pnpubid_index | pg_publication_namespace | f | pg_publication_namespace_pnnspid_pnpubid_index | t | 0
+pg_publication_rel_oid_index | pg_publication_rel | f | pg_publication_rel_oid_index | t | 0
+pg_publication_rel_oid_not_null | pg_publication_rel | f | - | t | 0
+pg_publication_rel_prrelid_prpubid_index | pg_publication_rel | f | pg_publication_rel_prrelid_prpubid_index | t | 0
+pg_range_rngmultitypid_index | pg_range | f | pg_range_rngmultitypid_index | t | 0
+pg_range_rngtypid_index | pg_range | f | pg_range_rngtypid_index | t | 0
+pg_range_rngtypid_not_null | pg_range | f | - | t | 0
+pg_replication_origin_roident_not_null | pg_replication_origin | f | - | t | 0
+pg_replication_origin_roiident_index | pg_replication_origin | f | pg_replication_origin_roiident_index | t | 0
+pg_replication_origin_roname_index | pg_replication_origin | f | pg_replication_origin_roname_index | t | 0
+pg_rewrite_oid_index | pg_rewrite | f | pg_rewrite_oid_index | t | 0
+pg_rewrite_oid_not_null | pg_rewrite | f | - | t | 0
+pg_rewrite_rel_rulename_index | pg_rewrite | f | pg_rewrite_rel_rulename_index | t | 0
+pg_seclabel_classoid_not_null | pg_seclabel | f | - | t | 0
+pg_seclabel_object_index | pg_seclabel | f | pg_seclabel_object_index | t | 0
+pg_seclabel_objoid_not_null | pg_seclabel | f | - | t | 0
+pg_seclabel_objsubid_not_null | pg_seclabel | f | - | t | 0
+pg_seclabel_provider_not_null | pg_seclabel | f | - | t | 0
+pg_sequence_seqrelid_index | pg_sequence | f | pg_sequence_seqrelid_index | t | 0
+pg_sequence_seqrelid_not_null | pg_sequence | f | - | t | 0
+pg_shdescription_classoid_not_null | pg_shdescription | f | - | t | 0
+pg_shdescription_o_c_index | pg_shdescription | f | pg_shdescription_o_c_index | t | 0
+pg_shdescription_objoid_not_null | pg_shdescription | f | - | t | 0
+pg_shseclabel_classoid_not_null | pg_shseclabel | f | - | t | 0
+pg_shseclabel_object_index | pg_shseclabel | f | pg_shseclabel_object_index | t | 0
+pg_shseclabel_objoid_not_null | pg_shseclabel | f | - | t | 0
+pg_shseclabel_provider_not_null | pg_shseclabel | f | - | t | 0
+pg_statistic_relid_att_inh_index | pg_statistic | f | pg_statistic_relid_att_inh_index | t | 0
+pg_statistic_staattnum_not_null | pg_statistic | f | - | t | 0
+pg_statistic_stainherit_not_null | pg_statistic | f | - | t | 0
+pg_statistic_starelid_not_null | pg_statistic | f | - | t | 0
+pg_statistic_ext_name_index | pg_statistic_ext | f | pg_statistic_ext_name_index | t | 0
+pg_statistic_ext_oid_index | pg_statistic_ext | f | pg_statistic_ext_oid_index | t | 0
+pg_statistic_ext_oid_not_null | pg_statistic_ext | f | - | t | 0
+pg_statistic_ext_data_stxdinherit_not_null | pg_statistic_ext_data | f | - | t | 0
+pg_statistic_ext_data_stxoid_inh_index | pg_statistic_ext_data | f | pg_statistic_ext_data_stxoid_inh_index | t | 0
+pg_statistic_ext_data_stxoid_not_null | pg_statistic_ext_data | f | - | t | 0
+pg_subscription_oid_index | pg_subscription | f | pg_subscription_oid_index | t | 0
+pg_subscription_oid_not_null | pg_subscription | f | - | t | 0
+pg_subscription_subname_index | pg_subscription | f | pg_subscription_subname_index | t | 0
+pg_subscription_rel_srrelid_not_null | pg_subscription_rel | f | - | t | 0
+pg_subscription_rel_srrelid_srsubid_index | pg_subscription_rel | f | pg_subscription_rel_srrelid_srsubid_index | t | 0
+pg_subscription_rel_srsubid_not_null | pg_subscription_rel | f | - | t | 0
+pg_tablespace_oid_index | pg_tablespace | f | pg_tablespace_oid_index | t | 0
+pg_tablespace_oid_not_null | pg_tablespace | f | - | t | 0
+pg_tablespace_spcname_index | pg_tablespace | f | pg_tablespace_spcname_index | t | 0
+pg_transform_oid_index | pg_transform | f | pg_transform_oid_index | t | 0
+pg_transform_oid_not_null | pg_transform | f | - | t | 0
+pg_transform_type_lang_index | pg_transform | f | pg_transform_type_lang_index | t | 0
+pg_trigger_oid_index | pg_trigger | f | pg_trigger_oid_index | t | 0
+pg_trigger_oid_not_null | pg_trigger | f | - | t | 0
+pg_trigger_tgrelid_tgname_index | pg_trigger | f | pg_trigger_tgrelid_tgname_index | t | 0
+pg_ts_config_cfgname_index | pg_ts_config | f | pg_ts_config_cfgname_index | t | 0
+pg_ts_config_oid_index | pg_ts_config | f | pg_ts_config_oid_index | t | 0
+pg_ts_config_oid_not_null | pg_ts_config | f | - | t | 0
+pg_ts_config_map_index | pg_ts_config_map | f | pg_ts_config_map_index | t | 0
+pg_ts_config_map_mapcfg_not_null | pg_ts_config_map | f | - | t | 0
+pg_ts_config_map_mapseqno_not_null | pg_ts_config_map | f | - | t | 0
+pg_ts_config_map_maptokentype_not_null | pg_ts_config_map | f | - | t | 0
+pg_ts_dict_dictname_index | pg_ts_dict | f | pg_ts_dict_dictname_index | t | 0
+pg_ts_dict_oid_index | pg_ts_dict | f | pg_ts_dict_oid_index | t | 0
+pg_ts_dict_oid_not_null | pg_ts_dict | f | - | t | 0
+pg_ts_parser_oid_index | pg_ts_parser | f | pg_ts_parser_oid_index | t | 0
+pg_ts_parser_oid_not_null | pg_ts_parser | f | - | t | 0
+pg_ts_parser_prsname_index | pg_ts_parser | f | pg_ts_parser_prsname_index | t | 0
+pg_ts_template_oid_index | pg_ts_template | f | pg_ts_template_oid_index | t | 0
+pg_ts_template_oid_not_null | pg_ts_template | f | - | t | 0
+pg_ts_template_tmplname_index | pg_ts_template | f | pg_ts_template_tmplname_index | t | 0
+pg_type_oid_index | pg_type | f | pg_type_oid_index | t | 0
+pg_type_oid_not_null | pg_type | f | - | t | 0
+pg_type_typname_nsp_index | pg_type | f | pg_type_typname_nsp_index | t | 0
+pg_user_mapping_oid_index | pg_user_mapping | f | pg_user_mapping_oid_index | t | 0
+pg_user_mapping_oid_not_null | pg_user_mapping | f | - | t | 0
+pg_user_mapping_user_server_index | pg_user_mapping | f | pg_user_mapping_user_server_index | t | 0
+r_x_z_fkey | r | f | p_pkey | t | 0
+r_x_z_fkey_1 | r | t | p1_pkey | f | 1
+r_x_z_fkey_2 | r | t | p2_pkey | f | 1
+r_x_z_fkey_3 | r | t | p3_pkey | f | 1
+r_x_z_fkey_4 | r | t | p3a_pkey | f | 1
+-- SELECT 217
+
+> select indexrelid::regclass::text, inhparent::regclass::text from pg_index left join pg_inherits on inhrelid = indexrelid where indrelid::regclass::text ~ '^p' order by 1, 2
+indexrelid:text | inhparent:text
+p1_a_k_idx | p_a_u
+p1_b_a_idx | p_b
+p1_k_idx | p_k
+p1_pkey | p_pkey
+p2_a_k_idx | p_a_u
+p2_b_a_idx | p_b
+p2_k_idx | p_k
+p2_own | NULL
+p2_pkey | p_pkey
+p3_a_k_idx | p_a_u
+p3_b_a_idx | p_b
+p3_k_idx | p_k
+p3_pkey | p_pkey
+p3a_a_k_idx | p3_a_k_idx
+p3a_b_a_idx | p3_b_a_idx
+p3a_k_idx | p3_k_idx
+p3a_pkey | p3_pkey
+p_a_u | NULL
+p_b | NULL
+p_k | NULL
+p_pkey | NULL
+pg_aggregate_fnoid_index | NULL
+pg_am_name_index | NULL
+pg_am_oid_index | NULL
+pg_amop_fam_strat_index | NULL
+pg_amop_oid_index | NULL
+pg_amop_opr_fam_index | NULL
+pg_amproc_fam_proc_index | NULL
+pg_amproc_oid_index | NULL
+pg_attrdef_adrelid_adnum_index | NULL
+pg_attrdef_oid_index | NULL
+pg_attribute_relid_attnam_index | NULL
+pg_attribute_relid_attnum_index | NULL
+pg_auth_members_grantor_index | NULL
+pg_auth_members_member_role_index | NULL
+pg_auth_members_oid_index | NULL
+pg_auth_members_role_member_index | NULL
+pg_authid_oid_index | NULL
+pg_authid_rolname_index | NULL
+pg_cast_oid_index | NULL
+pg_cast_source_target_index | NULL
+pg_class_oid_index | NULL
+pg_class_relname_nsp_index | NULL
+pg_class_tblspc_relfilenode_index | NULL
+pg_collation_name_enc_nsp_index | NULL
+pg_collation_oid_index | NULL
+pg_constraint_conname_nsp_index | NULL
+pg_constraint_conparentid_index | NULL
+pg_constraint_conrelid_contypid_conname_index | NULL
+pg_constraint_contypid_index | NULL
+pg_constraint_oid_index | NULL
+pg_conversion_default_index | NULL
+pg_conversion_name_nsp_index | NULL
+pg_conversion_oid_index | NULL
+pg_database_datname_index | NULL
+pg_database_oid_index | NULL
+pg_db_role_setting_databaseid_rol_index | NULL
+pg_default_acl_oid_index | NULL
+pg_default_acl_role_nsp_obj_index | NULL
+pg_depend_depender_index | NULL
+pg_depend_reference_index | NULL
+pg_description_o_c_o_index | NULL
+pg_enum_oid_index | NULL
+pg_enum_typid_label_index | NULL
+pg_enum_typid_sortorder_index | NULL
+pg_event_trigger_evtname_index | NULL
+pg_event_trigger_oid_index | NULL
+pg_extension_name_index | NULL
+pg_extension_oid_index | NULL
+pg_foreign_data_wrapper_name_index | NULL
+pg_foreign_data_wrapper_oid_index | NULL
+pg_foreign_server_name_index | NULL
+pg_foreign_server_oid_index | NULL
+pg_foreign_table_relid_index | NULL
+pg_index_indexrelid_index | NULL
+pg_index_indrelid_index | NULL
+pg_inherits_parent_index | NULL
+pg_inherits_relid_seqno_index | NULL
+pg_init_privs_o_c_o_index | NULL
+pg_language_name_index | NULL
+pg_language_oid_index | NULL
+pg_largeobject_loid_pn_index | NULL
+pg_largeobject_metadata_oid_index | NULL
+pg_namespace_nspname_index | NULL
+pg_namespace_oid_index | NULL
+pg_opclass_am_name_nsp_index | NULL
+pg_opclass_oid_index | NULL
+pg_operator_oid_index | NULL
+pg_operator_oprname_l_r_n_index | NULL
+pg_opfamily_am_name_nsp_index | NULL
+pg_opfamily_oid_index | NULL
+pg_parameter_acl_oid_index | NULL
+pg_parameter_acl_parname_index | NULL
+pg_partitioned_table_partrelid_index | NULL
+pg_policy_oid_index | NULL
+pg_policy_polrelid_polname_index | NULL
+pg_proc_oid_index | NULL
+pg_proc_proname_args_nsp_index | NULL
+pg_publication_namespace_oid_index | NULL
+pg_publication_namespace_pnnspid_pnpubid_index | NULL
+pg_publication_oid_index | NULL
+pg_publication_pubname_index | NULL
+pg_publication_rel_oid_index | NULL
+pg_publication_rel_prpubid_index | NULL
+pg_publication_rel_prrelid_prpubid_index | NULL
+pg_range_rngmultitypid_index | NULL
+pg_range_rngtypid_index | NULL
+pg_replication_origin_roiident_index | NULL
+pg_replication_origin_roname_index | NULL
+pg_rewrite_oid_index | NULL
+pg_rewrite_rel_rulename_index | NULL
+pg_seclabel_object_index | NULL
+pg_sequence_seqrelid_index | NULL
+pg_shdepend_depender_index | NULL
+pg_shdepend_reference_index | NULL
+pg_shdescription_o_c_index | NULL
+pg_shseclabel_object_index | NULL
+pg_statistic_ext_data_stxoid_inh_index | NULL
+pg_statistic_ext_name_index | NULL
+pg_statistic_ext_oid_index | NULL
+pg_statistic_ext_relid_index | NULL
+pg_statistic_relid_att_inh_index | NULL
+pg_subscription_oid_index | NULL
+pg_subscription_rel_srrelid_srsubid_index | NULL
+pg_subscription_subname_index | NULL
+pg_tablespace_oid_index | NULL
+pg_tablespace_spcname_index | NULL
+pg_toast.pg_toast_1213_index | NULL
+pg_toast.pg_toast_1247_index | NULL
+pg_toast.pg_toast_1255_index | NULL
+pg_toast.pg_toast_1262_index | NULL
+pg_toast.pg_toast_13510_index | NULL
+pg_toast.pg_toast_13515_index | NULL
+pg_toast.pg_toast_13520_index | NULL
+pg_toast.pg_toast_13525_index | NULL
+pg_toast.pg_toast_1417_index | NULL
+pg_toast.pg_toast_1418_index | NULL
+pg_toast.pg_toast_2328_index | NULL
+pg_toast.pg_toast_2396_index | NULL
+pg_toast.pg_toast_2600_index | NULL
+pg_toast.pg_toast_2604_index | NULL
+pg_toast.pg_toast_2606_index | NULL
+pg_toast.pg_toast_2609_index | NULL
+pg_toast.pg_toast_2610_index | NULL
+pg_toast.pg_toast_2612_index | NULL
+pg_toast.pg_toast_2615_index | NULL
+pg_toast.pg_toast_2618_index | NULL
+pg_toast.pg_toast_2619_index | NULL
+pg_toast.pg_toast_2620_index | NULL
+pg_toast.pg_toast_2964_index | NULL
+pg_toast.pg_toast_3079_index | NULL
+pg_toast.pg_toast_3118_index | NULL
+pg_toast.pg_toast_3256_index | NULL
+pg_toast.pg_toast_3350_index | NULL
+pg_toast.pg_toast_3381_index | NULL
+pg_toast.pg_toast_3394_index | NULL
+pg_toast.pg_toast_3429_index | NULL
+pg_toast.pg_toast_3456_index | NULL
+pg_toast.pg_toast_3466_index | NULL
+pg_toast.pg_toast_3592_index | NULL
+pg_toast.pg_toast_3596_index | NULL
+pg_toast.pg_toast_3600_index | NULL
+pg_toast.pg_toast_6100_index | NULL
+pg_toast.pg_toast_6106_index | NULL
+pg_toast.pg_toast_6243_index | NULL
+pg_toast.pg_toast_826_index | NULL
+pg_transform_oid_index | NULL
+pg_transform_type_lang_index | NULL
+pg_trigger_oid_index | NULL
+pg_trigger_tgconstraint_index | NULL
+pg_trigger_tgrelid_tgname_index | NULL
+pg_ts_config_cfgname_index | NULL
+pg_ts_config_map_index | NULL
+pg_ts_config_oid_index | NULL
+pg_ts_dict_dictname_index | NULL
+pg_ts_dict_oid_index | NULL
+pg_ts_parser_oid_index | NULL
+pg_ts_parser_prsname_index | NULL
+pg_ts_template_oid_index | NULL
+pg_ts_template_tmplname_index | NULL
+pg_type_oid_index | NULL
+pg_type_typname_nsp_index | NULL
+pg_user_mapping_oid_index | NULL
+pg_user_mapping_user_server_index | NULL
+-- SELECT 184
+
+> select tgrelid::regclass, tgfoid::regproc, oid::int8 - (select oid::int8 from pg_class where relname = 'mk1') from pg_trigger where tgrelid::regclass::text ~ '^(p|r)' order by oid
+tgrelid:regclass | tgfoid:regproc | ?column?:int8
+p | "RI_FKey_noaction_del" | 35
+p | "RI_FKey_noaction_upd" | 36
+p1 | "RI_FKey_noaction_del" | 38
+p1 | "RI_FKey_noaction_upd" | 39
+p2 | "RI_FKey_noaction_del" | 41
+p2 | "RI_FKey_noaction_upd" | 42
+p3 | "RI_FKey_noaction_del" | 44
+p3 | "RI_FKey_noaction_upd" | 45
+p3a | "RI_FKey_noaction_del" | 47
+p3a | "RI_FKey_noaction_upd" | 48
+r | "RI_FKey_check_ins" | 49
+r | "RI_FKey_check_upd" | 50
+-- SELECT 12
+
+> select obj_description('p_b'::regclass, 'pg_class')
+obj_description:text
+b index
+-- SELECT 1
+
+> insert into p values (1, 2, 3), (11, 4, 5), (21, 6, 1)
+-- INSERT 0 3
+
+> insert into r values (1, 2)
+-- INSERT 0 1
+
+> insert into r values (1, 3)
+ERROR 23503: insert or update on table "r" violates foreign key constraint "r_x_z_fkey"
+DETAIL: Key (x, z)=(1, 3) is not present in table "p".
+OBJECTS: schema=public table=r constraint=r_x_z_fkey
+
+> delete from p where k = 1
+ERROR 23503: update or delete on table "p1" violates foreign key constraint "r_x_z_fkey_1" on table "r"
+DETAIL: Key (k, a)=(1, 2) is still referenced from table "r".
+OBJECTS: schema=public table=r constraint=r_x_z_fkey_1
+
+> select * from p order by k
+k:int4 | a:int8 | b:int4
+1 | 2 | 3
+11 | 4 | 5
+21 | 6 | 1
+-- SELECT 3
+
+> drop view objs
+-- DROP VIEW
+
+> drop table r, p, mk0, mk1, mk2
+-- DROP TABLE
+
+> create table pk (a int primary key)
+-- CREATE TABLE
+
+> create table f (k int, a int references pk) partition by range (k)
+-- CREATE TABLE
+
+> create table f1 partition of f for values from (0) to (10)
+-- CREATE TABLE
+
+> create table f2 partition of f for values from (10) to (20)
+-- CREATE TABLE
+
+> create table mk0 ()
+-- CREATE TABLE
+
+> alter table pk alter a type bigint
+-- ALTER TABLE
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> select conname, conrelid::regclass, oid::int8 - (select oid::int8 from pg_class where relname = 'mk0') from pg_constraint where contype = 'f' order by oid
+conname:name | conrelid:regclass | ?column?:int8
+f_a_fkey | f | 6
+f_a_fkey | f1 | 11
+f_a_fkey | f2 | 14
+-- SELECT 3
+
+> select tgrelid::regclass, tgfoid::regproc, oid::int8 - (select oid::int8 from pg_class where relname = 'mk0') from pg_trigger where tgrelid::regclass::text in ('pk', 'f', 'f1', 'f2') order by oid
+tgrelid:regclass | tgfoid:regproc | ?column?:int8
+pk | "RI_FKey_noaction_del" | 7
+pk | "RI_FKey_noaction_upd" | 8
+f | "RI_FKey_check_ins" | 9
+f | "RI_FKey_check_upd" | 10
+f1 | "RI_FKey_check_ins" | 12
+f1 | "RI_FKey_check_upd" | 13
+f2 | "RI_FKey_check_ins" | 15
+f2 | "RI_FKey_check_upd" | 16
+-- SELECT 8
+
+> select (select oid from pg_class where relname = 'mk1')::int8 - (select oid from pg_class where relname = 'mk0')::int8
+?column?:int8
+21
+-- SELECT 1
+
+> drop table f, pk, mk0, mk1
+-- DROP TABLE
+
+> create table ip (a int not null, b int, constraint ick check (a > 0))
+-- CREATE TABLE
+
+> create table ic (a int, constraint ic_nn not null a, constraint ick check (a > 0)) inherits (ip)
+NOTICE 00000: merging column "a" with inherited definition
+NOTICE 00000: merging constraint "ick" with inherited definition
+-- CREATE TABLE
+
+> create table mk0 ()
+-- CREATE TABLE
+
+> alter table ip alter a type bigint
+ERROR 55000: cannot create not-null constraint "ic_nn" on column "a" of table "ic"
+DETAIL: A not-null constraint named "ip_a_not_null" already exists for this column.
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> select conname, conrelid::regclass, conislocal, coninhcount, oid::int8 - (select oid::int8 from pg_class where relname = 'mk0') from pg_constraint where conrelid in ('ip'::regclass, 'ic'::regclass) order by oid
+conname:name | conrelid:regclass | conislocal:bool | coninhcount:int2 | ?column?:int8
+ick | ip | t | 0 | -7
+ip_a_not_null | ip | t | 0 | -6
+ick | ic | t | 1 | -2
+ic_nn | ic | t | 1 | -1
+-- SELECT 4
+
+> drop table ip, ic, mk0, mk1
+-- DROP TABLE
+

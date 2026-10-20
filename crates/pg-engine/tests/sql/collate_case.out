@@ -1,0 +1,138 @@
+> select lower('ÀÉÎ ÑẞΣ' collate "C"), upper('àéî ñßσς' collate "C"), initcap('àéî ñß hello wORLD' collate "C")
+lower:text | upper:text | initcap:text
+ÀÉÎ ÑẞΣ | àéî ñßσς | àéî ñß Hello World
+-- SELECT 1
+
+> select lower('ÀÉÎ ÑẞΣ'), upper('àéî ñßσς'), initcap('àéî ñß hello wORLD')
+lower:text | upper:text | initcap:text
+àéî ñßσ | ÀÉÎ ÑßΣΣ | Àéî Ñß Hello World
+-- SELECT 1
+
+> select lower('ÀÉÎ' collate "POSIX"), upper('àéî' collate "POSIX"), initcap('éa' collate "POSIX")
+lower:text | upper:text | initcap:text
+ÀÉÎ | àéî | éA
+-- SELECT 1
+
+> select lower('ÀÉÎ' collate "ucs_basic"), upper('àéî ß' collate "ucs_basic"), initcap('éa ß' collate "ucs_basic")
+lower:text | upper:text | initcap:text
+ÀÉÎ | àéî ß | éA ß
+-- SELECT 1
+
+> select lower('ÀÉÎ' collate "pg_c_utf8"), upper('àéî ß' collate "pg_c_utf8"), initcap('éa ß ǆ' collate "pg_c_utf8")
+lower:text | upper:text | initcap:text
+àéî | ÀÉÎ ß | Éa ß Ǆ
+-- SELECT 1
+
+> select casefold('Àß' collate "C"), casefold('ÀßΣ'), casefold('ÀB' collate "POSIX"), lower(null collate "C")
+casefold:text | casefold:text | casefold:text | lower:text
+Àß | àßσ | Àb | NULL
+-- SELECT 1
+
+> select initcap('hello-wORLD é3x'), initcap('hello-wORLD é3x' collate "C"), initcap('x9é_y' collate "C")
+initcap:text | initcap:text | initcap:text
+Hello-World É3x | Hello-World é3x | X9é_Y
+-- SELECT 1
+
+> select lower('ÀB'::varchar collate "C"), upper('àb'::char(3) collate "C")
+lower:text | upper:text
+Àb | àB
+-- SELECT 1
+
+> select lower('ǅ' collate "C"), upper('ǆ' collate "C"), initcap('ǆa' collate "C"), initcap('ǆa')
+lower:text | upper:text | initcap:text | initcap:text
+ǅ | ǆ | ǆA | Ǆa
+-- SELECT 1
+
+> select lower('İ'), lower('İ' collate "C"), upper('ﬀ'), upper('ﬀ' collate "C")
+lower:text | lower:text | upper:text | upper:text
+i | İ | ﬀ | ﬀ
+-- SELECT 1
+
+> select upper(lower('ÄÖ' collate "C")), lower('Ä' collate "C") = 'Ä'
+upper:text | ?column?:bool
+ÄÖ | t
+-- SELECT 1
+
+> select 'É' collate "C" ilike 'é', 'É' ilike 'é', 'É' collate "C" not ilike 'é', 'É' collate "C" !~~* 'é'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | t | t
+-- SELECT 1
+
+> select 'é' collate "C" ilike '_', 'é' collate "C" ilike '__', 'é' ilike '_', 'xÉy' collate "C" ilike 'X%Y', 'İ' ilike 'i', 'İ' collate "C" ilike 'i'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t | f
+-- SELECT 1
+
+> select 'abc'::name ilike 'ABC', 'Éb'::name ilike 'éB', 'Éb'::name ~~* 'éB'::text collate "default"
+?column?:bool | ?column?:bool | ?column?:bool
+t | f | t
+-- SELECT 1
+
+> select 'É' collate "C" ~* 'é', 'É' ~* 'é', 'Éa' collate "C" ~* 'éA', 'aB' collate "C" ~* 'Ab', 'q' collate "C" ~* '[A-Z]', 'Q' collate "C" ~* '[a-c]x|[p-r]'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | f | t | t | t
+-- SELECT 1
+
+> select 'É' collate "C" ~ '[[:upper:]]', 'É' ~ '[[:upper:]]', 'é' ~ '[[:upper:]]', 'é' ~* '[[:upper:]]', 'é' collate "C" ~ '[[:alpha:]]', 'é' ~ '[[:alpha:]]', 'é' ~ '[[:alnum:]]'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | f | t | f | t | t
+-- SELECT 1
+
+> select '٣' ~ '\d', '٣' ~ '\w', '٣' ~ '[[:digit:]]', 'é' collate "C" ~ '\w', 'é' collate "C" ~ '\W', 'é' ~ '\w', 'é' ~ '\W', '_' ~ '\w', 'x' collate "C" ~ '[\w]'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | f | f | t | t | f | t | t
+-- SELECT 1
+
+> select ']' ~ '[]]', 'a' ~ '[^]]', '[' ~ '[[]', 'x' ~ '[[:alpha:][:digit:]]', E' ' ~ '\s', E' ' collate "C" ~ '\s', E' ' ~ '[[:space:]]'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t | f | t
+-- SELECT 1
+
+> select 'Ab' collate "C" ~* '[[:lower:]]b', 'É' collate "C" !~* 'é', 'É' collate "C" !~ 'é', 'abc' collate "C" ~ '^a.c$', 'K' ~* 'k', 'K' collate "C" ~* '[a-z]'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t | t
+-- SELECT 1
+
+> create table gxc_c (a text collate "C", b text, n name)
+-- CREATE TABLE
+
+> insert into gxc_c values ('ÀbÇ', 'ÀbÇ', 'ÀbÇ')
+-- INSERT 0 1
+
+> select lower(a), upper(a), initcap(a), lower(b), lower(n), lower(a collate "default"), a ilike 'àbç', b ilike 'àbç', n ilike 'àbç', a not ilike 'àbç', a !~~* 'àBç', a ~* 'àbç', b ~* 'àbç' from gxc_c
+lower:text | upper:text | initcap:text | lower:text | lower:text | lower:text | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+ÀbÇ | ÀBÇ | ÀBÇ | àbç | ÀbÇ | àbç | f | t | f | t | t | f | t
+-- SELECT 1
+
+> select lower(a || b), lower(a) || b, lower(a || b collate "C"), lower(a || n) from gxc_c
+lower:text | ?column?:text | lower:text | lower:text
+ÀbÇÀbÇ | ÀbÇÀbÇ | ÀbÇÀbÇ | ÀbÇÀbÇ
+-- SELECT 1
+
+> select lower(b || n) from gxc_c
+lower:text
+ÀbÇÀbÇ
+-- SELECT 1
+
+> create view gxc_v as select lower(a) l, a ilike 'x' i, upper(b) u from gxc_c
+-- CREATE VIEW
+
+> select * from gxc_v
+l:text | i:bool | u:text
+ÀbÇ | f | ÀBÇ
+-- SELECT 1
+
+> select pg_get_viewdef('gxc_v')
+pg_get_viewdef:text
+ SELECT lower(a) AS l,
+    (a ~~* 'x'::text) AS i,
+    upper(b) AS u
+   FROM gxc_c;
+-- SELECT 1
+
+> drop view gxc_v
+-- DROP VIEW
+
+> drop table gxc_c
+-- DROP TABLE
+

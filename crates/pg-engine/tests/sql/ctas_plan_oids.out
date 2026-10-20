@@ -1,0 +1,130 @@
+> create table gxk_a0 (x int)
+-- CREATE TABLE
+
+> create table gxk_t1 as select 1/0 as x
+ERROR 22012: division by zero
+
+> create table gxk_a1 (x int)
+-- CREATE TABLE
+
+> create materialized view gxk_m1 as select 1/0 as x
+ERROR 22012: division by zero
+
+> create table gxk_a2 (x int)
+-- CREATE TABLE
+
+> create table gxk_t2 as select x/0 from gxk_a0
+-- SELECT 0
+
+> create table gxk_a3 (x int)
+-- CREATE TABLE
+
+> insert into gxk_a0 values (1)
+-- INSERT 0 1
+
+> create table gxk_t3 as select x/0 from gxk_a0
+ERROR 22012: division by zero
+
+> create table gxk_a4 (x int)
+-- CREATE TABLE
+
+> create materialized view gxk_m2 as select x/0 from gxk_a0
+ERROR 22012: division by zero
+
+> create table gxk_a5 (x int)
+-- CREATE TABLE
+
+> create table gxk_t4 as select 'abc'::int
+ERROR 22P02: invalid input syntax for type integer: "abc" (at 31)
+
+> create table gxk_a6 (x int)
+-- CREATE TABLE
+
+> create table gxk_t5 as select 1/0 as x with no data
+-- CREATE TABLE AS
+
+> create table gxk_a7 (x int)
+-- CREATE TABLE
+
+> create table gxk_t6 as select (select 1/0) as x
+ERROR 22012: division by zero
+
+> create table gxk_a8 (x int)
+-- CREATE TABLE
+
+> create table gxk_t7 as select x from gxk_a0 where 1/0 = 1
+ERROR 22012: division by zero
+
+> create table gxk_a9 (x int)
+-- CREATE TABLE
+
+> create table gxk_t8 as select sqrt(-1::float8)
+ERROR 2201F: cannot take square root of a negative number
+
+> create table gxk_a10 (x int)
+-- CREATE TABLE
+
+> select * into gxk_t9 from (select 1/0) s
+ERROR 22012: division by zero
+
+> create table gxk_a11 (x int)
+-- CREATE TABLE
+
+> create table gxk_t10 as select generate_series(1, 1/0)
+ERROR 22012: division by zero
+
+> create table gxk_a12 (x int)
+-- CREATE TABLE
+
+> create materialized view gxk_m3 as select 1/0 as x with no data
+-- CREATE MATERIALIZED VIEW
+
+> create table gxk_a13 (x int)
+-- CREATE TABLE
+
+> create table gxk_t11 as select 1 as x, 1/0 as y
+ERROR 22012: division by zero
+
+> create table gxk_a14 (x int)
+-- CREATE TABLE
+
+> create view gxk_v1 as select 1/0 as x
+-- CREATE VIEW
+
+> select * from gxk_v1
+ERROR 22012: division by zero
+
+> create table gxk_a15 (x int)
+-- CREATE TABLE
+
+> explain (costs off) create table gxk_t12 as select 1/0 as x
+ERROR 22012: division by zero
+
+> create table gxk_a16 (x int)
+-- CREATE TABLE
+
+> select relname, oid::int8 - (select oid::int8 from pg_class where relname='gxk_a0') from pg_class where relname like 'gxk_%' order by 2
+relname:name | ?column?:int8
+gxk_a0 | 0
+gxk_a1 | 3
+gxk_a2 | 13
+gxk_t2 | 16
+gxk_a3 | 19
+gxk_a4 | 25
+gxk_a5 | 35
+gxk_a6 | 38
+gxk_t5 | 41
+gxk_a7 | 44
+gxk_a8 | 47
+gxk_a9 | 50
+gxk_a10 | 53
+gxk_a11 | 56
+gxk_a12 | 59
+gxk_m3 | 62
+gxk_a13 | 66
+gxk_a14 | 69
+gxk_v1 | 72
+gxk_a15 | 76
+gxk_a16 | 79
+-- SELECT 21
+

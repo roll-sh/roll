@@ -1,0 +1,102 @@
+> create function tc_bs() returns trigger language plpgsql as $$
+> begin
+>   raise notice 'before statement on %', tg_table_name;
+>   return null;
+> end $$
+-- CREATE FUNCTION
+
+> create function tc_dump() returns trigger language plpgsql as $$
+> begin
+>   raise notice 'trigger = %, old table = %', tg_name,
+>     (select string_agg(old_table::text, ', ' order by a) from old_table);
+>   return null;
+> end $$
+-- CREATE FUNCTION
+
+> create table tc_self (a int primary key, b int references tc_self(a) on delete cascade)
+-- CREATE TABLE
+
+> create trigger tc_bs before delete on tc_self for each statement execute function tc_bs()
+-- CREATE TRIGGER
+
+> create trigger tc_r after delete on tc_self referencing old table as old_table
+>   for each row execute function tc_dump()
+-- CREATE TRIGGER
+
+> create trigger tc_s after delete on tc_self referencing old table as old_table
+>   for each statement execute function tc_dump()
+-- CREATE TRIGGER
+
+> insert into tc_self values (1, null), (2, 1), (3, 2)
+-- INSERT 0 3
+
+> delete from tc_self where a = 1
+NOTICE 00000: before statement on tc_self
+CONTEXT: PL/pgSQL function tc_bs() line 3 at RAISE
+NOTICE 00000: trigger = tc_r, old table = (1,), (2,1)
+CONTEXT: PL/pgSQL function tc_dump() line 3 at RAISE
+NOTICE 00000: before statement on tc_self
+CONTEXT: PL/pgSQL function tc_bs() line 3 at RAISE
+CONTEXT: SQL statement "DELETE FROM ONLY "public"."tc_self" WHERE $1 OPERATOR(pg_catalog.=) "b""
+NOTICE 00000: trigger = tc_r, old table = (1,), (2,1)
+CONTEXT: PL/pgSQL function tc_dump() line 3 at RAISE
+NOTICE 00000: trigger = tc_s, old table = (1,), (2,1)
+CONTEXT: PL/pgSQL function tc_dump() line 3 at RAISE
+NOTICE 00000: trigger = tc_r, old table = (3,2)
+CONTEXT: PL/pgSQL function tc_dump() line 3 at RAISE
+NOTICE 00000: trigger = tc_s, old table = (3,2)
+CONTEXT: PL/pgSQL function tc_dump() line 3 at RAISE
+-- DELETE 1
+
+> drop trigger tc_r on tc_self
+-- DROP TRIGGER
+
+> insert into tc_self values (1, null), (2, 1), (3, 2), (4, 3)
+-- INSERT 0 4
+
+> delete from tc_self where a = 1
+NOTICE 00000: before statement on tc_self
+CONTEXT: PL/pgSQL function tc_bs() line 3 at RAISE
+NOTICE 00000: trigger = tc_s, old table = (1,), (2,1), (3,2), (4,3)
+CONTEXT: PL/pgSQL function tc_dump() line 3 at RAISE
+-- DELETE 1
+
+> create table tc_p (a int primary key)
+-- CREATE TABLE
+
+> create table tc_c (a int, p int references tc_p on delete cascade)
+-- CREATE TABLE
+
+> create trigger tc_bs before delete on tc_c for each statement execute function tc_bs()
+-- CREATE TRIGGER
+
+> create trigger tc_s after delete on tc_c referencing old table as old_table
+>   for each statement execute function tc_dump()
+-- CREATE TRIGGER
+
+> create trigger tc_s after delete on tc_p referencing old table as old_table
+>   for each statement execute function tc_dump()
+-- CREATE TRIGGER
+
+> insert into tc_p values (1), (2)
+-- INSERT 0 2
+
+> insert into tc_c values (10, 1), (11, 1), (20, 2)
+-- INSERT 0 3
+
+> delete from tc_p
+NOTICE 00000: before statement on tc_c
+CONTEXT: PL/pgSQL function tc_bs() line 3 at RAISE
+CONTEXT: SQL statement "DELETE FROM ONLY "public"."tc_c" WHERE $1 OPERATOR(pg_catalog.=) "p""
+NOTICE 00000: trigger = tc_s, old table = (1), (2)
+CONTEXT: PL/pgSQL function tc_dump() line 3 at RAISE
+NOTICE 00000: trigger = tc_s, old table = (10,1), (11,1), (20,2)
+CONTEXT: PL/pgSQL function tc_dump() line 3 at RAISE
+-- DELETE 2
+
+> drop table tc_self, tc_c, tc_p
+-- DROP TABLE
+
+> drop function tc_bs(), tc_dump()
+-- DROP FUNCTION
+

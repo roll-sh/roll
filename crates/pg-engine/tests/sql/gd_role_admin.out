@@ -1,0 +1,337 @@
+> DROP ROLE IF EXISTS gd_ra_super, gd_ra_admin, gd_ra_limited, gd_ra_normal, gd_ra_made,
+>   gd_ra_made2, gd_ra_x, gd_ra_y, gd_ra_z, gd_ra_w, gd_ra_md5, gd_ra_scram, gd_ra_empty,
+>   gd_ra_renamed, gd_ra_group
+NOTICE 00000: role "gd_ra_super" does not exist, skipping
+NOTICE 00000: role "gd_ra_admin" does not exist, skipping
+NOTICE 00000: role "gd_ra_limited" does not exist, skipping
+NOTICE 00000: role "gd_ra_normal" does not exist, skipping
+NOTICE 00000: role "gd_ra_made" does not exist, skipping
+NOTICE 00000: role "gd_ra_made2" does not exist, skipping
+NOTICE 00000: role "gd_ra_x" does not exist, skipping
+NOTICE 00000: role "gd_ra_y" does not exist, skipping
+NOTICE 00000: role "gd_ra_z" does not exist, skipping
+NOTICE 00000: role "gd_ra_w" does not exist, skipping
+NOTICE 00000: role "gd_ra_md5" does not exist, skipping
+NOTICE 00000: role "gd_ra_scram" does not exist, skipping
+NOTICE 00000: role "gd_ra_empty" does not exist, skipping
+NOTICE 00000: role "gd_ra_renamed" does not exist, skipping
+NOTICE 00000: role "gd_ra_group" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE gd_ra_super SUPERUSER
+-- CREATE ROLE
+
+> CREATE ROLE gd_ra_admin CREATEROLE CREATEDB
+-- CREATE ROLE
+
+> CREATE ROLE gd_ra_limited CREATEROLE
+-- CREATE ROLE
+
+> CREATE ROLE gd_ra_normal
+-- CREATE ROLE
+
+> SET SESSION AUTHORIZATION gd_ra_limited
+-- SET
+
+> CREATE ROLE gd_ra_x SUPERUSER
+ERROR 42501: permission denied to create role
+DETAIL: Only roles with the SUPERUSER attribute may create roles with the SUPERUSER attribute.
+
+> CREATE ROLE gd_ra_x CREATEDB
+ERROR 42501: permission denied to create role
+DETAIL: Only roles with the CREATEDB attribute may create roles with the CREATEDB attribute.
+
+> ALTER ROLE gd_ra_super NOLOGIN
+ERROR 42501: permission denied to alter role
+DETAIL: Only roles with the SUPERUSER attribute may alter roles with the SUPERUSER attribute.
+
+> ALTER ROLE gd_ra_normal NOSUPERUSER
+ERROR 42501: permission denied to alter role
+DETAIL: Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.
+
+> ALTER ROLE gd_ra_normal NOINHERIT
+ERROR 42501: permission denied to alter role
+DETAIL: Only roles with the CREATEROLE attribute and the ADMIN option on role "gd_ra_normal" may alter this role.
+
+> ALTER ROLE gd_ra_normal PASSWORD 'x'
+ERROR 42501: permission denied to alter role
+DETAIL: To change another role's password, the current user must have the CREATEROLE attribute and the ADMIN option on the role.
+
+> COMMENT ON ROLE gd_ra_normal IS 'nope'
+ERROR 42501: permission denied
+DETAIL: The current user must have the ADMIN option on role "gd_ra_normal".
+
+> COMMENT ON ROLE gd_ra_super IS 'nope'
+ERROR 42501: permission denied
+DETAIL: The current user must have the SUPERUSER attribute.
+
+> ALTER ROLE gd_ra_normal RENAME TO gd_ra_renamed
+ERROR 42501: permission denied to rename role
+DETAIL: Only roles with the CREATEROLE attribute and the ADMIN option on role "gd_ra_normal" may rename this role.
+
+> DROP ROLE gd_ra_normal
+ERROR 42501: permission denied to drop role
+DETAIL: Only roles with the CREATEROLE attribute and the ADMIN option on role "gd_ra_normal" may drop this role.
+
+> DROP ROLE gd_ra_super
+ERROR 42501: permission denied to drop role
+DETAIL: Only roles with the SUPERUSER attribute may drop roles with the SUPERUSER attribute.
+
+> CREATE ROLE gd_ra_x IN ROLE gd_ra_super
+ERROR 42501: permission denied to grant role "gd_ra_super"
+DETAIL: Only roles with the SUPERUSER attribute may grant roles with the SUPERUSER attribute.
+
+> CREATE ROLE gd_ra_x IN ROLE pg_database_owner
+ERROR 0A000: role "pg_database_owner" cannot have explicit members
+
+> CREATE ROLE gd_ra_x IN ROLE gd_ra_normal
+ERROR 42501: permission denied to grant role "gd_ra_normal"
+DETAIL: Only roles with the ADMIN option on role "gd_ra_normal" may grant this role.
+
+> CREATE ROLE gd_ra_y ROLE gd_ra_y
+ERROR 0LP01: role "gd_ra_y" is a member of role "gd_ra_y"
+
+> CREATE ROLE gd_ra_y ADMIN gd_ra_y
+ERROR 0LP01: role "gd_ra_y" is a member of role "gd_ra_y"
+
+> CREATE ROLE gd_ra_made
+-- CREATE ROLE
+
+> SELECT r.rolname, m.rolname AS member, m2.rolname = current_user AS by_me, a.admin_option, a.inherit_option, a.set_option
+>   FROM pg_auth_members a JOIN pg_roles r ON r.oid = a.roleid JOIN pg_roles m ON m.oid = a.member
+>   JOIN pg_roles m2 ON m2.oid = a.grantor
+>  WHERE r.rolname = 'gd_ra_made' ORDER BY 2, 3
+rolname:name | member:name | by_me:bool | admin_option:bool | inherit_option:bool | set_option:bool
+gd_ra_made | gd_ra_limited | f | t | f | f
+-- SELECT 1
+
+> COMMENT ON ROLE gd_ra_made IS 'mine'
+-- COMMENT
+
+> ALTER ROLE gd_ra_made CONNECTION LIMIT 3
+-- ALTER ROLE
+
+> ALTER ROLE gd_ra_made CREATEDB
+ERROR 42501: permission denied to alter role
+DETAIL: Only roles with the CREATEDB attribute may change the CREATEDB attribute.
+
+> SET createrole_self_grant = 'set, inherit'
+-- SET
+
+> CREATE ROLE gd_ra_made2
+-- CREATE ROLE
+
+> SELECT r.rolname, a.admin_option, a.inherit_option, a.set_option, g.rolname = 'gd_ra_limited' AS self_granted
+>   FROM pg_auth_members a JOIN pg_roles r ON r.oid = a.roleid JOIN pg_roles g ON g.oid = a.grantor
+>  WHERE r.rolname = 'gd_ra_made2' ORDER BY 2, 5
+rolname:name | admin_option:bool | inherit_option:bool | set_option:bool | self_granted:bool
+gd_ra_made2 | f | t | t | t
+gd_ra_made2 | t | f | f | f
+-- SELECT 2
+
+> RESET createrole_self_grant
+-- RESET
+
+> ALTER GROUP gd_ra_made ADD USER gd_ra_made2
+-- ALTER ROLE
+
+> ALTER GROUP gd_ra_made ADD USER gd_ra_made2
+NOTICE 00000: role "gd_ra_made2" has already been granted membership in role "gd_ra_made" by role "gd_ra_limited"
+-- ALTER ROLE
+
+> ALTER GROUP gd_ra_normal ADD USER gd_ra_made2
+ERROR 42501: permission denied to alter role
+DETAIL: Only roles with the ADMIN option on role "gd_ra_normal" may add or drop members.
+
+> ALTER GROUP gd_ra_made DROP USER gd_ra_made2
+-- ALTER ROLE
+
+> ALTER GROUP gd_ra_made DROP USER gd_ra_made2
+WARNING 01000: role "gd_ra_made2" has not been granted membership in role "gd_ra_made" by role "gd_ra_limited"
+-- ALTER ROLE
+
+> ALTER ROLE gd_ra_made RENAME TO gd_ra_renamed
+-- ALTER ROLE
+
+> ALTER ROLE gd_ra_renamed RENAME TO gd_ra_made
+-- ALTER ROLE
+
+> DROP ROLE gd_ra_made2, gd_ra_made2
+ERROR 42501: permission denied to drop role
+DETAIL: Only roles with the CREATEROLE attribute and the ADMIN option on role "gd_ra_made2" may drop this role.
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> CREATE ROLE gd_ra_x
+-- CREATE ROLE
+
+> CREATE ROLE gd_ra_y
+-- CREATE ROLE
+
+> CREATE ROLE gd_ra_z
+-- CREATE ROLE
+
+> CREATE ROLE gd_ra_w
+-- CREATE ROLE
+
+> GRANT gd_ra_x TO gd_ra_y WITH ADMIN OPTION
+-- GRANT ROLE
+
+> GRANT gd_ra_x TO gd_ra_z WITH ADMIN OPTION GRANTED BY gd_ra_y
+-- GRANT ROLE
+
+> GRANT gd_ra_x TO gd_ra_y WITH ADMIN OPTION GRANTED BY gd_ra_z
+ERROR 0LP01: ADMIN option cannot be granted back to your own grantor
+
+> GRANT gd_ra_x TO gd_ra_w GRANTED BY gd_ra_w
+ERROR 42501: permission denied to grant privileges as role "gd_ra_w"
+DETAIL: The grantor must have the ADMIN option on role "gd_ra_x".
+
+> GRANT gd_ra_x TO gd_ra_w GRANTED BY gd_ra_super
+ERROR 42501: permission denied to grant privileges as role "gd_ra_super"
+DETAIL: The grantor must have the ADMIN option on role "gd_ra_x".
+
+> REVOKE ADMIN OPTION FOR gd_ra_x FROM gd_ra_y
+ERROR 2BP01: dependent privileges exist
+HINT: Use CASCADE to revoke them too.
+
+> REVOKE gd_ra_x FROM gd_ra_y
+ERROR 2BP01: dependent privileges exist
+HINT: Use CASCADE to revoke them too.
+
+> SELECT m.rolname AS member, g.rolname AS grantor, a.admin_option
+>   FROM pg_auth_members a JOIN pg_roles m ON m.oid = a.member JOIN pg_roles g ON g.oid = a.grantor
+>  WHERE a.roleid = 'gd_ra_x'::regrole ORDER BY 1, 2
+member:name | grantor:name | admin_option:bool
+gd_ra_y | postgres | t
+gd_ra_z | gd_ra_y | t
+-- SELECT 2
+
+> BEGIN
+-- BEGIN
+
+> REVOKE ADMIN OPTION FOR gd_ra_x FROM gd_ra_y CASCADE
+-- REVOKE ROLE
+
+> SELECT m.rolname AS member, a.admin_option FROM pg_auth_members a JOIN pg_roles m ON m.oid = a.member
+>  WHERE a.roleid = 'gd_ra_x'::regrole ORDER BY 1
+member:name | admin_option:bool
+gd_ra_y | f
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP ROLE gd_ra_y
+ERROR 2BP01: role "gd_ra_y" cannot be dropped because some objects depend on it
+DETAIL: privileges for membership of role gd_ra_z in role gd_ra_x
+
+> REASSIGN OWNED BY gd_ra_y TO gd_ra_w
+-- REASSIGN OWNED
+
+> DROP ROLE gd_ra_y
+ERROR 2BP01: role "gd_ra_y" cannot be dropped because some objects depend on it
+DETAIL: privileges for membership of role gd_ra_z in role gd_ra_x
+
+> DROP OWNED BY gd_ra_y
+-- DROP OWNED
+
+> SELECT count(*) FROM pg_auth_members WHERE grantor = 'gd_ra_y'::regrole
+count:int8
+0
+-- SELECT 1
+
+> DROP ROLE gd_ra_y
+-- DROP ROLE
+
+> CREATE ROLE gd_ra_y
+-- CREATE ROLE
+
+> GRANT gd_ra_x TO gd_ra_y WITH ADMIN OPTION
+-- GRANT ROLE
+
+> GRANT gd_ra_y TO gd_ra_z
+-- GRANT ROLE
+
+> SET ROLE gd_ra_z
+-- SET
+
+> GRANT gd_ra_x TO gd_ra_w
+-- GRANT ROLE
+
+> RESET ROLE
+-- RESET
+
+> SELECT g.rolname AS grantor FROM pg_auth_members a JOIN pg_roles g ON g.oid = a.grantor
+>  WHERE a.roleid = 'gd_ra_x'::regrole AND a.member = 'gd_ra_w'::regrole ORDER BY 1
+grantor:name
+gd_ra_y
+-- SELECT 1
+
+> SET password_encryption = 'md5'
+-- SET
+
+> CREATE ROLE gd_ra_md5 PASSWORD 'pw1'
+WARNING 01P01: setting an MD5-encrypted password
+DETAIL: MD5 password support is deprecated and will be removed in a future release of PostgreSQL.
+HINT: Refer to the PostgreSQL documentation for details about migrating to another password type.
+-- CREATE ROLE
+
+> ALTER ROLE gd_ra_md5 PASSWORD 'md5e73a4b11df52a6068f8b39f90be36023'
+WARNING 01P01: setting an MD5-encrypted password
+DETAIL: MD5 password support is deprecated and will be removed in a future release of PostgreSQL.
+HINT: Refer to the PostgreSQL documentation for details about migrating to another password type.
+-- ALTER ROLE
+
+> SET password_encryption = 'scram-sha-256'
+-- SET
+
+> SET scram_iterations = 1024
+-- SET
+
+> CREATE ROLE gd_ra_scram PASSWORD 'pw2'
+-- CREATE ROLE
+
+> CREATE ROLE gd_ra_empty PASSWORD ''
+NOTICE 00000: empty string is not a valid password, clearing password
+-- CREATE ROLE
+
+> ALTER ROLE gd_ra_empty PASSWORD 'md561ca20d14261b22101b0cac7ba35336c'
+NOTICE 00000: empty string is not a valid password, clearing password
+-- ALTER ROLE
+
+> SELECT rolname, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>') AS pw
+>   FROM pg_authid WHERE rolname IN ('gd_ra_md5', 'gd_ra_scram', 'gd_ra_empty') ORDER BY 1
+rolname:name | pw:text
+gd_ra_empty | NULL
+gd_ra_md5 | md5e73a4b11df52a6068f8b39f90be36023
+gd_ra_scram | SCRAM-SHA-256$1024:<salt>$<storedkey>:<serverkey>
+-- SELECT 3
+
+> ALTER ROLE gd_ra_md5 RENAME TO gd_ra_renamed
+NOTICE 00000: MD5 password cleared because of role rename
+-- ALTER ROLE
+
+> SELECT rolpassword IS NULL FROM pg_authid WHERE rolname = 'gd_ra_renamed'
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE ROLE gd_ra_md5 PASSWORD 'SCRAM-SHA-256$000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004096:wNFxNSk1hAXBkgub8py3bg==$65zC6E+R0U7tiYTC9+Wtq4Thw6gUDj3eDCINij8TflU=:rC1I7tcVugrHEY2DT0iPjGyjM4aJxkMM9n8WBxtUtHU='
+ERROR 54000: encrypted password is too long
+DETAIL: Encrypted passwords must be no longer than 512 bytes.
+
+> RESET password_encryption
+-- RESET
+
+> RESET scram_iterations
+-- RESET
+
+> DROP ROLE gd_ra_super, gd_ra_admin, gd_ra_limited, gd_ra_normal, gd_ra_made,
+>   gd_ra_x, gd_ra_y, gd_ra_z, gd_ra_w, gd_ra_scram, gd_ra_empty, gd_ra_renamed
+-- DROP ROLE
+
+> DROP ROLE IF EXISTS gd_ra_made2
+-- DROP ROLE
+

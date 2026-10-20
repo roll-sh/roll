@@ -1,0 +1,367 @@
+> set jit = off
+-- SET
+
+> create table pi_l (id int, t text, v varchar(20), n name, b char(8))
+-- CREATE TABLE
+
+> insert into pi_l select g, 'word' || (g % 500) || 'x', 'v' || (g % 300), 'nm' || g, 'b' || (g % 50) from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> create index pi_l_t on pi_l (t)
+-- CREATE INDEX
+
+> create index pi_l_v on pi_l (v)
+-- CREATE INDEX
+
+> create index pi_l_n on pi_l (n)
+-- CREATE INDEX
+
+> create index pi_l_b on pi_l (b)
+-- CREATE INDEX
+
+> analyze pi_l
+-- ANALYZE
+
+> explain select * from pi_l where t like 'word1%'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=66.67..431.26 rows=4445 width=89)
+  Filter: (t ~~ 'word1%'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..65.56 rows=4527 width=0)
+        Index Cond: ((t >= 'word1'::text) AND (t < 'word2'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where t like 'word12%'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=8.90..337.74 rows=442 width=89)
+  Filter: (t ~~ 'word12%'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..8.79 rows=450 width=0)
+        Index Cond: ((t >= 'word12'::text) AND (t < 'word13'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where t like 'word123x'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=4.60..117.05 rows=40 width=89)
+  Filter: (t ~~ 'word123x'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..4.59 rows=40 width=0)
+        Index Cond: (t = 'word123x'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t like '%word1'
+QUERY PLAN:text
+Seq Scan on pi_l  (cost=0.00..558.00 rows=2 width=89)
+  Filter: (t ~~ '%word1'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t like 'word1_x'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=65.65..430.24 rows=362 width=89)
+  Filter: (t ~~ 'word1_x'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..65.56 rows=4527 width=0)
+        Index Cond: ((t >= 'word1'::text) AND (t < 'word2'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where t ilike 'word1%'
+QUERY PLAN:text
+Seq Scan on pi_l  (cost=0.00..558.00 rows=4445 width=89)
+  Filter: (t ~~* 'word1%'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t ilike '12%'
+QUERY PLAN:text
+Index Scan using pi_l_t on pi_l  (cost=0.29..8.31 rows=2 width=89)
+  Index Cond: ((t >= '12'::text) AND (t < '13'::text))
+  Filter: (t ~~* '12%'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t ~ '^word12'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=8.90..337.74 rows=442 width=89)
+  Filter: (t ~ '^word12'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..8.79 rows=450 width=0)
+        Index Cond: ((t >= 'word12'::text) AND (t < 'word13'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where t ~ '^word12x$'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=4.60..117.05 rows=40 width=89)
+  Filter: (t ~ '^word12x$'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..4.59 rows=40 width=0)
+        Index Cond: (t = 'word12x'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t ~ 'word12'
+QUERY PLAN:text
+Seq Scan on pi_l  (cost=0.00..558.00 rows=442 width=89)
+  Filter: (t ~ 'word12'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t ~ '^wor[d]12'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=8.90..337.74 rows=442 width=89)
+  Filter: (t ~ '^wor[d]12'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..8.79 rows=450 width=0)
+        Index Cond: ((t >= 'word12'::text) AND (t < 'word13'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where t ~ '^w(o)rd12'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=8.90..337.74 rows=442 width=89)
+  Filter: (t ~ '^w(o)rd12'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..8.79 rows=450 width=0)
+        Index Cond: ((t >= 'word12'::text) AND (t < 'word13'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where t ~ '^word1(2|3)'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=65.78..430.37 rows=882 width=89)
+  Filter: (t ~ '^word1(2|3)'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..65.56 rows=4527 width=0)
+        Index Cond: ((t >= 'word1'::text) AND (t < 'word2'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where t ~ '^(word12)$'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=4.60..117.05 rows=40 width=89)
+  Filter: (t ~ '^(word12)$'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..4.59 rows=40 width=0)
+        Index Cond: (t = 'word12'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t ~* '^word12'
+QUERY PLAN:text
+Seq Scan on pi_l  (cost=0.00..558.00 rows=442 width=89)
+  Filter: (t ~* '^word12'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t similar to 'word12%'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=8.90..337.74 rows=442 width=89)
+  Filter: (t ~ '^(?:word12.*)$'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..8.79 rows=450 width=0)
+        Index Cond: ((t >= 'word12'::text) AND (t < 'word13'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where t not like 'word1%'
+QUERY PLAN:text
+Seq Scan on pi_l  (cost=0.00..558.00 rows=15555 width=89)
+  Filter: (t !~~ 'word1%'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where v like 'v1%'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=109.21..511.03 rows=7506 width=89)
+  Filter: ((v)::text ~~ 'v1%'::text)
+  ->  Bitmap Index Scan on pi_l_v  (cost=0.00..107.34 rows=7505 width=0)
+        Index Cond: (((v)::text >= 'v1'::text) AND ((v)::text < 'v2'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where n like 'nm12%'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=22.57..343.11 rows=1010 width=89)
+  Filter: (n ~~ 'nm12%'::text)
+  ->  Bitmap Index Scan on pi_l_n  (cost=0.00..22.32 rows=1003 width=0)
+        Index Cond: ((n >= 'nm12'::text) AND (n < 'nm13'::text))
+-- EXPLAIN
+
+> explain select * from pi_l where b like 'b1%'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=65.39..428.39 rows=4400 width=89)
+  Filter: (b ~~ 'b1%'::text)
+  ->  Bitmap Index Scan on pi_l_b  (cost=0.00..64.29 rows=4400 width=0)
+        Index Cond: ((b >= 'b1'::bpchar) AND (b < 'b2'::bpchar))
+-- EXPLAIN
+
+> explain select * from pi_l where b = 'b1'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=7.39..336.86 rows=400 width=89)
+  Recheck Cond: (b = 'b1'::bpchar)
+  ->  Bitmap Index Scan on pi_l_b  (cost=0.00..7.29 rows=400 width=0)
+        Index Cond: (b = 'b1'::bpchar)
+-- EXPLAIN
+
+> explain select * from pi_l where t like 'zzz%'
+QUERY PLAN:text
+Index Scan using pi_l_t on pi_l  (cost=0.29..8.31 rows=2 width=89)
+  Index Cond: ((t >= 'zzz'::text) AND (t < 'zz{'::text))
+  Filter: (t ~~ 'zzz%'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t like 'word%'
+QUERY PLAN:text
+Seq Scan on pi_l  (cost=0.00..558.00 rows=19998 width=89)
+  Filter: (t ~~ 'word%'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t like 'word42%' and id < 100
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=8.38..338.96 rows=2 width=89)
+  Filter: ((t ~~ 'word42%'::text) AND (id < 100))
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..8.38 rows=409 width=0)
+        Index Cond: ((t >= 'word42'::text) AND (t < 'word43'::text))
+-- EXPLAIN
+
+> explain select t from pi_l where t like 'word42%'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=8.46..338.02 rows=323 width=8)
+  Filter: (t ~~ 'word42%'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..8.38 rows=409 width=0)
+        Index Cond: ((t >= 'word42'::text) AND (t < 'word43'::text))
+-- EXPLAIN
+
+> select count(*) from pi_l where t like 'word42%'
+count:int8
+440
+-- SELECT 1
+
+> select count(*) from pi_l where t ~ '^word12'
+count:int8
+440
+-- SELECT 1
+
+> select count(*) from pi_l where t similar to 'word12%'
+count:int8
+440
+-- SELECT 1
+
+> select count(*) from pi_l where t ilike 'WORD4%'
+count:int8
+4440
+-- SELECT 1
+
+> select count(*), min(t), max(t) from pi_l where t like 'word12%'
+count:int8 | min:text | max:text
+440 | word120x | word12x
+-- SELECT 1
+
+> explain select * from pi_l where t < 'word'
+QUERY PLAN:text
+Index Scan using pi_l_t on pi_l  (cost=0.29..8.30 rows=1 width=89)
+  Index Cond: (t < 'word'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t > 'word99x'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_l  (cost=5.47..266.20 rows=153 width=89)
+  Recheck Cond: (t > 'word99x'::text)
+  ->  Bitmap Index Scan on pi_l_t  (cost=0.00..5.43 rows=153 width=0)
+        Index Cond: (t > 'word99x'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t >= 'word1'
+QUERY PLAN:text
+Seq Scan on pi_l  (cost=0.00..558.00 rows=19930 width=89)
+  Filter: (t >= 'word1'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where id > 19990
+QUERY PLAN:text
+Seq Scan on pi_l  (cost=0.00..558.00 rows=10 width=89)
+  Filter: (id > 19990)
+-- EXPLAIN
+
+> explain select * from pi_l where id < 5
+QUERY PLAN:text
+Seq Scan on pi_l  (cost=0.00..558.00 rows=4 width=89)
+  Filter: (id < 5)
+-- EXPLAIN
+
+> create index pi_l_id on pi_l (id)
+-- CREATE INDEX
+
+> explain select * from pi_l where id > 19990
+QUERY PLAN:text
+Index Scan using pi_l_id on pi_l  (cost=0.29..8.46 rows=10 width=89)
+  Index Cond: (id > 19990)
+-- EXPLAIN
+
+> explain select * from pi_l where id < 5
+QUERY PLAN:text
+Index Scan using pi_l_id on pi_l  (cost=0.29..8.36 rows=4 width=89)
+  Index Cond: (id < 5)
+-- EXPLAIN
+
+> insert into pi_l select g, 'zzz' || g, 'v', 'n', 'b' from generate_series(20001, 20500) g
+-- INSERT 0 500
+
+> explain select * from pi_l where t > 'zz'
+QUERY PLAN:text
+Index Scan using pi_l_t on pi_l  (cost=0.29..8.30 rows=1 width=89)
+  Index Cond: (t > 'zz'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where t like 'zzz1%'
+QUERY PLAN:text
+Index Scan using pi_l_t on pi_l  (cost=0.29..8.31 rows=2 width=89)
+  Index Cond: ((t >= 'zzz1'::text) AND (t < 'zzz2'::text))
+  Filter: (t ~~ 'zzz1%'::text)
+-- EXPLAIN
+
+> explain select * from pi_l where id > 20000
+QUERY PLAN:text
+Index Scan using pi_l_id on pi_l  (cost=0.29..12.84 rows=146 width=89)
+  Index Cond: (id > 20000)
+-- EXPLAIN
+
+> create table pi_p (id int, t text)
+-- CREATE TABLE
+
+> insert into pi_p select g, 'word' || (g % 500) || 'x' from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> create index pi_p_t on pi_p (t)
+-- CREATE INDEX
+
+> create index pi_p_tp on pi_p (t text_pattern_ops)
+-- CREATE INDEX
+
+> analyze pi_p
+-- ANALYZE
+
+> explain select * from pi_p where t like 'word1%'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_p  (cost=66.67..232.26 rows=4445 width=12)
+  Filter: (t ~~ 'word1%'::text)
+  ->  Bitmap Index Scan on pi_p_t  (cost=0.00..65.56 rows=4527 width=0)
+        Index Cond: ((t >= 'word1'::text) AND (t < 'word2'::text))
+-- EXPLAIN
+
+> explain select * from pi_p where t like 'word42%'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_p  (cost=7.54..120.50 rows=323 width=12)
+  Filter: (t ~~ 'word42%'::text)
+  ->  Bitmap Index Scan on pi_p_tp  (cost=0.00..7.46 rows=317 width=0)
+        Index Cond: ((t ~>=~ 'word42'::text) AND (t ~<~ 'word43'::text))
+-- EXPLAIN
+
+> explain select * from pi_p where t ~ '^word12'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_p  (cost=8.80..123.30 rows=442 width=12)
+  Filter: (t ~ '^word12'::text)
+  ->  Bitmap Index Scan on pi_p_tp  (cost=0.00..8.69 rows=440 width=0)
+        Index Cond: ((t ~>=~ 'word12'::text) AND (t ~<~ 'word13'::text))
+-- EXPLAIN
+
+> explain select * from pi_p where t ~<~ 'word2'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_p  (cost=56.20..223.13 rows=4634 width=12)
+  Recheck Cond: (t ~<~ 'word2'::text)
+  ->  Bitmap Index Scan on pi_p_tp  (cost=0.00..55.04 rows=4634 width=0)
+        Index Cond: (t ~<~ 'word2'::text)
+-- EXPLAIN
+
+> explain select * from pi_p where t ~>=~ 'word42' and t ~<~ 'word43'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_p  (cost=7.54..121.29 rows=317 width=12)
+  Recheck Cond: ((t ~>=~ 'word42'::text) AND (t ~<~ 'word43'::text))
+  ->  Bitmap Index Scan on pi_p_tp  (cost=0.00..7.46 rows=317 width=0)
+        Index Cond: ((t ~>=~ 'word42'::text) AND (t ~<~ 'word43'::text))
+-- EXPLAIN
+
+> explain select * from pi_p where t < 'word2'
+QUERY PLAN:text
+Bitmap Heap Scan on pi_p  (cost=55.91..222.38 rows=4597 width=12)
+  Recheck Cond: (t < 'word2'::text)
+  ->  Bitmap Index Scan on pi_p_t  (cost=0.00..54.77 rows=4597 width=0)
+        Index Cond: (t < 'word2'::text)
+-- EXPLAIN
+

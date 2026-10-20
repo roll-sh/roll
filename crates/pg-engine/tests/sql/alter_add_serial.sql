@@ -1,0 +1,23 @@
+-- bool to string casts (text(boolean)); ALTER TABLE ADD COLUMN serial / identity filling existing rows.
+select true::text, cast(false as varchar), true::char(5), format('%s', true), true || '';
+create table gx_s1(a int);
+insert into gx_s1 values (1), (2);
+alter table gx_s1 add column b serial;
+select * from gx_s1 order by a;
+select currval('gx_s1_b_seq'), lastval();
+alter table gx_s1 add column c bigserial, add column d int default 5;
+select * from gx_s1 order by a;
+drop table gx_s1;
+create table gx_s2(a int);
+insert into gx_s2 values (1), (2), (3);
+alter table gx_s2 add column i int generated always as identity;
+alter table gx_s2 add column j smallserial;
+select * from gx_s2 order by a;
+insert into gx_s2(a) values (4);
+select * from gx_s2 order by a;
+begin;
+alter table gx_s2 add column k serial;
+select k from gx_s2 order by a;
+rollback;
+select * from gx_s2 order by a;
+drop table gx_s2;

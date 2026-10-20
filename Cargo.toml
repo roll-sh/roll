@@ -27,9 +27,37 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 object_store = { version = "0.14", features = ["aws"] }
 postgres-protocol = "0.6"
+fallible-iterator = "0.2"
 zstd = "0.14"
+unicode-normalization = "0.1"
 humantime = "2"
 futures = "0.3"
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
+pg-engine = { path = "crates/pg-engine" }
+pg-snowball = { path = "crates/pg-snowball" }
+pg-icu = { path = "crates/pg-icu" }
+
+pg_query = { git = "https://github.com/pganalyze/pg_query.rs", rev = "ad0c87ed59c84ec6b42c970bb42d7985b7b5878b" }
+prost = "0.13"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
+bigdecimal = "0.4"
+num-bigint = "0.4"
+num-traits = "0.2"
+uuid = "1"
+sha2 = "0.10"
+hmac = "0.12"
+md-5 = "0.10"
+base64 = "0.22"
+crc32fast = "1"
+parking_lot = "0.12"
+crossbeam-skiplist = "0.1"
+tempfile = "3"
+# ICU4X: pg-engine's `icu4x` fallback where ICU4C 78.1 (crates/pg-icu) can't be built
+icu_collator = "2.3"
+icu_casemap = "2.3"
+icu_locale_core = "2.3"
+icu_provider = "2.3"
+icu_segmenter = "2.3"

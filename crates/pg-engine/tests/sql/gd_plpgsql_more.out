@@ -1,0 +1,270 @@
+> CREATE FUNCTION gd_pl_out(out int, out int) RETURNS SETOF record LANGUAGE plpgsql AS $$
+> BEGIN
+>   $1 := -1;
+>   $2 := -2;
+>   RETURN NEXT;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM gd_pl_out()
+column1:int4 | column2:int4
+-1 | -2
+-- SELECT 1
+
+> CREATE FUNCTION gd_pl_kw() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE
+>   return int := 42;
+> BEGIN
+>   return := return + 1;
+>   RETURN return;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT gd_pl_kw()
+gd_pl_kw:int4
+43
+-- SELECT 1
+
+> CREATE FUNCTION gd_pl_todate(int) RETURNS date LANGUAGE sql IMMUTABLE STRICT AS 'SELECT $1::text::date'
+-- CREATE FUNCTION
+
+> CREATE CAST (int AS date) WITH FUNCTION gd_pl_todate(int) AS ASSIGNMENT
+-- CREATE CAST
+
+> CREATE FUNCTION gd_pl_castret(int) RETURNS date LANGUAGE plpgsql AS 'BEGIN RETURN $1; END'
+-- CREATE FUNCTION
+
+> SELECT gd_pl_castret(20150717)
+gd_pl_castret:date
+2015-07-17
+-- SELECT 1
+
+> SELECT gd_pl_castret(-1)
+ERROR 22007: invalid input syntax for type date: "-1"
+CONTEXT: SQL function "gd_pl_todate" statement 1
+CONTEXT: PL/pgSQL function gd_pl_castret(integer) while casting return value to function's return type
+
+> DROP FUNCTION gd_pl_castret(int)
+-- DROP FUNCTION
+
+> DROP FUNCTION gd_pl_todate(int) CASCADE
+NOTICE 00000: drop cascades to cast from integer to date
+-- DROP FUNCTION
+
+> CREATE TABLE gd_pl_rc (a int)
+-- CREATE TABLE
+
+> CREATE FUNCTION gd_pl_constcur() RETURNS refcursor LANGUAGE plpgsql AS $$
+> DECLARE
+>   rc CONSTANT refcursor;
+> BEGIN
+>   OPEN rc FOR SELECT a FROM gd_pl_rc;
+>   RETURN rc;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT gd_pl_constcur()
+ERROR 22005: variable "rc" is declared CONSTANT
+CONTEXT: PL/pgSQL function gd_pl_constcur() line 5 at OPEN
+
+> DROP FUNCTION gd_pl_constcur()
+-- DROP FUNCTION
+
+> CREATE TYPE gd_pl_ct AS (x int, y varchar)
+-- CREATE TYPE
+
+> CREATE FUNCTION gd_pl_comp() RETURNS gd_pl_ct LANGUAGE plpgsql AS 'BEGIN RETURN (1, ''hello''); END'
+-- CREATE FUNCTION
+
+> SELECT gd_pl_comp()
+ERROR 42804: returned record type does not match expected record type
+DETAIL: Returned type unknown does not match expected type character varying in column "y" (position 2).
+CONTEXT: PL/pgSQL function gd_pl_comp() while casting return value to function's return type
+
+> CREATE OR REPLACE FUNCTION gd_pl_comp() RETURNS gd_pl_ct LANGUAGE plpgsql AS 'BEGIN RETURN (1, ''hello''::varchar); END'
+-- CREATE FUNCTION
+
+> SELECT gd_pl_comp()
+gd_pl_comp:user
+(1,hello)
+-- SELECT 1
+
+> CREATE OR REPLACE FUNCTION gd_pl_comp() RETURNS gd_pl_ct LANGUAGE plpgsql AS 'BEGIN RETURN 1 + 1; END'
+-- CREATE FUNCTION
+
+> SELECT gd_pl_comp()
+ERROR 42804: cannot return non-composite value from function returning composite type
+CONTEXT: PL/pgSQL function gd_pl_comp() line 1 at RETURN
+
+> DROP FUNCTION gd_pl_comp()
+-- DROP FUNCTION
+
+> CREATE FUNCTION gd_pl_rq() RETURNS SETOF int LANGUAGE plpgsql AS $$
+> BEGIN
+>   RETURN QUERY SELECT 10 INTO gd_pl_nosuch;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM gd_pl_rq()
+ERROR 42601: SELECT INTO query does not return tuples
+CONTEXT: SQL statement "SELECT 10 INTO gd_pl_nosuch"
+CONTEXT: PL/pgSQL function gd_pl_rq() line 3 at RETURN QUERY
+
+> DROP FUNCTION gd_pl_rq()
+-- DROP FUNCTION
+
+> CREATE FUNCTION gd_pl_fe(anyarray) RETURNS void LANGUAGE plpgsql AS $$
+> DECLARE x int[];
+> BEGIN
+>   FOREACH x SLICE 2 IN ARRAY $1 LOOP
+>     RAISE NOTICE '%', x;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT gd_pl_fe(ARRAY[1, 2, 3, 4])
+ERROR 2202E: slice dimension (2) is out of the valid range 0..1
+CONTEXT: PL/pgSQL function gd_pl_fe(anyarray) line 4 at FOREACH over array
+
+> SELECT gd_pl_fe(ARRAY[[1, 2], [3, 4]])
+NOTICE 00000: {{1,2},{3,4}}
+CONTEXT: PL/pgSQL function gd_pl_fe(anyarray) line 5 at RAISE
+gd_pl_fe:void
+
+-- SELECT 1
+
+> SELECT gd_pl_fe(ARRAY[[[1, 2]], [[3, 4]]])
+NOTICE 00000: {{1,2}}
+CONTEXT: PL/pgSQL function gd_pl_fe(anyarray) line 5 at RAISE
+NOTICE 00000: {{3,4}}
+CONTEXT: PL/pgSQL function gd_pl_fe(anyarray) line 5 at RAISE
+gd_pl_fe:void
+
+-- SELECT 1
+
+> CREATE OR REPLACE FUNCTION gd_pl_fe(anyarray) RETURNS void LANGUAGE plpgsql AS $$
+> DECLARE x int;
+> BEGIN
+>   FOREACH x SLICE 1 IN ARRAY $1 LOOP
+>     RAISE NOTICE '%', x;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT gd_pl_fe(ARRAY[1, 2, 3, 4])
+ERROR 42804: FOREACH ... SLICE loop variable must be of an array type
+CONTEXT: PL/pgSQL function gd_pl_fe(anyarray) line 4 at FOREACH over array
+
+> CREATE OR REPLACE FUNCTION gd_pl_fe(anyarray) RETURNS void LANGUAGE plpgsql AS $$
+> DECLARE r record;
+> BEGIN
+>   FOREACH r IN ARRAY $1 LOOP
+>     RAISE NOTICE '%', r;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT gd_pl_fe(ARRAY[(10, 'a'), (40, 'b')]::gd_pl_ct[])
+NOTICE 00000: (10,a)
+CONTEXT: PL/pgSQL function gd_pl_fe(anyarray) line 5 at RAISE
+NOTICE 00000: (40,b)
+CONTEXT: PL/pgSQL function gd_pl_fe(anyarray) line 5 at RAISE
+gd_pl_fe:void
+
+-- SELECT 1
+
+> DROP FUNCTION gd_pl_fe(anyarray)
+-- DROP FUNCTION
+
+> DROP TYPE gd_pl_ct
+-- DROP TYPE
+
+> CREATE FUNCTION gd_pl_md() RETURNS text[] LANGUAGE plpgsql AS $$
+> DECLARE
+>   arr text[];
+>   i int := 1;
+> BEGIN
+>   arr := array[array['foo', 'bar'], array['baz', 'quux']];
+>   arr[(SELECT i)][(SELECT i + 1)] := (SELECT 'fool');
+>   RETURN arr;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT gd_pl_md()
+gd_pl_md:text[]
+{{foo,fool},{baz,quux}}
+-- SELECT 1
+
+> DROP FUNCTION gd_pl_md()
+-- DROP FUNCTION
+
+> CREATE FUNCTION gd_pl_from() RETURNS void LANGUAGE plpgsql AS $$
+> DECLARE
+>   a int := 5;
+>   b int := 7;
+>   n int;
+>   r record;
+>   c CURSOR (r1 int, r2 int) FOR SELECT * FROM generate_series(r1, r2) i;
+> BEGIN
+>   SELECT count(*) INTO n FROM generate_series(a, b) i;
+>   RAISE NOTICE 'count %', n;
+>   SELECT x INTO n FROM (SELECT a + 100 AS x) s;
+>   RAISE NOTICE 'sub %', n;
+>   FOR r IN c(a, b) LOOP
+>     RAISE NOTICE 'cursor %', r.i;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT gd_pl_from()
+NOTICE 00000: count 3
+CONTEXT: PL/pgSQL function gd_pl_from() line 10 at RAISE
+NOTICE 00000: sub 105
+CONTEXT: PL/pgSQL function gd_pl_from() line 12 at RAISE
+NOTICE 00000: cursor 5
+CONTEXT: PL/pgSQL function gd_pl_from() line 14 at RAISE
+NOTICE 00000: cursor 6
+CONTEXT: PL/pgSQL function gd_pl_from() line 14 at RAISE
+NOTICE 00000: cursor 7
+CONTEXT: PL/pgSQL function gd_pl_from() line 14 at RAISE
+gd_pl_from:void
+
+-- SELECT 1
+
+> DROP FUNCTION gd_pl_from()
+-- DROP FUNCTION
+
+> CREATE TABLE gd_pl_tt (a int)
+-- CREATE TABLE
+
+> CREATE FUNCTION gd_pl_ttf() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   INSERT INTO dx VALUES (1);
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER gd_pl_ttt AFTER INSERT ON gd_pl_tt REFERENCING NEW TABLE AS dx
+>   FOR EACH STATEMENT EXECUTE FUNCTION gd_pl_ttf()
+-- CREATE TRIGGER
+
+> INSERT INTO gd_pl_tt VALUES (1)
+ERROR 0A000: relation "dx" cannot be the target of a modifying statement
+CONTEXT: SQL statement "INSERT INTO dx VALUES (1)"
+CONTEXT: PL/pgSQL function gd_pl_ttf() line 3 at SQL statement
+
+> SELECT 'gd_pl_nosch.stuff'::regclass
+ERROR 42P01: relation "gd_pl_nosch.stuff" does not exist (at 8)
+
+> SELECT 'gd_pl_nosch.stuff'::text::regclass
+ERROR 3F000: schema "gd_pl_nosch" does not exist
+
+> DROP TABLE gd_pl_tt
+-- DROP TABLE
+
+> DROP FUNCTION gd_pl_ttf(), gd_pl_out(), gd_pl_kw()
+-- DROP FUNCTION
+
+> DROP TABLE gd_pl_rc
+-- DROP TABLE
+

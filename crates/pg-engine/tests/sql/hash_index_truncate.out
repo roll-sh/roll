@@ -1,0 +1,61 @@
+> create table hit (a int, b text)
+-- CREATE TABLE
+
+> insert into hit select g, 'x' || g from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> create index hit_a on hit using hash (a)
+-- CREATE INDEX
+
+> select pg_relation_size('hit_a')
+pg_relation_size:int8
+1064960
+-- SELECT 1
+
+> analyze hit
+-- ANALYZE
+
+> select relpages, reltuples from pg_class where relname = 'hit'
+relpages:int4 | reltuples:float4
+109 | 20000
+-- SELECT 1
+
+> truncate hit
+-- TRUNCATE TABLE
+
+> select relname, relpages, reltuples from pg_class where relname in ('hit', 'hit_a') order by relname
+relname:name | relpages:int4 | reltuples:float4
+hit | 0 | -1
+hit_a | 0 | -1
+-- SELECT 2
+
+> select pg_relation_size('hit_a')
+pg_relation_size:int8
+81920
+-- SELECT 1
+
+> insert into hit select g, 'x' || g from generate_series(1, 5000) g
+-- INSERT 0 5000
+
+> select pg_relation_size('hit_a'), pg_relation_size('hit')
+pg_relation_size:int8 | pg_relation_size:int8
+319488 | 221184
+-- SELECT 1
+
+> begin
+-- BEGIN
+
+> truncate hit
+-- TRUNCATE TABLE
+
+> insert into hit select g, 'y' from generate_series(1, 100) g
+-- INSERT 0 100
+
+> select pg_relation_size('hit_a')
+pg_relation_size:int8
+81920
+-- SELECT 1
+
+> commit
+-- COMMIT
+

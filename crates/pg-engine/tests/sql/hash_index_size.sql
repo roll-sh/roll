@@ -1,0 +1,33 @@
+-- Hash index sizes: initial buckets from the heap estimate at build time, splits by
+-- splitpoint phases, overflow pages (taken and freed again as buckets split), fillfactor.
+create table h1 (id int, t text);
+insert into h1 select g, md5(g::text) from generate_series(1, 5000) g;
+create index h1_id on h1 using hash (id);
+create index h1_t on h1 using hash (t);
+select pg_relation_size('h1_id'), pg_relation_size('h1_t');
+create table h2 (id int, t text);
+create index h2_id on h2 using hash (id);
+select pg_relation_size('h2_id');
+insert into h2 select g, md5(g::text) from generate_series(1, 20000) g;
+select pg_relation_size('h2_id');
+create table h3 (k int);
+insert into h3 select g % 3 from generate_series(1, 3000) g;
+create index h3_k on h3 using hash (k);
+select pg_relation_size('h3_k');
+insert into h3 select g % 3 from generate_series(1, 3000) g;
+select pg_relation_size('h3_k');
+create table h4 (id bigint, d date, f float8, u uuid);
+insert into h4 select g, date '2020-01-01' + g, g * 1.5, md5(g::text)::uuid from generate_series(1, 30000) g;
+create index on h4 using hash (id);
+create index on h4 using hash (d);
+create index on h4 using hash (f);
+create index on h4 using hash (u);
+select relname, pg_relation_size(oid) from pg_class where relname like 'h4_%' order by relname;
+create index h1_ff on h1 using hash (id) with (fillfactor = 10);
+select pg_relation_size('h1_ff');
+create table h5 (t varchar(20), c char(4), b bool);
+insert into h5 select 'v' || (g % 500), 'c' || (g % 40), g % 2 = 0 from generate_series(1, 12000) g;
+create index on h5 using hash (t);
+create index on h5 using hash (c);
+create index on h5 using hash (b);
+select relname, pg_relation_size(oid) from pg_class where relname like 'h5_%' order by relname;

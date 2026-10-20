@@ -1,0 +1,30 @@
+-- A foreign key can't use a deferrable primary key or unique constraint of the referenced table
+create table a (a int primary key deferrable, b int unique deferrable initially deferred, c int, d int);
+create unique index a_c on a (c);
+alter table a add constraint a_d unique (d) deferrable;
+alter table a add constraint a_cd unique (c, d);
+create table r1 (x int references a);
+create table r2 (x int references a (b));
+create table r3 (x int references a (c));
+create table r4 (x int references a (d));
+create table r5 (x int, y int, foreign key (x, y) references a (d, c));
+create table r6 (x int);
+alter table r6 add foreign key (x) references a;
+alter table r6 add foreign key (x) references a (b);
+create table s (a int primary key deferrable, foreign key (a) references s);
+create table s2 (a int unique deferrable, b int references s2 (a));
+create table p (a int primary key deferrable) partition by range (a);
+create table r7 (x int references p);
+create table q (a int, b int, unique (a) deferrable, unique (a));
+create table r8 (x int references q (a));
+select conname, confrelid::regclass, conindid::regclass from pg_constraint where conrelid = 'r8'::regclass;
+drop table r3, r5, r8, q, a, r6, p cascade;
+-- the referenced key's columns may be listed in any order; the index found backs the key
+create table u (c int, d int, unique (c, d));
+create table ur (x int, y int, foreign key (x, y) references u (d, c));
+select conname, conindid::regclass from pg_constraint where conrelid = 'ur'::regclass;
+insert into u values (1, 2);
+insert into ur values (2, 1);
+insert into ur values (1, 2);
+alter table u alter constraint u_c_d_key deferrable;
+drop table ur, u;

@@ -1,0 +1,327 @@
+> SELECT '[1,5)'::int4range, '(1,5]'::int4range, '[1,5]'::int4range, '(1,5)'::int4range, '(,5)'::int4range, '[1,)'::int4range, '(,)'::int4range
+int4range:3904 | int4range:3904 | int4range:3904 | int4range:3904 | int4range:3904 | int4range:3904 | int4range:3904
+[1,5) | [2,6) | [1,6) | [2,5) | (,5) | [1,) | (,)
+-- SELECT 1
+
+> SELECT 'empty'::int4range, ' EMPTY '::int4range, '[5,5)'::int4range, '[5,5]'::int4range, '(5,5]'::int4range, '(4,5)'::int4range
+int4range:3904 | int4range:3904 | int4range:3904 | int4range:3904 | int4range:3904 | int4range:3904
+empty | empty | empty | [5,6) | empty | empty
+-- SELECT 1
+
+> SELECT '[1.5,2.25)'::numrange, '[2020-01-01,2020-02-01]'::daterange, '["2020-01-01 10:00","2020-01-02 00:00")'::tsrange
+numrange:3906 | daterange:3912 | tsrange:3908
+[1.5,2.25) | [2020-01-01,2020-02-02) | ["2020-01-01 10:00:00","2020-01-02 00:00:00")
+-- SELECT 1
+
+> SELECT '[2020-01-01 10:00+00, 2020-01-02 00:00+00)'::tstzrange
+tstzrange:3910
+["2020-01-01 10:00:00+00","2020-01-02 00:00:00+00")
+-- SELECT 1
+
+> SELECT '[ 1 , 5 )'::int4range, '[1,5'::int4range
+ERROR 22P02: malformed range literal: "[1,5" (at 32)
+DETAIL: Unexpected end of input.
+
+> SELECT 'x'::int4range
+ERROR 22P02: malformed range literal: "x" (at 8)
+DETAIL: Missing left parenthesis or bracket.
+
+> SELECT '[1,5'::int4range
+ERROR 22P02: malformed range literal: "[1,5" (at 8)
+DETAIL: Unexpected end of input.
+
+> SELECT '[1,5,6)'::int4range
+ERROR 22P02: malformed range literal: "[1,5,6)" (at 8)
+DETAIL: Too many commas.
+
+> SELECT '[1,5)x'::int4range
+ERROR 22P02: malformed range literal: "[1,5)x" (at 8)
+DETAIL: Junk after right parenthesis or bracket.
+
+> SELECT '[5,1)'::int4range
+ERROR 22000: range lower bound must be less than or equal to range upper bound (at 8)
+
+> SELECT 'emptyx'::int4range
+ERROR 22P02: malformed range literal: "emptyx" (at 8)
+DETAIL: Junk after "empty" key word.
+
+> SELECT '[a,b)'::int4range
+ERROR 22P02: invalid input syntax for type integer: "a" (at 8)
+
+> SELECT '[1 5)'::int4range
+ERROR 22P02: malformed range literal: "[1 5)" (at 8)
+DETAIL: Missing comma after lower bound.
+
+> SELECT int4range(1, 5), int4range(1, 5, '[]'), int4range(NULL, 5), int4range(1, NULL, '()'), int4range(NULL, NULL)
+int4range:3904 | int4range:3904 | int4range:3904 | int4range:3904 | int4range:3904
+[1,5) | [1,6) | (,5) | [2,) | (,)
+-- SELECT 1
+
+> SELECT int4range(1, 5, 'x')
+ERROR 42601: invalid range bound flags
+HINT: Valid values are "[]", "[)", "(]", and "()".
+
+> SELECT int4range(1, 5, NULL)
+ERROR 22000: range constructor flags argument must not be null
+
+> SELECT int4range(5, 1)
+ERROR 22000: range lower bound must be less than or equal to range upper bound
+
+> SELECT int8range(1, 10), numrange(1, 2.5), numrange(1.0, 2.0, '[]'), daterange('2020-01-01', '2020-01-05', '[]')
+int8range:3926 | numrange:3906 | numrange:3906 | daterange:3912
+[1,10) | [1,2.5) | [1.0,2.0] | [2020-01-01,2020-01-06)
+-- SELECT 1
+
+> SELECT tsrange('2020-01-01', '2020-01-02'), tstzrange('2020-01-01 00:00+00', NULL)
+tsrange:3908 | tstzrange:3910
+["2020-01-01 00:00:00","2020-01-02 00:00:00") | ["2020-01-01 00:00:00+00",)
+-- SELECT 1
+
+> SELECT int4range(2147483646, 2147483647, '[]')
+ERROR 22003: integer out of range
+
+> SELECT lower(int4range(1, 5)), upper(int4range(1, 5)), lower('(,5)'::int4range), upper('empty'::int4range), isempty('empty'::int4range), isempty(int4range(1,2))
+lower:int4 | upper:int4 | lower:int4 | upper:int4 | isempty:bool | isempty:bool
+1 | 5 | NULL | NULL | t | f
+-- SELECT 1
+
+> SELECT lower_inc('[1,5)'::numrange), upper_inc('[1,5]'::numrange), lower_inf('(,5)'::numrange), upper_inf('[1,)'::numrange), lower_inc('empty'::numrange)
+lower_inc:bool | upper_inc:bool | lower_inf:bool | upper_inf:bool | lower_inc:bool
+t | t | t | t | f
+-- SELECT 1
+
+> SELECT int4range(1,5) @> 3, int4range(1,5) @> 5, 3 <@ int4range(1,5), int4range(1,5) @> int4range(2,3), int4range(2,3) <@ int4range(1,5), int4range(1,5) @> 'empty'::int4range
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t | t
+-- SELECT 1
+
+> SELECT int4range(1,5) && int4range(4,8), int4range(1,5) && int4range(5,8), int4range(1,5) << int4range(5,8), int4range(5,8) >> int4range(1,5)
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t
+-- SELECT 1
+
+> SELECT int4range(1,5) &< int4range(2,8), int4range(1,9) &< int4range(2,8), int4range(3,5) &> int4range(2,8), int4range(1,5) &> int4range(2,8)
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | f
+-- SELECT 1
+
+> SELECT int4range(1,5) -|- int4range(5,8), int4range(1,5) -|- int4range(6,8), numrange(1,5) -|- numrange(5,8), numrange(1,5,'[]') -|- numrange(5,8)
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | f
+-- SELECT 1
+
+> SELECT int4range(1,5) + int4range(4,8), int4range(1,5) + int4range(5,8), int4range(1,5) * int4range(4,8), int4range(1,5) * int4range(6,8), int4range(1,9) - int4range(4,12), int4range(1,9) - int4range(0,4)
+?column?:3904 | ?column?:3904 | ?column?:3904 | ?column?:3904 | ?column?:3904 | ?column?:3904
+[1,8) | [1,8) | [4,5) | empty | [1,4) | [4,9)
+-- SELECT 1
+
+> SELECT int4range(1,5) + int4range(6,8)
+ERROR 22000: result of range union would not be contiguous
+
+> SELECT int4range(1,9) - int4range(4,6)
+ERROR 22000: result of range difference would not be contiguous
+
+> SELECT range_merge(int4range(1,5), int4range(7,8)), range_merge('empty'::int4range, int4range(7,8))
+range_merge:3904 | range_merge:3904
+[1,8) | [7,8)
+-- SELECT 1
+
+> SELECT int4range(1,5) = int4range(1,5), int4range(1,5) = '[1,4]', int4range(1,5) < int4range(1,6), int4range(1,5) < int4range(2,3), 'empty'::int4range < int4range(1,2), numrange(1,2,'()') > numrange(1,2,'[)')
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t | t
+-- SELECT 1
+
+> SELECT r FROM (VALUES (int4range(3,4)), ('empty'), (int4range(1,10)), (int4range(NULL,2)), (int4range(1,3)), (int4range(1,NULL))) v(r) ORDER BY r
+r:3904
+empty
+(,2)
+[1,3)
+[1,10)
+[1,)
+[3,4)
+-- SELECT 6
+
+> SELECT DISTINCT r FROM (VALUES (int4range(1,3)), ('[1,2]'), (int4range(1,4))) v(r) ORDER BY r
+r:3904
+[1,3)
+[1,4)
+-- SELECT 2
+
+> SELECT pg_typeof(int4range(1,2)), pg_typeof(lower(numrange(1,2))), pg_typeof(int4range(1,2) + int4range(2,3))
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+int4range | numeric | int4range
+-- SELECT 1
+
+> SELECT '{[1,3), [5,7)}'::int4multirange, '{}'::int4multirange, '{[1,3), [2,7), empty}'::int4multirange, '{[1,3), [3,7)}'::int4multirange, ' { [5,6) , [1,2) } '::int4multirange
+int4multirange:4451 | int4multirange:4451 | int4multirange:4451 | int4multirange:4451 | int4multirange:4451
+{[1,3),[5,7)} | {} | {[1,7)} | {[1,7)} | {[1,2),[5,6)}
+-- SELECT 1
+
+> SELECT '{[1,3)'::int4multirange
+ERROR 22P02: malformed multirange literal: "{[1,3)" (at 8)
+DETAIL: Unexpected end of input.
+
+> SELECT '[1,3)'::int4multirange
+ERROR 22P02: malformed multirange literal: "[1,3)" (at 8)
+DETAIL: Missing left brace.
+
+> SELECT '{[1,3) x}'::int4multirange
+ERROR 22P02: malformed multirange literal: "{[1,3) x}" (at 8)
+DETAIL: Expected comma or end of multirange.
+
+> SELECT '{[1,3)} x'::int4multirange
+ERROR 22P02: malformed multirange literal: "{[1,3)} x" (at 8)
+DETAIL: Junk after closing right brace.
+
+> SELECT '{x}'::int4multirange
+ERROR 22P02: malformed multirange literal: "{x}" (at 8)
+DETAIL: Expected range start.
+
+> SELECT int4multirange(), int4multirange(int4range(1,2)), int4multirange(int4range(5,6), int4range(1,2), int4range(2,3)), nummultirange(numrange(1,2), numrange(1.5, 3))
+int4multirange:4451 | int4multirange:4451 | int4multirange:4451 | nummultirange:4532
+{} | {[1,2)} | {[1,3),[5,6)} | {[1,3)}
+-- SELECT 1
+
+> SELECT multirange(int4range(1,2)), range_merge('{[1,2), [5,6)}'::int4multirange), lower('{[1,2), [5,6)}'::int4multirange), upper('{[1,2), [5,6)}'::int4multirange), isempty('{}'::int4multirange)
+multirange:4451 | range_merge:3904 | lower:int4 | upper:int4 | isempty:bool
+{[1,2)} | [1,6) | 1 | 6 | t
+-- SELECT 1
+
+> SELECT '{[1,3), [5,7)}'::int4multirange @> 6, '{[1,3), [5,7)}'::int4multirange @> 4, '{[1,3), [5,7)}'::int4multirange @> int4range(5,6), int4range(0,10) @> '{[1,3), [5,7)}'::int4multirange
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t
+-- SELECT 1
+
+> SELECT '{[1,3), [5,7)}'::int4multirange && int4range(3,5), '{[1,3), [5,7)}'::int4multirange && '{[2,4)}'::int4multirange, '{[1,3)}'::int4multirange << '{[5,7)}'::int4multirange, '{[1,3)}'::int4multirange -|- int4range(3,4)
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | t | t
+-- SELECT 1
+
+> SELECT '{[1,3), [5,7)}'::int4multirange + '{[3,5)}'::int4multirange, '{[1,10)}'::int4multirange - '{[3,5), [7,8)}'::int4multirange, '{[1,5), [7,10)}'::int4multirange * '{[3,8)}'::int4multirange
+?column?:4451 | ?column?:4451 | ?column?:4451
+{[1,7)} | {[1,3),[5,7),[8,10)} | {[3,5),[7,8)}
+-- SELECT 1
+
+> SELECT unnest('{[1,3), [5,7)}'::int4multirange)
+unnest:3904
+[1,3)
+[5,7)
+-- SELECT 2
+
+> SELECT '{[1,3)}'::int4multirange = '{[1,2]}'::int4multirange, '{[1,3)}'::int4multirange < '{[1,3), [4,5)}'::int4multirange
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> SELECT int4range(1,5)::int4multirange, '[1,5)'::int4range::text, '{[1,2)}'::int4multirange::text
+int4range:4451 | text:text | text:text
+{[1,5)} | [1,5) | {[1,2)}
+-- SELECT 1
+
+> CREATE TABLE rt (id int, r tstzrange, d daterange, n numrange[])
+-- CREATE TABLE
+
+> INSERT INTO rt VALUES (1, '[2020-01-01 00:00+00, 2020-01-02 00:00+00)', '[2020-01-01,2020-01-10)', ARRAY[numrange(1,2), numrange(3,4)])
+-- INSERT 0 1
+
+> INSERT INTO rt VALUES (2, '(,2020-01-01 00:00+00)', 'empty', '{"[1,2)","(,5]"}')
+-- INSERT 0 1
+
+> SELECT * FROM rt ORDER BY id
+id:int4 | r:3910 | d:3912 | n:3907
+1 | ["2020-01-01 00:00:00+00","2020-01-02 00:00:00+00") | [2020-01-01,2020-01-10) | {"[1,2)","[3,4)"}
+2 | (,"2020-01-01 00:00:00+00") | empty | {"[1,2)","(,5]"}
+-- SELECT 2
+
+> SELECT id FROM rt WHERE r @> '2020-01-01 12:00+00'::timestamptz
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM rt WHERE d @> '2020-01-05'::date
+id:int4
+1
+-- SELECT 1
+
+> CREATE INDEX ON rt (r)
+-- CREATE INDEX
+
+> CREATE INDEX ON rt USING gist (d)
+-- CREATE INDEX
+
+> SELECT id FROM rt WHERE r = '(,2020-01-01 00:00+00)' ORDER BY id
+id:int4
+2
+-- SELECT 1
+
+> SELECT id, r FROM rt ORDER BY r DESC
+id:int4 | r:3910
+1 | ["2020-01-01 00:00:00+00","2020-01-02 00:00:00+00")
+2 | (,"2020-01-01 00:00:00+00")
+-- SELECT 2
+
+> SELECT format_type('int4range'::regtype, -1), 'int4range'::regtype::oid, 'int4multirange'::regtype::oid, '_int4range'::regtype
+format_type:text | oid:oid | oid:oid | regtype:regtype
+int4range | 3904 | 4451 | int4range[]
+-- SELECT 1
+
+> SELECT typname, typtype, typcategory, typarray::regtype FROM pg_type WHERE typname IN ('int4range', 'int4multirange', 'tstzrange', 'datemultirange') ORDER BY 1
+typname:name | typtype:char | typcategory:char | typarray:regtype
+datemultirange | m | R | datemultirange[]
+int4multirange | m | R | int4multirange[]
+int4range | r | R | int4range[]
+tstzrange | r | R | tstzrange[]
+-- SELECT 4
+
+> SELECT rngtypid::regtype, rngsubtype::regtype, rngmultitypid::regtype FROM pg_range ORDER BY 1::text
+rngtypid:regtype | rngsubtype:regtype | rngmultitypid:regtype
+int4range | integer | int4multirange
+numrange | numeric | nummultirange
+tsrange | timestamp without time zone | tsmultirange
+tstzrange | timestamp with time zone | tstzmultirange
+daterange | date | datemultirange
+int8range | bigint | int8multirange
+-- SELECT 6
+
+> DROP TABLE rt
+-- DROP TABLE
+
+> SELECT range_agg(r) FROM (VALUES (int4range(1,3)), (int4range(2,5)), (int4range(8,9)), (NULL)) v(r)
+range_agg:4451
+{[1,5),[8,9)}
+-- SELECT 1
+
+> SELECT range_agg(r) FROM (VALUES ('{[1,3)}'::int4multirange), ('{[5,6)}')) v(r)
+range_agg:4451
+{[1,3),[5,6)}
+-- SELECT 1
+
+> SELECT range_intersect_agg(r) FROM (VALUES (int4range(1,10)), (int4range(2,5)), (int4range(3,9))) v(r)
+range_intersect_agg:3904
+[3,5)
+-- SELECT 1
+
+> SELECT range_agg(r) FROM (VALUES (int4range(1,3))) v(r) WHERE false
+range_agg:4451
+NULL
+-- SELECT 1
+
+> SELECT int4range(1, 5) @> '3'
+ERROR 22P02: malformed range literal: "3" (at 27)
+DETAIL: Missing left parenthesis or bracket.
+
+> SELECT int4range(1, 5) @> '[2,3)'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT lower('[1,2)')
+lower:text
+[1,2)
+-- SELECT 1
+
+> SELECT int4range_subdiff(5, 2), daterange_subdiff('2020-01-10', '2020-01-01')
+int4range_subdiff:float8 | daterange_subdiff:float8
+3 | 9
+-- SELECT 1
+

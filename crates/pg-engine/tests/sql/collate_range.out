@@ -1,0 +1,186 @@
+> create type trde as range (subtype = text, collation = "de-x-icu")
+-- CREATE TYPE
+
+> create type trc as range (subtype = text, collation = "C")
+-- CREATE TYPE
+
+> create type trsv as range (subtype = text, collation = "sv-x-icu")
+-- CREATE TYPE
+
+> select trde('a', 'B'), trc('B', 'a')
+trde:user | trc:user
+[a,B) | [B,a)
+-- SELECT 1
+
+> select trc('a', 'B')
+ERROR 22000: range lower bound must be less than or equal to range upper bound
+
+> select trde('B', 'a')
+ERROR 22000: range lower bound must be less than or equal to range upper bound
+
+> select trde('a', 'B') @> 'Ab'::text, trc('B', 'a') @> 'Ab'::text, trde('a','b') @> 'B'::text
+?column?:bool | ?column?:bool | ?column?:bool
+t | f | f
+-- SELECT 1
+
+> select trde('a', 'c') && trde('B', 'd'), trde('a', 'b') -|- trde('b', 'C')
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> select trde('a', 'c') + trde('B', 'd'), trde('a', 'C') * trde('b', 'd')
+?column?:user | ?column?:user
+[a,d) | [b,C)
+-- SELECT 1
+
+> select r from (values (trde('B','c')), (trde('a','z')), (trde('b','c')), (trde('A','b'))) v(r) order by r
+r:user
+[a,z)
+[A,b)
+[b,c)
+[B,c)
+-- SELECT 4
+
+> select trsv('z', 'ä') @> 'zz'::text, trsv('a', 'z') @> 'ä'::text
+?column?:bool | ?column?:bool
+t | f
+-- SELECT 1
+
+> select lower(trde('a','B')), upper_inf(trde('a', null)), range_merge(trde('a','b'), trde('C','d'))
+lower:text | upper_inf:bool | range_merge:user
+a | t | [a,d)
+-- SELECT 1
+
+> select trde('a','b') < trde('B','c'), trde('a','b') = trde('a','b')
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> select trde('[a,a)'), isempty(trde('[B,b)')), trde('[b,B]')
+ERROR 22000: range lower bound must be less than or equal to range upper bound (at 36)
+
+> select trde_multirange(trde('a','c'), trde('B','d'))
+trde_multirange:user
+{[a,d)}
+-- SELECT 1
+
+> select trde('a','c') << trde('D','e'), trde('a','c') &< trde('B','d')
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> select '[a,B)'::trde, '[B,a)'::trc
+trde:user | trc:user
+[a,B) | [B,a)
+-- SELECT 1
+
+> create collation ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> create type trci as range (subtype = text, collation = ci)
+-- CREATE TYPE
+
+> create table r (id int, r trde, m trde_multirange)
+-- CREATE TABLE
+
+> insert into r values (1, '[B,c)', '{[a,b), [C,d)}'), (2, '[a,z)', '{[B,c)}'), (3, '[b,c)', '{}'), (4, '[A,b)', '{[x,y), [a,B)}'), (5, 'empty', null)
+-- INSERT 0 5
+
+> select id, r, m from r order by r, id
+id:int4 | r:user | m:user
+5 | empty | NULL
+2 | [a,z) | {[B,c)}
+4 | [A,b) | {[a,B),[x,y)}
+3 | [b,c) | {}
+1 | [B,c) | {[a,b),[C,d)}
+-- SELECT 5
+
+> select id, r from r order by r desc
+id:int4 | r:user
+1 | [B,c)
+3 | [b,c)
+4 | [A,b)
+2 | [a,z)
+5 | empty
+-- SELECT 5
+
+> select id, row_number() over (order by r) from r order by id
+id:int4 | row_number:int8
+1 | 5
+2 | 2
+3 | 4
+4 | 3
+5 | 1
+-- SELECT 5
+
+> select id, m from r order by m, id
+id:int4 | m:user
+3 | {}
+1 | {[a,b),[C,d)}
+4 | {[a,B),[x,y)}
+2 | {[B,c)}
+5 | NULL
+-- SELECT 5
+
+> select r @> 'Bz'::text, id from r order by id
+?column?:bool | id:int4
+t | 1
+t | 2
+t | 3
+f | 4
+f | 5
+-- SELECT 5
+
+> select range_agg(r order by id) from r
+range_agg:user
+{[a,z)}
+-- SELECT 1
+
+> select '{[c,D), [a,B)}'::trde_multirange, '{[a,B), [b,c)}'::trde_multirange
+trde_multirange:user | trde_multirange:user
+{[a,B),[c,D)} | {[a,c)}
+-- SELECT 1
+
+> select '{[a,c)}'::trde_multirange @> 'B'::text, '{[a,c)}'::trde_multirange - '{[B,b]}'::trde_multirange
+ERROR 22000: range lower bound must be less than or equal to range upper bound (at 78)
+
+> select distinct r from r order by 1
+r:user
+empty
+[a,z)
+[A,b)
+[b,c)
+[B,c)
+-- SELECT 5
+
+> select trci('a', 'B'), trci('B', 'a'), trci('a','A'), trci('a', 'A', '[]')
+ERROR 22000: range lower bound must be less than or equal to range upper bound
+
+> select trci('a', 'b') @> 'B'::text, trci('a', 'b') = trci('A', 'b')
+?column?:bool | ?column?:bool
+f | t
+-- SELECT 1
+
+> select max(id) from r group by r order by 1
+max:int4
+1
+2
+3
+4
+5
+-- SELECT 5
+
+> select r, r < '[b,c)'::trde from r order by id
+r:user | ?column?:bool
+[B,c) | f
+[a,z) | t
+[b,c) | f
+[A,b) | t
+empty | t
+-- SELECT 5
+
+> select array_agg(r order by r) from r
+array_agg:user
+{empty,"[a,z)","[A,b)","[b,c)","[B,c)"}
+-- SELECT 1
+

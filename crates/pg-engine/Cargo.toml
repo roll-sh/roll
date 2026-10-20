@@ -1,0 +1,56 @@
+[package]
+name = "pg-engine"
+description = "roll's Postgres-compatible database engine: wire protocol, SQL, MVCC, bottomless storage, many databases per process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+bigdecimal.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+clap.workspace = true
+crc32fast.workspace = true
+crossbeam-skiplist.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+icu_casemap = { workspace = true, optional = true }
+icu_collator = { workspace = true, optional = true }
+icu_locale_core = { workspace = true, optional = true }
+icu_provider = { workspace = true, optional = true }
+icu_segmenter = { workspace = true, optional = true }
+md-5.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+parking_lot.workspace = true
+pg-snowball.workspace = true
+pg-icu.workspace = true
+pg_query.workspace = true
+prost.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true
+zstd.workspace = true
+
+[features]
+# ICU4X in place of ICU4C where the ICU4C build (crates/pg-icu) is unavailable: an
+# approximation of the reference server's ICU.
+icu4x = ["dep:icu_casemap", "dep:icu_collator", "dep:icu_locale_core", "dep:icu_provider", "dep:icu_segmenter"]
+
+[dev-dependencies]
+fallible-iterator.workspace = true
+futures.workspace = true
+postgres-protocol.workspace = true
+tempfile.workspace = true
+tokio-postgres.workspace = true
+tracing-subscriber.workspace = true

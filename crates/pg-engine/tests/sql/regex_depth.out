@@ -1,0 +1,63 @@
+> select 'a' ~ (repeat('(', 7683) || 'a' || repeat(')', 7683))
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ (repeat('(', 7684) || 'a' || repeat(')', 7684))
+ERROR 2201B: invalid regular expression: regular expression is too complex
+
+> select 'a' ~ repeat('a', 43539)
+?column?:bool
+f
+-- SELECT 1
+
+> select 'a' ~ repeat('a', 43540)
+ERROR 2201B: invalid regular expression: regular expression is too complex
+
+> select 'a' ~ repeat('(a)', 11874)
+?column?:bool
+f
+-- SELECT 1
+
+> select 'a' ~ repeat('(a)', 11875)
+ERROR 2201B: invalid regular expression: regular expression is too complex
+
+> select 'a' ~ (repeat('(', 1308) || 'a' || repeat(')*', 1308))
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ (repeat('(', 1309) || 'a' || repeat(')*', 1309))
+ERROR 2201B: invalid regular expression: regular expression is too complex
+
+> select 'a' ~ (repeat('(?=', 5841) || 'a' || repeat(')', 5841))
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ (repeat('(?=', 5842) || 'a' || repeat(')', 5842))
+ERROR 2201B: regular expression failed: regular expression is too complex
+
+> select regexp_match('a', repeat('(', 7684) || 'a' || repeat(')', 7684))
+ERROR 2201B: invalid regular expression: regular expression is too complex
+
+> select regexp_replace('a', repeat('a', 43540), 'x')
+ERROR 2201B: invalid regular expression: regular expression is too complex
+
+> set statement_timeout = '50ms'
+-- SET
+
+> select length(regexp_replace(repeat('a', 5000000), 'a', 'b', 'g'))
+ERROR 57014: canceling statement due to statement timeout
+
+> select count(*) from regexp_matches(repeat('a', 2000000), 'a', 'g')
+ERROR 57014: canceling statement due to statement timeout
+
+> reset statement_timeout
+-- RESET
+
+> select length(regexp_replace(repeat('a', 50000), 'a', 'b', 'g'))
+length:int4
+50000
+-- SELECT 1
+

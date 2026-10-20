@@ -1,0 +1,112 @@
+> create table cix_t (a varchar(10), b varchar(10), c varchar(10), d varchar(10), e varchar(10), g text, h varchar(10), k varchar(10), m varchar(10), n text, p text collate "C", q text collate "C", r varchar(10))
+-- CREATE TABLE
+
+> create index cix_a on cix_t (a)
+-- CREATE INDEX
+
+> create index cix_b_part on cix_t (b) where b > 'm'
+-- CREATE INDEX
+
+> create index cix_c_expr on cix_t (lower(c))
+-- CREATE INDEX
+
+> create index cix_d_coll on cix_t (d collate "C")
+-- CREATE INDEX
+
+> create index cix_e_incl on cix_t (g) include (e)
+-- CREATE INDEX
+
+> create index cix_h_hash on cix_t using hash (h)
+-- CREATE INDEX
+
+> alter table cix_t add constraint cix_ex exclude using btree (k with =)
+-- ALTER TABLE
+
+> create index cix_m_multi on cix_t (m, a)
+-- CREATE INDEX
+
+> create index cix_n on cix_t (n)
+-- CREATE INDEX
+
+> create index cix_g_desc on cix_t (g desc nulls last)
+-- CREATE INDEX
+
+> create index cix_p on cix_t (p)
+-- CREATE INDEX
+
+> create index cix_q_coll on cix_t (q collate "POSIX")
+-- CREATE INDEX
+
+> create unique index cix_r_uniq on cix_t (r) with (fillfactor = 50)
+-- CREATE INDEX
+
+> create temp table cix_files as select relname, pg_relation_filenode(oid) as fn from pg_class where relname like 'cix\_%' and relkind = 'i'
+-- SELECT 13
+
+> alter table cix_t alter a type varchar(20)
+-- ALTER TABLE
+
+> alter table cix_t alter b type varchar(20)
+-- ALTER TABLE
+
+> alter table cix_t alter c type varchar(20)
+-- ALTER TABLE
+
+> alter table cix_t alter d type text
+-- ALTER TABLE
+
+> alter table cix_t alter e type varchar(20)
+-- ALTER TABLE
+
+> alter table cix_t alter h type text
+-- ALTER TABLE
+
+> alter table cix_t alter k type text
+-- ALTER TABLE
+
+> alter table cix_t alter m type text
+-- ALTER TABLE
+
+> alter table cix_t alter n type text collate "C"
+-- ALTER TABLE
+
+> alter table cix_t alter p type varchar
+-- ALTER TABLE
+
+> alter table cix_t alter q type varchar
+-- ALTER TABLE
+
+> alter table cix_t alter r type varchar(30)
+-- ALTER TABLE
+
+> select attname, attcollation::regcollation from pg_attribute where attrelid = 'cix_t'::regclass and attname in ('n', 'p', 'q', 'r') order by attnum
+attname:name | attcollation:4191
+n | "C"
+p | "default"
+q | "default"
+r | "default"
+-- SELECT 4
+
+> select f.relname, pg_relation_filenode(c.oid) = f.fn as kept from cix_files f join pg_class c on c.relname = f.relname order by 1
+relname:name | kept:bool
+cix_a | t
+cix_b_part | f
+cix_c_expr | f
+cix_d_coll | t
+cix_e_incl | t
+cix_ex | t
+cix_g_desc | t
+cix_h_hash | t
+cix_m_multi | t
+cix_n | f
+cix_p | f
+cix_q_coll | t
+cix_r_uniq | t
+-- SELECT 13
+
+> drop table cix_t
+-- DROP TABLE
+
+> drop table cix_files
+-- DROP TABLE
+

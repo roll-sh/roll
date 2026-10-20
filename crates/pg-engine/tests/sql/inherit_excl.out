@@ -1,0 +1,326 @@
+> CREATE TABLE p (a int, b text, CHECK (a > 0))
+-- CREATE TABLE
+
+> CREATE TABLE c1 (CHECK (a < 10)) INHERITS (p)
+-- CREATE TABLE
+
+> CREATE TABLE c2 (CHECK (a >= 10 AND a < 20)) INHERITS (p)
+-- CREATE TABLE
+
+> CREATE TABLE c3 (CHECK (b IN ('x', 'y'))) INHERITS (p)
+-- CREATE TABLE
+
+> CREATE TABLE c4 (CHECK (a IS NOT NULL), CHECK (b <> 'z')) INHERITS (p)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a = 15
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (a = 15)
+  ->  Seq Scan on c2 p_2
+        Filter: (a = 15)
+  ->  Seq Scan on c3 p_3
+        Filter: (a = 15)
+  ->  Seq Scan on c4 p_4
+        Filter: (a = 15)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a < 0
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a BETWEEN 12 AND 13
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: ((a >= 12) AND (a <= 13))
+  ->  Seq Scan on c2 p_2
+        Filter: ((a >= 12) AND (a <= 13))
+  ->  Seq Scan on c3 p_3
+        Filter: ((a >= 12) AND (a <= 13))
+  ->  Seq Scan on c4 p_4
+        Filter: ((a >= 12) AND (a <= 13))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE b = 'q'
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (b = 'q'::text)
+  ->  Seq Scan on c1 p_2
+        Filter: (b = 'q'::text)
+  ->  Seq Scan on c2 p_3
+        Filter: (b = 'q'::text)
+  ->  Seq Scan on c4 p_4
+        Filter: (b = 'q'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE b = 'z'
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (b = 'z'::text)
+  ->  Seq Scan on c1 p_2
+        Filter: (b = 'z'::text)
+  ->  Seq Scan on c2 p_3
+        Filter: (b = 'z'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a IS NULL
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (a IS NULL)
+  ->  Seq Scan on c1 p_2
+        Filter: (a IS NULL)
+  ->  Seq Scan on c2 p_3
+        Filter: (a IS NULL)
+  ->  Seq Scan on c3 p_4
+        Filter: (a IS NULL)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a IN (15, 16)
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (a = ANY ('{15,16}'::integer[]))
+  ->  Seq Scan on c2 p_2
+        Filter: (a = ANY ('{15,16}'::integer[]))
+  ->  Seq Scan on c3 p_3
+        Filter: (a = ANY ('{15,16}'::integer[]))
+  ->  Seq Scan on c4 p_4
+        Filter: (a = ANY ('{15,16}'::integer[]))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a = 15 OR a = 3
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: ((a = 15) OR (a = 3))
+  ->  Seq Scan on c1 p_2
+        Filter: ((a = 15) OR (a = 3))
+  ->  Seq Scan on c2 p_3
+        Filter: ((a = 15) OR (a = 3))
+  ->  Seq Scan on c3 p_4
+        Filter: ((a = 15) OR (a = 3))
+  ->  Seq Scan on c4 p_5
+        Filter: ((a = 15) OR (a = 3))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE false
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a = 15 AND b = 'q'
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: ((a = 15) AND (b = 'q'::text))
+  ->  Seq Scan on c2 p_2
+        Filter: ((a = 15) AND (b = 'q'::text))
+  ->  Seq Scan on c4 p_3
+        Filter: ((a = 15) AND (b = 'q'::text))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM c1 WHERE a = 15
+QUERY PLAN:text
+Seq Scan on c1
+  Filter: (a = 15)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) UPDATE p SET b = 'w' WHERE a = 15
+QUERY PLAN:text
+Update on p
+  Update on p p_1
+  Update on c2 p_2
+  Update on c3 p_3
+  Update on c4 p_4
+  ->  Result
+        ->  Append
+              ->  Seq Scan on p p_1
+                    Filter: (a = 15)
+              ->  Seq Scan on c2 p_2
+                    Filter: (a = 15)
+              ->  Seq Scan on c3 p_3
+                    Filter: (a = 15)
+              ->  Seq Scan on c4 p_4
+                    Filter: (a = 15)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DELETE FROM p WHERE a = 15 AND b = 'q'
+QUERY PLAN:text
+Delete on p
+  Delete on p p_1
+  Delete on c2 p_2
+  Delete on c4 p_3
+  ->  Append
+        ->  Seq Scan on p p_1
+              Filter: ((a = 15) AND (b = 'q'::text))
+        ->  Seq Scan on c2 p_2
+              Filter: ((a = 15) AND (b = 'q'::text))
+        ->  Seq Scan on c4 p_3
+              Filter: ((a = 15) AND (b = 'q'::text))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a = 15::bigint
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (a = '15'::bigint)
+  ->  Seq Scan on c2 p_2
+        Filter: (a = '15'::bigint)
+  ->  Seq Scan on c3 p_3
+        Filter: (a = '15'::bigint)
+  ->  Seq Scan on c4 p_4
+        Filter: (a = '15'::bigint)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a > 25
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (a > 25)
+  ->  Seq Scan on c3 p_2
+        Filter: (a > 25)
+  ->  Seq Scan on c4 p_3
+        Filter: (a > 25)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a >= 10
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (a >= 10)
+  ->  Seq Scan on c2 p_2
+        Filter: (a >= 10)
+  ->  Seq Scan on c3 p_3
+        Filter: (a >= 10)
+  ->  Seq Scan on c4 p_4
+        Filter: (a >= 10)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE 10 > a
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (10 > a)
+  ->  Seq Scan on c1 p_2
+        Filter: (10 > a)
+  ->  Seq Scan on c3 p_3
+        Filter: (10 > a)
+  ->  Seq Scan on c4 p_4
+        Filter: (10 > a)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a = $$5$$
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (a = 5)
+  ->  Seq Scan on c1 p_2
+        Filter: (a = 5)
+  ->  Seq Scan on c3 p_3
+        Filter: (a = 5)
+  ->  Seq Scan on c4 p_4
+        Filter: (a = 5)
+-- EXPLAIN
+
+> SET constraint_exclusion = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a = 15
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: (a = 15)
+  ->  Seq Scan on c1 p_2
+        Filter: (a = 15)
+  ->  Seq Scan on c2 p_3
+        Filter: (a = 15)
+  ->  Seq Scan on c3 p_4
+        Filter: (a = 15)
+  ->  Seq Scan on c4 p_5
+        Filter: (a = 15)
+-- EXPLAIN
+
+> SET constraint_exclusion = on
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM c1 WHERE a = 15
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> SHOW constraint_exclusion
+constraint_exclusion:text
+on
+-- SHOW
+
+> SET constraint_exclusion = bogus
+ERROR 22023: invalid value for parameter "constraint_exclusion": "bogus"
+HINT: Available values: partition, on, off.
+
+> RESET constraint_exclusion
+-- RESET
+
+> SHOW constraint_exclusion
+constraint_exclusion:text
+partition
+-- SHOW
+
+> SELECT setting, vartype, enumvals FROM pg_settings WHERE name = 'constraint_exclusion'
+setting:text | vartype:text | enumvals:text[]
+partition | enum | {partition,on,off}
+-- SELECT 1
+
+> UPDATE p SET b = 'w' WHERE a < 0
+-- UPDATE 0
+
+> EXPLAIN (COSTS OFF) UPDATE p SET b = 'w' WHERE a < 0
+QUERY PLAN:text
+Update on p
+  ->  Result
+        One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a = 15 AND b = 'q' AND a IS NOT NULL
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p p_1
+        Filter: ((a IS NOT NULL) AND (a = 15) AND (b = 'q'::text))
+  ->  Seq Scan on c2 p_2
+        Filter: ((a IS NOT NULL) AND (a = 15) AND (b = 'q'::text))
+  ->  Seq Scan on c4 p_3
+        Filter: ((a IS NOT NULL) AND (a = 15) AND (b = 'q'::text))
+-- EXPLAIN
+
+> CREATE TABLE q (a int CHECK (a > 100))
+-- CREATE TABLE
+
+> CREATE TABLE qc () INHERITS (q)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM q WHERE a = 5
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> INSERT INTO p VALUES (5, 'x'), (15, 'y')
+-- INSERT 0 2
+
+> SELECT * FROM p WHERE a = 15
+a:int4 | b:text
+15 | y
+-- SELECT 1
+
+> SELECT * FROM p WHERE a < 0
+a:int4 | b:text
+-- SELECT 0
+

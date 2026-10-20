@@ -1,0 +1,370 @@
+> CREATE TABLE gc2_j1 (i int, j int, t text)
+-- CREATE TABLE
+
+> CREATE TABLE gc2_j2 (i int, k int)
+-- CREATE TABLE
+
+> INSERT INTO gc2_j1 VALUES (1, 4, 'one'), (2, 3, 'two'), (3, 2, 'three'), (4, 1, 'four'), (5, 0, 'five'), (0, NULL, 'zero'), (NULL, NULL, 'null'), (NULL, 0, 'zero')
+-- INSERT 0 8
+
+> INSERT INTO gc2_j2 VALUES (1, -1), (2, 2), (3, -3), (2, 4), (5, -5), (5, -5), (0, NULL), (NULL, NULL), (NULL, 0)
+-- INSERT 0 9
+
+> ANALYZE gc2_j1, gc2_j2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc2_j1 FULL JOIN (SELECT * FROM gc2_j2 ORDER BY gc2_j2.i DESC, gc2_j2.k) j2 ON gc2_j1.i = j2.i AND gc2_j1.i = j2.k
+QUERY PLAN:text
+Hash Full Join
+  Hash Cond: ((gc2_j2.i = gc2_j1.i) AND (gc2_j2.k = gc2_j1.i))
+  ->  Sort
+        Sort Key: gc2_j2.i DESC, gc2_j2.k
+        ->  Seq Scan on gc2_j2
+  ->  Hash
+        ->  Seq Scan on gc2_j1
+-- EXPLAIN
+
+> SELECT * FROM gc2_j1 FULL JOIN (SELECT * FROM gc2_j2 ORDER BY gc2_j2.i DESC, gc2_j2.k) j2 ON gc2_j1.i = j2.i AND gc2_j1.i = j2.k
+i:int4 | j:int4 | t:text | i:int4 | k:int4
+NULL | NULL | NULL | NULL | 0
+NULL | NULL | NULL | NULL | NULL
+NULL | NULL | NULL | 5 | -5
+NULL | NULL | NULL | 5 | -5
+NULL | NULL | NULL | 3 | -3
+2 | 3 | two | 2 | 2
+NULL | NULL | NULL | 2 | 4
+NULL | NULL | NULL | 1 | -1
+NULL | NULL | NULL | 0 | NULL
+NULL | 0 | zero | NULL | NULL
+NULL | NULL | null | NULL | NULL
+3 | 2 | three | NULL | NULL
+4 | 1 | four | NULL | NULL
+1 | 4 | one | NULL | NULL
+0 | NULL | zero | NULL | NULL
+5 | 0 | five | NULL | NULL
+-- SELECT 16
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc2_j1 a FULL JOIN gc2_j2 b ON false
+QUERY PLAN:text
+Merge Full Join
+  Join Filter: false
+  ->  Seq Scan on gc2_j1 a
+  ->  Materialize
+        ->  Seq Scan on gc2_j2 b
+-- EXPLAIN
+
+> SELECT * FROM gc2_j1 a FULL JOIN gc2_j2 b ON false
+i:int4 | j:int4 | t:text | i:int4 | k:int4
+0 | NULL | zero | NULL | NULL
+1 | 4 | one | NULL | NULL
+2 | 3 | two | NULL | NULL
+3 | 2 | three | NULL | NULL
+4 | 1 | four | NULL | NULL
+5 | 0 | five | NULL | NULL
+NULL | 0 | zero | NULL | NULL
+NULL | NULL | NULL | 0 | NULL
+NULL | NULL | NULL | 1 | -1
+NULL | NULL | NULL | 2 | 2
+NULL | NULL | NULL | 2 | 4
+NULL | NULL | NULL | 3 | -3
+NULL | NULL | NULL | 5 | -5
+NULL | NULL | NULL | 5 | -5
+NULL | NULL | NULL | NULL | 0
+NULL | NULL | NULL | NULL | NULL
+NULL | NULL | null | NULL | NULL
+-- SELECT 17
+
+> CREATE TABLE gc2_d (x int, y int)
+-- CREATE TABLE
+
+> INSERT INTO gc2_d SELECT i % 10, i % 10 FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> CREATE INDEX gc2_d_x_y ON gc2_d (x, y)
+-- CREATE INDEX
+
+> ANALYZE gc2_d
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT y, x FROM gc2_d
+QUERY PLAN:text
+HashAggregate
+  Group Key: y, x
+  ->  Seq Scan on gc2_d
+-- EXPLAIN
+
+> SELECT DISTINCT y, x FROM gc2_d
+y:int4 | x:int4
+0 | 0
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+9 | 9
+-- SELECT 10
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT x % 3 FROM gc2_d
+QUERY PLAN:text
+Unique
+  ->  Sort
+        Sort Key: ((x % 3))
+        ->  Seq Scan on gc2_d
+-- EXPLAIN
+
+> SELECT DISTINCT x % 3 FROM gc2_d
+?column?:int4
+0
+1
+2
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT x FROM gc2_d WHERE x < 3 UNION SELECT y FROM gc2_d WHERE y > 6
+QUERY PLAN:text
+Unique
+  ->  Merge Append
+        Sort Key: gc2_d.x
+        ->  Sort
+              Sort Key: gc2_d.x
+              ->  Bitmap Heap Scan on gc2_d
+                    Recheck Cond: (x < 3)
+                    ->  Bitmap Index Scan on gc2_d_x_y
+                          Index Cond: (x < 3)
+        ->  Sort
+              Sort Key: gc2_d_1.y
+              ->  Seq Scan on gc2_d gc2_d_1
+                    Filter: (y > 6)
+-- EXPLAIN
+
+> SELECT x FROM gc2_d WHERE x < 3 UNION SELECT y FROM gc2_d WHERE y > 6
+x:int4
+0
+1
+2
+7
+8
+9
+-- SELECT 6
+
+> EXPLAIN (COSTS OFF) SELECT i FROM gc2_j1 INTERSECT SELECT i FROM gc2_j2
+QUERY PLAN:text
+SetOp Intersect
+  ->  Sort
+        Sort Key: gc2_j2.i
+        ->  Seq Scan on gc2_j2
+  ->  Sort
+        Sort Key: gc2_j1.i
+        ->  Seq Scan on gc2_j1
+-- EXPLAIN
+
+> SELECT i FROM gc2_j1 INTERSECT SELECT i FROM gc2_j2
+i:int4
+0
+1
+2
+3
+5
+NULL
+-- SELECT 6
+
+> EXPLAIN (COSTS OFF) SELECT i FROM gc2_j1 EXCEPT SELECT i FROM gc2_j2
+QUERY PLAN:text
+SetOp Except
+  ->  Sort
+        Sort Key: gc2_j1.i
+        ->  Seq Scan on gc2_j1
+  ->  Sort
+        Sort Key: gc2_j2.i
+        ->  Seq Scan on gc2_j2
+-- EXPLAIN
+
+> SELECT i FROM gc2_j1 EXCEPT SELECT i FROM gc2_j2
+i:int4
+4
+-- SELECT 1
+
+> RESET enable_hashagg
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT x FROM gc2_d WHERE x = 4
+QUERY PLAN:text
+Limit
+  ->  Bitmap Heap Scan on gc2_d
+        Recheck Cond: (x = 4)
+        ->  Bitmap Index Scan on gc2_d_x_y
+              Index Cond: (x = 4)
+-- EXPLAIN
+
+> SELECT DISTINCT x FROM gc2_d WHERE x = 4
+x:int4
+4
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT 1 AS t, x FROM gc2_d UNION ALL SELECT 2 AS t, i FROM gc2_j2) s WHERE t = 2
+QUERY PLAN:text
+Seq Scan on gc2_j2
+-- EXPLAIN
+
+> SELECT * FROM (SELECT 1 AS t, x FROM gc2_d UNION ALL SELECT 2 AS t, i FROM gc2_j2) s WHERE t = 2 ORDER BY 2
+t:int4 | x:int4
+2 | 0
+2 | 1
+2 | 2
+2 | 2
+2 | 3
+2 | 5
+2 | 5
+2 | NULL
+2 | NULL
+-- SELECT 9
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT x, 0 AS z FROM gc2_d UNION ALL SELECT i, 1 FROM gc2_j2) s WHERE z = 0 OR x = 5
+QUERY PLAN:text
+Append
+  ->  Seq Scan on gc2_d
+  ->  Seq Scan on gc2_j2
+        Filter: (i = 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT x, y, count(*) FROM gc2_d a JOIN gc2_d b USING (x, y) GROUP BY x, y ORDER BY x DESC, y
+QUERY PLAN:text
+Sort
+  Sort Key: a.x DESC, a.y
+  ->  HashAggregate
+        Group Key: a.x, a.y
+        ->  Nested Loop
+              ->  Seq Scan on gc2_d a
+              ->  Memoize
+                    Cache Key: a.x, a.y
+                    Cache Mode: logical
+                    ->  Index Only Scan using gc2_d_x_y on gc2_d b
+                          Index Cond: ((x = a.x) AND (y = a.y))
+-- EXPLAIN
+
+> SET enable_partitionwise_join = on
+-- SET
+
+> CREATE TABLE gc2_p1 (a int, b int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gc2_p1_a PARTITION OF gc2_p1 FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE gc2_p1_b PARTITION OF gc2_p1 FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> CREATE TABLE gc2_p1_c PARTITION OF gc2_p1 FOR VALUES FROM (20) TO (30)
+-- CREATE TABLE
+
+> CREATE TABLE gc2_p2 (a int, b int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gc2_p2_a PARTITION OF gc2_p2 FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE gc2_p2_b PARTITION OF gc2_p2 FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> CREATE TABLE gc2_p2_x PARTITION OF gc2_p2 FOR VALUES FROM (40) TO (50)
+-- CREATE TABLE
+
+> INSERT INTO gc2_p1 SELECT i, i FROM generate_series(0, 29) i
+-- INSERT 0 30
+
+> INSERT INTO gc2_p2 SELECT i, i FROM generate_series(0, 19) i
+-- INSERT 0 20
+
+> INSERT INTO gc2_p2 SELECT i, i FROM generate_series(40, 49) i
+-- INSERT 0 10
+
+> ANALYZE gc2_p1, gc2_p2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc2_p1 t1 JOIN gc2_p2 t2 ON t1.a = t2.a WHERE t1.b < 15 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (t1_1.a = t2_1.a)
+              ->  Seq Scan on gc2_p1_a t1_1
+                    Filter: (b < 15)
+              ->  Hash
+                    ->  Seq Scan on gc2_p2_a t2_1
+        ->  Hash Join
+              Hash Cond: (t2_2.a = t1_2.a)
+              ->  Seq Scan on gc2_p2_b t2_2
+              ->  Hash
+                    ->  Seq Scan on gc2_p1_b t1_2
+                          Filter: (b < 15)
+-- EXPLAIN
+
+> SELECT * FROM gc2_p1 t1 JOIN gc2_p2 t2 ON t1.a = t2.a WHERE t1.b < 15 ORDER BY t1.a
+a:int4 | b:int4 | a:int4 | b:int4
+0 | 0 | 0 | 0
+1 | 1 | 1 | 1
+2 | 2 | 2 | 2
+3 | 3 | 3 | 3
+4 | 4 | 4 | 4
+5 | 5 | 5 | 5
+6 | 6 | 6 | 6
+7 | 7 | 7 | 7
+8 | 8 | 8 | 8
+9 | 9 | 9 | 9
+10 | 10 | 10 | 10
+11 | 11 | 11 | 11
+12 | 12 | 12 | 12
+13 | 13 | 13 | 13
+14 | 14 | 14 | 14
+-- SELECT 15
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc2_p1 t1 LEFT JOIN gc2_p2 t2 ON t1.a = t2.a WHERE t1.b > 15 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Hash Right Join
+        Hash Cond: (t2.a = t1.a)
+        ->  Append
+              ->  Seq Scan on gc2_p2_a t2_1
+              ->  Seq Scan on gc2_p2_b t2_2
+              ->  Seq Scan on gc2_p2_x t2_3
+        ->  Hash
+              ->  Append
+                    ->  Seq Scan on gc2_p1_a t1_1
+                          Filter: (b > 15)
+                    ->  Seq Scan on gc2_p1_b t1_2
+                          Filter: (b > 15)
+                    ->  Seq Scan on gc2_p1_c t1_3
+                          Filter: (b > 15)
+-- EXPLAIN
+
+> SELECT * FROM gc2_p1 t1 LEFT JOIN gc2_p2 t2 ON t1.a = t2.a WHERE t1.b > 15 ORDER BY t1.a
+a:int4 | b:int4 | a:int4 | b:int4
+16 | 16 | 16 | 16
+17 | 17 | 17 | 17
+18 | 18 | 18 | 18
+19 | 19 | 19 | 19
+20 | 20 | NULL | NULL
+21 | 21 | NULL | NULL
+22 | 22 | NULL | NULL
+23 | 23 | NULL | NULL
+24 | 24 | NULL | NULL
+25 | 25 | NULL | NULL
+26 | 26 | NULL | NULL
+27 | 27 | NULL | NULL
+28 | 28 | NULL | NULL
+29 | 29 | NULL | NULL
+-- SELECT 14
+
+> RESET enable_partitionwise_join
+-- RESET
+
+> DROP TABLE gc2_p1, gc2_p2, gc2_d, gc2_j1, gc2_j2
+-- DROP TABLE
+

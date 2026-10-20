@@ -1,0 +1,155 @@
+> CREATE TABLE atr_arr (id int)
+-- CREATE TABLE
+
+> CREATE TABLE atr_arr2 (id int)
+-- CREATE TABLE
+
+> SELECT typname FROM pg_type WHERE oid = 'atr_arr[]'::regtype
+typname:name
+_atr_arr
+-- SELECT 1
+
+> SELECT typname FROM pg_type WHERE oid = 'atr_arr2[]'::regtype
+typname:name
+_atr_arr2
+-- SELECT 1
+
+> ALTER TABLE atr_arr2 RENAME TO _atr_arr
+-- ALTER TABLE
+
+> SELECT typname FROM pg_type WHERE oid = 'atr_arr[]'::regtype
+typname:name
+__atr_arr
+-- SELECT 1
+
+> SELECT typname FROM pg_type WHERE oid = '_atr_arr[]'::regtype
+typname:name
+__atr_arr_1
+-- SELECT 1
+
+> DROP TABLE _atr_arr
+-- DROP TABLE
+
+> DROP TABLE atr_arr
+-- DROP TABLE
+
+> CREATE TABLE atr_arr (id int)
+-- CREATE TABLE
+
+> SELECT typname FROM pg_type WHERE oid = 'atr_arr[]'::regtype
+typname:name
+_atr_arr
+-- SELECT 1
+
+> ALTER TABLE atr_arr RENAME TO _atr_arr
+-- ALTER TABLE
+
+> SELECT typname FROM pg_type WHERE oid = '_atr_arr[]'::regtype
+typname:name
+__atr_arr
+-- SELECT 1
+
+> create table atr_a (id int)
+-- CREATE TABLE
+
+> create table atr_a2 (id int)
+-- CREATE TABLE
+
+> alter table atr_a2 rename to _atr_a
+-- ALTER TABLE
+
+> select typname from pg_type where typname like '%atr_a%' order by 1
+typname:name
+__atr_a
+__atr_a_1
+__atr_arr
+_atr_a
+_atr_arr
+atr_a
+-- SELECT 6
+
+> select '__atr_a'::regtype, '__atr_a_1'::regtype, '_atr_a'::regtype, '_atr_a[]'::regtype, 'atr_a[]'::regtype
+regtype:regtype | regtype:regtype | regtype:regtype | regtype:regtype | regtype:regtype
+atr_a[] | _atr_a[] | _atr_a | _atr_a[] | atr_a[]
+-- SELECT 1
+
+> select pg_typeof(array[row(1)::_atr_a]), pg_typeof(array[row(1)::atr_a])
+pg_typeof:regtype | pg_typeof:regtype
+_atr_a[] | atr_a[]
+-- SELECT 1
+
+> create table atr_a3 (a atr_a[], b _atr_a[], c __atr_a)
+-- CREATE TABLE
+
+> alter table _atr_a rename to atr_a4
+-- ALTER TABLE
+
+> select typname from pg_type where typname like '%atr_a%' order by 1
+typname:name
+__atr_a
+__atr_arr
+_atr_a3
+_atr_a4
+_atr_arr
+atr_a
+atr_a3
+atr_a4
+-- SELECT 8
+
+> drop table atr_a3, atr_a, atr_a4
+-- DROP TABLE
+
+> create table atr_b (id int)
+-- CREATE TABLE
+
+> create table _atr_b (id int)
+-- CREATE TABLE
+
+> select typname from pg_type where typname like '%atr_b%' order by 1
+typname:name
+__atr_b
+__atr_b_1
+_atr_b
+atr_b
+-- SELECT 4
+
+> create type atr_c as (a int)
+-- CREATE TYPE
+
+> create type _atr_c as enum ('x')
+-- CREATE TYPE
+
+> create domain _atr_c as int
+ERROR 42710: type "_atr_c" already exists
+
+> select typname from pg_type where typname like '%atr_c%' order by 1
+typname:name
+__atr_c
+__atr_c_1
+_atr_c
+atr_c
+-- SELECT 4
+
+> create domain atr_d as int
+-- CREATE DOMAIN
+
+> create type _atr_d as (a int)
+-- CREATE TYPE
+
+> select typname, typtype from pg_type where typname like '%atr_d%' order by 1
+typname:name | typtype:char
+__atr_d | b
+__atr_d_1 | b
+_atr_d | c
+atr_d | d
+-- SELECT 4
+
+> drop table atr_b, _atr_b
+-- DROP TABLE
+
+> drop type atr_c, _atr_c, _atr_d
+-- DROP TYPE
+
+> drop domain atr_d
+-- DROP DOMAIN
+

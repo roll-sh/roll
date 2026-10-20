@@ -1,0 +1,273 @@
+> begin
+-- BEGIN
+
+> create temp table temp_parted_oncommit (a int)
+>   partition by list (a) on commit delete rows
+-- CREATE TABLE
+
+> create temp table temp_parted_oncommit_1
+>   partition of temp_parted_oncommit
+>   for values in (1) on commit delete rows
+-- CREATE TABLE
+
+> insert into temp_parted_oncommit values (1)
+-- INSERT 0 1
+
+> commit
+-- COMMIT
+
+> select * from temp_parted_oncommit
+a:int4
+-- SELECT 0
+
+> drop table temp_parted_oncommit
+-- DROP TABLE
+
+> begin
+-- BEGIN
+
+> create temp table temp_parted_oncommit_test (a int)
+>   partition by list (a) on commit drop
+-- CREATE TABLE
+
+> create temp table temp_parted_oncommit_test1
+>   partition of temp_parted_oncommit_test
+>   for values in (1) on commit delete rows
+-- CREATE TABLE
+
+> create temp table temp_parted_oncommit_test2
+>   partition of temp_parted_oncommit_test
+>   for values in (2) on commit drop
+-- CREATE TABLE
+
+> insert into temp_parted_oncommit_test values (1), (2)
+-- INSERT 0 2
+
+> commit
+-- COMMIT
+
+> select relname from pg_class where relname ~ '^temp_parted_oncommit_test'
+relname:name
+-- SELECT 0
+
+> begin
+-- BEGIN
+
+> create temp table temp_parted_oncommit_test (a int)
+>   partition by list (a) on commit delete rows
+-- CREATE TABLE
+
+> create temp table temp_parted_oncommit_test1
+>   partition of temp_parted_oncommit_test
+>   for values in (1) on commit preserve rows
+-- CREATE TABLE
+
+> create temp table temp_parted_oncommit_test2
+>   partition of temp_parted_oncommit_test
+>   for values in (2) on commit drop
+-- CREATE TABLE
+
+> insert into temp_parted_oncommit_test values (1), (2)
+-- INSERT 0 2
+
+> commit
+-- COMMIT
+
+> select * from temp_parted_oncommit_test
+a:int4
+1
+-- SELECT 1
+
+> select relname from pg_class where relname ~ '^temp_parted_oncommit_test'
+>   order by relname
+relname:name
+temp_parted_oncommit_test
+temp_parted_oncommit_test1
+-- SELECT 2
+
+> drop table temp_parted_oncommit_test
+-- DROP TABLE
+
+> begin
+-- BEGIN
+
+> create temp table temp_inh_oncommit_test (a int) on commit drop
+-- CREATE TABLE
+
+> create temp table temp_inh_oncommit_test1 ()
+>   inherits(temp_inh_oncommit_test) on commit delete rows
+-- CREATE TABLE
+
+> insert into temp_inh_oncommit_test1 values (1)
+-- INSERT 0 1
+
+> commit
+-- COMMIT
+
+> select relname from pg_class where relname ~ '^temp_inh_oncommit_test'
+relname:name
+-- SELECT 0
+
+> begin
+-- BEGIN
+
+> create temp table temp_inh_oncommit_test (a int) on commit delete rows
+-- CREATE TABLE
+
+> create temp table temp_inh_oncommit_test1 ()
+>   inherits(temp_inh_oncommit_test) on commit drop
+-- CREATE TABLE
+
+> insert into temp_inh_oncommit_test1 values (1)
+-- INSERT 0 1
+
+> insert into temp_inh_oncommit_test values (1)
+-- INSERT 0 1
+
+> commit
+-- COMMIT
+
+> select * from temp_inh_oncommit_test
+a:int4
+-- SELECT 0
+
+> select relname from pg_class where relname ~ '^temp_inh_oncommit_test'
+relname:name
+temp_inh_oncommit_test
+-- SELECT 1
+
+> drop table temp_inh_oncommit_test
+-- DROP TABLE
+
+> begin
+-- BEGIN
+
+> create function pg_temp.twophase_func() returns void as
+>   $$ select '2pc_func'::text $$ language sql
+-- CREATE FUNCTION
+
+> prepare transaction 'twophase_func'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> create function pg_temp.twophase_func() returns void as
+>   $$ select '2pc_func'::text $$ language sql
+-- CREATE FUNCTION
+
+> begin
+-- BEGIN
+
+> drop function pg_temp.twophase_func()
+-- DROP FUNCTION
+
+> prepare transaction 'twophase_func'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> begin
+-- BEGIN
+
+> create operator pg_temp.@@ (leftarg = int4, rightarg = int4, procedure = int4mi)
+-- CREATE OPERATOR
+
+> prepare transaction 'twophase_operator'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> begin
+-- BEGIN
+
+> create type pg_temp.twophase_type as (a int)
+-- CREATE TYPE
+
+> prepare transaction 'twophase_type'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> begin
+-- BEGIN
+
+> create view pg_temp.twophase_view as select 1
+-- CREATE VIEW
+
+> prepare transaction 'twophase_view'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> begin
+-- BEGIN
+
+> create sequence pg_temp.twophase_seq
+-- CREATE SEQUENCE
+
+> prepare transaction 'twophase_sequence'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> create temp table twophase_tab (a int)
+-- CREATE TABLE
+
+> begin
+-- BEGIN
+
+> select a from twophase_tab
+a:int4
+-- SELECT 0
+
+> prepare transaction 'twophase_tab'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> begin
+-- BEGIN
+
+> insert into twophase_tab values (1)
+-- INSERT 0 1
+
+> prepare transaction 'twophase_tab'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> begin
+-- BEGIN
+
+> lock twophase_tab in access exclusive mode
+-- LOCK TABLE
+
+> prepare transaction 'twophase_tab'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> begin
+-- BEGIN
+
+> drop table twophase_tab
+-- DROP TABLE
+
+> prepare transaction 'twophase_tab'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> SET search_path TO 'pg_temp'
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> SELECT current_schema() ~ 'pg_temp' AS is_temp_schema
+is_temp_schema:bool
+t
+-- SELECT 1
+
+> PREPARE TRANSACTION 'twophase_search'
+ERROR 55000: prepared transactions are disabled
+HINT: Set "max_prepared_transactions" to a nonzero value.
+
+> SET temp_buffers = 100
+ERROR 22023: invalid value for parameter "temp_buffers": 100
+DETAIL: "temp_buffers" cannot be changed after any temporary tables have been accessed in the session.
+
+> CREATE TEMPORARY TABLE test_temp(a int not null unique, b TEXT not null, cnt int not null)
+-- CREATE TABLE
+
+> INSERT INTO test_temp SELECT generate_series(1, 10000) as id, repeat('a', 200), 0
+-- INSERT 0 10000
+
+> SELECT pg_relation_size('test_temp') / current_setting('block_size')::int8 > 200
+?column?:bool
+t
+-- SELECT 1
+
+> DROP TABLE test_temp
+-- DROP TABLE
+

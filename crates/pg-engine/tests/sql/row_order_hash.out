@@ -1,0 +1,927 @@
+> create table ro_t (id int, g int, s text, n numeric, f float8, d date, b bool)
+-- CREATE TABLE
+
+> insert into ro_t select i, i % 7, 'str' || (i % 13), (i % 5) * 1.5, (i % 3)::float8 / 7,
+>   date '2024-01-01' + (i % 11), i % 2 = 0 from generate_series(1, 300) i
+-- INSERT 0 300
+
+> analyze ro_t
+-- ANALYZE
+
+> select g, count(*) from ro_t group by g
+g:int4 | count:int8
+1 | 43
+5 | 43
+4 | 43
+2 | 43
+0 | 42
+6 | 43
+3 | 43
+-- SELECT 7
+
+> select s, count(*) from ro_t group by s
+s:text | count:int8
+str7 | 23
+str12 | 23
+str9 | 23
+str5 | 23
+str1 | 24
+str0 | 23
+str3 | 23
+str11 | 23
+str8 | 23
+str4 | 23
+str2 | 23
+str6 | 23
+str10 | 23
+-- SELECT 13
+
+> select n, sum(id) from ro_t group by n
+n:numeric | sum:int8
+1.5 | 8910
+0.0 | 9150
+6.0 | 9090
+4.5 | 9030
+3.0 | 8970
+-- SELECT 5
+
+> select f, count(*) from ro_t group by f
+f:float8 | count:int8
+0 | 100
+0.2857142857142857 | 100
+0.14285714285714285 | 100
+-- SELECT 3
+
+> select d, count(*) from ro_t group by d
+d:date | count:int8
+2024-01-01 | 27
+2024-01-03 | 28
+2024-01-09 | 27
+2024-01-05 | 27
+2024-01-10 | 27
+2024-01-04 | 28
+2024-01-11 | 27
+2024-01-02 | 28
+2024-01-08 | 27
+2024-01-06 | 27
+2024-01-07 | 27
+-- SELECT 11
+
+> select b, count(*) from ro_t group by b
+b:bool | count:int8
+f | 150
+t | 150
+-- SELECT 2
+
+> select g, s, count(*) from ro_t group by g, s limit 20
+g:int4 | s:text | count:int8
+5 | str2 | 3
+4 | str6 | 3
+1 | str3 | 3
+5 | str11 | 3
+3 | str2 | 3
+0 | str7 | 4
+0 | str1 | 4
+3 | str9 | 3
+6 | str0 | 4
+5 | str10 | 3
+0 | str0 | 3
+4 | str1 | 3
+2 | str11 | 3
+6 | str11 | 3
+6 | str4 | 3
+3 | str8 | 3
+2 | str2 | 4
+4 | str9 | 3
+5 | str7 | 3
+6 | str7 | 4
+-- SELECT 20
+
+> select distinct s from ro_t
+s:text
+str7
+str12
+str9
+str5
+str1
+str0
+str3
+str11
+str8
+str4
+str2
+str6
+str10
+-- SELECT 13
+
+> select distinct g, n from ro_t
+g:int4 | n:numeric
+1 | 6.0
+2 | 4.5
+5 | 4.5
+1 | 3.0
+5 | 0.0
+2 | 3.0
+3 | 3.0
+6 | 4.5
+0 | 4.5
+0 | 0.0
+2 | 6.0
+4 | 6.0
+4 | 1.5
+3 | 4.5
+6 | 1.5
+3 | 0.0
+3 | 1.5
+6 | 0.0
+1 | 0.0
+1 | 1.5
+5 | 6.0
+2 | 0.0
+0 | 3.0
+6 | 6.0
+4 | 0.0
+6 | 3.0
+2 | 1.5
+0 | 1.5
+4 | 4.5
+5 | 1.5
+5 | 3.0
+3 | 6.0
+1 | 4.5
+4 | 3.0
+0 | 6.0
+-- SELECT 35
+
+> select g from ro_t union select id from ro_t where id < 20
+g:int4
+15
+19
+5
+4
+10
+6
+14
+13
+2
+7
+1
+18
+8
+11
+9
+3
+17
+0
+16
+12
+-- SELECT 20
+
+> select s from ro_t where id < 30 union select 'zz' union select s from ro_t where id > 290
+s:text
+str4
+str12
+str0
+str3
+str2
+str6
+str9
+zz
+str5
+str1
+str11
+str8
+str10
+str7
+-- SELECT 14
+
+> select g from ro_t intersect select id from ro_t where id < 20
+g:int4
+1
+5
+4
+2
+6
+3
+-- SELECT 6
+
+> select id from ro_t where id < 20 intersect select g from ro_t
+id:int4
+1
+5
+4
+2
+6
+3
+-- SELECT 6
+
+> select g from ro_t except select id from ro_t where id < 3
+g:int4
+5
+4
+0
+6
+3
+-- SELECT 5
+
+> select g from ro_t intersect all select id from ro_t where id < 20
+g:int4
+1
+5
+4
+2
+6
+3
+-- SELECT 6
+
+> select g from ro_t except all select id from ro_t where id < 3
+g:int4
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+6
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+-- SELECT 298
+
+> select s, g from ro_t except select s, id from ro_t where id < 3
+s:text | g:int4
+str1 | 2
+str6 | 4
+str3 | 4
+str1 | 0
+str8 | 3
+str11 | 2
+str7 | 5
+str8 | 0
+str8 | 2
+str12 | 2
+str3 | 1
+str0 | 6
+str3 | 5
+str7 | 3
+str6 | 2
+str10 | 1
+str7 | 2
+str7 | 0
+str8 | 4
+str8 | 6
+str4 | 3
+str7 | 1
+str7 | 4
+str6 | 1
+str2 | 1
+str12 | 5
+str5 | 6
+str4 | 0
+str12 | 0
+str11 | 0
+str0 | 5
+str9 | 0
+str2 | 0
+str12 | 4
+str9 | 1
+str11 | 3
+str6 | 0
+str2 | 3
+str0 | 1
+str4 | 1
+str4 | 4
+str5 | 3
+str8 | 1
+str5 | 0
+str9 | 5
+str12 | 6
+str4 | 2
+str10 | 4
+str10 | 2
+str3 | 6
+str0 | 0
+str10 | 6
+str7 | 6
+str6 | 6
+str5 | 4
+str4 | 5
+str5 | 1
+str11 | 1
+str11 | 4
+str2 | 6
+str3 | 2
+str11 | 6
+str12 | 1
+str10 | 0
+str10 | 3
+str1 | 3
+str8 | 5
+str1 | 4
+str9 | 4
+str3 | 3
+str1 | 5
+str0 | 4
+str3 | 0
+str10 | 5
+str11 | 5
+str4 | 6
+str2 | 5
+str6 | 3
+str9 | 6
+str5 | 5
+str0 | 3
+str5 | 2
+str12 | 3
+str2 | 4
+str0 | 2
+str6 | 5
+str9 | 3
+str9 | 2
+str1 | 6
+-- SELECT 89
+
+> explain select g from ro_t intersect select id from ro_t where id < 20
+QUERY PLAN:text
+HashSetOp Intersect  (cost=13.55..13.56 rows=7 width=4)
+  ->  Seq Scan on ro_t  (cost=0.00..6.00 rows=300 width=4)
+  ->  Seq Scan on ro_t ro_t_1  (cost=0.00..6.75 rows=19 width=4)
+        Filter: (id < 20)
+-- EXPLAIN
+
+> explain select id from ro_t where id < 20 intersect select g from ro_t
+QUERY PLAN:text
+HashSetOp Intersect  (cost=13.55..13.56 rows=7 width=4)
+  ->  Seq Scan on ro_t  (cost=0.00..6.00 rows=300 width=4)
+  ->  Seq Scan on ro_t ro_t_1  (cost=0.00..6.75 rows=19 width=4)
+        Filter: (id < 20)
+-- EXPLAIN
+
+> explain select s, g from ro_t except select s, id from ro_t where id < 3
+QUERY PLAN:text
+HashSetOp Except  (cost=14.26..14.33 rows=30 width=36)
+  ->  Seq Scan on ro_t  (cost=0.00..6.00 rows=300 width=9)
+  ->  Seq Scan on ro_t ro_t_1  (cost=0.00..6.75 rows=2 width=9)
+        Filter: (id < 3)
+-- EXPLAIN
+
+> create table ro_h (x int, y text)
+-- CREATE TABLE
+
+> insert into ro_h values (1, 'a'), (2, 'b'), (2, 'b'), (3, null), (null, 'c'), (5, 'e')
+-- INSERT 0 6
+
+> select x, y, count(*) from ro_h group by rollup (x, y)
+x:int4 | y:text | count:int8
+NULL | NULL | 6
+1 | a | 1
+3 | NULL | 1
+5 | e | 1
+NULL | c | 1
+2 | b | 2
+NULL | NULL | 1
+3 | NULL | 1
+5 | NULL | 1
+2 | NULL | 2
+1 | NULL | 1
+-- SELECT 11
+
+> select x, y, count(*) from ro_h group by grouping sets ((x), (y))
+x:int4 | y:text | count:int8
+NULL | NULL | 1
+3 | NULL | 1
+5 | NULL | 1
+2 | NULL | 2
+1 | NULL | 1
+NULL | NULL | 1
+NULL | a | 1
+NULL | b | 2
+NULL | c | 1
+NULL | e | 1
+-- SELECT 10
+
+> explain (costs off) select x, y, count(*) from ro_h group by cube (x, y)
+QUERY PLAN:text
+MixedAggregate
+  Hash Key: x, y
+  Hash Key: x
+  Hash Key: y
+  Group Key: ()
+  ->  Seq Scan on ro_h
+-- EXPLAIN
+
+> select x, y, count(*) from ro_h group by cube (x, y)
+x:int4 | y:text | count:int8
+NULL | NULL | 6
+1 | a | 1
+3 | NULL | 1
+5 | e | 1
+NULL | c | 1
+2 | b | 2
+NULL | NULL | 1
+3 | NULL | 1
+5 | NULL | 1
+2 | NULL | 2
+1 | NULL | 1
+NULL | NULL | 1
+NULL | a | 1
+NULL | b | 2
+NULL | c | 1
+NULL | e | 1
+-- SELECT 16
+
+> explain (costs off) select x, y, rank(x, y) within group (order by x, y) from ro_h group by cube (x, y)
+QUERY PLAN:text
+GroupAggregate
+  Group Key: x, y
+  Group Key: x
+  Group Key: ()
+  Sort Key: y
+    Group Key: y
+  ->  Sort
+        Sort Key: x, y
+        ->  Seq Scan on ro_h
+-- EXPLAIN
+
+> select x, y, rank(x, y) within group (order by x, y) from ro_h group by cube (x, y)
+x:int4 | y:text | rank:int8
+1 | a | 1
+1 | NULL | 2
+2 | b | 1
+2 | NULL | 3
+3 | NULL | 1
+3 | NULL | 1
+5 | e | 1
+5 | NULL | 2
+NULL | c | 1
+NULL | NULL | 2
+NULL | NULL | 7
+NULL | a | 2
+NULL | b | 3
+NULL | c | 1
+NULL | e | 2
+NULL | NULL | 2
+-- SELECT 16
+
+> select x, y, rank(x, y) within group (order by x, y) from ro_h group by rollup (y, x)
+x:int4 | y:text | rank:int8
+1 | a | 1
+NULL | a | 2
+2 | b | 1
+NULL | b | 3
+NULL | c | 1
+NULL | c | 1
+5 | e | 1
+NULL | e | 2
+3 | NULL | 1
+NULL | NULL | 2
+NULL | NULL | 7
+-- SELECT 11
+
+> create table ro_x (a int, t text)
+-- CREATE TABLE
+
+> create table ro_y (b int, u text)
+-- CREATE TABLE
+
+> create table ro_z (c int, w text)
+-- CREATE TABLE
+
+> insert into ro_x select g % 300, 'x' || g from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> insert into ro_y select g % 500, 'y' || g from generate_series(1, 2500) g
+-- INSERT 0 2500
+
+> insert into ro_z select g, 'z' || g from generate_series(1, 40) g
+-- INSERT 0 40
+
+> insert into ro_z values (null, 'zn1'), (null, 'zn2')
+-- INSERT 0 2
+
+> analyze ro_x
+-- ANALYZE
+
+> analyze ro_y
+-- ANALYZE
+
+> analyze ro_z
+-- ANALYZE
+
+> explain (costs off) select * from ro_x join ro_y on a = b
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (ro_x.a = ro_y.b)
+  ->  Seq Scan on ro_x
+  ->  Hash
+        ->  Seq Scan on ro_y
+-- EXPLAIN
+
+> select md5(string_agg(t || u, ',')) from (select * from ro_x join ro_y on a = b) s
+md5:text
+1b4522ce5ad1dce7dabaa22284d00e0c
+-- SELECT 1
+
+> explain (costs off) select * from ro_x full join ro_y on a = b
+QUERY PLAN:text
+Hash Full Join
+  Hash Cond: (ro_x.a = ro_y.b)
+  ->  Seq Scan on ro_x
+  ->  Hash
+        ->  Seq Scan on ro_y
+-- EXPLAIN
+
+> select md5(string_agg(coalesce(t, '-') || coalesce(u, '-'), ',')) from (select * from ro_x full join ro_y on a = b) s
+md5:text
+85aa6cf0d953feb657876bcf75e88483
+-- SELECT 1
+
+> explain (costs off) select * from ro_z right join ro_y on c = b
+QUERY PLAN:text
+Hash Left Join
+  Hash Cond: (ro_y.b = ro_z.c)
+  ->  Seq Scan on ro_y
+  ->  Hash
+        ->  Seq Scan on ro_z
+-- EXPLAIN
+
+> select md5(string_agg(coalesce(w, '-') || coalesce(u, '-'), ',')) from (select * from ro_z right join ro_y on c = b) s
+md5:text
+1541b6e8eb18ffa3f5724863ba9a0899
+-- SELECT 1
+
+> explain (costs off) select * from ro_y where not exists (select 1 from ro_z where c = b)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (ro_y.b = ro_z.c)
+  ->  Seq Scan on ro_y
+  ->  Hash
+        ->  Seq Scan on ro_z
+-- EXPLAIN
+
+> select md5(string_agg(u, ',')) from (select * from ro_y where not exists (select 1 from ro_z where c = b)) s
+md5:text
+16e0159cdf272737c22cc012e8a54b0b
+-- SELECT 1
+
+> explain (costs off) select * from ro_z where exists (select 1 from ro_y where c = b)
+QUERY PLAN:text
+Hash Right Semi Join
+  Hash Cond: (ro_y.b = ro_z.c)
+  ->  Seq Scan on ro_y
+  ->  Hash
+        ->  Seq Scan on ro_z
+-- EXPLAIN
+
+> select * from ro_z where exists (select 1 from ro_y where c = b) limit 10
+c:int4 | w:text
+1 | z1
+2 | z2
+3 | z3
+4 | z4
+5 | z5
+6 | z6
+7 | z7
+8 | z8
+9 | z9
+10 | z10
+-- SELECT 10
+
+> explain (costs off) select * from ro_z where not exists (select 1 from ro_y where c = b)
+QUERY PLAN:text
+Hash Right Anti Join
+  Hash Cond: (ro_y.b = ro_z.c)
+  ->  Seq Scan on ro_y
+  ->  Hash
+        ->  Seq Scan on ro_z
+-- EXPLAIN
+
+> select * from ro_z where not exists (select 1 from ro_y where c = b)
+c:int4 | w:text
+NULL | zn2
+NULL | zn1
+-- SELECT 2
+
+> create table ro_k (k int, v text)
+-- CREATE TABLE
+
+> insert into ro_k values (1, 'b1'), (2, 'b2'), (1, 'b1x'), (3, 'b3'), (1, 'b1y'), (7, 'b7'), (8, 'b8')
+-- INSERT 0 7
+
+> analyze ro_k
+-- ANALYZE
+
+> select * from ro_t join ro_k on ro_t.id = ro_k.k where ro_t.id < 10
+id:int4 | g:int4 | s:text | n:numeric | f:float8 | d:date | b:bool | k:int4 | v:text
+1 | 1 | str1 | 1.5 | 0.14285714285714285 | 2024-01-02 | f | 1 | b1y
+1 | 1 | str1 | 1.5 | 0.14285714285714285 | 2024-01-02 | f | 1 | b1x
+1 | 1 | str1 | 1.5 | 0.14285714285714285 | 2024-01-02 | f | 1 | b1
+2 | 2 | str2 | 3.0 | 0.2857142857142857 | 2024-01-03 | t | 2 | b2
+3 | 3 | str3 | 4.5 | 0 | 2024-01-04 | f | 3 | b3
+7 | 0 | str7 | 3.0 | 0.14285714285714285 | 2024-01-08 | f | 7 | b7
+8 | 1 | str8 | 4.5 | 0.2857142857142857 | 2024-01-09 | t | 8 | b8
+-- SELECT 7
+
+> select * from ro_k k1 full join ro_k k2 on k1.k = k2.k + 1
+k:int4 | v:text | k:int4 | v:text
+1 | b1 | NULL | NULL
+2 | b2 | 1 | b1y
+2 | b2 | 1 | b1x
+2 | b2 | 1 | b1
+1 | b1x | NULL | NULL
+3 | b3 | 2 | b2
+1 | b1y | NULL | NULL
+7 | b7 | NULL | NULL
+8 | b8 | 7 | b7
+NULL | NULL | 3 | b3
+NULL | NULL | 8 | b8
+-- SELECT 11
+

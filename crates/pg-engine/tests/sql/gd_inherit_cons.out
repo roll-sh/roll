@@ -1,0 +1,288 @@
+> CREATE TABLE gd_ic_p1 (f1 int CONSTRAINT gd_ic_ck CHECK (f1 > 0))
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_p2 (f1 int CONSTRAINT gd_ic_ck CHECK (f1 > 0) NOT ENFORCED)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_c1 () INHERITS (gd_ic_p1, gd_ic_p2)
+NOTICE 00000: merging multiple inherited definitions of column "f1"
+-- CREATE TABLE
+
+> SELECT conname, conenforced, convalidated, coninhcount FROM pg_constraint
+>  WHERE conrelid = 'gd_ic_c1'::regclass AND contype = 'c'
+conname:name | conenforced:bool | convalidated:bool | coninhcount:int2
+gd_ic_ck | t | t | 2
+-- SELECT 1
+
+> CREATE TABLE gd_ic_c2 (f1 int CONSTRAINT gd_ic_ck CHECK (f1 > 0) NOT ENFORCED) INHERITS (gd_ic_p1)
+NOTICE 00000: merging column "f1" with inherited definition
+ERROR 42P17: constraint "gd_ic_ck" conflicts with NOT ENFORCED constraint on relation "gd_ic_c2"
+
+> DROP TABLE gd_ic_c1, gd_ic_p1, gd_ic_p2
+-- DROP TABLE
+
+> CREATE TABLE gd_ic_v (f1 int)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_vc () INHERITS (gd_ic_v)
+-- CREATE TABLE
+
+> ALTER TABLE gd_ic_vc ADD CONSTRAINT gd_ic_vck CHECK (f1 > 0) NOT VALID
+-- ALTER TABLE
+
+> ALTER TABLE gd_ic_v ADD CONSTRAINT gd_ic_vck CHECK (f1 > 0)
+ERROR 42P17: constraint "gd_ic_vck" conflicts with NOT VALID constraint on relation "gd_ic_vc"
+
+> ALTER TABLE gd_ic_v ADD CONSTRAINT gd_ic_vck CHECK (f1 > 0) NOT VALID
+NOTICE 00000: merging constraint "gd_ic_vck" with inherited definition
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, convalidated, conislocal, coninhcount FROM pg_constraint
+>  WHERE conname = 'gd_ic_vck' ORDER BY 1
+conrelid:regclass | convalidated:bool | conislocal:bool | coninhcount:int2
+gd_ic_v | f | t | 0
+gd_ic_vc | f | t | 1
+-- SELECT 2
+
+> DROP TABLE gd_ic_v CASCADE
+NOTICE 00000: drop cascades to table gd_ic_vc
+-- DROP TABLE
+
+> CREATE TABLE gd_ic_n1 (a int CONSTRAINT gd_ic_nn NOT NULL)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_n2 (b int CONSTRAINT gd_ic_nn NOT NULL)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_n3 (CONSTRAINT gd_ic_foo NOT NULL a) INHERITS (gd_ic_n1, gd_ic_n2)
+-- CREATE TABLE
+
+> SELECT conname, conkey, conislocal, coninhcount FROM pg_constraint
+>  WHERE conrelid = 'gd_ic_n3'::regclass ORDER BY conname
+conname:name | conkey:int2[] | conislocal:bool | coninhcount:int2
+gd_ic_foo | {1} | t | 1
+gd_ic_nn | {2} | f | 1
+-- SELECT 2
+
+> DROP TABLE gd_ic_n1, gd_ic_n2 CASCADE
+NOTICE 00000: drop cascades to table gd_ic_n3
+-- DROP TABLE
+
+> CREATE TABLE gd_ic_ni (f1 int NOT NULL NO INHERIT)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_nic (f1 int NOT NULL) INHERITS (gd_ic_ni)
+NOTICE 00000: merging column "f1" with inherited definition
+-- CREATE TABLE
+
+> ALTER TABLE gd_ic_ni ALTER CONSTRAINT gd_ic_ni_f1_not_null INHERIT
+-- ALTER TABLE
+
+> ALTER TABLE gd_ic_ni ALTER CONSTRAINT gd_ic_ni_f1_not_null NO INHERIT
+-- ALTER TABLE
+
+> ALTER TABLE gd_ic_ni DROP CONSTRAINT gd_ic_ni_f1_not_null
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, coninhcount, conislocal FROM pg_constraint
+>  WHERE contype = 'n' AND conrelid::regclass::text LIKE 'gd_ic_ni%' ORDER BY 1
+conrelid:regclass | coninhcount:int2 | conislocal:bool
+gd_ic_nic | 0 | t
+-- SELECT 1
+
+> DROP TABLE gd_ic_ni CASCADE
+NOTICE 00000: drop cascades to table gd_ic_nic
+-- DROP TABLE
+
+> DROP ROLE IF EXISTS gd_ic_alice, gd_ic_bob
+NOTICE 00000: role "gd_ic_alice" does not exist, skipping
+NOTICE 00000: role "gd_ic_bob" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE gd_ic_alice
+-- CREATE ROLE
+
+> CREATE ROLE gd_ic_bob
+-- CREATE ROLE
+
+> GRANT CREATE ON SCHEMA public TO gd_ic_alice, gd_ic_bob
+-- GRANT
+
+> GRANT gd_ic_alice TO gd_ic_bob
+-- GRANT ROLE
+
+> SET SESSION AUTHORIZATION gd_ic_alice
+-- SET
+
+> CREATE TABLE gd_ic_own (a int NOT NULL)
+-- CREATE TABLE
+
+> SET SESSION AUTHORIZATION gd_ic_bob
+-- SET
+
+> CREATE TABLE gd_ic_ownc () INHERITS (gd_ic_own)
+-- CREATE TABLE
+
+> SET SESSION AUTHORIZATION gd_ic_alice
+-- SET
+
+> ALTER TABLE gd_ic_own ALTER a DROP NOT NULL
+ERROR 42501: must be owner of table gd_ic_ownc
+
+> SET SESSION AUTHORIZATION gd_ic_bob
+-- SET
+
+> ALTER TABLE gd_ic_own ALTER a DROP NOT NULL
+-- ALTER TABLE
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> DROP TABLE gd_ic_own CASCADE
+NOTICE 00000: drop cascades to table gd_ic_ownc
+-- DROP TABLE
+
+> REVOKE CREATE ON SCHEMA public FROM gd_ic_alice, gd_ic_bob
+-- REVOKE
+
+> DROP ROLE gd_ic_alice, gd_ic_bob
+-- DROP ROLE
+
+> CREATE TYPE gd_ic_ty AS (a int, b text)
+-- CREATE TYPE
+
+> CREATE TABLE gd_ic_typed OF gd_ic_ty (b WITH OPTIONS NOT NULL, b WITH OPTIONS DEFAULT '')
+ERROR 42701: column "b" specified more than once
+
+> CREATE TABLE gd_ic_typed OF gd_ic_ty
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_typedc () INHERITS (gd_ic_typed)
+-- CREATE TABLE
+
+> ALTER TABLE gd_ic_typedc OF gd_ic_ty
+ERROR 42809: typed tables cannot inherit
+
+> ALTER TYPE gd_ic_ty ADD ATTRIBUTE c text CASCADE
+-- ALTER TYPE
+
+> SELECT attname FROM pg_attribute WHERE attrelid = 'gd_ic_typedc'::regclass AND attnum > 0 ORDER BY attnum
+attname:name
+a
+b
+c
+-- SELECT 3
+
+> DROP TABLE gd_ic_typed CASCADE
+NOTICE 00000: drop cascades to table gd_ic_typedc
+-- DROP TABLE
+
+> CREATE TABLE gd_ic_tx (x int, y gd_ic_ty CHECK ((y).a > 0))
+-- CREATE TABLE
+
+> SELECT conname FROM pg_constraint WHERE conrelid = 'gd_ic_tx'::regclass
+conname:name
+gd_ic_tx_y_check
+-- SELECT 1
+
+> ALTER TYPE gd_ic_ty DROP ATTRIBUTE a
+ERROR 2BP01: cannot drop column a of composite type gd_ic_ty because other objects depend on it
+DETAIL: constraint gd_ic_tx_y_check on table gd_ic_tx depends on column a of composite type gd_ic_ty
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TYPE gd_ic_ty DROP ATTRIBUTE a CASCADE
+NOTICE 00000: drop cascades to constraint gd_ic_tx_y_check on table gd_ic_tx
+-- ALTER TYPE
+
+> SELECT count(*) FROM pg_constraint WHERE conrelid = 'gd_ic_tx'::regclass
+count:int8
+0
+-- SELECT 1
+
+> DROP TABLE gd_ic_tx
+-- DROP TABLE
+
+> CREATE TABLE gd_ic_rec (f1 int)
+-- CREATE TABLE
+
+> ALTER TABLE gd_ic_rec ADD COLUMN f2 gd_ic_rec
+ERROR 42P16: composite type gd_ic_rec cannot be made a member of itself
+
+> ALTER TABLE gd_ic_rec ADD COLUMN f2 gd_ic_rec[]
+ERROR 42P16: composite type gd_ic_rec cannot be made a member of itself
+
+> CREATE TABLE gd_ic_rec2 (f1 int, f2 gd_ic_rec)
+-- CREATE TABLE
+
+> ALTER TABLE gd_ic_rec ADD COLUMN f2 gd_ic_rec2
+ERROR 42P16: composite type gd_ic_rec cannot be made a member of itself
+
+> DROP TABLE gd_ic_rec2, gd_ic_rec
+-- DROP TABLE
+
+> DROP TYPE gd_ic_ty
+-- DROP TYPE
+
+> CREATE TABLE gd_ic_lp (a int, b char(1)) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_lp5 PARTITION OF gd_ic_lp FOR VALUES IN (5) PARTITION BY LIST (b)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_lp5a PARTITION OF gd_ic_lp5 FOR VALUES IN ('a')
+-- CREATE TABLE
+
+> ALTER TABLE ONLY gd_ic_lp ALTER b SET NOT NULL
+ERROR 42P16: constraint must be added to child tables too
+HINT: Do not specify the ONLY keyword.
+
+> ALTER TABLE gd_ic_lp DROP COLUMN b
+ERROR 42P16: cannot drop column "b" because it is part of the partition key of relation "gd_ic_lp5"
+
+> ALTER TABLE gd_ic_lp ALTER COLUMN b TYPE text
+ERROR 42P16: cannot alter column "b" because it is part of the partition key of relation "gd_ic_lp5" (at 35)
+
+> CREATE TABLE gd_ic_lp6 (a int, b char(1)) PARTITION BY LIST (b)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_lp6a PARTITION OF gd_ic_lp6 FOR VALUES IN ('a')
+-- CREATE TABLE
+
+> INSERT INTO gd_ic_lp6 VALUES (7, 'a')
+-- INSERT 0 1
+
+> ALTER TABLE gd_ic_lp ATTACH PARTITION gd_ic_lp6 FOR VALUES IN (6)
+ERROR 23514: partition constraint of relation "gd_ic_lp6a" is violated by some row
+OBJECTS: schema=public table=gd_ic_lp6a
+
+> CREATE TABLE gd_ic_rp (a int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_rp1 PARTITION OF gd_ic_rp FOR VALUES FROM (0) TO (100)
+-- CREATE TABLE
+
+> CREATE TABLE gd_ic_rp2 PARTITION OF gd_ic_rp (CHECK (a >= 123 AND a < 133 AND a IS NOT NULL))
+>   FOR VALUES FROM (100) TO (200)
+-- CREATE TABLE
+
+> ALTER TABLE gd_ic_rp DETACH PARTITION gd_ic_rp1 CONCURRENTLY
+-- ALTER TABLE
+
+> ALTER TABLE gd_ic_rp DETACH PARTITION gd_ic_rp2 CONCURRENTLY
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, pg_get_constraintdef(oid) FROM pg_constraint
+>  WHERE conrelid IN ('gd_ic_rp1'::regclass, 'gd_ic_rp2'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | pg_get_constraintdef:text
+gd_ic_rp1 | gd_ic_rp1_a_check | CHECK (((a IS NOT NULL) AND (a >= 0) AND (a < 100)))
+gd_ic_rp2 | gd_ic_rp2_a_check | CHECK (((a >= 123) AND (a < 133) AND (a IS NOT NULL)))
+-- SELECT 2
+
+> SELECT attislocal FROM pg_attribute WHERE attrelid = 'gd_ic_rp1'::regclass AND attname = 'a'
+attislocal:bool
+t
+-- SELECT 1
+
+> DROP TABLE gd_ic_lp, gd_ic_lp6, gd_ic_rp, gd_ic_rp1, gd_ic_rp2
+-- DROP TABLE
+

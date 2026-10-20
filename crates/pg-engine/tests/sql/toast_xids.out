@@ -1,0 +1,280 @@
+> create table f (a int primary key, b text)
+-- CREATE TABLE
+
+> create view ages as select case when c.relname = 'f' then 'heap' else 'toast' end k, age(c.relfrozenxid) from pg_class c where c.relname = 'f' or c.oid = (select reltoastrelid from pg_class where relname = 'f') order by 1
+-- CREATE VIEW
+
+> insert into f values (1, 'y')
+-- INSERT 0 1
+
+> insert into f select 2, string_agg(md5(i::text), '') from generate_series(1, 200) i
+-- INSERT 0 1
+
+> insert into f values (3, 'y')
+-- INSERT 0 1
+
+> select * from ages
+k:text | age:int4
+heap | 5
+toast | 5
+-- SELECT 2
+
+> vacuum f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 3
+toast | 2
+-- SELECT 2
+
+> insert into f select 4, string_agg(md5(i::text), '') from generate_series(1, 200) i
+-- INSERT 0 1
+
+> insert into f values (5, 'y')
+-- INSERT 0 1
+
+> vacuum f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 5
+toast | 4
+-- SELECT 2
+
+> vacuum (process_toast false) f
+-- VACUUM
+
+> insert into f values (6, 'z')
+-- INSERT 0 1
+
+> vacuum (process_toast false) f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 6
+toast | 5
+-- SELECT 2
+
+> insert into f values (7, 'z')
+-- INSERT 0 1
+
+> vacuum (process_main false) f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 7
+toast | 6
+-- SELECT 2
+
+> vacuum (freeze, process_main false) f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 7
+toast | 0
+-- SELECT 2
+
+> vacuum freeze f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 0
+toast | 0
+-- SELECT 2
+
+> update f set a = a + 10 where a = 14
+-- UPDATE 0
+
+> insert into f values (8, 'z')
+-- INSERT 0 1
+
+> vacuum f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 1
+toast | 0
+-- SELECT 2
+
+> vacuum full f
+-- VACUUM
+
+> drop view ages
+-- DROP VIEW
+
+> drop table f
+-- DROP TABLE
+
+> create table f (a int primary key, b text)
+-- CREATE TABLE
+
+> create view ages as select case when c.relname = 'f' then 'heap' else 'toast' end k, age(c.relfrozenxid) from pg_class c where c.relname = 'f' or c.oid = (select reltoastrelid from pg_class where relname = 'f') order by 1
+-- CREATE VIEW
+
+> select * from ages
+k:text | age:int4
+heap | 2
+toast | 2
+-- SELECT 2
+
+> insert into f values (1, repeat('x', 5000))
+-- INSERT 0 1
+
+> insert into f values (2, 'y')
+-- INSERT 0 1
+
+> select * from ages
+k:text | age:int4
+heap | 4
+toast | 4
+-- SELECT 2
+
+> vacuum f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 2
+toast | 0
+-- SELECT 2
+
+> insert into f values (3, repeat(md5('a'), 400))
+-- INSERT 0 1
+
+> insert into f values (4, 'z')
+-- INSERT 0 1
+
+> vacuum f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 4
+toast | 0
+-- SELECT 2
+
+> vacuum freeze f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 0
+toast | 0
+-- SELECT 2
+
+> insert into f values (5, 'z')
+-- INSERT 0 1
+
+> vacuum full f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 1
+toast | 1
+-- SELECT 2
+
+> insert into f values (6, 'z')
+-- INSERT 0 1
+
+> cluster f using f_pkey
+-- CLUSTER
+
+> select * from ages
+k:text | age:int4
+heap | 1
+toast | 1
+-- SELECT 2
+
+> insert into f values (7, 'z')
+-- INSERT 0 1
+
+> alter table f alter a type bigint
+-- ALTER TABLE
+
+> select * from ages
+k:text | age:int4
+heap | 1
+toast | 1
+-- SELECT 2
+
+> insert into f values (8, 'z')
+-- INSERT 0 1
+
+> truncate f
+-- TRUNCATE TABLE
+
+> select * from ages
+k:text | age:int4
+heap | 1
+toast | 1
+-- SELECT 2
+
+> insert into f values (9, 'z')
+-- INSERT 0 1
+
+> vacuum (process_toast false) f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 1
+toast | 2
+-- SELECT 2
+
+> insert into f values (10, 'z')
+-- INSERT 0 1
+
+> insert into f values (11, 'z')
+-- INSERT 0 1
+
+> vacuum (freeze, process_main false) f
+-- VACUUM
+
+> select * from ages
+k:text | age:int4
+heap | 3
+toast | 0
+-- SELECT 2
+
+> create table g (a int)
+-- CREATE TABLE
+
+> insert into g values (1)
+-- INSERT 0 1
+
+> insert into g values (2)
+-- INSERT 0 1
+
+> alter table g add column b text
+-- ALTER TABLE
+
+> select age(relfrozenxid) from pg_class where oid = (select reltoastrelid from pg_class where relname = 'g')
+age:int4
+1
+-- SELECT 1
+
+> insert into g values (3)
+-- INSERT 0 1
+
+> alter table g add column c text default random()::text
+-- ALTER TABLE
+
+> select age(c.relfrozenxid), age(t.relfrozenxid) from pg_class c join pg_class t on t.oid = c.reltoastrelid where c.relname = 'g'
+age:int4 | age:int4
+1 | 1
+-- SELECT 1
+
+> drop view ages
+-- DROP VIEW
+
+> drop table f, g
+-- DROP TABLE
+

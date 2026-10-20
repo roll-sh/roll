@@ -1,0 +1,37 @@
+-- Range types compare their bounds under the subtype's collation (rng_collation): construction,
+-- operators, functions, multiranges, sorting.
+create type trde as range (subtype = text, collation = "de-x-icu");
+create type trc as range (subtype = text, collation = "C");
+create type trsv as range (subtype = text, collation = "sv-x-icu");
+select trde('a', 'B'), trc('B', 'a');
+select trc('a', 'B');
+select trde('B', 'a');
+select trde('a', 'B') @> 'Ab'::text, trc('B', 'a') @> 'Ab'::text, trde('a','b') @> 'B'::text;
+select trde('a', 'c') && trde('B', 'd'), trde('a', 'b') -|- trde('b', 'C');
+select trde('a', 'c') + trde('B', 'd'), trde('a', 'C') * trde('b', 'd');
+select r from (values (trde('B','c')), (trde('a','z')), (trde('b','c')), (trde('A','b'))) v(r) order by r;
+select trsv('z', 'ä') @> 'zz'::text, trsv('a', 'z') @> 'ä'::text;
+select lower(trde('a','B')), upper_inf(trde('a', null)), range_merge(trde('a','b'), trde('C','d'));
+select trde('a','b') < trde('B','c'), trde('a','b') = trde('a','b');
+select trde('[a,a)'), isempty(trde('[B,b)')), trde('[b,B]');
+select trde_multirange(trde('a','c'), trde('B','d'));
+select trde('a','c') << trde('D','e'), trde('a','c') &< trde('B','d');
+select '[a,B)'::trde, '[B,a)'::trc;
+create collation ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+create type trci as range (subtype = text, collation = ci);
+create table r (id int, r trde, m trde_multirange);
+insert into r values (1, '[B,c)', '{[a,b), [C,d)}'), (2, '[a,z)', '{[B,c)}'), (3, '[b,c)', '{}'), (4, '[A,b)', '{[x,y), [a,B)}'), (5, 'empty', null);
+select id, r, m from r order by r, id;
+select id, r from r order by r desc;
+select id, row_number() over (order by r) from r order by id;
+select id, m from r order by m, id;
+select r @> 'Bz'::text, id from r order by id;
+select range_agg(r order by id) from r;
+select '{[c,D), [a,B)}'::trde_multirange, '{[a,B), [b,c)}'::trde_multirange;
+select '{[a,c)}'::trde_multirange @> 'B'::text, '{[a,c)}'::trde_multirange - '{[B,b]}'::trde_multirange;
+select distinct r from r order by 1;
+select trci('a', 'B'), trci('B', 'a'), trci('a','A'), trci('a', 'A', '[]');
+select trci('a', 'b') @> 'B'::text, trci('a', 'b') = trci('A', 'b');
+select max(id) from r group by r order by 1;
+select r, r < '[b,c)'::trde from r order by id;
+select array_agg(r order by r) from r;

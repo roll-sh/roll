@@ -1,0 +1,569 @@
+> create table b (a int, b text)
+-- CREATE TABLE
+
+> insert into b values (1, 'x'), (2, 'y')
+-- INSERT 0 2
+
+> create materialized view mv as select * from b
+-- SELECT 2
+
+> create unique index on mv (a)
+-- CREATE INDEX
+
+> create table m1 ()
+-- CREATE TABLE
+
+> refresh materialized view concurrently mv
+-- REFRESH MATERIALIZED VIEW
+
+> create table m2 ()
+-- CREATE TABLE
+
+> refresh materialized view concurrently mv
+-- REFRESH MATERIALIZED VIEW
+
+> create table m3 ()
+-- CREATE TABLE
+
+> refresh materialized view mv
+-- REFRESH MATERIALIZED VIEW
+
+> create table m4 ()
+-- CREATE TABLE
+
+> create materialized view mv2 as select a from b
+-- SELECT 2
+
+> create unique index on mv2 (a)
+-- CREATE INDEX
+
+> create table m5 ()
+-- CREATE TABLE
+
+> refresh materialized view concurrently mv2
+-- REFRESH MATERIALIZED VIEW
+
+> create table m6 ()
+-- CREATE TABLE
+
+> select 'm2'::regclass::int8 - 'm1'::regclass::int8, 'm3'::regclass::int8 - 'm2'::regclass::int8, 'm4'::regclass::int8 - 'm3'::regclass::int8, 'm6'::regclass::int8 - 'm5'::regclass::int8
+?column?:int8 | ?column?:int8 | ?column?:int8 | ?column?:int8
+15 | 13 | 9 | 11
+-- SELECT 1
+
+> drop table b cascade
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to materialized view mv
+DETAIL: drop cascades to materialized view mv2
+-- DROP TABLE
+
+> drop table m1, m2, m3, m4, m5, m6
+-- DROP TABLE
+
+> create table old (a int, b text)
+-- CREATE TABLE
+
+> create index on old (a)
+-- CREATE INDEX
+
+> begin
+-- BEGIN
+
+> create table m0 ()
+-- CREATE TABLE
+
+> create table n (a int, b text)
+-- CREATE TABLE
+
+> create index on n (a)
+-- CREATE INDEX
+
+> create table m1 ()
+-- CREATE TABLE
+
+> truncate n
+-- TRUNCATE TABLE
+
+> create table m2 ()
+-- CREATE TABLE
+
+> truncate old
+-- TRUNCATE TABLE
+
+> create table m3 ()
+-- CREATE TABLE
+
+> truncate old
+-- TRUNCATE TABLE
+
+> create table m4 ()
+-- CREATE TABLE
+
+> savepoint s
+-- SAVEPOINT
+
+> truncate old
+-- TRUNCATE TABLE
+
+> create table m5 ()
+-- CREATE TABLE
+
+> truncate n
+-- TRUNCATE TABLE
+
+> create table m6 ()
+-- CREATE TABLE
+
+> release savepoint s
+-- RELEASE
+
+> truncate old
+-- TRUNCATE TABLE
+
+> create table m7 ()
+-- CREATE TABLE
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> alter table old alter column a type bigint
+-- ALTER TABLE
+
+> create table m8 ()
+-- CREATE TABLE
+
+> truncate old
+-- TRUNCATE TABLE
+
+> create table m9 ()
+-- CREATE TABLE
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> create table m11 ()
+-- CREATE TABLE
+
+> cluster old using old_a_idx
+-- CLUSTER
+
+> create table m12 ()
+-- CREATE TABLE
+
+> truncate old
+-- TRUNCATE TABLE
+
+> create table m13 ()
+-- CREATE TABLE
+
+> reindex table old
+-- REINDEX
+
+> create table m14 ()
+-- CREATE TABLE
+
+> truncate old
+-- TRUNCATE TABLE
+
+> create table m15 ()
+-- CREATE TABLE
+
+> commit
+-- COMMIT
+
+> select string_agg((c.oid::int8 - p.oid::int8)::text, ',' order by c.relname::text collate "C") from pg_class c, pg_class p where p.relname = 'm0' and c.relname ~ '^m\d+$' and c.relname <> 'm10'
+string_agg:text
+0,9,55,64,67,72,75,12,19,22,29,36,39,49,52
+-- SELECT 1
+
+> drop table old, n, m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m11, m12, m13, m14, m15
+-- DROP TABLE
+
+> create table t (a int, b text)
+-- CREATE TABLE
+
+> create index ti on t (a)
+-- CREATE INDEX
+
+> create index tj on t (b)
+-- CREATE INDEX
+
+> create table p (a int) partition by list (a)
+-- CREATE TABLE
+
+> create table p1 partition of p for values in (1)
+-- CREATE TABLE
+
+> create table p2 partition of p for values in (2)
+-- CREATE TABLE
+
+> create index pi on p (a)
+-- CREATE INDEX
+
+> comment on index ti is 'tic'
+-- COMMENT
+
+> create table m0 ()
+-- CREATE TABLE
+
+> reindex table t
+-- REINDEX
+
+> create table m1 ()
+-- CREATE TABLE
+
+> reindex index ti
+-- REINDEX
+
+> create table m2 ()
+-- CREATE TABLE
+
+> reindex table p
+-- REINDEX
+
+> create table m3 ()
+-- CREATE TABLE
+
+> reindex index pi
+-- REINDEX
+
+> create table m4 ()
+-- CREATE TABLE
+
+> reindex schema public
+-- REINDEX
+
+> create table m5 ()
+-- CREATE TABLE
+
+> create table keep as select 'ti'::regclass::oid as ti
+-- SELECT 1
+
+> reindex index concurrently ti
+-- REINDEX
+
+> create table m6 ()
+-- CREATE TABLE
+
+> select obj_description('ti'::regclass, 'pg_class'), indisvalid from pg_index where indexrelid = 'ti'::regclass
+obj_description:text | indisvalid:bool
+tic | t
+-- SELECT 1
+
+> select 'ti'::regclass::oid = (select ti from keep), 'ti'::regclass::int8 - 'm5'::regclass::int8
+?column?:bool | ?column?:int8
+f | 6
+-- SELECT 1
+
+> reindex table concurrently t
+-- REINDEX
+
+> create table m7 ()
+-- CREATE TABLE
+
+> reindex table m7
+NOTICE 00000: table "m7" has no indexes to reindex
+-- REINDEX
+
+> create table m8 ()
+-- CREATE TABLE
+
+> select string_agg((c.oid::int8 - p.oid::int8)::text, ',' order by c.relname::text collate "C") from pg_class c, pg_class p where p.relname = 'm0' and c.relname ~ '^m\d+$'
+string_agg:text
+0,6,10,15,20,28,35,41,44
+-- SELECT 1
+
+> drop table keep, t, p, m0, m1, m2, m3, m4, m5, m6, m7, m8
+-- DROP TABLE
+
+> create table f (a int, b text)
+-- CREATE TABLE
+
+> select age(relfrozenxid), mxid_age(relminmxid), relminmxid from pg_class where relname = 'f'
+age:int4 | mxid_age:int4 | relminmxid:28
+1 | 0 | 1
+-- SELECT 1
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+1
+-- SELECT 1
+
+> select age('2'::xid), age('0'::xid), age('1'::xid), pg_typeof(age('5'::xid)), mxid_age('0'::xid)
+age:int4 | age:int4 | age:int4 | pg_typeof:regtype | mxid_age:int4
+2147483647 | 2147483647 | 2147483647 | integer | 2147483647
+-- SELECT 1
+
+> begin
+-- BEGIN
+
+> select txid_current() > 0
+?column?:bool
+t
+-- SELECT 1
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+1
+-- SELECT 1
+
+> truncate f
+-- TRUNCATE TABLE
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+0
+-- SELECT 1
+
+> commit
+-- COMMIT
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+1
+-- SELECT 1
+
+> insert into f values (1)
+-- INSERT 0 1
+
+> vacuum f
+-- VACUUM
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+1
+-- SELECT 1
+
+> insert into f values (2)
+-- INSERT 0 1
+
+> insert into f values (3)
+-- INSERT 0 1
+
+> vacuum f
+-- VACUUM
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+3
+-- SELECT 1
+
+> vacuum freeze f
+-- VACUUM
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+0
+-- SELECT 1
+
+> insert into f values (4)
+-- INSERT 0 1
+
+> vacuum f
+-- VACUUM
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+1
+-- SELECT 1
+
+> select c.relname = 'f', age(c.relfrozenxid) from pg_class c where c.relname = 'f' or c.oid = (select reltoastrelid from pg_class where relname = 'f') order by 1
+?column?:bool | age:int4
+f | 0
+t | 1
+-- SELECT 2
+
+> vacuum full f
+-- VACUUM
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+1
+-- SELECT 1
+
+> insert into f values (5)
+-- INSERT 0 1
+
+> cluster f using f_pkey
+ERROR 42704: index "f_pkey" for table "f" does not exist
+
+> alter table f add primary key (a)
+-- ALTER TABLE
+
+> insert into f values (6)
+-- INSERT 0 1
+
+> cluster f using f_pkey
+-- CLUSTER
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+1
+-- SELECT 1
+
+> insert into f values (7)
+-- INSERT 0 1
+
+> alter table f alter column a type bigint
+-- ALTER TABLE
+
+> select age(relfrozenxid) from pg_class where relname = 'f'
+age:int4
+1
+-- SELECT 1
+
+> create materialized view mv as select * from f
+-- SELECT 7
+
+> select age(relfrozenxid) from pg_class where relname = 'mv'
+age:int4
+1
+-- SELECT 1
+
+> insert into f values (8)
+-- INSERT 0 1
+
+> refresh materialized view mv
+-- REFRESH MATERIALIZED VIEW
+
+> select age(relfrozenxid) from pg_class where relname = 'mv'
+age:int4
+1
+-- SELECT 1
+
+> create view v as select 1
+-- CREATE VIEW
+
+> select relfrozenxid, relminmxid from pg_class where relname in ('v', 'f_pkey')
+relfrozenxid:28 | relminmxid:28
+0 | 0
+0 | 0
+-- SELECT 2
+
+> select age(relfrozenxid) < 1000 from pg_class where relname = 'f'
+?column?:bool
+t
+-- SELECT 1
+
+> select relfrozenxid::text::int8 > 0, relfrozenxid <> '0'::xid from pg_class where relname = 'f'
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> begin
+-- BEGIN
+
+> create table g (a int)
+-- CREATE TABLE
+
+> select age(relfrozenxid) from pg_class where relname = 'g'
+age:int4
+0
+-- SELECT 1
+
+> select txid_current() is not null
+?column?:bool
+t
+-- SELECT 1
+
+> select age(relfrozenxid) from pg_class where relname = 'g'
+age:int4
+0
+-- SELECT 1
+
+> commit
+-- COMMIT
+
+> drop table f, g cascade
+NOTICE 00000: drop cascades to materialized view mv
+-- DROP TABLE
+
+> drop view v
+-- DROP VIEW
+
+> create table z0 (a int)
+-- CREATE TABLE
+
+> create table x (a int8)
+-- CREATE TABLE
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> create table z ()
+-- CREATE TABLE
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> vacuum z0
+-- VACUUM
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> analyze z0
+-- ANALYZE
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> vacuum analyze z0
+-- VACUUM
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> truncate z0
+-- TRUNCATE TABLE
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> insert into z0 values (1)
+-- INSERT 0 1
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> analyze z0
+-- ANALYZE
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> vacuum analyze z0
+-- VACUUM
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> vacuum z0
+-- VACUUM
+
+> insert into x select txid_current()
+-- INSERT 0 1
+
+> select a - lag(a) over (order by a) from x order by a
+?column?:int8
+NULL
+2
+1
+1
+1
+2
+2
+2
+2
+1
+-- SELECT 10
+
+> drop table x, z, z0
+-- DROP TABLE
+

@@ -1,0 +1,28 @@
+> CREATE FUNCTION gx_li_leak(integer,integer) RETURNS boolean AS 'int4lt' LANGUAGE internal IMMUTABLE STRICT
+-- CREATE FUNCTION
+
+> SELECT gx_li_leak(1, 2), gx_li_leak(3, 2), gx_li_leak(NULL, 1)
+gx_li_leak:bool | gx_li_leak:bool | gx_li_leak:bool
+t | f | NULL
+-- SELECT 1
+
+> CREATE TABLE gx_li_lt (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO gx_li_lt VALUES (1, 2), (5, 3)
+-- INSERT 0 2
+
+> SELECT * FROM gx_li_lt WHERE gx_li_leak(a, b)
+a:int4 | b:int4
+1 | 2
+-- SELECT 1
+
+> CREATE FUNCTION gx_li_bad(int) RETURNS int AS 'no_such_fn' LANGUAGE internal
+ERROR 42883: there is no built-in function named "no_such_fn"
+
+> DROP TABLE gx_li_lt
+-- DROP TABLE
+
+> DROP FUNCTION gx_li_leak(integer, integer)
+-- DROP FUNCTION
+

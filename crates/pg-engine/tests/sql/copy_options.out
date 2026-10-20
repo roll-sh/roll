@@ -1,0 +1,247 @@
+> CREATE TABLE co (a int, b text, g int GENERATED ALWAYS AS (a + 1) STORED)
+-- CREATE TABLE
+
+> INSERT INTO co VALUES (1, 'x'), (2, NULL)
+-- INSERT 0 2
+
+> COPY co TO STDOUT WITH (FORMAT csv, FORMAT text)
+ERROR 42601: conflicting or redundant options (at 37)
+
+> COPY co TO STDOUT WITH (QUOTE '"')
+ERROR 0A000: COPY QUOTE requires CSV mode
+
+> COPY co TO STDOUT WITH (ESCAPE '"')
+ERROR 0A000: COPY ESCAPE requires CSV mode
+
+> COPY co FROM STDIN WITH (FORMAT csv, FORCE_QUOTE (a))
+ERROR 0A000: COPY FORCE_QUOTE cannot be used with COPY FROM
+
+> COPY co TO STDOUT WITH (FORMAT csv, FORCE_NOT_NULL (a))
+ERROR 22023: COPY FORCE_NOT_NULL cannot be used with COPY TO
+
+> COPY co TO STDOUT WITH (FORMAT csv, FORCE_NULL (a))
+ERROR 22023: COPY FORCE_NULL cannot be used with COPY TO
+
+> COPY co TO STDOUT WITH (FORCE_NOT_NULL (a))
+ERROR 0A000: COPY FORCE_NOT_NULL requires CSV mode
+
+> COPY co TO STDOUT WITH (FREEZE)
+ERROR 22023: COPY FREEZE cannot be used with COPY TO
+
+> COPY co TO STDOUT WITH (DEFAULT 'd')
+ERROR 0A000: COPY DEFAULT cannot be used with COPY TO
+
+> COPY co TO STDOUT WITH (HEADER match)
+ERROR 0A000: cannot use "match" with HEADER in COPY TO
+
+> COPY co TO STDOUT WITH (HEADER 'maybe')
+ERROR 42601: header requires a Boolean value or "match"
+
+> COPY co TO STDOUT WITH (DELIMITER 'a')
+ERROR 22023: COPY delimiter cannot be "a"
+
+> COPY co TO STDOUT WITH (DELIMITER E'\n')
+ERROR 22023: COPY delimiter cannot be newline or carriage return
+
+> COPY co TO STDOUT WITH (FORMAT csv, QUOTE 'ab')
+ERROR 0A000: COPY quote must be a single one-byte character
+
+> COPY co TO STDOUT WITH (FORMAT csv, DELIMITER '"')
+ERROR 22023: COPY delimiter and quote must be different
+
+> COPY co TO STDOUT WITH (DELIMITER ',', NULL 'a,b')
+ERROR 22023: COPY delimiter character must not appear in the NULL specification
+
+> COPY co TO STDOUT WITH (FORMAT csv, NULL '"')
+ERROR 22023: CSV quote character must not appear in the NULL specification
+
+> COPY co TO STDOUT WITH (FORMAT binary, DELIMITER ',')
+ERROR 42601: cannot specify DELIMITER in BINARY mode
+
+> COPY co TO STDOUT WITH (FORMAT binary, HEADER)
+ERROR 0A000: cannot specify HEADER in BINARY mode
+
+> COPY co FROM STDIN WITH (ON_ERROR foo)
+ERROR 22023: COPY ON_ERROR "foo" not recognized (at 26)
+
+> COPY co TO STDOUT WITH (ON_ERROR ignore)
+ERROR 22023: COPY ON_ERROR cannot be used with COPY TO (at 25)
+
+> COPY co TO STDOUT WITH (LOG_VERBOSITY foo)
+ERROR 22023: COPY LOG_VERBOSITY "foo" not recognized (at 25)
+
+> COPY co TO STDOUT WITH (ENCODING 'nope')
+ERROR 22023: argument to option "encoding" must be a valid encoding name (at 25)
+
+> COPY co FROM STDIN WITH (NULL 'x', DEFAULT 'x')
+ERROR 0A000: NULL specification and DEFAULT specification cannot be the same
+
+> COPY co FROM STDIN WITH (REJECT_LIMIT 5)
+ERROR 22023: COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE
+
+> COPY co TO STDOUT WITH (bogus)
+ERROR 42601: option "bogus" not recognized (at 25)
+
+> COPY co (g) TO STDOUT
+ERROR 42P10: column "g" is a generated column
+DETAIL: Generated columns cannot be used in COPY.
+
+> COPY co TO STDOUT WITH (FORMAT csv, FORCE_QUOTE (g))
+ERROR 42P10: column "g" is a generated column
+DETAIL: Generated columns cannot be used in COPY.
+
+> COPY co (a) TO STDOUT WITH (FORMAT csv, FORCE_QUOTE (b))
+ERROR 42P10: FORCE_QUOTE column "b" not referenced by COPY
+
+> COPY (INSERT INTO co (a) VALUES (3)) TO STDOUT
+ERROR 0A000: COPY query must have a RETURNING clause
+
+> COPY (INSERT INTO co (a) VALUES (3) RETURNING a, b) TO STDOUT
+copy:text
+3	\N
+-- COPY 1
+
+> COPY (SELECT a FROM co) TO STDOUT WITH (FORMAT csv, FORCE_QUOTE (zz))
+ERROR 42703: column "zz" does not exist
+
+> COPY co TO STDOUT WITH (HEADER)
+copy:text
+1	x
+2	\N
+3	\N
+a	b
+-- COPY 3
+
+> COPY co TO STDOUT WITH (HEADER false, FORMAT csv)
+copy:text
+1,x
+2,
+3,
+-- COPY 3
+
+> COPY co TO STDOUT WITH (FORMAT csv, HEADER, DELIMITER '|', NULL 'N', FORCE_QUOTE *)
+copy:text
+"1"|"x"
+"2"|N
+"3"|N
+a|b
+-- COPY 3
+
+> CREATE TABLE ce (s text)
+-- CREATE TABLE
+
+> INSERT INTO ce VALUES (E'a\tb'), (E'c\nd'), (E'e\\f'), (E'g\bh\fi\vj\rk'), ('l|m')
+-- INSERT 0 5
+
+> COPY ce TO STDOUT
+copy:text
+a\tb
+c\nd
+e\\f
+g\bh\fi\vj\rk
+l|m
+-- COPY 5
+
+> COPY ce TO STDOUT WITH (DELIMITER '|')
+copy:text
+a\tb
+c\nd
+e\\f
+g\bh\fi\vj\rk
+l\|m
+-- COPY 5
+
+> TRUNCATE ce
+-- TRUNCATE TABLE
+
+> COPY ce FROM STDIN
+>> \x41\102\z
+>> oct\0101
+-- COPY 2
+
+> SELECT s FROM ce ORDER BY s
+s:text
+ABz
+oct1
+-- SELECT 2
+
+> CREATE TABLE cf (a int, b text, c text)
+-- CREATE TABLE
+
+> COPY cf FROM STDIN WITH (FORMAT csv, NULL 'N', FORCE_NULL (b), FORCE_NOT_NULL (c))
+>> 1,"N",N
+>> 2,N,"N"
+>> 3,,
+-- COPY 3
+
+> SELECT a, b IS NULL AS b_null, b, c IS NULL AS c_null, c FROM cf ORDER BY a
+a:int4 | b_null:bool | b:text | c_null:bool | c:text
+1 | t | NULL | f | N
+2 | t | NULL | f | N
+3 | f |  | f | 
+-- SELECT 3
+
+> COPY cf FROM STDIN WITH (FORMAT csv, FORCE_NULL *, FORCE_NOT_NULL *)
+>> 4,"",
+-- COPY 1
+
+> SELECT a, b IS NULL AS b_null, c IS NULL AS c_null FROM cf WHERE a = 4
+a:int4 | b_null:bool | c_null:bool
+4 | t | f
+-- SELECT 1
+
+> COPY cf FROM STDIN WITH (FORMAT csv, HEADER match)
+>> a,b
+ERROR 22P04: wrong number of fields in header line: got 2, expected 3
+CONTEXT: COPY cf, line 1: "a,b"
+
+> COPY cf (a) FROM STDIN WITH (ON_ERROR ignore)
+>> x
+>> y
+>> 5
+NOTICE 00000: 2 rows were skipped due to data type incompatibility
+-- COPY 1
+
+> COPY cf (a) FROM STDIN WITH (ON_ERROR ignore, LOG_VERBOSITY verbose)
+>> z
+>> 6
+NOTICE 00000: skipping row due to data type incompatibility at line 1 for column "a": "z"
+CONTEXT: COPY cf
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 1
+
+> COPY cf (a) FROM STDIN WITH (ON_ERROR ignore, LOG_VERBOSITY silent)
+>> w
+>> 7
+-- COPY 1
+
+> COPY cf (a) FROM STDIN WITH (ON_ERROR ignore, REJECT_LIMIT 1)
+>> p
+>> q
+ERROR 22P02: skipped more than REJECT_LIMIT (1) rows due to data type incompatibility
+CONTEXT: COPY cf, line 2, column a: "q"
+
+> SELECT a FROM cf WHERE a >= 5 ORDER BY a
+a:int4
+5
+6
+7
+-- SELECT 3
+
+> CREATE TABLE cd (a int, b text DEFAULT 'dflt')
+-- CREATE TABLE
+
+> COPY cd FROM STDIN WITH (FORMAT csv, DEFAULT 'D')
+>> 1,D
+>> 2,"D"
+-- COPY 2
+
+> SELECT * FROM cd ORDER BY a
+a:int4 | b:text
+1 | dflt
+2 | D
+-- SELECT 2
+
+> DROP TABLE co, ce, cf, cd
+-- DROP TABLE
+

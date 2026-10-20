@@ -1,0 +1,173 @@
+> CREATE TABLE m (k int, v text) PARTITION BY LIST (k)
+-- CREATE TABLE
+
+> CREATE TABLE m1 PARTITION OF m FOR VALUES IN (1, 2)
+-- CREATE TABLE
+
+> CREATE TABLE m2 PARTITION OF m FOR VALUES IN (3, 4)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX m_k ON m (k)
+-- CREATE INDEX
+
+> INSERT INTO m VALUES (1, 'a'), (3, 'c')
+-- INSERT 0 2
+
+> INSERT INTO m VALUES (1, 'z') ON CONFLICT (k) DO UPDATE SET k = 3
+ERROR 0A000: invalid ON UPDATE specification
+DETAIL: The result tuple would appear in a different partition than the original tuple.
+
+> INSERT INTO m VALUES (1, 'z') ON CONFLICT (k) DO UPDATE SET v = m.v || excluded.v WHERE m.v = 'a' RETURNING tableoid::regclass, *
+tableoid:regclass | k:int4 | v:text
+m1 | 1 | az
+-- INSERT 0 1
+
+> CREATE FUNCTION trg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE '% % % on %', TG_WHEN, TG_LEVEL, TG_OP, TG_TABLE_NAME; IF TG_LEVEL = 'ROW' THEN IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END IF; RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tb BEFORE INSERT OR UPDATE OR DELETE ON m FOR EACH ROW EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER ta AFTER INSERT OR UPDATE OR DELETE ON m FOR EACH ROW EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER ts AFTER INSERT ON m FOR EACH STATEMENT EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> SELECT tgname, tgrelid::regclass, tgparentid <> 0 AS child FROM pg_trigger WHERE tgrelid IN ('m'::regclass, 'm1'::regclass, 'm2'::regclass) ORDER BY 2, 1
+tgname:name | tgrelid:regclass | child:bool
+ta | m | f
+tb | m | f
+ts | m | f
+ta | m1 | t
+tb | m1 | t
+ta | m2 | t
+tb | m2 | t
+-- SELECT 7
+
+> CREATE TABLE m3 PARTITION OF m FOR VALUES IN (5, 6)
+-- CREATE TABLE
+
+> SELECT tgname, tgrelid::regclass FROM pg_trigger WHERE tgrelid = 'm3'::regclass ORDER BY 1
+tgname:name | tgrelid:regclass
+ta | m3
+tb | m3
+-- SELECT 2
+
+> INSERT INTO m VALUES (2, 'b'), (5, 'e')
+NOTICE 00000: BEFORE ROW INSERT on m1
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: BEFORE ROW INSERT on m3
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: AFTER ROW INSERT on m1
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: AFTER ROW INSERT on m3
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: AFTER STATEMENT INSERT on m
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+-- INSERT 0 2
+
+> UPDATE m SET k = 4 WHERE k = 2
+NOTICE 00000: BEFORE ROW UPDATE on m1
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: BEFORE ROW DELETE on m1
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: BEFORE ROW INSERT on m2
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: AFTER ROW DELETE on m1
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: AFTER ROW INSERT on m2
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+-- UPDATE 1
+
+> DELETE FROM m WHERE k = 5
+NOTICE 00000: BEFORE ROW DELETE on m3
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: AFTER ROW DELETE on m3
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+-- DELETE 1
+
+> DROP TRIGGER ta ON m1
+ERROR 2BP01: cannot drop trigger ta on table m1 because trigger ta on table m requires it
+HINT: You can drop trigger ta on table m instead.
+
+> DROP TRIGGER ta ON m
+-- DROP TRIGGER
+
+> SELECT tgname, tgrelid::regclass FROM pg_trigger WHERE tgrelid IN ('m'::regclass, 'm1'::regclass, 'm3'::regclass) ORDER BY 2, 1
+tgname:name | tgrelid:regclass
+tb | m
+ts | m
+tb | m1
+tb | m3
+-- SELECT 4
+
+> MERGE INTO m USING (VALUES (1, 'q'), (6, 'f'), (3, 'r')) s(k, v) ON m.k = s.k
+>   WHEN MATCHED AND s.k = 3 THEN DELETE
+>   WHEN MATCHED THEN UPDATE SET v = s.v
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.k, s.v)
+NOTICE 00000: BEFORE ROW UPDATE on m1
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: BEFORE ROW INSERT on m3
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: BEFORE ROW DELETE on m2
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: AFTER STATEMENT INSERT on m
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+-- MERGE 3
+
+> SELECT tableoid::regclass, * FROM m ORDER BY k
+tableoid:regclass | k:int4 | v:text
+m1 | 1 | q
+m2 | 4 | b
+m3 | 6 | f
+-- SELECT 3
+
+> MERGE INTO m USING (VALUES (1)) s(k) ON m.k = s.k WHEN MATCHED THEN UPDATE SET k = 6
+NOTICE 00000: BEFORE ROW UPDATE on m1
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: BEFORE ROW DELETE on m1
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: BEFORE ROW INSERT on m3
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+ERROR 23505: duplicate key value violates unique constraint "m3_k_idx"
+DETAIL: Key (k)=(6) already exists.
+OBJECTS: schema=public table=m3 constraint=m3_k_idx
+
+> SELECT tableoid::regclass, * FROM m ORDER BY k
+tableoid:regclass | k:int4 | v:text
+m1 | 1 | q
+m2 | 4 | b
+m3 | 6 | f
+-- SELECT 3
+
+> ALTER TABLE m1 ADD COLUMN extra int
+ERROR 42809: cannot add column to a partition
+
+> ALTER TABLE m ADD COLUMN extra int
+-- ALTER TABLE
+
+> SELECT attname FROM pg_attribute WHERE attrelid = 'm2'::regclass AND attnum > 0 ORDER BY attnum
+attname:name
+k
+v
+extra
+-- SELECT 3
+
+> ALTER TABLE m ALTER COLUMN v SET NOT NULL
+-- ALTER TABLE
+
+> SELECT attnotnull FROM pg_attribute WHERE attrelid = 'm2'::regclass AND attname = 'v'
+attnotnull:bool
+t
+-- SELECT 1
+
+> ALTER TABLE m1 ALTER COLUMN v DROP NOT NULL
+ERROR 42P16: column "v" is marked NOT NULL in parent table
+
+> DROP TABLE m
+-- DROP TABLE
+
+> DROP FUNCTION trg()
+-- DROP FUNCTION
+

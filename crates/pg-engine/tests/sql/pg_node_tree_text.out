@@ -1,0 +1,144 @@
+> create function pnt_f(x int) returns int return x + 1
+-- CREATE FUNCTION
+
+> select prosqlbody || 'x' from pg_proc limit 0
+ERROR 42725: operator is not unique: pg_node_tree || unknown (at 19)
+HINT: Could not choose a best candidate operator. You might need to add explicit type casts.
+
+> select stxdndistinct || 'x' from pg_statistic_ext_data limit 0
+ERROR 42725: operator is not unique: pg_ndistinct || unknown (at 22)
+HINT: Could not choose a best candidate operator. You might need to add explicit type casts.
+
+> select left(prosqlbody, 3), length(prosqlbody) > 10, pg_typeof(prosqlbody::text), left(upper(prosqlbody), 8) from pg_proc where proname = 'pnt_f'
+left:text | ?column?:bool | pg_typeof:regtype | left:text
+{QU | t | text | {QUERY :
+-- SELECT 1
+
+> select prosqlbody = 'x' from pg_proc limit 0
+?column?:bool
+-- SELECT 0
+
+> select prosqlbody like 'x' from pg_proc limit 0
+?column?:bool
+-- SELECT 0
+
+> select prosqlbody::varchar(5) from pg_proc where proname = 'pnt_f'
+prosqlbody:varchar
+{QUER
+-- SELECT 1
+
+> select pg_collation_for(prosqlbody), pg_collation_for(prosqlbody::text) from pg_proc where proname = 'pnt_f'
+pg_collation_for:text | pg_collation_for:text
+"C" | "C"
+-- SELECT 1
+
+> select relpartbound ~ 'x' from pg_class limit 0
+?column?:bool
+-- SELECT 0
+
+> select concat(prosqlbody) is not null from pg_proc where proname = 'pnt_f'
+?column?:bool
+t
+-- SELECT 1
+
+> select position('QUERY' in prosqlbody) from pg_proc where proname = 'pnt_f'
+position:int4
+2
+-- SELECT 1
+
+> select 'x'::pg_node_tree
+ERROR 0A000: cannot accept a value of type pg_node_tree (at 8)
+
+> select 'x'::text::pg_node_tree
+ERROR 0A000: cannot accept a value of type pg_node_tree
+
+> select length(stxdndistinct) from pg_statistic_ext_data limit 0
+ERROR 42725: function length(pg_ndistinct) is not unique (at 8)
+HINT: Could not choose a best candidate function. You might need to add explicit type casts.
+
+> select regexp_replace(prosqlbody, ':location -?[0-9]+', '', 'g') = regexp_replace(prosqlbody::text, ':location -?[0-9]+', '', 'g') from pg_proc where proname = 'pnt_f'
+?column?:bool
+t
+-- SELECT 1
+
+> select prosqlbody::text = prosqlbody from pg_proc where proname = 'pnt_f'
+?column?:bool
+t
+-- SELECT 1
+
+> select pg_typeof(coalesce(prosqlbody, 'x')) from pg_proc where proname = 'pnt_f'
+ERROR 0A000: cannot accept a value of type pg_node_tree (at 39)
+
+> select null::pg_node_tree::bytea
+ERROR 42846: cannot cast type pg_node_tree to bytea (at 26)
+
+> select stxdndistinct::text from pg_statistic_ext_data limit 0
+stxdndistinct:text
+-- SELECT 0
+
+> select prosqlbody::name is not null from pg_proc where proname = 'pnt_f'
+?column?:bool
+t
+-- SELECT 1
+
+> select prosqlbody::bpchar is not null from pg_proc where proname = 'pnt_f'
+?column?:bool
+t
+-- SELECT 1
+
+> select substr(prosqlbody, 1, 3), strpos(prosqlbody, 'QUERY'), md5(prosqlbody) = md5(prosqlbody::text) from pg_proc where proname = 'pnt_f'
+substr:text | strpos:int4 | ?column?:bool
+{QU | 2 | t
+-- SELECT 1
+
+> select prosqlbody < 'z', prosqlbody >= prosqlbody from pg_proc where proname = 'pnt_f'
+?column?:bool | ?column?:bool
+f | t
+-- SELECT 1
+
+> select pg_collation_for(relname), pg_collation_for(description), upper(description) from pg_description d, pg_class c where c.oid = d.objoid and relname = 'pg_class' limit 1
+pg_collation_for:text | pg_collation_for:text | upper:text
+-- SELECT 0
+
+> select pg_collation_for(table_name), pg_collation_for(table_type) from information_schema.tables where table_name = 'pg_class'
+pg_collation_for:text | pg_collation_for:text
+"C" | "C"
+-- SELECT 1
+
+> select castsource::regtype, casttarget::regtype, castfunc, castcontext, castmethod from pg_cast where castsource = 'pg_node_tree'::regtype
+castsource:regtype | casttarget:regtype | castfunc:oid | castcontext:char | castmethod:char
+pg_node_tree | text | 0 | i | b
+-- SELECT 1
+
+> select typname, typcollation from pg_type where typname in ('pg_node_tree','pg_ndistinct','pg_dependencies','pg_mcv_list') order by 1
+typname:name | typcollation:oid
+pg_dependencies | 100
+pg_mcv_list | 100
+pg_ndistinct | 100
+pg_node_tree | 100
+-- SELECT 4
+
+> select null::pg_node_tree collate "C"
+pg_node_tree:194
+NULL
+-- SELECT 1
+
+> select pg_collation_for(null::pg_ndistinct)
+pg_collation_for:text
+"default"
+-- SELECT 1
+
+> create table pnt_nt (a pg_node_tree)
+-- CREATE TABLE
+
+> select attcollation from pg_attribute where attrelid = 'pnt_nt'::regclass and attname = 'a'
+attcollation:oid
+100
+-- SELECT 1
+
+> drop table pnt_nt
+-- DROP TABLE
+
+> drop function pnt_f
+-- DROP FUNCTION
+

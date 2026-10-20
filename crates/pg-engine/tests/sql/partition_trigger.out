@@ -1,0 +1,161 @@
+> CREATE TABLE m (k int, v text) PARTITION BY LIST (k)
+-- CREATE TABLE
+
+> CREATE TABLE m1 PARTITION OF m FOR VALUES IN (1, 2)
+-- CREATE TABLE
+
+> CREATE FUNCTION trg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER i INSTEAD OF INSERT ON m FOR EACH ROW EXECUTE FUNCTION trg()
+ERROR 42809: "m" is a table
+DETAIL: Tables cannot have INSTEAD OF triggers.
+
+> CREATE TRIGGER r AFTER INSERT ON m REFERENCING NEW TABLE AS n FOR EACH ROW EXECUTE FUNCTION trg()
+ERROR 0A000: "m" is a partitioned table
+DETAIL: ROW triggers with transition tables are not supported on partitioned tables.
+
+> CREATE TRIGGER r AFTER INSERT ON m1 REFERENCING NEW TABLE AS n FOR EACH ROW EXECUTE FUNCTION trg()
+ERROR 0A000: ROW triggers with transition tables are not supported on partitions
+
+> CREATE TRIGGER r AFTER INSERT ON m1 REFERENCING NEW TABLE AS n FOR EACH STATEMENT EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER s AFTER INSERT ON m REFERENCING NEW TABLE AS n FOR EACH STATEMENT EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER x AFTER INSERT ON m1 FOR EACH ROW EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER x AFTER INSERT ON m FOR EACH ROW EXECUTE FUNCTION trg()
+ERROR 42710: trigger "x" for relation "m1" already exists
+
+> DROP TRIGGER x ON m1
+-- DROP TRIGGER
+
+> CREATE TRIGGER x AFTER UPDATE OF v ON m FOR EACH ROW WHEN (OLD.v IS DISTINCT FROM NEW.v) EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> ALTER TRIGGER x ON m1 RENAME TO y
+ERROR 0A000: cannot rename trigger "x" on table "m1"
+HINT: Rename the trigger on the partitioned table "m" instead.
+
+> ALTER TRIGGER x ON m RENAME TO y
+-- ALTER TRIGGER
+
+> ALTER TABLE m DISABLE TRIGGER y
+-- ALTER TABLE
+
+> SELECT tgname, tgrelid::regclass, tgenabled, tgattr, tgparentid = (SELECT oid FROM pg_trigger WHERE tgrelid = 'm'::regclass AND tgname = 'y') FROM pg_trigger WHERE tgname IN ('y','s','r') ORDER BY 2, 1
+tgname:name | tgrelid:regclass | tgenabled:char | tgattr:22 | ?column?:bool
+s | m | O |  | f
+y | m | D | 2 | f
+r | m1 | O |  | f
+y | m1 | D | 2 | t
+-- SELECT 4
+
+> ALTER TABLE m1 ENABLE TRIGGER y
+-- ALTER TABLE
+
+> SELECT tgname, tgrelid::regclass, tgenabled FROM pg_trigger WHERE tgname = 'y' ORDER BY 2
+tgname:name | tgrelid:regclass | tgenabled:char
+y | m | D
+y | m1 | O
+-- SELECT 2
+
+> CREATE OR REPLACE TRIGGER y AFTER DELETE ON m FOR EACH ROW EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> SELECT tgname, tgrelid::regclass, tgtype, tgenabled FROM pg_trigger WHERE tgname = 'y' ORDER BY 2
+tgname:name | tgrelid:regclass | tgtype:int2 | tgenabled:char
+y | m | 9 | O
+y | m1 | 9 | O
+-- SELECT 2
+
+> ALTER TABLE m DETACH PARTITION m1
+-- ALTER TABLE
+
+> SELECT tgname, tgrelid::regclass FROM pg_trigger WHERE tgrelid = 'm1'::regclass ORDER BY 1
+tgname:name | tgrelid:regclass
+r | m1
+-- SELECT 1
+
+> CREATE TRIGGER y AFTER DELETE ON m1 FOR EACH ROW EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> ALTER TABLE m ATTACH PARTITION m1 FOR VALUES IN (1, 2)
+ERROR 42710: trigger "y" for relation "m1" already exists
+
+> DROP TRIGGER y ON m1
+-- DROP TRIGGER
+
+> ALTER TABLE m ATTACH PARTITION m1 FOR VALUES IN (1, 2)
+-- ALTER TABLE
+
+> SELECT tgname, tgrelid::regclass, tgparentid <> 0 FROM pg_trigger WHERE tgrelid = 'm1'::regclass ORDER BY 1
+tgname:name | tgrelid:regclass | ?column?:bool
+r | m1 | f
+y | m1 | t
+-- SELECT 2
+
+> DROP TABLE m
+-- DROP TABLE
+
+> DROP FUNCTION trg()
+-- DROP FUNCTION
+
+> CREATE TABLE m (k int, v text) PARTITION BY LIST (k)
+-- CREATE TABLE
+
+> CREATE TABLE m1 PARTITION OF m FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE m2 PARTITION OF m FOR VALUES IN (2)
+-- CREATE TABLE
+
+> CREATE FUNCTION bump() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.k := NEW.k + 1; RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER b BEFORE INSERT OR UPDATE ON m FOR EACH ROW EXECUTE FUNCTION bump()
+-- CREATE TRIGGER
+
+> INSERT INTO m VALUES (1, 'a')
+ERROR 0A000: moving row to another partition during a BEFORE FOR EACH ROW trigger is not supported
+DETAIL: Before executing trigger "b", the row was to be in partition "public.m1".
+
+> INSERT INTO m1 VALUES (1, 'a')
+ERROR 0A000: moving row to another partition during a BEFORE FOR EACH ROW trigger is not supported
+DETAIL: Before executing trigger "b", the row was to be in partition "public.m1".
+
+> DROP TRIGGER b ON m
+-- DROP TRIGGER
+
+> INSERT INTO m VALUES (1, 'a')
+-- INSERT 0 1
+
+> CREATE TRIGGER b BEFORE UPDATE ON m FOR EACH ROW EXECUTE FUNCTION bump()
+-- CREATE TRIGGER
+
+> UPDATE m SET v = 'b'
+-- UPDATE 1
+
+> UPDATE m1 SET v = 'b'
+-- UPDATE 0
+
+> DROP TRIGGER b ON m
+-- DROP TRIGGER
+
+> CREATE TRIGGER own BEFORE INSERT ON m1 FOR EACH ROW EXECUTE FUNCTION bump()
+-- CREATE TRIGGER
+
+> INSERT INTO m VALUES (1, 'z')
+ERROR 23514: new row for relation "m1" violates partition constraint
+DETAIL: Failing row contains (2, z).
+OBJECTS: schema=public table=m1
+
+> DROP TABLE m
+-- DROP TABLE
+
+> DROP FUNCTION bump()
+-- DROP FUNCTION
+

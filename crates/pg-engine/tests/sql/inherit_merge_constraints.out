@@ -1,0 +1,323 @@
+> create table ip (a int not null, b int, constraint ck check (a > 0), constraint ckn check (b > 0) no inherit)
+-- CREATE TABLE
+
+> create table c1 (a int, constraint ck check (a > 0)) inherits (ip)
+NOTICE 00000: merging column "a" with inherited definition
+NOTICE 00000: merging constraint "ck" with inherited definition
+-- CREATE TABLE
+
+> create table c2 (a int, constraint ck check (a > 1)) inherits (ip)
+NOTICE 00000: merging column "a" with inherited definition
+ERROR 42710: constraint "ck" for relation "c2" already exists
+
+> create table c3 (a int, constraint ck check (a > 0) no inherit) inherits (ip)
+NOTICE 00000: merging column "a" with inherited definition
+ERROR 42P17: constraint "ck" conflicts with inherited constraint on relation "c3"
+
+> create table c4 (a int, constraint ck check (a > 0) not valid) inherits (ip)
+NOTICE 00000: merging column "a" with inherited definition
+NOTICE 00000: merging constraint "ck" with inherited definition
+-- CREATE TABLE
+
+> create table c5 (a int, constraint ck check (a > 0) not enforced) inherits (ip)
+NOTICE 00000: merging column "a" with inherited definition
+ERROR 42P17: constraint "ck" conflicts with NOT ENFORCED constraint on relation "c5"
+
+> create table c6 (a int not null no inherit) inherits (ip)
+NOTICE 00000: merging column "a" with inherited definition
+ERROR 42804: cannot define not-null constraint with NO INHERIT on column "a"
+DETAIL: The column has an inherited not-null constraint.
+
+> create table c7 (a int, constraint nn not null a) inherits (ip)
+NOTICE 00000: merging column "a" with inherited definition
+-- CREATE TABLE
+
+> create table c8 (b int, constraint ckn check (b > 0)) inherits (ip)
+NOTICE 00000: moving and merging column "b" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+-- CREATE TABLE
+
+> create table c9 (b int, constraint ckn check (b > 5)) inherits (ip)
+NOTICE 00000: moving and merging column "b" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+-- CREATE TABLE
+
+> create table c10 (b int not null no inherit) inherits (ip)
+NOTICE 00000: moving and merging column "b" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+-- CREATE TABLE
+
+> select conrelid::regclass, conname, contype, conislocal, coninhcount, connoinherit, convalidated, conenforced from pg_constraint where conrelid::regclass::text like 'c%' order by conrelid::regclass::text, conname
+conrelid:regclass | conname:name | contype:char | conislocal:bool | coninhcount:int2 | connoinherit:bool | convalidated:bool | conenforced:bool
+c1 | ck | c | t | 1 | f | t | t
+c1 | ip_a_not_null | n | f | 1 | f | t | t
+c10 | c10_b_not_null | n | t | 0 | t | t | t
+c10 | ck | c | f | 1 | f | t | t
+c10 | ip_a_not_null | n | f | 1 | f | t | t
+c4 | ck | c | t | 1 | f | t | t
+c4 | ip_a_not_null | n | f | 1 | f | t | t
+c7 | ck | c | f | 1 | f | t | t
+c7 | nn | n | t | 1 | f | t | t
+c8 | ck | c | f | 1 | f | t | t
+c8 | ckn | c | t | 0 | f | t | t
+c8 | ip_a_not_null | n | f | 1 | f | t | t
+c9 | ck | c | f | 1 | f | t | t
+c9 | ckn | c | t | 0 | f | t | t
+c9 | ip_a_not_null | n | f | 1 | f | t | t
+-- SELECT 15
+
+> create table ip2 (a int not null no inherit)
+-- CREATE TABLE
+
+> create table c11 (a int) inherits (ip2)
+NOTICE 00000: merging column "a" with inherited definition
+-- CREATE TABLE
+
+> create table ip3 (a int, constraint z check (a > 0) not enforced)
+-- CREATE TABLE
+
+> create table c12 (a int, constraint z check (a > 0)) inherits (ip3)
+NOTICE 00000: merging column "a" with inherited definition
+NOTICE 00000: merging constraint "z" with inherited definition
+-- CREATE TABLE
+
+> create table c13 (a int, constraint z check (a > 0) not enforced) inherits (ip3)
+NOTICE 00000: merging column "a" with inherited definition
+NOTICE 00000: merging constraint "z" with inherited definition
+-- CREATE TABLE
+
+> create table ip4 (a int, constraint z check (a > 0))
+-- CREATE TABLE
+
+> create table c14 (a int, constraint z check (a > 0) not enforced) inherits (ip4)
+NOTICE 00000: merging column "a" with inherited definition
+ERROR 42P17: constraint "z" conflicts with NOT ENFORCED constraint on relation "c14"
+
+> select conrelid::regclass, conname, contype, conislocal, coninhcount, connoinherit, convalidated, conenforced from pg_constraint where conrelid::regclass::text ~ 'c1[1-4]' order by conrelid::regclass::text, conname
+conrelid:regclass | conname:name | contype:char | conislocal:bool | coninhcount:int2 | connoinherit:bool | convalidated:bool | conenforced:bool
+c12 | z | c | t | 1 | f | t | t
+c13 | z | c | t | 1 | f | f | f
+-- SELECT 2
+
+> create table d1 (a int, b int, constraint ck check (a > 0))
+-- CREATE TABLE
+
+> alter table d1 inherit ip
+ERROR 42804: column "a" in child table "d1" must be marked NOT NULL
+
+> create table d2 (a int not null, b int, constraint ck check (a > 0))
+-- CREATE TABLE
+
+> alter table d2 inherit ip
+-- ALTER TABLE
+
+> create table d3 (a int not null, b int, constraint ck check (a > 1))
+-- CREATE TABLE
+
+> alter table d3 inherit ip
+ERROR 42804: child table "d3" has different definition for check constraint "ck"
+
+> create table d4 (a int not null, b int, constraint ck check (a > 0) no inherit)
+-- CREATE TABLE
+
+> alter table d4 inherit ip
+ERROR 42P17: constraint "ck" conflicts with non-inherited constraint on child table "d4"
+
+> create table d5 (a int not null no inherit, b int, constraint ck check (a > 0))
+-- CREATE TABLE
+
+> alter table d5 inherit ip
+ERROR 42P17: constraint "d5_a_not_null" conflicts with non-inherited constraint on child table "d5"
+
+> create table d6 (a int not null, b int, constraint ck check (a > 0) not enforced)
+-- CREATE TABLE
+
+> alter table d6 inherit ip
+ERROR 42P17: constraint "ck" conflicts with NOT ENFORCED constraint on child table "d6"
+
+> create table d7 (a int not null, b int, constraint ck check (a > 0) not valid)
+-- CREATE TABLE
+
+> alter table d7 inherit ip
+-- ALTER TABLE
+
+> select conrelid::regclass, conname, contype, conislocal, coninhcount, connoinherit, convalidated, conenforced from pg_constraint where conrelid::regclass::text like 'd%' order by conrelid::regclass::text, conname
+conrelid:regclass | conname:name | contype:char | conislocal:bool | coninhcount:int2 | connoinherit:bool | convalidated:bool | conenforced:bool
+d1 | ck | c | t | 0 | f | t | t
+d2 | ck | c | t | 1 | f | t | t
+d2 | d2_a_not_null | n | t | 1 | f | t | t
+d3 | ck | c | t | 0 | f | t | t
+d3 | d3_a_not_null | n | t | 0 | f | t | t
+d4 | ck | c | t | 0 | t | t | t
+d4 | d4_a_not_null | n | t | 0 | f | t | t
+d5 | ck | c | t | 0 | f | t | t
+d5 | d5_a_not_null | n | t | 0 | t | t | t
+d6 | ck | c | t | 0 | f | f | f
+d6 | d6_a_not_null | n | t | 0 | f | t | t
+d7 | ck | c | t | 1 | f | t | t
+d7 | d7_a_not_null | n | t | 1 | f | t | t
+-- SELECT 13
+
+> drop table ip, ip2, ip3, ip4 cascade
+NOTICE 00000: drop cascades to 11 other objects
+DETAIL: drop cascades to table c12
+DETAIL: drop cascades to table c13
+DETAIL: drop cascades to table c11
+DETAIL: drop cascades to table c1
+DETAIL: drop cascades to table c4
+DETAIL: drop cascades to table c7
+DETAIL: drop cascades to table c8
+DETAIL: drop cascades to table c9
+DETAIL: drop cascades to table c10
+DETAIL: drop cascades to table d2
+DETAIL: drop cascades to table d7
+-- DROP TABLE
+
+> create table mp1 (a int, constraint mck check (a > 0))
+-- CREATE TABLE
+
+> create table mp2 (a int, constraint mck check (a > 0))
+-- CREATE TABLE
+
+> create table mp3 (a int, constraint mck check (a < 0))
+-- CREATE TABLE
+
+> create table mc1 () inherits (mp1, mp2)
+NOTICE 00000: merging multiple inherited definitions of column "a"
+-- CREATE TABLE
+
+> create table mc2 () inherits (mp1, mp3)
+NOTICE 00000: merging multiple inherited definitions of column "a"
+ERROR 42710: check constraint name "mck" appears multiple times but with different expressions
+
+> create table mc3 (constraint mck check (a > 0)) inherits (mp1, mp2)
+NOTICE 00000: merging multiple inherited definitions of column "a"
+NOTICE 00000: merging constraint "mck" with inherited definition
+-- CREATE TABLE
+
+> select conrelid::regclass, conname, conislocal, coninhcount from pg_constraint where conrelid::regclass::text ~ '^mc' order by conrelid::regclass::text, conname
+conrelid:regclass | conname:name | conislocal:bool | coninhcount:int2
+mc1 | mck | f | 2
+mc3 | mck | t | 2
+-- SELECT 2
+
+> create table q (a int not null, constraint qck check (a > 0))
+-- CREATE TABLE
+
+> create table qc (a int not null, constraint qck check (a > 0))
+-- CREATE TABLE
+
+> create table mk0 ()
+-- CREATE TABLE
+
+> alter table qc inherit q
+-- ALTER TABLE
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> select conname, conislocal, coninhcount, oid < 'mk0'::regclass::oid from pg_constraint where conrelid = 'qc'::regclass order by conname
+conname:name | conislocal:bool | coninhcount:int2 | ?column?:bool
+qc_a_not_null | t | 1 | t
+qck | t | 1 | t
+-- SELECT 2
+
+> select 'mk1'::regclass::int8 - 'mk0'::regclass::int8
+?column?:int8
+3
+-- SELECT 1
+
+> alter table qc no inherit q
+-- ALTER TABLE
+
+> select conname, conislocal, coninhcount from pg_constraint where conrelid = 'qc'::regclass order by conname
+conname:name | conislocal:bool | coninhcount:int2
+qc_a_not_null | t | 0
+qck | t | 0
+-- SELECT 2
+
+> drop table mp1, mp2, mp3, q, qc, mk0, mk1 cascade
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to table mc1
+DETAIL: drop cascades to table mc3
+-- DROP TABLE
+
+> create table ap (a int, constraint ack check (a > 0), constraint ack2 check (a > 0), constraint ack3 check (a > 0))
+-- CREATE TABLE
+
+> create table ac () inherits (ap)
+-- CREATE TABLE
+
+> alter table ac add constraint ack check (a > 0)
+NOTICE 00000: merging constraint "ack" with inherited definition
+-- ALTER TABLE
+
+> alter table ac add constraint ack2 check (a > 0) no inherit
+ERROR 42P17: constraint "ack2" conflicts with inherited constraint on relation "ac"
+
+> alter table ac add constraint ack3 check (a > 0) not enforced
+ERROR 42P17: constraint "ack3" conflicts with NOT ENFORCED constraint on relation "ac"
+
+> alter table ac add constraint ack3 check (a > 1)
+ERROR 42710: constraint "ack3" for relation "ac" already exists
+
+> select conname, conislocal, coninhcount, connoinherit from pg_constraint where conrelid = 'ac'::regclass order by conname
+conname:name | conislocal:bool | coninhcount:int2 | connoinherit:bool
+ack | t | 1 | f
+ack2 | f | 1 | f
+ack3 | f | 1 | f
+-- SELECT 3
+
+> create table nv1 (a int, constraint v check (a > 0) not valid)
+-- CREATE TABLE
+
+> select convalidated from pg_constraint where conname = 'v'
+convalidated:bool
+t
+-- SELECT 1
+
+> create table nvp (a int, constraint w check (a > 0))
+-- CREATE TABLE
+
+> create table nvc (a int)
+-- CREATE TABLE
+
+> alter table nvc add constraint w check (a > 0) not valid
+-- ALTER TABLE
+
+> alter table nvc inherit nvp
+ERROR 42P17: constraint "w" conflicts with NOT VALID constraint on child table "nvc"
+
+> create table pp (k int, a int not null, constraint pck check (a > 0)) partition by range (k)
+-- CREATE TABLE
+
+> create table pp1 (a int not null, k int, constraint pck check (a > 0))
+-- CREATE TABLE
+
+> alter table pp attach partition pp1 for values from (0) to (10)
+-- ALTER TABLE
+
+> create table pp2 partition of pp for values from (10) to (20)
+-- CREATE TABLE
+
+> select conrelid::regclass, conname, conislocal, coninhcount from pg_constraint where conrelid in ('pp1'::regclass, 'pp2'::regclass) order by conrelid::regclass::text, conname
+conrelid:regclass | conname:name | conislocal:bool | coninhcount:int2
+pp1 | pck | f | 1
+pp1 | pp1_a_not_null | f | 1
+pp2 | pck | f | 1
+pp2 | pp_a_not_null | f | 1
+-- SELECT 4
+
+> alter table pp detach partition pp1
+-- ALTER TABLE
+
+> select conname, conislocal, coninhcount from pg_constraint where conrelid = 'pp1'::regclass order by conname
+conname:name | conislocal:bool | coninhcount:int2
+pck | t | 0
+pp1_a_not_null | t | 0
+-- SELECT 2
+
+> drop table ap, nv1, nvp, nvc, pp, pp1 cascade
+NOTICE 00000: drop cascades to table ac
+-- DROP TABLE
+

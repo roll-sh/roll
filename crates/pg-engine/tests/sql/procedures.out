@@ -1,0 +1,355 @@
+> CREATE TABLE proc_t (id int, note text)
+-- CREATE TABLE
+
+> CREATE PROCEDURE ins(a int, b text DEFAULT 'dflt') LANGUAGE sql AS $$ INSERT INTO proc_t VALUES (a, b) $$
+-- CREATE PROCEDURE
+
+> CALL ins(1)
+-- CALL
+
+> CALL ins(2, 'two')
+-- CALL
+
+> CALL ins(b => 'named', a => 3)
+-- CALL
+
+> CALL public.ins(4, 'qualified')
+-- CALL
+
+> SELECT * FROM proc_t ORDER BY id
+id:int4 | note:text
+1 | dflt
+2 | two
+3 | named
+4 | qualified
+-- SELECT 4
+
+> CREATE PROCEDURE plp(INOUT x int, OUT y text) LANGUAGE plpgsql AS $$ BEGIN x := x * 2; y := 'doubled'; END $$
+-- CREATE PROCEDURE
+
+> CALL plp(21, NULL)
+x:int4 | y:text
+42 | doubled
+-- CALL
+
+> CALL plp(1)
+ERROR 42883: procedure plp(integer) does not exist (at 6)
+HINT: No procedure matches the given name and argument types. You might need to add explicit type casts.
+
+> CREATE PROCEDURE inout_sql(INOUT a int, INOUT b text) LANGUAGE sql AS $$ SELECT a + 1, b || '!' $$
+-- CREATE PROCEDURE
+
+> CALL inout_sql(1, 'x')
+a:int4 | b:text
+2 | x!
+-- CALL
+
+> CREATE PROCEDURE noargs() LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'noargs ran'; END $$
+-- CREATE PROCEDURE
+
+> CALL noargs()
+NOTICE 00000: noargs ran
+CONTEXT: PL/pgSQL function noargs() line 1 at RAISE
+-- CALL
+
+> SELECT plp(1, NULL)
+ERROR 42883: function plp(integer, unknown) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT noargs()
+ERROR 42809: noargs() is a procedure (at 8)
+HINT: To call a procedure, use CALL.
+
+> CREATE FUNCTION fn1() RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CALL fn1()
+ERROR 42809: fn1() is not a procedure (at 6)
+HINT: To call a function, use SELECT.
+
+> CALL nope()
+ERROR 42883: procedure nope() does not exist (at 6)
+HINT: No procedure matches the given name and argument types. You might need to add explicit type casts.
+
+> CALL ins()
+ERROR 42883: procedure ins() does not exist (at 6)
+HINT: No procedure matches the given name and argument types. You might need to add explicit type casts.
+
+> CALL ins('x')
+ERROR 22P02: invalid input syntax for type integer: "x" (at 10)
+
+> CREATE FUNCTION nf(a int, b int DEFAULT 10) RETURNS int LANGUAGE sql AS 'SELECT a * 100 + b'
+-- CREATE FUNCTION
+
+> SELECT nf(b => 1, a => 2), nf(1), nf(a => 5), nf(3, b => 4)
+nf:int4 | nf:int4 | nf:int4 | nf:int4
+201 | 110 | 510 | 304
+-- SELECT 1
+
+> SELECT nf(c => 1)
+ERROR 42883: function nf(c => integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT nf(b => 1)
+ERROR 42883: function nf(b => integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> DROP FUNCTION nf(int, int)
+-- DROP FUNCTION
+
+> SELECT proname, prokind, prorettype::regtype FROM pg_proc WHERE proname IN ('ins', 'plp', 'fn1', 'noargs') ORDER BY 1
+proname:name | prokind:char | prorettype:regtype
+fn1 | f | integer
+ins | p | void
+noargs | p | void
+plp | p | record
+-- SELECT 4
+
+> CREATE PROCEDURE tc() LANGUAGE plpgsql AS $$
+> BEGIN
+>   FOR i IN 1..4 LOOP
+>     INSERT INTO proc_t VALUES (10 + i, 'tc');
+>     IF i % 2 = 0 THEN COMMIT; ELSE ROLLBACK; END IF;
+>   END LOOP;
+> END $$
+-- CREATE PROCEDURE
+
+> CALL tc()
+-- CALL
+
+> SELECT * FROM proc_t WHERE note = 'tc' ORDER BY id
+id:int4 | note:text
+12 | tc
+14 | tc
+-- SELECT 2
+
+> BEGIN
+-- BEGIN
+
+> CALL tc()
+ERROR 2D000: invalid transaction termination
+CONTEXT: PL/pgSQL function tc() line 5 at ROLLBACK
+
+> ROLLBACK
+-- ROLLBACK
+
+> DO $$
+> BEGIN
+>   INSERT INTO proc_t VALUES (20, 'do');
+>   COMMIT;
+>   INSERT INTO proc_t VALUES (21, 'do');
+>   ROLLBACK;
+> END $$
+-- DO
+
+> SELECT * FROM proc_t WHERE note = 'do' ORDER BY id
+id:int4 | note:text
+20 | do
+-- SELECT 1
+
+> DO $$
+> BEGIN
+>   BEGIN
+>     COMMIT;
+>   EXCEPTION WHEN others THEN
+>     RAISE NOTICE 'caught: %', SQLERRM;
+>   END;
+> END $$
+NOTICE 00000: caught: cannot commit while a subtransaction is active
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+-- DO
+
+> DO $$
+> BEGIN
+>   INSERT INTO proc_t VALUES (22, 'sub');
+>   BEGIN
+>     INSERT INTO proc_t VALUES (23, 'sub');
+>   EXCEPTION WHEN others THEN NULL;
+>   END;
+>   COMMIT;
+> END $$
+-- DO
+
+> SELECT * FROM proc_t WHERE note = 'sub' ORDER BY id
+id:int4 | note:text
+22 | sub
+23 | sub
+-- SELECT 2
+
+> CREATE FUNCTION fc() RETURNS void LANGUAGE plpgsql AS $$ BEGIN COMMIT; END $$
+-- CREATE FUNCTION
+
+> SELECT fc()
+ERROR 2D000: invalid transaction termination
+CONTEXT: PL/pgSQL function fc() line 1 at COMMIT
+
+> CREATE PROCEDURE via_fn() LANGUAGE plpgsql AS $$ BEGIN PERFORM fc(); END $$
+-- CREATE PROCEDURE
+
+> CALL via_fn()
+ERROR 2D000: invalid transaction termination
+CONTEXT: PL/pgSQL function fc() line 1 at COMMIT
+CONTEXT: SQL statement "SELECT fc()"
+CONTEXT: PL/pgSQL function via_fn() line 1 at PERFORM
+
+> CREATE PROCEDURE sqlcommit() LANGUAGE sql AS $$ COMMIT $$
+-- CREATE PROCEDURE
+
+> CALL sqlcommit()
+ERROR 0A000: COMMIT is not allowed in an SQL function
+CONTEXT: SQL function "sqlcommit" statement 1
+
+> DO $$
+> BEGIN
+>   INSERT INTO proc_t VALUES (30, 'chain');
+>   COMMIT AND CHAIN;
+>   RAISE NOTICE 'chained %', current_setting('transaction_isolation');
+>   ROLLBACK AND CHAIN;
+> END $$
+NOTICE 00000: chained read committed
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> SELECT * FROM proc_t WHERE note = 'chain' ORDER BY id
+id:int4 | note:text
+30 | chain
+-- SELECT 1
+
+> DO $$
+> DECLARE r record;
+> BEGIN
+>   FOR r IN SELECT id FROM proc_t WHERE note = 'tc' ORDER BY id LOOP
+>     UPDATE proc_t SET note = 'tc-looped' WHERE id = r.id;
+>     COMMIT;
+>   END LOOP;
+> END $$
+-- DO
+
+> SELECT * FROM proc_t WHERE note LIKE 'tc%' ORDER BY id
+id:int4 | note:text
+12 | tc-looped
+14 | tc-looped
+-- SELECT 2
+
+> DO $$
+> DECLARE c refcursor;
+> BEGIN
+>   OPEN c FOR SELECT 1;
+>   COMMIT;
+>   CLOSE c;
+> END $$
+ERROR 34000: cursor "<unnamed portal 2>" does not exist
+CONTEXT: PL/pgSQL function inline_code_block line 6 at CLOSE
+
+> DO $$
+> BEGIN
+>   PERFORM 1;
+>   COMMIT;
+>   RAISE NOTICE 'same xact time: %', transaction_timestamp() = statement_timestamp();
+> END $$
+NOTICE 00000: same xact time: f
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> CREATE PROCEDURE outer_p() LANGUAGE plpgsql AS $$
+> DECLARE a int := 5; b text;
+> BEGIN
+>   CALL plp(a, b);
+>   RAISE NOTICE 'a=% b=%', a, b;
+>   CALL tc();
+>   CALL ins(40, 'nested');
+> END $$
+-- CREATE PROCEDURE
+
+> CALL outer_p()
+NOTICE 00000: a=10 b=doubled
+CONTEXT: PL/pgSQL function outer_p() line 5 at RAISE
+-- CALL
+
+> SELECT count(*) FROM proc_t WHERE note IN ('tc', 'nested')
+count:int8
+3
+-- SELECT 1
+
+> DO $$
+> DECLARE r int := 3;
+> BEGIN
+>   CALL plp(r, NULL);
+> END $$
+ERROR 42601: procedure parameter "y" is an output parameter but corresponding argument is not writable
+CONTEXT: PL/pgSQL function inline_code_block line 4 at CALL
+
+> DO $$
+> BEGIN
+>   CALL plp(7, NULL);
+> END $$
+ERROR 42601: procedure parameter "x" is an output parameter but corresponding argument is not writable
+CONTEXT: PL/pgSQL function inline_code_block line 3 at CALL
+
+> DO $$
+> DECLARE x int := 2; y text;
+> BEGIN
+>   CALL plp(x => x, y => y);
+>   RAISE NOTICE 'named x=% y=%', x, y;
+> END $$
+NOTICE 00000: named x=4 y=doubled
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> CREATE PROCEDURE r1(x int) LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF x > 0 THEN RETURN; END IF;
+>   RAISE NOTICE 'not returned';
+> END $$
+-- CREATE PROCEDURE
+
+> CALL r1(1)
+-- CALL
+
+> CALL r1(0)
+NOTICE 00000: not returned
+CONTEXT: PL/pgSQL function r1(integer) line 4 at RAISE
+-- CALL
+
+> CREATE PROCEDURE r2() LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$
+ERROR 42601: RETURN cannot have a parameter in a procedure (at 59)
+
+> CREATE PROCEDURE r3() RETURNS int LANGUAGE plpgsql AS $$ BEGIN END $$
+ERROR 42601: syntax error at or near "int" (at 31)
+
+> ALTER PROCEDURE noargs() RENAME TO noargs2
+-- ALTER PROCEDURE
+
+> CALL noargs2()
+NOTICE 00000: noargs ran
+CONTEXT: PL/pgSQL function noargs2() line 1 at RAISE
+-- CALL
+
+> DROP PROCEDURE plp(int)
+-- DROP PROCEDURE
+
+> DROP FUNCTION plp(int, text)
+ERROR 42883: function plp(integer, text) does not exist
+
+> DROP PROCEDURE fn1()
+ERROR 42809: fn1() is not a procedure
+
+> DROP ROUTINE fn1()
+-- DROP ROUTINE
+
+> DROP PROCEDURE plp(int, text)
+ERROR 42883: procedure plp(integer, text) does not exist
+
+> DROP PROCEDURE IF EXISTS plp(int, text)
+NOTICE 00000: procedure plp(pg_catalog.int4,text) does not exist, skipping
+-- DROP PROCEDURE
+
+> DROP PROCEDURE ins, inout_sql, noargs2, tc, via_fn, sqlcommit, outer_p, r1
+-- DROP PROCEDURE
+
+> DROP FUNCTION fc()
+-- DROP FUNCTION
+
+> DROP TABLE proc_t
+-- DROP TABLE
+

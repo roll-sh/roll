@@ -1,0 +1,492 @@
+> set jit = off
+-- SET
+
+> create table ee_a(id int, t text, v varchar(20), n numeric, b bool, ts timestamptz)
+-- CREATE TABLE
+
+> explain select * from ee_a
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..15.00 rows=500 width=135)
+-- EXPLAIN
+
+> explain select id from ee_a where id = 5
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..16.25 rows=2 width=4)
+  Filter: (id = 5)
+-- EXPLAIN
+
+> explain select id from ee_a where id < 5
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..16.25 rows=167 width=4)
+  Filter: (id < 5)
+-- EXPLAIN
+
+> explain select id from ee_a where id <> 5
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..16.25 rows=498 width=4)
+  Filter: (id <> 5)
+-- EXPLAIN
+
+> explain select id from ee_a where t like 'a%'
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..16.25 rows=2 width=4)
+  Filter: (t ~~ 'a%'::text)
+-- EXPLAIN
+
+> explain select id from ee_a where t is null
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..15.00 rows=2 width=4)
+  Filter: (t IS NULL)
+-- EXPLAIN
+
+> explain select id from ee_a where b
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..15.00 rows=250 width=4)
+  Filter: b
+-- EXPLAIN
+
+> explain select id from ee_a where id = 5 and t = 'x'
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..17.50 rows=1 width=4)
+  Filter: ((id = 5) AND (t = 'x'::text))
+-- EXPLAIN
+
+> explain select id from ee_a where id = 5 or id = 6
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..17.50 rows=5 width=4)
+  Filter: ((id = 5) OR (id = 6))
+-- EXPLAIN
+
+> explain select id from ee_a where id > 1 and id < 10
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..17.50 rows=2 width=4)
+  Filter: ((id > 1) AND (id < 10))
+-- EXPLAIN
+
+> explain select id from ee_a where id in (1,2,3)
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..16.88 rows=8 width=4)
+  Filter: (id = ANY ('{1,2,3}'::integer[]))
+-- EXPLAIN
+
+> explain select * from ee_a a, ee_a b
+QUERY PLAN:text
+Nested Loop  (cost=0.00..3156.25 rows=250000 width=270)
+  ->  Seq Scan on ee_a a  (cost=0.00..15.00 rows=500 width=135)
+  ->  Materialize  (cost=0.00..17.50 rows=500 width=135)
+        ->  Seq Scan on ee_a b  (cost=0.00..15.00 rows=500 width=135)
+-- EXPLAIN
+
+> insert into ee_a select g, 'text'||g, 'v'||g, g, g%2=0, '2024-01-01' from generate_series(1,5000) g
+-- INSERT 0 5000
+
+> explain select * from ee_a
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..61.50 rows=2050 width=135)
+-- EXPLAIN
+
+> insert into ee_a values (1)
+-- INSERT 0 1
+
+> explain select * from ee_a
+QUERY PLAN:text
+Seq Scan on ee_a  (cost=0.00..61.50 rows=2050 width=135)
+-- EXPLAIN
+
+> explain select * from generate_series(1,10) g
+QUERY PLAN:text
+Function Scan on generate_series g  (cost=0.00..0.10 rows=10 width=4)
+-- EXPLAIN
+
+> explain select * from generate_series(1,10) g where g > 3
+QUERY PLAN:text
+Function Scan on generate_series g  (cost=0.00..0.13 rows=3 width=4)
+  Filter: (g > 3)
+-- EXPLAIN
+
+> explain select * from unnest(array[1,2,3]) u
+QUERY PLAN:text
+Function Scan on unnest u  (cost=0.00..0.03 rows=3 width=4)
+-- EXPLAIN
+
+> explain select * from ee_a a cross join lateral generate_series(1, a.id) g
+QUERY PLAN:text
+Nested Loop  (cost=0.00..41061.50 rows=2050000 width=139)
+  ->  Seq Scan on ee_a a  (cost=0.00..61.50 rows=2050 width=135)
+  ->  Function Scan on generate_series g  (cost=0.00..10.00 rows=1000 width=4)
+-- EXPLAIN
+
+> create table ee_b(x int, y int)
+-- CREATE TABLE
+
+> explain select * from ee_b b1 join ee_b b2 on b1.x < b2.x
+QUERY PLAN:text
+Nested Loop  (cost=0.00..76684.85 rows=1702533 width=16)
+  Join Filter: (b1.x < b2.x)
+  ->  Seq Scan on ee_b b1  (cost=0.00..32.60 rows=2260 width=8)
+  ->  Materialize  (cost=0.00..43.90 rows=2260 width=8)
+        ->  Seq Scan on ee_b b2  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select count(*) from ee_b
+QUERY PLAN:text
+Aggregate  (cost=38.25..38.26 rows=1 width=8)
+  ->  Seq Scan on ee_b  (cost=0.00..32.60 rows=2260 width=0)
+-- EXPLAIN
+
+> explain select x, count(*) from ee_b group by x
+QUERY PLAN:text
+HashAggregate  (cost=43.90..45.90 rows=200 width=12)
+  Group Key: x
+  ->  Seq Scan on ee_b  (cost=0.00..32.60 rows=2260 width=4)
+-- EXPLAIN
+
+> explain select * from ee_b order by x
+QUERY PLAN:text
+Sort  (cost=158.51..164.16 rows=2260 width=8)
+  Sort Key: x
+  ->  Seq Scan on ee_b  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select * from ee_b order by x limit 10
+QUERY PLAN:text
+Limit  (cost=81.44..81.46 rows=10 width=8)
+  ->  Sort  (cost=81.44..87.09 rows=2260 width=8)
+        Sort Key: x
+        ->  Seq Scan on ee_b  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select * from ee_b order by x offset 5 limit 10
+QUERY PLAN:text
+Limit  (cost=88.06..88.09 rows=10 width=8)
+  ->  Sort  (cost=88.05..93.70 rows=2260 width=8)
+        Sort Key: x
+        ->  Seq Scan on ee_b  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select distinct x from ee_b
+QUERY PLAN:text
+HashAggregate  (cost=38.25..40.25 rows=200 width=4)
+  Group Key: x
+  ->  Seq Scan on ee_b  (cost=0.00..32.60 rows=2260 width=4)
+-- EXPLAIN
+
+> explain select x + 1, y * 2 from ee_b
+QUERY PLAN:text
+Seq Scan on ee_b  (cost=0.00..43.90 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select * from ee_b union all select * from ee_b
+QUERY PLAN:text
+Append  (cost=0.00..87.80 rows=4520 width=8)
+  ->  Seq Scan on ee_b  (cost=0.00..32.60 rows=2260 width=8)
+  ->  Seq Scan on ee_b ee_b_1  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select x, sum(y) over (order by x) from ee_b
+QUERY PLAN:text
+WindowAgg  (cost=158.70..198.06 rows=2260 width=12)
+  Window: w1 AS (ORDER BY x)
+  ->  Sort  (cost=158.51..164.16 rows=2260 width=8)
+        Sort Key: x
+        ->  Seq Scan on ee_b  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain with c as materialized (select * from ee_b) select * from c
+QUERY PLAN:text
+CTE Scan on c  (cost=32.60..77.80 rows=2260 width=8)
+  CTE c
+    ->  Seq Scan on ee_b  (cost=0.00..32.60 rows=2260 width=8)
+-- EXPLAIN
+
+> explain select * from ee_b where x = (select max(y) from ee_b)
+QUERY PLAN:text
+Seq Scan on ee_b  (cost=38.26..76.51 rows=11 width=8)
+  Filter: (x = (InitPlan 1).col1)
+  InitPlan 1
+    ->  Aggregate  (cost=38.25..38.26 rows=1 width=4)
+          ->  Seq Scan on ee_b ee_b_1  (cost=0.00..32.60 rows=2260 width=4)
+-- EXPLAIN
+
+> explain select * from (values (1,'a'),(2,'b')) v(a,b)
+QUERY PLAN:text
+Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=2 width=36)
+-- EXPLAIN
+
+> create table ee_s(id int, k int, t text, v varchar(20), n numeric(10,2), b bool)
+-- CREATE TABLE
+
+> insert into ee_s select g, g % 10, 'text'||g, 'v'||(g%100), g, g%2=0 from generate_series(1,5000) g
+-- INSERT 0 5000
+
+> analyze ee_s
+-- ANALYZE
+
+> explain select * from ee_s
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..87.00 rows=5000 width=25)
+-- EXPLAIN
+
+> explain select id from ee_s where id = 5
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..99.50 rows=1 width=4)
+  Filter: (id = 5)
+-- EXPLAIN
+
+> explain select id from ee_s where k = 5
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..99.50 rows=500 width=4)
+  Filter: (k = 5)
+-- EXPLAIN
+
+> explain select id from ee_s where k = 50
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..99.50 rows=1 width=4)
+  Filter: (k = 50)
+-- EXPLAIN
+
+> explain select id from ee_s where id < 100
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..99.50 rows=99 width=4)
+  Filter: (id < 100)
+-- EXPLAIN
+
+> explain select id from ee_s where id > 4900
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..99.50 rows=100 width=4)
+  Filter: (id > 4900)
+-- EXPLAIN
+
+> explain select id from ee_s where id between 100 and 200
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..112.00 rows=101 width=4)
+  Filter: ((id >= 100) AND (id <= 200))
+-- EXPLAIN
+
+> explain select id from ee_s where t = 'text7'
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..99.50 rows=1 width=4)
+  Filter: (t = 'text7'::text)
+-- EXPLAIN
+
+> explain select id from ee_s where t < 'text2'
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..99.50 rows=1149 width=4)
+  Filter: (t < 'text2'::text)
+-- EXPLAIN
+
+> explain select id from ee_s where v = 'v7'
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..99.50 rows=50 width=4)
+  Filter: ((v)::text = 'v7'::text)
+-- EXPLAIN
+
+> explain select id from ee_s where b
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..87.00 rows=2500 width=4)
+  Filter: b
+-- EXPLAIN
+
+> explain select id from ee_s where not b
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..87.00 rows=2500 width=4)
+  Filter: (NOT b)
+-- EXPLAIN
+
+> explain select id from ee_s where k in (1,2,3)
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..105.75 rows=1500 width=4)
+  Filter: (k = ANY ('{1,2,3}'::integer[]))
+-- EXPLAIN
+
+> explain select id from ee_s where t is null
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..87.00 rows=1 width=4)
+  Filter: (t IS NULL)
+-- EXPLAIN
+
+> explain select k, count(*) from ee_s group by k
+QUERY PLAN:text
+HashAggregate  (cost=112.00..112.10 rows=10 width=12)
+  Group Key: k
+  ->  Seq Scan on ee_s  (cost=0.00..87.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select v, count(*) from ee_s group by v
+QUERY PLAN:text
+HashAggregate  (cost=112.00..113.00 rows=100 width=11)
+  Group Key: v
+  ->  Seq Scan on ee_s  (cost=0.00..87.00 rows=5000 width=3)
+-- EXPLAIN
+
+> explain select k, v, count(*) from ee_s group by k, v
+QUERY PLAN:text
+HashAggregate  (cost=124.50..129.50 rows=500 width=15)
+  Group Key: k, v
+  ->  Seq Scan on ee_s  (cost=0.00..87.00 rows=5000 width=7)
+-- EXPLAIN
+
+> explain select k, count(*) from ee_s where id < 1000 group by k
+QUERY PLAN:text
+HashAggregate  (cost=104.50..104.59 rows=10 width=12)
+  Group Key: k
+  ->  Seq Scan on ee_s  (cost=0.00..99.50 rows=999 width=4)
+        Filter: (id < 1000)
+-- EXPLAIN
+
+> explain select distinct k from ee_s
+QUERY PLAN:text
+HashAggregate  (cost=99.50..99.60 rows=10 width=4)
+  Group Key: k
+  ->  Seq Scan on ee_s  (cost=0.00..87.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select * from ee_s a join ee_s b on a.id = b.id
+QUERY PLAN:text
+Hash Join  (cost=149.50..305.25 rows=5000 width=50)
+  Hash Cond: (a.id = b.id)
+  ->  Seq Scan on ee_s a  (cost=0.00..87.00 rows=5000 width=25)
+  ->  Hash  (cost=87.00..87.00 rows=5000 width=25)
+        ->  Seq Scan on ee_s b  (cost=0.00..87.00 rows=5000 width=25)
+-- EXPLAIN
+
+> explain select * from ee_s a join ee_s b on a.k = b.k where a.id < 10
+QUERY PLAN:text
+Hash Join  (cost=99.61..300.36 rows=4500 width=50)
+  Hash Cond: (b.k = a.k)
+  ->  Seq Scan on ee_s b  (cost=0.00..87.00 rows=5000 width=25)
+  ->  Hash  (cost=99.50..99.50 rows=9 width=25)
+        ->  Seq Scan on ee_s a  (cost=0.00..99.50 rows=9 width=25)
+              Filter: (id < 10)
+-- EXPLAIN
+
+> explain select * from ee_s order by t limit 5
+QUERY PLAN:text
+Limit  (cost=170.05..170.06 rows=5 width=25)
+  ->  Sort  (cost=170.05..182.55 rows=5000 width=25)
+        Sort Key: t
+        ->  Seq Scan on ee_s  (cost=0.00..87.00 rows=5000 width=25)
+-- EXPLAIN
+
+> explain select * from ee_s order by t offset 10 limit 5
+QUERY PLAN:text
+Limit  (cost=209.70..209.71 rows=5 width=25)
+  ->  Sort  (cost=209.67..222.17 rows=5000 width=25)
+        Sort Key: t
+        ->  Seq Scan on ee_s  (cost=0.00..87.00 rows=5000 width=25)
+-- EXPLAIN
+
+> explain select count(*), sum(id), avg(n) from ee_s
+QUERY PLAN:text
+Aggregate  (cost=124.50..124.51 rows=1 width=48)
+  ->  Seq Scan on ee_s  (cost=0.00..87.00 rows=5000 width=9)
+-- EXPLAIN
+
+> explain select * from ee_s where id + 1 = 7
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..112.00 rows=25 width=25)
+  Filter: ((id + 1) = 7)
+-- EXPLAIN
+
+> explain select id * 2, upper(t) from ee_s
+QUERY PLAN:text
+Seq Scan on ee_s  (cost=0.00..112.00 rows=5000 width=36)
+-- EXPLAIN
+
+> create table ee_c(x int)
+-- CREATE TABLE
+
+> insert into ee_c select g from generate_series(1,100) g
+-- INSERT 0 100
+
+> analyze ee_c
+-- ANALYZE
+
+> explain select * from ee_s, ee_c where ee_s.id = ee_c.x
+QUERY PLAN:text
+Hash Join  (cost=3.25..110.00 rows=100 width=29)
+  Hash Cond: (ee_s.id = ee_c.x)
+  ->  Seq Scan on ee_s  (cost=0.00..87.00 rows=5000 width=25)
+  ->  Hash  (cost=2.00..2.00 rows=100 width=4)
+        ->  Seq Scan on ee_c  (cost=0.00..2.00 rows=100 width=4)
+-- EXPLAIN
+
+> explain select * from ee_c c1, ee_c c2
+QUERY PLAN:text
+Nested Loop  (cost=0.00..129.25 rows=10000 width=8)
+  ->  Seq Scan on ee_c c1  (cost=0.00..2.00 rows=100 width=4)
+  ->  Materialize  (cost=0.00..2.50 rows=100 width=4)
+        ->  Seq Scan on ee_c c2  (cost=0.00..2.00 rows=100 width=4)
+-- EXPLAIN
+
+> explain select * from ee_c c1, ee_c c2 where c1.x < c2.x
+QUERY PLAN:text
+Nested Loop  (cost=0.00..154.25 rows=3333 width=8)
+  Join Filter: (c1.x < c2.x)
+  ->  Seq Scan on ee_c c1  (cost=0.00..2.00 rows=100 width=4)
+  ->  Materialize  (cost=0.00..2.50 rows=100 width=4)
+        ->  Seq Scan on ee_c c2  (cost=0.00..2.00 rows=100 width=4)
+-- EXPLAIN
+
+> explain select * from (values (1),(2),(3)) v(a), ee_c where ee_c.x = v.a
+QUERY PLAN:text
+Hash Join  (cost=0.08..2.48 rows=3 width=8)
+  Hash Cond: (ee_c.x = "*VALUES*".column1)
+  ->  Seq Scan on ee_c  (cost=0.00..2.00 rows=100 width=4)
+  ->  Hash  (cost=0.04..0.04 rows=3 width=4)
+        ->  Values Scan on "*VALUES*"  (cost=0.00..0.04 rows=3 width=4)
+-- EXPLAIN
+
+> create table ee_i(id int primary key, k int, t text)
+-- CREATE TABLE
+
+> insert into ee_i select g, g % 100, md5(g::text) from generate_series(1,20000) g
+-- INSERT 0 20000
+
+> explain select * from ee_i where id = 42
+QUERY PLAN:text
+Index Scan using ee_i_pkey on ee_i  (cost=0.29..8.30 rows=1 width=40)
+  Index Cond: (id = 42)
+-- EXPLAIN
+
+> explain select * from ee_i where id = 42 and k = 3
+QUERY PLAN:text
+Index Scan using ee_i_pkey on ee_i  (cost=0.29..8.31 rows=1 width=40)
+  Index Cond: (id = 42)
+  Filter: (k = 3)
+-- EXPLAIN
+
+> analyze ee_i
+-- ANALYZE
+
+> explain select * from ee_i where id = 42
+QUERY PLAN:text
+Index Scan using ee_i_pkey on ee_i  (cost=0.29..8.30 rows=1 width=41)
+  Index Cond: (id = 42)
+-- EXPLAIN
+
+> explain select * from ee_i where id = 42 and k = 3
+QUERY PLAN:text
+Index Scan using ee_i_pkey on ee_i  (cost=0.29..8.31 rows=1 width=41)
+  Index Cond: (id = 42)
+  Filter: (k = 3)
+-- EXPLAIN
+
+> create table ee_j(a int, b int)
+-- CREATE TABLE
+
+> insert into ee_j select g, g from generate_series(1,100000) g
+-- INSERT 0 100000
+
+> create index on ee_j(a)
+-- CREATE INDEX
+
+> analyze ee_j
+-- ANALYZE
+
+> explain select * from ee_j where a = 7
+QUERY PLAN:text
+Index Scan using ee_j_a_idx on ee_j  (cost=0.29..8.31 rows=1 width=8)
+  Index Cond: (a = 7)
+-- EXPLAIN
+

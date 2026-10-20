@@ -1,0 +1,212 @@
+> create collation ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> create table pk (k text collate ci primary key)
+-- CREATE TABLE
+
+> create table fk (id int, k text collate ci references pk on update cascade on delete cascade)
+-- CREATE TABLE
+
+> insert into pk values ('abc'), ('xyz')
+-- INSERT 0 2
+
+> insert into fk values (1, 'ABC'), (2, 'abc'), (3, 'Xyz')
+-- INSERT 0 3
+
+> insert into fk values (4, 'q')
+ERROR 23503: insert or update on table "fk" violates foreign key constraint "fk_k_fkey"
+DETAIL: Key (k)=(q) is not present in table "pk".
+OBJECTS: schema=public table=fk constraint=fk_k_fkey
+
+> update pk set k = 'ABC' where k = 'abc'
+-- UPDATE 1
+
+> select * from fk order by id
+id:int4 | k:text
+1 | ABC
+2 | ABC
+3 | Xyz
+-- SELECT 3
+
+> update pk set k = 'Abc' where k = 'ABC'
+-- UPDATE 1
+
+> select * from fk order by id
+id:int4 | k:text
+1 | Abc
+2 | Abc
+3 | Xyz
+-- SELECT 3
+
+> delete from pk where k = 'XYZ'
+-- DELETE 1
+
+> select * from fk order by id
+id:int4 | k:text
+1 | Abc
+2 | Abc
+-- SELECT 2
+
+> create table pk2 (k text collate ci primary key)
+-- CREATE TABLE
+
+> create table fk2 (k text collate "C" references pk2 on update cascade)
+ERROR 42P21: foreign key constraint "fk2_k_fkey" cannot be implemented
+DETAIL: Key columns "k" of the referencing table and "k" of the referenced table have incompatible collations: "C" and "ci".  If either collation is nondeterministic, then both collations have to be the same.
+
+> create table fk3 (k text collate ci references pk2 on update restrict on delete restrict)
+-- CREATE TABLE
+
+> insert into pk2 values ('abc')
+-- INSERT 0 1
+
+> insert into fk3 values ('ABC')
+-- INSERT 0 1
+
+> update pk2 set k = 'ABC'
+ERROR 23001: update or delete on table "pk2" violates RESTRICT setting of foreign key constraint "fk3_k_fkey" on table "fk3"
+DETAIL: Key (k)=(abc) is referenced from table "fk3".
+OBJECTS: schema=public table=fk3 constraint=fk3_k_fkey
+
+> update pk2 set k = 'abd'
+ERROR 23001: update or delete on table "pk2" violates RESTRICT setting of foreign key constraint "fk3_k_fkey" on table "fk3"
+DETAIL: Key (k)=(abc) is referenced from table "fk3".
+OBJECTS: schema=public table=fk3 constraint=fk3_k_fkey
+
+> delete from pk2
+ERROR 23001: update or delete on table "pk2" violates RESTRICT setting of foreign key constraint "fk3_k_fkey" on table "fk3"
+DETAIL: Key (k)=(abc) is referenced from table "fk3".
+OBJECTS: schema=public table=fk3 constraint=fk3_k_fkey
+
+> create table pk3 (k text collate ci primary key)
+-- CREATE TABLE
+
+> create table fk4 (k text collate ci references pk3 on update set null)
+-- CREATE TABLE
+
+> insert into pk3 values ('abc')
+-- INSERT 0 1
+
+> insert into fk4 values ('abc')
+-- INSERT 0 1
+
+> update pk3 set k = 'ABC'
+-- UPDATE 1
+
+> select * from fk4
+k:text
+NULL
+-- SELECT 1
+
+> create table pk4 (k text collate "de-x-icu" primary key)
+-- CREATE TABLE
+
+> create table fk5 (k text collate "de-x-icu" references pk4 on update cascade)
+-- CREATE TABLE
+
+> insert into pk4 values ('a')
+-- INSERT 0 1
+
+> insert into fk5 values ('a')
+-- INSERT 0 1
+
+> insert into fk5 values ('A')
+ERROR 23503: insert or update on table "fk5" violates foreign key constraint "fk5_k_fkey"
+DETAIL: Key (k)=(A) is not present in table "pk4".
+OBJECTS: schema=public table=fk5 constraint=fk5_k_fkey
+
+> update pk4 set k = 'A'
+-- UPDATE 1
+
+> select * from fk5
+k:text
+A
+-- SELECT 1
+
+> create table pk5 (k text collate ci primary key)
+-- CREATE TABLE
+
+> create table fk6 (k text collate ci references pk5 on update no action)
+-- CREATE TABLE
+
+> insert into pk5 values ('abc')
+-- INSERT 0 1
+
+> insert into fk6 values ('abc')
+-- INSERT 0 1
+
+> update pk5 set k = 'ABC'
+-- UPDATE 1
+
+> select * from pk5, fk6
+k:text | k:text
+ABC | abc
+-- SELECT 1
+
+> create table a (k text collate ci primary key)
+-- CREATE TABLE
+
+> create table b (k text collate ci)
+-- CREATE TABLE
+
+> insert into a values ('abc')
+-- INSERT 0 1
+
+> insert into b values ('ABC'), ('Abc')
+-- INSERT 0 2
+
+> alter table b add constraint b_fk foreign key (k) references a
+-- ALTER TABLE
+
+> insert into b values ('zzz')
+ERROR 23503: insert or update on table "b" violates foreign key constraint "b_fk"
+DETAIL: Key (k)=(zzz) is not present in table "a".
+OBJECTS: schema=public table=b constraint=b_fk
+
+> create table c (k text collate ci)
+-- CREATE TABLE
+
+> insert into c values ('zzz')
+-- INSERT 0 1
+
+> alter table c add constraint c_fk foreign key (k) references a
+ERROR 23503: insert or update on table "c" violates foreign key constraint "c_fk"
+DETAIL: Key (k)=(zzz) is not present in table "a".
+OBJECTS: schema=public table=c constraint=c_fk
+
+> create table pp (k text collate ci primary key) partition by list (k)
+-- CREATE TABLE
+
+> create table pp1 partition of pp for values in ('a')
+-- CREATE TABLE
+
+> create table pp2 partition of pp for values in ('b')
+-- CREATE TABLE
+
+> insert into pp values ('A'), ('b')
+-- INSERT 0 2
+
+> create table pf (k text collate ci references pp on delete cascade)
+-- CREATE TABLE
+
+> insert into pf values ('a'), ('B')
+-- INSERT 0 2
+
+> insert into pf values ('c')
+ERROR 23503: insert or update on table "pf" violates foreign key constraint "pf_k_fkey"
+DETAIL: Key (k)=(c) is not present in table "pp".
+OBJECTS: schema=public table=pf constraint=pf_k_fkey
+
+> delete from pp where k = 'a'
+-- DELETE 1
+
+> select * from pf
+k:text
+B
+-- SELECT 1
+
+> select * from pp order by k
+k:text
+b
+-- SELECT 1
+

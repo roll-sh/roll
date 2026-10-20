@@ -1,0 +1,35 @@
+-- pg_node_tree is binary-coercible to text (implicitly), collatable, and has no input; the
+-- extended-statistics types convert to text and bytea.
+create function pnt_f(x int) returns int return x + 1;
+select prosqlbody || 'x' from pg_proc limit 0;
+select stxdndistinct || 'x' from pg_statistic_ext_data limit 0;
+select left(prosqlbody, 3), length(prosqlbody) > 10, pg_typeof(prosqlbody::text), left(upper(prosqlbody), 8) from pg_proc where proname = 'pnt_f';
+select prosqlbody = 'x' from pg_proc limit 0;
+select prosqlbody like 'x' from pg_proc limit 0;
+select prosqlbody::varchar(5) from pg_proc where proname = 'pnt_f';
+select pg_collation_for(prosqlbody), pg_collation_for(prosqlbody::text) from pg_proc where proname = 'pnt_f';
+select relpartbound ~ 'x' from pg_class limit 0;
+select concat(prosqlbody) is not null from pg_proc where proname = 'pnt_f';
+select position('QUERY' in prosqlbody) from pg_proc where proname = 'pnt_f';
+select 'x'::pg_node_tree;
+select 'x'::text::pg_node_tree;
+select length(stxdndistinct) from pg_statistic_ext_data limit 0;
+select regexp_replace(prosqlbody, ':location -?[0-9]+', '', 'g') = regexp_replace(prosqlbody::text, ':location -?[0-9]+', '', 'g') from pg_proc where proname = 'pnt_f';
+select prosqlbody::text = prosqlbody from pg_proc where proname = 'pnt_f';
+select pg_typeof(coalesce(prosqlbody, 'x')) from pg_proc where proname = 'pnt_f';
+select null::pg_node_tree::bytea;
+select stxdndistinct::text from pg_statistic_ext_data limit 0;
+select prosqlbody::name is not null from pg_proc where proname = 'pnt_f';
+select prosqlbody::bpchar is not null from pg_proc where proname = 'pnt_f';
+select substr(prosqlbody, 1, 3), strpos(prosqlbody, 'QUERY'), md5(prosqlbody) = md5(prosqlbody::text) from pg_proc where proname = 'pnt_f';
+select prosqlbody < 'z', prosqlbody >= prosqlbody from pg_proc where proname = 'pnt_f';
+select pg_collation_for(relname), pg_collation_for(description), upper(description) from pg_description d, pg_class c where c.oid = d.objoid and relname = 'pg_class' limit 1;
+select pg_collation_for(table_name), pg_collation_for(table_type) from information_schema.tables where table_name = 'pg_class';
+select castsource::regtype, casttarget::regtype, castfunc, castcontext, castmethod from pg_cast where castsource = 'pg_node_tree'::regtype;
+select typname, typcollation from pg_type where typname in ('pg_node_tree','pg_ndistinct','pg_dependencies','pg_mcv_list') order by 1;
+select null::pg_node_tree collate "C";
+select pg_collation_for(null::pg_ndistinct);
+create table pnt_nt (a pg_node_tree);
+select attcollation from pg_attribute where attrelid = 'pnt_nt'::regclass and attname = 'a';
+drop table pnt_nt;
+drop function pnt_f;

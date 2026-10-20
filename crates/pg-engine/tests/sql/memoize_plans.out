@@ -1,0 +1,147 @@
+> create table mz1 (a int, n numeric, c int, x text)
+-- CREATE TABLE
+
+> create table mz2 (b int, y text, nb numeric, d int)
+-- CREATE TABLE
+
+> create table mz3 (id int primary key, z text)
+-- CREATE TABLE
+
+> insert into mz1 select g % 10, (g % 7) * 1.5, g % 3, 'x' || g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> insert into mz2 select g, 'y' || g, g * 1.5, g % 5 from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> insert into mz3 select g, 'z' || g from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> create index on mz2 (b)
+-- CREATE INDEX
+
+> create index on mz2 (nb)
+-- CREATE INDEX
+
+> analyze mz1
+-- ANALYZE
+
+> analyze mz2
+-- ANALYZE
+
+> analyze mz3
+-- ANALYZE
+
+> explain select * from mz1 join mz2 on b = a
+QUERY PLAN:text
+Nested Loop  (cost=0.30..53.48 rows=1000 width=38)
+  ->  Seq Scan on mz1  (cost=0.00..17.00 rows=1000 width=17)
+  ->  Memoize  (cost=0.30..1.05 rows=1 width=21)
+        Cache Key: mz1.a
+        Cache Mode: logical
+        ->  Index Scan using mz2_b_idx on mz2  (cost=0.29..1.04 rows=1 width=21)
+              Index Cond: (b = mz1.a)
+-- EXPLAIN
+
+> explain select * from mz1 join mz2 on nb = n
+QUERY PLAN:text
+Nested Loop  (cost=0.30..50.57 rows=1000 width=38)
+  ->  Seq Scan on mz1  (cost=0.00..17.00 rows=1000 width=17)
+  ->  Memoize  (cost=0.30..1.08 rows=1 width=21)
+        Cache Key: mz1.n
+        Cache Mode: logical
+        ->  Index Scan using mz2_nb_idx on mz2  (cost=0.29..1.07 rows=1 width=21)
+              Index Cond: (nb = mz1.n)
+-- EXPLAIN
+
+> explain select * from mz1 join mz3 on id = a
+QUERY PLAN:text
+Nested Loop  (cost=0.30..52.64 rows=1000 width=27)
+  ->  Seq Scan on mz1  (cost=0.00..17.00 rows=1000 width=17)
+  ->  Memoize  (cost=0.30..0.98 rows=1 width=10)
+        Cache Key: mz1.a
+        Cache Mode: logical
+        ->  Index Scan using mz3_pkey on mz3  (cost=0.29..0.97 rows=1 width=10)
+              Index Cond: (id = mz1.a)
+-- EXPLAIN
+
+> explain select * from mz1 where exists (select 1 from mz3 where id = a)
+QUERY PLAN:text
+Nested Loop  (cost=0.30..52.64 rows=1000 width=17)
+  ->  Seq Scan on mz1  (cost=0.00..17.00 rows=1000 width=17)
+  ->  Memoize  (cost=0.30..0.98 rows=1 width=4)
+        Cache Key: mz1.a
+        Cache Mode: logical
+        ->  Index Only Scan using mz3_pkey on mz3  (cost=0.29..0.97 rows=1 width=4)
+              Index Cond: (id = mz1.a)
+-- EXPLAIN
+
+> explain select * from mz1, lateral (select * from mz2 where b = mz1.a limit 1) s
+QUERY PLAN:text
+Nested Loop  (cost=0.30..133.27 rows=1000 width=38)
+  ->  Seq Scan on mz1  (cost=0.00..17.00 rows=1000 width=17)
+  ->  Memoize  (cost=0.30..8.31 rows=1 width=21)
+        Cache Key: mz1.a
+        Cache Mode: binary
+        ->  Limit  (cost=0.29..8.30 rows=1 width=21)
+              ->  Index Scan using mz2_b_idx on mz2  (cost=0.29..8.30 rows=1 width=21)
+                    Index Cond: (b = mz1.a)
+-- EXPLAIN
+
+> explain (costs off) select * from mz1 join mz2 on b > a and b < a + 2
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on mz1
+  ->  Memoize
+        Cache Key: mz1.a, (mz1.a + 2)
+        Cache Mode: binary
+        ->  Index Scan using mz2_b_idx on mz2
+              Index Cond: ((b > mz1.a) AND (b < (mz1.a + 2)))
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from mz1 join mz3 on id = a
+QUERY PLAN:text
+Nested Loop (actual rows=900.00 loops=1)
+  ->  Seq Scan on mz1 (actual rows=1000.00 loops=1)
+  ->  Memoize (actual rows=0.90 loops=1000)
+        Cache Key: mz1.a
+        Cache Mode: logical
+        Hits: 990  Misses: 10  Evictions: 0  Overflows: 0  Memory Usage: 2kB
+        ->  Index Scan using mz3_pkey on mz3 (actual rows=0.90 loops=10)
+              Index Cond: (id = mz1.a)
+              Index Searches: 10
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from mz1 join mz2 on b = a
+QUERY PLAN:text
+Nested Loop (actual rows=900.00 loops=1)
+  ->  Seq Scan on mz1 (actual rows=1000.00 loops=1)
+  ->  Memoize (actual rows=0.90 loops=1000)
+        Cache Key: mz1.a
+        Cache Mode: logical
+        Hits: 990  Misses: 10  Evictions: 0  Overflows: 0  Memory Usage: 2kB
+        ->  Index Scan using mz2_b_idx on mz2 (actual rows=0.90 loops=10)
+              Index Cond: (b = mz1.a)
+              Index Searches: 10
+-- EXPLAIN
+
+> select count(*), sum(b) from mz1 join mz2 on b = a
+count:int8 | sum:int8
+900 | 4500
+-- SELECT 1
+
+> set enable_memoize = off
+-- SET
+
+> explain (costs off) select * from mz1 join mz2 on b = a
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (mz2.b = mz1.a)
+  ->  Index Scan using mz2_b_idx on mz2
+  ->  Sort
+        Sort Key: mz1.a
+        ->  Seq Scan on mz1
+-- EXPLAIN
+
+> reset enable_memoize
+-- RESET
+

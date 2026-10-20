@@ -1,0 +1,98 @@
+> CREATE TEMP TABLE bug6051_3 AS SELECT a FROM generate_series(11,13) AS a
+-- SELECT 3
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL debug_parallel_query = on
+-- SET
+
+> WITH t1 AS ( DELETE FROM bug6051_3 RETURNING * ) INSERT INTO bug6051_3 SELECT * FROM t1
+-- INSERT 0 3
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM bug6051_3
+a:int4
+11
+12
+13
+-- SELECT 3
+
+> SELECT ctid, aggfnoid::oid FROM pg_aggregate WHERE aggfnoid = 0
+ctid:27 | aggfnoid:oid
+-- SELECT 0
+
+> CREATE TABLE gx_ab_b (a int, b text)
+-- CREATE TABLE
+
+> CREATE VIEW gx_ab_v14 AS SELECT ctid, a, b FROM gx_ab_b
+-- CREATE VIEW
+
+> SELECT * FROM gx_ab_v14
+ctid:27 | a:int4 | b:text
+-- SELECT 0
+
+> select '[2147483646:2147483647]={1,2}'::int[]
+ERROR 54000: array upper bound is too large: 2147483647 (at 8)
+
+> select '[1:0]={}'::int[]
+ERROR 2202E: upper bound cannot be less than lower bound (at 8)
+
+> select '[1:]={1}'::int[]
+ERROR 22P02: malformed array literal: "[1:]={1}" (at 8)
+DETAIL: Missing array dimension value.
+
+> select '[:1]={1}'::int[]
+ERROR 22P02: malformed array literal: "[:1]={1}" (at 8)
+DETAIL: "[" must introduce explicitly-specified array dimensions.
+
+> select '[21474836488:21474836489]={1,2}'::int[]
+ERROR 54000: array bound is out of integer range (at 8)
+
+> select '[2147483646:2147483646]={1}'::int[]
+int4:int4[]
+[2147483646:2147483646]={1}
+-- SELECT 1
+
+> select '[-2147483648:-2147483647]={1,2}'::int[]
+int4:int4[]
+[-2147483648:-2147483647]={1,2}
+-- SELECT 1
+
+> create temp table arr_pk_tbl (pk int4 primary key, f1 int[])
+-- CREATE TABLE
+
+> insert into arr_pk_tbl values(10, '[-2147483648:-2147483647]={1,2}')
+-- INSERT 0 1
+
+> update arr_pk_tbl set f1[2147483647] = 42 where pk = 10
+ERROR 54000: array size exceeds the maximum allowed (134217727)
+
+> update arr_pk_tbl set f1[2147483646:2147483647] = array[4,2] where pk = 10
+ERROR 54000: array size exceeds the maximum allowed (134217727)
+
+> insert into arr_pk_tbl(pk, f1[0:2147483647]) values (2, '{}')
+ERROR 54000: array size exceeds the maximum allowed (134217727)
+
+> do $$ declare a int[];
+> begin
+>   a := '[-2147483648:-2147483647]={1,2}'::int[];
+>   a[2147483647] := 42;
+> end $$
+ERROR 54000: array size exceeds the maximum allowed (134217727)
+CONTEXT: PL/pgSQL function inline_code_block line 4 at assignment
+
+> create temp table gx_ab_j (j jsonb)
+-- CREATE TABLE
+
+> select j[1:2] from gx_ab_j
+ERROR 42804: jsonb subscript does not support slices (at 12)
+
+> DROP VIEW gx_ab_v14
+-- DROP VIEW
+
+> DROP TABLE gx_ab_b
+-- DROP TABLE
+

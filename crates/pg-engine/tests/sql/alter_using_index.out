@@ -1,0 +1,346 @@
+> create table t (a int, b int, c text, d int)
+-- CREATE TABLE
+
+> create unique index i1 on t (a)
+-- CREATE INDEX
+
+> alter table t add constraint pk primary key using index i1
+NOTICE 00000: ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "i1" to "pk"
+-- ALTER TABLE
+
+> select conname, contype, conindid::regclass, condeferrable, condeferred, conkey from pg_constraint where conrelid = 't'::regclass order by oid
+conname:name | contype:char | conindid:regclass | condeferrable:bool | condeferred:bool | conkey:int2[]
+t_a_not_null | n | - | f | f | {1}
+pk | p | pk | f | f | {1}
+-- SELECT 2
+
+> select relname from pg_class where relname like 'i%' or relname like 'pk%'
+relname:name
+information_schema_catalog_name
+pk
+-- SELECT 2
+
+> select indisprimary, indisunique from pg_index where indexrelid = 'pk'::regclass
+indisprimary:bool | indisunique:bool
+t | t
+-- SELECT 1
+
+> create unique index i2 on t (b)
+-- CREATE INDEX
+
+> alter table t add unique using index i2
+-- ALTER TABLE
+
+> create unique index i3 on t (d)
+-- CREATE INDEX
+
+> alter table t add constraint u3 unique using index i3 deferrable initially deferred
+NOTICE 00000: ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "i3" to "u3"
+-- ALTER TABLE
+
+> create index i4 on t (c)
+-- CREATE INDEX
+
+> alter table t add unique using index i4
+ERROR 42809: "i4" is not a unique index (at 19)
+DETAIL: Cannot create a primary key or unique constraint using such an index.
+
+> create unique index i5 on t (lower(c))
+-- CREATE INDEX
+
+> alter table t add unique using index i5
+ERROR 42809: index "i5" contains expressions (at 19)
+DETAIL: Cannot create a primary key or unique constraint using such an index.
+
+> create unique index i6 on t (c) where d > 0
+-- CREATE INDEX
+
+> alter table t add unique using index i6
+ERROR 42809: "i6" is a partial index (at 19)
+DETAIL: Cannot create a primary key or unique constraint using such an index.
+
+> create unique index i7 on t (c desc)
+-- CREATE INDEX
+
+> alter table t add unique using index i7
+ERROR 42809: index "i7" column number 1 does not have default sorting behavior (at 19)
+DETAIL: Cannot create a primary key or unique constraint using such an index.
+
+> create unique index i8 on t (c) include (d)
+-- CREATE INDEX
+
+> alter table t add unique using index i8
+-- ALTER TABLE
+
+> alter table t add primary key using index i8
+ERROR 55000: index "i8" is already associated with a constraint (at 19)
+
+> create unique index i9 on t (c collate "C")
+-- CREATE INDEX
+
+> alter table t add unique using index i9
+ERROR 42809: index "i9" column number 1 does not have default sorting behavior (at 19)
+DETAIL: Cannot create a primary key or unique constraint using such an index.
+
+> create unique index i10 on t (c text_pattern_ops)
+-- CREATE INDEX
+
+> alter table t add unique using index i10
+ERROR 42809: index "i10" column number 1 does not have default sorting behavior (at 19)
+DETAIL: Cannot create a primary key or unique constraint using such an index.
+
+> create unique index i11 on t using hash (c)
+ERROR 0A000: access method "hash" does not support unique indexes
+
+> alter table t add unique using index i11
+ERROR 42704: index "i11" does not exist (at 19)
+
+> alter table t add unique using index nope
+ERROR 42704: index "nope" does not exist (at 19)
+
+> alter table t add unique using index pk
+ERROR 55000: index "pk" is already associated with a constraint (at 19)
+
+> create table o (a int)
+-- CREATE TABLE
+
+> create unique index oi on o (a)
+-- CREATE INDEX
+
+> alter table t add unique using index oi
+ERROR 55000: index "oi" does not belong to table "t" (at 19)
+
+> create unique index i12 on t (a, b) nulls not distinct
+-- CREATE INDEX
+
+> alter table t add unique using index i12
+-- ALTER TABLE
+
+> create table n (a int, b int)
+-- CREATE TABLE
+
+> create unique index ni on n (a, b)
+-- CREATE INDEX
+
+> insert into n values (null, 1)
+-- INSERT 0 1
+
+> alter table n add primary key using index ni
+ERROR 23502: column "a" of relation "n" contains null values
+OBJECTS: schema=public table=n column=a
+
+> delete from n
+-- DELETE 1
+
+> alter table n add primary key using index ni
+-- ALTER TABLE
+
+> select attname, attnotnull from pg_attribute where attrelid = 'n'::regclass and attnum > 0 order by attnum
+attname:name | attnotnull:bool
+a | t
+b | t
+-- SELECT 2
+
+> select conname, contype from pg_constraint where conrelid = 'n'::regclass order by oid
+conname:name | contype:char
+n_a_not_null | n
+n_b_not_null | n
+ni | p
+-- SELECT 3
+
+> create unique index ni2 on n (a)
+-- CREATE INDEX
+
+> alter table n add primary key using index ni2
+ERROR 42P16: multiple primary keys for table "n" are not allowed
+
+> alter table n add constraint n_pk2 unique using index ni2
+NOTICE 00000: ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "ni2" to "n_pk2"
+-- ALTER TABLE
+
+> select conname, contype, conindid::regclass, condeferrable, condeferred from pg_constraint where conrelid = 't'::regclass order by oid
+conname:name | contype:char | conindid:regclass | condeferrable:bool | condeferred:bool
+t_a_not_null | n | - | f | f
+pk | p | pk | f | f
+i2 | u | i2 | f | f
+u3 | u | u3 | t | t
+i8 | u | i8 | f | f
+i12 | u | i12 | f | f
+-- SELECT 6
+
+> select indexrelid::regclass, indisprimary, indimmediate from pg_index where indrelid = 't'::regclass order by indexrelid::regclass::text
+indexrelid:regclass | indisprimary:bool | indimmediate:bool
+i10 | f | t
+i12 | f | t
+i2 | f | t
+i4 | f | t
+i5 | f | t
+i6 | f | t
+i7 | f | t
+i8 | f | t
+i9 | f | t
+pk | t | t
+u3 | f | f
+-- SELECT 11
+
+> create table pt (a int) partition by range (a)
+-- CREATE TABLE
+
+> create unique index pti on pt (a)
+-- CREATE INDEX
+
+> alter table pt add unique using index pti
+ERROR 0A000: ALTER TABLE / ADD CONSTRAINT USING INDEX is not supported on partitioned tables
+
+> create table x (a int)
+-- CREATE TABLE
+
+> create unique index xi on x (a)
+-- CREATE INDEX
+
+> create table x2 (b int)
+-- CREATE TABLE
+
+> alter table x add constraint x2 unique using index xi
+NOTICE 00000: ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "xi" to "x2"
+ERROR 42P07: relation "x2" already exists
+
+> alter table x add constraint xi unique using index xi
+-- ALTER TABLE
+
+> select conname from pg_constraint where conrelid = 'x'::regclass
+conname:name
+xi
+-- SELECT 1
+
+> create unique index xi3 on x (a)
+-- CREATE INDEX
+
+> alter table x add constraint xi unique using index xi3
+NOTICE 00000: ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "xi3" to "xi"
+ERROR 42P07: relation "xi" already exists
+
+> create table k (a int, b int)
+-- CREATE TABLE
+
+> create unique index ki on k (a, b)
+-- CREATE INDEX
+
+> create unique index kj on k (b)
+-- CREATE INDEX
+
+> create table mk0 ()
+-- CREATE TABLE
+
+> alter table k add constraint kpk primary key using index ki
+NOTICE 00000: ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "ki" to "kpk"
+-- ALTER TABLE
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> alter table k add constraint kd unique using index kj deferrable
+NOTICE 00000: ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "kj" to "kd"
+-- ALTER TABLE
+
+> create table mk2 ()
+-- CREATE TABLE
+
+> select conname, oid::int8 - 'mk0'::regclass::int8 from pg_constraint where conrelid = 'k'::regclass order by oid
+conname:name | ?column?:int8
+k_a_not_null | 3
+k_b_not_null | 4
+kpk | 5
+kd | 9
+-- SELECT 4
+
+> select tgname ~ '^Unique_ConstraintTrigger', oid::int8 - 'mk0'::regclass::int8 from pg_trigger where tgrelid = 'k'::regclass
+?column?:bool | ?column?:int8
+t | 10
+-- SELECT 1
+
+> select 'mk1'::regclass::int8 - 'mk0'::regclass::int8, 'mk2'::regclass::int8 - 'mk1'::regclass::int8
+?column?:int8 | ?column?:int8
+6 | 5
+-- SELECT 1
+
+> select classid::regclass, objid::regclass, refclassid::regclass, deptype from pg_depend where objid = 'kpk'::regclass and classid = 'pg_class'::regclass order by refclassid::regclass::text, refobjid
+classid:regclass | objid:regclass | refclassid:regclass | deptype:char
+pg_class | kpk | pg_constraint | i
+-- SELECT 1
+
+> select pg_get_constraintdef(oid), pg_get_indexdef(conindid) from pg_constraint where conrelid = 'k'::regclass and contype in ('p', 'u') order by oid
+pg_get_constraintdef:text | pg_get_indexdef:text
+PRIMARY KEY (a, b) | CREATE UNIQUE INDEX kpk ON public.k USING btree (a, b)
+UNIQUE (b) DEFERRABLE | CREATE UNIQUE INDEX kd ON public.k USING btree (b)
+-- SELECT 2
+
+> insert into k values (1, 1)
+-- INSERT 0 1
+
+> begin
+-- BEGIN
+
+> insert into k values (2, 1)
+ERROR 23505: duplicate key value violates unique constraint "kd"
+DETAIL: Key (b)=(1) already exists.
+OBJECTS: schema=public table=k constraint=kd
+
+> rollback
+-- ROLLBACK
+
+> drop table t, o, n, pt, x, x2, k, mk0, mk1, mk2
+-- DROP TABLE
+
+> create table r (a int, b text)
+-- CREATE TABLE
+
+> insert into r values (3, 'c'), (1, 'a'), (2, 'b')
+-- INSERT 0 3
+
+> create unique index ri on r (a)
+-- CREATE INDEX
+
+> create index rb on r (b)
+-- CREATE INDEX
+
+> alter table r add primary key using index ri
+-- ALTER TABLE
+
+> select * from r order by a
+a:int4 | b:text
+1 | a
+2 | b
+3 | c
+-- SELECT 3
+
+> insert into r values (1, 'z')
+ERROR 23505: duplicate key value violates unique constraint "ri"
+DETAIL: Key (a)=(1) already exists.
+OBJECTS: schema=public table=r constraint=ri
+
+> insert into r values (4, 'd')
+-- INSERT 0 1
+
+> select * from r where a = 4
+a:int4 | b:text
+4 | d
+-- SELECT 1
+
+> select a from r where b = 'b'
+a:int4
+2
+-- SELECT 1
+
+> select relname from pg_class where oid in (select indexrelid from pg_index where indrelid = 'r'::regclass) order by 1
+relname:name
+rb
+ri
+-- SELECT 2
+
+> create table z (a int, unique using index zz)
+ERROR 0A000: cannot use an existing index in CREATE TABLE (at 24)
+
+> drop table r
+-- DROP TABLE
+

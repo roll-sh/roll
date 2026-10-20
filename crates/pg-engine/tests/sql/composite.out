@@ -1,0 +1,171 @@
+> CREATE TYPE pt AS (x int, y int)
+-- CREATE TYPE
+
+> CREATE TABLE pt (a int)
+ERROR 42P07: relation "pt" already exists
+
+> CREATE TYPE pt AS (x int)
+ERROR 42710: type "pt" already exists
+
+> CREATE TYPE bad AS (x int, x text)
+ERROR 42701: column "x" specified more than once
+
+> CREATE TYPE empty_t AS ()
+-- CREATE TYPE
+
+> SELECT '(1,2)'::pt, pg_typeof('(1,2)'::pt), ('(1,2)'::pt).y, ROW(3, '4')::pt, '(1,)'::pt, ('(1,2)'::pt).*
+pt:user | pg_typeof:regtype | y:int4 | row:user | pt:user | x:int4 | y:int4
+(1,2) | pt | 2 | (3,4) | (1,) | 1 | 2
+-- SELECT 1
+
+> SELECT '(1,2,3)'::pt
+ERROR 22P02: malformed record literal: "(1,2,3)" (at 8)
+DETAIL: Too many columns.
+
+> SELECT '(a,2)'::pt
+ERROR 22P02: invalid input syntax for type integer: "a" (at 8)
+
+> SELECT ROW(1)::pt
+ERROR 42846: cannot cast type record to pt (at 14)
+DETAIL: Input has too few columns.
+
+> CREATE TABLE s (id int, p pt, ps pt[])
+-- CREATE TABLE
+
+> INSERT INTO s VALUES (1, '(1,2)', ARRAY['(3,4)'::pt]), (2, ROW(5, 6), '{"(7,8)"}'), (3, NULL, NULL)
+-- INSERT 0 3
+
+> SELECT p, ps, (p).x, ps[1].y, pg_typeof(ps) FROM s ORDER BY id
+p:user | ps:user | x:int4 | y:int4 | pg_typeof:regtype
+(1,2) | {"(3,4)"} | 1 | 4 | pt[]
+(5,6) | {"(7,8)"} | 5 | 8 | pt[]
+NULL | NULL | NULL | NULL | pt[]
+-- SELECT 3
+
+> SELECT id FROM s WHERE p = ROW(1, 2)
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM s WHERE p < ROW(5, 0)::pt ORDER BY id
+id:int4
+1
+-- SELECT 1
+
+> SELECT id, p IS NULL, (p).x IS NULL FROM s ORDER BY id
+id:int4 | ?column?:bool | ?column?:bool
+1 | f | f
+2 | f | f
+3 | t | t
+-- SELECT 3
+
+> UPDATE s SET p.x = 10, ps[2] = ROW(9, 9) WHERE id = 1 RETURNING p, ps
+p:user | ps:user
+(10,2) | {"(3,4)","(9,9)"}
+-- UPDATE 1
+
+> UPDATE s SET p.y = 7 WHERE id = 3 RETURNING p
+p:user
+(,7)
+-- UPDATE 1
+
+> INSERT INTO s (id, p.y) VALUES (4, 9) RETURNING *
+id:int4 | p:user | ps:user
+4 | (,9) | NULL
+-- INSERT 0 1
+
+> SELECT typname, typtype, typcategory, typrelid <> 0, typarray <> 0, typelem <> 0 FROM pg_type WHERE typname IN ('pt', '_pt') ORDER BY 1
+typname:name | typtype:char | typcategory:char | ?column?:bool | ?column?:bool | ?column?:bool
+_pt | b | A | f | f | t
+pt | c | C | t | t | f
+-- SELECT 2
+
+> SELECT relname, relkind, relnatts, reltype = 'pt'::regtype FROM pg_class WHERE relname = 'pt'
+relname:name | relkind:char | relnatts:int2 | ?column?:bool
+pt | c | 2 | t
+-- SELECT 1
+
+> SELECT attname, atttypid::regtype, attnum FROM pg_attribute WHERE attrelid = 'pt'::regclass ORDER BY attnum
+attname:name | atttypid:regtype | attnum:int2
+x | integer | 1
+y | integer | 2
+-- SELECT 2
+
+> SELECT column_name, data_type, udt_name FROM information_schema.columns WHERE table_name = 's' ORDER BY ordinal_position
+column_name:name | data_type:varchar | udt_name:name
+id | integer | int4
+p | USER-DEFINED | pt
+ps | ARRAY | _pt
+-- SELECT 3
+
+> SELECT format_type('pt'::regtype, NULL), '_pt'::regtype, 'pt[]'::regtype, format_type('_pt'::regtype, NULL)
+format_type:text | regtype:regtype | regtype:regtype | format_type:text
+pt | pt[] | pt[] | pt[]
+-- SELECT 1
+
+> DROP TYPE pt
+ERROR 2BP01: cannot drop type pt because other objects depend on it
+DETAIL: column ps of table s depends on type pt[]
+DETAIL: column p of table s depends on type pt
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TYPE pt CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to column ps of table s
+DETAIL: drop cascades to column p of table s
+-- DROP TYPE
+
+> SELECT * FROM s ORDER BY id
+id:int4
+1
+2
+3
+4
+-- SELECT 4
+
+> DROP TABLE s
+-- DROP TABLE
+
+> CREATE TYPE money_t AS (amount numeric(6,2), currency char(3))
+-- CREATE TYPE
+
+> CREATE TYPE line_item AS (sku text, price money_t, qty int)
+-- CREATE TYPE
+
+> SELECT ROW('x', 1.26, 'eur')::money_t, ROW('a', ROW(9.999, 'usd')::money_t, 2)::line_item
+ERROR 22P02: invalid input syntax for type numeric: "x" (at 12)
+
+> SELECT (ROW('a', ROW(9.5, 'usd')::money_t, 2)::line_item).price.amount
+amount:numeric
+9.50
+-- SELECT 1
+
+> SELECT ((ROW('a', ROW(9.5, 'usd')::money_t, 2)::line_item).price).*
+amount:numeric | currency:bpchar
+9.50 | usd
+-- SELECT 1
+
+> SELECT '("a b",3.0)'::money_t, '(sku,"(1.5,gbp)",4)'::line_item
+ERROR 22P02: invalid input syntax for type numeric: "a b" (at 8)
+
+> SELECT pg_typeof((SELECT ROW(1, 'x')::money_t))
+pg_typeof:regtype
+money_t
+-- SELECT 1
+
+> SELECT array_agg(ROW(i, 'usd')::money_t ORDER BY i) FROM generate_series(1, 3) i
+array_agg:user
+{"(1.00,usd)","(2.00,usd)","(3.00,usd)"}
+-- SELECT 1
+
+> DROP TYPE money_t
+ERROR 2BP01: cannot drop type money_t because other objects depend on it
+DETAIL: column price of composite type line_item depends on type money_t
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TYPE line_item, money_t
+-- DROP TYPE
+
+> DROP TYPE empty_t
+-- DROP TYPE
+

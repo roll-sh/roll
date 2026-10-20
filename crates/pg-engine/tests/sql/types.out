@@ -1,0 +1,159 @@
+> CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
+-- CREATE TYPE
+
+> CREATE TABLE person (name text, current_mood mood)
+-- CREATE TABLE
+
+> INSERT INTO person VALUES ('a', 'happy'), ('b', 'sad'), ('c', 'ok')
+-- INSERT 0 3
+
+> SELECT * FROM person ORDER BY current_mood
+name:text | current_mood:user
+b | sad
+c | ok
+a | happy
+-- SELECT 3
+
+> SELECT * FROM person WHERE current_mood > 'ok'
+name:text | current_mood:user
+a | happy
+-- SELECT 1
+
+> INSERT INTO person VALUES ('d', 'angry')
+ERROR 22P02: invalid input value for enum mood: "angry" (at 33)
+
+> CREATE TYPE mood AS ENUM ('x')
+ERROR 42710: type "mood" already exists
+
+> ALTER TYPE mood ADD VALUE 'ecstatic'
+-- ALTER TYPE
+
+> ALTER TYPE mood ADD VALUE 'meh' BEFORE 'ok'
+-- ALTER TYPE
+
+> ALTER TYPE mood ADD VALUE 'ok'
+ERROR 42710: enum label "ok" already exists
+
+> ALTER TYPE mood ADD VALUE IF NOT EXISTS 'ok'
+NOTICE 42710: enum label "ok" already exists, skipping
+-- ALTER TYPE
+
+> SELECT enum_range(NULL::mood)
+enum_range:user
+{sad,meh,ok,happy,ecstatic}
+-- SELECT 1
+
+> ALTER TYPE mood RENAME VALUE 'sad' TO 'blue'
+-- ALTER TYPE
+
+> SELECT * FROM person ORDER BY current_mood
+name:text | current_mood:user
+b | blue
+c | ok
+a | happy
+-- SELECT 3
+
+> ALTER TYPE mood RENAME VALUE 'nosuch' TO 'x'
+ERROR 22023: "nosuch" is not an existing enum label
+
+> SELECT enumlabel FROM pg_enum WHERE enumtypid = 'mood'::regtype ORDER BY enumsortorder
+enumlabel:name
+blue
+meh
+ok
+happy
+ecstatic
+-- SELECT 5
+
+> DROP TYPE mood
+ERROR 2BP01: cannot drop type mood because other objects depend on it
+DETAIL: column current_mood of table person depends on type mood
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TYPE mood CASCADE
+NOTICE 00000: drop cascades to column current_mood of table person
+-- DROP TYPE
+
+> SELECT * FROM person ORDER BY name
+name:text
+a
+b
+c
+-- SELECT 3
+
+> CREATE DOMAIN posint AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE TABLE dt (x posint)
+-- CREATE TABLE
+
+> INSERT INTO dt VALUES (1)
+-- INSERT 0 1
+
+> INSERT INTO dt VALUES (0)
+ERROR 23514: value for domain posint violates check constraint "posint_check"
+OBJECTS: schema=public datatype=posint constraint=posint_check
+
+> SELECT 5::posint, (-1)::posint
+ERROR 23514: value for domain posint violates check constraint "posint_check"
+OBJECTS: schema=public datatype=posint constraint=posint_check
+
+> CREATE DOMAIN nn_text AS text NOT NULL DEFAULT 'd'
+-- CREATE DOMAIN
+
+> CREATE TABLE dt2 (a int, t nn_text)
+-- CREATE TABLE
+
+> INSERT INTO dt2 (a) VALUES (1)
+-- INSERT 0 1
+
+> INSERT INTO dt2 VALUES (2, NULL)
+ERROR 23502: domain nn_text does not allow null values
+OBJECTS: schema=public datatype=nn_text
+
+> SELECT * FROM dt2
+a:int4 | t:text
+1 | d
+-- SELECT 1
+
+> CREATE DOMAIN email AS text CONSTRAINT has_at CHECK (VALUE LIKE '%@%')
+-- CREATE DOMAIN
+
+> SELECT 'x'::email
+ERROR 23514: value for domain email violates check constraint "has_at"
+OBJECTS: schema=public datatype=email constraint=has_at
+
+> SELECT typname, typtype FROM pg_type WHERE typname IN ('posint', 'nn_text', 'email') ORDER BY 1
+typname:name | typtype:char
+email | d
+nn_text | d
+posint | d
+-- SELECT 3
+
+> DROP DOMAIN posint
+ERROR 2BP01: cannot drop type posint because other objects depend on it
+DETAIL: column x of table dt depends on type posint
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP DOMAIN posint CASCADE
+NOTICE 00000: drop cascades to column x of table dt
+-- DROP DOMAIN
+
+> DROP DOMAIN nosuch
+ERROR 42704: type "nosuch" does not exist
+
+> DROP DOMAIN IF EXISTS nosuch
+NOTICE 00000: type "nosuch" does not exist, skipping
+-- DROP DOMAIN
+
+> DROP TYPE email
+-- DROP TYPE
+
+> CREATE TYPE posint AS ENUM ('a')
+-- CREATE TYPE
+
+> SELECT 'a'::posint
+posint:user
+a
+-- SELECT 1
+

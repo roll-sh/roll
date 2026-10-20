@@ -1,0 +1,241 @@
+> DROP ROLE IF EXISTS gd_rl_u
+NOTICE 00000: role "gd_rl_u" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE gd_rl_u
+-- CREATE ROLE
+
+> CREATE FUNCTION gd_rl_leak(text) RETURNS bool COST 0.0000001 LANGUAGE plpgsql
+>   AS 'BEGIN RAISE NOTICE ''leak => %'', $1; RETURN true; END'
+-- CREATE FUNCTION
+
+> GRANT EXECUTE ON FUNCTION gd_rl_leak(text) TO PUBLIC
+-- GRANT
+
+> CREATE TABLE gd_rl_t (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO gd_rl_t VALUES (1, 'aaa'), (2, 'bbb'), (3, 'ccc'), (4, 'ddd')
+-- INSERT 0 4
+
+> GRANT ALL ON gd_rl_t TO gd_rl_u
+-- GRANT
+
+> CREATE POLICY gd_rl_p ON gd_rl_t USING (a % 2 = 0)
+-- CREATE POLICY
+
+> ALTER TABLE gd_rl_t ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> SET SESSION AUTHORIZATION gd_rl_u
+-- SET
+
+> SELECT * FROM gd_rl_t WHERE gd_rl_leak(b) ORDER BY a
+NOTICE 00000: leak => bbb
+CONTEXT: PL/pgSQL function gd_rl_leak(text) line 1 at RAISE
+NOTICE 00000: leak => ddd
+CONTEXT: PL/pgSQL function gd_rl_leak(text) line 1 at RAISE
+a:int4 | b:text
+2 | bbb
+4 | ddd
+-- SELECT 2
+
+> UPDATE gd_rl_t SET b = b WHERE gd_rl_leak(b)
+NOTICE 00000: leak => bbb
+CONTEXT: PL/pgSQL function gd_rl_leak(text) line 1 at RAISE
+NOTICE 00000: leak => ddd
+CONTEXT: PL/pgSQL function gd_rl_leak(text) line 1 at RAISE
+-- UPDATE 2
+
+> DELETE FROM gd_rl_t WHERE a = 1 AND gd_rl_leak(b)
+-- DELETE 0
+
+> SELECT * FROM gd_rl_t WHERE gd_rl_leak('x') ORDER BY a
+NOTICE 00000: leak => x
+CONTEXT: PL/pgSQL function gd_rl_leak(text) line 1 at RAISE
+NOTICE 00000: leak => x
+CONTEXT: PL/pgSQL function gd_rl_leak(text) line 1 at RAISE
+NOTICE 00000: leak => x
+CONTEXT: PL/pgSQL function gd_rl_leak(text) line 1 at RAISE
+NOTICE 00000: leak => x
+CONTEXT: PL/pgSQL function gd_rl_leak(text) line 1 at RAISE
+a:int4 | b:text
+2 | bbb
+4 | ddd
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gd_rl_t WHERE a <= 2
+QUERY PLAN:text
+Seq Scan on gd_rl_t
+  Filter: ((a <= 2) AND ((a % 2) = 0))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) UPDATE gd_rl_t SET b = b WHERE a <= 2
+QUERY PLAN:text
+Update on gd_rl_t
+  ->  Seq Scan on gd_rl_t
+        Filter: ((a <= 2) AND ((a % 2) = 0))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DELETE FROM gd_rl_t WHERE gd_rl_leak(b)
+QUERY PLAN:text
+Delete on gd_rl_t
+  ->  Seq Scan on gd_rl_t
+        Filter: (((a % 2) = 0) AND gd_rl_leak(b))
+-- EXPLAIN
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> CREATE TABLE gd_rl_r1 (x int, y int)
+-- CREATE TABLE
+
+> CREATE TABLE gd_rl_r2 (a int, b int)
+-- CREATE TABLE
+
+> CREATE POLICY gd_rl_r1p ON gd_rl_r1 USING (x = (SELECT a FROM gd_rl_r2 WHERE b = y))
+-- CREATE POLICY
+
+> CREATE POLICY gd_rl_r2p ON gd_rl_r2 USING (a = (SELECT x FROM gd_rl_r1 WHERE y = b))
+-- CREATE POLICY
+
+> ALTER TABLE gd_rl_r1 ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> ALTER TABLE gd_rl_r2 ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> GRANT ALL ON gd_rl_r1, gd_rl_r2 TO gd_rl_u
+-- GRANT
+
+> CREATE VIEW gd_rl_v1 AS SELECT * FROM gd_rl_r1
+-- CREATE VIEW
+
+> GRANT ALL ON gd_rl_v1 TO gd_rl_u
+-- GRANT
+
+> ALTER POLICY gd_rl_r2p ON gd_rl_r2 USING (a = (SELECT x FROM gd_rl_v1 WHERE y = b))
+-- ALTER POLICY
+
+> SET SESSION AUTHORIZATION gd_rl_u
+-- SET
+
+> SELECT * FROM gd_rl_r1
+x:int4 | y:int4
+-- SELECT 0
+
+> SELECT * FROM gd_rl_v1
+x:int4 | y:int4
+-- SELECT 0
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> DROP VIEW gd_rl_v1 CASCADE
+NOTICE 00000: drop cascades to policy gd_rl_r2p on table gd_rl_r2
+-- DROP VIEW
+
+> CREATE TABLE gd_rl_c (a int, b text)
+-- CREATE TABLE
+
+> CREATE POLICY gd_rl_cp ON gd_rl_c USING (a % 2 = 0)
+-- CREATE POLICY
+
+> ALTER TABLE gd_rl_c ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> SET SESSION AUTHORIZATION gd_rl_u
+-- SET
+
+> SET row_security TO OFF
+-- SET
+
+> COPY gd_rl_c TO STDOUT
+ERROR 42501: permission denied for table gd_rl_c
+
+> RESET row_security
+-- RESET
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> CREATE TABLE gd_rl_pk (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE gd_rl_fk (id int REFERENCES gd_rl_pk)
+-- CREATE TABLE
+
+> INSERT INTO gd_rl_pk VALUES (1)
+-- INSERT 0 1
+
+> INSERT INTO gd_rl_fk VALUES (1)
+-- INSERT 0 1
+
+> GRANT DELETE, SELECT ON gd_rl_pk TO gd_rl_u
+-- GRANT
+
+> GRANT INSERT ON gd_rl_fk TO gd_rl_u
+-- GRANT
+
+> ALTER TABLE gd_rl_pk ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY gd_rl_pkp ON gd_rl_pk USING (true)
+-- CREATE POLICY
+
+> SET SESSION AUTHORIZATION gd_rl_u
+-- SET
+
+> DELETE FROM gd_rl_pk WHERE id = 1
+ERROR 23503: update or delete on table "gd_rl_pk" violates foreign key constraint "gd_rl_fk_id_fkey" on table "gd_rl_fk"
+DETAIL: Key is still referenced from table "gd_rl_fk".
+OBJECTS: schema=public table=gd_rl_fk constraint=gd_rl_fk_id_fkey
+
+> INSERT INTO gd_rl_fk VALUES (2)
+ERROR 23503: insert or update on table "gd_rl_fk" violates foreign key constraint "gd_rl_fk_id_fkey"
+DETAIL: Key is not present in table "gd_rl_pk".
+OBJECTS: schema=public table=gd_rl_fk constraint=gd_rl_fk_id_fkey
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> CREATE POLICY gd_rl_bad ON gd_rl_pk AS UGLY USING (true)
+ERROR 42601: unrecognized row security option "ugly" (at 40)
+HINT: Only PERMISSIVE or RESTRICTIVE policies are supported currently.
+
+> CREATE TABLE gd_rl_rt (c text)
+-- CREATE TABLE
+
+> INSERT INTO gd_rl_rt VALUES ('x')
+-- INSERT 0 1
+
+> CREATE FUNCTION gd_rl_f() RETURNS SETOF gd_rl_rt STABLE LANGUAGE sql
+>   AS $$ SELECT exists(SELECT * FROM gd_rl_rt)::text $$
+-- CREATE FUNCTION
+
+> SELECT * FROM gd_rl_f()
+c:text
+true
+-- SELECT 1
+
+> CREATE OR REPLACE FUNCTION gd_rl_f() RETURNS SETOF gd_rl_rt STABLE LANGUAGE sql
+>   AS $$ SELECT * FROM (SELECT array_agg(c) AS cs FROM gd_rl_rt) _ GROUP BY cs $$
+-- CREATE FUNCTION
+
+> SELECT * FROM gd_rl_f()
+c:text
+{x}
+-- SELECT 1
+
+> DROP FUNCTION gd_rl_f()
+-- DROP FUNCTION
+
+> DROP TABLE gd_rl_t, gd_rl_r1, gd_rl_r2, gd_rl_c, gd_rl_fk, gd_rl_pk, gd_rl_rt
+-- DROP TABLE
+
+> DROP FUNCTION gd_rl_leak(text)
+-- DROP FUNCTION
+
+> DROP ROLE gd_rl_u
+-- DROP ROLE
+

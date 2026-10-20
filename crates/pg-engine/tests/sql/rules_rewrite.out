@@ -1,0 +1,455 @@
+> CREATE TABLE rr_t1 (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE rr_t2 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO rr_t2 VALUES (1, 21), (2, 22), (3, 23)
+-- INSERT 0 3
+
+> CREATE VIEW rr_v1 AS SELECT * FROM rr_t1
+-- CREATE VIEW
+
+> CREATE RULE rr_v1_ins AS ON INSERT TO rr_v1 DO INSTEAD INSERT INTO rr_t1 VALUES (new.a, new.b)
+-- CREATE RULE
+
+> CREATE RULE rr_v1_upd AS ON UPDATE TO rr_v1 DO INSTEAD UPDATE rr_t1 SET a = new.a, b = new.b WHERE a = old.a
+-- CREATE RULE
+
+> CREATE RULE rr_v1_del AS ON DELETE TO rr_v1 DO INSTEAD DELETE FROM rr_t1 WHERE a = old.a
+-- CREATE RULE
+
+> INSERT INTO rr_v1 VALUES (1, 11)
+-- INSERT 0 1
+
+> INSERT INTO rr_v1 SELECT * FROM rr_t2
+-- INSERT 0 3
+
+> INSERT INTO rr_v1 (b, a) SELECT b, a + 10 FROM rr_t2
+-- INSERT 0 3
+
+> SELECT * FROM rr_v1 ORDER BY a, b
+a:int4 | b:int4
+1 | 11
+1 | 21
+2 | 22
+3 | 23
+11 | 21
+12 | 22
+13 | 23
+-- SELECT 7
+
+> UPDATE rr_v1 SET b = 42 WHERE a = 2
+-- UPDATE 1
+
+> UPDATE rr_v1 SET b = rr_t2.b + 100 FROM rr_t2 WHERE rr_v1.a = rr_t2.a
+-- UPDATE 4
+
+> DELETE FROM rr_v1 WHERE b = 42
+-- DELETE 0
+
+> SELECT * FROM rr_v1 ORDER BY a, b
+a:int4 | b:int4
+1 | 121
+1 | 121
+2 | 122
+3 | 123
+11 | 21
+12 | 22
+13 | 23
+-- SELECT 7
+
+> DELETE FROM rr_v1
+-- DELETE 7
+
+> SELECT count(*) FROM rr_t1
+count:int8
+0
+-- SELECT 1
+
+> CREATE TABLE rr_emp (ename text, salary numeric)
+-- CREATE TABLE
+
+> CREATE TABLE rr_log (ename text, action text, newsal numeric, oldsal numeric)
+-- CREATE TABLE
+
+> CREATE RULE rr_emp_ins AS ON INSERT TO rr_emp DO INSERT INTO rr_log VALUES (new.ename, 'hired', new.salary, 0)
+-- CREATE RULE
+
+> CREATE RULE rr_emp_upd AS ON UPDATE TO rr_emp WHERE new.salary <> old.salary DO INSERT INTO rr_log VALUES (new.ename, 'honored', new.salary, old.salary)
+-- CREATE RULE
+
+> CREATE RULE rr_emp_del AS ON DELETE TO rr_emp DO INSERT INTO rr_log VALUES (old.ename, 'fired', 0, old.salary)
+-- CREATE RULE
+
+> INSERT INTO rr_emp VALUES ('w', 5000), ('g', 80000)
+-- INSERT 0 2
+
+> UPDATE rr_emp SET ename = 'x' WHERE ename = 'w'
+-- UPDATE 1
+
+> UPDATE rr_emp SET salary = 6000 WHERE ename = 'x'
+-- UPDATE 1
+
+> DELETE FROM rr_emp WHERE ename = 'g'
+-- DELETE 1
+
+> SELECT * FROM rr_log ORDER BY ename, action
+ename:text | action:text | newsal:numeric | oldsal:numeric
+g | fired | 0 | 80000
+g | hired | 80000 | 0
+w | hired | 5000 | 0
+x | honored | 6000 | 5000
+-- SELECT 4
+
+> CREATE TABLE rr_a (a int, b text)
+-- CREATE TABLE
+
+> CREATE TABLE rr_b (a int, b text)
+-- CREATE TABLE
+
+> CREATE TABLE rr_c (a int, b text)
+-- CREATE TABLE
+
+> CREATE RULE rr_a_2 AS ON INSERT TO rr_a WHERE new.a >= 10 AND new.a < 20 DO INSTEAD INSERT INTO rr_b VALUES (new.a, new.b)
+-- CREATE RULE
+
+> CREATE RULE rr_a_1 AS ON INSERT TO rr_a WHERE new.a >= 20 DO INSERT INTO rr_c VALUES (new.a, new.b)
+-- CREATE RULE
+
+> CREATE RULE rr_a_3 AS ON INSERT TO rr_a WHERE a < 5 DO INSTEAD NOTHING
+-- CREATE RULE
+
+> INSERT INTO rr_a VALUES (1, 'gone'), (7, 'a'), (15, 'b'), (25, 'a and c')
+-- INSERT 0 2
+
+> SELECT 'a', * FROM rr_a UNION ALL SELECT 'b', * FROM rr_b UNION ALL SELECT 'c', * FROM rr_c ORDER BY 1, 2
+?column?:text | a:int4 | b:text
+a | 7 | a
+a | 25 | a and c
+b | 15 | b
+c | 25 | a and c
+-- SELECT 4
+
+> CREATE TABLE rr_ret (f1 int, f2 int, tag text)
+-- CREATE TABLE
+
+> CREATE VIEW rr_retv AS SELECT f1, f2 FROM rr_ret
+-- CREATE VIEW
+
+> CREATE RULE rr_retv_ins AS ON INSERT TO rr_retv DO INSTEAD INSERT INTO rr_ret VALUES (new.f1, new.f2, 'via rule') RETURNING f1, f2
+-- CREATE RULE
+
+> INSERT INTO rr_retv VALUES (1, 2) RETURNING *, f1 + f2 AS sum
+f1:int4 | f2:int4 | sum:int4
+1 | 2 | 3
+-- INSERT 0 1
+
+> UPDATE rr_retv SET f2 = 3 RETURNING *
+f1:int4 | f2:int4
+1 | 3
+-- UPDATE 1
+
+> CREATE RULE rr_retv_upd AS ON UPDATE TO rr_retv WHERE new.f1 > 0 DO INSTEAD NOTHING
+-- CREATE RULE
+
+> UPDATE rr_retv SET f2 = 3 RETURNING *
+ERROR 55000: cannot update view "rr_retv"
+DETAIL: Views with conditional DO INSTEAD rules are not automatically updatable.
+HINT: To enable updating the view, provide an INSTEAD OF UPDATE trigger or an unconditional ON UPDATE DO INSTEAD rule.
+
+> CREATE TABLE rr_src (f1 int, f2 int DEFAULT 0)
+-- CREATE TABLE
+
+> CREATE TABLE rr_slog (f1 int, f2 int, tag text, id serial)
+-- CREATE TABLE
+
+> INSERT INTO rr_src VALUES (1, 2), (11, 12)
+-- INSERT 0 2
+
+> CREATE RULE r1 AS ON UPDATE TO rr_src DO ALSO INSERT INTO rr_slog VALUES (old.*, 'old', DEFAULT), (new.*, 'new', DEFAULT)
+-- CREATE RULE
+
+> UPDATE rr_src SET f2 = f2 + 1
+-- UPDATE 2
+
+> SELECT * FROM rr_slog ORDER BY id
+f1:int4 | f2:int4 | tag:text | id:int4
+1 | 2 | old | 1
+1 | 3 | new | 2
+11 | 12 | old | 3
+11 | 13 | new | 4
+-- SELECT 4
+
+> CREATE RULE r2 AS ON UPDATE TO rr_src DO ALSO VALUES (old.*, 'old'), (new.*, 'new')
+-- CREATE RULE
+
+> UPDATE rr_src SET f2 = f2 * 10
+column1:int4 | column2:int4 | column3:text
+1 | 3 | old
+1 | 30 | new
+11 | 13 | old
+11 | 130 | new
+-- UPDATE 2
+
+> CREATE RULE r3 AS ON DELETE TO rr_src DO INSTEAD (INSERT INTO rr_slog VALUES (old.f1, 0, 'deleted'); INSERT INTO rr_slog VALUES (old.f2, 0, 'deleted'))
+-- CREATE RULE
+
+> DELETE FROM rr_src WHERE f1 = 1
+-- DELETE 0
+
+> SELECT f1, f2, tag FROM rr_slog WHERE tag = 'deleted' ORDER BY f1
+f1:int4 | f2:int4 | tag:text
+1 | 0 | deleted
+30 | 0 | deleted
+-- SELECT 2
+
+> SELECT f1, f2 FROM rr_src ORDER BY f1
+f1:int4 | f2:int4
+1 | 30
+11 | 130
+-- SELECT 2
+
+> SELECT tablename, rulename, definition FROM pg_rules WHERE tablename LIKE 'rr_%' ORDER BY 1, 2
+tablename:name | rulename:name | definition:text
+rr_a | rr_a_1 | CREATE RULE rr_a_1 AS
+    ON INSERT TO public.rr_a
+   WHERE (new.a >= 20) DO  INSERT INTO rr_c (a, b)
+  VALUES (new.a, new.b);
+rr_a | rr_a_2 | CREATE RULE rr_a_2 AS
+    ON INSERT TO public.rr_a
+   WHERE ((new.a >= 10) AND (new.a < 20)) DO INSTEAD  INSERT INTO rr_b (a, b)
+  VALUES (new.a, new.b);
+rr_a | rr_a_3 | CREATE RULE rr_a_3 AS
+    ON INSERT TO public.rr_a
+   WHERE (new.a < 5) DO INSTEAD NOTHING;
+rr_emp | rr_emp_del | CREATE RULE rr_emp_del AS
+    ON DELETE TO public.rr_emp DO  INSERT INTO rr_log (ename, action, newsal, oldsal)
+  VALUES (old.ename, 'fired'::text, 0, old.salary);
+rr_emp | rr_emp_ins | CREATE RULE rr_emp_ins AS
+    ON INSERT TO public.rr_emp DO  INSERT INTO rr_log (ename, action, newsal, oldsal)
+  VALUES (new.ename, 'hired'::text, new.salary, 0);
+rr_emp | rr_emp_upd | CREATE RULE rr_emp_upd AS
+    ON UPDATE TO public.rr_emp
+   WHERE (new.salary <> old.salary) DO  INSERT INTO rr_log (ename, action, newsal, oldsal)
+  VALUES (new.ename, 'honored'::text, new.salary, old.salary);
+rr_retv | rr_retv_ins | CREATE RULE rr_retv_ins AS
+    ON INSERT TO public.rr_retv DO INSTEAD  INSERT INTO rr_ret (f1, f2, tag)
+  VALUES (new.f1, new.f2, 'via rule'::text)
+  RETURNING rr_ret.f1,
+    rr_ret.f2;
+rr_retv | rr_retv_upd | CREATE RULE rr_retv_upd AS
+    ON UPDATE TO public.rr_retv
+   WHERE (new.f1 > 0) DO INSTEAD NOTHING;
+rr_src | r1 | CREATE RULE r1 AS
+    ON UPDATE TO public.rr_src DO  INSERT INTO rr_slog (f1, f2, tag, id) VALUES (old.f1,old.f2,'old'::text,DEFAULT), (new.f1,new.f2,'new'::text,DEFAULT);
+rr_src | r2 | CREATE RULE r2 AS
+    ON UPDATE TO public.rr_src DO  VALUES (old.f1,old.f2,'old'::text), (new.f1,new.f2,'new'::text);
+rr_src | r3 | CREATE RULE r3 AS
+    ON DELETE TO public.rr_src DO INSTEAD ( INSERT INTO rr_slog (f1, f2, tag)
+  VALUES (old.f1, 0, 'deleted'::text);
+ INSERT INTO rr_slog (f1, f2, tag)
+  VALUES (old.f2, 0, 'deleted'::text);
+);
+rr_v1 | rr_v1_del | CREATE RULE rr_v1_del AS
+    ON DELETE TO public.rr_v1 DO INSTEAD  DELETE FROM rr_t1
+  WHERE (rr_t1.a = old.a);
+rr_v1 | rr_v1_ins | CREATE RULE rr_v1_ins AS
+    ON INSERT TO public.rr_v1 DO INSTEAD  INSERT INTO rr_t1 (a, b)
+  VALUES (new.a, new.b);
+rr_v1 | rr_v1_upd | CREATE RULE rr_v1_upd AS
+    ON UPDATE TO public.rr_v1 DO INSTEAD  UPDATE rr_t1 SET a = new.a, b = new.b
+  WHERE (rr_t1.a = old.a);
+-- SELECT 14
+
+> SELECT rulename, pg_get_ruledef(oid, true) FROM pg_rewrite WHERE ev_class = 'rr_src'::regclass ORDER BY 1
+rulename:name | pg_get_ruledef:text
+r1 | CREATE RULE r1 AS
+    ON UPDATE TO rr_src DO  INSERT INTO rr_slog (f1, f2, tag, id) VALUES (old.f1,old.f2,'old'::text,DEFAULT), (new.f1,new.f2,'new'::text,DEFAULT);
+r2 | CREATE RULE r2 AS
+    ON UPDATE TO rr_src DO  VALUES (old.f1,old.f2,'old'::text), (new.f1,new.f2,'new'::text);
+r3 | CREATE RULE r3 AS
+    ON DELETE TO rr_src DO INSTEAD ( INSERT INTO rr_slog (f1, f2, tag)
+  VALUES (old.f1, 0, 'deleted'::text);
+ INSERT INTO rr_slog (f1, f2, tag)
+  VALUES (old.f2, 0, 'deleted'::text);
+);
+-- SELECT 3
+
+> SELECT rulename, ev_type, ev_enabled, is_instead FROM pg_rewrite WHERE ev_class = 'rr_a'::regclass ORDER BY 1
+rulename:name | ev_type:char | ev_enabled:char | is_instead:bool
+rr_a_1 | 3 | O | f
+rr_a_2 | 3 | O | t
+rr_a_3 | 3 | O | t
+-- SELECT 3
+
+> SELECT relhasrules FROM pg_class WHERE oid = 'rr_a'::regclass
+relhasrules:bool
+t
+-- SELECT 1
+
+> CREATE RULE rr_bad AS ON INSERT TO rr_a DO INSTEAD INSERT INTO rr_b VALUES (a, b)
+ERROR 42703: column "a" does not exist (at 77)
+DETAIL: There are columns named "a", but they are in tables that cannot be referenced from this part of the query.
+HINT: Try using a table-qualified name.
+
+> CREATE RULE rr_bad AS ON INSERT TO rr_a DO INSTEAD INSERT INTO rr_b VALUES (old.a, old.b)
+ERROR 42P17: ON INSERT rule cannot use OLD
+
+> CREATE RULE rr_bad AS ON DELETE TO rr_a DO INSTEAD INSERT INTO rr_b VALUES (new.a, new.b)
+ERROR 42P17: ON DELETE rule cannot use NEW
+
+> CREATE RULE rr_bad AS ON INSERT TO rr_a WHERE new.a > 0 DO INSTEAD NOTIFY rr_chan
+ERROR 42P17: rules with WHERE conditions can only have SELECT, INSERT, UPDATE, or DELETE actions
+
+> CREATE RULE rr_bad AS ON INSERT TO rr_a DO ALSO INSERT INTO rr_b VALUES (new.a, new.b) RETURNING *
+ERROR 0A000: RETURNING lists are not supported in non-INSTEAD rules
+
+> CREATE RULE rr_a_1 AS ON INSERT TO rr_a DO INSTEAD NOTHING
+ERROR 42710: rule "rr_a_1" for relation "rr_a" already exists
+
+> CREATE RULE "_RETURN" AS ON INSERT TO rr_a DO INSTEAD NOTHING
+ERROR 42P17: non-view rule for "rr_a" must not be named "_RETURN"
+
+> CREATE RULE "_RETURN" AS ON SELECT TO rr_a DO INSTEAD SELECT 1 AS a, 'x'::text AS b
+ERROR 42809: relation "rr_a" cannot have ON SELECT rules
+DETAIL: This operation is not supported for tables.
+
+> DROP RULE "_RETURN" ON rr_v1
+ERROR 2BP01: cannot drop rule _RETURN on view rr_v1 because view rr_v1 requires it
+HINT: You can drop view rr_v1 instead.
+
+> DROP RULE rr_nope ON rr_a
+ERROR 42704: rule "rr_nope" for relation "rr_a" does not exist
+
+> DROP RULE IF EXISTS rr_nope ON rr_a
+NOTICE 00000: rule "rr_nope" for relation "rr_a" does not exist, skipping
+-- DROP RULE
+
+> ALTER RULE rr_a_1 ON rr_a RENAME TO rr_a_2
+ERROR 42710: rule "rr_a_2" for relation "rr_a" already exists
+
+> ALTER RULE rr_a_1 ON rr_a RENAME TO "_RETURN"
+ERROR 42P17: non-view rule for "rr_a" must not be named "_RETURN"
+
+> ALTER RULE "_RETURN" ON rr_v1 RENAME TO abc
+ERROR 42P17: renaming an ON SELECT rule is not allowed
+
+> ALTER RULE rr_a_1 ON rr_a RENAME TO rr_a_0
+-- ALTER RULE
+
+> INSERT INTO rr_a VALUES (1, 'x') ON CONFLICT DO NOTHING
+ERROR 0A000: INSERT with ON CONFLICT clause cannot be used with table that has INSERT or UPDATE rules
+
+> MERGE INTO rr_a t USING (VALUES (1)) v(a) ON t.a = v.a WHEN MATCHED THEN DELETE
+ERROR 0A000: cannot execute MERGE on relation "rr_a"
+DETAIL: MERGE is not supported for relations with rules.
+
+> CREATE TABLE rr_loop (a int)
+-- CREATE TABLE
+
+> CREATE RULE rr_loop_r AS ON INSERT TO rr_loop DO INSTEAD INSERT INTO rr_loop VALUES (new.a + 1)
+-- CREATE RULE
+
+> INSERT INTO rr_loop VALUES (1)
+ERROR 42P17: infinite recursion detected in rules for relation "rr_loop"
+
+> DROP RULE rr_loop_r ON rr_loop
+-- DROP RULE
+
+> CREATE TABLE rr_cp (id serial, t text)
+-- CREATE TABLE
+
+> CREATE RULE rr_cp_r AS ON INSERT TO rr_cp DO ALSO DELETE FROM rr_cp
+-- CREATE RULE
+
+> COPY (INSERT INTO rr_cp (t) VALUES ('x') RETURNING id) TO stdout
+ERROR 0A000: DO ALSO rules are not supported for COPY
+
+> WITH w AS (INSERT INTO rr_cp (t) VALUES ('x') RETURNING id) SELECT * FROM w
+ERROR 0A000: DO ALSO rules are not supported for data-modifying statements in WITH
+
+> CREATE OR REPLACE RULE rr_cp_r AS ON INSERT TO rr_cp DO INSTEAD NOTHING
+-- CREATE RULE
+
+> COPY (INSERT INTO rr_cp (t) VALUES ('x') RETURNING id) TO stdout
+ERROR 0A000: cannot perform INSERT RETURNING on relation "rr_cp"
+HINT: You need an unconditional ON INSERT DO INSTEAD rule with a RETURNING clause.
+
+> WITH w AS (INSERT INTO rr_cp (t) VALUES ('x') RETURNING id) SELECT * FROM w
+ERROR 0A000: cannot perform INSERT RETURNING on relation "rr_cp"
+HINT: You need an unconditional ON INSERT DO INSTEAD rule with a RETURNING clause.
+
+> CREATE OR REPLACE RULE rr_cp_r AS ON INSERT TO rr_cp DO INSTEAD NOTIFY rr_chan
+-- CREATE RULE
+
+> WITH w AS (INSERT INTO rr_cp (t) VALUES ('x')) SELECT 1
+ERROR 0A000: DO INSTEAD NOTIFY rules are not supported for data-modifying statements in WITH
+
+> ALTER TABLE rr_a DISABLE RULE rr_a_2
+-- ALTER TABLE
+
+> INSERT INTO rr_a VALUES (12, 'not redirected')
+-- INSERT 0 1
+
+> ALTER TABLE rr_a ENABLE REPLICA RULE rr_a_2
+-- ALTER TABLE
+
+> INSERT INTO rr_a VALUES (13, 'not redirected either')
+-- INSERT 0 1
+
+> SET session_replication_role = replica
+-- SET
+
+> INSERT INTO rr_a VALUES (14, 'redirected in replica')
+-- INSERT 0 0
+
+> RESET session_replication_role
+-- RESET
+
+> SELECT rulename, ev_enabled FROM pg_rewrite WHERE ev_class = 'rr_a'::regclass ORDER BY 1
+rulename:name | ev_enabled:char
+rr_a_0 | O
+rr_a_2 | R
+rr_a_3 | O
+-- SELECT 3
+
+> SELECT 'a', * FROM rr_a WHERE a BETWEEN 10 AND 19 UNION ALL SELECT 'b', * FROM rr_b ORDER BY 1, 2
+?column?:text | a:int4 | b:text
+a | 12 | not redirected
+a | 13 | not redirected either
+b | 14 | redirected in replica
+b | 15 | b
+-- SELECT 4
+
+> COMMENT ON RULE rr_a_2 ON rr_a IS 'redirect'
+-- COMMENT
+
+> SELECT obj_description(oid, 'pg_rewrite') FROM pg_rewrite WHERE rulename = 'rr_a_2'
+obj_description:text
+redirect
+-- SELECT 1
+
+> DROP TABLE rr_b
+ERROR 2BP01: cannot drop table rr_b because other objects depend on it
+DETAIL: rule rr_a_2 on table rr_a depends on table rr_b
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE rr_b CASCADE
+NOTICE 00000: drop cascades to rule rr_a_2 on table rr_a
+-- DROP TABLE
+
+> SELECT rulename FROM pg_rewrite WHERE ev_class = 'rr_a'::regclass ORDER BY 1
+rulename:name
+rr_a_0
+rr_a_3
+-- SELECT 2
+
+> DROP TABLE rr_a
+-- DROP TABLE
+
+> SELECT count(*) FROM pg_rewrite WHERE rulename LIKE 'rr_a%'
+count:int8
+0
+-- SELECT 1
+

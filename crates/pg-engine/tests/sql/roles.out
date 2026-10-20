@@ -1,0 +1,400 @@
+> DROP ROLE IF EXISTS gp_admin, gp_alice, gp_bob, gp_carol, gp_group, gp_sub, gp_x, gp_y
+NOTICE 00000: role "gp_admin" does not exist, skipping
+NOTICE 00000: role "gp_alice" does not exist, skipping
+NOTICE 00000: role "gp_bob" does not exist, skipping
+NOTICE 00000: role "gp_carol" does not exist, skipping
+NOTICE 00000: role "gp_group" does not exist, skipping
+NOTICE 00000: role "gp_sub" does not exist, skipping
+NOTICE 00000: role "gp_x" does not exist, skipping
+NOTICE 00000: role "gp_y" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE gp_admin CREATEROLE
+-- CREATE ROLE
+
+> CREATE ROLE gp_alice LOGIN PASSWORD 'secret' CONNECTION LIMIT 5 VALID UNTIL '2030-01-01 00:00:00+00'
+-- CREATE ROLE
+
+> CREATE USER gp_bob NOINHERIT
+-- CREATE ROLE
+
+> CREATE ROLE gp_group NOLOGIN
+-- CREATE ROLE
+
+> CREATE ROLE gp_alice
+ERROR 42710: role "gp_alice" already exists
+
+> CREATE ROLE public
+ERROR 42939: role name "public" is reserved (at 13)
+
+> CREATE ROLE pg_foo
+ERROR 42939: role name "pg_foo" is reserved
+DETAIL: Role names starting with "pg_" are reserved.
+
+> CREATE ROLE gp_x SUPERUSER SUPERUSER
+ERROR 42601: conflicting or redundant options (at 28)
+
+> CREATE ROLE gp_x WITH FOO
+ERROR 42601: unrecognized role option "foo" (at 23)
+
+> SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolconnlimit, rolpassword, rolvaliduntil, rolbypassrls, rolconfig
+> FROM pg_roles WHERE rolname LIKE 'gp\_%' ORDER BY 1
+rolname:name | rolsuper:bool | rolinherit:bool | rolcreaterole:bool | rolcreatedb:bool | rolcanlogin:bool | rolreplication:bool | rolconnlimit:int4 | rolpassword:text | rolvaliduntil:timestamptz | rolbypassrls:bool | rolconfig:text[]
+gp_admin | f | t | t | f | f | f | -1 | ******** | NULL | f | NULL
+gp_alice | f | t | f | f | t | f | 5 | ******** | 2030-01-01 00:00:00+00 | f | NULL
+gp_bob | f | f | f | f | t | f | -1 | ******** | NULL | f | NULL
+gp_group | f | t | f | f | f | f | -1 | ******** | NULL | f | NULL
+-- SELECT 4
+
+> SELECT usename, usecreatedb, usesuper FROM pg_user WHERE usename LIKE 'gp\_%' ORDER BY 1
+usename:name | usecreatedb:bool | usesuper:bool
+gp_alice | f | f
+gp_bob | f | f
+-- SELECT 2
+
+> GRANT gp_group TO gp_alice
+-- GRANT ROLE
+
+> GRANT gp_group TO gp_alice
+NOTICE 00000: role "gp_alice" has already been granted membership in role "gp_group" by role "postgres"
+-- GRANT ROLE
+
+> GRANT gp_group TO gp_bob WITH ADMIN OPTION, INHERIT TRUE
+-- GRANT ROLE
+
+> GRANT gp_alice TO gp_group
+ERROR 0LP01: role "gp_alice" is a member of role "gp_group"
+
+> GRANT gp_group TO gp_group
+ERROR 0LP01: role "gp_group" is a member of role "gp_group"
+
+> GRANT pg_database_owner TO gp_alice
+ERROR 0A000: role "pg_database_owner" cannot have explicit members
+
+> GRANT gp_group TO gp_carol
+ERROR 42704: role "gp_carol" does not exist
+
+> GRANT gp_nobody TO gp_alice
+ERROR 42704: role "gp_nobody" does not exist
+
+> GRANT gp_group TO gp_alice WITH FOO TRUE
+ERROR 42601: unrecognized role option "foo" (at 33)
+
+> SELECT r.rolname AS role, m.rolname AS member, g.rolname AS grantor, admin_option, inherit_option, set_option
+> FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member JOIN pg_roles g ON g.oid = am.grantor
+> WHERE r.rolname LIKE 'gp\_%' ORDER BY 1, 2, 3
+role:name | member:name | grantor:name | admin_option:bool | inherit_option:bool | set_option:bool
+gp_group | gp_alice | postgres | f | t | t
+gp_group | gp_bob | postgres | t | t | t
+-- SELECT 2
+
+> SELECT pg_has_role('gp_alice', 'gp_group', 'MEMBER'), pg_has_role('gp_alice', 'gp_group', 'USAGE'), pg_has_role('gp_bob', 'gp_group', 'USAGE'),
+>        pg_has_role('gp_bob', 'gp_group', 'MEMBER WITH ADMIN OPTION'), pg_has_role('gp_alice', 'gp_group', 'SET'), pg_has_role('gp_alice', 'gp_bob', 'MEMBER')
+pg_has_role:bool | pg_has_role:bool | pg_has_role:bool | pg_has_role:bool | pg_has_role:bool | pg_has_role:bool
+t | t | t | t | t | f
+-- SELECT 1
+
+> SELECT pg_has_role('gp_alice', 'gp_group', 'FOO')
+ERROR 22023: unrecognized privilege type: "FOO"
+
+> SELECT pg_has_role('nobody', 'gp_group', 'MEMBER')
+ERROR 42704: role "nobody" does not exist
+
+> SET ROLE gp_alice
+-- SET
+
+> SELECT current_user, session_user, current_role
+current_user:name | session_user:name | current_role:name
+gp_alice | postgres | gp_alice
+-- SELECT 1
+
+> SHOW role
+role:text
+gp_alice
+-- SHOW
+
+> SHOW is_superuser
+is_superuser:text
+off
+-- SHOW
+
+> SET ROLE gp_group
+-- SET
+
+> SELECT current_user
+current_user:name
+gp_group
+-- SELECT 1
+
+> SET ROLE gp_bob
+-- SET
+
+> CREATE ROLE gp_y
+ERROR 42501: permission denied to create role
+DETAIL: Only roles with the CREATEROLE attribute may create roles.
+
+> RESET ROLE
+-- RESET
+
+> SELECT current_user
+current_user:name
+postgres
+-- SELECT 1
+
+> SET SESSION AUTHORIZATION gp_bob
+-- SET
+
+> SELECT current_user, session_user
+current_user:name | session_user:name
+gp_bob | gp_bob
+-- SELECT 1
+
+> SHOW session_authorization
+session_authorization:text
+gp_bob
+-- SHOW
+
+> SET ROLE gp_group
+-- SET
+
+> SELECT current_user, session_user
+current_user:name | session_user:name
+gp_group | gp_bob
+-- SELECT 1
+
+> SET ROLE gp_alice
+ERROR 42501: permission denied to set role "gp_alice"
+
+> SET SESSION AUTHORIZATION gp_alice
+-- SET
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> SELECT current_user, session_user
+current_user:name | session_user:name
+postgres | postgres
+-- SELECT 1
+
+> SHOW role
+role:text
+none
+-- SHOW
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL ROLE gp_alice
+-- SET
+
+> SELECT current_user
+current_user:name
+gp_alice
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT current_user
+current_user:name
+postgres
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SET ROLE gp_alice
+-- SET
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT current_user
+current_user:name
+postgres
+-- SELECT 1
+
+> SET ROLE nobody
+ERROR 22023: role "nobody" does not exist
+
+> SET ROLE gp_admin
+-- SET
+
+> CREATE ROLE gp_sub
+-- CREATE ROLE
+
+> CREATE ROLE gp_y SUPERUSER
+ERROR 42501: permission denied to create role
+DETAIL: Only roles with the SUPERUSER attribute may create roles with the SUPERUSER attribute.
+
+> CREATE ROLE gp_y CREATEDB
+ERROR 42501: permission denied to create role
+DETAIL: Only roles with the CREATEDB attribute may create roles with the CREATEDB attribute.
+
+> GRANT gp_sub TO gp_alice
+-- GRANT ROLE
+
+> GRANT gp_group TO gp_sub
+ERROR 42501: permission denied to grant role "gp_group"
+DETAIL: Only roles with the ADMIN option on role "gp_group" may grant this role.
+
+> ALTER ROLE gp_sub CONNECTION LIMIT 3
+-- ALTER ROLE
+
+> ALTER ROLE gp_alice CONNECTION LIMIT 3
+ERROR 42501: permission denied to alter role
+DETAIL: Only roles with the CREATEROLE attribute and the ADMIN option on role "gp_alice" may alter this role.
+
+> RESET ROLE
+-- RESET
+
+> SELECT r.rolname AS role, m.rolname AS member, g.rolname AS grantor, admin_option, inherit_option, set_option
+> FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member JOIN pg_roles g ON g.oid = am.grantor
+> WHERE r.rolname LIKE 'gp\_%' ORDER BY 1, 2, 3
+role:name | member:name | grantor:name | admin_option:bool | inherit_option:bool | set_option:bool
+gp_group | gp_alice | postgres | f | t | t
+gp_group | gp_bob | postgres | t | t | t
+gp_sub | gp_admin | postgres | t | f | f
+gp_sub | gp_alice | gp_admin | f | t | t
+-- SELECT 4
+
+> SELECT rolname, rolconnlimit FROM pg_roles WHERE rolname = 'gp_sub'
+rolname:name | rolconnlimit:int4
+gp_sub | 3
+-- SELECT 1
+
+> REVOKE gp_group FROM gp_carol
+ERROR 42704: role "gp_carol" does not exist
+
+> REVOKE gp_sub FROM gp_bob
+WARNING 01000: role "gp_bob" has not been granted membership in role "gp_sub" by role "postgres"
+-- REVOKE ROLE
+
+> REVOKE ADMIN OPTION FOR gp_group FROM gp_bob
+-- REVOKE ROLE
+
+> SELECT r.rolname AS role, m.rolname AS member, admin_option FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
+> WHERE r.rolname = 'gp_group' ORDER BY 1, 2
+role:name | member:name | admin_option:bool
+gp_group | gp_alice | f
+gp_group | gp_bob | f
+-- SELECT 2
+
+> GRANT gp_group TO gp_bob WITH ADMIN OPTION
+-- GRANT ROLE
+
+> SET ROLE gp_bob
+-- SET
+
+> GRANT gp_group TO gp_sub
+-- GRANT ROLE
+
+> RESET ROLE
+-- RESET
+
+> REVOKE ADMIN OPTION FOR gp_group FROM gp_bob
+ERROR 2BP01: dependent privileges exist
+HINT: Use CASCADE to revoke them too.
+
+> REVOKE ADMIN OPTION FOR gp_group FROM gp_bob CASCADE
+-- REVOKE ROLE
+
+> SELECT r.rolname AS role, m.rolname AS member, g.rolname AS grantor, admin_option FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member JOIN pg_roles g ON g.oid = am.grantor
+> WHERE r.rolname = 'gp_group' ORDER BY 1, 2, 3
+role:name | member:name | grantor:name | admin_option:bool
+gp_group | gp_alice | postgres | f
+gp_group | gp_bob | postgres | f
+-- SELECT 2
+
+> ALTER ROLE gp_alice NOLOGIN CREATEDB
+-- ALTER ROLE
+
+> ALTER ROLE gp_alice SET search_path = a, b
+-- ALTER ROLE
+
+> ALTER ROLE gp_alice SET work_mem = '64MB'
+-- ALTER ROLE
+
+> ALTER ROLE gp_alice SET no_such_setting = 1
+ERROR 42704: unrecognized configuration parameter "no_such_setting"
+
+> ALTER ROLE gp_alice IN DATABASE postgres SET work_mem = '1MB'
+-- ALTER ROLE
+
+> SELECT rolname, rolcanlogin, rolcreatedb, rolconfig FROM pg_roles WHERE rolname = 'gp_alice'
+rolname:name | rolcanlogin:bool | rolcreatedb:bool | rolconfig:text[]
+gp_alice | f | t | {"search_path=a, b",work_mem=64MB}
+-- SELECT 1
+
+> ALTER ROLE gp_alice RESET work_mem
+-- ALTER ROLE
+
+> SELECT rolconfig FROM pg_roles WHERE rolname = 'gp_alice'
+rolconfig:text[]
+{"search_path=a, b"}
+-- SELECT 1
+
+> ALTER ROLE gp_alice RESET ALL
+-- ALTER ROLE
+
+> SELECT rolconfig FROM pg_roles WHERE rolname = 'gp_alice'
+rolconfig:text[]
+NULL
+-- SELECT 1
+
+> ALTER ROLE nobody LOGIN
+ERROR 42704: role "nobody" does not exist
+
+> DROP ROLE gp_nobody
+ERROR 42704: role "gp_nobody" does not exist
+
+> DROP ROLE IF EXISTS gp_nobody
+NOTICE 00000: role "gp_nobody" does not exist, skipping
+-- DROP ROLE
+
+> DROP ROLE postgres
+ERROR 55006: current user cannot be dropped
+
+> DROP ROLE pg_monitor
+ERROR 2BP01: cannot drop role pg_monitor because it is required by the database system
+
+> SET ROLE gp_alice
+-- SET
+
+> DROP ROLE gp_bob
+ERROR 42501: permission denied to drop role
+DETAIL: Only roles with the CREATEROLE attribute and the ADMIN option on the target roles may drop roles.
+
+> RESET ROLE
+-- RESET
+
+> DROP ROLE gp_sub, gp_carol
+ERROR 42704: role "gp_carol" does not exist
+
+> DROP ROLE IF EXISTS gp_sub, gp_carol
+NOTICE 00000: role "gp_carol" does not exist, skipping
+-- DROP ROLE
+
+> DROP ROLE gp_admin, gp_alice, gp_bob, gp_group
+-- DROP ROLE
+
+> DROP ROLE IF EXISTS gp_admin, gp_alice, gp_bob, gp_group, gp_sub, gp_x, gp_y
+NOTICE 00000: role "gp_admin" does not exist, skipping
+NOTICE 00000: role "gp_alice" does not exist, skipping
+NOTICE 00000: role "gp_bob" does not exist, skipping
+NOTICE 00000: role "gp_group" does not exist, skipping
+NOTICE 00000: role "gp_sub" does not exist, skipping
+NOTICE 00000: role "gp_x" does not exist, skipping
+NOTICE 00000: role "gp_y" does not exist, skipping
+-- DROP ROLE
+
+> SELECT count(*) FROM pg_roles WHERE rolname LIKE 'gp\_%'
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid WHERE r.rolname LIKE 'gp\_%'
+count:int8
+0
+-- SELECT 1
+

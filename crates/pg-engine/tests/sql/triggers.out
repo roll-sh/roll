@@ -1,0 +1,501 @@
+> CREATE TABLE tr (id int PRIMARY KEY, v text, n int DEFAULT 0)
+-- CREATE TABLE
+
+> CREATE TABLE tr_log (seq serial, what text)
+-- CREATE TABLE
+
+> CREATE FUNCTION tr_log_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   INSERT INTO tr_log (what) VALUES (format('%s %s %s %s on %s.%s nargs=%s args=%s', TG_NAME, TG_WHEN, TG_LEVEL, TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_NARGS, TG_ARGV));
+>   IF TG_LEVEL = 'ROW' THEN
+>     IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+>     RETURN NEW;
+>   END IF;
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a_bs BEFORE INSERT OR UPDATE OR DELETE ON tr FOR EACH STATEMENT EXECUTE FUNCTION tr_log_fn('x', 'y')
+-- CREATE TRIGGER
+
+> CREATE TRIGGER b_br BEFORE INSERT OR UPDATE OR DELETE ON tr FOR EACH ROW EXECUTE FUNCTION tr_log_fn()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER c_ar AFTER INSERT OR UPDATE OR DELETE ON tr FOR EACH ROW EXECUTE FUNCTION tr_log_fn(1)
+-- CREATE TRIGGER
+
+> CREATE TRIGGER d_as AFTER INSERT OR UPDATE OR DELETE ON tr FOR EACH STATEMENT EXECUTE FUNCTION tr_log_fn()
+-- CREATE TRIGGER
+
+> INSERT INTO tr VALUES (1, 'a'), (2, 'b')
+-- INSERT 0 2
+
+> UPDATE tr SET v = v || '!' WHERE id = 1
+-- UPDATE 1
+
+> DELETE FROM tr WHERE id = 2
+-- DELETE 1
+
+> UPDATE tr SET v = 'none' WHERE id = 99
+-- UPDATE 0
+
+> SELECT what FROM tr_log ORDER BY seq
+what:text
+a_bs BEFORE STATEMENT INSERT on public.tr nargs=2 args=[0:1]={x,y}
+b_br BEFORE ROW INSERT on public.tr nargs=0 args=
+b_br BEFORE ROW INSERT on public.tr nargs=0 args=
+c_ar AFTER ROW INSERT on public.tr nargs=1 args=[0:0]={1}
+c_ar AFTER ROW INSERT on public.tr nargs=1 args=[0:0]={1}
+d_as AFTER STATEMENT INSERT on public.tr nargs=0 args=
+a_bs BEFORE STATEMENT UPDATE on public.tr nargs=2 args=[0:1]={x,y}
+b_br BEFORE ROW UPDATE on public.tr nargs=0 args=
+c_ar AFTER ROW UPDATE on public.tr nargs=1 args=[0:0]={1}
+d_as AFTER STATEMENT UPDATE on public.tr nargs=0 args=
+a_bs BEFORE STATEMENT DELETE on public.tr nargs=2 args=[0:1]={x,y}
+b_br BEFORE ROW DELETE on public.tr nargs=0 args=
+c_ar AFTER ROW DELETE on public.tr nargs=1 args=[0:0]={1}
+d_as AFTER STATEMENT DELETE on public.tr nargs=0 args=
+a_bs BEFORE STATEMENT UPDATE on public.tr nargs=2 args=[0:1]={x,y}
+d_as AFTER STATEMENT UPDATE on public.tr nargs=0 args=
+-- SELECT 16
+
+> TRUNCATE tr_log
+-- TRUNCATE TABLE
+
+> DROP TRIGGER a_bs ON tr
+-- DROP TRIGGER
+
+> DROP TRIGGER b_br ON tr
+-- DROP TRIGGER
+
+> DROP TRIGGER c_ar ON tr
+-- DROP TRIGGER
+
+> DROP TRIGGER d_as ON tr
+-- DROP TRIGGER
+
+> CREATE FUNCTION tr_mod() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF NEW.v = 'skip' THEN RETURN NULL; END IF;
+>   NEW.v := upper(NEW.v);
+>   NEW.n := NEW.n + 1;
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tr_mod BEFORE INSERT OR UPDATE ON tr FOR EACH ROW EXECUTE FUNCTION tr_mod()
+-- CREATE TRIGGER
+
+> INSERT INTO tr VALUES (10, 'x'), (11, 'skip'), (12, 'y') RETURNING *
+id:int4 | v:text | n:int4
+10 | X | 1
+12 | Y | 1
+-- INSERT 0 2
+
+> UPDATE tr SET v = 'skip' WHERE id = 10
+-- UPDATE 0
+
+> UPDATE tr SET v = 'z' WHERE id = 12 RETURNING *
+id:int4 | v:text | n:int4
+12 | Z | 2
+-- UPDATE 1
+
+> SELECT * FROM tr ORDER BY id
+id:int4 | v:text | n:int4
+1 | a! | 0
+10 | X | 1
+12 | Z | 2
+-- SELECT 3
+
+> DROP TRIGGER tr_mod ON tr
+-- DROP TRIGGER
+
+> CREATE FUNCTION tr_note() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE '% fired: old=% new=%', TG_NAME, OLD.v, NEW.v;
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tr_when BEFORE UPDATE ON tr FOR EACH ROW WHEN (OLD.v IS DISTINCT FROM NEW.v) EXECUTE FUNCTION tr_note()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tr_of AFTER UPDATE OF n ON tr FOR EACH ROW EXECUTE FUNCTION tr_note()
+-- CREATE TRIGGER
+
+> UPDATE tr SET v = v WHERE id = 10
+-- UPDATE 1
+
+> UPDATE tr SET v = 'changed' WHERE id = 10
+NOTICE 00000: tr_when fired: old=X new=changed
+CONTEXT: PL/pgSQL function tr_note() line 3 at RAISE
+-- UPDATE 1
+
+> UPDATE tr SET n = 5 WHERE id = 10
+NOTICE 00000: tr_of fired: old=changed new=changed
+CONTEXT: PL/pgSQL function tr_note() line 3 at RAISE
+-- UPDATE 1
+
+> CREATE TRIGGER tr_bad BEFORE INSERT ON tr FOR EACH ROW WHEN (OLD.v = 'x') EXECUTE FUNCTION tr_note()
+ERROR 42P17: INSERT trigger's WHEN condition cannot reference OLD values (at 62)
+
+> CREATE TRIGGER tr_bad2 BEFORE INSERT ON tr FOR EACH STATEMENT WHEN (NEW.v = 'x') EXECUTE FUNCTION tr_note()
+ERROR 42P17: statement trigger's WHEN condition cannot reference column values (at 69)
+
+> SELECT tgname, pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'tr'::regclass ORDER BY tgname
+tgname:name | pg_get_triggerdef:text
+tr_of | CREATE TRIGGER tr_of AFTER UPDATE OF n ON public.tr FOR EACH ROW EXECUTE FUNCTION tr_note()
+tr_when | CREATE TRIGGER tr_when BEFORE UPDATE ON public.tr FOR EACH ROW WHEN ((old.v IS DISTINCT FROM new.v)) EXECUTE FUNCTION tr_note()
+-- SELECT 2
+
+> SELECT tgname, tgtype, tgenabled, tgnargs FROM pg_trigger WHERE tgrelid = 'tr'::regclass ORDER BY tgname
+tgname:name | tgtype:int2 | tgenabled:char | tgnargs:int2
+tr_of | 17 | O | 0
+tr_when | 19 | O | 0
+-- SELECT 2
+
+> SELECT trigger_name, event_manipulation, action_timing, action_orientation, action_condition, action_statement
+>   FROM information_schema.triggers WHERE event_object_table = 'tr' ORDER BY trigger_name, event_manipulation
+trigger_name:name | event_manipulation:varchar | action_timing:varchar | action_orientation:varchar | action_condition:varchar | action_statement:varchar
+tr_of | UPDATE | AFTER | ROW | NULL | EXECUTE FUNCTION tr_note()
+tr_when | UPDATE | BEFORE | ROW | (old.v IS DISTINCT FROM new.v) | EXECUTE FUNCTION tr_note()
+-- SELECT 2
+
+> ALTER TABLE tr DISABLE TRIGGER tr_when
+-- ALTER TABLE
+
+> UPDATE tr SET v = 'quiet' WHERE id = 10
+-- UPDATE 1
+
+> ALTER TABLE tr ENABLE TRIGGER tr_when
+-- ALTER TABLE
+
+> ALTER TABLE tr DISABLE TRIGGER ALL
+-- ALTER TABLE
+
+> UPDATE tr SET v = 'quiet2', n = 1 WHERE id = 10
+-- UPDATE 1
+
+> ALTER TABLE tr ENABLE TRIGGER ALL
+-- ALTER TABLE
+
+> SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 'tr'::regclass ORDER BY tgname
+tgname:name | tgenabled:char
+tr_of | O
+tr_when | O
+-- SELECT 2
+
+> ALTER TRIGGER tr_of ON tr RENAME TO tr_of2
+-- ALTER TRIGGER
+
+> DROP TRIGGER tr_when ON tr
+-- DROP TRIGGER
+
+> DROP TRIGGER tr_of2 ON tr
+-- DROP TRIGGER
+
+> DROP TRIGGER IF EXISTS nope ON tr
+NOTICE 00000: trigger "nope" for relation "tr" does not exist, skipping
+-- DROP TRIGGER
+
+> DROP TRIGGER nope ON tr
+ERROR 42704: trigger "nope" for table "tr" does not exist
+
+> CREATE FUNCTION tr_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE EXCEPTION 'nope for %', NEW.id USING HINT = 'trigger said no';
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tr_fail BEFORE INSERT ON tr FOR EACH ROW EXECUTE FUNCTION tr_fail()
+-- CREATE TRIGGER
+
+> INSERT INTO tr VALUES (20, 'q')
+ERROR P0001: nope for 20
+HINT: trigger said no
+CONTEXT: PL/pgSQL function tr_fail() line 3 at RAISE
+
+> DROP TRIGGER tr_fail ON tr
+-- DROP TRIGGER
+
+> CREATE FUNCTION not_trig() RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE TRIGGER t_nt BEFORE INSERT ON tr FOR EACH ROW EXECUTE FUNCTION not_trig()
+ERROR 42P17: function not_trig must return type trigger
+
+> SELECT tr_mod()
+ERROR 0A000: trigger functions can only be called as triggers
+CONTEXT: compilation of PL/pgSQL function "tr_mod" near line 1
+
+> CREATE FUNCTION tr_count() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE '% %: % rows in tr', TG_WHEN, TG_OP, (SELECT count(*) FROM tr);
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tr_cnt_b BEFORE INSERT ON tr FOR EACH STATEMENT EXECUTE FUNCTION tr_count()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tr_cnt_a AFTER INSERT ON tr FOR EACH STATEMENT EXECUTE FUNCTION tr_count()
+-- CREATE TRIGGER
+
+> INSERT INTO tr VALUES (30, 'a'), (31, 'b')
+NOTICE 00000: BEFORE INSERT: 3 rows in tr
+CONTEXT: PL/pgSQL function tr_count() line 3 at RAISE
+NOTICE 00000: AFTER INSERT: 5 rows in tr
+CONTEXT: PL/pgSQL function tr_count() line 3 at RAISE
+-- INSERT 0 2
+
+> INSERT INTO tr SELECT * FROM tr WHERE false
+NOTICE 00000: BEFORE INSERT: 5 rows in tr
+CONTEXT: PL/pgSQL function tr_count() line 3 at RAISE
+NOTICE 00000: AFTER INSERT: 5 rows in tr
+CONTEXT: PL/pgSQL function tr_count() line 3 at RAISE
+-- INSERT 0 0
+
+> DROP TRIGGER tr_cnt_b ON tr
+-- DROP TRIGGER
+
+> DROP TRIGGER tr_cnt_a ON tr
+-- DROP TRIGGER
+
+> CREATE TRIGGER tr_trunc BEFORE TRUNCATE ON tr FOR EACH STATEMENT EXECUTE FUNCTION tr_count()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tr_trunc_row BEFORE TRUNCATE ON tr FOR EACH ROW EXECUTE FUNCTION tr_count()
+ERROR 0A000: TRUNCATE FOR EACH ROW triggers are not supported
+
+> TRUNCATE tr
+NOTICE 00000: BEFORE TRUNCATE: 5 rows in tr
+CONTEXT: PL/pgSQL function tr_count() line 3 at RAISE
+-- TRUNCATE TABLE
+
+> DROP TRIGGER tr_trunc ON tr
+-- DROP TRIGGER
+
+> CREATE TRIGGER c_ar AFTER INSERT OR UPDATE ON tr FOR EACH ROW EXECUTE FUNCTION tr_log_fn()
+-- CREATE TRIGGER
+
+> INSERT INTO tr VALUES (40, 'a')
+-- INSERT 0 1
+
+> INSERT INTO tr VALUES (40, 'b') ON CONFLICT (id) DO UPDATE SET v = excluded.v
+-- INSERT 0 1
+
+> INSERT INTO tr VALUES (40, 'c') ON CONFLICT DO NOTHING
+-- INSERT 0 0
+
+> SELECT what FROM tr_log ORDER BY seq
+what:text
+c_ar AFTER ROW INSERT on public.tr nargs=0 args=
+c_ar AFTER ROW UPDATE on public.tr nargs=0 args=
+-- SELECT 2
+
+> DROP TRIGGER c_ar ON tr
+-- DROP TRIGGER
+
+> CREATE TABLE tr_parent (id int PRIMARY KEY, total int DEFAULT 0)
+-- CREATE TABLE
+
+> CREATE TABLE tr_child (pid int REFERENCES tr_parent ON DELETE CASCADE, amt int)
+-- CREATE TABLE
+
+> CREATE FUNCTION tr_sum() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF TG_OP = 'DELETE' THEN
+>     UPDATE tr_parent SET total = total - OLD.amt WHERE id = OLD.pid;
+>     RETURN OLD;
+>   END IF;
+>   UPDATE tr_parent SET total = total + NEW.amt WHERE id = NEW.pid;
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tr_sum AFTER INSERT OR DELETE ON tr_child FOR EACH ROW EXECUTE FUNCTION tr_sum()
+-- CREATE TRIGGER
+
+> INSERT INTO tr_parent VALUES (1), (2)
+-- INSERT 0 2
+
+> INSERT INTO tr_child VALUES (1, 5), (1, 7), (2, 1)
+-- INSERT 0 3
+
+> SELECT * FROM tr_parent ORDER BY id
+id:int4 | total:int4
+1 | 12
+2 | 1
+-- SELECT 2
+
+> DELETE FROM tr_child WHERE amt = 7
+-- DELETE 1
+
+> SELECT * FROM tr_parent ORDER BY id
+id:int4 | total:int4
+1 | 5
+2 | 1
+-- SELECT 2
+
+> CREATE FUNCTION tr_del_note() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE 'deleting child % %', OLD.pid, OLD.amt;
+>   RETURN OLD;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tr_del_note BEFORE DELETE ON tr_child FOR EACH ROW EXECUTE FUNCTION tr_del_note()
+-- CREATE TRIGGER
+
+> DELETE FROM tr_parent WHERE id = 1
+NOTICE 00000: deleting child 1 5
+CONTEXT: PL/pgSQL function tr_del_note() line 3 at RAISE
+CONTEXT: SQL statement "DELETE FROM ONLY "public"."tr_child" WHERE $1 OPERATOR(pg_catalog.=) "pid""
+-- DELETE 1
+
+> SELECT * FROM tr_child ORDER BY pid
+pid:int4 | amt:int4
+2 | 1
+-- SELECT 1
+
+> CREATE FUNCTION tr_trans() RETURNS trigger LANGUAGE plpgsql AS $$
+> DECLARE r record;
+> BEGIN
+>   IF TG_OP IN ('UPDATE', 'DELETE') THEN
+>     FOR r IN SELECT * FROM old_rows ORDER BY 1 LOOP RAISE NOTICE 'old: %', r; END LOOP;
+>   END IF;
+>   IF TG_OP IN ('UPDATE', 'INSERT') THEN
+>     FOR r IN SELECT * FROM new_rows ORDER BY 1 LOOP RAISE NOTICE 'new: %', r; END LOOP;
+>   END IF;
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TABLE tt (a int, b text)
+-- CREATE TABLE
+
+> CREATE TRIGGER tt_ins AFTER INSERT ON tt REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION tr_trans()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tt_upd AFTER UPDATE ON tt REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION tr_trans()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tt_del AFTER DELETE ON tt REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION tr_trans()
+-- CREATE TRIGGER
+
+> INSERT INTO tt VALUES (1, 'a'), (2, 'b')
+NOTICE 00000: new: (1,a)
+CONTEXT: PL/pgSQL function tr_trans() line 8 at RAISE
+NOTICE 00000: new: (2,b)
+CONTEXT: PL/pgSQL function tr_trans() line 8 at RAISE
+-- INSERT 0 2
+
+> UPDATE tt SET b = b || b
+NOTICE 00000: old: (1,a)
+CONTEXT: PL/pgSQL function tr_trans() line 5 at RAISE
+NOTICE 00000: old: (2,b)
+CONTEXT: PL/pgSQL function tr_trans() line 5 at RAISE
+NOTICE 00000: new: (1,aa)
+CONTEXT: PL/pgSQL function tr_trans() line 8 at RAISE
+NOTICE 00000: new: (2,bb)
+CONTEXT: PL/pgSQL function tr_trans() line 8 at RAISE
+-- UPDATE 2
+
+> DELETE FROM tt WHERE a = 1
+NOTICE 00000: old: (1,aa)
+CONTEXT: PL/pgSQL function tr_trans() line 5 at RAISE
+-- DELETE 1
+
+> CREATE TRIGGER tt_bad BEFORE INSERT ON tt REFERENCING NEW TABLE AS n FOR EACH STATEMENT EXECUTE FUNCTION tr_trans()
+ERROR 42P17: transition table name can only be specified for an AFTER trigger
+
+> SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'tt_upd'
+pg_get_triggerdef:text
+CREATE TRIGGER tt_upd AFTER UPDATE ON public.tt REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION tr_trans()
+-- SELECT 1
+
+> CREATE VIEW trv AS SELECT a, b FROM tt
+-- CREATE VIEW
+
+> CREATE FUNCTION trv_ins() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF TG_OP = 'INSERT' THEN
+>     INSERT INTO tt VALUES (NEW.a * 10, NEW.b);
+>     RETURN NEW;
+>   ELSIF TG_OP = 'UPDATE' THEN
+>     UPDATE tt SET b = NEW.b WHERE a = OLD.a;
+>     RETURN NEW;
+>   ELSE
+>     DELETE FROM tt WHERE a = OLD.a;
+>     RETURN OLD;
+>   END IF;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER trv_io INSTEAD OF INSERT OR UPDATE OR DELETE ON trv FOR EACH ROW EXECUTE FUNCTION trv_ins()
+-- CREATE TRIGGER
+
+> DROP TRIGGER tt_ins ON tt
+-- DROP TRIGGER
+
+> DROP TRIGGER tt_upd ON tt
+-- DROP TRIGGER
+
+> DROP TRIGGER tt_del ON tt
+-- DROP TRIGGER
+
+> INSERT INTO trv VALUES (3, 'c') RETURNING *
+a:int4 | b:text
+3 | c
+-- INSERT 0 1
+
+> UPDATE trv SET b = 'upd' WHERE a = 30
+-- UPDATE 1
+
+> SELECT * FROM tt ORDER BY a
+a:int4 | b:text
+2 | bb
+30 | upd
+-- SELECT 2
+
+> DELETE FROM trv WHERE a = 2
+-- DELETE 1
+
+> SELECT * FROM trv ORDER BY a
+a:int4 | b:text
+30 | upd
+-- SELECT 1
+
+> CREATE TRIGGER trv_bad BEFORE INSERT ON trv FOR EACH ROW EXECUTE FUNCTION trv_ins()
+ERROR 42809: "trv" is a view
+DETAIL: Views cannot have row-level BEFORE or AFTER triggers.
+
+> CREATE TRIGGER tt_bad INSTEAD OF INSERT ON tt FOR EACH ROW EXECUTE FUNCTION trv_ins()
+ERROR 42809: "tt" is a table
+DETAIL: Tables cannot have INSTEAD OF triggers.
+
+> CREATE FUNCTION tr_star() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE 'row: % / %', NEW, ROW(NEW.*);
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tr_star BEFORE INSERT ON tt FOR EACH ROW EXECUTE FUNCTION tr_star()
+-- CREATE TRIGGER
+
+> INSERT INTO tt VALUES (50, 'star')
+NOTICE 00000: row: (50,star) / (50,star)
+CONTEXT: PL/pgSQL function tr_star() line 3 at RAISE
+-- INSERT 0 1
+
+> DROP TABLE tt CASCADE
+NOTICE 00000: drop cascades to view trv
+-- DROP TABLE
+
+> DROP TABLE tr, tr_log, tr_parent, tr_child
+-- DROP TABLE
+
+> DROP FUNCTION tr_log_fn(), tr_mod(), tr_note(), tr_fail(), not_trig(), tr_count(), tr_sum(), tr_del_note(), tr_trans(), trv_ins(), tr_star()
+-- DROP FUNCTION
+

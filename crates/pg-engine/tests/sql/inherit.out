@@ -1,0 +1,371 @@
+> CREATE TABLE ip (a int NOT NULL, b text DEFAULT 'x', CONSTRAINT ip_a_check CHECK (a > 0), CHECK (a < 1000) NO INHERIT)
+-- CREATE TABLE
+
+> CREATE TABLE ic (c int) INHERITS (ip)
+-- CREATE TABLE
+
+> CREATE TABLE ic2 (b text, a int, d int DEFAULT 7) INHERITS (ip)
+NOTICE 00000: moving and merging column "b" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+NOTICE 00000: moving and merging column "a" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+-- CREATE TABLE
+
+> INSERT INTO ip VALUES (1, 'p')
+-- INSERT 0 1
+
+> INSERT INTO ic VALUES (2, 'c', 3)
+-- INSERT 0 1
+
+> INSERT INTO ic2 (a, d) VALUES (3, 4)
+-- INSERT 0 1
+
+> SELECT *, tableoid::regclass FROM ip ORDER BY a
+a:int4 | b:text | tableoid:regclass
+1 | p | ip
+2 | c | ic
+3 | x | ic2
+-- SELECT 3
+
+> SELECT * FROM ONLY ip
+a:int4 | b:text
+1 | p
+-- SELECT 1
+
+> SELECT * FROM ic2
+a:int4 | b:text | d:int4
+3 | x | 4
+-- SELECT 1
+
+> SELECT attname, attnum, attinhcount, attislocal, attnotnull FROM pg_attribute WHERE attrelid = 'ic2'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attnum:int2 | attinhcount:int2 | attislocal:bool | attnotnull:bool
+a | 1 | 1 | t | t
+b | 2 | 1 | t | f
+d | 3 | 0 | t | f
+-- SELECT 3
+
+> SELECT conname, coninhcount, conislocal, connoinherit FROM pg_constraint WHERE conrelid = 'ic'::regclass ORDER BY conname
+conname:name | coninhcount:int2 | conislocal:bool | connoinherit:bool
+ip_a_check | 1 | f | f
+ip_a_not_null | 1 | f | f
+-- SELECT 2
+
+> SELECT inhrelid::regclass, inhparent::regclass, inhseqno FROM pg_inherits ORDER BY 1
+inhrelid:regclass | inhparent:regclass | inhseqno:int4
+ic | ip | 1
+ic2 | ip | 1
+-- SELECT 2
+
+> SELECT relname, relhassubclass, relkind, relispartition FROM pg_class WHERE relname IN ('ip','ic','ic2') ORDER BY 1
+relname:name | relhassubclass:bool | relkind:char | relispartition:bool
+ic | f | r | f
+ic2 | f | r | f
+ip | t | r | f
+-- SELECT 3
+
+> INSERT INTO ic VALUES (-1, 'bad', 0)
+ERROR 23514: new row for relation "ic" violates check constraint "ip_a_check"
+DETAIL: Failing row contains (-1, bad, 0).
+OBJECTS: schema=public table=ic constraint=ip_a_check
+
+> UPDATE ip SET a = a + 10 RETURNING *, tableoid::regclass
+a:int4 | b:text | tableoid:regclass
+11 | p | ip
+12 | c | ic
+13 | x | ic2
+-- UPDATE 3
+
+> DELETE FROM ip WHERE a = 12 RETURNING tableoid::regclass, a
+tableoid:regclass | a:int4
+ic | 12
+-- DELETE 1
+
+> SELECT count(*) FROM ip
+count:int8
+2
+-- SELECT 1
+
+> UPDATE ONLY ip SET b = 'only'
+-- UPDATE 1
+
+> SELECT a, b FROM ip ORDER BY a
+a:int4 | b:text
+11 | only
+13 | x
+-- SELECT 2
+
+> ALTER TABLE ip ADD COLUMN e int DEFAULT 5
+-- ALTER TABLE
+
+> SELECT * FROM ic2
+a:int4 | b:text | d:int4 | e:int4
+13 | x | 4 | 5
+-- SELECT 1
+
+> ALTER TABLE ic DROP COLUMN a
+ERROR 42P16: cannot drop inherited column "a"
+
+> ALTER TABLE ic RENAME COLUMN a TO z
+ERROR 42P16: cannot rename inherited column "a"
+
+> ALTER TABLE ip RENAME COLUMN b TO bb
+-- ALTER TABLE
+
+> SELECT * FROM ic
+a:int4 | bb:text | c:int4 | e:int4
+-- SELECT 0
+
+> ALTER TABLE ONLY ip DROP COLUMN e
+-- ALTER TABLE
+
+> SELECT * FROM ic
+a:int4 | bb:text | c:int4 | e:int4
+-- SELECT 0
+
+> ALTER TABLE ip DROP COLUMN c
+ERROR 42703: column "c" of relation "ip" does not exist
+
+> DROP TABLE ip
+ERROR 2BP01: cannot drop table ip because other objects depend on it
+DETAIL: table ic depends on table ip
+DETAIL: table ic2 depends on table ip
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> CREATE TABLE ic3 (a text) INHERITS (ip)
+NOTICE 00000: merging column "a" with inherited definition
+ERROR 42804: column "a" has a type conflict
+DETAIL: integer versus text
+
+> CREATE TABLE ic4 () INHERITS (ip, ip)
+ERROR 42P07: relation "ip" would be inherited from more than once
+
+> CREATE TABLE ip2 (a int, x int)
+-- CREATE TABLE
+
+> CREATE TABLE ic5 () INHERITS (ip, ip2)
+NOTICE 00000: merging multiple inherited definitions of column "a"
+-- CREATE TABLE
+
+> SELECT * FROM ic5
+a:int4 | bb:text | x:int4
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ip WHERE a > 5
+QUERY PLAN:text
+Append
+  ->  Seq Scan on ip ip_1
+        Filter: (a > 5)
+  ->  Seq Scan on ic ip_2
+        Filter: (a > 5)
+  ->  Seq Scan on ic2 ip_3
+        Filter: (a > 5)
+  ->  Seq Scan on ic5 ip_4
+        Filter: (a > 5)
+-- EXPLAIN
+
+> ALTER TABLE ic NO INHERIT ip
+-- ALTER TABLE
+
+> SELECT a FROM ip ORDER BY a
+a:int4
+11
+13
+-- SELECT 2
+
+> ALTER TABLE ic INHERIT ip
+-- ALTER TABLE
+
+> SELECT a FROM ip ORDER BY a
+a:int4
+11
+13
+-- SELECT 2
+
+> TRUNCATE ip
+-- TRUNCATE TABLE
+
+> SELECT count(*) FROM ip
+count:int8
+0
+-- SELECT 1
+
+> DROP TABLE ip
+ERROR 2BP01: cannot drop table ip because other objects depend on it
+DETAIL: table ic depends on table ip
+DETAIL: table ic2 depends on table ip
+DETAIL: table ic5 depends on table ip
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE ip CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to table ic
+DETAIL: drop cascades to table ic2
+DETAIL: drop cascades to table ic5
+-- DROP TABLE
+
+> DROP TABLE ip2 CASCADE
+-- DROP TABLE
+
+> CREATE TABLE p1 (a int DEFAULT 1, b text, CONSTRAINT ck CHECK (a > 0))
+-- CREATE TABLE
+
+> CREATE TABLE p2 (a int DEFAULT 2, c int NOT NULL, CONSTRAINT ck CHECK (a > 0))
+-- CREATE TABLE
+
+> CREATE TABLE p3 (a bigint)
+-- CREATE TABLE
+
+> CREATE TABLE c1 () INHERITS (p1, p2)
+NOTICE 00000: merging multiple inherited definitions of column "a"
+ERROR 42611: column "a" inherits conflicting default values
+HINT: To resolve the conflict, specify a default explicitly.
+
+> CREATE TABLE c1 (a int DEFAULT 5) INHERITS (p1, p2)
+NOTICE 00000: merging multiple inherited definitions of column "a"
+NOTICE 00000: merging column "a" with inherited definition
+-- CREATE TABLE
+
+> SELECT attname, attinhcount, attislocal, attnotnull, pg_get_expr(adbin, adrelid) FROM pg_attribute LEFT JOIN pg_attrdef ON adrelid=attrelid AND adnum=attnum WHERE attrelid = 'c1'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attinhcount:int2 | attislocal:bool | attnotnull:bool | pg_get_expr:text
+a | 2 | t | f | 5
+b | 1 | f | f | NULL
+c | 1 | f | t | NULL
+-- SELECT 3
+
+> SELECT conname, contype, coninhcount, conislocal FROM pg_constraint WHERE conrelid = 'c1'::regclass ORDER BY conname
+conname:name | contype:char | coninhcount:int2 | conislocal:bool
+ck | c | 2 | f
+p2_c_not_null | n | 1 | f
+-- SELECT 2
+
+> CREATE TABLE c2 () INHERITS (p1, p3)
+NOTICE 00000: merging multiple inherited definitions of column "a"
+ERROR 42804: inherited column "a" has a type conflict
+DETAIL: integer versus bigint
+
+> CREATE TABLE c3 (CONSTRAINT ck CHECK (a > 0)) INHERITS (p1)
+NOTICE 00000: merging constraint "ck" with inherited definition
+-- CREATE TABLE
+
+> SELECT conname, coninhcount, conislocal FROM pg_constraint WHERE conrelid = 'c3'::regclass ORDER BY conname
+conname:name | coninhcount:int2 | conislocal:bool
+ck | 1 | t
+-- SELECT 1
+
+> CREATE TABLE c4 (CONSTRAINT ck CHECK (a > 1)) INHERITS (p1)
+ERROR 42710: constraint "ck" for relation "c4" already exists
+
+> CREATE VIEW v AS SELECT 1 AS x
+-- CREATE VIEW
+
+> CREATE TABLE c5 () INHERITS (v)
+ERROR 42809: inherited relation "v" is not a table or foreign table
+
+> CREATE TABLE c6 () INHERITS (nosuch)
+ERROR 42P01: relation "nosuch" does not exist
+
+> CREATE TEMP TABLE tp (x int)
+-- CREATE TABLE
+
+> CREATE TABLE c7 () INHERITS (tp)
+ERROR 42809: cannot inherit from temporary relation "tp"
+
+> CREATE TABLE g (a int, b int GENERATED ALWAYS AS (a * 2) STORED)
+-- CREATE TABLE
+
+> CREATE TABLE gc () INHERITS (g)
+-- CREATE TABLE
+
+> INSERT INTO gc (a) VALUES (4)
+-- INSERT 0 1
+
+> SELECT * FROM g
+a:int4 | b:int4
+4 | 8
+-- SELECT 1
+
+> CREATE TABLE gc2 (b int) INHERITS (g)
+NOTICE 00000: moving and merging column "b" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+-- CREATE TABLE
+
+> CREATE TABLE gc3 (b int DEFAULT 3) INHERITS (g)
+NOTICE 00000: moving and merging column "b" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+ERROR 42611: column "b" inherits from generated column but specifies default
+
+> CREATE TABLE ng (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE ngc (b int GENERATED ALWAYS AS (a * 3) STORED) INHERITS (ng)
+NOTICE 00000: moving and merging column "b" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+ERROR 42611: child column "b" specifies generation expression
+HINT: A child table column cannot be generated unless its parent column is.
+
+> CREATE TABLE s (id serial, x int)
+-- CREATE TABLE
+
+> CREATE TABLE sc (y int) INHERITS (s)
+-- CREATE TABLE
+
+> INSERT INTO sc (x, y) VALUES (1, 2)
+-- INSERT 0 1
+
+> INSERT INTO s (x) VALUES (5)
+-- INSERT 0 1
+
+> SELECT * FROM s ORDER BY id
+id:int4 | x:int4
+1 | 1
+2 | 5
+-- SELECT 2
+
+> SELECT attname, attnotnull FROM pg_attribute WHERE attrelid='sc'::regclass and attnum>0 ORDER BY attnum
+attname:name | attnotnull:bool
+id | t
+x | f
+y | f
+-- SELECT 3
+
+> CREATE TABLE ip (a int PRIMARY KEY, b int UNIQUE)
+-- CREATE TABLE
+
+> CREATE TABLE ipc () INHERITS (ip)
+-- CREATE TABLE
+
+> SELECT conname, contype, coninhcount, conislocal FROM pg_constraint WHERE conrelid = 'ipc'::regclass ORDER BY conname
+conname:name | contype:char | coninhcount:int2 | conislocal:bool
+ip_a_not_null | n | 1 | f
+-- SELECT 1
+
+> INSERT INTO ipc VALUES (1,1),(1,1)
+-- INSERT 0 2
+
+> CREATE TABLE coll (a text COLLATE "C")
+-- CREATE TABLE
+
+> CREATE TABLE collc (a text COLLATE "POSIX") INHERITS (coll)
+NOTICE 00000: merging column "a" with inherited definition
+ERROR 42P21: column "a" has a collation conflict
+DETAIL: "C" versus "POSIX"
+
+> CREATE TABLE tm (a varchar(10))
+-- CREATE TABLE
+
+> CREATE TABLE tmc (a varchar(20)) INHERITS (tm)
+NOTICE 00000: merging column "a" with inherited definition
+ERROR 42804: column "a" has a type conflict
+DETAIL: character varying(10) versus character varying(20)
+
+> CREATE TABLE idt (a int GENERATED ALWAYS AS IDENTITY)
+-- CREATE TABLE
+
+> CREATE TABLE idtc () INHERITS (idt)
+-- CREATE TABLE
+
+> SELECT attname, attidentity, attnotnull FROM pg_attribute WHERE attrelid='idtc'::regclass and attnum>0
+attname:name | attidentity:char | attnotnull:bool
+a |  | t
+-- SELECT 1
+

@@ -1,0 +1,319 @@
+> create table st (a int, b int, c text)
+-- CREATE TABLE
+
+> create statistics st_ab on a, b from st
+-- CREATE STATISTICS
+
+> create statistics st_ab on a, b from st
+ERROR 42710: statistics object "st_ab" already exists
+
+> create statistics if not exists st_ab on a, b from st
+NOTICE 42710: statistics object "st_ab" already exists, skipping
+-- CREATE STATISTICS
+
+> create statistics (ndistinct, dependencies) on a, c from st
+-- CREATE STATISTICS
+
+> create statistics st_x (mcv) on a, (b + 1) from st
+-- CREATE STATISTICS
+
+> create statistics st_e on (a + b) from st
+-- CREATE STATISTICS
+
+> create statistics st_1 on a from st
+ERROR 42P17: extended statistics require at least 2 columns
+
+> create statistics st_bad (foo) on a, b from st
+ERROR 42601: unrecognized statistics kind "foo"
+
+> create statistics st_z on a, zz from st
+ERROR 42703: column "zz" does not exist
+
+> create statistics st_d on a, a from st
+ERROR 42701: duplicate column name in statistics definition
+
+> create statistics on a, b from nosuch
+ERROR 42P01: relation "nosuch" does not exist
+
+> create view stv as select 1 x, 2 y
+-- CREATE VIEW
+
+> create statistics on x, y from stv
+ERROR 42809: cannot define statistics for relation "stv"
+DETAIL: This operation is not supported for views.
+
+> select stxname, stxkeys, stxkind, stxstattarget, pg_get_statisticsobjdef(oid) from pg_statistic_ext where stxrelid = 'st'::regclass order by 1
+stxname:name | stxkeys:22 | stxkind:1002 | stxstattarget:int2 | pg_get_statisticsobjdef:text
+st_a_c_stat | 1 3 | {d,f} | NULL | CREATE STATISTICS public.st_a_c_stat (ndistinct, dependencies) ON a, c FROM st
+st_ab | 1 2 | {d,f,m} | NULL | CREATE STATISTICS public.st_ab ON a, b FROM st
+st_e |  | {e} | NULL | CREATE STATISTICS public.st_e ON (a + b) FROM st
+st_x | 1 | {m,e} | NULL | CREATE STATISTICS public.st_x (mcv) ON a, (b + 1) FROM st
+-- SELECT 4
+
+> alter statistics st_ab rename to st_ab2
+-- ALTER STATISTICS
+
+> alter statistics st_ab2 set statistics 500
+-- ALTER STATISTICS
+
+> alter statistics st_ab2 set statistics -1
+-- ALTER STATISTICS
+
+> alter statistics nosuch set statistics 5
+ERROR 42704: statistics object "nosuch" does not exist
+
+> alter statistics if exists nosuch set statistics 5
+NOTICE 00000: statistics object "nosuch" does not exist, skipping
+-- ALTER STATISTICS
+
+> create schema sts
+-- CREATE SCHEMA
+
+> alter statistics st_ab2 set schema sts
+-- ALTER STATISTICS
+
+> alter statistics sts.st_ab2 owner to current_user
+-- ALTER STATISTICS
+
+> select stxname, stxnamespace::regnamespace, stxstattarget from pg_statistic_ext where stxrelid = 'st'::regclass order by 1
+stxname:name | stxnamespace:4089 | stxstattarget:int2
+st_a_c_stat | public | NULL
+st_ab2 | sts | NULL
+st_e | public | NULL
+st_x | public | NULL
+-- SELECT 4
+
+> comment on statistics sts.st_ab2 is 'hello'
+-- COMMENT
+
+> select obj_description(oid, 'pg_statistic_ext') from pg_statistic_ext where stxname = 'st_ab2'
+obj_description:text
+hello
+-- SELECT 1
+
+> drop statistics sts.st_ab2
+-- DROP STATISTICS
+
+> drop statistics nosuch
+ERROR 42704: statistics object "nosuch" does not exist
+
+> drop statistics if exists nosuch
+NOTICE 00000: statistics object "nosuch" does not exist, skipping
+-- DROP STATISTICS
+
+> alter table st drop column c
+-- ALTER TABLE
+
+> select stxname from pg_statistic_ext where stxrelid = 'st'::regclass order by 1
+stxname:name
+st_e
+st_x
+-- SELECT 2
+
+> alter table st alter column b type bigint
+-- ALTER TABLE
+
+> select stxname, pg_get_statisticsobjdef(oid) from pg_statistic_ext where stxrelid = 'st'::regclass order by 1
+stxname:name | pg_get_statisticsobjdef:text
+st_e | CREATE STATISTICS public.st_e ON (a + b) FROM st
+st_x | CREATE STATISTICS public.st_x (mcv) ON a, (b + 1) FROM st
+-- SELECT 2
+
+> analyze st
+-- ANALYZE
+
+> drop table st
+-- DROP TABLE
+
+> select count(*) from pg_statistic_ext where stxname like 'st%'
+count:int8
+0
+-- SELECT 1
+
+> drop view stv
+-- DROP VIEW
+
+> drop schema sts
+-- DROP SCHEMA
+
+> CREATE TABLE sy (a int, b int, t text)
+-- CREATE TABLE
+
+> CREATE STATISTICS sy1 ON (lower(t)), (a + b * 2), ((a)), b FROM sy
+-- CREATE STATISTICS
+
+> CREATE STATISTICS sy2 ON (a::text || t) FROM sy
+-- CREATE STATISTICS
+
+> CREATE STATISTICS sy3 (ndistinct) ON (a + 1), (b - 1) FROM sy
+-- CREATE STATISTICS
+
+> SELECT stxname, stxkeys, stxkind, pg_get_statisticsobjdef(oid), pg_get_statisticsobjdef_columns(oid), pg_get_statisticsobjdef_expressions(oid) FROM pg_statistic_ext WHERE stxrelid = 'sy'::regclass ORDER BY 1
+stxname:name | stxkeys:22 | stxkind:1002 | pg_get_statisticsobjdef:text | pg_get_statisticsobjdef_columns:text | pg_get_statisticsobjdef_expressions:text[]
+sy1 | 1 2 | {d,f,m,e} | CREATE STATISTICS public.sy1 ON a, b, lower(t), (a + b * 2) FROM sy | a, b, lower(t), (a + b * 2) | {lower(t),"(a + (b * 2))"}
+sy2 |  | {e} | CREATE STATISTICS public.sy2 ON (a::text || t) FROM sy | (a::text || t) | {"((a)::text || t)"}
+sy3 |  | {d,e} | CREATE STATISTICS public.sy3 (ndistinct) ON (a + 1), (b - 1) FROM sy | (a + 1), (b - 1) | {"(a + 1)","(b - 1)"}
+-- SELECT 3
+
+> SELECT stxexprs IS NOT NULL FROM pg_statistic_ext WHERE stxname='sy3'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT pg_get_statisticsobjdef(0), pg_get_statisticsobjdef_columns(0), pg_get_statisticsobjdef_expressions(0)
+pg_get_statisticsobjdef:text | pg_get_statisticsobjdef_columns:text | pg_get_statisticsobjdef_expressions:text[]
+NULL | NULL | NULL
+-- SELECT 1
+
+> ALTER TABLE sy DROP COLUMN t
+-- ALTER TABLE
+
+> SELECT stxname FROM pg_statistic_ext WHERE stxrelid = 'sy'::regclass ORDER BY 1
+stxname:name
+sy3
+-- SELECT 1
+
+> CREATE TABLE sy4 (LIKE sy INCLUDING STATISTICS)
+-- CREATE TABLE
+
+> SELECT stxname, pg_get_statisticsobjdef(oid) FROM pg_statistic_ext WHERE stxrelid = 'sy4'::regclass ORDER BY 1
+stxname:name | pg_get_statisticsobjdef:text
+sy4_expr_expr_stat | CREATE STATISTICS public.sy4_expr_expr_stat (ndistinct) ON (a + 1), (b - 1) FROM sy4
+-- SELECT 1
+
+> DROP TABLE sy, sy4
+-- DROP TABLE
+
+> CREATE TABLE sx (a int, b int, c int)
+-- CREATE TABLE
+
+> CREATE STATISTICS sx1 ON a, b FROM sx
+-- CREATE STATISTICS
+
+> CREATE STATISTICS sx2 ON a, c FROM sx
+-- CREATE STATISTICS
+
+> ALTER STATISTICS sx1 RENAME TO sx2
+ERROR 42710: statistics object "sx2" already exists in schema "public"
+
+> ALTER STATISTICS sx1 RENAME TO sx3
+-- ALTER STATISTICS
+
+> ALTER STATISTICS nosuch RENAME TO sx4
+ERROR 42704: statistics object "nosuch" does not exist
+
+> CREATE SCHEMA sxs
+-- CREATE SCHEMA
+
+> ALTER STATISTICS sx3 SET SCHEMA sxs
+-- ALTER STATISTICS
+
+> ALTER STATISTICS sx2 SET SCHEMA nosuchs
+ERROR 3F000: schema "nosuchs" does not exist
+
+> CREATE STATISTICS sxs.sx2 ON b, c FROM sx
+-- CREATE STATISTICS
+
+> ALTER STATISTICS sx2 SET SCHEMA sxs
+ERROR 42710: statistics object "sx2" already exists in schema "sxs"
+
+> ALTER STATISTICS IF EXISTS nosuch SET SCHEMA sxs
+ERROR 42601: syntax error at or near "SCHEMA" (at 39)
+
+> ALTER STATISTICS sxs.sx3 OWNER TO nosuchrole
+ERROR 42704: role "nosuchrole" does not exist
+
+> CREATE ROLE sxr
+-- CREATE ROLE
+
+> ALTER STATISTICS sxs.sx3 OWNER TO sxr
+-- ALTER STATISTICS
+
+> SELECT stxname, stxnamespace::regnamespace, stxowner::regrole FROM pg_statistic_ext ORDER BY 1, 2
+stxname:name | stxnamespace:4089 | stxowner:4096
+sx2 | public | postgres
+sx2 | sxs | postgres
+sx3 | sxs | sxr
+-- SELECT 3
+
+> COMMENT ON STATISTICS sxs.sx3 IS 'hi'
+-- COMMENT
+
+> SELECT obj_description(oid, 'pg_statistic_ext') FROM pg_statistic_ext WHERE stxname = 'sx3'
+obj_description:text
+hi
+-- SELECT 1
+
+> COMMENT ON STATISTICS nosuch IS 'x'
+ERROR 42704: statistics object "nosuch" does not exist
+
+> SET ROLE sxr
+-- SET
+
+> ALTER STATISTICS sx2 SET STATISTICS 10
+ERROR 42501: must be owner of statistics object sx2
+
+> DROP STATISTICS sx2
+ERROR 42501: must be owner of statistics object sx2
+
+> ALTER STATISTICS sxs.sx3 SET STATISTICS 10
+ERROR 42501: permission denied for schema sxs
+
+> RESET ROLE
+-- RESET
+
+> ALTER TABLE sx RENAME COLUMN a TO aa
+-- ALTER TABLE
+
+> CREATE STATISTICS sxe ON (aa + b), (c * 2) FROM sx
+-- CREATE STATISTICS
+
+> ALTER TABLE sx RENAME COLUMN b TO bb
+-- ALTER TABLE
+
+> SELECT pg_get_statisticsobjdef(oid) FROM pg_statistic_ext WHERE stxrelid = 'sx'::regclass ORDER BY stxname
+pg_get_statisticsobjdef:text
+CREATE STATISTICS public.sx2 ON aa, c FROM sx
+CREATE STATISTICS sxs.sx2 ON bb, c FROM sx
+CREATE STATISTICS sxs.sx3 ON aa, bb FROM sx
+CREATE STATISTICS public.sxe ON (aa + bb), (c * 2) FROM sx
+-- SELECT 4
+
+> SELECT pg_get_statisticsobjdef_columns(oid) FROM pg_statistic_ext WHERE stxrelid = 'sx'::regclass ORDER BY stxname
+pg_get_statisticsobjdef_columns:text
+aa, c
+bb, c
+aa, bb
+(aa + bb), (c * 2)
+-- SELECT 4
+
+> SELECT pg_get_statisticsobjdef_expressions(oid) FROM pg_statistic_ext WHERE stxrelid = 'sx'::regclass ORDER BY stxname
+pg_get_statisticsobjdef_expressions:text[]
+NULL
+NULL
+NULL
+{"(aa + bb)","(c * 2)"}
+-- SELECT 4
+
+> SELECT stxname, stxkeys, stxkind, stxstattarget, stxexprs IS NOT NULL FROM pg_statistic_ext WHERE stxrelid = 'sx'::regclass ORDER BY stxname
+stxname:name | stxkeys:22 | stxkind:1002 | stxstattarget:int2 | ?column?:bool
+sx2 | 1 3 | {d,f,m} | NULL | f
+sx2 | 2 3 | {d,f,m} | NULL | f
+sx3 | 1 2 | {d,f,m} | NULL | f
+sxe |  | {d,f,m,e} | NULL | t
+-- SELECT 4
+
+> DROP TABLE sx
+-- DROP TABLE
+
+> SELECT count(*) FROM pg_statistic_ext WHERE stxname LIKE 'sx%'
+count:int8
+0
+-- SELECT 1
+
+> DROP SCHEMA sxs
+-- DROP SCHEMA
+
+> DROP ROLE sxr
+-- DROP ROLE
+

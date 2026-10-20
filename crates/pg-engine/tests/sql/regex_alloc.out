@@ -1,0 +1,44 @@
+> select 'x' ~ '(x{1,181}){1,181}'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'x' ~ '(x{1,182}){1,182}'
+ERROR XX000: invalid memory alloc request size 1097638284
+
+> select 'x' ~ '(x{1,190}){1,190}'
+ERROR XX000: invalid memory alloc request size 1303688340
+
+> select 'x' ~ '(x{1,200}){1,200}'
+ERROR XX000: invalid memory alloc request size 1600690020
+
+> select 'x' ~ '(x{1,255}){1,180}'
+ERROR 2201B: invalid regular expression: regular expression is too complex
+
+> select 'x' ~ '(x{1,255}){1,255}'
+ERROR 2201B: invalid regular expression: regular expression is too complex
+
+> select 'x' ~ '((x{1,20}){1,20}){1,20}'
+?column?:bool
+t
+-- SELECT 1
+
+> select substring('x' from '(x{1,200}){1,200}')
+ERROR XX000: invalid memory alloc request size 1600690020
+
+> select regexp_match('x', '(x{1,200}){1,200}')
+ERROR XX000: invalid memory alloc request size 1600690020
+
+> select 'x' ~ 'y(x{1,200}){1,200}'
+?column?:bool
+f
+-- SELECT 1
+
+> select '' ~ '(x{1,200}){1,200}'
+ERROR XX000: invalid memory alloc request size 1600690020
+
+> select 'x' ~ '(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q){1,93}(x{1,255}){1,170}'
+?column?:bool
+f
+-- SELECT 1
+

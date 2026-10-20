@@ -1,0 +1,184 @@
+> CREATE TYPE tt_person AS (name text, age int)
+-- CREATE TYPE
+
+> CREATE TABLE tt_people OF tt_person
+-- CREATE TABLE
+
+> INSERT INTO tt_people VALUES ('ann', 30)
+-- INSERT 0 1
+
+> SELECT * FROM tt_people
+name:text | age:int4
+ann | 30
+-- SELECT 1
+
+> CREATE TABLE tt_people2 OF tt_person (PRIMARY KEY (name), age WITH OPTIONS DEFAULT 18 NOT NULL CHECK (age >= 0))
+-- CREATE TABLE
+
+> INSERT INTO tt_people2 (name) VALUES ('bob')
+-- INSERT 0 1
+
+> INSERT INTO tt_people2 VALUES ('carl', -1)
+ERROR 23514: new row for relation "tt_people2" violates check constraint "tt_people2_age_check"
+DETAIL: Failing row contains (carl, -1).
+OBJECTS: schema=public table=tt_people2 constraint=tt_people2_age_check
+
+> SELECT * FROM tt_people2
+name:text | age:int4
+bob | 18
+-- SELECT 1
+
+> SELECT relname, reloftype::regtype FROM pg_class WHERE relname LIKE 'tt_people%' ORDER BY 1
+relname:name | reloftype:regtype
+tt_people | tt_person
+tt_people2 | tt_person
+tt_people2_pkey | -
+-- SELECT 3
+
+> SELECT attname, attislocal, attnotnull FROM pg_attribute WHERE attrelid = 'tt_people2'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attislocal:bool | attnotnull:bool
+name | t | t
+age | t | t
+-- SELECT 2
+
+> CREATE TABLE tt_bad OF tt_person (nope WITH OPTIONS DEFAULT 1)
+ERROR 42703: column "nope" does not exist
+
+> CREATE TABLE tt_bad OF tt_nope
+ERROR 42704: type "tt_nope" does not exist (at 24)
+
+> CREATE TABLE tt_bad OF int4
+ERROR 42809: type integer is not a composite type
+
+> CREATE TABLE tt_bad OF tt_people
+ERROR 42809: type tt_people is the row type of another table
+DETAIL: A typed table must use a stand-alone composite type created with CREATE TYPE.
+
+> ALTER TABLE tt_people ADD COLUMN extra int
+ERROR 42809: cannot add column to typed table
+
+> ALTER TABLE tt_people DROP COLUMN age
+ERROR 42809: cannot drop column from typed table
+
+> ALTER TABLE tt_people ALTER COLUMN age TYPE bigint
+ERROR 42809: cannot alter column type of typed table (at 36)
+
+> ALTER TABLE tt_people RENAME COLUMN age TO years
+ERROR 42809: cannot rename column of typed table
+
+> ALTER TABLE tt_people ALTER COLUMN age SET DEFAULT 5
+-- ALTER TABLE
+
+> ALTER TABLE tt_people ALTER COLUMN age SET NOT NULL
+-- ALTER TABLE
+
+> INSERT INTO tt_people (name) VALUES ('dee')
+-- INSERT 0 1
+
+> SELECT * FROM tt_people ORDER BY name
+name:text | age:int4
+ann | 30
+dee | 5
+-- SELECT 2
+
+> ALTER TYPE tt_person ADD ATTRIBUTE email text
+ERROR 2BP01: cannot alter type "tt_person" because it is the type of a typed table
+HINT: Use ALTER ... CASCADE to alter the typed tables too.
+
+> ALTER TYPE tt_person ADD ATTRIBUTE email text CASCADE
+-- ALTER TYPE
+
+> SELECT * FROM tt_people ORDER BY name
+name:text | age:int4 | email:text
+ann | 30 | NULL
+dee | 5 | NULL
+-- SELECT 2
+
+> ALTER TYPE tt_person ALTER ATTRIBUTE age TYPE bigint CASCADE
+-- ALTER TYPE
+
+> ALTER TYPE tt_person RENAME ATTRIBUTE email TO mail CASCADE
+-- ALTER TYPE
+
+> ALTER TYPE tt_person DROP ATTRIBUTE mail RESTRICT
+ERROR 2BP01: cannot alter type "tt_person" because it is the type of a typed table
+HINT: Use ALTER ... CASCADE to alter the typed tables too.
+
+> ALTER TYPE tt_person DROP ATTRIBUTE mail CASCADE
+-- ALTER TYPE
+
+> SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'tt_people'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum
+attname:name | format_type:text
+name | text
+age | bigint
+-- SELECT 2
+
+> SELECT * FROM tt_people ORDER BY name
+name:text | age:int8
+ann | 30
+dee | 5
+-- SELECT 2
+
+> CREATE TABLE tt_plain (name text, age bigint)
+-- CREATE TABLE
+
+> ALTER TABLE tt_plain OF tt_person
+-- ALTER TABLE
+
+> SELECT reloftype::regtype FROM pg_class WHERE relname = 'tt_plain'
+reloftype:regtype
+tt_person
+-- SELECT 1
+
+> ALTER TABLE tt_plain NOT OF
+-- ALTER TABLE
+
+> SELECT reloftype FROM pg_class WHERE relname = 'tt_plain'
+reloftype:oid
+0
+-- SELECT 1
+
+> CREATE TABLE tt_plain2 (name text, age int)
+-- CREATE TABLE
+
+> ALTER TABLE tt_plain2 OF tt_person
+ERROR 42804: table "tt_plain2" has different type for column "age"
+
+> CREATE TABLE tt_plain3 (name text, years bigint)
+-- CREATE TABLE
+
+> ALTER TABLE tt_plain3 OF tt_person
+ERROR 42804: table has column "years" where type requires "age"
+
+> DROP TYPE tt_person
+ERROR 2BP01: cannot drop type tt_person because other objects depend on it
+DETAIL: table tt_people depends on type tt_person
+DETAIL: table tt_people2 depends on type tt_person
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> SELECT pg_get_viewdef('pg_class'::regclass) IS NULL
+?column?:bool
+t
+-- SELECT 1
+
+> DROP TABLE tt_people, tt_people2, tt_plain, tt_plain2, tt_plain3
+-- DROP TABLE
+
+> DROP TYPE tt_person
+-- DROP TYPE
+
+> CREATE TYPE tt_x AS (a int)
+-- CREATE TYPE
+
+> CREATE TABLE tt_xt OF tt_x
+-- CREATE TABLE
+
+> DROP TYPE tt_x CASCADE
+NOTICE 00000: drop cascades to table tt_xt
+-- DROP TYPE
+
+> SELECT count(*) FROM pg_class WHERE relname = 'tt_xt'
+count:int8
+0
+-- SELECT 1
+

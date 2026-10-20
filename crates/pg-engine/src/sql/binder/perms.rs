@@ -1,0 +1,346 @@
+//! Permissions a statement needs (Postgres's RTEPermissionInfo): collected while binding,
+//! checked before the plan runs (and again whenever a cached plan runs).
+
+use super::Binder;
+use crate::catalog::acl::{self, ObjKind};
+use crate::error::{Error, Result, code};
+use crate::exec::ExecCtx;
+use std::collections::BTreeSet;
+
+/// What one relation reference needs.
+#[derive(Clone, Debug, Default)]
+pub struct RelPerm {
+    pub oid: u32,
+    /// The role to check as (a view's owner for the relations its query reads).
+    pub as_user: Option<u32>,
+    pub privs: u32,
+    pub select_cols: BTreeSet<i16>,
+    pub insert_cols: BTreeSet<i16>,
+    pub update_cols: BTreeSet<i16>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Perms {
+    pub rels: Vec<RelPerm>,
+    /// User functions called (EXECUTE).
+    pub funcs: Vec<u32>,
+    /// While binding a table's rules: the functions its generated columns call.
+    pub gen_funcs: Vec<u32>,
+}
+
+impl Perms {
+    pub fn is_empty(&self) -> bool {
+        self.rels.is_empty() && self.funcs.is_empty()
+    }
+}
+
+impl Binder<'_, '_> {
+    /// Note that the statement needs `privs` on relation `oid` (as the current check-as role).
+    pub(crate) fn require_rel(&mut self, oid: u32, privs: u32) -> usize {
+        if self.cat.table(oid).is_some_and(|t| t.temporary) {
+            self.ctx.sess.temp_used.set(true);
+            self.ctx.sess.temp_ever.set(true);
+        }
+        let as_user = self.check_as;
+        match self
+            .perms
+            .rels
+            .iter()
+            .position(|p| p.oid == oid && p.as_user == as_user)
+        {
+            Some(i) => {
+                self.perms.rels[i].privs |= privs;
+                i
+            }
+            None => {
+                self.perms.rels.push(RelPerm {
+                    oid,
+                    as_user,
+                    privs,
+                    ..Default::default()
+                });
+                self.perms.rels.len() - 1
+            }
+        }
+    }
+
+    /// A column of `table` is read.
+    pub(crate) fn note_col(&mut self, table: u32, attnum: i16) {
+        if table == 0 {
+            return;
+        }
+        let as_user = self.check_as;
+        if let Some(p) = self
+            .perms
+            .rels
+            .iter_mut()
+            .rev()
+            .find(|p| p.oid == table && p.as_user == as_user)
+        {
+            p.select_cols.insert(attnum);
+        }
+    }
+
+    /// A column of a function's composite result is read: what's collecting dependencies
+    /// notes the composite type's relation's column.
+    pub(crate) fn note_rowtype_col(&mut self, col: Option<(u32, i16)>) {
+        if let Some(c) = col
+            && self.deps.is_some()
+            && !self.rowtype_deps.contains(&c)
+        {
+            self.rowtype_deps.push(c);
+        }
+    }
+
+    pub(crate) fn note_target_cols(&mut self, idx: usize, cols: &[usize], insert: bool) {
+        let p = &mut self.perms.rels[idx];
+        for c in cols {
+            let n = *c as i16 + 1;
+            if insert {
+                p.insert_cols.insert(n);
+            } else {
+                p.update_cols.insert(n);
+            }
+        }
+    }
+
+    /// A built-in function is called: its EXECUTE privilege is checked when it isn't PUBLIC's.
+    pub(crate) fn note_builtin_call(&mut self, oid: u32) {
+        if acl::builtin_proc_acl(oid).is_some() || self.cat.acl(ObjKind::Function, oid, 0).is_some()
+        {
+            self.require_function(oid);
+        }
+    }
+
+    pub(crate) fn require_function(&mut self, oid: u32) {
+        if !self.perms.funcs.contains(&oid) {
+            self.perms.funcs.push(oid);
+        }
+    }
+
+    /// USAGE on an explicitly named schema (name lookups through it fail otherwise).
+    pub(crate) fn check_schema_usage(&self, schema: &str, loc: i32) -> Result<()> {
+        let Some(s) = self.cat.schema_by_name(schema) else {
+            return Ok(());
+        };
+        let me = self.ctx.current_user();
+        if self.cat.is_superuser(me) {
+            return Ok(());
+        }
+        let (p, _) = self
+            .cat
+            .obj_mask(ObjKind::Schema, s.oid, me, self.ctx.db_owner());
+        if p & acl::USAGE == 0 {
+            return Err(super::ast::with_pos(
+                Error::new(
+                    code::INSUFFICIENT_PRIVILEGE,
+                    format!("permission denied for schema {schema}"),
+                ),
+                loc,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check what the bound statement needs, as the current user.
+    pub fn check_perms(&self) -> Result<()> {
+        check(&self.perms, self.ctx)
+    }
+}
+
+/// "table", "view", … for "permission denied for …".
+pub fn rel_word(cat: &crate::catalog::Catalog, oid: u32) -> (&'static str, String) {
+    if let Some(t) = cat.tables.get(&oid) {
+        return ("table", t.name.clone());
+    }
+    if let Some(v) = cat.views.get(&oid) {
+        return (
+            if v.materialized {
+                "materialized view"
+            } else {
+                "view"
+            },
+            v.name.clone(),
+        );
+    }
+    if let Some(s) = cat.sequences.get(&oid) {
+        return ("sequence", s.name.clone());
+    }
+    match crate::catalog::system::SysTable::by_oid(oid) {
+        Some(t) => (
+            if t.is_view() { "view" } else { "table" },
+            t.name().to_string(),
+        ),
+        None => ("relation", oid.to_string()),
+    }
+}
+
+/// A SQL function's statement about to run again after `row_security` was turned off
+/// (by an earlier call: `set_config('row_security', 'false', true)`): Postgres re-plans it
+/// (the plan depends on the setting), and rewriting it fails for a table whose policies
+/// apply (check_enable_rls). With the setting on, the plan made at bind time stands.
+pub fn check_row_security(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
+    if perms.rels.is_empty()
+        || ctx.sess.settings.borrow().get_raw("row_security").as_deref() != Some("off")
+    {
+        return Ok(());
+    }
+    let cat = ctx.catalog();
+    let me = ctx.current_user();
+    let db_owner = ctx.db_owner();
+    for p in &perms.rels {
+        let Some(t) = cat.tables.get(&p.oid) else {
+            continue;
+        };
+        if !t.rls {
+            continue;
+        }
+        let user = p.as_user.unwrap_or(me);
+        if cat.is_superuser(user) || cat.roles.get(&user).is_some_and(|r| r.bypass_rls) {
+            continue;
+        }
+        let owner = cat.has_privs_of_role(user, t.owner, db_owner);
+        if owner && !t.rls_force {
+            continue;
+        }
+        let e = Error::new(
+            code::INSUFFICIENT_PRIVILEGE,
+            format!(
+                "query would be affected by row-level security policy for table \"{}\"",
+                t.name
+            ),
+        );
+        return Err(if owner {
+            e.hint("To disable the policy for the table's owner, use ALTER TABLE NO FORCE ROW LEVEL SECURITY.")
+        } else {
+            e
+        });
+    }
+    Ok(())
+}
+
+/// ExecCheckPermissions.
+pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
+    if perms.is_empty() {
+        return Ok(());
+    }
+    // The system views' columns read (see `ExecCtx::sys_cols`).
+    for p in &perms.rels {
+        if !p.select_cols.is_empty() && crate::catalog::system::SysTable::by_oid(p.oid).is_some() {
+            ctx.sys_cols
+                .borrow_mut()
+                .entry(p.oid)
+                .or_default()
+                .extend(p.select_cols.iter().copied());
+        }
+    }
+    let cat = ctx.catalog();
+    let me = ctx.current_user();
+    let db_owner = ctx.db_owner();
+    for p in &perms.rels {
+        let user = p.as_user.unwrap_or(me);
+        if cat.is_superuser(user) {
+            continue;
+        }
+        let Some((held, _)) = cat.rel_mask(p.oid, user, db_owner) else {
+            continue;
+        };
+        let mut need = p.privs;
+        if !p.select_cols.is_empty() {
+            need |= acl::SELECT;
+        }
+        let remaining = need & !held;
+        if remaining == 0 {
+            continue;
+        }
+        let denied = || {
+            let (word, name) = rel_word(&cat, p.oid);
+            Error::new(
+                code::INSUFFICIENT_PRIVILEGE,
+                format!("permission denied for {word} {name}"),
+            )
+        };
+        if remaining & !(acl::SELECT | acl::INSERT | acl::UPDATE) != 0 {
+            return Err(denied());
+        }
+        // Column privileges can stand in for missing table privileges.
+        for (bit, cols) in [
+            (acl::SELECT, &p.select_cols),
+            (acl::INSERT, &p.insert_cols),
+            (acl::UPDATE, &p.update_cols),
+        ] {
+            if remaining & bit == 0 {
+                continue;
+            }
+            let ok = if cols.is_empty() || cols.contains(&0) {
+                let all_cols = cols.contains(&0);
+                let col_entries: Vec<i32> = cat
+                    .acls
+                    .iter()
+                    .filter(|a| a.class == 1259 && a.oid == p.oid && a.sub > 0)
+                    .map(|a| a.sub)
+                    .collect();
+                if all_cols {
+                    let n = cat
+                        .tables
+                        .get(&p.oid)
+                        .map_or(0, |t| t.columns.iter().filter(|c| !c.dropped).count());
+                    n > 0
+                        && (1..=n as i32)
+                            .all(|c| cat.col_mask(p.oid, c, user, db_owner).0 & bit != 0)
+                } else {
+                    col_entries
+                        .into_iter()
+                        .any(|c| cat.col_mask(p.oid, c, user, db_owner).0 & bit != 0)
+                }
+            } else {
+                cols.iter()
+                    .all(|c| cat.col_mask(p.oid, *c as i32, user, db_owner).0 & bit != 0)
+            };
+            if !ok {
+                return Err(denied());
+            }
+        }
+    }
+    for f in &perms.funcs {
+        if cat.is_superuser(me) {
+            break;
+        }
+        let (held, _) = cat.obj_mask(ObjKind::Function, *f, me, db_owner);
+        if held & acl::EXECUTE == 0 {
+            let (word, name) = match cat.functions.get(f) {
+                Some(f) => (
+                    if f.procedure {
+                        "procedure"
+                    } else if f.agg.is_some() {
+                        "aggregate"
+                    } else {
+                        "function"
+                    },
+                    f.name.clone(),
+                ),
+                None => (
+                    "function",
+                    crate::sql::func::registry()
+                        .funcs
+                        .values()
+                        .flatten()
+                        .find(|d| d.oid == *f)
+                        .map(|d| d.name.to_string())
+                        .or_else(|| {
+                            crate::catalog::system::builtin_proc_sigs()
+                                .iter()
+                                .find(|p| p.oid == *f)
+                                .map(|p| p.name.to_string())
+                        })
+                        .unwrap_or_else(|| f.to_string()),
+                ),
+            };
+            return Err(Error::new(
+                code::INSUFFICIENT_PRIVILEGE,
+                format!("permission denied for {word} {name}"),
+            ));
+        }
+    }
+    Ok(())
+}

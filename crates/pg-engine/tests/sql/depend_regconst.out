@@ -1,0 +1,180 @@
+> create schema drc_s
+-- CREATE SCHEMA
+
+> create table drc_t (a int)
+-- CREATE TABLE
+
+> create table drc_u (a int)
+-- CREATE TABLE
+
+> create function drc_fn(int) returns int language sql as 'select 1'
+-- CREATE FUNCTION
+
+> create type drc_ty as (x int)
+-- CREATE TYPE
+
+> create view drc_v as select 'drc_t'::regclass as r, a from drc_u
+-- CREATE VIEW
+
+> create view drc_v2 as select a from drc_u where 'drc_fn'::regproc is not null and 'drc_fn(int)'::regprocedure is not null
+-- CREATE VIEW
+
+> create view drc_v3 as select 'drc_u'::regclass::oid as o, 'drc_t'::regtype as t, 'drc_ty'::regtype as ty, 'drc_s'::regnamespace as n, regclass 'drc_t' as r2
+-- CREATE VIEW
+
+> create view drc_v4 as select 'drc_t'::text::regclass as r, 'pg_class'::regclass as c, 'int4'::regtype as i
+-- CREATE VIEW
+
+> create table drc_d (a regclass default 'drc_t'::regclass, b int check (b > 'drc_t'::regclass::oid::int), c int)
+-- CREATE TABLE
+
+> create index drc_d_ix on drc_d ((c + ('drc_u'::regclass::oid)::int))
+-- CREATE INDEX
+
+> create policy drc_p on drc_d using ('drc_u'::regclass is not null)
+-- CREATE POLICY
+
+> create function drc_tf() returns trigger language plpgsql as $$ begin return new; end $$
+-- CREATE FUNCTION
+
+> create trigger drc_tr before update on drc_d for each row when ('drc_u'::regclass is not null) execute function drc_tf()
+-- CREATE TRIGGER
+
+> create function drc_sb() returns regclass return 'drc_t'::regclass
+-- CREATE FUNCTION
+
+> create function drc_sb2() returns int begin atomic select 1 where 'drc_fn'::regproc is not null; end
+-- CREATE FUNCTION
+
+> create function drc_def(r regclass default 'drc_u'::regclass) returns int language sql as 'select 1'
+-- CREATE FUNCTION
+
+> select pg_describe_object(classid, objid, objsubid) as obj, pg_describe_object(refclassid, refobjid, refobjsubid) as ref, deptype from pg_depend where refobjid in ('drc_t'::regclass, 'drc_u'::regclass, 'drc_fn'::regproc, 'drc_t'::regtype, 'drc_ty'::regtype, 'drc_s'::regnamespace) and classid <> 'pg_type'::regclass order by 1, 2
+obj:text | ref:text | deptype:char
+composite type drc_ty | type drc_ty | i
+constraint drc_d_b_check on table drc_d | table drc_t | n
+default value for column a of table drc_d | table drc_t | n
+function drc_def(regclass) | table drc_u | n
+function drc_sb() | table drc_t | n
+function drc_sb2() | function drc_fn(integer) | n
+index drc_d_ix | table drc_u | n
+policy drc_p on table drc_d | table drc_u | n
+rule _RETURN on view drc_v | column a of table drc_u | n
+rule _RETURN on view drc_v | table drc_t | n
+rule _RETURN on view drc_v2 | column a of table drc_u | n
+rule _RETURN on view drc_v2 | function drc_fn(integer) | n
+rule _RETURN on view drc_v3 | schema drc_s | n
+rule _RETURN on view drc_v3 | table drc_t | n
+rule _RETURN on view drc_v3 | table drc_u | n
+rule _RETURN on view drc_v3 | type drc_t | n
+rule _RETURN on view drc_v3 | type drc_ty | n
+trigger drc_tr on table drc_d | table drc_u | n
+-- SELECT 18
+
+> drop table drc_t
+ERROR 2BP01: cannot drop table drc_t because other objects depend on it
+DETAIL: view drc_v depends on table drc_t
+DETAIL: view drc_v3 depends on table drc_t
+DETAIL: default value for column a of table drc_d depends on table drc_t
+DETAIL: constraint drc_d_b_check on table drc_d depends on table drc_t
+DETAIL: function drc_sb() depends on table drc_t
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop function drc_fn(int)
+ERROR 2BP01: cannot drop function drc_fn(integer) because other objects depend on it
+DETAIL: view drc_v2 depends on function drc_fn(integer)
+DETAIL: function drc_sb2() depends on function drc_fn(integer)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop schema drc_s
+ERROR 2BP01: cannot drop schema drc_s because other objects depend on it
+DETAIL: view drc_v3 depends on schema drc_s
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop type drc_ty
+ERROR 2BP01: cannot drop type drc_ty because other objects depend on it
+DETAIL: view drc_v3 depends on type drc_ty
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop table drc_u
+ERROR 2BP01: cannot drop table drc_u because other objects depend on it
+DETAIL: view drc_v depends on table drc_u
+DETAIL: view drc_v2 depends on table drc_u
+DETAIL: view drc_v3 depends on table drc_u
+DETAIL: index drc_d_ix depends on table drc_u
+DETAIL: policy drc_p on table drc_d depends on table drc_u
+DETAIL: trigger drc_tr on table drc_d depends on table drc_u
+DETAIL: function drc_def(regclass) depends on table drc_u
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> begin
+-- BEGIN
+
+> drop table drc_u cascade
+NOTICE 00000: drop cascades to 7 other objects
+DETAIL: drop cascades to view drc_v
+DETAIL: drop cascades to view drc_v2
+DETAIL: drop cascades to view drc_v3
+DETAIL: drop cascades to index drc_d_ix
+DETAIL: drop cascades to policy drc_p on table drc_d
+DETAIL: drop cascades to trigger drc_tr on table drc_d
+DETAIL: drop cascades to function drc_def(regclass)
+-- DROP TABLE
+
+> select relname from pg_class where relname like 'drc\_%' order by 1
+relname:name
+drc_d
+drc_t
+drc_ty
+drc_v4
+-- SELECT 4
+
+> rollback
+-- ROLLBACK
+
+> drop table drc_t cascade
+NOTICE 00000: drop cascades to 5 other objects
+DETAIL: drop cascades to view drc_v
+DETAIL: drop cascades to view drc_v3
+DETAIL: drop cascades to default value for column a of table drc_d
+DETAIL: drop cascades to constraint drc_d_b_check on table drc_d
+DETAIL: drop cascades to function drc_sb()
+-- DROP TABLE
+
+> drop function drc_fn(int) cascade
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to view drc_v2
+DETAIL: drop cascades to function drc_sb2()
+-- DROP FUNCTION
+
+> drop schema drc_s cascade
+-- DROP SCHEMA
+
+> drop type drc_ty cascade
+-- DROP TYPE
+
+> select relname from pg_class where relname like 'drc\_%' order by 1
+relname:name
+drc_d
+drc_d_ix
+drc_u
+drc_v4
+-- SELECT 4
+
+> select proname from pg_proc where proname like 'drc\_%' order by 1
+proname:name
+drc_def
+drc_tf
+-- SELECT 2
+
+> drop table drc_u cascade
+NOTICE 00000: drop cascades to 4 other objects
+DETAIL: drop cascades to index drc_d_ix
+DETAIL: drop cascades to policy drc_p on table drc_d
+DETAIL: drop cascades to trigger drc_tr on table drc_d
+DETAIL: drop cascades to function drc_def(regclass)
+-- DROP TABLE
+
+> drop function drc_tf, drc_def
+ERROR 42883: could not find a function named "drc_def"
+

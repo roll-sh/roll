@@ -1,0 +1,325 @@
+> SELECT '{"b": 1, "a": [1, 2.50, "x", null, true]}'::json, '{"b": 1, "a": [1, 2.50, "x", null, true]}'::jsonb
+json:json | jsonb:jsonb
+{"b": 1, "a": [1, 2.50, "x", null, true]} | {"a": [1, 2.50, "x", null, true], "b": 1}
+-- SELECT 1
+
+> SELECT '{"a": 1, "a": 2}'::json, '{"a": 1, "a": 2}'::jsonb, '  [1,  2 ]'::jsonb, '"str"'::jsonb, '12.3e2'::jsonb, 'null'::jsonb
+json:json | jsonb:jsonb | jsonb:jsonb | jsonb:jsonb | jsonb:jsonb | jsonb:jsonb
+{"a": 1, "a": 2} | {"a": 2} | [1, 2] | "str" | 1230 | null
+-- SELECT 1
+
+> SELECT '{"a": }'::jsonb
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Expected JSON value, but found "}".
+CONTEXT: JSON data, line 1: {"a": }
+
+> SELECT '[1, 2'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: The input string ended unexpectedly.
+CONTEXT: JSON data, line 1: [1, 2
+
+> SELECT '"é\n"'::jsonb, '"\u0000"'::jsonb
+ERROR 22P05: unsupported Unicode escape sequence (at 24)
+DETAIL: \u0000 cannot be converted to text.
+CONTEXT: JSON data, line 1: "\u0000...
+
+> SELECT '{"k": "v"}'::jsonb = '{ "k" : "v" }'::jsonb, '[1,2]'::jsonb = '[2,1]'::jsonb
+?column?:bool | ?column?:bool
+t | f
+-- SELECT 1
+
+> SELECT '{"a": {"b": [10, 20, 30]}}'::jsonb -> 'a', '{"a": {"b": [10, 20, 30]}}'::jsonb -> 'a' -> 'b' -> 1, '{"a": {"b": [10, 20, 30]}}'::jsonb -> 'a' -> 'b' ->> -1
+?column?:jsonb | ?column?:jsonb | ?column?:text
+{"b": [10, 20, 30]} | 20 | 30
+-- SELECT 1
+
+> SELECT '{"a": {"b": [10, 20, 30]}}'::jsonb #> '{a,b,2}', '{"a": {"b": [10, 20, 30]}}'::jsonb #>> '{a,b}', '{"a": 1}'::jsonb -> 'zz'
+?column?:jsonb | ?column?:text | ?column?:jsonb
+30 | [10, 20, 30] | NULL
+-- SELECT 1
+
+> SELECT '{"a": 1, "b": 2}'::json -> 'a', '{"a": "x"}'::json ->> 'a', '[1, [2, 3]]'::json #> '{1,0}'
+?column?:json | ?column?:text | ?column?:json
+1 | x | 2
+-- SELECT 1
+
+> SELECT '{"a": 1, "b": {"c": 2}}'::jsonb @> '{"b": {"c": 2}}', '{"a": 1}'::jsonb <@ '{"a": 1, "b": 2}', '[1, 2, 3]'::jsonb @> '[3, 1]', '[1, [2]]'::jsonb @> '[[2]]'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+-- SELECT 1
+
+> SELECT '{"a": 1, "b": 2}'::jsonb ? 'a', '{"a": 1, "b": 2}'::jsonb ?| array['x', 'b'], '{"a": 1, "b": 2}'::jsonb ?& array['a', 'x'], '["a", "b"]'::jsonb ? 'b'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | f | t
+-- SELECT 1
+
+> SELECT '{"a": 1}'::jsonb || '{"b": 2}', '[1, 2]'::jsonb || '[3]', '[1]'::jsonb || '2', '{"a": 1}'::jsonb || '[1]'
+?column?:jsonb | ?column?:jsonb | ?column?:jsonb | ?column?:jsonb
+{"a": 1, "b": 2} | [1, 2, 3] | [1, 2] | [{"a": 1}, 1]
+-- SELECT 1
+
+> SELECT '{"a": 1, "b": 2}'::jsonb - 'a', '["a", "b", "c"]'::jsonb - 1, '["a", "b", "a"]'::jsonb - 'a', '{"a": 1, "b": 2, "c": 3}'::jsonb - array['a', 'c']
+?column?:jsonb | ?column?:jsonb | ?column?:jsonb | ?column?:jsonb
+{"b": 2} | ["a", "c"] | ["b"] | {"b": 2}
+-- SELECT 1
+
+> SELECT '{"a": {"b": 1, "c": 2}}'::jsonb #- '{a,b}', '[1, [2, 3]]'::jsonb #- '{1,0}'
+?column?:jsonb | ?column?:jsonb
+{"a": {"c": 2}} | [1, [3]]
+-- SELECT 1
+
+> SELECT '{"a": 1}'::jsonb -> 1, '[1]'::jsonb -> 'a', '1'::jsonb -> 0
+?column?:jsonb | ?column?:jsonb | ?column?:jsonb
+NULL | NULL | 1
+-- SELECT 1
+
+> SELECT to_json('text'::text), to_jsonb(1.50), to_json(array[1, 2]), to_jsonb(true), to_json(NULL::int), to_jsonb(date '2024-01-02')
+to_json:json | to_jsonb:jsonb | to_json:json | to_jsonb:jsonb | to_json:json | to_jsonb:jsonb
+"text" | 1.50 | [1,2] | true | NULL | "2024-01-02"
+-- SELECT 1
+
+> SELECT json_build_object('a', 1, 'b', array[1, 2], 'c', NULL), jsonb_build_object('z', 1, 'a', 2), json_build_array(1, 'x', NULL, true)
+json_build_object:json | jsonb_build_object:jsonb | json_build_array:json
+{"a" : 1, "b" : [1,2], "c" : null} | {"a": 2, "z": 1} | [1, "x", null, true]
+-- SELECT 1
+
+> SELECT jsonb_build_object('a')
+ERROR 22023: argument list must have even number of elements
+HINT: The arguments of jsonb_build_object() must consist of alternating keys and values.
+
+> SELECT json_object('{a, 1, b, 2}'), jsonb_object('{{a, 1}, {b, 2}}'), json_object(array['k1', 'k2'], array['v1', 'v2'])
+json_object:json | jsonb_object:jsonb | json_object:json
+{"a" : "1", "b" : "2"} | {"a": "1", "b": "2"} | {"k1" : "v1", "k2" : "v2"}
+-- SELECT 1
+
+> SELECT row_to_json(row(1, 'x')), to_jsonb(row(1, 'x'))
+row_to_json:json | to_jsonb:jsonb
+{"f1":1,"f2":"x"} | {"f1": 1, "f2": "x"}
+-- SELECT 1
+
+> SELECT array_to_json(array[[1, 2], [3, 4]]), array_to_json(array[1, 2], true)
+array_to_json:json | array_to_json:json
+[[1,2],[3,4]] | [1,
+ 2]
+-- SELECT 1
+
+> CREATE TABLE docs (id int PRIMARY KEY, body jsonb, meta json)
+-- CREATE TABLE
+
+> INSERT INTO docs VALUES
+>   (1, '{"name": "ann", "tags": ["a", "b"], "age": 31, "addr": {"city": "Oslo"}}', '{"v": 1}'),
+>   (2, '{"name": "bob", "tags": [], "age": null}', '{"v": 2}'),
+>   (3, '{"name": "cy", "tags": ["b"], "age": 22, "addr": {"city": "Rome"}}', NULL),
+>   (4, '[1, 2, 3]', '[]')
+-- INSERT 0 4
+
+> SELECT row_to_json(d) FROM docs d WHERE id = 1
+row_to_json:json
+{"id":1,"body":{"age": 31, "addr": {"city": "Oslo"}, "name": "ann", "tags": ["a", "b"]},"meta":{"v": 1}}
+-- SELECT 1
+
+> SELECT json_agg(id ORDER BY id), jsonb_agg(body -> 'name' ORDER BY id) FROM docs
+json_agg:json | jsonb_agg:jsonb
+[1, 2, 3, 4] | ["ann", "bob", "cy", null]
+-- SELECT 1
+
+> SELECT json_object_agg(id, body ->> 'name' ORDER BY id), jsonb_object_agg(body ->> 'name', id) FROM docs WHERE id < 4
+json_object_agg:json | jsonb_object_agg:jsonb
+{ "1" : "ann", "2" : "bob", "3" : "cy" } | {"cy": 3, "ann": 1, "bob": 2}
+-- SELECT 1
+
+> SELECT jsonb_agg(d ORDER BY id) FROM (SELECT id, body ->> 'name' AS name FROM docs WHERE id < 3) d
+jsonb_agg:jsonb
+[{"id": 1, "name": "ann"}, {"id": 2, "name": "bob"}]
+-- SELECT 1
+
+> SELECT id, body ->> 'name' AS name, (body ->> 'age')::int AS age FROM docs ORDER BY id
+id:int4 | name:text | age:int4
+1 | ann | 31
+2 | bob | NULL
+3 | cy | 22
+4 | NULL | NULL
+-- SELECT 4
+
+> SELECT id FROM docs WHERE body @> '{"tags": ["b"]}' ORDER BY id
+id:int4
+1
+3
+-- SELECT 2
+
+> SELECT id FROM docs WHERE body ? 'addr' ORDER BY id
+id:int4
+1
+3
+-- SELECT 2
+
+> SELECT id, body #>> '{addr,city}' FROM docs WHERE body -> 'addr' IS NOT NULL ORDER BY id
+id:int4 | ?column?:text
+1 | Oslo
+3 | Rome
+-- SELECT 2
+
+> SELECT id, jsonb_typeof(body), jsonb_typeof(body -> 'age'), json_typeof(meta) FROM docs ORDER BY id
+id:int4 | jsonb_typeof:text | jsonb_typeof:text | json_typeof:text
+1 | object | number | object
+2 | object | null | object
+3 | object | number | NULL
+4 | array | NULL | array
+-- SELECT 4
+
+> SELECT id, jsonb_array_length(body -> 'tags') FROM docs WHERE jsonb_typeof(body -> 'tags') = 'array' ORDER BY id
+id:int4 | jsonb_array_length:int4
+1 | 2
+2 | 0
+3 | 1
+-- SELECT 3
+
+> SELECT jsonb_array_length('{"a": 1}')
+ERROR 22023: cannot get array length of a non-array
+
+> SELECT body ->> 'name', count(*) FROM docs, jsonb_array_elements_text(body -> 'tags') t GROUP BY 1 ORDER BY 1
+?column?:text | count:int8
+ann | 2
+cy | 1
+-- SELECT 2
+
+> CREATE INDEX docs_body ON docs USING gin (body)
+-- CREATE INDEX
+
+> SELECT id FROM docs WHERE body @> '{"name": "cy"}'
+id:int4
+3
+-- SELECT 1
+
+> SELECT * FROM jsonb_each('{"a": 1, "b": [2], "c": null}')
+key:text | value:jsonb
+a | 1
+b | [2]
+c | null
+-- SELECT 3
+
+> SELECT * FROM json_each_text('{"a": 1, "b": "x", "c": null}')
+key:text | value:text
+a | 1
+b | x
+c | NULL
+-- SELECT 3
+
+> SELECT * FROM jsonb_object_keys('{"b": 1, "a": 2}')
+jsonb_object_keys:text
+a
+b
+-- SELECT 2
+
+> SELECT * FROM json_array_elements('[1, "two", {"three": 3}]')
+value:json
+"two"
+1
+{"three": 3}
+-- SELECT 3
+
+> SELECT value FROM jsonb_array_elements('[1, [2], null]') WITH ORDINALITY ORDER BY ordinality DESC
+value:jsonb
+null
+[2]
+1
+-- SELECT 3
+
+> SELECT * FROM jsonb_to_record('{"a": 1, "b": "x", "c": [1]}') AS r(a int, b text, c jsonb, d date)
+a:int4 | b:text | c:jsonb | d:date
+1 | x | [1] | NULL
+-- SELECT 1
+
+> SELECT * FROM jsonb_to_recordset('[{"a": 1}, {"a": 2, "b": "y"}]') AS r(a int, b text)
+a:int4 | b:text
+1 | NULL
+2 | y
+-- SELECT 2
+
+> SELECT * FROM json_populate_record(NULL::docs, '{"id": 9, "body": {"x": 1}}')
+id:int4 | body:jsonb | meta:json
+9 | {"x": 1} | NULL
+-- SELECT 1
+
+> SELECT jsonb_path_query_array('{"a": [1, 2, 3, 4]}', '$.a[*] ? (@ > 2)')
+jsonb_path_query_array:jsonb
+[3, 4]
+-- SELECT 1
+
+> SELECT jsonb_set('{"a": {"b": 1}}', '{a,b}', '2'), jsonb_set('{"a": 1}', '{c}', '3'), jsonb_set('{"a": 1}', '{c}', '3', false), jsonb_set('[1, 2]', '{5}', '9')
+jsonb_set:jsonb | jsonb_set:jsonb | jsonb_set:jsonb | jsonb_set:jsonb
+{"a": {"b": 2}} | {"a": 1, "c": 3} | {"a": 1} | [1, 2, 9]
+-- SELECT 1
+
+> SELECT jsonb_insert('{"a": [1, 2]}', '{a,1}', '9'), jsonb_insert('{"a": [1, 2]}', '{a,1}', '9', true)
+jsonb_insert:jsonb | jsonb_insert:jsonb
+{"a": [1, 9, 2]} | {"a": [1, 2, 9]}
+-- SELECT 1
+
+> SELECT jsonb_set_lax('{"a": 1}', '{a}', NULL), jsonb_set_lax('{"a": 1}', '{a}', NULL, true, 'delete_key')
+jsonb_set_lax:jsonb | jsonb_set_lax:jsonb
+{"a": null} | {}
+-- SELECT 1
+
+> SELECT jsonb_strip_nulls('{"a": null, "b": {"c": null, "d": 1}, "e": [null]}'), json_strip_nulls('{"a": null, "b": 1}')
+jsonb_strip_nulls:jsonb | json_strip_nulls:json
+{"b": {"d": 1}, "e": [null]} | {"b":1}
+-- SELECT 1
+
+> SELECT jsonb_pretty('{"a": [1, {"b": 2}], "c": {}}')
+jsonb_pretty:text
+{
+    "a": [
+        1,
+        {
+            "b": 2
+        }
+    ],
+    "c": {
+    }
+}
+-- SELECT 1
+
+> UPDATE docs SET body = jsonb_set(body, '{age}', to_jsonb((body ->> 'age')::int + 1)) WHERE id = 1 RETURNING body -> 'age'
+?column?:jsonb
+32
+-- UPDATE 1
+
+> UPDATE docs SET body = body || '{"seen": true}' WHERE id IN (2, 3)
+-- UPDATE 2
+
+> SELECT id, body FROM docs WHERE body ? 'seen' ORDER BY id
+id:int4 | body:jsonb
+2 | {"age": null, "name": "bob", "seen": true, "tags": []}
+3 | {"age": 22, "addr": {"city": "Rome"}, "name": "cy", "seen": true, "tags": ["b"]}
+-- SELECT 2
+
+> SELECT '1'::jsonb::int, '"x"'::jsonb::text, '1.5'::jsonb::numeric, 'true'::jsonb::bool, '{"a": 1}'::jsonb::json, '[1]'::json::jsonb
+int4:int4 | text:text | numeric:numeric | bool:bool | json:json | jsonb:jsonb
+1 | "x" | 1.5 | t | {"a": 1} | [1]
+-- SELECT 1
+
+> SELECT '"x"'::jsonb::int
+ERROR 22023: cannot cast jsonb string to type integer
+
+> SELECT '{"a": 1}'::jsonb < '{"a": 2}'::jsonb, '[1]'::jsonb < '{}'::jsonb, 'null'::jsonb < '1'::jsonb, '"a"'::jsonb < '1'::jsonb
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+-- SELECT 1
+
+> SELECT body FROM docs ORDER BY body
+body:jsonb
+[1, 2, 3]
+{"age": null, "name": "bob", "seen": true, "tags": []}
+{"age": 32, "addr": {"city": "Oslo"}, "name": "ann", "tags": ["a", "b"]}
+{"age": 22, "addr": {"city": "Rome"}, "name": "cy", "seen": true, "tags": ["b"]}
+-- SELECT 4
+
+> SELECT json_typeof('1'), jsonb_typeof('null'), '{"a": 1}'::json::text, '{"b":1,   "a":2}'::jsonb::text
+json_typeof:text | jsonb_typeof:text | text:text | text:text
+number | null | {"a": 1} | {"a": 2, "b": 1}
+-- SELECT 1
+
+> DROP TABLE docs
+-- DROP TABLE
+

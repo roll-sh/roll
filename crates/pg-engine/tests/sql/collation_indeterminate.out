@@ -1,0 +1,124 @@
+> create table ci1 (a text collate "C", x int)
+-- CREATE TABLE
+
+> create table ci2 (a text collate "POSIX", y int)
+-- CREATE TABLE
+
+> create table ci3 (a text collate "C", b text collate "POSIX")
+-- CREATE TABLE
+
+> select * from ci1 full join ci2 using (a) order by a
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select a, count(*) from ci1 full join ci2 using (a) group by a
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select distinct a from ci1 full join ci2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select max(a) from ci1 full join ci2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select a, b from ci1 x(a, b) union all select a, y from ci2 order by 1
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select a, b from ci1 x(a, b) union all select a, y from ci2 order by 2
+a:text | b:int4
+-- SELECT 0
+
+> select b, count(*) from (select a, x from ci1 union all select a, y from ci2) s(b, c) group by b
+b:text | count:int8
+-- SELECT 0
+
+> insert into ci1 values ('x', 1)
+-- INSERT 0 1
+
+> insert into ci2 values ('x', 1), ('y', 2)
+-- INSERT 0 2
+
+> select * from ci1 full join ci2 using (a) order by a
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select a, count(*) from ci1 full join ci2 using (a) group by a
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select distinct a from ci1 full join ci2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select max(a) from ci1 full join ci2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select min(a) from ci1 full join ci2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select b, count(*) from (select a, x from ci1 union all select a, y from ci2) s(b, c) group by b
+ERROR 42P22: could not determine which collation to use for string hashing
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> insert into ci3 values ('a', 'a'), ('b', 'b')
+-- INSERT 0 2
+
+> select max(a || b) from ci3
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select max(a), min(b), max(a collate "POSIX") from ci3
+max:text | min:text | max:text
+b | a | b
+-- SELECT 1
+
+> explain (costs off) select * from ci3 x where x.a = x.b
+QUERY PLAN:text
+Seq Scan on ci3 x
+  Filter: ((a)::text = (b)::text)
+-- EXPLAIN
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> explain (costs off) select * from ci1 join ci2 using (a)
+QUERY PLAN:text
+Nested Loop
+  Join Filter: ((ci1.a)::text = (ci2.a)::text)
+  ->  Seq Scan on ci1
+  ->  Materialize
+        ->  Seq Scan on ci2
+-- EXPLAIN
+
+> explain (costs off) select * from ci1 left join ci2 using (a)
+QUERY PLAN:text
+Nested Loop Left Join
+  Join Filter: (ci1.a = ci2.a)
+  ->  Seq Scan on ci1
+  ->  Materialize
+        ->  Seq Scan on ci2
+-- EXPLAIN
+
+> explain (costs off) select * from ci3 x join ci3 y on x.a = y.b
+QUERY PLAN:text
+Nested Loop
+  Join Filter: ((x.a)::text = (y.b)::text)
+  ->  Seq Scan on ci3 x
+  ->  Materialize
+        ->  Seq Scan on ci3 y
+-- EXPLAIN
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+

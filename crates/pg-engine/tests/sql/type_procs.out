@@ -1,0 +1,127 @@
+> SELECT typname, typsubscript, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typcollation, typndims FROM pg_type WHERE typname IN ('bool', 'bytea', 'char', 'name', 'int8', 'int2', 'int2vector', 'int4', 'regproc', 'text', 'oid', 'tid', 'oidvector', 'json', 'xml', 'point', 'lseg', 'box', 'float4', 'float8', 'circle', 'money', 'macaddr', 'inet', 'cidr', 'bpchar', 'varchar', 'date', 'time', 'timestamp', 'timestamptz', 'interval', 'timetz', 'bit', 'varbit', 'numeric', 'refcursor', 'uuid', 'tsvector', 'tsquery', 'jsonb', 'jsonpath', 'int4range', 'int4multirange', 'regclass', 'regtype', 'record', 'cstring', 'any', 'anyarray', 'void', 'trigger', 'internal', 'pg_lsn', 'aclitem', 'unknown') ORDER BY oid
+typname:name | typsubscript:regproc | typinput:regproc | typoutput:regproc | typreceive:regproc | typsend:regproc | typmodin:regproc | typmodout:regproc | typanalyze:regproc | typcollation:oid | typndims:int4
+bool | - | boolin | boolout | boolrecv | boolsend | - | - | - | 0 | 0
+bytea | - | byteain | byteaout | bytearecv | byteasend | - | - | - | 0 | 0
+char | - | charin | charout | charrecv | charsend | - | - | - | 0 | 0
+name | raw_array_subscript_handler | namein | nameout | namerecv | namesend | - | - | - | 950 | 0
+int8 | - | int8in | int8out | int8recv | int8send | - | - | - | 0 | 0
+int2 | - | int2in | int2out | int2recv | int2send | - | - | - | 0 | 0
+int2vector | array_subscript_handler | int2vectorin | int2vectorout | int2vectorrecv | int2vectorsend | - | - | - | 0 | 0
+int4 | - | int4in | int4out | int4recv | int4send | - | - | - | 0 | 0
+regproc | - | regprocin | regprocout | regprocrecv | regprocsend | - | - | - | 0 | 0
+text | - | textin | textout | textrecv | textsend | - | - | - | 100 | 0
+oid | - | oidin | oidout | oidrecv | oidsend | - | - | - | 0 | 0
+tid | - | tidin | tidout | tidrecv | tidsend | - | - | - | 0 | 0
+oidvector | array_subscript_handler | oidvectorin | oidvectorout | oidvectorrecv | oidvectorsend | - | - | - | 0 | 0
+json | - | json_in | json_out | json_recv | json_send | - | - | - | 0 | 0
+xml | - | xml_in | xml_out | xml_recv | xml_send | - | - | - | 0 | 0
+point | raw_array_subscript_handler | point_in | point_out | point_recv | point_send | - | - | - | 0 | 0
+lseg | raw_array_subscript_handler | lseg_in | lseg_out | lseg_recv | lseg_send | - | - | - | 0 | 0
+box | raw_array_subscript_handler | box_in | box_out | box_recv | box_send | - | - | - | 0 | 0
+cidr | - | cidr_in | cidr_out | cidr_recv | cidr_send | - | - | - | 0 | 0
+float4 | - | float4in | float4out | float4recv | float4send | - | - | - | 0 | 0
+float8 | - | float8in | float8out | float8recv | float8send | - | - | - | 0 | 0
+unknown | - | unknownin | unknownout | unknownrecv | unknownsend | - | - | - | 0 | 0
+circle | - | circle_in | circle_out | circle_recv | circle_send | - | - | - | 0 | 0
+money | - | cash_in | cash_out | cash_recv | cash_send | - | - | - | 0 | 0
+macaddr | - | macaddr_in | macaddr_out | macaddr_recv | macaddr_send | - | - | - | 0 | 0
+inet | - | inet_in | inet_out | inet_recv | inet_send | - | - | - | 0 | 0
+aclitem | - | aclitemin | aclitemout | - | - | - | - | - | 0 | 0
+bpchar | - | bpcharin | bpcharout | bpcharrecv | bpcharsend | bpchartypmodin | bpchartypmodout | - | 100 | 0
+varchar | - | varcharin | varcharout | varcharrecv | varcharsend | varchartypmodin | varchartypmodout | - | 100 | 0
+date | - | date_in | date_out | date_recv | date_send | - | - | - | 0 | 0
+time | - | time_in | time_out | time_recv | time_send | timetypmodin | timetypmodout | - | 0 | 0
+timestamp | - | timestamp_in | timestamp_out | timestamp_recv | timestamp_send | timestamptypmodin | timestamptypmodout | - | 0 | 0
+timestamptz | - | timestamptz_in | timestamptz_out | timestamptz_recv | timestamptz_send | timestamptztypmodin | timestamptztypmodout | - | 0 | 0
+interval | - | interval_in | interval_out | interval_recv | interval_send | intervaltypmodin | intervaltypmodout | - | 0 | 0
+timetz | - | timetz_in | timetz_out | timetz_recv | timetz_send | timetztypmodin | timetztypmodout | - | 0 | 0
+bit | - | bit_in | bit_out | bit_recv | bit_send | bittypmodin | bittypmodout | - | 0 | 0
+varbit | - | varbit_in | varbit_out | varbit_recv | varbit_send | varbittypmodin | varbittypmodout | - | 0 | 0
+numeric | - | numeric_in | numeric_out | numeric_recv | numeric_send | numerictypmodin | numerictypmodout | - | 0 | 0
+refcursor | - | textin | textout | textrecv | textsend | - | - | - | 0 | 0
+regclass | - | regclassin | regclassout | regclassrecv | regclasssend | - | - | - | 0 | 0
+regtype | - | regtypein | regtypeout | regtyperecv | regtypesend | - | - | - | 0 | 0
+record | - | record_in | record_out | record_recv | record_send | - | - | - | 0 | 0
+cstring | - | cstring_in | cstring_out | cstring_recv | cstring_send | - | - | - | 0 | 0
+any | - | any_in | any_out | - | - | - | - | - | 0 | 0
+anyarray | - | anyarray_in | anyarray_out | anyarray_recv | anyarray_send | - | - | - | 0 | 0
+void | - | void_in | void_out | void_recv | void_send | - | - | - | 0 | 0
+trigger | - | trigger_in | trigger_out | - | - | - | - | - | 0 | 0
+internal | - | internal_in | internal_out | - | - | - | - | - | 0 | 0
+uuid | - | uuid_in | uuid_out | uuid_recv | uuid_send | - | - | - | 0 | 0
+pg_lsn | - | pg_lsn_in | pg_lsn_out | pg_lsn_recv | pg_lsn_send | - | - | - | 0 | 0
+tsvector | - | tsvectorin | tsvectorout | tsvectorrecv | tsvectorsend | - | - | ts_typanalyze | 0 | 0
+tsquery | - | tsqueryin | tsqueryout | tsqueryrecv | tsquerysend | - | - | - | 0 | 0
+jsonb | jsonb_subscript_handler | jsonb_in | jsonb_out | jsonb_recv | jsonb_send | - | - | - | 0 | 0
+int4range | - | range_in | range_out | range_recv | range_send | - | - | range_typanalyze | 0 | 0
+jsonpath | - | jsonpath_in | jsonpath_out | jsonpath_recv | jsonpath_send | - | - | - | 0 | 0
+int4multirange | - | multirange_in | multirange_out | multirange_recv | multirange_send | - | - | multirange_typanalyze | 0 | 0
+-- SELECT 56
+
+> SELECT typname, typsubscript, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typcollation FROM pg_type WHERE typname IN ('_bool', '_int4', '_text', '_varchar', '_bpchar', '_numeric', '_timestamp', '_point', '_jsonb', '_int4range', '_name', '_bit', '_interval') ORDER BY oid
+typname:name | typsubscript:regproc | typinput:regproc | typoutput:regproc | typreceive:regproc | typsend:regproc | typmodin:regproc | typmodout:regproc | typanalyze:regproc | typcollation:oid
+_bool | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0
+_name | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 950
+_int4 | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0
+_text | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 100
+_bpchar | array_subscript_handler | array_in | array_out | array_recv | array_send | bpchartypmodin | bpchartypmodout | array_typanalyze | 100
+_varchar | array_subscript_handler | array_in | array_out | array_recv | array_send | varchartypmodin | varchartypmodout | array_typanalyze | 100
+_point | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0
+_timestamp | array_subscript_handler | array_in | array_out | array_recv | array_send | timestamptypmodin | timestamptypmodout | array_typanalyze | 0
+_interval | array_subscript_handler | array_in | array_out | array_recv | array_send | intervaltypmodin | intervaltypmodout | array_typanalyze | 0
+_numeric | array_subscript_handler | array_in | array_out | array_recv | array_send | numerictypmodin | numerictypmodout | array_typanalyze | 0
+_bit | array_subscript_handler | array_in | array_out | array_recv | array_send | bittypmodin | bittypmodout | array_typanalyze | 0
+_jsonb | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0
+_int4range | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0
+-- SELECT 13
+
+> CREATE TYPE gx_e AS ENUM ('a')
+-- CREATE TYPE
+
+> CREATE TYPE gx_c AS (x int)
+-- CREATE TYPE
+
+> CREATE DOMAIN gx_d AS varchar(5)
+-- CREATE DOMAIN
+
+> CREATE DOMAIN gx_d2 AS int[]
+-- CREATE DOMAIN
+
+> CREATE DOMAIN gx_d3 AS gx_d
+-- CREATE DOMAIN
+
+> CREATE TYPE gx_r AS RANGE (subtype = int4)
+-- CREATE TYPE
+
+> CREATE TABLE gx_t (a int)
+-- CREATE TABLE
+
+> SELECT typname, typsubscript, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typcollation, typndims FROM pg_type WHERE typname ~ '^_?gx_' ORDER BY typname
+typname:name | typsubscript:regproc | typinput:regproc | typoutput:regproc | typreceive:regproc | typsend:regproc | typmodin:regproc | typmodout:regproc | typanalyze:regproc | typcollation:oid | typndims:int4
+_gx_c | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0 | 0
+_gx_d | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 100 | 0
+_gx_d2 | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0 | 0
+_gx_d3 | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 100 | 0
+_gx_e | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0 | 0
+_gx_r | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0 | 0
+_gx_r_multirange | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0 | 0
+_gx_t | array_subscript_handler | array_in | array_out | array_recv | array_send | - | - | array_typanalyze | 0 | 0
+gx_c | - | record_in | record_out | record_recv | record_send | - | - | - | 0 | 0
+gx_d | - | domain_in | varcharout | domain_recv | varcharsend | - | - | - | 100 | 0
+gx_d2 | - | domain_in | array_out | domain_recv | array_send | - | - | array_typanalyze | 0 | 1
+gx_d3 | - | domain_in | varcharout | domain_recv | varcharsend | - | - | - | 100 | 0
+gx_e | - | enum_in | enum_out | enum_recv | enum_send | - | - | - | 0 | 0
+gx_r | - | range_in | range_out | range_recv | range_send | - | - | range_typanalyze | 0 | 0
+gx_r_multirange | - | multirange_in | multirange_out | multirange_recv | multirange_send | - | - | multirange_typanalyze | 0 | 0
+gx_t | - | record_in | record_out | record_recv | record_send | - | - | - | 0 | 0
+-- SELECT 16
+
+> DROP TABLE gx_t
+-- DROP TABLE
+
+> DROP TYPE gx_e, gx_c, gx_r
+-- DROP TYPE
+
+> DROP DOMAIN gx_d3, gx_d, gx_d2
+-- DROP DOMAIN
+

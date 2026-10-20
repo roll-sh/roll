@@ -1,0 +1,197 @@
+> CREATE TABLE vc_t (id int, val text)
+-- CREATE TABLE
+
+> INSERT INTO vc_t VALUES (1, 'one'), (2, 'two')
+-- INSERT 0 2
+
+> CREATE FUNCTION vc_err(id int) RETURNS text LANGUAGE plpgsql AS $$
+> BEGIN
+>   RETURN (SELECT val FROM vc_t WHERE vc_t.id = id);
+> END $$
+-- CREATE FUNCTION
+
+> SELECT vc_err(1)
+ERROR 42702: column reference "id" is ambiguous
+DETAIL: It could refer to either a PL/pgSQL variable or a table column.
+QUERY: (SELECT val FROM vc_t WHERE vc_t.id = id) (at 39)
+CONTEXT: PL/pgSQL function vc_err(integer) line 3 at RETURN
+
+> CREATE FUNCTION vc_qualified(id int) RETURNS text LANGUAGE plpgsql AS $$
+> BEGIN
+>   RETURN (SELECT val FROM vc_t WHERE vc_t.id = vc_qualified.id);
+> END $$
+-- CREATE FUNCTION
+
+> SELECT vc_qualified(2)
+vc_qualified:text
+two
+-- SELECT 1
+
+> CREATE FUNCTION vc_var(id int) RETURNS text LANGUAGE plpgsql AS $$
+> #variable_conflict use_variable
+> BEGIN
+>   RETURN (SELECT val FROM vc_t WHERE vc_t.id = id);
+> END $$
+-- CREATE FUNCTION
+
+> SELECT vc_var(1)
+vc_var:text
+one
+-- SELECT 1
+
+> CREATE FUNCTION vc_col(id int) RETURNS bigint LANGUAGE plpgsql AS $$
+> #variable_conflict use_column
+> BEGIN
+>   RETURN (SELECT count(*) FROM vc_t WHERE vc_t.id = id);
+> END $$
+-- CREATE FUNCTION
+
+> SELECT vc_col(1)
+vc_col:int8
+2
+-- SELECT 1
+
+> CREATE FUNCTION vc_explicit_error(id int) RETURNS text LANGUAGE plpgsql AS $$
+> #variable_conflict error
+> DECLARE v text;
+> BEGIN
+>   SELECT val INTO v FROM vc_t WHERE id = 1;
+>   RETURN v;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT vc_explicit_error(1)
+ERROR 42702: column reference "id" is ambiguous
+DETAIL: It could refer to either a PL/pgSQL variable or a table column.
+QUERY: SELECT val        FROM vc_t WHERE id = 1 (at 35)
+CONTEXT: PL/pgSQL function vc_explicit_error(integer) line 5 at SQL statement
+
+> SET plpgsql.variable_conflict = use_variable
+-- SET
+
+> CREATE FUNCTION vc_guc(id int) RETURNS text LANGUAGE plpgsql AS $$
+> BEGIN
+>   RETURN (SELECT val FROM vc_t WHERE vc_t.id = id);
+> END $$
+-- CREATE FUNCTION
+
+> SELECT vc_guc(2)
+vc_guc:text
+two
+-- SELECT 1
+
+> SET plpgsql.variable_conflict = bogus
+ERROR 22023: invalid value for parameter "plpgsql.variable_conflict": "bogus"
+HINT: Available values: error, use_variable, use_column.
+
+> RESET plpgsql.variable_conflict
+-- RESET
+
+> SELECT vc_guc(2)
+vc_guc:text
+two
+-- SELECT 1
+
+> DO $$
+> DECLARE val text := 'x';
+> BEGIN
+>   UPDATE vc_t SET val = 'y' WHERE val = 'one';
+> END $$
+ERROR 42702: column reference "val" is ambiguous
+DETAIL: It could refer to either a PL/pgSQL variable or a table column.
+QUERY: UPDATE vc_t SET val = 'y' WHERE val = 'one' (at 33)
+CONTEXT: PL/pgSQL function inline_code_block line 4 at SQL statement
+
+> DO $$
+> DECLARE v text := 'x';
+> BEGIN
+>   UPDATE vc_t SET val = v WHERE id = 99;
+>   RAISE NOTICE 'no conflict';
+> END $$
+NOTICE 00000: no conflict
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> DO $$
+> <<blk>>
+> DECLARE id int := 2;
+> BEGIN
+>   PERFORM 1 FROM vc_t WHERE vc_t.id = blk.id;
+>   RAISE NOTICE 'label ok %', FOUND;
+> END $$
+NOTICE 00000: label ok t
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+-- DO
+
+> DO $$
+> DECLARE vc_t record;
+> BEGIN
+>   SELECT 5 AS id INTO vc_t;
+>   PERFORM 1 FROM vc_t WHERE vc_t.id = 1;
+> END $$
+ERROR 42702: column reference "vc_t.id" is ambiguous
+DETAIL: It could refer to either a PL/pgSQL variable or a table column.
+QUERY: SELECT 1 FROM vc_t WHERE vc_t.id = 1 (at 26)
+CONTEXT: PL/pgSQL function inline_code_block line 5 at PERFORM
+
+> DO $$
+> DECLARE r record;
+> BEGIN
+>   FOR r IN SELECT id FROM vc_t ORDER BY id LOOP
+>     RAISE NOTICE 'id %', r.id;
+>   END LOOP;
+> END $$
+NOTICE 00000: id 1
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+NOTICE 00000: id 2
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> DO $$
+> DECLARE id int := 1;
+> BEGIN
+>   PERFORM (SELECT max(x.id) FROM (SELECT vc_t.id FROM vc_t) x);
+>   RAISE NOTICE 'subquery ok';
+>   PERFORM (SELECT max(id) FROM (SELECT vc_t.id FROM vc_t) x);
+> END $$
+NOTICE 00000: subquery ok
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+ERROR 42702: column reference "id" is ambiguous
+DETAIL: It could refer to either a PL/pgSQL variable or a table column.
+QUERY: SELECT (SELECT max(id) FROM (SELECT vc_t.id FROM vc_t) x) (at 20)
+CONTEXT: PL/pgSQL function inline_code_block line 6 at PERFORM
+
+> DO $$
+> DECLARE id int := 1;
+> BEGIN
+>   INSERT INTO vc_t (id, val) VALUES (id + 10, 'ins');
+>   RAISE NOTICE 'insert ok';
+>   INSERT INTO vc_t SELECT id + 20, 'sel' FROM vc_t;
+> END $$
+NOTICE 00000: insert ok
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+ERROR 42702: column reference "id" is ambiguous
+DETAIL: It could refer to either a PL/pgSQL variable or a table column.
+QUERY: INSERT INTO vc_t SELECT id + 20, 'sel' FROM vc_t (at 25)
+CONTEXT: PL/pgSQL function inline_code_block line 6 at SQL statement
+
+> SELECT * FROM vc_t ORDER BY id
+id:int4 | val:text
+1 | one
+2 | two
+-- SELECT 2
+
+> CREATE FUNCTION vc_sql(id int) RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM vc_t WHERE vc_t.id = id'
+-- CREATE FUNCTION
+
+> SELECT vc_sql(1)
+vc_sql:int8
+2
+-- SELECT 1
+
+> DROP FUNCTION vc_err(int), vc_qualified(int), vc_var(int), vc_col(int), vc_explicit_error(int), vc_guc(int), vc_sql(int)
+-- DROP FUNCTION
+
+> DROP TABLE vc_t
+-- DROP TABLE
+

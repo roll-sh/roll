@@ -1,0 +1,145 @@
+> CREATE TABLE ev (id int, at date, v text, PRIMARY KEY (id, at)) PARTITION BY RANGE (at)
+-- CREATE TABLE
+
+> CREATE TABLE bad (id int PRIMARY KEY, at date) PARTITION BY RANGE (at)
+ERROR 0A000: unique constraint on partitioned table must include all partitioning columns
+DETAIL: PRIMARY KEY constraint on table "bad" lacks column "at" which is part of the partition key.
+
+> CREATE TABLE bad (id int, at date, UNIQUE (id)) PARTITION BY RANGE (at)
+ERROR 0A000: unique constraint on partitioned table must include all partitioning columns
+DETAIL: UNIQUE constraint on table "bad" lacks column "at" which is part of the partition key.
+
+> CREATE TABLE ev1 PARTITION OF ev FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')
+-- CREATE TABLE
+
+> CREATE TABLE ev2 PARTITION OF ev FOR VALUES FROM ('2024-02-01') TO ('2024-03-01')
+-- CREATE TABLE
+
+> CREATE INDEX ev_v ON ev (v)
+-- CREATE INDEX
+
+> CREATE TABLE ev3 (id int NOT NULL, at date NOT NULL, v text)
+-- CREATE TABLE
+
+> ALTER TABLE ev ATTACH PARTITION ev3 FOR VALUES FROM ('2024-03-01') TO ('2024-04-01')
+-- ALTER TABLE
+
+> SELECT c.relname, c.relkind, i.indisunique, i.indisprimary FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid IN ('ev'::regclass, 'ev1'::regclass, 'ev3'::regclass) ORDER BY 1
+relname:name | relkind:char | indisunique:bool | indisprimary:bool
+ev1_pkey | i | t | t
+ev1_v_idx | i | f | f
+ev3_pkey | i | t | t
+ev3_v_idx | i | f | f
+ev_pkey | I | t | t
+ev_v | I | f | f
+-- SELECT 6
+
+> SELECT inhrelid::regclass, inhparent::regclass FROM pg_inherits WHERE inhparent IN ('ev_pkey'::regclass, 'ev_v'::regclass) ORDER BY 1
+inhrelid:regclass | inhparent:regclass
+ev1_pkey | ev_pkey
+ev2_pkey | ev_pkey
+ev1_v_idx | ev_v
+ev2_v_idx | ev_v
+ev3_pkey | ev_pkey
+ev3_v_idx | ev_v
+-- SELECT 6
+
+> SELECT conname, conrelid::regclass, contype, conislocal, coninhcount, conparentid <> 0 FROM pg_constraint WHERE conrelid IN ('ev'::regclass, 'ev1'::regclass, 'ev3'::regclass) AND contype IN ('p','u') ORDER BY 2, 1
+conname:name | conrelid:regclass | contype:char | conislocal:bool | coninhcount:int2 | ?column?:bool
+ev_pkey | ev | p | t | 0 | f
+ev1_pkey | ev1 | p | f | 1 | t
+ev3_pkey | ev3 | p | f | 1 | t
+-- SELECT 3
+
+> INSERT INTO ev VALUES (1, '2024-01-05', 'a'), (2, '2024-02-05', 'b')
+-- INSERT 0 2
+
+> INSERT INTO ev VALUES (1, '2024-01-05', 'dup')
+ERROR 23505: duplicate key value violates unique constraint "ev1_pkey"
+DETAIL: Key (id, at)=(1, 2024-01-05) already exists.
+OBJECTS: schema=public table=ev1 constraint=ev1_pkey
+
+> INSERT INTO ev VALUES (1, '2024-01-05', 'x') ON CONFLICT (id, at) DO UPDATE SET v = excluded.v RETURNING tableoid::regclass, *
+tableoid:regclass | id:int4 | at:date | v:text
+ev1 | 1 | 2024-01-05 | x
+-- INSERT 0 1
+
+> INSERT INTO ev VALUES (1, '2024-01-05', 'y') ON CONFLICT DO NOTHING
+-- INSERT 0 0
+
+> INSERT INTO ev VALUES (3, '2024-03-05', 'c') ON CONFLICT (id, at) DO NOTHING RETURNING *
+id:int4 | at:date | v:text
+3 | 2024-03-05 | c
+-- INSERT 0 1
+
+> SELECT tableoid::regclass, * FROM ev ORDER BY id
+tableoid:regclass | id:int4 | at:date | v:text
+ev1 | 1 | 2024-01-05 | x
+ev2 | 2 | 2024-02-05 | b
+ev3 | 3 | 2024-03-05 | c
+-- SELECT 3
+
+> DROP INDEX ev1_v_idx
+ERROR 2BP01: cannot drop index ev1_v_idx because index ev_v requires it
+HINT: You can drop index ev_v instead.
+
+> DROP INDEX ev_v
+-- DROP INDEX
+
+> SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'ev1'::regclass ORDER BY 1
+indexrelid:regclass
+ev1_pkey
+-- SELECT 1
+
+> ALTER TABLE ev DETACH PARTITION ev2
+-- ALTER TABLE
+
+> SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'ev2'::regclass ORDER BY 1
+indexrelid:regclass
+ev2_pkey
+-- SELECT 1
+
+> SELECT conname, conislocal, coninhcount FROM pg_constraint WHERE conrelid = 'ev2'::regclass ORDER BY 1
+conname:name | conislocal:bool | coninhcount:int2
+ev2_pkey | t | 0
+ev_at_not_null | t | 0
+ev_id_not_null | t | 0
+-- SELECT 3
+
+> CREATE UNIQUE INDEX bad_u ON ev (v)
+ERROR 0A000: unique constraint on partitioned table must include all partitioning columns
+DETAIL: UNIQUE constraint on table "ev" lacks column "at" which is part of the partition key.
+
+> CREATE INDEX ev_at ON ONLY ev (at)
+-- CREATE INDEX
+
+> SELECT indisvalid FROM pg_index WHERE indexrelid = 'ev_at'::regclass
+indisvalid:bool
+f
+-- SELECT 1
+
+> CREATE INDEX ev1_at ON ev1 (at)
+-- CREATE INDEX
+
+> ALTER INDEX ev_at ATTACH PARTITION ev1_at
+-- ALTER INDEX
+
+> SELECT indisvalid FROM pg_index WHERE indexrelid = 'ev_at'::regclass
+indisvalid:bool
+f
+-- SELECT 1
+
+> CREATE INDEX ev3_at ON ev3 (at)
+-- CREATE INDEX
+
+> ALTER INDEX ev_at ATTACH PARTITION ev3_at
+-- ALTER INDEX
+
+> SELECT indisvalid FROM pg_index WHERE indexrelid = 'ev_at'::regclass
+indisvalid:bool
+t
+-- SELECT 1
+
+> DROP TABLE ev, ev2
+-- DROP TABLE
+

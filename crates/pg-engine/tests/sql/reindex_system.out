@@ -1,0 +1,154 @@
+> create table mk0 ()
+-- CREATE TABLE
+
+> reindex table pg_class
+-- REINDEX
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> reindex index pg_class_oid_index
+-- REINDEX
+
+> create table mk2 ()
+-- CREATE TABLE
+
+> reindex table pg_am
+-- REINDEX
+
+> create table mk3 ()
+-- CREATE TABLE
+
+> reindex table pg_database
+-- REINDEX
+
+> create table mk4 ()
+-- CREATE TABLE
+
+> reindex index pg_proc_oid_index
+-- REINDEX
+
+> create table mk5 ()
+-- CREATE TABLE
+
+> reindex table pg_toast.pg_toast_1255
+-- REINDEX
+
+> create table mk6 ()
+-- CREATE TABLE
+
+> reindex index pg_toast.pg_toast_1255_index
+-- REINDEX
+
+> create table mk7 ()
+-- CREATE TABLE
+
+> reindex system golden_reindex_system
+-- REINDEX
+
+> create table mk8 ()
+-- CREATE TABLE
+
+> reindex system
+-- REINDEX
+
+> create table mk9 ()
+-- CREATE TABLE
+
+> reindex system postgres
+ERROR 0A000: can only reindex the currently open database
+
+> reindex system concurrently
+ERROR 0A000: cannot reindex system catalogs concurrently
+
+> reindex table concurrently pg_class
+ERROR 0A000: cannot reindex system catalogs concurrently
+
+> reindex index concurrently pg_class_oid_index
+ERROR 0A000: cannot reindex system catalogs concurrently
+
+> reindex schema pg_catalog
+-- REINDEX
+
+> reindex schema concurrently pg_catalog
+WARNING 0A000: cannot reindex system catalogs concurrently, skipping all
+-- REINDEX
+
+> reindex database golden_reindex_system
+-- REINDEX
+
+> reindex database
+-- REINDEX
+
+> reindex database postgres
+ERROR 0A000: can only reindex the currently open database
+
+> reindex table pg_toast.pg_toast_2619
+-- REINDEX
+
+> select relname, oid::int8 - lag(oid::int8) over (order by oid) from pg_class where relname like 'mk%' order by oid
+relname:name | ?column?:int8
+mk0 | NULL
+mk1 | 6
+mk2 | 4
+mk3 | 5
+mk4 | 6
+mk5 | 4
+mk6 | 4
+mk7 | 4
+mk8 | 162
+mk9 | 162
+-- SELECT 10
+
+> select relname, relfilenode = oid, relfilenode <> 0 from pg_class where relname in ('pg_am', 'pg_am_oid_index', 'pg_am_name_index', 'pg_class_oid_index', 'pg_proc_oid_index', 'pg_toast_1255_index') order by relname
+relname:name | ?column?:bool | ?column?:bool
+pg_am | t | t
+pg_am_name_index | f | t
+pg_am_oid_index | f | t
+pg_class_oid_index | f | f
+pg_proc_oid_index | f | f
+pg_toast_1255_index | f | f
+-- SELECT 6
+
+> select pg_relation_filenode('pg_class_oid_index') = 2662, pg_relation_filenode('pg_database_oid_index') = 2672
+?column?:bool | ?column?:bool
+f | f
+-- SELECT 1
+
+> select count(*) from pg_class c join pg_namespace n on n.oid = relnamespace where relkind = 'i' and nspname in ('pg_catalog', 'pg_toast') and not relisshared
+count:int8
+135
+-- SELECT 1
+
+> select count(*) from pg_class c join pg_namespace n on n.oid = relnamespace where relkind = 'i' and nspname in ('pg_catalog', 'pg_toast') and relisshared
+count:int8
+28
+-- SELECT 1
+
+> select pg_relation_filenode('pg_class_oid_index') <> 2662, pg_relation_filenode('pg_am_oid_index') = relfilenode, pg_relation_filepath('pg_class_oid_index') ~ '^base/\d+/\d+$', pg_relation_filepath('pg_database_oid_index') ~ '^global/\d+$' from pg_class where relname = 'pg_am_oid_index'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+-- SELECT 1
+
+> select pg_filenode_relation(0, pg_relation_filenode('pg_class_oid_index')), pg_filenode_relation(1664, pg_relation_filenode('pg_database_oid_index')), pg_filenode_relation(0, 2662)
+pg_filenode_relation:regclass | pg_filenode_relation:regclass | pg_filenode_relation:regclass
+pg_class_oid_index | pg_database_oid_index | NULL
+-- SELECT 1
+
+> select count(*) from pg_class where relkind = 'i' and relfilenode <> 0 and relfilenode = oid and relnamespace in ('pg_catalog'::regnamespace, 'pg_toast'::regnamespace)
+count:int8
+0
+-- SELECT 1
+
+> reindex table nope
+ERROR 42P01: relation "nope" does not exist
+
+> reindex index pg_class
+ERROR 42809: "pg_class" is not an index
+
+> reindex table pg_class_oid_index
+ERROR 42809: "pg_class_oid_index" is not a table or materialized view
+
+> drop table mk0, mk1, mk2, mk3, mk4, mk5, mk6, mk7, mk8, mk9
+-- DROP TABLE
+

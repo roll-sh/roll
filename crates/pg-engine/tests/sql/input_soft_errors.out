@@ -1,0 +1,975 @@
+> SELECT pg_input_is_valid('{1,2,3}', 'integer[]')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('{1,2', 'integer[]')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT pg_input_is_valid('{1,zed}', 'integer[]')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('{1,zed}', 'integer[]')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type integer: "zed" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('200', 'box')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('200', 'box')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type box: "200" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('((200,300),(500, xyz))', 'box')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('((200,300),(500, xyz))', 'box')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type box: "((200,300),(500, xyz))" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('true', 'bool')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('asdf', 'bool')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('junk', 'bool')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type boolean: "junk" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('abcd  ', 'char(4)')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('abcde', 'char(4)')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('abcde', 'char(4)')
+message:text | detail:text | hint:text | sql_error_code:text
+value too long for type character(4) | NULL | NULL | 22001
+-- SELECT 1
+
+> SELECT pg_input_is_valid('01010001', 'bit(10)')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('01010001', 'bit(10)')
+message:text | detail:text | hint:text | sql_error_code:text
+bit string length 8 does not match type bit(10) | NULL | NULL | 22026
+-- SELECT 1
+
+> SELECT pg_input_is_valid('01010Z01', 'bit(8)')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('01010Z01', 'bit(8)')
+message:text | detail:text | hint:text | sql_error_code:text
+"Z" is not a valid binary digit | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('x01010Z01', 'bit(32)')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('x01010Z01', 'bit(32)')
+message:text | detail:text | hint:text | sql_error_code:text
+"Z" is not a valid hexadecimal digit | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('01010Z01', 'varbit')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('01010Z01', 'varbit')
+message:text | detail:text | hint:text | sql_error_code:text
+"Z" is not a valid binary digit | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('x01010Z01', 'varbit')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('x01010Z01', 'varbit')
+message:text | detail:text | hint:text | sql_error_code:text
+"Z" is not a valid hexadecimal digit | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('34.5', 'float4')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('xyz', 'float4')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1e400', 'float4')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('1e400', 'float4')
+message:text | detail:text | hint:text | sql_error_code:text
+"1e400" is out of range for type real | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid('34.5', 'float8')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('xyz', 'float8')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1e4000', 'float8')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('1e4000', 'float8')
+message:text | detail:text | hint:text | sql_error_code:text
+"1e4000" is out of range for type double precision | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid('(1', 'circle')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('1,', 'circle')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type circle: "1," | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('(1,2),-1', 'circle')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('(1,2),-1', 'circle')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type circle: "(1,2),-1" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('34', 'int4')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('asdf', 'int4')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1000000000000', 'int4')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('1000000000000', 'int4')
+message:text | detail:text | hint:text | sql_error_code:text
+value "1000000000000" is out of range for type integer | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid('34', 'int2')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('asdf', 'int2')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT pg_input_is_valid('50000', 'int2')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('50000', 'int2')
+message:text | detail:text | hint:text | sql_error_code:text
+value "50000" is out of range for type smallint | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid(' 1 3  5 ', 'int2vector')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('1 asdf', 'int2vector')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type smallint: "asdf" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('50000', 'int2vector')
+message:text | detail:text | hint:text | sql_error_code:text
+value "50000" is out of range for type smallint | NULL | NULL | 22003
+-- SELECT 1
+
+> select pg_input_is_valid('{"a":true}', 'jsonb')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> select pg_input_is_valid('{"a":true', 'jsonb')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('{"a":true', 'jsonb')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type json | The input string ended unexpectedly. | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('[(1,2),(3)]', 'lseg')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('[(1,2),(3)]', 'lseg')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type lseg: "[(1,2),(3)]" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('08:00:2b:01:02:ZZ', 'macaddr')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('08:00:2b:01:02:ZZ', 'macaddr')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type macaddr: "08:00:2b:01:02:ZZ" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('08:00:2b:01:02:', 'macaddr')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('08:00:2b:01:02:', 'macaddr')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type macaddr: "08:00:2b:01:02:" | NULL | NULL | 22P02
+-- SELECT 1
+
+> select pg_input_is_valid('{[1,2], [4,5]}', 'int4multirange')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> select pg_input_is_valid('{[1,2], [4,5]', 'int4multirange')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('{[1,2], [4,5]', 'int4multirange')
+message:text | detail:text | hint:text | sql_error_code:text
+malformed multirange literal: "{[1,2], [4,5]" | Unexpected end of input. | NULL | 22P02
+-- SELECT 1
+
+> select pg_input_is_valid('{[1,2], [4,zed]}', 'int4multirange')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('{[1,2], [4,zed]}', 'int4multirange')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type integer: "zed" | NULL | NULL | 22P02
+-- SELECT 1
+
+> select pg_input_is_valid('{"a":true}', 'json')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> select pg_input_is_valid('{"a":true', 'json')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('{"a":true', 'json')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type json | The input string ended unexpectedly. | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1234', 'oid')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('01XYZ', 'oid')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('01XYZ', 'oid')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type oid: "01XYZ" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('9999999999', 'oid')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('9999999999', 'oid')
+message:text | detail:text | hint:text | sql_error_code:text
+value "9999999999" is out of range for type oid | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid(' 1 2  4 ', 'oidvector')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('01 01XYZ', 'oidvector')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('01 01XYZ', 'oidvector')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type oid: "XYZ" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('01 9999999999', 'oidvector')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('01 9999999999', 'oidvector')
+message:text | detail:text | hint:text | sql_error_code:text
+value "9999999999" is out of range for type oid | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1234', 'cidr')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('1234', 'cidr')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type cidr: "1234" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('192.168.198.200/24', 'cidr')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('192.168.198.200/24', 'cidr')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid cidr value: "192.168.198.200/24" | Value has bits set to right of mask. | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1234', 'inet')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('1234', 'inet')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type inet: "1234" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('[(1,2),(3)]', 'path')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('[(1,2),(3)]', 'path')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type path: "[(1,2),(3)]" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('[(1,2,6),(3,4,6)]', 'path')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('[(1,2,6),(3,4,6)]', 'path')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type path: "[(1,2,6),(3,4,6)]" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1,y', 'point')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('1,y', 'point')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type point: "1,y" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('34', 'int8')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('asdf', 'int8')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT pg_input_is_valid('10000000000000000000', 'int8')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('10000000000000000000', 'int8')
+message:text | detail:text | hint:text | sql_error_code:text
+value "10000000000000000000" is out of range for type bigint | NULL | NULL | 22003
+-- SELECT 1
+
+> select * from pg_input_error_info('{ "a":  "\ud83d\ude04\ud83d\udc36" }', 'jsonb')
+message:text | detail:text | hint:text | sql_error_code:text
+NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT pg_input_is_valid('\x0001', 'money')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('\x0001', 'money')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type money: "\x0001" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('192233720368547758.07', 'money')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('192233720368547758.07', 'money')
+message:text | detail:text | hint:text | sql_error_code:text
+value "192233720368547758.07" is out of range for type money | NULL | NULL | 22003
+-- SELECT 1
+
+> select pg_input_is_valid('(1,4)', 'int4range')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> select pg_input_is_valid('(1,4', 'int4range')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('(1,4', 'int4range')
+message:text | detail:text | hint:text | sql_error_code:text
+malformed range literal: "(1,4" | Unexpected end of input. | NULL | 22P02
+-- SELECT 1
+
+> select pg_input_is_valid('(4,1)', 'int4range')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('(4,1)', 'int4range')
+message:text | detail:text | hint:text | sql_error_code:text
+range lower bound must be less than or equal to range upper bound | NULL | NULL | 22000
+-- SELECT 1
+
+> select pg_input_is_valid('(4,zed)', 'int4range')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('(4,zed)', 'int4range')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type integer: "zed" | NULL | NULL | 22P02
+-- SELECT 1
+
+> select pg_input_is_valid('[1,2147483647]', 'int4range')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('[1,2147483647]', 'int4range')
+message:text | detail:text | hint:text | sql_error_code:text
+integer out of range | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid('{1, 1}', 'line')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('{1, 1}', 'line')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type line: "{1, 1}" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('{0, 0, 0}', 'line')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('{0, 0, 0}', 'line')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid line specification: A and B cannot both be zero | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('{1, 1, a}', 'line')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('{1, 1, a}', 'line')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type line: "{1, 1, a}" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('{1, 1, 1e400}', 'line')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('{1, 1, 1e400}', 'line')
+message:text | detail:text | hint:text | sql_error_code:text
+"1e400" is out of range for type double precision | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid('(1, 1), (1, 1e400)', 'line')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('(1, 1), (1, 1e400)', 'line')
+message:text | detail:text | hint:text | sql_error_code:text
+"1e400" is out of range for type double precision | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid('08:00:2b:01:02:03:04:ZZ', 'macaddr8')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('08:00:2b:01:02:03:04:ZZ', 'macaddr8')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type macaddr8: "08:00:2b:01:02:03:04:ZZ" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('08:00:2b:01:02:03:04:', 'macaddr8')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('08:00:2b:01:02:03:04:', 'macaddr8')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type macaddr8: "08:00:2b:01:02:03:04:" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1234.567', 'numeric(8,4)')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1234.567', 'numeric(7,4)')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('1234.567', 'numeric(7,4)')
+message:text | detail:text | hint:text | sql_error_code:text
+numeric field overflow | A field with precision 7, scale 4 must round to an absolute value less than 10^3. | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid('16AE7F7', 'pg_lsn')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('16AE7F7', 'pg_lsn')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type pg_lsn: "16AE7F7" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('(0)', 'tid')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('(0)', 'tid')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type tid: "(0)" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('(0,-1)', 'tid')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('(0,-1)', 'tid')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type tid: "(0,-1)" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('(2.0,0.8,0.1)', 'polygon')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('(2.0,0.8,0.1)', 'polygon')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type polygon: "(2.0,0.8,0.1)" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('(2.0,xyz)', 'polygon')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('(2.0,xyz)', 'polygon')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type polygon: "(2.0,xyz)" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid(E'\\xDeAdBeE', 'bytea')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info(E'\\xDeAdBeE', 'bytea')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid hexadecimal data: odd number of digits | NULL | NULL | 22023
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info(E'\\xDeAdBeEx', 'bytea')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid hexadecimal digit: "x" | NULL | NULL | 22023
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info(E'foo\\99bar', 'bytea')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type bytea | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('foo', 'tsvector')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid($$''$$, 'tsvector')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info($$''$$, 'tsvector')
+message:text | detail:text | hint:text | sql_error_code:text
+syntax error in tsvector: "''" | NULL | NULL | 42601
+-- SELECT 1
+
+> SELECT pg_input_is_valid('foo', 'tsquery')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('foo!', 'tsquery')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('foo!', 'tsquery')
+message:text | detail:text | hint:text | sql_error_code:text
+syntax error in tsquery: "foo!" | NULL | NULL | 42601
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('a <100000> b', 'tsquery')
+message:text | detail:text | hint:text | sql_error_code:text
+distance in phrase operator must be an integer value between zero and 16384 inclusive | NULL | NULL | 22023
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('ng_catalog.pg_class', 'regclass')
+message:text | detail:text | hint:text | sql_error_code:text
+relation "ng_catalog.pg_class" does not exist | NULL | NULL | 42P01
+-- SELECT 1
+
+> SELECT pg_input_is_valid('ng_catalog."POSIX"', 'regcollation')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('no_such_config', 'regconfig')
+message:text | detail:text | hint:text | sql_error_code:text
+text search configuration "no_such_config" does not exist | NULL | NULL | 42704
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('no_such_dictionary', 'regdictionary')
+message:text | detail:text | hint:text | sql_error_code:text
+text search dictionary "no_such_dictionary" does not exist | NULL | NULL | 42704
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('Nonexistent', 'regnamespace')
+message:text | detail:text | hint:text | sql_error_code:text
+schema "nonexistent" does not exist | NULL | NULL | 3F000
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('ng_catalog.||/', 'regoper')
+message:text | detail:text | hint:text | sql_error_code:text
+operator does not exist: ng_catalog.||/ | NULL | NULL | 42883
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('-', 'regoper')
+message:text | detail:text | hint:text | sql_error_code:text
+more than one operator named - | NULL | NULL | 42725
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('ng_catalog.+(int4,int4)', 'regoperator')
+message:text | detail:text | hint:text | sql_error_code:text
+operator does not exist: ng_catalog.+(int4,int4) | NULL | NULL | 42883
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('-', 'regoperator')
+message:text | detail:text | hint:text | sql_error_code:text
+expected a left parenthesis | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('ng_catalog.now', 'regproc')
+message:text | detail:text | hint:text | sql_error_code:text
+function "ng_catalog.now" does not exist | NULL | NULL | 42883
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('ng_catalog.abs(numeric)', 'regprocedure')
+message:text | detail:text | hint:text | sql_error_code:text
+function "ng_catalog.abs(numeric)" does not exist | NULL | NULL | 42883
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('regress_regrole_test', 'regrole')
+message:text | detail:text | hint:text | sql_error_code:text
+role "regress_regrole_test" does not exist | NULL | NULL | 42704
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('no_such_type', 'regtype')
+message:text | detail:text | hint:text | sql_error_code:text
+type "no_such_type" does not exist | NULL | NULL | 42704
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('incorrect type name syntax', 'regtype')
+ERROR 42601: syntax error at or near "type" (at 11)
+CONTEXT: invalid type name "incorrect type name syntax"
+
+> SELECT * FROM pg_input_error_info('numeric(1,2,3)', 'regtype')
+ERROR 22023: invalid NUMERIC type modifier
+
+> SELECT * FROM pg_input_error_info('way.too.many.names', 'regtype')
+ERROR 42601: improper qualified name (too many dotted names): way.too.many.names
+
+> SELECT pg_input_is_valid('abcd  ', 'varchar(4)')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('abcde', 'varchar(4)')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('abcde', 'varchar(4)')
+message:text | detail:text | hint:text | sql_error_code:text
+value too long for type character varying(4) | NULL | NULL | 22001
+-- SELECT 1
+
+> SELECT pg_input_is_valid('<value>one</value>', 'xml')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('<value>one</', 'xml')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT message FROM pg_input_error_info('<value>one</', 'xml')
+message:text
+invalid XML content
+-- SELECT 1
+
+> SELECT pg_input_is_valid('<?xml version="1.0" standalone="y"?><foo/>', 'xml')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT message FROM pg_input_error_info('<?xml version="1.0" standalone="y"?><foo/>', 'xml')
+message:text
+invalid XML content: invalid XML declaration
+-- SELECT 1
+
+> SELECT pg_input_is_valid('11', 'uuid')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('11', 'uuid')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type uuid: "11" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('42', 'xid')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('asdf', 'xid')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('0xffffffffff', 'xid')
+message:text | detail:text | hint:text | sql_error_code:text
+value "0xffffffffff" is out of range for type xid | NULL | NULL | 22003
+-- SELECT 1
+
+> SELECT pg_input_is_valid('42', 'xid8')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> SELECT pg_input_is_valid('asdf', 'xid8')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('0xffffffffffffffffffff', 'xid8')
+message:text | detail:text | hint:text | sql_error_code:text
+value "0xffffffffffffffffffff" is out of range for type xid8 | NULL | NULL | 22003
+-- SELECT 1
+
+> select pg_input_is_valid('12:13:', 'pg_snapshot')
+pg_input_is_valid:bool
+t
+-- SELECT 1
+
+> select pg_input_is_valid('31:12:', 'pg_snapshot')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('31:12:', 'pg_snapshot')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type pg_snapshot: "31:12:" | NULL | NULL | 22P02
+-- SELECT 1
+
+> select pg_input_is_valid('12:16:14,13', 'pg_snapshot')
+pg_input_is_valid:bool
+f
+-- SELECT 1
+
+> select * from pg_input_error_info('12:16:14,13', 'pg_snapshot')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type pg_snapshot: "12:16:14,13" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid('abcde', 'char(4)'), pg_input_is_valid('abcd ', 'char(4)')
+pg_input_is_valid:bool | pg_input_is_valid:bool
+f | t
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('abcde', 'varchar(4)')
+message:text | detail:text | hint:text | sql_error_code:text
+value too long for type character varying(4) | NULL | NULL | 22001
+-- SELECT 1
+
+> SELECT pg_input_is_valid('1', 'no_such_type')
+ERROR 42704: type "no_such_type" does not exist
+
+> SELECT pg_input_is_valid('1', 'int4 int4')
+ERROR 42601: syntax error at or near "int4" (at 6)
+CONTEXT: invalid type name "int4 int4"
+
+> SELECT pg_input_is_valid('1', 'setof int4')
+ERROR 42601: invalid type name "setof int4"
+
+> SELECT * FROM pg_input_error_info('incorrect type name syntax', 'regtype')
+ERROR 42601: syntax error at or near "type" (at 11)
+CONTEXT: invalid type name "incorrect type name syntax"
+
+> SELECT * FROM pg_input_error_info('no_such_type', 'regtype')
+message:text | detail:text | hint:text | sql_error_code:text
+type "no_such_type" does not exist | NULL | NULL | 42704
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('{1,2', 'integer[]')
+message:text | detail:text | hint:text | sql_error_code:text
+malformed array literal: "{1,2" | Unexpected end of input. | NULL | 22P02
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('{1,x}', 'integer[]')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input syntax for type integer: "x" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('(1', 'int4range')
+message:text | detail:text | hint:text | sql_error_code:text
+malformed range literal: "(1" | Unexpected end of input. | NULL | 22P02
+-- SELECT 1
+
+> CREATE DOMAIN gx_posint AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> SELECT pg_input_is_valid('1', 'gx_posint'), pg_input_is_valid('-1', 'gx_posint'), pg_input_is_valid('x', 'gx_posint')
+pg_input_is_valid:bool | pg_input_is_valid:bool | pg_input_is_valid:bool
+t | f | f
+-- SELECT 1
+
+> SELECT * FROM pg_input_error_info('-1', 'gx_posint')
+message:text | detail:text | hint:text | sql_error_code:text
+value for domain gx_posint violates check constraint "gx_posint_check" | NULL | NULL | 23514
+-- SELECT 1
+
+> CREATE DOMAIN gx_weird AS float8 CHECK (1/VALUE > 0)
+-- CREATE DOMAIN
+
+> SELECT * FROM pg_input_error_info('0', 'gx_weird')
+ERROR 22012: division by zero
+
+> CREATE TYPE gx_rainbow AS ENUM ('red', 'green')
+-- CREATE TYPE
+
+> SELECT * FROM pg_input_error_info('blue', 'gx_rainbow')
+message:text | detail:text | hint:text | sql_error_code:text
+invalid input value for enum gx_rainbow: "blue" | NULL | NULL | 22P02
+-- SELECT 1
+
+> SELECT pg_input_is_valid(NULL, 'int4'), pg_input_is_valid('1', NULL)
+pg_input_is_valid:bool | pg_input_is_valid:bool
+NULL | NULL
+-- SELECT 1
+
+> DROP DOMAIN gx_posint
+-- DROP DOMAIN
+
+> DROP DOMAIN gx_weird
+-- DROP DOMAIN
+
+> DROP TYPE gx_rainbow
+-- DROP TYPE
+

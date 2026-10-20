@@ -1,0 +1,27 @@
+-- PL/pgSQL results: the RETURN cast at function exit, record functions with column definitions.
+create function gx_f1() returns int begin atomic select 1; end;
+create function gx_f2(a int) returns int language sql return a + 1;
+create function gx_f3() returns int language sql as 'select 3';
+select proname, prosrc, prosqlbody is not null, pg_get_functiondef(oid) from pg_proc where proname like 'gx_f_' order by 1;
+create function gx_f4() returns setof record language plpgsql as $$ begin return query select 1, 'a'::text; end $$;
+select * from gx_f4() as t(a int, b int);
+select * from gx_f4() as t(a int, b text, c int);
+create function gx_f5() returns int language plpgsql set work_mem = '1MB' as $$ begin return current_setting('work_mem')::text = '1MB'; end $$;
+select proconfig from pg_proc where proname = 'gx_f5';
+select gx_f5();
+drop function gx_f1, gx_f2, gx_f3, gx_f4, gx_f5;
+create function gx_f4() returns setof record language plpgsql as $$ begin return query select 1, 'a'::text; return query select 2, 'b'::text; end $$;
+select * from gx_f4() as t(a int, b text);
+create function gx_f6() returns setof record language plpgsql as $$ declare r record; begin r := row(5, 'x'::text); return next r; end $$;
+select * from gx_f6() as t(a int, b text);
+create function gx_f7() returns record language plpgsql as $$ begin return row(7, 'y'::text); end $$;
+select * from gx_f7() as t(a int, b text);
+create function gx_f8() returns text language plpgsql as $$ begin return 1.50; end $$;
+select gx_f8();
+create function gx_f9() returns int language plpgsql as $$ begin return '12'; end $$;
+select gx_f9();
+create function gx_f10() returns varchar(2) language plpgsql as $$ begin return 'abc'; end $$;
+select gx_f10();
+create function gx_f11() returns int language plpgsql as $$ begin return 2.6; end $$;
+select gx_f11();
+drop function gx_f4, gx_f6, gx_f7, gx_f8, gx_f9, gx_f10, gx_f11;

@@ -1,0 +1,331 @@
+> DROP ROLE IF EXISTS gsd_r, gsd_s
+NOTICE 00000: role "gsd_r" does not exist, skipping
+NOTICE 00000: role "gsd_s" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE gsd_r
+-- CREATE ROLE
+
+> CREATE ROLE gsd_s
+-- CREATE ROLE
+
+> CREATE SCHEMA gsd_sch AUTHORIZATION gsd_r
+-- CREATE SCHEMA
+
+> SET ROLE gsd_r
+-- SET
+
+> CREATE TABLE gsd_sch.t (a int GENERATED ALWAYS AS IDENTITY, b serial, c text)
+-- CREATE TABLE
+
+> CREATE INDEX ON gsd_sch.t (c)
+-- CREATE INDEX
+
+> CREATE VIEW gsd_sch.v AS SELECT 1 AS x
+-- CREATE VIEW
+
+> CREATE MATERIALIZED VIEW gsd_sch.mv AS SELECT 1 AS x
+-- SELECT 1
+
+> CREATE SEQUENCE gsd_sch.s
+-- CREATE SEQUENCE
+
+> CREATE FUNCTION gsd_sch.f() RETURNS int LANGUAGE sql AS 'select 1'
+-- CREATE FUNCTION
+
+> CREATE TYPE gsd_sch.e AS ENUM ('a')
+-- CREATE TYPE
+
+> CREATE TYPE gsd_sch.c AS (a int)
+-- CREATE TYPE
+
+> CREATE DOMAIN gsd_sch.d AS int
+-- CREATE DOMAIN
+
+> CREATE TYPE gsd_sch.rg AS RANGE (subtype = int4)
+-- CREATE TYPE
+
+> CREATE AGGREGATE gsd_sch.ag (int) (sfunc = int4pl, stype = int)
+-- CREATE AGGREGATE
+
+> CREATE OPERATOR gsd_sch.### (leftarg = int, rightarg = int, function = int4pl)
+-- CREATE OPERATOR
+
+> CREATE TEXT SEARCH CONFIGURATION gsd_sch.cfg (COPY = english)
+-- CREATE TEXT SEARCH CONFIGURATION
+
+> CREATE TEXT SEARCH DICTIONARY gsd_sch.dct (TEMPLATE = simple)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE STATISTICS gsd_sch.st ON a, b FROM gsd_sch.t
+-- CREATE STATISTICS
+
+> CREATE PROCEDURE gsd_sch.p() LANGUAGE sql AS 'select 1'
+-- CREATE PROCEDURE
+
+> GRANT SELECT ON gsd_sch.t TO gsd_s
+-- GRANT
+
+> GRANT SELECT (c) ON gsd_sch.t TO gsd_s
+-- GRANT
+
+> GRANT USAGE ON SCHEMA gsd_sch TO gsd_s
+-- GRANT
+
+> GRANT EXECUTE ON FUNCTION gsd_sch.f() TO gsd_s
+-- GRANT
+
+> ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO gsd_s
+-- ALTER DEFAULT PRIVILEGES
+
+> ALTER DEFAULT PRIVILEGES IN SCHEMA gsd_sch GRANT SELECT ON TABLES TO gsd_s
+-- ALTER DEFAULT PRIVILEGES
+
+> ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO gsd_s
+-- ALTER DEFAULT PRIVILEGES
+
+> RESET ROLE
+-- RESET
+
+> CREATE TABLE gsd_pt (a int)
+-- CREATE TABLE
+
+> CREATE POLICY gsd_pol ON gsd_pt TO gsd_s, gsd_r, PUBLIC USING (true)
+WARNING 22023: ignoring specified roles other than PUBLIC
+HINT: All roles are members of the PUBLIC role.
+-- CREATE POLICY
+
+> GRANT SELECT ON gsd_pt TO gsd_r WITH GRANT OPTION
+-- GRANT
+
+> SET ROLE gsd_r
+-- SET
+
+> GRANT SELECT ON gsd_pt TO gsd_s
+-- GRANT
+
+> RESET ROLE
+-- RESET
+
+> SELECT lo_create(71001)
+lo_create:oid
+71001
+-- SELECT 1
+
+> GRANT SELECT ON LARGE OBJECT 71001 TO gsd_s
+-- GRANT
+
+> ALTER LARGE OBJECT 71001 OWNER TO gsd_r
+-- ALTER LARGE OBJECT
+
+> SELECT dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AS thisdb, dbid = 0 AS shared, classid::regclass,
+>        CASE WHEN classid = 'pg_class'::regclass THEN objid::regclass::text WHEN classid = 'pg_type'::regclass THEN objid::regtype::text
+>             WHEN classid = 'pg_proc'::regclass THEN objid::regprocedure::text ELSE pg_describe_object(classid, objid, objsubid) END AS obj,
+>        objsubid, refclassid::regclass, refobjid::regrole, deptype
+> FROM pg_shdepend WHERE refobjid IN ('gsd_r'::regrole, 'gsd_s'::regrole)
+> ORDER BY refobjid::regrole::text, classid::regclass::text, obj, objsubid, deptype
+thisdb:bool | shared:bool | classid:regclass | obj:text | objsubid:int4 | refclassid:regclass | refobjid:4096 | deptype:char
+t | f | pg_class | gsd_pt | 0 | pg_authid | gsd_r | a
+t | f | pg_class | gsd_sch.mv | 0 | pg_authid | gsd_r | o
+t | f | pg_class | gsd_sch.s | 0 | pg_authid | gsd_r | o
+t | f | pg_class | gsd_sch.t | 0 | pg_authid | gsd_r | o
+t | f | pg_class | gsd_sch.t_a_seq | 0 | pg_authid | gsd_r | o
+t | f | pg_class | gsd_sch.t_b_seq | 0 | pg_authid | gsd_r | o
+t | f | pg_class | gsd_sch.v | 0 | pg_authid | gsd_r | o
+t | f | pg_default_acl | default privileges on new functions belonging to role gsd_r | 0 | pg_authid | gsd_r | o
+t | f | pg_default_acl | default privileges on new relations belonging to role gsd_r | 0 | pg_authid | gsd_r | o
+t | f | pg_default_acl | default privileges on new relations belonging to role gsd_r in schema gsd_sch | 0 | pg_authid | gsd_r | o
+t | f | pg_largeobject | large object 71001 | 0 | pg_authid | gsd_r | o
+t | f | pg_namespace | schema gsd_sch | 0 | pg_authid | gsd_r | o
+t | f | pg_operator | operator gsd_sch.###(integer,integer) | 0 | pg_authid | gsd_r | o
+t | f | pg_proc | gsd_sch.ag(integer) | 0 | pg_authid | gsd_r | o
+t | f | pg_proc | gsd_sch.f() | 0 | pg_authid | gsd_r | o
+t | f | pg_proc | gsd_sch.p() | 0 | pg_authid | gsd_r | o
+t | f | pg_statistic_ext | statistics object gsd_sch.st | 0 | pg_authid | gsd_r | o
+t | f | pg_ts_config | text search configuration gsd_sch.cfg | 0 | pg_authid | gsd_r | o
+t | f | pg_ts_dict | text search dictionary gsd_sch.dct | 0 | pg_authid | gsd_r | o
+t | f | pg_type | gsd_sch.c | 0 | pg_authid | gsd_r | o
+t | f | pg_type | gsd_sch.d | 0 | pg_authid | gsd_r | o
+t | f | pg_type | gsd_sch.e | 0 | pg_authid | gsd_r | o
+t | f | pg_type | gsd_sch.rg | 0 | pg_authid | gsd_r | o
+t | f | pg_class | gsd_pt | 0 | pg_authid | gsd_s | a
+t | f | pg_class | gsd_sch.t | 0 | pg_authid | gsd_s | a
+t | f | pg_class | gsd_sch.t | 3 | pg_authid | gsd_s | a
+t | f | pg_default_acl | default privileges on new functions belonging to role gsd_r | 0 | pg_authid | gsd_s | a
+t | f | pg_default_acl | default privileges on new relations belonging to role gsd_r | 0 | pg_authid | gsd_s | a
+t | f | pg_default_acl | default privileges on new relations belonging to role gsd_r in schema gsd_sch | 0 | pg_authid | gsd_s | a
+t | f | pg_largeobject | large object 71001 | 0 | pg_authid | gsd_s | a
+t | f | pg_namespace | schema gsd_sch | 0 | pg_authid | gsd_s | a
+t | f | pg_proc | gsd_sch.f() | 0 | pg_authid | gsd_s | a
+-- SELECT 32
+
+> SELECT count(*) FROM pg_shdepend WHERE refobjid < 16384
+count:int8
+0
+-- SELECT 1
+
+> DROP ROLE gsd_r
+ERROR 2BP01: role "gsd_r" cannot be dropped because some objects depend on it
+DETAIL: owner of schema gsd_sch
+DETAIL: owner of sequence gsd_sch.t_a_seq
+DETAIL: owner of sequence gsd_sch.t_b_seq
+DETAIL: owner of table gsd_sch.t
+DETAIL: owner of view gsd_sch.v
+DETAIL: owner of materialized view gsd_sch.mv
+DETAIL: owner of sequence gsd_sch.s
+DETAIL: owner of function gsd_sch.f()
+DETAIL: owner of type gsd_sch.e
+DETAIL: owner of type gsd_sch.c
+DETAIL: owner of type gsd_sch.d
+DETAIL: owner of type gsd_sch.rg
+DETAIL: owner of function gsd_sch.ag(integer)
+DETAIL: owner of operator gsd_sch.###(integer,integer)
+DETAIL: owner of text search configuration gsd_sch.cfg
+DETAIL: owner of text search dictionary gsd_sch.dct
+DETAIL: owner of statistics object gsd_sch.st
+DETAIL: owner of function gsd_sch.p()
+DETAIL: owner of default privileges on new relations belonging to role gsd_r
+DETAIL: owner of default privileges on new relations belonging to role gsd_r in schema gsd_sch
+DETAIL: owner of default privileges on new functions belonging to role gsd_r
+DETAIL: privileges for table gsd_pt
+DETAIL: owner of large object 71001
+
+> DROP ROLE gsd_s
+ERROR 2BP01: role "gsd_s" cannot be dropped because some objects depend on it
+DETAIL: privileges for schema gsd_sch
+DETAIL: privileges for table gsd_sch.t
+DETAIL: privileges for column c of table gsd_sch.t
+DETAIL: privileges for function gsd_sch.f()
+DETAIL: privileges for default privileges on new relations belonging to role gsd_r
+DETAIL: privileges for default privileges on new relations belonging to role gsd_r in schema gsd_sch
+DETAIL: privileges for default privileges on new functions belonging to role gsd_r
+DETAIL: privileges for table gsd_pt
+DETAIL: privileges for large object 71001
+
+> SELECT p.oid::regprocedure, proacl FROM pg_proc p WHERE proacl IS NOT NULL AND p.oid < 16384 AND proname ~ '^(lo_|pg_read_file|pg_ls_dir|pg_reload_conf|pg_current_logfile|pg_stat_reset$)' ORDER BY p.oid
+oid:2202 | proacl:1034
+lo_import(text) | {postgres=X/postgres}
+lo_export(oid,text) | {postgres=X/postgres}
+lo_import(text,oid) | {postgres=X/postgres}
+pg_stat_reset() | {postgres=X/postgres}
+pg_reload_conf() | {postgres=X/postgres}
+pg_read_file(text,bigint,bigint) | {postgres=X/postgres}
+pg_ls_dir(text) | {postgres=X/postgres}
+pg_read_file(text,bigint,bigint,boolean) | {postgres=X/postgres}
+pg_ls_dir(text,boolean,boolean) | {postgres=X/postgres}
+pg_current_logfile() | {postgres=X/postgres,pg_monitor=X/postgres}
+pg_current_logfile(text) | {postgres=X/postgres,pg_monitor=X/postgres}
+pg_read_file(text) | {postgres=X/postgres}
+pg_read_file(text,boolean) | {postgres=X/postgres}
+-- SELECT 13
+
+> SELECT has_function_privilege('gsd_s', 'pg_read_file(text)', 'EXECUTE'), has_function_privilege('gsd_s', 'pg_reload_conf()', 'EXECUTE'), has_function_privilege('gsd_s', 'now()', 'EXECUTE')
+has_function_privilege:bool | has_function_privilege:bool | has_function_privilege:bool
+f | f | t
+-- SELECT 1
+
+> SELECT has_function_privilege('pg_monitor', 'pg_current_logfile()', 'EXECUTE'), has_function_privilege('pg_monitor', 'pg_reload_conf()', 'EXECUTE')
+has_function_privilege:bool | has_function_privilege:bool
+t | f
+-- SELECT 1
+
+> SET ROLE gsd_s
+-- SET
+
+> SELECT pg_reload_conf()
+ERROR 42501: permission denied for function pg_reload_conf
+
+> SELECT * FROM pg_ls_dir('.')
+ERROR 42501: permission denied for function pg_ls_dir
+
+> RESET ROLE
+-- RESET
+
+> GRANT EXECUTE ON FUNCTION pg_reload_conf() TO gsd_s
+-- GRANT
+
+> GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text, bigint, bigint) TO gsd_s
+-- GRANT
+
+> GRANT EXECUTE ON FUNCTION pg_read_file(int) TO gsd_s
+ERROR 42883: function pg_read_file(integer) does not exist
+
+> REVOKE EXECUTE ON FUNCTION abs(int) FROM PUBLIC
+-- REVOKE
+
+> SELECT p.oid::regprocedure, proacl FROM pg_proc p WHERE p.oid IN ('pg_reload_conf()'::regprocedure, 'pg_read_file(text,bigint,bigint)'::regprocedure, 'abs(int)'::regprocedure) ORDER BY p.oid
+oid:2202 | proacl:1034
+abs(integer) | {postgres=X/postgres}
+pg_reload_conf() | {postgres=X/postgres,gsd_s=X/postgres}
+pg_read_file(text,bigint,bigint) | {postgres=X/postgres,gsd_s=X/postgres}
+-- SELECT 3
+
+> SELECT has_function_privilege('gsd_s', 'pg_reload_conf()', 'EXECUTE'), has_function_privilege('gsd_s', 'abs(int)', 'EXECUTE'), has_function_privilege('gsd_s', 'abs(bigint)', 'EXECUTE')
+has_function_privilege:bool | has_function_privilege:bool | has_function_privilege:bool
+t | f | t
+-- SELECT 1
+
+> SET ROLE gsd_s
+-- SET
+
+> SELECT abs(-1)
+ERROR 42501: permission denied for function abs
+
+> SELECT abs(-1::bigint)
+abs:int8
+1
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> DROP ROLE gsd_s
+ERROR 2BP01: role "gsd_s" cannot be dropped because some objects depend on it
+DETAIL: privileges for function pg_reload_conf()
+DETAIL: privileges for function pg_read_file(text,bigint,bigint)
+DETAIL: privileges for schema gsd_sch
+DETAIL: privileges for table gsd_sch.t
+DETAIL: privileges for column c of table gsd_sch.t
+DETAIL: privileges for function gsd_sch.f()
+DETAIL: privileges for default privileges on new relations belonging to role gsd_r
+DETAIL: privileges for default privileges on new relations belonging to role gsd_r in schema gsd_sch
+DETAIL: privileges for default privileges on new functions belonging to role gsd_r
+DETAIL: privileges for table gsd_pt
+DETAIL: privileges for large object 71001
+
+> GRANT EXECUTE ON FUNCTION abs(int) TO PUBLIC
+-- GRANT
+
+> REVOKE EXECUTE ON FUNCTION pg_reload_conf() FROM gsd_s
+-- REVOKE
+
+> REVOKE EXECUTE ON FUNCTION pg_read_file(text, bigint, bigint) FROM gsd_s
+-- REVOKE
+
+> SELECT p.oid::regprocedure, proacl FROM pg_proc p WHERE p.oid IN ('pg_reload_conf()'::regprocedure, 'pg_read_file(text,bigint,bigint)'::regprocedure, 'abs(int)'::regprocedure) ORDER BY p.oid
+oid:2202 | proacl:1034
+abs(integer) | {postgres=X/postgres,=X/postgres}
+pg_reload_conf() | {postgres=X/postgres}
+pg_read_file(text,bigint,bigint) | {postgres=X/postgres}
+-- SELECT 3
+
+> SELECT lo_unlink(71001)
+lo_unlink:int4
+1
+-- SELECT 1
+
+> DROP POLICY gsd_pol ON gsd_pt
+-- DROP POLICY
+
+> DROP TABLE gsd_pt
+-- DROP TABLE
+
+> DROP OWNED BY gsd_r
+-- DROP OWNED
+
+> DROP OWNED BY gsd_s
+-- DROP OWNED
+
+> DROP ROLE gsd_r, gsd_s
+-- DROP ROLE
+

@@ -1,0 +1,249 @@
+> create role fdwd_user
+-- CREATE ROLE
+
+> create foreign data wrapper fdwd_dummy
+-- CREATE FOREIGN DATA WRAPPER
+
+> comment on foreign data wrapper fdwd_dummy is 'useless'
+-- COMMENT
+
+> create foreign data wrapper fdwd_pg validator postgresql_fdw_validator
+-- CREATE FOREIGN DATA WRAPPER
+
+> create foreign data wrapper fdwd_bad validator nope
+ERROR 42883: function nope(text[], oid) does not exist
+
+> create foreign data wrapper fdwd_dummy
+ERROR 42710: foreign-data wrapper "fdwd_dummy" already exists
+
+> create foreign data wrapper fdwd_o options (testing '1', testing '2')
+ERROR 42710: option "testing" provided more than once
+
+> create foreign data wrapper fdwd_o options (testing '1', another '2')
+-- CREATE FOREIGN DATA WRAPPER
+
+> select fdwname, fdwhandler::regproc, fdwvalidator::regproc, fdwoptions from pg_foreign_data_wrapper where fdwname like 'fdwd%' order by 1
+fdwname:name | fdwhandler:regproc | fdwvalidator:regproc | fdwoptions:text[]
+fdwd_dummy | - | - | NULL
+fdwd_o | - | - | {testing=1,another=2}
+fdwd_pg | - | postgresql_fdw_validator | NULL
+-- SELECT 3
+
+> alter foreign data wrapper fdwd_o options (set c '4')
+ERROR 42704: option "c" not found
+
+> alter foreign data wrapper fdwd_o options (drop c)
+ERROR 42704: option "c" not found
+
+> alter foreign data wrapper fdwd_o options (add x '1', drop x)
+-- ALTER FOREIGN DATA WRAPPER
+
+> alter foreign data wrapper fdwd_o options (drop testing, set another '3', add c '4')
+-- ALTER FOREIGN DATA WRAPPER
+
+> alter foreign data wrapper fdwd_o options (c '5')
+ERROR 42710: option "c" provided more than once
+
+> alter foreign data wrapper fdwd_o no validator
+-- ALTER FOREIGN DATA WRAPPER
+
+> alter foreign data wrapper fdwd_o validator postgresql_fdw_validator
+WARNING 01000: changing the foreign-data wrapper validator can cause the options for dependent objects to become invalid
+-- ALTER FOREIGN DATA WRAPPER
+
+> select fdwname, fdwvalidator::regproc, fdwoptions from pg_foreign_data_wrapper where fdwname = 'fdwd_o'
+fdwname:name | fdwvalidator:regproc | fdwoptions:text[]
+fdwd_o | postgresql_fdw_validator | {another=3,c=4}
+-- SELECT 1
+
+> alter foreign data wrapper fdwd_o rename to fdwd_dummy
+ERROR 42710: foreign-data wrapper "fdwd_dummy" already exists
+
+> alter foreign data wrapper fdwd_o rename to fdwd_o2
+-- ALTER FOREIGN DATA WRAPPER
+
+> alter foreign data wrapper fdwd_o2 owner to fdwd_user
+ERROR 42501: permission denied to change owner of foreign-data wrapper "fdwd_o2"
+HINT: The owner of a foreign-data wrapper must be a superuser.
+
+> create server fdwd_s1 foreign data wrapper fdwd_dummy
+-- CREATE SERVER
+
+> create server fdwd_s1 foreign data wrapper fdwd_dummy
+ERROR 42710: server "fdwd_s1" already exists
+
+> create server if not exists fdwd_s1 foreign data wrapper fdwd_dummy
+NOTICE 42710: server "fdwd_s1" already exists, skipping
+-- CREATE SERVER
+
+> create server fdwd_s2 type 'oracle' version '1.0' foreign data wrapper fdwd_pg options (host 'a', dbname 'b')
+-- CREATE SERVER
+
+> create server fdwd_s3 foreign data wrapper fdwd_pg options (foo '1')
+ERROR 42601: invalid option "foo"
+
+> create server fdwd_s3 foreign data wrapper fdwd_pg options (hostx 'a')
+ERROR 42601: invalid option "hostx"
+HINT: Perhaps you meant the option "host".
+
+> create server fdwd_s3 foreign data wrapper fdwd_pg options (user 'a')
+ERROR 42601: invalid option "user"
+
+> create server fdwd_s3 foreign data wrapper nope
+ERROR 42704: foreign-data wrapper "nope" does not exist
+
+> select srvname, srvtype, srvversion, srvoptions from pg_foreign_server where srvname like 'fdwd%' order by 1
+srvname:name | srvtype:text | srvversion:text | srvoptions:text[]
+fdwd_s1 | NULL | NULL | NULL
+fdwd_s2 | oracle | 1.0 | {host=a,dbname=b}
+-- SELECT 2
+
+> alter server fdwd_s2 version '2.0' options (set host 'c', add port '5432')
+-- ALTER SERVER
+
+> alter server fdwd_s2 version null
+-- ALTER SERVER
+
+> select srvname, srvtype, srvversion, srvoptions from pg_foreign_server where srvname = 'fdwd_s2'
+srvname:name | srvtype:text | srvversion:text | srvoptions:text[]
+fdwd_s2 | oracle | NULL | {host=c,dbname=b,port=5432}
+-- SELECT 1
+
+> create user mapping for current_user server fdwd_s2 options (user 'u', password 'p')
+-- CREATE USER MAPPING
+
+> create user mapping for current_user server fdwd_s2
+ERROR 42710: user mapping for "postgres" already exists for server "fdwd_s2"
+
+> create user mapping if not exists for current_user server fdwd_s2
+NOTICE 42710: user mapping for "postgres" already exists for server "fdwd_s2", skipping
+-- CREATE USER MAPPING
+
+> create user mapping for public server fdwd_s2 options (dbname 'x')
+ERROR 42601: invalid option "dbname"
+
+> create user mapping for fdwd_user server fdwd_s1
+-- CREATE USER MAPPING
+
+> create user mapping for nope server fdwd_s1
+ERROR 42704: role "nope" does not exist
+
+> alter user mapping for public server fdwd_s2 options (drop dbname)
+ERROR 42704: user mapping for "public" does not exist for server "fdwd_s2"
+
+> alter user mapping for fdwd_user server fdwd_s2 options (add user 'a')
+ERROR 42704: user mapping for "fdwd_user" does not exist for server "fdwd_s2"
+
+> select srvname, usename, umoptions from pg_user_mappings where srvname like 'fdwd%' order by 1, 2
+srvname:name | usename:name | umoptions:text[]
+fdwd_s1 | fdwd_user | NULL
+fdwd_s2 | postgres | {user=u,password=p}
+-- SELECT 2
+
+> select pg_describe_object(classid, objid, objsubid) as obj, pg_describe_object(refclassid, refobjid, refobjsubid) as ref, deptype from pg_depend where refclassid in ('pg_foreign_data_wrapper'::regclass, 'pg_foreign_server'::regclass) order by 1, 2
+obj:text | ref:text | deptype:char
+server fdwd_s1 | foreign-data wrapper fdwd_dummy | n
+server fdwd_s2 | foreign-data wrapper fdwd_pg | n
+user mapping for fdwd_user on server fdwd_s1 | server fdwd_s1 | n
+user mapping for postgres on server fdwd_s2 | server fdwd_s2 | n
+-- SELECT 4
+
+> select (pg_identify_object(classid, objid, objsubid)).*, (pg_identify_object_as_address(classid, objid, objsubid)).* from pg_depend where classid in ('pg_foreign_server'::regclass, 'pg_user_mapping'::regclass) order by 4
+type:text | schema:text | name:text | identity:text | type:text | object_names:text[] | object_args:text[]
+server | NULL | fdwd_s1 | fdwd_s1 | server | {fdwd_s1} | {}
+server | NULL | fdwd_s2 | fdwd_s2 | server | {fdwd_s2} | {}
+user mapping | NULL | NULL | fdwd_user on server fdwd_s1 | user mapping | {fdwd_user} | {fdwd_s1}
+user mapping | NULL | NULL | postgres on server fdwd_s2 | user mapping | {postgres} | {fdwd_s2}
+-- SELECT 4
+
+> grant usage on foreign data wrapper fdwd_dummy to fdwd_user
+-- GRANT
+
+> grant usage on foreign server fdwd_s1 to fdwd_user with grant option
+-- GRANT
+
+> select fdwname, fdwacl from pg_foreign_data_wrapper where fdwname = 'fdwd_dummy'
+fdwname:name | fdwacl:1034
+fdwd_dummy | {postgres=U/postgres,fdwd_user=U/postgres}
+-- SELECT 1
+
+> select srvname, srvacl from pg_foreign_server where srvname = 'fdwd_s1'
+srvname:name | srvacl:1034
+fdwd_s1 | {postgres=U/postgres,fdwd_user=U*/postgres}
+-- SELECT 1
+
+> select has_foreign_data_wrapper_privilege('fdwd_user', 'fdwd_dummy', 'usage'), has_server_privilege('fdwd_user', 'fdwd_s1', 'usage'), has_server_privilege('fdwd_user', 'fdwd_s2', 'usage')
+has_foreign_data_wrapper_privilege:bool | has_server_privilege:bool | has_server_privilege:bool
+t | t | f
+-- SELECT 1
+
+> select has_server_privilege('nope', 'usage')
+ERROR 42704: server "nope" does not exist
+
+> drop role fdwd_user
+ERROR 2BP01: role "fdwd_user" cannot be dropped because some objects depend on it
+DETAIL: privileges for foreign-data wrapper fdwd_dummy
+DETAIL: privileges for server fdwd_s1
+DETAIL: owner of user mapping for fdwd_user on server fdwd_s1
+
+> alter server fdwd_s1 rename to fdwd_s2
+ERROR 42710: server "fdwd_s2" already exists
+
+> alter server fdwd_s1 rename to fdwd_s9
+-- ALTER SERVER
+
+> drop server fdwd_s9
+ERROR 2BP01: cannot drop server fdwd_s9 because other objects depend on it
+DETAIL: user mapping for fdwd_user on server fdwd_s9 depends on server fdwd_s9
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop server if exists fdwd_nope
+NOTICE 00000: server "fdwd_nope" does not exist, skipping
+-- DROP SERVER
+
+> drop server fdwd_nope
+ERROR 42704: server "fdwd_nope" does not exist
+
+> drop foreign data wrapper if exists fdwd_nope
+NOTICE 00000: foreign-data wrapper "fdwd_nope" does not exist, skipping
+-- DROP FOREIGN DATA WRAPPER
+
+> drop foreign data wrapper fdwd_pg
+ERROR 2BP01: cannot drop foreign-data wrapper fdwd_pg because other objects depend on it
+DETAIL: server fdwd_s2 depends on foreign-data wrapper fdwd_pg
+DETAIL: user mapping for postgres on server fdwd_s2 depends on server fdwd_s2
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop user mapping if exists for nope server fdwd_s2
+NOTICE 00000: role "nope" does not exist, skipping
+-- DROP USER MAPPING
+
+> drop user mapping if exists for current_user server fdwd_nope
+NOTICE 00000: server "fdwd_nope" does not exist, skipping
+-- DROP USER MAPPING
+
+> drop user mapping for public server fdwd_s9
+ERROR 42704: user mapping for "public" does not exist for server "fdwd_s9"
+
+> drop user mapping if exists for public server fdwd_s9
+NOTICE 00000: user mapping for "public" does not exist for server "fdwd_s9", skipping
+-- DROP USER MAPPING
+
+> drop foreign data wrapper fdwd_pg cascade
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to server fdwd_s2
+DETAIL: drop cascades to user mapping for postgres on server fdwd_s2
+-- DROP FOREIGN DATA WRAPPER
+
+> drop foreign data wrapper fdwd_dummy cascade
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to server fdwd_s9
+DETAIL: drop cascades to user mapping for fdwd_user on server fdwd_s9
+-- DROP FOREIGN DATA WRAPPER
+
+> drop foreign data wrapper fdwd_o2
+-- DROP FOREIGN DATA WRAPPER
+
+> drop role fdwd_user
+-- DROP ROLE
+

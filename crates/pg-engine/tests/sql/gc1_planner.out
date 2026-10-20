@@ -1,0 +1,326 @@
+> CREATE TABLE gc1_pred (a int NOT NULL, b int, c int NOT NULL)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_pred t WHERE t.a IS NOT NULL OR t.b = 1
+QUERY PLAN:text
+Seq Scan on gc1_pred t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_pred t WHERE t.a IS NULL OR t.c IS NULL
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_pred t1 LEFT JOIN gc1_pred t2 ON t1.a IS NOT NULL
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on gc1_pred t1
+  ->  Materialize
+        ->  Seq Scan on gc1_pred t2
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_pred t1 LEFT JOIN gc1_pred t2 ON (t1.a IS NULL OR t1.c IS NULL)
+QUERY PLAN:text
+Nested Loop Left Join
+  Join Filter: false
+  ->  Seq Scan on gc1_pred t1
+  ->  Result
+        One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_pred t1 FULL JOIN gc1_pred t2 ON t1.a = t2.a LEFT JOIN gc1_pred t3 ON t2.a IS NOT NULL
+QUERY PLAN:text
+Nested Loop Left Join
+  Join Filter: (t2.a IS NOT NULL)
+  ->  Merge Full Join
+        Merge Cond: (t1.a = t2.a)
+        ->  Sort
+              Sort Key: t1.a
+              ->  Seq Scan on gc1_pred t1
+        ->  Sort
+              Sort Key: t2.a
+              ->  Seq Scan on gc1_pred t2
+  ->  Materialize
+        ->  Seq Scan on gc1_pred t3
+-- EXPLAIN
+
+> CREATE TABLE gc1_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO gc1_i8 VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123), (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> SELECT t1.q2, count(t2.*) FROM gc1_i8 t1 LEFT JOIN gc1_i8 t2 ON (t1.q2 = t2.q1) GROUP BY t1.q2 ORDER BY 1
+q2:int8 | count:int8
+-4567890123456789 | 0
+123 | 2
+456 | 0
+4567890123456789 | 6
+-- SELECT 4
+
+> SELECT t1.q1, t2 FROM gc1_i8 t1 LEFT JOIN gc1_i8 t2 ON t1.q1 = t2.q2 AND t2.q1 = 123 ORDER BY 1, 2
+q1:int8 | t2:user
+123 | NULL
+123 | NULL
+4567890123456789 | (123,4567890123456789)
+4567890123456789 | (123,4567890123456789)
+4567890123456789 | (123,4567890123456789)
+-- SELECT 5
+
+> SELECT t2.* IS NULL AS nulled FROM gc1_i8 t1 LEFT JOIN gc1_i8 t2 ON false LIMIT 1
+nulled:bool
+t
+-- SELECT 1
+
+> CREATE FUNCTION gc1_f(int) RETURNS int AS $$ BEGIN RETURN $1; END $$ LANGUAGE plpgsql STABLE
+-- CREATE FUNCTION
+
+> CREATE FUNCTION gc1_g(int) RETURNS int AS $$ SELECT $1 + 1 $$ LANGUAGE sql
+-- CREATE FUNCTION
+
+> CREATE FUNCTION gc1_h(int) RETURNS int AS $$ SELECT a FROM (VALUES ($1)) v(a) WHERE a > 0 $$ LANGUAGE sql
+-- CREATE FUNCTION
+
+> CREATE TABLE gc1_t (f1 int)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_t WHERE f1 = gc1_f(1)
+QUERY PLAN:text
+Seq Scan on gc1_t
+  Filter: (f1 = gc1_f(1))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_t WHERE f1 = gc1_g(1)
+QUERY PLAN:text
+Seq Scan on gc1_t
+  Filter: (f1 = 2)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_t WHERE f1 = gc1_g(f1)
+QUERY PLAN:text
+Seq Scan on gc1_t
+  Filter: (f1 = (f1 + 1))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_t WHERE f1 = gc1_h(f1)
+QUERY PLAN:text
+Seq Scan on gc1_t
+  Filter: (f1 = gc1_h(f1))
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT gc1_f(f1) FROM gc1_t
+QUERY PLAN:text
+Seq Scan on public.gc1_t
+  Output: gc1_f(f1)
+-- EXPLAIN
+
+> SELECT * FROM (gc1_i8 JOIN gc1_t ON q1 = f1) AS x WHERE gc1_i8.q1 = 1
+ERROR 42P01: invalid reference to FROM-clause entry for table "gc1_i8" (at 57)
+DETAIL: There is an entry for table "gc1_i8", but it cannot be referenced from this part of the query.
+
+> SELECT * FROM gc1_i8 a1 JOIN gc1_i8 a2 USING (q1) AS a1
+ERROR 42712: table name "a1" specified more than once
+
+> SELECT row_to_json(x.*) FROM gc1_i8 JOIN gc1_i8 b USING (q1, q2) AS x ORDER BY 1 LIMIT 1
+ERROR 42883: could not identify an ordering operator for type json (at 80)
+HINT: Use an explicit ordering operator or modify the query.
+
+> SELECT q3 FROM gc1_i8
+ERROR 42703: column "q3" does not exist (at 8)
+HINT: Perhaps you meant to reference the column "gc1_i8.q1" or the column "gc1_i8.q2".
+
+> SELECT t1.q3 FROM gc1_i8 t1 JOIN gc1_i8 t2 USING (q1)
+ERROR 42703: column t1.q3 does not exist (at 8)
+HINT: Perhaps you meant to reference the column "t1.q1" or the column "t1.q2".
+
+> SELECT qq1 FROM gc1_i8 t1 JOIN gc1_i8 t2 ON t1.q1 = t2.q2
+ERROR 42703: column "qq1" does not exist (at 8)
+HINT: Perhaps you meant to reference the column "t1.q1" or the column "t2.q1".
+
+> SELECT ctid FROM gc1_i8 t1 JOIN gc1_i8 t2 ON t1.q1 = t2.q2
+ERROR 42703: column "ctid" does not exist (at 8)
+DETAIL: There are columns named "ctid", but they are in tables that cannot be referenced from this part of the query.
+HINT: Try using a table-qualified name.
+
+> SELECT q1, g FROM gc1_i8 a, (SELECT q1 AS g) ss
+ERROR 42703: column "q1" does not exist (at 37)
+DETAIL: There is a column named "q1" in table "a", but it cannot be referenced from this part of the query.
+HINT: To reference that column, you must mark this subquery with LATERAL.
+
+> SELECT q1, g FROM gc1_i8 a, (SELECT a.q1 AS g) ss
+ERROR 42P01: invalid reference to FROM-clause entry for table "a" (at 37)
+DETAIL: There is an entry for table "a", but it cannot be referenced from this part of the query.
+HINT: To reference that table, you must mark this subquery with LATERAL.
+
+> SELECT q1, g FROM gc1_i8 a RIGHT JOIN LATERAL generate_series(0, a.q1::int) g ON true
+ERROR 42P10: invalid reference to FROM-clause entry for table "a" (at 66)
+DETAIL: The combining JOIN type must be INNER or LEFT for a LATERAL reference.
+
+> SELECT 1 FROM gc1_i8 a, LATERAL (SELECT max(a.q1) FROM gc1_t b) ss
+ERROR 42803: aggregate functions are not allowed in FROM clause of their own query level (at 41)
+
+> SELECT * FROM gc1_i8 JOIN gc1_t ON q1 = f1 AS foo FOR UPDATE OF foo
+ERROR 42601: syntax error at or near "AS" (at 44)
+
+> UPDATE gc1_t SET f1 = 1 FROM (SELECT * FROM gc1_i8 WHERE q1 = f1) ss
+ERROR 42703: column "f1" does not exist (at 63)
+DETAIL: There is a column named "f1" in table "gc1_t", but it cannot be referenced from this part of the query.
+
+> UPDATE gc1_t SET f1 = 1 FROM LATERAL (SELECT * FROM gc1_i8 WHERE q1 = f1) ss
+ERROR 42P10: invalid reference to FROM-clause entry for table "gc1_t" (at 71)
+HINT: There is an entry for table "gc1_t", but it cannot be referenced from this part of the query.
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_t a WHERE NOT EXISTS (SELECT 1 FROM gc1_t b LEFT JOIN gc1_t c ON b.f1 = c.f1 WHERE a.f1 = b.f1)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (a.f1 = b.f1)
+  ->  Seq Scan on gc1_t a
+  ->  Hash
+        ->  Merge Left Join
+              Merge Cond: (b.f1 = c.f1)
+              ->  Sort
+                    Sort Key: b.f1
+                    ->  Seq Scan on gc1_t b
+              ->  Sort
+                    Sort Key: c.f1
+                    ->  Seq Scan on gc1_t c
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_t a WHERE EXISTS (SELECT 1 FROM gc1_t b WHERE a.f1 = b.f1 GROUP BY b.f1)
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (a.f1 = b.f1)
+  ->  Seq Scan on gc1_t a
+  ->  Hash
+        ->  HashAggregate
+              Group Key: b.f1
+              ->  Seq Scan on gc1_t b
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_i8 a LEFT JOIN LATERAL (SELECT *, a.q2 AS x FROM gc1_i8 b) ss ON a.q2 = ss.q1
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on gc1_i8 a
+  ->  Seq Scan on gc1_i8 b
+        Filter: (a.q2 = q1)
+-- EXPLAIN
+
+> CREATE TABLE gc1_par AS SELECT g AS id, g % 20 AS grp, 'x' || g AS t FROM generate_series(1, 20000) g
+-- SELECT 20000
+
+> ANALYZE gc1_par
+-- ANALYZE
+
+> SET parallel_setup_cost = 0
+-- SET
+
+> SET parallel_tuple_cost = 0
+-- SET
+
+> SET min_parallel_table_scan_size = 0
+-- SET
+
+> SET max_parallel_workers_per_gather = 4
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM gc1_par WHERE grp = 3
+QUERY PLAN:text
+Finalize Aggregate
+  ->  Gather
+        Workers Planned: 4
+        ->  Partial Aggregate
+              ->  Parallel Seq Scan on gc1_par
+                    Filter: (grp = 3)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT grp, count(*) FROM gc1_par GROUP BY grp
+QUERY PLAN:text
+Finalize GroupAggregate
+  Group Key: grp
+  ->  Gather Merge
+        Workers Planned: 4
+        ->  Sort
+              Sort Key: grp
+              ->  Partial HashAggregate
+                    Group Key: grp
+                    ->  Parallel Seq Scan on gc1_par
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gc1_par WHERE grp = 3 ORDER BY id
+QUERY PLAN:text
+Gather Merge
+  Workers Planned: 4
+  ->  Sort
+        Sort Key: id
+        ->  Parallel Seq Scan on gc1_par
+              Filter: (grp = 3)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM gc1_par a JOIN gc1_par b USING (id)
+QUERY PLAN:text
+Finalize Aggregate
+  ->  Gather
+        Workers Planned: 4
+        ->  Partial Aggregate
+              ->  Parallel Hash Join
+                    Hash Cond: (a.id = b.id)
+                    ->  Parallel Seq Scan on gc1_par a
+                    ->  Parallel Hash
+                          ->  Parallel Seq Scan on gc1_par b
+-- EXPLAIN
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT grp, count(*) FROM gc1_par GROUP BY grp
+QUERY PLAN:text
+Finalize GroupAggregate
+  Group Key: grp
+  ->  Gather Merge
+        Workers Planned: 4
+        ->  Partial GroupAggregate
+              Group Key: grp
+              ->  Sort
+                    Sort Key: grp
+                    ->  Parallel Seq Scan on gc1_par
+-- EXPLAIN
+
+> RESET enable_hashagg
+-- RESET
+
+> SELECT count(*), sum(id) FROM gc1_par WHERE grp = 3
+count:int8 | sum:int8
+1000 | 9993000
+-- SELECT 1
+
+> RESET parallel_setup_cost
+-- RESET
+
+> RESET parallel_tuple_cost
+-- RESET
+
+> RESET min_parallel_table_scan_size
+-- RESET
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM gc1_par
+QUERY PLAN:text
+Aggregate
+  ->  Seq Scan on gc1_par
+-- EXPLAIN
+
+> DROP TABLE gc1_par, gc1_t, gc1_i8, gc1_pred
+-- DROP TABLE
+
+> DROP FUNCTION gc1_f(int)
+-- DROP FUNCTION
+
+> DROP FUNCTION gc1_g(int)
+-- DROP FUNCTION
+
+> DROP FUNCTION gc1_h(int)
+-- DROP FUNCTION
+

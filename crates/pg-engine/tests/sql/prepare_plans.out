@@ -1,0 +1,313 @@
+> create table gx_pp_pt (a int primary key, b text)
+-- CREATE TABLE
+
+> insert into gx_pp_pt select g, 'v' || g from generate_series(1, 20) g
+-- INSERT 0 20
+
+> prepare gx_pp_q(int) as select b from gx_pp_pt where a = $1
+-- PREPARE
+
+> explain (costs off) execute gx_pp_q(1)
+QUERY PLAN:text
+Index Scan using gx_pp_pt_pkey on gx_pp_pt
+  Index Cond: (a = 1)
+-- EXPLAIN
+
+> execute gx_pp_q(1)
+b:text
+v1
+-- SELECT 1
+
+> execute gx_pp_q(2)
+b:text
+v2
+-- SELECT 1
+
+> execute gx_pp_q(3)
+b:text
+v3
+-- SELECT 1
+
+> execute gx_pp_q(4)
+b:text
+v4
+-- SELECT 1
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'gx_pp_q'
+generic_plans:int8 | custom_plans:int8
+0 | 5
+-- SELECT 1
+
+> explain (costs off) execute gx_pp_q(5)
+QUERY PLAN:text
+Index Scan using gx_pp_pt_pkey on gx_pp_pt
+  Index Cond: (a = $1)
+-- EXPLAIN
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'gx_pp_q'
+generic_plans:int8 | custom_plans:int8
+1 | 5
+-- SELECT 1
+
+> execute gx_pp_q(6)
+b:text
+v6
+-- SELECT 1
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'gx_pp_q'
+generic_plans:int8 | custom_plans:int8
+2 | 5
+-- SELECT 1
+
+> set plan_cache_mode = force_custom_plan
+-- SET
+
+> explain (costs off) execute gx_pp_q(7)
+QUERY PLAN:text
+Index Scan using gx_pp_pt_pkey on gx_pp_pt
+  Index Cond: (a = 7)
+-- EXPLAIN
+
+> set plan_cache_mode = force_generic_plan
+-- SET
+
+> prepare gx_pp_q2(int) as select b from gx_pp_pt where a = $1
+-- PREPARE
+
+> explain (costs off) execute gx_pp_q2(7)
+QUERY PLAN:text
+Index Scan using gx_pp_pt_pkey on gx_pp_pt
+  Index Cond: (a = $1)
+-- EXPLAIN
+
+> execute gx_pp_q2(8)
+b:text
+v8
+-- SELECT 1
+
+> select name, generic_plans, custom_plans from pg_prepared_statements where name like 'gxo%' order by 1
+name:text | generic_plans:int8 | custom_plans:int8
+-- SELECT 0
+
+> reset plan_cache_mode
+-- RESET
+
+> prepare gx_pp_x(text) as select xpath($1, '<a><b>1</b></a>'::xml)
+-- PREPARE
+
+> execute gx_pp_x('//b/text()')
+xpath:143
+{1}
+-- SELECT 1
+
+> execute gx_pp_x('bad[')
+ERROR 10608: invalid XPath expression
+DETAIL: Invalid expression
+CONTEXT: SQL function "xpath" statement 1
+
+> prepare gx_pp_x2(text, xml) as select xpath($1, $2)
+-- PREPARE
+
+> execute gx_pp_x2('bad[', '<a/>')
+ERROR 10608: invalid XPath expression
+DETAIL: Invalid expression
+CONTEXT: SQL function "xpath" statement 1
+
+> prepare gx_pp_n0 as select 1
+-- PREPARE
+
+> execute gx_pp_n0
+?column?:int4
+1
+-- SELECT 1
+
+> execute gx_pp_n0
+?column?:int4
+1
+-- SELECT 1
+
+> select name, generic_plans, custom_plans from pg_prepared_statements where name = 'gx_pp_n0'
+name:text | generic_plans:int8 | custom_plans:int8
+gx_pp_n0 | 2 | 0
+-- SELECT 1
+
+> prepare gx_pp_r(int) as select $1 + 1
+-- PREPARE
+
+> explain (verbose, costs off) execute gx_pp_r(1)
+QUERY PLAN:text
+Result
+  Output: 2
+-- EXPLAIN
+
+> execute gx_pp_r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> execute gx_pp_r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> execute gx_pp_r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> execute gx_pp_r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> explain (verbose, costs off) execute gx_pp_r(1)
+QUERY PLAN:text
+Result
+  Output: ($1 + 1)
+-- EXPLAIN
+
+> select name, generic_plans, custom_plans from pg_prepared_statements where name = 'gx_pp_r'
+name:text | generic_plans:int8 | custom_plans:int8
+gx_pp_r | 1 | 5
+-- SELECT 1
+
+> prepare gx_pp_i(int) as insert into gx_pp_pt values ($1, 'x')
+-- PREPARE
+
+> execute gx_pp_i(100)
+-- INSERT 0 1
+
+> select name, generic_plans, custom_plans from pg_prepared_statements where name = 'gx_pp_i'
+name:text | generic_plans:int8 | custom_plans:int8
+gx_pp_i | 0 | 1
+-- SELECT 1
+
+> deallocate all
+-- DEALLOCATE ALL
+
+> drop table gx_pp_pt
+-- DROP TABLE
+
+> select xpath('bad[', '<a/>'::xml)
+ERROR 10608: invalid XPath expression
+DETAIL: Invalid expression
+CONTEXT: SQL function "xpath" statement 1
+
+> create table gx_pp_xt (p text, x xml)
+-- CREATE TABLE
+
+> insert into gx_pp_xt values ('bad[', '<a/>')
+-- INSERT 0 1
+
+> select xpath(p, x) from gx_pp_xt
+ERROR 10608: invalid XPath expression
+DETAIL: Invalid expression
+
+> set plan_cache_mode = force_generic_plan
+-- SET
+
+> prepare gx_pp_x2(text, xml) as select xpath($1, $2)
+-- PREPARE
+
+> execute gx_pp_x2('bad[', '<a/>')
+ERROR 10608: invalid XPath expression
+DETAIL: Invalid expression
+
+> reset plan_cache_mode
+-- RESET
+
+> deallocate all
+-- DEALLOCATE ALL
+
+> drop table gx_pp_xt
+-- DROP TABLE
+
+> create table gx_pp_t (a int, b text)
+-- CREATE TABLE
+
+> insert into gx_pp_t values (1, 'x'), (2, 'y')
+-- INSERT 0 2
+
+> prepare gx_pp_s(int) as select b from gx_pp_t where a = $1
+-- PREPARE
+
+> execute gx_pp_s(1)
+b:text
+x
+-- SELECT 1
+
+> select name, result_types, generic_plans, custom_plans from pg_prepared_statements
+name:text | result_types:2211 | generic_plans:int8 | custom_plans:int8
+gx_pp_s | {text} | 0 | 1
+-- SELECT 1
+
+> prepare gx_pp_e(int) as select 1 / $1
+-- PREPARE
+
+> execute gx_pp_e(0)
+ERROR 22012: division by zero
+
+> select name, generic_plans, custom_plans from pg_prepared_statements where name = 'gx_pp_e'
+name:text | generic_plans:int8 | custom_plans:int8
+gx_pp_e | 0 | 0
+-- SELECT 1
+
+> prepare gx_pp_v(int) as select a from gx_pp_t where a > $1 order by a
+-- PREPARE
+
+> explain (costs off) execute gx_pp_v(1)
+QUERY PLAN:text
+Sort
+  Sort Key: a
+  ->  Seq Scan on gx_pp_t
+        Filter: (a > 1)
+-- EXPLAIN
+
+> execute gx_pp_v(0)
+a:int4
+1
+2
+-- SELECT 2
+
+> execute gx_pp_v(0)
+a:int4
+1
+2
+-- SELECT 2
+
+> execute gx_pp_v(0)
+a:int4
+1
+2
+-- SELECT 2
+
+> execute gx_pp_v(0)
+a:int4
+1
+2
+-- SELECT 2
+
+> explain (costs off) execute gx_pp_v(1)
+QUERY PLAN:text
+Sort
+  Sort Key: a
+  ->  Seq Scan on gx_pp_t
+        Filter: (a > $1)
+-- EXPLAIN
+
+> execute gx_pp_v(1)
+a:int4
+2
+-- SELECT 1
+
+> select name, generic_plans, custom_plans from pg_prepared_statements where name = 'gx_pp_v'
+name:text | generic_plans:int8 | custom_plans:int8
+gx_pp_v | 2 | 5
+-- SELECT 1
+
+> deallocate all
+-- DEALLOCATE ALL
+
+> drop table gx_pp_t
+-- DROP TABLE
+

@@ -1,0 +1,376 @@
+> CREATE TABLE mg_t (id int PRIMARY KEY, val text, n int DEFAULT 0)
+-- CREATE TABLE
+
+> CREATE TABLE mg_s (id int, val text)
+-- CREATE TABLE
+
+> INSERT INTO mg_t VALUES (1, 'one', 1), (2, 'two', 2), (3, 'three', 3)
+-- INSERT 0 3
+
+> INSERT INTO mg_s VALUES (2, 'TWO'), (3, NULL), (4, 'four'), (5, 'five')
+-- INSERT 0 4
+
+> MERGE INTO mg_t t USING mg_s s ON t.id = s.id
+>   WHEN MATCHED AND s.val IS NULL THEN DELETE
+>   WHEN MATCHED THEN UPDATE SET val = s.val, n = t.n + 10
+>   WHEN NOT MATCHED AND s.id = 5 THEN DO NOTHING
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val)
+-- MERGE 3
+
+> SELECT * FROM mg_t ORDER BY id
+id:int4 | val:text | n:int4
+1 | one | 1
+2 | TWO | 12
+4 | four | 0
+-- SELECT 3
+
+> MERGE INTO mg_t t USING (VALUES (1, 'uno'), (6, 'six'), (4, NULL)) AS s(id, val) ON t.id = s.id
+>   WHEN MATCHED AND s.val IS NULL THEN DELETE
+>   WHEN MATCHED THEN UPDATE SET val = s.val
+>   WHEN NOT MATCHED THEN INSERT (id, val) VALUES (s.id, s.val)
+>   RETURNING merge_action(), s.id, t.*
+merge_action:text | id:int4 | id:int4 | val:text | n:int4
+DELETE | 4 | 4 | four | 0
+INSERT | 6 | 6 | six | 0
+UPDATE | 1 | 1 | uno | 1
+-- MERGE 3
+
+> SELECT * FROM mg_t ORDER BY id
+id:int4 | val:text | n:int4
+1 | uno | 1
+2 | TWO | 12
+6 | six | 0
+-- SELECT 3
+
+> MERGE INTO mg_t t USING (SELECT 1 AS id UNION ALL SELECT 2) s ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET n = 100
+>   WHEN NOT MATCHED BY SOURCE AND t.id > 5 THEN DELETE
+>   WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = -1
+>   RETURNING merge_action(), t.id, t.n
+merge_action:text | id:int4 | n:int4
+DELETE | 6 | 0
+UPDATE | 1 | 100
+UPDATE | 2 | 100
+-- MERGE 3
+
+> SELECT * FROM mg_t ORDER BY id
+id:int4 | val:text | n:int4
+1 | uno | 100
+2 | TWO | 100
+-- SELECT 2
+
+> CREATE TABLE mg_d (id serial PRIMARY KEY, note text DEFAULT 'dflt')
+-- CREATE TABLE
+
+> MERGE INTO mg_d d USING (VALUES (10), (11)) s(x) ON false
+>   WHEN NOT MATCHED BY TARGET AND s.x = 10 THEN INSERT DEFAULT VALUES
+>   WHEN NOT MATCHED BY TARGET THEN INSERT (note) VALUES (DEFAULT)
+-- MERGE 2
+
+> SELECT * FROM mg_d ORDER BY id
+id:int4 | note:text
+1 | dflt
+2 | dflt
+-- SELECT 2
+
+> MERGE INTO public.mg_d USING mg_s ON mg_d.id = mg_s.id
+>   WHEN MATCHED THEN UPDATE SET note = mg_s.val
+-- MERGE 1
+
+> SELECT * FROM mg_d ORDER BY id
+id:int4 | note:text
+1 | dflt
+2 | TWO
+-- SELECT 2
+
+> MERGE INTO mg_t t USING (VALUES (1), (1)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET n = n + 1
+ERROR 21000: MERGE command cannot affect row a second time
+HINT: Ensure that not more than one source row matches any one target row.
+
+> MERGE INTO mg_t t USING (VALUES (1), (1)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN DO NOTHING
+-- MERGE 0
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET id = 1
+ERROR 23505: duplicate key value violates unique constraint "mg_t_pkey"
+DETAIL: Key (id)=(1) already exists.
+OBJECTS: schema=public table=mg_t constraint=mg_t_pkey
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN NOT MATCHED THEN UPDATE SET n = 1
+ERROR 42601: syntax error at or near "UPDATE" (at 83)
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN INSERT VALUES (1)
+ERROR 42601: syntax error at or near "INSERT" (at 79)
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET nope = 1
+ERROR 42703: column "nope" of relation "mg_t" does not exist (at 90)
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN NOT MATCHED THEN INSERT VALUES (t.id)
+ERROR 42P01: invalid reference to FROM-clause entry for table "t" (at 98)
+DETAIL: There is an entry for table "t", but it cannot be referenced from this part of the query.
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = s.id
+ERROR 42P01: invalid reference to FROM-clause entry for table "s" (at 108)
+DETAIL: There is an entry for table "s", but it cannot be referenced from this part of the query.
+
+> MERGE INTO mg_nope t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN DELETE
+ERROR 42P01: relation "mg_nope" does not exist (at 12)
+
+> MERGE INTO mg_t USING mg_t ON true WHEN MATCHED THEN DELETE
+ERROR 42712: name "mg_t" specified more than once
+DETAIL: The name is used both as MERGE target table and data source.
+
+> MERGE INTO mg_t t USING mg_s t ON true WHEN MATCHED THEN DELETE
+ERROR 42712: name "t" specified more than once
+DETAIL: The name is used both as MERGE target table and data source.
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET n = count(*)
+ERROR 42803: aggregate functions are not allowed in UPDATE (at 94)
+
+> SELECT merge_action()
+ERROR 42601: MERGE_ACTION() can only be used in the RETURNING list of a MERGE command (at 8)
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET val = 'x'
+>   WHEN MATCHED THEN DELETE
+ERROR 42601: unreachable WHEN clause specified after unconditional WHEN clause
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN NOT MATCHED THEN INSERT (id, id) VALUES (1, 2)
+ERROR 42701: column "id" specified more than once (at 95)
+
+> MERGE INTO mg_t t USING (VALUES (2)) s(id) ON t.id = s.id
+>   WHEN NOT MATCHED THEN INSERT (id) VALUES (1, 2)
+ERROR 42601: INSERT has more expressions than target columns (at 106)
+
+> WITH src AS (SELECT id, val || '+' AS val FROM mg_s WHERE val IS NOT NULL)
+> MERGE INTO mg_t t USING src ON t.id = src.id
+>   WHEN MATCHED THEN UPDATE SET val = src.val
+>   WHEN NOT MATCHED THEN INSERT VALUES (src.id, src.val, 7)
+>   RETURNING merge_action() AS act, t.id, t.val, t.n
+act:text | id:int4 | val:text | n:int4
+INSERT | 4 | four+ | 7
+INSERT | 5 | five+ | 7
+UPDATE | 2 | TWO+ | 100
+-- MERGE 3
+
+> CREATE TABLE mg_log (msg text)
+-- CREATE TABLE
+
+> CREATE FUNCTION mg_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   INSERT INTO mg_log VALUES (TG_WHEN || ' ' || TG_OP || ' ' || TG_LEVEL || coalesce(' ' || NEW.id, '') || coalesce(' old ' || OLD.id, ''));
+>   RETURN coalesce(NEW, OLD);
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TABLE mg_tr (id int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> INSERT INTO mg_tr VALUES (1, 1), (2, 2)
+-- INSERT 0 2
+
+> CREATE TRIGGER mg_b BEFORE INSERT OR UPDATE OR DELETE ON mg_tr FOR EACH ROW EXECUTE FUNCTION mg_trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER mg_a AFTER INSERT OR UPDATE OR DELETE ON mg_tr FOR EACH ROW EXECUTE FUNCTION mg_trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER mg_bs BEFORE INSERT OR UPDATE OR DELETE ON mg_tr FOR EACH STATEMENT EXECUTE FUNCTION mg_trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER mg_as AFTER INSERT OR UPDATE OR DELETE ON mg_tr FOR EACH STATEMENT EXECUTE FUNCTION mg_trg()
+-- CREATE TRIGGER
+
+> MERGE INTO mg_tr t USING (VALUES (1), (3)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET v = 10
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.id, 30)
+>   WHEN NOT MATCHED BY SOURCE THEN DELETE
+-- MERGE 3
+
+> SELECT * FROM mg_log
+msg:text
+AFTER DELETE ROW old 2
+AFTER DELETE STATEMENT
+AFTER INSERT ROW 3
+AFTER INSERT STATEMENT
+AFTER UPDATE ROW 1 old 1
+AFTER UPDATE STATEMENT
+BEFORE DELETE ROW old 2
+BEFORE DELETE STATEMENT
+BEFORE INSERT ROW 3
+BEFORE INSERT STATEMENT
+BEFORE UPDATE ROW 1 old 1
+BEFORE UPDATE STATEMENT
+-- SELECT 12
+
+> SELECT * FROM mg_tr ORDER BY id
+id:int4 | v:int4
+1 | 10
+3 | 30
+-- SELECT 2
+
+> DELETE FROM mg_log
+-- DELETE 12
+
+> MERGE INTO mg_tr t USING (VALUES (1)) s(id) ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET v = 11
+-- MERGE 1
+
+> SELECT * FROM mg_log
+msg:text
+AFTER UPDATE ROW 1 old 1
+AFTER UPDATE STATEMENT
+BEFORE UPDATE ROW 1 old 1
+BEFORE UPDATE STATEMENT
+-- SELECT 4
+
+> DO $$
+> DECLARE n int;
+> BEGIN
+>   MERGE INTO mg_tr t USING (VALUES (1), (2), (3)) s(id) ON t.id = s.id
+>     WHEN MATCHED THEN UPDATE SET v = v + 1;
+>   GET DIAGNOSTICS n = ROW_COUNT;
+>   RAISE NOTICE 'merged % found %', n, FOUND;
+> END $$
+NOTICE 00000: merged 2 found t
+CONTEXT: PL/pgSQL function inline_code_block line 7 at RAISE
+-- DO
+
+> CREATE TABLE mg_base (id int PRIMARY KEY, v text, hidden int DEFAULT 5)
+-- CREATE TABLE
+
+> CREATE VIEW mg_v AS SELECT id, v FROM mg_base WHERE id < 100
+-- CREATE VIEW
+
+> MERGE INTO mg_v USING (VALUES (1, 'a'), (2, 'b')) s(id, v) ON mg_v.id = s.id
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)
+-- MERGE 2
+
+> MERGE INTO mg_v USING (VALUES (1, 'A'), (3, 'c')) s(id, v) ON mg_v.id = s.id
+>   WHEN MATCHED THEN UPDATE SET v = s.v
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)
+-- MERGE 2
+
+> SELECT * FROM mg_base ORDER BY id
+id:int4 | v:text | hidden:int4
+1 | A | 5
+2 | b | 5
+3 | c | 5
+-- SELECT 3
+
+> PREPARE mg_p(int, text) AS MERGE INTO mg_t t USING (VALUES ($1, $2)) s(id, val) ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET val = s.val WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val)
+-- PREPARE
+
+> EXECUTE mg_p(1, 'p1')
+-- MERGE 1
+
+> EXECUTE mg_p(50, 'p50')
+-- MERGE 1
+
+> SELECT * FROM mg_t ORDER BY id
+id:int4 | val:text | n:int4
+1 | p1 | 100
+2 | TWO+ | 100
+4 | four+ | 7
+5 | five+ | 7
+50 | p50 | 0
+-- SELECT 5
+
+> DEALLOCATE mg_p
+-- DEALLOCATE
+
+> EXPLAIN (COSTS OFF) MERGE INTO mg_t t USING mg_s s ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET val = s.val
+QUERY PLAN:text
+Merge on mg_t t
+  ->  Hash Join
+        Hash Cond: (s.id = t.id)
+        ->  Seq Scan on mg_s s
+        ->  Hash
+              ->  Seq Scan on mg_t t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) MERGE INTO mg_t t USING mg_s s ON t.id = s.id
+>   WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT VALUES (s.id)
+QUERY PLAN:text
+Merge on mg_t t
+  ->  Hash Left Join
+        Hash Cond: (s.id = t.id)
+        ->  Seq Scan on mg_s s
+        ->  Hash
+              ->  Seq Scan on mg_t t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) MERGE INTO mg_t t USING mg_s s ON t.id = s.id
+>   WHEN NOT MATCHED BY SOURCE THEN DELETE
+QUERY PLAN:text
+Merge on mg_t t
+  ->  Hash Right Join
+        Hash Cond: (s.id = t.id)
+        ->  Seq Scan on mg_s s
+        ->  Hash
+              ->  Seq Scan on mg_t t
+-- EXPLAIN
+
+> CREATE TABLE mg_g (id int GENERATED ALWAYS AS IDENTITY, k int UNIQUE, dbl int GENERATED ALWAYS AS (k * 2) STORED)
+-- CREATE TABLE
+
+> MERGE INTO mg_g g USING (VALUES (1), (2)) s(k) ON g.k = s.k WHEN NOT MATCHED THEN INSERT (k) VALUES (s.k)
+-- MERGE 2
+
+> MERGE INTO mg_g g USING (VALUES (2), (3)) s(k) ON g.k = s.k
+>   WHEN MATCHED THEN UPDATE SET k = g.k + 10 WHEN NOT MATCHED THEN INSERT (k) VALUES (s.k)
+-- MERGE 2
+
+> SELECT * FROM mg_g ORDER BY id
+id:int4 | k:int4 | dbl:int4
+1 | 1 | 2
+2 | 12 | 24
+3 | 3 | 6
+-- SELECT 3
+
+> MERGE INTO mg_g g USING (VALUES (5)) s(k) ON g.k = s.k WHEN NOT MATCHED THEN INSERT (id, k) VALUES (99, s.k)
+ERROR 428C9: cannot insert a non-DEFAULT value into column "id"
+DETAIL: Column "id" is an identity column defined as GENERATED ALWAYS.
+HINT: Use OVERRIDING SYSTEM VALUE to override.
+
+> MERGE INTO mg_g g USING (VALUES (5)) s(k) ON g.k = s.k WHEN NOT MATCHED THEN INSERT (id, k) OVERRIDING SYSTEM VALUE VALUES (99, s.k)
+-- MERGE 1
+
+> MERGE INTO mg_g g USING (VALUES (5)) s(k) ON g.k = s.k WHEN MATCHED THEN UPDATE SET dbl = 1
+ERROR 428C9: column "dbl" can only be updated to DEFAULT
+DETAIL: Column "dbl" is a generated column.
+
+> SELECT * FROM mg_g ORDER BY id
+id:int4 | k:int4 | dbl:int4
+1 | 1 | 2
+2 | 12 | 24
+3 | 3 | 6
+99 | 5 | 10
+-- SELECT 4
+
+> MERGE INTO mg_g g USING (VALUES (1)) s(k) ON false WHEN NOT MATCHED THEN INSERT (k) VALUES (s.k)
+ERROR 23505: duplicate key value violates unique constraint "mg_g_k_key"
+DETAIL: Key (k)=(1) already exists.
+OBJECTS: schema=public table=mg_g constraint=mg_g_k_key
+
+> DROP VIEW mg_v
+-- DROP VIEW
+
+> DROP TABLE mg_t, mg_s, mg_d, mg_log, mg_tr, mg_base, mg_g
+-- DROP TABLE
+
+> DROP FUNCTION mg_trg()
+-- DROP FUNCTION
+

@@ -1,0 +1,115 @@
+> CREATE FUNCTION add(a int, b int) RETURNS int AS 'SELECT a + b' LANGUAGE sql IMMUTABLE
+-- CREATE FUNCTION
+
+> SELECT add(1, 2)
+add:int4
+3
+-- SELECT 1
+
+> CREATE FUNCTION add(a int, b int) RETURNS int AS 'SELECT a - b' LANGUAGE sql
+ERROR 42723: function "add" already exists with same argument types
+
+> CREATE OR REPLACE FUNCTION add(a int, b int) RETURNS int AS 'SELECT $1 * $2' LANGUAGE sql
+-- CREATE FUNCTION
+
+> SELECT add(3, 4)
+add:int4
+12
+-- SELECT 1
+
+> CREATE OR REPLACE FUNCTION add(a int, b int) RETURNS text AS 'SELECT 1' LANGUAGE sql
+ERROR 42P13: cannot change return type of existing function
+HINT: Use DROP FUNCTION add(integer,integer) first.
+
+> CREATE FUNCTION add(a text, b text) RETURNS text LANGUAGE sql RETURN a || b
+-- CREATE FUNCTION
+
+> SELECT add('x', 'y'), add(1, 1)
+add:text | add:int4
+xy | 1
+-- SELECT 1
+
+> CREATE FUNCTION nums(n int) RETURNS SETOF int LANGUAGE sql AS $$ SELECT generate_series(1, n) $$
+-- CREATE FUNCTION
+
+> SELECT * FROM nums(3)
+nums:int4
+1
+2
+3
+-- SELECT 3
+
+> CREATE FUNCTION pairs() RETURNS TABLE (a int, b text) LANGUAGE sql AS $$ VALUES (1, 'x'), (2, 'y') $$
+-- CREATE FUNCTION
+
+> SELECT * FROM pairs() ORDER BY a
+a:int4 | b:text
+1 | x
+2 | y
+-- SELECT 2
+
+> CREATE TABLE emp (name text, salary int)
+-- CREATE TABLE
+
+> INSERT INTO emp VALUES ('a', 10), ('b', 20)
+-- INSERT 0 2
+
+> CREATE FUNCTION total() RETURNS bigint LANGUAGE sql STABLE AS 'SELECT sum(salary) FROM emp'
+-- CREATE FUNCTION
+
+> SELECT total()
+total:int8
+30
+-- SELECT 1
+
+> CREATE FUNCTION greet(who text DEFAULT 'world') RETURNS text LANGUAGE sql AS $$ SELECT 'hi ' || who $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION f_strict(x int) RETURNS int LANGUAGE sql STRICT AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> SELECT f_strict(NULL), f_strict(5)
+f_strict:int4 | f_strict:int4
+NULL | 1
+-- SELECT 1
+
+> CREATE FUNCTION plp() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION badlang() RETURNS int LANGUAGE nosuch AS 'x'
+ERROR 42704: language "nosuch" does not exist
+
+> SELECT proname, prorettype::regtype, provolatile, proisstrict FROM pg_proc WHERE proname IN ('add', 'nums', 'total', 'f_strict') ORDER BY proname, prorettype::regtype::text
+proname:name | prorettype:regtype | provolatile:char | proisstrict:bool
+add | integer | v | f
+add | text | v | f
+f_strict | integer | v | t
+nums | integer | v | f
+total | bigint | s | f
+-- SELECT 5
+
+> DROP FUNCTION add(int, int)
+-- DROP FUNCTION
+
+> SELECT add(1, 2)
+ERROR 42883: function add(integer, integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> DROP FUNCTION add
+-- DROP FUNCTION
+
+> DROP FUNCTION nosuch(int)
+ERROR 42883: function nosuch(integer) does not exist
+
+> DROP FUNCTION IF EXISTS nosuch(int)
+NOTICE 00000: function nosuch(pg_catalog.int4) does not exist, skipping
+-- DROP FUNCTION
+
+> DROP FUNCTION nums, pairs
+-- DROP FUNCTION
+
+> SELECT count(*) FROM pg_proc WHERE proname IN ('nums', 'pairs')
+count:int8
+0
+-- SELECT 1
+

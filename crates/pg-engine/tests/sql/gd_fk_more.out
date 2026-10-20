@@ -1,0 +1,305 @@
+> CREATE TABLE gd_fk_pk (p1 numeric PRIMARY KEY, p2 varchar(4) UNIQUE, p3 real UNIQUE)
+-- CREATE TABLE
+
+> INSERT INTO gd_fk_pk VALUES (42, 'a', 1.5)
+-- INSERT 0 1
+
+> CREATE TABLE gd_fk_fk (f1 int, f2 varchar(4), f3 real)
+-- CREATE TABLE
+
+> INSERT INTO gd_fk_fk VALUES (42, 'a', 1.5)
+-- INSERT 0 1
+
+> ALTER TABLE gd_fk_fk ADD FOREIGN KEY (f1) REFERENCES gd_fk_pk
+-- ALTER TABLE
+
+> INSERT INTO gd_fk_fk VALUES (43)
+ERROR 23503: insert or update on table "gd_fk_fk" violates foreign key constraint "gd_fk_fk_f1_fkey"
+DETAIL: Key (f1)=(43) is not present in table "gd_fk_pk".
+OBJECTS: schema=public table=gd_fk_fk constraint=gd_fk_fk_f1_fkey
+
+> ALTER TABLE gd_fk_fk ADD CONSTRAINT gd_fk_bad FOREIGN KEY (f2) REFERENCES gd_fk_pk (p3)
+ERROR 42804: foreign key constraint "gd_fk_bad" cannot be implemented
+DETAIL: Key columns "f2" of the referencing table and "p3" of the referenced table are of incompatible types: character varying and real.
+
+> ALTER TABLE gd_fk_fk ADD CONSTRAINT gd_fk_bad FOREIGN KEY (f1) REFERENCES gd_fk_pk (p2)
+ERROR 42804: foreign key constraint "gd_fk_bad" cannot be implemented
+DETAIL: Key columns "f1" of the referencing table and "p2" of the referenced table are of incompatible types: integer and character varying.
+
+> CREATE TABLE gd_fk_sys (f1 int, FOREIGN KEY (tableoid) REFERENCES gd_fk_pk (p1))
+ERROR 0A000: system columns cannot be used in foreign keys
+
+> DROP TABLE gd_fk_fk, gd_fk_pk
+-- DROP TABLE
+
+> CREATE TABLE gd_fk_p (tid int, id int, PRIMARY KEY (tid, id))
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_c (tid int, id int, foo int, FOREIGN KEY (tid, id) REFERENCES gd_fk_p ON DELETE SET NULL (bar))
+ERROR 42703: column "bar" referenced in foreign key constraint does not exist
+
+> CREATE TABLE gd_fk_c (tid int, id int, foo int, FOREIGN KEY (tid, id) REFERENCES gd_fk_p ON DELETE SET NULL (foo))
+ERROR 42P10: column "foo" referenced in ON DELETE SET action must be part of foreign key
+
+> CREATE TABLE gd_fk_c (
+>   tid int, id int, n int, d int DEFAULT 0,
+>   FOREIGN KEY (tid, n) REFERENCES gd_fk_p ON DELETE SET NULL (n),
+>   FOREIGN KEY (tid, d) REFERENCES gd_fk_p ON DELETE SET DEFAULT (d, d))
+-- CREATE TABLE
+
+> SELECT pg_get_constraintdef(oid), confdelsetcols FROM pg_constraint
+>  WHERE conrelid = 'gd_fk_c'::regclass ORDER BY oid
+pg_get_constraintdef:text | confdelsetcols:int2[]
+FOREIGN KEY (tid, n) REFERENCES gd_fk_p(tid, id) ON DELETE SET NULL (n) | {3}
+FOREIGN KEY (tid, d) REFERENCES gd_fk_p(tid, id) ON DELETE SET DEFAULT (d) | {4}
+-- SELECT 2
+
+> INSERT INTO gd_fk_p VALUES (1, 0), (1, 1), (1, 2)
+-- INSERT 0 3
+
+> INSERT INTO gd_fk_c VALUES (1, 1, 1, NULL), (1, 2, NULL, 2)
+-- INSERT 0 2
+
+> DELETE FROM gd_fk_p WHERE id = 1 OR id = 2
+-- DELETE 2
+
+> SELECT * FROM gd_fk_c ORDER BY id
+tid:int4 | id:int4 | n:int4 | d:int4
+1 | 1 | NULL | NULL
+1 | 2 | NULL | 0
+-- SELECT 2
+
+> DROP TABLE gd_fk_c, gd_fk_p
+-- DROP TABLE
+
+> CREATE TABLE gd_fk_mp (a int, b int, PRIMARY KEY (a, b))
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_mf (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO gd_fk_mf VALUES (1, NULL)
+-- INSERT 0 1
+
+> ALTER TABLE gd_fk_mf ADD FOREIGN KEY (a, b) REFERENCES gd_fk_mp MATCH FULL
+ERROR 23503: insert or update on table "gd_fk_mf" violates foreign key constraint "gd_fk_mf_a_b_fkey"
+DETAIL: MATCH FULL does not allow mixing of null and nonnull key values.
+OBJECTS: schema=public table=gd_fk_mf constraint=gd_fk_mf_a_b_fkey
+
+> DROP TABLE gd_fk_mf, gd_fk_mp
+-- DROP TABLE
+
+> CREATE TABLE gd_fk_dp (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_df (id int PRIMARY KEY, fk int REFERENCES gd_fk_dp DEFERRABLE INITIALLY DEFERRED)
+-- CREATE TABLE
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO gd_fk_df VALUES (0, 20)
+-- INSERT 0 1
+
+> UPDATE gd_fk_df SET id = id + 1
+-- UPDATE 1
+
+> COMMIT
+ERROR 23503: insert or update on table "gd_fk_df" violates foreign key constraint "gd_fk_df_fk_fkey"
+DETAIL: Key (fk)=(20) is not present in table "gd_fk_dp".
+OBJECTS: schema=public table=gd_fk_df constraint=gd_fk_df_fk_fkey
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO gd_fk_df VALUES (2, 20)
+-- INSERT 0 1
+
+> ALTER TABLE gd_fk_df DROP CONSTRAINT gd_fk_df_fk_fkey
+ERROR 55006: cannot ALTER TABLE "gd_fk_df" because it has pending trigger events
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP TABLE gd_fk_df, gd_fk_dp
+-- DROP TABLE
+
+> CREATE TABLE gd_fk_sp (f1 int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_sc (f1 int DEFAULT 0 REFERENCES gd_fk_sp ON DELETE SET DEFAULT)
+-- CREATE TABLE
+
+> INSERT INTO gd_fk_sp VALUES (0), (1), (2)
+-- INSERT 0 3
+
+> INSERT INTO gd_fk_sc VALUES (2)
+-- INSERT 0 1
+
+> DELETE FROM gd_fk_sp WHERE f1 = 2
+-- DELETE 1
+
+> DELETE FROM gd_fk_sp WHERE f1 = 0
+ERROR 23503: update or delete on table "gd_fk_sp" violates foreign key constraint "gd_fk_sc_f1_fkey" on table "gd_fk_sc"
+DETAIL: Key (f1)=(0) is still referenced from table "gd_fk_sc".
+OBJECTS: schema=public table=gd_fk_sc constraint=gd_fk_sc_f1_fkey
+
+> SELECT * FROM gd_fk_sc
+f1:int4
+0
+-- SELECT 1
+
+> DROP TABLE gd_fk_sc, gd_fk_sp
+-- DROP TABLE
+
+> CREATE TABLE gd_fk_zp (a float8 PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_zf (x float8 REFERENCES gd_fk_zp ON UPDATE CASCADE)
+-- CREATE TABLE
+
+> INSERT INTO gd_fk_zp VALUES ('-0')
+-- INSERT 0 1
+
+> INSERT INTO gd_fk_zf VALUES ('-0')
+-- INSERT 0 1
+
+> UPDATE gd_fk_zp SET a = '0' WHERE a = '-0'
+-- UPDATE 1
+
+> SELECT * FROM gd_fk_zf
+x:float8
+0
+-- SELECT 1
+
+> DROP TABLE gd_fk_zf, gd_fk_zp
+-- DROP TABLE
+
+> CREATE TABLE gd_fk_np (a int, b int, PRIMARY KEY (a, b))
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_pf (a int, b int) PARTITION BY RANGE (a, b)
+-- CREATE TABLE
+
+> ALTER TABLE ONLY gd_fk_pf ADD FOREIGN KEY (a, b) REFERENCES gd_fk_np
+ERROR 42809: cannot use ONLY for foreign key on partitioned table "gd_fk_pf" referencing relation "gd_fk_np"
+
+> ALTER TABLE gd_fk_pf ADD FOREIGN KEY (a, b) REFERENCES gd_fk_np NOT VALID
+-- ALTER TABLE
+
+> CREATE TABLE gd_fk_pf1 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO gd_fk_pf1 VALUES (1000, 1000)
+-- INSERT 0 1
+
+> ALTER TABLE gd_fk_pf1 ADD FOREIGN KEY (a, b) REFERENCES gd_fk_np NOT VALID
+-- ALTER TABLE
+
+> ALTER TABLE gd_fk_pf ATTACH PARTITION gd_fk_pf1 FOR VALUES FROM (1000, 1000) TO (2000, 2000)
+-- ALTER TABLE
+
+> ALTER TABLE gd_fk_pf VALIDATE CONSTRAINT gd_fk_pf_a_b_fkey
+ERROR 23503: insert or update on table "gd_fk_pf1" violates foreign key constraint "gd_fk_pf1_a_b_fkey"
+DETAIL: Key (a, b)=(1000, 1000) is not present in table "gd_fk_np".
+OBJECTS: schema=public table=gd_fk_pf1 constraint=gd_fk_pf1_a_b_fkey
+
+> ALTER TABLE gd_fk_pf ATTACH PARTITION gd_fk_pf1 FOR VALUES FROM (1000, 1000) TO (2000, 2000)
+ERROR 42809: "gd_fk_pf1" is already a partition
+
+> INSERT INTO gd_fk_np VALUES (1000, 1000)
+-- INSERT 0 1
+
+> ALTER TABLE gd_fk_pf ATTACH PARTITION gd_fk_pf1 FOR VALUES FROM (1000, 1000) TO (2000, 2000)
+ERROR 42809: "gd_fk_pf1" is already a partition
+
+> SELECT conrelid::regclass, conname, convalidated, conparentid <> 0 AS child FROM pg_constraint
+>  WHERE conrelid IN ('gd_fk_pf'::regclass, 'gd_fk_pf1'::regclass) AND contype = 'f' ORDER BY 1, 2
+conrelid:regclass | conname:name | convalidated:bool | child:bool
+gd_fk_pf | gd_fk_pf_a_b_fkey | f | f
+gd_fk_pf1 | gd_fk_pf1_a_b_fkey | f | t
+-- SELECT 2
+
+> CREATE TABLE gd_fk_pf2 (a int, b int, CONSTRAINT gd_fk_c2 FOREIGN KEY (a, b) REFERENCES gd_fk_np NOT ENFORCED)
+-- CREATE TABLE
+
+> ALTER TABLE gd_fk_pf ATTACH PARTITION gd_fk_pf2 FOR VALUES FROM (2000, 2000) TO (3000, 3000)
+ERROR 42P17: constraint "gd_fk_pf_a_b_fkey" enforceability conflicts with constraint "gd_fk_c2" on relation "gd_fk_pf2"
+
+> DROP TABLE gd_fk_pf, gd_fk_pf2, gd_fk_np
+-- DROP TABLE
+
+> CREATE TABLE gd_fk_rp (a int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_rf (a int REFERENCES gd_fk_rp) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> ALTER TABLE gd_fk_rf ATTACH PARTITION gd_fk_rp FOR VALUES IN (1)
+ERROR 0A000: cannot attach table "gd_fk_rp" as a partition because it is referenced by foreign key "gd_fk_rf_a_fkey"
+
+> DROP TABLE gd_fk_rf, gd_fk_rp
+-- DROP TABLE
+
+> CREATE TABLE gd_fk_self (id int PRIMARY KEY, ref int REFERENCES gd_fk_self) PARTITION BY RANGE (id)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_self1 PARTITION OF gd_fk_self FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_self3 PARTITION OF gd_fk_self FOR VALUES FROM (20) TO (40) PARTITION BY RANGE (id)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_self31 PARTITION OF gd_fk_self3 FOR VALUES FROM (20) TO (30)
+-- CREATE TABLE
+
+> SELECT co.conname, cf.relname AS ref FROM pg_constraint co JOIN pg_class cf ON cf.oid = co.confrelid
+>  WHERE co.conrelid = 'gd_fk_self'::regclass AND co.contype = 'f' ORDER BY 1
+conname:name | ref:name
+gd_fk_self_ref_fkey | gd_fk_self
+gd_fk_self_ref_fkey_1 | gd_fk_self1
+gd_fk_self_ref_fkey_2 | gd_fk_self3
+gd_fk_self_ref_fkey_2_1 | gd_fk_self31
+-- SELECT 4
+
+> DROP TABLE gd_fk_self
+-- DROP TABLE
+
+> CREATE TABLE gd_fk_xp (a int PRIMARY KEY) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_xp1 PARTITION OF gd_fk_xp FOR VALUES IN (1, 2) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_xp11 PARTITION OF gd_fk_xp1 FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_xp12 PARTITION OF gd_fk_xp1 FOR VALUES IN (2)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_xp2 PARTITION OF gd_fk_xp FOR VALUES IN (3)
+-- CREATE TABLE
+
+> CREATE TABLE gd_fk_xf (a int REFERENCES gd_fk_xp1 ON UPDATE CASCADE)
+-- CREATE TABLE
+
+> INSERT INTO gd_fk_xp VALUES (2), (3)
+-- INSERT 0 2
+
+> UPDATE gd_fk_xp SET a = a - 1
+ERROR 0A000: cannot move tuple across partitions when a non-root ancestor of the source partition is directly referenced in a foreign key
+DETAIL: A foreign key points to ancestor "gd_fk_xp1" but not the root ancestor "gd_fk_xp".
+HINT: Consider defining the foreign key on table "gd_fk_xp".
+
+> UPDATE gd_fk_xp1 SET a = a - 1
+-- UPDATE 1
+
+> SELECT tableoid::regclass, a FROM gd_fk_xp ORDER BY a
+tableoid:regclass | a:int4
+gd_fk_xp11 | 1
+gd_fk_xp2 | 3
+-- SELECT 2
+
+> DROP TABLE gd_fk_xf, gd_fk_xp
+-- DROP TABLE
+

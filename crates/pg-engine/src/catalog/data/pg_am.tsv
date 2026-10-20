@@ -1,0 +1,7 @@
+2	heap	3	t
+403	btree	330	i
+405	hash	331	i
+783	gist	332	i
+2742	gin	333	i
+4000	spgist	334	i
+3580	brin	335	i

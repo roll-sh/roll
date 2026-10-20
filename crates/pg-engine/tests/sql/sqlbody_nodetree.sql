@@ -1,0 +1,43 @@
+-- pg_proc.prosqlbody holds a SQL-standard body's analyzed statements as a node tree
+-- (nodeToString): Query nodes with their range tables, targets and expressions.
+create table sbn_t(x int, y text, z numeric);
+create function sbn_n1(a int8, b bool, c text) returns text return c || 'k';
+create function sbn_n2(a int, b int2) returns bigint return a + b * 2::int8;
+create function sbn_n3(a text) returns bool return a is null or not (a = 'q' and length(a) > 3);
+create function sbn_n4(a int) returns text return a::text;
+create function sbn_n5(a varchar) returns text return a;
+create function sbn_n6(a int) returns numeric return 1.5 + a;
+create function sbn_n7() returns float8 return 2.5e0;
+create function sbn_n8() returns text return null;
+create function sbn_n9() returns setof int begin atomic select x from sbn_t where y = 'a' order by x limit 2; end;
+create function sbn_n10() returns numeric begin atomic select sum(z) from sbn_t t where t.x > 0; end;
+create function sbn_n11(a text) returns text return upper(a collate "C");
+create function sbn_n12(a int) returns int return case when a > 0 then 1 else coalesce(a, 0) end;
+create function sbn_n13(a int) returns text return 'x'::varchar || a;
+create function sbn_m1() returns int return -1;
+create function sbn_m2() returns text return 'é';
+create function sbn_m3() returns float4 return 1.5::float4;
+create function sbn_m4(a name) returns name return a;
+create function sbn_q1(a int) returns int begin atomic select a; select x from sbn_t; end;
+create function sbn_q2() returns setof sbn_t begin atomic select * from sbn_t order by y desc, 1; end;
+create function sbn_q3(a text) returns bigint begin atomic select count(*) from sbn_t, sbn_t u where sbn_t.y = a and u.x is not null and (sbn_t.y = a) is true is not false; end;
+create function sbn_q4(a text) returns text return a like 'x%' or a ~* 'y' or a ilike 'z';
+create function sbn_q5(a int[]) returns int return a[1];
+create function sbn_q6(a int, b int) returns int return greatest(a, b) + abs(a) + (a % b);
+create function sbn_q7(a timestamptz) returns date return a::date;
+create function sbn_q8(a int) returns text return 'v' || a::text || true;
+create function sbn_q9(a int) returns int begin atomic select x from sbn_t where x > a order by x desc limit a; end;
+create function sbn_r1(a int, b int) returns int return nullif(a, b) + least(a, b, 3);
+create function sbn_r2(a text, b text) returns bool return a is distinct from b and a is not distinct from 'x';
+create function sbn_r3(a numeric) returns numeric return -12345.678 + 0 + 100000000 + 0.00001 + a;
+create function sbn_r5(a int[]) returns int[] return a[1:2];
+create function sbn_r6(a text[]) returns text return a[2];
+create function sbn_r7(a int[][]) returns int return a[1][2];
+create function sbn_r4(a int2) returns int return -a + (-2)::int2;
+do $$ declare r record; begin for r in select oid::regprocedure p from pg_proc where proname like 'gxt\_%' loop execute 'drop function ' || r.p; end loop; end $$;
+create function sbn_u1(a int) returns int begin atomic insert into sbn_t values (a); select 1; end;
+SELECT proname, regexp_replace(prosqlbody::text, ':(relid|resorigtbl) [1-9][0-9]*', ':\1 X', 'g') FROM pg_proc WHERE proname LIKE 'sbn\_%' AND proname <> 'sbn_u1' ORDER BY 1;
+-- The range table entries name the table's oid.
+SELECT proname, position(':relid ' || 'sbn_t'::regclass::oid || ' ' IN prosqlbody::text) > 0 FROM pg_proc WHERE proname IN ('sbn_n9', 'sbn_n10', 'sbn_q3') ORDER BY 1;
+SELECT proname, prosqlbody IS NOT NULL, prosrc FROM pg_proc WHERE proname = 'sbn_u1';
+DROP TABLE sbn_t CASCADE;

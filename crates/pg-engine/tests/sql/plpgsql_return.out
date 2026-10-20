@@ -1,0 +1,120 @@
+> create function gx_f1() returns int begin atomic select 1; end
+-- CREATE FUNCTION
+
+> create function gx_f2(a int) returns int language sql return a + 1
+-- CREATE FUNCTION
+
+> create function gx_f3() returns int language sql as 'select 3'
+-- CREATE FUNCTION
+
+> select proname, prosrc, prosqlbody is not null, pg_get_functiondef(oid) from pg_proc where proname like 'gx_f_' order by 1
+proname:name | prosrc:text | ?column?:bool | pg_get_functiondef:text
+gx_f1 |  | t | CREATE OR REPLACE FUNCTION public.gx_f1()
+ RETURNS integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT 1;
+END
+
+gx_f2 |  | t | CREATE OR REPLACE FUNCTION public.gx_f2(a integer)
+ RETURNS integer
+ LANGUAGE sql
+RETURN (a + 1)
+
+gx_f3 | select 3 | f | CREATE OR REPLACE FUNCTION public.gx_f3()
+ RETURNS integer
+ LANGUAGE sql
+AS $function$select 3$function$
+
+-- SELECT 3
+
+> create function gx_f4() returns setof record language plpgsql as $$ begin return query select 1, 'a'::text; end $$
+-- CREATE FUNCTION
+
+> select * from gx_f4() as t(a int, b int)
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type text does not match expected type integer in column "b" (position 2).
+CONTEXT: SQL statement "select 1, 'a'::text"
+CONTEXT: PL/pgSQL function gx_f4() line 1 at RETURN QUERY
+
+> select * from gx_f4() as t(a int, b text, c int)
+ERROR 42804: structure of query does not match function result type
+DETAIL: Number of returned columns (2) does not match expected column count (3).
+CONTEXT: SQL statement "select 1, 'a'::text"
+CONTEXT: PL/pgSQL function gx_f4() line 1 at RETURN QUERY
+
+> create function gx_f5() returns int language plpgsql set work_mem = '1MB' as $$ begin return current_setting('work_mem')::text = '1MB'; end $$
+-- CREATE FUNCTION
+
+> select proconfig from pg_proc where proname = 'gx_f5'
+proconfig:text[]
+{work_mem=1MB}
+-- SELECT 1
+
+> select gx_f5()
+ERROR 22P02: invalid input syntax for type integer: "t"
+CONTEXT: PL/pgSQL function gx_f5() while casting return value to function's return type
+
+> drop function gx_f1, gx_f2, gx_f3, gx_f4, gx_f5
+-- DROP FUNCTION
+
+> create function gx_f4() returns setof record language plpgsql as $$ begin return query select 1, 'a'::text; return query select 2, 'b'::text; end $$
+-- CREATE FUNCTION
+
+> select * from gx_f4() as t(a int, b text)
+a:int4 | b:text
+1 | a
+2 | b
+-- SELECT 2
+
+> create function gx_f6() returns setof record language plpgsql as $$ declare r record; begin r := row(5, 'x'::text); return next r; end $$
+-- CREATE FUNCTION
+
+> select * from gx_f6() as t(a int, b text)
+a:int4 | b:text
+5 | x
+-- SELECT 1
+
+> create function gx_f7() returns record language plpgsql as $$ begin return row(7, 'y'::text); end $$
+-- CREATE FUNCTION
+
+> select * from gx_f7() as t(a int, b text)
+a:int4 | b:text
+7 | y
+-- SELECT 1
+
+> create function gx_f8() returns text language plpgsql as $$ begin return 1.50; end $$
+-- CREATE FUNCTION
+
+> select gx_f8()
+gx_f8:text
+1.50
+-- SELECT 1
+
+> create function gx_f9() returns int language plpgsql as $$ begin return '12'; end $$
+-- CREATE FUNCTION
+
+> select gx_f9()
+gx_f9:int4
+12
+-- SELECT 1
+
+> create function gx_f10() returns varchar(2) language plpgsql as $$ begin return 'abc'; end $$
+-- CREATE FUNCTION
+
+> select gx_f10()
+gx_f10:varchar
+abc
+-- SELECT 1
+
+> create function gx_f11() returns int language plpgsql as $$ begin return 2.6; end $$
+-- CREATE FUNCTION
+
+> select gx_f11()
+gx_f11:int4
+3
+-- SELECT 1
+
+> drop function gx_f4, gx_f6, gx_f7, gx_f8, gx_f9, gx_f10, gx_f11
+-- DROP FUNCTION
+

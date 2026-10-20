@@ -1,0 +1,467 @@
+> CREATE FUNCTION et_fn() RETURNS event_trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE 'et_fn: % %', tg_event, tg_tag;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT et_fn()
+ERROR 0A000: trigger functions can only be called as triggers
+CONTEXT: compilation of PL/pgSQL function "et_fn" near line 1
+
+> CREATE FUNCTION et_arg(x int) RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN END $$
+ERROR 42P13: event trigger functions cannot have declared arguments
+CONTEXT: compilation of PL/pgSQL function "et_arg" near line 1
+
+> CREATE FUNCTION et_sql() RETURNS event_trigger LANGUAGE sql AS $$ SELECT 1 $$
+ERROR 42P13: SQL functions cannot return type event_trigger
+
+> CREATE FUNCTION tg_arg(x int) RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$
+ERROR 42P13: trigger functions cannot have declared arguments
+HINT: The arguments of the trigger can be accessed through TG_NARGS and TG_ARGV instead.
+CONTEXT: compilation of PL/pgSQL function "tg_arg" near line 1
+
+> CREATE EVENT TRIGGER et_bad ON ddl_command_start EXECUTE FUNCTION pg_backend_pid()
+ERROR 42P17: function pg_backend_pid must return type event_trigger
+
+> CREATE EVENT TRIGGER et_bad ON elephant_bootstrap EXECUTE FUNCTION et_fn()
+ERROR 42601: unrecognized event name "elephant_bootstrap"
+
+> CREATE EVENT TRIGGER et_bad ON ddl_command_start WHEN food IN ('x') EXECUTE FUNCTION et_fn()
+ERROR 42601: unrecognized filter variable "food"
+
+> CREATE EVENT TRIGGER et_bad ON ddl_command_start WHEN tag IN ('create skunkcabbage') EXECUTE FUNCTION et_fn()
+ERROR 42601: filter value "create skunkcabbage" not recognized for filter variable "tag"
+
+> CREATE EVENT TRIGGER et_bad ON ddl_command_start WHEN tag IN ('CREATE ROLE') EXECUTE FUNCTION et_fn()
+ERROR 0A000: event triggers are not supported for CREATE ROLE
+
+> CREATE EVENT TRIGGER et_bad ON ddl_command_start WHEN tag IN ('drop event trigger') EXECUTE FUNCTION et_fn()
+ERROR 0A000: event triggers are not supported for drop event trigger
+
+> CREATE EVENT TRIGGER et_bad ON ddl_command_start WHEN tag IN ('create table') AND tag IN ('create view') EXECUTE FUNCTION et_fn()
+ERROR 42601: filter variable "tag" specified more than once
+
+> CREATE EVENT TRIGGER et_bad ON table_rewrite WHEN tag IN ('create table') EXECUTE FUNCTION et_fn()
+ERROR 0A000: event triggers are not supported for create table
+
+> CREATE EVENT TRIGGER et_bad ON login WHEN tag IN ('create table') EXECUTE FUNCTION et_fn()
+ERROR 0A000: tag filtering is not supported for login event triggers
+
+> CREATE EVENT TRIGGER et_bad ON ddl_command_start EXECUTE FUNCTION no_such_fn()
+ERROR 42883: function no_such_fn() does not exist
+
+> CREATE EVENT TRIGGER et_start ON ddl_command_start EXECUTE FUNCTION et_fn()
+-- CREATE EVENT TRIGGER
+
+> CREATE EVENT TRIGGER et_end ON ddl_command_end EXECUTE FUNCTION et_fn()
+-- CREATE EVENT TRIGGER
+
+> CREATE EVENT TRIGGER et_tab ON ddl_command_start WHEN TAG IN ('create table', 'CREATE FUNCTION') EXECUTE FUNCTION et_fn()
+-- CREATE EVENT TRIGGER
+
+> CREATE EVENT TRIGGER et_start ON ddl_command_start EXECUTE FUNCTION et_fn()
+ERROR 42710: event trigger "et_start" already exists
+
+> SELECT evtname, evtevent, evtenabled, evttags FROM pg_event_trigger ORDER BY 1
+evtname:name | evtevent:name | evtenabled:char | evttags:text[]
+et_end | ddl_command_end | O | NULL
+et_start | ddl_command_start | O | NULL
+et_tab | ddl_command_start | O | {"CREATE TABLE","CREATE FUNCTION"}
+-- SELECT 3
+
+> CREATE TABLE et_t1 (a int)
+NOTICE 00000: et_fn: ddl_command_start CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+NOTICE 00000: et_fn: ddl_command_start CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+NOTICE 00000: et_fn: ddl_command_end CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+-- CREATE TABLE
+
+> CREATE VIEW et_v1 AS SELECT 1 AS x
+NOTICE 00000: et_fn: ddl_command_start CREATE VIEW
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+NOTICE 00000: et_fn: ddl_command_end CREATE VIEW
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+-- CREATE VIEW
+
+> ALTER EVENT TRIGGER et_start DISABLE
+-- ALTER EVENT TRIGGER
+
+> CREATE TABLE et_t2 (a int)
+NOTICE 00000: et_fn: ddl_command_start CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+NOTICE 00000: et_fn: ddl_command_end CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+-- CREATE TABLE
+
+> SET session_replication_role = replica
+-- SET
+
+> CREATE TABLE et_t3 (a int)
+-- CREATE TABLE
+
+> ALTER EVENT TRIGGER et_start ENABLE REPLICA
+-- ALTER EVENT TRIGGER
+
+> CREATE TABLE et_t4 (a int)
+NOTICE 00000: et_fn: ddl_command_start CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+-- CREATE TABLE
+
+> ALTER EVENT TRIGGER et_start ENABLE ALWAYS
+-- ALTER EVENT TRIGGER
+
+> CREATE TABLE et_t5 (a int)
+NOTICE 00000: et_fn: ddl_command_start CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+-- CREATE TABLE
+
+> RESET session_replication_role
+-- RESET
+
+> CREATE TABLE et_t6 (a int)
+NOTICE 00000: et_fn: ddl_command_start CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+NOTICE 00000: et_fn: ddl_command_start CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+NOTICE 00000: et_fn: ddl_command_end CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+-- CREATE TABLE
+
+> CREATE FUNCTION et_inner() RETURNS int LANGUAGE plpgsql AS $$ BEGIN CREATE TABLE et_t7 (a int); RETURN 0; END $$
+NOTICE 00000: et_fn: ddl_command_start CREATE FUNCTION
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+NOTICE 00000: et_fn: ddl_command_start CREATE FUNCTION
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+NOTICE 00000: et_fn: ddl_command_end CREATE FUNCTION
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+-- CREATE FUNCTION
+
+> SELECT et_inner()
+NOTICE 00000: et_fn: ddl_command_start CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+CONTEXT: SQL statement "CREATE TABLE et_t7 (a int)"
+CONTEXT: PL/pgSQL function et_inner() line 1 at SQL statement
+NOTICE 00000: et_fn: ddl_command_start CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+CONTEXT: SQL statement "CREATE TABLE et_t7 (a int)"
+CONTEXT: PL/pgSQL function et_inner() line 1 at SQL statement
+NOTICE 00000: et_fn: ddl_command_end CREATE TABLE
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+CONTEXT: SQL statement "CREATE TABLE et_t7 (a int)"
+CONTEXT: PL/pgSQL function et_inner() line 1 at SQL statement
+et_inner:int4
+0
+-- SELECT 1
+
+> CREATE ROLE et_role
+-- CREATE ROLE
+
+> DROP ROLE et_role
+-- DROP ROLE
+
+> ALTER EVENT TRIGGER et_start RENAME TO et_tab
+ERROR 42710: event trigger "et_tab" already exists
+
+> ALTER EVENT TRIGGER et_start RENAME TO et_begin
+-- ALTER EVENT TRIGGER
+
+> ALTER EVENT TRIGGER et_nope DISABLE
+ERROR 42704: event trigger "et_nope" does not exist
+
+> COMMENT ON EVENT TRIGGER et_begin IS 'starts'
+-- COMMENT
+
+> SELECT obj_description(oid, 'pg_event_trigger') FROM pg_event_trigger WHERE evtname = 'et_begin'
+obj_description:text
+starts
+-- SELECT 1
+
+> SELECT pg_describe_object('pg_event_trigger'::regclass, oid, 0), (pg_identify_object('pg_event_trigger'::regclass, oid, 0)).* FROM pg_event_trigger WHERE evtname = 'et_begin'
+pg_describe_object:text | type:text | schema:text | name:text | identity:text
+event trigger et_begin | event trigger | NULL | et_begin | et_begin
+-- SELECT 1
+
+> DROP FUNCTION et_fn()
+NOTICE 00000: et_fn: ddl_command_start DROP FUNCTION
+CONTEXT: PL/pgSQL function et_fn() line 3 at RAISE
+ERROR 2BP01: cannot drop function et_fn() because other objects depend on it
+DETAIL: event trigger et_begin depends on function et_fn()
+DETAIL: event trigger et_end depends on function et_fn()
+DETAIL: event trigger et_tab depends on function et_fn()
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP EVENT TRIGGER et_begin
+-- DROP EVENT TRIGGER
+
+> DROP EVENT TRIGGER et_end
+-- DROP EVENT TRIGGER
+
+> DROP EVENT TRIGGER et_tab
+-- DROP EVENT TRIGGER
+
+> DROP EVENT TRIGGER et_tab
+ERROR 42704: event trigger "et_tab" does not exist
+
+> DROP EVENT TRIGGER IF EXISTS et_tab
+NOTICE 00000: event trigger "et_tab" does not exist, skipping
+-- DROP EVENT TRIGGER
+
+> DROP TABLE et_t1, et_t2, et_t3, et_t4, et_t5, et_t6, et_t7
+-- DROP TABLE
+
+> DROP VIEW et_v1
+-- DROP VIEW
+
+> CREATE FUNCTION et_dropped() RETURNS event_trigger LANGUAGE plpgsql AS $$
+> DECLARE r record;
+> BEGIN
+>   FOR r IN SELECT * FROM pg_event_trigger_dropped_objects() LOOP
+>     -- (oids in generated names masked)
+>     RAISE NOTICE 'DROP: % orig=% normal=% temp=% type=% identity=% schema=% name=% addr=% args=%',
+>       tg_tag, r.original, r.normal, r.is_temporary, r.object_type,
+>       regexp_replace(r.object_identity, '[0-9]{4,}', 'N', 'g'), r.schema_name,
+>       regexp_replace(r.object_name, '[0-9]{4,}', 'N', 'g'),
+>       regexp_replace(r.address_names::text, '[0-9]{4,}', 'N', 'g'), r.address_args;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION et_cmds() RETURNS event_trigger LANGUAGE plpgsql AS $$
+> DECLARE r record;
+> BEGIN
+>   FOR r IN SELECT * FROM pg_event_trigger_ddl_commands() LOOP
+>     RAISE NOTICE 'END: % type=% identity=% schema=%', r.command_tag, r.object_type, r.object_identity, r.schema_name;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE EVENT TRIGGER et_drop ON sql_drop EXECUTE FUNCTION et_dropped()
+-- CREATE EVENT TRIGGER
+
+> CREATE EVENT TRIGGER et_cmd ON ddl_command_end EXECUTE FUNCTION et_cmds()
+-- CREATE EVENT TRIGGER
+
+> CREATE SCHEMA et_s
+NOTICE 00000: END: CREATE SCHEMA type=schema identity=et_s schema=<NULL>
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- CREATE SCHEMA
+
+> CREATE TABLE et_s.one (id serial PRIMARY KEY, b text DEFAULT 'x')
+NOTICE 00000: END: CREATE SEQUENCE type=sequence identity=et_s.one_id_seq schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+NOTICE 00000: END: CREATE TABLE type=table identity=et_s.one schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+NOTICE 00000: END: CREATE INDEX type=index identity=et_s.one_pkey schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+NOTICE 00000: END: ALTER SEQUENCE type=sequence identity=et_s.one_id_seq schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- CREATE TABLE
+
+> CREATE INDEX et_one_b ON et_s.one (b)
+NOTICE 00000: END: CREATE INDEX type=index identity=et_s.et_one_b schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- CREATE INDEX
+
+> CREATE TABLE et_s.two (c int CHECK (c > 0) REFERENCES et_s.one)
+NOTICE 00000: END: CREATE TABLE type=table identity=et_s.two schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+NOTICE 00000: END: ALTER TABLE type=table identity=et_s.two schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- CREATE TABLE
+
+> ALTER TABLE et_s.two DROP COLUMN c
+NOTICE 00000: DROP: ALTER TABLE orig=t normal=f temp=f type=table column identity=et_s.two.c schema=et_s name=<NULL> addr={et_s,two,c} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: ALTER TABLE orig=f normal=t temp=f type=table constraint identity=two_c_check on et_s.two schema=et_s name=<NULL> addr={et_s,two,two_c_check} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: ALTER TABLE orig=f normal=f temp=f type=table constraint identity=two_c_fkey on et_s.two schema=et_s name=<NULL> addr={et_s,two,two_c_fkey} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: ALTER TABLE orig=f normal=f temp=f type=trigger identity="RI_ConstraintTrigger_a_N" on et_s.one schema=et_s name=<NULL> addr={et_s,one,RI_ConstraintTrigger_a_N} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: ALTER TABLE orig=f normal=f temp=f type=trigger identity="RI_ConstraintTrigger_a_N" on et_s.one schema=et_s name=<NULL> addr={et_s,one,RI_ConstraintTrigger_a_N} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: ALTER TABLE orig=f normal=f temp=f type=trigger identity="RI_ConstraintTrigger_c_N" on et_s.two schema=et_s name=<NULL> addr={et_s,two,RI_ConstraintTrigger_c_N} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: ALTER TABLE orig=f normal=f temp=f type=trigger identity="RI_ConstraintTrigger_c_N" on et_s.two schema=et_s name=<NULL> addr={et_s,two,RI_ConstraintTrigger_c_N} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: END: ALTER TABLE type=table identity=et_s.two schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- ALTER TABLE
+
+> ALTER TABLE et_s.one ALTER COLUMN b DROP DEFAULT
+NOTICE 00000: DROP: ALTER TABLE orig=t normal=f temp=f type=default value identity=for et_s.one.b schema=et_s name=<NULL> addr={et_s,one,b} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: END: ALTER TABLE type=table identity=et_s.one schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- ALTER TABLE
+
+> CREATE OR REPLACE FUNCTION et_s.f(int) RETURNS int LANGUAGE sql AS 'SELECT $1'
+NOTICE 00000: END: CREATE FUNCTION type=function identity=et_s.f(integer) schema=et_s
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- CREATE FUNCTION
+
+> CREATE TRIGGER et_trig BEFORE INSERT ON et_s.one FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger()
+NOTICE 00000: END: CREATE TRIGGER type=trigger identity=et_trig on et_s.one schema=<NULL>
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- CREATE TRIGGER
+
+> CREATE POLICY et_pol ON et_s.one USING (true)
+NOTICE 00000: END: CREATE POLICY type=policy identity=et_pol on et_s.one schema=<NULL>
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- CREATE POLICY
+
+> DROP INDEX et_s.et_one_b
+NOTICE 00000: DROP: DROP INDEX orig=t normal=f temp=f type=index identity=et_s.et_one_b schema=et_s name=et_one_b addr={et_s,et_one_b} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+-- DROP INDEX
+
+> DROP SCHEMA et_s CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to table et_s.one
+DETAIL: drop cascades to table et_s.two
+DETAIL: drop cascades to function et_s.f(integer)
+NOTICE 00000: DROP: DROP SCHEMA orig=t normal=f temp=f type=schema identity=et_s schema=<NULL> name=et_s addr={et_s} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=t temp=f type=table identity=et_s.one schema=et_s name=one addr={et_s,one} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=t temp=f type=sequence identity=et_s.one_id_seq schema=et_s name=one_id_seq addr={et_s,one_id_seq} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=type identity=et_s.one schema=et_s name=one addr={et_s.one} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=type identity=et_s.one[] schema=et_s name=_one addr={et_s.one[]} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=t temp=f type=default value identity=for et_s.one.id schema=et_s name=<NULL> addr={et_s,one,id} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=table constraint identity=one_id_not_null on et_s.one schema=et_s name=<NULL> addr={et_s,one,one_id_not_null} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=toast table identity=pg_toast.pg_toast_N schema=pg_toast name=pg_toast_N addr={pg_toast,pg_toast_N} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=index identity=pg_toast.pg_toast_N_index schema=pg_toast name=pg_toast_N_index addr={pg_toast,pg_toast_N_index} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=table constraint identity=one_pkey on et_s.one schema=et_s name=<NULL> addr={et_s,one,one_pkey} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=index identity=et_s.one_pkey schema=et_s name=one_pkey addr={et_s,one_pkey} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=trigger identity=et_trig on et_s.one schema=et_s name=<NULL> addr={et_s,one,et_trig} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=policy identity=et_pol on et_s.one schema=et_s name=<NULL> addr={et_s,one,et_pol} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=t temp=f type=table identity=et_s.two schema=et_s name=two addr={et_s,two} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=type identity=et_s.two schema=et_s name=two addr={et_s.two} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=f temp=f type=type identity=et_s.two[] schema=et_s name=_two addr={et_s.two[]} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP SCHEMA orig=f normal=t temp=f type=function identity=et_s.f(integer) schema=et_s name=<NULL> addr={et_s,f} args={integer}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+-- DROP SCHEMA
+
+> CREATE TEMP TABLE et_tmp (a int PRIMARY KEY)
+NOTICE 00000: END: CREATE TABLE type=table identity=pg_temp.et_tmp schema=pg_temp
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+NOTICE 00000: END: CREATE INDEX type=index identity=pg_temp.et_tmp_pkey schema=pg_temp
+CONTEXT: PL/pgSQL function et_cmds() line 5 at RAISE
+-- CREATE TABLE
+
+> DROP TABLE et_tmp
+NOTICE 00000: DROP: DROP TABLE orig=t normal=f temp=t type=table identity=pg_temp.et_tmp schema=pg_temp name=et_tmp addr={pg_temp,et_tmp} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP TABLE orig=f normal=f temp=t type=type identity=pg_temp.et_tmp schema=pg_temp name=et_tmp addr={pg_temp.et_tmp} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP TABLE orig=f normal=f temp=t type=type identity=pg_temp.et_tmp[] schema=pg_temp name=_et_tmp addr={pg_temp.et_tmp[]} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP TABLE orig=f normal=f temp=t type=table constraint identity=et_tmp_a_not_null on pg_temp.et_tmp schema=pg_temp name=<NULL> addr={pg_temp,et_tmp,et_tmp_a_not_null} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP TABLE orig=f normal=f temp=t type=table constraint identity=et_tmp_pkey on pg_temp.et_tmp schema=pg_temp name=<NULL> addr={pg_temp,et_tmp,et_tmp_pkey} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+NOTICE 00000: DROP: DROP TABLE orig=f normal=f temp=t type=index identity=pg_temp.et_tmp_pkey schema=pg_temp name=et_tmp_pkey addr={pg_temp,et_tmp_pkey} args={}
+CONTEXT: PL/pgSQL function et_dropped() line 6 at RAISE
+-- DROP TABLE
+
+> SELECT * FROM pg_event_trigger_dropped_objects()
+ERROR 39P03: pg_event_trigger_dropped_objects() can only be called in a sql_drop event trigger function
+
+> SELECT * FROM pg_event_trigger_ddl_commands()
+ERROR 39P03: pg_event_trigger_ddl_commands() can only be called in an event trigger function
+
+> SELECT pg_event_trigger_table_rewrite_oid()
+ERROR 39P03: pg_event_trigger_table_rewrite_oid() can only be called in a table_rewrite event trigger function
+
+> DROP EVENT TRIGGER et_drop
+-- DROP EVENT TRIGGER
+
+> DROP EVENT TRIGGER et_cmd
+-- DROP EVENT TRIGGER
+
+> CREATE FUNCTION et_rw() RETURNS event_trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE 'rewriting % (reason %) for %', pg_event_trigger_table_rewrite_oid()::regclass, pg_event_trigger_table_rewrite_reason(), tg_tag;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE EVENT TRIGGER et_rewrite ON table_rewrite EXECUTE FUNCTION et_rw()
+-- CREATE EVENT TRIGGER
+
+> CREATE TABLE et_rw_t (id int, f float, ts timestamptz)
+-- CREATE TABLE
+
+> INSERT INTO et_rw_t VALUES (1, 1.5, now())
+-- INSERT 0 1
+
+> ALTER TABLE et_rw_t ALTER COLUMN f TYPE numeric
+NOTICE 00000: rewriting et_rw_t (reason 4) for ALTER TABLE
+CONTEXT: PL/pgSQL function et_rw() line 3 at RAISE
+-- ALTER TABLE
+
+> ALTER TABLE et_rw_t ADD COLUMN g int DEFAULT 0
+-- ALTER TABLE
+
+> ALTER TABLE et_rw_t ADD COLUMN h float DEFAULT random()
+NOTICE 00000: rewriting et_rw_t (reason 2) for ALTER TABLE
+CONTEXT: PL/pgSQL function et_rw() line 3 at RAISE
+-- ALTER TABLE
+
+> ALTER TABLE et_rw_t ADD COLUMN i int DEFAULT 1, ALTER COLUMN f TYPE numeric(10,4)
+NOTICE 00000: rewriting et_rw_t (reason 4) for ALTER TABLE
+CONTEXT: PL/pgSQL function et_rw() line 3 at RAISE
+-- ALTER TABLE
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL timezone = 'UTC'
+-- SET
+
+> ALTER TABLE et_rw_t ALTER COLUMN ts TYPE timestamp
+-- ALTER TABLE
+
+> SET LOCAL timezone = 'Europe/London'
+-- SET
+
+> ALTER TABLE et_rw_t ALTER COLUMN ts TYPE timestamptz
+NOTICE 00000: rewriting et_rw_t (reason 4) for ALTER TABLE
+CONTEXT: PL/pgSQL function et_rw() line 3 at RAISE
+-- ALTER TABLE
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP EVENT TRIGGER et_rewrite
+-- DROP EVENT TRIGGER
+
+> DROP TABLE et_rw_t
+-- DROP TABLE
+
+> SET event_triggers = off
+-- SET
+
+> SHOW event_triggers
+event_triggers:text
+off
+-- SHOW
+
+> RESET event_triggers
+-- RESET
+

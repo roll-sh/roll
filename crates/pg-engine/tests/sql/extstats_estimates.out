@@ -1,0 +1,173 @@
+> create function est(q text) returns int language plpgsql as $$
+> declare
+>   ln text;
+> begin
+>   for ln in execute 'explain ' || q loop
+>     return substring(ln from ' rows=(\d+)')::int;
+>   end loop;
+> end $$
+-- CREATE FUNCTION
+
+> create table ge (a int, b int, c int, d varchar, ia int[]) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into ge select i % 50, i % 50 / 5, i % 7, (i % 25)::text, array[i % 10, i % 3]
+>   from generate_series(1, 5000) i
+-- INSERT 0 5000
+
+> analyze ge
+-- ANALYZE
+
+> select est('select * from ge where a = 1 and b = 0')
+est:int4
+10
+-- SELECT 1
+
+> select est('select * from ge where a = 1 and d = ''1''')
+est:int4
+4
+-- SELECT 1
+
+> select est('select a, b from ge group by a, b')
+est:int4
+500
+-- SELECT 1
+
+> select est('select a from ge group by a, (b + 1)')
+est:int4
+500
+-- SELECT 1
+
+> select est('select 1 from ge group by (a + 1), (c * 2)')
+est:int4
+350
+-- SELECT 1
+
+> select est('select 1 from ge group by a > 3, b')
+est:int4
+20
+-- SELECT 1
+
+> select est('select * from ge where a in (1, 2) and b = 0')
+est:int4
+20
+-- SELECT 1
+
+> select est('select * from ge where a not in (1, 2)')
+est:int4
+4800
+-- SELECT 1
+
+> select est('select * from ge where 4 = any(ia)')
+est:int4
+500
+-- SELECT 1
+
+> select est('select * from ge where 11 = any(ia)')
+est:int4
+25
+-- SELECT 1
+
+> select est('select * from ge where (a + 1) = any(array[1, null, 3])')
+est:int4
+50
+-- SELECT 1
+
+> create statistics ge_s1 (ndistinct, dependencies) on a, b from ge
+-- CREATE STATISTICS
+
+> create statistics ge_s2 (mcv) on a, c, d from ge
+-- CREATE STATISTICS
+
+> create statistics ge_s3 on (a + 1), (c * 2) from ge
+-- CREATE STATISTICS
+
+> analyze ge
+-- ANALYZE
+
+> select est('select * from ge where a = 1 and b = 0')
+est:int4
+100
+-- SELECT 1
+
+> select est('select * from ge where a = 1 and b in (0, 1)')
+est:int4
+100
+-- SELECT 1
+
+> select est('select * from ge where (a = 1 or a = 2) and b = 0')
+est:int4
+198
+-- SELECT 1
+
+> select est('select * from ge where a = 1 and d = ''1''')
+est:int4
+33
+-- SELECT 1
+
+> select est('select * from ge where a = 1 and c = 1 and d = ''1''')
+est:int4
+15
+-- SELECT 1
+
+> select est('select * from ge where a < 5 and c < 3')
+est:int4
+287
+-- SELECT 1
+
+> select est('select * from ge where a = 1 or c = 1')
+est:int4
+786
+-- SELECT 1
+
+> select est('select * from ge where (a = 1 and c = 1) or (a = 2 and c = 2)')
+est:int4
+57
+-- SELECT 1
+
+> select est('select * from ge where a is null and c = 1')
+est:int4
+1
+-- SELECT 1
+
+> select est('select * from ge where not (a = 1) and c = 1')
+est:int4
+903
+-- SELECT 1
+
+> select est('select a, b from ge group by a, b')
+est:int4
+50
+-- SELECT 1
+
+> select est('select a, b from ge group by b, a')
+est:int4
+50
+-- SELECT 1
+
+> select est('select 1 from ge group by (a + 1), (c * 2)')
+est:int4
+350
+-- SELECT 1
+
+> select est('select 1 from ge group by (a + 1)')
+est:int4
+50
+-- SELECT 1
+
+> select est('select * from ge where (a + 1) = 2')
+est:int4
+100
+-- SELECT 1
+
+> select est('select * from ge where (a + 1) = 2 and (c * 2) = 2')
+est:int4
+15
+-- SELECT 1
+
+> drop table ge
+-- DROP TABLE
+
+> drop function est(text)
+-- DROP FUNCTION
+

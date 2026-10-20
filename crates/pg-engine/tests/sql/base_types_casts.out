@@ -1,0 +1,238 @@
+> create type btc_xf4
+-- CREATE TYPE
+
+> create type btc_xf4
+ERROR 42710: type "btc_xf4" already exists
+
+> create function btc_xf4in(cstring) returns btc_xf4 immutable strict language internal as 'int4in'
+NOTICE 42809: return type btc_xf4 is only a shell
+-- CREATE FUNCTION
+
+> create function btc_xf4out(btc_xf4) returns cstring immutable strict language internal as 'int4out'
+NOTICE 42809: argument type btc_xf4 is only a shell (at 28)
+-- CREATE FUNCTION
+
+> create function btc_bad(btc_xf4) returns int language sql as 'select 1'
+ERROR 42P13: SQL function cannot accept shell type btc_xf4 (at 25)
+
+> create table btc_shell (a btc_xf4)
+ERROR 42704: type "btc_xf4" is only a shell (at 27)
+
+> create type btc_xf4 (input = btc_xf4in, output = btc_xf4out, like = float4)
+-- CREATE TYPE
+
+> create type btc_xf4 (input = btc_xf4in, output = btc_xf4out, like = float4)
+ERROR 42710: type "btc_xf4" already exists
+
+> create cast (btc_xf4 as float4) without function
+-- CREATE CAST
+
+> create cast (float4 as btc_xf4) without function
+-- CREATE CAST
+
+> create cast (btc_xf4 as integer) without function
+-- CREATE CAST
+
+> create cast (integer as btc_xf4) without function
+-- CREATE CAST
+
+> select 1065353216::btc_xf4::float4, 1.5::float4::btc_xf4::integer, '42'::btc_xf4
+float4:float4 | int4:int4 | btc_xf4:user
+1 | 1069547520 | 42
+-- SELECT 1
+
+> select typname, typlen, typbyval, typalign, typstorage, typcategory, typinput, typoutput, typarray::regtype, typisdefined, typtype from pg_type where typname like '%btc_xf4' order by 1
+typname:name | typlen:int2 | typbyval:bool | typalign:char | typstorage:char | typcategory:char | typinput:regproc | typoutput:regproc | typarray:regtype | typisdefined:bool | typtype:char
+_btc_xf4 | -1 | f | i | x | A | array_in | array_out | - | t | b
+btc_xf4 | 4 | t | i | p | U | btc_xf4in | btc_xf4out | btc_xf4[] | t | b
+-- SELECT 2
+
+> select castsource::regtype, casttarget::regtype, castfunc, castcontext, castmethod from pg_cast where castsource = 'btc_xf4'::regtype or casttarget = 'btc_xf4'::regtype order by 1, 2
+castsource:regtype | casttarget:regtype | castfunc:oid | castcontext:char | castmethod:char
+integer | btc_xf4 | 0 | e | b
+real | btc_xf4 | 0 | e | b
+btc_xf4 | integer | 0 | e | b
+btc_xf4 | real | 0 | e | b
+-- SELECT 4
+
+> create cast (int8 as btc_xf4) without function
+ERROR 42P17: source and target data types are not physically compatible
+
+> create cast (btc_xf4 as int4) without function
+ERROR 42710: cast from type btc_xf4 to type integer already exists
+
+> create function btc_internal_bad(int) returns int language internal as 'no_such_builtin'
+ERROR 42883: there is no built-in function named "no_such_builtin"
+
+> create function btc_c_bad(int) returns int language c as '/no/such/lib.so', 'f'
+ERROR 58P01: could not access file "/no/such/lib.so": No such file or directory
+
+> create type btc_ct
+-- CREATE TYPE
+
+> create function btc_ct_in(cstring) returns btc_ct as 'textin' language internal strict immutable
+NOTICE 42809: return type btc_ct is only a shell
+-- CREATE FUNCTION
+
+> create function btc_ct_out(btc_ct) returns cstring as 'textout' language internal strict immutable
+NOTICE 42809: argument type btc_ct is only a shell (at 28)
+-- CREATE FUNCTION
+
+> create type btc_ct (internallength = variable, input = btc_ct_in, output = btc_ct_out, alignment = int4, default = 'zippo')
+-- CREATE TYPE
+
+> create table btc_dt (a btc_ct, b int)
+-- CREATE TABLE
+
+> insert into btc_dt (b) values (1)
+-- INSERT 0 1
+
+> select * from btc_dt
+a:user | b:int4
+zippo | 1
+-- SELECT 1
+
+> create function btc_ctf(btc_ct) returns int4 language sql as $$ select 1 $$
+-- CREATE FUNCTION
+
+> select btc_ctf('foo'::text)
+ERROR 42883: function btc_ctf(text) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> create cast (text as btc_ct) without function
+-- CREATE CAST
+
+> select btc_ctf('foo'::text::btc_ct)
+btc_ctf:int4
+1
+-- SELECT 1
+
+> drop cast (text as btc_ct)
+-- DROP CAST
+
+> create cast (text as btc_ct) without function as implicit
+-- CREATE CAST
+
+> select btc_ctf('foo'::text)
+btc_ctf:int4
+1
+-- SELECT 1
+
+> select 1234::int4::btc_ct
+ERROR 42846: cannot cast type integer to btc_ct (at 18)
+
+> create cast (int4 as btc_ct) with inout
+-- CREATE CAST
+
+> select 1234::int4::btc_ct
+btc_ct:user
+1234
+-- SELECT 1
+
+> drop cast (int4 as btc_ct)
+-- DROP CAST
+
+> create function btc_i2c(int4) returns btc_ct language sql as $$ select ('foo'::text || $1::text)::btc_ct; $$
+-- CREATE FUNCTION
+
+> create cast (int4 as btc_ct) with function btc_i2c(int4) as implicit
+-- CREATE CAST
+
+> select 1234::int4::btc_ct
+btc_ct:user
+foo1234
+-- SELECT 1
+
+> drop function btc_i2c(int4) cascade
+NOTICE 00000: drop cascades to cast from integer to btc_ct
+-- DROP FUNCTION
+
+> create function btc_bar(int4) returns text language sql as $$ select ('bar'::text || $1::text); $$
+-- CREATE FUNCTION
+
+> create cast (int4 as btc_ct) with function btc_bar(int4) as implicit
+-- CREATE CAST
+
+> select 1234::int4::btc_ct
+btc_ct:user
+bar1234
+-- SELECT 1
+
+> select pg_describe_object(classid, objid, objsubid) as obj, pg_describe_object(refclassid, refobjid, refobjsubid) as objref, deptype from pg_depend where classid = 'pg_cast'::regclass and objid = (select oid from pg_cast where castsource = 'int4'::regtype and casttarget = 'btc_ct'::regtype) order by refclassid
+obj:text | objref:text | deptype:char
+cast from integer to btc_ct | type btc_ct | n
+cast from integer to btc_ct | function btc_bar(integer) | n
+cast from integer to btc_ct | cast from text to btc_ct | n
+-- SELECT 3
+
+> select pg_identify_object('pg_cast'::regclass, oid, 0) from pg_cast where castsource = 'int4'::regtype and casttarget = 'btc_ct'::regtype
+pg_identify_object:record
+(cast,,,"(integer AS public.btc_ct)")
+-- SELECT 1
+
+> create cast (int4 as btc_ct) with function btc_bar(int4)
+ERROR 42710: cast from type integer to type btc_ct already exists
+
+> create cast (btc_ct as btc_ct) with inout
+ERROR 42P17: source data type and target data type are the same
+
+> drop cast if exists (int4 as nope)
+NOTICE 00000: type "nope" does not exist, skipping
+-- DROP CAST
+
+> drop cast if exists (nope.x as int4)
+NOTICE 00000: schema "nope" does not exist, skipping
+-- DROP CAST
+
+> drop cast if exists (int4 as int8)
+ERROR 2BP01: cannot drop cast from integer to bigint because it is required by the database system
+
+> drop cast (int4 as int8)
+ERROR 2BP01: cannot drop cast from integer to bigint because it is required by the database system
+
+> drop cast (int4 as bool)
+ERROR 2BP01: cannot drop cast from integer to boolean because it is required by the database system
+
+> drop function btc_ct_in(cstring)
+ERROR 2BP01: cannot drop function btc_ct_in(cstring) because other objects depend on it
+DETAIL: type btc_ct depends on function btc_ct_in(cstring)
+DETAIL: function btc_ct_out(btc_ct) depends on type btc_ct
+DETAIL: column a of table btc_dt depends on type btc_ct
+DETAIL: function btc_ctf(btc_ct) depends on type btc_ct
+DETAIL: cast from text to btc_ct depends on type btc_ct
+DETAIL: cast from integer to btc_ct depends on type btc_ct
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop type btc_ct
+ERROR 2BP01: cannot drop type btc_ct because other objects depend on it
+DETAIL: function btc_ct_in(cstring) depends on type btc_ct
+DETAIL: function btc_ct_out(btc_ct) depends on type btc_ct
+DETAIL: column a of table btc_dt depends on type btc_ct
+DETAIL: function btc_ctf(btc_ct) depends on type btc_ct
+DETAIL: cast from text to btc_ct depends on type btc_ct
+DETAIL: cast from integer to btc_ct depends on type btc_ct
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop type btc_ct cascade
+NOTICE 00000: drop cascades to 6 other objects
+DETAIL: drop cascades to function btc_ct_in(cstring)
+DETAIL: drop cascades to function btc_ct_out(btc_ct)
+DETAIL: drop cascades to column a of table btc_dt
+DETAIL: drop cascades to function btc_ctf(btc_ct)
+DETAIL: drop cascades to cast from text to btc_ct
+DETAIL: drop cascades to cast from integer to btc_ct
+-- DROP TYPE
+
+> drop type btc_xf4 cascade
+NOTICE 00000: drop cascades to 6 other objects
+DETAIL: drop cascades to function btc_xf4in(cstring)
+DETAIL: drop cascades to function btc_xf4out(btc_xf4)
+DETAIL: drop cascades to cast from btc_xf4 to real
+DETAIL: drop cascades to cast from real to btc_xf4
+DETAIL: drop cascades to cast from btc_xf4 to integer
+DETAIL: drop cascades to cast from integer to btc_xf4
+-- DROP TYPE
+
+> drop function btc_bar(int4)
+-- DROP FUNCTION
+

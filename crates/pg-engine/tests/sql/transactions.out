@@ -1,0 +1,297 @@
+> CREATE TABLE t (x int PRIMARY KEY)
+-- CREATE TABLE
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO t VALUES (1)
+-- INSERT 0 1
+
+> SELECT count(*) FROM t
+count:int8
+1
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT count(*) FROM t
+count:int8
+0
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO t VALUES (1)
+-- INSERT 0 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT count(*) FROM t
+count:int8
+1
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO t VALUES (1)
+ERROR 23505: duplicate key value violates unique constraint "t_pkey"
+DETAIL: Key (x)=(1) already exists.
+OBJECTS: schema=public table=t constraint=t_pkey
+
+> SELECT 1
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> COMMIT
+-- ROLLBACK
+
+> SELECT count(*) FROM t
+count:int8
+1
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO t VALUES (2)
+-- INSERT 0 1
+
+> SAVEPOINT a
+-- SAVEPOINT
+
+> INSERT INTO t VALUES (3)
+-- INSERT 0 1
+
+> ROLLBACK TO SAVEPOINT a
+-- ROLLBACK
+
+> INSERT INTO t VALUES (4)
+-- INSERT 0 1
+
+> RELEASE SAVEPOINT a
+-- RELEASE
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM t ORDER BY x
+x:int4
+1
+2
+4
+-- SELECT 3
+
+> BEGIN
+-- BEGIN
+
+> SAVEPOINT s1
+-- SAVEPOINT
+
+> INSERT INTO t VALUES (1)
+ERROR 23505: duplicate key value violates unique constraint "t_pkey"
+DETAIL: Key (x)=(1) already exists.
+OBJECTS: schema=public table=t constraint=t_pkey
+
+> ROLLBACK TO s1
+-- ROLLBACK
+
+> INSERT INTO t VALUES (5)
+-- INSERT 0 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM t ORDER BY x
+x:int4
+1
+2
+4
+5
+-- SELECT 4
+
+> ROLLBACK TO nosuch
+ERROR 25P01: ROLLBACK TO SAVEPOINT can only be used in transaction blocks
+
+> BEGIN
+-- BEGIN
+
+> ROLLBACK TO nosuch
+ERROR 3B001: savepoint "nosuch" does not exist
+
+> ROLLBACK
+-- ROLLBACK
+
+> COMMIT
+WARNING 25P01: there is no transaction in progress
+-- COMMIT
+
+> ROLLBACK
+WARNING 25P01: there is no transaction in progress
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> BEGIN
+WARNING 25001: there is already a transaction in progress
+-- BEGIN
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> CREATE TABLE in_txn (a int)
+-- CREATE TABLE
+
+> INSERT INTO in_txn VALUES (1)
+-- INSERT 0 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT * FROM in_txn
+ERROR 42P01: relation "in_txn" does not exist (at 15)
+
+> BEGIN
+-- BEGIN
+
+> CREATE TABLE in_txn (a int)
+-- CREATE TABLE
+
+> COMMIT
+-- COMMIT
+
+> SELECT count(*) FROM in_txn
+count:int8
+0
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> DROP TABLE in_txn
+-- DROP TABLE
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT count(*) FROM in_txn
+count:int8
+0
+-- SELECT 1
+
+> BEGIN ISOLATION LEVEL SERIALIZABLE
+-- BEGIN
+
+> SHOW transaction_isolation
+transaction_isolation:text
+serializable
+-- SHOW
+
+> COMMIT
+-- COMMIT
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> INSERT INTO t VALUES (100)
+ERROR 25006: cannot execute INSERT in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> START TRANSACTION
+-- START TRANSACTION
+
+> SET LOCAL statement_timeout = '5s'
+-- SET
+
+> SHOW statement_timeout
+statement_timeout:text
+5s
+-- SHOW
+
+> COMMIT
+-- COMMIT
+
+> SHOW statement_timeout
+statement_timeout:text
+0
+-- SHOW
+
+> SET LOCAL statement_timeout = '5s'
+WARNING 25P01: SET LOCAL can only be used in transaction blocks
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> SET TRANSACTION ISOLATION LEVEL REPEATABLE READ
+-- SET
+
+> SHOW transaction_isolation
+transaction_isolation:text
+repeatable read
+-- SHOW
+
+> SELECT 1
+?column?:int4
+1
+-- SELECT 1
+
+> SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+ERROR 25001: SET TRANSACTION ISOLATION LEVEL must be called before any query
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> SELECT 1/0
+ERROR 22012: division by zero
+
+> SELECT 1
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> COMMIT
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> SAVEPOINT x
+-- SAVEPOINT
+
+> SELECT 1/0
+ERROR 22012: division by zero
+
+> ROLLBACK TO x
+-- ROLLBACK
+
+> SELECT 2
+?column?:int4
+2
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> END
+WARNING 25P01: there is no transaction in progress
+-- COMMIT
+
+> ABORT
+WARNING 25P01: there is no transaction in progress
+-- ROLLBACK
+
+> SELECT txid_current() > 0
+?column?:bool
+t
+-- SELECT 1
+

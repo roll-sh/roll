@@ -1,0 +1,13 @@
+SELECT typname, typsubscript, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typcollation, typndims FROM pg_type WHERE typname IN ('bool', 'bytea', 'char', 'name', 'int8', 'int2', 'int2vector', 'int4', 'regproc', 'text', 'oid', 'tid', 'oidvector', 'json', 'xml', 'point', 'lseg', 'box', 'float4', 'float8', 'circle', 'money', 'macaddr', 'inet', 'cidr', 'bpchar', 'varchar', 'date', 'time', 'timestamp', 'timestamptz', 'interval', 'timetz', 'bit', 'varbit', 'numeric', 'refcursor', 'uuid', 'tsvector', 'tsquery', 'jsonb', 'jsonpath', 'int4range', 'int4multirange', 'regclass', 'regtype', 'record', 'cstring', 'any', 'anyarray', 'void', 'trigger', 'internal', 'pg_lsn', 'aclitem', 'unknown') ORDER BY oid;
+SELECT typname, typsubscript, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typcollation FROM pg_type WHERE typname IN ('_bool', '_int4', '_text', '_varchar', '_bpchar', '_numeric', '_timestamp', '_point', '_jsonb', '_int4range', '_name', '_bit', '_interval') ORDER BY oid;
+CREATE TYPE gx_e AS ENUM ('a');
+CREATE TYPE gx_c AS (x int);
+CREATE DOMAIN gx_d AS varchar(5);
+CREATE DOMAIN gx_d2 AS int[];
+CREATE DOMAIN gx_d3 AS gx_d;
+CREATE TYPE gx_r AS RANGE (subtype = int4);
+CREATE TABLE gx_t (a int);
+SELECT typname, typsubscript, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typcollation, typndims FROM pg_type WHERE typname ~ '^_?gx_' ORDER BY typname;
+DROP TABLE gx_t;
+DROP TYPE gx_e, gx_c, gx_r;
+DROP DOMAIN gx_d3, gx_d, gx_d2;

@@ -1,0 +1,794 @@
+> set jit = off
+-- SET
+
+> create table sp_k (a int primary key, c text)
+-- CREATE TABLE
+
+> insert into sp_k select g, 'c' || g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> analyze sp_k
+-- ANALYZE
+
+> explain select c from sp_k where a < 900
+QUERY PLAN:text
+Seq Scan on sp_k  (cost=0.00..18.50 rows=899 width=4)
+  Filter: (a < 900)
+-- EXPLAIN
+
+> explain select c from sp_k where a < 4
+QUERY PLAN:text
+Index Scan using sp_k_pkey on sp_k  (cost=0.28..8.33 rows=3 width=4)
+  Index Cond: (a < 4)
+-- EXPLAIN
+
+> explain select c from sp_k where a < 100
+QUERY PLAN:text
+Index Scan using sp_k_pkey on sp_k  (cost=0.28..10.01 rows=99 width=4)
+  Index Cond: (a < 100)
+-- EXPLAIN
+
+> explain select a from sp_k where a < 300
+QUERY PLAN:text
+Seq Scan on sp_k  (cost=0.00..18.50 rows=299 width=4)
+  Filter: (a < 300)
+-- EXPLAIN
+
+> explain select a from sp_k where a < 30
+QUERY PLAN:text
+Index Only Scan using sp_k_pkey on sp_k  (cost=0.28..8.78 rows=29 width=4)
+  Index Cond: (a < 30)
+-- EXPLAIN
+
+> explain select * from sp_k order by a
+QUERY PLAN:text
+Index Scan using sp_k_pkey on sp_k  (cost=0.28..44.27 rows=1000 width=8)
+-- EXPLAIN
+
+> explain select * from sp_k order by a limit 5
+QUERY PLAN:text
+Limit  (cost=0.28..0.49 rows=5 width=8)
+  ->  Index Scan using sp_k_pkey on sp_k  (cost=0.28..44.27 rows=1000 width=8)
+-- EXPLAIN
+
+> explain select * from sp_k order by a desc limit 1
+QUERY PLAN:text
+Limit  (cost=0.28..0.32 rows=1 width=8)
+  ->  Index Scan Backward using sp_k_pkey on sp_k  (cost=0.28..44.27 rows=1000 width=8)
+-- EXPLAIN
+
+> create table sp_b (a int, b int, c int, d text)
+-- CREATE TABLE
+
+> insert into sp_b select g, g % 100, g % 7, 'x' || (g % 1000) from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> create index sp_b_b on sp_b (b)
+-- CREATE INDEX
+
+> create index sp_b_c on sp_b (c)
+-- CREATE INDEX
+
+> create index sp_b_ab on sp_b (a, b)
+-- CREATE INDEX
+
+> create index sp_b_d on sp_b (d)
+-- CREATE INDEX
+
+> analyze sp_b
+-- ANALYZE
+
+> explain select * from sp_b where b = 5
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=5.84..139.55 rows=200 width=16)
+  Recheck Cond: (b = 5)
+  ->  Bitmap Index Scan on sp_b_b  (cost=0.00..5.79 rows=200 width=0)
+        Index Cond: (b = 5)
+-- EXPLAIN
+
+> explain select * from sp_b where b = 5 and c = 3
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=39.77..110.71 rows=29 width=16)
+  Recheck Cond: ((b = 5) AND (c = 3))
+  ->  BitmapAnd  (cost=39.77..39.77 rows=29 width=0)
+        ->  Bitmap Index Scan on sp_b_b  (cost=0.00..5.79 rows=200 width=0)
+              Index Cond: (b = 5)
+        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.72 rows=2857 width=0)
+              Index Cond: (c = 3)
+-- EXPLAIN
+
+> explain select * from sp_b where b = 5 or c = 3
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=41.02..212.87 rows=3028 width=16)
+  Recheck Cond: ((b = 5) OR (c = 3))
+  ->  BitmapOr  (cost=41.02..41.02 rows=3057 width=0)
+        ->  Bitmap Index Scan on sp_b_b  (cost=0.00..5.79 rows=200 width=0)
+              Index Cond: (b = 5)
+        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.72 rows=2857 width=0)
+              Index Cond: (c = 3)
+-- EXPLAIN
+
+> explain select count(*) from sp_b where b = 5
+QUERY PLAN:text
+Aggregate  (cost=140.05..140.06 rows=1 width=8)
+  ->  Bitmap Heap Scan on sp_b  (cost=5.84..139.55 rows=200 width=0)
+        Recheck Cond: (b = 5)
+        ->  Bitmap Index Scan on sp_b_b  (cost=0.00..5.79 rows=200 width=0)
+              Index Cond: (b = 5)
+-- EXPLAIN
+
+> explain select * from sp_b where b = 5 or b = 7
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=11.67..143.67 rows=398 width=16)
+  Recheck Cond: ((b = 5) OR (b = 7))
+  ->  Bitmap Index Scan on sp_b_b  (cost=0.00..11.57 rows=400 width=0)
+        Index Cond: (b = ANY ('{5,7}'::integer[]))
+-- EXPLAIN
+
+> explain select * from sp_b where b = 5 or b = 7 or c = 1
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=46.90..229.91 rows=3199 width=16)
+  Recheck Cond: (((b = 5) OR (b = 7)) OR (c = 1))
+  Filter: ((b = 5) OR (b = 7) OR (c = 1))
+  ->  BitmapOr  (cost=46.90..46.90 rows=3258 width=0)
+        ->  Bitmap Index Scan on sp_b_b  (cost=0.00..11.57 rows=400 width=0)
+              Index Cond: (b = ANY ('{5,7}'::integer[]))
+        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.72 rows=2858 width=0)
+              Index Cond: (c = 1)
+-- EXPLAIN
+
+> explain select * from sp_b where b in (1, 5, 9) and c = 2
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=17.38..153.13 rows=86 width=16)
+  Recheck Cond: (b = ANY ('{1,5,9}'::integer[]))
+  Filter: (c = 2)
+  ->  Bitmap Index Scan on sp_b_b  (cost=0.00..17.36 rows=600 width=0)
+        Index Cond: (b = ANY ('{1,5,9}'::integer[]))
+-- EXPLAIN
+
+> explain select * from sp_b where a < 100
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=5.05..131.01 rows=99 width=16)
+  Recheck Cond: (a < 100)
+  ->  Bitmap Index Scan on sp_b_ab  (cost=0.00..5.03 rows=99 width=0)
+        Index Cond: (a < 100)
+-- EXPLAIN
+
+> explain select * from sp_b where a = 100
+QUERY PLAN:text
+Index Scan using sp_b_ab on sp_b  (cost=0.29..8.30 rows=1 width=16)
+  Index Cond: (a = 100)
+-- EXPLAIN
+
+> explain select * from sp_b where a = 100 and b = 0
+QUERY PLAN:text
+Index Scan using sp_b_ab on sp_b  (cost=0.29..8.31 rows=1 width=16)
+  Index Cond: ((a = 100) AND (b = 0))
+-- EXPLAIN
+
+> explain select * from sp_b where a between 100 and 200 and b = 5
+QUERY PLAN:text
+Index Scan using sp_b_ab on sp_b  (cost=0.29..9.56 rows=1 width=16)
+  Index Cond: ((a >= 100) AND (a <= 200) AND (b = 5))
+-- EXPLAIN
+
+> explain select * from sp_b where b = 7 and a > 10
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=5.84..140.05 rows=200 width=16)
+  Recheck Cond: (b = 7)
+  Filter: (a > 10)
+  ->  Bitmap Index Scan on sp_b_b  (cost=0.00..5.79 rows=200 width=0)
+        Index Cond: (b = 7)
+-- EXPLAIN
+
+> explain select a, b from sp_b where b = 7 and a > 10
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=5.84..140.05 rows=200 width=8)
+  Recheck Cond: (b = 7)
+  Filter: (a > 10)
+  ->  Bitmap Index Scan on sp_b_b  (cost=0.00..5.79 rows=200 width=0)
+        Index Cond: (b = 7)
+-- EXPLAIN
+
+> explain select * from sp_b where d = 'x5'
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=4.44..58.56 rows=20 width=16)
+  Recheck Cond: (d = 'x5'::text)
+  ->  Bitmap Index Scan on sp_b_d  (cost=0.00..4.44 rows=20 width=0)
+        Index Cond: (d = 'x5'::text)
+-- EXPLAIN
+
+> explain select * from sp_b where d < 'x2'
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=30.42..185.67 rows=2340 width=16)
+  Recheck Cond: (d < 'x2'::text)
+  ->  Bitmap Index Scan on sp_b_d  (cost=0.00..29.84 rows=2340 width=0)
+        Index Cond: (d < 'x2'::text)
+-- EXPLAIN
+
+> explain select * from sp_b where d > 'x995'
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b  (cost=4.91..122.58 rows=80 width=16)
+  Recheck Cond: (d > 'x995'::text)
+  ->  Bitmap Index Scan on sp_b_d  (cost=0.00..4.89 rows=80 width=0)
+        Index Cond: (d > 'x995'::text)
+-- EXPLAIN
+
+> explain select * from sp_b where b is null
+QUERY PLAN:text
+Index Scan using sp_b_b on sp_b  (cost=0.29..8.30 rows=1 width=16)
+  Index Cond: (b IS NULL)
+-- EXPLAIN
+
+> explain select * from sp_b order by a
+QUERY PLAN:text
+Index Scan using sp_b_ab on sp_b  (cost=0.29..821.35 rows=20000 width=16)
+-- EXPLAIN
+
+> explain select * from sp_b order by a limit 10
+QUERY PLAN:text
+Limit  (cost=0.29..0.70 rows=10 width=16)
+  ->  Index Scan using sp_b_ab on sp_b  (cost=0.29..821.35 rows=20000 width=16)
+-- EXPLAIN
+
+> explain select * from sp_b order by a desc limit 10
+QUERY PLAN:text
+Limit  (cost=0.29..0.70 rows=10 width=16)
+  ->  Index Scan Backward using sp_b_ab on sp_b  (cost=0.29..821.35 rows=20000 width=16)
+-- EXPLAIN
+
+> explain select * from sp_b order by a, b limit 10
+QUERY PLAN:text
+Limit  (cost=0.29..0.70 rows=10 width=16)
+  ->  Index Scan using sp_b_ab on sp_b  (cost=0.29..821.35 rows=20000 width=16)
+-- EXPLAIN
+
+> explain select * from sp_b order by a, c limit 10
+QUERY PLAN:text
+Limit  (cost=0.34..1.20 rows=10 width=16)
+  ->  Incremental Sort  (cost=0.34..1721.35 rows=20000 width=16)
+        Sort Key: a, c
+        Presorted Key: a
+        ->  Index Scan using sp_b_ab on sp_b  (cost=0.29..821.35 rows=20000 width=16)
+-- EXPLAIN
+
+> explain select * from sp_b where b = 4 order by a limit 10
+QUERY PLAN:text
+Limit  (cost=0.29..29.23 rows=10 width=16)
+  ->  Index Scan using sp_b_ab on sp_b  (cost=0.29..579.10 rows=200 width=16)
+        Index Cond: (b = 4)
+-- EXPLAIN
+
+> explain select * from sp_b order by d limit 3
+QUERY PLAN:text
+Limit  (cost=0.29..0.42 rows=3 width=16)
+  ->  Index Scan using sp_b_d on sp_b  (cost=0.29..887.63 rows=20000 width=16)
+-- EXPLAIN
+
+> explain select * from sp_b order by d offset 10 limit 3
+QUERY PLAN:text
+Limit  (cost=0.73..0.86 rows=3 width=16)
+  ->  Index Scan using sp_b_d on sp_b  (cost=0.29..887.63 rows=20000 width=16)
+-- EXPLAIN
+
+> explain select * from sp_b order by d offset 19990
+QUERY PLAN:text
+Limit  (cost=887.18..887.63 rows=10 width=16)
+  ->  Index Scan using sp_b_d on sp_b  (cost=0.29..887.63 rows=20000 width=16)
+-- EXPLAIN
+
+> explain select a from sp_b order by a
+QUERY PLAN:text
+Index Only Scan using sp_b_ab on sp_b  (cost=0.29..821.35 rows=20000 width=4)
+-- EXPLAIN
+
+> explain select * from sp_b where a < 1000 order by a
+QUERY PLAN:text
+Sort  (cost=208.29..210.79 rows=999 width=16)
+  Sort Key: a
+  ->  Bitmap Heap Scan on sp_b  (cost=20.03..158.52 rows=999 width=16)
+        Recheck Cond: (a < 1000)
+        ->  Bitmap Index Scan on sp_b_ab  (cost=0.00..19.78 rows=999 width=0)
+              Index Cond: (a < 1000)
+-- EXPLAIN
+
+> explain select * from sp_b where a > 100 limit 5
+QUERY PLAN:text
+Limit  (cost=0.00..0.09 rows=5 width=16)
+  ->  Seq Scan on sp_b  (cost=0.00..376.00 rows=19900 width=16)
+        Filter: (a > 100)
+-- EXPLAIN
+
+> explain select b from sp_b where c = 4 order by b
+QUERY PLAN:text
+Sort  (cost=360.14..367.28 rows=2857 width=4)
+  Sort Key: b
+  ->  Bitmap Heap Scan on sp_b  (cost=34.43..196.14 rows=2857 width=4)
+        Recheck Cond: (c = 4)
+        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.72 rows=2857 width=0)
+              Index Cond: (c = 4)
+-- EXPLAIN
+
+> explain (format json) select * from sp_b where b = 5 or c = 3
+QUERY PLAN:json
+[
+  {
+    "Plan": {
+      "Node Type": "Bitmap Heap Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Relation Name": "sp_b",
+      "Alias": "sp_b",
+      "Startup Cost": 41.02,
+      "Total Cost": 212.87,
+      "Plan Rows": 3028,
+      "Plan Width": 16,
+      "Disabled": false,
+      "Recheck Cond": "((b = 5) OR (c = 3))",
+      "Plans": [
+        {
+          "Node Type": "BitmapOr",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 41.02,
+          "Total Cost": 41.02,
+          "Plan Rows": 3057,
+          "Plan Width": 0,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Member",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Index Name": "sp_b_b",
+              "Startup Cost": 0.00,
+              "Total Cost": 5.79,
+              "Plan Rows": 200,
+              "Plan Width": 0,
+              "Disabled": false,
+              "Index Cond": "(b = 5)"
+            },
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Member",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Index Name": "sp_b_c",
+              "Startup Cost": 0.00,
+              "Total Cost": 33.72,
+              "Plan Rows": 2857,
+              "Plan Width": 0,
+              "Disabled": false,
+              "Index Cond": "(c = 3)"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]
+-- EXPLAIN
+
+> set enable_bitmapscan = off
+-- SET
+
+> explain select * from sp_b where b = 5
+QUERY PLAN:text
+Seq Scan on sp_b  (cost=0.00..376.00 rows=200 width=16)
+  Filter: (b = 5)
+-- EXPLAIN
+
+> reset enable_bitmapscan
+-- RESET
+
+> set enable_indexscan = off
+-- SET
+
+> explain select * from sp_b order by a limit 10
+QUERY PLAN:text
+Limit  (cost=758.19..758.22 rows=10 width=16)
+  ->  Sort  (cost=758.19..808.19 rows=20000 width=16)
+        Sort Key: a
+        ->  Seq Scan on sp_b  (cost=0.00..326.00 rows=20000 width=16)
+-- EXPLAIN
+
+> reset enable_indexscan
+-- RESET
+
+> set enable_seqscan = off
+-- SET
+
+> explain select * from sp_b where c + 1 = 5
+QUERY PLAN:text
+Seq Scan on sp_b  (cost=0.00..426.00 rows=100 width=16)
+  Disabled: true
+  Filter: ((c + 1) = 5)
+-- EXPLAIN
+
+> explain (format yaml) select * from sp_b where c + 1 = 5
+QUERY PLAN:text
+- Plan: 
+    Node Type: "Seq Scan"
+    Parallel Aware: false
+    Async Capable: false
+    Relation Name: "sp_b"
+    Alias: "sp_b"
+    Startup Cost: 0.00
+    Total Cost: 426.00
+    Plan Rows: 100
+    Plan Width: 16
+    Disabled: true
+    Filter: "((c + 1) = 5)"
+-- EXPLAIN
+
+> reset enable_seqscan
+-- RESET
+
+> set random_page_cost = 1.1
+-- SET
+
+> explain select * from sp_b where b < 30
+QUERY PLAN:text
+Index Scan using sp_b_b on sp_b  (cost=0.29..250.47 rows=6000 width=16)
+  Index Cond: (b < 30)
+-- EXPLAIN
+
+> reset random_page_cost
+-- RESET
+
+> select * from sp_b order by a desc limit 3
+a:int4 | b:int4 | c:int4 | d:text
+20000 | 0 | 1 | x0
+19999 | 99 | 0 | x999
+19998 | 98 | 6 | x998
+-- SELECT 3
+
+> select * from sp_b where b = 5 and c = 3 order by a limit 5
+a:int4 | b:int4 | c:int4 | d:text
+605 | 5 | 3 | x605
+1305 | 5 | 3 | x305
+2005 | 5 | 3 | x5
+2705 | 5 | 3 | x705
+3405 | 5 | 3 | x405
+-- SELECT 5
+
+> select count(*) from sp_b where b = 5 or c = 3
+count:int8
+3029
+-- SELECT 1
+
+> select a, b from sp_b where b = 7 and a > 10 limit 5
+a:int4 | b:int4
+107 | 7
+207 | 7
+307 | 7
+407 | 7
+507 | 7
+-- SELECT 5
+
+> select a from sp_b where a < 8
+a:int4
+1
+2
+3
+4
+5
+6
+7
+-- SELECT 7
+
+> select a, b, c from sp_b where b = 5 and c = 3 limit 4
+a:int4 | b:int4 | c:int4
+1305 | 5 | 3
+2005 | 5 | 3
+2705 | 5 | 3
+605 | 5 | 3
+-- SELECT 4
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select a from sp_b where a < 50
+QUERY PLAN:text
+Index Only Scan using sp_b_ab on sp_b (actual rows=49.00 loops=1)
+  Index Cond: (a < 50)
+  Heap Fetches: 49
+  Index Searches: 1
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from sp_b where b = 5 or c = 3
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b (actual rows=3029.00 loops=1)
+  Recheck Cond: ((b = 5) OR (c = 3))
+  Heap Blocks: exact=126
+  ->  BitmapOr (actual rows=0.00 loops=1)
+        ->  Bitmap Index Scan on sp_b_b (actual rows=200.00 loops=1)
+              Index Cond: (b = 5)
+              Index Searches: 1
+        ->  Bitmap Index Scan on sp_b_c (actual rows=2857.00 loops=1)
+              Index Cond: (c = 3)
+              Index Searches: 1
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from sp_b where b = 5 and c = 3 and a > 100
+QUERY PLAN:text
+Bitmap Heap Scan on sp_b (actual rows=28.00 loops=1)
+  Recheck Cond: ((b = 5) AND (c = 3))
+  Filter: (a > 100)
+  Heap Blocks: exact=28
+  ->  BitmapAnd (actual rows=0.00 loops=1)
+        ->  Bitmap Index Scan on sp_b_b (actual rows=200.00 loops=1)
+              Index Cond: (b = 5)
+              Index Searches: 1
+        ->  Bitmap Index Scan on sp_b_c (actual rows=2857.00 loops=1)
+              Index Cond: (c = 3)
+              Index Searches: 1
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from sp_b order by a desc limit 3
+QUERY PLAN:text
+Limit (actual rows=3.00 loops=1)
+  ->  Index Scan Backward using sp_b_ab on sp_b (actual rows=3.00 loops=1)
+        Index Searches: 1
+-- EXPLAIN
+
+> vacuum sp_b
+-- VACUUM
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select a from sp_b where a < 50
+QUERY PLAN:text
+Index Only Scan using sp_b_ab on sp_b (actual rows=49.00 loops=1)
+  Index Cond: (a < 50)
+  Heap Fetches: 0
+  Index Searches: 1
+-- EXPLAIN
+
+> explain select a from sp_b where a < 50
+QUERY PLAN:text
+Index Only Scan using sp_b_ab on sp_b  (cost=0.29..5.14 rows=49 width=4)
+  Index Cond: (a < 50)
+-- EXPLAIN
+
+> explain select b from sp_b where b < 10
+QUERY PLAN:text
+Index Only Scan using sp_b_b on sp_b  (cost=0.29..43.29 rows=2000 width=4)
+  Index Cond: (b < 10)
+-- EXPLAIN
+
+> explain select count(*) from sp_b
+QUERY PLAN:text
+Aggregate  (cost=376.00..376.01 rows=1 width=8)
+  ->  Seq Scan on sp_b  (cost=0.00..326.00 rows=20000 width=0)
+-- EXPLAIN
+
+> explain update sp_b set c = 1 where a = 5
+QUERY PLAN:text
+Update on sp_b  (cost=0.29..8.30 rows=0 width=0)
+  ->  Index Scan using sp_b_ab on sp_b  (cost=0.29..8.30 rows=1 width=10)
+        Index Cond: (a = 5)
+-- EXPLAIN
+
+> explain delete from sp_b where b = 5
+QUERY PLAN:text
+Delete on sp_b  (cost=5.84..139.55 rows=0 width=0)
+  ->  Bitmap Heap Scan on sp_b  (cost=5.84..139.55 rows=200 width=6)
+        Recheck Cond: (b = 5)
+        ->  Bitmap Index Scan on sp_b_b  (cost=0.00..5.79 rows=200 width=0)
+              Index Cond: (b = 5)
+-- EXPLAIN
+
+> create table sp_m (a int, b int)
+-- CREATE TABLE
+
+> insert into sp_m select g, g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> analyze sp_m
+-- ANALYZE
+
+> explain delete from sp_m where b < 10
+QUERY PLAN:text
+Delete on sp_m  (cost=0.00..17.50 rows=0 width=0)
+  ->  Seq Scan on sp_m  (cost=0.00..17.50 rows=9 width=6)
+        Filter: (b < 10)
+-- EXPLAIN
+
+> explain update sp_m set b = b + 1 where b < 10
+QUERY PLAN:text
+Update on sp_m  (cost=0.00..17.52 rows=0 width=0)
+  ->  Seq Scan on sp_m  (cost=0.00..17.52 rows=9 width=10)
+        Filter: (b < 10)
+-- EXPLAIN
+
+> explain update sp_m set b = 5
+QUERY PLAN:text
+Update on sp_m  (cost=0.00..15.00 rows=0 width=0)
+  ->  Seq Scan on sp_m  (cost=0.00..15.00 rows=1000 width=10)
+-- EXPLAIN
+
+> explain insert into sp_m select * from sp_m
+QUERY PLAN:text
+Insert on sp_m  (cost=0.00..15.00 rows=0 width=0)
+  ->  Seq Scan on sp_m sp_m_1  (cost=0.00..15.00 rows=1000 width=8)
+-- EXPLAIN
+
+> explain insert into sp_m values (1, 2)
+QUERY PLAN:text
+Insert on sp_m  (cost=0.00..0.01 rows=0 width=0)
+  ->  Result  (cost=0.00..0.01 rows=1 width=8)
+-- EXPLAIN
+
+> explain delete from sp_m where b < 10 returning *
+QUERY PLAN:text
+Delete on sp_m  (cost=0.00..17.50 rows=9 width=6)
+  ->  Seq Scan on sp_m  (cost=0.00..17.50 rows=9 width=6)
+        Filter: (b < 10)
+-- EXPLAIN
+
+> explain update sp_m set b = b + 1, a = 7 where b < 10 returning *
+QUERY PLAN:text
+Update on sp_m  (cost=0.00..17.52 rows=9 width=14)
+  ->  Seq Scan on sp_m  (cost=0.00..17.52 rows=9 width=14)
+        Filter: (b < 10)
+-- EXPLAIN
+
+> explain delete from sp_m using sp_m m2 where m2.a = sp_m.b
+QUERY PLAN:text
+Delete on sp_m  (cost=27.50..56.25 rows=0 width=0)
+  ->  Hash Join  (cost=27.50..56.25 rows=1000 width=12)
+        Hash Cond: (sp_m.b = m2.a)
+        ->  Seq Scan on sp_m  (cost=0.00..15.00 rows=1000 width=10)
+        ->  Hash  (cost=15.00..15.00 rows=1000 width=10)
+              ->  Seq Scan on sp_m m2  (cost=0.00..15.00 rows=1000 width=10)
+-- EXPLAIN
+
+> create table sp_p (a int, b int, c int, f bool, t text, n numeric)
+-- CREATE TABLE
+
+> insert into sp_p select g, g % 100, g % 7, g % 3 = 0, 't' || g, g / 10.0 from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> create index sp_p_part on sp_p (b) where c = 1
+-- CREATE INDEX
+
+> create index sp_p_expr on sp_p ((a % 50))
+-- CREATE INDEX
+
+> create index sp_p_cb on sp_p (c, b)
+-- CREATE INDEX
+
+> create index sp_p_f on sp_p (f)
+-- CREATE INDEX
+
+> create index sp_p_h on sp_p using hash (a)
+-- CREATE INDEX
+
+> create index sp_p_n on sp_p (n)
+-- CREATE INDEX
+
+> analyze sp_p
+-- ANALYZE
+
+> explain select * from sp_p where b = 5 and c = 1
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=4.50..78.23 rows=29 width=25)
+  Recheck Cond: ((b = 5) AND (c = 1))
+  ->  Bitmap Index Scan on sp_p_part  (cost=0.00..4.50 rows=29 width=0)
+        Index Cond: (b = 5)
+-- EXPLAIN
+
+> explain select * from sp_p where b = 5
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=27.59..184.82 rows=200 width=25)
+  Recheck Cond: (b = 5)
+  ->  Bitmap Index Scan on sp_p_cb  (cost=0.00..27.54 rows=200 width=0)
+        Index Cond: (b = 5)
+-- EXPLAIN
+
+> explain select * from sp_p where a % 50 = 3
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=7.39..160.39 rows=400 width=25)
+  Recheck Cond: ((a % 50) = 3)
+  ->  Bitmap Index Scan on sp_p_expr  (cost=0.00..7.29 rows=400 width=0)
+        Index Cond: ((a % 50) = 3)
+-- EXPLAIN
+
+> explain select * from sp_p where b = 7
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=27.59..184.82 rows=200 width=25)
+  Recheck Cond: (b = 7)
+  ->  Bitmap Index Scan on sp_p_cb  (cost=0.00..27.54 rows=200 width=0)
+        Index Cond: (b = 7)
+-- EXPLAIN
+
+> explain select * from sp_p where c = 2 and b = 7
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=4.58..78.31 rows=29 width=25)
+  Recheck Cond: ((c = 2) AND (b = 7))
+  ->  Bitmap Index Scan on sp_p_cb  (cost=0.00..4.58 rows=29 width=0)
+        Index Cond: ((c = 2) AND (b = 7))
+-- EXPLAIN
+
+> explain select * from sp_p where f
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=79.95..293.61 rows=6666 width=25)
+  Recheck Cond: f
+  ->  Bitmap Index Scan on sp_p_f  (cost=0.00..78.28 rows=6666 width=0)
+        Index Cond: (f = true)
+-- EXPLAIN
+
+> explain select * from sp_p where not f
+QUERY PLAN:text
+Seq Scan on sp_p  (cost=0.00..347.00 rows=13334 width=25)
+  Filter: (NOT f)
+-- EXPLAIN
+
+> explain select * from sp_p where a = 77
+QUERY PLAN:text
+Index Scan using sp_p_h on sp_p  (cost=0.00..8.02 rows=1 width=25)
+  Index Cond: (a = 77)
+-- EXPLAIN
+
+> explain select * from sp_p where n = 5.5
+QUERY PLAN:text
+Index Scan using sp_p_n on sp_p  (cost=0.29..8.30 rows=1 width=25)
+  Index Cond: (n = 5.5)
+-- EXPLAIN
+
+> explain select * from sp_p where n < 10
+QUERY PLAN:text
+Index Scan using sp_p_n on sp_p  (cost=0.29..10.02 rows=99 width=25)
+  Index Cond: (n < '10'::numeric)
+-- EXPLAIN
+
+> explain select * from sp_p where c is not null and b = 3
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=28.09..185.33 rows=200 width=25)
+  Recheck Cond: ((c IS NOT NULL) AND (b = 3))
+  ->  Bitmap Index Scan on sp_p_cb  (cost=0.00..28.04 rows=200 width=0)
+        Index Cond: ((c IS NOT NULL) AND (b = 3))
+-- EXPLAIN
+
+> explain select * from sp_p where a = 5 or a = 9
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=8.02..15.35 rows=2 width=25)
+  Recheck Cond: ((a = 5) OR (a = 9))
+  ->  BitmapOr  (cost=8.02..8.02 rows=2 width=0)
+        ->  Bitmap Index Scan on sp_p_h  (cost=0.00..4.01 rows=1 width=0)
+              Index Cond: (a = 5)
+        ->  Bitmap Index Scan on sp_p_h  (cost=0.00..4.01 rows=1 width=0)
+              Index Cond: (a = 9)
+-- EXPLAIN
+
+> explain select * from sp_p where (c = 1 and b = 2) or (c = 2 and b = 3)
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=9.10..119.96 rows=57 width=25)
+  Recheck Cond: (((b = 2) AND (c = 1)) OR ((c = 2) AND (b = 3)))
+  ->  BitmapOr  (cost=9.10..9.10 rows=57 width=0)
+        ->  Bitmap Index Scan on sp_p_part  (cost=0.00..4.50 rows=29 width=0)
+              Index Cond: (b = 2)
+        ->  Bitmap Index Scan on sp_p_cb  (cost=0.00..4.58 rows=29 width=0)
+              Index Cond: ((c = 2) AND (b = 3))
+-- EXPLAIN
+
+> explain select * from sp_p where c in (1, 2) and b = 50
+QUERY PLAN:text
+Bitmap Heap Scan on sp_p  (cost=9.17..119.74 rows=57 width=25)
+  Recheck Cond: ((c = ANY ('{1,2}'::integer[])) AND (b = 50))
+  ->  Bitmap Index Scan on sp_p_cb  (cost=0.00..9.15 rows=57 width=0)
+        Index Cond: ((c = ANY ('{1,2}'::integer[])) AND (b = 50))
+-- EXPLAIN
+
+> select a, b, c from sp_p where (c = 1 and b = 2) or (c = 2 and b = 3) order by a limit 5
+a:int4 | b:int4 | c:int4
+302 | 2 | 1
+303 | 3 | 2
+1002 | 2 | 1
+1003 | 3 | 2
+1702 | 2 | 1
+-- SELECT 5
+
+> select count(*) from sp_p where f
+count:int8
+6666
+-- SELECT 1
+

@@ -1,0 +1,421 @@
+> CREATE TABLE ub (id int PRIMARY KEY, name text NOT NULL, qty int DEFAULT 7, note text DEFAULT 'n/a', CHECK (qty >= 0))
+-- CREATE TABLE
+
+> INSERT INTO ub VALUES (1, 'a', 1), (2, 'b', 2), (3, 'c', 30)
+-- INSERT 0 3
+
+> CREATE VIEW uv AS SELECT id, name, qty FROM ub
+-- CREATE VIEW
+
+> INSERT INTO uv VALUES (4, 'd', 4) RETURNING *
+id:int4 | name:text | qty:int4
+4 | d | 4
+-- INSERT 0 1
+
+> INSERT INTO uv (name, id) VALUES ('e', 5) RETURNING id, qty, uv.*
+id:int4 | qty:int4 | id:int4 | name:text | qty:int4
+5 | 7 | 5 | e | 7
+-- INSERT 0 1
+
+> UPDATE uv SET qty = qty + 100 WHERE id IN (1, 2) RETURNING *
+id:int4 | name:text | qty:int4
+1 | a | 101
+2 | b | 102
+-- UPDATE 2
+
+> DELETE FROM uv WHERE id = 5 RETURNING name
+name:text
+e
+-- DELETE 1
+
+> SELECT * FROM ub ORDER BY id
+id:int4 | name:text | qty:int4 | note:text
+1 | a | 101 | n/a
+2 | b | 102 | n/a
+3 | c | 30 | n/a
+4 | d | 4 | n/a
+-- SELECT 4
+
+> INSERT INTO uv VALUES (6, NULL, 1)
+ERROR 23502: null value in column "name" of relation "ub" violates not-null constraint
+DETAIL: Failing row contains (6, null, 1, n/a).
+OBJECTS: schema=public table=ub column=name
+
+> INSERT INTO uv VALUES (6, 'f', -1)
+ERROR 23514: new row for relation "ub" violates check constraint "ub_qty_check"
+DETAIL: Failing row contains (6, f, -1, n/a).
+OBJECTS: schema=public table=ub constraint=ub_qty_check
+
+> INSERT INTO uv VALUES (1, 'dup', 1)
+ERROR 23505: duplicate key value violates unique constraint "ub_pkey"
+DETAIL: Key (id)=(1) already exists.
+OBJECTS: schema=public table=ub constraint=ub_pkey
+
+> INSERT INTO uv (note) VALUES ('x')
+ERROR 42703: column "note" of relation "uv" does not exist (at 17)
+
+> CREATE VIEW uv2 (k, label, doubled) AS SELECT id, upper(name), qty * 2 FROM ub
+-- CREATE VIEW
+
+> CREATE VIEW uv3 AS SELECT qty AS amount, id AS key, 'const' AS c, name FROM ub WHERE qty < 50
+-- CREATE VIEW
+
+> INSERT INTO uv3 (key, name, amount) VALUES (10, 'ten', 10) RETURNING *
+amount:int4 | key:int4 | c:text | name:text
+10 | 10 | const | ten
+-- INSERT 0 1
+
+> INSERT INTO uv3 VALUES (11, 11, 'const', 'eleven')
+ERROR 0A000: cannot insert into column "c" of view "uv3"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> INSERT INTO uv3 VALUES (11, 11, DEFAULT, 'eleven') RETURNING *
+ERROR 0A000: cannot insert into column "c" of view "uv3"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> UPDATE uv3 SET amount = amount + 1 RETURNING key, amount
+key:int4 | amount:int4
+10 | 11
+3 | 31
+4 | 5
+-- UPDATE 3
+
+> UPDATE uv3 SET c = 'x'
+ERROR 0A000: cannot update column "c" of view "uv3"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> UPDATE uv2 SET label = 'x'
+ERROR 0A000: cannot update column "label" of view "uv2"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> UPDATE uv2 SET k = k + 1000 WHERE label = 'TEN' RETURNING *
+k:int4 | label:text | doubled:int4
+1010 | TEN | 22
+-- UPDATE 1
+
+> DELETE FROM uv2 WHERE doubled > 100 RETURNING k
+k:int4
+1
+2
+-- DELETE 2
+
+> SELECT * FROM ub ORDER BY id
+id:int4 | name:text | qty:int4 | note:text
+3 | c | 31 | n/a
+4 | d | 5 | n/a
+1010 | ten | 11 | n/a
+-- SELECT 3
+
+> UPDATE uv3 SET amount = 0 WHERE key = 3
+-- UPDATE 1
+
+> DELETE FROM uv3 WHERE key = 3
+-- DELETE 1
+
+> INSERT INTO uv3 VALUES (99, 12, 'const', 'hidden')
+ERROR 0A000: cannot insert into column "c" of view "uv3"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> SELECT * FROM uv3 ORDER BY key
+amount:int4 | key:int4 | c:text | name:text
+5 | 4 | const | d
+11 | 1010 | const | ten
+-- SELECT 2
+
+> CREATE VIEW uvc AS SELECT * FROM ub WHERE qty < 50 WITH CHECK OPTION
+-- CREATE VIEW
+
+> INSERT INTO uvc VALUES (20, 't', 5)
+-- INSERT 0 1
+
+> INSERT INTO uvc VALUES (21, 't', 500)
+ERROR 44000: new row violates check option for view "uvc"
+DETAIL: Failing row contains (21, t, 500, n/a).
+
+> UPDATE uvc SET qty = 1000 WHERE id = 20
+ERROR 44000: new row violates check option for view "uvc"
+DETAIL: Failing row contains (20, t, 1000, n/a).
+
+> CREATE VIEW uvl AS SELECT * FROM uvc WHERE qty > 2 WITH LOCAL CHECK OPTION
+-- CREATE VIEW
+
+> INSERT INTO uvl VALUES (22, 'u', 1)
+ERROR 44000: new row violates check option for view "uvl"
+DETAIL: Failing row contains (22, u, 1, n/a).
+
+> INSERT INTO uvl VALUES (22, 'u', 100)
+ERROR 44000: new row violates check option for view "uvc"
+DETAIL: Failing row contains (22, u, 100, n/a).
+
+> INSERT INTO uvl VALUES (22, 'u', 3)
+-- INSERT 0 1
+
+> CREATE VIEW uvn AS SELECT * FROM uv3 WHERE amount > 2
+-- CREATE VIEW
+
+> CREATE VIEW uvcc AS SELECT * FROM uvn WITH CASCADED CHECK OPTION
+-- CREATE VIEW
+
+> INSERT INTO uvcc (amount, key, name) VALUES (1, 23, 'v')
+ERROR 44000: new row violates check option for view "uvn"
+DETAIL: Failing row contains (23, v, 1, n/a).
+
+> INSERT INTO uvcc (amount, key, name) VALUES (100, 23, 'v')
+ERROR 44000: new row violates check option for view "uv3"
+DETAIL: Failing row contains (23, v, 100, n/a).
+
+> INSERT INTO uvcc (amount, key, name) VALUES (5, 23, 'v') RETURNING *
+amount:int4 | key:int4 | c:text | name:text
+5 | 23 | const | v
+-- INSERT 0 1
+
+> UPDATE uvcc SET amount = 60 WHERE key = 23
+ERROR 44000: new row violates check option for view "uv3"
+DETAIL: Failing row contains (23, v, 60, n/a).
+
+> UPDATE uvcc SET amount = 6 WHERE key = 23 RETURNING key, amount
+key:int4 | amount:int4
+23 | 6
+-- UPDATE 1
+
+> SELECT table_name, check_option, is_updatable, is_insertable_into FROM information_schema.views WHERE table_name LIKE 'uv%' ORDER BY table_name
+table_name:name | check_option:varchar | is_updatable:varchar | is_insertable_into:varchar
+uv | NONE | YES | YES
+uv2 | NONE | YES | YES
+uv3 | NONE | YES | YES
+uvc | CASCADED | YES | YES
+uvcc | CASCADED | YES | YES
+uvl | LOCAL | YES | YES
+uvn | NONE | YES | YES
+-- SELECT 7
+
+> UPDATE uvn SET name = 'nested' WHERE key = 23 RETURNING *
+amount:int4 | key:int4 | c:text | name:text
+6 | 23 | const | nested
+-- UPDATE 1
+
+> DELETE FROM uvn WHERE key = 23
+-- DELETE 1
+
+> CREATE VIEW nv1 AS SELECT DISTINCT name FROM ub
+-- CREATE VIEW
+
+> CREATE VIEW nv2 AS SELECT name, count(*) FROM ub GROUP BY name
+-- CREATE VIEW
+
+> CREATE VIEW nv3 AS SELECT a.id FROM ub a JOIN ub b USING (id)
+-- CREATE VIEW
+
+> CREATE VIEW nv4 AS SELECT id FROM ub LIMIT 5
+-- CREATE VIEW
+
+> CREATE VIEW nv5 AS SELECT id FROM ub UNION SELECT 1
+-- CREATE VIEW
+
+> CREATE VIEW nv6 AS SELECT 1 AS one
+-- CREATE VIEW
+
+> CREATE VIEW nv7 AS SELECT id, row_number() OVER () FROM ub
+-- CREATE VIEW
+
+> CREATE VIEW nv8 AS SELECT id, generate_series(1, 2) FROM ub
+-- CREATE VIEW
+
+> CREATE VIEW nv9 AS WITH w AS (SELECT * FROM ub) SELECT * FROM w
+-- CREATE VIEW
+
+> CREATE VIEW nv10 AS SELECT * FROM (SELECT * FROM ub) s
+-- CREATE VIEW
+
+> CREATE VIEW nv11 AS SELECT id * 2 AS x FROM ub
+-- CREATE VIEW
+
+> INSERT INTO nv1 VALUES ('x')
+ERROR 55000: cannot insert into view "nv1"
+DETAIL: Views containing DISTINCT are not automatically updatable.
+HINT: To enable inserting into the view, provide an INSTEAD OF INSERT trigger or an unconditional ON INSERT DO INSTEAD rule.
+
+> INSERT INTO nv2 VALUES ('x', 1)
+ERROR 55000: cannot insert into view "nv2"
+DETAIL: Views containing GROUP BY are not automatically updatable.
+HINT: To enable inserting into the view, provide an INSTEAD OF INSERT trigger or an unconditional ON INSERT DO INSTEAD rule.
+
+> DELETE FROM nv3
+ERROR 55000: cannot delete from view "nv3"
+DETAIL: Views that do not select from a single table or view are not automatically updatable.
+HINT: To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.
+
+> UPDATE nv4 SET id = 1
+ERROR 55000: cannot update view "nv4"
+DETAIL: Views containing LIMIT or OFFSET are not automatically updatable.
+HINT: To enable updating the view, provide an INSTEAD OF UPDATE trigger or an unconditional ON UPDATE DO INSTEAD rule.
+
+> DELETE FROM nv5
+ERROR 55000: cannot delete from view "nv5"
+DETAIL: Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.
+HINT: To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.
+
+> DELETE FROM nv6
+ERROR 55000: cannot delete from view "nv6"
+DETAIL: Views that do not select from a single table or view are not automatically updatable.
+HINT: To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.
+
+> DELETE FROM nv7
+ERROR 55000: cannot delete from view "nv7"
+DETAIL: Views that return window functions are not automatically updatable.
+HINT: To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.
+
+> DELETE FROM nv8
+ERROR 55000: cannot delete from view "nv8"
+DETAIL: Views that return set-returning functions are not automatically updatable.
+HINT: To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.
+
+> DELETE FROM nv9
+ERROR 55000: cannot delete from view "nv9"
+DETAIL: Views containing WITH are not automatically updatable.
+HINT: To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.
+
+> DELETE FROM nv10
+ERROR 55000: cannot delete from view "nv10"
+DETAIL: Views that do not select from a single table or view are not automatically updatable.
+HINT: To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.
+
+> INSERT INTO nv11 VALUES (1)
+ERROR 55000: cannot insert into view "nv11"
+DETAIL: Views that have no updatable columns are not automatically updatable.
+HINT: To enable inserting into the view, provide an INSTEAD OF INSERT trigger or an unconditional ON INSERT DO INSTEAD rule.
+
+> UPDATE nv11 SET x = 1
+ERROR 55000: cannot update view "nv11"
+DETAIL: Views that have no updatable columns are not automatically updatable.
+HINT: To enable updating the view, provide an INSTEAD OF UPDATE trigger or an unconditional ON UPDATE DO INSTEAD rule.
+
+> DELETE FROM nv11 WHERE x = 6 RETURNING *
+x:int4
+-- DELETE 0
+
+> SELECT table_name, is_updatable, is_insertable_into FROM information_schema.views WHERE table_name LIKE 'nv%' ORDER BY table_name
+table_name:name | is_updatable:varchar | is_insertable_into:varchar
+nv1 | NO | NO
+nv10 | NO | NO
+nv11 | NO | NO
+nv2 | NO | NO
+nv3 | NO | NO
+nv4 | NO | NO
+nv5 | NO | NO
+nv6 | NO | NO
+nv7 | NO | NO
+nv8 | NO | NO
+nv9 | NO | NO
+-- SELECT 11
+
+> SELECT table_name, column_name, is_updatable FROM information_schema.columns WHERE table_name IN ('uv2', 'uv3', 'nv11') ORDER BY table_name, ordinal_position
+table_name:name | column_name:name | is_updatable:varchar
+nv11 | x | NO
+uv2 | k | YES
+uv2 | label | NO
+uv2 | doubled | NO
+uv3 | amount | YES
+uv3 | key | YES
+uv3 | c | NO
+uv3 | name | YES
+-- SELECT 8
+
+> SELECT pg_relation_is_updatable('uv3'::regclass, false), pg_relation_is_updatable('nv1'::regclass, false), pg_column_is_updatable('uv3'::regclass, 3::int2, false), pg_column_is_updatable('uv3'::regclass, 1::int2, false)
+pg_relation_is_updatable:int4 | pg_relation_is_updatable:int4 | pg_column_is_updatable:bool | pg_column_is_updatable:bool
+28 | 0 | f | t
+-- SELECT 1
+
+> CREATE FUNCTION ub_note() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE '% % on %', TG_WHEN, TG_OP, TG_TABLE_NAME;
+>   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER ub_row BEFORE INSERT OR UPDATE OR DELETE ON ub FOR EACH ROW EXECUTE FUNCTION ub_note()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER ub_stmt AFTER INSERT OR UPDATE OR DELETE ON ub FOR EACH STATEMENT EXECUTE FUNCTION ub_note()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER uv_stmt BEFORE INSERT ON uv FOR EACH STATEMENT EXECUTE FUNCTION ub_note()
+-- CREATE TRIGGER
+
+> INSERT INTO uv VALUES (30, 'trig', 1)
+NOTICE 00000: BEFORE INSERT on ub
+CONTEXT: PL/pgSQL function ub_note() line 3 at RAISE
+NOTICE 00000: AFTER INSERT on ub
+CONTEXT: PL/pgSQL function ub_note() line 3 at RAISE
+-- INSERT 0 1
+
+> UPDATE uv SET qty = 2 WHERE id = 30
+NOTICE 00000: BEFORE UPDATE on ub
+CONTEXT: PL/pgSQL function ub_note() line 3 at RAISE
+NOTICE 00000: AFTER UPDATE on ub
+CONTEXT: PL/pgSQL function ub_note() line 3 at RAISE
+-- UPDATE 1
+
+> DELETE FROM uv WHERE id = 30
+NOTICE 00000: BEFORE DELETE on ub
+CONTEXT: PL/pgSQL function ub_note() line 3 at RAISE
+NOTICE 00000: AFTER DELETE on ub
+CONTEXT: PL/pgSQL function ub_note() line 3 at RAISE
+-- DELETE 1
+
+> CREATE TABLE ux (id int, bump int)
+-- CREATE TABLE
+
+> INSERT INTO ux VALUES (4, 5), (20, 6), (4, 100)
+-- INSERT 0 3
+
+> DROP TRIGGER ub_row ON ub
+-- DROP TRIGGER
+
+> DROP TRIGGER ub_stmt ON ub
+-- DROP TRIGGER
+
+> UPDATE uv SET qty = uv.qty + ux.bump FROM ux WHERE ux.id = uv.id RETURNING uv.id, uv.qty, ux.bump
+id:int4 | qty:int4 | bump:int4
+20 | 11 | 6
+4 | 10 | 5
+-- UPDATE 2
+
+> DELETE FROM uv USING ux WHERE ux.id = uv.id AND ux.bump = 6
+-- DELETE 1
+
+> SELECT * FROM ub ORDER BY id
+id:int4 | name:text | qty:int4 | note:text
+4 | d | 10 | n/a
+22 | u | 3 | n/a
+1010 | ten | 11 | n/a
+-- SELECT 3
+
+> DROP VIEW nv6
+-- DROP VIEW
+
+> DROP TABLE ub, ux CASCADE
+NOTICE 00000: drop cascades to 17 other objects
+DETAIL: drop cascades to view uv
+DETAIL: drop cascades to view uv2
+DETAIL: drop cascades to view uv3
+DETAIL: drop cascades to view uvn
+DETAIL: drop cascades to view uvcc
+DETAIL: drop cascades to view uvc
+DETAIL: drop cascades to view uvl
+DETAIL: drop cascades to view nv1
+DETAIL: drop cascades to view nv2
+DETAIL: drop cascades to view nv3
+DETAIL: drop cascades to view nv4
+DETAIL: drop cascades to view nv5
+DETAIL: drop cascades to view nv7
+DETAIL: drop cascades to view nv8
+DETAIL: drop cascades to view nv9
+DETAIL: drop cascades to view nv10
+DETAIL: drop cascades to view nv11
+-- DROP TABLE
+
+> DROP FUNCTION ub_note()
+-- DROP FUNCTION
+

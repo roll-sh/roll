@@ -1,0 +1,107 @@
+> CREATE FUNCTION sfu_make() RETURNS void LANGUAGE sql AS $$ CREATE TABLE sfu_t (a int) $$
+-- CREATE FUNCTION
+
+> SELECT sfu_make()
+sfu_make:void
+NULL
+-- SELECT 1
+
+> SELECT attname FROM pg_attribute WHERE attrelid = 'sfu_t'::regclass AND attnum > 0
+attname:name
+a
+-- SELECT 1
+
+> SELECT sfu_make()
+ERROR 42P07: relation "sfu_t" already exists
+CONTEXT: SQL function "sfu_make" statement 1
+
+> CREATE FUNCTION sfu_alter() RETURNS void LANGUAGE sql AS $$ CREATE INDEX ON sfu_t (a); ALTER TABLE sfu_t ADD COLUMN b int; $$
+-- CREATE FUNCTION
+
+> SELECT sfu_alter()
+sfu_alter:void
+NULL
+-- SELECT 1
+
+> SELECT attname FROM pg_attribute WHERE attrelid = 'sfu_t'::regclass AND attnum > 0 ORDER BY attnum
+attname:name
+a
+b
+-- SELECT 2
+
+> SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'sfu_t'::regclass
+indexrelid:regclass
+sfu_t_a_idx
+-- SELECT 1
+
+> CREATE FUNCTION sfu_mixed() RETURNS int LANGUAGE sql AS $$ INSERT INTO sfu_t VALUES (1, 2); COMMENT ON TABLE sfu_t IS 'made'; SELECT count(*)::int FROM sfu_t $$
+-- CREATE FUNCTION
+
+> SELECT sfu_mixed()
+sfu_mixed:int4
+1
+-- SELECT 1
+
+> SELECT obj_description('sfu_t'::regclass)
+obj_description:text
+made
+-- SELECT 1
+
+> CREATE FUNCTION sfu_later() RETURNS int LANGUAGE sql AS $$ CREATE TABLE sfu_t2 (a int); INSERT INTO sfu_t2 VALUES (1); SELECT 1 $$
+ERROR 42P01: relation "sfu_t2" does not exist (at 101)
+
+> CREATE FUNCTION sfu_ret() RETURNS int LANGUAGE sql AS $$ CREATE TABLE sfu_t3 (a int) $$
+ERROR 42P13: return type mismatch in function declared to return integer
+DETAIL: Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING.
+CONTEXT: SQL function "sfu_ret"
+
+> CREATE FUNCTION sfu_vac() RETURNS void LANGUAGE sql AS $$ VACUUM $$
+-- CREATE FUNCTION
+
+> SELECT sfu_vac()
+ERROR 25001: VACUUM cannot be executed from a function
+CONTEXT: SQL function "sfu_vac" statement 1
+
+> CREATE FUNCTION sfu_analyze() RETURNS void LANGUAGE sql AS $$ ANALYZE sfu_t $$
+-- CREATE FUNCTION
+
+> SELECT sfu_analyze()
+sfu_analyze:void
+NULL
+-- SELECT 1
+
+> CREATE FUNCTION sfu_tx() RETURNS void LANGUAGE sql AS $$ COMMIT $$
+-- CREATE FUNCTION
+
+> SELECT sfu_tx()
+ERROR 0A000: COMMIT is not allowed in an SQL function
+CONTEXT: SQL function "sfu_tx" statement 1
+
+> CREATE FUNCTION sfu_atomic() RETURNS void LANGUAGE sql BEGIN ATOMIC CREATE TABLE sfu_x (a int); END
+ERROR 0A000: CREATE TABLE is not yet supported in unquoted SQL function body
+
+> CREATE FUNCTION sfu_atomic2() RETURNS void LANGUAGE sql BEGIN ATOMIC SELECT 1; NOTIFY sfu; END
+ERROR 0A000: NOTIFY is not yet supported in unquoted SQL function body
+
+> CREATE PROCEDURE sfu_proc(n text) LANGUAGE sql AS $$ CREATE TABLE sfu_p (a int) $$
+-- CREATE PROCEDURE
+
+> CALL sfu_proc('x')
+-- CALL
+
+> SELECT count(*) FROM pg_class WHERE relname = 'sfu_p'
+count:int8
+1
+-- SELECT 1
+
+> CREATE PROCEDURE sfu_proc2() LANGUAGE sql AS $$ DROP TABLE sfu_p; CREATE TABLE sfu_p2 (b text) $$
+-- CREATE PROCEDURE
+
+> CALL sfu_proc2()
+-- CALL
+
+> SELECT relname FROM pg_class WHERE relname LIKE 'sfu_p%' AND relkind = 'r' ORDER BY 1
+relname:name
+sfu_p2
+-- SELECT 1
+

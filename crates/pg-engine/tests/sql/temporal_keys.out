@@ -1,0 +1,360 @@
+> SET datestyle TO ISO, YMD
+-- SET
+
+> CREATE TABLE tk_bad (valid_at daterange, CONSTRAINT tk_bad_pk PRIMARY KEY (valid_at WITHOUT OVERLAPS))
+ERROR 42601: constraint using WITHOUT OVERLAPS needs at least two columns
+
+> CREATE TABLE tk_bad (id int4range, CONSTRAINT tk_bad_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS))
+ERROR 42703: column "valid_at" named in key does not exist (at 36)
+
+> CREATE TABLE tk_bad (id int4range, valid_at text, CONSTRAINT tk_bad_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS))
+ERROR 42804: column "valid_at" in WITHOUT OVERLAPS is not a range or multirange type (at 51)
+
+> CREATE TABLE tk_bad (id int, valid_at daterange, CONSTRAINT tk_bad_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS))
+ERROR 42704: data type integer has no default operator class for access method "gist"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> CREATE TABLE tk_rng (id int4range, valid_at daterange, name text, CONSTRAINT tk_rng_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS))
+-- CREATE TABLE
+
+> SELECT conname, contype, conperiod, conkey, conexclop::regoper[], conindid::regclass FROM pg_constraint WHERE conrelid = 'tk_rng'::regclass ORDER BY conname
+conname:name | contype:char | conperiod:bool | conkey:int2[] | conexclop:2208 | conindid:regclass
+tk_rng_id_not_null | n | f | {1} | NULL | -
+tk_rng_pk | p | t | {1,2} | {pg_catalog.=,pg_catalog.&&} | tk_rng_pk
+tk_rng_valid_at_not_null | n | f | {2} | NULL | -
+-- SELECT 3
+
+> SELECT indisunique, indisprimary, indisexclusion, indimmediate, indnatts FROM pg_index WHERE indexrelid = 'tk_rng_pk'::regclass
+indisunique:bool | indisprimary:bool | indisexclusion:bool | indimmediate:bool | indnatts:int2
+t | t | t | t | 2
+-- SELECT 1
+
+> SELECT pg_get_constraintdef(oid), pg_get_indexdef(conindid, 0, true) FROM pg_constraint WHERE conname = 'tk_rng_pk'
+pg_get_constraintdef:text | pg_get_indexdef:text
+PRIMARY KEY (id, valid_at WITHOUT OVERLAPS) | CREATE UNIQUE INDEX tk_rng_pk ON tk_rng USING gist (id, valid_at)
+-- SELECT 1
+
+> SELECT attname, attnotnull FROM pg_attribute WHERE attrelid = 'tk_rng'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attnotnull:bool
+id | t
+valid_at | t
+name | f
+-- SELECT 3
+
+> SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam WHERE c.oid = 'tk_rng_pk'::regclass
+amname:name
+gist
+-- SELECT 1
+
+> SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 'tk_rng' ORDER BY 1
+constraint_name:name | constraint_type:varchar
+tk_rng_id_not_null | CHECK
+tk_rng_pk | PRIMARY KEY
+tk_rng_valid_at_not_null | CHECK
+-- SELECT 3
+
+> ALTER TABLE tk_rng ADD CONSTRAINT tk_rng_pk2 PRIMARY KEY (id)
+ERROR 42P16: multiple primary keys for table "tk_rng" are not allowed
+
+> ALTER TABLE tk_rng ALTER COLUMN valid_at DROP NOT NULL
+ERROR 42P16: column "valid_at" is in a primary key
+
+> INSERT INTO tk_rng VALUES ('[1,2)', '[2018-01-01,2018-02-01)', 'a'), ('[1,2)', '[2018-02-01,2018-03-01)', 'b'), ('[2,3)', '[2018-01-01,2018-03-01)', 'c')
+-- INSERT 0 3
+
+> INSERT INTO tk_rng VALUES ('[1,2)', '[2018-01-15,2018-01-20)', 'x')
+ERROR 23P01: conflicting key value violates exclusion constraint "tk_rng_pk"
+DETAIL: Key (id, valid_at)=([1,2), [2018-01-15,2018-01-20)) conflicts with existing key (id, valid_at)=([1,2), [2018-01-01,2018-02-01)).
+OBJECTS: schema=public table=tk_rng constraint=tk_rng_pk
+
+> INSERT INTO tk_rng VALUES ('[3,4)', 'empty', 'x')
+ERROR 23514: empty WITHOUT OVERLAPS value found in column "valid_at" in relation "tk_rng"
+
+> INSERT INTO tk_rng VALUES (NULL, '[2018-01-01,2018-02-01)', 'x')
+ERROR 23502: null value in column "id" of relation "tk_rng" violates not-null constraint
+DETAIL: Failing row contains (null, [2018-01-01,2018-02-01), x).
+OBJECTS: schema=public table=tk_rng column=id
+
+> UPDATE tk_rng SET valid_at = '[2018-01-20,2018-02-15)' WHERE name = 'b'
+ERROR 23P01: conflicting key value violates exclusion constraint "tk_rng_pk"
+DETAIL: Key (id, valid_at)=([1,2), [2018-01-20,2018-02-15)) conflicts with existing key (id, valid_at)=([1,2), [2018-01-01,2018-02-01)).
+OBJECTS: schema=public table=tk_rng constraint=tk_rng_pk
+
+> UPDATE tk_rng SET valid_at = 'empty' WHERE name = 'c'
+ERROR 23514: empty WITHOUT OVERLAPS value found in column "valid_at" in relation "tk_rng"
+
+> SELECT * FROM tk_rng ORDER BY id, valid_at
+id:3904 | valid_at:3912 | name:text
+[1,2) | [2018-01-01,2018-02-01) | a
+[1,2) | [2018-02-01,2018-03-01) | b
+[2,3) | [2018-01-01,2018-03-01) | c
+-- SELECT 3
+
+> CREATE TABLE tk_uq (id int4range, valid_at daterange, CONSTRAINT tk_uq_key UNIQUE (id, valid_at WITHOUT OVERLAPS))
+-- CREATE TABLE
+
+> INSERT INTO tk_uq VALUES (NULL, '[2018-01-01,2018-02-01)'), (NULL, '[2018-01-01,2018-02-01)'), ('[1,2)', NULL), ('[1,2)', NULL)
+-- INSERT 0 4
+
+> INSERT INTO tk_uq VALUES (NULL, 'empty')
+ERROR 23514: empty WITHOUT OVERLAPS value found in column "valid_at" in relation "tk_uq"
+
+> SELECT conname, contype, conperiod, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'tk_uq'::regclass
+conname:name | contype:char | conperiod:bool | pg_get_constraintdef:text
+tk_uq_key | u | t | UNIQUE (id, valid_at WITHOUT OVERLAPS)
+-- SELECT 1
+
+> CREATE TABLE tk_uq2 (id int4range, valid_at daterange, UNIQUE (id, valid_at WITHOUT OVERLAPS))
+-- CREATE TABLE
+
+> CREATE TABLE tk_pk2 (id int4range, valid_at daterange, PRIMARY KEY (id, valid_at WITHOUT OVERLAPS))
+-- CREATE TABLE
+
+> SELECT conname, contype FROM pg_constraint WHERE conrelid IN ('tk_uq2'::regclass, 'tk_pk2'::regclass) AND contype IN ('p', 'u') ORDER BY 1
+conname:name | contype:char
+tk_pk2_pkey | p
+tk_uq2_id_valid_at_key | u
+-- SELECT 2
+
+> CREATE TABLE tk_add (id int4range, valid_at daterange)
+-- CREATE TABLE
+
+> INSERT INTO tk_add VALUES ('[1,2)', '[2018-01-01,2018-02-01)'), ('[1,2)', '[2018-01-15,2018-03-01)')
+-- INSERT 0 2
+
+> ALTER TABLE tk_add ADD CONSTRAINT tk_add_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)
+ERROR 23P01: could not create exclusion constraint "tk_add_pk"
+DETAIL: Key (id, valid_at)=([1,2), [2018-01-01,2018-02-01)) conflicts with key (id, valid_at)=([1,2), [2018-01-15,2018-03-01)).
+OBJECTS: schema=public table=tk_add constraint=tk_add_pk
+
+> DELETE FROM tk_add WHERE valid_at = '[2018-01-15,2018-03-01)'
+-- DELETE 1
+
+> INSERT INTO tk_add VALUES ('[2,3)', 'empty')
+-- INSERT 0 1
+
+> ALTER TABLE tk_add ADD CONSTRAINT tk_add_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)
+ERROR 23514: empty WITHOUT OVERLAPS value found in column "valid_at" in relation "tk_add"
+
+> DELETE FROM tk_add WHERE valid_at = 'empty'
+-- DELETE 1
+
+> ALTER TABLE tk_add ADD CONSTRAINT tk_add_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)
+-- ALTER TABLE
+
+> ALTER TABLE tk_add REPLICA IDENTITY USING INDEX tk_add_pk
+-- ALTER TABLE
+
+> SELECT relreplident FROM pg_class WHERE oid = 'tk_add'::regclass
+relreplident:char
+i
+-- SELECT 1
+
+> CREATE TABLE tk_like (LIKE tk_add INCLUDING ALL)
+-- CREATE TABLE
+
+> SELECT conname, contype, conperiod FROM pg_constraint WHERE conrelid = 'tk_like'::regclass ORDER BY 1
+conname:name | contype:char | conperiod:bool
+tk_add_id_not_null | n | f
+tk_add_valid_at_not_null | n | f
+tk_like_pkey | p | t
+-- SELECT 3
+
+> CREATE TABLE tk_mr (id int4range, valid_at datemultirange, CONSTRAINT tk_mr_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS))
+-- CREATE TABLE
+
+> INSERT INTO tk_mr VALUES ('[1,2)', '{[2018-01-01,2018-02-01),[2018-03-01,2018-04-01)}'), ('[1,2)', '{[2018-02-01,2018-03-01)}')
+-- INSERT 0 2
+
+> INSERT INTO tk_mr VALUES ('[1,2)', '{[2018-03-15,2018-03-20)}')
+ERROR 23P01: conflicting key value violates exclusion constraint "tk_mr_pk"
+DETAIL: Key (id, valid_at)=([1,2), {[2018-03-15,2018-03-20)}) conflicts with existing key (id, valid_at)=([1,2), {[2018-01-01,2018-02-01),[2018-03-01,2018-04-01)}).
+OBJECTS: schema=public table=tk_mr constraint=tk_mr_pk
+
+> INSERT INTO tk_mr VALUES ('[1,2)', '{}')
+ERROR 23514: empty WITHOUT OVERLAPS value found in column "valid_at" in relation "tk_mr"
+
+> CREATE TABLE tk_fk (id int4range, valid_at daterange, parent_id int4range,
+>   CONSTRAINT tk_fk_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS),
+>   CONSTRAINT tk_fk_fk FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_rng (id, PERIOD valid_at))
+-- CREATE TABLE
+
+> SELECT conname, contype, conperiod, confupdtype, confdeltype, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'tk_fk_fk'
+conname:name | contype:char | conperiod:bool | confupdtype:char | confdeltype:char | pg_get_constraintdef:text
+tk_fk_fk | f | t | a | a | FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_rng(id, PERIOD valid_at)
+-- SELECT 1
+
+> SELECT conindid::regclass FROM pg_constraint WHERE conname = 'tk_fk_fk'
+conindid:regclass
+tk_rng_pk
+-- SELECT 1
+
+> INSERT INTO tk_fk VALUES ('[10,11)', '[2018-01-05,2018-02-10)', '[1,2)')
+-- INSERT 0 1
+
+> INSERT INTO tk_fk VALUES ('[11,12)', '[2017-12-05,2018-02-10)', '[1,2)')
+ERROR 23503: insert or update on table "tk_fk" violates foreign key constraint "tk_fk_fk"
+DETAIL: Key (parent_id, valid_at)=([1,2), [2017-12-05,2018-02-10)) is not present in table "tk_rng".
+OBJECTS: schema=public table=tk_fk constraint=tk_fk_fk
+
+> INSERT INTO tk_fk VALUES ('[12,13)', '[2018-01-05,2018-02-10)', '[9,10)')
+ERROR 23503: insert or update on table "tk_fk" violates foreign key constraint "tk_fk_fk"
+DETAIL: Key (parent_id, valid_at)=([9,10), [2018-01-05,2018-02-10)) is not present in table "tk_rng".
+OBJECTS: schema=public table=tk_fk constraint=tk_fk_fk
+
+> INSERT INTO tk_fk VALUES ('[13,14)', '[2018-01-05,2018-02-10)', NULL)
+-- INSERT 0 1
+
+> UPDATE tk_fk SET valid_at = '[2018-01-06,2018-02-09)' WHERE id = '[10,11)'
+-- UPDATE 1
+
+> UPDATE tk_fk SET valid_at = '[2018-01-01,2018-05-01)' WHERE id = '[10,11)'
+ERROR 23503: insert or update on table "tk_fk" violates foreign key constraint "tk_fk_fk"
+DETAIL: Key (parent_id, valid_at)=([1,2), [2018-01-01,2018-05-01)) is not present in table "tk_rng".
+OBJECTS: schema=public table=tk_fk constraint=tk_fk_fk
+
+> UPDATE tk_rng SET valid_at = '[2017-01-01,2017-02-01)' WHERE name = 'a'
+ERROR 23503: update or delete on table "tk_rng" violates foreign key constraint "tk_fk_fk" on table "tk_fk"
+DETAIL: Key (id, valid_at)=([1,2), [2018-01-01,2018-02-01)) is still referenced from table "tk_fk".
+OBJECTS: schema=public table=tk_fk constraint=tk_fk_fk
+
+> UPDATE tk_rng SET valid_at = '[2017-12-01,2018-02-01)' WHERE name = 'a'
+-- UPDATE 1
+
+> DELETE FROM tk_rng WHERE name = 'b'
+ERROR 23503: update or delete on table "tk_rng" violates foreign key constraint "tk_fk_fk" on table "tk_fk"
+DETAIL: Key (id, valid_at)=([1,2), [2018-02-01,2018-03-01)) is still referenced from table "tk_fk".
+OBJECTS: schema=public table=tk_fk constraint=tk_fk_fk
+
+> UPDATE tk_rng SET id = '[5,6)' WHERE name = 'b'
+ERROR 23503: update or delete on table "tk_rng" violates foreign key constraint "tk_fk_fk" on table "tk_fk"
+DETAIL: Key (id, valid_at)=([1,2), [2018-02-01,2018-03-01)) is still referenced from table "tk_fk".
+OBJECTS: schema=public table=tk_fk constraint=tk_fk_fk
+
+> BEGIN
+-- BEGIN
+
+> ALTER TABLE tk_fk ALTER CONSTRAINT tk_fk_fk DEFERRABLE INITIALLY DEFERRED
+-- ALTER TABLE
+
+> DELETE FROM tk_rng WHERE name = 'b'
+-- DELETE 1
+
+> INSERT INTO tk_rng VALUES ('[1,2)', '[2018-01-20,2018-02-15)', 'b2')
+ERROR 23P01: conflicting key value violates exclusion constraint "tk_rng_pk"
+DETAIL: Key (id, valid_at)=([1,2), [2018-01-20,2018-02-15)) conflicts with existing key (id, valid_at)=([1,2), [2017-12-01,2018-02-01)).
+OBJECTS: schema=public table=tk_rng constraint=tk_rng_pk
+
+> COMMIT
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> ALTER TABLE tk_fk ALTER CONSTRAINT tk_fk_fk DEFERRABLE INITIALLY DEFERRED
+-- ALTER TABLE
+
+> DELETE FROM tk_rng WHERE name = 'b2'
+-- DELETE 0
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM tk_rng ORDER BY id, valid_at
+id:3904 | valid_at:3912 | name:text
+[1,2) | [2017-12-01,2018-02-01) | a
+[1,2) | [2018-02-01,2018-03-01) | b
+[2,3) | [2018-01-01,2018-03-01) | c
+-- SELECT 3
+
+> ALTER TABLE tk_fk DROP CONSTRAINT tk_fk_fk
+-- ALTER TABLE
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk2 FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_rng
+-- ALTER TABLE
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk3 FOREIGN KEY (parent_id, valid_at) REFERENCES tk_rng
+ERROR 42830: foreign key uses PERIOD on the referenced table but not the referencing table
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk3 FOREIGN KEY (parent_id, valid_at) REFERENCES tk_rng (id, valid_at)
+ERROR 42830: foreign key must use PERIOD when referencing a primary key using WITHOUT OVERLAPS
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk3 FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_rng (id, valid_at)
+ERROR 42830: foreign key uses PERIOD on the referencing table but not the referenced table
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk3 FOREIGN KEY (parent_id, valid_at) REFERENCES tk_rng (id, PERIOD valid_at)
+ERROR 42830: foreign key uses PERIOD on the referenced table but not the referencing table
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk3 FOREIGN KEY (parent_id, PERIOD parent_id) REFERENCES tk_rng (id, PERIOD id)
+ERROR 42830: foreign key referenced-columns list must not contain duplicates
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk3 FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_rng ON DELETE CASCADE
+ERROR 0A000: unsupported ON DELETE action for foreign key constraint using PERIOD
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk3 FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_rng ON UPDATE RESTRICT
+ERROR 0A000: unsupported ON UPDATE action for foreign key constraint using PERIOD
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk3 FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_rng ON DELETE SET NULL
+ERROR 0A000: unsupported ON DELETE action for foreign key constraint using PERIOD
+
+> CREATE TABLE tk_ts (id int4range, valid_at tsrange, parent_id int4range)
+-- CREATE TABLE
+
+> ALTER TABLE tk_ts ADD CONSTRAINT tk_ts_fk FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_rng (id, PERIOD valid_at)
+ERROR 42804: foreign key constraint "tk_ts_fk" cannot be implemented
+DETAIL: Key columns "valid_at" of the referencing table and "valid_at" of the referenced table are of incompatible types: tsrange and daterange.
+
+> INSERT INTO tk_fk VALUES ('[14,15)', '[2030-01-01,2030-02-01)', '[1,2)')
+ERROR 23503: insert or update on table "tk_fk" violates foreign key constraint "tk_fk_fk2"
+DETAIL: Key (parent_id, valid_at)=([1,2), [2030-01-01,2030-02-01)) is not present in table "tk_rng".
+OBJECTS: schema=public table=tk_fk constraint=tk_fk_fk2
+
+> ALTER TABLE tk_fk ADD CONSTRAINT tk_fk_fk4 FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_rng (id, PERIOD valid_at)
+-- ALTER TABLE
+
+> CREATE TABLE tk_part (id int4range, valid_at daterange, CONSTRAINT tk_part_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)) PARTITION BY LIST (id)
+-- CREATE TABLE
+
+> CREATE TABLE tk_part1 PARTITION OF tk_part FOR VALUES IN ('[1,2)', '[3,4)')
+-- CREATE TABLE
+
+> CREATE TABLE tk_part2 PARTITION OF tk_part FOR VALUES IN ('[2,3)')
+-- CREATE TABLE
+
+> SELECT c.conrelid::regclass, c.conname, c.contype, c.conperiod FROM pg_constraint c WHERE c.conrelid IN ('tk_part1'::regclass, 'tk_part2'::regclass) AND contype IN ('p', 'u', 'x') ORDER BY 1
+conrelid:regclass | conname:name | contype:char | conperiod:bool
+tk_part1 | tk_part1_pkey | p | t
+tk_part2 | tk_part2_pkey | p | t
+-- SELECT 2
+
+> INSERT INTO tk_part VALUES ('[1,2)', '[2000-01-01,2000-02-01)'), ('[2,3)', '[2000-01-01,2000-02-01)')
+-- INSERT 0 2
+
+> INSERT INTO tk_part VALUES ('[1,2)', '[2000-01-15,2000-03-01)')
+ERROR 23P01: conflicting key value violates exclusion constraint "tk_part1_pkey"
+DETAIL: Key (id, valid_at)=([1,2), [2000-01-15,2000-03-01)) conflicts with existing key (id, valid_at)=([1,2), [2000-01-01,2000-02-01)).
+OBJECTS: schema=public table=tk_part1 constraint=tk_part1_pkey
+
+> CREATE TABLE tk_part_fk (id int4range, valid_at daterange, parent_id int4range,
+>   CONSTRAINT tk_part_fk_fk FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES tk_part (id, PERIOD valid_at))
+-- CREATE TABLE
+
+> INSERT INTO tk_part_fk VALUES ('[1,2)', '[2000-01-10,2000-01-20)', '[1,2)')
+-- INSERT 0 1
+
+> INSERT INTO tk_part_fk VALUES ('[1,2)', '[2000-01-10,2000-03-20)', '[1,2)')
+ERROR 23503: insert or update on table "tk_part_fk" violates foreign key constraint "tk_part_fk_fk"
+DETAIL: Key (parent_id, valid_at)=([1,2), [2000-01-10,2000-03-20)) is not present in table "tk_part".
+OBJECTS: schema=public table=tk_part_fk constraint=tk_part_fk_fk
+
+> DELETE FROM tk_part WHERE id = '[1,2)'
+ERROR 23503: update or delete on table "tk_part1" violates foreign key constraint "tk_part_fk_fk_1" on table "tk_part_fk"
+DETAIL: Key (id, valid_at)=([1,2), [2000-01-01,2000-02-01)) is still referenced from table "tk_part_fk".
+OBJECTS: schema=public table=tk_part_fk constraint=tk_part_fk_fk_1
+
+> DELETE FROM tk_part WHERE id = '[2,3)'
+-- DELETE 1
+
+> DROP TABLE tk_part_fk, tk_part, tk_ts, tk_fk, tk_mr, tk_like, tk_add, tk_pk2, tk_uq2, tk_uq, tk_rng
+-- DROP TABLE
+

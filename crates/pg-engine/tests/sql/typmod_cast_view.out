@@ -1,0 +1,48 @@
+> create table gx_tm_numeric_tbl (f1 numeric(18,3), f2 numeric, v varchar(10), c char(3))
+-- CREATE TABLE
+
+> create view gx_tm_numeric_view as select f1, f1::numeric(16,4) as f1164, f1::numeric as f1n, f2, f2::numeric(16,4) as f2164, f2::numeric as f2n, v::varchar as vv, c::bpchar as cc from gx_tm_numeric_tbl
+-- CREATE VIEW
+
+> select pg_get_viewdef('gx_tm_numeric_view'::regclass)
+pg_get_viewdef:text
+ SELECT f1,
+    (f1)::numeric(16,4) AS f1164,
+    (f1)::numeric AS f1n,
+    f2,
+    (f2)::numeric(16,4) AS f2164,
+    f2 AS f2n,
+    (v)::character varying AS vv,
+    (c)::bpchar AS cc
+   FROM gx_tm_numeric_tbl;
+-- SELECT 1
+
+> select attname, format_type(atttypid, atttypmod) from pg_attribute where attrelid = 'gx_tm_numeric_view'::regclass and attnum > 0 order by attnum
+attname:name | format_type:text
+f1 | numeric(18,3)
+f1164 | numeric(16,4)
+f1n | numeric
+f2 | numeric
+f2164 | numeric(16,4)
+f2n | numeric
+vv | character varying
+cc | bpchar
+-- SELECT 8
+
+> explain (verbose, costs off) select * from gx_tm_numeric_view
+QUERY PLAN:text
+Seq Scan on public.gx_tm_numeric_tbl
+  Output: gx_tm_numeric_tbl.f1, (gx_tm_numeric_tbl.f1)::numeric(16,4), (gx_tm_numeric_tbl.f1)::numeric, gx_tm_numeric_tbl.f2, (gx_tm_numeric_tbl.f2)::numeric(16,4), gx_tm_numeric_tbl.f2, (gx_tm_numeric_tbl.v)::character varying, (gx_tm_numeric_tbl.c)::bpchar
+-- EXPLAIN
+
+> select pg_typeof((1.5::numeric(5,2))::numeric), 1.5::numeric(5,2)::numeric
+pg_typeof:regtype | numeric:numeric
+numeric | 1.50
+-- SELECT 1
+
+> drop view gx_tm_numeric_view
+-- DROP VIEW
+
+> drop table gx_tm_numeric_tbl
+-- DROP TABLE
+

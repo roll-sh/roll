@@ -1,0 +1,167 @@
+> create table jr_a (id int primary key, v int, w int)
+-- CREATE TABLE
+
+> create table jr_b (id int primary key, a_id int, t text)
+-- CREATE TABLE
+
+> create table jr_c (k int, x int)
+-- CREATE TABLE
+
+> insert into jr_a select g, g % 10, g % 7 from generate_series(1, 200) g
+-- INSERT 0 200
+
+> insert into jr_b select g, g % 150, 't' || g from generate_series(1, 300) g
+-- INSERT 0 300
+
+> insert into jr_c select g % 20, g from generate_series(1, 100) g
+-- INSERT 0 100
+
+> analyze jr_a
+-- ANALYZE
+
+> analyze jr_b
+-- ANALYZE
+
+> analyze jr_c
+-- ANALYZE
+
+> explain (costs off) select * from jr_a a left join jr_b b on a.id = b.a_id where b.t = 't5'
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (a.id = b.a_id)
+  ->  Seq Scan on jr_a a
+  ->  Hash
+        ->  Seq Scan on jr_b b
+              Filter: (t = 't5'::text)
+-- EXPLAIN
+
+> explain (costs off) select a.* from jr_a a left join jr_b b on a.id = b.a_id where b.a_id is null
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (a.id = b.a_id)
+  ->  Seq Scan on jr_a a
+  ->  Hash
+        ->  Seq Scan on jr_b b
+-- EXPLAIN
+
+> explain (costs off) select a.* from jr_a a left join jr_b b on a.id = b.a_id and b.id > 10 where b.id is null
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (a.id = b.a_id)
+  ->  Seq Scan on jr_a a
+  ->  Hash
+        ->  Seq Scan on jr_b b
+              Filter: (id > 10)
+-- EXPLAIN
+
+> explain (costs off) select * from jr_a a full join jr_c c on a.v = c.k where c.x > 5
+QUERY PLAN:text
+Hash Right Join
+  Hash Cond: (a.v = c.k)
+  ->  Seq Scan on jr_a a
+  ->  Hash
+        ->  Seq Scan on jr_c c
+              Filter: (x > 5)
+-- EXPLAIN
+
+> explain (costs off) select * from jr_a a full join jr_c c on a.v = c.k where a.w > 5 and c.x > 5
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (a.v = c.k)
+  ->  Seq Scan on jr_a a
+        Filter: (w > 5)
+  ->  Hash
+        ->  Seq Scan on jr_c c
+              Filter: (x > 5)
+-- EXPLAIN
+
+> explain (costs off) select * from jr_a a right join jr_c c on a.v = c.k where a.w = 1
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (a.v = c.k)
+  ->  Seq Scan on jr_a a
+        Filter: (w = 1)
+  ->  Hash
+        ->  Seq Scan on jr_c c
+-- EXPLAIN
+
+> explain (costs off) select * from jr_a a left join jr_c c on a.v = c.k join jr_b b on b.id = c.x
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (a.v = c.k)
+  ->  Seq Scan on jr_a a
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (b.id = c.x)
+              ->  Seq Scan on jr_b b
+              ->  Hash
+                    ->  Seq Scan on jr_c c
+-- EXPLAIN
+
+> explain (costs off) select a.id from jr_a a left join jr_b b on a.id = b.id
+QUERY PLAN:text
+Seq Scan on jr_a a
+-- EXPLAIN
+
+> explain (costs off) select a.id from jr_a a left join (select distinct k from jr_c) c on a.v = c.k
+QUERY PLAN:text
+Seq Scan on jr_a a
+-- EXPLAIN
+
+> explain (costs off) select a1.id, a2.w from jr_a a1 join jr_a a2 on a1.id = a2.id where a1.v = 3
+QUERY PLAN:text
+Seq Scan on jr_a a2
+  Filter: (v = 3)
+-- EXPLAIN
+
+> explain (costs off) select * from jr_a a join jr_c c on a.v = c.k and false
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> explain (costs off) select * from jr_a a left join jr_c c on a.v = c.k and false
+QUERY PLAN:text
+Nested Loop Left Join
+  Join Filter: false
+  ->  Seq Scan on jr_a a
+  ->  Result
+        One-Time Filter: false
+-- EXPLAIN
+
+> explain (costs off) select * from jr_a where v not in (1, 2, 3)
+QUERY PLAN:text
+Seq Scan on jr_a
+  Filter: (v <> ALL ('{1,2,3}'::integer[]))
+-- EXPLAIN
+
+> select count(*), sum(a.id) from jr_a a left join jr_b b on a.id = b.a_id where b.a_id is null
+count:int8 | sum:int8
+51 | 8925
+-- SELECT 1
+
+> select count(*) from jr_a a left join jr_b b on a.id = b.a_id and b.id > 10 where b.id is null
+count:int8
+51
+-- SELECT 1
+
+> select count(*), sum(c.x) from jr_a a full join jr_c c on a.v = c.k where c.x > 5
+count:int8 | sum:int8
+950 | 48925
+-- SELECT 1
+
+> select count(*) from jr_a a right join jr_c c on a.v = c.k where a.w = 1
+count:int8
+145
+-- SELECT 1
+
+> select count(*) from jr_a a left join jr_c c on a.v = c.k join jr_b b on b.id = c.x
+count:int8
+1000
+-- SELECT 1
+
+> select count(*) from jr_a a1 join jr_a a2 on a1.id = a2.id where a1.v = 3
+count:int8
+20
+-- SELECT 1
+

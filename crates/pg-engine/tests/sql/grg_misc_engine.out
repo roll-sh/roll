@@ -1,0 +1,308 @@
+> SELECT count(*) FROM pg_get_catalog_foreign_keys()
+count:int8
+219
+-- SELECT 1
+
+> SELECT fktable, fkcols, pktable, pkcols, is_array, is_opt FROM pg_get_catalog_foreign_keys() WHERE fktable IN ('pg_proc'::regclass, 'pg_constraint'::regclass) ORDER BY 1::text, 2::text
+fktable:regclass | fkcols:text[] | pktable:regclass | pkcols:text[] | is_array:bool | is_opt:bool
+pg_proc | {pronamespace} | pg_namespace | {oid} | f | f
+pg_proc | {proowner} | pg_authid | {oid} | f | f
+pg_proc | {prolang} | pg_language | {oid} | f | f
+pg_proc | {provariadic} | pg_type | {oid} | f | t
+pg_proc | {prosupport} | pg_proc | {oid} | f | t
+pg_proc | {prorettype} | pg_type | {oid} | f | f
+pg_proc | {proargtypes} | pg_type | {oid} | t | f
+pg_proc | {proallargtypes} | pg_type | {oid} | t | f
+pg_proc | {protrftypes} | pg_type | {oid} | t | f
+pg_constraint | {connamespace} | pg_namespace | {oid} | f | f
+pg_constraint | {conrelid} | pg_class | {oid} | f | t
+pg_constraint | {contypid} | pg_type | {oid} | f | t
+pg_constraint | {conindid} | pg_class | {oid} | f | t
+pg_constraint | {conparentid} | pg_constraint | {oid} | f | t
+pg_constraint | {confrelid} | pg_class | {oid} | f | t
+pg_constraint | {conpfeqop} | pg_operator | {oid} | t | f
+pg_constraint | {conppeqop} | pg_operator | {oid} | t | f
+pg_constraint | {conffeqop} | pg_operator | {oid} | t | f
+pg_constraint | {conexclop} | pg_operator | {oid} | t | f
+pg_constraint | {conrelid,conkey} | pg_attribute | {attrelid,attnum} | t | t
+pg_constraint | {confrelid,confkey} | pg_attribute | {attrelid,attnum} | t | f
+-- SELECT 21
+
+> SELECT count(*) FROM pg_get_catalog_foreign_keys() WHERE is_array
+count:int8
+19
+-- SELECT 1
+
+> CREATE OPERATOR |@| (PROCEDURE = unnest, RIGHTARG = anyarray)
+-- CREATE OPERATOR
+
+> SELECT |@| ARRAY[1, 2, 3]
+?column?:int4
+1
+2
+3
+-- SELECT 3
+
+> SELECT |@| ARRAY['x', 'y'] AS v, 1 AS k
+v:text | k:int4
+x | 1
+y | 1
+-- SELECT 2
+
+> DROP OPERATOR |@| (none, anyarray)
+-- DROP OPERATOR
+
+> CREATE TABLE grg_ct (a int, x text COLLATE "C", y text COLLATE "POSIX")
+-- CREATE TABLE
+
+> INSERT INTO grg_ct VALUES (1, 'a', 'b'), (2, 'b', 'a')
+-- INSERT 0 2
+
+> SELECT * FROM grg_ct WHERE (x, y) NOT IN (SELECT y, x FROM grg_ct)
+ERROR 42P22: could not determine which collation to use for string hashing
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> SELECT * FROM grg_ct WHERE (x COLLATE "POSIX", y COLLATE "C") NOT IN (SELECT y, x FROM grg_ct)
+a:int4 | x:text | y:text
+-- SELECT 0
+
+> SELECT * FROM grg_ct WHERE (x, y) NOT IN (SELECT y COLLATE "C", x COLLATE "POSIX" FROM grg_ct)
+a:int4 | x:text | y:text
+-- SELECT 0
+
+> CREATE TYPE grg_avg AS (x numeric)
+-- CREATE TYPE
+
+> CREATE TABLE grg_opf (a grg_avg NOT NULL, b text)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX ON grg_opf (a record_image_ops)
+-- CREATE INDEX
+
+> INSERT INTO grg_opf VALUES (row(1.0)::grg_avg, 'X'), (row(1.00)::grg_avg, 'Y')
+-- INSERT 0 2
+
+> INSERT INTO grg_opf VALUES (row(1.0)::grg_avg, 'Z')
+ERROR 23505: duplicate key value violates unique constraint "grg_opf_a_idx"
+DETAIL: Key (a)=((1.0)) already exists.
+OBJECTS: schema=public table=grg_opf constraint=grg_opf_a_idx
+
+> SELECT a, b FROM grg_opf GROUP BY a, b ORDER BY b
+a:user | b:text
+(1.0) | X
+(1.00) | Y
+-- SELECT 2
+
+> CREATE TABLE grg_tid (a int)
+-- CREATE TABLE
+
+> INSERT INTO grg_tid VALUES (1), (2), (3)
+-- INSERT 0 3
+
+> BEGIN ISOLATION LEVEL SERIALIZABLE
+-- BEGIN
+
+> SELECT * FROM grg_tid WHERE ctid = '(0,1)'
+a:int4
+1
+-- SELECT 1
+
+> SELECT locktype, relation::regclass, page, tuple, mode FROM pg_locks WHERE pid = pg_backend_pid() AND mode = 'SIReadLock'
+locktype:text | relation:regclass | page:int4 | tuple:int2 | mode:text
+tuple | grg_tid | 0 | 1 | SIReadLock
+-- SELECT 1
+
+> SELECT * FROM grg_tid WHERE ctid = ANY ('{"(0,2)","(0,3)"}')
+a:int4
+2
+3
+-- SELECT 2
+
+> SELECT locktype, relation::regclass, page, tuple, mode FROM pg_locks WHERE pid = pg_backend_pid() AND mode = 'SIReadLock'
+locktype:text | relation:regclass | page:int4 | tuple:int2 | mode:text
+page | grg_tid | 0 | NULL | SIReadLock
+-- SELECT 1
+
+> SELECT count(*) FROM grg_tid
+count:int8
+3
+-- SELECT 1
+
+> SELECT locktype, relation::regclass, page, tuple, mode FROM pg_locks WHERE pid = pg_backend_pid() AND mode = 'SIReadLock'
+locktype:text | relation:regclass | page:int4 | tuple:int2 | mode:text
+relation | grg_tid | NULL | NULL | SIReadLock
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY
+-- BEGIN
+
+> SELECT count(*) FROM grg_tid
+count:int8
+3
+-- SELECT 1
+
+> SELECT count(*) FROM pg_locks WHERE pid = pg_backend_pid() AND mode = 'SIReadLock'
+count:int8
+0
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE TABLE grg_chunk (a text, b text STORAGE EXTERNAL)
+-- CREATE TABLE
+
+> INSERT INTO grg_chunk VALUES ('x', repeat('x', 8192))
+-- INSERT 0 1
+
+> CREATE FUNCTION grg_chunks(OUT chunk_id oid, OUT chunk_seq int, OUT len int) RETURNS SETOF record LANGUAGE plpgsql AS $$
+> BEGIN
+>   RETURN QUERY EXECUTE format('SELECT chunk_id, chunk_seq, length(chunk_data) FROM %s ORDER BY 2',
+>     (SELECT reltoastrelid::regclass FROM pg_class WHERE relname = 'grg_chunk'));
+> END $$
+-- CREATE FUNCTION
+
+> SELECT pg_column_toast_chunk_id(a) IS NULL, pg_column_toast_chunk_id(b) IN (SELECT chunk_id FROM grg_chunks()) FROM grg_chunk
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> SELECT chunk_seq, len FROM grg_chunks()
+chunk_seq:int4 | len:int4
+0 | 1996
+1 | 1996
+2 | 1996
+3 | 1996
+4 | 208
+-- SELECT 5
+
+> DROP FUNCTION grg_chunks()
+-- DROP FUNCTION
+
+> MERGE INTO pg_class c USING (SELECT 'pg_depend'::regclass AS oid) AS j ON j.oid = c.oid
+> WHEN MATCHED THEN UPDATE SET reltuples = reltuples + 1 RETURNING j.oid
+oid:regclass
+pg_depend
+-- MERGE 1
+
+> CREATE VIEW grg_classv AS SELECT * FROM pg_class
+-- CREATE VIEW
+
+> MERGE INTO grg_classv c USING pg_namespace n ON n.oid = c.relnamespace
+> WHEN MATCHED AND c.oid = 'pg_depend'::regclass THEN UPDATE SET reltuples = reltuples - 1 RETURNING c.oid
+oid:oid
+2608
+-- MERGE 1
+
+> MERGE INTO pg_class c USING (SELECT 'grg_tid'::regclass AS oid) AS j ON j.oid = c.oid
+> WHEN MATCHED THEN UPDATE SET reltuples = 42, relpages = 7
+-- MERGE 1
+
+> SELECT relname, reltuples, relpages FROM pg_class WHERE relname = 'grg_tid'
+relname:name | reltuples:float4 | relpages:int4
+grg_tid | 42 | 7
+-- SELECT 1
+
+> CREATE TABLE grg_foo (f1 int, f2 text, f3 int, f4 int)
+-- CREATE TABLE
+
+> CREATE FUNCTION grg_foo_update() RETURNS void LANGUAGE sql
+> BEGIN ATOMIC
+>   WITH u1 AS (UPDATE grg_foo SET f1 = f1 + 1 RETURNING old.*, new.*)
+>   UPDATE grg_foo SET f1 = f1 + 1
+>     RETURNING WITH (OLD AS o, NEW AS n) o.*, n.*, o.f1 = n.f1,
+>               (SELECT o.f2 = n.f2),
+>               (SELECT count(*) FROM grg_foo WHERE grg_foo.f1 = o.f4),
+>               (SELECT count(*) FROM grg_foo WHERE grg_foo = n);
+> END
+-- CREATE FUNCTION
+
+> SELECT pg_get_functiondef('grg_foo_update'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.grg_foo_update()
+ RETURNS void
+ LANGUAGE sql
+BEGIN ATOMIC
+ WITH u1 AS (
+          UPDATE grg_foo grg_foo_1 SET f1 = (grg_foo_1.f1 + 1)
+           RETURNING old.f1,
+             old.f2,
+             old.f3,
+             old.f4,
+             new.f1,
+             new.f2,
+             new.f3,
+             new.f4
+         )
+  UPDATE grg_foo SET f1 = (grg_foo.f1 + 1)
+   RETURNING WITH (OLD AS o, NEW AS n) o.f1,
+     o.f2,
+     o.f3,
+     o.f4,
+     n.f1,
+     n.f2,
+     n.f3,
+     n.f4,
+     (o.f1 = n.f1),
+     ( SELECT (o.f2 = n.f2)),
+     ( SELECT count(*) AS count
+            FROM grg_foo grg_foo_1
+           WHERE (grg_foo_1.f1 = o.f4)) AS count,
+     ( SELECT count(*) AS count
+            FROM grg_foo grg_foo_1
+           WHERE (grg_foo_1.* = n.*)) AS count;
+END
+
+-- SELECT 1
+
+> CREATE FUNCTION grg_div(int) RETURNS int LANGUAGE sql PARALLEL SAFE AS $$ SELECT 1 / $1 $$
+-- CREATE FUNCTION
+
+> SET debug_parallel_query = on
+-- SET
+
+> SELECT 1 / (a - 1) FROM grg_tid
+ERROR 22012: division by zero
+CONTEXT: parallel worker
+
+> SELECT grg_div(0)
+ERROR 22012: division by zero
+CONTEXT: SQL function "grg_div" during inlining
+
+> SELECT grg_div(a) FROM grg_tid WHERE a = 1
+grg_div:int4
+1
+-- SELECT 1
+
+> SET debug_parallel_query = regress
+-- SET
+
+> SELECT grg_div(0)
+ERROR 22012: division by zero
+CONTEXT: SQL function "grg_div" during inlining
+
+> RESET debug_parallel_query
+-- RESET
+
+> SELECT grg_div(0)
+ERROR 22012: division by zero
+CONTEXT: SQL function "grg_div" during inlining
+
+> DROP FUNCTION grg_div(int)
+-- DROP FUNCTION
+
+> DROP FUNCTION grg_foo_update()
+-- DROP FUNCTION
+
+> DROP VIEW grg_classv
+-- DROP VIEW
+
+> DROP TABLE grg_ct, grg_opf, grg_tid, grg_chunk, grg_foo
+-- DROP TABLE
+
+> DROP TYPE grg_avg
+-- DROP TYPE
+

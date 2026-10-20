@@ -1,0 +1,119 @@
+> CREATE FUNCTION oio_rcmp(int4, int4) RETURNS int LANGUAGE sql IMMUTABLE AS $$ SELECT CASE WHEN $1 = $2 THEN 0 WHEN $1 > $2 THEN -1 ELSE 1 END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION oio_rlt(int4, int4) RETURNS bool LANGUAGE sql IMMUTABLE AS $$ SELECT $1 > $2 $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION oio_rle(int4, int4) RETURNS bool LANGUAGE sql IMMUTABLE AS $$ SELECT $1 >= $2 $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION oio_rgt(int4, int4) RETURNS bool LANGUAGE sql IMMUTABLE AS $$ SELECT $1 < $2 $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION oio_rge(int4, int4) RETURNS bool LANGUAGE sql IMMUTABLE AS $$ SELECT $1 <= $2 $$
+-- CREATE FUNCTION
+
+> CREATE OPERATOR <<< (leftarg = int4, rightarg = int4, function = oio_rlt)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR <<<= (leftarg = int4, rightarg = int4, function = oio_rle)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR >>> (leftarg = int4, rightarg = int4, function = oio_rgt)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR >>>= (leftarg = int4, rightarg = int4, function = oio_rge)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR === (leftarg = int4, rightarg = int4, function = int4eq)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR CLASS oio_rev_ops FOR TYPE int4 USING btree AS OPERATOR 1 <<<, OPERATOR 2 <<<=, OPERATOR 3 ===, OPERATOR 4 >>>=, OPERATOR 5 >>>, FUNCTION 1 oio_rcmp(int4, int4)
+-- CREATE OPERATOR CLASS
+
+> CREATE TABLE oio_t (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO oio_t SELECT g, g::text FROM generate_series(1, 200) g
+-- INSERT 0 200
+
+> CREATE INDEX oio_t_a ON oio_t (a)
+-- CREATE INDEX
+
+> CREATE INDEX oio_t_ar ON oio_t (a oio_rev_ops)
+-- CREATE INDEX
+
+> ANALYZE oio_t
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT a FROM oio_t ORDER BY a USING <<< LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using oio_t_ar on oio_t
+-- EXPLAIN
+
+> SELECT a FROM oio_t ORDER BY a USING <<< LIMIT 3
+a:int4
+200
+199
+198
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT a FROM oio_t ORDER BY a LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using oio_t_a on oio_t
+-- EXPLAIN
+
+> SELECT a FROM oio_t ORDER BY a LIMIT 3
+a:int4
+1
+2
+3
+-- SELECT 3
+
+> SELECT a FROM oio_t WHERE a === 7
+a:int4
+7
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT a FROM oio_t WHERE a === 7
+QUERY PLAN:text
+Index Only Scan using oio_t_ar on oio_t
+  Index Cond: (a === 7)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a FROM oio_t ORDER BY a USING >>> LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan Backward using oio_t_ar on oio_t
+-- EXPLAIN
+
+> SELECT a FROM oio_t ORDER BY a USING >>> LIMIT 3
+a:int4
+1
+2
+3
+-- SELECT 3
+
+> INSERT INTO oio_t VALUES (NULL, 'n')
+-- INSERT 0 1
+
+> SELECT a FROM oio_t ORDER BY a USING <<< NULLS FIRST LIMIT 2
+a:int4
+NULL
+200
+-- SELECT 2
+
+> SELECT a FROM oio_t WHERE a === 150 OR a IS NULL ORDER BY a USING <<<
+a:int4
+150
+NULL
+-- SELECT 2
+
+> RESET enable_seqscan
+-- RESET
+

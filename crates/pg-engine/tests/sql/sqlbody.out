@@ -1,0 +1,591 @@
+> CREATE SCHEMA sb
+-- CREATE SCHEMA
+
+> SET search_path = sb, public
+-- SET
+
+> CREATE TABLE t (a int PRIMARY KEY, b text DEFAULT 'z', c int)
+-- CREATE TABLE
+
+> CREATE TABLE u (a int, d int)
+-- CREATE TABLE
+
+> CREATE FUNCTION r1(x int) RETURNS int LANGUAGE sql IMMUTABLE RETURN x + 1
+-- CREATE FUNCTION
+
+> CREATE FUNCTION r2(x int, y int) RETURNS int LANGUAGE sql RETURN (SELECT count(*) FROM t WHERE a > x AND c < y)::int
+-- CREATE FUNCTION
+
+> CREATE FUNCTION r3(int) RETURNS bool LANGUAGE sql STRICT RETURN $1 > 0 OR $1 IS NULL
+-- CREATE FUNCTION
+
+> CREATE FUNCTION r4(x text) RETURNS text LANGUAGE sql RETURN upper(x) || 'a'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION r5(x int) RETURNS int LANGUAGE sql RETURN (SELECT x)
+-- CREATE FUNCTION
+
+> CREATE FUNCTION r6(x int) RETURNS int LANGUAGE sql RETURN CASE WHEN x > 0 THEN (SELECT max(a) FROM t) ELSE 0 END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION b1(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC INSERT INTO t VALUES (x, 'a'); SELECT count(*) FROM t WHERE a > x; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION b2(x int) RETURNS bigint LANGUAGE sql BEGIN ATOMIC SELECT x + 1; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION b3(x int) RETURNS SETOF t LANGUAGE sql BEGIN ATOMIC SELECT * FROM t WHERE t.a = x ORDER BY b; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION b4(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC
+>   UPDATE t SET b = 'q', c = c + x WHERE a = x;
+>   DELETE FROM u WHERE d = x;
+>   INSERT INTO u (d) SELECT a FROM t WHERE c > x;
+>   INSERT INTO t (a) VALUES (x), (x + 1) ON CONFLICT (a) DO UPDATE SET c = excluded.c WHERE t.c > 0;
+>   INSERT INTO t DEFAULT VALUES ON CONFLICT DO NOTHING;
+>   DELETE FROM t USING u WHERE t.a = u.a RETURNING t.a;
+> END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION b5(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC
+>   UPDATE t SET c = u.d FROM u WHERE t.a = u.a AND u.d > x RETURNING c;
+> END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION b6(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC
+>   WITH w AS (SELECT a FROM t) SELECT count(*) FROM w, u WHERE w.a = u.a;
+> END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION b7(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC
+>   INSERT INTO t AS tt (a, c) VALUES (x, x) ON CONFLICT ON CONSTRAINT t_pkey DO UPDATE SET c = tt.c + 1;
+>   SELECT 1;
+> END
+-- CREATE FUNCTION
+
+> CREATE PROCEDURE p1(x int) LANGUAGE sql BEGIN ATOMIC INSERT INTO t VALUES (x, 'b'); END
+-- CREATE PROCEDURE
+
+> CREATE PROCEDURE p2(x int, INOUT y int) LANGUAGE sql BEGIN ATOMIC SELECT x + y; END
+-- CREATE PROCEDURE
+
+> SELECT pg_get_functiondef(oid) FROM pg_proc WHERE pronamespace = 'sb'::regnamespace ORDER BY proname
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION sb.b1(x integer)
+ RETURNS integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ INSERT INTO t (a, b)
+   VALUES (b1.x, 'a'::text);
+ SELECT count(*) AS count
+    FROM t
+   WHERE (t.a > b1.x);
+END
+
+CREATE OR REPLACE FUNCTION sb.b2(x integer)
+ RETURNS bigint
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT (x + 1);
+END
+
+CREATE OR REPLACE FUNCTION sb.b3(x integer)
+ RETURNS SETOF t
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT t.a,
+     t.b,
+     t.c
+    FROM t
+   WHERE (t.a = b3.x)
+   ORDER BY t.b;
+END
+
+CREATE OR REPLACE FUNCTION sb.b4(x integer)
+ RETURNS integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ UPDATE t SET b = 'q'::text, c = (t.c + b4.x)
+   WHERE (t.a = b4.x);
+ DELETE FROM u
+   WHERE (u.d = b4.x);
+ INSERT INTO u (d)  SELECT t.a
+            FROM t
+           WHERE (t.c > b4.x);
+ INSERT INTO t (a) VALUES (b4.x), ((b4.x + 1)) ON CONFLICT(a) DO UPDATE SET c = excluded.c
+   WHERE (t.c > 0);
+ INSERT INTO t DEFAULT VALUES ON CONFLICT DO NOTHING;
+ DELETE FROM t
+    USING u
+   WHERE (t.a = u.a)
+   RETURNING t.a;
+END
+
+CREATE OR REPLACE FUNCTION sb.b5(x integer)
+ RETURNS integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ UPDATE t SET c = u.d
+    FROM u
+   WHERE ((t.a = u.a) AND (u.d > b5.x))
+   RETURNING t.c;
+END
+
+CREATE OR REPLACE FUNCTION sb.b6(x integer)
+ RETURNS integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ WITH w AS (
+          SELECT t.a
+            FROM t
+         )
+  SELECT count(*) AS count
+    FROM w,
+     u
+   WHERE (w.a = u.a);
+END
+
+CREATE OR REPLACE FUNCTION sb.b7(x integer)
+ RETURNS integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ INSERT INTO t AS tt (a, c)
+   VALUES (b7.x, b7.x) ON CONFLICT ON CONSTRAINT t_pkey DO UPDATE SET c = (tt.c + 1);
+ SELECT 1;
+END
+
+CREATE OR REPLACE PROCEDURE sb.p1(IN x integer)
+ LANGUAGE sql
+BEGIN ATOMIC
+ INSERT INTO t (a, b)
+   VALUES (p1.x, 'b'::text);
+END
+
+CREATE OR REPLACE PROCEDURE sb.p2(IN x integer, INOUT y integer)
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT (x + y);
+END
+
+CREATE OR REPLACE FUNCTION sb.r1(x integer)
+ RETURNS integer
+ LANGUAGE sql
+ IMMUTABLE
+RETURN (x + 1)
+
+CREATE OR REPLACE FUNCTION sb.r2(x integer, y integer)
+ RETURNS integer
+ LANGUAGE sql
+RETURN ((SELECT count(*) AS count FROM t WHERE ((t.a > r2.x) AND (t.c < r2.y))))::integer
+
+CREATE OR REPLACE FUNCTION sb.r3(integer)
+ RETURNS boolean
+ LANGUAGE sql
+ STRICT
+RETURN (($1 > 0) OR ($1 IS NULL))
+
+CREATE OR REPLACE FUNCTION sb.r4(x text)
+ RETURNS text
+ LANGUAGE sql
+RETURN (upper(x) || 'a'::text)
+
+CREATE OR REPLACE FUNCTION sb.r5(x integer)
+ RETURNS integer
+ LANGUAGE sql
+RETURN (SELECT x AS x)
+
+CREATE OR REPLACE FUNCTION sb.r6(x integer)
+ RETURNS integer
+ LANGUAGE sql
+RETURN CASE WHEN (x > 0) THEN (SELECT max(t.a) AS max FROM t) ELSE 0 END
+
+-- SELECT 15
+
+> SELECT proname, pg_get_function_sqlbody(oid) FROM pg_proc WHERE pronamespace = 'sb'::regnamespace ORDER BY proname
+proname:name | pg_get_function_sqlbody:text
+b1 | BEGIN ATOMIC
+ INSERT INTO t (a, b)
+   VALUES (b1.x, 'a'::text);
+ SELECT count(*) AS count
+    FROM t
+   WHERE (t.a > b1.x);
+END
+b2 | BEGIN ATOMIC
+ SELECT (x + 1);
+END
+b3 | BEGIN ATOMIC
+ SELECT t.a,
+     t.b,
+     t.c
+    FROM t
+   WHERE (t.a = b3.x)
+   ORDER BY t.b;
+END
+b4 | BEGIN ATOMIC
+ UPDATE t SET b = 'q'::text, c = (t.c + b4.x)
+   WHERE (t.a = b4.x);
+ DELETE FROM u
+   WHERE (u.d = b4.x);
+ INSERT INTO u (d)  SELECT t.a
+            FROM t
+           WHERE (t.c > b4.x);
+ INSERT INTO t (a) VALUES (b4.x), ((b4.x + 1)) ON CONFLICT(a) DO UPDATE SET c = excluded.c
+   WHERE (t.c > 0);
+ INSERT INTO t DEFAULT VALUES ON CONFLICT DO NOTHING;
+ DELETE FROM t
+    USING u
+   WHERE (t.a = u.a)
+   RETURNING t.a;
+END
+b5 | BEGIN ATOMIC
+ UPDATE t SET c = u.d
+    FROM u
+   WHERE ((t.a = u.a) AND (u.d > b5.x))
+   RETURNING t.c;
+END
+b6 | BEGIN ATOMIC
+ WITH w AS (
+          SELECT t.a
+            FROM t
+         )
+  SELECT count(*) AS count
+    FROM w,
+     u
+   WHERE (w.a = u.a);
+END
+b7 | BEGIN ATOMIC
+ INSERT INTO t AS tt (a, c)
+   VALUES (b7.x, b7.x) ON CONFLICT ON CONSTRAINT t_pkey DO UPDATE SET c = (tt.c + 1);
+ SELECT 1;
+END
+p1 | BEGIN ATOMIC
+ INSERT INTO t (a, b)
+   VALUES (p1.x, 'b'::text);
+END
+p2 | BEGIN ATOMIC
+ SELECT (x + y);
+END
+r1 | RETURN (x + 1)
+r2 | RETURN ((SELECT count(*) AS count FROM t WHERE ((t.a > r2.x) AND (t.c < r2.y))))::integer
+r3 | RETURN (($1 > 0) OR ($1 IS NULL))
+r4 | RETURN (upper(x) || 'a'::text)
+r5 | RETURN (SELECT x AS x)
+r6 | RETURN CASE WHEN (x > 0) THEN (SELECT max(t.a) AS max FROM t) ELSE 0 END
+-- SELECT 15
+
+> SELECT proname, prosrc, prosqlbody IS NOT NULL AS has_body FROM pg_proc WHERE pronamespace = 'sb'::regnamespace ORDER BY proname
+proname:name | prosrc:text | has_body:bool
+b1 |  | t
+b2 |  | t
+b3 |  | t
+b4 |  | t
+b5 |  | t
+b6 |  | t
+b7 |  | t
+p1 |  | t
+p2 |  | t
+r1 |  | t
+r2 |  | t
+r3 |  | t
+r4 |  | t
+r5 |  | t
+r6 |  | t
+-- SELECT 15
+
+> SELECT pg_get_function_sqlbody('pg_catalog.lower(text)'::regprocedure), pg_get_function_sqlbody(0)
+pg_get_function_sqlbody:text | pg_get_function_sqlbody:text
+NULL | NULL
+-- SELECT 1
+
+> ALTER TABLE t RENAME COLUMN c TO cc
+-- ALTER TABLE
+
+> SELECT pg_get_functiondef('b4'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION sb.b4(x integer)
+ RETURNS integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ UPDATE t SET b = 'q'::text, cc = (t.cc + b4.x)
+   WHERE (t.a = b4.x);
+ DELETE FROM u
+   WHERE (u.d = b4.x);
+ INSERT INTO u (d)  SELECT t.a
+            FROM t
+           WHERE (t.cc > b4.x);
+ INSERT INTO t (a) VALUES (b4.x), ((b4.x + 1)) ON CONFLICT(a) DO UPDATE SET cc = excluded.cc
+   WHERE (t.cc > 0);
+ INSERT INTO t DEFAULT VALUES ON CONFLICT DO NOTHING;
+ DELETE FROM t
+    USING u
+   WHERE (t.a = u.a)
+   RETURNING t.a;
+END
+
+-- SELECT 1
+
+> SELECT pg_get_functiondef('r2'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION sb.r2(x integer, y integer)
+ RETURNS integer
+ LANGUAGE sql
+RETURN ((SELECT count(*) AS count FROM t WHERE ((t.a > r2.x) AND (t.cc < r2.y))))::integer
+
+-- SELECT 1
+
+> DROP SCHEMA sb CASCADE
+NOTICE 00000: drop cascades to 17 other objects
+DETAIL: drop cascades to table t
+DETAIL: drop cascades to table u
+DETAIL: drop cascades to function r1(integer)
+DETAIL: drop cascades to function r2(integer,integer)
+DETAIL: drop cascades to function r3(integer)
+DETAIL: drop cascades to function r4(text)
+DETAIL: drop cascades to function r5(integer)
+DETAIL: drop cascades to function r6(integer)
+DETAIL: drop cascades to function b1(integer)
+DETAIL: drop cascades to function b2(integer)
+DETAIL: drop cascades to function b3(integer)
+DETAIL: drop cascades to function b4(integer)
+DETAIL: drop cascades to function b5(integer)
+DETAIL: drop cascades to function b6(integer)
+DETAIL: drop cascades to function b7(integer)
+DETAIL: drop cascades to function p1(integer)
+DETAIL: drop cascades to function p2(integer,integer)
+-- DROP SCHEMA
+
+> RESET search_path
+-- RESET
+
+> CREATE SCHEMA zb
+-- CREATE SCHEMA
+
+> SET search_path = zb, public
+-- SET
+
+> CREATE TABLE t (a int PRIMARY KEY, b text, c int)
+-- CREATE TABLE
+
+> CREATE TABLE u (a int, d int)
+-- CREATE TABLE
+
+> CREATE TYPE pair AS (p int, q int)
+-- CREATE TYPE
+
+> CREATE FUNCTION e1(x int) RETURNS bigint LANGUAGE sql BEGIN ATOMIC
+>   DELETE FROM t WHERE a IN (SELECT a FROM u WHERE d = x) AND EXISTS (SELECT 1 FROM t WHERE c = x);
+>   INSERT INTO t SELECT * FROM t WHERE a = x;
+>   UPDATE t AS z SET c = 1 WHERE z.a = x;
+>   SELECT $1 + x FROM u;
+>   WITH g AS (DELETE FROM u WHERE d = x RETURNING a) SELECT count(*) FROM g;
+> END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION e2(int, text) RETURNS text LANGUAGE sql RETURN $2 || $1::text
+-- CREATE FUNCTION
+
+> CREATE FUNCTION e3(r pair) RETURNS int LANGUAGE sql RETURN (r).p + r.q
+-- CREATE FUNCTION
+
+> CREATE FUNCTION e4(x int) RETURNS SETOF int LANGUAGE sql BEGIN ATOMIC SELECT a FROM t JOIN u USING (a) WHERE u.d > x ORDER BY 1 LIMIT 3; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION e5(x int, OUT y int, OUT z text) LANGUAGE sql BEGIN ATOMIC SELECT x, 'a'; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION e6() RETURNS bigint LANGUAGE sql RETURN (SELECT sum(a) FROM t) + (SELECT count(*) FROM u)
+-- CREATE FUNCTION
+
+> CREATE FUNCTION e7(x int) RETURNS int LANGUAGE sql STABLE BEGIN ATOMIC SELECT x; SELECT x + 1; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION e8(x int[]) RETURNS int LANGUAGE sql RETURN x[1] + array_length(x, 1)
+-- CREATE FUNCTION
+
+> CREATE FUNCTION e9(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC INSERT INTO u VALUES (x, DEFAULT) RETURNING a, d AS dd; END
+ERROR 42P13: return type mismatch in function declared to return integer
+DETAIL: Final statement must return exactly one column.
+CONTEXT: SQL function "e9"
+
+> SELECT pg_get_functiondef(oid) FROM pg_proc WHERE pronamespace = 'zb'::regnamespace ORDER BY proname
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION zb.e1(x integer)
+ RETURNS bigint
+ LANGUAGE sql
+BEGIN ATOMIC
+ DELETE FROM t
+   WHERE ((t.a IN ( SELECT u.a
+            FROM u
+           WHERE (u.d = e1.x))) AND (EXISTS ( SELECT 1
+            FROM t t_1
+           WHERE (t_1.c = e1.x))));
+ INSERT INTO t (a, b, c)  SELECT t_1.a,
+             t_1.b,
+             t_1.c
+            FROM t t_1
+           WHERE (t_1.a = e1.x);
+ UPDATE t z SET c = 1
+   WHERE (z.a = e1.x);
+ SELECT (e1.x + e1.x)
+    FROM u;
+ WITH g AS (
+          DELETE FROM u
+           WHERE (u.d = e1.x)
+           RETURNING u.a
+         )
+  SELECT count(*) AS count
+    FROM g;
+END
+
+CREATE OR REPLACE FUNCTION zb.e2(integer, text)
+ RETURNS text
+ LANGUAGE sql
+RETURN ($2 || ($1)::text)
+
+CREATE OR REPLACE FUNCTION zb.e3(r pair)
+ RETURNS integer
+ LANGUAGE sql
+RETURN ((r).p + (r).q)
+
+CREATE OR REPLACE FUNCTION zb.e4(x integer)
+ RETURNS SETOF integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT t.a
+    FROM (t
+      JOIN u USING (a))
+   WHERE (u.d > e4.x)
+   ORDER BY t.a
+  LIMIT 3;
+END
+
+CREATE OR REPLACE FUNCTION zb.e5(x integer, OUT y integer, OUT z text)
+ RETURNS record
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT x AS x,
+     'a'::text;
+END
+
+CREATE OR REPLACE FUNCTION zb.e6()
+ RETURNS bigint
+ LANGUAGE sql
+RETURN ((SELECT sum(t.a) AS sum FROM t) + (SELECT count(*) AS count FROM u))
+
+CREATE OR REPLACE FUNCTION zb.e7(x integer)
+ RETURNS integer
+ LANGUAGE sql
+ STABLE
+BEGIN ATOMIC
+ SELECT x AS x;
+ SELECT (x + 1);
+END
+
+CREATE OR REPLACE FUNCTION zb.e8(x integer[])
+ RETURNS integer
+ LANGUAGE sql
+RETURN ((x)[1] + array_length(x, 1))
+
+-- SELECT 8
+
+> SELECT e2(1, 'n'), e3(ROW(1, 2)), e8(ARRAY[4, 5]), e7(1)
+e2:text | e3:int4 | e8:int4 | e7:int4
+n1 | 3 | 6 | 2
+-- SELECT 1
+
+> DROP TABLE u
+ERROR 2BP01: cannot drop table u because other objects depend on it
+DETAIL: function e1(integer) depends on table u
+DETAIL: function e4(integer) depends on table u
+DETAIL: function e6() depends on table u
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE t
+ERROR 2BP01: cannot drop table t because other objects depend on it
+DETAIL: function e1(integer) depends on table t
+DETAIL: function e4(integer) depends on table t
+DETAIL: function e6() depends on table t
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP SCHEMA zb CASCADE
+NOTICE 00000: drop cascades to 11 other objects
+DETAIL: drop cascades to table t
+DETAIL: drop cascades to table u
+DETAIL: drop cascades to type pair
+DETAIL: drop cascades to function e1(integer)
+DETAIL: drop cascades to function e2(integer,text)
+DETAIL: drop cascades to function e3(pair)
+DETAIL: drop cascades to function e4(integer)
+DETAIL: drop cascades to function e5(integer)
+DETAIL: drop cascades to function e6()
+DETAIL: drop cascades to function e7(integer)
+DETAIL: drop cascades to function e8(integer[])
+-- DROP SCHEMA
+
+> RESET search_path
+-- RESET
+
+> CREATE TYPE zpair AS (p int, q int)
+-- CREATE TYPE
+
+> CREATE FUNCTION zf(r zpair) RETURNS int LANGUAGE sql RETURN r.p + r.q
+-- CREATE FUNCTION
+
+> SELECT zf(ROW(1, 2, 3))
+ERROR 42846: cannot cast type record to zpair (at 11)
+DETAIL: Input has too many columns.
+
+> SELECT zf(ROW(1))
+ERROR 42846: cannot cast type record to zpair (at 11)
+DETAIL: Input has too few columns.
+
+> SELECT zf(ROW('a', 2))
+ERROR 22P02: invalid input syntax for type integer: "a" (at 15)
+
+> SELECT zf(r) FROM (SELECT ROW(1, 2) AS r) s
+ERROR 42846: cannot cast type record to zpair (at 11)
+
+> SELECT zf(s) FROM (SELECT 1 AS a, 2 AS b) s
+zf:int4
+3
+-- SELECT 1
+
+> SELECT zf((1, 2))
+zf:int4
+3
+-- SELECT 1
+
+> DROP FUNCTION zf
+-- DROP FUNCTION
+
+> DROP TYPE zpair
+-- DROP TYPE
+
+> CREATE FUNCTION sb_ra(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; RETURN x + 1; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION sb_rb(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC RETURN (SELECT x); END
+-- CREATE FUNCTION
+
+> SELECT pg_get_functiondef('sb_ra'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.sb_ra(x integer)
+ RETURNS integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT 1;
+ RETURN (x + 1);
+END
+
+-- SELECT 1
+
+> SELECT pg_get_function_sqlbody('sb_rb'::regproc), sb_ra(1), sb_rb(2)
+pg_get_function_sqlbody:text | sb_ra:int4 | sb_rb:int4
+BEGIN ATOMIC
+ RETURN ( SELECT x AS x);
+END | 2 | 2
+-- SELECT 1
+
+> DROP FUNCTION sb_ra, sb_rb
+-- DROP FUNCTION
+

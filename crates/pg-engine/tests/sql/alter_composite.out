@@ -1,0 +1,226 @@
+> CREATE TYPE ac_pt AS (x int, y int)
+-- CREATE TYPE
+
+> ALTER TYPE ac_pt ADD ATTRIBUTE z int
+-- ALTER TYPE
+
+> SELECT ROW(1, 2, 3)::ac_pt
+row:user
+(1,2,3)
+-- SELECT 1
+
+> SELECT attname, atttypid::regtype, attnum FROM pg_attribute WHERE attrelid = 'ac_pt'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | atttypid:regtype | attnum:int2
+x | integer | 1
+y | integer | 2
+z | integer | 3
+-- SELECT 3
+
+> ALTER TYPE ac_pt DROP ATTRIBUTE y
+-- ALTER TYPE
+
+> SELECT attname, atttypid::regtype FROM pg_attribute WHERE attrelid = 'ac_pt'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum
+attname:name | atttypid:regtype
+x | integer
+z | integer
+-- SELECT 2
+
+> SELECT ROW(1, 3)::ac_pt
+row:user
+(1,3)
+-- SELECT 1
+
+> ALTER TYPE ac_pt ALTER ATTRIBUTE z TYPE bigint
+-- ALTER TYPE
+
+> ALTER TYPE ac_pt ALTER ATTRIBUTE z SET DATA TYPE numeric(10, 2)
+-- ALTER TYPE
+
+> SELECT ROW(1, 3.456)::ac_pt
+row:user
+(1,3.46)
+-- SELECT 1
+
+> ALTER TYPE ac_pt RENAME ATTRIBUTE z TO zz
+-- ALTER TYPE
+
+> SELECT (ROW(1, 2)::ac_pt).zz
+zz:numeric
+2.00
+-- SELECT 1
+
+> ALTER TYPE ac_pt ADD ATTRIBUTE x text
+ERROR 42701: column "x" of relation "ac_pt" already exists
+
+> ALTER TYPE ac_pt DROP ATTRIBUTE nope
+ERROR 42703: column "nope" of relation "ac_pt" does not exist
+
+> ALTER TYPE ac_pt DROP ATTRIBUTE IF EXISTS nope
+NOTICE 00000: column "nope" of relation "ac_pt" does not exist, skipping
+-- ALTER TYPE
+
+> ALTER TYPE ac_pt ALTER ATTRIBUTE nope TYPE int
+ERROR 42703: column "nope" of relation "ac_pt" does not exist
+
+> ALTER TYPE ac_pt RENAME ATTRIBUTE nope TO n2
+ERROR 42703: column "nope" does not exist
+
+> ALTER TYPE ac_pt RENAME ATTRIBUTE x TO zz
+ERROR 42701: column "zz" of relation "ac_pt" already exists
+
+> ALTER TYPE ac_pt ADD ATTRIBUTE a int, ADD ATTRIBUTE b text, DROP ATTRIBUTE a
+ERROR 42703: column "a" of relation "ac_pt" does not exist
+
+> ALTER TYPE ac_pt ALTER ATTRIBUTE x SET DEFAULT 1
+ERROR 42601: syntax error at or near "DEFAULT" (at 40)
+
+> SELECT format_type(atttypid, atttypmod), attname FROM pg_attribute WHERE attrelid = 'ac_pt'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum
+format_type:text | attname:name
+integer | x
+numeric(10,2) | zz
+-- SELECT 2
+
+> ALTER TYPE ac_nope ADD ATTRIBUTE a int
+ERROR 42P01: relation "ac_nope" does not exist
+
+> CREATE TABLE ac_plain (a int)
+-- CREATE TABLE
+
+> ALTER TYPE ac_plain ADD ATTRIBUTE b int
+ERROR 42809: "ac_plain" is not a composite type
+
+> CREATE TYPE ac_mood AS ENUM ('a')
+-- CREATE TYPE
+
+> ALTER TYPE ac_mood ADD ATTRIBUTE b int
+ERROR 42P01: relation "ac_mood" does not exist
+
+> CREATE TABLE ac_t (id int, p ac_pt)
+-- CREATE TABLE
+
+> INSERT INTO ac_t VALUES (1, ROW(1, 2.5)), (2, NULL)
+-- INSERT 0 2
+
+> INSERT INTO ac_t VALUES (3, ROW(7, 8.25)::ac_pt)
+-- INSERT 0 1
+
+> ALTER TYPE ac_pt ADD ATTRIBUTE c int, ADD ATTRIBUTE b text
+-- ALTER TYPE
+
+> SELECT * FROM ac_t ORDER BY id
+id:int4 | p:user
+1 | (1,2.50,,)
+2 | NULL
+3 | (7,8.25,,)
+-- SELECT 3
+
+> UPDATE ac_t SET p.b = 'bee' WHERE id = 1
+-- UPDATE 1
+
+> ALTER TYPE ac_pt DROP ATTRIBUTE c
+-- ALTER TYPE
+
+> ALTER TYPE ac_pt ALTER ATTRIBUTE zz TYPE int
+ERROR 0A000: cannot alter type "ac_pt" because column "ac_t.p" uses it
+
+> ALTER TYPE ac_pt RENAME ATTRIBUTE b TO bee
+-- ALTER TYPE
+
+> SELECT (p).bee, (p).x, p FROM ac_t ORDER BY id
+bee:text | x:int4 | p:user
+bee | 1 | (1,2.50,bee)
+NULL | NULL | NULL
+NULL | 7 | (7,8.25,)
+-- SELECT 3
+
+> ALTER TYPE ac_pt DROP ATTRIBUTE x
+-- ALTER TYPE
+
+> SELECT * FROM ac_t ORDER BY id
+id:int4 | p:user
+1 | (2.50,bee)
+2 | NULL
+3 | (8.25,)
+-- SELECT 3
+
+> CREATE TABLE ac_arr (ps ac_pt[])
+-- CREATE TABLE
+
+> INSERT INTO ac_arr VALUES (ARRAY[ROW(1, 'a')::ac_pt, ROW(2, 'b')::ac_pt])
+-- INSERT 0 1
+
+> ALTER TYPE ac_pt ADD ATTRIBUTE w int
+-- ALTER TYPE
+
+> SELECT ps, ps[2].bee FROM ac_arr
+ps:user | bee:text
+{"(1.00,a,)","(2.00,b,)"} | b
+-- SELECT 1
+
+> DROP TABLE ac_arr
+-- DROP TABLE
+
+> CREATE TYPE ac_inner AS (a int)
+-- CREATE TYPE
+
+> CREATE TYPE ac_outer AS (i ac_inner, n int)
+-- CREATE TYPE
+
+> CREATE FUNCTION ac_make(v int) RETURNS ac_inner LANGUAGE sql AS 'SELECT ROW(v)::ac_inner'
+-- CREATE FUNCTION
+
+> ALTER TYPE ac_inner ADD ATTRIBUTE b text
+-- ALTER TYPE
+
+> SELECT ROW(ROW(1, 'x'), 2)::ac_outer
+row:user
+("(1,x)",2)
+-- SELECT 1
+
+> SELECT ac_make(5)
+ERROR 42846: cannot cast type record to ac_inner
+DETAIL: Input has too few columns.
+QUERY: SELECT ROW(v)::ac_inner (at 14)
+CONTEXT: SQL function "ac_make" during inlining
+
+> ALTER TYPE ac_inner RENAME ATTRIBUTE a TO aa
+-- ALTER TYPE
+
+> SELECT ((ROW(ROW(1, 'x'), 2)::ac_outer).i).aa
+aa:int4
+1
+-- SELECT 1
+
+> CREATE TABLE ac_t2 (o ac_outer)
+-- CREATE TABLE
+
+> ALTER TYPE ac_inner ADD ATTRIBUTE c int
+-- ALTER TYPE
+
+> SELECT * FROM ac_t2
+o:user
+-- SELECT 0
+
+> INSERT INTO ac_t2 VALUES (ROW(ROW(1, 'x', 2), 3))
+-- INSERT 0 1
+
+> ALTER TYPE ac_inner DROP ATTRIBUTE b
+-- ALTER TYPE
+
+> SELECT o, (o).i, ((o).i).c FROM ac_t2
+o:user | i:user | c:int4
+("(1,2)",3) | (1,2) | 2
+-- SELECT 1
+
+> DROP TABLE ac_t2
+-- DROP TABLE
+
+> DROP FUNCTION ac_make(int)
+-- DROP FUNCTION
+
+> DROP TABLE ac_t, ac_plain
+-- DROP TABLE
+
+> DROP TYPE ac_outer, ac_inner, ac_pt, ac_mood
+-- DROP TYPE
+

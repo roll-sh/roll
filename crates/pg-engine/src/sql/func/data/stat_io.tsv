@@ -1,0 +1,79 @@
+client backend	relation	bulkread	t	t	t	t	t	t	t	t	f	f	f	t	t	t	f	f
+client backend	relation	bulkwrite	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+client backend	relation	init	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+client backend	relation	normal	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+client backend	relation	vacuum	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+client backend	temp relation	normal	t	t	t	t	t	t	f	f	t	t	t	t	t	f	f	f
+client backend	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+client backend	wal	normal	t	t	t	t	t	t	f	f	f	f	f	f	f	f	t	t
+autovacuum launcher	relation	bulkread	t	t	t	t	t	t	t	t	f	f	f	t	t	t	f	f
+autovacuum launcher	relation	init	t	t	t	t	t	t	t	t	f	f	f	t	t	f	t	t
+autovacuum launcher	relation	normal	t	t	t	t	t	t	t	t	f	f	f	t	t	f	t	t
+autovacuum launcher	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+autovacuum launcher	wal	normal	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+autovacuum worker	relation	bulkread	t	t	t	t	t	t	t	t	f	f	f	t	t	t	f	f
+autovacuum worker	relation	init	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+autovacuum worker	relation	normal	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+autovacuum worker	relation	vacuum	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+autovacuum worker	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+autovacuum worker	wal	normal	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+background worker	relation	bulkread	t	t	t	t	t	t	t	t	f	f	f	t	t	t	f	f
+background worker	relation	bulkwrite	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+background worker	relation	init	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+background worker	relation	normal	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+background worker	relation	vacuum	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+background worker	temp relation	normal	t	t	t	t	t	t	f	f	t	t	t	t	t	f	f	f
+background worker	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+background worker	wal	normal	t	t	t	t	t	t	f	f	f	f	f	f	f	f	t	t
+walsender	relation	bulkread	t	t	t	t	t	t	t	t	f	f	f	t	t	t	f	f
+walsender	relation	bulkwrite	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+walsender	relation	init	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+walsender	relation	normal	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+walsender	relation	vacuum	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+walsender	temp relation	normal	t	t	t	t	t	t	f	f	t	t	t	t	t	f	f	f
+walsender	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+walsender	wal	normal	t	t	t	t	t	t	f	f	f	f	f	f	f	f	t	t
+slotsync worker	relation	bulkread	t	t	t	t	t	t	t	t	f	f	f	t	t	t	f	f
+slotsync worker	relation	bulkwrite	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+slotsync worker	relation	init	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+slotsync worker	relation	normal	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+slotsync worker	relation	vacuum	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+slotsync worker	temp relation	normal	t	t	t	t	t	t	f	f	t	t	t	t	t	f	f	f
+slotsync worker	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+slotsync worker	wal	normal	t	t	t	t	t	t	f	f	f	f	f	f	f	f	t	t
+standalone backend	relation	bulkread	t	t	t	t	t	t	t	t	f	f	f	t	t	t	f	f
+standalone backend	relation	bulkwrite	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+standalone backend	relation	init	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+standalone backend	relation	normal	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+standalone backend	relation	vacuum	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+standalone backend	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+standalone backend	wal	normal	t	t	t	t	t	t	f	f	f	f	f	f	f	f	t	t
+background writer	relation	init	f	f	f	t	t	t	t	t	f	f	f	f	f	f	t	t
+background writer	relation	normal	f	f	f	t	t	t	t	t	f	f	f	f	f	f	t	t
+background writer	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+background writer	wal	normal	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+checkpointer	relation	init	f	f	f	t	t	t	t	t	f	f	f	f	f	f	t	t
+checkpointer	relation	normal	f	f	f	t	t	t	t	t	f	f	f	f	f	f	t	t
+checkpointer	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+checkpointer	wal	normal	t	t	t	t	t	t	f	f	f	f	f	f	f	f	t	t
+io worker	relation	bulkread	t	t	t	t	t	t	t	t	f	f	f	t	t	t	f	f
+io worker	relation	bulkwrite	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+io worker	relation	init	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+io worker	relation	normal	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+io worker	relation	vacuum	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+io worker	temp relation	normal	t	t	t	t	t	t	f	f	t	t	t	t	t	f	f	f
+io worker	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+io worker	wal	normal	t	t	t	t	t	t	f	f	f	f	f	f	f	f	t	t
+startup	relation	bulkread	t	t	t	t	t	t	t	t	f	f	f	t	t	t	f	f
+startup	relation	bulkwrite	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+startup	relation	init	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+startup	relation	normal	t	t	t	t	t	t	t	t	t	t	t	t	t	f	t	t
+startup	relation	vacuum	t	t	t	t	t	t	t	t	t	t	t	t	t	t	f	f
+startup	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+startup	wal	normal	t	t	t	t	t	t	f	f	f	f	f	f	f	f	t	t
+walreceiver	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+walreceiver	wal	normal	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+walsummarizer	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+walsummarizer	wal	normal	t	t	t	t	t	t	f	f	f	f	f	f	f	f	t	t
+walwriter	wal	init	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t
+walwriter	wal	normal	f	f	f	t	t	t	f	f	f	f	f	f	f	f	t	t

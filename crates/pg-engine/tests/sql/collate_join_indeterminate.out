@@ -1,0 +1,149 @@
+> create table cji_c1 (a text collate "C")
+-- CREATE TABLE
+
+> create table cji_c2 (a text collate "POSIX")
+-- CREATE TABLE
+
+> create table cji_c3 (a text collate "C")
+-- CREATE TABLE
+
+> explain (costs off) select * from cji_c1 full join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select * from cji_c1 full join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select * from cji_c1 full join cji_c2 on cji_c1.a = cji_c2.a
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> set enable_mergejoin = off
+-- SET
+
+> explain (costs off) select * from cji_c1 full join cji_c2 using (a)
+QUERY PLAN:text
+Hash Full Join
+  Hash Cond: (cji_c1.a = cji_c2.a)
+  ->  Seq Scan on cji_c1
+  ->  Hash
+        ->  Seq Scan on cji_c2
+-- EXPLAIN
+
+> select * from cji_c1 full join cji_c2 using (a)
+a:text
+-- SELECT 0
+
+> select * from cji_c1 join cji_c2 using (a)
+a:text
+-- SELECT 0
+
+> reset enable_mergejoin
+-- RESET
+
+> insert into cji_c1 values ('x'), ('y')
+-- INSERT 0 2
+
+> insert into cji_c2 values ('x'), ('z')
+-- INSERT 0 2
+
+> insert into cji_c3 values ('x')
+-- INSERT 0 1
+
+> select * from cji_c1 full join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select * from cji_c1 full join cji_c2 using (a) order by 1
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select pg_collation_for(a) from cji_c1 full join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> set enable_mergejoin = off
+-- SET
+
+> select * from cji_c1 full join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for string hashing
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select * from cji_c1 full join cji_c2 on cji_c1.a = cji_c2.a
+ERROR 42P22: could not determine which collation to use for string hashing
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select * from cji_c1 left join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for string hashing
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select * from cji_c1 join cji_c3 using (a) full join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for string hashing
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> set enable_hashjoin = off
+-- SET
+
+> select * from cji_c1 join cji_c2 on cji_c1.a = cji_c2.a
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select * from cji_c1 join cji_c2 on cji_c1.a < cji_c2.a
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> select * from cji_c1 c1 full join cji_c2 c2 on c1.a = c2.a collate "C" order by 1, 2
+a:text | a:text
+x | x
+y | NULL
+NULL | z
+-- SELECT 3
+
+> select * from cji_c1 full join cji_c2 using (a) where false
+a:text
+-- SELECT 0
+
+> explain (costs off) select * from cji_c1 full join cji_c2 using (a) where false
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> create view cji_v as select * from cji_c1 full join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for view column "a"
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> create view cji_v2 as select c1.a from cji_c1 c1 join cji_c2 c2 on c1.a = c2.a
+-- CREATE VIEW
+
+> select * from cji_v2
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> delete from cji_c1
+-- DELETE 2
+
+> delete from cji_c2
+-- DELETE 2
+
+> insert into cji_c1 values (null)
+-- INSERT 0 1
+
+> insert into cji_c2 values (null)
+-- INSERT 0 1
+
+> select * from cji_c1 full join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select * from cji_c1 left join cji_c2 using (a)
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+

@@ -1,0 +1,310 @@
+> CREATE TABLE uv_base (a int PRIMARY KEY, b text DEFAULT 'def', c int)
+-- CREATE TABLE
+
+> INSERT INTO uv_base VALUES (1, 'one', 10), (2, 'two', 20), (3, 'three', 30)
+-- INSERT 0 3
+
+> CREATE VIEW uv_simple AS SELECT a, b, c * 2 AS c2 FROM uv_base
+-- CREATE VIEW
+
+> CREATE VIEW uv_distinct AS SELECT DISTINCT a FROM uv_base
+-- CREATE VIEW
+
+> CREATE VIEW uv_agg AS SELECT count(*) AS n FROM uv_base
+-- CREATE VIEW
+
+> CREATE VIEW uv_union AS SELECT a FROM uv_base UNION SELECT c FROM uv_base
+-- CREATE VIEW
+
+> CREATE VIEW uv_const AS SELECT 1 AS one
+-- CREATE VIEW
+
+> CREATE VIEW uv_sys AS SELECT a, ctid FROM uv_base
+-- CREATE VIEW
+
+> SELECT table_name, is_insertable_into FROM information_schema.tables WHERE table_name LIKE 'uv_%' ORDER BY 1
+table_name:name | is_insertable_into:varchar
+uv_agg | NO
+uv_base | YES
+uv_const | NO
+uv_distinct | NO
+uv_simple | YES
+uv_sys | YES
+uv_union | NO
+-- SELECT 7
+
+> SELECT table_name, is_updatable, is_insertable_into, is_trigger_updatable FROM information_schema.views WHERE table_name LIKE 'uv_%' ORDER BY 1
+table_name:name | is_updatable:varchar | is_insertable_into:varchar | is_trigger_updatable:varchar
+uv_agg | NO | NO | NO
+uv_const | NO | NO | NO
+uv_distinct | NO | NO | NO
+uv_simple | YES | YES | NO
+uv_sys | YES | YES | NO
+uv_union | NO | NO | NO
+-- SELECT 6
+
+> SELECT table_name, column_name, is_updatable FROM information_schema.columns WHERE table_name LIKE 'uv_%' ORDER BY 1, ordinal_position
+table_name:name | column_name:name | is_updatable:varchar
+uv_agg | n | NO
+uv_base | a | YES
+uv_base | b | YES
+uv_base | c | YES
+uv_const | one | NO
+uv_distinct | a | NO
+uv_simple | a | YES
+uv_simple | b | YES
+uv_simple | c2 | NO
+uv_sys | a | YES
+uv_sys | ctid | NO
+uv_union | a | NO
+-- SELECT 12
+
+> SELECT c.relname, pg_relation_is_updatable(c.oid, false), pg_column_is_updatable(c.oid, 1::int2, false) FROM pg_class c WHERE c.relname LIKE 'uv_%' AND c.relkind = 'v' ORDER BY 1
+relname:name | pg_relation_is_updatable:int4 | pg_column_is_updatable:bool
+uv_agg | 0 | f
+uv_const | 0 | f
+uv_distinct | 0 | f
+uv_simple | 28 | t
+uv_sys | 28 | t
+uv_union | 0 | f
+-- SELECT 6
+
+> INSERT INTO uv_distinct VALUES (5)
+ERROR 55000: cannot insert into view "uv_distinct"
+DETAIL: Views containing DISTINCT are not automatically updatable.
+HINT: To enable inserting into the view, provide an INSTEAD OF INSERT trigger or an unconditional ON INSERT DO INSTEAD rule.
+
+> UPDATE uv_agg SET n = 1
+ERROR 55000: cannot update view "uv_agg"
+DETAIL: Views that return aggregate functions are not automatically updatable.
+HINT: To enable updating the view, provide an INSTEAD OF UPDATE trigger or an unconditional ON UPDATE DO INSTEAD rule.
+
+> DELETE FROM uv_union
+ERROR 55000: cannot delete from view "uv_union"
+DETAIL: Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.
+HINT: To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.
+
+> INSERT INTO uv_const VALUES (1)
+ERROR 55000: cannot insert into view "uv_const"
+DETAIL: Views that do not select from a single table or view are not automatically updatable.
+HINT: To enable inserting into the view, provide an INSTEAD OF INSERT trigger or an unconditional ON INSERT DO INSTEAD rule.
+
+> UPDATE uv_simple SET c2 = 1
+ERROR 0A000: cannot update column "c2" of view "uv_simple"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> INSERT INTO uv_simple (a, c2) VALUES (9, 9)
+ERROR 0A000: cannot insert into column "c2" of view "uv_simple"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> UPDATE uv_sys SET ctid = '(0,1)'
+ERROR 0A000: cannot update column "ctid" of view "uv_sys"
+DETAIL: View columns that refer to system columns are not updatable.
+
+> INSERT INTO uv_simple (a, a) VALUES (9, 9)
+ERROR 42701: column "a" specified more than once (at 27)
+
+> INSERT INTO uv_simple (a) VALUES (4) RETURNING *
+a:int4 | b:text | c2:int4
+4 | def | NULL
+-- INSERT 0 1
+
+> ALTER VIEW uv_simple ALTER COLUMN b SET DEFAULT 'view default'
+-- ALTER VIEW
+
+> INSERT INTO uv_simple (a) VALUES (5) RETURNING *
+a:int4 | b:text | c2:int4
+5 | view default | NULL
+-- INSERT 0 1
+
+> ALTER VIEW uv_simple ALTER COLUMN b DROP DEFAULT
+-- ALTER VIEW
+
+> UPDATE uv_simple SET b = upper(b) WHERE a > 3 RETURNING a, b, c2
+a:int4 | b:text | c2:int4
+4 | DEF | NULL
+5 | VIEW DEFAULT | NULL
+-- UPDATE 2
+
+> DELETE FROM uv_simple WHERE a = 5 RETURNING *
+a:int4 | b:text | c2:int4
+5 | VIEW DEFAULT | NULL
+-- DELETE 1
+
+> INSERT INTO uv_simple (a, b) VALUES (1, 'conflict') ON CONFLICT (a) DO UPDATE SET b = excluded.b || '!' RETURNING *
+a:int4 | b:text | c2:int4
+1 | conflict! | 20
+-- INSERT 0 1
+
+> INSERT INTO uv_simple (a, b) VALUES (1, 'skip') ON CONFLICT (a) DO NOTHING RETURNING *
+a:int4 | b:text | c2:int4
+-- INSERT 0 0
+
+> MERGE INTO uv_simple t USING (VALUES (2, 'merged'), (7, 'new')) s(a, b) ON t.a = s.a
+>   WHEN MATCHED THEN UPDATE SET b = s.b WHEN NOT MATCHED THEN INSERT (a, b) VALUES (s.a, s.b)
+-- MERGE 2
+
+> SELECT * FROM uv_base ORDER BY a
+a:int4 | b:text | c:int4
+1 | conflict! | 10
+2 | merged | 20
+3 | three | 30
+4 | DEF | NULL
+7 | new | NULL
+-- SELECT 5
+
+> CREATE VIEW uv_pos AS SELECT * FROM uv_base WHERE c > 0 WITH LOCAL CHECK OPTION
+-- CREATE VIEW
+
+> CREATE VIEW uv_small AS SELECT * FROM uv_pos WHERE c < 100
+-- CREATE VIEW
+
+> CREATE VIEW uv_small_local AS SELECT * FROM uv_pos WHERE c < 100 WITH LOCAL CHECK OPTION
+-- CREATE VIEW
+
+> CREATE VIEW uv_small_casc AS SELECT * FROM uv_pos WHERE c < 100 WITH CASCADED CHECK OPTION
+-- CREATE VIEW
+
+> INSERT INTO uv_pos VALUES (10, 'neg', -1)
+ERROR 44000: new row violates check option for view "uv_pos"
+DETAIL: Failing row contains (10, neg, -1).
+
+> INSERT INTO uv_small VALUES (11, 'big', 500)
+-- INSERT 0 1
+
+> INSERT INTO uv_small VALUES (12, 'neg', -5)
+ERROR 44000: new row violates check option for view "uv_pos"
+DETAIL: Failing row contains (12, neg, -5).
+
+> INSERT INTO uv_small_local VALUES (13, 'big', 500)
+ERROR 44000: new row violates check option for view "uv_small_local"
+DETAIL: Failing row contains (13, big, 500).
+
+> INSERT INTO uv_small_casc VALUES (14, 'neg', -5)
+ERROR 44000: new row violates check option for view "uv_pos"
+DETAIL: Failing row contains (14, neg, -5).
+
+> UPDATE uv_small_casc SET c = 1000 WHERE a = 1
+ERROR 44000: new row violates check option for view "uv_small_casc"
+DETAIL: Failing row contains (1, conflict!, 1000).
+
+> SELECT table_name, check_option FROM information_schema.views WHERE table_name LIKE 'uv_pos%' OR table_name LIKE 'uv_small%' ORDER BY 1
+table_name:name | check_option:varchar
+uv_pos | LOCAL
+uv_small | NONE
+uv_small_casc | CASCADED
+uv_small_local | LOCAL
+-- SELECT 4
+
+> ALTER VIEW uv_small SET (check_option = cascaded)
+-- ALTER VIEW
+
+> INSERT INTO uv_small VALUES (15, 'big', 500)
+ERROR 44000: new row violates check option for view "uv_small"
+DETAIL: Failing row contains (15, big, 500).
+
+> CREATE VIEW uv_bad AS SELECT DISTINCT a FROM uv_base WITH CHECK OPTION
+ERROR 0A000: WITH CHECK OPTION is supported only on automatically updatable views
+HINT: Views containing DISTINCT are not automatically updatable.
+
+> CREATE FUNCTION uv_trig() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF tg_op = 'INSERT' THEN
+>     INSERT INTO uv_base VALUES (new.a, 'trig ' || new.a, 1);
+>     RETURN new;
+>   ELSIF tg_op = 'UPDATE' THEN
+>     UPDATE uv_base SET a = new.a WHERE a = old.a;
+>     RETURN new;
+>   ELSE
+>     DELETE FROM uv_base WHERE a = old.a;
+>     RETURN old;
+>   END IF;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER uv_t INSTEAD OF INSERT OR UPDATE OR DELETE ON uv_distinct FOR EACH ROW EXECUTE FUNCTION uv_trig()
+-- CREATE TRIGGER
+
+> SELECT table_name, is_updatable, is_insertable_into, is_trigger_updatable, is_trigger_deletable, is_trigger_insertable_into FROM information_schema.views WHERE table_name = 'uv_distinct'
+table_name:name | is_updatable:varchar | is_insertable_into:varchar | is_trigger_updatable:varchar | is_trigger_deletable:varchar | is_trigger_insertable_into:varchar
+uv_distinct | NO | NO | YES | YES | YES
+-- SELECT 1
+
+> SELECT pg_relation_is_updatable('uv_distinct'::regclass, true)
+pg_relation_is_updatable:int4
+28
+-- SELECT 1
+
+> INSERT INTO uv_distinct VALUES (20) RETURNING *
+a:int4
+20
+-- INSERT 0 1
+
+> UPDATE uv_distinct SET a = 21 WHERE a = 20 RETURNING *
+a:int4
+21
+-- UPDATE 1
+
+> DELETE FROM uv_distinct WHERE a = 21 RETURNING *
+a:int4
+21
+-- DELETE 1
+
+> CREATE TABLE uv_log (op text, a int)
+-- CREATE TABLE
+
+> CREATE VIEW uv_rv1 AS SELECT a, b FROM uv_base WHERE a < 100
+-- CREATE VIEW
+
+> CREATE RULE uv_rv1_ins AS ON INSERT TO uv_rv1 DO INSTEAD INSERT INTO uv_log VALUES ('ins', new.a)
+-- CREATE RULE
+
+> CREATE RULE uv_rv1_upd AS ON UPDATE TO uv_rv1 DO INSTEAD INSERT INTO uv_log VALUES ('upd', old.a)
+-- CREATE RULE
+
+> CREATE VIEW uv_rv2 AS SELECT b AS bb, a AS aa FROM uv_rv1 WHERE a > 1
+-- CREATE VIEW
+
+> INSERT INTO uv_rv2 (aa, bb) VALUES (50, 'x')
+-- INSERT 0 1
+
+> UPDATE uv_rv2 SET bb = 'y' WHERE aa < 4
+-- UPDATE 0
+
+> DELETE FROM uv_rv2 WHERE aa = 3
+-- DELETE 1
+
+> SELECT * FROM uv_log ORDER BY 1, 2
+op:text | a:int4
+ins | 50
+upd | 2
+upd | 3
+-- SELECT 3
+
+> SELECT relname, pg_relation_is_updatable(oid, true) FROM pg_class WHERE relname IN ('uv_rv1', 'uv_rv2') ORDER BY 1
+relname:name | pg_relation_is_updatable:int4
+uv_rv1 | 28
+uv_rv2 | 28
+-- SELECT 2
+
+> DROP TABLE uv_base CASCADE
+NOTICE 00000: drop cascades to 11 other objects
+DETAIL: drop cascades to view uv_simple
+DETAIL: drop cascades to view uv_distinct
+DETAIL: drop cascades to view uv_agg
+DETAIL: drop cascades to view uv_union
+DETAIL: drop cascades to view uv_sys
+DETAIL: drop cascades to view uv_pos
+DETAIL: drop cascades to view uv_small
+DETAIL: drop cascades to view uv_small_local
+DETAIL: drop cascades to view uv_small_casc
+DETAIL: drop cascades to view uv_rv1
+DETAIL: drop cascades to view uv_rv2
+-- DROP TABLE
+
+> DROP TABLE uv_log
+-- DROP TABLE
+
+> DROP FUNCTION uv_trig()
+-- DROP FUNCTION
+

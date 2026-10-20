@@ -1,0 +1,608 @@
+> create sequence s
+-- CREATE SEQUENCE
+
+> create table t (a int)
+-- CREATE TABLE
+
+> insert into t values (1),(2),(3),(4)
+-- INSERT 0 4
+
+> create function q(int) returns bool language plpgsql volatile as $$ begin raise notice 'qual %', $1; return true; end $$
+-- CREATE FUNCTION
+
+> create function odd(int) returns bool language plpgsql volatile as $$ declare n int := nextval('s'); begin raise notice 'odd % %', $1, n; return n % 2 = 1; end $$
+-- CREATE FUNCTION
+
+> create function n(int) returns int language plpgsql volatile as $$ begin raise notice 'tl %', $1; return $1; end $$
+-- CREATE FUNCTION
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where q(a)
+-- DECLARE CURSOR
+
+> fetch 2 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+2
+-- FETCH 2
+
+> fetch prior from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+-- FETCH 1
+
+> fetch next from c
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+2
+-- FETCH 1
+
+> fetch absolute 4 from c
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+4
+-- FETCH 1
+
+> fetch backward all from c
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+2
+3
+-- FETCH 3
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a, n(a) from t where q(a)
+-- DECLARE CURSOR
+
+> fetch 2 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: tl 1
+CONTEXT: PL/pgSQL function n(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: tl 2
+CONTEXT: PL/pgSQL function n(integer) line 1 at RAISE
+a:int4 | n:int4
+1 | 1
+2 | 2
+-- FETCH 2
+
+> fetch prior from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: tl 1
+CONTEXT: PL/pgSQL function n(integer) line 1 at RAISE
+a:int4 | n:int4
+1 | 1
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where odd(a)
+-- DECLARE CURSOR
+
+> fetch all from c
+NOTICE 00000: odd 1 1
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 2 2
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 3 3
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 4 4
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+1
+3
+-- FETCH 2
+
+> fetch backward all from c
+NOTICE 00000: odd 4 5
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 3 6
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 2 7
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 1 8
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+2
+4
+-- FETCH 2
+
+> fetch all from c
+NOTICE 00000: odd 1 9
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 2 10
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 3 11
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 4 12
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+1
+3
+-- FETCH 2
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where a > 1 and q(a)
+-- DECLARE CURSOR
+
+> fetch 2 from c
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+2
+3
+-- FETCH 2
+
+> fetch prior from c
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+2
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where q(a) order by a
+-- DECLARE CURSOR
+
+> fetch 2 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+2
+-- FETCH 2
+
+> fetch prior from c
+a:int4
+1
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select g from generate_series(1,3) g where q(g)
+-- DECLARE CURSOR
+
+> fetch 2 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+g:int4
+1
+2
+-- FETCH 2
+
+> fetch prior from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+g:int4
+1
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select x from (values (1),(2),(3)) v(x) where q(x)
+-- DECLARE CURSOR
+
+> fetch 2 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+x:int4
+1
+2
+-- FETCH 2
+
+> fetch prior from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+x:int4
+1
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where q(a) limit 3
+-- DECLARE CURSOR
+
+> fetch 3 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+2
+3
+-- FETCH 3
+
+> fetch prior from c
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+2
+-- FETCH 1
+
+> fetch next from c
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+3
+-- FETCH 1
+
+> fetch next from c
+a:int4
+-- FETCH 0
+
+> fetch prior from c
+a:int4
+3
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where q(a) limit 2
+-- DECLARE CURSOR
+
+> fetch 2 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+2
+-- FETCH 2
+
+> fetch backward 3 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+-- FETCH 1
+
+> fetch next from c
+a:int4
+1
+-- FETCH 1
+
+> fetch next from c
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+2
+-- FETCH 1
+
+> fetch absolute 2 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+2
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where q(a) limit 10
+-- DECLARE CURSOR
+
+> fetch all from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+2
+3
+4
+-- FETCH 4
+
+> fetch prior from c
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+4
+-- FETCH 1
+
+> fetch prior from c
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+3
+-- FETCH 1
+
+> fetch first from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+-- FETCH 1
+
+> fetch last from c
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+4
+-- FETCH 1
+
+> move absolute 2 in c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+-- MOVE 1
+
+> fetch relative 0 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+2
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where odd(a) for read only
+-- DECLARE CURSOR
+
+> fetch next from c
+NOTICE 00000: odd 1 13
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+1
+-- FETCH 1
+
+> fetch next from c
+NOTICE 00000: odd 2 14
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 3 15
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+3
+-- FETCH 1
+
+> fetch prior from c
+NOTICE 00000: odd 2 16
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 1 17
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+1
+-- FETCH 1
+
+> fetch absolute -1 from c
+NOTICE 00000: odd 2 18
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 3 19
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 4 20
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 4 21
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+4
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where odd(a)
+-- DECLARE CURSOR
+
+> fetch next from c
+NOTICE 00000: odd 1 22
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 2 23
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+2
+-- FETCH 1
+
+> fetch next from c
+NOTICE 00000: odd 3 24
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 4 25
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+4
+-- FETCH 1
+
+> update t set a = a * 10 where current of c
+-- UPDATE 1
+
+> fetch prior from c
+NOTICE 00000: odd 3 26
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+NOTICE 00000: odd 2 27
+CONTEXT: PL/pgSQL function odd(integer) line 1 at RAISE
+a:int4
+2
+-- FETCH 1
+
+> delete from t where current of c
+-- DELETE 1
+
+> commit
+-- COMMIT
+
+> select * from t order by a
+a:int4
+1
+3
+40
+-- SELECT 3
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor with hold for select a from t where q(a)
+-- DECLARE CURSOR
+
+> fetch next from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+-- FETCH 1
+
+> commit
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 40
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+-- COMMIT
+
+> fetch next from c
+a:int4
+3
+-- FETCH 1
+
+> fetch prior from c
+a:int4
+1
+-- FETCH 1
+
+> fetch prior from c
+a:int4
+-- FETCH 0
+
+> close c
+-- CLOSE CURSOR
+
+> create index t_a on t (a)
+-- CREATE INDEX
+
+> set enable_seqscan = off
+-- SET
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from t where a > 0 and q(a)
+-- DECLARE CURSOR
+
+> fetch 2 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+3
+-- FETCH 2
+
+> fetch prior from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function q(integer) line 1 at RAISE
+a:int4
+1
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> reset enable_seqscan
+-- RESET
+
+> drop table t
+-- DROP TABLE
+
+> drop function q, odd, n
+-- DROP FUNCTION
+
+> drop sequence s
+-- DROP SEQUENCE
+

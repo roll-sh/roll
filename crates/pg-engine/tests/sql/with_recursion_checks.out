@@ -1,0 +1,167 @@
+> CREATE TEMP TABLE gx_dept (id INTEGER PRIMARY KEY, parent_gx_dept INTEGER REFERENCES gx_dept, name TEXT)
+-- CREATE TABLE
+
+> INSERT INTO gx_dept VALUES (0, NULL, 'ROOT'), (1, 0, 'A'), (2, 1, 'B'), (3, 2, 'C'), (4, 2, 'D'), (5, 0, 'E'), (6, 4, 'F'), (7, 5, 'G')
+-- INSERT 0 8
+
+> with recursive q as (
+>       select * from gx_dept
+>     union all
+>       (with recursive x as (
+>            select * from gx_dept
+>          union all
+>            (select * from q union all select * from x)
+>         )
+>        select * from x)
+>     )
+> select * from q limit 24
+id:int4 | parent_gx_dept:int4 | name:text
+0 | NULL | ROOT
+0 | NULL | ROOT
+0 | NULL | ROOT
+1 | 0 | A
+1 | 0 | A
+1 | 0 | A
+2 | 1 | B
+2 | 1 | B
+2 | 1 | B
+3 | 2 | C
+3 | 2 | C
+3 | 2 | C
+4 | 2 | D
+4 | 2 | D
+4 | 2 | D
+5 | 0 | E
+5 | 0 | E
+5 | 0 | E
+6 | 4 | F
+6 | 4 | F
+6 | 4 | F
+7 | 5 | G
+7 | 5 | G
+7 | 5 | G
+-- SELECT 24
+
+> CREATE TEMP TABLE bug6051 AS select i from generate_series(1,3) as t(i)
+-- SELECT 3
+
+> WITH t1 AS ( DELETE FROM bug6051 RETURNING * ) INSERT INTO bug6051 SELECT * FROM t1
+-- INSERT 0 3
+
+> SELECT * FROM bug6051
+i:int4
+1
+2
+3
+-- SELECT 3
+
+> CREATE TEMP TABLE m (k int, v text)
+-- CREATE TABLE
+
+> WITH RECURSIVE cte_basic AS (SELECT 1 a, 'cte_basic val' b)
+> MERGE INTO m USING (select 0 k, 'merge source SubPlan' v) o ON m.k=o.k
+> WHEN MATCHED THEN UPDATE SET v = (SELECT b || ' merge update' FROM cte_basic WHERE cte_basic.a = m.k LIMIT 1)
+> WHEN NOT MATCHED THEN INSERT VALUES(o.k, o.v)
+ERROR 42601: WITH RECURSIVE is not supported for MERGE statement
+
+> WITH RECURSIVE x(id) AS (values (1) UNION ALL SELECT (SELECT * FROM x) FROM x WHERE id < 5) SELECT * FROM x
+ERROR 42P19: recursive reference to query "x" must not appear within a subquery (at 69)
+
+> WITH RECURSIVE
+>   x (id) AS (SELECT 1 UNION ALL SELECT id+1 FROM y WHERE id < 5),
+>   y (id) AS (SELECT 1 UNION ALL SELECT id+1 FROM x WHERE id < 5)
+> SELECT * FROM x
+ERROR 0A000: mutual recursion between WITH items is not implemented (at 18)
+
+> WITH RECURSIVE foo(i) AS (values (1) UNION ALL (SELECT i+1 FROM foo WHERE i < 10 EXCEPT SELECT i+1 FROM foo WHERE i < 5)) SELECT * FROM foo
+ERROR 42P19: recursive reference to query "foo" must not appear within EXCEPT (at 105)
+
+> WITH RECURSIVE foo(i) AS (values (1) UNION ALL SELECT * FROM (SELECT i+1 FROM foo WHERE i < 10 UNION ALL SELECT i+1 FROM foo WHERE i < 5) AS t) SELECT * FROM foo
+ERROR 42P19: recursive reference to query "foo" must not appear more than once (at 122)
+
+> WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT count(*) FROM x) SELECT * FROM x
+ERROR 42P19: aggregate functions are not allowed in a recursive query's recursive term (at 51)
+
+> WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x LIMIT 10 OFFSET 1) SELECT * FROM x
+ERROR 0A000: OFFSET in a recursive query is not implemented (at 78)
+
+> WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x FOR UPDATE) SELECT * FROM x
+ERROR 0A000: FOR UPDATE/SHARE in a recursive query is not implemented
+
+> WITH RECURSIVE x(id) AS (SELECT 1 UNION ALL SELECT x.id+1 FROM generate_series(1,3) g LEFT JOIN x ON true WHERE x.id < 3) SELECT * FROM x
+ERROR 42P19: recursive reference to query "x" must not appear within an outer join (at 97)
+
+> WITH RECURSIVE a AS (SELECT * FROM b), b AS (SELECT 1 AS v) SELECT * FROM a
+v:int4
+1
+-- SELECT 1
+
+> WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM t) SELECT * FROM t LIMIT 5
+n:int4
+1
+2
+3
+4
+5
+-- SELECT 5
+
+> CREATE TABLE gx_t1 (a bigint)
+-- CREATE TABLE
+
+> CREATE TABLE gx_t1a (a bigint)
+-- CREATE TABLE
+
+> CREATE VIEW gx_v2(a,b) AS SELECT * FROM gx_t1, gx_t1a
+-- CREATE VIEW
+
+> CREATE VIEW gx_v3 AS SELECT * from gx_v2
+-- CREATE VIEW
+
+> CREATE OR REPLACE VIEW gx_v2 AS SELECT * from gx_v3
+-- CREATE VIEW
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE gx_v2 IN EXCLUSIVE MODE
+-- LOCK TABLE
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE VIEW gx_v7 AS SELECT * from gx_v2
+-- CREATE VIEW
+
+> SELECT * FROM gx_v7
+ERROR 42P17: infinite recursion detected in rules for relation "gx_v2"
+
+> SELECT * FROM gx_v3
+ERROR 42P17: infinite recursion detected in rules for relation "gx_v3"
+
+> DROP VIEW gx_v7
+-- DROP VIEW
+
+> DROP VIEW gx_v3
+ERROR 2BP01: cannot drop view gx_v3 because other objects depend on it
+DETAIL: view gx_v2 depends on view gx_v3
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP VIEW gx_v3 CASCADE
+NOTICE 00000: drop cascades to view gx_v2
+-- DROP VIEW
+
+> DROP VIEW gx_v2
+ERROR 42P01: view "gx_v2" does not exist
+
+> DROP TABLE gx_t1, gx_t1a
+-- DROP TABLE
+
+> SET client_min_messages = warning
+-- SET
+
+> DROP TABLE IF EXISTS gx_nothere
+-- DROP TABLE
+
+> RESET client_min_messages
+-- RESET
+

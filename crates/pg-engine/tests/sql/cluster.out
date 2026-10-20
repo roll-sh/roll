@@ -1,0 +1,251 @@
+> create table ct (a int, b text)
+-- CREATE TABLE
+
+> insert into ct values (3,'c'),(1,'a'),(2,'b')
+-- INSERT 0 3
+
+> create index ct_a on ct(a)
+-- CREATE INDEX
+
+> create index ct_b on ct using hash(b)
+-- CREATE INDEX
+
+> create index ct_p on ct(a) where a > 1
+-- CREATE INDEX
+
+> create unique index ct_u on ct(b)
+-- CREATE INDEX
+
+> cluster ct
+ERROR 42704: there is no previously clustered index for table "ct"
+
+> cluster ct using nosuch
+ERROR 42704: index "nosuch" for table "ct" does not exist
+
+> cluster ct using ct_b
+ERROR 0A000: cannot cluster on index "ct_b" because access method does not support clustering
+
+> cluster ct using ct_p
+ERROR 0A000: cannot cluster on partial index "ct_p"
+
+> cluster ct using ct_a
+-- CLUSTER
+
+> select * from ct
+a:int4 | b:text
+1 | a
+2 | b
+3 | c
+-- SELECT 3
+
+> select relname, indisclustered from pg_index join pg_class on oid=indexrelid where indrelid='ct'::regclass order by 1
+relname:name | indisclustered:bool
+ct_a | t
+ct_b | f
+ct_p | f
+ct_u | f
+-- SELECT 4
+
+> select relpages, reltuples, relallvisible from pg_class where relname in ('ct','ct_a','ct_u') order by relname
+relpages:int4 | reltuples:float4 | relallvisible:int4
+1 | 3 | 0
+2 | 3 | 0
+2 | 3 | 0
+-- SELECT 3
+
+> insert into ct values (0, 'z')
+-- INSERT 0 1
+
+> cluster ct
+-- CLUSTER
+
+> select * from ct
+a:int4 | b:text
+0 | z
+1 | a
+2 | b
+3 | c
+-- SELECT 4
+
+> alter table ct cluster on ct_u
+-- ALTER TABLE
+
+> select relname, indisclustered from pg_index join pg_class on oid=indexrelid where indrelid='ct'::regclass order by 1
+relname:name | indisclustered:bool
+ct_a | f
+ct_b | f
+ct_p | f
+ct_u | t
+-- SELECT 4
+
+> alter table ct cluster on nosuch
+ERROR 42704: index "nosuch" for table "ct" does not exist
+
+> alter table ct cluster on ct_p
+ERROR 0A000: cannot cluster on partial index "ct_p"
+
+> alter table ct set without cluster
+-- ALTER TABLE
+
+> select relname, indisclustered from pg_index join pg_class on oid=indexrelid where indrelid='ct'::regclass order by 1
+relname:name | indisclustered:bool
+ct_a | f
+ct_b | f
+ct_p | f
+ct_u | f
+-- SELECT 4
+
+> create table ct2 (x int)
+-- CREATE TABLE
+
+> create index ct2_x on ct2(x)
+-- CREATE INDEX
+
+> cluster ct using ct2_x
+ERROR 42809: "ct2_x" is not an index for table "ct"
+
+> alter table ct cluster on ct2_x
+ERROR 42809: "ct2_x" is not an index for table "ct"
+
+> begin
+-- BEGIN
+
+> cluster ct using ct_a
+-- CLUSTER
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> cluster
+ERROR 25001: CLUSTER cannot run inside a transaction block
+
+> rollback
+-- ROLLBACK
+
+> cluster
+-- CLUSTER
+
+> create view cv as select 1
+-- CREATE VIEW
+
+> cluster cv
+ERROR 42809: "cv" is not a table or materialized view
+
+> create sequence cs
+-- CREATE SEQUENCE
+
+> cluster cs
+ERROR 42809: "cs" is not a table or materialized view
+
+> cluster nosuch
+ERROR 42P01: relation "nosuch" does not exist
+
+> create table cp (a int) partition by range (a)
+-- CREATE TABLE
+
+> create index cp_a on cp(a)
+-- CREATE INDEX
+
+> create table cp1 partition of cp for values from (0) to (10)
+-- CREATE TABLE
+
+> insert into cp values (5),(1),(3)
+-- INSERT 0 3
+
+> cluster cp
+ERROR 42704: there is no previously clustered index for table "cp"
+
+> alter table cp cluster on cp_a
+ERROR 0A000: cannot mark index clustered in partitioned table
+
+> alter table cp set without cluster
+ERROR 0A000: cannot mark index clustered in partitioned table
+
+> begin
+-- BEGIN
+
+> cluster cp using cp_a
+ERROR 25001: CLUSTER cannot run inside a transaction block
+
+> rollback
+-- ROLLBACK
+
+> cluster cp using cp_a
+-- CLUSTER
+
+> select relname, indisclustered from pg_index join pg_class on oid=indexrelid where indrelid in ('cp'::regclass, 'cp1'::regclass) order by 1
+relname:name | indisclustered:bool
+cp1_a_idx | t
+cp_a | f
+-- SELECT 2
+
+> select * from cp
+a:int4
+1
+3
+5
+-- SELECT 3
+
+> cluster cp1
+-- CLUSTER
+
+> create materialized view cm as select * from ct
+-- SELECT 4
+
+> create index cm_a on cm(a)
+-- CREATE INDEX
+
+> cluster cm using cm_a
+-- CLUSTER
+
+> cluster cm
+-- CLUSTER
+
+> alter materialized view cm cluster on cm_a
+-- ALTER MATERIALIZED VIEW
+
+> alter materialized view cm set without cluster
+-- ALTER MATERIALIZED VIEW
+
+> cluster (foo) ct
+ERROR 42601: unrecognized CLUSTER option "foo" (at 10)
+
+> create temp table ctt (a int)
+-- CREATE TABLE
+
+> create index ctt_a on ctt(a)
+-- CREATE INDEX
+
+> cluster ctt using ctt_a
+-- CLUSTER
+
+> vacuum full ct
+-- VACUUM
+
+> select * from ct
+a:int4 | b:text
+0 | z
+1 | a
+2 | b
+3 | c
+-- SELECT 4
+
+> select relname, relpages, reltuples, relallvisible from pg_class where relname in ('ct','ct_a') order by 1
+relname:name | relpages:int4 | reltuples:float4 | relallvisible:int4
+ct | 1 | 4 | 0
+ct_a | 2 | 4 | 0
+-- SELECT 2
+
+> drop table ct, ct2, cp, ctt cascade
+NOTICE 00000: drop cascades to materialized view cm
+-- DROP TABLE
+
+> drop view cv
+-- DROP VIEW
+
+> drop sequence cs
+-- DROP SEQUENCE
+

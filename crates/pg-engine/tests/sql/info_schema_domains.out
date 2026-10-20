@@ -1,0 +1,194 @@
+> SELECT oid, typname, typbasetype::regtype, typtypmod, typarray, typcollation, typnotnull, typdefault, typowner, typacl FROM pg_type WHERE typnamespace = 'information_schema'::regnamespace AND typtype = 'd' ORDER BY oid
+oid:oid | typname:name | typbasetype:regtype | typtypmod:int4 | typarray:oid | typcollation:oid | typnotnull:bool | typdefault:text | typowner:oid | typacl:1034
+13341 | cardinal_number | integer | -1 | 13340 | 0 | f | NULL | 10 | NULL
+13344 | character_data | character varying | -1 | 13343 | 950 | f | NULL | 10 | NULL
+13346 | sql_identifier | name | -1 | 13345 | 950 | f | NULL | 10 | NULL
+13352 | time_stamp | timestamp with time zone | 2 | 13351 | 0 | f | CURRENT_TIMESTAMP(2) | 10 | NULL
+13354 | yes_or_no | character varying | 7 | 13353 | 950 | f | NULL | 10 | NULL
+-- SELECT 5
+
+> SELECT oid, typname, typelem, typcollation, typalign, typstorage FROM pg_type WHERE typelem IN (13341, 13344, 13346, 13352, 13354) ORDER BY oid
+oid:oid | typname:name | typelem:oid | typcollation:oid | typalign:char | typstorage:char
+13340 | _cardinal_number | 13341 | 0 | i | x
+13343 | _character_data | 13344 | 950 | i | x
+13345 | _sql_identifier | 13346 | 950 | i | x
+13351 | _time_stamp | 13352 | 0 | d | x
+13353 | _yes_or_no | 13354 | 950 | i | x
+-- SELECT 5
+
+> SELECT oid, conname, contypid::regtype, pg_get_constraintdef(oid), connamespace::regnamespace, convalidated FROM pg_constraint WHERE connamespace = 'information_schema'::regnamespace ORDER BY oid
+oid:oid | conname:name | contypid:regtype | pg_get_constraintdef:text | connamespace:4089 | convalidated:bool
+13342 | cardinal_number_domain_check | information_schema.cardinal_number | CHECK ((VALUE >= 0)) | information_schema | t
+13355 | yes_or_no_check | information_schema.yes_or_no | CHECK (((VALUE)::text = ANY ((ARRAY['YES'::character varying, 'NO'::character varying])::text[]))) | information_schema | t
+-- SELECT 2
+
+> SELECT classid::regclass, objid, objsubid, refclassid::regclass, refobjid, deptype FROM pg_depend WHERE objid IN (13340, 13341, 13342, 13344, 13346, 13352, 13354, 13355, 13353) ORDER BY 1, 2, 4, 5
+classid:regclass | objid:oid | objsubid:int4 | refclassid:regclass | refobjid:oid | deptype:char
+pg_type | 13340 | 0 | pg_type | 13341 | i
+pg_type | 13341 | 0 | pg_namespace | 13327 | n
+pg_type | 13344 | 0 | pg_namespace | 13327 | n
+pg_type | 13346 | 0 | pg_namespace | 13327 | n
+pg_type | 13352 | 0 | pg_namespace | 13327 | n
+pg_type | 13353 | 0 | pg_type | 13354 | i
+pg_type | 13354 | 0 | pg_namespace | 13327 | n
+pg_constraint | 13342 | 0 | pg_type | 13341 | a
+pg_constraint | 13355 | 0 | pg_type | 13354 | a
+-- SELECT 9
+
+> SELECT domain_schema, domain_name, data_type, character_maximum_length, character_octet_length, collation_name, numeric_precision, numeric_precision_radix, numeric_scale, datetime_precision, domain_default, udt_name, dtd_identifier FROM information_schema.domains ORDER BY domain_name
+domain_schema:name | domain_name:name | data_type:varchar | character_maximum_length:int4 | character_octet_length:int4 | collation_name:name | numeric_precision:int4 | numeric_precision_radix:int4 | numeric_scale:int4 | datetime_precision:int4 | domain_default:varchar | udt_name:name | dtd_identifier:name
+information_schema | cardinal_number | integer | NULL | NULL | NULL | 32 | 2 | 0 | NULL | NULL | int4 | 1
+information_schema | character_data | character varying | NULL | 1073741824 | C | NULL | NULL | NULL | NULL | NULL | varchar | 1
+information_schema | sql_identifier | name | NULL | NULL | C | NULL | NULL | NULL | NULL | NULL | name | 1
+information_schema | time_stamp | timestamp with time zone | NULL | NULL | NULL | NULL | NULL | NULL | 2 | CURRENT_TIMESTAMP(2) | timestamptz | 1
+information_schema | yes_or_no | character varying | 3 | 12 | C | NULL | NULL | NULL | NULL | NULL | varchar | 1
+-- SELECT 5
+
+> SELECT constraint_schema, constraint_name, domain_schema, domain_name, is_deferrable, initially_deferred FROM information_schema.domain_constraints ORDER BY 2
+constraint_schema:name | constraint_name:name | domain_schema:name | domain_name:name | is_deferrable:varchar | initially_deferred:varchar
+information_schema | cardinal_number_domain_check | information_schema | cardinal_number | NO | NO
+information_schema | yes_or_no_check | information_schema | yes_or_no | NO | NO
+-- SELECT 2
+
+> SELECT domain_schema, domain_name, udt_name FROM information_schema.domain_udt_usage ORDER BY 2
+domain_schema:name | domain_name:name | udt_name:name
+information_schema | cardinal_number | int4
+information_schema | character_data | varchar
+information_schema | sql_identifier | name
+information_schema | time_stamp | timestamptz
+information_schema | yes_or_no | varchar
+-- SELECT 5
+
+> SELECT '5'::information_schema.cardinal_number, pg_typeof('x'::information_schema.sql_identifier), pg_typeof('YES'::information_schema.yes_or_no)
+cardinal_number:int4 | pg_typeof:regtype | pg_typeof:regtype
+5 | information_schema.sql_identifier | information_schema.yes_or_no
+-- SELECT 1
+
+> SELECT '-1'::information_schema.cardinal_number
+ERROR 23514: value for domain information_schema.cardinal_number violates check constraint "cardinal_number_domain_check"
+OBJECTS: schema=information_schema datatype=cardinal_number constraint=cardinal_number_domain_check
+
+> SELECT 'maybe'::information_schema.yes_or_no
+ERROR 23514: value for domain information_schema.yes_or_no violates check constraint "yes_or_no_check"
+OBJECTS: schema=information_schema datatype=yes_or_no constraint=yes_or_no_check
+
+> SELECT format_type(13341, -1), format_type(13340, -1), 13354::regtype
+format_type:text | format_type:text | regtype:regtype
+information_schema.cardinal_number | information_schema.cardinal_number[] | information_schema.yes_or_no
+-- SELECT 1
+
+> CREATE SCHEMA isd_s
+-- CREATE SCHEMA
+
+> CREATE DOMAIN isd_s.d AS int NOT NULL CHECK (VALUE > 0) CHECK (VALUE < 10)
+-- CREATE DOMAIN
+
+> CREATE DOMAIN isd_v AS varchar(7) CHECK (VALUE IN ('YES', 'NO'))
+-- CREATE DOMAIN
+
+> CREATE DOMAIN isd_n AS name
+-- CREATE DOMAIN
+
+> SELECT conname, oid::int8 - 'isd_s.d'::regtype::oid::int8 AS after_type FROM pg_constraint WHERE contypid = 'isd_s.d'::regtype ORDER BY oid
+conname:name | after_type:int8
+d_not_null | 1
+d_check | 2
+d_check1 | 3
+-- SELECT 3
+
+> SELECT typarray::int8 - oid::int8 FROM pg_type WHERE oid = 'isd_s.d'::regtype
+?column?:int8
+-1
+-- SELECT 1
+
+> ALTER DOMAIN isd_s.d ADD CONSTRAINT isd_more CHECK (VALUE <> 5)
+-- ALTER DOMAIN
+
+> ALTER DOMAIN isd_s.d RENAME CONSTRAINT d_check TO d_low
+-- ALTER DOMAIN
+
+> SELECT conname, oid::int8 - 'isd_s.d'::regtype::oid::int8 AS after_type FROM pg_constraint WHERE contypid = 'isd_s.d'::regtype ORDER BY oid
+conname:name | after_type:int8
+d_not_null | 1
+d_low | 2
+d_check1 | 3
+isd_more | 9
+-- SELECT 4
+
+> ALTER DOMAIN isd_s.d DROP CONSTRAINT d_low
+-- ALTER DOMAIN
+
+> SELECT conname, oid::int8 - 'isd_s.d'::regtype::oid::int8 AS after_type FROM pg_constraint WHERE contypid = 'isd_s.d'::regtype ORDER BY oid
+conname:name | after_type:int8
+d_not_null | 1
+d_check1 | 3
+isd_more | 9
+-- SELECT 3
+
+> CREATE TABLE isd_t (v varchar(7) CHECK (v IN ('a', 'b')), w varchar CHECK (w IN ('a')), x text CHECK (x IN ('a', 'b')), c char(2) CHECK (c IN ('a', 'b')), y varchar CHECK (y NOT IN ('a', 'b')), z varchar CHECK (z IN ('a', x)), u varchar CHECK (u IN ('a', 'b', x, upper(w))))
+-- CREATE TABLE
+
+> SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'isd_t'::regclass OR contypid = 'isd_v'::regtype ORDER BY conname
+conname:name | pg_get_constraintdef:text
+isd_t_c_check | CHECK ((c = ANY (ARRAY['a'::bpchar, 'b'::bpchar])))
+isd_t_check | CHECK ((((z)::text = 'a'::text) OR ((z)::text = x)))
+isd_t_check1 | CHECK (((((u)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[])) OR ((u)::text = x)) OR ((u)::text = upper((w)::text))))
+isd_t_v_check | CHECK (((v)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[])))
+isd_t_w_check | CHECK (((w)::text = 'a'::text))
+isd_t_x_check | CHECK ((x = ANY (ARRAY['a'::text, 'b'::text])))
+isd_t_y_check | CHECK (((y)::text <> ALL ((ARRAY['a'::character varying, 'b'::character varying])::text[])))
+isd_v_check | CHECK (((VALUE)::text = ANY ((ARRAY['YES'::character varying, 'NO'::character varying])::text[])))
+-- SELECT 8
+
+> CREATE VIEW isd_vw AS SELECT v, 'x'::isd_n AS n FROM isd_t WHERE v IN ('a', 'b') AND c NOT IN ('x', 'y')
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('isd_vw')
+pg_get_viewdef:text
+ SELECT v,
+    ('x'::name)::isd_n AS n
+   FROM isd_t
+  WHERE (((v)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[])) AND (c <> ALL (ARRAY['x'::bpchar, 'y'::bpchar])));
+-- SELECT 1
+
+> SELECT pg_typeof('1'::isd_s.d), pg_typeof('YES'::isd_v), pg_typeof('x'::isd_n)
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+isd_s.d | isd_v | isd_n
+-- SELECT 1
+
+> SELECT '-1'::isd_s.d
+d:int4
+-1
+-- SELECT 1
+
+> SELECT NULL::isd_s.d
+ERROR 23502: domain isd_s.d does not allow null values
+OBJECTS: schema=isd_s datatype=d
+
+> SET search_path = isd_s, public
+-- SET
+
+> SELECT '-1'::d
+d:int4
+-1
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> DROP VIEW isd_vw
+-- DROP VIEW
+
+> DROP TABLE isd_t
+-- DROP TABLE
+
+> DROP DOMAIN isd_v
+-- DROP DOMAIN
+
+> DROP DOMAIN isd_n
+-- DROP DOMAIN
+
+> DROP SCHEMA isd_s CASCADE
+NOTICE 00000: drop cascades to type isd_s.d
+-- DROP SCHEMA
+

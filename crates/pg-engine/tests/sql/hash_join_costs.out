@@ -1,0 +1,223 @@
+> create table hjc_1 (a int, t text, v varchar(20))
+-- CREATE TABLE
+
+> create table hjc_2 (b int, u text, w varchar(20))
+-- CREATE TABLE
+
+> create table hjc_3 (c int)
+-- CREATE TABLE
+
+> insert into hjc_1 select case when g % 3 = 0 then 1 else g end, 't' || (g % 50), 'v' || (g % 9) from generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> insert into hjc_2 select case when g % 2 = 0 then 1 else g % 100 end, 'T' || (g % 30), 'v' || (g % 4) from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> insert into hjc_3 select g % 5 from generate_series(1, 50) g
+-- INSERT 0 50
+
+> analyze hjc_1
+-- ANALYZE
+
+> analyze hjc_2
+-- ANALYZE
+
+> analyze hjc_3
+-- ANALYZE
+
+> explain select * from hjc_1 join hjc_2 on a = b
+QUERY PLAN:text
+Hash Join  (cost=56.00..12831.55 rows=1021980 width=20)
+  Hash Cond: (hjc_2.b = hjc_1.a)
+  ->  Seq Scan on hjc_2  (cost=0.00..47.00 rows=3000 width=10)
+  ->  Hash  (cost=31.00..31.00 rows=2000 width=10)
+        ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+-- EXPLAIN
+
+> explain select * from hjc_2 join hjc_1 on a = b
+QUERY PLAN:text
+Hash Join  (cost=56.00..12831.55 rows=1021980 width=20)
+  Hash Cond: (hjc_2.b = hjc_1.a)
+  ->  Seq Scan on hjc_2  (cost=0.00..47.00 rows=3000 width=10)
+  ->  Hash  (cost=31.00..31.00 rows=2000 width=10)
+        ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+-- EXPLAIN
+
+> explain select * from hjc_1 join hjc_2 on v = w
+QUERY PLAN:text
+Hash Join  (cost=56.00..7621.75 rows=667500 width=20)
+  Hash Cond: ((hjc_2.w)::text = (hjc_1.v)::text)
+  ->  Seq Scan on hjc_2  (cost=0.00..47.00 rows=3000 width=10)
+  ->  Hash  (cost=31.00..31.00 rows=2000 width=10)
+        ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+-- EXPLAIN
+
+> explain select * from hjc_1 join hjc_3 on a = c
+QUERY PLAN:text
+Hash Join  (cost=2.12..130.22 rows=6710 width=14)
+  Hash Cond: (hjc_1.a = hjc_3.c)
+  ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+  ->  Hash  (cost=1.50..1.50 rows=50 width=4)
+        ->  Seq Scan on hjc_3  (cost=0.00..1.50 rows=50 width=4)
+-- EXPLAIN
+
+> explain select * from hjc_3 join hjc_1 on a = c
+QUERY PLAN:text
+Hash Join  (cost=2.12..130.22 rows=6710 width=14)
+  Hash Cond: (hjc_1.a = hjc_3.c)
+  ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+  ->  Hash  (cost=1.50..1.50 rows=50 width=4)
+        ->  Seq Scan on hjc_3  (cost=0.00..1.50 rows=50 width=4)
+-- EXPLAIN
+
+> explain select * from hjc_1 join hjc_2 on a = b and t = u
+QUERY PLAN:text
+Merge Join  (cost=360.92..383.44 rows=1 width=20)
+  Merge Cond: ((hjc_1.t = hjc_2.u) AND (hjc_1.a = hjc_2.b))
+  ->  Sort  (cost=140.66..145.66 rows=2000 width=10)
+        Sort Key: hjc_1.t, hjc_1.a
+        ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+  ->  Sort  (cost=220.26..227.76 rows=3000 width=10)
+        Sort Key: hjc_2.u, hjc_2.b
+        ->  Seq Scan on hjc_2  (cost=0.00..47.00 rows=3000 width=10)
+-- EXPLAIN
+
+> explain select * from hjc_1 left join hjc_2 on a = b
+QUERY PLAN:text
+Hash Right Join  (cost=56.00..12831.55 rows=1021980 width=20)
+  Hash Cond: (hjc_2.b = hjc_1.a)
+  ->  Seq Scan on hjc_2  (cost=0.00..47.00 rows=3000 width=10)
+  ->  Hash  (cost=31.00..31.00 rows=2000 width=10)
+        ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+-- EXPLAIN
+
+> explain select * from hjc_1 full join hjc_2 on a = b
+QUERY PLAN:text
+Hash Full Join  (cost=56.00..12831.55 rows=1021980 width=20)
+  Hash Cond: (hjc_2.b = hjc_1.a)
+  ->  Seq Scan on hjc_2  (cost=0.00..47.00 rows=3000 width=10)
+  ->  Hash  (cost=31.00..31.00 rows=2000 width=10)
+        ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+-- EXPLAIN
+
+> explain select * from hjc_1 where a in (select b from hjc_2)
+QUERY PLAN:text
+Hash Join  (cost=55.62..99.84 rows=716 width=10)
+  Hash Cond: (hjc_1.a = hjc_2.b)
+  ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+  ->  Hash  (cost=55.00..55.00 rows=50 width=4)
+        ->  HashAggregate  (cost=54.50..55.00 rows=50 width=4)
+              Group Key: hjc_2.b
+              ->  Seq Scan on hjc_2  (cost=0.00..47.00 rows=3000 width=4)
+-- EXPLAIN
+
+> explain select * from hjc_1 where a not in (select b from hjc_2 where b is not null)
+QUERY PLAN:text
+Seq Scan on hjc_1  (cost=54.50..90.50 rows=1000 width=10)
+  Filter: (NOT (ANY (a = (hashed SubPlan 1).col1)))
+  SubPlan 1
+    ->  Seq Scan on hjc_2  (cost=0.00..47.00 rows=3000 width=4)
+          Filter: (b IS NOT NULL)
+-- EXPLAIN
+
+> explain select * from hjc_1 where not exists (select 1 from hjc_2 where b = a)
+QUERY PLAN:text
+Hash Anti Join  (cost=84.50..135.29 rows=1284 width=10)
+  Hash Cond: (hjc_1.a = hjc_2.b)
+  ->  Seq Scan on hjc_1  (cost=0.00..31.00 rows=2000 width=10)
+  ->  Hash  (cost=47.00..47.00 rows=3000 width=4)
+        ->  Seq Scan on hjc_2  (cost=0.00..47.00 rows=3000 width=4)
+-- EXPLAIN
+
+> create table hjc_4 (a int, t text, n numeric)
+-- CREATE TABLE
+
+> create table hjc_5 (b int, u text, m numeric)
+-- CREATE TABLE
+
+> insert into hjc_4 select g, 't' || (g % 50), g % 13 from generate_series(1, 200) g
+-- INSERT 0 200
+
+> insert into hjc_5 select g % 40, 'T' || (g % 30), g % 7 from generate_series(1, 300) g
+-- INSERT 0 300
+
+> analyze hjc_4
+-- ANALYZE
+
+> analyze hjc_5
+-- ANALYZE
+
+> explain select * from hjc_4 join hjc_5 on n = m
+QUERY PLAN:text
+Hash Join  (cost=6.50..65.40 rows=4715 width=22)
+  Hash Cond: (hjc_5.m = hjc_4.n)
+  ->  Seq Scan on hjc_5  (cost=0.00..5.00 rows=300 width=11)
+  ->  Hash  (cost=4.00..4.00 rows=200 width=11)
+        ->  Seq Scan on hjc_4  (cost=0.00..4.00 rows=200 width=11)
+-- EXPLAIN
+
+> explain select * from hjc_4 join hjc_5 on a = b and n = m
+QUERY PLAN:text
+Hash Join  (cost=7.00..14.49 rows=24 width=22)
+  Hash Cond: ((hjc_5.b = hjc_4.a) AND (hjc_5.m = hjc_4.n))
+  ->  Seq Scan on hjc_5  (cost=0.00..5.00 rows=300 width=11)
+  ->  Hash  (cost=4.00..4.00 rows=200 width=11)
+        ->  Seq Scan on hjc_4  (cost=0.00..4.00 rows=200 width=11)
+-- EXPLAIN
+
+> explain select * from hjc_4 join hjc_5 on upper(t) = u
+QUERY PLAN:text
+Hash Join  (cost=8.75..21.25 rows=300 width=22)
+  Hash Cond: (upper(hjc_4.t) = hjc_5.u)
+  ->  Seq Scan on hjc_4  (cost=0.00..4.00 rows=200 width=11)
+  ->  Hash  (cost=5.00..5.00 rows=300 width=11)
+        ->  Seq Scan on hjc_5  (cost=0.00..5.00 rows=300 width=11)
+-- EXPLAIN
+
+> set enable_mergejoin = off
+-- SET
+
+> explain select * from hjc_4 join hjc_5 on a + 1 = b + 1
+QUERY PLAN:text
+Hash Join  (cost=6.50..37.75 rows=300 width=22)
+  Hash Cond: ((hjc_5.b + 1) = (hjc_4.a + 1))
+  ->  Seq Scan on hjc_5  (cost=0.00..5.00 rows=300 width=11)
+  ->  Hash  (cost=4.00..4.00 rows=200 width=11)
+        ->  Seq Scan on hjc_4  (cost=0.00..4.00 rows=200 width=11)
+-- EXPLAIN
+
+> explain select * from hjc_4 join hjc_5 on length(t) = b
+QUERY PLAN:text
+Hash Join  (cost=8.75..20.25 rows=300 width=22)
+  Hash Cond: (length(hjc_4.t) = hjc_5.b)
+  ->  Seq Scan on hjc_4  (cost=0.00..4.00 rows=200 width=11)
+  ->  Hash  (cost=5.00..5.00 rows=300 width=11)
+        ->  Seq Scan on hjc_5  (cost=0.00..5.00 rows=300 width=11)
+-- EXPLAIN
+
+> explain select * from hjc_4 join hjc_5 on a::text = u
+QUERY PLAN:text
+Hash Join  (cost=8.75..23.75 rows=300 width=22)
+  Hash Cond: ((hjc_4.a)::text = hjc_5.u)
+  ->  Seq Scan on hjc_4  (cost=0.00..4.00 rows=200 width=11)
+  ->  Hash  (cost=5.00..5.00 rows=300 width=11)
+        ->  Seq Scan on hjc_5  (cost=0.00..5.00 rows=300 width=11)
+-- EXPLAIN
+
+> explain select * from hjc_4 join hjc_5 on (a % 10) = (b % 10)
+QUERY PLAN:text
+Hash Join  (cost=6.50..37.75 rows=300 width=22)
+  Hash Cond: ((hjc_5.b % 10) = (hjc_4.a % 10))
+  ->  Seq Scan on hjc_5  (cost=0.00..5.00 rows=300 width=11)
+  ->  Hash  (cost=4.00..4.00 rows=200 width=11)
+        ->  Seq Scan on hjc_4  (cost=0.00..4.00 rows=200 width=11)
+-- EXPLAIN
+
+> reset enable_mergejoin
+-- RESET
+
+> select count(*), sum(a) from hjc_4 join hjc_5 on n = m
+count:int8 | sum:int8
+4715 | 473805
+-- SELECT 1
+

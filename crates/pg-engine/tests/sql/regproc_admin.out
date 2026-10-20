@@ -1,0 +1,249 @@
+> SELECT 'abs(int)'::regprocedure, 'abs( bigint )'::regprocedure, 'pg_catalog.abs(numeric)'::regprocedure
+regprocedure:2202 | regprocedure:2202 | regprocedure:2202
+abs(integer) | abs(bigint) | abs(numeric)
+-- SELECT 1
+
+> SELECT 'round(numeric, int)'::regprocedure, 'to_char(timestamp with time zone, text)'::regprocedure, 'now()'::regprocedure
+regprocedure:2202 | regprocedure:2202 | regprocedure:2202
+round(numeric,integer) | to_char(timestamp with time zone,text) | now()
+-- SELECT 1
+
+> SELECT 'abs(text)'::regprocedure
+ERROR 42883: function "abs(text)" does not exist (at 8)
+
+> SELECT 'abs'::regprocedure
+ERROR 22P02: expected a left parenthesis (at 8)
+
+> SELECT 'abs(int'::regprocedure
+ERROR 22P02: expected a right parenthesis (at 8)
+
+> SELECT 'abs(int,)'::regprocedure
+ERROR 22P02: expected a type name (at 8)
+
+> SELECT 'abs()'::regprocedure
+ERROR 42883: function "abs()" does not exist (at 8)
+
+> SELECT 'nosuch(int)'::regprocedure
+ERROR 42883: function "nosuch(int)" does not exist (at 8)
+
+> SELECT 'abs(nosuchtype)'::regprocedure
+ERROR 42704: type "nosuchtype" does not exist (at 8)
+
+> SELECT 'nosuchschema.abs(int)'::regprocedure
+ERROR 42883: function "nosuchschema.abs(int)" does not exist (at 8)
+
+> SELECT 'abs'::regproc
+ERROR 42725: more than one function named "abs" (at 8)
+
+> SELECT 'nosuch'::regproc
+ERROR 42883: function "nosuch" does not exist (at 8)
+
+> SELECT 'now'::regproc, 'pg_catalog.now'::regproc
+regproc:regproc | regproc:regproc
+now | now
+-- SELECT 1
+
+> SELECT 'now()'::regproc
+ERROR 42883: function "now()" does not exist (at 8)
+
+> SELECT 'eqsel'::regproc, 'eqsel(internal,oid,internal,integer)'::regprocedure
+regproc:regproc | regprocedure:2202
+eqsel | eqsel(internal,oid,internal,integer)
+-- SELECT 1
+
+> SELECT to_regprocedure('abs(text)'), to_regprocedure('abs(int)'), to_regprocedure('abs'), to_regproc('abs'), to_regproc('now'), to_regproc('nosuch')
+to_regprocedure:2202 | to_regprocedure:2202 | to_regprocedure:2202 | to_regproc:regproc | to_regproc:regproc | to_regproc:regproc
+NULL | abs(integer) | NULL | NULL | now | NULL
+-- SELECT 1
+
+> SELECT 'count(*)'::regprocedure
+ERROR 42601: syntax error at or near "*" (at 8)
+CONTEXT: invalid type name "*"
+
+> SELECT 'count("any")'::regprocedure, 'sum(int4)'::regprocedure
+regprocedure:2202 | regprocedure:2202
+count("any") | sum(integer)
+-- SELECT 1
+
+> SELECT 'array_agg(anynonarray)'::regprocedure
+regprocedure:2202
+array_agg(anynonarray)
+-- SELECT 1
+
+> SELECT 'concat("any")'::regprocedure
+regprocedure:2202
+concat("any")
+-- SELECT 1
+
+> CREATE SCHEMA gx_rp
+-- CREATE SCHEMA
+
+> CREATE FUNCTION gx_rp.f(int) RETURNS int LANGUAGE sql AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION gx_rp.f(text) RETURNS text LANGUAGE sql AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION public.gx_g(int, VARIADIC int[]) RETURNS int LANGUAGE sql AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE DOMAIN gx_rp.d AS int
+-- CREATE DOMAIN
+
+> CREATE FUNCTION gx_rp.h(gx_rp.d) RETURNS int LANGUAGE sql AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> SELECT 'gx_rp.f(int)'::regprocedure, 'gx_rp.f(text)'::regprocedure, 'gx_g(int, int[])'::regprocedure, 'gx_rp.h(gx_rp.d)'::regprocedure
+regprocedure:2202 | regprocedure:2202 | regprocedure:2202 | regprocedure:2202
+gx_rp.f(integer) | gx_rp.f(text) | gx_g(integer,integer[]) | gx_rp.h(gx_rp.d)
+-- SELECT 1
+
+> SELECT 'gx_rp.f(bigint)'::regprocedure
+ERROR 42883: function "gx_rp.f(bigint)" does not exist (at 8)
+
+> SELECT 'gx_rp.h(int)'::regprocedure
+ERROR 42883: function "gx_rp.h(int)" does not exist (at 8)
+
+> SELECT 'gx_rp.f'::regproc
+ERROR 42725: more than one function named "gx_rp.f" (at 8)
+
+> SELECT 'f(int)'::regprocedure
+ERROR 42883: function "f(int)" does not exist (at 8)
+
+> SET search_path = gx_rp, public
+-- SET
+
+> SELECT 'f(int)'::regprocedure, 'f(text)'::regprocedure
+regprocedure:2202 | regprocedure:2202
+f(integer) | f(text)
+-- SELECT 1
+
+> SELECT 'f'::regproc
+ERROR 42725: more than one function named "f" (at 8)
+
+> SELECT 'h'::regproc
+regproc:regproc
+h
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> SELECT has_function_privilege('gx_rp.f(int)', 'EXECUTE'), has_function_privilege('abs(int)', 'EXECUTE')
+has_function_privilege:bool | has_function_privilege:bool
+t | t
+-- SELECT 1
+
+> SELECT has_function_privilege('gx_rp.f(bigint)', 'EXECUTE')
+ERROR 42883: function "gx_rp.f(bigint)" does not exist
+
+> SELECT has_function_privilege('abs', 'EXECUTE')
+ERROR 22P02: expected a left parenthesis
+
+> DROP SCHEMA gx_rp CASCADE
+NOTICE 00000: drop cascades to 4 other objects
+DETAIL: drop cascades to function gx_rp.f(integer)
+DETAIL: drop cascades to function gx_rp.f(text)
+DETAIL: drop cascades to type gx_rp.d
+DETAIL: drop cascades to function gx_rp.h(gx_rp.d)
+-- DROP SCHEMA
+
+> DROP FUNCTION gx_g(int, int[])
+-- DROP FUNCTION
+
+> SELECT pg_reload_conf()
+pg_reload_conf:bool
+t
+-- SELECT 1
+
+> SELECT pg_rotate_logfile()
+WARNING 01000: rotation not possible because log collection not active
+pg_rotate_logfile:bool
+f
+-- SELECT 1
+
+> SELECT pg_current_logfile(), pg_current_logfile('stderr'), pg_current_logfile(NULL)
+pg_current_logfile:text | pg_current_logfile:text | pg_current_logfile:text
+NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT pg_current_logfile('foo')
+ERROR 22023: log format "foo" is not supported
+HINT: The supported log formats are "stderr", "csvlog", and "jsonlog".
+
+> SELECT pg_log_backend_memory_contexts(1)
+WARNING 01000: PID 1 is not a PostgreSQL server process
+pg_log_backend_memory_contexts:bool
+f
+-- SELECT 1
+
+> SELECT pg_stat_reset(), pg_stat_reset_shared(), pg_stat_reset_shared(NULL), pg_stat_reset_shared('io'), pg_stat_reset_shared('wal')
+pg_stat_reset:void | pg_stat_reset_shared:void | pg_stat_reset_shared:void | pg_stat_reset_shared:void | pg_stat_reset_shared:void
+ |  |  |  | 
+-- SELECT 1
+
+> SELECT pg_stat_reset_shared('foo')
+ERROR 22023: unrecognized reset target: "foo"
+HINT: Target must be "archiver", "bgwriter", "checkpointer", "io", "recovery_prefetch", "slru", or "wal".
+
+> SELECT pg_stat_reset_slru(), pg_stat_reset_slru('foo'), pg_stat_reset_slru(NULL)
+pg_stat_reset_slru:void | pg_stat_reset_slru:void | pg_stat_reset_slru:void
+ |  | 
+-- SELECT 1
+
+> SELECT pg_stat_reset_single_table_counters(0), pg_stat_reset_single_function_counters(0)
+pg_stat_reset_single_table_counters:void | pg_stat_reset_single_function_counters:void
+ | 
+-- SELECT 1
+
+> SELECT pg_stat_reset_replication_slot(NULL)
+pg_stat_reset_replication_slot:void
+
+-- SELECT 1
+
+> SELECT pg_stat_reset_replication_slot('nope')
+ERROR 22023: replication slot "nope" does not exist
+
+> SELECT pg_stat_reset_subscription_stats(NULL), pg_stat_reset_subscription_stats(1)
+pg_stat_reset_subscription_stats:void | pg_stat_reset_subscription_stats:void
+ | 
+-- SELECT 1
+
+> SELECT pg_stat_have_stats('relation', 0, 0), pg_stat_have_stats('io', 0, 0), pg_stat_have_stats('wal', 0, 0)
+pg_stat_have_stats:bool | pg_stat_have_stats:bool | pg_stat_have_stats:bool
+f | t | t
+-- SELECT 1
+
+> SELECT pg_stat_have_stats('foo', 0, 0)
+ERROR 22023: invalid statistics kind: "foo"
+
+> SELECT pg_ls_replslotdir('nope')
+ERROR 42704: replication slot "nope" does not exist
+
+> SELECT * FROM pg_ls_tmpdir(1)
+ERROR 42704: tablespace with OID 1 does not exist
+
+> SELECT count(*) FROM pg_ls_tmpdir(1663)
+count:int8
+0
+-- SELECT 1
+
+> SELECT p.oid::regprocedure, p.provolatile, p.proisstrict, p.proretset, p.pronargdefaults, p.prorettype::regtype FROM pg_proc p WHERE proname IN ('pg_reload_conf', 'pg_current_logfile', 'pg_stat_reset_shared', 'pg_stat_reset_slru', 'pg_read_file', 'pg_ls_dir', 'pg_ls_tmpdir', 'pg_stat_have_stats', 'pg_stat_reset_replication_slot') ORDER BY p.oid
+oid:2202 | provolatile:char | proisstrict:bool | proretset:bool | pronargdefaults:int2 | prorettype:regtype
+pg_stat_reset_slru(text) | v | f | f | 1 | void
+pg_reload_conf() | v | t | f | 0 | boolean
+pg_read_file(text,bigint,bigint) | v | t | f | 0 | text
+pg_ls_dir(text) | v | t | t | 0 | text
+pg_read_file(text,bigint,bigint,boolean) | v | t | f | 0 | text
+pg_ls_dir(text,boolean,boolean) | v | t | t | 0 | text
+pg_stat_reset_shared(text) | v | f | f | 1 | void
+pg_current_logfile() | v | f | f | 0 | text
+pg_current_logfile(text) | v | f | f | 0 | text
+pg_read_file(text) | v | t | f | 0 | text
+pg_ls_tmpdir() | v | t | t | 0 | record
+pg_ls_tmpdir(oid) | v | t | t | 0 | record
+pg_stat_reset_replication_slot(text) | v | f | f | 0 | void
+pg_read_file(text,boolean) | v | t | f | 0 | text
+pg_stat_have_stats(text,oid,bigint) | v | t | f | 0 | boolean
+-- SELECT 15
+

@@ -1,0 +1,367 @@
+> DROP ROLE IF EXISTS gd_cp_u1, gd_cp_u2
+NOTICE 00000: role "gd_cp_u1" does not exist, skipping
+NOTICE 00000: role "gd_cp_u2" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE gd_cp_u1
+-- CREATE ROLE
+
+> CREATE ROLE gd_cp_u2
+-- CREATE ROLE
+
+> CREATE TABLE gd_cp_t (c1 int PRIMARY KEY, c2 int, c3 int CHECK (c3 < 10), UNIQUE (c1, c2))
+-- CREATE TABLE
+
+> INSERT INTO gd_cp_t VALUES (1, 1, 1)
+-- INSERT 0 1
+
+> GRANT SELECT (c1, c3), INSERT (c1, c2), UPDATE (c3) ON gd_cp_t TO gd_cp_u1
+-- GRANT
+
+> CREATE TABLE gd_cp_p (a text, b text NOT NULL, c text, s1 text) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE gd_cp_p1 (s1 text, c text, a text, b text NOT NULL)
+-- CREATE TABLE
+
+> ALTER TABLE gd_cp_p ATTACH PARTITION gd_cp_p1 FOR VALUES IN ('aaa')
+-- ALTER TABLE
+
+> INSERT INTO gd_cp_p VALUES ('aaa', 'b', 'ccc', 'secret')
+-- INSERT 0 1
+
+> GRANT SELECT (a, b, c), UPDATE (a, b, c), INSERT (a, b, c) ON gd_cp_p TO gd_cp_u1
+-- GRANT
+
+> SELECT unnest(pg_get_acl('pg_class'::regclass, 'gd_cp_t'::regclass::oid, 1))
+unnest:1033
+gd_cp_u1=ar/postgres
+-- SELECT 1
+
+> SELECT pg_get_acl('pg_class'::regclass, 'gd_cp_t'::regclass::oid, 2)
+pg_get_acl:1034
+{gd_cp_u1=a/postgres}
+-- SELECT 1
+
+> SELECT pg_get_acl(0, 0, 0)
+pg_get_acl:1034
+NULL
+-- SELECT 1
+
+> SET SESSION AUTHORIZATION gd_cp_u1
+-- SET
+
+> INSERT INTO gd_cp_t (c1, c2) VALUES (1, 1)
+ERROR 23505: duplicate key value violates unique constraint "gd_cp_t_pkey"
+DETAIL: Key (c1)=(1) already exists.
+OBJECTS: schema=public table=gd_cp_t constraint=gd_cp_t_pkey
+
+> INSERT INTO gd_cp_t (c1, c2) VALUES (null, null)
+ERROR 23502: null value in column "c1" of relation "gd_cp_t" violates not-null constraint
+DETAIL: Failing row contains (c1, c2, c3) = (null, null, null).
+OBJECTS: schema=public table=gd_cp_t column=c1
+
+> INSERT INTO gd_cp_t (c1) VALUES (2)
+-- INSERT 0 1
+
+> UPDATE gd_cp_t SET c3 = 10
+ERROR 23514: new row for relation "gd_cp_t" violates check constraint "gd_cp_t_c3_check"
+DETAIL: Failing row contains (c1, c3) = (1, 10).
+OBJECTS: schema=public table=gd_cp_t constraint=gd_cp_t_c3_check
+
+> INSERT INTO gd_cp_p (a, b) VALUES ('aaa', NULL)
+ERROR 23502: null value in column "b" of relation "gd_cp_p1" violates not-null constraint
+DETAIL: Failing row contains (a, b, c) = (aaa, null, null).
+OBJECTS: schema=public table=gd_cp_p1 column=b
+
+> UPDATE gd_cp_p SET b = NULL
+ERROR 23502: null value in column "b" of relation "gd_cp_p1" violates not-null constraint
+DETAIL: Failing row contains (a, b, c) = (aaa, null, ccc).
+OBJECTS: schema=public table=gd_cp_p1 column=b
+
+> SELECT 1 FROM gd_cp_t a JOIN gd_cp_t b USING (c2)
+ERROR 42501: permission denied for table gd_cp_t
+
+> SELECT 1 FROM gd_cp_t a JOIN gd_cp_t b USING (c1)
+?column?:int4
+1
+1
+-- SELECT 2
+
+> INSERT INTO gd_cp_t (c1) VALUES (5) ON CONFLICT (c1) DO NOTHING
+-- INSERT 0 1
+
+> INSERT INTO gd_cp_t (c1, c2) VALUES (5, 5) ON CONFLICT ON CONSTRAINT gd_cp_t_c1_c2_key DO NOTHING
+ERROR 42501: permission denied for table gd_cp_t
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> GRANT ALL (c2) ON gd_cp_t TO gd_cp_u2
+-- GRANT
+
+> SELECT attname, attacl FROM pg_attribute WHERE attrelid = 'gd_cp_t'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attacl:1034
+c1 | {gd_cp_u1=ar/postgres}
+c2 | {gd_cp_u1=a/postgres,gd_cp_u2=arwx/postgres}
+c3 | {gd_cp_u1=rw/postgres}
+-- SELECT 3
+
+> REVOKE ALL (c2) ON gd_cp_t FROM gd_cp_u2
+-- REVOKE
+
+> CREATE TABLE gd_cp_s (x int)
+-- CREATE TABLE
+
+> GRANT SELECT (x, tableoid) ON gd_cp_s TO gd_cp_u2
+-- GRANT
+
+> SELECT attname, attacl FROM pg_attribute WHERE attrelid = 'gd_cp_s'::regclass AND attacl IS NOT NULL ORDER BY attnum
+attname:name | attacl:1034
+tableoid | {gd_cp_u2=r/postgres}
+x | {gd_cp_u2=r/postgres}
+-- SELECT 2
+
+> SELECT has_column_privilege('gd_cp_u2', 'gd_cp_s', 'tableoid', 'SELECT'),
+>        has_column_privilege('gd_cp_u2', 'gd_cp_s', 'ctid', 'SELECT')
+has_column_privilege:bool | has_column_privilege:bool
+t | f
+-- SELECT 1
+
+> SELECT has_column_privilege('pg_authid', 'nosuchcol', 'select')
+ERROR 42703: column "nosuchcol" of relation "pg_authid" does not exist
+
+> ALTER TABLE gd_cp_s ADD COLUMN y int
+-- ALTER TABLE
+
+> ALTER TABLE gd_cp_s DROP COLUMN y
+-- ALTER TABLE
+
+> SELECT has_column_privilege('gd_cp_s', '........pg.dropped.2........', 'select')
+has_column_privilege:bool
+NULL
+-- SELECT 1
+
+> SET SESSION AUTHORIZATION gd_cp_u2
+-- SET
+
+> SELECT tableoid::regclass, x FROM gd_cp_s
+tableoid:regclass | x:int4
+-- SELECT 0
+
+> SELECT ctid FROM gd_cp_s
+ERROR 42501: permission denied for table gd_cp_s
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> CREATE TABLE gd_cp_ip (f1 int)
+-- CREATE TABLE
+
+> CREATE TABLE gd_cp_ic () INHERITS (gd_cp_ip)
+-- CREATE TABLE
+
+> GRANT ALL ON gd_cp_ip TO gd_cp_u2
+-- GRANT
+
+> SET SESSION AUTHORIZATION gd_cp_u2
+-- SET
+
+> TRUNCATE gd_cp_ip
+-- TRUNCATE TABLE
+
+> TRUNCATE gd_cp_ic
+ERROR 42501: permission denied for table gd_cp_ic
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> CREATE TABLE gd_cp_lock (a int)
+-- CREATE TABLE
+
+> GRANT SELECT ON gd_cp_lock TO gd_cp_u2
+-- GRANT
+
+> SET SESSION AUTHORIZATION gd_cp_u2
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE gd_cp_lock IN ACCESS SHARE MODE
+-- LOCK TABLE
+
+> LOCK TABLE gd_cp_lock IN ROW EXCLUSIVE MODE
+ERROR 42501: permission denied for table gd_cp_lock
+
+> ROLLBACK
+-- ROLLBACK
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> REVOKE SELECT ON gd_cp_lock FROM gd_cp_u2
+-- REVOKE
+
+> GRANT UPDATE ON gd_cp_lock TO gd_cp_u2
+-- GRANT
+
+> SET SESSION AUTHORIZATION gd_cp_u2
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE gd_cp_lock IN ACCESS SHARE MODE
+-- LOCK TABLE
+
+> LOCK TABLE gd_cp_lock IN ACCESS EXCLUSIVE MODE
+-- LOCK TABLE
+
+> ROLLBACK
+-- ROLLBACK
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> CREATE DOMAIN gd_cp_dom AS int
+-- CREATE DOMAIN
+
+> CREATE TYPE gd_cp_typ AS (a int, b int)
+-- CREATE TYPE
+
+> REVOKE USAGE ON DOMAIN gd_cp_dom FROM PUBLIC
+-- REVOKE
+
+> REVOKE USAGE ON TYPE gd_cp_typ FROM PUBLIC
+-- REVOKE
+
+> REVOKE USAGE ON LANGUAGE sql FROM PUBLIC
+-- REVOKE
+
+> GRANT CREATE ON SCHEMA public TO gd_cp_u2
+-- GRANT
+
+> SET SESSION AUTHORIZATION gd_cp_u2
+-- SET
+
+> CREATE FUNCTION gd_cp_f(int) RETURNS int LANGUAGE sql AS 'SELECT $1'
+ERROR 42501: permission denied for language sql
+
+> CREATE AGGREGATE gd_cp_agg(gd_cp_dom) (sfunc = int4_sum, stype = bigint)
+ERROR 42501: permission denied for type gd_cp_dom
+
+> CREATE DOMAIN gd_cp_dom2 AS gd_cp_dom
+ERROR 42501: permission denied for type gd_cp_dom
+
+> CREATE DOMAIN gd_cp_dom3 AS int CHECK (VALUE > ('(0,1)'::gd_cp_typ).a)
+ERROR 42501: permission denied for type gd_cp_typ
+
+> CREATE OPERATOR !+! (PROCEDURE = int4pl, LEFTARG = gd_cp_dom, RIGHTARG = gd_cp_dom)
+ERROR 42501: permission denied for type gd_cp_dom
+
+> CREATE TABLE gd_cp_t5 (a int, b gd_cp_dom)
+ERROR 42501: permission denied for type gd_cp_dom
+
+> CREATE TABLE gd_cp_t6 OF gd_cp_typ
+ERROR 42501: permission denied for type gd_cp_typ
+
+> CREATE TABLE gd_cp_t7 (a int, b gd_cp_typ[])
+ERROR 42501: permission denied for type gd_cp_typ
+
+> CREATE TYPE gd_cp_c AS (a int, b gd_cp_dom)
+ERROR 42501: permission denied for type gd_cp_dom
+
+> CREATE TABLE gd_cp_t8 (c int DEFAULT ('(0,1)'::gd_cp_typ).a)
+ERROR 42501: permission denied for type gd_cp_typ
+
+> CREATE VIEW gd_cp_v AS SELECT ('(0,1)'::gd_cp_typ).a
+ERROR 42501: permission denied for type gd_cp_typ
+
+> CREATE TABLE gd_cp_t9 (a int)
+-- CREATE TABLE
+
+> ALTER TABLE gd_cp_t9 ADD COLUMN c gd_cp_dom
+ERROR 42501: permission denied for type gd_cp_dom
+
+> CREATE INDEX ON gd_cp_t9 ((a::gd_cp_dom))
+ERROR 42501: permission denied for type public.gd_cp_dom
+
+> DROP TABLE gd_cp_t9
+-- DROP TABLE
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> GRANT USAGE ON LANGUAGE sql TO PUBLIC
+-- GRANT
+
+> REVOKE CREATE ON SCHEMA public FROM gd_cp_u2
+-- REVOKE
+
+> CREATE TABLE gd_cp_m (a int)
+-- CREATE TABLE
+
+> CREATE INDEX gd_cp_m_idx ON gd_cp_m (a)
+-- CREATE INDEX
+
+> CREATE SCHEMA gd_cp_sch
+-- CREATE SCHEMA
+
+> SET SESSION AUTHORIZATION gd_cp_u2
+-- SET
+
+> REINDEX TABLE gd_cp_m
+ERROR 42501: permission denied for table gd_cp_m
+
+> REINDEX INDEX gd_cp_m_idx
+ERROR 42501: permission denied for index gd_cp_m_idx
+
+> REINDEX SCHEMA gd_cp_sch
+ERROR 42501: must be owner of schema gd_cp_sch
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> GRANT MAINTAIN ON gd_cp_m TO gd_cp_u2
+-- GRANT
+
+> SET SESSION AUTHORIZATION gd_cp_u2
+-- SET
+
+> REINDEX TABLE gd_cp_m
+-- REINDEX
+
+> REINDEX INDEX gd_cp_m_idx
+-- REINDEX
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> GRANT pg_maintain TO gd_cp_u2
+-- GRANT ROLE
+
+> SET SESSION AUTHORIZATION gd_cp_u2
+-- SET
+
+> REINDEX SCHEMA gd_cp_sch
+-- REINDEX
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> DROP SCHEMA gd_cp_sch
+-- DROP SCHEMA
+
+> DROP TABLE gd_cp_t, gd_cp_p, gd_cp_s, gd_cp_ip, gd_cp_ic, gd_cp_lock, gd_cp_m
+-- DROP TABLE
+
+> DROP DOMAIN gd_cp_dom
+-- DROP DOMAIN
+
+> DROP TYPE gd_cp_typ
+-- DROP TYPE
+
+> DROP ROLE gd_cp_u1, gd_cp_u2
+-- DROP ROLE
+

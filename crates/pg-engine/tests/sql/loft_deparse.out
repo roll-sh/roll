@@ -1,0 +1,101 @@
+> create table onek (thousand int, ten int, hundred int, string4 name, f1 text)
+-- CREATE TABLE
+
+> create view v_lim as select thousand from onek order by thousand fetch first (null::integer + 1) rows with ties
+-- CREATE VIEW
+
+> select pg_get_viewdef('v_lim'::regclass, true)
+pg_get_viewdef:text
+ SELECT thousand
+   FROM onek
+  ORDER BY thousand
+ FETCH FIRST ((NULL::integer + 1)) ROWS WITH TIES;
+-- SELECT 1
+
+> create view v_aggs as select ten, percentile_disc(0.5) within group (order by thousand) as p50, percentile_disc(0.5) within group (order by thousand) filter (where hundred = 1) as px, rank(5, 'AZZZZ', 50) within group (order by hundred, string4 desc, hundred) from onek group by ten order by ten
+-- CREATE VIEW
+
+> select pg_get_viewdef('v_aggs'::regclass, true)
+pg_get_viewdef:text
+ SELECT ten,
+    percentile_disc(0.5::double precision) WITHIN GROUP (ORDER BY thousand) AS p50,
+    percentile_disc(0.5::double precision) WITHIN GROUP (ORDER BY thousand) FILTER (WHERE hundred = 1) AS px,
+    rank(5, 'AZZZZ'::name, 50) WITHIN GROUP (ORDER BY hundred, string4 DESC, hundred) AS rank
+   FROM onek
+  GROUP BY ten
+  ORDER BY ten;
+-- SELECT 1
+
+> create view v_json as select json('123') j1, json('123' format json) j2, json('123'::bytea format json) j3, json('123'::bytea format json encoding utf8) j4, json_serialize('{}') j5, json_serialize('{}' returning bytea) j6, json_object('foo' : '1' format json, 'bar' : 'baz' returning json) j7, json_array('1' format json, 2 returning json) j8, json('123' with unique keys) j9
+-- CREATE VIEW
+
+> explain (verbose, costs off) select json('123'), json('123' format json), json_serialize('{}' returning bytea), json_object('foo' : '1' format json, 'bar' : 'baz' returning json), json_array('1' format json, 2 returning json), json('123' with unique keys)
+QUERY PLAN:text
+Result
+  Output: JSON('123'::json), JSON('123'::json), JSON_SERIALIZE('{}'::json RETURNING bytea), JSON_OBJECT('foo' : '1'::json, 'bar' : 'baz'::text RETURNING json), JSON_ARRAY('1'::json, 2 RETURNING json), JSON('123'::text WITH UNIQUE KEYS)
+-- EXPLAIN
+
+> select json('[1,')
+ERROR 22P02: invalid input syntax for type json
+DETAIL: The input string ended unexpectedly.
+CONTEXT: JSON data, line 1: [1,
+
+> select pg_get_viewdef('v_json'::regclass, true)
+pg_get_viewdef:text
+ SELECT JSON('123'::text) AS j1,
+    JSON('123'::text FORMAT JSON) AS j2,
+    JSON('\x313233'::bytea FORMAT JSON) AS j3,
+    JSON('\x313233'::bytea FORMAT JSON ENCODING UTF8) AS j4,
+    JSON_SERIALIZE('{}'::text RETURNING text) AS j5,
+    JSON_SERIALIZE('{}'::text RETURNING bytea) AS j6,
+    JSON_OBJECT('foo' : '1'::text FORMAT JSON, 'bar' : 'baz'::text RETURNING json) AS j7,
+    JSON_ARRAY('1'::text FORMAT JSON, 2 RETURNING json) AS j8,
+    JSON('123'::text WITH UNIQUE KEYS) AS j9;
+-- SELECT 1
+
+> create view v_jagg as select json_objectagg(i : ('111' || i)::bytea format json with unique returning text) filter (where i > 3) as o, json_arrayagg(('111' || i)::bytea format json null on null returning text) filter (where i > 3) as a from generate_series(1, 5) i
+-- CREATE VIEW
+
+> select pg_get_viewdef('v_jagg'::regclass, true)
+pg_get_viewdef:text
+ SELECT JSON_OBJECTAGG(i : ('111'::text || i)::bytea FORMAT JSON WITH UNIQUE KEYS RETURNING text) FILTER (WHERE i > 3) AS o,
+    JSON_ARRAYAGG(('111'::text || i)::bytea FORMAT JSON NULL ON NULL RETURNING text) FILTER (WHERE i > 3) AS a
+   FROM generate_series(1, 5) i(i);
+-- SELECT 1
+
+> select * from v_jagg
+o:text | a:text
+{ "4" : 1114, "5" : 1115 } | [1114, 1115]
+-- SELECT 1
+
+> create table defs (a int, b int, x numeric generated always as ((a + b) * 2) stored, d numeric default (1 + 2), t text default 'x')
+-- CREATE TABLE
+
+> select pg_get_expr(adbin, adrelid, true), pg_get_expr(adbin, adrelid) from pg_attrdef where adrelid = 'defs'::regclass order by adnum
+pg_get_expr:text | pg_get_expr:text
+((a + b) * 2) | ((a + b) * 2)
+(1 + 2) | (1 + 2)
+'x'::text | 'x'::text
+-- SELECT 3
+
+> create function chk(onek) returns bool language sql as 'select true'
+-- CREATE FUNCTION
+
+> create table chkt (f1 int, check (f1 > 0 and '(1,1,1,a,b)'::onek is not null))
+-- CREATE TABLE
+
+> create table chkw (f1 int)
+-- CREATE TABLE
+
+> create function chkw_f(chkw) returns bool language sql as 'select true'
+-- CREATE FUNCTION
+
+> alter table chkw add check (chkw_f(chkw.*))
+-- ALTER TABLE
+
+> select pg_get_constraintdef(oid, true) from pg_constraint where conrelid in ('chkt'::regclass, 'chkw'::regclass) order by 1
+pg_get_constraintdef:text
+CHECK (chkw_f(chkw.*))
+CHECK (f1 > 0 AND '(1,1,1,a,b)'::onek IS NOT NULL)
+-- SELECT 2
+

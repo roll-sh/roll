@@ -1,0 +1,12 @@
+CREATE VIEW vf1 AS SELECT * FROM generate_series(1, 2), generate_series(1, 3) g, generate_series(1, 2) x(a), unnest(ARRAY[1, 2]) WITH ORDINALITY u, jsonb_each('{}') j;
+SELECT pg_get_viewdef('vf1');
+CREATE VIEW vf2 AS SELECT g FROM generate_series(1, 3) g WHERE g > 1;
+SELECT pg_get_viewdef('vf2');
+SELECT pg_get_viewdef('vf2', true);
+CREATE TABLE vft (a int);
+CREATE VIEW vf3 AS SELECT t.a, s.n FROM vft t, LATERAL generate_series(1, t.a) s(n);
+SELECT pg_get_viewdef('vf3');
+CREATE VIEW vf4 AS SELECT * FROM json_to_record('{"a":1}') AS r(a int);
+SELECT pg_get_viewdef('vf4');
+DROP VIEW vf1, vf2, vf3, vf4;
+DROP TABLE vft;

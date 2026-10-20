@@ -1,0 +1,25 @@
+-- referential actions run as queries their errors and notices name
+CREATE TABLE fac_p (id int PRIMARY KEY, k text UNIQUE);
+CREATE TABLE fac_c (pid int NOT NULL REFERENCES fac_p ON DELETE SET NULL ON UPDATE CASCADE);
+INSERT INTO fac_p VALUES (1, 'a'), (2, 'b');
+INSERT INTO fac_c VALUES (1);
+DELETE FROM fac_p WHERE id = 1;
+CREATE TABLE fac_c2 (pid bigint CHECK (pid < 100) REFERENCES fac_p ON UPDATE CASCADE ON DELETE CASCADE, k varchar REFERENCES fac_p (k) ON UPDATE SET DEFAULT);
+INSERT INTO fac_c2 VALUES (2, 'b');
+UPDATE fac_p SET id = 200 WHERE id = 2;
+CREATE FUNCTION fac_note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE '% on %', TG_OP, TG_TABLE_NAME; RETURN NULL; END $$;
+CREATE TRIGGER fac_t AFTER UPDATE OR DELETE ON fac_c2 FOR EACH ROW EXECUTE FUNCTION fac_note();
+UPDATE fac_p SET k = 'z' WHERE id = 2;
+UPDATE fac_p SET id = 3 WHERE id = 2;
+DELETE FROM fac_p WHERE id = 3;
+CREATE TABLE fac_m (a int, b int, PRIMARY KEY (a, b));
+CREATE TABLE fac_mc (x int, y int, FOREIGN KEY (x, y) REFERENCES fac_m ON DELETE CASCADE ON UPDATE CASCADE) PARTITION BY RANGE (x);
+CREATE TABLE fac_mc1 PARTITION OF fac_mc FOR VALUES FROM (0) TO (10);
+CREATE TRIGGER fac_mt AFTER UPDATE OR DELETE ON fac_mc1 FOR EACH ROW EXECUTE FUNCTION fac_note();
+INSERT INTO fac_m VALUES (1, 1);
+INSERT INTO fac_mc VALUES (1, 1);
+UPDATE fac_m SET b = 2;
+UPDATE fac_m SET a = 20;
+DELETE FROM fac_m;
+DROP TABLE fac_c, fac_c2, fac_mc, fac_m, fac_p;
+DROP FUNCTION fac_note();

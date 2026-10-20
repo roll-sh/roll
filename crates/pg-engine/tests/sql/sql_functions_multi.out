@@ -1,0 +1,162 @@
+> CREATE TABLE sm_log (id serial, msg text)
+-- CREATE TABLE
+
+> CREATE FUNCTION sm_add(m text) RETURNS bigint LANGUAGE sql AS $$
+>   INSERT INTO sm_log (msg) VALUES (m);
+>   INSERT INTO sm_log (msg) VALUES (m || '!');
+>   SELECT count(*) FROM sm_log;
+> $$
+-- CREATE FUNCTION
+
+> SELECT sm_add('a')
+sm_add:int8
+2
+-- SELECT 1
+
+> SELECT sm_add('b')
+sm_add:int8
+4
+-- SELECT 1
+
+> SELECT id, msg FROM sm_log ORDER BY id
+id:int4 | msg:text
+1 | a
+2 | a!
+3 | b
+4 | b!
+-- SELECT 4
+
+> CREATE FUNCTION sm_set(n int) RETURNS SETOF sm_log LANGUAGE sql AS $$
+>   DELETE FROM sm_log WHERE id > n;
+>   SELECT * FROM sm_log ORDER BY id;
+> $$
+-- CREATE FUNCTION
+
+> SELECT * FROM sm_set(3)
+id:int4 | msg:text
+1 | a
+2 | a!
+3 | b
+-- SELECT 3
+
+> CREATE FUNCTION sm_void() RETURNS void LANGUAGE sql AS $$
+>   UPDATE sm_log SET msg = upper(msg);
+>   DELETE FROM sm_log WHERE id = 1;
+> $$
+-- CREATE FUNCTION
+
+> SELECT sm_void()
+sm_void:void
+NULL
+-- SELECT 1
+
+> SELECT id, msg FROM sm_log ORDER BY id
+id:int4 | msg:text
+2 | A!
+3 | B
+-- SELECT 2
+
+> CREATE FUNCTION sm_atomic(x int) RETURNS int LANGUAGE sql
+> BEGIN ATOMIC
+>   INSERT INTO sm_log (msg) VALUES ('atomic ' || x);
+>   SELECT x * 2;
+> END
+-- CREATE FUNCTION
+
+> SELECT sm_atomic(21)
+sm_atomic:int4
+42
+-- SELECT 1
+
+> SELECT msg FROM sm_log WHERE msg LIKE 'atomic%'
+msg:text
+atomic 21
+-- SELECT 1
+
+> CREATE FUNCTION sm_empty_last() RETURNS int LANGUAGE sql AS $$
+>   SELECT 1;
+>   SELECT 2 WHERE false;
+> $$
+-- CREATE FUNCTION
+
+> SELECT sm_empty_last() IS NULL
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE FUNCTION sm_out(a int, OUT d int, OUT s text) LANGUAGE sql AS $$
+>   SELECT 0, 'ignored';
+>   SELECT a * 2, 'two';
+> $$
+-- CREATE FUNCTION
+
+> SELECT * FROM sm_out(5)
+d:int4 | s:text
+10 | two
+-- SELECT 1
+
+> CREATE PROCEDURE sm_proc(n int) LANGUAGE sql AS $$
+>   INSERT INTO sm_log (msg) VALUES ('proc ' || n);
+>   INSERT INTO sm_log (msg) VALUES ('proc ' || n + 1);
+> $$
+-- CREATE PROCEDURE
+
+> CALL sm_proc(10)
+-- CALL
+
+> SELECT msg FROM sm_log WHERE msg LIKE 'proc%' ORDER BY id
+msg:text
+proc 10
+proc 11
+-- SELECT 2
+
+> CREATE FUNCTION sm_strict(a int) RETURNS int LANGUAGE sql STRICT AS $$
+>   INSERT INTO sm_log (msg) VALUES ('strict');
+>   SELECT a;
+> $$
+-- CREATE FUNCTION
+
+> SELECT sm_strict(NULL), sm_strict(4)
+sm_strict:int4 | sm_strict:int4
+NULL | 4
+-- SELECT 1
+
+> SELECT count(*) FROM sm_log WHERE msg = 'strict'
+count:int8
+1
+-- SELECT 1
+
+> CREATE FUNCTION sm_bad() RETURNS int LANGUAGE sql AS $$
+>   SELECT 1;
+>   INSERT INTO sm_log (msg) VALUES ('x');
+> $$
+ERROR 42P13: return type mismatch in function declared to return integer
+DETAIL: Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING.
+CONTEXT: SQL function "sm_bad"
+
+> CREATE FUNCTION sm_commit() RETURNS int LANGUAGE sql AS $$
+>   SELECT 1;
+>   COMMIT;
+> $$
+ERROR 42P13: return type mismatch in function declared to return integer
+DETAIL: Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING.
+CONTEXT: SQL function "sm_commit"
+
+> SELECT prosrc FROM pg_proc WHERE proname = 'sm_add'
+prosrc:text
+
+  INSERT INTO sm_log (msg) VALUES (m);
+  INSERT INTO sm_log (msg) VALUES (m || '!');
+  SELECT count(*) FROM sm_log;
+
+-- SELECT 1
+
+> DROP FUNCTION sm_add(text), sm_set(int), sm_void(), sm_atomic(int), sm_empty_last(), sm_out(int), sm_strict(int)
+-- DROP FUNCTION
+
+> DROP PROCEDURE sm_proc(int)
+-- DROP PROCEDURE
+
+> DROP TABLE sm_log
+-- DROP TABLE
+

@@ -1,0 +1,101 @@
+> SELECT '&&'::regoper
+ERROR 42725: more than one operator named && (at 8)
+
+> SELECT '||/'::regoper, '|/'::regoper
+regoper:2203 | regoper:2203
+||/ | |/
+-- SELECT 1
+
+> SELECT '+(integer,integer)'::regoperator, '-(NONE,integer)'::regoperator, '&&(anyrange,anyrange)'::regoperator::regoper
+regoperator:2204 | regoperator:2204 | regoper:2203
++(integer,integer) | -(NONE,integer) | pg_catalog.&&
+-- SELECT 1
+
+> SELECT '&&(anyrange,anyrange)'::regoperator::regoper::regoperator, '+(int4,int4)'::regoperator::oid = '+(integer,integer)'::regoperator::oid
+regoperator:2204 | ?column?:bool
+&&(anyrange,anyrange) | t
+-- SELECT 1
+
+> SELECT 'nope'::regoper
+ERROR 42883: operator does not exist: nope (at 8)
+
+> SELECT '+(integer,text)'::regoperator
+ERROR 42883: operator does not exist: +(integer,text) (at 8)
+
+> SELECT '+'::regoperator
+ERROR 22P02: expected a left parenthesis (at 8)
+
+> SELECT '-(int4)'::regoperator
+ERROR 42P02: missing argument (at 8)
+HINT: Use NONE to denote the missing argument of a unary operator.
+
+> SELECT '+(int4,int4,int4)'::regoperator
+ERROR 54023: too many arguments (at 8)
+HINT: Provide two argument types for operator.
+
+> SELECT 'nope.+(int4,int4)'::regoperator
+ERROR 42883: operator does not exist: nope.+(int4,int4) (at 8)
+
+> SELECT 'pg_catalog.+(int4,int4)'::regoperator, ' ||/ '::regoper, '+ ( int4 , int4 )'::regoperator
+regoperator:2204 | regoper:2203 | regoperator:2204
++(integer,integer) | ||/ | +(integer,integer)
+-- SELECT 1
+
+> SELECT to_regoper('&&'), to_regoper('||/'), to_regoperator('+(integer,integer)'), to_regoperator('+(int4,text)'), to_regoperator('nope')
+to_regoper:2203 | to_regoper:2203 | to_regoperator:2204 | to_regoperator:2204 | to_regoperator:2204
+NULL | ||/ | +(integer,integer) | NULL | NULL
+-- SELECT 1
+
+> SELECT '"C"'::regcollation, 'default'::regcollation, '"POSIX"'::regcollation, '"C"'::regcollation::oid, 'pg_catalog."C"'::regcollation, 'ucs_basic'::regcollation, 'unicode'::regcollation
+regcollation:4191 | regcollation:4191 | regcollation:4191 | oid:oid | regcollation:4191 | regcollation:4191 | regcollation:4191
+"C" | "default" | "POSIX" | 950 | "C" | ucs_basic | unicode
+-- SELECT 1
+
+> SELECT 'C'::regcollation
+ERROR 42704: collation "c" for encoding "UTF8" does not exist (at 8)
+
+> SELECT 'nope.ucs_basic'::regcollation
+ERROR 42704: collation "nope.ucs_basic" for encoding "UTF8" does not exist (at 8)
+
+> SELECT to_regcollation('nope'), to_regcollation('"C"'), to_regcollation('C')
+to_regcollation:4191 | to_regcollation:4191 | to_regcollation:4191
+NULL | "C" | NULL
+-- SELECT 1
+
+> SELECT 0::regoper, 0::regoperator, 0::regcollation, '-'::regcollation, 99999::regcollation
+regoper:2203 | regoperator:2204 | regcollation:4191 | regcollation:4191 | regcollation:4191
+0 | 0 | - | - | 99999
+-- SELECT 1
+
+> SELECT pg_typeof('"C"'::regcollation), pg_typeof('||/'::regoper), pg_typeof('+(int4,int4)'::regoperator)
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+regcollation | regoper | regoperator
+-- SELECT 1
+
+> SELECT '{||/}'::regoper[], pg_typeof('{||/}'::regoper[])
+regoper:2208 | pg_typeof:regtype
+{||/} | regoper[]
+-- SELECT 1
+
+> SELECT 'regoper'::regtype::oid, 'regoperator[]'::regtype::oid, 'regcollation'::regtype::oid, 'regcollation[]'::regtype::oid
+oid:oid | oid:oid | oid:oid | oid:oid
+2203 | 2209 | 4191 | 4192
+-- SELECT 1
+
+> SELECT typname, typlen, typcategory, typarray::regtype FROM pg_type WHERE typname IN ('regoper', 'regoperator', 'regcollation') ORDER BY 1
+typname:name | typlen:int2 | typcategory:char | typarray:regtype
+regcollation | 4 | N | regcollation[]
+regoper | 4 | N | regoper[]
+regoperator | 4 | N | regoperator[]
+-- SELECT 3
+
+> SELECT '"C"'::regcollation::text, '"C"'::regcollation::oid::int4, 950::regcollation::text
+text:text | int4:int4 | text:text
+"C" | 950 | "C"
+-- SELECT 1
+
+> SELECT oprname, oprleft::regtype, oprright::regtype FROM pg_operator WHERE oid = '+(integer,integer)'::regoperator
+oprname:name | oprleft:regtype | oprright:regtype
++ | integer | integer
+-- SELECT 1
+

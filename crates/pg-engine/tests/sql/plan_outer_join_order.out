@@ -1,0 +1,94 @@
+> create table oj_a (id int primary key, x int)
+-- CREATE TABLE
+
+> create table oj_b (id int primary key, a_id int, y int)
+-- CREATE TABLE
+
+> create table oj_c (id int primary key, b_id int, z int)
+-- CREATE TABLE
+
+> create table oj_d (id int, w int)
+-- CREATE TABLE
+
+> insert into oj_a select g, g % 13 from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> insert into oj_b select g, g % 1000 + 1, g % 17 from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> insert into oj_c select g, g % 3000 + 1, g % 19 from generate_series(1, 6000) g
+-- INSERT 0 6000
+
+> insert into oj_d select g % 50, g from generate_series(1, 200) g
+-- INSERT 0 200
+
+> analyze oj_a
+-- ANALYZE
+
+> analyze oj_b
+-- ANALYZE
+
+> analyze oj_c
+-- ANALYZE
+
+> analyze oj_d
+-- ANALYZE
+
+> explain (costs off) select * from oj_a a left join oj_b b on b.a_id = a.id left join oj_c c on c.b_id = b.id where a.x = 1
+QUERY PLAN:text
+Hash Right Join
+  Hash Cond: (c.b_id = b.id)
+  ->  Seq Scan on oj_c c
+  ->  Hash
+        ->  Hash Right Join
+              Hash Cond: (b.a_id = a.id)
+              ->  Seq Scan on oj_b b
+              ->  Hash
+                    ->  Seq Scan on oj_a a
+                          Filter: (x = 1)
+-- EXPLAIN
+
+> explain (costs off) select * from oj_a a left join (oj_b b join oj_c c on c.b_id = b.id) on b.a_id = a.id where a.x = 2
+QUERY PLAN:text
+Hash Right Join
+  Hash Cond: (b.a_id = a.id)
+  ->  Hash Join
+        Hash Cond: (c.b_id = b.id)
+        ->  Seq Scan on oj_c c
+        ->  Hash
+              ->  Seq Scan on oj_b b
+  ->  Hash
+        ->  Seq Scan on oj_a a
+              Filter: (x = 2)
+-- EXPLAIN
+
+> explain (costs off) select * from oj_a a left join oj_b b on b.a_id = a.id where coalesce(b.y, 0) = 3
+QUERY PLAN:text
+Hash Right Join
+  Hash Cond: (b.a_id = a.id)
+  Filter: (COALESCE(b.y, 0) = 3)
+  ->  Seq Scan on oj_b b
+  ->  Hash
+        ->  Seq Scan on oj_a a
+-- EXPLAIN
+
+> select count(*), sum(c.z) from oj_a a left join oj_b b on b.a_id = a.id left join oj_c c on c.b_id = b.id where a.x = 1
+count:int8 | sum:int8
+462 | 4160
+-- SELECT 1
+
+> select count(*) from oj_a a left join oj_b b on b.a_id = a.id where coalesce(b.y, 0) = 3
+count:int8
+177
+-- SELECT 1
+
+> select count(*) from oj_d d left join oj_a a on a.id = d.id left join oj_b b on b.a_id = a.id and b.y = d.w
+count:int8
+200
+-- SELECT 1
+
+> select count(*) from oj_a a where exists (select 1 from oj_b b where b.a_id = a.id and not exists (select 1 from oj_c c where c.b_id = b.id and c.z = 0))
+count:int8
+1000
+-- SELECT 1
+

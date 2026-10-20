@@ -1,0 +1,386 @@
+> SELECT '(1,2)'::point, ' ( 1.5 , -2e3 ) '::point, '1,2'::point, '(inf,nan)'::point, '(-0,0)'::point, point(3, 4)
+point:600 | point:600 | point:600 | point:600 | point:600 | point:600
+(1,2) | (1.5,-2000) | (1,2) | (Infinity,NaN) | (-0,0) | (3,4)
+-- SELECT 1
+
+> SELECT '(1,2'::point
+ERROR 22P02: invalid input syntax for type point: "(1,2" (at 8)
+
+> SELECT 'x'::point
+ERROR 22P02: invalid input syntax for type point: "x" (at 8)
+
+> SELECT '(1,2,3)'::point
+ERROR 22P02: invalid input syntax for type point: "(1,2,3)" (at 8)
+
+> SELECT '(1e400,0)'::point
+ERROR 22003: "1e400" is out of range for type double precision (at 8)
+
+> SELECT '{1,2,3}'::line, '[(0,0),(1,1)]'::line, '(0,0),(0,1)'::line, '((1,1),(2,1))'::line, line(point(0,0), point(2,1))
+line:628 | line:628 | line:628 | line:628 | line:628
+{1,2,3} | {1,-1,0} | {-1,0,0} | {0,-1,1} | {0.5,-1,0}
+-- SELECT 1
+
+> SELECT '{0,0,1}'::line
+ERROR 22P02: invalid line specification: A and B cannot both be zero (at 8)
+
+> SELECT '[(1,1),(1,1)]'::line
+ERROR 22P02: invalid line specification: must be two distinct points (at 8)
+
+> SELECT '[(1,2),(3,4)]'::lseg, '(1,2),(3,4)'::lseg, '((1,2),(3,4))'::lseg, '1,2,3,4'::lseg, lseg(point(0,0), point(1,1))
+lseg:601 | lseg:601 | lseg:601 | lseg:601 | lseg:601
+[(1,2),(3,4)] | [(1,2),(3,4)] | [(1,2),(3,4)] | [(1,2),(3,4)] | [(0,0),(1,1)]
+-- SELECT 1
+
+> SELECT '(1,1),(0,0)'::box, '(0,0),(1,1)'::box, '((3,1),(1,3))'::box, '1,2,3,4'::box, box(point(2,2), point(0,0)), box(point(1,1))
+box:603 | box:603 | box:603 | box:603 | box:603 | box:603
+(1,1),(0,0) | (1,1),(0,0) | (3,3),(1,1) | (3,4),(1,2) | (2,2),(0,0) | (1,1),(1,1)
+-- SELECT 1
+
+> SELECT '[(1,1),(1,1)]'::box
+ERROR 22P02: invalid input syntax for type box: "[(1,1),(1,1)]" (at 8)
+
+> SELECT '[(0,0),(1,1),(2,0)]'::path, '((0,0),(1,1),(2,0))'::path, '(0,0),(1,1),(2,0)'::path, '(1,2)'::path, '((1,2))'::path, '[1,2,3,4]'::path
+path:602 | path:602 | path:602 | path:602 | path:602 | path:602
+[(0,0),(1,1),(2,0)] | ((0,0),(1,1),(2,0)) | ((0,0),(1,1),(2,0)) | ((1,2)) | ((1,2)) | [(1,2),(3,4)]
+-- SELECT 1
+
+> SELECT '[(0,0),(1,1)'::path
+ERROR 22P02: invalid input syntax for type path: "[(0,0),(1,1)" (at 8)
+
+> SELECT '(0,0),(1,1)]'::path
+ERROR 22P02: invalid input syntax for type path: "(0,0),(1,1)]" (at 8)
+
+> SELECT '((0,0),(1,1),(2,0))'::polygon, '(0,0),(1,1),(2,0)'::polygon, '0,0,1,1,2,0'::polygon, '(1,2)'::polygon
+polygon:604 | polygon:604 | polygon:604 | polygon:604
+((0,0),(1,1),(2,0)) | ((0,0),(1,1),(2,0)) | ((0,0),(1,1),(2,0)) | ((1,2))
+-- SELECT 1
+
+> SELECT '[(0,0),(1,1)]'::polygon
+ERROR 22P02: invalid input syntax for type polygon: "[(0,0),(1,1)]" (at 8)
+
+> SELECT '<(1,2),3>'::circle, '((1,2),3)'::circle, '(1,2),3'::circle, '1,2,3'::circle, '<(1,2),0>'::circle, circle(point(0,0), 2)
+circle:718 | circle:718 | circle:718 | circle:718 | circle:718 | circle:718
+<(1,2),3> | <(1,2),3> | <(1,2),3> | <(1,2),3> | <(1,2),0> | <(0,0),2>
+-- SELECT 1
+
+> SELECT '<(1,2),-3>'::circle
+ERROR 22P02: invalid input syntax for type circle: "<(1,2),-3>" (at 8)
+
+> SELECT '<(1,2),3'::circle
+ERROR 22P02: invalid input syntax for type circle: "<(1,2),3" (at 8)
+
+> SELECT p1, p2, p1 + p2 AS add, p1 - p2 AS sub, p1 * p2 AS mul, p1 / p2 AS div, p1 <-> p2 AS dist FROM (VALUES (point '(1,2)', point '(3,4)'), ('(0,0)', '(1,0)'), ('(-1,5.5)', '(2,-3)')) v(p1, p2)
+p1:600 | p2:600 | add:600 | sub:600 | mul:600 | div:600 | dist:float8
+(-1,5.5) | (2,-3) | (1,2.5) | (-3,8.5) | (14.5,14) | (-1.4230769230769231,0.6153846153846154) | 9.013878188659973
+(0,0) | (1,0) | (1,0) | (-1,0) | (0,0) | (0,0) | 1
+(1,2) | (3,4) | (4,6) | (-2,-2) | (-5,10) | (0.44,0.08) | 2.8284271247461903
+-- SELECT 3
+
+> SELECT point '(1,2)' / point '(0,0)'
+ERROR 22012: division by zero
+
+> SELECT p1 << p2, p1 >> p2, p1 <<| p2, p1 |>> p2, p1 <^ p2, p1 >^ p2, p1 ?- p2, p1 ?| p2, p1 ~= p2, p1 <> p2 FROM (VALUES (point '(1,2)', point '(3,4)'), ('(1,1)', '(1,1.0000001)'), ('(5,1)', '(1,1)')) v(p1, p2)
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | f | f | f | f | t | t | t | f
+f | t | f | f | f | f | t | f | f | t
+t | f | t | f | t | f | f | f | f | t
+-- SELECT 3
+
+> SELECT slope(point '(0,0)', point '(2,1)'), slope(point '(1,1)', point '(1,5)'), slope(point '(1,1)', point '(5,1)'), isvertical(point '(1,1)', point '(1,5)'), ishorizontal(point '(1,1)', point '(5,1)')
+slope:float8 | slope:float8 | slope:float8 | isvertical:bool | ishorizontal:bool
+0.5 | Infinity | 0 | t | t
+-- SELECT 1
+
+> SELECT (point '(1,2)')[0], (point '(1,2)')[1], (point '(1,2)')[2], (point '(1,2)')[-1], (lseg '[(1,2),(3,4)]')[1], (box '(1,2),(3,4)')[0], (line '{1,2,3}')[2], (box '(1,1),(0,0)')[0][1]
+point:float8 | point:float8 | point:float8 | point:float8 | lseg:600 | box:600 | line:float8 | box:600
+1 | 2 | NULL | NULL | (3,4) | (3,4) | 3 | NULL
+-- SELECT 1
+
+> SELECT (point '(1,2)')[0:1]
+ERROR 0A000: slices of fixed-length arrays not implemented
+
+> SELECT (circle '<(1,2),3>')[0]
+ERROR 42804: cannot subscript type circle because it does not support subscripting (at 16)
+
+> SELECT point '(1,1)' <@ box '(0,0),(2,2)', point '(3,3)' <@ box '(0,0),(2,2)', point '(0.5,0.5)' <@ lseg '[(0,0),(1,1)]', point '(1,1)' <@ line '{1,-1,0}', point '(1,1)' <@ circle '<(0,0),2>', point '(5,5)' <@ circle '<(0,0),2>'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t | f
+-- SELECT 1
+
+> SELECT point '(1,1)' <@ polygon '((0,0),(2,0),(2,2),(0,2))', point '(2,1)' <@ polygon '((0,0),(2,0),(2,2),(0,2))', point '(3,1)' <@ polygon '((0,0),(2,0),(2,2),(0,2))', point '(1,0)' <@ path '[(0,0),(2,0)]', point '(1,1)' <@ path '((0,0),(2,0),(2,2),(0,2))'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | f | t | t
+-- SELECT 1
+
+> SELECT point '(3,4)' <-> box '(0,0),(1,1)', point '(3,4)' <-> lseg '[(0,0),(0,10)]', point '(3,4)' <-> line '{1,0,0}', point '(3,4)' <-> circle '<(0,0),1>', point '(0,0)' <-> circle '<(0,0),1>', point '(5,5)' <-> path '[(0,0),(1,1),(2,0)]', point '(5,5)' <-> polygon '((0,0),(1,1),(2,0))'
+?column?:float8 | ?column?:float8 | ?column?:float8 | ?column?:float8 | ?column?:float8 | ?column?:float8 | ?column?:float8
+3.6055512754639896 | 3 | 3 | 4 | 0 | 5.656854249492381 | 5.656854249492381
+-- SELECT 1
+
+> SELECT point '(3,4)' ## box '(0,0),(1,1)', point '(3,4)' ## lseg '[(0,0),(0,10)]', point '(3,4)' ## line '{1,-1,0}', point '(0.5,0.5)' ## box '(0,0),(1,1)'
+?column?:600 | ?column?:600 | ?column?:600 | ?column?:600
+(1,1) | (0,4) | (3.5,3.5) | (0.5,0.5)
+-- SELECT 1
+
+> SELECT l1, l2, l1 # l2 AS inter, l1 <-> l2 AS dist, l1 = l2 AS eq, l1 ?# l2 AS isect, l1 ?-| l2 AS perp, l1 ?|| l2 AS par FROM (VALUES (line '{1,-1,0}', line '{1,1,0}'), ('{1,-1,0}', '{2,-2,4}'), ('{0,-1,3}', '{-1,0,2}'), ('{1,2,3}', '{2,4,6}')) v(l1, l2)
+l1:628 | l2:628 | inter:600 | dist:float8 | eq:bool | isect:bool | perp:bool | par:bool
+{0,-1,3} | {-1,0,2} | (2,3) | 0 | f | t | t | f
+{1,-1,0} | {1,1,0} | (0,0) | 0 | f | t | t | f
+{1,-1,0} | {2,-2,4} | NULL | 1.414213562373095 | f | f | f | t
+{1,2,3} | {2,4,6} | NULL | 0 | t | f | f | t
+-- SELECT 4
+
+> SELECT ?- line '{0,1,2}', ?| line '{1,0,2}', ishorizontal(line '{0,1,2}'), isvertical(line '{0,1,2}'), isparallel(line '{1,1,0}', line '{2,2,5}'), isperp(line '{1,-1,0}', line '{1,1,0}')
+?column?:bool | ?column?:bool | ishorizontal:bool | isvertical:bool | isparallel:bool | isperp:bool
+t | t | t | f | t | t
+-- SELECT 1
+
+> SELECT line '{1,-1,0}' ?# box '(2,3),(3,2)', line '{1,-1,0}' ?# box '(5,1),(6,0)', line '{1,-1,0}' <-> point '(1,0)', line '{1,-1,0}' <-> lseg '[(2,0),(3,0)]', line '{1,-1,0}' ## lseg '[(2,0),(3,0)]'
+?column?:bool | ?column?:bool | ?column?:float8 | ?column?:float8 | ?column?:600
+t | f | 0.7071067811865476 | 1.4142135623730951 | (2,0)
+-- SELECT 1
+
+> SELECT s1 # s2, s1 ## s2, s1 <-> s2, s1 ?# s2, s1 ?-| s2, s1 ?|| s2, s1 = s2, s1 <> s2, s1 < s2, s1 >= s2 FROM (VALUES (lseg '[(0,0),(2,2)]', lseg '[(0,2),(2,0)]'), ('[(0,0),(1,0)]', '[(0,1),(1,1)]'), ('[(0,0),(1,1)]', '[(5,5),(6,8)]'), ('[(0,0),(1,0)]', '[(0,0),(1,0)]')) v(s1, s2)
+?column?:600 | ?column?:600 | ?column?:float8 | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+(1,1) | (1,1) | 0 | t | t | f | f | t | f | t
+NULL | (5,5) | 5.656854249492381 | f | f | f | f | t | t | f
+NULL | NULL | 0 | f | f | t | t | f | f | t
+NULL | NULL | 1 | f | f | t | f | t | f | t
+-- SELECT 4
+
+> SELECT @-@ lseg '[(0,0),(3,4)]', @@ lseg '[(0,0),(3,4)]', ?- lseg '[(0,1),(3,1)]', ?| lseg '[(1,1),(1,4)]', length(lseg '[(0,0),(3,4)]'), point(lseg '[(0,0),(3,4)]'), isvertical(lseg '[(1,1),(1,4)]'), isparallel(lseg '[(0,0),(1,1)]', lseg '[(1,0),(2,1)]'), isperp(lseg '[(0,0),(1,1)]', lseg '[(0,1),(1,0)]')
+?column?:float8 | ?column?:600 | ?column?:bool | ?column?:bool | length:float8 | point:600 | isvertical:bool | isparallel:bool | isperp:bool
+5 | (1.5,2) | t | t | 5 | (1.5,2) | t | t | t
+-- SELECT 1
+
+> SELECT lseg '[(0,0),(1,1)]' <@ box '(0,0),(2,2)', lseg '[(0,0),(3,3)]' <@ box '(0,0),(2,2)', lseg '[(0,0),(3,3)]' ?# box '(1,0),(2,0.5)', lseg '[(0,0),(3,3)]' ?# box '(1,1.5),(2,2.5)', lseg '[(5,5),(6,6)]' <-> box '(0,0),(1,1)', lseg '[(5,5),(6,6)]' ## box '(0,0),(1,1)'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:float8 | ?column?:600
+t | f | f | t | 5.656854249492381 | (1,1)
+-- SELECT 1
+
+> SELECT lseg '[(0,0),(2,2)]' <-> line '{1,1,-10}', lseg '[(0,0),(2,2)]' <@ line '{1,-1,0}', lseg '[(0,0),(2,2)]' ?# line '{1,1,-2}', lseg '[(0,0),(10,0)]' <-> point '(5,3)'
+?column?:float8 | ?column?:bool | ?column?:bool | ?column?:float8
+4.242640687119286 | t | t | 3
+-- SELECT 1
+
+> SELECT b1, b2, b1 && b2, b1 &< b2, b1 &> b2, b1 << b2, b1 >> b2, b1 <@ b2, b1 @> b2, b1 ~= b2, b1 = b2, b1 < b2, b1 # b2, b1 <-> b2 FROM (VALUES (box '(2,2),(0,0)', box '(3,3),(1,1)'), ('(1,1),(0,0)', '(3,3),(2,2)'), ('(3,3),(0,0)', '(2,2),(1,1)'), ('(1,1),(0,0)', '(2,2),(1,1)')) v(b1, b2)
+b1:603 | b2:603 | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:603 | ?column?:float8
+(1,1),(0,0) | (2,2),(1,1) | t | t | f | f | f | f | f | f | t | f | (1,1),(1,1) | 1.4142135623730951
+(1,1),(0,0) | (3,3),(2,2) | f | t | f | t | f | f | f | f | t | f | NULL | 2.8284271247461903
+(2,2),(0,0) | (3,3),(1,1) | t | t | f | f | f | f | f | f | t | f | (2,2),(1,1) | 1.4142135623730951
+(3,3),(0,0) | (2,2),(1,1) | t | f | f | f | f | f | t | f | f | f | (2,2),(1,1) | 0
+-- SELECT 4
+
+> SELECT b1 <<| b2, b1 |>> b2, b1 &<| b2, b1 |&> b2, b1 <^ b2, b1 >^ b2, b1 ?# b2 FROM (VALUES (box '(1,1),(0,0)', box '(1,3),(0,2)'), ('(1,3),(0,2)', '(1,1),(0,0)'), ('(1,2),(0,1)', '(1,1),(0,0)')) v(b1, b2)
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | f | t | f | t | t
+f | t | f | t | f | t | f
+t | f | t | f | t | f | f
+-- SELECT 3
+
+> SELECT area(box '(2,3),(0,0)'), width(box '(2,3),(0,0)'), height(box '(2,3),(0,0)'), center(box '(2,3),(0,0)'), @@ box '(2,3),(0,0)', diagonal(box '(2,3),(0,0)'), lseg(box '(2,3),(0,0)'), point(box '(2,3),(0,0)'), bound_box(box '(1,1),(0,0)', box '(3,3),(2,2)')
+area:float8 | width:float8 | height:float8 | center:600 | ?column?:600 | diagonal:601 | lseg:601 | point:600 | bound_box:603
+6 | 2 | 3 | (1,1.5) | (1,1.5) | [(2,3),(0,0)] | [(2,3),(0,0)] | (1,1.5) | (3,3),(0,0)
+-- SELECT 1
+
+> SELECT box '(2,2),(0,0)' + point '(1,1)', box '(2,2),(0,0)' - point '(1,1)', box '(2,2),(0,0)' * point '(2,0)', box '(2,2),(1,1)' / point '(2,0)', box '(2,2),(0,0)' @> point '(1,1)', box '(2,2),(0,0)' <-> point '(3,3)'
+?column?:603 | ?column?:603 | ?column?:603 | ?column?:603 | ?column?:bool | ?column?:float8
+(3,3),(1,1) | (1,1),(-1,-1) | (4,4),(0,0) | (1,1),(0.5,0.5) | t | 1.4142135623730951
+-- SELECT 1
+
+> SELECT box '(2,2),(0,0)' / point '(0,0)'
+ERROR 22012: division by zero
+
+> SELECT polygon(box '(2,2),(0,0)'), circle(box '(2,2),(0,0)'), box(circle '<(0,0),2>'), box(polygon '((0,0),(3,1),(1,4))')
+polygon:604 | circle:718 | box:603 | box:603
+((0,0),(0,2),(2,2),(2,0)) | <(1,1),1.4142135623730951> | (1.414213562373095,1.414213562373095),(-1.414213562373095,-1.414213562373095) | (3,4),(0,0)
+-- SELECT 1
+
+> SELECT p, npoints(p), # p, isclosed(p), isopen(p), length(p), @-@ p, area(p), pclose(p), popen(p) FROM (VALUES (path '[(0,0),(3,4),(3,0)]'), ('((0,0),(3,4),(3,0))'), ('[(1,1)]')) v(p)
+p:602 | npoints:int4 | ?column?:int4 | isclosed:bool | isopen:bool | length:float8 | ?column?:float8 | area:float8 | pclose:602 | popen:602
+((0,0),(3,4),(3,0)) | 3 | 3 | t | f | 12 | 12 | 6 | ((0,0),(3,4),(3,0)) | [(0,0),(3,4),(3,0)]
+[(0,0),(3,4),(3,0)] | 3 | 3 | f | t | 9 | 9 | NULL | ((0,0),(3,4),(3,0)) | [(0,0),(3,4),(3,0)]
+[(1,1)] | 1 | 1 | f | t | 0 | 0 | NULL | ((1,1)) | [(1,1)]
+-- SELECT 3
+
+> SELECT path '[(0,0),(1,1)]' + path '[(2,2),(3,3)]', path '((0,0),(1,1))' + path '[(2,2)]', path '[(0,0),(1,1)]' + point '(1,1)', path '[(0,0),(1,1)]' - point '(1,1)', path '[(1,0),(1,1)]' * point '(0,1)', path '[(2,0),(1,1)]' / point '(0,1)'
+?column?:602 | ?column?:602 | ?column?:602 | ?column?:602 | ?column?:602 | ?column?:602
+[(0,0),(1,1),(2,2),(3,3)] | NULL | [(1,1),(2,2)] | [(-1,-1),(0,0)] | [(0,1),(-1,1)] | [(0,-2),(1,-1)]
+-- SELECT 1
+
+> SELECT path '[(0,0),(2,2)]' ?# path '[(0,2),(2,0)]', path '[(0,0),(1,1)]' ?# path '[(5,5),(6,6)]', path '[(0,0),(1,1)]' <-> path '[(5,5),(6,6)]', path '[(0,0),(1,1)]' = path '[(5,5),(6,6)]', path '[(0,0)]' < path '[(5,5),(6,6)]', path '((0,0),(2,0),(2,2))' @> point '(1.5,0.5)', path '[(0,0),(2,0),(2,2)]' @> point '(1.5,0.5)'
+?column?:bool | ?column?:bool | ?column?:float8 | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | 5.656854249492381 | t | t | t | f
+-- SELECT 1
+
+> SELECT polygon(path '((0,0),(1,1),(2,0))'), path(polygon '((0,0),(1,1),(2,0))')
+polygon:604 | path:602
+((0,0),(1,1),(2,0)) | ((0,0),(1,1),(2,0))
+-- SELECT 1
+
+> SELECT polygon(path '[(0,0),(1,1),(2,0)]')
+ERROR 22023: open path cannot be converted to polygon
+
+> SELECT p1 && p2, p1 @> p2, p1 <@ p2, p1 ~= p2, p1 << p2, p1 >> p2, p1 &< p2, p1 &> p2, p1 <<| p2, p1 |>> p2, p1 &<| p2, p1 |&> p2, p1 <-> p2 FROM (VALUES (polygon '((0,0),(4,0),(4,4),(0,4))', polygon '((1,1),(2,1),(2,2),(1,2))'), ('((0,0),(1,0),(1,1))', '((2,2),(3,2),(3,3))'), ('((0,0),(2,0),(2,2),(0,2))', '((0,2),(2,2),(2,0),(0,0))'), ('((0,0),(2,0),(0,2))', '((1,1),(3,1),(3,3))')) v(p1, p2)
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:float8
+f | f | f | f | t | f | t | f | t | f | t | f | 1.4142135623730951
+t | f | f | f | f | f | t | f | f | f | t | f | 0
+t | t | f | f | f | f | f | f | f | f | f | f | 0
+t | t | t | t | f | f | t | t | f | f | t | t | 0
+-- SELECT 4
+
+> SELECT npoints(polygon '((0,0),(1,1),(2,0))'), # polygon '((0,0),(1,1),(2,0))', @@ polygon '((0,0),(2,0),(2,2),(0,2))', center(circle(polygon '((0,0),(2,0),(2,2),(0,2))')), point(polygon '((0,0),(2,0),(2,2),(0,2))'), box(polygon '((0,0),(1,1),(2,0))'), polygon '((0,0),(2,0),(2,2),(0,2))' @> point '(1,1)', polygon '((0,0),(2,0),(2,2),(0,2))' <-> point '(5,1)', polygon '((0,0),(2,0),(2,2),(0,2))' <-> circle '<(5,1),1>'
+npoints:int4 | ?column?:int4 | ?column?:600 | center:600 | point:600 | box:603 | ?column?:bool | ?column?:float8 | ?column?:float8
+3 | 3 | (1,1) | (1,1) | (1,1) | (2,1),(0,0) | t | 3 | 2
+-- SELECT 1
+
+> SELECT polygon(4, circle '<(0,0),1>'), npoints(polygon(circle '<(1,1),2>')), polygon(circle '<(1,1),2>') ~= polygon(12, circle '<(1,1),2>') AS same
+polygon:604 | npoints:int4 | same:bool
+((-1,0),(-6.123233995736766e-17,1),(1,1.2246467991473532e-16),(1.8369701987210297e-16,-1)) | 12 | t
+-- SELECT 1
+
+> SELECT polygon(1, circle '<(0,0),1>')
+ERROR 22023: must request at least 2 points
+
+> SELECT polygon(4, circle '<(0,0),0>')
+ERROR 0A000: cannot convert circle with radius zero to polygon
+
+> SELECT c1, c2, c1 && c2, c1 &< c2, c1 &> c2, c1 << c2, c1 >> c2, c1 <<| c2, c1 |>> c2, c1 &<| c2, c1 |&> c2, c1 <@ c2, c1 @> c2, c1 ~= c2, c1 = c2, c1 <> c2, c1 < c2, c1 >= c2, c1 <-> c2 FROM (VALUES (circle '<(0,0),1>', circle '<(1,1),1>'), ('<(0,0),1>', '<(5,5),1>'), ('<(0,0),5>', '<(1,1),1>'), ('<(0,0),1>', '<(0,0),1>')) v(c1, c2)
+c1:718 | c2:718 | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:float8
+<(0,0),1> | <(0,0),1> | t | t | t | f | f | f | f | t | t | t | t | t | t | f | f | t | 0
+<(0,0),1> | <(1,1),1> | t | t | f | f | f | f | f | t | f | f | f | f | t | f | f | t | 0
+<(0,0),1> | <(5,5),1> | f | t | f | t | f | t | f | t | f | f | f | f | t | f | f | t | 5.0710678118654755
+<(0,0),5> | <(1,1),1> | t | f | f | f | f | f | f | f | f | f | t | f | f | t | f | t | 0
+-- SELECT 4
+
+> SELECT area(circle '<(0,0),2>'), radius(circle '<(0,0),2>'), diameter(circle '<(0,0),2>'), center(circle '<(1,2),2>'), @@ circle '<(1,2),2>', point(circle '<(1,2),2>'), circle(point '(1,1)', 3), circle '<(1,1),1>' + point '(1,1)', circle '<(1,1),1>' - point '(1,1)', circle '<(1,1),1>' * point '(0,2)', circle '<(1,1),2>' / point '(0,2)'
+area:float8 | radius:float8 | diameter:float8 | center:600 | ?column?:600 | point:600 | circle:718 | ?column?:718 | ?column?:718 | ?column?:718 | ?column?:718
+12.566370614359172 | 2 | 4 | (1,2) | (1,2) | (1,2) | <(1,1),3> | <(2,2),1> | <(0,0),1> | <(-2,2),2> | <(0.5,-0.5),1>
+-- SELECT 1
+
+> SELECT circle '<(0,0),2>' @> point '(1,1)', circle '<(0,0),2>' <-> point '(5,0)', circle '<(0,0),1>' <-> polygon '((3,0),(4,0),(4,1))'
+?column?:bool | ?column?:float8 | ?column?:float8
+t | 3 | 2
+-- SELECT 1
+
+> SELECT point '(1,1)'::box, lseg '[(0,0),(2,2)]'::point, path '((0,0),(1,1),(2,0))'::polygon, box '(2,2),(0,0)'::point, box '(2,2),(0,0)'::lseg, box '(2,2),(0,0)'::polygon, box '(2,2),(0,0)'::circle
+box:603 | point:600 | polygon:604 | point:600 | lseg:601 | polygon:604 | circle:718
+(1,1),(1,1) | (1,1) | ((0,0),(1,1),(2,0)) | (1,1) | [(2,2),(0,0)] | ((0,0),(0,2),(2,2),(2,0)) | <(1,1),1.4142135623730951>
+-- SELECT 1
+
+> SELECT polygon '((0,0),(2,0),(2,2),(0,2))'::point, polygon '((0,0),(2,0),(2,2),(0,2))'::path, polygon '((0,0),(2,0),(2,2),(0,2))'::box, polygon '((0,0),(2,0),(2,2),(0,2))'::circle, circle '<(1,1),1>'::point, circle '<(0,0),1>'::box
+point:600 | path:602 | box:603 | circle:718 | point:600 | box:603
+(1,1) | ((0,0),(2,0),(2,2),(0,2)) | (2,2),(0,0) | <(1,1),1.4142135623730951> | (1,1) | (0.7071067811865475,0.7071067811865475),(-0.7071067811865475,-0.7071067811865475)
+-- SELECT 1
+
+> SELECT npoints(circle '<(0,0),1>'::polygon), circle '<(0,0),1>'::polygon ~= polygon(circle '<(0,0),1>')
+npoints:int4 | ?column?:bool
+12 | t
+-- SELECT 1
+
+> SELECT point '(1,1)'::circle
+ERROR 42846: cannot cast type point to circle (at 21)
+
+> SELECT point '(1,1)'::text, '(1,1)'::text::point, box '(1,1),(0,0)'::text::box
+text:text | point:600 | box:603
+(1,1) | (1,1) | (1,1),(0,0)
+-- SELECT 1
+
+> CREATE TABLE geo (id int, p point, l line, s lseg, b box, pa path, po polygon, c circle)
+-- CREATE TABLE
+
+> INSERT INTO geo VALUES (1, '(1,2)', '{1,2,3}', '[(0,0),(1,1)]', '(1,1),(0,0)', '[(0,0),(1,1)]', '((0,0),(1,1),(1,0))', '<(1,1),2>'), (2, '(-1,-2.5)', '{0,1,0}', '[(1,1),(2,2)]', '(5,5),(3,3)', '((0,0),(1,1),(2,0))', '((0,0),(2,0),(2,2))', '<(0,0),0.5>'), (3, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+-- INSERT 0 3
+
+> SELECT * FROM geo ORDER BY id
+id:int4 | p:600 | l:628 | s:601 | b:603 | pa:602 | po:604 | c:718
+1 | (1,2) | {1,2,3} | [(0,0),(1,1)] | (1,1),(0,0) | [(0,0),(1,1)] | ((0,0),(1,1),(1,0)) | <(1,1),2>
+2 | (-1,-2.5) | {0,1,0} | [(1,1),(2,2)] | (5,5),(3,3) | ((0,0),(1,1),(2,0)) | ((0,0),(2,0),(2,2)) | <(0,0),0.5>
+3 | NULL | NULL | NULL | NULL | NULL | NULL | NULL
+-- SELECT 3
+
+> SELECT id FROM geo WHERE p <@ box '(2,3),(0,0)'
+id:int4
+1
+-- SELECT 1
+
+> SELECT id, b FROM geo WHERE b && box '(4,4),(2,2)'
+id:int4 | b:603
+2 | (5,5),(3,3)
+-- SELECT 1
+
+> UPDATE geo SET p[0] = 10, b[1] = point '(-1,-1)' WHERE id = 1
+-- UPDATE 1
+
+> SELECT p, b FROM geo WHERE id = 1
+p:600 | b:603
+(10,2) | (1,1),(-1,-1)
+-- SELECT 1
+
+> UPDATE geo SET p[2] = 10 WHERE id = 1
+ERROR 2202E: array subscript out of range
+
+> UPDATE geo SET p[0] = NULL WHERE id = 1
+-- UPDATE 1
+
+> UPDATE geo SET p[0] = 1 WHERE id = 3
+-- UPDATE 1
+
+> SELECT p FROM geo WHERE id = 3
+p:600
+NULL
+-- SELECT 1
+
+> SELECT ARRAY[point '(1,2)', point '(3,4)'], '{"(1,2)","(3,4)"}'::point[], ARRAY[box '(1,1),(0,0)', box '(2,2),(1,1)'], '{(1,1),(0,0);(2,2),(1,1)}'::box[], ARRAY[circle '<(1,1),1>']
+array:1017 | point:1017 | array:1020 | box:1020 | array:719
+{"(1,2)","(3,4)"} | {"(1,2)","(3,4)"} | {(1,1),(0,0);(2,2),(1,1)} | {(1,1),(0,0);(2,2),(1,1)} | {"<(1,1),1>"}
+-- SELECT 1
+
+> SELECT p FROM geo ORDER BY p
+ERROR 42883: could not identify an ordering operator for type point (at 28)
+HINT: Use an explicit ordering operator or modify the query.
+
+> SELECT b FROM geo ORDER BY b
+ERROR 42883: could not identify an ordering operator for type box (at 28)
+HINT: Use an explicit ordering operator or modify the query.
+
+> SELECT pg_typeof(p), pg_typeof(l), pg_typeof(s), pg_typeof(b), pg_typeof(pa), pg_typeof(po), pg_typeof(c) FROM geo WHERE id = 1
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+point | line | lseg | box | path | polygon | circle
+-- SELECT 1
+
+> CREATE INDEX geo_b ON geo USING gist (b)
+-- CREATE INDEX
+
+> CREATE INDEX geo_p ON geo USING gist (p)
+-- CREATE INDEX
+
+> CREATE INDEX geo_c ON geo USING gist (c)
+-- CREATE INDEX
+
+> CREATE INDEX geo_po ON geo USING gist (po)
+-- CREATE INDEX
+
+> SELECT id FROM geo WHERE b && box '(4,4),(2,2)'
+id:int4
+2
+-- SELECT 1
+
+> CREATE INDEX geo_bad ON geo (p)
+ERROR 42704: data type point has no default operator class for access method "btree"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> SELECT typname, typlen, typcategory, typdelim, typelem::regtype, typarray::regtype FROM pg_type WHERE typname IN ('point', 'line', 'lseg', 'box', 'path', 'polygon', 'circle') ORDER BY oid
+typname:name | typlen:int2 | typcategory:char | typdelim:char | typelem:regtype | typarray:regtype
+point | 16 | G | , | double precision | point[]
+lseg | 32 | G | , | point | lseg[]
+path | -1 | G | , | - | path[]
+box | 32 | G | ; | point | box[]
+polygon | -1 | G | , | - | polygon[]
+line | 24 | G | , | double precision | line[]
+circle | 24 | G | , | - | circle[]
+-- SELECT 7
+
+> DROP TABLE geo
+-- DROP TABLE
+

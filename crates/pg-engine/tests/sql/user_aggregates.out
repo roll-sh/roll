@@ -1,0 +1,528 @@
+> CREATE AGGREGATE ua_sum(int) (sfunc = int4pl, stype = int)
+-- CREATE AGGREGATE
+
+> SELECT ua_sum(x) FROM generate_series(1,4) x
+ua_sum:int4
+10
+-- SELECT 1
+
+> SELECT ua_sum(x) FROM generate_series(1,0) x
+ua_sum:int4
+NULL
+-- SELECT 1
+
+> CREATE AGGREGATE ua_sum0(int) (sfunc = int4pl, stype = int, initcond = '0')
+-- CREATE AGGREGATE
+
+> SELECT ua_sum0(x) FROM generate_series(1,0) x
+ua_sum0:int4
+0
+-- SELECT 1
+
+> SELECT x % 2 AS k, ua_sum(x), ua_sum0(x) FROM generate_series(1,5) x GROUP BY 1 ORDER BY 1
+k:int4 | ua_sum:int4 | ua_sum0:int4
+0 | 6 | 6
+1 | 9 | 9
+-- SELECT 2
+
+> CREATE AGGREGATE ua_acc(anycompatible) (sfunc = array_append, stype = anycompatiblearray, initcond = '{}')
+-- CREATE AGGREGATE
+
+> SELECT ua_acc(x), ua_acc(x::text) FROM generate_series(1,3) x
+ua_acc:int4[] | ua_acc:text[]
+{1,2,3} | {1,2,3}
+-- SELECT 1
+
+> CREATE FUNCTION ua_st(s int[], v int) RETURNS int[] LANGUAGE sql AS $$ SELECT s || v $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION ua_fin(s int[]) RETURNS text LANGUAGE sql AS $$ SELECT array_to_string(s, '-') $$
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE ua_j(int) (sfunc = ua_st, stype = int[], finalfunc = ua_fin)
+-- CREATE AGGREGATE
+
+> SELECT ua_j(x ORDER BY x DESC), ua_j(DISTINCT x % 2) FILTER (WHERE x > 1) FROM generate_series(1,4) x
+ua_j:text | ua_j:text
+4-3-2-1 | 0-1
+-- SELECT 1
+
+> SELECT ua_j(x) OVER (ORDER BY x) FROM generate_series(1,3) x
+ua_j:text
+1
+1-2
+1-2-3
+-- SELECT 3
+
+> SELECT ua_j(x) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM generate_series(1,4) x
+ua_j:text
+1
+1-2
+2-3
+3-4
+-- SELECT 4
+
+> SELECT proname, prokind, proisstrict, provolatile, proparallel, prosrc, prolang, prorettype::regtype, pronargs, proargtypes::regtype[], procost, prorows FROM pg_proc WHERE proname IN ('ua_sum','ua_j','ua_acc') ORDER BY 1
+proname:name | prokind:char | proisstrict:bool | provolatile:char | proparallel:char | prosrc:text | prolang:oid | prorettype:regtype | pronargs:int2 | proargtypes:2211 | procost:float4 | prorows:float4
+ua_acc | a | f | i | u | aggregate_dummy | 12 | anycompatiblearray | 1 | [0:0]={anycompatible} | 1 | 0
+ua_j | a | f | i | u | aggregate_dummy | 12 | text | 1 | [0:0]={integer} | 1 | 0
+ua_sum | a | f | i | u | aggregate_dummy | 12 | integer | 1 | [0:0]={integer} | 1 | 0
+-- SELECT 3
+
+> SELECT aggfnoid::regprocedure, aggkind, aggnumdirectargs, aggtransfn, aggfinalfn, aggcombinefn, aggserialfn, aggdeserialfn, aggmtransfn, aggminvtransfn, aggmfinalfn, aggfinalextra, aggmfinalextra, aggfinalmodify, aggmfinalmodify, aggsortop, aggtranstype::regtype, aggtransspace, aggmtranstype, aggmtransspace, agginitval, aggminitval FROM pg_aggregate WHERE aggfnoid::regproc::text LIKE 'ua%' ORDER BY 1::text
+aggfnoid:2202 | aggkind:char | aggnumdirectargs:int2 | aggtransfn:regproc | aggfinalfn:regproc | aggcombinefn:regproc | aggserialfn:regproc | aggdeserialfn:regproc | aggmtransfn:regproc | aggminvtransfn:regproc | aggmfinalfn:regproc | aggfinalextra:bool | aggmfinalextra:bool | aggfinalmodify:char | aggmfinalmodify:char | aggsortop:oid | aggtranstype:regtype | aggtransspace:int4 | aggmtranstype:oid | aggmtransspace:int4 | agginitval:text | aggminitval:text
+ua_sum(integer) | n | 0 | int4pl | - | - | - | - | - | - | - | f | f | r | r | 0 | integer | 0 | 0 | 0 | NULL | NULL
+ua_sum0(integer) | n | 0 | int4pl | - | - | - | - | - | - | - | f | f | r | r | 0 | integer | 0 | 0 | 0 | 0 | NULL
+ua_acc(anycompatible) | n | 0 | array_append | - | - | - | - | - | - | - | f | f | r | r | 0 | anycompatiblearray | 0 | 0 | 0 | {} | NULL
+ua_j(integer) | n | 0 | ua_st | ua_fin | - | - | - | - | - | - | f | f | r | r | 0 | integer[] | 0 | 0 | 0 | NULL | NULL
+-- SELECT 4
+
+> SELECT pg_get_function_arguments('ua_sum'::regproc), pg_get_function_result('ua_sum'::regproc), pg_get_function_identity_arguments('ua_sum'::regproc)
+pg_get_function_arguments:text | pg_get_function_result:text | pg_get_function_identity_arguments:text
+integer | integer | integer
+-- SELECT 1
+
+> SELECT 'ua_sum'::regproc, 'ua_sum(int)'::regprocedure
+regproc:regproc | regprocedure:2202
+ua_sum | ua_sum(integer)
+-- SELECT 1
+
+> CREATE AGGREGATE ua_sum(int) (sfunc = int4pl, stype = int)
+ERROR 42723: function "ua_sum" already exists with same argument types
+
+> CREATE AGGREGATE ua_bad(int) (sfunc = nope, stype = int)
+ERROR 42883: function nope(integer, integer) does not exist
+
+> CREATE AGGREGATE ua_bad(int) (stype = int)
+ERROR 42P13: aggregate sfunc must be specified
+
+> CREATE AGGREGATE ua_bad(int) (sfunc = int4pl)
+ERROR 42P13: aggregate stype must be specified
+
+> CREATE AGGREGATE ua_bad(text) (sfunc = int4pl, stype = int)
+ERROR 42883: function int4pl(integer, text) does not exist
+
+> CREATE AGGREGATE ua_bad(int) (sfunc = int4pl, stype = int, finalfunc = ua_fin)
+ERROR 42883: function ua_fin(integer) does not exist
+
+> CREATE AGGREGATE ua_bad(int) (sfunc = int4pl, stype = int8)
+ERROR 42883: function int4pl(bigint, integer) does not exist
+
+> CREATE AGGREGATE ua_bad(int) (sfunc = int4pl, stype = int, initcond = 'abc')
+ERROR 22P02: invalid input syntax for type integer: "abc"
+
+> CREATE FUNCTION ua_t(int, int) RETURNS int8 LANGUAGE sql AS $$ SELECT ($1 + $2)::int8 $$
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE ua_bad(int) (sfunc = ua_t, stype = int)
+ERROR 42804: return type of transition function ua_t is not integer
+
+> CREATE AGGREGATE ua_bad(int) (sfunc = int4pl, stype = int, foo = 1)
+WARNING 42601: aggregate attribute "foo" not recognized
+-- CREATE AGGREGATE
+
+> DROP AGGREGATE ua_bad(int)
+-- DROP AGGREGATE
+
+> CREATE OR REPLACE AGGREGATE ua_sum0(int) (sfunc = int4pl, stype = int, initcond = '100')
+-- CREATE AGGREGATE
+
+> SELECT ua_sum0(x) FROM generate_series(1,3) x
+ua_sum0:int4
+106
+-- SELECT 1
+
+> CREATE OR REPLACE AGGREGATE ua_sum0(int) (sfunc = int8pl, stype = int8)
+ERROR 42804: function int8pl(bigint, bigint) requires run-time type coercion
+
+> CREATE OR REPLACE FUNCTION ua_sum0(int) RETURNS int LANGUAGE sql AS 'select 1'
+ERROR 42809: cannot change routine kind
+DETAIL: "ua_sum0" is an aggregate function.
+
+> CREATE AGGREGATE ua_st(int[], int) (sfunc = int4pl, stype = int)
+ERROR 42883: function int4pl(integer, integer[], integer) does not exist
+
+> CREATE OR REPLACE AGGREGATE ua_st(int[], int) (sfunc = int4pl, stype = int)
+ERROR 42883: function int4pl(integer, integer[], integer) does not exist
+
+> DROP FUNCTION ua_sum(int)
+ERROR 42809: "ua_sum" is an aggregate function
+HINT: Use DROP AGGREGATE to drop aggregate functions.
+
+> DROP AGGREGATE ua_st(int[], int)
+ERROR 42809: function ua_st(integer[], integer) is not an aggregate
+
+> DROP FUNCTION ua_fin(int[])
+ERROR 2BP01: cannot drop function ua_fin(integer[]) because other objects depend on it
+DETAIL: function ua_j(integer) depends on function ua_fin(integer[])
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> SELECT pg_get_functiondef('ua_sum'::regproc)
+ERROR 42809: "ua_sum" is an aggregate function
+
+> SELECT ua_sum(x) OVER () FROM generate_series(1,2) x
+ua_sum:int4
+3
+3
+-- SELECT 2
+
+> SELECT ua_sum(DISTINCT x) FROM generate_series(1,2) x
+ua_sum:int4
+3
+-- SELECT 1
+
+> SELECT ua_sum(*) FROM generate_series(1,2) x
+ERROR 42883: function ua_sum() does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT ua_sum(x, x) FROM generate_series(1,3) x
+ERROR 42883: function ua_sum(integer, integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT ua_sum(x::int8) FROM generate_series(1,3) x
+ERROR 42883: function ua_sum(bigint) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT ua_sum(x) FROM generate_series(1,3) x GROUP BY ua_sum(x)
+ERROR 42803: aggregate functions are not allowed in GROUP BY (at 55)
+
+> SELECT ua_sum(ua_sum(x)) FROM generate_series(1,3) x
+ERROR 42803: aggregate function calls cannot be nested (at 15)
+
+> SELECT * FROM ua_sum(1)
+ERROR 42803: aggregate functions are not allowed in functions in FROM (at 15)
+
+> SELECT x FROM generate_series(1,3) x WHERE ua_sum(x) > 1
+ERROR 42803: aggregate functions are not allowed in WHERE (at 44)
+
+> SELECT ua_sum(x) FROM generate_series(1,3) x HAVING ua_sum(x) > 1
+ua_sum:int4
+6
+-- SELECT 1
+
+> SELECT public.ua_sum(x) FROM generate_series(1,3) x
+ua_sum:int4
+6
+-- SELECT 1
+
+> CREATE AGGREGATE ua_old (basetype = int, sfunc = int4pl, stype = int)
+-- CREATE AGGREGATE
+
+> SELECT ua_old(x) FROM generate_series(1,3) x
+ua_old:int4
+6
+-- SELECT 1
+
+> CREATE AGGREGATE ua_cnt(*) (sfunc = int8inc, stype = int8, initcond = '0')
+-- CREATE AGGREGATE
+
+> SELECT ua_cnt(*) FROM generate_series(1,3) x
+ua_cnt:int8
+3
+-- SELECT 1
+
+> CREATE FUNCTION ua_s(int, int) RETURNS int LANGUAGE sql STRICT AS $$ SELECT $1 + $2 $$
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE ua_strict(int) (sfunc = ua_s, stype = int)
+-- CREATE AGGREGATE
+
+> SELECT ua_strict(x) FROM (VALUES (1), (NULL), (3)) v(x)
+ua_strict:int4
+4
+-- SELECT 1
+
+> SELECT ua_strict(x) FROM (VALUES (NULL::int)) v(x)
+ua_strict:int4
+NULL
+-- SELECT 1
+
+> CREATE FUNCTION ua_ns(int, int) RETURNS int LANGUAGE sql AS $$ SELECT coalesce($1, 0) + coalesce($2, 100) $$
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE ua_n(int) (sfunc = ua_ns, stype = int)
+-- CREATE AGGREGATE
+
+> SELECT ua_n(x) FROM (VALUES (1), (NULL), (3)) v(x)
+ua_n:int4
+104
+-- SELECT 1
+
+> CREATE FUNCTION ua_fe(int, int) RETURNS text LANGUAGE sql AS $$ SELECT $1 || ':' || coalesce($2::text, 'null') $$
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE ua_f(int) (sfunc = int4pl, stype = int, finalfunc = ua_fe, finalfunc_extra)
+-- CREATE AGGREGATE
+
+> SELECT ua_f(x) FROM generate_series(1,3) x
+ua_f:text
+6:null
+-- SELECT 1
+
+> CREATE AGGREGATE ua_g(int) (sfunc = int4pl, stype = int, finalfunc = ua_fe)
+ERROR 42883: function ua_fe(integer) does not exist
+
+> CREATE FUNCTION ua_plst(s text, v text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN coalesce(s || ',', '') || v; END $$
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE ua_pl(text) (sfunc = ua_plst, stype = text)
+-- CREATE AGGREGATE
+
+> SELECT ua_pl(x::text ORDER BY x DESC) FROM generate_series(1,3) x
+ua_pl:text
+3,2,1
+-- SELECT 1
+
+> CREATE VIEW ua_v AS SELECT ua_sum(x) FILTER (WHERE x > 1), ua_f(x ORDER BY x) FROM generate_series(1,3) x
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('ua_v')
+pg_get_viewdef:text
+ SELECT ua_sum(x) FILTER (WHERE (x > 1)) AS ua_sum,
+    ua_f(x ORDER BY x) AS ua_f
+   FROM generate_series(1, 3) x(x);
+-- SELECT 1
+
+> SELECT * FROM ua_v
+ua_sum:int4 | ua_f:text
+5 | 6:null
+-- SELECT 1
+
+> DROP AGGREGATE ua_sum(int)
+ERROR 2BP01: cannot drop function ua_sum(integer) because other objects depend on it
+DETAIL: view ua_v depends on function ua_sum(integer)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP FUNCTION ua_fe(int, int)
+ERROR 2BP01: cannot drop function ua_fe(integer,integer) because other objects depend on it
+DETAIL: function ua_f(integer) depends on function ua_fe(integer,integer)
+DETAIL: view ua_v depends on function ua_f(integer)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP AGGREGATE ua_sum(int) CASCADE
+NOTICE 00000: drop cascades to view ua_v
+-- DROP AGGREGATE
+
+> ALTER FUNCTION ua_f(int) RENAME TO ua_f2
+-- ALTER FUNCTION
+
+> ALTER FUNCTION ua_f2(int) STABLE
+ERROR 42809: "ua_f2" is an aggregate function
+
+> ALTER AGGREGATE ua_fe(int, int) RENAME TO ua_q
+ERROR 42809: function ua_fe(integer, integer) is not an aggregate
+
+> ALTER AGGREGATE ua_f2(int) SET SCHEMA public
+-- ALTER AGGREGATE
+
+> ALTER AGGREGATE ua_f2(int) OWNER TO CURRENT_USER
+-- ALTER AGGREGATE
+
+> COMMENT ON AGGREGATE ua_f2(int) IS 'agg comment'
+-- COMMENT
+
+> SELECT obj_description('ua_f2(int)'::regprocedure)
+obj_description:text
+agg comment
+-- SELECT 1
+
+> CREATE SCHEMA ua_sc
+-- CREATE SCHEMA
+
+> CREATE AGGREGATE ua_sc.ua_m(int) (sfunc = int4pl, stype = int, initcond = '1000')
+-- CREATE AGGREGATE
+
+> SELECT ua_m(1)
+ERROR 42883: function ua_m(integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT ua_sc.ua_m(x) FROM generate_series(1,2) x
+ua_m:int4
+1003
+-- SELECT 1
+
+> DROP SCHEMA ua_sc CASCADE
+NOTICE 00000: drop cascades to function ua_sc.ua_m(integer)
+-- DROP SCHEMA
+
+> DROP FUNCTION ua_fe(int, int) CASCADE
+NOTICE 00000: drop cascades to function ua_f2(integer)
+-- DROP FUNCTION
+
+> DROP AGGREGATE IF EXISTS nope(int)
+NOTICE 00000: aggregate nope(pg_catalog.int4) does not exist, skipping
+-- DROP AGGREGATE
+
+> DROP AGGREGATE nope(int)
+ERROR 42883: aggregate nope(integer) does not exist
+
+> DROP AGGREGATE ua_sum0(int), ua_acc(anycompatible), ua_j(int), ua_old(int), ua_cnt(*), ua_strict(int), ua_n(int), ua_pl(text)
+-- DROP AGGREGATE
+
+> DROP FUNCTION ua_st, ua_fin, ua_t, ua_s, ua_ns, ua_plst
+-- DROP FUNCTION
+
+> CREATE AGGREGATE ua_avg(float8) (sfunc = float8_accum, stype = float8[], finalfunc = float8_avg, initcond = '{0,0,0}')
+-- CREATE AGGREGATE
+
+> CREATE AGGREGATE ua_var(float8) (sfunc = float8_accum, stype = float8[], finalfunc = float8_var_samp, initcond = '{0,0,0}')
+-- CREATE AGGREGATE
+
+> SELECT ua_avg(x), ua_var(x), avg(x), var_samp(x) FROM (VALUES (1.0::float8), (2), (4)) v(x)
+ua_avg:float8 | ua_var:float8 | avg:float8 | var_samp:float8
+2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335
+-- SELECT 1
+
+> CREATE AGGREGATE ua_count(anyelement) (sfunc = int8inc_any, stype = int8, initcond = '0')
+-- CREATE AGGREGATE
+
+> SELECT ua_count(x), ua_count(x::text) FROM (VALUES (1), (NULL), (3)) v(x)
+ua_count:int8 | ua_count:int8
+2 | 2
+-- SELECT 1
+
+> CREATE AGGREGATE ua_max(int) (sfunc = int4larger, stype = int)
+-- CREATE AGGREGATE
+
+> CREATE AGGREGATE ua_min(text) (sfunc = text_smaller, stype = text)
+-- CREATE AGGREGATE
+
+> SELECT ua_max(x), ua_min(x::text) FROM (VALUES (3), (10), (NULL), (2)) v(x)
+ua_max:int4 | ua_min:text
+10 | 10
+-- SELECT 1
+
+> CREATE FUNCTION ua_pair(s text, a text, b int) RETURNS text LANGUAGE sql AS $$ SELECT coalesce(s, '') || a || b $$
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE ua_two(text, int) (sfunc = ua_pair, stype = text)
+-- CREATE AGGREGATE
+
+> SELECT ua_two(t, n ORDER BY n DESC) FROM (VALUES ('a', 1), ('b', 2)) v(t, n)
+ua_two:text
+b2a1
+-- SELECT 1
+
+> CREATE FUNCTION ua_first_s(anyelement, anyelement) RETURNS anyelement LANGUAGE sql IMMUTABLE STRICT AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE ua_first(anyelement) (sfunc = ua_first_s, stype = anyelement)
+-- CREATE AGGREGATE
+
+> SELECT ua_first(x ORDER BY x DESC), ua_first(x::text ORDER BY x) FROM generate_series(1,3) x
+ua_first:int4 | ua_first:text
+3 | 1
+-- SELECT 1
+
+> SELECT g, ua_first(x) OVER (PARTITION BY g ORDER BY x DESC) FROM (VALUES (1, 5), (1, 6), (2, 7)) v(g, x) ORDER BY 1, 2
+g:int4 | ua_first:int4
+1 | 6
+1 | 6
+2 | 7
+-- SELECT 3
+
+> SELECT (SELECT ua_max(y) FROM generate_series(1, x) y) FROM generate_series(1,3) x
+ua_max:int4
+1
+2
+3
+-- SELECT 3
+
+> SELECT x, (SELECT ua_max(x)) FROM generate_series(1,2) x GROUP BY x ORDER BY 1
+x:int4 | ua_max:int4
+1 | 1
+2 | 2
+-- SELECT 2
+
+> CREATE AGGREGATE sum(text) (sfunc = textcat, stype = text, initcond = '')
+-- CREATE AGGREGATE
+
+> SELECT sum(x::text), sum(x) FROM generate_series(1,3) x
+sum:text | sum:int8
+123 | 6
+-- SELECT 1
+
+> DROP AGGREGATE sum(text)
+-- DROP AGGREGATE
+
+> CREATE FUNCTION ua_plcall() RETURNS int LANGUAGE plpgsql AS $$ DECLARE r int; BEGIN SELECT ua_max(x) INTO r FROM generate_series(1,7) x; RETURN r; END $$
+-- CREATE FUNCTION
+
+> SELECT ua_plcall()
+ua_plcall:int4
+7
+-- SELECT 1
+
+> CREATE SCHEMA ua_s2
+-- CREATE SCHEMA
+
+> CREATE AGGREGATE ua_s2.ua_hidden(int) (sfunc = int4pl, stype = int)
+-- CREATE AGGREGATE
+
+> CREATE VIEW ua_v2 AS SELECT ua_s2.ua_hidden(x) FROM generate_series(1,3) x
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('ua_v2')
+pg_get_viewdef:text
+ SELECT ua_s2.ua_hidden(x) AS ua_hidden
+   FROM generate_series(1, 3) x(x);
+-- SELECT 1
+
+> SELECT * FROM ua_v2
+ua_hidden:int4
+6
+-- SELECT 1
+
+> SELECT 'ua_s2.ua_hidden(int)'::regprocedure, 'ua_s2.ua_hidden'::regproc
+regprocedure:2202 | regproc:regproc
+ua_s2.ua_hidden(integer) | ua_s2.ua_hidden
+-- SELECT 1
+
+> DROP SCHEMA ua_s2 CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to function ua_s2.ua_hidden(integer)
+DETAIL: drop cascades to view ua_v2
+-- DROP SCHEMA
+
+> CREATE AGGREGATE ua_bad2(int) (sfunc = int4pl, stype = anyelement)
+ERROR 42P13: cannot determine transition data type
+DETAIL: A result of type anyelement requires at least one input of type anyelement, anyarray, anynonarray, anyenum, anyrange, or anymultirange.
+
+> CREATE AGGREGATE ua_bad2(int) (sfunc = int4pl, stype = int, finalfunc = ua_first_s)
+ERROR 42883: function ua_first_s(integer) does not exist
+
+> CREATE AGGREGATE ua_bad2(anyelement) (sfunc = ua_first_s, stype = anyelement, finalfunc = float8_avg)
+ERROR 42883: function float8_avg(anyelement) does not exist
+
+> REVOKE EXECUTE ON FUNCTION ua_max(int) FROM PUBLIC
+-- REVOKE
+
+> GRANT EXECUTE ON FUNCTION ua_max(int) TO PUBLIC
+-- GRANT
+
+> SELECT p.proname, a.aggtransfn, a.aggfinalfn, a.agginitval FROM pg_aggregate a JOIN pg_proc p ON p.oid = a.aggfnoid WHERE p.proname LIKE 'ua%' ORDER BY 1
+proname:name | aggtransfn:regproc | aggfinalfn:regproc | agginitval:text
+ua_avg | float8_accum | float8_avg | {0,0,0}
+ua_count | int8inc_any | - | 0
+ua_first | ua_first_s | - | NULL
+ua_max | int4larger | - | NULL
+ua_min | text_smaller | - | NULL
+ua_two | ua_pair | - | NULL
+ua_var | float8_accum | float8_var_samp | {0,0,0}
+-- SELECT 7
+
+> DROP FUNCTION ua_first_s(anyelement, anyelement)
+ERROR 2BP01: cannot drop function ua_first_s(anyelement,anyelement) because other objects depend on it
+DETAIL: function ua_first(anyelement) depends on function ua_first_s(anyelement,anyelement)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP AGGREGATE ua_avg(float8), ua_var(float8), ua_count(anyelement), ua_max(int), ua_min(text), ua_two(text, int), ua_first(anyelement)
+-- DROP AGGREGATE
+
+> DROP FUNCTION ua_pair, ua_first_s, ua_plcall
+-- DROP FUNCTION
+
+> DROP VIEW IF EXISTS ua_v2
+NOTICE 00000: view "ua_v2" does not exist, skipping
+-- DROP VIEW
+

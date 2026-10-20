@@ -1,0 +1,157 @@
+> create collation gxc_en (provider = libc, locale = 'en_US.utf8')
+-- CREATE COLLATION
+
+> create collation gxc_de (lc_collate = 'de_DE.utf8', lc_ctype = 'de_DE.utf8')
+-- CREATE COLLATION
+
+> create collation gxc_mixed (provider = libc, lc_collate = 'C', lc_ctype = 'tr_TR.utf8')
+-- CREATE COLLATION
+
+> create collation gxc_cc (provider = libc, lc_collate = 'en_US.utf8', lc_ctype = 'C')
+-- CREATE COLLATION
+
+> select collname, collprovider, collisdeterministic, collencoding, collcollate, collctype, colllocale, collversion from pg_collation where collname like 'gxl%' order by 1
+collname:name | collprovider:char | collisdeterministic:bool | collencoding:int4 | collcollate:text | collctype:text | colllocale:text | collversion:text
+-- SELECT 0
+
+> select pg_collation_actual_version(oid) from pg_collation where collname like 'gxl%' order by collname
+pg_collation_actual_version:text
+-- SELECT 0
+
+> select upper('àéî ñß ǆ ǈ ı i ſ ﬁ ŉ ΐ ᾳ' collate gxc_en), lower('ÀÉÎ Ñ ẞ Ǆ ǅ İ I Σ ΑΣ' collate gxc_en)
+upper:text | lower:text
+ÀÉÎ Ñẞ Ǆ Ǉ I I S ﬁ ŉ ΐ ᾼ | àéî ñ ß ǆ ǆ i i σ ασ
+-- SELECT 1
+
+> select initcap('hello wORLD ǆa ﬁx éa 3x a1b don''t' collate gxc_en), initcap('ǆa' collate gxc_cc)
+initcap:text | initcap:text
+Hello World Ǆa ﬁx Éa 3x A1b Don'T | ǆA
+-- SELECT 1
+
+> select upper('àéî ß' collate gxc_mixed), upper('àéî ß' collate gxc_cc), lower('ÀÉÎ' collate gxc_cc), casefold('ÀßΣ' collate gxc_en)
+upper:text | upper:text | lower:text | casefold:text
+ÀÉÎ ẞ | àéî ß | ÀÉÎ | àßσ
+-- SELECT 1
+
+> select x, x < 'b' collate gxc_en as lt_en, x < 'b' collate gxc_de as lt_de from (values ('a'), ('B'), ('ä'), ('Ä'), ('b'), ('é')) v(x) order by x collate gxc_en
+x:text | lt_en:bool | lt_de:bool
+B | t | t
+a | t | t
+b | f | f
+Ä | f | f
+ä | f | f
+é | f | f
+-- SELECT 6
+
+> select string_agg(x, ',' order by x collate gxc_de) from (values ('a'), ('B'), ('ä'), ('Ä'), ('b'), ('é'), ('1'), ('-')) v(x)
+string_agg:text
+-,1,B,a,b,Ä,ä,é
+-- SELECT 1
+
+> select 'ÉCOLE' ilike 'école' collate gxc_en, 'ÉCOLE' ilike 'école' collate gxc_cc, 'İ' ilike 'i' collate gxc_en, 'ß' ilike 'ẞ' collate gxc_en
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t
+-- SELECT 1
+
+> select x, x ~ '[[:alpha:]]' collate gxc_en as alpha, x ~ '[[:upper:]]' collate gxc_en as upper, x ~ '[[:lower:]]' collate gxc_en as lower,
+>        x ~ '[[:digit:]]' collate gxc_en as digit, x ~ '[[:punct:]]' collate gxc_en as punct, x ~ '[[:space:]]' collate gxc_en as space,
+>        x ~ '[[:graph:]]' collate gxc_en as graph, x ~ '[[:print:]]' collate gxc_en as print
+>   from (values ('a'), ('É'), ('ß'), ('٣'), ('²'), ('€'), ('_'), ('-'), (' '), (U&'\00A0'), (U&'\3000'), ('ǅ'), ('ⅷ'), ('Ⅷ'), ('中'), ('🙂'), (U&'\0085'), (U&'\00AD'), (U&'\200B')) v(x) order by x collate "C"
+x:text | alpha:bool | upper:bool | lower:bool | digit:bool | punct:bool | space:bool | graph:bool | print:bool
+  | f | f | f | f | f | t | f | t
+- | f | f | f | f | t | f | t | t
+_ | f | f | f | f | t | f | t | t
+a | t | f | t | f | f | f | t | t
+ | f | f | f | f | f | t | f | f
+  | f | f | f | f | t | f | t | t
+­ | f | f | f | f | t | f | t | t
+² | f | f | f | f | t | f | t | t
+É | t | t | f | f | f | f | t | t
+ß | t | f | t | f | f | f | t | t
+ǅ | t | t | t | f | f | f | t | t
+٣ | t | f | f | f | f | f | t | t
+​ | f | f | f | f | t | f | t | t
+€ | f | f | f | f | t | f | t | t
+Ⅷ | t | t | f | f | f | f | t | t
+ⅷ | t | f | t | f | f | f | t | t
+　 | f | f | f | f | f | t | f | t
+中 | t | f | f | f | f | f | t | t
+🙂 | f | f | f | f | t | f | t | t
+-- SELECT 19
+
+> select 'É' ~* 'é' collate gxc_en, 'ǅ' ~* 'ǆ' collate gxc_en, 'ſ' ~* 's' collate gxc_en, 'K' ~* 'k' collate gxc_en, 'ß' ~* 'ẞ' collate gxc_en, 'Σ' ~* 'ς' collate gxc_en
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | f | t | t | t
+-- SELECT 1
+
+> select regexp_replace('ÀBC àbc' collate gxc_en, '[[:upper:]]+', '_', 'g'), regexp_matches('aÉ1٣ ǅ' collate gxc_en, '\w+', 'g')
+regexp_replace:text | regexp_matches:text[]
+_ àbc | {aÉ1٣}
+_ àbc | {ǅ}
+-- SELECT 2
+
+> create table gxc_lt (a text collate gxc_en)
+-- CREATE TABLE
+
+> insert into gxc_lt values ('b'), ('A'), ('ä'), ('a')
+-- INSERT 0 4
+
+> select a, upper(a), a ~ '^[[:lower:]]' from gxc_lt order by a
+a:text | upper:text | ?column?:bool
+A | A | f
+a | A | t
+b | B | t
+ä | Ä | t
+-- SELECT 4
+
+> select min(a), max(a) from gxc_lt
+min:text | max:text
+A | ä
+-- SELECT 1
+
+> drop table gxc_lt
+-- DROP TABLE
+
+> create collation gxc_bad (provider = libc, locale = 'en_US.utf8', deterministic = false)
+ERROR 0A000: nondeterministic collations not supported with this provider
+
+> create collation gxc_bad (provider = libc, locale = 'C', rules = '&a < b')
+ERROR 42P17: ICU rules cannot be specified unless locale provider is ICU
+
+> drop collation gxc_en, gxc_de, gxc_mixed, gxc_cc
+-- DROP COLLATION
+
+> create collation gxc_b1 (provider = builtin, locale = 'C')
+-- CREATE COLLATION
+
+> create collation gxc_b2 (provider = builtin, locale = 'C.UTF-8')
+-- CREATE COLLATION
+
+> create collation gxc_b3 (provider = builtin, locale = 'PG_UNICODE_FAST')
+-- CREATE COLLATION
+
+> select upper('ß ǆ ﬁ ŉ' collate gxc_b1), upper('ß ǆ ﬁ ŉ' collate gxc_b2), upper('ß ǆ ﬁ ŉ' collate gxc_b3)
+upper:text | upper:text | upper:text
+ß ǆ ﬁ ŉ | ß Ǆ ﬁ ŉ | SS Ǆ FI ʼN
+-- SELECT 1
+
+> select initcap('ǆa ßa ﬁa 3a a3a' collate gxc_b2), initcap('ǆa ßa ﬁa 3a a3a' collate gxc_b3), casefold('ẞ ß İ ſ' collate gxc_b2), casefold('ẞ ß İ ſ' collate gxc_b3)
+initcap:text | initcap:text | casefold:text | casefold:text
+Ǆa ßa ﬁa 3a A3a | ǅa Ssa Fia 3a A3a | ß ß İ s | ss ss i̇ s
+-- SELECT 1
+
+> select '٣' ~ '\d' collate gxc_b2, '٣' ~ '\d' collate gxc_b3, '€' ~ '[[:punct:]]' collate gxc_b2, '€' ~ '[[:punct:]]' collate gxc_b3
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | t | f
+-- SELECT 1
+
+> select collname, colllocale, collversion, pg_collation_actual_version(oid) from pg_collation where collname like 'gxc_b%' order by 1
+collname:name | colllocale:text | collversion:text | pg_collation_actual_version:text
+gxc_b1 | C | 1 | 1
+gxc_b2 | C.UTF-8 | 1 | 1
+gxc_b3 | PG_UNICODE_FAST | 1 | 1
+-- SELECT 3
+
+> drop collation gxc_b1, gxc_b2, gxc_b3
+-- DROP COLLATION
+

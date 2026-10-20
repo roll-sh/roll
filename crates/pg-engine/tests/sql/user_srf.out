@@ -1,0 +1,213 @@
+> CREATE FUNCTION us_nums(n int) RETURNS SETOF int LANGUAGE sql AS $$ SELECT generate_series(1, n) $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION us_pairs(n int, OUT a int, OUT b text) RETURNS SETOF record LANGUAGE sql AS $$ SELECT i, 'v' || i FROM generate_series(1, n) i $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION us_tab(n int) RETURNS TABLE (x int, y int) LANGUAGE sql AS $$ SELECT i, i * i FROM generate_series(1, n) i $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION us_plpg(n int) RETURNS SETOF text LANGUAGE plpgsql AS $$
+> BEGIN
+>   FOR i IN 1..n LOOP RETURN NEXT 'p' || i; END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION us_strict(n int) RETURNS SETOF int LANGUAGE sql STRICT AS $$ SELECT 42 $$
+-- CREATE FUNCTION
+
+> SELECT us_nums(3)
+us_nums:int4
+1
+2
+3
+-- SELECT 3
+
+> SELECT us_nums(2), us_nums(3)
+us_nums:int4 | us_nums:int4
+1 | 1
+2 | 2
+NULL | 3
+-- SELECT 3
+
+> SELECT us_nums(2), generate_series(10, 12)
+us_nums:int4 | generate_series:int4
+1 | 10
+2 | 11
+NULL | 12
+-- SELECT 3
+
+> SELECT us_pairs(2)
+us_pairs:record
+(1,v1)
+(2,v2)
+-- SELECT 2
+
+> SELECT (us_pairs(2)).*
+a:int4 | b:text
+1 | v1
+2 | v2
+-- SELECT 2
+
+> SELECT (us_pairs(2)).b
+b:text
+v1
+v2
+-- SELECT 2
+
+> SELECT us_tab(3)
+us_tab:record
+(1,1)
+(2,4)
+(3,9)
+-- SELECT 3
+
+> SELECT (us_tab(2)).y
+y:int4
+1
+4
+-- SELECT 2
+
+> SELECT us_plpg(3)
+us_plpg:text
+p1
+p2
+p3
+-- SELECT 3
+
+> SELECT us_strict(NULL), us_strict(1)
+us_strict:int4 | us_strict:int4
+NULL | 42
+-- SELECT 1
+
+> SELECT n, us_nums(n) FROM (VALUES (1), (2), (0)) v(n) ORDER BY 1, 2
+n:int4 | us_nums:int4
+1 | 1
+2 | 1
+2 | 2
+-- SELECT 3
+
+> SELECT us_nums(3) + 100 AS plus
+plus:int4
+101
+102
+103
+-- SELECT 3
+
+> SELECT * FROM us_nums(2) WHERE us_nums = 2
+us_nums:int4
+2
+-- SELECT 1
+
+> SELECT 1 WHERE us_nums(1) = 1
+ERROR 0A000: set-returning functions are not allowed in WHERE (at 16)
+
+> SELECT sum(us_nums(3))
+ERROR 0A000: aggregate function calls cannot contain set-returning function calls (at 12)
+HINT: You might be able to move the set-returning function into a LATERAL FROM item.
+
+> SELECT count(*) FROM (SELECT us_nums(4)) s
+count:int8
+4
+-- SELECT 1
+
+> SELECT us_nums(2) ORDER BY 1 DESC
+us_nums:int4
+2
+1
+-- SELECT 2
+
+> SELECT DISTINCT us_nums(2) % 2
+?column?:int4
+0
+1
+-- SELECT 2
+
+> SELECT sum(1) OVER (PARTITION BY generate_series(1, 2))
+sum:int8
+1
+1
+-- SELECT 2
+
+> SELECT lag(generate_series(1, 2)) OVER ()
+ERROR 0A000: window function calls cannot contain set-returning function calls (at 12)
+HINT: You might be able to move the set-returning function into a LATERAL FROM item.
+
+> SELECT generate_series(1, generate_series(1, 2))
+generate_series:int4
+1
+1
+2
+-- SELECT 3
+
+> SELECT us_nums(us_nums(3)), generate_series(5, 6)
+us_nums:int4 | generate_series:int4
+1 | 5
+1 | 6
+1 | NULL
+2 | 6
+2 | NULL
+3 | NULL
+-- SELECT 6
+
+> SELECT generate_series(1, 2) + generate_series(1, generate_series(2, 3))
+?column?:int4
+2
+3
+3
+4
+5
+-- SELECT 5
+
+> SELECT CASE WHEN true THEN generate_series(1, 2) END
+ERROR 0A000: set-returning functions are not allowed in CASE (at 28)
+HINT: You might be able to move the set-returning function into a LATERAL FROM item.
+
+> SELECT coalesce(generate_series(1, 2), 0)
+ERROR 0A000: set-returning functions are not allowed in COALESCE (at 17)
+HINT: You might be able to move the set-returning function into a LATERAL FROM item.
+
+> SELECT CASE generate_series(1, 2) WHEN 1 THEN 'one' ELSE 'other' END
+ERROR 0A000: set-returning functions are not allowed in CASE (at 13)
+HINT: You might be able to move the set-returning function into a LATERAL FROM item.
+
+> CREATE TABLE us_t (v int)
+-- CREATE TABLE
+
+> INSERT INTO us_t VALUES (generate_series(1, 3))
+-- INSERT 0 3
+
+> INSERT INTO us_t VALUES (us_nums(2))
+-- INSERT 0 2
+
+> INSERT INTO us_t SELECT us_nums(2)
+-- INSERT 0 2
+
+> INSERT INTO us_t VALUES (1), (generate_series(1, 2))
+ERROR 0A000: set-returning functions are not allowed in VALUES (at 31)
+
+> SELECT v, count(*) FROM us_t GROUP BY v ORDER BY v
+v:int4 | count:int8
+1 | 3
+2 | 3
+3 | 1
+-- SELECT 3
+
+> UPDATE us_t SET v = us_nums(1)
+ERROR 0A000: set-returning functions are not allowed in UPDATE (at 21)
+
+> SELECT us_t.v, us_nums(us_t.v) FROM us_t WHERE v = 1 LIMIT 2
+v:int4 | us_nums:int4
+1 | 1
+1 | 1
+-- SELECT 2
+
+> VALUES (generate_series(1, 2))
+ERROR 0A000: set-returning functions are not allowed in VALUES (at 9)
+
+> DROP TABLE us_t
+-- DROP TABLE
+
+> DROP FUNCTION us_nums(int), us_pairs(int), us_tab(int), us_plpg(int), us_strict(int)
+-- DROP FUNCTION
+

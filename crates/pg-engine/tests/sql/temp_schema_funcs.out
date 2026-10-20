@@ -1,0 +1,114 @@
+> create function pg_temp.whoami() returns text as $$select 'temp'::text$$ language sql
+-- CREATE FUNCTION
+
+> select pg_temp.whoami()
+whoami:text
+temp
+-- SELECT 1
+
+> create domain pg_temp.nonempty as text check (value <> '')
+-- CREATE DOMAIN
+
+> select pg_temp.nonempty('x')
+nonempty:text
+x
+-- SELECT 1
+
+> create view pg_temp.gx_tv as select 1 as x
+-- CREATE VIEW
+
+> create sequence pg_temp.gx_ts
+-- CREATE SEQUENCE
+
+> create type pg_temp.gx_tt as (a int)
+-- CREATE TYPE
+
+> select nspname like 'pg_temp%' from pg_namespace n join pg_proc p on p.pronamespace = n.oid where proname = 'whoami'
+?column?:bool
+t
+-- SELECT 1
+
+> drop function pg_temp.whoami()
+-- DROP FUNCTION
+
+> SELECT to_regtypemod('text'), to_regtypemod('timestamp(4)'), to_regtypemod('no_such_type(4)')
+to_regtypemod:int4 | to_regtypemod:int4 | to_regtypemod:int4
+-1 | 4 | NULL
+-- SELECT 1
+
+> SELECT format_type(to_regtype('varchar(32)'), to_regtypemod('varchar(32)'))
+format_type:text
+character varying(32)
+-- SELECT 1
+
+> SELECT format_type(to_regtype('bit'), to_regtypemod('bit'))
+format_type:text
+bit(1)
+-- SELECT 1
+
+> SELECT format_type(to_regtype('"bit"'), to_regtypemod('"bit"'))
+format_type:text
+"bit"
+-- SELECT 1
+
+> SELECT to_regtypemod('int4 int4')
+ERROR 42601: syntax error at or near "int4" (at 6)
+CONTEXT: invalid type name "int4 int4"
+
+> SELECT pg_trigger_depth(), pg_numa_available()
+pg_trigger_depth:int4 | pg_numa_available:bool
+0 | f
+-- SELECT 1
+
+> CREATE TABLE gx_depth (a int)
+-- CREATE TABLE
+
+> CREATE FUNCTION gx_depth_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE 'depth = %', pg_trigger_depth();
+>   IF NEW.a < 3 THEN INSERT INTO gx_depth VALUES (NEW.a + 1); END IF;
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER gx_depth_t BEFORE INSERT ON gx_depth FOR EACH ROW EXECUTE FUNCTION gx_depth_trg()
+-- CREATE TRIGGER
+
+> INSERT INTO gx_depth VALUES (1)
+NOTICE 00000: depth = 1
+CONTEXT: PL/pgSQL function gx_depth_trg() line 3 at RAISE
+NOTICE 00000: depth = 2
+CONTEXT: PL/pgSQL function gx_depth_trg() line 3 at RAISE
+CONTEXT: SQL statement "INSERT INTO gx_depth VALUES (NEW.a + 1)"
+CONTEXT: PL/pgSQL function gx_depth_trg() line 4 at SQL statement
+NOTICE 00000: depth = 3
+CONTEXT: PL/pgSQL function gx_depth_trg() line 3 at RAISE
+CONTEXT: SQL statement "INSERT INTO gx_depth VALUES (NEW.a + 1)"
+CONTEXT: PL/pgSQL function gx_depth_trg() line 4 at SQL statement
+CONTEXT: SQL statement "INSERT INTO gx_depth VALUES (NEW.a + 1)"
+CONTEXT: PL/pgSQL function gx_depth_trg() line 4 at SQL statement
+-- INSERT 0 1
+
+> SELECT pg_trigger_depth()
+pg_trigger_depth:int4
+0
+-- SELECT 1
+
+> DO $$ BEGIN SHOW work_mem; END $$
+ERROR 42601: query has no destination for result data
+CONTEXT: PL/pgSQL function inline_code_block line 1 at SQL statement
+
+> CREATE UNLOGGED TABLE gx_unl (a int) PARTITION BY RANGE (a)
+ERROR 0A000: partitioned tables cannot be unlogged
+
+> SELECT pg_stat_force_next_flush()
+pg_stat_force_next_flush:void
+
+-- SELECT 1
+
+> DROP TABLE gx_depth
+-- DROP TABLE
+
+> DROP FUNCTION gx_depth_trg()
+-- DROP FUNCTION
+

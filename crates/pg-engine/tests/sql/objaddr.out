@@ -1,0 +1,251 @@
+> CREATE SCHEMA oa
+-- CREATE SCHEMA
+
+> CREATE TYPE oa.en AS ENUM ('x')
+-- CREATE TYPE
+
+> CREATE TYPE oa.co AS (a int, "B c" text)
+-- CREATE TYPE
+
+> CREATE DOMAIN oa.dm AS int CONSTRAINT dm_pos CHECK (VALUE > 0) NOT NULL
+-- CREATE DOMAIN
+
+> CREATE TYPE oa.rng AS RANGE (subtype = int4)
+-- CREATE TYPE
+
+> CREATE SEQUENCE oa.sq
+-- CREATE SEQUENCE
+
+> CREATE TABLE oa.t (id serial PRIMARY KEY, v int DEFAULT 1 CHECK (v > 0), "Odd" text UNIQUE)
+-- CREATE TABLE
+
+> CREATE INDEX t_v ON oa.t (v)
+-- CREATE INDEX
+
+> CREATE VIEW oa.v AS SELECT id FROM oa.t
+-- CREATE VIEW
+
+> CREATE MATERIALIZED VIEW oa.mv AS SELECT 1 AS one
+-- SELECT 1
+
+> CREATE FUNCTION oa.f(int, text) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE PROCEDURE oa.p(a int) LANGUAGE sql AS ''
+-- CREATE PROCEDURE
+
+> CREATE AGGREGATE oa.ag(int) (sfunc = int4pl, stype = int)
+-- CREATE AGGREGATE
+
+> CREATE FUNCTION oa.tf() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'
+-- CREATE FUNCTION
+
+> CREATE TRIGGER trg BEFORE INSERT ON oa.t FOR EACH ROW EXECUTE FUNCTION oa.tf()
+-- CREATE TRIGGER
+
+> CREATE POLICY pol ON oa.t USING (true)
+-- CREATE POLICY
+
+> CREATE STATISTICS oa.st ON id, v FROM oa.t
+-- CREATE STATISTICS
+
+> CREATE OPERATOR oa.### (LEFTARG = int, RIGHTARG = int, FUNCTION = int4pl)
+-- CREATE OPERATOR
+
+> CREATE TABLE oa.child (w int REFERENCES oa.t)
+-- CREATE TABLE
+
+> CREATE ROLE oa_role
+-- CREATE ROLE
+
+> WITH objs(c, o, s) AS (VALUES
+>   ('pg_namespace'::regclass, 'oa'::regnamespace::oid, 0),
+>   ('pg_type'::regclass, 'oa.en'::regtype::oid, 0),
+>   ('pg_type'::regclass, 'oa.en[]'::regtype::oid, 0),
+>   ('pg_type'::regclass, 'oa.co'::regtype::oid, 0),
+>   ('pg_class'::regclass, 'oa.co'::regclass::oid, 0),
+>   ('pg_class'::regclass, 'oa.co'::regclass::oid, 2),
+>   ('pg_type'::regclass, 'oa.dm'::regtype::oid, 0),
+>   ('pg_type'::regclass, 'oa.rng'::regtype::oid, 0),
+>   ('pg_type'::regclass, 'int4'::regtype::oid, 0),
+>   ('pg_type'::regclass, 'int4[]'::regtype::oid, 0),
+>   ('pg_class'::regclass, 'oa.sq'::regclass::oid, 0),
+>   ('pg_class'::regclass, 'oa.t'::regclass::oid, 0),
+>   ('pg_class'::regclass, 'oa.t'::regclass::oid, 1),
+>   ('pg_class'::regclass, 'oa.t'::regclass::oid, 3),
+>   ('pg_class'::regclass, 'oa.t_v'::regclass::oid, 0),
+>   ('pg_class'::regclass, 'oa.t_pkey'::regclass::oid, 0),
+>   ('pg_class'::regclass, 'oa.v'::regclass::oid, 0),
+>   ('pg_class'::regclass, 'oa.mv'::regclass::oid, 0),
+>   ('pg_class'::regclass, 'pg_class'::regclass::oid, 0),
+>   ('pg_proc'::regclass, 'oa.f'::regproc::oid, 0),
+>   ('pg_proc'::regclass, 'oa.p'::regproc::oid, 0),
+>   ('pg_proc'::regclass, 'oa.ag'::regproc::oid, 0),
+>   ('pg_proc'::regclass, 'lower(text)'::regprocedure::oid, 0),
+>   ('pg_namespace'::regclass, 'public'::regnamespace::oid, 0),
+>   ('pg_namespace'::regclass, 'pg_catalog'::regnamespace::oid, 0),
+>   ('pg_authid'::regclass, 'oa_role'::regrole::oid, 0),
+>   ('pg_operator'::regclass, 'oa.###(int,int)'::regoperator::oid, 0),
+>   ('pg_language'::regclass, (SELECT oid FROM pg_language WHERE lanname = 'plpgsql'), 0),
+>   ('pg_extension'::regclass, (SELECT oid FROM pg_extension WHERE extname = 'plpgsql'), 0),
+>   ('pg_class'::regclass, 0, 0),
+>   ('pg_proc'::regclass, 0, 0))
+> SELECT (pg_identify_object(c, o, s)).*, (pg_identify_object_as_address(c, o, s)).* FROM objs
+type:text | schema:text | name:text | identity:text | type:text | object_names:text[] | object_args:text[]
+aggregate | oa | NULL | oa.ag(integer) | aggregate | {oa,ag} | {integer}
+composite type column | oa | co | oa.co."B c" | composite type column | {oa,co,"B c"} | {}
+composite type | oa | co | oa.co | composite type | {oa,co} | {}
+extension | NULL | plpgsql | plpgsql | extension | {plpgsql} | {}
+function | oa | NULL | oa.f(integer,pg_catalog.text) | function | {oa,f} | {integer,pg_catalog.text}
+function | pg_catalog | NULL | pg_catalog.lower(pg_catalog.text) | function | {pg_catalog,lower} | {pg_catalog.text}
+index | oa | t_pkey | oa.t_pkey | index | {oa,t_pkey} | {}
+index | oa | t_v | oa.t_v | index | {oa,t_v} | {}
+language | NULL | plpgsql | plpgsql | language | {plpgsql} | {}
+materialized view | oa | mv | oa.mv | materialized view | {oa,mv} | {}
+operator | oa | NULL | oa.###(integer,integer) | operator | {oa,###} | {integer,integer}
+procedure | oa | NULL | oa.p(integer) | procedure | {oa,p} | {integer}
+relation | NULL | NULL | NULL | relation | NULL | NULL
+role | NULL | oa_role | oa_role | role | {oa_role} | {}
+routine | NULL | NULL | NULL | routine | NULL | NULL
+schema | NULL | oa | oa | schema | {oa} | {}
+schema | NULL | pg_catalog | pg_catalog | schema | {pg_catalog} | {}
+schema | NULL | public | public | schema | {public} | {}
+sequence | oa | sq | oa.sq | sequence | {oa,sq} | {}
+table column | oa | t | oa.t."Odd" | table column | {oa,t,Odd} | {}
+table column | oa | t | oa.t.id | table column | {oa,t,id} | {}
+table | oa | t | oa.t | table | {oa,t} | {}
+table | pg_catalog | pg_class | pg_catalog.pg_class | table | {pg_catalog,pg_class} | {}
+type | oa | _en | oa.en[] | type | {oa.en[]} | {}
+type | oa | co | oa.co | type | {oa.co} | {}
+type | oa | dm | oa.dm | type | {oa.dm} | {}
+type | oa | en | oa.en | type | {oa.en} | {}
+type | oa | rng | oa.rng | type | {oa.rng} | {}
+type | pg_catalog | _int4 | integer[] | type | {integer[]} | {}
+type | pg_catalog | int4 | integer | type | {integer} | {}
+view | oa | v | oa.v | view | {oa,v} | {}
+-- SELECT 31
+
+> SELECT (pg_identify_object(classid, objid, objsubid)).*, (pg_identify_object_as_address(classid, objid, objsubid)).*
+>   FROM pg_depend WHERE classid IN ('pg_constraint'::regclass, 'pg_attrdef'::regclass, 'pg_rewrite'::regclass, 'pg_trigger'::regclass, 'pg_policy'::regclass, 'pg_statistic_ext'::regclass)
+>   AND objid >= 16384 AND refobjid IN (SELECT oid FROM pg_class WHERE relnamespace = 'oa'::regnamespace UNION SELECT oid FROM pg_type WHERE typnamespace = 'oa'::regnamespace)
+>   AND (pg_identify_object(classid, objid, objsubid)).identity !~ 'RI_ConstraintTrigger' GROUP BY 1, 2, 3, 4, 5, 6, 7 ORDER BY 1, 4
+type:text | schema:text | name:text | identity:text | type:text | object_names:text[] | object_args:text[]
+default value | NULL | NULL | for oa.t.id | default value | {oa,t,id} | {}
+default value | NULL | NULL | for oa.t.v | default value | {oa,t,v} | {}
+domain constraint | oa | NULL | dm_not_null on oa.dm | domain constraint | {oa.dm} | {dm_not_null}
+domain constraint | oa | NULL | dm_pos on oa.dm | domain constraint | {oa.dm} | {dm_pos}
+policy | NULL | NULL | pol on oa.t | policy | {oa,t,pol} | {}
+rule | NULL | NULL | "_RETURN" on oa.mv | rule | {oa,mv,_RETURN} | {}
+rule | NULL | NULL | "_RETURN" on oa.v | rule | {oa,v,_RETURN} | {}
+statistics object | oa | st | oa.st | statistics object | {oa,st} | {}
+table constraint | oa | NULL | "t_Odd_key" on oa.t | table constraint | {oa,t,t_Odd_key} | {}
+table constraint | oa | NULL | child_w_fkey on oa.child | table constraint | {oa,child,child_w_fkey} | {}
+table constraint | oa | NULL | t_id_not_null on oa.t | table constraint | {oa,t,t_id_not_null} | {}
+table constraint | oa | NULL | t_pkey on oa.t | table constraint | {oa,t,t_pkey} | {}
+table constraint | oa | NULL | t_v_check on oa.t | table constraint | {oa,t,t_v_check} | {}
+trigger | NULL | NULL | trg on oa.t | trigger | {oa,t,trg} | {}
+-- SELECT 14
+
+> SELECT * FROM pg_identify_object('pg_cast'::regclass, (SELECT oid FROM pg_cast WHERE castsource = 'int4'::regtype AND casttarget = 'int8'::regtype), 0)
+type:text | schema:text | name:text | identity:text
+cast | NULL | NULL | (integer AS bigint)
+-- SELECT 1
+
+> SELECT * FROM pg_identify_object_as_address('pg_cast'::regclass, (SELECT oid FROM pg_cast WHERE castsource = 'int4'::regtype AND casttarget = 'int8'::regtype), 0)
+type:text | object_names:text[] | object_args:text[]
+cast | {integer} | {bigint}
+-- SELECT 1
+
+> SELECT pg_describe_object(a.classid, a.objid, a.objsubid) FROM (VALUES
+>   ('table', '{oa,t}'::text[], '{}'::text[]),
+>   ('table column', '{oa,t,v}', '{}'),
+>   ('index', '{oa,t_v}', '{}'),
+>   ('sequence', '{oa,sq}', '{}'),
+>   ('view', '{oa,v}', '{}'),
+>   ('materialized view', '{oa,mv}', '{}'),
+>   ('type', '{oa.en}', '{}'),
+>   ('type', '{int4}', '{}'),
+>   ('type', '{oa.dm}', '{}'),
+>   ('function', '{oa,f}', '{int4,text}'),
+>   ('procedure', '{oa,p}', '{int4}'),
+>   ('aggregate', '{oa,ag}', '{int4}'),
+>   ('schema', '{oa}', '{}'),
+>   ('role', '{oa_role}', '{}'),
+>   ('operator', '{oa,###}', '{int4,int4}'),
+>   ('table constraint', '{oa,t,t_pkey}', '{}'),
+>   ('domain constraint', '{oa.dm}', '{dm_pos}'),
+>   ('trigger', '{oa,t,trg}', '{}'),
+>   ('policy', '{oa,t,pol}', '{}'),
+>   ('default value', '{oa,t,v}', '{}'),
+>   ('rule', '{oa,v,_RETURN}', '{}'),
+>   ('statistics object', '{oa,st}', '{}'),
+>   ('language', '{plpgsql}', '{}'),
+>   ('extension', '{plpgsql}', '{}'),
+>   ('cast', '{int4}', '{int8}')) AS x(ty, n, ar), pg_get_object_address(x.ty, x.n, x.ar) a
+pg_describe_object:text
+cast from integer to bigint
+column v of table oa.t
+constraint dm_pos
+constraint t_pkey on table oa.t
+default value for column v of table oa.t
+extension plpgsql
+function oa.ag(integer)
+function oa.f(integer,text)
+function oa.p(integer)
+index oa.t_v
+language plpgsql
+materialized view oa.mv
+operator oa.###(integer,integer)
+policy pol on table oa.t
+role oa_role
+rule _RETURN on view oa.v
+schema oa
+sequence oa.sq
+statistics object oa.st
+table oa.t
+trigger trg on table oa.t
+type integer
+type oa.dm
+type oa.en
+view oa.v
+-- SELECT 25
+
+> SELECT * FROM pg_get_object_address('composite type', '{oa,co}', '{}')
+ERROR 22023: unsupported object type "composite type"
+
+> SELECT * FROM pg_get_object_address('table', '{oa,nope}', '{}')
+ERROR 42P01: relation "oa.nope" does not exist
+
+> SELECT * FROM pg_get_object_address('nonsense', '{oa,t}', '{}')
+ERROR 22023: unrecognized object type "nonsense"
+
+> SELECT * FROM pg_get_object_address('function', '{oa,f}', '{int4}')
+ERROR 42883: function oa.f(integer) does not exist
+
+> SELECT * FROM pg_get_object_address('table column', '{t}', '{}')
+ERROR 42601: column name must be qualified
+
+> SELECT * FROM pg_get_object_address('schema', '{a,b}', '{}')
+ERROR 22023: name list length must be exactly 1
+
+> DROP SCHEMA oa CASCADE
+NOTICE 00000: drop cascades to 14 other objects
+DETAIL: drop cascades to type oa.en
+DETAIL: drop cascades to type oa.co
+DETAIL: drop cascades to type oa.dm
+DETAIL: drop cascades to type oa.rng
+DETAIL: drop cascades to sequence oa.sq
+DETAIL: drop cascades to table oa.t
+DETAIL: drop cascades to view oa.v
+DETAIL: drop cascades to materialized view oa.mv
+DETAIL: drop cascades to function oa.f(integer,text)
+DETAIL: drop cascades to function oa.p(integer)
+DETAIL: drop cascades to function oa.ag(integer)
+DETAIL: drop cascades to function oa.tf()
+DETAIL: drop cascades to operator oa.###(integer,integer)
+DETAIL: drop cascades to table oa.child
+-- DROP SCHEMA
+
+> DROP ROLE oa_role
+-- DROP ROLE
+

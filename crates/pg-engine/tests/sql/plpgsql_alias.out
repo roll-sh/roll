@@ -1,0 +1,333 @@
+> create table gxw_a (id int, v text)
+-- CREATE TABLE
+
+> insert into gxw_a values (1, 'one'), (2, 'two')
+-- INSERT 0 2
+
+> create function gxw_al(int, text) returns text language plpgsql as $$
+> declare
+>   n alias for $1;
+>   t alias for $2;
+>   n2 alias for n;
+>   r record;
+> begin
+>   raise notice '% % % %', n, $1, n2, t;
+>   n2 := n2 + 1;
+>   raise notice 'after % % %', n, $1, n2;
+>   select v into r from gxw_a where id = n2 - 1;
+>   perform 1 from gxw_a where id = n and v = t;
+>   return r.v || ':' || (select count(*) from gxw_a where id <= n2) || ':' || t || $2;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_al(1, 'x')
+NOTICE 00000: 1 1 1 x
+CONTEXT: PL/pgSQL function gxw_al(integer,text) line 8 at RAISE
+NOTICE 00000: after 2 2 2
+CONTEXT: PL/pgSQL function gxw_al(integer,text) line 10 at RAISE
+gxw_al:text
+one:2:xx
+-- SELECT 1
+
+> create function gxw_al2(a int) returns int language plpgsql as $$
+> declare
+>   b alias for a;
+>   c alias for gxw_al2.a;
+> begin
+>   declare
+>     a int := 100;
+>     d alias for b;
+>   begin
+>     raise notice 'inner % % % %', a, b, c, d;
+>   end;
+>   return b + c + gxw_al2.a;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_al2(5)
+NOTICE 00000: inner 100 5 5 5
+CONTEXT: PL/pgSQL function gxw_al2(integer) line 10 at RAISE
+gxw_al2:int4
+15
+-- SELECT 1
+
+> create function gxw_al3() returns int language plpgsql as $$
+> <<lo>>
+> declare
+>   x int := 7;
+>   y alias for x;
+>   z alias for lo.x;
+> begin
+>   y := y * 2;
+>   return x + y + z + lo.y;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_al3()
+gxw_al3:int4
+56
+-- SELECT 1
+
+> create function gxw_al4(int) returns int language plpgsql as $$
+> declare
+>   q alias for $1;
+> begin
+>   return (select max(id) from gxw_a where id < q) + q;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_al4(3)
+gxw_al4:int4
+5
+-- SELECT 1
+
+> create function gxw_al5() returns int language plpgsql as $$
+> declare
+>   q alias for nosuch;
+> begin
+>   return 1;
+> end $$
+ERROR 42704: variable "nosuch" does not exist (at 84)
+
+> create function gxw_al6(int) returns int language plpgsql as $$
+> declare
+>   q alias for $2;
+> begin
+>   return 1;
+> end $$
+ERROR 42704: variable "$2" does not exist (at 87)
+
+> create function gxw_al7(rec gxw_a) returns text language plpgsql as $$
+> declare
+>   r alias for rec;
+>   s alias for $1;
+> begin
+>   return r.v || s.id || rec.v;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_al7(row(3, 'three')::gxw_a)
+gxw_al7:text
+three3three
+-- SELECT 1
+
+> create function gxw_al8() returns trigger language plpgsql as $$
+> declare
+>   nn alias for new;
+> begin
+>   nn.v := upper(nn.v);
+>   return nn;
+> end $$
+-- CREATE FUNCTION
+
+> create trigger gxw_tr before insert on gxw_a for each row execute function gxw_al8()
+-- CREATE TRIGGER
+
+> insert into gxw_a values (9, 'nine') returning *
+id:int4 | v:text
+9 | NINE
+-- INSERT 0 1
+
+> drop trigger gxw_tr on gxw_a
+-- DROP TRIGGER
+
+> delete from gxw_a where id = 9
+-- DELETE 1
+
+> drop function gxw_al, gxw_al2, gxw_al3, gxw_al4, gxw_al7, gxw_al8
+-- DROP FUNCTION
+
+> create function gxw_b1(int, out res int, out msg text) language plpgsql as $$
+> declare
+>   k alias for $1;
+>   o alias for res;
+>   m alias for msg;
+>   cnt alias for o;
+> begin
+>   select count(*) into cnt from gxw_a where id >= k;
+>   get diagnostics m = row_count;
+>   m := m || '/' || o;
+> end $$
+-- CREATE FUNCTION
+
+> select * from gxw_b1(1)
+res:int4 | msg:text
+2 | 1/2
+-- SELECT 1
+
+> create function gxw_b2(lim int) returns setof gxw_a language plpgsql as $$
+> declare
+>   l alias for lim;
+>   rec record;
+>   rr alias for rec;
+> begin
+>   for rec in select * from gxw_a where id <= l order by id loop
+>     rr.v := rr.v || '!';
+>     return next rr;
+>   end loop;
+>   return query select * from gxw_a where id = l;
+>   return query execute 'select * from gxw_a where id = $1' using l;
+> end $$
+-- CREATE FUNCTION
+
+> select * from gxw_b2(1)
+id:int4 | v:text
+1 | one
+1 | one
+1 | one!
+-- SELECT 3
+
+> create function gxw_b3(id int) returns text language plpgsql as $$
+> declare
+>   ident alias for id;
+>   c cursor for select v from gxw_a where gxw_a.id = ident;
+>   r text;
+> begin
+>   open c;
+>   fetch c into r;
+>   close c;
+>   declare
+>     ident text := 'shadow';
+>   begin
+>     r := r || ident;
+>   end;
+>   return r || ident;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_b3(2)
+gxw_b3:text
+twoshadow2
+-- SELECT 1
+
+> create function gxw_b4(v text) returns int language plpgsql as $$
+> declare
+>   vv alias for v;
+> begin
+>   return (select id from gxw_a where gxw_a.v = vv);
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_b4('two')
+gxw_b4:int4
+2
+-- SELECT 1
+
+> create function gxw_b5(v text) returns int language plpgsql as $$
+> declare
+>   vv alias for v;
+> begin
+>   return (select id from gxw_a where v = vv);
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_b5('two')
+ERROR 42702: column reference "v" is ambiguous
+DETAIL: It could refer to either a PL/pgSQL variable or a table column.
+QUERY: (select id from gxw_a where v = vv) (at 29)
+CONTEXT: PL/pgSQL function gxw_b5(text) line 5 at RETURN
+
+> create function gxw_b6(x int) returns int language plpgsql as $$
+> declare
+>   y alias for x;
+> begin
+>   y := y + 1;
+>   x := x * 10;
+>   return y + gxw_b6.y + gxw_b6.x;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_b6(1)
+ERROR 42P01: missing FROM-clause entry for table "gxw_b6"
+QUERY: y + gxw_b6.y + gxw_b6.x (at 5)
+CONTEXT: PL/pgSQL function gxw_b6(integer) line 7 at RETURN
+
+> create function gxw_b7(arr int[]) returns int language plpgsql as $$
+> declare
+>   a alias for arr;
+>   s int := 0;
+>   e int;
+> begin
+>   a[2] := 10;
+>   foreach e in array a loop
+>     s := s + e;
+>   end loop;
+>   return s + arr[2];
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_b7(array[1,2,3])
+gxw_b7:int4
+24
+-- SELECT 1
+
+> drop table gxw_a cascade
+NOTICE 00000: drop cascades to function gxw_b2(integer)
+-- DROP TABLE
+
+> create function gxw_l1(p int) returns int language plpgsql as $$
+> <<lo>>
+> declare
+>   x int := 1;
+> begin
+>   declare
+>     y int := 2;
+>   begin
+>     return lo.x + gxw_l1.p + gxw_l1.found::int + y;
+>   end;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_l1(10)
+gxw_l1:int4
+13
+-- SELECT 1
+
+> create function gxw_l2(p int) returns int language plpgsql as $$
+> <<lo>>
+> declare
+>   x int := 1;
+> begin
+>   declare
+>     y int := 2;
+>   begin
+>     return lo.y;
+>   end;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_l2(10)
+ERROR 42P01: missing FROM-clause entry for table "lo"
+QUERY: lo.y (at 1)
+CONTEXT: PL/pgSQL function gxw_l2(integer) line 9 at RETURN
+
+> create function gxw_l3(p int) returns int language plpgsql as $$
+> declare
+>   x int := 1;
+> begin
+>   return gxw_l3.x;
+> end $$
+-- CREATE FUNCTION
+
+> select gxw_l3(10)
+ERROR 42P01: missing FROM-clause entry for table "gxw_l3"
+QUERY: gxw_l3.x (at 1)
+CONTEXT: PL/pgSQL function gxw_l3(integer) line 5 at RETURN
+
+> do $$
+> <<a>>
+> declare
+>   v int := 1;
+>   w alias for v;
+> begin
+>   <<b>>
+>   declare
+>     v int := 2;
+>   begin
+>     raise notice '% % % %', v, w, a.v, a.w;
+>   end;
+> end $$
+NOTICE 00000: 2 1 1 1
+CONTEXT: PL/pgSQL function inline_code_block line 11 at RAISE
+-- DO
+

@@ -1,0 +1,332 @@
+> create tablespace tsd_space location 'relative'
+ERROR 42P17: tablespace location must be an absolute path
+
+> create tablespace tsd_space location ''
+ERROR 42P17: tablespace location must be an absolute path
+
+> set allow_in_place_tablespaces = true
+-- SET
+
+> create tablespace pg_tsd location ''
+ERROR 42939: unacceptable tablespace name "pg_tsd"
+DETAIL: The prefix "pg_" is reserved for system tablespaces.
+
+> create tablespace tsd_space location '' with (nope = 1)
+ERROR 22023: unrecognized parameter "nope"
+
+> create tablespace tsd_space location '' with (random_page_cost = 3.0)
+-- CREATE TABLESPACE
+
+> create tablespace tsd_space location ''
+ERROR 42710: tablespace "tsd_space" already exists
+
+> create tablespace tsd_bad location '/no/such/location'
+ERROR 58P01: directory "/no/such/location" does not exist
+
+> select spcname, spcoptions, regexp_replace(pg_tablespace_location(oid), '(pg_tblspc)/(\d+)', '\1/NNN') from pg_tablespace where spcname like 'tsd%' or spcname like 'pg_%' order by 1
+spcname:name | spcoptions:text[] | regexp_replace:text
+pg_default | NULL | 
+pg_global | NULL | 
+tsd_space | {random_page_cost=3.0} | pg_tblspc/NNN
+-- SELECT 3
+
+> alter tablespace tsd_space set (seq_page_cost = 1.1, effective_io_concurrency = 4)
+-- ALTER TABLESPACE
+
+> alter tablespace tsd_space set (effective_io_concurrency = 5000)
+ERROR 22023: value 5000 out of bounds for option "effective_io_concurrency"
+DETAIL: Valid values are between "0" and "1000".
+
+> alter tablespace tsd_space set (random_page_cost = 'x')
+ERROR 22023: invalid value for floating point option "random_page_cost": x
+
+> alter tablespace tsd_space reset (random_page_cost = 2)
+ERROR 42601: RESET must not include values for parameters
+
+> alter tablespace tsd_space reset (random_page_cost)
+-- ALTER TABLESPACE
+
+> alter tablespace tsd_nope set (seq_page_cost = 1)
+ERROR 42704: tablespace "tsd_nope" does not exist
+
+> select spcoptions from pg_tablespace where spcname = 'tsd_space'
+spcoptions:text[]
+{seq_page_cost=1.1,effective_io_concurrency=4}
+-- SELECT 1
+
+> begin
+-- BEGIN
+
+> create tablespace tsd_txn location ''
+ERROR 25001: CREATE TABLESPACE cannot run inside a transaction block
+
+> rollback
+-- ROLLBACK
+
+> create table tsd_t1 (a int primary key, b text) tablespace tsd_space
+-- CREATE TABLE
+
+> create table tsd_t2 (a int) tablespace tsd_nope
+ERROR 42704: tablespace "tsd_nope" does not exist
+
+> create table tsd_t3 (a int) tablespace pg_global
+ERROR 22023: only shared relations can be placed in pg_global tablespace
+
+> create index tsd_i1 on tsd_t1 (b) tablespace tsd_space
+-- CREATE INDEX
+
+> create index tsd_i2 on tsd_t1 (b)
+-- CREATE INDEX
+
+> create table tsd_t4 (a int, constraint tsd_t4_u unique (a) using index tablespace tsd_space)
+-- CREATE TABLE
+
+> create table tsd_t5 tablespace tsd_space as select 1 as x
+-- SELECT 1
+
+> set default_tablespace = tsd_nope
+ERROR 22023: invalid value for parameter "default_tablespace": "tsd_nope"
+DETAIL: Tablespace "tsd_nope" does not exist.
+
+> set default_tablespace = tsd_space
+-- SET
+
+> create table tsd_t6 (a int)
+-- CREATE TABLE
+
+> create table tsd_t7 (a int) tablespace pg_default
+-- CREATE TABLE
+
+> set default_tablespace = pg_global
+-- SET
+
+> create table tsd_t8 (a int)
+ERROR 22023: only shared relations can be placed in pg_global tablespace
+
+> reset default_tablespace
+-- RESET
+
+> select c.relname, t.spcname from pg_class c left join pg_tablespace t on t.oid = c.reltablespace where c.relname like 'tsd%' order by 1
+relname:name | spcname:name
+tsd_i1 | tsd_space
+tsd_i2 | NULL
+tsd_t1 | tsd_space
+tsd_t1_pkey | NULL
+tsd_t4 | NULL
+tsd_t4_u | tsd_space
+tsd_t5 | tsd_space
+tsd_t6 | tsd_space
+tsd_t7 | NULL
+-- SELECT 9
+
+> select tablename, tablespace from pg_tables where tablename like 'tsd%' order by 1
+tablename:name | tablespace:name
+tsd_t1 | tsd_space
+tsd_t4 | NULL
+tsd_t5 | tsd_space
+tsd_t6 | tsd_space
+tsd_t7 | NULL
+-- SELECT 5
+
+> select indexname, tablespace from pg_indexes where tablename like 'tsd%' order by 1
+indexname:name | tablespace:name
+tsd_i1 | tsd_space
+tsd_i2 | NULL
+tsd_t1_pkey | NULL
+tsd_t4_u | tsd_space
+-- SELECT 4
+
+> create table tsd_p (a int) partition by list (a) tablespace pg_default
+ERROR 0A000: cannot specify default tablespace for partitioned relations
+
+> set default_tablespace = pg_default
+-- SET
+
+> create table tsd_p (a int) partition by list (a)
+ERROR 0A000: cannot specify default tablespace for partitioned relations
+
+> reset default_tablespace
+-- RESET
+
+> create table tsd_p (a int) partition by list (a) tablespace tsd_space
+-- CREATE TABLE
+
+> create table tsd_p1 partition of tsd_p for values in (1)
+-- CREATE TABLE
+
+> create table tsd_p2 partition of tsd_p for values in (2) tablespace pg_default
+-- CREATE TABLE
+
+> create index tsd_p_i on tsd_p (a) tablespace tsd_space
+-- CREATE INDEX
+
+> create table tsd_p3 partition of tsd_p for values in (3)
+-- CREATE TABLE
+
+> select c.relname, c.relkind, t.spcname from pg_class c left join pg_tablespace t on t.oid = c.reltablespace where c.relname like 'tsd_p%' order by 1
+relname:name | relkind:char | spcname:name
+tsd_p | p | tsd_space
+tsd_p1 | r | tsd_space
+tsd_p1_a_idx | i | tsd_space
+tsd_p2 | r | NULL
+tsd_p2_a_idx | i | tsd_space
+tsd_p3 | r | tsd_space
+tsd_p3_a_idx | i | tsd_space
+tsd_p_i | I | tsd_space
+-- SELECT 8
+
+> alter table tsd_t1 set tablespace pg_default
+-- ALTER TABLE
+
+> alter table tsd_t1 set tablespace pg_global
+ERROR 22023: only shared relations can be placed in pg_global tablespace
+
+> alter table tsd_t1 set tablespace tsd_nope
+ERROR 42704: tablespace "tsd_nope" does not exist
+
+> alter index tsd_i2 set tablespace tsd_space
+-- ALTER INDEX
+
+> alter table tsd_p set tablespace pg_default
+-- ALTER TABLE
+
+> select c.relname, t.spcname from pg_class c left join pg_tablespace t on t.oid = c.reltablespace where c.relname in ('tsd_t1', 'tsd_i1', 'tsd_i2', 'tsd_p') order by 1
+relname:name | spcname:name
+tsd_i1 | tsd_space
+tsd_i2 | tsd_space
+tsd_p | NULL
+tsd_t1 | NULL
+-- SELECT 4
+
+> reindex (tablespace tsd_space) table tsd_t1
+-- REINDEX
+
+> reindex (tablespace pg_global) index tsd_i1
+ERROR 22023: only shared relations can be placed in pg_global tablespace
+
+> reindex (tablespace tsd_space) table pg_am
+ERROR 0A000: cannot move system relation "pg_am_name_index"
+
+> reindex (tablespace tsd_nope) table tsd_t1
+ERROR 42704: tablespace "tsd_nope" does not exist
+
+> select c.relname, t.spcname from pg_class c left join pg_tablespace t on t.oid = c.reltablespace where c.relname like 'tsd_t1%' or c.relname like 'tsd_i%' order by 1
+relname:name | spcname:name
+tsd_i1 | tsd_space
+tsd_i2 | tsd_space
+tsd_t1 | NULL
+tsd_t1_pkey | tsd_space
+-- SELECT 4
+
+> alter index all in tablespace tsd_space set tablespace pg_default
+-- ALTER INDEX
+
+> alter table all in tablespace tsd_space set tablespace pg_default
+-- ALTER TABLE
+
+> alter materialized view all in tablespace tsd_space set tablespace pg_default
+NOTICE P0002: no matching relations in tablespace "tsd_space" found
+-- ALTER MATERIALIZED VIEW
+
+> alter table all in tablespace tsd_space set tablespace pg_default
+NOTICE P0002: no matching relations in tablespace "tsd_space" found
+-- ALTER TABLE
+
+> drop tablespace tsd_space
+-- DROP TABLESPACE
+
+> drop table tsd_p
+-- DROP TABLE
+
+> drop tablespace tsd_space
+ERROR 42704: tablespace "tsd_space" does not exist
+
+> drop table tsd_t4, tsd_t6
+-- DROP TABLE
+
+> drop tablespace tsd_space
+ERROR 42704: tablespace "tsd_space" does not exist
+
+> drop tablespace if exists tsd_space
+NOTICE 00000: tablespace "tsd_space" does not exist, skipping
+-- DROP TABLESPACE
+
+> drop tablespace tsd_space
+ERROR 42704: tablespace "tsd_space" does not exist
+
+> drop tablespace pg_default
+ERROR 42501: permission denied for tablespace pg_default
+
+> create role tsd_user
+-- CREATE ROLE
+
+> grant create on schema public to tsd_user
+-- GRANT
+
+> create tablespace tsd_space2 owner tsd_user location ''
+-- CREATE TABLESPACE
+
+> select spcname, spcowner::regrole from pg_tablespace where spcname = 'tsd_space2'
+spcname:name | spcowner:4096
+tsd_space2 | tsd_user
+-- SELECT 1
+
+> alter tablespace tsd_space2 rename to tsd_space3
+-- ALTER TABLESPACE
+
+> alter tablespace tsd_space3 rename to pg_x
+ERROR 42939: unacceptable tablespace name "pg_x"
+DETAIL: The prefix "pg_" is reserved for system tablespaces.
+
+> alter tablespace tsd_space3 owner to postgres
+-- ALTER TABLESPACE
+
+> grant create on tablespace tsd_space3 to tsd_user
+-- GRANT
+
+> select spcname, spcacl from pg_tablespace where spcname = 'tsd_space3'
+spcname:name | spcacl:1034
+tsd_space3 | {postgres=C/postgres,tsd_user=C/postgres}
+-- SELECT 1
+
+> comment on tablespace tsd_space3 is 'a tablespace'
+-- COMMENT
+
+> select shobj_description(oid, 'pg_tablespace') from pg_tablespace where spcname = 'tsd_space3'
+shobj_description:text
+a tablespace
+-- SELECT 1
+
+> set role tsd_user
+-- SET
+
+> create table tsd_t9 (a int) tablespace tsd_space3
+-- CREATE TABLE
+
+> reset role
+-- RESET
+
+> revoke create on tablespace tsd_space3 from tsd_user
+-- REVOKE
+
+> set role tsd_user
+-- SET
+
+> create table tsd_t10 (a int) tablespace tsd_space3
+ERROR 42501: permission denied for tablespace tsd_space3
+
+> reset role
+-- RESET
+
+> drop table tsd_t1, tsd_t5, tsd_t7, tsd_t9
+-- DROP TABLE
+
+> drop tablespace tsd_space3
+-- DROP TABLESPACE
+
+> revoke create on schema public from tsd_user
+-- REVOKE
+
+> drop role tsd_user
+-- DROP ROLE
+

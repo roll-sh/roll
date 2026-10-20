@@ -1,0 +1,179 @@
+# rowsecurity: 1201/1226 units match; first 12 differing units (- reference, + engine)
+
+@@ unit 52 (sql line 134) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle);
++                              QUERY PLAN                             
++ --------------------------------------------------------------------
+-                                 QUERY PLAN                                
+- --------------------------------------------------------------------------
+   Hash Join
++    Hash Cond: (document.cid = category.cid)
+-    Hash Cond: (category.cid = document.cid)
+     InitPlan 1
+       ->  Index Scan using uaccount_pkey on uaccount
+             Index Cond: (pguser = CURRENT_USER)
++    ->  Seq Scan on document
++          Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+-    ->  Seq Scan on category
+     ->  Hash
++          ->  Seq Scan on category
+-          ->  Seq Scan on document
+-                Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+  (9 rows)
+  
+
+@@ unit 133 (sql line 290) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM t1 FOR SHARE;
+               QUERY PLAN              
+  -------------------------------------
++  Append
++    ->  LockRows
+-  LockRows
+-    ->  Append
+           ->  Seq Scan on t1 t1_1
+                 Filter: ((a % 2) = 0)
++    ->  LockRows
+           ->  Seq Scan on t2 t1_2
+                 Filter: ((a % 2) = 0)
++    ->  LockRows
+           ->  Seq Scan on t3 t1_3
+                 Filter: ((a % 2) = 0)
++ (10 rows)
+- (8 rows)
+  
+
+@@ unit 135 (sql line 293) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM t1 WHERE f_leak(b) FOR SHARE;
+                       QUERY PLAN                      
+  -----------------------------------------------------
++  Append
++    ->  LockRows
+-  LockRows
+-    ->  Append
+           ->  Seq Scan on t1 t1_1
+                 Filter: (((a % 2) = 0) AND f_leak(b))
++    ->  LockRows
+           ->  Seq Scan on t2 t1_2
+                 Filter: (((a % 2) = 0) AND f_leak(b))
++    ->  LockRows
+           ->  Seq Scan on t3 t1_3
+                 Filter: (((a % 2) = 0) AND f_leak(b))
++ (10 rows)
+- (8 rows)
+  
+
+@@ unit 341 (sql line 684) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM bv1 WHERE f_leak(b);
++                      QUERY PLAN                      
++ -----------------------------------------------------
++  Seq Scan on b1
++    Filter: ((a > 0) AND ((a % 2) = 0) AND f_leak(b))
++ (2 rows)
+-                  QUERY PLAN                  
+- ---------------------------------------------
+-  Subquery Scan on bv1
+-    Filter: f_leak(bv1.b)
+-    ->  Seq Scan on b1
+-          Filter: ((a > 0) AND ((a % 2) = 0))
+- (4 rows)
+  
+
+@@ unit 500 (sql line 1153) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+                                        QUERY PLAN                                       
+  ---------------------------------------------------------------------------------------
+   Seq Scan on z1
++    Filter: (((a % 2) = 0) AND (NOT (ANY (a = (hashed SubPlan 1).col1))) AND f_leak(b))
+-    Filter: ((NOT (ANY (a = (hashed SubPlan 1).col1))) AND ((a % 2) = 0) AND f_leak(b))
+     SubPlan 1
+       ->  Seq Scan on z1_blacklist
+  (4 rows)
+  
+
+@@ unit 503 (sql line 1158) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+                                        QUERY PLAN                                       
+  ---------------------------------------------------------------------------------------
+   Seq Scan on z1
++    Filter: (((a % 2) = 0) AND (NOT (ANY (a = (hashed SubPlan 1).col1))) AND f_leak(b))
+-    Filter: ((NOT (ANY (a = (hashed SubPlan 1).col1))) AND ((a % 2) = 0) AND f_leak(b))
+     SubPlan 1
+       ->  Seq Scan on z1_blacklist
+  (4 rows)
+  
+
+@@ unit 548 (sql line 1236) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+                                        QUERY PLAN                                       
+  ---------------------------------------------------------------------------------------
+   Seq Scan on z1
++    Filter: (((a % 2) = 0) AND (NOT (ANY (a = (hashed SubPlan 1).col1))) AND f_leak(b))
+-    Filter: ((NOT (ANY (a = (hashed SubPlan 1).col1))) AND ((a % 2) = 0) AND f_leak(b))
+     SubPlan 1
+       ->  Seq Scan on z1_blacklist
+  (4 rows)
+  
+
+@@ unit 556 (sql line 1249) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+                                        QUERY PLAN                                       
+  ---------------------------------------------------------------------------------------
+   Seq Scan on z1
++    Filter: (((a % 2) = 1) AND (NOT (ANY (a = (hashed SubPlan 1).col1))) AND f_leak(b))
+-    Filter: ((NOT (ANY (a = (hashed SubPlan 1).col1))) AND ((a % 2) = 1) AND f_leak(b))
+     SubPlan 1
+       ->  Seq Scan on z1_blacklist
+  (4 rows)
+  
+
+@@ unit 592 (sql line 1320) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM rls_sbv WHERE (a = 1);
+                              QUERY PLAN                            
+  ------------------------------------------------------------------
+   Seq Scan on y1
++    Filter: ((((a % 2) = 0) OR (a > 2)) AND f_leak(b) AND (a = 1))
+-    Filter: ((a = 1) AND ((a > 2) OR ((a % 2) = 0)) AND f_leak(b))
+  (2 rows)
+  
+
+@@ unit 600 (sql line 1333) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM y2 WHERE f_leak(b);
+                                   QUERY PLAN                                  
+  -----------------------------------------------------------------------------
+   Seq Scan on y2
++    Filter: ((((a % 2) = 0) OR ((a % 3) = 0) OR ((a % 4) = 0)) AND f_leak(b))
+-    Filter: ((((a % 4) = 0) OR ((a % 3) = 0) OR ((a % 2) = 0)) AND f_leak(b))
+  (2 rows)
+  
+
+@@ unit 602 (sql line 1339) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM y2 WHERE f_leak('abc');
++                             QUERY PLAN                             
++ -------------------------------------------------------------------
++  Result
++    One-Time Filter: f_leak('abc'::text)
++    ->  Seq Scan on y2
++          Filter: (((a % 2) = 0) OR ((a % 3) = 0) OR ((a % 4) = 0))
++ (4 rows)
+-                                       QUERY PLAN                                       
+- ---------------------------------------------------------------------------------------
+-  Seq Scan on y2
+-    Filter: (f_leak('abc'::text) AND (((a % 4) = 0) OR ((a % 3) = 0) OR ((a % 2) = 0)))
+- (2 rows)
+  
+
+@@ unit 606 (sql line 1348) [wrong EXPLAIN] EXPLAIN plan text differs
+  EXPLAIN (COSTS OFF) SELECT * FROM y2 JOIN test_qual_pushdown ON (b = abc) WHERE f_leak(abc);
+                                 QUERY PLAN                                
+  -------------------------------------------------------------------------
+   Hash Join
+     Hash Cond: (test_qual_pushdown.abc = y2.b)
+     ->  Seq Scan on test_qual_pushdown
+           Filter: f_leak(abc)
+     ->  Hash
+           ->  Seq Scan on y2
++                Filter: (((a % 2) = 0) OR ((a % 3) = 0) OR ((a % 4) = 0))
+-                Filter: (((a % 4) = 0) OR ((a % 3) = 0) OR ((a % 2) = 0))
+  (7 rows)
+  
+

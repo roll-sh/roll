@@ -1,0 +1,477 @@
+> \fcall abs(integer) i4:-5
+result:text
+5
+-- FASTPATH
+
+> \fcallb abs(integer) i4:-5
+result:text
+\x00000005
+-- FASTPATH
+
+> \fcall abs(integer) '-7'
+result:text
+7
+-- FASTPATH
+
+> \fcallb abs(integer) '-7'
+result:text
+\x00000007
+-- FASTPATH
+
+> \fcall abs(integer) NULL
+result:text
+NULL
+-- FASTPATH
+
+> \fcall abs(bigint) i8:-9000000000
+result:text
+9000000000
+-- FASTPATH
+
+> \fcall round(numeric,integer) '3.14159' '2'
+result:text
+3.14
+-- FASTPATH
+
+> \fcall upper(text) 'héllo'
+ERROR 42P22: could not determine which collation to use for upper() function
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcallb upper(text) 'abc'
+ERROR 42P22: could not determine which collation to use for upper() function
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall pg_current_logfile(text) NULL
+result:text
+NULL
+-- FASTPATH
+
+> \fcall upper(text) NULL
+result:text
+NULL
+-- FASTPATH
+
+> \fcall length(text) 'abc'
+result:text
+3
+-- FASTPATH
+
+> \fcall lower(text) 'ABC'
+ERROR 42P22: could not determine which collation to use for lower() function
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall initcap(text) 'abc'
+ERROR 42P22: could not determine which collation to use for initcap() function
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall casefold(text) 'abc'
+ERROR 42P22: could not determine which collation to use for lower() function
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall strpos(text,text) 'abc' 'b'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall position(text,text) 'b' 'abc'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall replace(text,text,text) 'abc' 'b' 'x'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall split_part(text,text,integer) 'a,b' ',' '1'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall starts_with(text,text) 'abc' 'a'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall texteq(text,text) 'a' 'a'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall textne(text,text) 'a' 'a'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall text_lt(text,text) 'a' 'b'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall bttextcmp(text,text) 'a' 'b'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall text_larger(text,text) 'a' 'b'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall textlike(text,text) 'abc' 'a%'
+ERROR 42P22: could not determine which collation to use for LIKE
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall textnlike(text,text) 'abc' 'a%'
+ERROR 42P22: could not determine which collation to use for LIKE
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall texticlike(text,text) 'abc' 'A%'
+ERROR 42P22: could not determine which collation to use for ILIKE
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall textregexeq(text,text) 'abc' '^a'
+ERROR 42P22: could not determine which collation to use for regular expression
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall texticregexeq(text,text) 'abc' '^A'
+ERROR 42P22: could not determine which collation to use for regular expression
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall regexp_replace(text,text,text) 'abc' 'b' 'x'
+ERROR 42P22: could not determine which collation to use for regular expression
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall regexp_like(text,text) 'abc' 'b'
+ERROR 42P22: could not determine which collation to use for regular expression
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall substring(text,text) 'abc' 'b'
+ERROR 42P22: could not determine which collation to use for regular expression
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall hashtext(text) 'abc'
+ERROR 42P22: could not determine which collation to use for string hashing
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall bpchareq(character,character) 'a' 'a'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall bpcharlt(character,character) 'a' 'b'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall bpcharlike(character,text) 'a' 'a'
+ERROR 42P22: could not determine which collation to use for LIKE
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall nameeq(name,name) 'a' 'a'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall namelt(name,name) 'a' 'b'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall btnamecmp(name,name) 'a' 'b'
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> \fcall like_escape(text,text) 'a' ''
+result:text
+a
+-- FASTPATH
+
+> \fcall concat_ws(text,"any") ',' NULL
+ERROR XX000: could not determine data type of concat() input
+
+> \fcall md5(text) 'abc'
+result:text
+900150983cd24fb0d6963f7d28e17f72
+-- FASTPATH
+
+> \fcall to_tsvector(text) 'a b'
+result:text
+'b':2
+-- FASTPATH
+
+> \fcall text_pattern_lt(text,text) 'a' 'b'
+result:text
+t
+-- FASTPATH
+
+> \fcall pg_rotate_logfile()
+WARNING 01000: rotation not possible because log collection not active
+result:text
+f
+-- FASTPATH
+
+> \fcall abs(integer)
+ERROR 08P01: function call message contains 0 arguments but function requires 1
+
+> \fcall abs(integer) i4:1 i4:2
+ERROR 08P01: function call message contains 2 arguments but function requires 1
+
+> \fcall abs(integer) 'abc'
+ERROR 22P02: invalid input syntax for type integer: "abc"
+
+> \fcall abs(integer) x:000000000001
+ERROR 22P03: incorrect binary data format in function argument 1
+
+> \fcall 999999
+ERROR 42883: function with OID 999999 does not exist
+
+> \fcall count("any") NULL
+ERROR 0A000: cannot call function "count" via fastpath interface
+
+> \fcall generate_series(integer,integer) i4:1 i4:2
+ERROR 0A000: cannot call function "generate_series" via fastpath interface
+
+> CREATE PROCEDURE gx_fp_proc() LANGUAGE sql AS 'SELECT 1'
+-- CREATE PROCEDURE
+
+> \fcall gx_fp_proc()
+ERROR 0A000: cannot call function "gx_fp_proc" via fastpath interface
+
+> DROP PROCEDURE gx_fp_proc()
+-- DROP PROCEDURE
+
+> CREATE DOMAIN gx_fp_pos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE FUNCTION gx_fp_d(gx_fp_pos) RETURNS int LANGUAGE sql AS 'SELECT $1 * 2'
+-- CREATE FUNCTION
+
+> \fcall gx_fp_d(gx_fp_pos) i4:21
+result:text
+42
+-- FASTPATH
+
+> \fcall gx_fp_d(gx_fp_pos) i4:-1
+ERROR 23514: value for domain gx_fp_pos violates check constraint "gx_fp_pos_check"
+OBJECTS: schema=public datatype=gx_fp_pos constraint=gx_fp_pos_check
+
+> \fcall gx_fp_d(gx_fp_pos) '-1'
+ERROR 23514: value for domain gx_fp_pos violates check constraint "gx_fp_pos_check"
+OBJECTS: schema=public datatype=gx_fp_pos constraint=gx_fp_pos_check
+
+> CREATE FUNCTION gx_fp_v(int) RETURNS void LANGUAGE sql AS 'SELECT'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION gx_fp_vs(int) RETURNS void LANGUAGE sql STRICT AS 'SELECT'
+-- CREATE FUNCTION
+
+> \fcall gx_fp_v(integer) NULL
+result:text
+NULL
+-- FASTPATH
+
+> \fcallb gx_fp_v(integer) i4:1
+result:text
+NULL
+-- FASTPATH
+
+> \fcall gx_fp_vs(integer) NULL
+result:text
+NULL
+-- FASTPATH
+
+> CREATE FUNCTION gx_fp_pv(int) RETURNS void LANGUAGE plpgsql AS 'BEGIN END'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION gx_fp_pv2(int) RETURNS void LANGUAGE plpgsql AS 'BEGIN RETURN; END'
+-- CREATE FUNCTION
+
+> \fcall gx_fp_pv(integer) i4:1
+result:text
+
+-- FASTPATH
+
+> \fcall gx_fp_pv2(integer) i4:1
+result:text
+
+-- FASTPATH
+
+> CREATE FUNCTION gx_fp_t(text) RETURNS text LANGUAGE sql AS 'SELECT upper($1)'
+-- CREATE FUNCTION
+
+> \fcall gx_fp_t(text) 'abc'
+result:text
+ABC
+-- FASTPATH
+
+> CREATE FUNCTION gx_fp_t2(text) RETURNS boolean LANGUAGE plpgsql AS 'BEGIN RETURN $1 < ''b''; END'
+-- CREATE FUNCTION
+
+> \fcall gx_fp_t2(text) 'abc'
+result:text
+t
+-- FASTPATH
+
+> DROP FUNCTION gx_fp_pv(int)
+-- DROP FUNCTION
+
+> DROP FUNCTION gx_fp_pv2(int)
+-- DROP FUNCTION
+
+> DROP FUNCTION gx_fp_t(text)
+-- DROP FUNCTION
+
+> DROP FUNCTION gx_fp_t2(text)
+-- DROP FUNCTION
+
+> CREATE ROLE gx_fp_r
+-- CREATE ROLE
+
+> REVOKE EXECUTE ON FUNCTION gx_fp_d(gx_fp_pos) FROM PUBLIC
+-- REVOKE
+
+> SET ROLE gx_fp_r
+-- SET
+
+> \fcall gx_fp_d(gx_fp_pos) i4:1
+ERROR 42501: permission denied for function gx_fp_d
+
+> \fcall abs(integer) i4:-1
+result:text
+1
+-- FASTPATH
+
+> RESET ROLE
+-- RESET
+
+> DROP FUNCTION gx_fp_d(gx_fp_pos)
+-- DROP FUNCTION
+
+> DROP FUNCTION gx_fp_v(int)
+-- DROP FUNCTION
+
+> DROP FUNCTION gx_fp_vs(int)
+-- DROP FUNCTION
+
+> DROP DOMAIN gx_fp_pos
+-- DROP DOMAIN
+
+> DROP ROLE gx_fp_r
+-- DROP ROLE
+
+> \fcall lo_create(oid) i4:424242
+result:text
+424242
+-- FASTPATH
+
+> \fcall lo_open(oid,integer) i4:424242 i4:393216
+result:text
+0
+-- FASTPATH
+
+> BEGIN
+-- BEGIN
+
+> \fcall lo_open(oid,integer) i4:424242 i4:393216
+result:text
+0
+-- FASTPATH
+
+> \fcall lowrite(integer,bytea) i4:0 x:68656c6c6f20776f726c64
+result:text
+11
+-- FASTPATH
+
+> \fcall lo_tell(integer) i4:0
+result:text
+11
+-- FASTPATH
+
+> \fcall lo_lseek(integer,integer,integer) i4:0 i4:6 i4:0
+result:text
+6
+-- FASTPATH
+
+> \fcall loread(integer,integer) i4:0 i4:5
+result:text
+\x776f726c64
+-- FASTPATH
+
+> \fcall lo_lseek64(integer,bigint,integer) i4:0 i8:0 i4:0
+result:text
+0
+-- FASTPATH
+
+> \fcallb loread(integer,integer) i4:0 i4:100
+result:text
+\x68656c6c6f20776f726c64
+-- FASTPATH
+
+> \fcall lo_tell64(integer) i4:0
+result:text
+11
+-- FASTPATH
+
+> \fcall lo_truncate(integer,integer) i4:0 i4:5
+result:text
+0
+-- FASTPATH
+
+> \fcall lo_close(integer) i4:0
+result:text
+0
+-- FASTPATH
+
+> \fcall lo_close(integer) i4:0
+ERROR 42704: invalid large-object descriptor: 0
+
+> \fcall lo_open(oid,integer) i4:999 i4:262144
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> SELECT 1
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> \fcall lo_open(oid,integer) i4:424242 i4:262144
+result:text
+0
+-- FASTPATH
+
+> \fcall lo_put(oid,bigint,bytea) i4:424242 i8:0 x:41
+result:text
+
+-- FASTPATH
+
+> \fcallb lo_put(oid,bigint,bytea) i4:424242 i8:1 x:42
+result:text
+\x
+-- FASTPATH
+
+> \fcall loread(integer,integer) i4:0 i4:10
+result:text
+\x
+-- FASTPATH
+
+> SELECT 1/0
+ERROR 22012: division by zero
+
+> \fcall 1397 i4:1
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> \fcall lo_creat(integer) i4:-1
+ERROR 25006: cannot execute lo_creat() in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT lo_get(424242)
+lo_get:bytea
+\x
+-- SELECT 1
+
+> \fcall lo_unlink(oid) i4:424242
+result:text
+1
+-- FASTPATH
+
+> \fcall lo_unlink(oid) i4:424242
+ERROR 42704: large object 424242 does not exist
+

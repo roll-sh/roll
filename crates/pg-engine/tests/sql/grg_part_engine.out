@@ -1,0 +1,197 @@
+> CREATE TABLE grg_ip (i int) PARTITION BY HASH (i)
+-- CREATE TABLE
+
+> CREATE TABLE grg_ip0 PARTITION OF grg_ip (i) FOR VALUES WITH (MODULUS 2, REMAINDER 0)
+-- CREATE TABLE
+
+> CREATE TABLE grg_ip1 PARTITION OF grg_ip (i) FOR VALUES WITH (MODULUS 2, REMAINDER 1)
+-- CREATE TABLE
+
+> ALTER TABLE grg_ip0 ADD PRIMARY KEY (i)
+-- ALTER TABLE
+
+> ALTER TABLE grg_ip ADD PRIMARY KEY (i)
+-- ALTER TABLE
+
+> SELECT indrelid::regclass, indexrelid::regclass, inhparent::regclass, indisvalid, conname, conislocal, coninhcount, connoinherit, convalidated
+>   FROM pg_index idx LEFT JOIN pg_inherits inh ON (idx.indexrelid = inh.inhrelid)
+>   LEFT JOIN pg_constraint con ON (idx.indexrelid = con.conindid)
+>   WHERE indrelid::regclass::text LIKE 'grg_ip%'
+>   ORDER BY indexrelid::regclass::text COLLATE "C"
+indrelid:regclass | indexrelid:regclass | inhparent:regclass | indisvalid:bool | conname:name | conislocal:bool | coninhcount:int2 | connoinherit:bool | convalidated:bool
+grg_ip0 | grg_ip0_pkey | grg_ip_pkey | t | grg_ip0_pkey | f | 1 | t | t
+grg_ip1 | grg_ip1_pkey | grg_ip_pkey | t | grg_ip1_pkey | f | 1 | f | t
+grg_ip | grg_ip_pkey | NULL | t | grg_ip_pkey | t | 0 | t | t
+-- SELECT 3
+
+> ALTER TABLE grg_ip0 DROP CONSTRAINT grg_ip0_pkey
+ERROR 42P16: cannot drop inherited constraint "grg_ip0_pkey" of relation "grg_ip0"
+
+> ALTER TABLE grg_ip DROP CONSTRAINT grg_ip_pkey
+-- ALTER TABLE
+
+> DROP TABLE grg_ip
+-- DROP TABLE
+
+> CREATE TABLE grg_ip (a int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE grg_ip0 (LIKE grg_ip)
+-- CREATE TABLE
+
+> ALTER TABLE grg_ip0 ADD PRIMARY KEY (a)
+-- ALTER TABLE
+
+> ALTER TABLE grg_ip ATTACH PARTITION grg_ip0 FOR VALUES FROM (0) TO (1000)
+-- ALTER TABLE
+
+> ALTER TABLE ONLY grg_ip ADD PRIMARY KEY (a)
+-- ALTER TABLE
+
+> ALTER INDEX grg_ip_pkey ATTACH PARTITION grg_ip0_pkey
+-- ALTER INDEX
+
+> SELECT indrelid::regclass, indexrelid::regclass, inhparent::regclass, indisvalid, conname, conislocal, coninhcount, connoinherit, convalidated
+>   FROM pg_index idx LEFT JOIN pg_inherits inh ON (idx.indexrelid = inh.inhrelid)
+>   LEFT JOIN pg_constraint con ON (idx.indexrelid = con.conindid)
+>   WHERE indrelid::regclass::text LIKE 'grg_ip%'
+>   ORDER BY indexrelid::regclass::text COLLATE "C"
+indrelid:regclass | indexrelid:regclass | inhparent:regclass | indisvalid:bool | conname:name | conislocal:bool | coninhcount:int2 | connoinherit:bool | convalidated:bool
+grg_ip0 | grg_ip0_pkey | grg_ip_pkey | t | grg_ip0_pkey | f | 1 | t | t
+grg_ip | grg_ip_pkey | NULL | t | grg_ip_pkey | t | 0 | t | t
+-- SELECT 2
+
+> DROP TABLE grg_ip
+-- DROP TABLE
+
+> CREATE TABLE grg_ref (a int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE grg_pp (a int REFERENCES grg_ref, b int, c int, UNIQUE (a, b), EXCLUDE USING btree (a WITH =, c WITH =)) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE grg_pp1 PARTITION OF grg_pp FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE grg_pp2 (a int REFERENCES grg_ref, b int, c int, UNIQUE (a, b), EXCLUDE USING btree (a WITH =, c WITH =))
+-- CREATE TABLE
+
+> ALTER TABLE grg_pp ATTACH PARTITION grg_pp2 FOR VALUES FROM (10) TO (20)
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, contype, conislocal, coninhcount, connoinherit FROM pg_constraint
+>   WHERE conrelid::regclass::text LIKE 'grg_%' AND contype <> 'n' ORDER BY conrelid::regclass::text, conname
+conrelid:regclass | conname:name | contype:char | conislocal:bool | coninhcount:int2 | connoinherit:bool
+grg_pp | grg_pp_a_b_key | u | t | 0 | t
+grg_pp | grg_pp_a_c_excl | x | t | 0 | t
+grg_pp | grg_pp_a_fkey | f | t | 0 | f
+grg_pp1 | grg_pp1_a_b_key | u | f | 1 | f
+grg_pp1 | grg_pp1_a_c_excl | x | f | 1 | f
+grg_pp1 | grg_pp_a_fkey | f | f | 1 | f
+grg_pp2 | grg_pp2_a_b_key | u | f | 1 | t
+grg_pp2 | grg_pp2_a_c_excl | x | f | 1 | t
+grg_pp2 | grg_pp2_a_fkey | f | f | 1 | t
+grg_ref | grg_ref_pkey | p | t | 0 | t
+-- SELECT 10
+
+> ALTER TABLE grg_pp DETACH PARTITION grg_pp2
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, contype, conislocal, coninhcount, connoinherit FROM pg_constraint
+>   WHERE conrelid::regclass::text LIKE 'grg_pp2%' AND contype <> 'n' ORDER BY conname
+conrelid:regclass | conname:name | contype:char | conislocal:bool | coninhcount:int2 | connoinherit:bool
+grg_pp2 | grg_pp2_a_b_key | u | t | 0 | t
+grg_pp2 | grg_pp2_a_c_excl | x | t | 0 | t
+grg_pp2 | grg_pp2_a_fkey | f | t | 0 | t
+-- SELECT 3
+
+> DROP TABLE grg_pp, grg_pp2, grg_ref
+-- DROP TABLE
+
+> CREATE TABLE grg_inv (a int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE INDEX grg_inv_idx ON grg_inv (a)
+-- CREATE INDEX
+
+> CREATE TABLE grg_inv_1 (a int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE grg_inv_1_1 PARTITION OF grg_inv_1 FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE grg_inv_1_2 PARTITION OF grg_inv_1 FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> CREATE INDEX grg_inv_ixd_1 ON ONLY grg_inv_1 (a)
+-- CREATE INDEX
+
+> ALTER TABLE grg_inv ATTACH PARTITION grg_inv_1 FOR VALUES FROM (1) TO (100)
+-- ALTER TABLE
+
+> SELECT indexrelid::regclass, indisvalid, indrelid::regclass, inhparent::regclass
+>   FROM pg_index idx LEFT JOIN pg_inherits inh ON (idx.indexrelid = inh.inhrelid)
+>   WHERE indexrelid::regclass::text LIKE 'grg_inv%'
+>   ORDER BY indexrelid::regclass::text COLLATE "C"
+indexrelid:regclass | indisvalid:bool | indrelid:regclass | inhparent:regclass
+grg_inv_1_1_a_idx | t | grg_inv_1_1 | grg_inv_1_a_idx
+grg_inv_1_2_a_idx | t | grg_inv_1_2 | grg_inv_1_a_idx
+grg_inv_1_a_idx | t | grg_inv_1 | grg_inv_idx
+grg_inv_idx | t | grg_inv | NULL
+grg_inv_ixd_1 | f | grg_inv_1 | NULL
+-- SELECT 5
+
+> DROP TABLE grg_inv
+-- DROP TABLE
+
+> CREATE TABLE grg_isv (a int, b int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE grg_isv_1 PARTITION OF grg_isv FOR VALUES FROM (1) TO (10) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE grg_isv_2 PARTITION OF grg_isv FOR VALUES FROM (10) TO (20) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE grg_isv_11 PARTITION OF grg_isv_1 FOR VALUES FROM (1) TO (5)
+-- CREATE TABLE
+
+> CREATE TABLE grg_isv_12 PARTITION OF grg_isv_1 FOR VALUES FROM (5) TO (10)
+-- CREATE TABLE
+
+> INSERT INTO grg_isv_11 VALUES (1, 0)
+-- INSERT 0 1
+
+> CREATE INDEX CONCURRENTLY grg_isv_idx_11 ON grg_isv_11 ((a/b))
+ERROR 22012: division by zero
+
+> CREATE INDEX grg_isv_idx ON grg_isv ((a/b))
+-- CREATE INDEX
+
+> SELECT indexrelid::regclass, indisvalid, indrelid::regclass, inhparent::regclass
+>   FROM pg_index idx LEFT JOIN pg_inherits inh ON (idx.indexrelid = inh.inhrelid)
+>   WHERE indexrelid::regclass::text LIKE 'grg_isv%'
+>   ORDER BY indexrelid::regclass::text COLLATE "C"
+indexrelid:regclass | indisvalid:bool | indrelid:regclass | inhparent:regclass
+grg_isv_12_expr_idx | t | grg_isv_12 | grg_isv_1_expr_idx
+grg_isv_1_expr_idx | f | grg_isv_1 | grg_isv_idx
+grg_isv_2_expr_idx | t | grg_isv_2 | grg_isv_idx
+grg_isv_idx | f | grg_isv | NULL
+grg_isv_idx_11 | f | grg_isv_11 | grg_isv_1_expr_idx
+-- SELECT 5
+
+> DROP TABLE grg_isv
+-- DROP TABLE
+
+> CREATE TABLE grg_mp (a int PRIMARY KEY, b int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE grg_mp1 PARTITION OF grg_mp (b PRIMARY KEY) FOR VALUES FROM (0) TO (100)
+ERROR 42P16: multiple primary keys for table "grg_mp1" are not allowed
+
+> CREATE TABLE grg_mp2 (a int PRIMARY KEY, b int PRIMARY KEY)
+ERROR 42P16: multiple primary keys for table "grg_mp2" are not allowed (at 48)
+
+> DROP TABLE grg_mp
+-- DROP TABLE
+

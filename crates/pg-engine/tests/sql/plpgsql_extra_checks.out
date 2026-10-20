@@ -1,0 +1,330 @@
+> set plpgsql.extra_warnings = 'shadowed_variables'
+-- SET
+
+> create function xc_w1(in1 int) returns table (out1 int) language plpgsql as $$
+> declare
+> in1 int;
+> out1 int;
+> begin
+> end $$
+WARNING 42712: variable "in1" shadows a previously defined variable (at 88)
+WARNING 42712: variable "out1" shadows a previously defined variable (at 97)
+-- CREATE FUNCTION
+
+> create function xc_w2() returns void language plpgsql as $$
+> declare
+> f1 int;
+> c1 cursor (f1 int) for select 1;
+> begin
+>   declare f1 int; begin end;
+>   for f1 in 1..2 loop end loop;
+> end $$
+WARNING 42712: variable "f1" shadows a previously defined variable (at 88)
+WARNING 42712: variable "f1" shadows a previously defined variable (at 126)
+-- CREATE FUNCTION
+
+> do $$ declare found int; begin end $$
+-- DO
+
+> set plpgsql.extra_errors = 'shadowed_variables'
+-- SET
+
+> create function xc_w3(f1 int) returns int language plpgsql as $$
+> declare f1 int; begin return 1; end $$
+ERROR 42712: variable "f1" shadows a previously defined variable (at 74)
+
+> set plpgsql.extra_errors = 'foo'
+ERROR 22023: invalid value for parameter "plpgsql.extra_errors": "foo"
+DETAIL: Unrecognized key word: "foo".
+
+> set plpgsql.extra_errors = 'all, shadowed_variables'
+ERROR 22023: invalid value for parameter "plpgsql.extra_errors": "all, shadowed_variables"
+DETAIL: Key word "all" cannot be combined with other key words.
+
+> set plpgsql.extra_warnings = 'shadowed_variables, too_many_rows'
+-- SET
+
+> show plpgsql.extra_warnings
+plpgsql.extra_warnings:text
+shadowed_variables, too_many_rows
+-- SHOW
+
+> set plpgsql.extra_warnings = 'ALL'
+-- SET
+
+> show plpgsql.extra_warnings
+plpgsql.extra_warnings:text
+ALL
+-- SHOW
+
+> reset plpgsql.extra_errors
+-- RESET
+
+> reset plpgsql.extra_warnings
+-- RESET
+
+> show plpgsql.extra_errors
+plpgsql.extra_errors:text
+none
+-- SHOW
+
+> create table xc_t (f1 int, f2 text)
+-- CREATE TABLE
+
+> insert into xc_t values (1, 'a'), (2, 'b'), (3, 'c')
+-- INSERT 0 3
+
+> create type xc_pair as (a int, b int)
+-- CREATE TYPE
+
+> set plpgsql.extra_warnings to 'too_many_rows'
+-- SET
+
+> do $$
+> declare x int;
+> begin
+>   select v from generate_series(1,2) g(v) into x;
+>   execute 'select v from generate_series(1,2) g(v)' into x;
+>   raise notice 'x = %', x;
+> end $$
+WARNING P0003: query returned more than one row
+HINT: Make sure the query returns a single row, or use LIMIT 1.
+CONTEXT: PL/pgSQL function inline_code_block line 4 at SQL statement
+NOTICE 00000: x = 1
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+-- DO
+
+> set plpgsql.extra_errors to 'too_many_rows'
+-- SET
+
+> do $$
+> declare x int;
+> begin
+>   select v from generate_series(1,2) g(v) into x;
+> end $$
+ERROR P0003: query returned more than one row
+HINT: Make sure the query returns a single row, or use LIMIT 1.
+CONTEXT: PL/pgSQL function inline_code_block line 4 at SQL statement
+
+> reset plpgsql.extra_errors
+-- RESET
+
+> reset plpgsql.extra_warnings
+-- RESET
+
+> set plpgsql.extra_warnings to 'strict_multi_assignment'
+-- SET
+
+> do $$
+> declare
+>   x int;
+>   y int;
+>   p xc_pair;
+> begin
+>   select 1 into x, y;
+>   select 1,2 into x, y;
+>   select 1,2,3 into x, y;
+>   select 1 into x;
+>   select 1, 2 into x;
+>   select 1, 2 into p;
+>   select 1 into p;
+>   select 1, 2, 3 into p;
+>   select 1 where false into x, y;
+>   for x, y in select 1 loop end loop;
+> end $$
+WARNING 42804: number of source and target fields in assignment does not match
+DETAIL: strict_multi_assignment check of extra_warnings is active.
+HINT: Make sure the query returns the exact list of columns.
+CONTEXT: PL/pgSQL function inline_code_block line 7 at SQL statement
+WARNING 42804: number of source and target fields in assignment does not match
+DETAIL: strict_multi_assignment check of extra_warnings is active.
+HINT: Make sure the query returns the exact list of columns.
+CONTEXT: PL/pgSQL function inline_code_block line 9 at SQL statement
+WARNING 42804: number of source and target fields in assignment does not match
+DETAIL: strict_multi_assignment check of extra_warnings is active.
+HINT: Make sure the query returns the exact list of columns.
+CONTEXT: PL/pgSQL function inline_code_block line 11 at SQL statement
+WARNING 42804: number of source and target fields in assignment does not match
+DETAIL: strict_multi_assignment check of extra_warnings is active.
+HINT: Make sure the query returns the exact list of columns.
+CONTEXT: PL/pgSQL function inline_code_block line 13 at SQL statement
+WARNING 42804: number of source and target fields in assignment does not match
+DETAIL: strict_multi_assignment check of extra_warnings is active.
+HINT: Make sure the query returns the exact list of columns.
+CONTEXT: PL/pgSQL function inline_code_block line 14 at SQL statement
+WARNING 42804: number of source and target fields in assignment does not match
+DETAIL: strict_multi_assignment check of extra_warnings is active.
+HINT: Make sure the query returns the exact list of columns.
+CONTEXT: PL/pgSQL function inline_code_block line 16 at FOR over SELECT rows
+-- DO
+
+> set plpgsql.extra_errors to 'strict_multi_assignment'
+-- SET
+
+> do $$
+> declare
+>   x int;
+>   y int;
+> begin
+>   select 1,2 into x, y;
+>   raise notice 'ok';
+>   select 1 into x, y;
+> end $$
+NOTICE 00000: ok
+CONTEXT: PL/pgSQL function inline_code_block line 7 at RAISE
+ERROR 42804: number of source and target fields in assignment does not match
+DETAIL: strict_multi_assignment check of extra_errors is active.
+HINT: Make sure the query returns the exact list of columns.
+CONTEXT: PL/pgSQL function inline_code_block line 8 at SQL statement
+
+> reset plpgsql.extra_errors
+-- RESET
+
+> reset plpgsql.extra_warnings
+-- RESET
+
+> create function xc_strict() returns void language plpgsql as $$
+> declare
+> x record;
+> p1 int := 1;
+> p3 text := 'foo';
+> begin
+>   select * from xc_t where f1 > p1 or f2 = p3 into strict x;
+> end $$
+-- CREATE FUNCTION
+
+> select xc_strict()
+ERROR P0003: query returned more than one row
+HINT: Make sure the query returns a single row, or use LIMIT 1.
+CONTEXT: PL/pgSQL function xc_strict() line 7 at SQL statement
+
+> set plpgsql.print_strict_params to true
+-- SET
+
+> create or replace function xc_strict() returns void language plpgsql as $$
+> declare
+> x record;
+> p1 int := 1;
+> p3 text := 'it''s';
+> begin
+>   select * from xc_t where f1 > p1 into strict x;
+> end $$
+-- CREATE FUNCTION
+
+> select xc_strict()
+ERROR P0003: query returned more than one row
+DETAIL: parameters: p1 = '1'
+HINT: Make sure the query returns a single row, or use LIMIT 1.
+CONTEXT: PL/pgSQL function xc_strict() line 7 at SQL statement
+
+> create or replace function xc_strict() returns void language plpgsql as $$
+> declare
+> x record;
+> p1 int := 7;
+> p3 text;
+> begin
+>   select * from xc_t where f1 > p1 or f2 = p3 into strict x;
+> end $$
+-- CREATE FUNCTION
+
+> select xc_strict()
+ERROR P0002: query returned no rows
+DETAIL: parameters: p1 = '7', p3 = NULL
+CONTEXT: PL/pgSQL function xc_strict() line 7 at SQL statement
+
+> create or replace function xc_strict() returns void language plpgsql as $$
+> declare
+> x record;
+> begin
+>   execute 'select * from xc_t where f1 > $1 or f2 = $2' using 0, 'foo' into strict x;
+> end $$
+-- CREATE FUNCTION
+
+> select xc_strict()
+ERROR P0003: query returned more than one row
+DETAIL: parameters: $1 = '0', $2 = 'foo'
+CONTEXT: PL/pgSQL function xc_strict() line 5 at EXECUTE
+
+> create or replace function xc_strict() returns void language plpgsql as $$
+> declare
+> x record;
+> begin
+>   execute 'select * from xc_t where f1 = $1' using 9 into strict x;
+> end $$
+-- CREATE FUNCTION
+
+> select xc_strict()
+ERROR P0002: query returned no rows
+DETAIL: parameters: $1 = '9'
+CONTEXT: PL/pgSQL function xc_strict() line 5 at EXECUTE
+
+> create or replace function xc_strict() returns void language plpgsql as $$
+> declare
+> x record;
+> begin
+>   select * from xc_t into strict x;
+> end $$
+-- CREATE FUNCTION
+
+> select xc_strict()
+ERROR P0003: query returned more than one row
+HINT: Make sure the query returns a single row, or use LIMIT 1.
+CONTEXT: PL/pgSQL function xc_strict() line 5 at SQL statement
+
+> reset plpgsql.print_strict_params
+-- RESET
+
+> create or replace function xc_strict() returns void language plpgsql as $$
+> -- the option wins over the setting
+> #print_strict_params on
+> declare
+> x record;
+> p1 int := 1;
+> begin
+>   select * from xc_t where f1 > p1 into strict x;
+> end $$
+-- CREATE FUNCTION
+
+> select xc_strict()
+ERROR P0003: query returned more than one row
+DETAIL: parameters: p1 = '1'
+HINT: Make sure the query returns a single row, or use LIMIT 1.
+CONTEXT: PL/pgSQL function xc_strict() line 8 at SQL statement
+
+> create or replace function xc_strict() returns void language plpgsql as $$
+> #print_strict_params on
+> declare
+> x int;
+> p1 int := 1;
+> begin
+>   update xc_t set f2 = f2 where f1 > p1 returning f1 into x;
+> end $$
+-- CREATE FUNCTION
+
+> select xc_strict()
+ERROR P0003: query returned more than one row
+DETAIL: parameters: p1 = '1'
+HINT: Make sure the query returns a single row, or use LIMIT 1.
+CONTEXT: PL/pgSQL function xc_strict() line 7 at SQL statement
+
+> set plpgsql.print_strict_params to on
+-- SET
+
+> create or replace function xc_strict() returns void language plpgsql as $$
+> #print_strict_params off
+> declare
+> x record;
+> p1 int := 1;
+> begin
+>   select * from xc_t where f1 > p1 into strict x;
+> end $$
+-- CREATE FUNCTION
+
+> select xc_strict()
+ERROR P0003: query returned more than one row
+HINT: Make sure the query returns a single row, or use LIMIT 1.
+CONTEXT: PL/pgSQL function xc_strict() line 7 at SQL statement
+
+> reset plpgsql.print_strict_params
+-- RESET
+

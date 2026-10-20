@@ -1,0 +1,32 @@
+-- CREATE TYPE ... AS ENUM: the array type's oid first, then the type's, then even label oids
+create table m0 ();
+create type e as enum ('a', 'b', 'c');
+select t.oid::int8 - t.typarray::int8 as type_after_array, t.typarray::int8 - 'm0'::regclass::int8 as array_after_marker from pg_type t where typname = 'e';
+select bool_and(oid::int8 % 2 = 0) as even, min(oid::int8) - 'e'::regtype::oid::int8 between 1 and 2 as first, max(oid::int8) - min(oid::int8) as span from pg_enum where enumtypid = 'e'::regtype;
+select array_agg(enumlabel order by oid) = array_agg(enumlabel order by enumsortorder) from pg_enum where enumtypid = 'e'::regtype;
+create table m1 (x e[]);
+select 'm1'::regclass::int8 - (select max(oid::int8) from pg_enum where enumtypid = 'e'::regtype) between 1 and 2;
+select atttypid = '_e'::regtype, format_type(atttypid, atttypmod) from pg_attribute where attrelid = 'm1'::regclass and attname = 'x';
+select typname, typelem::regtype, typarray::regtype, typtype from pg_type where typname in ('e', '_e') order by 1;
+insert into m1 values ('{a,b}');
+select pg_typeof(x), pg_typeof(x[1]), x from m1;
+select ('{c}'::e[])::text, pg_typeof('{c}'::_e), pg_typeof(array['a'::e]);
+select array_agg(x) from (select unnest(enum_range(null::e)) x) s;
+create type g as enum ();
+select t.oid::int8 - t.typarray::int8 from pg_type t where typname = 'g';
+create type h as enum ('p', 'q');
+select t.oid::int8 - t.typarray::int8 from pg_type t where typname = 'h';
+-- a repeated label fails after the type's oids are taken
+create table m2 ();
+do $$ begin create type d as enum ('x', 'x'); exception when unique_violation then raise notice '%', sqlerrm; end $$;
+create table m3 ();
+select 'm3'::regclass::int8 - 'm2'::regclass::int8 > 2;
+alter type h add value 'r';
+select enumlabel, enumsortorder from pg_enum where enumtypid = 'h'::regtype order by enumsortorder;
+create table m4 (y h[], z e);
+select attname, atttypid::regtype from pg_attribute where attrelid = 'm4'::regclass and attnum > 0 order by attnum;
+create function ef(h[]) returns text language sql as 'select $1::text';
+select ef('{p,r}');
+drop table m0, m1, m2, m3, m4;
+drop function ef;
+drop type e, g, h;

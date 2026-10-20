@@ -1,0 +1,33 @@
+> CREATE TABLE gx_dr_te (a int)
+-- CREATE TABLE
+
+> DROP TRIGGER IF EXISTS gx_dr_trg ON gx_dr_no_such_table
+NOTICE 00000: relation "gx_dr_no_such_table" does not exist, skipping
+-- DROP TRIGGER
+
+> DROP TRIGGER IF EXISTS gx_dr_trg ON gx_dr_no_such_schema.gx_dr_no_such_table
+NOTICE 00000: schema "gx_dr_no_such_schema" does not exist, skipping
+-- DROP TRIGGER
+
+> DROP TRIGGER gx_dr_trg ON gx_dr_no_such_schema.gx_dr_no_such_table
+ERROR 3F000: schema "gx_dr_no_such_schema" does not exist
+
+> DROP TRIGGER IF EXISTS gx_dr_trg ON gx_dr_te
+NOTICE 00000: trigger "gx_dr_trg" for relation "gx_dr_te" does not exist, skipping
+-- DROP TRIGGER
+
+> DROP POLICY IF EXISTS gx_dr_pol ON gx_dr_no_such_table
+NOTICE 00000: relation "gx_dr_no_such_table" does not exist, skipping
+-- DROP POLICY
+
+> DROP POLICY IF EXISTS gx_dr_pol ON gx_dr_no_such_schema.gx_dr_no_such_table
+NOTICE 00000: schema "gx_dr_no_such_schema" does not exist, skipping
+-- DROP POLICY
+
+> DROP POLICY IF EXISTS gx_dr_pol ON gx_dr_te
+NOTICE 00000: policy "gx_dr_pol" for relation "gx_dr_te" does not exist, skipping
+-- DROP POLICY
+
+> DROP TABLE gx_dr_te
+-- DROP TABLE
+

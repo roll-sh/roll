@@ -1,0 +1,94 @@
+> create table ci_p1 (f1 text compression pglz)
+-- CREATE TABLE
+
+> create table ci_p2 (f1 text compression lz4)
+-- CREATE TABLE
+
+> create table ci_p3 (f1 text)
+-- CREATE TABLE
+
+> create table ci_c1 () inherits (ci_p1, ci_p2)
+NOTICE 00000: merging multiple inherited definitions of column "f1"
+ERROR 42804: column "f1" has a compression method conflict
+DETAIL: pglz versus lz4
+
+> create table ci_c2 (f1 text compression lz4) inherits (ci_p1)
+NOTICE 00000: merging column "f1" with inherited definition
+ERROR 42804: column "f1" has a compression method conflict
+DETAIL: pglz versus lz4
+
+> create table ci_c3 () inherits (ci_p1, ci_p3)
+NOTICE 00000: merging multiple inherited definitions of column "f1"
+-- CREATE TABLE
+
+> create table ci_c4 () inherits (ci_p3, ci_p2)
+NOTICE 00000: merging multiple inherited definitions of column "f1"
+-- CREATE TABLE
+
+> create table ci_c5 (f1 text) inherits (ci_p2)
+NOTICE 00000: merging column "f1" with inherited definition
+-- CREATE TABLE
+
+> create table ci_c6 (f1 text compression pglz) inherits (ci_p3)
+NOTICE 00000: merging column "f1" with inherited definition
+-- CREATE TABLE
+
+> create table ci_c7 (f1 text storage external) inherits (ci_p1)
+NOTICE 00000: merging column "f1" with inherited definition
+-- CREATE TABLE
+
+> create table ci_c8 (f1 text storage main) inherits (ci_p3)
+NOTICE 00000: merging column "f1" with inherited definition
+-- CREATE TABLE
+
+> select c.relname, a.attcompression, a.attstorage from pg_attribute a join pg_class c on c.oid = a.attrelid
+>   where c.relname like 'ci\_%' and a.attname = 'f1' order by 1
+relname:name | attcompression:char | attstorage:char
+ci_c3 | p | x
+ci_c4 | l | x
+ci_c5 | l | x
+ci_c6 | p | x
+ci_c7 | p | x
+ci_c8 |  | x
+ci_p1 | p | x
+ci_p2 | l | x
+ci_p3 |  | x
+-- SELECT 9
+
+> create materialized view ci_mv (x, y) as select f1, 1 from ci_p1
+-- SELECT 0
+
+> alter materialized view ci_mv alter column x set compression lz4
+-- ALTER MATERIALIZED VIEW
+
+> alter materialized view ci_mv alter column x set storage main
+-- ALTER MATERIALIZED VIEW
+
+> alter materialized view ci_mv alter column y set compression lz4
+ERROR 0A000: column data type integer does not support compression
+
+> alter materialized view ci_mv alter column z set compression lz4
+ERROR 42703: column "z" of relation "ci_mv" does not exist
+
+> alter table ci_mv alter column x set compression pglz
+-- ALTER TABLE
+
+> select attname, attcompression, attstorage from pg_attribute where attrelid = 'ci_mv'::regclass and attnum > 0 order by attnum
+attname:name | attcompression:char | attstorage:char
+x | p | m
+y |  | p
+-- SELECT 2
+
+> drop materialized view ci_mv
+-- DROP MATERIALIZED VIEW
+
+> drop table ci_p1, ci_p2, ci_p3 cascade
+NOTICE 00000: drop cascades to 6 other objects
+DETAIL: drop cascades to table ci_c6
+DETAIL: drop cascades to table ci_c8
+DETAIL: drop cascades to table ci_c4
+DETAIL: drop cascades to table ci_c5
+DETAIL: drop cascades to table ci_c3
+DETAIL: drop cascades to table ci_c7
+-- DROP TABLE
+

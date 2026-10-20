@@ -1,0 +1,150 @@
+> create table sap_1 (a int, b int, t text)
+-- CREATE TABLE
+
+> create table sap_2 (c int, d int)
+-- CREATE TABLE
+
+> create table sap_3 (e int)
+-- CREATE TABLE
+
+> insert into sap_1 select g, g % 10, 't' || g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> insert into sap_2 select g % 300, g from generate_series(1, 5000) g
+-- INSERT 0 5000
+
+> insert into sap_3 values (1), (2), (3)
+-- INSERT 0 3
+
+> analyze sap_1
+-- ANALYZE
+
+> analyze sap_2
+-- ANALYZE
+
+> analyze sap_3
+-- ANALYZE
+
+> explain select * from sap_1 where exists (select 1 from sap_2 where c = a) or b = 1
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=0.00..5047.91 rows=550 width=12)
+  Filter: ((ANY (a = (hashed SubPlan 2).col1)) OR (b = 1))
+  SubPlan 2
+    ->  Seq Scan on sap_2  (cost=0.00..73.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select * from sap_1 where a in (select c from sap_2) or b = 1
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=85.50..106.50 rows=550 width=12)
+  Filter: ((ANY (a = (hashed SubPlan 1).col1)) OR (b = 1))
+  SubPlan 1
+    ->  Seq Scan on sap_2  (cost=0.00..73.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select * from sap_1 where not exists (select 1 from sap_2 where c = a) or b = 1
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=0.00..5047.91 rows=550 width=12)
+  Filter: ((NOT (ANY (a = (hashed SubPlan 2).col1))) OR (b = 1))
+  SubPlan 2
+    ->  Seq Scan on sap_2  (cost=0.00..73.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select * from sap_1 where a not in (select c from sap_2)
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=85.50..104.00 rows=500 width=12)
+  Filter: (NOT (ANY (a = (hashed SubPlan 1).col1)))
+  SubPlan 1
+    ->  Seq Scan on sap_2  (cost=0.00..73.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select * from sap_1 where a = (select max(c) from sap_2)
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=85.51..104.01 rows=1 width=12)
+  Filter: (a = (InitPlan 1).col1)
+  InitPlan 1
+    ->  Aggregate  (cost=85.50..85.51 rows=1 width=4)
+          ->  Seq Scan on sap_2  (cost=0.00..73.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select *, (select count(*) from sap_2) from sap_1 where b < 3
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=85.51..104.01 rows=300 width=20)
+  Filter: (b < 3)
+  InitPlan 1
+    ->  Aggregate  (cost=85.50..85.51 rows=1 width=8)
+          ->  Seq Scan on sap_2  (cost=0.00..73.00 rows=5000 width=0)
+-- EXPLAIN
+
+> explain select * from sap_1 where exists (select 1 from sap_2 where c = a and d > b) or b = 1
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=0.00..16351.83 rows=550 width=12)
+  Filter: (EXISTS(SubPlan 1) OR (b = 1))
+  SubPlan 1
+    ->  Seq Scan on sap_2  (cost=0.00..98.00 rows=6 width=0)
+          Filter: ((d > sap_1.b) AND (c = sap_1.a))
+-- EXPLAIN
+
+> explain select a, exists (select 1 from sap_2 where c = a) from sap_1
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=0.00..5045.41 rows=1000 width=5)
+  SubPlan 2
+    ->  Seq Scan on sap_2  (cost=0.00..73.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select * from sap_1 where (exists (select 1 from sap_2 where c = a) or b = 1) and a in (select d from sap_2 where d < 100 or a = 3)
+QUERY PLAN:text
+Hash Semi Join  (cost=135.50..5185.03 rows=11 width=12)
+  Hash Cond: (sap_1.a = sap_2.d)
+  Join Filter: ((sap_2.d < 100) OR (sap_1.a = 3))
+  ->  Seq Scan on sap_1  (cost=0.00..5047.91 rows=550 width=12)
+        Filter: ((ANY (a = (hashed SubPlan 2).col1)) OR (b = 1))
+        SubPlan 2
+          ->  Seq Scan on sap_2 sap_2_1  (cost=0.00..73.00 rows=5000 width=4)
+  ->  Hash  (cost=73.00..73.00 rows=5000 width=4)
+        ->  Seq Scan on sap_2  (cost=0.00..73.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select * from sap_1 where exists (select 1 from sap_2 where c = a and d > 4990) or b = 1
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=0.00..98018.50 rows=550 width=12)
+  Filter: ((ANY (a = (hashed SubPlan 2).col1)) OR (b = 1))
+  SubPlan 2
+    ->  Seq Scan on sap_2  (cost=0.00..85.50 rows=10 width=4)
+          Filter: (d > 4990)
+-- EXPLAIN
+
+> explain select * from sap_1 where b = 1 and (exists (select 1 from sap_2 where c = a) or a > 990)
+QUERY PLAN:text
+Seq Scan on sap_1  (cost=0.00..5050.41 rows=51 width=12)
+  Filter: ((b = 1) AND ((ANY (a = (hashed SubPlan 2).col1)) OR (a > 990)))
+  SubPlan 2
+    ->  Seq Scan on sap_2  (cost=0.00..73.00 rows=5000 width=4)
+-- EXPLAIN
+
+> explain select e, exists (select 1 from sap_2 where c = e) from sap_3
+QUERY PLAN:text
+Seq Scan on sap_3  (cost=0.00..16.12 rows=3 width=5)
+  SubPlan 1
+    ->  Seq Scan on sap_2  (cost=0.00..85.50 rows=17 width=0)
+          Filter: (c = sap_3.e)
+-- EXPLAIN
+
+> explain select * from sap_3 where exists (select 1 from sap_2 where c = e) or e = 1
+QUERY PLAN:text
+Seq Scan on sap_3  (cost=0.00..16.13 rows=2 width=4)
+  Filter: (EXISTS(SubPlan 1) OR (e = 1))
+  SubPlan 1
+    ->  Seq Scan on sap_2  (cost=0.00..85.50 rows=17 width=0)
+          Filter: (c = sap_3.e)
+-- EXPLAIN
+
+> select count(*) from sap_1 where exists (select 1 from sap_2 where c = a) or b = 1
+count:int8
+369
+-- SELECT 1
+
+> select count(*) from sap_1 where not exists (select 1 from sap_2 where c = a) or b = 1
+count:int8
+731
+-- SELECT 1
+

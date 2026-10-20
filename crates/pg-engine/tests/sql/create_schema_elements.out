@@ -1,0 +1,65 @@
+> SELECT pg_catalog.set_config('search_path', ' ', false)
+set_config:text
+ 
+-- SELECT 1
+
+> CREATE SCHEMA gx_ns_schema_1
+>        CREATE UNIQUE INDEX abc_a_idx ON abc (a)
+> 
+>        CREATE VIEW abc_view AS
+>               SELECT a+1 AS a, b+1 AS b FROM abc
+> 
+>        CREATE TABLE abc (
+>               a serial,
+>               b int UNIQUE
+>        )
+-- CREATE SCHEMA
+
+> SET search_path to public
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> SET search_path to public, gx_ns_schema_1
+-- SET
+
+> CREATE SCHEMA gx_ns_schema_2
+>        CREATE VIEW abc_view AS SELECT c FROM abc
+ERROR 42703: column "c" does not exist (at 68)
+
+> COMMIT
+-- ROLLBACK
+
+> SHOW search_path
+search_path:text
+public
+-- SHOW
+
+> BEGIN
+-- BEGIN
+
+> SET search_path to public, gx_ns_schema_1
+-- SET
+
+> CREATE SCHEMA gx_ns_schema_2
+>        CREATE VIEW abc_view AS SELECT a FROM abc
+-- CREATE SCHEMA
+
+> SHOW search_path
+search_path:text
+public, gx_ns_schema_1
+-- SHOW
+
+> COMMIT
+-- COMMIT
+
+> SHOW search_path
+search_path:text
+public, gx_ns_schema_1
+-- SHOW
+
+> DROP SCHEMA gx_ns_schema_2 CASCADE
+NOTICE 00000: drop cascades to view gx_ns_schema_2.abc_view
+-- DROP SCHEMA
+

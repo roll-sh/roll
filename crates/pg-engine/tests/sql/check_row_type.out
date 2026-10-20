@@ -1,0 +1,84 @@
+> create table crt_t1 (a int, b text)
+-- CREATE TABLE
+
+> create table crt_t2 (x int, y text, check ((x, y)::crt_t1 = (1, '42')::crt_t1))
+-- CREATE TABLE
+
+> insert into crt_t2 values (1, '42')
+-- INSERT 0 1
+
+> alter table crt_t1 alter column b type varchar
+-- ALTER TABLE
+
+> insert into crt_t2 values (1, '42')
+ERROR 42804: ROW() column has type text instead of type character varying
+
+> update crt_t2 set x = 1 where false
+-- UPDATE 0
+
+> update crt_t2 set x = 1
+ERROR 42804: ROW() column has type text instead of type character varying
+
+> insert into crt_t2 select 1, '42' where false
+-- INSERT 0 0
+
+> select * from crt_t2
+x:int4 | y:text
+1 | 42
+-- SELECT 1
+
+> alter table crt_t1 alter column b type varchar(20)
+-- ALTER TABLE
+
+> insert into crt_t2 values (1, '42')
+ERROR 42804: ROW() column has type text instead of type character varying
+
+> alter table crt_t1 alter column b type text
+-- ALTER TABLE
+
+> insert into crt_t2 values (1, '42')
+-- INSERT 0 1
+
+> select count(*) from crt_t2
+count:int8
+2
+-- SELECT 1
+
+> create table crt_t3 (a int, b varchar(5))
+-- CREATE TABLE
+
+> create table crt_t4 (x int, y text, check ((x, y)::crt_t3 = (1, 'a')::crt_t3))
+-- CREATE TABLE
+
+> insert into crt_t4 values (1, 'a')
+-- INSERT 0 1
+
+> alter table crt_t3 alter column b type text
+-- ALTER TABLE
+
+> insert into crt_t4 values (1, 'a')
+ERROR 42804: ROW() column has type character varying instead of type text
+
+> alter table crt_t3 alter column b type varchar(7)
+-- ALTER TABLE
+
+> insert into crt_t4 values (1, 'a')
+-- INSERT 0 1
+
+> create table crt_t5 (a int, b numeric(5, 2))
+-- CREATE TABLE
+
+> create table crt_t6 (x int, y numeric, check ((x, y)::crt_t5 is distinct from null::crt_t5))
+-- CREATE TABLE
+
+> alter table crt_t5 alter column b type numeric(8, 3)
+-- ALTER TABLE
+
+> insert into crt_t6 values (1, 2.5)
+-- INSERT 0 1
+
+> select * from crt_t6
+x:int4 | y:numeric
+1 | 2.5
+-- SELECT 1
+

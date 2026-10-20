@@ -1,0 +1,84 @@
+> create table dsr_t9 (a int, r regclass default 'dsr_t9'::regclass, s text default 'dsr_t9'::regclass::text)
+-- CREATE TABLE
+
+> insert into dsr_t9 (a) values (1)
+-- INSERT 0 1
+
+> select a, r, s from dsr_t9
+a:int4 | r:regclass | s:text
+1 | dsr_t9 | dsr_t9
+-- SELECT 1
+
+> select pg_get_expr(adbin, adrelid) from pg_attrdef where adrelid = 'dsr_t9'::regclass order by adnum
+pg_get_expr:text
+'dsr_t9'::regclass
+('dsr_t9'::regclass)::text
+-- SELECT 2
+
+> create table dsr_t10 (a int default (select count(*) from dsr_t10))
+ERROR 0A000: cannot use subquery in DEFAULT expression (at 37)
+
+> create table dsr_t11 (a int, b int default nextval('dsr_t11'))
+-- CREATE TABLE
+
+> create table dsr_t12 (a regclass default 'dsr_nosuch'::regclass)
+ERROR 42P01: relation "dsr_nosuch" does not exist (at 42)
+
+> create table dsr_t13 (a int check (a > 0), r regclass default 'dsr_t13'::regclass, b nosuchtype)
+ERROR 42704: type "nosuchtype" does not exist (at 86)
+
+> create table dsr_t14 (r regclass default 'dsr_t14'::regclass, b int default 'x')
+ERROR 22P02: invalid input syntax for type integer: "x" (at 77)
+
+> create table dsr_t15 (r oid default 'dsr_t15'::regclass, like dsr_t9)
+ERROR 42701: column "r" specified more than once
+
+> create table dsr_g (a int default 'x', b int generated always as (nosuch) stored)
+ERROR 22P02: invalid input syntax for type integer: "x" (at 35)
+
+> create table dsr_g (b int generated always as (nosuch) stored, a int default 'x')
+ERROR 42703: column "nosuch" does not exist (at 48)
+
+> create table dsr_p (a int, r regclass default 'dsr_p'::regclass) partition by list (a)
+-- CREATE TABLE
+
+> create table dsr_p1 partition of dsr_p (r default 'dsr_p1'::regclass) for values in (1)
+-- CREATE TABLE
+
+> insert into dsr_p (a) values (1)
+-- INSERT 0 1
+
+> select tableoid::regclass, * from dsr_p
+tableoid:regclass | a:int4 | r:regclass
+dsr_p1 | 1 | dsr_p
+-- SELECT 1
+
+> create table dsr_i (r regclass default 'dsr_i'::regclass) inherits (dsr_t9)
+NOTICE 00000: moving and merging column "r" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+-- CREATE TABLE
+
+> insert into dsr_i (a) values (2)
+-- INSERT 0 1
+
+> select a, r, s from dsr_i
+a:int4 | r:regclass | s:text
+2 | dsr_i | dsr_t9
+-- SELECT 1
+
+> alter table dsr_t9 add column z regclass default 'dsr_t9'::regclass
+-- ALTER TABLE
+
+> select a, z from dsr_t9 order by a
+a:int4 | z:regclass
+1 | dsr_t9
+2 | dsr_t9
+-- SELECT 2
+
+> drop table dsr_t9 cascade
+NOTICE 00000: drop cascades to table dsr_i
+-- DROP TABLE
+
+> drop table dsr_t11, dsr_p
+-- DROP TABLE
+

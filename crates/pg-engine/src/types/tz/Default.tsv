@@ -1,0 +1,195 @@
+eat	10800	
+sast	7200	
+wat	3600	
+act	-18000	
+akdt	-28800	D
+akst	-32400	
+art	America/Argentina/Buenos_Aires	
+arst	America/Argentina/Buenos_Aires	
+bot	-14400	
+bra	-10800	
+brst	-7200	D
+brt	-10800	
+cot	-18000	
+cdt	-18000	D
+clst	-10800	D
+clt	America/Santiago	
+cst	-21600	
+edt	-14400	D
+egst	0	D
+egt	-3600	
+est	-18000	
+fnt	-7200	
+fnst	-3600	D
+gft	-10800	
+gyt	America/Guyana	
+mdt	-21600	D
+mst	-25200	
+ndt	-9000	D
+nft	-12600	
+nst	-12600	
+pet	-18000	
+pdt	-25200	D
+pmdt	-7200	D
+pmst	-10800	
+pst	-28800	
+pyst	-10800	D
+pyt	America/Asuncion	
+uyst	-7200	D
+uyt	-10800	
+vet	America/Caracas	
+wgst	-7200	D
+wgt	-10800	
+davt	Antarctica/Davis	
+ddut	36000	
+mawt	Antarctica/Mawson	
+aft	16200	
+almt	21600	
+almst	25200	D
+amst	Asia/Yerevan	
+amt	-14400	
+anast	Asia/Anadyr	
+anat	Asia/Anadyr	
+azst	Asia/Baku	
+azt	Asia/Baku	
+bdt	21600	
+bnt	28800	
+bort	28800	
+btt	21600	
+cct	28800	
+gest	Asia/Tbilisi	
+get	Asia/Tbilisi	
+hkt	28800	
+ict	25200	
+idt	10800	D
+irkst	Asia/Irkutsk	
+irkt	Asia/Irkutsk	
+irt	12600	
+ist	7200	
+jayt	32400	
+jst	32400	
+kdt	36000	D
+kgst	21600	D
+kgt	Asia/Bishkek	
+krast	Asia/Krasnoyarsk	
+krat	Asia/Krasnoyarsk	
+kst	32400	
+lkt	Asia/Colombo	
+magst	Asia/Magadan	
+magt	Asia/Magadan	
+mmt	23400	
+myt	28800	
+novst	Asia/Novosibirsk	
+novt	Asia/Novosibirsk	
+npt	20700	
+omsst	Asia/Omsk	
+omst	Asia/Omsk	
+petst	Asia/Kamchatka	
+pett	Asia/Kamchatka	
+pht	28800	
+pkt	18000	
+pkst	21600	D
+sgt	Asia/Singapore	
+tjt	18000	
+tmt	Asia/Ashgabat	
+ulast	32400	D
+ulat	Asia/Ulaanbaatar	
+uzst	21600	D
+uzt	18000	
+vlast	Asia/Vladivostok	
+vlat	Asia/Vladivostok	
+xjt	21600	
+yakst	Asia/Yakutsk	
+yakt	Asia/Yakutsk	
+yekst	21600	D
+yekt	Asia/Yekaterinburg	
+adt	-10800	D
+ast	-14400	
+azost	0	D
+azot	-3600	
+fkst	Atlantic/Stanley	
+fkt	Atlantic/Stanley	
+acsst	37800	D
+acdt	37800	D
+acst	34200	
+acwst	31500	
+aesst	39600	D
+aedt	39600	D
+aest	36000	
+awsst	32400	D
+awst	28800	
+cadt	37800	D
+cast	34200	
+lhdt	Australia/Lord_Howe	
+lhst	37800	
+ligt	36000	
+nzt	43200	
+sadt	37800	D
+wadt	28800	D
+wast	25200	
+wdt	32400	D
+gmt	0	
+uct	0	
+ut	0	
+utc	0	
+z	0	
+zulu	0	
+bst	3600	D
+bdst	7200	D
+cest	7200	D
+cet	3600	
+cetdst	7200	D
+eest	10800	D
+eet	7200	
+eetdst	10800	D
+fet	10800	
+mest	7200	D
+mesz	7200	D
+met	3600	
+metdst	7200	D
+mez	3600	
+msd	14400	D
+msk	Europe/Moscow	
+volt	Europe/Volgograd	
+wet	0	
+wetdst	3600	D
+cxt	25200	
+iot	Indian/Chagos	
+mut	14400	
+must	18000	D
+mvt	18000	
+ret	14400	
+sct	14400	
+tft	18000	
+chadt	49500	D
+chast	45900	
+chut	36000	
+ckt	Pacific/Rarotonga	
+easst	Pacific/Easter	
+east	Pacific/Easter	
+fjst	46800	D
+fjt	43200	
+galt	-21600	
+gamt	-32400	
+gilt	43200	
+hst	-36000	
+kost	Pacific/Kosrae	
+lint	Pacific/Kiritimati	
+mart	-34200	
+mht	43200	
+mpt	36000	
+nut	Pacific/Niue	
+nzdt	46800	D
+nzst	43200	
+pgt	36000	
+pont	39600	
+pwt	32400	
+taht	-36000	
+tkt	Pacific/Fakaofo	
+tot	46800	
+trut	36000	
+tvt	43200	
+vut	39600	
+wakt	43200	
+wft	43200	
+yapt	36000	

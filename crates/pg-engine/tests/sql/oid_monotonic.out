@@ -1,0 +1,94 @@
+> create table om_a (x int)
+-- CREATE TABLE
+
+> insert into om_a values (0)
+-- INSERT 0 1
+
+> begin
+-- BEGIN
+
+> create table om_b (x int)
+-- CREATE TABLE
+
+> create table om_c (x int)
+-- CREATE TABLE
+
+> rollback
+-- ROLLBACK
+
+> create table om_d (x int)
+-- CREATE TABLE
+
+> create table om_e as select 1 / x as y from om_a
+ERROR 22012: division by zero
+
+> create table om_f (x int)
+-- CREATE TABLE
+
+> begin
+-- BEGIN
+
+> create sequence om_s
+-- CREATE SEQUENCE
+
+> select 1 / 0
+ERROR 22012: division by zero
+
+> rollback
+-- ROLLBACK
+
+> create table om_g (x int)
+-- CREATE TABLE
+
+> create view om_v as select nosuch from om_a
+ERROR 42703: column "nosuch" does not exist (at 28)
+
+> create view om_w as select x from om_a
+-- CREATE VIEW
+
+> create table om_i as select 'a'::text as t
+-- SELECT 1
+
+> create table om_j (x int)
+-- CREATE TABLE
+
+> create materialized view om_m as select 'a'::text as t
+-- SELECT 1
+
+> create table om_k (x int)
+-- CREATE TABLE
+
+> create materialized view om_n as select 1 / x as y from om_a
+ERROR 22012: division by zero
+
+> create table om_l (x int)
+-- CREATE TABLE
+
+> create materialized view om_o as select 1 / x as y from om_a with no data
+-- CREATE MATERIALIZED VIEW
+
+> create table om_p (x int)
+-- CREATE TABLE
+
+> select relname, oid::int8 - 'om_a'::regclass::oid::int8 as delta, reltoastrelid <> 0 as toast from pg_class where relname like 'om\_%' order by oid
+relname:name | delta:int8 | toast:bool
+om_a | 0 | f
+om_d | 9 | f
+om_f | 15 | f
+om_g | 19 | f
+om_w | 22 | f
+om_i | 26 | t
+om_j | 31 | f
+om_m | 34 | t
+om_k | 45 | f
+om_l | 55 | f
+om_o | 58 | f
+om_p | 62 | f
+-- SELECT 12
+
+> drop table om_a, om_d, om_f, om_g, om_i, om_j, om_k, om_l, om_p cascade
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to view om_w
+DETAIL: drop cascades to materialized view om_o
+-- DROP TABLE
+

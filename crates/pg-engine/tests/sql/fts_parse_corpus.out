@@ -1,0 +1,624 @@
+> select tokid, token from ts_parse('default', $$The quick brown fox$$)
+tokid:int4 | token:text
+1 | The
+1 | brown
+1 | fox
+1 | quick
+12 |  
+12 |  
+12 |  
+-- SELECT 7
+
+> select tokid, token from ts_parse('default', $$foo-bar$$)
+tokid:int4 | token:text
+11 | bar
+11 | foo
+12 | -
+16 | foo-bar
+-- SELECT 4
+
+> select tokid, token from ts_parse('default', $$foo-bar-baz2$$)
+tokid:int4 | token:text
+11 | bar
+11 | foo
+12 | -
+12 | -
+15 | foo-bar-baz2
+9 | baz2
+-- SELECT 6
+
+> select tokid, token from ts_parse('default', $$abc123 123abc a1b2$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+3 | 123abc
+3 | a1b2
+3 | abc123
+-- SELECT 5
+
+> select tokid, token from ts_parse('default', $$-123 +123 123 1.5 -1.5 .5 5. 1e5 1.5e-3 1.2.3 1.2.3.4 v1.2$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  .
+12 | . 
+19 | v1.2
+20 | -1.5
+20 | 1.5
+21 | +123
+21 | -123
+22 | 123
+22 | 5
+22 | 5
+7 | 1.5e-3
+7 | 1e5
+8 | 1.2.3
+8 | 1.2.3.4
+-- SELECT 23
+
+> select tokid, token from ts_parse('default', $$user@example.com first.last@sub.example.co.uk$$)
+tokid:int4 | token:text
+12 |  
+4 | first.last@sub.example.co.uk
+4 | user@example.com
+-- SELECT 3
+
+> select tokid, token from ts_parse('default', $$http://www.example.com/path/to?x=1#frag$$)
+tokid:int4 | token:text
+14 | http://
+18 | /path/to?x=1#frag
+5 | www.example.com/path/to?x=1#frag
+6 | www.example.com
+-- SELECT 4
+
+> select tokid, token from ts_parse('default', $$https://example.com$$)
+tokid:int4 | token:text
+14 | https://
+6 | example.com
+-- SELECT 2
+
+> select tokid, token from ts_parse('default', $$www.example.com example.com localhost.localdomain a.b$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+12 |  
+19 | a.b
+6 | example.com
+6 | localhost.localdomain
+6 | www.example.com
+-- SELECT 7
+
+> select tokid, token from ts_parse('default', $$/usr/local/bin/psql ./foo.txt foo.txt ../a/b C:\path\file$$)
+tokid:int4 | token:text
+1 | C
+1 | file
+1 | path
+12 |  
+12 |  
+12 |  .
+12 |  ..
+12 | :\
+12 | \
+19 | /a/b
+19 | /foo.txt
+19 | /usr/local/bin/psql
+6 | foo.txt
+-- SELECT 13
+
+> select tokid, token from ts_parse('default', $$<b>bold</b> <a href="x">link</a> &amp; &#123; &lt;$$)
+tokid:int4 | token:text
+1 | bold
+1 | link
+12 |  
+12 |  
+12 |  
+12 |  
+13 | </a>
+13 | </b>
+13 | <a href="x">
+13 | <b>
+23 | &#123;
+23 | &amp;
+23 | &lt;
+-- SELECT 13
+
+> select tokid, token from ts_parse('default', $$café naïve résumé Ünïcödé straße$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+12 |  
+12 |  
+2 | café
+2 | naïve
+2 | résumé
+2 | straße
+2 | Ünïcödé
+-- SELECT 9
+
+> select tokid, token from ts_parse('default', $$hello,world;semi:colon!bang?q$$)
+tokid:int4 | token:text
+1 | bang
+1 | colon
+1 | hello
+1 | q
+1 | semi
+1 | world
+12 | !
+12 | ,
+12 | :
+12 | ;
+12 | ?
+-- SELECT 11
+
+> select tokid, token from ts_parse('default', $$don't it's O'Reilly$$)
+tokid:int4 | token:text
+1 | O
+1 | Reilly
+1 | don
+1 | it
+1 | s
+1 | t
+12 |  
+12 |  
+12 | '
+12 | '
+12 | '
+-- SELECT 11
+
+> select tokid, token from ts_parse('default', $$multi   spaces	tab$$)
+tokid:int4 | token:text
+1 | multi
+1 | spaces
+1 | tab
+12 | 	
+12 |    
+-- SELECT 5
+
+> select tokid, token from ts_parse('default', $$foo_bar foo__bar _x$$)
+tokid:int4 | token:text
+1 | bar
+1 | bar
+1 | foo
+1 | foo
+1 | x
+12 |  
+12 |  _
+12 | _
+12 | __
+-- SELECT 9
+
+> select tokid, token from ts_parse('default', $$12-34 a-1 1-a x-y-z$$)
+tokid:int4 | token:text
+1 | a
+1 | a
+11 | x
+11 | y
+11 | z
+12 |  
+12 |  
+12 |  
+12 | -
+12 | -
+12 | -
+16 | x-y-z
+21 | -1
+21 | -34
+22 | 1
+22 | 12
+-- SELECT 16
+
+> select tokid, token from ts_parse('default', $$3.14abc abc3.14 1,000 1_000$$)
+tokid:int4 | token:text
+1 | abc
+12 |  
+12 |  
+12 |  
+12 | ,
+12 | _
+19 | abc3.14
+20 | 3.14
+22 | 000
+22 | 000
+22 | 1
+22 | 1
+-- SELECT 12
+
+> select tokid, token from ts_parse('default', $$e-mail co-operation re-enter$$)
+tokid:int4 | token:text
+11 | co
+11 | e
+11 | enter
+11 | mail
+11 | operation
+11 | re
+12 |  
+12 |  
+12 | -
+12 | -
+12 | -
+16 | co-operation
+16 | e-mail
+16 | re-enter
+-- SELECT 14
+
+> select tokid, token from ts_parse('default', $$mail@host-name.com host-name.com 192.168.1.1 10.0.0.1:8080$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+12 |  
+12 | :
+22 | 8080
+4 | mail@host-name.com
+6 | host-name.com
+8 | 10.0.0.1
+8 | 192.168.1.1
+-- SELECT 9
+
+> select tokid, token from ts_parse('default', $$ftp://ftp.example.org/file.tar.gz$$)
+tokid:int4 | token:text
+14 | ftp://
+18 | /file.tar.gz
+5 | ftp.example.org/file.tar.gz
+6 | ftp.example.org
+-- SELECT 4
+
+> select tokid, token from ts_parse('default', $$x@y$$)
+tokid:int4 | token:text
+1 | x
+1 | y
+12 | @
+-- SELECT 3
+
+> select tokid, token from ts_parse('default', $$--double -- dash$$)
+tokid:int4 | token:text
+1 | dash
+1 | double
+12 |  
+12 | -
+12 | -
+12 | -
+12 | - 
+-- SELECT 7
+
+> select tokid, token from ts_parse('default', $$a.b.c.d.e$$)
+tokid:int4 | token:text
+19 | a.b.c.d.e
+-- SELECT 1
+
+> select tokid, token from ts_parse('default', $$http://localhost:5432/db$$)
+tokid:int4 | token:text
+1 | localhost
+12 | :
+14 | http://
+19 | 5432/db
+-- SELECT 4
+
+> select tokid, token from ts_parse('default', $$foo.bar/baz /path/with-dash/x_y.z$$)
+tokid:int4 | token:text
+12 |  
+18 | /baz
+19 | /path/with-dash/x_y.z
+5 | foo.bar/baz
+6 | foo.bar
+-- SELECT 5
+
+> select tokid, token from ts_parse('default', $$<script>var x = 1;</script> after <style>p{}</style> done <SCRIPT type="a">x</SCRIPT>y$$)
+tokid:int4 | token:text
+1 | after
+1 | done
+1 | y
+12 |  
+12 |  
+12 |  
+12 |  
+12 | p{}
+12 | var x = 1;
+12 | x
+13 | </SCRIPT>
+13 | </script>
+13 | </style>
+13 | <SCRIPT type="a">
+13 | <script>
+13 | <style>
+-- SELECT 16
+
+> select tokid, token from ts_parse('default', $$<!-- comment --> <!DOCTYPE html> <?xml version="1.0"?> <br/> <a b='c\'d'>t</a>$$)
+tokid:int4 | token:text
+1 | t
+12 |  
+12 |  
+12 |  
+12 |  
+13 | <!-- comment -->
+13 | <!DOCTYPE html>
+13 | </a>
+13 | <?xml version="1.0"?>
+13 | <a b='c\'d'>
+13 | <br/>
+-- SELECT 11
+
+> select tokid, token from ts_parse('default', $$&nbsp; &#x1F600; &#xZZ; &abc &a:b-c.d; &#12a;$$)
+tokid:int4 | token:text
+1 | abc
+1 | xZZ
+12 |  
+12 |  
+12 |  
+12 |  
+12 | &
+12 | &#
+12 | &#
+12 | ;
+12 | ; 
+23 | &#x1F600;
+23 | &a:b-c.d;
+23 | &nbsp;
+3 | 12a
+-- SELECT 15
+
+> select tokid, token from ts_parse('default', $$http://example.com:8080/a/b?c=d&e=f http://user@host.com/ mailto:me@x.org$$)
+tokid:int4 | token:text
+1 | mailto
+12 |  
+12 | / 
+12 | :
+14 | http://
+14 | http://
+18 | /a/b?c=d&e=f
+4 | me@x.org
+4 | user@host.com
+5 | example.com:8080/a/b?c=d&e=f
+6 | example.com:8080
+-- SELECT 11
+
+> select tokid, token from ts_parse('default', $$https://a.b.c/d%20e/f~g ftp://h.i/ http://[::1]/ http://1.2.3.4/x$$)
+tokid:int4 | token:text
+12 |  
+12 | %
+12 | / 
+12 | / 
+12 | [::
+12 | ]
+14 | ftp://
+14 | http://
+14 | http://
+14 | https://
+19 | /x
+19 | 20e/f
+19 | a.b.c/d
+19 | h.i
+19 | ~g
+22 | 1
+8 | 1.2.3.4
+-- SELECT 17
+
+> select tokid, token from ts_parse('default', $$~/file ~user/file /a/b/c.d.e .hidden ../../up ./x/../y a/b c:/x$$)
+tokid:int4 | token:text
+1 | c
+1 | hidden
+12 |  
+12 |  
+12 |  
+12 |  .
+12 |  .
+12 |  ..
+12 |  ~
+12 | :
+19 | /../up
+19 | /a/b/c.d.e
+19 | /x
+19 | /x/../y
+19 | a/b
+19 | user/file
+19 | ~/file
+-- SELECT 17
+
+> select tokid, token from ts_parse('default', $$1.2.3.4.5 1.2e3.4 10e 10e+ 10e+5 -5e-5 +.5 -.5 1..2 1.2..3$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 | + 
+12 | +.
+12 | -.
+12 | .
+12 | ..
+12 | ..
+20 | 1.2
+22 | 1
+22 | 2
+22 | 3
+22 | 4
+22 | 5
+22 | 5
+3 | 10e
+3 | 10e
+7 | -5e-5
+7 | 1.2e3
+7 | 10e+5
+8 | 1.2.3.4.5
+-- SELECT 27
+
+> select tokid, token from ts_parse('default', $$a-b-c-1 1-2-3 a1-b2 über-straße x-über 1-über über-1$$)
+tokid:int4 | token:text
+10 | straße
+10 | über
+10 | über
+11 | a
+11 | b
+11 | c
+11 | x
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 |  
+12 | -
+12 | -
+12 | -
+12 | -
+12 | -
+12 | -
+12 | -
+15 | a1-b2
+16 | a-b-c
+17 | x-über
+17 | über-straße
+2 | über
+2 | über
+21 | -1
+21 | -2
+21 | -3
+22 | 1
+22 | 1
+22 | 1
+9 | a1
+9 | b2
+-- SELECT 34
+
+> select tokid, token from ts_parse('default', $$word123word 123.456.789 v2.0.1-beta 2.0-rc1$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+12 |  
+12 | -
+19 | v2.0.1-beta
+20 | 2.0
+3 | rc1
+3 | word123word
+8 | 123.456.789
+-- SELECT 9
+
+> select tokid, token from ts_parse('default', $$आभार हिन्दी ক্রিকেট combin̈ed e⃝x$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+12 |  
+12 |  
+2 | combin̈ed
+2 | e⃝x
+2 | आभार
+2 | हिन्दी
+2 | ক্রিকেট
+-- SELECT 9
+
+> select tokid, token from ts_parse('default', $$a@b.c a@b a.b@c.d.e -@x.y foo@bar.baz.qux:99/path$$)
+tokid:int4 | token:text
+1 | a
+1 | a
+1 | b
+12 |  
+12 |  
+12 |  
+12 |  
+12 | -@
+12 | @
+12 | @
+12 | @
+19 | /path
+19 | a.b
+19 | b.c
+19 | c.d.e
+19 | x.y
+4 | foo@bar.baz.qux:99
+-- SELECT 17
+
+> select tokid, token from ts_parse('default', $$example.com/path example.com:80 example.com:80/x host.name/~user/$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+12 |  
+18 | /path
+18 | /x
+18 | /~user/
+5 | example.com/path
+5 | example.com:80/x
+5 | host.name/~user/
+6 | example.com
+6 | example.com:80
+6 | example.com:80
+6 | host.name
+-- SELECT 13
+
+> select tokid, token from ts_parse('default', $$O'Neil can't rock'n'roll l'été$$)
+tokid:int4 | token:text
+1 | Neil
+1 | O
+1 | can
+1 | l
+1 | n
+1 | rock
+1 | roll
+1 | t
+12 |  
+12 |  
+12 |  
+12 | '
+12 | '
+12 | '
+12 | '
+12 | '
+2 | été
+-- SELECT 17
+
+> select tokid, token from ts_parse('default', $$---x--y-- a--b a-$$)
+tokid:int4 | token:text
+1 | a
+1 | a
+1 | b
+1 | x
+1 | y
+12 |  
+12 | -
+12 | -
+12 | -
+12 | -
+12 | -
+12 | -
+12 | -
+12 | -
+12 | -
+12 | - 
+-- SELECT 16
+
+> select tokid, token from ts_parse('default', $$"quoted" (paren) [bracket] {brace} 'single'$$)
+tokid:int4 | token:text
+1 | brace
+1 | bracket
+1 | paren
+1 | quoted
+1 | single
+12 | "
+12 | " (
+12 | '
+12 | ) [
+12 | ] {
+12 | } '
+-- SELECT 11
+
+> select tokid, token from ts_parse('default', $$1st 2nd 3rd 4th 21st$$)
+tokid:int4 | token:text
+12 |  
+12 |  
+12 |  
+12 |  
+3 | 1st
+3 | 21st
+3 | 2nd
+3 | 3rd
+3 | 4th
+-- SELECT 9
+

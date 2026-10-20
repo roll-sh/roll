@@ -1,0 +1,287 @@
+> create sequence cvo_s
+-- CREATE SEQUENCE
+
+> create table cvo_t (a int)
+-- CREATE TABLE
+
+> insert into cvo_t values (1),(2),(3),(4),(5),(6)
+-- INSERT 0 6
+
+> create function cvo_q(int) returns bool language plpgsql volatile as $$ begin raise notice 'qual %', $1; return true; end $$
+-- CREATE FUNCTION
+
+> create function cvo_odd(int) returns bool language plpgsql volatile as $$ declare n int := nextval('cvo_s'); begin raise notice 'odd % %', $1, n; return n % 2 = 1; end $$
+-- CREATE FUNCTION
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from cvo_t where cvo_q(a) limit 2 offset 2
+-- DECLARE CURSOR
+
+> fetch next from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+3
+-- FETCH 1
+
+> fetch next from c
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+4
+-- FETCH 1
+
+> fetch next from c
+a:int4
+-- FETCH 0
+
+> fetch prior from c
+a:int4
+4
+-- FETCH 1
+
+> fetch prior from c
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+3
+-- FETCH 1
+
+> fetch prior from c
+a:int4
+-- FETCH 0
+
+> fetch prior from c
+a:int4
+-- FETCH 0
+
+> fetch next from c
+a:int4
+3
+-- FETCH 1
+
+> fetch all from c
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+4
+-- FETCH 1
+
+> fetch backward all from c
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+3
+4
+-- FETCH 2
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from cvo_t where cvo_q(a) offset 4
+-- DECLARE CURSOR
+
+> fetch all from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 5
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 6
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+5
+6
+-- FETCH 2
+
+> fetch backward all from c
+NOTICE 00000: qual 6
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 5
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+5
+6
+-- FETCH 2
+
+> fetch next from c
+a:int4
+5
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from cvo_t where cvo_q(a) limit 3 offset 10
+-- DECLARE CURSOR
+
+> fetch next from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 5
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 6
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+-- FETCH 0
+
+> fetch prior from c
+a:int4
+-- FETCH 0
+
+> fetch next from c
+a:int4
+-- FETCH 0
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from cvo_t where cvo_q(a) limit 0 offset 1
+-- DECLARE CURSOR
+
+> fetch next from c
+a:int4
+-- FETCH 0
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from cvo_t where cvo_q(a) limit 5 offset 3
+-- DECLARE CURSOR
+
+> fetch prior from c
+a:int4
+-- FETCH 0
+
+> fetch absolute 2 from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 5
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+5
+-- FETCH 1
+
+> fetch absolute -1 from c
+NOTICE 00000: qual 6
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 6
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+6
+-- FETCH 1
+
+> fetch first from c
+NOTICE 00000: qual 1
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 2
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 3
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 4
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+4
+-- FETCH 1
+
+> fetch relative 2 from c
+NOTICE 00000: qual 5
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+NOTICE 00000: qual 6
+CONTEXT: PL/pgSQL function cvo_q(integer) line 1 at RAISE
+a:int4
+6
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> begin
+-- BEGIN
+
+> declare c scroll cursor for select a from cvo_t where cvo_odd(a) limit 2 offset 1
+-- DECLARE CURSOR
+
+> fetch all from c
+NOTICE 00000: odd 1 1
+CONTEXT: PL/pgSQL function cvo_odd(integer) line 1 at RAISE
+NOTICE 00000: odd 2 2
+CONTEXT: PL/pgSQL function cvo_odd(integer) line 1 at RAISE
+NOTICE 00000: odd 3 3
+CONTEXT: PL/pgSQL function cvo_odd(integer) line 1 at RAISE
+NOTICE 00000: odd 4 4
+CONTEXT: PL/pgSQL function cvo_odd(integer) line 1 at RAISE
+NOTICE 00000: odd 5 5
+CONTEXT: PL/pgSQL function cvo_odd(integer) line 1 at RAISE
+a:int4
+3
+5
+-- FETCH 2
+
+> fetch backward all from c
+NOTICE 00000: odd 4 6
+CONTEXT: PL/pgSQL function cvo_odd(integer) line 1 at RAISE
+NOTICE 00000: odd 3 7
+CONTEXT: PL/pgSQL function cvo_odd(integer) line 1 at RAISE
+a:int4
+3
+5
+-- FETCH 2
+
+> fetch all from c
+NOTICE 00000: odd 4 8
+CONTEXT: PL/pgSQL function cvo_odd(integer) line 1 at RAISE
+NOTICE 00000: odd 5 9
+CONTEXT: PL/pgSQL function cvo_odd(integer) line 1 at RAISE
+a:int4
+3
+5
+-- FETCH 2
+
+> commit
+-- COMMIT
+
+> drop table cvo_t
+-- DROP TABLE
+
+> drop function cvo_q, cvo_odd
+-- DROP FUNCTION
+
+> drop sequence cvo_s
+-- DROP SEQUENCE
+

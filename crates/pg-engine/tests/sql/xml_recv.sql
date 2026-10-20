@@ -1,0 +1,80 @@
+-- xml_recv: binary input reads the encoding the XML declaration names (UTF-8 without one),
+-- converts from it, and checks the document is well-formed.
+-- UTF-8 without a declaration.
+\fcall xmlconcat2(xml,xml) x:3c613ec3a93c2f613e NULL;
+-- Latin-1 bytes under an encoding declaration are converted.
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2249534f2d383835392d31223f3e3c6120623d22e9ff223ee03c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d27312e302720656e636f64696e673d276c6174696e3127207374616e64616c6f6e653d27796573273f3e0a3c613ee93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2257494e31323532223f3e3c613e809c3c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2277696e646f77732d31323532223f3e3c613e813c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e32223f3e3c613eb1e83c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224b4f49382d52223f3e3c613ec1d73c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2249534f2d383835392d35223f3e3c613eb03c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2257494e31323531223f3e3c613e983c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2255544638223f3e3c613ec3a93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d225554462d38223f3e3c613ee93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ee93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2253514c5f4153434949223f3e3c613ec3a93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2253514c5f4153434949223f3e3c613ee93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d225554462d3136223f3e3c612f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d226e6f6e6573756368223f3e3c612f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f623e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e7465787420e9203c622f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e312220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e3122203f3e3c613ee93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c20656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223c613ee93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2257494e383734223f3e3c613ea13c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e39223f3e3c613ea43c2f613e NULL;
+\fcallb xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL;
+\fcallb xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e3122207374616e64616c6f6e653d226e6f223f3e3c613ee93c2f613e NULL;
+set xmloption = content;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e7465787420e9203c622f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f623e NULL;
+\fcall xmlconcat2(xml,xml) x:3c21444f435459504520613e3c613ee93c2f613e NULL;
+-- Without a declaration (or declaring UTF-8) the bytes go to libxml as they are, which reports
+-- invalid UTF-8 (once) and reads it as U+FFFD; a sequence cut short by the end stops it.
+\fcall xmlconcat2(xml,xml) x:3c613ee93c2f623e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e78e9793c632f3e3c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c6120623d22e9e9222f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c61e92f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c212d2de92d2d3e3c612f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e26e93b3c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ee9 NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e3c215b43444154415be95d5d3e3c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f7020e93f3e3c612f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ec33c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ec0803c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613eeda0803c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ef49080803c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e803c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ec3a9e9206d6f726520746578742026616d703b203c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e0a0ae93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:efbbbf3c612f3e NULL;
+set xmloption = document;
+\fcall xmlconcat2(xml,xml) x:3c613ee93c2f623e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e78e9793c632f3e3c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c6120623d22e9e9222f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c61e92f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c212d2de92d2d3e3c612f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e26e93b3c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ee9 NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e3c215b43444154415be95d5d3e3c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f7020e93f3e3c612f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ec33c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ec0803c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613eeda0803c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ef49080803c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e803c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613ec3a9e9206d6f726520746578742026616d703b203c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:3c613e0a0ae93c2f613e NULL;
+\fcall xmlconcat2(xml,xml) x:efbbbf3c612f3e NULL;
+\fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224c4154494e31223f3e3c613ee93c2f613e NULL;
+reset xmloption;
+-- A byte order mark starts a document.
+select xmlparse(document E'\uFEFF<a/>'), xmlparse(document E'\uFEFF<?xml version="1.0"?><a/>');
+select xmlparse(document E'\uFEFF<a></b>');
+select xmlparse(content E'\uFEFF<a/>');
+select xmlparse(document E' \uFEFF<a/>');
+select xmlserialize(document E'\uFEFF<a/>' as text indent), xpath('/', E'\uFEFF<a/>'::xml);

@@ -1,0 +1,228 @@
+> set jit = off
+-- SET
+
+> create table ps_w(a int, b int, c text, d varchar(10))
+-- CREATE TABLE
+
+> insert into ps_w select g % 10, g % 7, 'c'||g, 'd'||(g%5) from generate_series(1,100) g
+-- INSERT 0 100
+
+> explain (costs off) select a, b, row_number() over (partition by a order by b), rank() over (order by b) from ps_w
+QUERY PLAN:text
+WindowAgg
+  Window: w2 AS (ORDER BY b ROWS UNBOUNDED PRECEDING)
+  ->  Sort
+        Sort Key: b
+        ->  WindowAgg
+              Window: w1 AS (PARTITION BY a ORDER BY b ROWS UNBOUNDED PRECEDING)
+              ->  Sort
+                    Sort Key: a, b
+                    ->  Seq Scan on ps_w
+-- EXPLAIN
+
+> explain (costs off) select a, b, sum(b) over (partition by a), count(*) over (partition by a order by b) from ps_w
+QUERY PLAN:text
+WindowAgg
+  Window: w2 AS (PARTITION BY a)
+  ->  WindowAgg
+        Window: w1 AS (PARTITION BY a ORDER BY b)
+        ->  Sort
+              Sort Key: a, b
+              ->  Seq Scan on ps_w
+-- EXPLAIN
+
+> explain (costs off) select a, row_number() over (order by a, b), sum(b) over (order by a) from ps_w
+QUERY PLAN:text
+WindowAgg
+  Window: w2 AS (ORDER BY a)
+  ->  WindowAgg
+        Window: w1 AS (ORDER BY a, b ROWS UNBOUNDED PRECEDING)
+        ->  Sort
+              Sort Key: a, b
+              ->  Seq Scan on ps_w
+-- EXPLAIN
+
+> explain (costs off) select * from ps_w order by a, b
+QUERY PLAN:text
+Sort
+  Sort Key: a, b
+  ->  Seq Scan on ps_w
+-- EXPLAIN
+
+> explain (costs off) select a, b, row_number() over (partition by a order by b) from ps_w order by a, b, c
+QUERY PLAN:text
+Incremental Sort
+  Sort Key: a, b, c
+  Presorted Key: a, b
+  ->  WindowAgg
+        Window: w1 AS (PARTITION BY a ORDER BY b ROWS UNBOUNDED PRECEDING)
+        ->  Sort
+              Sort Key: a, b
+              ->  Seq Scan on ps_w
+-- EXPLAIN
+
+> explain (costs off) select a from ps_w union select b from ps_w
+QUERY PLAN:text
+HashAggregate
+  Group Key: ps_w.a
+  ->  Append
+        ->  Seq Scan on ps_w
+        ->  Seq Scan on ps_w ps_w_1
+-- EXPLAIN
+
+> explain (costs off) select a, c from ps_w union select b, c from ps_w
+QUERY PLAN:text
+HashAggregate
+  Group Key: ps_w.a, ps_w.c
+  ->  Append
+        ->  Seq Scan on ps_w
+        ->  Seq Scan on ps_w ps_w_1
+-- EXPLAIN
+
+> explain (costs off) select a from ps_w union select b from ps_w order by 1
+QUERY PLAN:text
+Unique
+  ->  Merge Append
+        Sort Key: ps_w.a
+        ->  Sort
+              Sort Key: ps_w.a
+              ->  Seq Scan on ps_w
+        ->  Sort
+              Sort Key: ps_w_1.b
+              ->  Seq Scan on ps_w ps_w_1
+-- EXPLAIN
+
+> explain (costs off) select distinct a, 1 as one from ps_w
+QUERY PLAN:text
+HashAggregate
+  Group Key: a
+  ->  Seq Scan on ps_w
+-- EXPLAIN
+
+> explain (costs off) select distinct a, 'x' from ps_w order by a
+QUERY PLAN:text
+Sort
+  Sort Key: a
+  ->  HashAggregate
+        Group Key: a
+        ->  Seq Scan on ps_w
+-- EXPLAIN
+
+> explain (costs off) select distinct on (a) a, b from ps_w where b = 3 order by a, b
+QUERY PLAN:text
+Unique
+  ->  Sort
+        Sort Key: a
+        ->  Seq Scan on ps_w
+              Filter: (b = 3)
+-- EXPLAIN
+
+> explain (costs off) select * from ps_w where a = 1 order by a, b
+QUERY PLAN:text
+Sort
+  Sort Key: b
+  ->  Seq Scan on ps_w
+        Filter: (a = 1)
+-- EXPLAIN
+
+> explain (costs off) select * from ps_w w1 join ps_w w2 on w1.c = w2.d where w2.d = 'x'
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on ps_w w1
+        Filter: (c = 'x'::text)
+  ->  Materialize
+        ->  Seq Scan on ps_w w2
+              Filter: ((d)::text = 'x'::text)
+-- EXPLAIN
+
+> explain (costs off, verbose) select * from ps_w w1 join ps_w w2 on w1.c = w2.d where w1.c = 'x'
+QUERY PLAN:text
+Nested Loop
+  Output: w1.a, w1.b, w1.c, w1.d, w2.a, w2.b, w2.c, w2.d
+  ->  Seq Scan on public.ps_w w1
+        Output: w1.a, w1.b, w1.c, w1.d
+        Filter: (w1.c = 'x'::text)
+  ->  Materialize
+        Output: w2.a, w2.b, w2.c, w2.d
+        ->  Seq Scan on public.ps_w w2
+              Output: w2.a, w2.b, w2.c, w2.d
+              Filter: ((w2.d)::text = 'x'::text)
+-- EXPLAIN
+
+> explain (costs off, verbose) select * from ps_w where d = c
+QUERY PLAN:text
+Seq Scan on public.ps_w
+  Output: a, b, c, d
+  Filter: ((ps_w.d)::text = ps_w.c)
+-- EXPLAIN
+
+> explain (costs off, verbose) select (select max(a) from ps_w) as m
+QUERY PLAN:text
+Result
+  Output: (InitPlan 1).col1
+  InitPlan 1
+    ->  Aggregate
+          Output: max(ps_w.a)
+          ->  Seq Scan on public.ps_w
+                Output: ps_w.a, ps_w.b, ps_w.c, ps_w.d
+-- EXPLAIN
+
+> explain (costs off, verbose) select 1 where exists (select 1 from ps_w)
+QUERY PLAN:text
+Result
+  Output: 1
+  One-Time Filter: (InitPlan 1).col1
+  InitPlan 1
+    ->  Seq Scan on public.ps_w
+-- EXPLAIN
+
+> explain (costs off) select (select max(a) from ps_w), (select min(b) from ps_w)
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Aggregate
+          ->  Seq Scan on ps_w
+  InitPlan 2
+    ->  Aggregate
+          ->  Seq Scan on ps_w ps_w_1
+-- EXPLAIN
+
+> explain (costs off) select * from ps_w w1, ps_w w2 where w1.a = w2.b and w1.a = 3
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on ps_w w1
+        Filter: (a = 3)
+  ->  Materialize
+        ->  Seq Scan on ps_w w2
+              Filter: (b = 3)
+-- EXPLAIN
+
+> explain (costs off) select * from ps_w w1 join ps_w w2 on w1.a = w2.a join ps_w w3 on w2.a = w3.b where w3.b = 4
+QUERY PLAN:text
+Nested Loop
+  ->  Nested Loop
+        ->  Seq Scan on ps_w w1
+              Filter: (a = 4)
+        ->  Materialize
+              ->  Seq Scan on ps_w w2
+                    Filter: (a = 4)
+  ->  Materialize
+        ->  Seq Scan on ps_w w3
+              Filter: (b = 4)
+-- EXPLAIN
+
+> explain (costs off) select * from ps_w w1 left join ps_w w2 on w1.a = w2.a where w1.a = 3
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on ps_w w1
+        Filter: (a = 3)
+  ->  Materialize
+        ->  Seq Scan on ps_w w2
+              Filter: (a = 3)
+-- EXPLAIN
+
+> select count(*) from ps_w w1, ps_w w2 where w1.a = w2.b and w1.a = 3
+count:int8
+140
+-- SELECT 1
+

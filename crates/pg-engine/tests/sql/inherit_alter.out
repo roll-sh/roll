@@ -1,0 +1,329 @@
+> CREATE TABLE p (a int, b text)
+-- CREATE TABLE
+
+> CREATE TABLE c (x int) INHERITS (p)
+-- CREATE TABLE
+
+> CREATE TABLE gc () INHERITS (c)
+-- CREATE TABLE
+
+> INSERT INTO c VALUES (1, 'one', 10)
+-- INSERT 0 1
+
+> ALTER TABLE p ADD COLUMN d int DEFAULT 4
+-- ALTER TABLE
+
+> SELECT * FROM gc
+a:int4 | b:text | x:int4 | d:int4
+-- SELECT 0
+
+> SELECT * FROM c
+a:int4 | b:text | x:int4 | d:int4
+1 | one | 10 | 4
+-- SELECT 1
+
+> ALTER TABLE p ADD COLUMN x int
+NOTICE 00000: merging definition of column "x" for child "c"
+-- ALTER TABLE
+
+> SELECT attname, attinhcount, attislocal FROM pg_attribute WHERE attrelid='c'::regclass AND attnum>0 ORDER BY attnum
+attname:name | attinhcount:int2 | attislocal:bool
+a | 1 | f
+b | 1 | f
+x | 1 | t
+d | 1 | f
+-- SELECT 4
+
+> ALTER TABLE p ADD COLUMN y text
+-- ALTER TABLE
+
+> ALTER TABLE c ADD COLUMN z int
+-- ALTER TABLE
+
+> ALTER TABLE p ADD COLUMN z text
+ERROR 42804: child table "c" has different type for column "z"
+
+> ALTER TABLE ONLY p ADD COLUMN w int
+ERROR 42P16: column must be added to child tables too
+
+> ALTER TABLE p DROP COLUMN x
+-- ALTER TABLE
+
+> SELECT attname, attinhcount, attislocal FROM pg_attribute WHERE attrelid='c'::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum
+attname:name | attinhcount:int2 | attislocal:bool
+a | 1 | f
+b | 1 | f
+x | 0 | t
+d | 1 | f
+y | 1 | f
+z | 0 | t
+-- SELECT 6
+
+> ALTER TABLE ONLY p DROP COLUMN y
+-- ALTER TABLE
+
+> SELECT attname, attinhcount, attislocal FROM pg_attribute WHERE attrelid='c'::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum
+attname:name | attinhcount:int2 | attislocal:bool
+a | 1 | f
+b | 1 | f
+x | 0 | t
+d | 1 | f
+y | 0 | t
+z | 0 | t
+-- SELECT 6
+
+> ALTER TABLE ONLY p RENAME COLUMN a TO aa
+ERROR 42P16: inherited column "a" must be renamed in child tables too
+
+> ALTER TABLE p RENAME COLUMN a TO aa
+-- ALTER TABLE
+
+> SELECT * FROM gc
+aa:int4 | b:text | x:int4 | d:int4 | y:text | z:int4
+-- SELECT 0
+
+> ALTER TABLE c RENAME COLUMN aa TO a
+ERROR 42P16: cannot rename inherited column "aa"
+
+> ALTER TABLE c ALTER COLUMN aa TYPE bigint
+ERROR 42P16: cannot alter inherited column "aa" (at 28)
+
+> ALTER TABLE ONLY p ALTER COLUMN aa TYPE bigint
+ERROR 42P16: type of inherited column "aa" must be changed in child tables too
+
+> ALTER TABLE p ALTER COLUMN aa TYPE bigint
+-- ALTER TABLE
+
+> SELECT attrelid::regclass, atttypid::regtype FROM pg_attribute WHERE attname='aa' ORDER BY 1
+attrelid:regclass | atttypid:regtype
+p | bigint
+c | bigint
+gc | bigint
+-- SELECT 3
+
+> ALTER TABLE p ALTER COLUMN b SET DEFAULT 'dflt'
+-- ALTER TABLE
+
+> INSERT INTO gc (aa) VALUES (2)
+-- INSERT 0 1
+
+> SELECT aa, b FROM gc
+aa:int8 | b:text
+2 | dflt
+-- SELECT 1
+
+> ALTER TABLE ONLY p ALTER COLUMN b SET DEFAULT 'only'
+-- ALTER TABLE
+
+> INSERT INTO c (aa) VALUES (3)
+-- INSERT 0 1
+
+> SELECT aa, b FROM c ORDER BY aa
+aa:int8 | b:text
+1 | one
+2 | dflt
+3 | dflt
+-- SELECT 3
+
+> ALTER TABLE p ALTER COLUMN aa SET NOT NULL
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal FROM pg_constraint WHERE contype='n' AND conrelid IN ('p'::regclass, 'c'::regclass, 'gc'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool
+p | p_aa_not_null | 0 | t
+c | p_aa_not_null | 1 | f
+gc | p_aa_not_null | 1 | f
+-- SELECT 3
+
+> ALTER TABLE c ALTER COLUMN aa DROP NOT NULL
+ERROR 42P16: cannot drop inherited constraint "p_aa_not_null" of relation "c"
+
+> ALTER TABLE p ALTER COLUMN aa DROP NOT NULL
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname FROM pg_constraint WHERE contype='n' AND conrelid IN ('p'::regclass, 'c'::regclass, 'gc'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name
+-- SELECT 0
+
+> ALTER TABLE p ADD CONSTRAINT pos CHECK (aa > 0)
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal FROM pg_constraint WHERE contype='c' AND conrelid IN ('p'::regclass, 'c'::regclass, 'gc'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool
+p | pos | 0 | t
+c | pos | 1 | f
+gc | pos | 1 | f
+-- SELECT 3
+
+> ALTER TABLE c DROP CONSTRAINT pos
+ERROR 42P16: cannot drop inherited constraint "pos" of relation "c"
+
+> ALTER TABLE c RENAME CONSTRAINT pos TO pos2
+ERROR 42P16: cannot rename inherited constraint "pos"
+
+> ALTER TABLE p RENAME CONSTRAINT pos TO pos2
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname FROM pg_constraint WHERE contype='c' AND conrelid IN ('p'::regclass, 'c'::regclass, 'gc'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name
+p | pos2
+c | pos2
+gc | pos2
+-- SELECT 3
+
+> ALTER TABLE p ADD CONSTRAINT neg CHECK (aa < 1000) NO INHERIT
+-- ALTER TABLE
+
+> ALTER TABLE c ADD CONSTRAINT bb CHECK (b <> 'zz')
+-- ALTER TABLE
+
+> ALTER TABLE p ADD CONSTRAINT bb CHECK (b <> 'zz')
+NOTICE 00000: merging constraint "bb" with inherited definition
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal FROM pg_constraint WHERE contype='c' AND conrelid IN ('p'::regclass, 'c'::regclass, 'gc'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool
+p | bb | 0 | t
+p | neg | 0 | t
+p | pos2 | 0 | t
+c | bb | 1 | t
+c | pos2 | 1 | f
+gc | bb | 1 | f
+gc | pos2 | 1 | f
+-- SELECT 7
+
+> ALTER TABLE p ADD CONSTRAINT big CHECK (aa > 100)
+ERROR 23514: check constraint "big" of relation "c" is violated by some row
+OBJECTS: schema=public table=c constraint=big
+
+> ALTER TABLE ONLY p DROP CONSTRAINT pos2
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal FROM pg_constraint WHERE contype='c' AND conrelid IN ('p'::regclass, 'c'::regclass, 'gc'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool
+p | bb | 0 | t
+p | neg | 0 | t
+c | bb | 1 | t
+c | pos2 | 0 | t
+gc | bb | 1 | f
+gc | pos2 | 1 | f
+-- SELECT 6
+
+> ALTER TABLE p DROP CONSTRAINT bb
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal FROM pg_constraint WHERE contype='c' AND conrelid IN ('p'::regclass, 'c'::regclass, 'gc'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool
+p | neg | 0 | t
+c | bb | 0 | t
+c | pos2 | 0 | t
+gc | bb | 1 | f
+gc | pos2 | 1 | f
+-- SELECT 5
+
+> ALTER TABLE p ADD COLUMN i int GENERATED ALWAYS AS IDENTITY
+ERROR 42P16: cannot recursively add identity column to table that has child tables
+
+> ALTER TABLE c NO INHERIT p
+-- ALTER TABLE
+
+> SELECT attname, attinhcount, attislocal FROM pg_attribute WHERE attrelid='c'::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum
+attname:name | attinhcount:int2 | attislocal:bool
+aa | 0 | t
+b | 0 | t
+x | 0 | t
+d | 0 | t
+y | 0 | t
+z | 0 | t
+-- SELECT 6
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal FROM pg_constraint WHERE conrelid='c'::regclass ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool
+c | bb | 0 | t
+c | pos2 | 0 | t
+-- SELECT 2
+
+> ALTER TABLE c NO INHERIT p
+ERROR 42P01: relation "p" is not a parent of relation "c"
+
+> ALTER TABLE c INHERIT p
+-- ALTER TABLE
+
+> SELECT attname, attinhcount, attislocal FROM pg_attribute WHERE attrelid='c'::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum
+attname:name | attinhcount:int2 | attislocal:bool
+aa | 1 | t
+b | 1 | t
+x | 0 | t
+d | 1 | t
+y | 0 | t
+z | 0 | t
+-- SELECT 6
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal FROM pg_constraint WHERE conrelid='c'::regclass ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool
+c | bb | 0 | t
+c | pos2 | 0 | t
+-- SELECT 2
+
+> ALTER TABLE c INHERIT p
+ERROR 42P07: relation "p" would be inherited from more than once
+
+> ALTER TABLE p INHERIT gc
+ERROR 42P07: circular inheritance not allowed
+DETAIL: "gc" is already a child of "p".
+
+> ALTER TABLE p INHERIT p
+ERROR 42P07: circular inheritance not allowed
+DETAIL: "p" is already a child of "p".
+
+> CREATE TABLE q (aa int)
+-- CREATE TABLE
+
+> ALTER TABLE c INHERIT q
+ERROR 42804: child table "c" has different type for column "aa"
+
+> CREATE TABLE r (zz int)
+-- CREATE TABLE
+
+> ALTER TABLE c INHERIT r
+ERROR 42804: child table is missing column "zz"
+
+> CREATE TABLE s (aa bigint, b text, CONSTRAINT sck CHECK (aa > 5))
+-- CREATE TABLE
+
+> ALTER TABLE c INHERIT s
+ERROR 42804: child table is missing constraint "sck"
+
+> CREATE TABLE s2 (aa bigint NOT NULL)
+-- CREATE TABLE
+
+> ALTER TABLE c INHERIT s2
+ERROR 42804: column "aa" in child table "c" must be marked NOT NULL
+
+> TRUNCATE p
+-- TRUNCATE TABLE
+
+> SELECT count(*) FROM p
+count:int8
+0
+-- SELECT 1
+
+> INSERT INTO gc (aa) VALUES (7)
+-- INSERT 0 1
+
+> TRUNCATE ONLY p
+-- TRUNCATE TABLE
+
+> SELECT count(*) FROM p
+count:int8
+1
+-- SELECT 1
+
+> DROP TABLE c
+ERROR 2BP01: cannot drop table c because other objects depend on it
+DETAIL: table gc depends on table c
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE p, c, gc, q, r, s, s2 CASCADE
+-- DROP TABLE
+

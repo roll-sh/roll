@@ -1,0 +1,65 @@
+> CREATE VIEW vf1 AS SELECT * FROM generate_series(1, 2), generate_series(1, 3) g, generate_series(1, 2) x(a), unnest(ARRAY[1, 2]) WITH ORDINALITY u, jsonb_each('{}') j
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('vf1')
+pg_get_viewdef:text
+ SELECT generate_series.generate_series,
+    g.g,
+    x.a,
+    u.u,
+    u.ordinality,
+    j.key,
+    j.value
+   FROM generate_series(1, 2) generate_series(generate_series),
+    generate_series(1, 3) g(g),
+    generate_series(1, 2) x(a),
+    unnest(ARRAY[1, 2]) WITH ORDINALITY u(u, ordinality),
+    jsonb_each('{}'::jsonb) j(key, value);
+-- SELECT 1
+
+> CREATE VIEW vf2 AS SELECT g FROM generate_series(1, 3) g WHERE g > 1
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('vf2')
+pg_get_viewdef:text
+ SELECT g
+   FROM generate_series(1, 3) g(g)
+  WHERE (g > 1);
+-- SELECT 1
+
+> SELECT pg_get_viewdef('vf2', true)
+pg_get_viewdef:text
+ SELECT g
+   FROM generate_series(1, 3) g(g)
+  WHERE g > 1;
+-- SELECT 1
+
+> CREATE TABLE vft (a int)
+-- CREATE TABLE
+
+> CREATE VIEW vf3 AS SELECT t.a, s.n FROM vft t, LATERAL generate_series(1, t.a) s(n)
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('vf3')
+pg_get_viewdef:text
+ SELECT t.a,
+    s.n
+   FROM vft t,
+    LATERAL generate_series(1, t.a) s(n);
+-- SELECT 1
+
+> CREATE VIEW vf4 AS SELECT * FROM json_to_record('{"a":1}') AS r(a int)
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('vf4')
+pg_get_viewdef:text
+ SELECT a
+   FROM json_to_record('{"a":1}'::json) r(a integer);
+-- SELECT 1
+
+> DROP VIEW vf1, vf2, vf3, vf4
+-- DROP VIEW
+
+> DROP TABLE vft
+-- DROP TABLE
+

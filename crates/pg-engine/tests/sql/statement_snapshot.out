@@ -1,0 +1,464 @@
+> CREATE TABLE y (a int)
+-- CREATE TABLE
+
+> CREATE TABLE z (a int PRIMARY KEY, b int)
+-- CREATE TABLE
+
+> INSERT INTO y VALUES (1), (2)
+-- INSERT 0 2
+
+> WITH t2 AS (INSERT INTO y VALUES (10) RETURNING *) SELECT * FROM y ORDER BY a
+a:int4
+1
+2
+-- SELECT 2
+
+> WITH t2 AS (INSERT INTO y VALUES (11) RETURNING *) SELECT (SELECT count(*) FROM y), (SELECT count(*) FROM t2)
+count:int8 | count:int8
+3 | 1
+-- SELECT 1
+
+> WITH d AS (DELETE FROM y WHERE a = 1 RETURNING *) SELECT * FROM y ORDER BY a
+a:int4
+1
+2
+10
+11
+-- SELECT 4
+
+> WITH u AS (UPDATE y SET a = a + 100 WHERE a = 2 RETURNING *) SELECT * FROM y ORDER BY a
+a:int4
+2
+10
+11
+-- SELECT 3
+
+> SELECT * FROM y ORDER BY a
+a:int4
+10
+11
+102
+-- SELECT 3
+
+> INSERT INTO z VALUES (1, 0), (2, 0), (3, 0)
+-- INSERT 0 3
+
+> WITH u1 AS (UPDATE z SET b = b + 1 RETURNING *), u2 AS (UPDATE z SET b = b + 10 RETURNING *) SELECT (SELECT count(*) FROM u1), (SELECT count(*) FROM u2)
+count:int8 | count:int8
+3 | 0
+-- SELECT 1
+
+> SELECT * FROM z ORDER BY a
+a:int4 | b:int4
+1 | 1
+2 | 1
+3 | 1
+-- SELECT 3
+
+> WITH u1 AS (UPDATE z SET b = 100 WHERE a = 1 RETURNING *) UPDATE z SET b = 200 RETURNING *
+a:int4 | b:int4
+1 | 200
+2 | 200
+3 | 200
+-- UPDATE 3
+
+> WITH d1 AS (DELETE FROM z WHERE a = 1 RETURNING *) UPDATE z SET b = 300 RETURNING *
+a:int4 | b:int4
+1 | 300
+2 | 300
+3 | 300
+-- UPDATE 3
+
+> SELECT * FROM z ORDER BY a
+a:int4 | b:int4
+1 | 300
+2 | 300
+3 | 300
+-- SELECT 3
+
+> WITH u1 AS (UPDATE z SET b = 1 RETURNING *), u2 AS (UPDATE z SET b = 2 RETURNING *) SELECT 1
+?column?:int4
+1
+-- SELECT 1
+
+> SELECT * FROM z ORDER BY a
+a:int4 | b:int4
+1 | 2
+2 | 2
+3 | 2
+-- SELECT 3
+
+> WITH u1 AS (UPDATE z SET b = 6 RETURNING *), u2 AS (UPDATE z SET b = 7 RETURNING *) SELECT a, b FROM u2 ORDER BY a
+a:int4 | b:int4
+1 | 7
+2 | 7
+3 | 7
+-- SELECT 3
+
+> SELECT * FROM z ORDER BY a
+a:int4 | b:int4
+1 | 7
+2 | 7
+3 | 7
+-- SELECT 3
+
+> WITH i AS (INSERT INTO z VALUES (5, 5) RETURNING *) DELETE FROM z RETURNING *
+a:int4 | b:int4
+1 | 7
+2 | 7
+3 | 7
+-- DELETE 3
+
+> SELECT * FROM z ORDER BY a
+a:int4 | b:int4
+5 | 5
+-- SELECT 1
+
+> INSERT INTO y SELECT a + 1000 FROM y
+-- INSERT 0 3
+
+> SELECT count(*) FROM y
+count:int8
+6
+-- SELECT 1
+
+> CREATE FUNCTION cnt_v() RETURNS bigint LANGUAGE plpgsql VOLATILE AS $$ BEGIN RETURN (SELECT count(*) FROM y); END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION cnt_s() RETURNS bigint LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN (SELECT count(*) FROM y); END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION cnt_sql_v() RETURNS bigint LANGUAGE sql VOLATILE AS $$ SELECT count(*) FROM y $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION cnt_sql_s() RETURNS bigint LANGUAGE sql STABLE AS $$ SELECT count(*) FROM y $$
+-- CREATE FUNCTION
+
+> DELETE FROM y
+-- DELETE 6
+
+> INSERT INTO y SELECT g FROM generate_series(1, 3) g
+-- INSERT 0 3
+
+> INSERT INTO y SELECT 100 + cnt_v() FROM generate_series(1, 3)
+-- INSERT 0 3
+
+> INSERT INTO y SELECT 200 + cnt_s() FROM generate_series(1, 3)
+-- INSERT 0 3
+
+> INSERT INTO y SELECT 300 + cnt_sql_v() FROM generate_series(1, 3)
+-- INSERT 0 3
+
+> INSERT INTO y SELECT 400 + cnt_sql_s() FROM generate_series(1, 3)
+-- INSERT 0 3
+
+> SELECT * FROM y ORDER BY a
+a:int4
+1
+2
+3
+103
+104
+105
+206
+206
+206
+309
+310
+311
+412
+412
+412
+-- SELECT 15
+
+> WITH i AS (INSERT INTO y VALUES (1) RETURNING *) SELECT cnt_v(), cnt_s(), cnt_sql_v(), cnt_sql_s() FROM i
+cnt_v:int8 | cnt_s:int8 | cnt_sql_v:int8 | cnt_sql_s:int8
+16 | 15 | 16 | 15
+-- SELECT 1
+
+> CREATE FUNCTION ins(int) RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO y VALUES ($1); RETURN (SELECT count(*) FROM y); END $$
+-- CREATE FUNCTION
+
+> SELECT ins(g), (SELECT count(*) FROM y) FROM generate_series(1, 3) g ORDER BY 1
+ins:int4 | count:int8
+17 | 16
+18 | 16
+19 | 16
+-- SELECT 3
+
+> CREATE TABLE t (id int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> INSERT INTO t VALUES (1, 0), (2, 0), (3, 0)
+-- INSERT 0 3
+
+> CREATE FUNCTION trg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF new.id = 1 THEN UPDATE t SET v = v + 50 WHERE id = 2; END IF; RETURN new; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER trg BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> UPDATE t SET v = v + 1
+ERROR 27000: tuple to be updated was already modified by an operation triggered by the current command
+HINT: Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.
+
+> UPDATE t SET v = v + 1 WHERE id = 1
+-- UPDATE 1
+
+> SELECT * FROM t ORDER BY id
+id:int4 | v:int4
+1 | 1
+2 | 50
+3 | 0
+-- SELECT 3
+
+> DROP TRIGGER trg ON t
+-- DROP TRIGGER
+
+> CREATE FUNCTION trgself() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE t SET v = 999 WHERE id = old.id; RETURN old; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER trgself BEFORE DELETE ON t FOR EACH ROW EXECUTE FUNCTION trgself()
+-- CREATE TRIGGER
+
+> DELETE FROM t WHERE id = 3
+ERROR 27000: tuple to be deleted was already modified by an operation triggered by the current command
+HINT: Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.
+
+> DROP TRIGGER trgself ON t
+-- DROP TRIGGER
+
+> CREATE FUNCTION bump() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN UPDATE t SET v = v + 100 WHERE id = 2; RETURN true; END $$
+-- CREATE FUNCTION
+
+> UPDATE t SET v = v + 1 WHERE bump()
+ERROR 27000: tuple to be updated was already modified by an operation triggered by the current command
+HINT: Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.
+
+> DELETE FROM t WHERE bump()
+ERROR 27000: tuple to be deleted was already modified by an operation triggered by the current command
+HINT: Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.
+
+> SELECT * FROM t ORDER BY id
+id:int4 | v:int4
+1 | 1
+2 | 50
+3 | 0
+-- SELECT 3
+
+> CREATE FUNCTION upd(int) RETURNS int LANGUAGE sql VOLATILE AS $$ UPDATE t SET v = v + 1000 WHERE id = $1 RETURNING v $$
+-- CREATE FUNCTION
+
+> UPDATE t SET v = upd(id + 1) WHERE id = 1
+-- UPDATE 1
+
+> SELECT * FROM t ORDER BY id
+id:int4 | v:int4
+1 | 1050
+2 | 1050
+3 | 0
+-- SELECT 3
+
+> CREATE TABLE log (n bigint)
+-- CREATE TABLE
+
+> CREATE FUNCTION after_ins() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log SELECT count(*) FROM y; RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER after_ins AFTER INSERT ON y FOR EACH ROW EXECUTE FUNCTION after_ins()
+-- CREATE TRIGGER
+
+> INSERT INTO y VALUES (1), (2), (3)
+-- INSERT 0 3
+
+> SELECT * FROM log
+n:int8
+22
+22
+22
+-- SELECT 3
+
+> DROP TRIGGER after_ins ON y
+-- DROP TRIGGER
+
+> CREATE TABLE oc (k int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> INSERT INTO oc VALUES (4, 1), (4, 2) ON CONFLICT (k) DO UPDATE SET v = 0
+ERROR 21000: ON CONFLICT DO UPDATE command cannot affect row a second time
+HINT: Ensure that no rows proposed for insertion within the same command have duplicate constrained values.
+
+> INSERT INTO oc VALUES (4, 1) ON CONFLICT (k) DO UPDATE SET v = 0
+-- INSERT 0 1
+
+> INSERT INTO oc VALUES (4, 1), (4, 2) ON CONFLICT (k) DO NOTHING
+-- INSERT 0 0
+
+> WITH i AS (INSERT INTO oc VALUES (5, 1) RETURNING *) INSERT INTO oc VALUES (5, 2) ON CONFLICT (k) DO UPDATE SET v = 9
+ERROR 23505: duplicate key value violates unique constraint "oc_pkey"
+DETAIL: Key (k)=(5) already exists.
+OBJECTS: schema=public table=oc constraint=oc_pkey
+
+> WITH u AS (UPDATE oc SET v = 7 WHERE k = 4 RETURNING *) INSERT INTO oc VALUES (4, 2) ON CONFLICT (k) DO UPDATE SET v = 9
+-- INSERT 0 1
+
+> SELECT * FROM oc ORDER BY k
+k:int4 | v:int4
+4 | 9
+-- SELECT 1
+
+> CREATE TABLE m (k int, v int)
+-- CREATE TABLE
+
+> INSERT INTO m VALUES (1, 0)
+-- INSERT 0 1
+
+> MERGE INTO m USING (VALUES (1), (1)) s(k) ON m.k = s.k WHEN MATCHED THEN UPDATE SET v = v + 1
+ERROR 21000: MERGE command cannot affect row a second time
+HINT: Ensure that not more than one source row matches any one target row.
+
+> WITH u AS (UPDATE m SET v = 5 RETURNING *) MERGE INTO m USING (VALUES (1)) s(k) ON m.k = s.k WHEN MATCHED THEN UPDATE SET v = v + 1
+-- MERGE 1
+
+> SELECT * FROM m
+k:int4 | v:int4
+1 | 1
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT * FROM m ORDER BY k
+-- DECLARE CURSOR
+
+> INSERT INTO m VALUES (2, 2)
+-- INSERT 0 1
+
+> FETCH ALL FROM c
+k:int4 | v:int4
+1 | 1
+-- FETCH 1
+
+> COMMIT
+-- COMMIT
+
+> CREATE TABLE w (id int, v int)
+-- CREATE TABLE
+
+> INSERT INTO w SELECT g, 0 FROM generate_series(1, 4) g
+-- INSERT 0 4
+
+> CREATE FUNCTION sum_v() RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN RETURN (SELECT sum(v) FROM w); END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION sum_s() RETURNS bigint LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN (SELECT sum(v) FROM w); END $$
+-- CREATE FUNCTION
+
+> UPDATE w SET v = 1 + sum_v()
+-- UPDATE 4
+
+> SELECT * FROM w ORDER BY id
+id:int4 | v:int4
+1 | 1
+2 | 2
+3 | 4
+4 | 8
+-- SELECT 4
+
+> UPDATE w SET v = 1 + sum_s()
+-- UPDATE 4
+
+> SELECT * FROM w ORDER BY id
+id:int4 | v:int4
+1 | 16
+2 | 16
+3 | 16
+4 | 16
+-- SELECT 4
+
+> CREATE TABLE ra (a int)
+-- CREATE TABLE
+
+> CREATE TABLE rlog (n bigint)
+-- CREATE TABLE
+
+> CREATE RULE r1 AS ON INSERT TO ra DO ALSO INSERT INTO rlog SELECT count(*) FROM ra
+-- CREATE RULE
+
+> INSERT INTO ra VALUES (1), (2)
+-- INSERT 0 2
+
+> SELECT * FROM rlog
+n:int8
+4
+-- SELECT 1
+
+> CREATE TABLE s (a int)
+-- CREATE TABLE
+
+> CREATE FUNCTION bs() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'before count %', (SELECT count(*) FROM s); RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER bs BEFORE INSERT ON s FOR EACH STATEMENT EXECUTE FUNCTION bs()
+-- CREATE TRIGGER
+
+> WITH x AS (INSERT INTO s VALUES (3) RETURNING *) INSERT INTO s SELECT a + 1 FROM x
+NOTICE 00000: before count 0
+CONTEXT: PL/pgSQL function bs() line 1 at RAISE
+-- INSERT 0 1
+
+> CREATE TABLE q (a int)
+-- CREATE TABLE
+
+> CREATE FUNCTION n() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE '% % %', tg_name, tg_op, tg_level; RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER q_bs BEFORE INSERT ON q FOR EACH STATEMENT EXECUTE FUNCTION n()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER q_as AFTER INSERT ON q FOR EACH STATEMENT EXECUTE FUNCTION n()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER q_ar AFTER INSERT ON q FOR EACH ROW EXECUTE FUNCTION n()
+-- CREATE TRIGGER
+
+> CREATE TABLE r (a int)
+-- CREATE TABLE
+
+> CREATE TRIGGER r_bs BEFORE INSERT ON r FOR EACH STATEMENT EXECUTE FUNCTION n()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER r_as AFTER INSERT ON r FOR EACH STATEMENT EXECUTE FUNCTION n()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER r_ar AFTER INSERT ON r FOR EACH ROW EXECUTE FUNCTION n()
+-- CREATE TRIGGER
+
+> WITH x AS (INSERT INTO q VALUES (1) RETURNING *) INSERT INTO r VALUES (2)
+NOTICE 00000: r_bs INSERT STATEMENT
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+NOTICE 00000: q_bs INSERT STATEMENT
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+NOTICE 00000: r_ar INSERT ROW
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+NOTICE 00000: r_as INSERT STATEMENT
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+NOTICE 00000: q_ar INSERT ROW
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+NOTICE 00000: q_as INSERT STATEMENT
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+-- INSERT 0 1
+
+> WITH x AS (INSERT INTO q VALUES (1), (2) RETURNING *) SELECT * FROM x LIMIT 1
+NOTICE 00000: q_bs INSERT STATEMENT
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+NOTICE 00000: q_ar INSERT ROW
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+NOTICE 00000: q_ar INSERT ROW
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+NOTICE 00000: q_as INSERT STATEMENT
+CONTEXT: PL/pgSQL function n() line 1 at RAISE
+a:int4
+1
+-- SELECT 1
+

@@ -1,0 +1,143 @@
+> create schema maint_sp
+-- CREATE SCHEMA
+
+> set search_path = maint_sp
+-- SET
+
+> create function fn(int) returns int immutable language plpgsql as $$ begin raise notice 'current search_path: %', current_setting('search_path'); return $1; end; $$
+-- CREATE FUNCTION
+
+> create table tm (i int)
+-- CREATE TABLE
+
+> insert into tm values (1), (2)
+-- INSERT 0 2
+
+> create index tm_idx on maint_sp.tm (fn(i))
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+-- CREATE INDEX
+
+> reindex table maint_sp.tm
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+-- REINDEX
+
+> analyze maint_sp.tm
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+-- ANALYZE
+
+> vacuum full maint_sp.tm
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+-- VACUUM
+
+> cluster maint_sp.tm using tm_idx
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+NOTICE 00000: current search_path: pg_catalog, pg_temp
+CONTEXT: PL/pgSQL function fn(integer) line 1 at RAISE
+-- CLUSTER
+
+> reset search_path
+-- RESET
+
+> drop schema maint_sp cascade
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to function maint_sp.fn(integer)
+DETAIL: drop cascades to table maint_sp.tm
+-- DROP SCHEMA
+
+> set default_toast_compression = 'pglz'
+-- SET
+
+> create table cmd (f1 text compression pglz)
+-- CREATE TABLE
+
+> insert into cmd values (repeat('1234567890', 1000))
+-- INSERT 0 1
+
+> create table cmd1 (f1 text compression lz4)
+-- CREATE TABLE
+
+> insert into cmd1 values (repeat('1234567890', 1004))
+-- INSERT 0 1
+
+> create table cmm (f1 text compression pglz)
+-- CREATE TABLE
+
+> insert into cmm select * from cmd
+-- INSERT 0 1
+
+> insert into cmm select * from cmd1
+-- INSERT 0 1
+
+> select pg_column_compression(f1) from cmm
+pg_column_compression:text
+lz4
+pglz
+-- SELECT 2
+
+> alter table cmd alter column f1 set compression lz4
+-- ALTER TABLE
+
+> insert into cmd values (repeat('123456789', 4004))
+-- INSERT 0 1
+
+> select pg_column_compression(f1) from cmd
+pg_column_compression:text
+lz4
+pglz
+-- SELECT 2
+
+> create materialized view cmv(x) as select * from cmd1
+-- SELECT 1
+
+> select pg_column_compression(x) from cmv
+pg_column_compression:text
+lz4
+-- SELECT 1
+
+> create table cmm2 (f1 text compression pglz)
+-- CREATE TABLE
+
+> insert into cmm2 values (repeat('1234567890', 1004))
+-- INSERT 0 1
+
+> select pg_column_compression(f1) from cmm2
+pg_column_compression:text
+pglz
+-- SELECT 1
+
+> update cmm2 set f1 = cmd1.f1 from cmd1
+-- UPDATE 1
+
+> select pg_column_compression(f1) from cmm2
+pg_column_compression:text
+lz4
+-- SELECT 1
+
+> create table cmm3 (f1 text compression lz4)
+-- CREATE TABLE
+
+> insert into cmm3 select repeat('1234567890', 1000)
+-- INSERT 0 1
+
+> select pg_column_compression(f1) from cmm3
+pg_column_compression:text
+lz4
+-- SELECT 1
+

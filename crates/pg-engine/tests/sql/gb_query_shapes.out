@@ -1,0 +1,241 @@
+> CREATE TABLE gb_g (a int PRIMARY KEY, b int, c int, d int)
+-- CREATE TABLE
+
+> INSERT INTO gb_g VALUES (1, 1, 1, 10), (2, 2, 1, 20), (3, 2, 2, 30)
+-- INSERT 0 3
+
+> SELECT a, d, grouping(a, b, c) FROM gb_g GROUP BY GROUPING SETS ((a, b), (a, c)) ORDER BY 3, 1
+a:int4 | d:int4 | grouping:int4
+1 | 10 | 1
+2 | 20 | 1
+3 | 30 | 1
+1 | 10 | 2
+2 | 20 | 2
+3 | 30 | 2
+-- SELECT 6
+
+> SET enable_hashagg = off
+-- SET
+
+> SELECT b, c, sum(d) FROM gb_g GROUP BY ROLLUP (b, c)
+b:int4 | c:int4 | sum:int8
+1 | 1 | 10
+1 | NULL | 10
+2 | 1 | 20
+2 | 2 | 30
+2 | NULL | 50
+NULL | NULL | 60
+-- SELECT 6
+
+> RESET enable_hashagg
+-- RESET
+
+> SELECT (SELECT grouping(g.b)) FROM gb_g g GROUP BY g.b ORDER BY 1
+grouping:int4
+0
+0
+-- SELECT 2
+
+> SELECT (SELECT grouping(a, b) FROM gb_g) FROM gb_g GROUP BY a, b
+ERROR 42803: arguments to GROUPING must be grouping expressions of the associated query level (at 25)
+
+> CREATE TABLE gb_u (h bit(4), s xid)
+-- CREATE TABLE
+
+> SELECT count(*) FROM gb_u GROUP BY ROLLUP (h, s)
+ERROR 0A000: could not implement GROUP BY
+DETAIL: Some of the datatypes only support hashing, while others only support sorting.
+
+> SELECT array_agg(h ORDER BY h) FROM gb_u GROUP BY GROUPING SETS ((h, s), (h))
+ERROR 0A000: could not implement GROUP BY
+DETAIL: Some of the datatypes only support hashing, while others only support sorting.
+
+> SELECT b, unnest('{1,1,3}'::int[]) AS u, count(*) FROM gb_g GROUP BY b, unnest('{1,1,3}'::int[]) ORDER BY 1, 2
+b:int4 | u:int4 | count:int8
+1 | 1 | 2
+1 | 3 | 1
+2 | 1 | 4
+2 | 3 | 2
+-- SELECT 4
+
+> SELECT b, generate_series(1, 2) AS g, count(*) FROM gb_g GROUP BY 1, 2 ORDER BY 1, 2
+b:int4 | g:int4 | count:int8
+1 | 1 | 1
+1 | 2 | 1
+2 | 1 | 2
+2 | 2 | 2
+-- SELECT 4
+
+> SELECT * FROM generate_series(1, generate_series(1, 3))
+ERROR 0A000: set-returning functions must appear at top level of FROM (at 34)
+
+> SELECT ( VALUES ((SELECT 1)) )
+column1:int4
+1
+-- SELECT 1
+
+> SELECT (SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1)
+?column?:int4
+1
+-- SELECT 1
+
+> SELECT (WITH c(foo) AS (VALUES (a)) SELECT (SELECT foo FROM c)) FROM gb_g ORDER BY 1
+foo:int4
+1
+2
+3
+-- SELECT 3
+
+> WITH RECURSIVE t(j) AS (
+>   WITH RECURSIVE s(i) AS (VALUES (1) UNION ALL SELECT i + 1 FROM s WHERE i < 3)
+>   SELECT i FROM s
+>   UNION ALL
+>   SELECT j + 1 FROM t WHERE j < 3)
+> SELECT j, count(*) FROM t GROUP BY j ORDER BY j
+j:int4 | count:int8
+1 | 1
+2 | 2
+3 | 3
+-- SELECT 3
+
+> WITH RECURSIVE x(n) AS (
+>   WITH x1 AS (SELECT 1 FROM x) SELECT 0 UNION SELECT * FROM x1)
+> SELECT * FROM x
+ERROR 42P19: recursive reference to query "x" must not appear within a subquery (at 54)
+
+> WITH RECURSIVE x(n) AS (DELETE FROM gb_g RETURNING (SELECT n FROM x)) SELECT * FROM x
+ERROR 42P19: recursive query "x" must not contain data-modifying statements (at 16)
+
+> SELECT * FROM (WITH t AS (UPDATE gb_g SET b = b RETURNING *) SELECT * FROM t) ss
+ERROR 0A000: WITH clause containing a data-modifying statement must be at the top level (at 21)
+
+> WITH a(x) AS (SELECT 1 UNION (WITH i AS (SELECT 2) SELECT * FROM a UNION SELECT * FROM i)) SELECT * FROM a
+ERROR 42P01: relation "a" does not exist (at 66)
+DETAIL: There is a WITH item named "a", but it cannot be referenced from this part of the query.
+HINT: Use WITH RECURSIVE, or re-order the WITH items to remove forward references.
+
+> WITH RECURSIVE foo(i) AS (SELECT i FROM (VALUES (1)) t(i) UNION ALL SELECT (i + 1)::numeric(10,0) FROM foo WHERE i < 3)
+> SELECT * FROM foo
+ERROR 42804: recursive query "foo" column 1 has type integer in non-recursive term but type numeric overall (at 34)
+HINT: Cast the output of the non-recursive term to the correct type.
+
+> WITH RECURSIVE foo(i) AS (SELECT i::numeric(3,0) FROM (VALUES (1)) t(i) UNION ALL SELECT (i + 1)::numeric(10,0) FROM foo WHERE i < 3)
+> SELECT * FROM foo
+ERROR 42804: recursive query "foo" column 1 has type numeric(3,0) in non-recursive term but type numeric overall (at 34)
+HINT: Cast the output of the non-recursive term to the correct type.
+
+> WITH RECURSIVE g(f, t) AS (SELECT 1, 2 UNION ALL SELECT 2, 3 UNION ALL SELECT g.t, g.t + 1 FROM g WHERE g.t < 4)
+>   SEARCH DEPTH FIRST BY f, t SET seq
+> SELECT * FROM g
+ERROR 0A000: with a SEARCH or CYCLE clause, the left side of the UNION must be a SELECT
+
+> WITH RECURSIVE g(f, t) AS (SELECT 1, 2 UNION ALL SELECT g.t, g.t + 1 FROM g WHERE g.t < 4)
+>   CYCLE f, t SET is_cycle TO true DEFAULT 55 USING path
+> SELECT * FROM g
+ERROR 42804: CYCLE types boolean and integer cannot be matched (at 134)
+
+> WITH RECURSIVE g(f, t) AS (SELECT 1, 2 UNION ALL SELECT g.t, g.t + 1 FROM g WHERE g.t < 4)
+>   CYCLE f, t SET is_cycle TO point '(1,1)' DEFAULT point '(0,0)' USING path
+> SELECT * FROM g
+ERROR 42883: could not identify an equality operator for type point
+
+> SELECT a FROM gb_g ORDER BY a FETCH FIRST NULL ROWS WITH TIES
+ERROR 2201W: row count cannot be null in FETCH FIRST ... WITH TIES clause
+
+> SELECT DISTINCT ON (b, c) b, a, c FROM gb_g ORDER BY b, a, c
+ERROR 42P10: SELECT DISTINCT ON expressions must match initial ORDER BY expressions (at 24)
+
+> SELECT b FROM gb_g GROUP BY b FOR UPDATE
+ERROR 0A000: FOR UPDATE is not allowed with GROUP BY clause
+
+> SELECT DISTINCT b FROM gb_g FOR SHARE
+ERROR 0A000: FOR SHARE is not allowed with DISTINCT clause
+
+> SELECT count(*) FROM gb_g FOR NO KEY UPDATE
+ERROR 0A000: FOR NO KEY UPDATE is not allowed with aggregate functions
+
+> CREATE TABLE gb_ts (id int, name text) WITH (fillfactor = 10)
+-- CREATE TABLE
+
+> INSERT INTO gb_ts SELECT i, repeat(i::text, 200) FROM generate_series(0, 9) s(i)
+-- INSERT 0 10
+
+> SELECT id FROM gb_ts TABLESAMPLE SYSTEM (50) REPEATABLE (0)
+id:int4
+3
+4
+5
+6
+7
+8
+-- SELECT 6
+
+> SELECT id FROM gb_ts TABLESAMPLE BERNOULLI (50) REPEATABLE (0)
+id:int4
+4
+5
+6
+7
+8
+-- SELECT 5
+
+> SELECT id FROM gb_ts TABLESAMPLE BERNOULLI (5.5) REPEATABLE (1)
+id:int4
+-- SELECT 0
+
+> SELECT random(min => 7, max => 7), random(min => 2::bigint, max => 2), random(min => 1.5, max => 1.5)
+random:int4 | random:int8 | random:numeric
+7 | 2 | 1.5
+-- SELECT 1
+
+> PREPARE gb_p AS SELECT * FROM gb_g WHERE a = 1
+-- PREPARE
+
+> ALTER TABLE gb_g ADD COLUMN e int
+-- ALTER TABLE
+
+> EXECUTE gb_p
+ERROR 0A000: cached plan must not change result type
+
+> DEALLOCATE gb_p
+-- DEALLOCATE
+
+> CREATE TEMP TABLE gb_oc (f1 int PRIMARY KEY, f2 text)
+-- CREATE TABLE
+
+> INSERT INTO gb_oc VALUES (1, 'a')
+-- INSERT 0 1
+
+> INSERT INTO gb_oc VALUES (1, 'b'), (2, 'c') ON CONFLICT (f1) DO UPDATE SET f2 = excluded.f2
+>   RETURNING old.tableoid::regclass, old.ctid, old.f2, new.ctid, new.f2
+tableoid:regclass | ctid:27 | f2:text | ctid:27 | f2:text
+NULL | NULL | NULL | (0,3) | c
+gb_oc | (0,1) | a | (0,2) | b
+-- INSERT 0 2
+
+> BEGIN
+-- BEGIN
+
+> DECLARE gb_bc BINARY CURSOR FOR SELECT 1
+-- DECLARE CURSOR
+
+> SELECT name, is_binary FROM pg_cursors WHERE name = 'gb_bc'
+name:text | is_binary:bool
+gb_bc | t
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> DROP TABLE gb_oc
+-- DROP TABLE
+
+> DROP TABLE gb_ts
+-- DROP TABLE
+
+> DROP TABLE gb_u
+-- DROP TABLE
+
+> DROP TABLE gb_g
+-- DROP TABLE
+

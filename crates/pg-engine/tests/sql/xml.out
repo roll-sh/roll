@@ -1,0 +1,1701 @@
+> select '<a></b>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Opening and ending tag mismatch: a line 1 and b
+DETAIL: <a></b>
+DETAIL:        ^
+
+> select '<a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Premature end of data in tag a line 1
+DETAIL: <a>
+DETAIL:    ^
+
+> select '<a'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Couldn't find end of Start Tag a line 1
+DETAIL: <a
+DETAIL:   ^
+
+> select '<a b=1/>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: AttValue: " or ' expected
+DETAIL: <a b=1/>
+DETAIL:      ^
+DETAIL: line 1: attributes construct error
+DETAIL: <a b=1/>
+DETAIL:      ^
+DETAIL: line 1: Couldn't find end of Start Tag a line 1
+DETAIL: <a b=1/>
+DETAIL:      ^
+
+> select '<a b="1" b="2"/>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Attribute b redefined
+DETAIL: <a b="1" b="2"/>
+DETAIL:               ^
+
+> select '&foo;'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Entity 'foo' not defined
+DETAIL: &foo;
+DETAIL:      ^
+
+> select '&amp'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: EntityRef: expecting ';'
+DETAIL: &amp
+DETAIL:     ^
+
+> select 'a & b'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: xmlParseEntityRef: no name
+DETAIL: a & b
+DETAIL:    ^
+
+> select '<a>&#0;</a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: xmlParseCharRef: invalid xmlChar value 0
+DETAIL: <a>&#0;</a>
+DETAIL:        ^
+
+> select '<1a/>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: StartTag: invalid element name
+DETAIL: <1a/>
+DETAIL:  ^
+
+> select '</a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: chunk is not well balanced
+DETAIL: </a>
+DETAIL: ^
+
+> select 'text <a/> more'::xml
+xml:xml
+text <a/> more
+-- SELECT 1
+
+> select '<?xml version="1.0"?><a/>'::xml
+xml:xml
+<a/>
+-- SELECT 1
+
+> select '<?xml version="2.0"?><a/>'::xml
+xml:xml
+<?xml version="2.0"?><a/>
+-- SELECT 1
+
+> select '<?xml encoding="x"?><a/>'::xml
+ERROR 2200N: invalid XML content: invalid XML declaration (at 8)
+DETAIL: Malformed declaration: missing version.
+
+> select ' <?xml version="1.0"?><a/>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: XML declaration allowed only at the start of the document
+DETAIL:  <?xml version="1.0"?><a/>
+DETAIL:       ^
+
+> select '<a/><b/>'::xml
+xml:xml
+<a/><b/>
+-- SELECT 1
+
+> select xmlparse(document '<a/><b/>')
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Extra content at the end of the document
+DETAIL: <a/><b/>
+DETAIL:     ^
+
+> select xmlparse(document 'text')
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Start tag expected, '<' not found
+DETAIL: text
+DETAIL: ^
+
+> select xmlparse(document '')
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Document is empty
+DETAIL: 
+DETAIL: ^
+
+> select xmlparse(content '')
+xmlparse:xml
+
+-- SELECT 1
+
+> select '<!DOCTYPE a><a/>'::xml
+xml:xml
+<!DOCTYPE a><a/>
+-- SELECT 1
+
+> select '<!-- c --><a/>'::xml
+xml:xml
+<!-- c --><a/>
+-- SELECT 1
+
+> select '<a><!-- c -- d --></a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Double hyphen within comment: <!-- c 
+DETAIL: <a><!-- c -- d --></a>
+DETAIL:           ^
+
+> select '<a><![CDATA[x]]></a>'::xml
+xml:xml
+<a><![CDATA[x]]></a>
+-- SELECT 1
+
+> select '<a><![CDATA[x</a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: CData section not finished
+DETAIL: x</
+DETAIL: <a><![CDATA[x</a>
+DETAIL:                  ^
+
+> select '<?pi x?><a/>'::xml
+xml:xml
+<?pi x?><a/>
+-- SELECT 1
+
+> select '<a>
+> <b>
+> </c>
+> </a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 3: Opening and ending tag mismatch: b line 2 and c
+DETAIL: </c>
+DETAIL:     ^
+
+> select '<a xmlns:x="u"><x:b/></a>'::xml
+xml:xml
+<a xmlns:x="u"><x:b/></a>
+-- SELECT 1
+
+> select '<a><y:b/></a>'::xml
+xml:xml
+<a><y:b/></a>
+-- SELECT 1
+
+> select '<a b="<"/>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Unescaped '<' not allowed in attributes values
+DETAIL: <a b="<"/>
+DETAIL:       ^
+
+> select '<a>]]></a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Sequence ']]>' not allowed in content
+DETAIL: <a>]]></a>
+DETAIL:    ^
+
+> select xmlparse(document '<a/>  ')
+xmlparse:xml
+<a/>  
+-- SELECT 1
+
+> select xmlparse(document '  <a/>')
+xmlparse:xml
+  <a/>
+-- SELECT 1
+
+> select '<a>&lt;&#65;&#x42;</a>'::xml
+xml:xml
+<a>&lt;&#65;&#x42;</a>
+-- SELECT 1
+
+> SELECT xmlparse(content '<a>x</a>  <b/>')
+xmlparse:xml
+<a>x</a>  <b/>
+-- SELECT 1
+
+> SELECT xmlparse(document '<a>x</a>')
+xmlparse:xml
+<a>x</a>
+-- SELECT 1
+
+> SELECT xmlparse(document '<a>x</a><b/>')
+ERROR 2200M: invalid XML document
+DETAIL: line 1: Extra content at the end of the document
+DETAIL: <a>x</a><b/>
+DETAIL:         ^
+
+> SELECT xmlparse(content '<a>x</b>')
+ERROR 2200N: invalid XML content
+DETAIL: line 1: Opening and ending tag mismatch: a line 1 and b
+DETAIL: <a>x</b>
+DETAIL:         ^
+
+> SELECT xmlparse(content '  <a> </a>  ' preserve whitespace)
+xmlparse:xml
+  <a> </a>  
+-- SELECT 1
+
+> SELECT xmlparse(content null)
+xmlparse:xml
+NULL
+-- SELECT 1
+
+> SELECT xmlelement(name foo)
+xmlelement:xml
+<foo/>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, 'bar')
+xmlelement:xml
+<foo>bar</foo>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, xmlattributes('x' as a, 2 as b), 'c', 3, null, true)
+xmlelement:xml
+<foo a="x" b="2">c3true</foo>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, xmlattributes(null as a))
+xmlelement:xml
+<foo/>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, '')
+xmlelement:xml
+<foo></foo>
+-- SELECT 1
+
+> SELECT xmlelement(name "a b", xmlattributes('<&>"' || chr(10) || chr(9) || 'é' as "x:y"), '<&>"é')
+xmlelement:xml
+<a_x0020_b x:y="&lt;&amp;&gt;&quot;&#10;&#9;&#xE9;">&lt;&amp;&gt;"é</a_x0020_b>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, xmlattributes('a' as x, 'b' as x))
+ERROR 42601: XML attribute name "x" appears more than once (at 53)
+
+> SELECT xmlelement(name foo, xmlattributes(1+1))
+ERROR 42601: unnamed XML attribute value must be a column reference (at 43)
+
+> SELECT xmlelement(name foo, xmlelement(name bar, 'x'), xmlcomment('hi'))
+xmlelement:xml
+<foo><bar>x</bar><!--hi--></foo>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, '<?xml version="1.0"?><b/>'::xml)
+xmlelement:xml
+<foo><b/></foo>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, ARRAY[1,2,null,3])
+xmlelement:xml
+<foo><element>1</element><element>2</element><element>3</element></foo>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, ARRAY[['a','<'],['c','d']])
+xmlelement:xml
+<foo><element>a</element><element>&lt;</element><element>c</element><element>d</element></foo>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, date '2020-01-02', timestamp '2020-01-02 03:04:05.5', timestamptz '2020-01-02 03:04:05+02')
+xmlelement:xml
+<foo>2020-01-022020-01-02T03:04:05.52020-01-02T01:04:05+00:00</foo>
+-- SELECT 1
+
+> SELECT xmlelement(name foo, date 'infinity')
+ERROR 22008: date out of range
+DETAIL: XML does not support infinite date values.
+
+> SELECT xmlelement(name foo, timestamp '-infinity')
+ERROR 22008: timestamp out of range
+DETAIL: XML does not support infinite timestamp values.
+
+> SELECT xmlelement(name foo, '\x00ff10'::bytea)
+xmlelement:xml
+<foo>AP8Q</foo>
+-- SELECT 1
+
+> SET xmlbinary = hex
+-- SET
+
+> SELECT xmlelement(name foo, '\x00ff10'::bytea)
+xmlelement:xml
+<foo>00FF10</foo>
+-- SELECT 1
+
+> RESET xmlbinary
+-- RESET
+
+> SELECT xmlelement(name foo, xmlattributes(true as t, date '2001-02-03' as d))
+xmlelement:xml
+<foo t="true" d="2001-02-03"/>
+-- SELECT 1
+
+> SELECT xmlforest('a' as x, 2 as y, null as z)
+xmlforest:xml
+<x>a</x><y>2</y>
+-- SELECT 1
+
+> SELECT xmlforest(null as z)
+xmlforest:xml
+NULL
+-- SELECT 1
+
+> SELECT xmlforest('<' as "1x", 'x' as "xml:a")
+xmlforest:xml
+<_x0031_x>&lt;</_x0031_x><xml:a>x</xml:a>
+-- SELECT 1
+
+> SELECT xmlforest(1+1)
+ERROR 42601: unnamed XML element value must be a column reference (at 18)
+
+> CREATE TEMP TABLE gx_t (a int, "b:c" text, _xy text, xmlz text)
+-- CREATE TABLE
+
+> INSERT INTO gx_t VALUES (1, 'q', 'r', 's')
+-- INSERT 0 1
+
+> SELECT xmlforest(a, "b:c", _xy, xmlz) FROM gx_t
+xmlforest:xml
+<a>1</a><b_x003A_c>q</b_x003A_c><_x005F_xy>r</_x005F_xy><_x0078_mlz>s</_x0078_mlz>
+-- SELECT 1
+
+> SELECT xmlelement(name e, xmlattributes(a, "b:c", _xy, xmlz)) FROM gx_t
+xmlelement:xml
+<e a="1" b_x003A_c="q" _x005F_xy="r" _x0078_mlz="s"/>
+-- SELECT 1
+
+> SELECT xmlpi(name foo)
+xmlpi:xml
+<?foo?>
+-- SELECT 1
+
+> SELECT xmlpi(name foo, '  bar baz')
+xmlpi:xml
+<?foo bar baz?>
+-- SELECT 1
+
+> SELECT xmlpi(name xml)
+ERROR 2200T: invalid XML processing instruction
+DETAIL: XML processing instruction target name cannot be "xml".
+
+> SELECT xmlpi(name XmL, null)
+ERROR 2200T: invalid XML processing instruction
+DETAIL: XML processing instruction target name cannot be "xml".
+
+> SELECT xmlpi(name foo, 'a?>b')
+ERROR 2200T: invalid XML processing instruction
+DETAIL: XML processing instruction cannot contain "?>".
+
+> SELECT xmlpi(name foo, null)
+xmlpi:xml
+NULL
+-- SELECT 1
+
+> SELECT xmlroot(xml '<a/>', version '1.1')
+xmlroot:xml
+<?xml version="1.1"?><a/>
+-- SELECT 1
+
+> SELECT xmlroot(xml '<?xml version="1.1"?><a/>', version no value, standalone yes)
+xmlroot:xml
+<?xml version="1.0" standalone="yes"?><a/>
+-- SELECT 1
+
+> SELECT xmlroot(xml '<?xml version="1.0" standalone="yes"?><a/>', version '1.0')
+xmlroot:xml
+<?xml version="1.0" standalone="yes"?><a/>
+-- SELECT 1
+
+> SELECT xmlroot(xml '<?xml version="1.0" standalone="yes"?><a/>', version '1.0', standalone no value)
+xmlroot:xml
+<a/>
+-- SELECT 1
+
+> SELECT xmlroot(xml '<a/>', version '1.0', standalone no)
+xmlroot:xml
+<?xml version="1.0" standalone="no"?><a/>
+-- SELECT 1
+
+> SELECT xmlroot(null, version '1.0')
+xmlroot:xml
+NULL
+-- SELECT 1
+
+> SELECT xmlconcat('<a/>', '<b/>')
+xmlconcat:xml
+<a/><b/>
+-- SELECT 1
+
+> SELECT xmlconcat('<?xml version="1.1"?><a/>', '<?xml version="1.1" standalone="no"?><b/>')
+xmlconcat:xml
+<?xml version="1.1"?><a/><b/>
+-- SELECT 1
+
+> SELECT xmlconcat('<?xml version="1.1"?><a/>', '<b/>')
+xmlconcat:xml
+<a/><b/>
+-- SELECT 1
+
+> SELECT xmlconcat(null, null)
+xmlconcat:xml
+NULL
+-- SELECT 1
+
+> SELECT xmlconcat('<a/>', null, '<c/>')
+xmlconcat:xml
+<a/><c/>
+-- SELECT 1
+
+> SELECT xmlconcat('a'::text)
+ERROR 42804: argument of XMLCONCAT must be type xml, not type text (at 18)
+
+> SELECT xmlconcat(1)
+ERROR 42804: argument of XMLCONCAT must be type xml, not type integer (at 18)
+
+> SELECT xmlserialize(content '<a>x</a>' as text)
+xmlserialize:text
+<a>x</a>
+-- SELECT 1
+
+> SELECT xmlserialize(document '<a>x</a><b/>' as text)
+ERROR 2200L: not an XML document
+
+> SELECT xmlserialize(document '<a>x</a>' as varchar(3))
+ERROR 22001: value too long for type character varying(3)
+
+> SELECT xmlserialize(content '<a>x</a>' as int)
+ERROR 42846: cannot cast XMLSERIALIZE result to integer (at 8)
+
+> SELECT xmlserialize(content '<a><b>x</b><c><d/></c></a><e/>text<f/>' as text indent)
+xmlserialize:text
+<a>
+  <b>x</b>
+  <c>
+    <d/>
+  </c>
+</a>
+<e/>text
+<f/>
+-- SELECT 1
+
+> SELECT xmlserialize(document '<?xml version="1.0"?><a><b>x</b><c><d/>é</c><g>é</g></a>' as text indent)
+xmlserialize:text
+<?xml version="1.0" encoding="UTF-8"?>
+<a>
+  <b>x</b>
+  <c><d/>é</c>
+  <g>é</g>
+</a>
+-- SELECT 1
+
+> SELECT xmlserialize(document '<a><b>x</b><g a="é">é&amp;</g></a>' as text indent)
+xmlserialize:text
+<a>
+  <b>x</b>
+  <g a="é">&#xE9;&amp;</g>
+</a>
+-- SELECT 1
+
+> SELECT xmlserialize(content 'é<a>é</a>' as text indent)
+xmlserialize:text
+&#xE9;
+<a>&#xE9;</a>
+-- SELECT 1
+
+> SELECT xmlserialize(content '' as text indent)
+xmlserialize:text
+
+-- SELECT 1
+
+> SELECT xmlserialize(content '<!DOCTYPE a [<!ELEMENT a (b|c)*><!ATTLIST a x CDATA "d"><!ENTITY e "v">]><a><b/></a>' as text indent)
+xmlserialize:text
+<!DOCTYPE a [
+<!ELEMENT a (b | c)*>
+<!ATTLIST a x CDATA "d">
+<!ENTITY e "v">
+]>
+<a x="d">
+  <b/>
+</a>
+
+-- SELECT 1
+
+> SELECT xmlserialize(document '<!DOCTYPE a [<!ELEMENT a (b,(c|d)+)?><!ENTITY % p "x"><!ENTITY q SYSTEM "u">]><a><?pi?><?pi2 x?><!--c--><![CDATA[x]]]]>y]]></a>' as text indent)
+ERROR 2200N: invalid XML content (at 30)
+DETAIL: line 1: Sequence ']]>' not allowed in content
+DETAIL: ENTITY % p "x"><!ENTITY q SYSTEM "u">]><a><?pi?><?pi2 x?><!--c--><![CDATA[x]]]]>
+DETAIL:                                                                                ^
+
+> SELECT xml '<a/>' IS DOCUMENT, xml 'a<b/>' IS DOCUMENT, xml 'a' IS NOT DOCUMENT, null::xml IS DOCUMENT
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | NULL
+-- SELECT 1
+
+> SELECT xmlcomment('a'), xmlcomment('a--b'), xmlcomment('a-')
+ERROR 2200S: invalid XML comment
+
+> SELECT xmlcomment('a-')
+ERROR 2200S: invalid XML comment
+
+> SELECT xmltext('< & > " '' é' || chr(13))
+xmltext:xml
+&lt; &amp; &gt; &quot; ' é&#13;
+-- SELECT 1
+
+> SELECT xml_is_well_formed('<a/>'), xml_is_well_formed('a'), xml_is_well_formed('<a>'), xml_is_well_formed_document('a<b/>'), xml_is_well_formed_content('a<b/>')
+xml_is_well_formed:bool | xml_is_well_formed:bool | xml_is_well_formed:bool | xml_is_well_formed_document:bool | xml_is_well_formed_content:bool
+t | t | f | f | t
+-- SELECT 1
+
+> SELECT xmlvalidate(xml '<a/>', 'x')
+ERROR 0A000: xmlvalidate is not implemented
+
+> SELECT xmlagg(x) FROM (VALUES (xml '<a/>'), (null), (xml '<b/>')) v(x)
+xmlagg:xml
+<a/><b/>
+-- SELECT 1
+
+> SELECT xmlagg(x) FROM (VALUES ('<?xml version="1.1"?><a/>'::xml), ('<?xml version="1.1"?><b/>'::xml)) v(x)
+xmlagg:xml
+<?xml version="1.1"?><a/><b/>
+-- SELECT 1
+
+> SELECT xml('<a/>'), xml('<a')
+ERROR 2200N: invalid XML content (at 25)
+DETAIL: line 1: Couldn't find end of Start Tag a line 1
+DETAIL: <a
+DETAIL:   ^
+
+> CREATE VIEW gx_v AS SELECT xmlelement(name "a b", xmlattributes(1 as "x y", 'z' as z), 'q') AS e, xmlforest(1 as a, 2 as "b c") AS f, xmlparse(content 'x') AS p, xmlparse(document '<a/>' preserve whitespace) AS p2, xmlpi(name x, 'y') AS pi, xmlroot(xml '<a/>', version '1.0', standalone yes) AS r, xmlroot(xml '<a/>', version no value) AS r2, xmlserialize(content '<a/>' as text) AS s, xmlserialize(document '<a/>' as varchar(10) indent) AS s2, xml '<a/>' IS DOCUMENT AS d, xml '<a/>' IS NOT DOCUMENT AS d2, xmlconcat('<a/>', '<b/>') AS c
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('gx_v')
+pg_get_viewdef:text
+ SELECT XMLELEMENT(NAME "a b", XMLATTRIBUTES(1 AS "x y", 'z' AS z), 'q') AS e,
+    XMLFOREST(1 AS a, 2 AS "b c") AS f,
+    XMLPARSE(CONTENT 'x'::text STRIP WHITESPACE) AS p,
+    XMLPARSE(DOCUMENT '<a/>'::text PRESERVE WHITESPACE) AS p2,
+    XMLPI(NAME x, 'y'::text) AS pi,
+    XMLROOT('<a/>'::xml, VERSION '1.0'::text, STANDALONE YES) AS r,
+    XMLROOT('<a/>'::xml, VERSION NO VALUE) AS r2,
+    XMLSERIALIZE(CONTENT '<a/>'::xml AS text NO INDENT) AS s,
+    (XMLSERIALIZE(DOCUMENT '<a/>'::xml AS character varying(10) INDENT))::character varying(10) AS s2,
+    '<a/>'::xml IS DOCUMENT AS d,
+    (NOT '<a/>'::xml IS DOCUMENT) AS d2,
+    XMLCONCAT('<a/>'::xml, '<b/>'::xml) AS c;
+-- SELECT 1
+
+> SELECT pg_get_viewdef('gx_v', true)
+pg_get_viewdef:text
+ SELECT XMLELEMENT(NAME "a b", XMLATTRIBUTES(1 AS "x y", 'z' AS z), 'q') AS e,
+    XMLFOREST(1 AS a, 2 AS "b c") AS f,
+    XMLPARSE(CONTENT 'x'::text STRIP WHITESPACE) AS p,
+    XMLPARSE(DOCUMENT '<a/>'::text PRESERVE WHITESPACE) AS p2,
+    XMLPI(NAME x, 'y'::text) AS pi,
+    XMLROOT('<a/>'::xml, VERSION '1.0'::text, STANDALONE YES) AS r,
+    XMLROOT('<a/>'::xml, VERSION NO VALUE) AS r2,
+    XMLSERIALIZE(CONTENT '<a/>'::xml AS text NO INDENT) AS s,
+    XMLSERIALIZE(DOCUMENT '<a/>'::xml AS character varying(10) INDENT)::character varying(10) AS s2,
+    ('<a/>'::xml) IS DOCUMENT AS d,
+    NOT ('<a/>'::xml) IS DOCUMENT AS d2,
+    XMLCONCAT('<a/>'::xml, '<b/>'::xml) AS c;
+-- SELECT 1
+
+> DROP VIEW gx_v
+-- DROP VIEW
+
+> SELECT xpath('/a[', '<a/>')
+ERROR 10608: invalid XPath expression
+DETAIL: Invalid expression
+CONTEXT: SQL function "xpath" statement 1
+
+> SELECT xpath('', '<a/>')
+ERROR 10608: empty XPath expression
+CONTEXT: SQL function "xpath" statement 1
+
+> SELECT xpath('foo(', '<a/>')
+ERROR 10608: could not create XPath object
+DETAIL: Unregistered function
+CONTEXT: SQL function "xpath" statement 1
+
+> SELECT xpath('foo()', '<a/>')
+ERROR 10608: could not create XPath object
+DETAIL: Unregistered function
+CONTEXT: SQL function "xpath" statement 1
+
+> SELECT xpath('$x', '<a/>')
+ERROR 10608: could not create XPath object
+DETAIL: Undefined variable
+CONTEXT: SQL function "xpath" statement 1
+
+> SELECT xpath('//p:a', '<a/>')
+ERROR 10608: could not create XPath object
+DETAIL: Undefined namespace prefix
+CONTEXT: SQL function "xpath" statement 1
+
+> SELECT xpath('1 div 3', '<a/>')
+xpath:143
+{0.3333333333333333}
+-- SELECT 1
+
+> SELECT xpath('string(1 div 3)', '<a/>')
+xpath:143
+{0.333333333333333}
+-- SELECT 1
+
+> SELECT xpath('/a', 'abc')
+ERROR 2200M: could not parse XML document
+DETAIL: line 1: Start tag expected, '<' not found
+DETAIL: abc
+DETAIL: ^
+CONTEXT: SQL function "xpath" statement 1
+
+> SELECT xpath('/a', '<a xmlns:p="x"><p:b/><c:d/></a>')
+ERROR 2200M: could not parse XML document
+DETAIL: line 1: Namespace prefix c on d is not defined
+DETAIL: <a xmlns:p="x"><p:b/><c:d/></a>
+DETAIL:                          ^
+CONTEXT: SQL function "xpath" statement 1
+
+> SELECT xpath('count(//*)', '<!DOCTYPE a [<!ENTITY e "<b/>">]><a>&e;</a>')
+xpath:143
+{1}
+-- SELECT 1
+
+> SELECT xpath('//b', '<!DOCTYPE a [<!ENTITY e "<b/>">]><a>&e;</a>')
+xpath:143
+{}
+-- SELECT 1
+
+> SELECT xpath('/a/text()', '<a>x &amp; &lt;y</a>')
+xpath:143
+{"x &amp; &lt;y"}
+-- SELECT 1
+
+> SELECT xpath('/a/@x', '<a x="1&amp;&lt;2"/>')
+xpath:143
+{1&amp;&lt;2}
+-- SELECT 1
+
+> SELECT xpath('namespace::*', '<a xmlns:p="u&amp;"/>')
+xpath:143
+{}
+-- SELECT 1
+
+> SELECT xpath('/a/namespace::*', '<a xmlns:p="u&amp;"/>')
+xpath:143
+{http://www.w3.org/XML/1998/namespace,u&amp;}
+-- SELECT 1
+
+> SELECT xpath('/', '<?xml version="1.0"?><!--c--><a><b>x</b></a>')
+xpath:143
+{"<!--c-->
+<a><b>x</b></a>
+"}
+-- SELECT 1
+
+> SELECT xpath('/a/b', '<a><b xmlns="u">x</b><b/></a>')
+WARNING 01000: line 1: xmlns: URI u is not absolute
+<a><b xmlns="u">x</b><b/></a>
+               ^
+CONTEXT: SQL function "xpath" statement 1
+xpath:143
+{<b/>}
+-- SELECT 1
+
+> SELECT xpath('//x:b', '<a><b xmlns="u">x</b><b/></a>', ARRAY[ARRAY['x','u']])
+WARNING 01000: line 1: xmlns: URI u is not absolute
+<a><b xmlns="u">x</b><b/></a>
+               ^
+xpath:143
+{"<b xmlns=\"u\">x</b>"}
+-- SELECT 1
+
+> SELECT xpath('//x:b', '<a/>', ARRAY['x','u'])
+ERROR 22000: invalid array for XML namespace mapping
+DETAIL: The array must be two-dimensional with length of the second axis equal to 2.
+
+> SELECT xpath('//x:b', '<a/>', ARRAY[ARRAY['x',null]])
+ERROR 22004: neither namespace name nor URI may be null
+
+> SELECT xpath('true()', '<a/>'), xpath('"a<b"', '<a/>'), xpath('1.5', '<a/>'), xpath('1 div 0', '<a/>'), xpath('0 div 0', '<a/>'), xpath('-1 div 0', '<a/>')
+xpath:143 | xpath:143 | xpath:143 | xpath:143 | xpath:143 | xpath:143
+{true} | {a&lt;b} | {1.5} | {Infinity} | {NaN} | {-Infinity}
+-- SELECT 1
+
+> SELECT xpath_exists('//b', '<a><b/></a>'), xpath_exists('//c', '<a><b/></a>'), xpath_exists('false()', '<a/>')
+xpath_exists:bool | xpath_exists:bool | xpath_exists:bool
+t | f | t
+-- SELECT 1
+
+> SELECT xmlexists('//b' PASSING '<a><b/></a>'), xmlexists('//b' PASSING BY REF '<a/>' BY VALUE)
+xmlexists:bool | xmlexists:bool
+t | f
+-- SELECT 1
+
+> SELECT xpath('/a/b[2]/preceding-sibling::*', '<a><c/><b/><d/><b/></a>')
+xpath:143
+{<c/>,<b/>,<d/>}
+-- SELECT 1
+
+> SELECT xpath('/a', '<a>é</a>')
+xpath:143
+{<a>é</a>}
+-- SELECT 1
+
+> SELECT xpath('//comment()', '<a><!--x--><?p d?></a>'), xpath('//processing-instruction()', '<a><!--x--><?p d?></a>')
+xpath:143 | xpath:143
+{<!--x-->} | {"<?p d?>"}
+-- SELECT 1
+
+> SELECT xpath('string(/a)', '<a>x<b>y</b>z</a>')
+xpath:143
+{xyz}
+-- SELECT 1
+
+> SELECT xpath('concat(1 div 3, " ", 1e20, " ", 0.1+0.2, " ", -0, " ", 1000000, " ", 123456789012345678)', '<a/>')
+xpath:143
+{"0.333333333333333 1e+20 0.3 0 1000000 1.23456789012346e+17"}
+-- SELECT 1
+
+> SELECT xpath('/a/b', '<a><b>1</b><b>2</b></a>')
+xpath:143
+{<b>1</b>,<b>2</b>}
+-- SELECT 1
+
+> SELECT xpath('a', '<a/>')
+xpath:143
+{<a/>}
+-- SELECT 1
+
+> SELECT xpath('//@*', '<a x="1" y="2"><b z="3"/></a>')
+xpath:143
+{1,2,3}
+-- SELECT 1
+
+> SELECT xpath('/a/b', '<a><b><![CDATA[x<y]]></b></a>')
+xpath:143
+{<b><![CDATA[x<y]]></b>}
+-- SELECT 1
+
+> SELECT xpath('/a/b/text()', '<a><b><![CDATA[x<y]]></b></a>')
+xpath:143
+{<![CDATA[x<y]]>}
+-- SELECT 1
+
+> SELECT xpath('/', '<?xml version="1.0"?><!--c--><a><b>x</b></a>')
+xpath:143
+{"<!--c-->
+<a><b>x</b></a>
+"}
+-- SELECT 1
+
+> SELECT xpath('/self::node()', '<?xml version="1.0"?><!--c--><a><b>x</b></a>')
+xpath:143
+{"<!--c-->
+<a><b>x</b></a>
+"}
+-- SELECT 1
+
+> SELECT xpath('/', '<a>é</a>')
+xpath:143
+{"<a>é</a>
+"}
+-- SELECT 1
+
+> SELECT xpath('/self::node()', '<!DOCTYPE a [<!ENTITY e "x">]><a>&e;é</a>')
+xpath:143
+{"<!DOCTYPE a [
+<!ENTITY e \"x\">
+]>
+<a>&e;é</a>
+"}
+-- SELECT 1
+
+> SELECT xpath('//b', '<a xmlns="u" xmlns:p="v"><b p:x="1"><p:c/></b></a>')
+WARNING 01000: line 1: xmlns: URI u is not absolute
+<a xmlns="u" xmlns:p="v"><b p:x="1"><p:c/></b></a>
+            ^
+CONTEXT: SQL function "xpath" statement 1
+xpath:143
+{}
+-- SELECT 1
+
+> SELECT xpath('//p:c', '<a xmlns="u" xmlns:p="v"><b p:x="1"><p:c><d/></p:c></b></a>', ARRAY[ARRAY['p','v']])
+WARNING 01000: line 1: xmlns: URI u is not absolute
+<a xmlns="u" xmlns:p="v"><b p:x="1"><p:c><d/></p:c></b></a>
+            ^
+xpath:143
+{"<p:c xmlns:p=\"v\" xmlns=\"u\"><d/></p:c>"}
+-- SELECT 1
+
+> SELECT xpath('//b/@p:x', '<a xmlns="u" xmlns:p="v"><b p:x="1"><p:c/></b></a>', ARRAY[ARRAY['p','v']])
+WARNING 01000: line 1: xmlns: URI u is not absolute
+<a xmlns="u" xmlns:p="v"><b p:x="1"><p:c/></b></a>
+            ^
+xpath:143
+{}
+-- SELECT 1
+
+> SELECT xpath('/a/node()', '<a>t<!--c--><?p?><![CDATA[d]]>&amp;</a>')
+xpath:143
+{t,<!--c-->,<?p?>,<![CDATA[d]]>,&amp;}
+-- SELECT 1
+
+> SELECT xpath('/a/node()', '<!DOCTYPE a [<!ENTITY e "x">]><a>&e;</a>')
+xpath:143
+{}
+-- SELECT 1
+
+> SELECT xpath('/a', '<!DOCTYPE a [<!ENTITY e "x">]><a>&e;</a>')
+xpath:143
+{<a>&e;</a>}
+-- SELECT 1
+
+> SELECT xpath('string(/a)', '<!DOCTYPE a [<!ENTITY e "x">]><a>1&e;2</a>')
+xpath:143
+{1x2}
+-- SELECT 1
+
+> SELECT xpath('/a', '<!DOCTYPE a [<!ATTLIST a x CDATA "d">]><a/>')
+xpath:143
+{<a/>}
+-- SELECT 1
+
+> create table gx_d(id int, x xml)
+-- CREATE TABLE
+
+> insert into gx_d values (1, '<rows><row a="1"><n>one</n><v>1.5</v></row><row a="2"><n>two</n></row></rows>')
+-- INSERT 0 1
+
+> create view gx_v as select t.* from gx_d, xmltable(xmlnamespaces('http://a' as a, 'http://b' as "B"), '/rows/row' passing x columns ord for ordinality, a int path '@a' not null, n text default 'zz' path 'n', v numeric(5,2), "q q" varchar(3) path 'n' default 'd') t
+-- CREATE VIEW
+
+> select pg_get_viewdef('gx_v')
+pg_get_viewdef:text
+ SELECT t.ord,
+    t.a,
+    t.n,
+    t.v,
+    t."q q"
+   FROM gx_d,
+    LATERAL XMLTABLE(XMLNAMESPACES ('http://a'::text AS a, 'http://b'::text AS "B"), ('/rows/row'::text) PASSING (gx_d.x) COLUMNS ord FOR ORDINALITY, a integer PATH ('@a'::text) NOT NULL, n text DEFAULT ('zz'::text) PATH ('n'::text), v numeric(5,2), "q q" character varying(3) DEFAULT ('d'::character varying(3)) PATH ('n'::text)) t;
+-- SELECT 1
+
+> select pg_get_viewdef('gx_v', true)
+pg_get_viewdef:text
+ SELECT t.ord,
+    t.a,
+    t.n,
+    t.v,
+    t."q q"
+   FROM gx_d,
+    LATERAL XMLTABLE(XMLNAMESPACES ('http://a'::text AS a, 'http://b'::text AS "B"), ('/rows/row'::text) PASSING (gx_d.x) COLUMNS ord FOR ORDINALITY, a integer PATH ('@a'::text) NOT NULL, n text DEFAULT ('zz'::text) PATH ('n'::text), v numeric(5,2), "q q" character varying(3) DEFAULT ('d'::character varying(3)) PATH ('n'::text)) t;
+-- SELECT 1
+
+> select * from gx_v
+ord:int4 | a:int4 | n:text | v:numeric | q q:varchar
+1 | 1 | one | 1.50 | one
+2 | 2 | two | NULL | two
+-- SELECT 2
+
+> explain (verbose, costs off) select * from gx_v
+QUERY PLAN:text
+Nested Loop
+  Output: t.ord, t.a, t.n, t.v, t."q q"
+  ->  Seq Scan on public.gx_d
+        Output: gx_d.id, gx_d.x
+  ->  Table Function Scan on "xmltable" t
+        Output: t.ord, t.a, t.n, t.v, t."q q"
+        Table Function Call: XMLTABLE(XMLNAMESPACES ('http://a'::text AS a, 'http://b'::text AS "B"), ('/rows/row'::text) PASSING (gx_d.x) COLUMNS ord FOR ORDINALITY, a integer PATH ('@a'::text) NOT NULL, n text DEFAULT ('zz'::text) PATH ('n'::text), v numeric(5,2), "q q" character varying(3) DEFAULT ('d'::character varying(3)) PATH ('n'::text))
+-- EXPLAIN
+
+> explain select * from xmltable('/a' passing '<a/>' columns x text) as q(y)
+QUERY PLAN:text
+Table Function Scan on "xmltable" q  (cost=0.00..1.00 rows=100 width=32)
+-- EXPLAIN
+
+> select * from xmltable('/a' passing '<a/>' columns x text) as q(y, z)
+ERROR 42P10: XMLTABLE function has 1 columns available but 2 columns specified
+
+> select * from xmltable('/a' passing '<a/>' columns x text, x int)
+ERROR 42601: column name "x" is not unique (at 60)
+
+> select * from xmltable('/a' passing '<a/>' columns x for ordinality, y for ordinality)
+ERROR 42601: only one FOR ORDINALITY column is allowed (at 70)
+
+> select * from xmltable(xmlnamespaces('a' as x, 'b' as x), '/a' passing '<a/>' columns y text)
+ERROR 42601: namespace name "x" is not unique (at 48)
+
+> select * from xmltable(xmlnamespaces(default 'a', default 'b'), '/a' passing '<a/>' columns y text)
+ERROR 42601: only one default namespace is allowed (at 51)
+
+> select * from xmltable(xmlnamespaces(default 'a'), '/a' passing '<a/>' columns y text)
+ERROR 0A000: DEFAULT namespace is not supported
+
+> select * from xmltable('/a' passing '<a/>' columns y int default 'x')
+ERROR 22P02: invalid input syntax for type integer: "x" (at 66)
+
+> select * from xmltable('/a' passing 1 columns y int)
+ERROR 42804: argument of XMLTABLE must be type xml, not type integer (at 37)
+
+> select * from xmltable(1 passing '<a/>' columns y int)
+y:int4
+-- SELECT 0
+
+> select * from xmltable('/a' passing '<a/>' columns y setof int)
+ERROR 42P16: column "y" cannot be declared SETOF (at 52)
+
+> select * from xmltable('' passing '<a/>' columns y int)
+ERROR 10608: row path filter must not be empty string
+
+> select * from xmltable('/a' passing '<a/>' columns y int path '')
+ERROR 10608: column path filter must not be empty string
+
+> select * from xmltable('/a' passing null columns y int default 1/0)
+ERROR 22012: division by zero
+
+> select * from xmltable('/a' passing '<a/>' columns y int default 1/0)
+ERROR 22012: division by zero
+
+> select * from xmltable('/a' passing '<a><y>1</y><y>2</y></a>' columns y int)
+ERROR 21000: more than one value returned by column XPath expression
+
+> select * from xmltable('/a' passing '<a><y>1</y><y>2</y></a>' columns y xml)
+y:xml
+<y>1</y><y>2</y>
+-- SELECT 1
+
+> select * from xmltable('/a' passing '<a><y>1</y><y>2</y></a>' columns y xml path 'y/text()', c int path 'count(y)', b bool path 'y=1', s text path 'string(y)', nb numeric path 'y=1')
+y:xml | c:int4 | b:bool | s:text | nb:numeric
+12 | 2 | t | 1 | 1
+-- SELECT 1
+
+> select xmltable.* from xmltable('/a' passing '<a/>' columns y int)
+y:int4
+NULL
+-- SELECT 1
+
+> select * from xmltable('/a' passing '<a>&lt;</a>' columns y xml path 'text()', z text path '.')
+y:xml | z:text
+&lt; | <
+-- SELECT 1
+
+> drop view gx_v
+-- DROP VIEW
+
+> drop table gx_d
+-- DROP TABLE
+
+> create schema gx_s
+-- CREATE SCHEMA
+
+> create domain gx_s.dm as varchar(5) check (value <> 'bad')
+-- CREATE DOMAIN
+
+> create table gx_s.t1(a int, "b c" text, d date, e numeric(5,2), f gx_s.dm, g bytea, h timestamptz, i bool, j float8, k xml)
+-- CREATE TABLE
+
+> insert into gx_s.t1 values (1,'x<y','2020-01-01',1.5,'ok','\x0102ff','2020-01-02 03:04:05+00',true,1.5,'<q/>'),(null,null,null,null,null,null,null,null,null,null)
+-- INSERT 0 2
+
+> create view gx_s.v1 as select a, i from gx_s.t1
+-- CREATE VIEW
+
+> set timezone = 'UTC'
+-- SET
+
+> select table_to_xml('gx_s.t1', true, false, '')
+table_to_xml:xml
+<t1 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+<row>
+  <a>1</a>
+  <b_x0020_c>x&lt;y</b_x0020_c>
+  <d>2020-01-01</d>
+  <e>1.50</e>
+  <f>ok</f>
+  <g>AQL/</g>
+  <h>2020-01-02T03:04:05+00:00</h>
+  <i>true</i>
+  <j>1.5</j>
+  <k><q/></k>
+</row>
+
+<row>
+  <a xsi:nil="true"/>
+  <b_x0020_c xsi:nil="true"/>
+  <d xsi:nil="true"/>
+  <e xsi:nil="true"/>
+  <f xsi:nil="true"/>
+  <g xsi:nil="true"/>
+  <h xsi:nil="true"/>
+  <i xsi:nil="true"/>
+  <j xsi:nil="true"/>
+  <k xsi:nil="true"/>
+</row>
+
+</t1>
+
+-- SELECT 1
+
+> select table_to_xml('gx_s.t1', false, true, 'urn:x')
+table_to_xml:xml
+<t1 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="urn:x">
+  <a>1</a>
+  <b_x0020_c>x&lt;y</b_x0020_c>
+  <d>2020-01-01</d>
+  <e>1.50</e>
+  <f>ok</f>
+  <g>AQL/</g>
+  <h>2020-01-02T03:04:05+00:00</h>
+  <i>true</i>
+  <j>1.5</j>
+  <k><q/></k>
+</t1>
+
+<t1 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="urn:x">
+</t1>
+
+
+-- SELECT 1
+
+> select query_to_xml('select a, f from gx_s.t1 order by a', true, false, '')
+query_to_xml:xml
+<table xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+<row>
+  <a>1</a>
+  <f>ok</f>
+</row>
+
+<row>
+  <a xsi:nil="true"/>
+  <f xsi:nil="true"/>
+</row>
+
+</table>
+
+-- SELECT 1
+
+> select table_to_xmlschema('gx_s.t1', true, false, '')
+table_to_xmlschema:xml
+<xsd:schema
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+<xsd:simpleType name="INTEGER">
+  <xsd:restriction base="xsd:int">
+    <xsd:maxInclusive value="2147483647"/>
+    <xsd:minInclusive value="-2147483648"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="UDT.golden_x005F_xml.pg_catalog.text">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="DATE">
+  <xsd:restriction base="xsd:date">
+    <xsd:pattern value="\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="NUMERIC">
+</xsd:simpleType>
+
+<xsd:simpleType name="Domain.golden_x005F_xml.gx_s.dm">
+  <xsd:restriction base="VARCHAR_5"/>
+</xsd:simpleType>
+
+<xsd:simpleType name="UDT.golden_x005F_xml.pg_catalog.bytea">
+  <xsd:restriction base="xsd:base64Binary">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="TIMESTAMP_WTZ">
+  <xsd:restriction base="xsd:dateTime">
+    <xsd:pattern value="\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}T\p{Nd}{2}:\p{Nd}{2}:\p{Nd}{2}(.\p{Nd}+)?(\+|-)\p{Nd}{2}:\p{Nd}{2}"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="BOOLEAN">
+  <xsd:restriction base="xsd:boolean"></xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="DOUBLE">
+  <xsd:restriction base="xsd:double"></xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType mixed="true">
+  <xsd:sequence>
+    <xsd:any name="element" minOccurs="0" maxOccurs="unbounded" processContents="skip"/>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:simpleType name="VARCHAR">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="RowType.golden_x005F_xml.gx_s.t1">
+  <xsd:sequence>
+    <xsd:element name="a" type="INTEGER" nillable="true"></xsd:element>
+    <xsd:element name="b_x0020_c" type="UDT.golden_x005F_xml.pg_catalog.text" nillable="true"></xsd:element>
+    <xsd:element name="d" type="DATE" nillable="true"></xsd:element>
+    <xsd:element name="e" type="NUMERIC" nillable="true"></xsd:element>
+    <xsd:element name="f" type="Domain.golden_x005F_xml.gx_s.dm" nillable="true"></xsd:element>
+    <xsd:element name="g" type="UDT.golden_x005F_xml.pg_catalog.bytea" nillable="true"></xsd:element>
+    <xsd:element name="h" type="TIMESTAMP_WTZ" nillable="true"></xsd:element>
+    <xsd:element name="i" type="BOOLEAN" nillable="true"></xsd:element>
+    <xsd:element name="j" type="DOUBLE" nillable="true"></xsd:element>
+    <xsd:element name="k" type="XML" nillable="true"></xsd:element>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:complexType name="TableType.golden_x005F_xml.gx_s.t1">
+  <xsd:sequence>
+    <xsd:element name="row" type="RowType.golden_x005F_xml.gx_s.t1" minOccurs="0" maxOccurs="unbounded"/>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:element name="t1" type="TableType.golden_x005F_xml.gx_s.t1"/>
+
+</xsd:schema>
+-- SELECT 1
+
+> select table_to_xmlschema('gx_s.t1', false, true, 'urn:x')
+table_to_xmlschema:xml
+<xsd:schema
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    targetNamespace="urn:x"
+    elementFormDefault="qualified">
+
+<xsd:simpleType name="INTEGER">
+  <xsd:restriction base="xsd:int">
+    <xsd:maxInclusive value="2147483647"/>
+    <xsd:minInclusive value="-2147483648"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="UDT.golden_x005F_xml.pg_catalog.text">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="DATE">
+  <xsd:restriction base="xsd:date">
+    <xsd:pattern value="\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="NUMERIC">
+</xsd:simpleType>
+
+<xsd:simpleType name="Domain.golden_x005F_xml.gx_s.dm">
+  <xsd:restriction base="VARCHAR_5"/>
+</xsd:simpleType>
+
+<xsd:simpleType name="UDT.golden_x005F_xml.pg_catalog.bytea">
+  <xsd:restriction base="xsd:base64Binary">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="TIMESTAMP_WTZ">
+  <xsd:restriction base="xsd:dateTime">
+    <xsd:pattern value="\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}T\p{Nd}{2}:\p{Nd}{2}:\p{Nd}{2}(.\p{Nd}+)?(\+|-)\p{Nd}{2}:\p{Nd}{2}"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="BOOLEAN">
+  <xsd:restriction base="xsd:boolean"></xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="DOUBLE">
+  <xsd:restriction base="xsd:double"></xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType mixed="true">
+  <xsd:sequence>
+    <xsd:any name="element" minOccurs="0" maxOccurs="unbounded" processContents="skip"/>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:simpleType name="VARCHAR">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="RowType.golden_x005F_xml.gx_s.t1">
+  <xsd:sequence>
+    <xsd:element name="a" type="INTEGER" minOccurs="0"></xsd:element>
+    <xsd:element name="b_x0020_c" type="UDT.golden_x005F_xml.pg_catalog.text" minOccurs="0"></xsd:element>
+    <xsd:element name="d" type="DATE" minOccurs="0"></xsd:element>
+    <xsd:element name="e" type="NUMERIC" minOccurs="0"></xsd:element>
+    <xsd:element name="f" type="Domain.golden_x005F_xml.gx_s.dm" minOccurs="0"></xsd:element>
+    <xsd:element name="g" type="UDT.golden_x005F_xml.pg_catalog.bytea" minOccurs="0"></xsd:element>
+    <xsd:element name="h" type="TIMESTAMP_WTZ" minOccurs="0"></xsd:element>
+    <xsd:element name="i" type="BOOLEAN" minOccurs="0"></xsd:element>
+    <xsd:element name="j" type="DOUBLE" minOccurs="0"></xsd:element>
+    <xsd:element name="k" type="XML" minOccurs="0"></xsd:element>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:element name="t1" type="RowType.golden_x005F_xml.gx_s.t1"/>
+
+</xsd:schema>
+-- SELECT 1
+
+> select query_to_xmlschema('select a, f from gx_s.t1', true, false, '')
+query_to_xmlschema:xml
+<xsd:schema
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+<xsd:simpleType name="INTEGER">
+  <xsd:restriction base="xsd:int">
+    <xsd:maxInclusive value="2147483647"/>
+    <xsd:minInclusive value="-2147483648"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="Domain.golden_x005F_xml.gx_s.dm">
+  <xsd:restriction base="VARCHAR_5"/>
+</xsd:simpleType>
+
+<xsd:simpleType name="VARCHAR">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="RowType">
+  <xsd:sequence>
+    <xsd:element name="a" type="INTEGER" nillable="true"></xsd:element>
+    <xsd:element name="f" type="Domain.golden_x005F_xml.gx_s.dm" nillable="true"></xsd:element>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:complexType name="TableType">
+  <xsd:sequence>
+    <xsd:element name="row" type="RowType" minOccurs="0" maxOccurs="unbounded"/>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:element name="table" type="TableType"/>
+
+</xsd:schema>
+-- SELECT 1
+
+> select query_to_xml_and_xmlschema('select a from gx_s.t1 where a = 1', false, false, '')
+query_to_xml_and_xmlschema:xml
+<table xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="#">
+
+<xsd:schema
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+<xsd:simpleType name="INTEGER">
+  <xsd:restriction base="xsd:int">
+    <xsd:maxInclusive value="2147483647"/>
+    <xsd:minInclusive value="-2147483648"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="RowType">
+  <xsd:sequence>
+    <xsd:element name="a" type="INTEGER" minOccurs="0"></xsd:element>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:complexType name="TableType">
+  <xsd:sequence>
+    <xsd:element name="row" type="RowType" minOccurs="0" maxOccurs="unbounded"/>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:element name="table" type="TableType"/>
+
+</xsd:schema>
+
+<row>
+  <a>1</a>
+</row>
+
+</table>
+
+-- SELECT 1
+
+> select table_to_xml_and_xmlschema('gx_s.v1', true, true, 'urn:y')
+table_to_xml_and_xmlschema:xml
+<xsd:schema
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    targetNamespace="urn:y"
+    elementFormDefault="qualified">
+
+<xsd:simpleType name="INTEGER">
+  <xsd:restriction base="xsd:int">
+    <xsd:maxInclusive value="2147483647"/>
+    <xsd:minInclusive value="-2147483648"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="BOOLEAN">
+  <xsd:restriction base="xsd:boolean"></xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="RowType.golden_x005F_xml.gx_s.v1">
+  <xsd:sequence>
+    <xsd:element name="a" type="INTEGER" nillable="true"></xsd:element>
+    <xsd:element name="i" type="BOOLEAN" nillable="true"></xsd:element>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:element name="v1" type="RowType.golden_x005F_xml.gx_s.v1"/>
+
+</xsd:schema>
+
+<v1 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="urn:y">
+  <a>1</a>
+  <i>true</i>
+</v1>
+
+<v1 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="urn:y">
+  <a xsi:nil="true"/>
+  <i xsi:nil="true"/>
+</v1>
+
+
+-- SELECT 1
+
+> select schema_to_xml('gx_s', true, false, '')
+schema_to_xml:xml
+<gx_s xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+<t1>
+
+<row>
+  <a>1</a>
+  <b_x0020_c>x&lt;y</b_x0020_c>
+  <d>2020-01-01</d>
+  <e>1.50</e>
+  <f>ok</f>
+  <g>AQL/</g>
+  <h>2020-01-02T03:04:05+00:00</h>
+  <i>true</i>
+  <j>1.5</j>
+  <k><q/></k>
+</row>
+
+<row>
+  <a xsi:nil="true"/>
+  <b_x0020_c xsi:nil="true"/>
+  <d xsi:nil="true"/>
+  <e xsi:nil="true"/>
+  <f xsi:nil="true"/>
+  <g xsi:nil="true"/>
+  <h xsi:nil="true"/>
+  <i xsi:nil="true"/>
+  <j xsi:nil="true"/>
+  <k xsi:nil="true"/>
+</row>
+
+</t1>
+
+<v1>
+
+<row>
+  <a>1</a>
+  <i>true</i>
+</row>
+
+<row>
+  <a xsi:nil="true"/>
+  <i xsi:nil="true"/>
+</row>
+
+</v1>
+
+</gx_s>
+
+-- SELECT 1
+
+> select schema_to_xmlschema('gx_s', false, true, '')
+schema_to_xmlschema:xml
+<xsd:schema
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+<xsd:simpleType name="INTEGER">
+  <xsd:restriction base="xsd:int">
+    <xsd:maxInclusive value="2147483647"/>
+    <xsd:minInclusive value="-2147483648"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="UDT.golden_x005F_xml.pg_catalog.text">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="DATE">
+  <xsd:restriction base="xsd:date">
+    <xsd:pattern value="\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="NUMERIC">
+</xsd:simpleType>
+
+<xsd:simpleType name="Domain.golden_x005F_xml.gx_s.dm">
+  <xsd:restriction base="VARCHAR_5"/>
+</xsd:simpleType>
+
+<xsd:simpleType name="UDT.golden_x005F_xml.pg_catalog.bytea">
+  <xsd:restriction base="xsd:base64Binary">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="TIMESTAMP_WTZ">
+  <xsd:restriction base="xsd:dateTime">
+    <xsd:pattern value="\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}T\p{Nd}{2}:\p{Nd}{2}:\p{Nd}{2}(.\p{Nd}+)?(\+|-)\p{Nd}{2}:\p{Nd}{2}"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="BOOLEAN">
+  <xsd:restriction base="xsd:boolean"></xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="DOUBLE">
+  <xsd:restriction base="xsd:double"></xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType mixed="true">
+  <xsd:sequence>
+    <xsd:any name="element" minOccurs="0" maxOccurs="unbounded" processContents="skip"/>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:simpleType name="VARCHAR">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="SchemaType.golden_x005F_xml.gx_s">
+  <xsd:sequence>
+    <xsd:element name="t1" type="RowType.golden_x005F_xml.gx_s.t1" minOccurs="0" maxOccurs="unbounded"/>
+    <xsd:element name="v1" type="RowType.golden_x005F_xml.gx_s.v1" minOccurs="0" maxOccurs="unbounded"/>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:element name="gx_s" type="SchemaType.golden_x005F_xml.gx_s"/>
+
+</xsd:schema>
+-- SELECT 1
+
+> select schema_to_xml_and_xmlschema('gx_s', true, false, 'urn:z')
+schema_to_xml_and_xmlschema:xml
+<gx_s xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="urn:z" xsi:schemaLocation="urn:z #">
+
+<xsd:schema
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    targetNamespace="urn:z"
+    elementFormDefault="qualified">
+
+<xsd:simpleType name="INTEGER">
+  <xsd:restriction base="xsd:int">
+    <xsd:maxInclusive value="2147483647"/>
+    <xsd:minInclusive value="-2147483648"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="UDT.golden_x005F_xml.pg_catalog.text">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="DATE">
+  <xsd:restriction base="xsd:date">
+    <xsd:pattern value="\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="NUMERIC">
+</xsd:simpleType>
+
+<xsd:simpleType name="Domain.golden_x005F_xml.gx_s.dm">
+  <xsd:restriction base="VARCHAR_5"/>
+</xsd:simpleType>
+
+<xsd:simpleType name="UDT.golden_x005F_xml.pg_catalog.bytea">
+  <xsd:restriction base="xsd:base64Binary">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="TIMESTAMP_WTZ">
+  <xsd:restriction base="xsd:dateTime">
+    <xsd:pattern value="\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2}T\p{Nd}{2}:\p{Nd}{2}:\p{Nd}{2}(.\p{Nd}+)?(\+|-)\p{Nd}{2}:\p{Nd}{2}"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="BOOLEAN">
+  <xsd:restriction base="xsd:boolean"></xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="DOUBLE">
+  <xsd:restriction base="xsd:double"></xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType mixed="true">
+  <xsd:sequence>
+    <xsd:any name="element" minOccurs="0" maxOccurs="unbounded" processContents="skip"/>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:simpleType name="VARCHAR">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="SchemaType.golden_x005F_xml.gx_s">
+  <xsd:all>
+    <xsd:element name="t1" type="TableType.golden_x005F_xml.gx_s.t1"/>
+    <xsd:element name="v1" type="TableType.golden_x005F_xml.gx_s.v1"/>
+  </xsd:all>
+</xsd:complexType>
+
+<xsd:element name="gx_s" type="SchemaType.golden_x005F_xml.gx_s"/>
+
+</xsd:schema>
+
+<t1>
+
+<row>
+  <a>1</a>
+  <b_x0020_c>x&lt;y</b_x0020_c>
+  <d>2020-01-01</d>
+  <e>1.50</e>
+  <f>ok</f>
+  <g>AQL/</g>
+  <h>2020-01-02T03:04:05+00:00</h>
+  <i>true</i>
+  <j>1.5</j>
+  <k><q/></k>
+</row>
+
+<row>
+  <a xsi:nil="true"/>
+  <b_x0020_c xsi:nil="true"/>
+  <d xsi:nil="true"/>
+  <e xsi:nil="true"/>
+  <f xsi:nil="true"/>
+  <g xsi:nil="true"/>
+  <h xsi:nil="true"/>
+  <i xsi:nil="true"/>
+  <j xsi:nil="true"/>
+  <k xsi:nil="true"/>
+</row>
+
+</t1>
+
+<v1>
+
+<row>
+  <a>1</a>
+  <i>true</i>
+</row>
+
+<row>
+  <a xsi:nil="true"/>
+  <i xsi:nil="true"/>
+</row>
+
+</v1>
+
+</gx_s>
+
+-- SELECT 1
+
+> begin
+-- BEGIN
+
+> declare gx_c cursor for select a, "b c" from gx_s.t1 order by a
+-- DECLARE CURSOR
+
+> select cursor_to_xml('gx_c', 1, true, false, '')
+cursor_to_xml:xml
+<table xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+<row>
+  <a>1</a>
+  <b_x0020_c>x&lt;y</b_x0020_c>
+</row>
+
+</table>
+
+-- SELECT 1
+
+> select cursor_to_xml('gx_c', 5, false, true, '')
+cursor_to_xml:xml
+<row xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+</row>
+
+
+-- SELECT 1
+
+> select cursor_to_xmlschema('gx_c', true, false, '')
+cursor_to_xmlschema:xml
+<xsd:schema
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+<xsd:simpleType name="INTEGER">
+  <xsd:restriction base="xsd:int">
+    <xsd:maxInclusive value="2147483647"/>
+    <xsd:minInclusive value="-2147483648"/>
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="UDT.golden_x005F_xml.pg_catalog.text">
+  <xsd:restriction base="xsd:string">
+  </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="RowType">
+  <xsd:sequence>
+    <xsd:element name="a" type="INTEGER" nillable="true"></xsd:element>
+    <xsd:element name="b_x0020_c" type="UDT.golden_x005F_xml.pg_catalog.text" nillable="true"></xsd:element>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:complexType name="TableType">
+  <xsd:sequence>
+    <xsd:element name="row" type="RowType" minOccurs="0" maxOccurs="unbounded"/>
+  </xsd:sequence>
+</xsd:complexType>
+
+<xsd:element name="table" type="TableType"/>
+
+</xsd:schema>
+-- SELECT 1
+
+> commit
+-- COMMIT
+
+> select query_to_xml('select 1/0', true, false, '')
+ERROR 22012: division by zero
+CONTEXT: SQL statement "select 1/0"
+
+> select query_to_xml('select from', true, false, '')
+ERROR 42601: syntax error at end of input
+QUERY: select from (at 12)
+
+> select query_to_xml('select 1 as "x y", 2 as ":a"', true, false, '')
+query_to_xml:xml
+<table xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+<row>
+  <x_x0020_y>1</x_x0020_y>
+  <_x003A_a>2</_x003A_a>
+</row>
+
+</table>
+
+-- SELECT 1
+
+> drop schema gx_s cascade
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to type gx_s.dm
+DETAIL: drop cascades to table gx_s.t1
+DETAIL: drop cascades to view gx_s.v1
+-- DROP SCHEMA
+

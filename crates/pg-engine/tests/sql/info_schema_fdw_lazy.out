@@ -1,0 +1,94 @@
+> CREATE FOREIGN DATA WRAPPER isfl_fdw
+-- CREATE FOREIGN DATA WRAPPER
+
+> CREATE SERVER isfl_srv FOREIGN DATA WRAPPER isfl_fdw
+-- CREATE SERVER
+
+> CREATE FOREIGN TABLE isfl_ft (a int) SERVER isfl_srv
+-- CREATE FOREIGN TABLE
+
+> CREATE TABLE isfl_t (a int)
+-- CREATE TABLE
+
+> CREATE VIEW isfl_v AS SELECT a FROM isfl_t
+-- CREATE VIEW
+
+> SELECT table_name, is_insertable_into FROM information_schema.tables WHERE table_name = 'isfl_t'
+table_name:name | is_insertable_into:varchar
+isfl_t | YES
+-- SELECT 1
+
+> SELECT table_name, is_updatable, is_insertable_into FROM information_schema.views WHERE table_name = 'isfl_v'
+table_name:name | is_updatable:varchar | is_insertable_into:varchar
+isfl_v | YES | YES
+-- SELECT 1
+
+> SELECT table_name, column_name, is_updatable FROM information_schema.columns WHERE table_name IN ('isfl_t', 'isfl_v') ORDER BY 1
+table_name:name | column_name:name | is_updatable:varchar
+isfl_t | a | YES
+isfl_v | a | YES
+-- SELECT 2
+
+> SELECT count(*) FROM information_schema.tables WHERE table_name LIKE 'isfl%'
+count:int8
+3
+-- SELECT 1
+
+> SELECT table_name, table_type FROM information_schema.tables WHERE table_name LIKE 'isfl%' ORDER BY 1
+table_name:name | table_type:varchar
+isfl_ft | FOREIGN
+isfl_t | BASE TABLE
+isfl_v | VIEW
+-- SELECT 3
+
+> SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'isfl%' ORDER BY 1
+table_name:name | column_name:name
+isfl_ft | a
+isfl_t | a
+isfl_v | a
+-- SELECT 3
+
+> SELECT table_name, is_insertable_into FROM information_schema.tables WHERE table_name LIKE 'isfl%' ORDER BY 1
+ERROR 55000: foreign-data wrapper "isfl_fdw" has no handler
+
+> SELECT * FROM information_schema.tables WHERE table_name LIKE 'isfl%' ORDER BY 1
+ERROR 55000: foreign-data wrapper "isfl_fdw" has no handler
+
+> SELECT table_name FROM information_schema.tables WHERE is_insertable_into = 'NO' AND table_name LIKE 'isfl%'
+ERROR 55000: foreign-data wrapper "isfl_fdw" has no handler
+
+> SELECT table_name, is_updatable FROM information_schema.columns WHERE table_name LIKE 'isfl%' ORDER BY 1
+ERROR 55000: foreign-data wrapper "isfl_fdw" has no handler
+
+> SELECT pg_relation_is_updatable('isfl_ft'::regclass, false)
+ERROR 55000: foreign-data wrapper "isfl_fdw" has no handler
+
+> SELECT pg_column_is_updatable('isfl_ft'::regclass, 1::int2, false)
+ERROR 55000: foreign-data wrapper "isfl_fdw" has no handler
+
+> SELECT pg_relation_is_updatable('isfl_t'::regclass, false), pg_relation_is_updatable('isfl_v'::regclass, false)
+pg_relation_is_updatable:int4 | pg_relation_is_updatable:int4
+28 | 28
+-- SELECT 1
+
+> DROP FOREIGN TABLE isfl_ft
+-- DROP FOREIGN TABLE
+
+> SELECT table_name, is_insertable_into FROM information_schema.tables WHERE table_name LIKE 'isfl%' ORDER BY 1
+table_name:name | is_insertable_into:varchar
+isfl_t | YES
+isfl_v | YES
+-- SELECT 2
+
+> DROP VIEW isfl_v
+-- DROP VIEW
+
+> DROP TABLE isfl_t
+-- DROP TABLE
+
+> DROP SERVER isfl_srv
+-- DROP SERVER
+
+> DROP FOREIGN DATA WRAPPER isfl_fdw
+-- DROP FOREIGN DATA WRAPPER
+

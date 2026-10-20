@@ -1,0 +1,186 @@
+> create table rc_p (a int, b int)
+-- CREATE TABLE
+
+> create table rc_c (x int) inherits (rc_p)
+-- CREATE TABLE
+
+> create table rc_d (y int) inherits (rc_c)
+-- CREATE TABLE
+
+> insert into rc_c values (1, 2, 3)
+-- INSERT 0 1
+
+> insert into rc_d values (4, 5, 6, 7)
+-- INSERT 0 1
+
+> select c::rc_p, pg_typeof(c::rc_p), (c::rc_p).b from rc_c c order by 1
+c:user | pg_typeof:regtype | b:int4
+(1,2) | rc_p | 2
+(4,5) | rc_p | 5
+-- SELECT 2
+
+> select d::rc_c::rc_p, (d::rc_c).x from rc_d d
+d:user | x:int4
+(4,5) | 6
+-- SELECT 1
+
+> select row(1,2)::rc_p, pg_typeof(row(1,2)::rc_p), (row(1,2)::rc_p).a
+row:user | pg_typeof:regtype | a:int4
+(1,2) | rc_p | 1
+-- SELECT 1
+
+> select row(a, b)::rc_p = '(1,2)'::rc_p from rc_p order by a
+?column?:bool
+t
+f
+-- SELECT 2
+
+> select row(1, 2, 3)::rc_p
+ERROR 42846: cannot cast type record to rc_p (at 20)
+DETAIL: Input has too many columns.
+
+> select row(1)::rc_p
+ERROR 42846: cannot cast type record to rc_p (at 14)
+DETAIL: Input has too few columns.
+
+> create view rc_v1 as select row(a, b)::rc_p as r, rc_p as w from rc_p
+-- CREATE VIEW
+
+> select pg_get_viewdef('rc_v1')
+pg_get_viewdef:text
+ SELECT ROW(a, b)::rc_p AS r,
+    rc_p.*::rc_p AS w
+   FROM rc_p;
+-- SELECT 1
+
+> create view rc_v2 as select c::rc_p as conv, (c::rc_p).a, d::rc_c::rc_p as conv2 from rc_c c, rc_d d
+-- CREATE VIEW
+
+> select pg_get_viewdef('rc_v2')
+pg_get_viewdef:text
+ SELECT (c.*)::rc_p AS conv,
+    ((c.*)::rc_p).a AS a,
+    ((d.*)::rc_c)::rc_p AS conv2
+   FROM rc_c c,
+    rc_d d;
+-- SELECT 1
+
+> select * from rc_v2
+conv:user | a:int4 | conv2:user
+(1,2) | 1 | (4,5)
+(4,5) | 4 | (4,5)
+-- SELECT 2
+
+> create function rc_f(rc_p) returns int as 'select $1.a + $1.b' language sql
+-- CREATE FUNCTION
+
+> select rc_f(c) from rc_c c
+rc_f:int4
+3
+9
+-- SELECT 2
+
+> create view rc_v3 as select rc_f(c) from rc_c c
+-- CREATE VIEW
+
+> select pg_get_viewdef('rc_v3')
+pg_get_viewdef:text
+ SELECT rc_f((c.*)::rc_p) AS rc_f
+   FROM rc_c c;
+-- SELECT 1
+
+> create view rc_v4 as select a is distinct from null as x, a is not distinct from null as y, null is distinct from b as z, c is distinct from null as w, a is distinct from null::int as v from rc_c c
+-- CREATE VIEW
+
+> select pg_get_viewdef('rc_v4')
+pg_get_viewdef:text
+ SELECT (a IS NOT NULL) AS x,
+    (a IS NULL) AS y,
+    (b IS NOT NULL) AS z,
+    (c.* IS DISTINCT FROM NULL) AS w,
+    (a IS DISTINCT FROM NULL::integer) AS v
+   FROM rc_c c;
+-- SELECT 1
+
+> select * from rc_v4
+x:bool | y:bool | z:bool | w:bool | v:bool
+t | f | t | t | t
+t | f | t | t | t
+-- SELECT 2
+
+> select row(null, null)::rc_p is distinct from null, row(null, null)::rc_p is null, null::rc_p is distinct from null
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | f
+-- SELECT 1
+
+> create table rc_pt (a int, b int) partition by list ((rc_pt))
+-- CREATE TABLE
+
+> create table rc_pt1 partition of rc_pt for values in ('(1,2)')
+-- CREATE TABLE
+
+> create table rc_pt2 partition of rc_pt for values in (null)
+-- CREATE TABLE
+
+> select pg_get_partition_constraintdef('rc_pt1'::regclass), pg_get_partition_constraintdef('rc_pt2'::regclass)
+pg_get_partition_constraintdef:text | pg_get_partition_constraintdef:text
+(((rc_pt1.*)::rc_pt IS DISTINCT FROM NULL) AND ((rc_pt1.*)::rc_pt = '(1,2)'::rc_pt)) | ((rc_pt2.*)::rc_pt IS NOT DISTINCT FROM NULL)
+-- SELECT 1
+
+> insert into rc_pt values (1, 2), (null, null)
+ERROR 23514: no partition of relation "rc_pt" found for row
+DETAIL: Partition key of the failing row contains ((rc_pt.*)) = ((,)).
+OBJECTS: schema=public table=rc_pt
+
+> insert into rc_pt values (2, 2)
+ERROR 23514: no partition of relation "rc_pt" found for row
+DETAIL: Partition key of the failing row contains ((rc_pt.*)) = ((2,2)).
+OBJECTS: schema=public table=rc_pt
+
+> select tableoid::regclass, * from rc_pt order by 1, 2
+tableoid:regclass | a:int4 | b:int4
+-- SELECT 0
+
+> create table rc_pr (a int, b int) partition by list ((row(a, b)::rc_pr))
+-- CREATE TABLE
+
+> create table rc_pr1 partition of rc_pr for values in ('(1,2)'::rc_pr)
+-- CREATE TABLE
+
+> select pg_get_partition_constraintdef('rc_pr1'::regclass), pg_get_partkeydef('rc_pr'::regclass), pg_get_partkeydef('rc_pt'::regclass)
+pg_get_partition_constraintdef:text | pg_get_partkeydef:text | pg_get_partkeydef:text
+((ROW(a, b)::rc_pr IS DISTINCT FROM NULL) AND (ROW(a, b)::rc_pr = '(1,2)'::rc_pr)) | LIST ((ROW(a, b)::rc_pr)) | LIST ((rc_pt.*))
+-- SELECT 1
+
+> insert into rc_pr values (1, 2)
+-- INSERT 0 1
+
+> insert into rc_pr values (1, 3)
+ERROR 23514: no partition of relation "rc_pr" found for row
+DETAIL: Partition key of the failing row contains ((ROW(a, b)::rc_pr)) = ((1,3)).
+OBJECTS: schema=public table=rc_pr
+
+> select * from rc_pr where row(a, b)::rc_pr = '(1,2)'::rc_pr
+a:int4 | b:int4
+1 | 2
+-- SELECT 1
+
+> explain (costs off) select * from rc_pr where row(a, b)::rc_pr = '(1,2)'::rc_pr
+QUERY PLAN:text
+Seq Scan on rc_pr1 rc_pr
+  Filter: (ROW(a, b)::rc_pr = '(1,2)'::rc_pr)
+-- EXPLAIN
+
+> drop table rc_pt, rc_pr
+-- DROP TABLE
+
+> drop view rc_v1, rc_v2, rc_v3, rc_v4
+-- DROP VIEW
+
+> drop table rc_p cascade
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to function rc_f(rc_p)
+DETAIL: drop cascades to table rc_c
+DETAIL: drop cascades to table rc_d
+-- DROP TABLE
+

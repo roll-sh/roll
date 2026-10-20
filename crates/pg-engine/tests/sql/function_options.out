@@ -1,0 +1,295 @@
+> CREATE FUNCTION fo_f1(int) RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE LEAKPROOF COST 5 AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fo_f2() RETURNS SETOF int LANGUAGE sql ROWS 7 SET search_path = pg_catalog SET work_mem = '64kB' AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> SELECT proname, procost, prorows, proparallel, proleakproof, proconfig FROM pg_proc WHERE proname LIKE 'fo_f%' ORDER BY 1
+proname:name | procost:float4 | prorows:float4 | proparallel:char | proleakproof:bool | proconfig:text[]
+fo_f1 | 5 | 0 | s | t | NULL
+fo_f2 | 100 | 7 | u | f | {search_path=pg_catalog,work_mem=64kB}
+-- SELECT 2
+
+> SELECT pg_get_functiondef('fo_f2'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.fo_f2()
+ RETURNS SETOF integer
+ LANGUAGE sql
+ ROWS 7
+ SET search_path TO 'pg_catalog'
+ SET work_mem TO '64kB'
+AS $function$SELECT 1$function$
+
+-- SELECT 1
+
+> SELECT pg_get_functiondef('fo_f1'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.fo_f1(integer)
+ RETURNS integer
+ LANGUAGE sql
+ IMMUTABLE PARALLEL SAFE LEAKPROOF COST 5
+AS $function$SELECT $1$function$
+
+-- SELECT 1
+
+> ALTER FUNCTION fo_f2() SET work_mem = '1MB'
+-- ALTER FUNCTION
+
+> ALTER FUNCTION fo_f2() RESET search_path
+-- ALTER FUNCTION
+
+> ALTER FUNCTION fo_f1(int) COST 9 PARALLEL RESTRICTED NOT LEAKPROOF
+-- ALTER FUNCTION
+
+> SELECT proname, procost, prorows, proparallel, proleakproof, proconfig FROM pg_proc WHERE proname LIKE 'fo_f%' ORDER BY 1
+proname:name | procost:float4 | prorows:float4 | proparallel:char | proleakproof:bool | proconfig:text[]
+fo_f1 | 9 | 0 | r | f | NULL
+fo_f2 | 100 | 7 | u | f | {work_mem=1MB}
+-- SELECT 2
+
+> ALTER FUNCTION fo_f2() RESET ALL
+-- ALTER FUNCTION
+
+> SELECT proconfig FROM pg_proc WHERE proname = 'fo_f2'
+proconfig:text[]
+NULL
+-- SELECT 1
+
+> CREATE FUNCTION fo_f3() RETURNS text LANGUAGE sql SET work_mem = '128kB' AS $$ SELECT current_setting('work_mem') $$
+-- CREATE FUNCTION
+
+> SELECT fo_f3()
+fo_f3:text
+128kB
+-- SELECT 1
+
+> SELECT current_setting('work_mem')
+current_setting:text
+4MB
+-- SELECT 1
+
+> CREATE FUNCTION fo_f4() RETURNS text LANGUAGE plpgsql SET search_path = pg_temp AS $$ BEGIN RETURN current_setting('search_path'); END $$
+-- CREATE FUNCTION
+
+> SELECT fo_f4()
+fo_f4:text
+pg_temp
+-- SELECT 1
+
+> SELECT current_setting('search_path')
+current_setting:text
+"$user", public
+-- SELECT 1
+
+> CREATE FUNCTION fo_f5(int) RETURNS int LANGUAGE sql COST 0 AS 'SELECT 1'
+ERROR 22023: COST must be positive
+
+> CREATE FUNCTION fo_f5(int) RETURNS int LANGUAGE sql ROWS 5 AS 'SELECT 1'
+ERROR 22023: ROWS is not applicable when function does not return a set
+
+> CREATE FUNCTION fo_f5(int) RETURNS int LANGUAGE sql SET nope.x = 1 AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> SELECT proconfig FROM pg_proc WHERE proname = 'fo_f5'
+proconfig:text[]
+{nope.x=1}
+-- SELECT 1
+
+> CREATE FUNCTION fo_f6(int) RETURNS int LANGUAGE sql SET work_mem = 'abc' AS 'SELECT 1'
+ERROR 22023: invalid value for parameter "work_mem": "abc"
+
+> CREATE FUNCTION fo_f6(int) RETURNS int LANGUAGE sql SET nope = 'abc' AS 'SELECT 1'
+ERROR 42704: unrecognized configuration parameter "nope"
+
+> CREATE FUNCTION fo_f6(int) RETURNS int LANGUAGE sql PARALLEL bogus AS 'SELECT 1'
+ERROR 42601: parameter "parallel" must be SAFE, RESTRICTED, or UNSAFE
+
+> CREATE FUNCTION fo_f7(int) RETURNS SETOF int LANGUAGE sql STABLE STRICT SECURITY DEFINER LEAKPROOF PARALLEL RESTRICTED COST 3 ROWS 2 SET search_path = a, "B c" SET datestyle = 'iso, mdy' AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> SELECT pg_get_functiondef('fo_f7'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.fo_f7(integer)
+ RETURNS SETOF integer
+ LANGUAGE sql
+ STABLE PARALLEL RESTRICTED STRICT SECURITY DEFINER LEAKPROOF COST 3 ROWS 2
+ SET search_path TO 'a', 'B c'
+ SET "DateStyle" TO 'iso, mdy'
+AS $function$SELECT $1$function$
+
+-- SELECT 1
+
+> SELECT proconfig FROM pg_proc WHERE proname = 'fo_f7'
+proconfig:text[]
+{"search_path=a, \"B c\"","DateStyle=iso, mdy"}
+-- SELECT 1
+
+> CREATE PROCEDURE fo_p1(a int) LANGUAGE sql SECURITY DEFINER SET work_mem = '1MB' AS 'SELECT 1'
+-- CREATE PROCEDURE
+
+> SELECT pg_get_functiondef('fo_p1'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE PROCEDURE public.fo_p1(IN a integer)
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET work_mem TO '1MB'
+AS $procedure$SELECT 1$procedure$
+
+-- SELECT 1
+
+> CREATE PROCEDURE fo_p2() LANGUAGE sql COST 5 AS 'SELECT 1'
+ERROR 42P13: invalid attribute in procedure definition (at 39)
+
+> CREATE PROCEDURE fo_p2() LANGUAGE sql IMMUTABLE AS 'SELECT 1'
+ERROR 42P13: invalid attribute in procedure definition (at 39)
+
+> ALTER FUNCTION fo_f7(int) ROWS 0
+ERROR 22023: ROWS must be positive
+
+> ALTER FUNCTION fo_f1(int) ROWS 10
+ERROR 22023: ROWS is not applicable when function does not return a set
+
+> ALTER FUNCTION fo_f7(int) SET search_path FROM CURRENT
+-- ALTER FUNCTION
+
+> SELECT proconfig FROM pg_proc WHERE proname = 'fo_f7'
+proconfig:text[]
+{"search_path=\"$user\", public","DateStyle=iso, mdy"}
+-- SELECT 1
+
+> ALTER FUNCTION fo_f7(int) SET work_mem TO DEFAULT
+-- ALTER FUNCTION
+
+> ALTER FUNCTION fo_f7(int) SET search_path TO DEFAULT
+-- ALTER FUNCTION
+
+> SELECT proconfig FROM pg_proc WHERE proname = 'fo_f7'
+proconfig:text[]
+{"DateStyle=iso, mdy"}
+-- SELECT 1
+
+> CREATE TABLE fo_t (a int)
+-- CREATE TABLE
+
+> CREATE SCHEMA fo_s
+-- CREATE SCHEMA
+
+> CREATE TABLE fo_s.fo_t (a int)
+-- CREATE TABLE
+
+> INSERT INTO fo_s.fo_t VALUES (42)
+-- INSERT 0 1
+
+> CREATE FUNCTION fo_f8() RETURNS int LANGUAGE sql SET search_path = fo_s AS 'SELECT a FROM fo_t'
+-- CREATE FUNCTION
+
+> SELECT fo_f8()
+fo_f8:int4
+42
+-- SELECT 1
+
+> CREATE FUNCTION fo_f9() RETURNS text LANGUAGE sql SET DateStyle = 'SQL, DMY' AS $$ SELECT '2024-03-04'::date::text $$
+-- CREATE FUNCTION
+
+> SELECT fo_f9(), '2024-03-04'::date::text
+fo_f9:text | text:text
+04/03/2024 | 2024-03-04
+-- SELECT 1
+
+> CREATE FUNCTION fo_trg() RETURNS trigger LANGUAGE plpgsql SET work_mem = '77kB' AS $$ BEGIN RAISE NOTICE 'wm %', current_setting('work_mem'); RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER fo_tr BEFORE INSERT ON fo_t FOR EACH ROW EXECUTE FUNCTION fo_trg()
+-- CREATE TRIGGER
+
+> INSERT INTO fo_t VALUES (1)
+NOTICE 00000: wm 77kB
+CONTEXT: PL/pgSQL function fo_trg() line 1 at RAISE
+-- INSERT 0 1
+
+> SELECT current_setting('work_mem')
+current_setting:text
+4MB
+-- SELECT 1
+
+> CREATE PROCEDURE fo_p3() LANGUAGE plpgsql SET work_mem = '99kB' AS $$ BEGIN RAISE NOTICE 'p %', current_setting('work_mem'); END $$
+-- CREATE PROCEDURE
+
+> CALL fo_p3()
+NOTICE 00000: p 99kB
+CONTEXT: PL/pgSQL function fo_p3() line 1 at RAISE
+-- CALL
+
+> SELECT current_setting('work_mem')
+current_setting:text
+4MB
+-- SELECT 1
+
+> DROP TABLE fo_t
+-- DROP TABLE
+
+> DROP SCHEMA fo_s CASCADE
+NOTICE 00000: drop cascades to table fo_s.fo_t
+-- DROP SCHEMA
+
+> DROP FUNCTION fo_f1, fo_f2, fo_f3, fo_f4, fo_f5, fo_f7, fo_f8, fo_f9, fo_trg
+-- DROP FUNCTION
+
+> DROP PROCEDURE fo_p1, fo_p3
+-- DROP PROCEDURE
+
+> CREATE FUNCTION fo_d(int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE TABLE fo_dt (a int DEFAULT fo_d(1) CHECK (fo_d(a) > 0), b int GENERATED ALWAYS AS (fo_d(a)) STORED)
+-- CREATE TABLE
+
+> DROP FUNCTION fo_d(int)
+ERROR 2BP01: cannot drop function fo_d(integer) because other objects depend on it
+DETAIL: default value for column a of table fo_dt depends on function fo_d(integer)
+DETAIL: column b of table fo_dt depends on function fo_d(integer)
+DETAIL: constraint fo_dt_a_check on table fo_dt depends on function fo_d(integer)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP FUNCTION fo_d(int) CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to default value for column a of table fo_dt
+DETAIL: drop cascades to column b of table fo_dt
+DETAIL: drop cascades to constraint fo_dt_a_check on table fo_dt
+-- DROP FUNCTION
+
+> SELECT column_name, column_default, generation_expression FROM information_schema.columns WHERE table_name = 'fo_dt' ORDER BY 1
+column_name:name | column_default:varchar | generation_expression:varchar
+a | NULL | NULL
+-- SELECT 1
+
+> SELECT conname FROM pg_constraint WHERE conrelid = 'fo_dt'::regclass
+conname:name
+-- SELECT 0
+
+> DROP TABLE fo_dt
+-- DROP TABLE
+
+> CREATE FUNCTION fo_v(int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 1'
+-- CREATE FUNCTION
+
+> CREATE VIEW fo_vv AS SELECT fo_v(1) AS x
+-- CREATE VIEW
+
+> DROP FUNCTION fo_v(int)
+ERROR 2BP01: cannot drop function fo_v(integer) because other objects depend on it
+DETAIL: view fo_vv depends on function fo_v(integer)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> CREATE OR REPLACE FUNCTION fo_v(int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 2'
+-- CREATE FUNCTION
+
+> SELECT * FROM fo_vv
+x:int4
+3
+-- SELECT 1
+
+> DROP FUNCTION fo_v(int) CASCADE
+NOTICE 00000: drop cascades to view fo_vv
+-- DROP FUNCTION
+

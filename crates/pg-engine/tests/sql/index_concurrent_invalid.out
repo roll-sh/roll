@@ -1,0 +1,122 @@
+> CREATE TABLE cic (c1 int, c2 text)
+-- CREATE TABLE
+
+> INSERT INTO cic VALUES (1, 'a'), (1, 'b'), (2, 'c')
+-- INSERT 0 3
+
+> CREATE UNIQUE INDEX CONCURRENTLY cic_u ON cic (c1)
+ERROR 23505: could not create unique index "cic_u"
+DETAIL: Key (c1)=(1) is duplicated.
+OBJECTS: schema=public table=cic constraint=cic_u
+
+> SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'cic'::regclass ORDER BY 1
+relname:name | indisvalid:bool
+cic_u | f
+-- SELECT 1
+
+> INSERT INTO cic VALUES (2, 'd')
+-- INSERT 0 1
+
+> REINDEX INDEX CONCURRENTLY cic_u
+ERROR 23505: could not create unique index "cic_u_ccnew"
+DETAIL: Key (c1)=(1) is duplicated.
+OBJECTS: schema=public table=cic constraint=cic_u_ccnew
+
+> SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'cic'::regclass ORDER BY 1
+relname:name | indisvalid:bool
+cic_u | f
+cic_u_ccnew | f
+-- SELECT 2
+
+> DROP INDEX cic_u_ccnew
+-- DROP INDEX
+
+> REINDEX TABLE cic
+ERROR 23505: could not create unique index "cic_u"
+DETAIL: Key (c1)=(1) is duplicated.
+OBJECTS: schema=public table=cic constraint=cic_u
+
+> DELETE FROM cic WHERE c2 IN ('b', 'd')
+-- DELETE 2
+
+> REINDEX TABLE CONCURRENTLY cic
+WARNING 55000: skipping reindex of invalid index "public.cic_u"
+HINT: Use DROP INDEX or REINDEX INDEX.
+-- REINDEX
+
+> REINDEX TABLE cic
+-- REINDEX
+
+> SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'cic'::regclass ORDER BY 1
+relname:name | indisvalid:bool
+cic_u | t
+-- SELECT 1
+
+> INSERT INTO cic VALUES (1, 'x')
+ERROR 23505: duplicate key value violates unique constraint "cic_u"
+DETAIL: Key (c1)=(1) already exists.
+OBJECTS: schema=public table=cic constraint=cic_u
+
+> BEGIN
+-- BEGIN
+
+> CREATE INDEX CONCURRENTLY cic_i ON cic (c2)
+ERROR 25001: CREATE INDEX CONCURRENTLY cannot run inside a transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP INDEX CONCURRENTLY cic_u
+ERROR 25001: DROP INDEX CONCURRENTLY cannot run inside a transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> REINDEX TABLE CONCURRENTLY cic
+ERROR 25001: REINDEX CONCURRENTLY cannot run inside a transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP INDEX CONCURRENTLY cic_u, cic_x
+ERROR 0A000: DROP INDEX CONCURRENTLY does not support dropping multiple objects
+
+> DROP INDEX CONCURRENTLY cic_u
+-- DROP INDEX
+
+> SELECT count(*) FROM pg_index WHERE indrelid = 'cic'::regclass
+count:int8
+0
+-- SELECT 1
+
+> CREATE TABLE cic2 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO cic2 VALUES (1, 0)
+-- INSERT 0 1
+
+> CREATE INDEX CONCURRENTLY cic2_e ON cic2 ((a / b))
+ERROR 22012: division by zero
+
+> SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'cic2'::regclass
+relname:name | indisvalid:bool
+cic2_e | f
+-- SELECT 1
+
+> UPDATE cic2 SET b = 1
+-- UPDATE 1
+
+> REINDEX INDEX CONCURRENTLY cic2_e
+-- REINDEX
+
+> SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'cic2'::regclass
+relname:name | indisvalid:bool
+cic2_e | t
+-- SELECT 1
+

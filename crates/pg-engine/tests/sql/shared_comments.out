@@ -1,0 +1,138 @@
+> COMMENT ON DATABASE gx_nosuch IS 'x'
+WARNING 3D000: database "gx_nosuch" does not exist
+-- COMMENT
+
+> COMMENT ON TABLESPACE gx_nosuch IS 'x'
+ERROR 42704: tablespace "gx_nosuch" does not exist
+
+> COMMENT ON TABLESPACE pg_default IS 'ts note'
+-- COMMENT
+
+> CREATE ROLE gx_c
+-- CREATE ROLE
+
+> COMMENT ON ROLE gx_c IS 'role note'
+-- COMMENT
+
+> SELECT shobj_description(oid, 'pg_tablespace') FROM pg_tablespace WHERE spcname = 'pg_default'
+shobj_description:text
+ts note
+-- SELECT 1
+
+> SELECT shobj_description(oid, 'pg_tablespace'), shobj_description(oid, 'pg_authid'), shobj_description(oid, 'pg_database'), obj_description(oid, 'pg_authid'), obj_description(oid), shobj_description(oid, 'nosuch') FROM pg_authid WHERE rolname = 'gx_c'
+shobj_description:text | shobj_description:text | shobj_description:text | obj_description:text | obj_description:text | shobj_description:text
+NULL | role note | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT d.classoid::regclass, d.description FROM pg_shdescription d WHERE description IN ('ts note', 'role note') ORDER BY 2
+classoid:regclass | description:text
+pg_authid | role note
+pg_tablespace | ts note
+-- SELECT 2
+
+> SELECT count(*) FROM pg_description WHERE description IN ('ts note', 'role note')
+count:int8
+0
+-- SELECT 1
+
+> CREATE TABLE gx_ct (a int CONSTRAINT gx_ck CHECK (a > 0))
+-- CREATE TABLE
+
+> COMMENT ON TABLE gx_ct IS 't note'
+-- COMMENT
+
+> COMMENT ON CONSTRAINT gx_ck ON gx_ct IS 'c note'
+-- COMMENT
+
+> CREATE TYPE gx_cty AS (x int)
+-- CREATE TYPE
+
+> COMMENT ON TYPE gx_cty IS 'ty note'
+-- COMMENT
+
+> CREATE TYPE gx_rng AS RANGE (subtype = int4)
+-- CREATE TYPE
+
+> COMMENT ON TYPE gx_rng IS 'rng note'
+-- COMMENT
+
+> CREATE FUNCTION gx_cf() RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE TRIGGER gx_ctg BEFORE INSERT ON gx_ct FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger()
+-- CREATE TRIGGER
+
+> COMMENT ON TRIGGER gx_ctg ON gx_ct IS 'tg note'
+-- COMMENT
+
+> CREATE TEXT SEARCH CONFIGURATION gx_ccfg (COPY = simple)
+-- CREATE TEXT SEARCH CONFIGURATION
+
+> COMMENT ON TEXT SEARCH CONFIGURATION gx_ccfg IS 'cfg note'
+-- COMMENT
+
+> SELECT classoid::regclass, objsubid, description FROM pg_description WHERE description ~ 'note$' ORDER BY 3
+classoid:regclass | objsubid:int4 | description:text
+pg_constraint | 0 | c note
+pg_ts_config | 0 | cfg note
+pg_type | 0 | rng note
+pg_class | 0 | t note
+pg_trigger | 0 | tg note
+pg_type | 0 | ty note
+-- SELECT 6
+
+> SELECT obj_description('gx_ct'::regclass, 'pg_class'), obj_description('gx_ct'::regclass, 'pg_proc'), obj_description('gx_ct'::regclass), obj_description('gx_ct'::regclass, 'nosuch')
+obj_description:text | obj_description:text | obj_description:text | obj_description:text
+t note | NULL | t note | NULL
+-- SELECT 1
+
+> SELECT obj_description('gx_cty'::regtype, 'pg_type'), obj_description('gx_ccfg'::regconfig, 'pg_ts_config'), obj_description('gx_ccfg'::regconfig, 'pg_class')
+obj_description:text | obj_description:text | obj_description:text
+ty note | cfg note | NULL
+-- SELECT 1
+
+> SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'gx_ck'
+obj_description:text
+c note
+-- SELECT 1
+
+> SET ROLE gx_c
+-- SET
+
+> COMMENT ON TABLESPACE pg_default IS 'y'
+ERROR 42501: must be owner of tablespace pg_default
+
+> RESET ROLE
+-- RESET
+
+> COMMENT ON TABLESPACE pg_default IS NULL
+-- COMMENT
+
+> SELECT count(*) FROM pg_shdescription WHERE description = 'ts note'
+count:int8
+0
+-- SELECT 1
+
+> DROP TEXT SEARCH CONFIGURATION gx_ccfg
+-- DROP TEXT SEARCH CONFIGURATION
+
+> DROP FUNCTION gx_cf()
+-- DROP FUNCTION
+
+> DROP TABLE gx_ct
+-- DROP TABLE
+
+> DROP TYPE gx_cty
+-- DROP TYPE
+
+> DROP TYPE gx_rng
+-- DROP TYPE
+
+> DROP ROLE gx_c
+-- DROP ROLE
+
+> SELECT count(*) FROM pg_shdescription WHERE description = 'role note'
+count:int8
+0
+-- SELECT 1
+

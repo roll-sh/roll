@@ -1,0 +1,90 @@
+> create table a (a int primary key deferrable, b int unique deferrable initially deferred, c int, d int)
+-- CREATE TABLE
+
+> create unique index a_c on a (c)
+-- CREATE INDEX
+
+> alter table a add constraint a_d unique (d) deferrable
+-- ALTER TABLE
+
+> alter table a add constraint a_cd unique (c, d)
+-- ALTER TABLE
+
+> create table r1 (x int references a)
+ERROR 55000: cannot use a deferrable primary key for referenced table "a"
+
+> create table r2 (x int references a (b))
+ERROR 55000: cannot use a deferrable unique constraint for referenced table "a"
+
+> create table r3 (x int references a (c))
+-- CREATE TABLE
+
+> create table r4 (x int references a (d))
+ERROR 55000: cannot use a deferrable unique constraint for referenced table "a"
+
+> create table r5 (x int, y int, foreign key (x, y) references a (d, c))
+-- CREATE TABLE
+
+> create table r6 (x int)
+-- CREATE TABLE
+
+> alter table r6 add foreign key (x) references a
+ERROR 55000: cannot use a deferrable primary key for referenced table "a"
+
+> alter table r6 add foreign key (x) references a (b)
+ERROR 55000: cannot use a deferrable unique constraint for referenced table "a"
+
+> create table s (a int primary key deferrable, foreign key (a) references s)
+ERROR 55000: cannot use a deferrable primary key for referenced table "s"
+
+> create table s2 (a int unique deferrable, b int references s2 (a))
+ERROR 55000: cannot use a deferrable unique constraint for referenced table "s2"
+
+> create table p (a int primary key deferrable) partition by range (a)
+-- CREATE TABLE
+
+> create table r7 (x int references p)
+ERROR 55000: cannot use a deferrable primary key for referenced table "p"
+
+> create table q (a int, b int, unique (a) deferrable, unique (a))
+-- CREATE TABLE
+
+> create table r8 (x int references q (a))
+-- CREATE TABLE
+
+> select conname, confrelid::regclass, conindid::regclass from pg_constraint where conrelid = 'r8'::regclass
+conname:name | confrelid:regclass | conindid:regclass
+r8_x_fkey | q | q_a_key1
+-- SELECT 1
+
+> drop table r3, r5, r8, q, a, r6, p cascade
+-- DROP TABLE
+
+> create table u (c int, d int, unique (c, d))
+-- CREATE TABLE
+
+> create table ur (x int, y int, foreign key (x, y) references u (d, c))
+-- CREATE TABLE
+
+> select conname, conindid::regclass from pg_constraint where conrelid = 'ur'::regclass
+conname:name | conindid:regclass
+ur_x_y_fkey | u_c_d_key
+-- SELECT 1
+
+> insert into u values (1, 2)
+-- INSERT 0 1
+
+> insert into ur values (2, 1)
+-- INSERT 0 1
+
+> insert into ur values (1, 2)
+ERROR 23503: insert or update on table "ur" violates foreign key constraint "ur_x_y_fkey"
+DETAIL: Key (x, y)=(1, 2) is not present in table "u".
+OBJECTS: schema=public table=ur constraint=ur_x_y_fkey
+
+> alter table u alter constraint u_c_d_key deferrable
+ERROR 42809: constraint "u_c_d_key" of relation "u" is not a foreign key constraint
+
+> drop table ur, u
+-- DROP TABLE
+

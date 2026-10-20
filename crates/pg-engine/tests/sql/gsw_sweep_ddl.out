@@ -1,0 +1,278 @@
+> DROP OWNED BY gsw_r1 CASCADE
+ERROR 42704: role "gsw_r1" does not exist
+
+> DROP OWNED BY gsw_r2 CASCADE
+ERROR 42704: role "gsw_r2" does not exist
+
+> DROP ROLE IF EXISTS gsw_r1
+NOTICE 00000: role "gsw_r1" does not exist, skipping
+-- DROP ROLE
+
+> DROP ROLE IF EXISTS gsw_r2
+NOTICE 00000: role "gsw_r2" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ACCESS METHOD gsw_gist2 TYPE INDEX HANDLER gisthandler
+-- CREATE ACCESS METHOD
+
+> CREATE TABLE gsw_fe (home_base box)
+-- CREATE TABLE
+
+> CREATE OPERATOR CLASS gsw_box_ops DEFAULT FOR TYPE box USING gsw_gist2 AS
+>   OPERATOR 1 <<, OPERATOR 2 &<, OPERATOR 3 &&, OPERATOR 4 &>, OPERATOR 5 >>, OPERATOR 6 ~=,
+>   OPERATOR 7 @>, OPERATOR 8 <@, OPERATOR 9 &<|, OPERATOR 10 <<|, OPERATOR 11 |>>, OPERATOR 12 |&>,
+>   FUNCTION 1 gist_box_consistent(internal, box, smallint, oid, internal),
+>   FUNCTION 2 gist_box_union(internal, internal),
+>   FUNCTION 5 gist_box_penalty(internal, internal, internal),
+>   FUNCTION 6 gist_box_picksplit(internal, internal),
+>   FUNCTION 7 gist_box_same(box, box, internal)
+-- CREATE OPERATOR CLASS
+
+> CREATE INDEX gsw_fe_g2 ON gsw_fe USING gsw_gist2 (home_base)
+-- CREATE INDEX
+
+> DROP ACCESS METHOD gsw_gist2
+ERROR 2BP01: cannot drop access method gsw_gist2 because other objects depend on it
+DETAIL: index gsw_fe_g2 depends on operator class gsw_box_ops for access method gsw_gist2
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP ACCESS METHOD gsw_gist2 CASCADE
+NOTICE 00000: drop cascades to index gsw_fe_g2
+-- DROP ACCESS METHOD
+
+> SELECT count(*) FROM pg_opclass WHERE opcname = 'gsw_box_ops'
+count:int8
+0
+-- SELECT 1
+
+> CREATE TABLE gsw_bb (f1 text COLLATE "C")
+-- CREATE TABLE
+
+> CREATE INDEX ON gsw_bb (f1 bpchar_ops)
+-- CREATE INDEX
+
+> INSERT INTO gsw_bb VALUES ('foo'), ('fool'), ('bar'), ('quux')
+-- INSERT 0 4
+
+> SELECT * FROM gsw_bb WHERE f1 LIKE 'foo%' ORDER BY 1
+f1:text
+foo
+fool
+-- SELECT 2
+
+> CREATE SEQUENCE gsw_ta_id1 START WITH 33
+-- CREATE SEQUENCE
+
+> CREATE TABLE gsw_ta (id serial, id1 integer DEFAULT nextval('gsw_ta_id1'))
+-- CREATE TABLE
+
+> ALTER SEQUENCE gsw_ta_id1 OWNED BY gsw_ta.id1
+-- ALTER SEQUENCE
+
+> INSERT INTO gsw_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> INSERT INTO gsw_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> TRUNCATE gsw_ta
+-- TRUNCATE TABLE
+
+> INSERT INTO gsw_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> SELECT * FROM gsw_ta
+id:int4 | id1:int4
+3 | 35
+-- SELECT 1
+
+> TRUNCATE gsw_ta RESTART IDENTITY
+-- TRUNCATE TABLE
+
+> INSERT INTO gsw_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> INSERT INTO gsw_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> SELECT * FROM gsw_ta
+id:int4 | id1:int4
+1 | 33
+2 | 34
+-- SELECT 2
+
+> CREATE TABLE gsw_tp (a int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_tpart (a int REFERENCES gsw_tp) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_tpart_1 PARTITION OF gsw_tpart FOR VALUES FROM (0) TO (100)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_tpart_2 PARTITION OF gsw_tpart FOR VALUES FROM (100) TO (200) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_tpart_2_1 PARTITION OF gsw_tpart_2 FOR VALUES FROM (100) TO (150)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_tpart_2_d PARTITION OF gsw_tpart_2 DEFAULT
+-- CREATE TABLE
+
+> TRUNCATE TABLE gsw_tp
+ERROR 0A000: cannot truncate a table referenced in a foreign key constraint
+DETAIL: Table "gsw_tpart" references "gsw_tp".
+HINT: Truncate table "gsw_tpart" at the same time, or use TRUNCATE ... CASCADE.
+
+> TRUNCATE TABLE gsw_tp CASCADE
+NOTICE 00000: truncate cascades to table "gsw_tpart"
+NOTICE 00000: truncate cascades to table "gsw_tpart_1"
+NOTICE 00000: truncate cascades to table "gsw_tpart_2"
+NOTICE 00000: truncate cascades to table "gsw_tpart_2_1"
+NOTICE 00000: truncate cascades to table "gsw_tpart_2_d"
+-- TRUNCATE TABLE
+
+> CREATE ROLE gsw_r1
+-- CREATE ROLE
+
+> CREATE ROLE gsw_r2
+-- CREATE ROLE
+
+> CREATE FOREIGN DATA WRAPPER gsw_fdw
+-- CREATE FOREIGN DATA WRAPPER
+
+> CREATE SERVER gsw_s5 FOREIGN DATA WRAPPER gsw_fdw
+-- CREATE SERVER
+
+> ALTER SERVER gsw_s5 OWNER TO gsw_r1
+-- ALTER SERVER
+
+> CREATE USER MAPPING FOR gsw_r1 SERVER gsw_s5
+-- CREATE USER MAPPING
+
+> REASSIGN OWNED BY gsw_r1 TO gsw_r2
+-- REASSIGN OWNED
+
+> DROP OWNED BY gsw_r2
+ERROR 2BP01: cannot drop server gsw_s5 because other objects depend on it
+DETAIL: user mapping for gsw_r1 on server gsw_s5 depends on server gsw_s5
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP OWNED BY gsw_r2 CASCADE
+NOTICE 00000: drop cascades to user mapping for gsw_r1 on server gsw_s5
+-- DROP OWNED
+
+> SELECT count(*) FROM pg_foreign_server WHERE srvname = 'gsw_s5'
+count:int8
+0
+-- SELECT 1
+
+> DROP FOREIGN DATA WRAPPER gsw_fdw
+-- DROP FOREIGN DATA WRAPPER
+
+> DROP ROLE gsw_r1
+-- DROP ROLE
+
+> DROP ROLE gsw_r2
+-- DROP ROLE
+
+> CREATE TABLE gsw_jc (js text, i int,
+>   CONSTRAINT gsw_jc1 CHECK (js IS JSON),
+>   CONSTRAINT gsw_jc2 CHECK (i > 0 AND i < 100),
+>   CONSTRAINT gsw_jc3 CHECK (JSON_VALUE(js::jsonb, '$.a' RETURNING int DEFAULT '12' ON EMPTY ERROR ON ERROR) > i),
+>   CONSTRAINT gsw_jc4 CHECK (js > 'a' COLLATE "C"))
+-- CREATE TABLE
+
+> SELECT constraint_name, check_clause FROM information_schema.check_constraints
+>   WHERE constraint_name LIKE 'gsw_jc%' ORDER BY 1
+constraint_name:name | check_clause:varchar
+gsw_jc1 | (js IS JSON)
+gsw_jc2 | ((i > 0) AND (i < 100))
+gsw_jc3 | (JSON_VALUE((js)::jsonb, '$."a"' RETURNING integer DEFAULT 12 ON EMPTY ERROR ON ERROR) > i)
+gsw_jc4 | (js > ('a'::text COLLATE "C"))
+-- SELECT 4
+
+> SELECT conname, pg_get_constraintdef(oid, true) FROM pg_constraint WHERE conname LIKE 'gsw_jc%' ORDER BY 1
+conname:name | pg_get_constraintdef:text
+gsw_jc1 | CHECK (js IS JSON)
+gsw_jc2 | CHECK (i > 0 AND i < 100)
+gsw_jc3 | CHECK (JSON_VALUE(js::jsonb, '$."a"' RETURNING integer DEFAULT 12 ON EMPTY ERROR ON ERROR) > i)
+gsw_jc4 | CHECK (js > ('a'::text COLLATE "C"))
+-- SELECT 4
+
+> CREATE VIEW gsw_cvv AS SELECT * FROM gsw_jc WHERE js < ('x' COLLATE "C") AND (js COLLATE "C") > 'b'
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('gsw_cvv', true)
+pg_get_viewdef:text
+ SELECT js,
+    i
+   FROM gsw_jc
+  WHERE js < ('x'::text COLLATE "C") AND (js COLLATE "C") > 'b'::text;
+-- SELECT 1
+
+> SELECT pg_get_viewdef('gsw_cvv', false)
+pg_get_viewdef:text
+ SELECT js,
+    i
+   FROM gsw_jc
+  WHERE ((js < ('x'::text COLLATE "C")) AND ((js COLLATE "C") > 'b'::text));
+-- SELECT 1
+
+> CREATE FUNCTION gsw_c7() RETURNS void AS $$
+> DECLARE
+>   c1 CURSOR (p1 int, p2 int) FOR SELECT * FROM pg_class WHERE oid = p1 AND relpages = p2;
+> BEGIN
+>   OPEN c1 (p2 := 77, p1 := 42/0);
+> END $$ LANGUAGE plpgsql
+-- CREATE FUNCTION
+
+> SELECT gsw_c7()
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL expression "42/0 AS p1, 77 AS p2"
+CONTEXT: PL/pgSQL function gsw_c7() line 5 at OPEN
+
+> CREATE TABLE gsw_rt (f1 int, f4 int)
+-- CREATE TABLE
+
+> CREATE FUNCTION gsw_rtf() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE x int;
+> BEGIN
+>   UPDATE gsw_rt SET f1 = 1
+>     RETURNING nosuch INTO x;  -- trailing
+>   RETURN x;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT gsw_rtf()
+ERROR 42703: column "nosuch" does not exist
+QUERY: UPDATE gsw_rt SET f1 = 1
+    RETURNING nosuch (at 40)
+CONTEXT: PL/pgSQL function gsw_rtf() line 4 at SQL statement
+
+> CREATE ACCESS METHOD gsw_heap2 TYPE TABLE HANDLER heap_tableam_handler
+-- CREATE ACCESS METHOD
+
+> CREATE FUNCTION gsw_rw() RETURNS event_trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE 'rewriting % (reason = %)', pg_event_trigger_table_rewrite_oid()::regclass, pg_event_trigger_table_rewrite_reason();
+> END $$
+-- CREATE FUNCTION
+
+> CREATE EVENT TRIGGER gsw_rw ON table_rewrite EXECUTE FUNCTION gsw_rw()
+-- CREATE EVENT TRIGGER
+
+> CREATE MATERIALIZED VIEW gsw_mv USING heap AS SELECT 1 AS a
+-- SELECT 1
+
+> ALTER MATERIALIZED VIEW gsw_mv SET ACCESS METHOD gsw_heap2
+NOTICE 00000: rewriting gsw_mv (reason = 8)
+CONTEXT: PL/pgSQL function gsw_rw() line 3 at RAISE
+-- ALTER MATERIALIZED VIEW
+
+> ALTER MATERIALIZED VIEW gsw_mv SET ACCESS METHOD gsw_heap2
+-- ALTER MATERIALIZED VIEW
+
+> DROP EVENT TRIGGER gsw_rw
+-- DROP EVENT TRIGGER
+

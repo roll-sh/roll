@@ -1,0 +1,477 @@
+> SELECT JSON_OBJECT('a' : 1, 'b' VALUE 'x', 'c' : NULL)
+json_object:json
+{"a" : 1, "b" : "x", "c" : null}
+-- SELECT 1
+
+> SELECT JSON_OBJECT('a' : 1, 'c' : NULL ABSENT ON NULL)
+json_object:json
+{"a" : 1}
+-- SELECT 1
+
+> SELECT JSON_OBJECT('a' : 1, 'b' : 2 RETURNING jsonb)
+json_object:jsonb
+{"a": 1, "b": 2}
+-- SELECT 1
+
+> SELECT JSON_OBJECT('a' : 1, 'b' : 2 RETURNING text)
+json_object:text
+{"a" : 1, "b" : 2}
+-- SELECT 1
+
+> SELECT JSON_OBJECT()
+json_object:json
+{}
+-- SELECT 1
+
+> SELECT JSON_OBJECT(RETURNING jsonb)
+json_object:jsonb
+{}
+-- SELECT 1
+
+> SELECT JSON_OBJECT('a' : 1, 'a' : 2)
+json_object:json
+{"a" : 1, "a" : 2}
+-- SELECT 1
+
+> SELECT JSON_OBJECT('a' : 1, 'a' : 2 WITH UNIQUE KEYS)
+ERROR 22030: duplicate JSON object key value: "a"
+
+> SELECT JSON_OBJECT('a' : 1, 'a' : 2 RETURNING jsonb)
+json_object:jsonb
+{"a": 2}
+-- SELECT 1
+
+> SELECT JSON_OBJECT('a' : 1, 'a' : 2 WITH UNIQUE KEYS RETURNING jsonb)
+ERROR 22030: duplicate JSON object key value
+
+> SELECT JSON_OBJECT(NULL : 1)
+ERROR 22004: null value not allowed for object key
+
+> SELECT JSON_OBJECT('a' : '{"x":1}'::json, 'b' : '[1]' FORMAT JSON, 'c' : ARRAY[1,2], 'd' : true)
+json_object:json
+{"a" : {"x":1}, "b" : [1], "c" : [1,2], "d" : true}
+-- SELECT 1
+
+> SELECT JSON_OBJECT(1 : 2, 2.5 : 'x')
+json_object:json
+{"1" : 2, "2.5" : "x"}
+-- SELECT 1
+
+> SELECT JSON_ARRAY(1, 'a', NULL, true)
+json_array:json
+[1, "a", true]
+-- SELECT 1
+
+> SELECT JSON_ARRAY(1, NULL NULL ON NULL)
+json_array:json
+[1, null]
+-- SELECT 1
+
+> SELECT JSON_ARRAY(1, '{"a":1}' FORMAT JSON, '{"a":1}')
+json_array:json
+[1, {"a":1}, "{\"a\":1}"]
+-- SELECT 1
+
+> SELECT JSON_ARRAY(1, 2 RETURNING jsonb)
+json_array:jsonb
+[1, 2]
+-- SELECT 1
+
+> SELECT JSON_ARRAY()
+json_array:json
+[]
+-- SELECT 1
+
+> SELECT JSON_ARRAY(RETURNING jsonb)
+json_array:jsonb
+[]
+-- SELECT 1
+
+> SELECT JSON_ARRAY(SELECT x FROM generate_series(1, 3) x)
+json_array:json
+[1, 2, 3]
+-- SELECT 1
+
+> SELECT JSON_ARRAY(SELECT x FROM (VALUES (3), (NULL), (1)) v(x) ORDER BY x)
+json_array:json
+[1, 3]
+-- SELECT 1
+
+> SELECT JSON_ARRAY(SELECT x FROM generate_series(1, 3) x RETURNING jsonb)
+json_array:jsonb
+[1, 2, 3]
+-- SELECT 1
+
+> SELECT JSON_ARRAY(SELECT 1, 2)
+ERROR 42601: subquery must return only one column (at 8)
+
+> SELECT JSON_ARRAYAGG(x) FROM (VALUES (1), (NULL), (3)) v(x)
+json_arrayagg:json
+[1, 3]
+-- SELECT 1
+
+> SELECT JSON_ARRAYAGG(x NULL ON NULL) FROM (VALUES (1), (NULL), (3)) v(x)
+json_arrayagg:json
+[1, null, 3]
+-- SELECT 1
+
+> SELECT JSON_ARRAYAGG(x ORDER BY x DESC RETURNING jsonb) FROM (VALUES (1), (NULL), (3)) v(x)
+json_arrayagg:jsonb
+[3, 1]
+-- SELECT 1
+
+> SELECT JSON_ARRAYAGG(x) FROM (VALUES (1)) v(x) WHERE false
+json_arrayagg:json
+NULL
+-- SELECT 1
+
+> SELECT JSON_OBJECTAGG(k : v) FROM (VALUES ('a', 1), ('b', NULL)) t(k, v)
+json_objectagg:json
+{ "a" : 1, "b" : null }
+-- SELECT 1
+
+> SELECT JSON_OBJECTAGG(k VALUE v ABSENT ON NULL) FROM (VALUES ('a', 1), ('b', NULL)) t(k, v)
+json_objectagg:json
+{ "a" : 1 }
+-- SELECT 1
+
+> SELECT JSON_OBJECTAGG(k : v RETURNING jsonb) FROM (VALUES ('a', 1), ('b', NULL)) t(k, v)
+json_objectagg:jsonb
+{"a": 1, "b": null}
+-- SELECT 1
+
+> SELECT JSON_OBJECTAGG(k : v WITH UNIQUE KEYS) FROM (VALUES ('a', 1), ('a', 2)) t(k, v)
+ERROR 22030: duplicate JSON object key value: "a"
+
+> SELECT JSON_OBJECTAGG(k : v) FROM (VALUES ('a', 1), ('a', 2)) t(k, v)
+json_objectagg:json
+{ "a" : 1, "a" : 2 }
+-- SELECT 1
+
+> SELECT JSON_ARRAYAGG(x) FILTER (WHERE x > 1) FROM (VALUES (1), (2), (3)) v(x)
+json_arrayagg:json
+[2, 3]
+-- SELECT 1
+
+> SELECT k, JSON_ARRAYAGG(v) OVER (PARTITION BY k) FROM (VALUES ('a', 1), ('a', 2), ('b', 3)) t(k, v) ORDER BY k
+k:text | json_arrayagg:json
+a | [1, 2]
+a | [1, 2]
+b | [3]
+-- SELECT 3
+
+> SELECT JSON('{"a": 1, "b": [1, 2]}')
+json:json
+{"a": 1, "b": [1, 2]}
+-- SELECT 1
+
+> SELECT JSON('{"a": 1, "a": 2}')
+json:json
+{"a": 1, "a": 2}
+-- SELECT 1
+
+> SELECT JSON('{"a": 1, "a": 2}' WITH UNIQUE KEYS)
+ERROR 22030: duplicate JSON object key value
+
+> SELECT JSON('[1,')
+ERROR 22P02: invalid input syntax for type json
+DETAIL: The input string ended unexpectedly.
+CONTEXT: JSON data, line 1: [1,
+
+> SELECT JSON(NULL)
+json:json
+NULL
+-- SELECT 1
+
+> SELECT JSON('123'::bytea)
+json:json
+123
+-- SELECT 1
+
+> SELECT JSON(123)
+ERROR 42846: cannot cast type integer to json (at 13)
+
+> SELECT JSON_SCALAR(1), JSON_SCALAR(1.5), JSON_SCALAR('abc'), JSON_SCALAR(true), JSON_SCALAR(NULL), JSON_SCALAR('2024-01-02'::date)
+json_scalar:json | json_scalar:json | json_scalar:json | json_scalar:json | json_scalar:json | json_scalar:json
+1 | 1.5 | "abc" | true | NULL | "2024-01-02"
+-- SELECT 1
+
+> SELECT JSON_SCALAR('{"a":1}'::json)
+json_scalar:json
+{"a":1}
+-- SELECT 1
+
+> SELECT JSON_SERIALIZE('{"a": 1}'), JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING text)
+json_serialize:text | json_serialize:text
+{"a": 1} | 
+-- SELECT 1
+
+> SELECT JSON_SERIALIZE('{"a": 1}' RETURNING bytea)
+json_serialize:bytea
+\x7b2261223a20317d
+-- SELECT 1
+
+> SELECT '{"a":1}' IS JSON, '[1' IS JSON, '1' IS JSON SCALAR, '[1]' IS JSON ARRAY, '{}' IS JSON OBJECT, '{}' IS JSON VALUE, '[]' IS NOT JSON OBJECT
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t | t | t
+-- SELECT 1
+
+> SELECT '{"a":1,"a":2}' IS JSON WITH UNIQUE KEYS, '{"a":1,"a":2}' IS JSON WITHOUT UNIQUE KEYS, NULL IS JSON
+?column?:bool | ?column?:bool | ?column?:bool
+f | t | NULL
+-- SELECT 1
+
+> SELECT '{"a":1}'::jsonb IS JSON OBJECT, '1'::json IS JSON SCALAR
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> SELECT 1 IS JSON
+ERROR 42804: cannot use type integer in IS JSON predicate
+
+> SELECT JSON_EXISTS('{"a": [1, 2]}', '$.a[1]'), JSON_EXISTS('{"a": 1}', '$.b'), JSON_EXISTS('{"a": 1}', 'strict $.b')
+json_exists:bool | json_exists:bool | json_exists:bool
+t | f | f
+-- SELECT 1
+
+> SELECT JSON_EXISTS('{"a": 1}', 'strict $.b' ERROR ON ERROR)
+ERROR 2203A: JSON object does not contain key "b"
+
+> SELECT JSON_EXISTS('{"a": 1}', 'strict $.b' TRUE ON ERROR), JSON_EXISTS('{"a": 1}', 'strict $.b' UNKNOWN ON ERROR)
+json_exists:bool | json_exists:bool
+t | NULL
+-- SELECT 1
+
+> SELECT JSON_EXISTS('{"a": [1, 5]}', '$.a[*] ? (@ > $x)' PASSING 3 AS x)
+json_exists:bool
+t
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a": "x"}', '$.a'), JSON_VALUE('{"a": 1}', '$.a' RETURNING int), JSON_VALUE('{"a": [1]}', '$.a')
+json_value:text | json_value:int4 | json_value:text
+x | 1 | NULL
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a": [1]}', '$.a' ERROR ON ERROR)
+ERROR 2203F: JSON path expression in JSON_VALUE must return single scalar item
+
+> SELECT JSON_VALUE('{"a": 1}', '$.b' DEFAULT 'none' ON EMPTY)
+json_value:text
+none
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a": 1}', 'strict $.b' DEFAULT 'err' ON ERROR)
+json_value:text
+err
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a": 1}', '$.b' ERROR ON EMPTY)
+ERROR 22035: no SQL/JSON item found for specified path
+
+> SELECT JSON_VALUE('{"a": "abc"}', '$.a' RETURNING int)
+json_value:int4
+NULL
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a": "abc"}', '$.a' RETURNING int ERROR ON ERROR)
+ERROR 22P02: invalid input syntax for type integer: "abc"
+
+> SELECT JSON_VALUE('{"a": "2024-01-02"}', '$.a' RETURNING date)
+json_value:date
+2024-01-02
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a": null}', '$.a') IS NULL
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT JSON_VALUE(jsonb '{"a": 1}', '$.a' RETURNING numeric)
+json_value:numeric
+1
+-- SELECT 1
+
+> SELECT JSON_QUERY('{"a": {"b": 1}}', '$.a'), JSON_QUERY('{"a": [1, 2]}', '$.a[*]'), JSON_QUERY('{"a": [1, 2]}', '$.a[*]' WITH WRAPPER)
+json_query:jsonb | json_query:jsonb | json_query:jsonb
+{"b": 1} | NULL | [1, 2]
+-- SELECT 1
+
+> SELECT JSON_QUERY('{"a": [1, 2]}', '$.a[0]' WITH CONDITIONAL WRAPPER), JSON_QUERY('{"a": [1, 2]}', '$.a' WITH CONDITIONAL WRAPPER), JSON_QUERY('{"a": [1, 2]}', '$.a[0]' WITH UNCONDITIONAL WRAPPER)
+json_query:jsonb | json_query:jsonb | json_query:jsonb
+1 | [1, 2] | [1]
+-- SELECT 1
+
+> SELECT JSON_QUERY('{"a": "x"}', '$.a'), JSON_QUERY('{"a": "x"}', '$.a' OMIT QUOTES), JSON_QUERY('{"a": "x"}', '$.a' KEEP QUOTES)
+json_query:jsonb | json_query:jsonb | json_query:jsonb
+"x" | NULL | "x"
+-- SELECT 1
+
+> SELECT JSON_QUERY('{"a": [1, 2]}', '$.a[*]' ERROR ON ERROR)
+ERROR 22034: JSON path expression in JSON_QUERY must return single item when no wrapper is requested
+HINT: Use the WITH WRAPPER clause to wrap SQL/JSON items into an array.
+
+> SELECT JSON_QUERY('{"a": 1}', '$.b' EMPTY ARRAY ON EMPTY), JSON_QUERY('{"a": 1}', '$.b' EMPTY OBJECT ON EMPTY)
+json_query:jsonb | json_query:jsonb
+[] | {}
+-- SELECT 1
+
+> SELECT JSON_QUERY('{"a": {"b": 1}}', '$.a' RETURNING text), JSON_QUERY('{"a": {"b": 1}}', '$.a' RETURNING json)
+json_query:text | json_query:json
+{"b": 1} | {"b": 1}
+-- SELECT 1
+
+> SELECT JSON_QUERY('{"a": "x"}', '$.a' WITH WRAPPER OMIT QUOTES)
+ERROR 42601: SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used (at 8)
+
+> SELECT JSON_QUERY(jsonb '[1, 2, 3]', '$[$i]' PASSING 1 AS i)
+json_query:jsonb
+2
+-- SELECT 1
+
+> CREATE TABLE jt (id int, doc jsonb)
+-- CREATE TABLE
+
+> INSERT INTO jt VALUES (1, '{"name": "a", "tags": ["x", "y"]}'), (2, '{"name": "b", "tags": []}')
+-- INSERT 0 2
+
+> SELECT id, JSON_VALUE(doc, '$.name'), JSON_QUERY(doc, '$.tags'), JSON_EXISTS(doc, '$.tags[0]') FROM jt ORDER BY id
+id:int4 | json_value:text | json_query:jsonb | json_exists:bool
+1 | a | ["x", "y"] | t
+2 | b | [] | f
+-- SELECT 2
+
+> CREATE VIEW jv AS SELECT JSON_OBJECT('id' : id, 'n' : JSON_VALUE(doc, '$.name')) AS o, JSON_ARRAY(id, 2) AS a, doc IS JSON OBJECT AS isj FROM jt
+-- CREATE VIEW
+
+> SELECT * FROM jv ORDER BY a::text
+o:json | a:json | isj:bool
+{"id" : 1, "n" : "a"} | [1, 2] | t
+{"id" : 2, "n" : "b"} | [2, 2] | t
+-- SELECT 2
+
+> SELECT pg_get_viewdef('jv')
+pg_get_viewdef:text
+ SELECT JSON_OBJECT('id' : id, 'n' : JSON_VALUE(doc, '$."name"' RETURNING text) RETURNING json) AS o,
+    JSON_ARRAY(id, 2 RETURNING json) AS a,
+    (doc IS JSON OBJECT) AS isj
+   FROM jt;
+-- SELECT 1
+
+> DROP VIEW jv
+-- DROP VIEW
+
+> DROP TABLE jt
+-- DROP TABLE
+
+> CREATE VIEW zv AS SELECT JSON_OBJECT('a' : 'x', 'b' : '[1]' FORMAT JSON, 'c': 1 ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb) o, JSON_ARRAY('x', 1 NULL ON NULL RETURNING text) a, JSON('{}' WITH UNIQUE KEYS) j, JSON_SCALAR(1) s, JSON_SERIALIZE('{}' RETURNING bytea) z, '1' IS NOT JSON ARRAY WITH UNIQUE KEYS i, JSON_EXISTS('{}', '$.a' PASSING 1 AS x TRUE ON ERROR) e, JSON_QUERY('{}', '$.a' WITH CONDITIONAL WRAPPER EMPTY ARRAY ON EMPTY DEFAULT '[1]' ON ERROR) q, JSON_QUERY('{}', '$.a' OMIT QUOTES) q2, JSON_VALUE('{}', '$.a' RETURNING int DEFAULT 1 ON EMPTY ERROR ON ERROR) v
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('zv')
+pg_get_viewdef:text
+ SELECT JSON_OBJECT('a' : 'x'::text, 'b' : '[1]'::text FORMAT JSON, 'c' : 1 ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb) AS o,
+    JSON_ARRAY('x'::text, 1 NULL ON NULL RETURNING text) AS a,
+    JSON('{}'::text WITH UNIQUE KEYS) AS j,
+    JSON_SCALAR(1) AS s,
+    JSON_SERIALIZE('{}'::text RETURNING bytea) AS z,
+    (NOT ('1'::text IS JSON ARRAY WITH UNIQUE KEYS)) AS i,
+    JSON_EXISTS('{}'::text, '$."a"' PASSING 1 AS x TRUE ON ERROR) AS e,
+    JSON_QUERY('{}'::text, '$."a"' RETURNING jsonb WITH CONDITIONAL WRAPPER KEEP QUOTES EMPTY ARRAY ON EMPTY DEFAULT '[1]'::jsonb ON ERROR) AS q,
+    JSON_QUERY('{}'::text, '$."a"' RETURNING jsonb WITHOUT WRAPPER OMIT QUOTES) AS q2,
+    JSON_VALUE('{}'::text, '$."a"' RETURNING integer DEFAULT 1 ON EMPTY ERROR ON ERROR) AS v;
+-- SELECT 1
+
+> SELECT * FROM zv
+o:jsonb | a:text | j:json | s:json | z:bytea | i:bool | e:bool | q:jsonb | q2:jsonb | v:int4
+{"a": "x", "b": [1], "c": 1} | ["x", 1] | {} | 1 | \x7b7d | t | f | [] | NULL | 1
+-- SELECT 1
+
+> CREATE VIEW zv2 AS SELECT JSON_ARRAYAGG(x ORDER BY x) a, JSON_OBJECTAGG(x : x RETURNING jsonb) b FROM generate_series(1, 2) x
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('zv2')
+pg_get_viewdef:text
+ SELECT JSON_ARRAYAGG(x ORDER BY x RETURNING json) AS a,
+    JSON_OBJECTAGG(x : x RETURNING jsonb) AS b
+   FROM generate_series(1, 2) x(x);
+-- SELECT 1
+
+> SELECT * FROM zv2
+a:json | b:jsonb
+[1, 2] | {"1": 1, "2": 2}
+-- SELECT 1
+
+> DROP VIEW zv, zv2
+-- DROP VIEW
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_OBJECT('a': 1), JSON_VALUE('{}', '$.a'), '1' IS JSON
+QUERY PLAN:text
+Result
+  Output: JSON_OBJECT('a' : 1 RETURNING json), JSON_VALUE('{}'::jsonb, '$."a"' RETURNING text), ('1'::text IS JSON)
+-- EXPLAIN
+
+> SELECT JSON_OBJECT('a': 1 RETURNING int)
+ERROR 42846: cannot cast type json to integer
+
+> SELECT JSON_ARRAY(1 RETURNING bytea)
+json_array:bytea
+\x5b315d
+-- SELECT 1
+
+> SELECT JSON_OBJECT('a': '[1]' FORMAT JSON RETURNING jsonb)
+json_object:jsonb
+{"a": [1]}
+-- SELECT 1
+
+> SELECT JSON_OBJECT(ARRAY[1] : 1)
+ERROR 22023: key value must be scalar, not array, composite, or json
+
+> SELECT JSON_VALUE('{"a":1}', '$.a' RETURNING int[])
+json_value:int4[]
+NULL
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a":[1]}', '$.a' RETURNING jsonb)
+json_value:jsonb
+NULL
+-- SELECT 1
+
+> SELECT JSON_EXISTS(NULL::jsonb, '$'), JSON_VALUE(NULL::jsonb, '$') IS NULL
+json_exists:bool | ?column?:bool
+NULL | t
+-- SELECT 1
+
+> SELECT JSON_QUERY('{"a": "x"}', '$.a' RETURNING text OMIT QUOTES)
+json_query:text
+x
+-- SELECT 1
+
+> SELECT JSON_VALUE(1, '$')
+ERROR 42846: cannot cast type integer to jsonb (at 19)
+
+> SELECT JSON_VALUE('1', 1)
+ERROR 42804: JSON path expression must be of type jsonpath, not of type integer (at 24)
+
+> SELECT JSON_VALUE('{"a":1}', '$.a' RETURNING int DEFAULT 'x' ON EMPTY)
+ERROR 22P02: invalid input syntax for type integer: "x" (at 58)
+
+> SELECT JSON_VALUE('{"a":1}', 'lax $.a.b' ERROR ON ERROR)
+json_value:text
+NULL
+-- SELECT 1
+
+> SELECT JSON_ARRAY(SELECT 1 WHERE false)
+json_array:json
+NULL
+-- SELECT 1
+
+> SELECT jsonb_object_agg_unique(k, v) FROM (VALUES ('a', 1), ('a', 2)) t(k, v)
+ERROR 22030: duplicate JSON object key value
+
+> SELECT json_object_agg_unique(k, v) FROM (VALUES ('a"b', 1), ('a"b', 2)) t(k, v)
+ERROR 22030: duplicate JSON object key value: "a\"b"
+
+> SELECT JSON_SERIALIZE('[1, 2]'::jsonb), length(JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING text))
+json_serialize:text | length:int4
+ | 1
+-- SELECT 1
+

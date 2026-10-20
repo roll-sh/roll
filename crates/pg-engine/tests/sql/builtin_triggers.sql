@@ -1,0 +1,17 @@
+CREATE TABLE sr (a int, b text);
+INSERT INTO sr VALUES (1, 'x'), (2, NULL);
+CREATE TRIGGER z_sup BEFORE UPDATE ON sr FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger();
+UPDATE sr SET a = a;
+UPDATE sr SET b = 'x';
+UPDATE sr SET a = a + 1 WHERE a = 1;
+SELECT * FROM sr ORDER BY a;
+SELECT tgname, tgfoid::regproc, pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'sr'::regclass;
+CREATE TRIGGER z_bad AFTER UPDATE ON sr FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger();
+UPDATE sr SET a = a;
+DROP TRIGGER z_bad ON sr;
+CREATE TRIGGER z_ins BEFORE INSERT ON sr FOR EACH ROW EXECUTE FUNCTION pg_catalog.suppress_redundant_updates_trigger();
+INSERT INTO sr VALUES (3, 'y');
+DROP TRIGGER z_ins ON sr;
+CREATE TRIGGER z_st BEFORE UPDATE ON sr FOR EACH STATEMENT EXECUTE FUNCTION suppress_redundant_updates_trigger();
+UPDATE sr SET a = a;
+DROP TABLE sr;

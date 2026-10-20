@@ -1,0 +1,202 @@
+> CREATE TABLE pd_t (f1 text, f2 text, f3 text, f4 text)
+-- CREATE TABLE
+
+> INSERT INTO pd_t VALUES ('foo', 'bar', 'baz', '42')
+-- INSERT 0 1
+
+> ALTER TABLE pd_t DROP COLUMN f2
+-- ALTER TABLE
+
+> CREATE FUNCTION pd_f() RETURNS SETOF pd_t LANGUAGE plpgsql AS $$
+> DECLARE rec1 record;
+> BEGIN
+>   FOR rec1 IN SELECT * FROM pd_t LOOP
+>     RETURN NEXT rec1;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE VIEW pd_v AS SELECT t.* FROM pd_f() t
+-- CREATE VIEW
+
+> SELECT pg_describe_object(classid, objid, objsubid) AS obj,
+>        pg_describe_object(refclassid, refobjid, refobjsubid) AS ref, deptype
+>   FROM pg_depend WHERE refobjid = 'pd_t'::regclass AND classid = 'pg_rewrite'::regclass
+>   ORDER BY 1, 2
+obj:text | ref:text | deptype:char
+rule _RETURN on view pd_v | column f1 of table pd_t | n
+rule _RETURN on view pd_v | column f3 of table pd_t | n
+rule _RETURN on view pd_v | column f4 of table pd_t | n
+-- SELECT 3
+
+> ALTER TABLE pd_t DROP COLUMN f3
+ERROR 2BP01: cannot drop column f3 of table pd_t because other objects depend on it
+DETAIL: view pd_v depends on column f3 of table pd_t
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE pd_t ALTER COLUMN f4 TYPE integer USING f4::integer
+ERROR 0A000: cannot alter type of a column used by a view or rule
+DETAIL: rule _RETURN on view pd_v depends on column "f4"
+
+> BEGIN
+-- BEGIN
+
+> DELETE FROM pg_depend WHERE
+>   objid = (SELECT oid FROM pg_rewrite WHERE ev_class = 'pd_v'::regclass AND rulename = '_RETURN')
+>   AND refobjsubid = 4
+> RETURNING pg_describe_object(classid, objid, objsubid) AS obj,
+>           pg_describe_object(refclassid, refobjid, refobjsubid) AS ref, deptype
+obj:text | ref:text | deptype:char
+rule _RETURN on view pd_v | column f4 of table pd_t | n
+-- DELETE 1
+
+> ALTER TABLE pd_t ALTER COLUMN f4 TYPE integer USING f4::integer
+-- ALTER TABLE
+
+> SELECT count(*) FROM pg_depend WHERE refobjid = 'pd_t'::regclass AND refobjsubid = 4
+count:int8
+0
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> ALTER TABLE pd_t ALTER COLUMN f4 TYPE integer USING f4::integer
+ERROR 0A000: cannot alter type of a column used by a view or rule
+DETAIL: rule _RETURN on view pd_v depends on column "f4"
+
+> BEGIN
+-- BEGIN
+
+> CREATE TEMP TABLE pd_saved AS SELECT * FROM pg_depend WHERE
+>   objid = (SELECT oid FROM pg_rewrite WHERE ev_class = 'pd_v'::regclass AND rulename = '_RETURN')
+>   AND refobjsubid = 3
+-- SELECT 1
+
+> DELETE FROM pg_depend WHERE
+>   objid = (SELECT oid FROM pg_rewrite WHERE ev_class = 'pd_v'::regclass AND rulename = '_RETURN')
+>   AND refobjsubid = 3
+-- DELETE 1
+
+> INSERT INTO pg_depend SELECT * FROM pd_saved
+-- INSERT 0 1
+
+> ALTER TABLE pd_t DROP COLUMN f3
+ERROR 2BP01: cannot drop column f3 of table pd_t because other objects depend on it
+DETAIL: view pd_v depends on column f3 of table pd_t
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP VIEW pd_v
+-- DROP VIEW
+
+> CREATE VIEW pd_v AS SELECT t.f1, t.f4 FROM pd_f() t
+-- CREATE VIEW
+
+> ALTER TABLE pd_t DROP COLUMN f3
+-- ALTER TABLE
+
+> SELECT * FROM pd_v
+f1:text | f4:text
+foo | 42
+-- SELECT 1
+
+> ALTER TABLE pd_t ADD COLUMN f5 int DEFAULT 5
+-- ALTER TABLE
+
+> SELECT * FROM pd_f()
+f1:text | f4:text | f5:int4
+foo | 42 | 5
+-- SELECT 1
+
+> CREATE ROLE regress_pd_user
+-- CREATE ROLE
+
+> SET ROLE regress_pd_user
+-- SET
+
+> DELETE FROM pg_depend WHERE false
+ERROR 42501: permission denied for table pg_depend
+
+> RESET ROLE
+-- RESET
+
+> DROP ROLE regress_pd_user
+-- DROP ROLE
+
+> CREATE TABLE pd_w (a int, b text, c int)
+-- CREATE TABLE
+
+> INSERT INTO pd_w VALUES (1, 'x', 2)
+-- INSERT 0 1
+
+> CREATE VIEW pd_wv1 AS SELECT t.*::text AS x FROM pd_w t
+-- CREATE VIEW
+
+> CREATE VIEW pd_wv2 AS SELECT t AS x FROM pd_w t
+-- CREATE VIEW
+
+> CREATE VIEW pd_wv3 AS SELECT t.a, t AS x FROM pd_w t
+-- CREATE VIEW
+
+> CREATE VIEW pd_wv5 AS SELECT row_to_json(t) AS j FROM pd_w t
+-- CREATE VIEW
+
+> CREATE VIEW pd_wv6 AS SELECT a FROM pd_w t WHERE t IS NOT NULL
+-- CREATE VIEW
+
+> SELECT pg_describe_object(classid, objid, objsubid) AS obj,
+>        pg_describe_object(refclassid, refobjid, refobjsubid) AS ref, deptype
+>   FROM pg_depend WHERE refobjid = 'pd_w'::regclass AND classid = 'pg_rewrite'::regclass ORDER BY 1, 2
+obj:text | ref:text | deptype:char
+rule _RETURN on view pd_wv1 | table pd_w | n
+rule _RETURN on view pd_wv2 | table pd_w | n
+rule _RETURN on view pd_wv3 | column a of table pd_w | n
+rule _RETURN on view pd_wv5 | table pd_w | n
+rule _RETURN on view pd_wv6 | column a of table pd_w | n
+-- SELECT 5
+
+> ALTER TABLE pd_w ALTER COLUMN c TYPE bigint
+-- ALTER TABLE
+
+> ALTER TABLE pd_w ALTER COLUMN a TYPE bigint
+ERROR 0A000: cannot alter type of a column used by a view or rule
+DETAIL: rule _RETURN on view pd_wv3 depends on column "a"
+
+> ALTER TABLE pd_w DROP COLUMN c
+-- ALTER TABLE
+
+> SELECT * FROM pd_wv1
+x:text
+(1,x)
+-- SELECT 1
+
+> SELECT * FROM pd_wv5
+j:json
+{"a":1,"b":"x"}
+-- SELECT 1
+
+> DROP TABLE pd_w
+ERROR 2BP01: cannot drop table pd_w because other objects depend on it
+DETAIL: view pd_wv1 depends on table pd_w
+DETAIL: view pd_wv2 depends on table pd_w
+DETAIL: view pd_wv3 depends on table pd_w
+DETAIL: view pd_wv5 depends on table pd_w
+DETAIL: view pd_wv6 depends on table pd_w
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> CREATE FUNCTION pd_wf() RETURNS bigint LANGUAGE sql BEGIN ATOMIC SELECT count(*) FROM pd_w t WHERE t IS NOT NULL; END
+-- CREATE FUNCTION
+
+> ALTER TABLE pd_w ALTER COLUMN b TYPE varchar(10)
+-- ALTER TABLE
+
+> SELECT pg_describe_object(classid, objid, objsubid) AS obj,
+>        pg_describe_object(refclassid, refobjid, refobjsubid) AS ref, deptype
+>   FROM pg_depend WHERE refobjid = 'pd_w'::regclass AND classid = 'pg_proc'::regclass ORDER BY 1, 2
+obj:text | ref:text | deptype:char
+function pd_wf() | table pd_w | n
+-- SELECT 1
+

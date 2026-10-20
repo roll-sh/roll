@@ -1,0 +1,505 @@
+> create table t (a int primary key, b text)
+-- CREATE TABLE
+
+> create index t_b on t (b)
+-- CREATE INDEX
+
+> create table mk ()
+-- CREATE TABLE
+
+> create view files as select c.oid, regexp_replace(c.relname, '\d+', 'N') rel, c.relfilenode::int8 - (select max(oid::int8) from pg_class where relname like 'mk%') d, c.relfilenode = c.oid same from pg_class c where relname like 't%' or c.oid = (select reltoastrelid from pg_class where relname = 't') or c.oid = (select reltoastrelid from pg_class where relname = 't') + 1
+ERROR 42883: operator does not exist: oid + integer (at 370)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> truncate t
+-- TRUNCATE TABLE
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> vacuum full t
+-- VACUUM
+
+> create table mk2 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> cluster t using t_pkey
+-- CLUSTER
+
+> create table mk3 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> alter table t alter b type varchar
+-- ALTER TABLE
+
+> create table mk4 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> alter table t alter b type varchar collate "C"
+-- ALTER TABLE
+
+> create table mk4a ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> reindex table t
+-- REINDEX
+
+> create table mk5 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> reindex index t_b
+-- REINDEX
+
+> create table mk6 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> alter table t alter a type bigint
+-- ALTER TABLE
+
+> create table mk7 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> alter table t add column c int default random()::int
+-- ALTER TABLE
+
+> create table mk8 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> alter table t set unlogged
+-- ALTER TABLE
+
+> create table mk9 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> reindex table concurrently t
+-- REINDEX
+
+> create table mk10 ()
+-- CREATE TABLE
+
+> select rel, d, same from files order by oid
+ERROR 42P01: relation "files" does not exist (at 26)
+
+> select relname, oid::int8 - lag(oid::int8) over (order by oid) from pg_class where relname ~ '^mk' order by oid
+relname:name | ?column?:int8
+mk | NULL
+mk1 | 8
+mk2 | 10
+mk3 | 10
+mk4 | 4
+mk4a | 4
+mk5 | 6
+mk6 | 4
+mk7 | 13
+mk8 | 11
+mk9 | 10
+mk10 | 6
+-- SELECT 12
+
+> begin
+-- BEGIN
+
+> create table t2 (a int primary key)
+-- CREATE TABLE
+
+> truncate t2
+-- TRUNCATE TABLE
+
+> select relfilenode = oid from pg_class where relname in ('t2', 't2_pkey')
+?column?:bool
+t
+t
+-- SELECT 2
+
+> commit
+-- COMMIT
+
+> truncate t2
+-- TRUNCATE TABLE
+
+> create table mk11 ()
+-- CREATE TABLE
+
+> select relname, relfilenode::int8 - 'mk11'::regclass::int8 from pg_class where relname in ('t2', 't2_pkey') order by oid
+relname:name | ?column?:int8
+t2 | -2
+t2_pkey | -1
+-- SELECT 2
+
+> select pg_relation_filenode('t') = relfilenode, pg_relation_filepath('t') = 'base/' || (select oid from pg_database where datname = current_database()) || '/' || relfilenode, pg_filenode_relation(0, relfilenode) = 't'::regclass, pg_filenode_relation(1663, relfilenode) = 't'::regclass from pg_class where oid = 't'::regclass
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+-- SELECT 1
+
+> select pg_filenode_relation(0, 't'::regclass::oid)
+pg_filenode_relation:regclass
+NULL
+-- SELECT 1
+
+> select pg_relation_filenode('files'), pg_relation_filepath('files'), pg_relation_filenode('pg_class'), pg_relation_filepath('pg_class') ~ '^base/\d+/1259$', pg_relation_filenode('pg_database'), pg_relation_filepath('pg_database')
+ERROR 42P01: relation "files" does not exist (at 29)
+
+> select pg_relation_filenode('pg_statistic'), pg_relation_filenode('pg_toast.pg_toast_2619'), pg_relation_filenode('pg_class_oid_index'), pg_relation_filepath('pg_authid')
+pg_relation_filenode:oid | pg_relation_filenode:oid | pg_relation_filenode:oid | pg_relation_filepath:text
+2619 | 2840 | 2662 | global/1260
+-- SELECT 1
+
+> select pg_filenode_relation(0, 0), pg_filenode_relation(1663, 1259), pg_filenode_relation(1664, 1262), pg_filenode_relation(0, 1262), pg_filenode_relation(0, 2619), pg_filenode_relation(0, 2662), pg_filenode_relation(1234, 2619), pg_filenode_relation(1664, 2619)
+pg_filenode_relation:regclass | pg_filenode_relation:regclass | pg_filenode_relation:regclass | pg_filenode_relation:regclass | pg_filenode_relation:regclass | pg_filenode_relation:regclass | pg_filenode_relation:regclass | pg_filenode_relation:regclass
+NULL | pg_class | pg_database | NULL | pg_statistic | pg_class_oid_index | NULL | NULL
+-- SELECT 1
+
+> select pg_filenode_relation(0, 999999), pg_relation_filenode(999999), pg_relation_filepath(999999), pg_relation_filenode(0)
+pg_filenode_relation:regclass | pg_relation_filenode:oid | pg_relation_filepath:text | pg_relation_filenode:oid
+NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> create temp table tt (a int)
+-- CREATE TABLE
+
+> select pg_relation_filepath('tt') ~ '^base/\d+/t\d+_\d+$', pg_filenode_relation(0, pg_relation_filenode('tt'))
+?column?:bool | pg_filenode_relation:regclass
+t | NULL
+-- SELECT 1
+
+> select pg_relation_filepath('tt') = format('base/%s/t%s_%s', (select oid from pg_database where datname = current_database()), substr(pg_my_temp_schema()::regnamespace::text, 9), pg_relation_filenode('tt'))
+?column?:bool
+t
+-- SELECT 1
+
+> create table p (a int) partition by list (a)
+-- CREATE TABLE
+
+> create index on p (a)
+-- CREATE INDEX
+
+> create type ct as (a int)
+-- CREATE TYPE
+
+> select relname, relfilenode, pg_relation_filenode(oid), pg_relation_filepath(oid) from pg_class where relname in ('p', 'p_a_idx', 'ct', 'files') order by relname
+relname:name | relfilenode:oid | pg_relation_filenode:oid | pg_relation_filepath:text
+ct | 0 | NULL | NULL
+p | 0 | NULL | NULL
+p_a_idx | 0 | NULL | NULL
+-- SELECT 3
+
+> create sequence s
+-- CREATE SEQUENCE
+
+> create table m0 ()
+-- CREATE TABLE
+
+> alter sequence s restart
+-- ALTER SEQUENCE
+
+> create table m1 ()
+-- CREATE TABLE
+
+> alter sequence s increment 2
+-- ALTER SEQUENCE
+
+> create table m2 ()
+-- CREATE TABLE
+
+> alter sequence s cache 3
+-- ALTER SEQUENCE
+
+> create table m3 ()
+-- CREATE TABLE
+
+> alter sequence s owned by none
+-- ALTER SEQUENCE
+
+> create table m4 ()
+-- CREATE TABLE
+
+> alter sequence s as int
+-- ALTER SEQUENCE
+
+> create table m5 ()
+-- CREATE TABLE
+
+> alter sequence s maxvalue 1000
+-- ALTER SEQUENCE
+
+> create table m6 ()
+-- CREATE TABLE
+
+> select setval('s', 5)
+setval:int8
+5
+-- SELECT 1
+
+> create table m7 ()
+-- CREATE TABLE
+
+> alter sequence s start 3
+-- ALTER SEQUENCE
+
+> create table m8 ()
+-- CREATE TABLE
+
+> alter sequence s as bigint
+-- ALTER SEQUENCE
+
+> create table m9 ()
+-- CREATE TABLE
+
+> alter sequence s set unlogged
+-- ALTER SEQUENCE
+
+> create table m10 ()
+-- CREATE TABLE
+
+> select relname, oid::int8 - lag(oid::int8) over (order by oid) from pg_class where relname ~ '^m\d' order by oid
+relname:name | ?column?:int8
+m0 | NULL
+m1 | 4
+m2 | 4
+m3 | 4
+m4 | 3
+m5 | 4
+m6 | 4
+m7 | 3
+m8 | 4
+m9 | 4
+m10 | 4
+-- SELECT 11
+
+> select relfilenode::int8 - 'm10'::regclass::int8 from pg_class where relname = 's'
+?column?:int8
+-1
+-- SELECT 1
+
+> create table ident (a int generated always as identity, b serial)
+-- CREATE TABLE
+
+> truncate ident restart identity
+-- TRUNCATE TABLE
+
+> create table m11 ()
+-- CREATE TABLE
+
+> select relname, relfilenode::int8 - 'm11'::regclass::int8, relfilenode = oid from pg_class where relname in ('ident', 'ident_a_seq', 'ident_b_seq') order by oid
+relname:name | ?column?:int8 | ?column?:bool
+ident_a_seq | -2 | f
+ident_b_seq | -1 | f
+ident | -3 | f
+-- SELECT 3
+
+> create table src (a int, b text)
+-- CREATE TABLE
+
+> insert into src values (1, 'x')
+-- INSERT 0 1
+
+> create materialized view mv as select * from src
+-- SELECT 1
+
+> create table n0 ()
+-- CREATE TABLE
+
+> select relfilenode::int8 - 'n0'::regclass::int8, relfilenode = oid from pg_class where relname = 'mv'
+?column?:int8 | ?column?:bool
+-5 | f
+-- SELECT 1
+
+> create materialized view mv0 as select * from src with no data
+-- CREATE MATERIALIZED VIEW
+
+> select relfilenode = oid from pg_class where relname = 'mv0'
+?column?:bool
+t
+-- SELECT 1
+
+> create unique index mv_a on mv (a)
+-- CREATE INDEX
+
+> refresh materialized view mv
+-- REFRESH MATERIALIZED VIEW
+
+> create table n1 ()
+-- CREATE TABLE
+
+> select relname, relfilenode::int8 - 'n1'::regclass::int8, relfilenode = oid from pg_class where relname in ('mv', 'mv_a') order by oid
+relname:name | ?column?:int8 | ?column?:bool
+mv | -6 | f
+mv_a | -1 | f
+-- SELECT 2
+
+> refresh materialized view concurrently mv
+-- REFRESH MATERIALIZED VIEW
+
+> create table n2 ()
+-- CREATE TABLE
+
+> select relname, relfilenode::int8 - 'n1'::regclass::int8 from pg_class where relname in ('mv', 'mv_a') order by oid
+relname:name | ?column?:int8
+mv | -6
+mv_a | -1
+-- SELECT 2
+
+> create table idt (a int generated always as identity, b int not null)
+-- CREATE TABLE
+
+> create table i0 ()
+-- CREATE TABLE
+
+> alter table idt alter a restart
+-- ALTER TABLE
+
+> create table i1 ()
+-- CREATE TABLE
+
+> alter table idt alter a set increment by 2
+-- ALTER TABLE
+
+> create table i2 ()
+-- CREATE TABLE
+
+> alter table idt alter a set cache 5 restart with 10
+-- ALTER TABLE
+
+> create table i3 ()
+-- CREATE TABLE
+
+> alter table idt alter b add generated by default as identity
+-- ALTER TABLE
+
+> create table i4 ()
+-- CREATE TABLE
+
+> alter table idt alter b drop identity
+-- ALTER TABLE
+
+> create table i5 ()
+-- CREATE TABLE
+
+> select relname, oid::int8 - lag(oid::int8) over (order by oid) from pg_class where relname ~ '^i\d' order by oid
+relname:name | ?column?:int8
+i0 | NULL
+i1 | 4
+i2 | 4
+i3 | 4
+i4 | 4
+i5 | 3
+-- SELECT 6
+
+> select relfilenode::int8 - 'i3'::regclass::int8 from pg_class where relname = 'idt_a_seq'
+?column?:int8
+-1
+-- SELECT 1
+
+> alter table idt add column c int
+-- ALTER TABLE
+
+> alter table idt alter c add generated always as identity
+ERROR 55000: column "c" of relation "idt" must be declared NOT NULL before identity can be added
+
+> create table pt (a int, b text) partition by range (a)
+-- CREATE TABLE
+
+> create table pt1 partition of pt for values from (0) to (10)
+-- CREATE TABLE
+
+> create table q0 ()
+-- CREATE TABLE
+
+> truncate pt
+-- TRUNCATE TABLE
+
+> create table q1 ()
+-- CREATE TABLE
+
+> alter table pt1 add primary key (a)
+-- ALTER TABLE
+
+> cluster pt1 using pt1_pkey
+-- CLUSTER
+
+> create table q2 ()
+-- CREATE TABLE
+
+> vacuum full pt
+-- VACUUM
+
+> create table q3 ()
+-- CREATE TABLE
+
+> alter table pt alter b type varchar(10)
+-- ALTER TABLE
+
+> create table q4 ()
+-- CREATE TABLE
+
+> alter table pt alter b type text
+-- ALTER TABLE
+
+> create table q5 ()
+-- CREATE TABLE
+
+> create unlogged table ul (a int primary key)
+-- CREATE TABLE
+
+> create table q6 ()
+-- CREATE TABLE
+
+> alter table ul set logged
+-- ALTER TABLE
+
+> create table q7 ()
+-- CREATE TABLE
+
+> select relname, oid::int8 - lag(oid::int8) over (order by oid) from pg_class where relname ~ '^q\d' order by oid
+relname:name | ?column?:int8
+q0 | NULL
+q1 | 6
+q2 | 12
+q3 | 9
+q4 | 7
+q5 | 5
+q6 | 9
+q7 | 7
+-- SELECT 8
+
+> select relname, relfilenode::int8 - 'q0'::regclass::int8 from pg_class where relname in ('pt1', 'pt1_pkey', 'ul', 'ul_pkey') order by relname
+relname:name | ?column?:int8
+pt1 | 30
+pt1_pkey | 33
+ul | 51
+ul_pkey | 54
+-- SELECT 4
+

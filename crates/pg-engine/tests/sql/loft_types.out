@@ -1,0 +1,137 @@
+> create function anyctest(anycompatiblenonarray, anycompatiblenonarray) returns anycompatiblearray as $$ select array[$1, $2] $$ language sql
+-- CREATE FUNCTION
+
+> select x, pg_typeof(x) from anyctest(11, 12) x
+x:int4[] | pg_typeof:regtype
+{11,12} | integer[]
+-- SELECT 1
+
+> select x, pg_typeof(x) from anyctest(11, 12.3) x
+x:numeric[] | pg_typeof:regtype
+{11,12.3} | numeric[]
+-- SELECT 1
+
+> select x from anyctest(array[1], array[2]) x
+ERROR 42883: function anyctest(integer[], integer[]) does not exist (at 15)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> drop function anyctest(anycompatiblenonarray, anycompatiblenonarray)
+-- DROP FUNCTION
+
+> select array_in('{1,2,3}', 'int4'::regtype, -1)
+array_in:2277
+{1,2,3}
+-- SELECT 1
+
+> select * from array_in('{1,2,3}', 'int4'::regtype, -1)
+ERROR 42804: function "array_in" in FROM has unsupported return type anyarray (at 15)
+
+> select anyrange_in('[10,20)', 'int4range'::regtype, -1)
+ERROR 0A000: cannot accept a value of type anyrange
+
+> create function outrow(out integer, out numeric) as $$ select (1, 2.1) $$ language sql
+-- CREATE FUNCTION
+
+> select * from outrow()
+column1:int4 | column2:numeric
+1 | 2.1
+-- SELECT 1
+
+> create or replace function outrow(out integer, out numeric) as $$ select (1, 2) $$ language sql
+-- CREATE FUNCTION
+
+> select * from outrow()
+ERROR 42804: function return row and query-specified return row do not match
+DETAIL: Returned type integer at ordinal position 2, but query expects numeric.
+
+> create or replace function outrow(out integer, out numeric) as $$ select (1, 2.1, 3) $$ language sql
+-- CREATE FUNCTION
+
+> select * from outrow()
+ERROR 42804: function return row and query-specified return row do not match
+DETAIL: Returned row contains 3 attributes, but query expects 2.
+
+> drop function outrow()
+-- DROP FUNCTION
+
+> with a(b) as (values (row(1,2,3))) select * from a, coalesce(b) as c(d int, e int)
+ERROR 42804: function return row and query-specified return row do not match
+DETAIL: Returned row contains 3 attributes, but query expects 2.
+
+> with a(b) as (values (row(1,2,3))) select * from a, coalesce(b) as c(d int, e int, f float)
+ERROR 42804: function return row and query-specified return row do not match
+DETAIL: Returned type integer at ordinal position 3, but query expects double precision.
+
+> with a(b) as (values (row(1,2,3))) select * from a, coalesce(b) as c(d int, e int, f int)
+b:record | d:int4 | e:int4 | f:int4
+(1,2,3) | 1 | 2 | 3
+-- SELECT 1
+
+> select * from coalesce(1) as (a int)
+ERROR 42601: a column definition list is only allowed for functions returning "record" (at 31)
+
+> create type tmtype as (f1 numeric(35,6), f2 numeric(35,2))
+-- CREATE TYPE
+
+> create function tmfunc() returns tmtype as $$ select 7.136178319899999964, 7.136178319899999964; $$ language sql immutable
+-- CREATE FUNCTION
+
+> select tmfunc()
+tmfunc:user
+(7.136178,7.14)
+-- SELECT 1
+
+> create function tmfunc2() returns setof tmtype as $$ select 1, 2 union select 3, 4 order by 1; $$ language sql immutable
+-- CREATE FUNCTION
+
+> select tmfunc2()
+tmfunc2:user
+(1.000000,2.00)
+(3.000000,4.00)
+-- SELECT 2
+
+> drop function tmfunc()
+-- DROP FUNCTION
+
+> drop function tmfunc2()
+-- DROP FUNCTION
+
+> drop type tmtype
+-- DROP TYPE
+
+> create table lim (a int)
+-- CREATE TABLE
+
+> select a from lim limit a
+ERROR 42P10: argument of LIMIT must not contain variables (at 25)
+
+> select a from lim offset a + 1
+ERROR 42P10: argument of OFFSET must not contain variables (at 26)
+
+> select nosuch from (values(1)) v(a) where a > 'x'
+ERROR 42703: column "nosuch" does not exist (at 8)
+
+> select a, count(*) from (values(1)) v(a) where nosuch = 1 group by a
+ERROR 42703: column "nosuch" does not exist (at 48)
+
+> select 1/0, nosuchcol
+ERROR 42703: column "nosuchcol" does not exist (at 13)
+
+> select nosuchfunc(int4range(5, 1))
+ERROR 42883: function nosuchfunc(int4range) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> create domain dint as int
+-- CREATE DOMAIN
+
+> select pg_typeof(coalesce(4::dint, 7::dint)), pg_typeof(coalesce(4::dint, 7))
+pg_typeof:regtype | pg_typeof:regtype
+dint | integer
+-- SELECT 1
+
+> drop domain dint
+-- DROP DOMAIN
+
+> drop table lim
+-- DROP TABLE
+

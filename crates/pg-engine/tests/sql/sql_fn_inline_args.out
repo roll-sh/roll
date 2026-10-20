@@ -1,0 +1,90 @@
+> create table sfi_t (f1 int)
+-- CREATE TABLE
+
+> insert into sfi_t values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> create function sfi_bleat(int) returns int as $$
+> begin
+>   raise notice 'bleat %', $1;
+>   return $1;
+> end$$ language plpgsql
+-- CREATE FUNCTION
+
+> create function sfi_if(bool, anyelement, anyelement) returns anyelement as $$
+> select case when $1 then $2 else $3 end $$ language sql
+-- CREATE FUNCTION
+
+> select f1, sfi_if(f1 > 0, sfi_bleat(f1), sfi_bleat(f1 + 1)) from sfi_t
+NOTICE 00000: bleat 1
+CONTEXT: PL/pgSQL function sfi_bleat(integer) line 3 at RAISE
+NOTICE 00000: bleat 123456
+CONTEXT: PL/pgSQL function sfi_bleat(integer) line 3 at RAISE
+NOTICE 00000: bleat -123455
+CONTEXT: PL/pgSQL function sfi_bleat(integer) line 3 at RAISE
+NOTICE 00000: bleat 2147483647
+CONTEXT: PL/pgSQL function sfi_bleat(integer) line 3 at RAISE
+NOTICE 00000: bleat -2147483646
+CONTEXT: PL/pgSQL function sfi_bleat(integer) line 3 at RAISE
+f1:int4 | sfi_if:int4
+-123456 | -123455
+-2147483647 | -2147483646
+0 | 1
+123456 | 123456
+2147483647 | 2147483647
+-- SELECT 5
+
+> select f1, sfi_if(f1 > 0, f1::int8, f1::int8 + 1) from sfi_t
+f1:int4 | sfi_if:int8
+-123456 | -123455
+-2147483647 | -2147483646
+0 | 1
+123456 | 123456
+2147483647 | 2147483647
+-- SELECT 5
+
+> create function sfi_add(int, int) returns int as 'select $1 + $2' language sql
+-- CREATE FUNCTION
+
+> select sfi_add(f1, 1) from sfi_t where f1 < 0 order by 1
+sfi_add:int4
+-2147483646
+-123455
+-- SELECT 2
+
+> select sfi_add(f1, 1) from sfi_t
+ERROR 22003: integer out of range
+
+> create function sfi_coalesce(int, int) returns int as 'select coalesce($1, $2)' language sql
+-- CREATE FUNCTION
+
+> select sfi_coalesce(nullif(f1, 0), sfi_bleat(-1)) from sfi_t order by 1
+NOTICE 00000: bleat -1
+CONTEXT: PL/pgSQL function sfi_bleat(integer) line 3 at RAISE
+sfi_coalesce:int4
+-2147483647
+-123456
+-1
+123456
+2147483647
+-- SELECT 5
+
+> create view sfi_v as select sfi_if(f1 > 0, f1, -f1) as a, sfi_add(f1, 2) as b from sfi_t
+-- CREATE VIEW
+
+> select pg_get_viewdef('sfi_v')
+pg_get_viewdef:text
+ SELECT sfi_if((f1 > 0), f1, (- f1)) AS a,
+    sfi_add(f1, 2) AS b
+   FROM sfi_t;
+-- SELECT 1
+
+> select * from sfi_v where b < 10 order by a
+ERROR 22003: integer out of range
+
+> drop view sfi_v
+-- DROP VIEW
+
+> drop table sfi_t
+-- DROP TABLE
+

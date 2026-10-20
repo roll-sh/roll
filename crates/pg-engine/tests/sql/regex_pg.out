@@ -1,0 +1,463 @@
+> set standard_conforming_strings = on
+-- SET
+
+> select 'bbbbb' ~ '^([bc])\1*$' as t
+t:bool
+t
+-- SELECT 1
+
+> select 'ccc' ~ '^([bc])\1*$' as t
+t:bool
+t
+-- SELECT 1
+
+> select 'xxx' ~ '^([bc])\1*$' as f
+f:bool
+f
+-- SELECT 1
+
+> select 'bbc' ~ '^([bc])\1*$' as f
+f:bool
+f
+-- SELECT 1
+
+> select 'b' ~ '^([bc])\1*$' as t
+t:bool
+t
+-- SELECT 1
+
+> select 'abc abc abc' ~ '^(\w+)( \1)+$' as t
+t:bool
+t
+-- SELECT 1
+
+> select 'abc abd abc' ~ '^(\w+)( \1)+$' as f
+f:bool
+f
+-- SELECT 1
+
+> select 'abc abc abd' ~ '^(\w+)( \1)+$' as f
+f:bool
+f
+-- SELECT 1
+
+> select 'abc abc abc' ~ '^(.+)( \1)+$' as t
+t:bool
+t
+-- SELECT 1
+
+> select 'abc abd abc' ~ '^(.+)( \1)+$' as f
+f:bool
+f
+-- SELECT 1
+
+> select 'abc abc abd' ~ '^(.+)( \1)+$' as f
+f:bool
+f
+-- SELECT 1
+
+> select substring('asd TO foo' from ' TO (([a-z0-9._]+|"([^"]+|"")+")+)')
+substring:text
+foo
+-- SELECT 1
+
+> select substring('a' from '((a))+')
+substring:text
+a
+-- SELECT 1
+
+> select substring('a' from '((a)+)')
+substring:text
+a
+-- SELECT 1
+
+> select regexp_match('abc', '')
+regexp_match:text[]
+{""}
+-- SELECT 1
+
+> select regexp_match('abc', 'bc')
+regexp_match:text[]
+{bc}
+-- SELECT 1
+
+> select regexp_match('abc', 'd') is null
+?column?:bool
+t
+-- SELECT 1
+
+> select regexp_match('abc', '(B)(c)', 'i')
+regexp_match:text[]
+{b,c}
+-- SELECT 1
+
+> select regexp_match('abc', 'Bd', 'ig')
+ERROR 22023: regexp_match() does not support the "global" option
+HINT: Use the regexp_matches function instead.
+
+> select regexp_matches('ab', 'a(?=b)b*')
+regexp_matches:text[]
+{ab}
+-- SELECT 1
+
+> select regexp_matches('a', 'a(?=b)b*')
+regexp_matches:text[]
+-- SELECT 0
+
+> select regexp_matches('abc', 'a(?=b)b*(?=c)c*')
+regexp_matches:text[]
+{abc}
+-- SELECT 1
+
+> select regexp_matches('ab', 'a(?=b)b*(?=c)c*')
+regexp_matches:text[]
+-- SELECT 0
+
+> select regexp_matches('ab', 'a(?!b)b*')
+regexp_matches:text[]
+-- SELECT 0
+
+> select regexp_matches('a', 'a(?!b)b*')
+regexp_matches:text[]
+{a}
+-- SELECT 1
+
+> select regexp_matches('b', '(?=b)b')
+regexp_matches:text[]
+{b}
+-- SELECT 1
+
+> select regexp_matches('a', '(?=b)b')
+regexp_matches:text[]
+-- SELECT 0
+
+> select regexp_matches('abb', '(?<=a)b*')
+regexp_matches:text[]
+{bb}
+-- SELECT 1
+
+> select regexp_matches('a', 'a(?<=a)b*')
+regexp_matches:text[]
+{a}
+-- SELECT 1
+
+> select regexp_matches('abc', 'a(?<=a)b*(?<=b)c*')
+regexp_matches:text[]
+{abc}
+-- SELECT 1
+
+> select regexp_matches('ab', 'a(?<=a)b*(?<=b)c*')
+regexp_matches:text[]
+{ab}
+-- SELECT 1
+
+> select regexp_matches('ab', 'a*(?<!a)b*')
+regexp_matches:text[]
+{""}
+-- SELECT 1
+
+> select regexp_matches('ab', 'a*(?<!a)b+')
+regexp_matches:text[]
+-- SELECT 0
+
+> select regexp_matches('b', 'a*(?<!a)b+')
+regexp_matches:text[]
+{b}
+-- SELECT 1
+
+> select regexp_matches('a', 'a(?<!a)b*')
+regexp_matches:text[]
+-- SELECT 0
+
+> select regexp_matches('b', '(?<=b)b')
+regexp_matches:text[]
+-- SELECT 0
+
+> select regexp_matches('foobar', '(?<=f)b+')
+regexp_matches:text[]
+-- SELECT 0
+
+> select regexp_matches('foobar', '(?<=foo)b+')
+regexp_matches:text[]
+{b}
+-- SELECT 1
+
+> select regexp_matches('foobar', '(?<=oo)b+')
+regexp_matches:text[]
+{b}
+-- SELECT 1
+
+> select 'xz' ~ 'x(?=[xy])'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'xy' ~ 'x(?=[xy])'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'xz' ~ 'x(?![xy])'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'xy' ~ 'x(?![xy])'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'x'  ~ 'x(?![xy])'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'xyy' ~ '(?<=[xy])yy+'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'zyy' ~ '(?<=[xy])yy+'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'xyy' ~ '(?<![xy])yy+'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'zyy' ~ '(?<![xy])yy+'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ '($|^)*'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ '(^)+^'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ '$($$)+'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ '($^)+'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'a' ~ '(^$)*'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'aa bb cc' ~ '(^(?!aa))+'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'aa x' ~ '(^(?!aa)(?!bb)(?!cc))+'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'bb x' ~ '(^(?!aa)(?!bb)(?!cc))+'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'cc x' ~ '(^(?!aa)(?!bb)(?!cc))+'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'dd x' ~ '(^(?!aa)(?!bb)(?!cc))+'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ '((((((a)*)*)*)*)*)*'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ '((((((a+|)+|)+|)+|)+|)+|)'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'x' ~ 'abcd(\m)+xyz'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'a' ~ '^abcd*(((((^(a c(e?d)a+|)+|)+|)+|)+|a)+|)'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'x' ~ 'a^(^)bcd*xy(((((($a+|)+|)+|)+$|)+|)+|)^$'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'x' ~ 'xyz(\Y\Y)+'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'x' ~ 'x|(?:\M)+'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'x' ~ repeat('x*y*z*', 1000)
+ERROR 2201B: invalid regular expression: regular expression is too complex
+
+> select 'Programmer' ~ '(\w).*?\1' as t
+t:bool
+t
+-- SELECT 1
+
+> select regexp_matches('Programmer', '(\w)(.*?\1)', 'g')
+regexp_matches:text[]
+{m,m}
+{r,ogr}
+-- SELECT 2
+
+> select regexp_matches('foo/bar/baz',
+>                       '^([^/]+?)(?:/([^/]+?))(?:/([^/]+?))?$', '')
+regexp_matches:text[]
+{foo,bar,baz}
+-- SELECT 1
+
+> select regexp_matches('llmmmfff', '^(l*)(.*)(f*)$')
+regexp_matches:text[]
+{ll,mmmfff,""}
+-- SELECT 1
+
+> select regexp_matches('llmmmfff', '^(l*){1,1}(.*)(f*)$')
+regexp_matches:text[]
+{ll,mmmfff,""}
+-- SELECT 1
+
+> select regexp_matches('llmmmfff', '^(l*){1,1}?(.*)(f*)$')
+regexp_matches:text[]
+{"",llmmmfff,""}
+-- SELECT 1
+
+> select regexp_matches('llmmmfff', '^(l*){1,1}?(.*){1,1}?(f*)$')
+regexp_matches:text[]
+{"",llmmm,fff}
+-- SELECT 1
+
+> select regexp_matches('llmmmfff', '^(l*?)(.*)(f*)$')
+regexp_matches:text[]
+{"",llmmmfff,""}
+-- SELECT 1
+
+> select regexp_matches('llmmmfff', '^(l*?){1,1}(.*)(f*)$')
+regexp_matches:text[]
+{ll,mmmfff,""}
+-- SELECT 1
+
+> select regexp_matches('llmmmfff', '^(l*?){1,1}?(.*)(f*)$')
+regexp_matches:text[]
+{"",llmmmfff,""}
+-- SELECT 1
+
+> select regexp_matches('llmmmfff', '^(l*?){1,1}?(.*){1,1}?(f*)$')
+regexp_matches:text[]
+{"",llmmm,fff}
+-- SELECT 1
+
+> select 'a' ~ '$()|^\1'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'a' ~ '.. ()|\1'
+?column?:bool
+f
+-- SELECT 1
+
+> select 'a' ~ '()*\1'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'a' ~ '()+\1'
+?column?:bool
+t
+-- SELECT 1
+
+> select 'xxx' ~ '(.){0}(\1)' as f
+f:bool
+f
+-- SELECT 1
+
+> select 'xxx' ~ '((.)){0}(\2)' as f
+f:bool
+f
+-- SELECT 1
+
+> select 'xyz' ~ '((.)){0}(\2){0}' as t
+t:bool
+t
+-- SELECT 1
+
+> select 'abcdef' ~ '^(.)\1|\1.' as f
+f:bool
+f
+-- SELECT 1
+
+> select 'abadef' ~ '^((.)\2|..)\2' as f
+f:bool
+f
+-- SELECT 1
+
+> select regexp_match('xy', '.|...')
+regexp_match:text[]
+{x}
+-- SELECT 1
+
+> select regexp_match('xyz', '.|...')
+regexp_match:text[]
+{xyz}
+-- SELECT 1
+
+> select regexp_match('xy', '.*')
+regexp_match:text[]
+{xy}
+-- SELECT 1
+
+> select regexp_match('fooba', '(?:..)*')
+regexp_match:text[]
+{foob}
+-- SELECT 1
+
+> select regexp_match('xyz', repeat('.', 260))
+regexp_match:text[]
+NULL
+-- SELECT 1
+
+> select regexp_match('foo', '(?:.|){99}')
+regexp_match:text[]
+{foo}
+-- SELECT 1
+
+> select 'xyz' ~ 'x(\w)(?=\1)'
+ERROR 2201B: invalid regular expression: invalid backreference number
+
+> select 'xyz' ~ 'x(\w)(?=(\1))'
+ERROR 2201B: invalid regular expression: invalid backreference number
+
+> select 'a' ~ '\x7fffffff'
+ERROR 2201B: invalid regular expression: invalid escape \ sequence
+
