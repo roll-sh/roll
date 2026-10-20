@@ -5,7 +5,7 @@
 //! is an anti join (and the `IS NULL` goes).
 
 use super::*;
-use crate::sql::binder::optimize::{add_filter, join};
+use crate::sql::binder::optimize::join;
 use crate::sql::expr::BoolTest;
 use std::collections::BTreeSet;
 

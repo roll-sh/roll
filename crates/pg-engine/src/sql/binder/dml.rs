@@ -2171,6 +2171,11 @@ impl Binder<'_, '_> {
     ) -> Result<(Plan, Option<Expr>)> {
         let n = t.columns.len();
         let view = self.cat.views.get(&t.oid).cloned();
+        // (The views an automatically updatable view's statement goes through stay range
+        // table entries of their own.)
+        if let Some(v) = updatable {
+            self.hidden_rtes += v.layers.len();
+        }
         if view.is_some() || updatable.is_some() {
             self.want_sys = false;
         } else if !self.want_sys && self.policies_read_sys(t) && self.rls_enabled(t)? {

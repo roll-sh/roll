@@ -823,6 +823,9 @@ impl Gen<'_> {
                     BoolTest::IsNotUnknown => Match::Nullness(true),
                 }
             }
+            // (A key that is itself a NOT: the clause the key's value.)
+            x if strip(x).same_as(strip(key)) => bool_clause(true),
+            x if matches!(strip(key), Expr::Not(y) if strip(y).same_as(strip(x))) => bool_clause(false),
             Expr::Not(x) => {
                 if strip(x).same_as(strip(key)) {
                     bool_clause(false)

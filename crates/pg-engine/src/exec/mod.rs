@@ -314,11 +314,22 @@ impl<'a> ExecCtx<'a> {
         txn_time: i64,
         stmt_time: i64,
     ) -> ExecCtx<'a> {
+        Self::with_search_path(txn, sess, params, txn_time, stmt_time, sess.search_path())
+    }
+
+    /// `new`, given the session's search path (`SessionState::search_path`).
+    pub fn with_search_path(
+        txn: &'a RefCell<Txn>,
+        sess: &'a SessionState,
+        params: &'a [Value],
+        txn_time: i64,
+        stmt_time: i64,
+        mut search_path: Vec<String>,
+    ) -> ExecCtx<'a> {
         let settings = sess.settings.borrow();
         let mut fmt = settings.format_ctx();
         drop(settings);
         let catalog = txn.borrow().catalog();
-        let mut search_path = sess.search_path();
         // Schemas the user may not use are skipped in name lookups.
         let me = sess.current_role(&catalog);
         if !catalog.is_superuser(me) {

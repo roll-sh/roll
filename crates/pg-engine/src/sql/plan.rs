@@ -484,6 +484,8 @@ pub struct WindowCall {
     /// The FROM subquery whose window this is: its alias and column names (EXPLAIN's
     /// Subquery Scan over it).
     pub subquery: Option<Arc<(String, Vec<String>)>>,
+    /// The named window it is computed over (`OVER w`): EXPLAIN shows the window by it.
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Debug)]

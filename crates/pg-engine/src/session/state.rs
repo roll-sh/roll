@@ -408,20 +408,12 @@ impl SessionState {
     /// The search path, with this session's temporary schema first (or where `pg_temp` is).
     pub fn search_path(&self) -> Vec<String> {
         // `$user` is the current user (SET ROLE, a SECURITY DEFINER function's owner).
-        let user = {
-            let cat = self.db.catalog();
-            let oid = self.current_role(&cat);
-            cat.roles
-                .get(&oid)
-                .map_or_else(|| self.user.clone(), |r| r.name.clone())
-        };
-        let mut p = self.settings.borrow().search_path(&user);
-        let temp = self.temp_schema();
-        match p.iter().position(|s| s == "pg_temp") {
-            Some(i) => p[i] = temp,
-            None => p.insert(0, temp),
-        }
-        p
+        let cat = self.db.catalog();
+        let oid = self.current_role(&cat);
+        let user = cat.roles.get(&oid).map_or(self.user.as_str(), |r| r.name.as_str());
+        self.settings
+            .borrow()
+            .session_search_path(user, self.pid, || self.temp_schema())
     }
 
     /// Name of this session's schema for temporary tables.

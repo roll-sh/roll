@@ -759,6 +759,16 @@ fn tableoid_first(n: &mut ExNode) {
     }
 }
 
+/// The inheritance trees a plan reads whose parent takes no name of its own (an Append of
+/// one member, dropped): each a range table entry all the same.
+fn inh_parents(p: &Plan) -> usize {
+    let own = match p {
+        Plan::Append { inh: Some(_), inputs } if inputs.len() == 1 => 1,
+        _ => 0,
+    };
+    own + plan_inputs(p).into_iter().map(|c| inh_parents(c)).sum::<usize>()
+}
+
 fn subqueries_in<'p>(e: &'p Expr, out: &mut Vec<&'p Subquery>) {
     e.walk(&mut |x| {
         // (A function call run as a subquery shows as the call: no plan of its own.)
@@ -949,6 +959,29 @@ fn assign_refnames_skip(
             let mut inputs = plan_inputs(p);
             if matches!(p, Plan::Join { meta, .. } if meta.from_call.is_some()) {
                 inputs.clear();
+            }
+            // (A subquery a filter keeps apart, its Subquery Scan shown: its alias is a
+            // name of this level, its own relations named after this level's.)
+            if let Plan::Filter { input, .. } = p
+                && let Plan::Barrier { input: bi, alias, .. } = &**input
+                && !out.contains_key(&addr(input))
+            {
+                let name = if used.contains_key(alias) {
+                    let n = used.get_mut(alias).unwrap();
+                    loop {
+                        *n += 1;
+                        let cand = crate::catalog::suffixed_name(alias, &format!("_{n}"));
+                        if !out.values().any(|v| *v == cand) {
+                            break cand;
+                        }
+                    }
+                } else {
+                    alias.clone()
+                };
+                used.entry(name.clone()).or_insert(0);
+                out.insert(addr(input), name);
+                inputs.clear();
+                later.push(&**bi);
             }
             if let (Some(ctx), Plan::Append { inputs: all, inh: Some(_) }) = (ctx, p)
                 && !matches!(all.first().map(|i| &**i), Some(Plan::Update(_) | Plan::Delete(_)))
@@ -2417,7 +2450,12 @@ impl Builder<'_, '_> {
                 // (The ORDER BY over windows: its items are the first sort group references
                 // the windows are ordered by.)
                 let win_keys: Vec<String> = {
-                    let (exprs, win): (Option<&Vec<Expr>>, &Plan) = match &**input {
+                    // (Through a DISTINCT of the columns: its sort comes in that order.)
+                    let below = match &**input {
+                        Plan::Distinct { input: di, on: None } => &**di,
+                        p => p,
+                    };
+                    let (exprs, win): (Option<&Vec<Expr>>, &Plan) = match below {
                         Plan::Project { input: pin, exprs } => (Some(exprs), pin),
                         p => (None, p),
                     };
@@ -2770,8 +2808,25 @@ impl Builder<'_, '_> {
                 }
                 // Every key fixed by an equality with a constant (its distinct pathkeys all
                 // redundant): the first row is the one distinct row (a Limit 1).
-                if on.is_none() && distinct_keys_fixed(input) {
-                    let l = limit_over(c.node, 1.0, 0.0);
+                // (So with DISTINCT ON keys the input fixes.)
+                let on_fixed = on.as_ref().is_some_and(|on| {
+                    let fixed = super::paths::constant_columns(input);
+                    !on.is_empty()
+                        && on.iter().all(|e| matches!(e, Expr::Col(j, _) if fixed.get(*j).copied().unwrap_or(false)))
+                });
+                if (on.is_none() && distinct_keys_fixed(input)) || on_fixed {
+                    // (Gathered: the workers stop at their first row too.)
+                    let mut node = c.node;
+                    if node.node_type == "Gather"
+                        && node.children.len() == 1
+                        && part.is_some()
+                    {
+                        let child = node.children.pop().expect("one child");
+                        let mut l = limit_over(child, 1.0, 0.0);
+                        l.relationship = Some("Outer");
+                        node.children.push(l);
+                    }
+                    let l = limit_over(node, 1.0, 0.0);
                     return Built::passthrough(l, c.exported);
                 }
                 // Or (create_distinct_paths) a Unique over the input sorted on the keys, in
@@ -2870,7 +2925,19 @@ impl Builder<'_, '_> {
                     && let Some(pt) = part.as_deref()
                     && self.par.is_some()
                     && !keys.is_empty()
-                    && let Some(best) = self.parallel_distinct(&n, u, pt, &keys, key_ops)
+                    && let Some(best) = self.parallel_distinct(&n, u, pt, &keys, key_ops, match &**input {
+                        // (create_agg_path: the computed keys per group.)
+                        Plan::Project { exprs, .. } => exprs
+                            .iter()
+                            .filter(|e| !matches!(e, Expr::Col(..)))
+                            .map(costs::qual_cost)
+                            .sum(),
+                        _ => 0.0,
+                    }, {
+                        // (A volatile key of no columns: every row a group.)
+                        matches!(&**input, Plan::Project { exprs, .. }
+                            if exprs.iter().any(|e| e.is_volatile() && e.columns().is_empty()))
+                    })
                 {
                     return Built::passthrough(best, c.exported);
                 }
@@ -3295,7 +3362,9 @@ impl Builder<'_, '_> {
                         node.cols
                             .iter()
                             .map(|c| ColInfo {
-                                var: None,
+                                // (A column of a relation: its statistics, as
+                                // examine_simple_variable finds them through the CTE.)
+                                var: c.var.clone().filter(|v| v.expr.is_none()),
                                 distinct: c.distinct.or(
                                     (node.rows < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(node.rows)),
                                 ),
@@ -4293,10 +4362,19 @@ impl Builder<'_, '_> {
     /// create_partial_distinct_paths: the DISTINCT (serial: hashed `n`, sorted `u`) done in
     /// the workers over partial plan `pt`, then over what a Gather (Merge) of them sends,
     /// when such a plan survives add_path and is the cheapest.
-    fn parallel_distinct(&self, n: &ExNode, u: &ExNode, pt: &ExNode, keys: &[ColInfo], key_ops: f64) -> Option<ExNode> {
+    fn parallel_distinct(
+        &self,
+        n: &ExNode,
+        u: &ExNode,
+        pt: &ExNode,
+        keys: &[ColInfo],
+        key_ops: f64,
+        per_group: f64,
+        every_row: bool,
+    ) -> Option<ExNode> {
         let g = crate::sql::paths::Gucs::read(self.ctx);
         let ord = u.order.clone();
-        let pd_rows = self.num_groups(keys, pt.rows);
+        let pd_rows = if every_row { pt.rows } else { self.num_groups(keys, pt.rows) };
         let unique_over = |child: ExNode, rows: f64| -> ExNode {
             let mut x = ExNode::new("Unique");
             x.unique_keys = u.unique_keys.clone();
@@ -4318,7 +4396,10 @@ impl Builder<'_, '_> {
             x.partial = None;
             x.rows = rows;
             x.startup_cost = child.total_cost + child.rows * key_ops;
-            x.total_cost = x.startup_cost + rows * costs::CPU_TUPLE_COST;
+            x.total_cost = x.startup_cost + rows * (costs::CPU_TUPLE_COST + per_group);
+            let (ss, st) = g.hashagg_spill(child.rows, child.width, rows, 0, 0.0);
+            x.startup_cost += ss;
+            x.total_cost += st;
             x.disabled = !g.hashagg;
             x.order.clear();
             x.workers = child.workers;
@@ -6599,10 +6680,23 @@ impl Builder<'_, '_> {
             }
             unique_orders[b].len().cmp(&unique_orders[a].len())
         });
-        // Windows are named in the order they are computed.
-        let mut name_of = vec![0; wins.len()];
-        for (pos, &wi) in sequence.iter().enumerate() {
-            name_of[wi] = pos + 1;
+        // Windows are named by their WINDOW clause name, else w1, w2, … in the order
+        // they are computed, skipping names in use (name_active_windows).
+        let given: Vec<Option<String>> =
+            wins.iter().map(|w| w.calls.iter().find_map(|c| c.name.clone())).collect();
+        let mut name_of = vec![String::new(); wins.len()];
+        let mut next = 1;
+        for &wi in &sequence {
+            name_of[wi] = match &given[wi] {
+                Some(n) => quote_ident(n),
+                None => loop {
+                    let cand = format!("w{next}");
+                    next += 1;
+                    if !given.iter().any(|g| g.as_deref() == Some(cand.as_str())) {
+                        break cand;
+                    }
+                },
+            };
         }
         let mut specs = Vec::new();
         for (i, w) in wins.iter().enumerate() {
@@ -6650,7 +6744,7 @@ impl Builder<'_, '_> {
             if !frame.is_empty() {
                 parts.push(frame);
             }
-            specs.push(format!("w{} AS ({})", name_of[i], parts.join(" ")));
+            specs.push(format!("{} AS ({})", name_of[i], parts.join(" ")));
         }
         let mut cnames = Vec::new();
         for (call, (i, ..)) in calls.iter().zip(&call_win) {
@@ -6693,8 +6787,8 @@ impl Builder<'_, '_> {
                 }
             };
             cnames.push(Name {
-                plain: format!("{} OVER w{}", f.plain, name_of[*i]),
-                full: format!("{} OVER w{}", f.full, name_of[*i]),
+                plain: format!("{} OVER {}", f.plain, name_of[*i]),
+                full: format!("{} OVER {}", f.full, name_of[*i]),
             });
         }
         // (The top WindowAgg computes its own calls; those of the ones below it it reads.)
@@ -7966,9 +8060,9 @@ pub(crate) fn push_cte_estimates(ctes: &[(usize, Arc<Plan>)], names: &[String], 
         let cols: Vec<ColInfo> = e
             .cols
             .iter()
-            .map(|(w, _, d)| ColInfo {
+            .map(|(w, v, d)| ColInfo {
                 width: *w,
-                var: None,
+                var: v.clone().filter(|v| v.expr.is_none()),
                 // (get_variable_numdistinct without statistics: a small relation's rows.)
                 distinct: d.or((e.rows < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(e.rows))),
             })
@@ -9752,7 +9846,8 @@ pub fn explain(
     let mut b = Builder {
         ctx,
         o,
-        prefix: refnames.len() + hidden_rtes + results + excluded > 1,
+        // (An inheritance tree's parent is a range table entry besides its members.)
+        prefix: refnames.len() + hidden_rtes + results + excluded + inh_parents(plan) > 1,
         refnames,
         labels: HashMap::new(),
         plan_ids: 0,

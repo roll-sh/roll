@@ -5540,6 +5540,11 @@ impl Binder<'_, '_> {
             ty,
             ignore_nulls: false,
             subquery: None,
+            // (`OVER w` alone: the named window itself.)
+            name: f.over.as_deref().and_then(|w| {
+                (!w.name.is_empty() && w.partition_clause.is_empty() && w.order_clause.is_empty() && w.refname.is_empty())
+                    .then(|| w.name.clone())
+            }),
         })
     }
 

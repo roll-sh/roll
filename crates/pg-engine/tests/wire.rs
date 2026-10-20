@@ -920,3 +920,131 @@ fn heap_order_sessions_and_reopen() {
     });
     s.engine.shutdown();
 }
+
+/// Sessions connecting to and leaving the same and different databases while the idle
+/// closer runs flat out and other databases are created, renamed and dropped: every
+/// database closes and reopens under them (a store must not be opened while its old one
+/// is still closing), nothing they wrote is lost, and template0 always refuses with 55000.
+#[test]
+fn concurrent_connects_and_closes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const DBS: [&str; 3] = ["cc1", "cc2", "cc3"];
+    const WORKERS: usize = 6;
+    const ROUNDS: usize = 30;
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let admin = s.connect("postgres").await;
+        for d in DBS {
+            admin.batch_execute(&format!("CREATE DATABASE {d}")).await.unwrap();
+            let c = s.connect(d).await;
+            c.batch_execute("CREATE TABLE t (w int, i int)").await.unwrap();
+        }
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    let closer = {
+        let (e, stop) = (s.engine.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                e.close_idle(Duration::ZERO);
+                std::thread::yield_now();
+            }
+        })
+    };
+    let s = &s;
+    std::thread::scope(|sc| {
+        for w in 0..WORKERS {
+            sc.spawn(move || {
+                runtime().block_on(async move {
+                    for i in 0..ROUNDS {
+                        // Two workers share each database at a time; each moves on to the next.
+                        let db = DBS[(w + i) % DBS.len()];
+                        let c = s.connect(db).await;
+                        c.execute("INSERT INTO t VALUES ($1, $2)", &[&(w as i32), &(i as i32)])
+                            .await
+                            .unwrap();
+                        drop(c);
+                        if i % 4 == w % 4 {
+                            let err = s
+                                .config("template0", "secret")
+                                .connect(NoTls)
+                                .await
+                                .err()
+                                .expect("template0 refuses connections");
+                            assert_eq!(err.code().map(|c| c.code()), Some("55000"), "{err:?}");
+                        }
+                    }
+                })
+            });
+        }
+        // Databases coming and going beside them.
+        sc.spawn(move || {
+            runtime().block_on(async move {
+                let admin = s.connect("postgres").await;
+                for n in 0..8 {
+                    admin.batch_execute(&format!("CREATE DATABASE churn{n}")).await.unwrap();
+                    {
+                        let c = s.connect(&format!("churn{n}")).await;
+                        c.batch_execute("CREATE TABLE k AS SELECT 1 AS v").await.unwrap();
+                    }
+                    // Its session may not have ended yet.
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        match admin
+                            .batch_execute(&format!("ALTER DATABASE churn{n} RENAME TO churned{n}"))
+                            .await
+                        {
+                            Ok(()) => break,
+                            Err(e) if e.code().map(|c| c.code()) == Some("55006")
+                                && Instant::now() < deadline =>
+                            {
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                            }
+                            Err(e) => panic!("rename: {e:?}"),
+                        }
+                    }
+                    let c = s.connect(&format!("churned{n}")).await;
+                    let v: i32 = c.query_one("SELECT v FROM k", &[]).await.unwrap().get(0);
+                    assert_eq!(v, 1);
+                    drop(c);
+                    admin
+                        .batch_execute(&format!("DROP DATABASE churned{n} WITH (FORCE)"))
+                        .await
+                        .unwrap();
+                }
+            })
+        });
+    });
+    stop.store(true, Ordering::Relaxed);
+    closer.join().unwrap();
+    runtime().block_on(async {
+        let mut total = 0;
+        for (d, db) in DBS.iter().enumerate() {
+            let c = s.connect(db).await;
+            let mut got: Vec<(i32, i32)> = c
+                .query("SELECT w, i FROM t", &[])
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| (r.get(0), r.get(1)))
+                .collect();
+            got.sort();
+            let mut want: Vec<(i32, i32)> = (0..WORKERS)
+                .flat_map(|w| (0..ROUNDS).map(move |i| (w, i)))
+                .filter(|(w, i)| (w + i) % DBS.len() == d)
+                .map(|(w, i)| (w as i32, i as i32))
+                .collect();
+            want.sort();
+            assert_eq!(got, want, "rows of {db}");
+            total += got.len();
+        }
+        assert_eq!(total, WORKERS * ROUNDS);
+        let admin = s.connect("postgres").await;
+        let n: i64 = admin
+            .query_one("SELECT count(*) FROM pg_database WHERE datname LIKE 'churn%'", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 0);
+    });
+    s.engine.shutdown();
+}

@@ -197,7 +197,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
                     .first()
                     .is_some_and(|p| matches!(&**p, Plan::Update(_) | Plan::Delete(_)));
             let inputs = if inh.is_some() && !dml {
-                runtime_pruned(inputs, crate::sql::binder::partition::Known::Running, ctx)
+                runtime_pruned(inputs, crate::sql::binder::partition::Known::Exec, ctx)
             } else {
                 inputs.clone()
             };

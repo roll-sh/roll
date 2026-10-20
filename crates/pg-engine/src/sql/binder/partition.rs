@@ -367,6 +367,9 @@ pub fn pruned(quals: &[Expr], levels: &[PartLevel]) -> bool {
 pub enum Known {
     Start,
     Running,
+    /// Each time the plan is (re)scanned: parameters from an outer row too (exec
+    /// pruning).
+    Exec,
 }
 
 fn knowable(e: &Expr) -> Option<Known> {
@@ -380,7 +383,9 @@ fn knowable(e: &Expr) -> Option<Known> {
     }
     let mut k = Some(Known::Start);
     e.walk(&mut |x| match x {
-        Expr::Col(..) | Expr::Outer(..) => k = None,
+        Expr::Col(..) => k = None,
+        // (An outer row's value: known when the plan is rescanned for it.)
+        Expr::Outer(..) => k = k.map(|k| k.max(Known::Exec)),
         Expr::Call(d, ..) if d.volatility == 'v' => k = None,
         // A call of a stable function over values known at the start: known then too
         // (its arguments are walked as its params).
@@ -392,8 +397,8 @@ fn knowable(e: &Expr) -> Option<Known> {
         Expr::Subquery(s) => {
             if !s.params.is_empty() || s.kind != crate::sql::expr::SubqueryKind::Scalar {
                 k = None;
-            } else if k.is_some() {
-                k = Some(Known::Running);
+            } else {
+                k = k.map(|k| k.max(Known::Running));
             }
         }
         _ => {}

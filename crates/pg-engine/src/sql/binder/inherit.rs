@@ -221,7 +221,15 @@ impl super::Binder<'_, '_> {
         let cat = self.cat.clone();
         let on = self.exclusion_mode() != "off";
         let root = scan.table.oid;
-        expand(&cat, scan, refname, &mut |t| {
+        // (A sub-partitioned partition with a default partition queried itself: its own
+        // partition constraint prunes too, gen_partprune_steps.)
+        let own = scan.table.partbound.is_some()
+            && scan.table.partkey.is_some()
+            && cat
+                .partitions(root)
+                .into_iter()
+                .any(|o| cat.table(o).is_some_and(|c| matches!(c.partbound, Some(crate::catalog::PartBound::Default))));
+        let mut plan = expand(&cat, scan, refname, &mut |t| {
             self.check_foreign_scan(t)?;
             Ok((
                 if on {
@@ -231,6 +239,33 @@ impl super::Binder<'_, '_> {
                 },
                 self.partition_levels(t, Some(root))?,
             ))
-        })
+        })?;
+        if own {
+            fn scans<'p>(p: &'p mut Plan, out: &mut Vec<&'p mut ScanPlan>) {
+                match p {
+                    Plan::Scan(s) => out.push(s),
+                    Plan::Project { input, .. } | Plan::Filter { input, .. } => scans(Arc::make_mut(input), out),
+                    Plan::Append { inputs, .. } => {
+                        for i in inputs {
+                            scans(Arc::make_mut(i), out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            scans(&mut plan, &mut found);
+            let tables: Vec<Arc<Table>> = found.iter().map(|s| s.table.clone()).collect();
+            let mut levels = Vec::new();
+            for t in &tables {
+                levels.push(self.partition_levels(t, None)?);
+            }
+            for (s, l) in found.into_iter().zip(levels) {
+                if s.part_excl.is_none() {
+                    s.part_excl = l;
+                }
+            }
+        }
+        Ok(plan)
     }
 }

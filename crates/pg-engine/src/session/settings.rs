@@ -373,6 +373,10 @@ pub struct Settings {
     /// What every statement derives from the settings, built on first use and dropped when
     /// a value changes (see `touched`).
     derived: DerivedCache,
+    /// The values `start_transaction` replaced (of `TXN_START`'s parameters), and its nest
+    /// level: the GUC stack entries its SET LOCALs make, until something needs them there
+    /// (`stack_txn_start`).
+    txn_start: Option<(usize, [Option<String>; 2])>,
 }
 
 impl Default for Settings {
@@ -385,6 +389,7 @@ impl Default for Settings {
             reserved: Vec::new(),
             changed: Vec::new(),
             derived: DerivedCache::default(),
+            txn_start: None,
         }
     }
 }
@@ -404,6 +409,23 @@ struct Derived {
     /// `role` and `session_authorization`.
     role: String,
     session_authorization: String,
+    /// `session_search_path`'s last answer.
+    path_memo: PathMemo,
+    /// A new transaction's characteristics (`default_transaction_isolation`, `…_read_only`),
+    /// and `lock_timeout` (ms).
+    default_txn: (crate::txn::Isolation, bool),
+    lock_timeout: i64,
+}
+
+/// A session's search path (`session_search_path`) for a `$user` and backend id: what every
+/// statement looks names up in, worked out once per change of the settings, user or backend.
+#[derive(Default)]
+struct PathMemo(parking_lot::Mutex<Option<(String, i32, Vec<String>)>>);
+
+impl Clone for PathMemo {
+    fn clone(&self) -> Self {
+        PathMemo::default()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -422,6 +444,9 @@ const NOT_DERIVED: &[&str] = &[
     "transaction_read_only",
     "transaction_deferrable",
 ];
+
+/// What a transaction's start sets (`start_transaction`).
+const TXN_START: [&str; 2] = ["transaction_isolation", "transaction_read_only"];
 
 pub fn canonical_name(name: &str) -> String {
     match find(name) {
@@ -1134,6 +1159,14 @@ impl Settings {
                     .get_str("session_authorization")
                     .unwrap_or_default()
                     .to_string(),
+                path_memo: PathMemo::default(),
+                default_txn: (
+                    self.get_str("default_transaction_isolation")
+                        .and_then(crate::txn::Isolation::parse)
+                        .unwrap_or(crate::txn::Isolation::ReadCommitted),
+                    self.bool("default_transaction_read_only"),
+                ),
+                lock_timeout: self.int("lock_timeout"),
             })
         })
     }
@@ -1378,8 +1411,53 @@ impl Settings {
         Ok(())
     }
 
+    /// A transaction starts as `isolation` (`Isolation::name`) and `read_only`: SET LOCAL
+    /// transaction_isolation and transaction_read_only. Unless they have stack entries
+    /// already, without making them yet (each transaction does this; few need them).
+    pub fn start_transaction(&mut self, isolation: &'static str, read_only: bool) {
+        let values = [isolation, if read_only { "on" } else { "off" }];
+        if self.txn_start.is_some() || TXN_START.iter().any(|n| self.stack.contains_key(*n)) {
+            for (name, v) in TXN_START.iter().zip(values) {
+                let _ = self.set(name, Some(v), true, true);
+            }
+            return;
+        }
+        // (What `set` does with these: user-context parameters, values in canonical form,
+        // neither reported nor read by `Derived`.)
+        let mut priors = [None, None];
+        for ((name, v), prior) in TXN_START.iter().zip(values).zip(&mut priors) {
+            *prior = match self.values.get_mut(*name) {
+                Some(slot) => Some(std::mem::replace(slot, v.to_string())),
+                None => {
+                    self.values.insert(name.to_string(), v.to_string());
+                    None
+                }
+            };
+        }
+        self.txn_start = Some((self.level, priors));
+    }
+
+    /// Make the stack entries `start_transaction` left out (before the stack is used).
+    fn stack_txn_start(&mut self) {
+        let Some((level, priors)) = self.txn_start.take() else {
+            return;
+        };
+        for (name, prior) in TXN_START.iter().zip(priors) {
+            self.stack.insert(
+                name.to_string(),
+                vec![Stacked {
+                    level,
+                    state: StackState::Local,
+                    prior,
+                    masked: None,
+                }],
+            );
+        }
+    }
+
     /// `push_old_value`: remember the value before the first change at this nest level.
     fn push_old(&mut self, name: &str, action: StackState) {
+        self.stack_txn_start();
         let level = self.level;
         if let Some(top) = self.stack.get_mut(name).and_then(|s| s.last_mut())
             && top.level >= level
@@ -1415,6 +1493,7 @@ impl Settings {
 
     /// `AtEOXact_GUC`: the (sub)transactions at `nest_level` and deeper end.
     fn at_eoxact(&mut self, commit: bool, nest_level: usize) {
+        self.stack_txn_start();
         if self.stack.is_empty() {
             return;
         }
@@ -1607,7 +1686,27 @@ impl Settings {
 
     /// Transaction end: undo SET LOCAL, and on abort undo every SET made in the transaction.
     pub fn end_transaction(&mut self, committed: bool) {
-        self.at_eoxact(committed, 1);
+        if self.stack.is_empty()
+            && let Some((_, priors)) = self.txn_start.take()
+        {
+            // Just `start_transaction`'s SET LOCALs: what `at_eoxact` does with their entries.
+            for (name, prior) in TXN_START.iter().zip(priors) {
+                match prior {
+                    Some(v) => {
+                        if let Some(slot) = self.values.get_mut(*name) {
+                            *slot = v;
+                        } else {
+                            self.values.insert(name.to_string(), v);
+                        }
+                    }
+                    None => {
+                        self.values.remove(*name);
+                    }
+                }
+            }
+        } else {
+            self.at_eoxact(committed, 1);
+        }
         self.level = 1;
     }
 
@@ -1629,6 +1728,16 @@ impl Settings {
         self.derived().max_stack_depth
     }
 
+    /// A new transaction's isolation level and read-only status, by default.
+    pub fn default_txn(&self) -> (crate::txn::Isolation, bool) {
+        self.derived().default_txn
+    }
+
+    /// `int("lock_timeout")`.
+    pub fn lock_timeout(&self) -> i64 {
+        self.derived().lock_timeout
+    }
+
     /// How the scanner reads string literals under these settings.
     pub fn lex_opts(&self) -> crate::sql::scs::LexOpts {
         self.derived().lex
@@ -1640,6 +1749,32 @@ impl Settings {
             .iter()
             .map(|s| s.as_deref().unwrap_or(user).to_string())
             .collect()
+    }
+
+    /// The search path of backend `pid`'s session: `search_path` with `$user` as `user`, and
+    /// `pg_temp` as the session's temporary schema (`temp`; first when not listed).
+    pub fn session_search_path(
+        &self,
+        user: &str,
+        pid: i32,
+        temp: impl FnOnce() -> String,
+    ) -> Vec<String> {
+        let d = self.derived();
+        let mut memo = d.path_memo.0.lock();
+        if let Some((u, p, path)) = &*memo
+            && u == user
+            && *p == pid
+        {
+            return path.clone();
+        }
+        let mut path = self.search_path(user);
+        let temp = temp();
+        match path.iter().position(|s| s == "pg_temp") {
+            Some(i) => path[i] = temp,
+            None => path.insert(0, temp),
+        }
+        *memo = Some((user.to_string(), pid, path.clone()));
+        path
     }
 
     /// `get_str("role")`, or "".

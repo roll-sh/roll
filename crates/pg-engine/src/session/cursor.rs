@@ -463,6 +463,15 @@ fn temp_buffers(ctx: &ExecCtx) -> usize {
     }
 }
 
+/// Whether `persist_for_commit` has a cursor to run into a store.
+pub fn any_to_persist(sess: &crate::session::state::SessionState, commit: bool) -> bool {
+    sess.cursors.borrow().values().any(|c| persisted(c, commit))
+}
+
+fn persisted(c: &Cursor, commit: bool) -> bool {
+    (c.pinned || (commit && c.hold)) && c.lazy.is_some() && !c.failed
+}
+
 /// Before the transaction commits, holdable cursors (and those PL/pgSQL loops read, over a
 /// COMMIT or ROLLBACK in a procedure) are run into a store (PersistHoldablePortal).
 pub fn persist_for_commit(ctx: &ExecCtx, commit: bool) -> Result<()> {
@@ -471,7 +480,7 @@ pub fn persist_for_commit(ctx: &ExecCtx, commit: bool) -> Result<()> {
         .cursors
         .borrow()
         .iter()
-        .filter(|(_, c)| (c.pinned || (commit && c.hold)) && c.lazy.is_some() && !c.failed)
+        .filter(|(_, c)| persisted(c, commit))
         .map(|(n, _)| n.clone())
         .collect();
     for name in names {

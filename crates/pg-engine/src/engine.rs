@@ -10,9 +10,9 @@ use crate::session::state::{Activity, Cluster, SessionState};
 use crate::storage::cache::BlockCache;
 use crate::storage::{Store, StoreOptions};
 use crate::txn::{Database, Isolation, Txn};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
@@ -107,11 +107,36 @@ struct Backend {
     activity: Activity,
 }
 
+/// The open databases, and those whose store is closing. A database's files aren't opened
+/// again until its old store is done with them: opening a store clears out what a closing
+/// one may still be writing (the files it flushes to, its MANIFEST.tmp, the WAL it retires).
+#[derive(Default)]
+struct OpenDbs {
+    dbs: HashMap<u32, Arc<Database>>,
+    closing: HashSet<u32>,
+}
+
+/// A database being closed (or kept closed while its files are copied, renamed or removed):
+/// it is opened again only once this drops.
+struct Closing<'a> {
+    engine: &'a Engine,
+    oid: u32,
+}
+
+impl Drop for Closing<'_> {
+    fn drop(&mut self) {
+        self.engine.open.lock().closing.remove(&self.oid);
+        self.engine.reopenable.notify_all();
+    }
+}
+
 pub struct Engine {
     opts: EngineOptions,
     cache: Arc<BlockCache>,
     registry: Mutex<Registry>,
-    open: Mutex<HashMap<u32, Arc<Database>>>,
+    open: Mutex<OpenDbs>,
+    /// Signalled when a database stops closing (`OpenDbs::closing`).
+    reopenable: Condvar,
     /// Held while committing catalog changes, so the cluster-wide catalogs change one
     /// transaction at a time and reach every open database in order.
     shared_lock: Mutex<()>,
@@ -189,7 +214,8 @@ impl Engine {
                 opts,
                 cache,
                 registry: Mutex::new(registry),
-                open: Mutex::new(HashMap::new()),
+                open: Mutex::new(OpenDbs::default()),
+                reopenable: Condvar::new(),
                 shared_lock: Mutex::new(()),
                 shared_history: Mutex::new(Default::default()),
                 oids,
@@ -252,22 +278,49 @@ impl Engine {
         }
     }
 
-    /// The open database for `entry`, opening (and on first use bootstrapping) it.
-    fn open_db(
-        &self,
-        open: &mut HashMap<u32, Arc<Database>>,
-        entry: &DbEntry,
-    ) -> Result<Arc<Database>> {
-        if let Some(db) = open.get(&entry.oid) {
-            return Ok(db.clone());
+    /// The open database for `entry`, opening (and on first use bootstrapping) it; once its
+    /// store has finished closing, if it is closing.
+    fn open_db(&self, entry: &DbEntry) -> Result<Arc<Database>> {
+        let mut open = self.open.lock();
+        loop {
+            if let Some(db) = open.dbs.get(&entry.oid) {
+                return Ok(db.clone());
+            }
+            if !open.closing.contains(&entry.oid) {
+                break;
+            }
+            self.reopenable.wait(&mut open);
+        }
+        // (It may have been dropped or renamed meanwhile.)
+        if !self
+            .registry
+            .lock()
+            .databases
+            .iter()
+            .any(|d| d.oid == entry.oid && d.name == entry.name)
+        {
+            return Err(Error::new(
+                code::INVALID_CATALOG_NAME,
+                format!("database \"{}\" does not exist", entry.name),
+            )
+            .fatal());
         }
         let store = Store::open(&self.db_dir(entry.oid), self.store_options())?;
         let db = Database::open(&entry.name, entry.oid, store, &entry.owner)?;
         db.set_oids(self.oids.clone());
         db.set_xids(self.xids.clone());
         info!(database = %entry.name, "opened database");
-        open.insert(entry.oid, db.clone());
+        open.dbs.insert(entry.oid, db.clone());
         Ok(db)
+    }
+
+    /// Whether `db` is (still) the open instance of its database.
+    fn is_open(&self, db: &Arc<Database>) -> bool {
+        self.open
+            .lock()
+            .dbs
+            .get(&db.oid)
+            .is_some_and(|d| Arc::ptr_eq(d, db))
     }
 
     /// First start: take the cluster-wide catalogs from `postgres` and move the oid counter
@@ -279,7 +332,7 @@ impl Engine {
             let mut floor = 0;
             let mut base = None;
             for e in &entries {
-                let db = self.open_db(&mut self.open.lock(), e)?;
+                let db = self.open_db(e)?;
                 let c = db.catalog();
                 floor = floor.max(c.next_oid);
                 if e.name == "postgres" {
@@ -362,6 +415,7 @@ impl Engine {
         let dbs: Vec<Arc<Database>> = self
             .open
             .lock()
+            .dbs
             .iter()
             .filter(|(oid, _)| Some(**oid) != except)
             .map(|(_, d)| d.clone())
@@ -416,15 +470,23 @@ impl Engine {
     }
 
     /// Roles for authenticating to `dbname`: its own catalog, or `postgres`'s when it doesn't
-    /// exist (so a wrong database name is reported only after authentication).
+    /// exist or takes no connections (so a wrong database name, or template0, is reported
+    /// only after authentication, and template0 isn't opened for it).
     pub fn auth_catalog(&self, dbname: &str) -> Result<Arc<Catalog>> {
         let entry = self
             .entry(dbname)
+            .filter(|e| e.allow_connections)
             .or_else(|| self.entry("postgres"))
             .ok_or_else(|| internal("no postgres database"))?;
-        let db = self.open_db(&mut self.open.lock(), &entry)?;
-        self.ensure_synced(&db)?;
-        Ok(db.catalog())
+        loop {
+            let db = self.open_db(&entry)?;
+            match self.ensure_synced(&db) {
+                Ok(()) => return Ok(db.catalog()),
+                // Closed meanwhile (DROP / RENAME / template copy): open it again.
+                Err(_) if !self.is_open(&db) => continue,
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Allocate a backend id and cancel key for a new connection.
@@ -485,18 +547,23 @@ impl Engine {
             )
             .fatal());
         }
-        // Create the session under the lock so the idle closer can't close the database
-        // between opening it and the session count going up; its roles must be up to date
-        // first (which can't happen under that lock).
+        // Create the session under the lock so the database can't be closed between the
+        // check that it is still open and the session count going up; its roles must be up
+        // to date first (which can't happen under that lock). (The idle closer leaves a
+        // database alone while this holds it; DROP / RENAME / a template copy don't, and
+        // then the steps may fail on the closed store: it is opened again, or reported gone.)
         let session = loop {
-            let db = self.open_db(&mut self.open.lock(), &entry)?;
-            self.ensure_synced(&db)?;
-            self.upgrade_index_keys(&db)?;
-            self.upgrade_storage(&db)?;
+            let db = self.open_db(&entry)?;
+            let ready = self
+                .ensure_synced(&db)
+                .and_then(|_| self.upgrade_index_keys(&db))
+                .and_then(|_| self.upgrade_storage(&db));
             let open = self.open.lock();
-            if open.get(&entry.oid).is_some_and(|d| Arc::ptr_eq(d, &db)) {
-                break Session::new(SessionState::new(db, self.arc(), user, pid));
+            if !open.dbs.get(&entry.oid).is_some_and(|d| Arc::ptr_eq(d, &db)) {
+                continue;
             }
+            ready?;
+            break Session::new(SessionState::new(db, self.arc(), user, pid));
         };
         let others = self
             .backends
@@ -557,19 +624,30 @@ impl Engine {
 
     /// Close databases nobody has used for `idle`.
     pub fn close_idle(&self, idle: Duration) {
-        let closing: Vec<Arc<Database>> = {
+        let closing: Vec<(Arc<Database>, Closing<'_>)> = {
             let mut open = self.open.lock();
             let ids: Vec<u32> = open
+                .dbs
                 .iter()
                 .filter(|(_, db)| {
-                    db.sessions.load(Ordering::Acquire) == 0
+                    // Held by nothing but this map: no session, nor a login, a catalog sync
+                    // or another database's statement working with it (each holds it; a
+                    // new hold needs this lock).
+                    Arc::strong_count(db) == 1
+                        && db.sessions.load(Ordering::Acquire) == 0
                         && db.last_active.lock().elapsed() >= idle
                 })
                 .map(|(id, _)| *id)
                 .collect();
-            ids.into_iter().filter_map(|id| open.remove(&id)).collect()
+            ids.into_iter()
+                .filter_map(|id| {
+                    let db = open.dbs.remove(&id)?;
+                    open.closing.insert(id);
+                    Some((db, Closing { engine: self, oid: id }))
+                })
+                .collect()
         };
-        for db in closing {
+        for (db, _closing) in closing {
             match db.store.close() {
                 Ok(()) => info!(database = %db.name, "closed idle database"),
                 Err(e) => warn!(database = %db.name, error = %e, "closing idle database failed"),
@@ -653,7 +731,7 @@ impl Engine {
         let entry = self
             .entry(dbname)
             .ok_or_else(|| internal(format!("no database {dbname}")))?;
-        let db = self.open_db(&mut self.open.lock(), &entry)?;
+        let db = self.open_db(&entry)?;
         let names = Self::reencoded_indexes(&db.catalog());
         let mut s = self.internal_session(&db);
         crate::storage::keys::with_legacy_index_keys(|| -> Result<()> {
@@ -1019,7 +1097,7 @@ impl Engine {
         let entry = self
             .entry(dbname)
             .ok_or_else(|| internal(format!("no database {dbname}")))?;
-        let db = self.open_db(&mut self.open.lock(), &entry)?;
+        let db = self.open_db(&entry)?;
         Self::set_storage_format(&db, 0)
     }
 
@@ -1030,7 +1108,7 @@ impl Engine {
         let entry = self
             .entry(dbname)
             .ok_or_else(|| internal(format!("no database {dbname}")))?;
-        let db = self.open_db(&mut self.open.lock(), &entry)?;
+        let db = self.open_db(&entry)?;
         let cat = db.catalog();
         let keyed = cat
             .tables
@@ -1046,13 +1124,13 @@ impl Engine {
         let entry = self
             .entry(dbname)
             .ok_or_else(|| internal(format!("no database {dbname}")))?;
-        let db = self.open_db(&mut self.open.lock(), &entry)?;
+        let db = self.open_db(&entry)?;
         Ok(db.catalog().index_key_format)
     }
 
     /// Number of databases currently open (holding memory).
     pub fn open_databases(&self) -> usize {
-        self.open.lock().len()
+        self.open.lock().dbs.len()
     }
 
     /// Flush and close everything (server shutdown).
@@ -1061,20 +1139,50 @@ impl Engine {
         for b in self.backends.lock().values() {
             Self::terminate(b);
         }
-        let dbs: Vec<Arc<Database>> = self.open.lock().drain().map(|(_, d)| d).collect();
-        for db in dbs {
+        let dbs: Vec<(Arc<Database>, Closing<'_>)> = {
+            let mut open = self.open.lock();
+            let dbs: Vec<(u32, Arc<Database>)> = open.dbs.drain().collect();
+            dbs.into_iter()
+                .map(|(oid, db)| {
+                    open.closing.insert(oid);
+                    (db, Closing { engine: self, oid })
+                })
+                .collect()
+        };
+        for (db, _closing) in dbs {
             if let Err(e) = db.store.close() {
                 warn!(database = %db.name, error = %e, "close failed");
             }
         }
     }
 
-    /// Close a database that must have no sessions (DROP / RENAME / template copy).
-    fn close_now(&self, oid: u32) -> Result<()> {
-        if let Some(db) = self.open.lock().remove(&oid) {
+    /// Close a database that must have no sessions (DROP / RENAME / template copy), and keep
+    /// it closed while the result lives (its files are the caller's to copy, move or remove).
+    /// `busy` is the error when sessions came in after the caller looked.
+    fn close_now(&self, oid: u32, busy: impl FnOnce(usize) -> Error) -> Result<Closing<'_>> {
+        let db = {
+            let mut open = self.open.lock();
+            while open.closing.contains(&oid) {
+                self.reopenable.wait(&mut open);
+            }
+            // (Sessions count themselves under this lock, once they found it still open.)
+            if let Some(n) = open
+                .dbs
+                .get(&oid)
+                .map(|db| db.sessions.load(Ordering::SeqCst))
+                .filter(|n| *n > 0)
+            {
+                return Err(busy(n));
+            }
+            let db = open.dbs.remove(&oid);
+            open.closing.insert(oid);
+            db
+        };
+        let closing = Closing { engine: self, oid };
+        if let Some(db) = db {
             db.store.close()?;
         }
-        Ok(())
+        Ok(closing)
     }
 
     fn busy(name: &str, n: usize) -> Error {
@@ -1082,11 +1190,23 @@ impl Engine {
             code::OBJECT_IN_USE,
             format!("database \"{name}\" is being accessed by other users"),
         )
-        .detail(if n == 1 {
+        .detail(Self::others_detail(n))
+    }
+
+    fn source_busy(name: &str, n: usize) -> Error {
+        Error::new(
+            code::OBJECT_IN_USE,
+            format!("source database \"{name}\" is being accessed by other users"),
+        )
+        .detail(Self::others_detail(n))
+    }
+
+    fn others_detail(n: usize) -> String {
+        if n == 1 {
             "There is 1 other session using the database.".to_string()
         } else {
             format!("There are {n} other sessions using the database.")
-        })
+        }
     }
 
     fn save(&self, r: &Registry) -> Result<()> {
@@ -1224,15 +1344,7 @@ impl Cluster for Engine {
                 })?;
                 let n = self.sessions_on(e.oid, None).len();
                 if n > 0 {
-                    return Err(Error::new(
-                        code::OBJECT_IN_USE,
-                        format!("source database \"{t}\" is being accessed by other users"),
-                    )
-                    .detail(if n == 1 {
-                        "There is 1 other session using the database.".to_string()
-                    } else {
-                        format!("There are {n} other sessions using the database.")
-                    }));
+                    return Err(Self::source_busy(t, n));
                 }
                 Some(e)
             }
@@ -1240,8 +1352,10 @@ impl Cluster for Engine {
         let oid = self.oids.take(0, 1);
         let dir = self.db_dir(oid);
         if let Some(src) = &source {
-            // A copy of a quiet database: its files are complete once it's closed.
-            self.close_now(src.oid)?;
+            // A copy of a quiet database: its files are complete once it's closed (and stay
+            // so while it is kept closed).
+            let t = template.unwrap_or_default();
+            let _closed = self.close_now(src.oid, |n| Self::source_busy(t, n))?;
             copy_dir(&self.db_dir(src.oid), &dir)?;
         } else {
             // Bootstrap now; it gets the cluster-wide catalogs when it's first opened.
@@ -1307,13 +1421,14 @@ impl Cluster for Engine {
                 return Err(Self::busy(name, left));
             }
         }
-        self.close_now(entry.oid)?;
+        let closed = self.close_now(entry.oid, |n| Self::busy(name, n))?;
         {
             let mut r = self.registry.lock();
             r.databases.retain(|d| d.oid != entry.oid);
             self.save(&r)?;
         }
         let _ = std::fs::remove_dir_all(self.db_dir(entry.oid));
+        drop(closed);
         // dropDatabaseDependencies, DeleteSharedComments: what refers to it goes too.
         self.publish(|s| {
             let n = s.comments.len() + s.acls.len() + s.role_settings.len();
@@ -1343,13 +1458,14 @@ impl Cluster for Engine {
         if !users.is_empty() {
             return Err(Self::busy(from, users.len()));
         }
-        self.close_now(entry.oid)?;
+        let closed = self.close_now(entry.oid, |n| Self::busy(from, n))?;
         let mut r = self.registry.lock();
         if let Some(d) = r.databases.iter_mut().find(|d| d.oid == entry.oid) {
             d.name = to.to_string();
         }
         self.save(&r)?;
         drop(r);
+        drop(closed);
         // pg_db_role_setting refers to it by name here.
         self.publish(|s| {
             let mut changed = false;
@@ -1457,7 +1573,7 @@ impl Cluster for Engine {
         let entries = self.registry.lock().databases.clone();
         let mut out = Vec::new();
         for e in entries.iter().filter(|e| e.oid != current) {
-            match self.open_db(&mut self.open.lock(), e) {
+            match self.open_db(e) {
                 Ok(db) => out.push((e.oid, e.name.clone(), db)),
                 Err(err) => warn!(database = %e.name, error = %err, "opening database failed"),
             }

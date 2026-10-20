@@ -359,7 +359,7 @@ impl Session {
         let mut txn = self.state.db.begin(iso, ro, self.cancel.clone());
         txn.lock_peer = Some(self.state.lock_owner);
         self.state.temp_used.set(false);
-        let lt = self.state.settings.borrow().int("lock_timeout");
+        let lt = self.state.settings.borrow().lock_timeout();
         if lt > 0 {
             txn.lock_timeout = Some(std::time::Duration::from_millis(lt as u64));
         }
@@ -394,6 +394,7 @@ impl Session {
         // rolls back).
         if commit
             && self.txn.is_some()
+            && crate::session::cursor::any_to_persist(&self.state, true)
             && let Err(e) =
                 self.with_ctx(&[], |ctx| crate::session::cursor::persist_for_commit(ctx, true))
         {
@@ -569,11 +570,30 @@ impl Session {
         params: &[Value],
         f: impl FnOnce(&ExecCtx) -> Result<T>,
     ) -> Result<T> {
+        self.with_ctx_path(params, None, f)
+    }
+
+    /// `with_ctx`, given the session's search path when the caller has it at hand
+    /// (`SessionState::search_path`, after `ensure_txn`).
+    fn with_ctx_path<T>(
+        &mut self,
+        params: &[Value],
+        search_path: Option<Vec<String>>,
+        f: impl FnOnce(&ExecCtx) -> Result<T>,
+    ) -> Result<T> {
         self.ensure_txn();
         self.sync_lex();
         let txn = self.txn.as_ref().unwrap();
         txn.borrow_mut().begin_statement();
-        let ctx = ExecCtx::new(txn, &self.state, params, self.txn_time, Self::now());
+        let search_path = search_path.unwrap_or_else(|| self.state.search_path());
+        let ctx = ExecCtx::with_search_path(
+            txn,
+            &self.state,
+            params,
+            self.txn_time,
+            Self::now(),
+            search_path,
+        );
         let entered = current::enter(&ctx);
         let r = f(&ctx);
         drop(entered);
@@ -1035,7 +1055,7 @@ impl Session {
         }
         let types = p.param_types.clone();
         let no_params = !self.infer_params && params.is_empty() && types.is_empty();
-        let b = self.with_ctx(params, |ctx| {
+        let b = self.with_ctx_path(params, Some(path.clone()), |ctx| {
             let mut b = Binder::new(ctx, types);
             b.no_params = no_params;
             b.bind_statement(stmt)
@@ -2149,24 +2169,13 @@ pub(crate) fn set_deferrable(state: &SessionState, opts: &[Node]) {
 }
 
 fn default_txn_opts(state: &SessionState) -> (Isolation, bool) {
-    let s = state.settings.borrow();
-    let iso = s
-        .get_str("default_transaction_isolation")
-        .and_then(Isolation::parse)
-        .unwrap_or(Isolation::ReadCommitted);
-    (iso, s.bool("default_transaction_read_only"))
+    state.settings.borrow().default_txn()
 }
 
 /// A new transaction's characteristics, as `transaction_isolation` / `transaction_read_only`.
 fn txn_settings(state: &SessionState, iso: Isolation, ro: bool) {
     let mut s = state.settings.borrow_mut();
-    let _ = s.set("transaction_isolation", Some(iso.name()), true, true);
-    let _ = s.set(
-        "transaction_read_only",
-        Some(if ro { "on" } else { "off" }),
-        true,
-        true,
-    );
+    s.start_transaction(iso.name(), ro);
     s.changed
         .retain(|n| n != "transaction_isolation" && n != "transaction_read_only");
 }

@@ -202,6 +202,10 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
             false,
         ));
     }
+    // A materialized CTE's scan: uncorrelated rows of its own.
+    if let Plan::CteScan { ncols, .. } = p {
+        return Some((Vec::new(), p.clone(), vec![crate::types::DataType::Unknown; *ncols], false));
+    }
     let Plan::Append {
         inputs,
         inh: inh @ Some(_),
@@ -682,7 +686,18 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         types
             .iter()
             .enumerate()
-            .map(|(i, t)| Expr::Col(i, t.clone()))
+            .map(|(i, t)| {
+                // (A CTE's column: the type its comparison operator takes.)
+                let t = match t {
+                    crate::types::DataType::Unknown => sub
+                        .ops
+                        .get(i)
+                        .and_then(|o| o.args.get(1).cloned())
+                        .unwrap_or(crate::types::DataType::Unknown),
+                    t => t.clone(),
+                };
+                Expr::Col(i, t)
+            })
             .collect()
     });
     if exprs.len() != sub.left.len() {

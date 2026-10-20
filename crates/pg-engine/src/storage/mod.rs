@@ -362,13 +362,15 @@ impl Store {
         check: impl FnOnce(&Store) -> Result<()>,
         after: impl FnOnce(u64),
     ) -> Result<u64> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(internal("database is closed"));
-        }
         let rotate;
         let ts;
         {
             let mut c = self.commit.lock();
+            // (Checked under the commit lock: `close` rotates under it, so no commit lands
+            // in a WAL or memtable after the store's last flush.)
+            if self.closed.load(Ordering::Acquire) {
+                return Err(internal("database is closed"));
+            }
             check(self)?;
             if writes.is_empty() {
                 return Ok(self.visible_ts());
@@ -395,7 +397,16 @@ impl Store {
 
     /// Freeze the memtable and start a new one (with its own WAL file).
     fn rotate(&self) -> Result<()> {
+        self.rotate_inner(false)
+    }
+
+    /// `rotate`; but once the store is closed only `close`'s own rotation (`closing`) runs:
+    /// the database's files may belong to a store opened after it.
+    fn rotate_inner(&self, closing: bool) -> Result<()> {
         let mut c = self.commit.lock();
+        if self.closed.load(Ordering::Acquire) && !closing {
+            return Ok(());
+        }
         let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
         let new_wal = WalWriter::create(&self.dir, seq)?;
         c.wal = new_wal;
@@ -494,6 +505,11 @@ impl Store {
 
     pub fn compact(&self) -> Result<()> {
         let _g = self.bg.lock();
+        // A closed store's files may belong to a store opened after it (`close` waits for a
+        // compaction that already runs: it takes `bg` too).
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let view = self.view();
         if view.l0.is_empty() {
             return Ok(());
@@ -593,7 +609,7 @@ impl Store {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        self.rotate()?;
+        self.rotate_inner(true)?;
         self.flush_all()?;
         let mut m = self.manifest.lock();
         m.last_ts = self.visible_ts();

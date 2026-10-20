@@ -782,7 +782,15 @@ impl Planner<'_, '_> {
             _ => return Vec::new(),
         };
         let key = &ii.keys[col];
-        if !matches_key(&args[0], key)
+        // (A text key indexed as bpchar (bpchar_ops): only a bpchar pattern operator, over
+        // the key relabelled as bpchar, matches its family.)
+        let bpchar_class = bpchar_class(ii, col);
+        if bpchar_class {
+            match &args[0] {
+                Expr::Cast(x, DataType::Text | DataType::Varchar(_), DataType::Bpchar(_), _) if matches_key(x, key) => {}
+                _ => return Vec::new(),
+            }
+        } else if !matches_key(&args[0], key)
             || !matches!(
                 key.ty(),
                 DataType::Text | DataType::Varchar(_) | DataType::Name | DataType::Bpchar(_)
@@ -802,6 +810,7 @@ impl Planner<'_, '_> {
         };
         let cty = match key.ty() {
             DataType::Bpchar(_) => DataType::Bpchar(-1),
+            _ if bpchar_class => DataType::Bpchar(-1),
             _ => DataType::Text,
         };
         let text = |s: &str| Expr::Const(Value::Text(s.into()), cty.clone());
@@ -1009,6 +1018,28 @@ impl VolatileCall for Expr {
     }
 }
 
+/// A column of a non-bpchar key indexed with a bpchar operator class (bpchar_ops).
+fn bpchar_class(ii: &IndexInfo, col: usize) -> bool {
+    !matches!(ii.keys.get(col).map(|k| k.ty()), Some(DataType::Bpchar(_)))
+        && ii
+            .ix
+            .columns
+            .get(col)
+            .filter(|c| c.opclass != 0)
+            .and_then(|c| crate::catalog::system::opclass_intype(c.opclass))
+            == Some(1042)
+}
+
+/// A clause comparing a value relabelled as bpchar.
+fn bpchar_operand(q: &Expr) -> bool {
+    match q {
+        Expr::Call(_, args, _) => args.first().is_some_and(|a| {
+            matches!(a, Expr::Cast(_, DataType::Text | DataType::Varchar(_), DataType::Bpchar(_), _))
+        }),
+        _ => false,
+    }
+}
+
 /// The index clauses of `quals` for each index column, in index column order.
 fn match_quals(
     ii: &IndexInfo,
@@ -1029,6 +1060,11 @@ fn match_quals(
             }
             // (Nor is a clause over a PlaceHolderVar an index qual.)
             if pl.phv_quals.borrow().iter().any(|(o, x)| *o == ii.ix.table && x.same_as(q)) {
+                continue;
+            }
+            // (A text key indexed as bpchar: only bpchar operators, over the key relabelled
+            // as bpchar, are its operator family's.)
+            if bpchar_class(ii, col) && !bpchar_operand(q) {
                 continue;
             }
             // A clause matches the first column it can (match_clause_to_index).

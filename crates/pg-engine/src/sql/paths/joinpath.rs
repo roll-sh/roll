@@ -1789,7 +1789,25 @@ impl Search<'_, '_, '_> {
                 let refs: Vec<&Expr> = exprs.iter().collect();
                 self.pl.num_groups(lr, &refs, rows_in)
             }
-            None => costs::clamp_rows(rows_in.min(costs::DEFAULT_NUM_DISTINCT)),
+            // (Columns with statistics of their own, as a CTE's of a table: their distinct
+            // counts; else estimate_num_groups' default.)
+            None => {
+                let leaf = &self.leaves[l];
+                let mut prod = 1.0;
+                let mut known = true;
+                for &g in cols.iter() {
+                    match leaf.cols.get(g - leaf.off) {
+                        Some((_, Some(v), _)) => prod *= v.ndistinct(&self.pl.cat).0,
+                        Some((_, None, Some(d))) => prod *= *d,
+                        _ => known = false,
+                    }
+                }
+                if known && !cols.is_empty() {
+                    costs::clamp_rows(prod.min(rows_in))
+                } else {
+                    costs::clamp_rows(rows_in.min(costs::DEFAULT_NUM_DISTINCT))
+                }
+            }
         };
         let n = cols.len() as f64;
         let width = input.width;

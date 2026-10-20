@@ -111,7 +111,8 @@ impl ViewBase {
     pub fn filter(&self) -> Option<Expr> {
         match self.conds.len() {
             0 => None,
-            _ => Some(Expr::And(self.conds.iter().map(|c| c.1.clone()).collect())),
+            // (The outer view's first: the rewriter adds each view's as it gets to it.)
+            _ => Some(Expr::And(self.conds.iter().rev().map(|c| c.1.clone()).collect())),
         }
     }
 }

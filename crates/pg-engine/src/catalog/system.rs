@@ -697,6 +697,11 @@ pub fn opclass_accepts(intype: u32, ty: &DataType) -> bool {
 pub fn opclass_name(oid: u32) -> Option<(&'static str, bool)> {
     OPCLASSES.iter().find(|c| c.0 == oid).map(|c| (c.2, c.6))
 }
+
+/// A built-in operator class's input type (opcintype).
+pub fn opclass_intype(oid: u32) -> Option<u32> {
+    OPCLASSES.iter().find(|c| c.0 == oid).map(|c| c.4)
+}
 /// Oid of a built-in collation.
 /// A built-in collation's name.
 pub fn collation_name(oid: u32) -> Option<&'static str> {
