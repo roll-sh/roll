@@ -123,10 +123,12 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
 
 ## Machine rules (learned the hard way)
 
-- **At most 2 agents at a time.** Six agents each building, running a debug engine and
-  driving Docker crashed the machine (out of RAM).
+- **Limit concurrent builds, not agents.** Six builds at once (each building, running a debug
+  engine and driving Docker) ran a machine out of RAM. Any number of agents can read,
+  edit and probe PostgreSQL; the heavy part is capped by `tools/heavy.sh`.
 - **Every heavy command goes through `tools/heavy.sh`**: cargo build/test/clippy, regress and
-  golden runs. It allows one at a time across agents. Hold it only for the command itself.
+  golden runs. It runs `HEAVY_SLOTS` jobs at once across agents (default 1; 2 is fine on a
+  62 GB / 16-core machine). Hold a slot only for the command itself.
 - **`CARGO_BUILD_JOBS=2`**, and wrap long cargo commands with a timeout.
 - **Disk:** on macOS the default `split-debuginfo = unpacked` leaves every build's `*.o` files in
   `target/debug/deps`. 1.5 million of them (~500 GB) once filled the disk. `heavy.sh` prunes
@@ -241,7 +243,7 @@ Then:
    engine, add a golden recorded from PostgreSQL, re-run the affected regress files (subset
    runs with PGREGRESS_ONLY and PGREGRESS_REPORT_DIR), and make sure nothing that matched
    before regresses. Results and errors before EXPLAIN text.
-3. Follow the machine rules: at most 2 agents at a time, every build/test/regress/golden run
+3. Follow the machine rules: limit concurrent builds (HEAVY_SLOTS), every build/test/regress/golden run
    through tools/heavy.sh, CARGO_BUILD_JOBS=2.
 4. After each verified batch (the whole `cargo test -p pg-engine` passes), update STATUS.md,
    commit with a clear message, and push the branch.
