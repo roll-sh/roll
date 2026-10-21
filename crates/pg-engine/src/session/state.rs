@@ -45,6 +45,10 @@ pub trait Cluster: Send + Sync {
     fn other_databases(&self, _current: u32) -> Vec<(u32, String, Arc<Database>)> {
         Vec::new()
     }
+    /// The directory server-side files are confined to, when they're allowed at all.
+    fn server_files(&self) -> Option<&crate::server_files::ServerFiles> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Default)]

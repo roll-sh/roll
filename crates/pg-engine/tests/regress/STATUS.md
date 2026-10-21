@@ -6,7 +6,9 @@ method). The numbers below come from one run of the whole schedule in one databa
 order (`PGREGRESS_TIMEOUT=400`), so every file sees the catalogs the files before it left, as
 `pg_regress` gives them (round 12's engine; that run measured 50700 matching units). Nine units of
 collate.icu.utf8 (370–394, 606, 609: a `GROUP BY x COLLATE c` key shown as `(x)`) were fixed after
-it and re-checked in a subset run of that file; they are counted as matching below.
+it and re-checked in a subset run of that file; they are counted as matching below. So are the
+28 units of misc_functions, largeobject and copy that server-side files fixed (see "Server-side
+files" below), re-checked in subset runs.
 
 Re-run one subset (example):
 
@@ -22,19 +24,19 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50709 (**99.14%**) |
-| units differing | 441 |
-| files fully matching | 185 |
-| engine output == expected/*.out (pg_regress "ok") | 162 files |
+| units matching | 50737 (**99.19%**) |
+| units differing | 413 |
+| files fully matching | 188 |
+| engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 394 | 89.3% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 18 | 4.1% |
-| by design (server-side files, large-object import/export; a parallel plan's combine function) | 29 | 6.6% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 394 | 95.4% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 18 | 4.4% |
+| by design (a parallel plan's combine function) | 1 | 0.2% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
@@ -58,23 +60,30 @@ join (3), with (3), updatable_views (3), join_hash (2), partition_info (2), grou
 Fixed in round 12: join 740–743, 745 and 791 match; 744 now runs and differs only in its plan
 (counted under C1).
 
-### By design — 29 units
-misc_functions (14), largeobject (13), copy (1), aggregates (1)
+### By design — 1 unit
+aggregates (1)
 
-- misc_functions: `pg_read_file`, `pg_read_binary_file`, `pg_stat_file`, `pg_ls_dir` of server
-  paths (14). Reading the host's files would expose the machine the engine runs on to its
-  tenants: refused for every role, with the error Postgres gives a role lacking the privilege
-  (`permission denied for function pg_read_file`, SQLSTATE 42501).
-- largeobject: server-side `lo_import`/`lo_export` (and the units reading the imported object),
-  for the same reason: `permission denied for function lo_import` / `lo_export` (42501).
-  Client-side `\lo_import` / `\lo_export` work.
-- copy: server-side `COPY FROM` a file (with progress reporting). There is no data directory a
-  tenant's COPY could safely read; refused with Postgres's `permission denied to COPY from a
-  file` and its DETAIL / HINT (`... to a file`, `... to or from an external program` likewise).
-  One-line `COPY ... :'file'` runs as `\copy` on both sides in the harness.
 - aggregates `balk` (1): a combine function returning NULL shows only under a parallel
   partial aggregation (Finalize / Partial Aggregate over Gather); the engine aggregates
   serially and its planner (C1) doesn't choose that plan here.
+
+### Server-side files — 0 units (were 28 by design)
+misc_functions (14), largeobject (13) and copy (1) match now. Server-side file access stays
+refused for every role by default (`permission denied for function pg_read_file`, `permission
+denied to COPY from a file`, with Postgres's DETAIL / HINT); a server started with
+`--allow-server-files <dir>` (`EngineOptions::server_files`) behaves as Postgres does for the
+roles Postgres allows (EXECUTE on the genfile / lo_import / lo_export functions; privileges of
+`pg_read_server_files` / `pg_write_server_files` for COPY), inside that directory only: it stands
+for the data directory, relative paths resolve against it, and every path gets Postgres's check
+for a role without `pg_read_server_files` ("absolute path not allowed", "path must be in or below
+the data directory"), plus a real-path check that refuses symbolic links leading out (Postgres
+would follow them). `COPY ... PROGRAM` stays refused. The regress harness starts the engine with
+the suite's directory (`PGREGRESS_DIR`: `data/`, `results/`, and a `postmaster.pid` and `base/`
+for misc_functions), and runs one-line `COPY ... :'file'` server-side unless psql wrote that file
+(4 statements left as `\copy`, were 45). Subset run of the 18 files with server-side COPYs (plus
+test_setup): misc_functions 134 → 148/148, largeobject 138 → 151/151, copy 117 → 118/118, no
+other unit changed. Code: `src/server_files.rs`; tests: `tests/server_files.rs`,
+`tests/sql/server_files_roles.sql`.
 
 Extension, not a difference: the table storage parameter `roll_pk_clustered` (roll's own;
 nothing Postgres records uses it). By default a table stores its rows under a hidden row id
@@ -559,7 +568,7 @@ produces no units on Linux (skipped by the file itself).
 | stats_import | 150 | 150 | 100% | yes | yes |  |
 | encoding | 81 | 81 | 100% | no | no |  |
 | euc_kr | 5 | 5 | 100% | yes | yes |  |
-| copy | 118 | 117 | 99% | yes | no | by design `server-side COPY file` (1) |
+| copy | 118 | 118 | 100% | yes | yes |  |
 | copyselect | 36 | 36 | 100% | no | no |  |
 | copydml | 62 | 62 | 100% | yes | yes |  |
 | copyencoding | 22 | 22 | 100% | yes | yes |  |
@@ -643,7 +652,7 @@ produces no units on Linux (skipped by the file itself).
 | async | 11 | 11 | 100% | yes | yes |  |
 | dbsize | 25 | 25 | 100% | yes | yes |  |
 | merge | 572 | 569 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
-| misc_functions | 148 | 134 | 91% | no | no | by design `server-side files` (14) |
+| misc_functions | 148 | 148 | 100% | no | no |  |
 | sysviews | 29 | 29 | 100% | yes | yes |  |
 | tsrf | 74 | 73 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | tid | 41 | 41 | 100% | yes | yes |  |
@@ -709,7 +718,7 @@ produces no units on Linux (skipped by the file itself).
 | polymorphism | 426 | 426 | 100% | yes | yes |  |
 | rowtypes | 237 | 230 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | returning | 145 | 142 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
-| largeobject | 151 | 138 | 91% | yes | no | wrong result `SELECT: row count differs` (11) |
+| largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 294 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (10) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 566 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (48) |

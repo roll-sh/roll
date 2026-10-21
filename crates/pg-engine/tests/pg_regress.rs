@@ -10,7 +10,11 @@
 //!   its `data/` is copied into the reference container at the same absolute path, so
 //!   `COPY ... FROM :'filename'` reads the same file on both servers.
 //! - The engine (`roll-engine`, built by cargo for this test) is started on 127.0.0.1:55600 with
-//!   a fresh data directory. The reference is the `roll-engine-ref` container (PG 18.6).
+//!   a fresh data directory, and with server-side files allowed in `PGREGRESS_DIR`
+//!   (`--allow-server-files`): it holds the suite's `data/` and `results/` (the absolute
+//!   paths the scripts use) and stands for the data directory (`pg_read_file('postmaster.pid')`,
+//!   `pg_ls_dir('.')`), so the harness puts a `postmaster.pid` and a `base/` there. The
+//!   reference is the `roll-engine-ref` container (PG 18.6).
 //! - Both sides get one database, `gxg_regression`, created and configured the way pg_regress
 //!   does (template0, UTF8, locale C, lc_*/bytea_output/timezone_abbreviations settings), and
 //!   every file of `parallel_schedule` runs in order against it, so objects created by earlier
@@ -528,17 +532,19 @@ fn prepare(src: &str, env: &HashMap<&str, String>) -> Prepared {
     let mut units = Vec::new();
     let mut rewrites = Vec::new();
     let mut vars: HashMap<String, String> = HashMap::new();
+    let mut client_files: BTreeSet<String> = BTreeSet::new();
     let mut cur = String::new();
     let mut start = 1;
     for (no, line) in src.lines().enumerate() {
         let mut line = rename_db(line);
         if lx.at_rest() {
             track_vars(&line, env, &mut vars);
-            if let Some(r) = copy_to_client(&line, &vars) {
+            if let Some(r) = copy_to_client(&line, &vars, &client_files) {
                 rewrites.push((line.clone(), r.clone()));
                 line = r;
             }
         }
+        client_written(&line, &vars, &mut client_files);
         if cur.trim().is_empty() && !cur.contains("/*") {
             start = no + 1;
         }
@@ -632,10 +638,42 @@ fn track_vars(line: &str, env: &HashMap<&str, String>, vars: &mut HashMap<String
     vars.insert(name.to_string(), val);
 }
 
-/// The engine has no server file system access by design, so one-line
-/// `COPY x FROM/TO :'file' ...;` statements become psql `\copy` on both sides (psql runs in the
-/// reference container, where the data files are). The echoed line changes accordingly.
-fn copy_to_client(line: &str, vars: &HashMap<String, String>) -> Option<String> {
+/// Files psql itself writes (`\o`, `\g`, `\w`, `\lo_export`, `\copy`): their names, as far
+/// as they can be resolved (`:var`, `:'var'`, a literal).
+fn client_written(line: &str, vars: &HashMap<String, String>, out: &mut BTreeSet<String>) {
+    const WRITERS: &[&str] = &["o", "out", "g", "gx", "w", "write", "lo_export", "copy"];
+    let mut rest = line;
+    while let Some(i) = rest.find('\\') {
+        let after = &rest[i + 1..];
+        let cmd: String = after.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        rest = &after[cmd.len()..];
+        if !WRITERS.contains(&cmd.as_str()) || !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let args = rest.split('\\').next().unwrap_or("");
+        for tok in args.split_whitespace() {
+            let name = tok.trim_end_matches(';');
+            let val = if let Some(v) = name.strip_prefix(":'").and_then(|v| v.strip_suffix('\'')) {
+                vars.get(v).cloned()
+            } else if let Some(v) = name.strip_prefix(':') {
+                vars.get(v).cloned()
+            } else {
+                name.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')).map(str::to_string)
+            };
+            out.extend(val);
+        }
+    }
+}
+
+/// One-line `COPY x FROM/TO :'file' ...;` statements on a file psql wrote earlier (`\o`,
+/// `\g`, ...) become psql `\copy` on both sides: psql runs in the reference container, so
+/// the engine's server would see a different file (the engine reaches server files in the
+/// suite's directory on the host). The echoed line changes accordingly.
+fn copy_to_client(
+    line: &str,
+    vars: &HashMap<String, String>,
+    client_files: &BTreeSet<String>,
+) -> Option<String> {
     let t = line.trim();
     if t.len() < 5 || !t[..5].eq_ignore_ascii_case("copy ") || !t.ends_with(';') {
         return None;
@@ -646,7 +684,7 @@ fn copy_to_client(line: &str, vars: &HashMap<String, String>) -> Option<String> 
     let p = t.find(":'")?;
     let end = p + 2 + t[p + 2..].find('\'')?;
     let var = &t[p + 2..end];
-    let val = vars.get(var)?;
+    let val = vars.get(var).filter(|v| client_files.contains(*v))?;
     let before = t[5..p].trim_end();
     let lw = before.to_ascii_lowercase();
     if !(lw.ends_with(" from") || lw.ends_with(" to")) || t[end + 1..].contains(":'") {
@@ -717,10 +755,12 @@ struct EngineProc {
     data: PathBuf,
     log: PathBuf,
     port: u16,
+    files: PathBuf,
 }
 
 impl EngineProc {
-    fn start(bin: &Path, data: &Path, log: &Path, port: u16) -> Self {
+    /// `files`: the directory server-side files are allowed in.
+    fn start(bin: &Path, data: &Path, log: &Path, port: u16, files: &Path) -> Self {
         let logf = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -735,6 +775,8 @@ impl EngineProc {
                 "--no-sync",
                 "--idle-close-secs",
                 "100000",
+                "--allow-server-files",
+                files.to_str().unwrap(),
             ])
             .env("RUST_LOG", "warn")
             .env("RUST_BACKTRACE", "0")
@@ -748,18 +790,35 @@ impl EngineProc {
             assert!(Instant::now() < deadline, "roll-engine did not start");
             std::thread::sleep(Duration::from_millis(100));
         }
+        // What misc_functions reads of the data directory: the lock file Postgres keeps there
+        // (its layout: pid, data directory, start time, port, socket directory, listen
+        // address, shared memory key, status) and `base/`.
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        std::fs::write(
+            files.join("postmaster.pid"),
+            format!(
+                "{}\n{}\n{started}\n{port}\n\n127.0.0.1\n  {port}001         0\nready   \n",
+                child.id(),
+                data.display()
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(files.join("base")).unwrap();
         EngineProc {
             child,
             bin: bin.to_path_buf(),
             data: data.to_path_buf(),
             log: log.to_path_buf(),
             port,
+            files: files.to_path_buf(),
         }
     }
 
     fn restart(&mut self) {
         self.stop();
-        *self = EngineProc::start(&self.bin, &self.data, &self.log, self.port);
+        *self = EngineProc::start(&self.bin, &self.data, &self.log, self.port, &self.files);
     }
 
     fn stop(&mut self) {
@@ -1060,7 +1119,7 @@ fn run_all(cfg: &Config, schedule: &[String]) {
     // A private copy: other builds may relink target/debug/roll-engine during the run.
     let bin = cfg.root.join("roll-engine.bin");
     std::fs::copy(env!("CARGO_BIN_EXE_roll-engine"), &bin).expect("copy roll-engine");
-    let mut engine = EngineProc::start(&bin, &data, &log, cfg.port);
+    let mut engine = EngineProc::start(&bin, &data, &log, cfg.port, &cfg.root);
     let eng = Target::Engine(cfg.port);
 
     let before = globals(cfg);
@@ -1455,23 +1514,6 @@ fn classify(stmt: &str, r: &[String], e: Option<&[String]>, cfuncs: &[String]) -
     if mentions_c(&lower) || rerr.is_some_and(mentions_c) || eerr.is_some_and(mentions_c) {
         return (Class::ByDesign, "regress.so C functions".into());
     }
-    if eerr.is_some_and(|e| {
-        e.contains("permission denied to COPY from a file")
-            || e.contains("permission denied to COPY to a file")
-    }) && rerr.is_none()
-    {
-        return (Class::ByDesign, "server-side COPY file".into());
-    }
-    // Server files are refused for every role, with the error a role lacking the privilege
-    // gets.
-    let server_fn = |e: &str| {
-        ["pg_read_file", "pg_read_binary_file", "pg_stat_file", "pg_ls_dir", "lo_import", "lo_export"]
-            .iter()
-            .any(|f| e.ends_with(&format!("permission denied for function {f}")))
-    };
-    if eerr.is_some_and(server_fn) && rerr != eerr {
-        return (Class::ByDesign, "server-side files".into());
-    }
     if lower.contains("tablespace") && lower.contains("location '/") {
         return (Class::ByDesign, "tablespace with a real directory".into());
     }
@@ -1659,7 +1701,7 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
     let _ = writeln!(s, "| files fully matching | {full_files} |");
     let _ = writeln!(
         s,
-        "| one-line server-side `COPY ... :'file'` run as `\\copy` on both sides | {} |",
+        "| one-line server-side `COPY ... :'file'` of a file psql wrote, run as `\\copy` on both sides | {} |",
         results.iter().map(|r| r.rewrites).sum::<usize>()
     );
     let _ = writeln!(
@@ -1865,7 +1907,7 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
         "## Limits of the measurement\n\n\
 - Files run serially; pg_regress runs most groups in parallel, so tests that look at concurrent sessions behave as in a serial run on both sides.\n\
 - The reference container has no `regress.so`, so `CREATE FUNCTION ... AS :'regresslib'` fails on both sides and later statements using those functions (`widget_in`, `interpt_pp`, `binary_coercible`, `test_canonicalize_path`, ...) error on the reference too. Those units are classed *by design*; where both sides fail identically they count as matching.\n\
-- Server-side files (`COPY ... TO :'filename'`, `pg_read_file`) are on the host for the engine and in the container for the reference; psql-side files (`\\copy`, `\\o`, `\\lo_import`) are always in the container, so a `\\copy FROM` of a file the server wrote reads the reference's copy.\n\
+- Server-side files (`COPY ... TO :'filename'`, `pg_read_file`, `lo_export`) are on the host for the engine (in `PGREGRESS_DIR`, allowed with `--allow-server-files`) and in the container for the reference; psql-side files (`\\copy`, `\\o`, `\\lo_import`) are always in the container, so a `\\lo_import` of a file the server wrote reads the reference's copy (and one-line server-side COPYs of a file psql wrote run as `\\copy`).\n\
 - The database is `gxg_regression` (not `regression`); `GRANT ... ON DATABASE regression` and psql's `\\d host.regression.x` patterns are rewritten. When comparing with `expected/*.out` the name is mapped back.\n\
 - A unit's output includes everything psql printed until the next unit, so one wrong statement in a multi-statement line marks the whole line. Pipeline tests (`\\startpipeline`) print results at `\\endpipeline`, so differences land on that unit.\n\
 - Units after a `\\quit` that the reference reached but the engine did not count as *not reached*; units neither side reached are not counted.\n"

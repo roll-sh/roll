@@ -1,7 +1,8 @@
 //! Server administration functions (Postgres's genfile.c, misc.c, pgstatfuncs.c resets):
 //! configuration reload, log files, statistics resets and server file access. There is no
 //! server log or data directory to reach here: log and directory listings are empty, and
-//! reading server files is refused (as COPY to or from a file is).
+//! reading server files is refused (as COPY to or from a file is) unless the server allows
+//! them in a directory of its own (`crate::server_files`).
 
 use super::{FnCtx, Registry, SrfIter, text_arg};
 use crate::error::{Error, Result, code};
@@ -216,13 +217,24 @@ fn pg_stat_have_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
     }))
 }
 
-/// Server files aren't reachable here, for any role: the error is the one Postgres gives a
-/// role without EXECUTE on the function (granted only to pg_read_server_files).
+/// Server files aren't reachable unless the server allows them (`--allow-server-files`): the
+/// error is the one Postgres gives a role without EXECUTE on the function (granted only to
+/// the bootstrap superuser).
 fn server_files(what: &str) -> Error {
     Error::new(
         code::INSUFFICIENT_PRIVILEGE,
         format!("permission denied for function {what}"),
     )
+}
+
+/// convert_and_check_filename: the name as messages show it (canonicalized) and where it
+/// is, inside the server's files directory.
+fn checked_file(c: &FnCtx, what: &str, name: &Value) -> Result<(String, std::path::PathBuf)> {
+    let Some(sf) = c.exec.sess.cluster.server_files() else {
+        return Err(server_files(what));
+    };
+    let name = text_arg(name);
+    Ok((crate::server_files::canonicalize_path(name), sf.resolve(name)?))
 }
 
 /// pg_read_file_common's argument check, which comes before the file is opened.
@@ -236,22 +248,135 @@ fn read_length_check(a: &[Value]) -> Result<()> {
     Ok(())
 }
 
-fn pg_read_file(a: &[Value], _: &FnCtx) -> Result<Value> {
+/// read_binary_file: `len` bytes from `offset` (from the end if negative), all of the rest
+/// without `len`; None for a missing file with `missing_ok`.
+fn read_server_file(a: &[Value], c: &FnCtx, what: &str) -> Result<Option<Vec<u8>>> {
+    use std::io::{Read, Seek, SeekFrom};
     read_length_check(a)?;
-    Err(server_files("pg_read_file"))
+    let (name, path) = checked_file(c, what, &a[0])?;
+    let (offset, len, missing_ok) = match a.len() {
+        2 => (0, None, a[1].as_bool() == Some(true)),
+        3 | 4 => (
+            a[1].as_i64().unwrap_or(0),
+            a[2].as_i64(),
+            a.get(3).and_then(Value::as_bool) == Some(true),
+        ),
+        _ => (0, None, false),
+    };
+    // MaxAllocSize - VARHDRSZ.
+    const MAX_LEN: i64 = 0x3fff_ffff - 4;
+    if len.is_some_and(|n| n > MAX_LEN) {
+        return Err(Error::new(
+            code::INVALID_PARAMETER_VALUE,
+            "requested length too large",
+        ));
+    }
+    let mut f = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) if missing_ok && crate::server_files::is_enoent(&e) => return Ok(None),
+        Err(e) => {
+            return Err(crate::server_files::file_error(
+                &e,
+                &format!("could not open file \"{name}\" for reading"),
+            ));
+        }
+    };
+    let pos = if offset >= 0 {
+        SeekFrom::Start(offset as u64)
+    } else {
+        SeekFrom::End(offset)
+    };
+    f.seek(pos).map_err(|e| {
+        crate::server_files::file_error(&e, &format!("could not seek in file \"{name}\""))
+    })?;
+    let mut buf = Vec::new();
+    let read = match len {
+        Some(n) => f.take(n as u64).read_to_end(&mut buf),
+        None => f.take(MAX_LEN as u64 + 1).read_to_end(&mut buf),
+    };
+    read.map_err(|e| crate::server_files::file_error(&e, &format!("could not read file \"{name}\"")))?;
+    if len.is_none() && buf.len() as i64 > MAX_LEN {
+        return Err(Error::new(code::PROGRAM_LIMIT_EXCEEDED, "file length too large"));
+    }
+    Ok(Some(buf))
 }
 
-fn pg_read_binary_file(a: &[Value], _: &FnCtx) -> Result<Value> {
-    read_length_check(a)?;
-    Err(server_files("pg_read_binary_file"))
+fn pg_read_file(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let Some(b) = read_server_file(a, c, "pg_read_file")? else {
+        return Ok(Value::Null);
+    };
+    // read_text_file: the contents must be valid in the database encoding.
+    crate::types::mbconv::verify(crate::types::mbconv::UTF8, &b)?;
+    match String::from_utf8(b) {
+        Ok(s) => Ok(Value::text(s)),
+        Err(_) => Err(crate::error::internal("invalid UTF-8 after verification")),
+    }
 }
 
-fn pg_stat_file(_: &[Value], _: &FnCtx) -> Result<Value> {
-    Err(server_files("pg_stat_file"))
+fn pg_read_binary_file(a: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(match read_server_file(a, c, "pg_read_binary_file")? {
+        Some(b) => Value::bytea(b),
+        None => Value::Null,
+    })
 }
 
-fn pg_ls_dir(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
-    Err(server_files("pg_ls_dir"))
+/// time_t_to_timestamptz.
+fn time_t(secs: i64) -> Value {
+    Value::Timestamptz((secs - 946_684_800) * 1_000_000)
+}
+
+fn pg_stat_file(a: &[Value], c: &FnCtx) -> Result<Value> {
+    use std::os::unix::fs::MetadataExt;
+    let missing_ok = a.get(1).and_then(Value::as_bool) == Some(true);
+    let (name, path) = checked_file(c, "pg_stat_file", &a[0])?;
+    let m = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) if missing_ok && crate::server_files::is_enoent(&e) => return Ok(Value::Null),
+        Err(e) => {
+            return Err(crate::server_files::file_error(
+                &e,
+                &format!("could not stat file \"{name}\""),
+            ));
+        }
+    };
+    // Unix has the status change time, no creation time.
+    Ok(Value::Record(std::sync::Arc::new(vec![
+        Value::Int8(m.size() as i64),
+        time_t(m.atime()),
+        time_t(m.mtime()),
+        time_t(m.ctime()),
+        Value::Null,
+        Value::Bool(m.is_dir()),
+    ])))
+}
+
+fn pg_ls_dir(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let (name, path) = checked_file(c, "pg_ls_dir", &a[0])?;
+    let missing_ok = a.get(1).and_then(Value::as_bool) == Some(true);
+    let include_dot_dirs = a.get(2).and_then(Value::as_bool) == Some(true);
+    let dir_error = |e: std::io::Error| {
+        crate::server_files::file_error(&e, &format!("could not open directory \"{name}\""))
+    };
+    let entries = match std::fs::read_dir(&path) {
+        Ok(d) => d,
+        Err(e) if missing_ok && crate::server_files::is_enoent(&e) => {
+            return Ok(Box::new(std::iter::empty()));
+        }
+        Err(e) => return Err(dir_error(e)),
+    };
+    // readdir's "." and ".." (std leaves them out).
+    let mut out = Vec::new();
+    if include_dot_dirs {
+        out.push(Ok(vec![Value::text(".")]));
+        out.push(Ok(vec![Value::text("..")]));
+    }
+    for e in entries {
+        let e = e.map_err(|e| {
+            crate::server_files::file_error(&e, &format!("could not read directory \"{name}\""))
+        })?;
+        out.push(Ok(vec![Value::text(e.file_name().to_string_lossy().into_owned())]));
+    }
+    Ok(Box::new(out.into_iter()))
 }
 
 /// pg_ls_logdir & co.: no files.

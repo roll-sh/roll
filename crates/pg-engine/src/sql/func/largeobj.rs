@@ -262,8 +262,8 @@ fn lo_put(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Null)
 }
 
-/// Server-side files aren't reachable here (as COPY to or from a file isn't), for any role:
-/// the error is the one Postgres gives a role without EXECUTE on the function.
+/// Server-side files aren't reachable unless the server allows them (as COPY to or from a
+/// file isn't): the error is the one Postgres gives a role without EXECUTE on the function.
 fn server_files(what: &str) -> Error {
     Error::new(
         code::INSUFFICIENT_PRIVILEGE,
@@ -271,15 +271,49 @@ fn server_files(what: &str) -> Error {
     )
 }
 
-fn lo_import(_: &[Value], c: &FnCtx) -> Result<Value> {
-    prevent_read_only(c, "lo_import()")?;
-    Err(server_files("lo_import"))
+/// Where a server file `name` is (relative to the server's files directory, as Postgres's
+/// are to its data directory), refused outside it.
+fn server_path(c: &FnCtx, what: &str, name: &str) -> Result<std::path::PathBuf> {
+    match c.exec.sess.cluster.server_files() {
+        Some(sf) => sf.resolve(name),
+        None => Err(server_files(what)),
+    }
 }
 
+/// lo_import_internal: the file's contents as a new large object (`lobjOid`, or a new oid).
+fn lo_import(a: &[Value], c: &FnCtx) -> Result<Value> {
+    prevent_read_only(c, "lo_import()")?;
+    let name = super::text_arg(&a[0]);
+    let path = server_path(c, "lo_import", name)?;
+    let data = std::fs::read(&path).map_err(|e| {
+        crate::server_files::file_error(&e, &format!("could not open server file \"{name}\""))
+    })?;
+    let oid = create(c, a.get(1).map_or(0, oid_arg))?;
+    let mut d = open(c, oid, INV_WRITE)?;
+    d.write(&mut c.exec.txn.borrow_mut(), &data)?;
+    Ok(Value::Oid(oid))
+}
+
+/// be_lo_export: the object's contents into a server file (created, or truncated).
 fn lo_export(a: &[Value], c: &FnCtx) -> Result<Value> {
+    use std::io::Write;
     // The object is opened (and checked) before the file.
-    open(c, oid_arg(&a[0]), INV_READ)?;
-    Err(server_files("lo_export"))
+    let mut d = open(c, oid_arg(&a[0]), INV_READ)?;
+    let name = super::text_arg(&a[1]);
+    let path = server_path(c, "lo_export", name)?;
+    let mut f = std::fs::File::create(&path).map_err(|e| {
+        crate::server_files::file_error(&e, &format!("could not create server file \"{name}\""))
+    })?;
+    let data = {
+        let txn = c.exec.txn.borrow();
+        let size = d.seek(&txn, 0, 2)?;
+        d.seek(&txn, 0, 0)?;
+        d.read(&txn, size)?
+    };
+    f.write_all(&data).map_err(|e| {
+        crate::server_files::file_error(&e, &format!("could not write server file \"{name}\""))
+    })?;
+    Ok(Value::Int4(1))
 }
 
 pub fn register(r: &mut Registry) {

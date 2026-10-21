@@ -25,6 +25,7 @@ fn server(auth: AuthMethod) -> Server {
         idle_close: Duration::from_millis(100),
         superuser: "postgres".into(),
         password: Some("secret".into()),
+        server_files: None,
     };
     let engine = Engine::open(opts).unwrap();
     let addr = pg_engine::server::spawn(engine.clone(), "127.0.0.1:0", ServerOptions { auth })

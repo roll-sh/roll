@@ -1,0 +1,142 @@
+> DROP ROLE IF EXISTS gsf_user, gsf_reader, gsf_noinherit
+NOTICE 00000: role "gsf_user" does not exist, skipping
+NOTICE 00000: role "gsf_reader" does not exist, skipping
+NOTICE 00000: role "gsf_noinherit" does not exist, skipping
+-- DROP ROLE
+
+> SELECT oid, rolname, rolsuper, rolinherit, rolcanlogin FROM pg_roles
+> WHERE rolname IN ('pg_read_server_files', 'pg_write_server_files', 'pg_execute_server_program') ORDER BY oid
+oid:oid | rolname:name | rolsuper:bool | rolinherit:bool | rolcanlogin:bool
+4569 | pg_read_server_files | f | t | f
+4570 | pg_write_server_files | f | t | f
+4571 | pg_execute_server_program | f | t | f
+-- SELECT 3
+
+> SELECT count(*) FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid
+> WHERE r.rolname IN ('pg_read_server_files', 'pg_write_server_files', 'pg_execute_server_program')
+count:int8
+0
+-- SELECT 1
+
+> CREATE ROLE gsf_user
+-- CREATE ROLE
+
+> CREATE ROLE gsf_reader
+-- CREATE ROLE
+
+> CREATE ROLE gsf_noinherit NOINHERIT
+-- CREATE ROLE
+
+> GRANT pg_read_server_files TO gsf_reader
+-- GRANT ROLE
+
+> GRANT pg_read_server_files TO gsf_noinherit
+-- GRANT ROLE
+
+> SELECT pg_has_role('gsf_reader', 'pg_read_server_files', 'USAGE'),
+>        pg_has_role('gsf_noinherit', 'pg_read_server_files', 'USAGE'),
+>        pg_has_role('gsf_noinherit', 'pg_read_server_files', 'MEMBER'),
+>        pg_has_role('gsf_user', 'pg_write_server_files', 'MEMBER')
+pg_has_role:bool | pg_has_role:bool | pg_has_role:bool | pg_has_role:bool
+t | f | t | f
+-- SELECT 1
+
+> SELECT f, has_function_privilege('gsf_reader', f, 'EXECUTE'), has_function_privilege('postgres', f, 'EXECUTE')
+> FROM unnest(array['pg_read_file(text)', 'pg_read_binary_file(text,bigint,bigint,boolean)', 'pg_stat_file(text,boolean)',
+>                   'pg_ls_dir(text,boolean,boolean)', 'lo_import(text)', 'lo_import(text,oid)', 'lo_export(oid,text)']) f
+f:text | has_function_privilege:bool | has_function_privilege:bool
+lo_export(oid,text) | f | t
+lo_import(text) | f | t
+lo_import(text,oid) | f | t
+pg_ls_dir(text,boolean,boolean) | f | t
+pg_read_binary_file(text,bigint,bigint,boolean) | f | t
+pg_read_file(text) | f | t
+pg_stat_file(text,boolean) | f | t
+-- SELECT 7
+
+> CREATE TABLE gsf_t (a int)
+-- CREATE TABLE
+
+> GRANT ALL ON gsf_t TO gsf_user, gsf_reader, gsf_noinherit
+-- GRANT
+
+> SET ROLE gsf_user
+-- SET
+
+> SELECT pg_read_file('postmaster.pid')
+ERROR 42501: permission denied for function pg_read_file
+
+> SELECT pg_read_binary_file('postmaster.pid')
+ERROR 42501: permission denied for function pg_read_binary_file
+
+> SELECT pg_stat_file('postmaster.pid')
+ERROR 42501: permission denied for function pg_stat_file
+
+> SELECT pg_ls_dir('.')
+ERROR 42501: permission denied for function pg_ls_dir
+
+> SELECT lo_import('/etc/hostname')
+ERROR 42501: permission denied for function lo_import
+
+> COPY gsf_t FROM '/etc/hostname'
+ERROR 42501: permission denied to COPY from a file
+DETAIL: Only roles with privileges of the "pg_read_server_files" role may COPY from a file.
+HINT: Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+
+> COPY gsf_t TO '/tmp/gsf_out'
+ERROR 42501: permission denied to COPY to a file
+DETAIL: Only roles with privileges of the "pg_write_server_files" role may COPY to a file.
+HINT: Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+
+> COPY gsf_t FROM PROGRAM 'cat'
+ERROR 42501: permission denied to COPY to or from an external program
+DETAIL: Only roles with privileges of the "pg_execute_server_program" role may COPY to or from an external program.
+HINT: Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+
+> COPY (SELECT 1) TO PROGRAM 'cat'
+ERROR 42501: permission denied to COPY to or from an external program
+DETAIL: Only roles with privileges of the "pg_execute_server_program" role may COPY to or from an external program.
+HINT: Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE gsf_noinherit
+-- SET
+
+> COPY gsf_t FROM '/etc/hostname'
+ERROR 42501: permission denied to COPY from a file
+DETAIL: Only roles with privileges of the "pg_read_server_files" role may COPY from a file.
+HINT: Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE gsf_reader
+-- SET
+
+> COPY gsf_t TO '/tmp/gsf_out'
+ERROR 42501: permission denied to COPY to a file
+DETAIL: Only roles with privileges of the "pg_write_server_files" role may COPY to a file.
+HINT: Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+
+> COPY gsf_t FROM PROGRAM 'cat'
+ERROR 42501: permission denied to COPY to or from an external program
+DETAIL: Only roles with privileges of the "pg_execute_server_program" role may COPY to or from an external program.
+HINT: Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+
+> RESET ROLE
+-- RESET
+
+> SELECT pg_read_file('does not exist', 0, -1)
+ERROR 22023: requested length cannot be negative
+
+> SELECT pg_read_binary_file('does not exist', 0, -1, true)
+ERROR 22023: requested length cannot be negative
+
+> DROP TABLE gsf_t
+-- DROP TABLE
+
+> DROP ROLE gsf_user, gsf_reader, gsf_noinherit
+-- DROP ROLE
+

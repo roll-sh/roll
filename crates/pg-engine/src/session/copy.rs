@@ -1,4 +1,5 @@
-//! COPY ... FROM STDIN / TO STDOUT in text, CSV and binary formats.
+//! COPY ... FROM STDIN / TO STDOUT in text, CSV and binary formats, and FROM / TO a server
+//! file when the server allows them (`crate::server_files`).
 
 use super::{Outcome, QueryResult, Session};
 use crate::catalog::{Relation, Table};
@@ -420,6 +421,8 @@ pub struct CopyIn {
     pub ncols: usize,
     /// COPY FROM ... WHERE: over the table's row.
     pub filter: Option<Expr>,
+    /// The size of the server file the data comes from (None: from the client).
+    pub file_size: Option<i64>,
 }
 
 /// COPY TO STDOUT output: one data message per line.
@@ -443,10 +446,26 @@ impl Session {
                 "COPY (SELECT INTO) is not supported",
             ));
         }
-        // Server files and programs aren't reachable here, for any role: the errors are the
-        // ones Postgres gives a role without pg_read_server_files / pg_write_server_files /
-        // pg_execute_server_program (DoCopy).
+        // Server files are reachable only when the server allows them (and then by the roles
+        // Postgres lets in), programs never: the errors are the ones Postgres gives a role
+        // without pg_read_server_files / pg_write_server_files / pg_execute_server_program
+        // (DoCopy).
         if s.is_program || !s.filename.is_empty() {
+            let allowed = !s.is_program
+                && self.state.cluster.server_files().is_some()
+                && {
+                    let cat = {
+                        self.ensure_txn();
+                        self.txn.as_ref().unwrap().borrow().catalog()
+                    };
+                    let role = if s.is_from {
+                        crate::server_files::PG_READ_SERVER_FILES
+                    } else {
+                        crate::server_files::PG_WRITE_SERVER_FILES
+                    };
+                    let me = self.state.current_role(&cat);
+                    cat.has_privs_of_role(me, role, self.state.db_owner(&cat))
+                };
             let (msg, role, what) = if s.is_program {
                 (
                     "permission denied to COPY to or from an external program",
@@ -458,9 +477,11 @@ impl Session {
             } else {
                 ("permission denied to COPY to a file", "pg_write_server_files", "COPY to a file")
             };
-            return Err(Error::new(code::INSUFFICIENT_PRIVILEGE, msg)
-                .detail(format!("Only roles with privileges of the \"{role}\" role may {what}."))
-                .hint("Anyone can COPY to stdout or from stdin. psql's \\copy command also works for anyone."));
+            if !allowed {
+                return Err(Error::new(code::INSUFFICIENT_PRIVILEGE, msg)
+                    .detail(format!("Only roles with privileges of the \"{role}\" role may {what}."))
+                    .hint("Anyone can COPY to stdout or from stdin. psql's \\copy command also works for anyone."));
+            }
         }
         let format = CopyFormat::parse(&s.options, s.is_from)?;
         let cols = names(&s.attlist);
@@ -577,13 +598,21 @@ impl Session {
                 }
                 Ok(Some(b.coerce_bool(e, "WHERE")?))
             })?;
-            return Ok(Outcome::CopyIn(CopyIn {
+            let mut cin = CopyIn {
                 table: t,
                 target,
                 format: Box::new(format),
                 ncols,
                 filter,
-            }));
+                file_size: None,
+            };
+            if s.filename.is_empty() {
+                return Ok(Outcome::CopyIn(cin));
+            }
+            // BeginCopyFrom: the file is read where the client's data would come.
+            let data = self.read_copy_file(&s.filename)?;
+            cin.file_size = Some(data.len() as i64);
+            return self.copy_in_rows(&cin, &data).map(Outcome::Done);
         }
         // COPY TO: a query.
         let sql = match (&s.relation, &s.query) {
@@ -717,9 +746,15 @@ impl Session {
                 .map(|b| *b)
                 .unwrap(),
         };
-        let (rows, cols, after) = self.with_ctx(params, |ctx| {
+        let (rows, cols, after, file) = self.with_ctx(params, |ctx| {
             let bq = Binder::new(ctx, Vec::new()).bind_statement(&stmt)?;
             bq.check_perms(ctx)?;
+            // BeginCopyTo opens the file once the query is planned.
+            let file = if s.filename.is_empty() {
+                None
+            } else {
+                Some(create_copy_file(ctx, &s.filename)?)
+            };
             if s.query.is_some() {
                 for c in &format.force_quote {
                     if !bq.cols.iter().any(|o| o.name == *c) {
@@ -743,7 +778,7 @@ impl Session {
                 })
             })?;
             let after = ctx.notices.borrow().len() - mark;
-            Ok((rows, bq.cols, after))
+            Ok((rows, bq.cols, after, file))
         })?;
         let trailing = self.notices.split_off(self.notices.len().saturating_sub(after));
         let fmt = self.state.settings.borrow().format_ctx();
@@ -762,13 +797,13 @@ impl Session {
             data.push(format!("{}\n", line.join(&format.delimiter.to_string())).into_bytes());
         }
         if format.binary {
-            return Ok(Outcome::CopyOut(CopyOut {
+            return self.copy_out_to(file, CopyOut {
                 data: binary_copy_out(&rows, &cols, &fmt)?,
                 ncols: cols.len(),
                 tag: format!("COPY {}", rows.len()),
                 binary: true,
                 trailing,
-            }));
+            });
         }
         for r in &rows {
             let mut fields = Vec::with_capacity(r.len());
@@ -796,13 +831,67 @@ impl Session {
                 *d = crate::types::mbconv::convert(d, crate::types::mbconv::UTF8, enc)?.into_owned();
             }
         }
-        Ok(Outcome::CopyOut(CopyOut {
+        self.copy_out_to(file, CopyOut {
             data,
             ncols: cols.len(),
             tag: format!("COPY {}", rows.len()),
             binary: false,
             trailing,
-        }))
+        })
+    }
+
+    /// COPY TO's data: to the client, or into the server file `file` (name, handle).
+    fn copy_out_to(&mut self, file: Option<(String, std::fs::File)>, out: CopyOut) -> Result<Outcome> {
+        use std::io::Write;
+        let Some((name, mut f)) = file else {
+            return Ok(Outcome::CopyOut(out));
+        };
+        let mut w = std::io::BufWriter::new(&mut f);
+        for d in &out.data {
+            w.write_all(d).map_err(|e| {
+                crate::server_files::file_error(&e, &format!("could not write to COPY file \"{name}\""))
+            })?;
+        }
+        w.flush().map_err(|e| {
+            crate::server_files::file_error(&e, &format!("could not write to COPY file \"{name}\""))
+        })?;
+        self.notices.extend(out.trailing);
+        Ok(Outcome::Done(QueryResult::command(out.tag)))
+    }
+
+    /// BeginCopyFrom's file: its contents (relative names are in the server's files
+    /// directory).
+    fn read_copy_file(&self, name: &str) -> Result<Vec<u8>> {
+        let Some(sf) = self.state.cluster.server_files() else {
+            return Err(crate::error::internal("COPY from a file without server files"));
+        };
+        let path = sf.resolve(name)?;
+        let open_error = |e: std::io::Error| {
+            let err = crate::server_files::file_error(
+                &e,
+                &format!("could not open file \"{name}\" for reading"),
+            );
+            if crate::server_files::is_enoent_or_eacces(&e) {
+                err.hint("COPY FROM instructs the PostgreSQL server process to read a file. You may want a client-side facility such as psql's \\copy.")
+            } else {
+                err
+            }
+        };
+        let mut f = std::fs::File::open(&path).map_err(open_error)?;
+        let m = f.metadata().map_err(|e| {
+            crate::server_files::file_error(&e, &format!("could not stat file \"{name}\""))
+        })?;
+        if m.is_dir() {
+            return Err(Error::new(
+                code::WRONG_OBJECT_TYPE,
+                format!("\"{name}\" is a directory"),
+            ));
+        }
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut data).map_err(|e| {
+            crate::server_files::file_error(&e, &format!("could not read from COPY file \"{name}\""))
+        })?;
+        Ok(data)
     }
 
     /// The client's data for a COPY FROM STDIN arrived.
@@ -1168,7 +1257,9 @@ impl Session {
             *ctx.sess.copy_progress.borrow_mut() = Some(super::state::CopyProgress {
                 relid: t.oid,
                 command: 1,
-                kind: 3,
+                // PROGRESS_COPY_TYPE_FILE (with the file's size) or _PIPE.
+                kind: if c.file_size.is_some() { 1 } else { 3 },
+                bytes_total: c.file_size.unwrap_or(0),
                 bytes_processed: data_len as i64,
                 tuples_excluded: excluded,
                 tuples_skipped: skipped as i64,
@@ -1192,6 +1283,43 @@ impl Session {
         })?;
         Ok(QueryResult::command(format!("COPY {processed}")))
     }
+}
+
+/// BeginCopyTo's file: an absolute path (in the server's files directory), created or
+/// truncated.
+fn create_copy_file(ctx: &crate::exec::ExecCtx, name: &str) -> Result<(String, std::fs::File)> {
+    let Some(sf) = ctx.sess.cluster.server_files() else {
+        return Err(crate::error::internal("COPY to a file without server files"));
+    };
+    // Too easy to overwrite a database file otherwise.
+    if !name.starts_with('/') {
+        return Err(Error::new(
+            code::INVALID_NAME,
+            "relative path not allowed for COPY to file",
+        ));
+    }
+    let path = sf.resolve(name)?;
+    let f = std::fs::File::create(&path).map_err(|e| {
+        let err = crate::server_files::file_error(
+            &e,
+            &format!("could not open file \"{name}\" for writing"),
+        );
+        if crate::server_files::is_enoent_or_eacces(&e) {
+            err.hint("COPY TO instructs the PostgreSQL server process to write a file. You may want a client-side facility such as psql's \\copy.")
+        } else {
+            err
+        }
+    })?;
+    let m = f.metadata().map_err(|e| {
+        crate::server_files::file_error(&e, &format!("could not stat file \"{name}\""))
+    })?;
+    if m.is_dir() {
+        return Err(Error::new(
+            code::WRONG_OBJECT_TYPE,
+            format!("\"{name}\" is a directory"),
+        ));
+    }
+    Ok((name.to_string(), f))
 }
 
 /// One input field: its value, plus the raw text when it can match the

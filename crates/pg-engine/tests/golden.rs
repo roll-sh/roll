@@ -201,6 +201,7 @@ fn golden_wire() {
         idle_close: std::time::Duration::from_millis(200),
         superuser: "postgres".into(),
         password: Some("pw".into()),
+        server_files: None,
     };
     let engine = pg_engine::engine::Engine::open(opts).unwrap();
     let server = pg_engine::server::ServerOptions {

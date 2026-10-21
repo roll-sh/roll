@@ -12,6 +12,7 @@ pub mod largeobj;
 pub mod notify;
 pub mod plpgsql;
 pub mod server;
+pub mod server_files;
 pub mod session;
 pub mod sort;
 pub mod sql;

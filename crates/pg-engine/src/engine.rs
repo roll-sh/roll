@@ -46,6 +46,10 @@ pub struct EngineOptions {
     pub superuser: String,
     /// Its password; None leaves it without one (trust authentication only).
     pub password: Option<String>,
+    /// Server-side file access (`pg_read_file`, server-side `lo_import` / `lo_export`,
+    /// `COPY ... FROM / TO '<file>'`) for the roles Postgres allows, confined to this
+    /// directory (see `server_files`). None (the default): refused for every role.
+    pub server_files: Option<PathBuf>,
 }
 
 impl Default for EngineOptions {
@@ -58,6 +62,7 @@ impl Default for EngineOptions {
             idle_close: Duration::from_secs(60),
             superuser: "postgres".into(),
             password: None,
+            server_files: None,
         }
     }
 }
@@ -152,12 +157,19 @@ pub struct Engine {
     started: i64,
     stopped: AtomicBool,
     me: Weak<Engine>,
+    server_files: Option<crate::server_files::ServerFiles>,
 }
 
 const REGISTRY_FILE: &str = "databases.json";
 
 impl Engine {
     pub fn open(opts: EngineOptions) -> Result<Arc<Engine>> {
+        let server_files = match &opts.server_files {
+            Some(d) => Some(crate::server_files::ServerFiles::new(d).map_err(|e| {
+                internal(format!("server files directory \"{}\": {e}", d.display()))
+            })?),
+            None => None,
+        };
         std::fs::create_dir_all(opts.data_dir.join("base"))?;
         let path = opts.data_dir.join(REGISTRY_FILE);
         let registry = match std::fs::read(&path) {
@@ -226,6 +238,7 @@ impl Engine {
                 started: crate::types::datetime::Clock::system().now,
                 stopped: AtomicBool::new(false),
                 me: me.clone(),
+                server_files,
             }
         });
         engine.init_shared()?;
@@ -1261,6 +1274,10 @@ fn dir_size(p: &Path) -> u64 {
 }
 
 impl Cluster for Engine {
+    fn server_files(&self) -> Option<&crate::server_files::ServerFiles> {
+        self.server_files.as_ref()
+    }
+
     fn database_owner(&self, name: &str) -> Option<String> {
         self.registry
             .lock()

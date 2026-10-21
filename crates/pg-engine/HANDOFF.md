@@ -15,14 +15,15 @@ compared statement by statement.
 
 ## Where it stands
 
-As of commit `e890fb0` (2026-10-21):
+As of commit `e890fb0` (2026-10-21), plus server-side files (below):
 
-- **Regression suite: 50,709 of 51,150 statements match (99.14%).** 441 differ. The full
+- **Regression suite: 50,737 of 51,150 statements match (99.19%).** 413 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 394 are `EXPLAIN` plan text (89%). Query results already match.
+  - 394 are `EXPLAIN` plan text (95%). Query results already match.
   - 18 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
-  - 29 differ **by design** (see "Decisions"), so the ceiling is about 99.94%.
+  - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
+    work), so the ceiling is about 99.998%.
 - No engine crashes or panics in a full run.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
@@ -146,10 +147,22 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
 
 ## Decisions already made (don't revisit)
 
-- **Server-side file access stays refused** for every role (`pg_read_file`, `pg_ls_dir`,
-  `lo_import`/`lo_export` of server paths, `COPY ... FROM '<server file>'`), with PostgreSQL's
-  exact permission errors. This is what managed services (Neon, RDS, Supabase) do. These
-  29 statements are documented as by design in STATUS.md.
+- **Server-side file access is refused by default** for every role (`pg_read_file`,
+  `pg_read_binary_file`, `pg_stat_file`, `pg_ls_dir`, `lo_import`/`lo_export` of server paths,
+  `COPY ... FROM / TO '<server file>'`), with PostgreSQL's exact permission errors. This is what
+  managed services (Neon, RDS, Supabase) do.
+- **Opt-in, confined directory for development and testing**: `roll-engine
+  --allow-server-files <dir>` (embedded: `EngineOptions::server_files`), a startup setting, not
+  a GUC. The roles PostgreSQL allows (EXECUTE on the functions, which only the superuser has
+  until granted; privileges of `pg_read_server_files` / `pg_write_server_files` for COPY) then
+  get PostgreSQL's behaviour, inside `<dir>` only: it stands for the data directory, relative
+  paths resolve against it, and every path (for every role, superuser included) gets
+  PostgreSQL's check for a role without `pg_read_server_files` (`convert_and_check_filename`:
+  "absolute path not allowed" / "path must be in or below the data directory"), plus a
+  real-path check refusing symbolic links that lead out (PostgreSQL would follow them).
+  `COPY ... PROGRAM` stays refused for everyone. Code: `src/server_files.rs`; tests:
+  `tests/server_files.rs`, `tests/sql/server_files_roles.sql`. The regress harness runs with it
+  (`PGREGRESS_DIR` as the directory), which is how misc_functions, largeobject and copy match.
 - **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
   as a separate index, so scans return PG's order and `ctid`s match.
 - **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for
@@ -213,7 +226,7 @@ Paste this into the new agent, from the repository root on branch
 ```text
 You are continuing work on crates/pg-engine, roll's in-process PostgreSQL engine. The goal is
 1:1 behaviour with PostgreSQL 18.6, measured by PostgreSQL's own regression suite. It is at
-99.14% (50,709 of 51,150 statements). Work autonomously and don't ask questions unless a
+99.19% (50,737 of 51,150 statements). Work autonomously and don't ask questions unless a
 decision is genuinely mine to make.
 
 First read, in this order: AGENTS.md, crates/pg-engine/HANDOFF.md (setup, testing, machine

@@ -32,6 +32,12 @@ struct Args {
     /// Don't fsync the WAL on commit (faster, loses the last commits on a crash).
     #[arg(long)]
     no_sync: bool,
+    /// Let the roles PostgreSQL allows read and write server files (pg_read_file, pg_ls_dir,
+    /// server-side lo_import/lo_export, COPY to or from a file), inside this directory only:
+    /// relative paths are resolved against it, others must be in it. Off by default (refused
+    /// for every role). For development and testing.
+    #[arg(long, value_name = "DIR")]
+    allow_server_files: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -53,6 +59,7 @@ fn main() -> anyhow::Result<()> {
         idle_close: Duration::from_secs(a.idle_close_secs),
         superuser: a.user,
         password: a.password,
+        server_files: a.allow_server_files,
         ..EngineOptions::default()
     })?;
     let listener = std::net::TcpListener::bind(&a.listen)?;

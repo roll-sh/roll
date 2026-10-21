@@ -15,6 +15,7 @@ fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
         idle_close: Duration::from_secs(60),
         superuser: "postgres".into(),
         password: None,
+        server_files: None,
     })
     .unwrap()
 }
