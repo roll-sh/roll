@@ -25,8 +25,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50775 (**99.27%**) |
-| units differing | 375 |
+| units matching | 50778 (**99.27%**) |
+| units differing | 372 |
 | files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
@@ -35,16 +35,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 360 | 96.0% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 14 | 3.7% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 357 | 96.0% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 14 | 3.8% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 360 units
-join (90), partition_join (44), partition_prune (38), subselect (30), collate.icu.utf8 (13), incremental_sort (15), select_parallel (14), updatable_views (13), groupingsets (11), with (8), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (7), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 360 | 96.0% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 14 | 3.7% |
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -108,11 +108,11 @@ Measured against the engine of commit 687fc9b in a 24-file subset (`test_setup`,
 create_table, create_index, create_view, create_function_sql, inherit, updatable_views,
 select_distinct, select_distinct_on, subselect, union, join, aggregates, groupingsets, equivclass,
 rowsecurity, with, rangefuncs, memoize, partition_join, partition_prune, partition_aggregate,
-rules): 13 units fixed, none broken.
+rules): 16 units fixed, none broken.
 
 | file | fixed units |
 |---|---|
-| join | 244, 351, 355, 359, 382, 406, 407, 524 (433, a row-order unit, too) |
+| join | 244, 351, 355, 359, 382, 399, 406, 407, 438, 455, 524 (433, a row-order unit, too) |
 | partition_join | 27, 76, 78, 84 |
 | memoize | 50 (`explain_memoize` over a partitionwise join) |
 
@@ -161,7 +161,22 @@ What changed:
 - apply_scanjoin_target_to_paths: the target list over a partitionwise join is computed in each
   child join (no Result over the Append), once the query level is planned (76/78/84).
 
-Goldens added: `tests/sql/gpu_join_subquery.sql`, `gpu_param_joins.sql`, `gpu_pw_targets.sql`.
+- Wrong results fixed: a pseudoconstant ON clause of an inner join (an outer query's value only,
+  `ON x0.f1 = 1`) inside an outer join's nullable side gated the whole join group, emptying
+  rows the outer join must null-extend (join 499's query: `EXISTS` false, `count(*)` 0 where
+  Postgres has true / 5). It now holds at its join (its syntactic scope); 499's plan still
+  associates the left joins differently.
+- A field of an outer join's nullable whole row (`(t2.*).unique1`, a SQL function's `t.unique2`
+  inlined) is its column (eval_const_expressions); a scan under a nested loop's Materialize
+  returns just the columns read (CP_SMALL_TLIST), none when nothing is (399).
+- A LATERAL subquery level (not pulled up) takes only the join clauses over the relations its
+  lateral references read; the others stay the join's (438).
+- reconsider_full_join_clause: `COALESCE(l, r) = constant` over a full join on `l = r` (a USING
+  column) restricts both sides to the constant, the join clause and the WHERE clause dropped
+  (455).
+
+Goldens added: `tests/sql/gpu_join_subquery.sql`, `gpu_param_joins.sql`, `gpu_pw_targets.sql`,
+`gpu_join_quals.sql`.
 
 Still open from this round's list, and why:
 
@@ -792,7 +807,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 325 | 91% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (31) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 832 | 90% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (89) |
+| join | 925 | 835 | 90% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (86) |
 | aggregates | 556 | 548 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

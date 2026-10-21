@@ -285,7 +285,12 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
         let below = sjs.len();
         if j.kind == JoinKind::Inner {
             for e in &j.conds {
-                let (req, nullable) = delay(items(e), &sjs[..below]);
+                // (A pseudoconstant ON clause (no column of this level: an outer query's
+                // value) holds at its join, as its syntactic scope: inside an outer join's
+                // nullable side it gates only that side, not the whole group.)
+                let it = items(e);
+                let it = if it == 0 && !e.is_volatile() { j.l | j.r } else { it };
+                let (req, nullable) = delay(it, &sjs[..below]);
                 clauses.push((e.clone(), false));
                 meta.push((None, req, nullable));
             }

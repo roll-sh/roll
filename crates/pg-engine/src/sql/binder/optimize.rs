@@ -582,6 +582,57 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             }
             Plan::Append { inputs, inh }
         }
+        // reconsider_full_join_clause: `COALESCE(l, r) = constant` over a full join on
+        // `l = r` (a USING column) holds the constant on both sides: each side is restricted
+        // to it, and the join clause and that one say nothing more.
+        Plan::Join {
+            kind: JoinKind::Full,
+            left,
+            right,
+            cond: None,
+            hash: Some((lk, rk)),
+            params,
+            nleft,
+            nright,
+            meta,
+        } if params.is_empty() && parts.iter().any(|p| full_key_const(p, &lk, &rk, nleft).is_some()) => {
+            let (mut lk, mut rk) = (lk, rk);
+            let mut hs = meta.hash_swapped.clone();
+            let (mut lpush, mut rpush, mut above) = (Vec::new(), Vec::new(), Vec::new());
+            for p in parts {
+                match full_key_const(&p, &lk, &rk, nleft) {
+                    Some((i, c, def)) => {
+                        lpush.push(Expr::Call(def.clone(), vec![lk[i].clone(), c.clone()], DataType::Bool));
+                        rpush.push(Expr::Call(def, vec![rk[i].clone(), c], DataType::Bool));
+                        lk.remove(i);
+                        rk.remove(i);
+                        if i < hs.len() {
+                            hs.remove(i);
+                        }
+                    }
+                    None => above.push(p),
+                }
+            }
+            let l = add_filter(cat, Arc::try_unwrap(left).unwrap_or_else(|a| (*a).clone()), Expr::And(lpush));
+            let r = add_filter(cat, Arc::try_unwrap(right).unwrap_or_else(|a| (*a).clone()), Expr::And(rpush));
+            let mut meta = meta;
+            meta.hash_swapped = hs;
+            let j = Plan::Join {
+                kind: JoinKind::Full,
+                left: Arc::new(l),
+                right: Arc::new(r),
+                cond: None,
+                hash: (!lk.is_empty()).then_some((lk, rk)),
+                params,
+                nleft,
+                nright,
+                meta,
+            };
+            match and_all(above) {
+                Some(p) => add_filter(cat, j, p),
+                None => j,
+            }
+        }
         // A semi / anti join's rows are its left side's: the filter goes there.
         Plan::Join {
             kind: kind @ (JoinKind::Semi | JoinKind::Anti),
@@ -1724,6 +1775,49 @@ fn side(e: &Expr, nleft: usize) -> Side {
     }
 }
 
+/// `COALESCE(l, r) = c` (either way round) with `l = r` the full join's `i`th key (`l` over
+/// its left side, `r` over its right) and `c` a non-null constant of their type: `i`, `c`
+/// and the `=`.
+fn full_key_const(
+    p: &Expr,
+    lk: &[Expr],
+    rk: &[Expr],
+    nleft: usize,
+) -> Option<(usize, Expr, Arc<crate::sql::func::FuncDef>)> {
+    let Expr::Call(def, args, _) = p else { return None };
+    if def.name != "=" || args.len() != 2 {
+        return None;
+    }
+    let (co, c) = match (&args[0], &args[1]) {
+        (co @ Expr::Coalesce(..), c @ Expr::Const(v, _)) | (c @ Expr::Const(v, _), co @ Expr::Coalesce(..)) if !v.is_null() => {
+            (co, c)
+        }
+        _ => return None,
+    };
+    let Expr::Coalesce(items, ty) = co else { return None };
+    let [x, y] = items.as_slice() else { return None };
+    let i = (0..lk.len()).find(|&i| {
+        x.same_as(&lk[i]) && y.clone().shift_cols(-(nleft as isize)).same_as(&rk[i]) && y.columns().iter().all(|&k| k >= nleft)
+    })?;
+    if lk[i].ty() != *ty || rk[i].ty() != *ty || c.ty() != *ty || args[0].ty() != args[1].ty() {
+        return None;
+    }
+    Some((i, c.clone(), def.clone()))
+}
+
+/// The column ranges of a join tree's relations (its leaves), from `off`.
+fn leaf_ranges(p: &Plan, off: usize) -> Vec<(usize, usize)> {
+    match p {
+        Plan::Join { kind, left, right, nleft, .. } if !matches!(kind, JoinKind::Semi | JoinKind::Anti) => {
+            let mut v = leaf_ranges(left, off);
+            v.extend(leaf_ranges(right, off + nleft));
+            v
+        }
+        Plan::Filter { input, .. } if matches!(&**input, Plan::Join { .. }) => leaf_ranges(input, off),
+        p => vec![(off, off + width(p))],
+    }
+}
+
 /// Inside a LATERAL right side, Outer(1, _) means the join's params, so predicates that read
 /// the enclosing query can't move there.
 fn right_pushable(e: &Expr, params: &[Expr]) -> bool {
@@ -1832,9 +1926,25 @@ pub fn join(
     // params too.
     let mut params = params;
     if !params.is_empty() && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti) {
+        // (A subquery level, not pulled up, takes only those over the relations its
+        // LATERAL references read: its parameterized path's clauses. The others are the
+        // join's.)
+        let sources: Option<Vec<(usize, usize)>> = matches!(right, Plan::Barrier { .. }).then(|| {
+            let read: Vec<usize> = params.iter().flat_map(|e| e.columns()).collect();
+            leaf_ranges(&left, 0)
+                .into_iter()
+                .filter(|(a, b)| read.iter().any(|c| c >= a && c < b))
+                .collect()
+        });
         let mut stay = Vec::new();
         for p in std::mem::take(&mut rest) {
             if p.is_volatile() || p.has_outer_refs() || side(&p, nleft) != Side::Both {
+                stay.push(p);
+                continue;
+            }
+            if let Some(src) = &sources
+                && p.columns().iter().any(|&c| c < nleft && !src.iter().any(|(a, b)| c >= *a && c < *b))
+            {
                 stay.push(p);
                 continue;
             }

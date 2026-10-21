@@ -1,0 +1,171 @@
+> CREATE TABLE gpu_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO gpu_i8 VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> CREATE TABLE gpu_i4 (f1 int)
+-- CREATE TABLE
+
+> INSERT INTO gpu_i4 VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> CREATE TABLE gpu_txt (f1 text)
+-- CREATE TABLE
+
+> INSERT INTO gpu_txt VALUES ('doh!'), ('hi de ho neighbor')
+-- INSERT 0 2
+
+> SELECT x0.f1, EXISTS (
+>   SELECT * FROM gpu_i8 t1 LEFT JOIN
+>     (gpu_i8 t2 INNER JOIN gpu_i8 t3 ON x0.f1 = 1
+>      LEFT JOIN gpu_i8 t4 ON t2.q2 = t4.q2)
+>   ON t1.q1 = t2.q1
+> ) FROM gpu_i4 x0 ORDER BY 1
+f1:int4 | exists:bool
+-2147483647 | t
+-123456 | t
+0 | t
+123456 | t
+2147483647 | t
+-- SELECT 5
+
+> SELECT x0.f1, (SELECT count(*) FROM gpu_i8 t1 LEFT JOIN
+>     (gpu_i8 t2 INNER JOIN gpu_i8 t3 ON x0.f1 = 0
+>      LEFT JOIN gpu_i8 t4 ON t2.q2 = t4.q2)
+>   ON t1.q1 = t2.q1) FROM gpu_i4 x0 ORDER BY 1
+f1:int4 | count:int8
+-2147483647 | 5
+-123456 | 5
+0 | 90
+123456 | 5
+2147483647 | 5
+-- SELECT 5
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT (t2.*).q1 FROM gpu_i4 t1 LEFT JOIN gpu_i8 t2 ON t1.f1 = t2.q1
+QUERY PLAN:text
+Merge Right Join
+  Output: t2.q1
+  Merge Cond: (t2.q1 = t1.f1)
+  ->  Sort
+        Output: t2.q1
+        Sort Key: t2.q1
+        ->  Seq Scan on public.gpu_i8 t2
+              Output: t2.q1
+  ->  Sort
+        Output: t1.f1
+        Sort Key: t1.f1
+        ->  Seq Scan on public.gpu_i4 t1
+              Output: t1.f1
+-- EXPLAIN
+
+> SELECT (t2.*).q1, (t2.*).q2 IS NULL FROM gpu_i8 t1 LEFT JOIN gpu_i8 t2 ON t1.q2 = t2.q1 ORDER BY 1, 2
+q1:int8 | ?column?:bool
+123 | f
+123 | f
+4567890123456789 | f
+4567890123456789 | f
+4567890123456789 | f
+4567890123456789 | f
+4567890123456789 | f
+4567890123456789 | f
+NULL | t
+NULL | t
+-- SELECT 10
+
+> CREATE FUNCTION gpu_field(t gpu_i8) RETURNS int8 AS $$ SELECT t.q2; $$ LANGUAGE sql IMMUTABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT (t2.*).q1, gpu_field(t2) FROM gpu_i4 t1
+>     LEFT JOIN gpu_i8 t2 ON t1.f1 = t2.q1
+>     LEFT JOIN gpu_txt t3 ON true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: t2.q1, t2.q2
+  ->  Merge Right Join
+        Output: t2.q1, t2.q2
+        Merge Cond: (t2.q1 = t1.f1)
+        ->  Sort
+              Output: t2.q1, t2.q2
+              Sort Key: t2.q1
+              ->  Seq Scan on public.gpu_i8 t2
+                    Output: t2.q1, t2.q2
+        ->  Sort
+              Output: t1.f1
+              Sort Key: t1.f1
+              ->  Seq Scan on public.gpu_i4 t1
+                    Output: t1.f1
+  ->  Materialize
+        ->  Seq Scan on public.gpu_txt t3
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM gpu_txt t1 LEFT JOIN gpu_i8 i8 ON i8.q2 = 123,
+>   LATERAL (SELECT i8.q1, t2.f1 FROM gpu_txt t2 LIMIT 1) AS ss
+> WHERE t1.f1 = ss.f1
+QUERY PLAN:text
+Nested Loop
+  Output: t1.f1, i8.q1, i8.q2, (i8.q1), t2.f1
+  Join Filter: (t1.f1 = t2.f1)
+  ->  Nested Loop Left Join
+        Output: t1.f1, i8.q1, i8.q2
+        ->  Seq Scan on public.gpu_txt t1
+              Output: t1.f1
+        ->  Materialize
+              Output: i8.q1, i8.q2
+              ->  Seq Scan on public.gpu_i8 i8
+                    Output: i8.q1, i8.q2
+                    Filter: (i8.q2 = 123)
+  ->  Limit
+        Output: (i8.q1), t2.f1
+        ->  Seq Scan on public.gpu_txt t2
+              Output: i8.q1, t2.f1
+-- EXPLAIN
+
+> SELECT * FROM gpu_txt t1 LEFT JOIN gpu_i8 i8 ON i8.q2 = 123,
+>   LATERAL (SELECT i8.q1, t2.f1 FROM gpu_txt t2 LIMIT 1) AS ss
+> WHERE t1.f1 = ss.f1
+f1:text | q1:int8 | q2:int8 | q1:int8 | f1:text
+doh! | 4567890123456789 | 123 | 4567890123456789 | doh!
+-- SELECT 1
+
+> CREATE TABLE gpu_t (unique1 int, unique2 int)
+-- CREATE TABLE
+
+> INSERT INTO gpu_t SELECT i, (i * 7919) % 10000 FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE INDEX gpu_t_unique2 ON gpu_t (unique2)
+-- CREATE INDEX
+
+> ANALYZE gpu_t
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM gpu_t a FULL JOIN gpu_t b USING (unique2) WHERE unique2 = 42
+QUERY PLAN:text
+Merge Full Join
+  ->  Index Scan using gpu_t_unique2 on gpu_t a
+        Index Cond: (unique2 = 42)
+  ->  Index Scan using gpu_t_unique2 on gpu_t b
+        Index Cond: (unique2 = 42)
+-- EXPLAIN
+
+> SELECT a.unique1, b.unique1, unique2 FROM gpu_t a FULL JOIN gpu_t b USING (unique2) WHERE unique2 = 42
+unique1:int4 | unique1:int4 | unique2:int4
+2518 | 2518 | 42
+-- SELECT 1
+
+> SELECT * FROM (VALUES (1), (2)) a(x) FULL JOIN (VALUES (2), (3)) b(x) USING (x) WHERE x = 3
+x:int4
+3
+-- SELECT 1
+
+> SELECT * FROM (VALUES (1), (2)) a(x) FULL JOIN (VALUES (2), (3)) b(x) USING (x) WHERE x = 2
+x:int4
+2
+-- SELECT 1
+

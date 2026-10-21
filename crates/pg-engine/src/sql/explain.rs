@@ -9332,13 +9332,46 @@ impl Builder<'_, '_> {
             };
             // (Its target list refers to its input's: a value the input computes shown
             // parenthesized.)
+            // A scan under it returns just the columns used above and by the join's quals
+            // (CP_SMALL_TLIST), possibly none.
+            let mut small: Option<Vec<usize>> = None;
+            if self.o.verbose && r.node.is_scan() {
+                let nleft = l.exported.len();
+                let width = r.internal.len();
+                let mut order: Vec<usize> = Vec::new();
+                let add = |i: usize, order: &mut Vec<usize>| {
+                    if i < width && !order.contains(&i) {
+                        order.push(i);
+                    }
+                };
+                if !matches!(kind, JoinKind::Semi | JoinKind::Anti)
+                    && let Some(need) = self.needed.get(&at)
+                {
+                    for i in 0..width {
+                        if need.get(nleft + i).copied().unwrap_or(true) {
+                            add(i, &mut order);
+                        }
+                    }
+                }
+                for q in &others {
+                    for c in q.columns() {
+                        if c >= nleft {
+                            add(c - nleft, &mut order);
+                        }
+                    }
+                }
+                order.sort_unstable();
+                if order.len() < width {
+                    r.node.output = order.iter().map(|&i| self.pick(&r.internal[i], Cx::Output)).collect();
+                    small = Some(order);
+                }
+            }
             r.internal = r.exported.clone();
             if self.o.verbose {
-                mn.output = r
-                    .internal
-                    .iter()
-                    .map(|x| self.pick(x, Cx::Output))
-                    .collect();
+                mn.output = match &small {
+                    Some(order) => order.iter().map(|&i| self.pick(&r.internal[i], Cx::Output)).collect(),
+                    None => r.internal.iter().map(|x| self.pick(x, Cx::Output)).collect(),
+                };
             }
             let child = std::mem::take(&mut r.node);
             mn.children.push(child.child("Outer"));

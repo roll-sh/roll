@@ -1178,6 +1178,13 @@ impl Binder<'_, '_> {
                     if let Expr::Row(items, _) = base {
                         return Ok(items.into_iter().nth(i).unwrap());
                     }
+                    // (eval_const_expressions: a field of a whole-row Var is the column, an
+                    // outer join's null-extended row's included.)
+                    if let Some(Expr::Row(items, _)) = nullable_whole_row(&base)
+                        && items.get(i).is_some_and(|c| c.ty() == ty)
+                    {
+                        return Ok(items[i].clone());
+                    }
                     Ok(Expr::Field(Box::new(base), i, ty))
                 }
                 None if fields.oid == 0 => Err(with_pos(
@@ -7131,7 +7138,11 @@ pub(crate) fn inline_scalar(plan: &Plan, args: &[Expr]) -> Option<Expr> {
                 Expr::Row(items, _) if i < items.len() && items[i].ty() == t => {
                     items.into_iter().nth(i).expect("checked")
                 }
-                r => Expr::Field(Box::new(r), i, t),
+                // (An outer join's nullable whole row: its column all the same.)
+                r => match nullable_whole_row(&r) {
+                    Some(Expr::Row(items, _)) if items.get(i).is_some_and(|c| c.ty() == t) => items[i].clone(),
+                    _ => Expr::Field(Box::new(r), i, t),
+                },
             },
             x => x,
         }
