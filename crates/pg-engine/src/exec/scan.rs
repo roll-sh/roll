@@ -770,12 +770,8 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
 /// is modelled), the pages they are on counted.
 fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
     let mut keys = bitmap_keys(&s.table, q, ctx)?;
-    if let Some(locs) = super::sizing::row_locations(&s.table, &keys, ctx) {
-        let mut pairs: Vec<(Option<(u32, u16)>, Vec<u8>)> = locs
-            .into_iter()
-            .map(|l| l.map(|x| x.0))
-            .zip(keys)
-            .collect();
+    if let Some(locs) = super::sizing::row_roots(&s.table, &keys, ctx) {
+        let mut pairs: Vec<(Option<(u32, u16)>, Vec<u8>)> = locs.into_iter().zip(keys).collect();
         pairs.sort_by(|a, b| match (a.0, b.0) {
             (Some(x), Some(y)) => x.cmp(&y),
             (Some(_), None) => std::cmp::Ordering::Less,

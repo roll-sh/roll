@@ -2378,6 +2378,17 @@ pub fn row_locations(
     )
 }
 
+/// The rows' locations as a bitmap heap scan reads them: their HOT chains' roots (what
+/// the indexes point to).
+pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Option<Tid>>> {
+    heap_blocks(t, ctx).ok().flatten()?;
+    let xids = ctx.sess.db.xids();
+    let v = Vis::new(&xids);
+    let rf = ctx.sess.db.relfiles.lock();
+    let h = rf.heaps.get(&t.oid)?;
+    Some(keys.iter().map(|k| h.locate(k, &v).map(|tid| h.hot_root(tid))).collect())
+}
+
 /// The table's current size in pages (None: not modelled).
 pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;

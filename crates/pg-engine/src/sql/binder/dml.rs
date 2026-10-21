@@ -2204,6 +2204,7 @@ impl Binder<'_, '_> {
             // A view (with INSTEAD OF triggers): its rows, and an empty key.
             Some(v) => {
                 let (p, cols) = self.bind_view_query(v)?;
+                let p = self.view_source_level(v, p, &cols, &v.name);
                 let mut exprs: Vec<Expr> = cols
                     .iter()
                     .enumerate()
@@ -2539,6 +2540,7 @@ impl Binder<'_, '_> {
         let mut tp = match &tview {
             Some(v) => {
                 let (p, cols) = self.bind_view_query(v)?;
+                let p = self.view_source_level(v, p, &cols, &v.name);
                 let mut exprs: Vec<Expr> = cols
                     .iter()
                     .enumerate()

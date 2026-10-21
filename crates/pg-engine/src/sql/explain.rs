@@ -860,7 +860,12 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
         // read: join clauses, whose Vars stay in the relation's target list
         // (attr_needed) though the parameterized scan checks them.
         let mut needed = needed;
+        // (Not an inheritance member's column mapping nothing above reads: a correlated
+        // SubPlan's member scan returns nothing.)
+        let member_map_unread = matches!(p, Plan::Project { exprs, .. }
+            if exprs.iter().all(|e| matches!(e, Expr::Col(..))) && needed.iter().all(|n| !n));
         if let Plan::Project { input, exprs } = p
+            && !member_map_unread
             && let Plan::Scan(sc) = &**input
             && let Some(f) = &sc.filter
         {
@@ -2555,7 +2560,12 @@ impl Builder<'_, '_> {
             // scan (no physical target list: its row is the index's).
             // (So does a dummy relation's Result.)
             let dummy = b.node.node_type == "Result" && b.node.children.is_empty() && matches!(&**p, Plan::Empty { .. });
-            let member = b.node.is_scan() && INH_SCANS.with(|m| m.borrow().contains(&addr(p)));
+            // (Or a member's column mapping over its scan.)
+            let member_addr = match &**p {
+                Plan::Project { input, .. } if matches!(&**input, Plan::Scan(_)) => addr(input),
+                _ => addr(p),
+            };
+            let member = b.node.is_scan() && INH_SCANS.with(|m| m.borrow().contains(&member_addr));
             // (A Sort over a join returns what the join does: the columns needed above.)
             let sorted_join = matches!(b.node.node_type, "Sort" | "Incremental Sort")
                 && b.node.children.first().is_some_and(|c| c.is_join());
@@ -4489,6 +4499,13 @@ impl Builder<'_, '_> {
                         while let Plan::Sort { input, .. } = x {
                             x = input;
                         }
+                        // (A member's column mapping over its scan: the scan is the member.)
+                        if let Plan::Project { input, exprs } = x
+                            && matches!(&**input, Plan::Scan(_))
+                            && exprs.iter().all(|e| matches!(e, Expr::Col(..)))
+                        {
+                            x = input;
+                        }
                         if matches!(x, Plan::Scan(_)) {
                             direct.push(addr(x));
                         }
@@ -5173,6 +5190,19 @@ impl Builder<'_, '_> {
             ..ExNode::new("ModifyTable")
         };
         n.title = op.to_string();
+        // A view written through its INSTEAD OF triggers whose query is a Subquery Scan of
+        // its own: that scan has the view's name, the result relation the next one.
+        fn view_scan(n: &ExNode, name: &str) -> bool {
+            (n.node_type == "Subquery Scan" && n.target.iter().any(|(t, v, _)| *t == "Alias" && v == name))
+                || (n.node_type != "ModifyTable" && n.children.iter().any(|c| view_scan(c, name)))
+        }
+        let suffixed;
+        let refname = if self.ctx.catalog().views.contains_key(&t.oid) && view_scan(child, &t.name) {
+            suffixed = crate::catalog::suffixed_name(&t.name, "_1");
+            suffixed.as_str()
+        } else {
+            refname
+        };
         let schema = self.ctx.catalog().schema_name(t.schema).to_string();
         self.target(
             &mut n,
@@ -7104,6 +7134,22 @@ impl Builder<'_, '_> {
             } else {
                 // A filter over a node that can't check quals: a subquery scan (named by
                 // its alias when known).
+                // (Its baserestrictinfo: the equivalence classes' equalities with constants
+                // come after the other clauses.)
+                let ec_const = |e: &Expr| match e {
+                    Expr::Call(d, a, _) if d.name == "=" && a.len() == 2 => {
+                        let col = |x: &Expr| matches!(strip_relabel(x), Expr::Col(..));
+                        let konst = |x: &Expr| x.columns().is_empty() && !super::paths::expr_volatile_deep(x);
+                        (col(&a[0]) && konst(&a[1])) || (konst(&a[0]) && col(&a[1]))
+                    }
+                    _ => false,
+                };
+                let quals: Vec<Expr> = quals
+                    .iter()
+                    .filter(|e| !ec_const(e))
+                    .chain(quals.iter().filter(|e| ec_const(e)))
+                    .cloned()
+                    .collect();
                 let sub = self.sub_alias.clone();
                 let names: Vec<Name> = match &sub {
                     Some(info) if info.1.len() == c.exported.len() => {

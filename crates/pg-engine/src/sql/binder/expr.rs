@@ -3499,6 +3499,17 @@ impl Binder<'_, '_> {
             self.sublink_nodes
                 .insert(id, (**s.subselect.as_ref().unwrap()).clone());
         }
+        // simplify_EXISTS_query: its select list doesn't matter (constants only: dropped).
+        let plan = match &*plan {
+            Plan::Project { input, exprs }
+                if kind == T::ExistsSublink
+                    && !self.deparse
+                    && exprs.iter().all(|e| matches!(e, Expr::Const(..))) =>
+            {
+                Arc::new(Plan::Project { input: input.clone(), exprs: Vec::new() })
+            }
+            _ => plan,
+        };
         match kind {
             T::ExistsSublink => Ok(Expr::Subquery(Box::new(Subquery {
                 id,

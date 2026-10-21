@@ -3558,6 +3558,48 @@ impl Binder<'_, '_> {
     }
 
     /// A view's query, as a subquery that can't see the outer query.
+    /// A view read as a subquery of a statement writing through its INSTEAD OF triggers:
+    /// a security barrier, or a query Postgres doesn't pull up, stays a query level of its own
+    /// (its Subquery Scan), as in a FROM clause.
+    pub(crate) fn view_source_level(
+        &self,
+        v: &crate::catalog::ViewDef,
+        plan: Plan,
+        cols: &[OutCol],
+        alias: &str,
+    ) -> Plan {
+        if v.storage.is_some() || self.deps.is_some() || self.refs.is_some() || self.unplanned || self.deparse {
+            return plan;
+        }
+        let names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+        if v.option("security_barrier") {
+            return Plan::Barrier {
+                input: Arc::new(plan),
+                alias: alias.to_string(),
+                cols: names,
+                secure: true,
+                sorted: None,
+            };
+        }
+        let Ok(node) = ast::parse_stmt(&v.query) else {
+            return plan;
+        };
+        if own_query_level(&node, &plan) || optimize::unsafe_outputs(&plan).iter().any(|u| *u) {
+            let sorted = match inner(&node) {
+                Some(NodeEnum::SelectStmt(s)) if !s.sort_clause.is_empty() => Some(s.sort_clause.len()),
+                _ => None,
+            };
+            return Plan::Barrier {
+                input: Arc::new(plan),
+                alias: alias.to_string(),
+                cols: names,
+                secure: false,
+                sorted,
+            };
+        }
+        plan
+    }
+
     pub(crate) fn bind_view_query(
         &mut self,
         v: &crate::catalog::ViewDef,

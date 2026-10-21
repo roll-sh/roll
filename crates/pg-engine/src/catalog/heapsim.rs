@@ -736,6 +736,23 @@ impl Heap {
         }
     }
 
+    /// The root of the HOT chain `tid` is in: the line pointer the indexes point to (a
+    /// bitmap heap scan reads the TIDs they give, in that order).
+    pub fn hot_root(&self, tid: Tid) -> Tid {
+        let mut cur = tid;
+        for _ in 0..u16::MAX {
+            let Some(t) = self.tuple(cur) else { return cur };
+            if !t.heap_only {
+                return cur;
+            }
+            match t.prev {
+                Some(p) if p.0 == cur.0 && p != cur => cur = p,
+                _ => return cur,
+            }
+        }
+        cur
+    }
+
     pub fn tid_of(&self, key: &[u8]) -> Option<Tid> {
         self.keys.get(key).copied()
     }

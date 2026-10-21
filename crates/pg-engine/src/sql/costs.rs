@@ -634,6 +634,8 @@ impl Est<'_> {
                 }
             }
             Expr::Call(..) => DEFAULT_INEQ_SEL,
+            // function_selectivity of a function called (not inlined): its default.
+            Expr::Subquery(sq) if sq.call.is_some() => DEFAULT_INEQ_SEL,
             Expr::ArrayOp {
                 left, right, op, all,
             } => {

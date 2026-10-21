@@ -2820,6 +2820,10 @@ impl Planner<'_, '_> {
             per_tuple += costs::qual_cost(q);
             q.walk(&mut |e| {
                 let Expr::Subquery(s) = e else { return };
+                // (A function call is costed as one: its procost.)
+                if s.call.is_some() {
+                    return;
+                }
                 use crate::sql::expr::SubqueryKind as K;
                 let correlated = !s.params.is_empty();
                 let hashed =
