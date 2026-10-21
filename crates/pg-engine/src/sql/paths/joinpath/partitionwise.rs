@@ -467,12 +467,23 @@ impl Planner<'_, '_> {
         let width = needed.len();
         let keys: Vec<Vec<Expr>> = (0..first.keys.len())
             .map(|j| {
-                parted
+                let mut ks: Vec<Expr> = parted
                     .iter()
                     .flat_map(|p| p.keys[j].iter())
                     .filter(|e| e.columns().iter().all(|c| *c < width))
                     .cloned()
-                    .collect()
+                    .collect();
+                // (A full join's key is also its sides' keys merged, COALESCE(l, r): a USING
+                // column of it, as set_joinrel_partition_key's merged expressions.)
+                if s.kind == JoinKind::Full
+                    && let [l, r] = parted.as_slice()
+                    && let (Some(a), Some(b)) = (merged_key(&l.keys[j]), merged_key(&r.keys[j]))
+                    && a.ty() == b.ty()
+                    && a.columns().iter().chain(b.columns().iter()).all(|c| *c < width)
+                {
+                    ks.push(Expr::Coalesce(vec![a.clone(), b.clone()], a.ty()));
+                }
+                ks
             })
             .collect();
         let pw = PwJoin {
@@ -486,6 +497,12 @@ impl Planner<'_, '_> {
         };
         Some((children, total, rows, pw))
     }
+}
+
+/// The expression a FROM item's partition key column is over its row when null-extended
+/// rows count: a full join's merged one (its last COALESCE), else its first.
+fn merged_key(alts: &[Expr]) -> Option<&Expr> {
+    alts.iter().rev().find(|e| matches!(e, Expr::Coalesce(..))).or(alts.first())
 }
 
 /// The row types of the whole-row references (`t.*` as a value) the plan reads: a
@@ -714,12 +731,23 @@ impl Planner<'_, '_> {
         let width = needed.len();
         let keys: Vec<Vec<Expr>> = (0..first.keys.len())
             .map(|j| {
-                parted
+                let mut ks: Vec<Expr> = parted
                     .iter()
                     .flat_map(|p| p.keys[j].iter())
                     .filter(|e| e.columns().iter().all(|c| *c < width))
                     .cloned()
-                    .collect()
+                    .collect();
+                // (A full join's key is also its sides' keys merged, COALESCE(l, r): a USING
+                // column of it, as set_joinrel_partition_key's merged expressions.)
+                if s.kind == JoinKind::Full
+                    && let [l, r] = parted
+                    && let (Some(a), Some(b)) = (merged_key(&l.keys[j]), merged_key(&r.keys[j]))
+                    && a.ty() == b.ty()
+                    && a.columns().iter().chain(b.columns().iter()).all(|c| *c < width)
+                {
+                    ks.push(Expr::Coalesce(vec![a.clone(), b.clone()], a.ty()));
+                }
+                ks
             })
             .collect();
         let pw = PwJoin {
