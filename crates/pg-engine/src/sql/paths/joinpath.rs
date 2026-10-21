@@ -1048,7 +1048,7 @@ impl Search<'_, '_, '_> {
             let sides = match (&c.eq, &c.expr) {
                 (Some((a, b, al, bl)), _) => vec![(a.clone(), b.clone(), *al, *bl)],
                 (None, Expr::Call(def, args, _))
-                    if args.len() == 2 && matches!(def.name, "<" | "<=" | ">" | ">=") && !c.on =>
+                    if args.len() == 2 && matches!(def.name, "<" | "<=" | ">" | ">=") =>
                 {
                     let (la, lb) = (leaves_of(&args[0]), leaves_of(&args[1]));
                     if la == 0 || lb == 0 || c.expr.is_volatile() {
@@ -2177,8 +2177,15 @@ impl Search<'_, '_, '_> {
         }
         let l = inner.trailing_zeros() as usize;
         let leaf = &self.leaves[l];
-        let Some((s, _)) = &leaf.scan else {
-            return false;
+        // (A pulled-up subquery's scan computing its PlaceHolderVars: through the
+        // projection's columns.)
+        let (s, proj): (&ScanPlan, Option<&Vec<Expr>>) = match (&leaf.scan, &leaf.plan) {
+            (Some((s, _)), _) => (s, None),
+            (None, Plan::Project { input, exprs }) => match &**input {
+                Plan::Scan(s) => (&**s, Some(exprs)),
+                _ => return false,
+            },
+            _ => return false,
         };
         let mut cols = Vec::new();
         for &c in restrict {
@@ -2194,7 +2201,13 @@ impl Search<'_, '_, '_> {
                         && *yl & inner == 0
                         && let Some(g) = key_col(x)
                     {
-                        let col = g - leaf.off;
+                        let col = match proj {
+                            None => g - leaf.off,
+                            Some(ex) => match ex.get(g - leaf.off) {
+                                Some(Expr::Col(j, _)) => *j,
+                                _ => continue,
+                            },
+                        };
                         if let Some(n) = &nondet
                             && s.table.columns.get(col).and_then(|c| c.collation.as_ref()) != Some(n)
                         {

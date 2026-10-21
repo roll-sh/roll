@@ -5505,6 +5505,7 @@ fn plan_level_ordered(
     if !p.lifted.borrow().is_empty() {
         p.lifted_into_aggs(plan);
     }
+    p.push_pw_targets(plan);
     p.minmax_aggs(plan);
     p.removed.get()
 }
@@ -5517,6 +5518,43 @@ static PLANNER_SUBQUERY_IDS: std::sync::atomic::AtomicUsize =
 pub const PLANNER_SUBQUERY_BASE: usize = 1 << 40;
 
 impl Planner<'_, '_> {
+    /// apply_scanjoin_target_to_paths: the target list over a join made partitionwise is
+    /// each child join's (no Result over the Append). Done once the level is planned: a
+    /// partitionwise join is found as a FROM item of a join above by its row.
+    fn push_pw_targets(&self, p: &mut Plan) {
+        for c in crate::sql::explain::plan_inputs_mut(p) {
+            self.push_pw_targets(take(c));
+        }
+        if let Plan::Project { input, exprs } = p
+            && let Plan::Append { inputs, inh: None } = &**input
+            && let Some(first) = inputs.first()
+            && exprs.iter().any(|e| !matches!(e, Expr::Col(..)))
+            && exprs.iter().all(|e| {
+                let mut ok = !e.is_volatile();
+                e.walk(&mut |x| {
+                    ok &= !matches!(x, Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..) | Expr::Param(..))
+                });
+                ok
+            })
+        {
+            let key = Arc::as_ptr(first) as usize;
+            let pos = self.pw_joins.borrow().iter().position(|(a, _)| *a == key);
+            if let Some(pos) = pos {
+                let inputs: Vec<Arc<Plan>> = inputs
+                    .iter()
+                    .map(|c| {
+                        Arc::new(Plan::Project {
+                            input: c.clone(),
+                            exprs: exprs.clone(),
+                        })
+                    })
+                    .collect();
+                self.pw_joins.borrow_mut()[pos].0 = Arc::as_ptr(&inputs[0]) as usize;
+                *p = Plan::Append { inputs, inh: None };
+            }
+        }
+    }
+
     /// preprocess_minmax_aggregates: an aggregation of only MIN / MAX over one table (or
     /// inheritance tree) with no grouping, as InitPlans each reading the first row of the
     /// table in that order (`IS NOT NULL` and a LIMIT 1 over the ordered scan), when that

@@ -1,0 +1,174 @@
+> BEGIN
+-- BEGIN
+
+> CREATE TEMP TABLE gpu_t (i int PRIMARY KEY)
+-- CREATE TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM gpu_t t1
+>     LEFT JOIN (SELECT 1 AS x, * FROM gpu_t t2(i2)) t2ss ON t1.i = t2ss.i2
+>     LEFT JOIN gpu_t t3(i3) ON false
+>     LEFT JOIN gpu_t t4(i4) ON t4.i4 > t2ss.x
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: t1.i, (1), t2.i2, i3, t4.i4
+  ->  Nested Loop Left Join
+        Output: t1.i, t2.i2, (1), i3
+        Join Filter: false
+        ->  Hash Left Join
+              Output: t1.i, t2.i2, (1)
+              Inner Unique: true
+              Hash Cond: (t1.i = t2.i2)
+              ->  Seq Scan on pg_temp.gpu_t t1
+                    Output: t1.i
+              ->  Hash
+                    Output: t2.i2, (1)
+                    ->  Seq Scan on pg_temp.gpu_t t2
+                          Output: t2.i2, 1
+        ->  Result
+              Output: i3
+              One-Time Filter: false
+  ->  Memoize
+        Output: t4.i4
+        Cache Key: (1)
+        Cache Mode: binary
+        ->  Index Only Scan using gpu_t_pkey on pg_temp.gpu_t t4
+              Output: t4.i4
+              Index Cond: (t4.i4 > (1))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM gpu_t t1 LEFT JOIN (SELECT 1 AS x, * FROM gpu_t t2(i2)) t2ss ON t1.i = t2ss.i2
+QUERY PLAN:text
+Hash Left Join
+  Hash Cond: (t1.i = t2.i2)
+  ->  Seq Scan on gpu_t t1
+  ->  Hash
+        ->  Seq Scan on gpu_t t2
+-- EXPLAIN
+
+> INSERT INTO gpu_t SELECT generate_series(1, 5)
+-- INSERT 0 5
+
+> SELECT * FROM gpu_t t1
+>     LEFT JOIN (SELECT 1 AS x, * FROM gpu_t t2(i2)) t2ss ON t1.i = t2ss.i2
+>     LEFT JOIN gpu_t t4(i4) ON t4.i4 > t2ss.x + 2
+> ORDER BY 1, 4
+i:int4 | x:int4 | i2:int4 | i4:int4
+1 | 1 | 1 | 4
+1 | 1 | 1 | 5
+2 | 1 | 2 | 4
+2 | 1 | 2 | 5
+3 | 1 | 3 | 4
+3 | 1 | 3 | 5
+4 | 1 | 4 | 4
+4 | 1 | 4 | 5
+5 | 1 | 5 | 4
+5 | 1 | 5 | 5
+-- SELECT 10
+
+> ROLLBACK
+-- ROLLBACK
+
+> SET enable_partitionwise_join = on
+-- SET
+
+> CREATE TABLE gpu_p1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_p1_p1 PARTITION OF gpu_p1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_p1_p3 PARTITION OF gpu_p1 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_p1_p2 PARTITION OF gpu_p1 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> INSERT INTO gpu_p1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 2 = 0
+-- INSERT 0 300
+
+> ANALYZE gpu_p1
+-- ANALYZE
+
+> CREATE TABLE gpu_p2 (a int, b int, c varchar) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_p2_p1 PARTITION OF gpu_p2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_p2_p2 PARTITION OF gpu_p2 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_p2_p3 PARTITION OF gpu_p2 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO gpu_p2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 3 = 0
+-- INSERT 0 200
+
+> ANALYZE gpu_p2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a + t2.a, t1.c FROM gpu_p1 t1, gpu_p2 t2 WHERE t1.a = t2.b AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (t2_1.b = t1_1.a)
+              ->  Seq Scan on gpu_p2_p1 t2_1
+              ->  Hash
+                    ->  Seq Scan on gpu_p1_p1 t1_1
+                          Filter: (b = 0)
+        ->  Hash Join
+              Hash Cond: (t2_2.b = t1_2.a)
+              ->  Seq Scan on gpu_p2_p2 t2_2
+              ->  Hash
+                    ->  Seq Scan on gpu_p1_p2 t1_2
+                          Filter: (b = 0)
+        ->  Hash Join
+              Hash Cond: (t2_3.b = t1_3.a)
+              ->  Seq Scan on gpu_p2_p3 t2_3
+              ->  Hash
+                    ->  Seq Scan on gpu_p1_p3 t1_3
+                          Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.a + t2.a, t1.c FROM gpu_p1 t1, gpu_p2 t2 WHERE t1.a = t2.b AND t1.b = 0 ORDER BY t1.a
+?column?:int4 | c:varchar
+0 | 0000
+150 | 0150
+300 | 0300
+450 | 0450
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b, t1.a + t2.b FROM gpu_p1 t1 LEFT JOIN gpu_p2 t2 ON t1.a = t2.b WHERE t1.b = 0 ORDER BY 1, 2
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a, t2.b
+  ->  Append
+        ->  Hash Right Join
+              Hash Cond: (t2_1.b = t1_1.a)
+              ->  Seq Scan on gpu_p2_p1 t2_1
+              ->  Hash
+                    ->  Seq Scan on gpu_p1_p1 t1_1
+                          Filter: (b = 0)
+        ->  Hash Right Join
+              Hash Cond: (t2_2.b = t1_2.a)
+              ->  Seq Scan on gpu_p2_p2 t2_2
+              ->  Hash
+                    ->  Seq Scan on gpu_p1_p2 t1_2
+                          Filter: (b = 0)
+        ->  Hash Right Join
+              Hash Cond: (t2_3.b = t1_3.a)
+              ->  Seq Scan on gpu_p2_p3 t2_3
+              ->  Hash
+                    ->  Seq Scan on gpu_p1_p3 t1_3
+                          Filter: (b = 0)
+-- EXPLAIN
+
+> RESET enable_partitionwise_join
+-- RESET
+

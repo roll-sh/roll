@@ -3329,8 +3329,13 @@ impl Builder<'_, '_> {
                                         c.node.cols.get(*j).filter(|x| x.var.is_none()).and_then(|x| x.distinct)
                                     })
                                     .collect();
-                                ds.filter(|d| !d.is_empty() && !e.is_volatile())
-                                    .map(|d| d.iter().product::<f64>().min(costs::clamp_rows(c.node.rows)))
+                                // (A constant: one value, as estimate_num_groups counts it.)
+                                if matches!(e, Expr::Const(..)) {
+                                    Some(1.0)
+                                } else {
+                                    ds.filter(|d| !d.is_empty() && !e.is_volatile())
+                                        .map(|d| d.iter().product::<f64>().min(costs::clamp_rows(c.node.rows)))
+                                }
                             },
                         },
                     })
