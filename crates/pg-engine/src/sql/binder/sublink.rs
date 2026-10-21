@@ -611,7 +611,12 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         || sub.left.len() != sub.ops.len()
         // (Several columns compare as rows: only `=` is a conjunction of joinable ones.)
         || sub.left.len() > 1 && sub.ops.iter().any(|o| o.name != "=")
-        || sub.left.iter().any(|l| l.columns().is_empty() || l.is_volatile() || has_sublink(l))
+        // (A sublink in the left operand stays a SubPlan of the join clause.)
+        || sub.left.iter().any(|l| {
+            let mut other = false;
+            l.walk(&mut |x| other |= matches!(x, Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+            l.columns().is_empty() || crate::sql::explain::expr_volatile_deep(l) || other
+        })
     {
         return None;
     }

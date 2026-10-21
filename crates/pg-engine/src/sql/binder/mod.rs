@@ -498,6 +498,14 @@ pub struct Binder<'b, 'a> {
     /// count and the offset): each arm is planned for the rows it reads
     /// (set_subquery_pathlist passes the tuple_fraction down).
     pub(crate) arm_limit: Option<(usize, f64, f64)>,
+    /// Binding a set operation's tree: how many of its leaf queries are bound so far
+    /// (their range table entries are `*SELECT* n`).
+    pub(crate) setop_leaves: Option<usize>,
+    /// A FROM subquery being bound whose query level the query above plans (a Subquery
+    /// Scan's, once it knows the columns read: remove_unused_subquery_outputs): the level
+    /// it is at, whose planning waits; `deferred` once it did.
+    pub(crate) defer_level: Option<usize>,
+    pub(crate) deferred: bool,
     /// Binding the arms of a CASE: a constant call that fails stays a call until the CASE
     /// knows which arms are reachable (eval_const_expressions never simplifies the others).
     pub(crate) defer_fold: bool,
@@ -613,6 +621,9 @@ impl<'b, 'a> Binder<'b, 'a> {
             no_params: false,
             unplanned: false,
             arm_limit: None,
+            setop_leaves: None,
+            defer_level: None,
+            deferred: false,
             defer_fold: false,
             fold_err: None,
             sql_fn_statement: false,

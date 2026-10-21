@@ -810,8 +810,17 @@ impl Search<'_, '_, '_> {
         let mut p = &leaf.plan;
         // (Column positions of the leaf's row in the current node's row.)
         let mut map: Vec<Option<usize>> = (0..leaf.ncols).map(Some).collect();
-        let keys = loop {
+        let mut limit_keys: Option<usize> = None;
+        let mut keys = loop {
             match p {
+                // (A subquery planned apart: its ORDER BY's keys at most.)
+                Plan::Barrier { input, sorted, .. } => {
+                    if let Some(n) = sorted {
+                        limit_keys = Some(limit_keys.map_or(*n, |m| m.min(*n)));
+                    }
+                    p = input;
+                }
+                Plan::Limit { input, .. } | Plan::LockRows { input, .. } | Plan::Filter { input, .. } => p = input,
                 Plan::Project { input, exprs } => {
                     map = map
                         .iter()
@@ -830,6 +839,9 @@ impl Search<'_, '_, '_> {
                 _ => return Vec::new(),
             }
         };
+        if let Some(n) = limit_keys {
+            keys.truncate(n);
+        }
         let mut out: Vec<GKey> = Vec::new();
         for k in &keys {
             let Expr::Col(c, _) = &k.expr else { break };
@@ -4425,7 +4437,7 @@ impl Planner<'_, '_> {
         order: Option<&Order>,
         sort_exprs: &[Expr],
     ) -> Option<bool> {
-        let lift::Lifted { plan: mut lp, map } = l;
+        let lift::Lifted { plan: mut lp, map, results } = l;
         let lw = crate::sql::binder::plan_width(&lp);
         let mut need = vec![false; lw];
         for (i, e) in map.iter().enumerate() {
@@ -4460,11 +4472,46 @@ impl Planner<'_, '_> {
         let extra = self.absorbed.take();
         self.absorbed
             .replace(extra.iter().map(|e| lift::subst(e, &map)).collect());
+        // (An empty relation removed, one leaf left: planned as it is.)
+        if !matches!(lp, Plan::Join { .. }) {
+            self.absorbed.take();
+            if !extra.is_empty() {
+                lp = Plan::Filter {
+                    input: Arc::new(lp),
+                    pred: Expr::And(extra.iter().map(|e| lift::subst(e, &map)).collect()),
+                };
+            }
+            self.walk(&mut lp, &need, None);
+            *p = Plan::Project {
+                input: Arc::new(lp),
+                exprs: map,
+            };
+            self.lifted.borrow_mut().push(p as *const Plan as usize);
+            return Some(false);
+        }
         let orig_lp = matches!(&*p, Plan::Join { params, .. } if !params.is_empty()).then(|| lp.clone());
         let saved = self.lifting.replace(&lp as *const Plan as usize);
         let r = self.plan_joins_with(&mut lp, &need, order2.as_ref(), &sort2);
         self.lifting.set(saved);
         let Some(sorted) = r else {
+            // (Empty relations gone, a LATERAL join of what remains: the tree as it
+            // became, its sides planned.)
+            if results
+                && let Plan::Join { left, right, params, .. } = &mut lp
+                && !params.is_empty()
+            {
+                self.absorbed.take();
+                let nl = crate::sql::binder::plan_width(left);
+                let w = crate::sql::binder::plan_width(right);
+                let lneed: Vec<bool> = (0..nl).map(|i| need.get(i).copied().unwrap_or(true) || params.iter().any(|e| e.columns().contains(&i))).collect();
+                let rneed: Vec<bool> = (0..w).map(|i| need.get(nl + i).copied().unwrap_or(true)).collect();
+                self.walk(take(left), &lneed, None);
+                self.walk(take(right), &rneed, None);
+                let input = Arc::new(lp);
+                self.lifted.borrow_mut().push(Arc::as_ptr(&input) as usize);
+                *p = Plan::Project { input, exprs: map };
+                return Some(false);
+            }
             self.absorbed.replace(extra);
             let r = self.plan_joins_with_unlifted(p, needed, order, sort_exprs);
             // A LATERAL join the search doesn't take on: its lifted form all the same
@@ -4643,7 +4690,12 @@ impl Planner<'_, '_> {
         let extra = self.absorbed.take();
         let mut laterals: Vec<(usize, Vec<Expr>)> = Vec::new();
         let (mut sjs, mut clause_meta, general) = match outerjoins::gather_group(p, &extra) {
-            Some(g) if !g.sjs.is_empty() && !(g.sjs.len() == 1 && g.leaves.len() == 2) => {
+            // (Or LATERAL items among more than two inner-joined ones: the join order
+            // the references allow.)
+            Some(g)
+                if !g.sjs.is_empty() && !(g.sjs.len() == 1 && g.leaves.len() == 2)
+                    || g.sjs.is_empty() && !g.laterals.is_empty() && g.leaves.len() > 2 =>
+            {
                 raw_leaves = g.leaves;
                 raw_clauses = g.clauses;
                 laterals = g.laterals;
@@ -4804,10 +4856,11 @@ impl Planner<'_, '_> {
             let eq = match &e {
                 // (Under a nondeterministic collation equal strings needn't hash or sort
                 // alike: a hash key of their sort keys, no merge key.)
+                // (A SubPlan in it is no volatile function: a hash key it can be.)
                 Expr::Call(d, args, _)
                     if d.name == "="
                         && args.len() == 2
-                        && !e.is_volatile() =>
+                        && !crate::sql::explain::expr_volatile_deep(&e) =>
                 {
                     let (al, bl) = (s.leaves_of(&args[0]), s.leaves_of(&args[1]));
                     (al != 0 && bl != 0 && al & bl == 0)

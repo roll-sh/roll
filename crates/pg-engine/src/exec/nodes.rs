@@ -913,7 +913,8 @@ fn tuple_bound(
     let mut p = input;
     loop {
         match p {
-            Plan::Project { input, .. } => p = input,
+            // (And through a subquery's scan without quals: ExecSetTupleBound.)
+            Plan::Project { input, .. } | Plan::Barrier { input, .. } => p = input,
             Plan::Sort { .. } => break,
             _ => return None,
         }

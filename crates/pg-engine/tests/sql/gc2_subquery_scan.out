@@ -1,0 +1,274 @@
+> CREATE TABLE gc2_t (x int, y int, z int)
+-- CREATE TABLE
+
+> INSERT INTO gc2_t SELECT i % 10, i % 10, i % 10 FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> CREATE INDEX gc2_t_xy ON gc2_t (x, y)
+-- CREATE INDEX
+
+> ANALYZE gc2_t
+-- ANALYZE
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT DISTINCT ON (y, x) x, y FROM (SELECT * FROM gc2_t ORDER BY x) s
+QUERY PLAN:text
+Unique
+  ->  Incremental Sort
+        Sort Key: s.x, s.y
+        Presorted Key: s.x
+        ->  Subquery Scan on s
+              ->  Index Only Scan using gc2_t_xy on gc2_t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT DISTINCT ON (y, x) x, y FROM (SELECT * FROM gc2_t ORDER BY x, z, y) s ORDER BY y, x, z
+QUERY PLAN:text
+Sort
+  Sort Key: s.y, s.x, s.z
+  ->  Unique
+        ->  Incremental Sort
+              Sort Key: s.x, s.y, s.z
+              Presorted Key: s.x
+              ->  Subquery Scan on s
+                    ->  Sort
+                          Sort Key: gc2_t.x, gc2_t.z, gc2_t.y
+                          ->  Seq Scan on gc2_t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE)
+> SELECT x, y FROM (SELECT * FROM gc2_t ORDER BY x, z, y) s ORDER BY x, y, z
+QUERY PLAN:text
+Incremental Sort
+  Output: s.x, s.y, s.z
+  Sort Key: s.x, s.y, s.z
+  Presorted Key: s.x
+  ->  Subquery Scan on s
+        Output: s.x, s.y, s.z
+        ->  Sort
+              Output: gc2_t.x, gc2_t.y, gc2_t.z
+              Sort Key: gc2_t.x, gc2_t.z, gc2_t.y
+              ->  Seq Scan on public.gc2_t
+                    Output: gc2_t.x, gc2_t.y, gc2_t.z
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE)
+> SELECT x, y, z FROM (SELECT * FROM gc2_t ORDER BY x, z, y) s ORDER BY x, y, z
+QUERY PLAN:text
+Incremental Sort
+  Output: gc2_t.x, gc2_t.y, gc2_t.z
+  Sort Key: gc2_t.x, gc2_t.y, gc2_t.z
+  Presorted Key: gc2_t.x
+  ->  Sort
+        Output: gc2_t.x, gc2_t.y, gc2_t.z
+        Sort Key: gc2_t.x, gc2_t.z, gc2_t.y
+        ->  Seq Scan on public.gc2_t
+              Output: gc2_t.x, gc2_t.y, gc2_t.z
+-- EXPLAIN
+
+> RESET enable_hashagg
+-- RESET
+
+> EXPLAIN (COSTS OFF)
+> SELECT DISTINCT y, x FROM (SELECT * FROM gc2_t ORDER BY x) s
+QUERY PLAN:text
+HashAggregate
+  Group Key: gc2_t.y, gc2_t.x
+  ->  Index Only Scan using gc2_t_xy on gc2_t
+-- EXPLAIN
+
+> SELECT DISTINCT ON (y, x) x, y FROM (SELECT * FROM gc2_t ORDER BY x) s
+x:int4 | y:int4
+0 | 0
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+9 | 9
+-- SELECT 10
+
+> CREATE TABLE gc2_lim (pk int PRIMARY KEY, c1 int, c2 int)
+-- CREATE TABLE
+
+> INSERT INTO gc2_lim VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3), (4, 4, 4), (5, 1, 1), (6, 2, 2), (7, 3, 3), (8, 4, 4)
+-- INSERT 0 8
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT pk, c2 FROM gc2_lim ORDER BY c1, pk) AS x LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Subquery Scan on x
+        ->  Sort
+              Sort Key: gc2_lim.c1, gc2_lim.pk
+              ->  Seq Scan on gc2_lim
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT pk, c1, c2 FROM gc2_lim ORDER BY c1, pk) AS x LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: gc2_lim.c1, gc2_lim.pk
+        ->  Seq Scan on gc2_lim
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT pk FROM (SELECT pk, c1 FROM gc2_lim ORDER BY c1) s
+QUERY PLAN:text
+Subquery Scan on s
+  ->  Sort
+        Sort Key: gc2_lim.c1
+        ->  Seq Scan on gc2_lim
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT pk FROM (SELECT pk, c1 FROM gc2_lim ORDER BY c1) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.pk
+  ->  Sort
+        Output: gc2_lim.pk, gc2_lim.c1
+        Sort Key: gc2_lim.c1
+        ->  Seq Scan on public.gc2_lim
+              Output: gc2_lim.pk, gc2_lim.c1
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT pk, c1 FROM gc2_lim ORDER BY c1 LIMIT 5) s WHERE pk > 2
+QUERY PLAN:text
+Subquery Scan on s
+  Filter: (s.pk > 2)
+  ->  Limit
+        ->  Sort
+              Sort Key: gc2_lim.c1
+              ->  Seq Scan on gc2_lim
+-- EXPLAIN
+
+> SELECT * FROM (SELECT pk, c2 FROM gc2_lim ORDER BY c1, pk) AS x LIMIT 3
+pk:int4 | c2:int4
+1 | 1
+5 | 1
+2 | 2
+-- SELECT 3
+
+> SELECT * FROM (SELECT pk, c1 FROM gc2_lim ORDER BY c1 LIMIT 5) s WHERE pk > 2 ORDER BY pk
+pk:int4 | c1:int4
+3 | 3
+5 | 1
+6 | 2
+-- SELECT 3
+
+> CREATE FUNCTION gc2_tattle(x int, y int) RETURNS bool VOLATILE LANGUAGE plpgsql AS
+> $$ BEGIN RAISE NOTICE 'x = %, y = %', x, y; RETURN x > y; END $$
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (SELECT 9 AS x, unnest(array[1,2,3,11,12,13]) AS u) ss WHERE gc2_tattle(x, 8)
+QUERY PLAN:text
+Subquery Scan on ss
+  Output: ss.x, ss.u
+  Filter: gc2_tattle(ss.x, 8)
+  ->  ProjectSet
+        Output: 9, unnest('{1,2,3,11,12,13}'::integer[])
+        ->  Result
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (SELECT 9 AS x, unnest(array[1,2,3,11,12,13]) AS u) ss WHERE gc2_tattle(x, u)
+QUERY PLAN:text
+Subquery Scan on ss
+  Output: ss.x, ss.u
+  Filter: gc2_tattle(ss.x, ss.u)
+  ->  ProjectSet
+        Output: 9, unnest('{1,2,3,11,12,13}'::integer[])
+        ->  Result
+-- EXPLAIN
+
+> SELECT * FROM (SELECT 9 AS x, unnest(array[1,2,3,11,12,13]) AS u) ss WHERE gc2_tattle(x, u)
+NOTICE 00000: x = 9, y = 1
+CONTEXT: PL/pgSQL function gc2_tattle(integer,integer) line 1 at RAISE
+NOTICE 00000: x = 9, y = 2
+CONTEXT: PL/pgSQL function gc2_tattle(integer,integer) line 1 at RAISE
+NOTICE 00000: x = 9, y = 3
+CONTEXT: PL/pgSQL function gc2_tattle(integer,integer) line 1 at RAISE
+NOTICE 00000: x = 9, y = 11
+CONTEXT: PL/pgSQL function gc2_tattle(integer,integer) line 1 at RAISE
+NOTICE 00000: x = 9, y = 12
+CONTEXT: PL/pgSQL function gc2_tattle(integer,integer) line 1 at RAISE
+NOTICE 00000: x = 9, y = 13
+CONTEXT: PL/pgSQL function gc2_tattle(integer,integer) line 1 at RAISE
+x:int4 | u:int4
+9 | 1
+9 | 2
+9 | 3
+-- SELECT 3
+
+> CREATE TYPE gc2_rec AS (x numeric)
+-- CREATE TYPE
+
+> CREATE TABLE gc2_pdt (id int, a gc2_rec)
+-- CREATE TABLE
+
+> INSERT INTO gc2_pdt VALUES (1, ROW(1.00)::gc2_rec), (2, ROW(1.0)::gc2_rec), (3, ROW(2)::gc2_rec)
+-- INSERT 0 3
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM gc2_pdt ORDER BY a, id) s WHERE a *= ROW(1.0)::gc2_rec
+QUERY PLAN:text
+Subquery Scan on s
+  Filter: (s.a *= '(1.0)'::gc2_rec)
+  ->  Unique
+        ->  Sort
+              Sort Key: gc2_pdt.a, gc2_pdt.id
+              ->  Seq Scan on gc2_pdt
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (SELECT DISTINCT a FROM gc2_pdt) s WHERE a *= ROW(1.0)::gc2_rec
+QUERY PLAN:text
+Subquery Scan on s
+  Filter: (s.a *= '(1.0)'::gc2_rec)
+  ->  HashAggregate
+        Group Key: gc2_pdt.a
+        ->  Seq Scan on gc2_pdt
+-- EXPLAIN
+
+> SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM gc2_pdt ORDER BY a, id) s WHERE a *= ROW(1.0)::gc2_rec
+id:int4 | a:user
+-- SELECT 0
+
+> SELECT count(*) FROM gc2_lim a, gc2_lim b JOIN LATERAL (VALUES (a.pk)) ss(v) ON b.pk = ss.v
+count:int8
+8
+-- SELECT 1
+
+> SELECT * FROM gc2_lim a, gc2_lim b LEFT JOIN LATERAL (SELECT a.c1 FROM gc2_lim c WHERE c.pk = 1) ss(z)
+>   ON b.c2 = ss.z
+>   WHERE a.pk < 3 AND b.pk < 4 ORDER BY a.pk, b.pk
+pk:int4 | c1:int4 | c2:int4 | pk:int4 | c1:int4 | c2:int4 | z:int4
+1 | 1 | 1 | 1 | 1 | 1 | 1
+1 | 1 | 1 | 2 | 2 | 2 | NULL
+1 | 1 | 1 | 3 | 3 | 3 | NULL
+2 | 2 | 2 | 1 | 1 | 1 | NULL
+2 | 2 | 2 | 2 | 2 | 2 | 2
+2 | 2 | 2 | 3 | 3 | 3 | NULL
+-- SELECT 6
+
+> SELECT * FROM gc2_lim a, (gc2_lim b JOIN (gc2_lim c JOIN LATERAL (SELECT a.pk + b.pk + c.pk AS s) ss ON true) ON true)
+>   WHERE a.pk = 1 AND b.pk = 2 ORDER BY c.pk
+pk:int4 | c1:int4 | c2:int4 | pk:int4 | c1:int4 | c2:int4 | pk:int4 | c1:int4 | c2:int4 | s:int4
+1 | 1 | 1 | 2 | 2 | 2 | 1 | 1 | 1 | 4
+1 | 1 | 1 | 2 | 2 | 2 | 2 | 2 | 2 | 5
+1 | 1 | 1 | 2 | 2 | 2 | 3 | 3 | 3 | 6
+1 | 1 | 1 | 2 | 2 | 2 | 4 | 4 | 4 | 7
+1 | 1 | 1 | 2 | 2 | 2 | 5 | 1 | 1 | 8
+1 | 1 | 1 | 2 | 2 | 2 | 6 | 2 | 2 | 9
+1 | 1 | 1 | 2 | 2 | 2 | 7 | 3 | 3 | 10
+1 | 1 | 1 | 2 | 2 | 2 | 8 | 4 | 4 | 11
+-- SELECT 8
+
+> SELECT * FROM gc2_lim x CROSS JOIN (gc2_lim x CROSS JOIN LATERAL (SELECT x.c1) ss)
+ERROR 42P09: table reference "x" is ambiguous (at 74)
+

@@ -450,6 +450,8 @@ struct ExNode {
     /// This node's output as a partial plan (rows spread over parallel workers), when
     /// one can make it: what a Gather above would run (`parallel`).
     partial: Option<Box<ExNode>>,
+    /// A Sort a LIMIT above bounds (ExecSetTupleBound): the rows it keeps.
+    bound: Option<f64>,
 }
 
 impl ExNode {
@@ -552,6 +554,11 @@ struct Builder<'c, 'a> {
     plan_ids: usize,
     /// Column names of enclosing queries' rows (`Outer(1)` first), always qualified.
     outer: Vec<Vec<String>>,
+    /// The query level (`depth`) each of `outer`'s rows was pushed at: a lateral join's
+    /// row is its level's own, a subquery's parameters the enclosing level's.
+    outer_depth: Vec<usize>,
+    /// Query levels entered: subqueries planned apart (and SubPlans).
+    depth: usize,
     /// SubPlans found in the expressions of the node being built.
     pending: Vec<ExNode>,
     /// InitPlans per query level.
@@ -592,6 +599,27 @@ struct Builder<'c, 'a> {
     pw_partial: bool,
     /// The aggregation node being converted's key.
     agg_key: Option<usize>,
+    /// The input of the aggregation being converted.
+    agg_input: Option<usize>,
+    /// The DISTINCTs that are a join's input: a semi join's inner side made unique
+    /// (create_unique_paths), over a projection to the compared expressions.
+    unique_sides: std::collections::HashSet<usize>,
+    /// A hashed DISTINCT's input projecting a subquery's plain columns: it labels the
+    /// subquery's physical target list, no Subquery Scan of its own.
+    plain_distinct: Option<usize>,
+    /// The top nodes of the query levels converted (a sub-select's, a CTE's): their
+    /// target lists keep the resjunk columns the level carries.
+    level_tops: std::collections::HashSet<usize>,
+    /// The FROM subqueries whose Subquery Scan shows (`shown_subqueries`), by address,
+    /// with whether the node above wants just the columns it reads from it.
+    shown: HashMap<usize, bool>,
+    /// Projections of the query level being converted above the node being converted
+    /// (its topmost one computes the select list: JSON_ARRAYAGG's constructor too).
+    proj_depth: usize,
+    /// Aggregations whose JSON_ARRAYAGG / JSON_OBJECTAGG calls a node further up
+    /// computes the constructor of (by the Agg's address): the calls, their input's
+    /// column names, and the group key count.
+    json_aggs: HashMap<usize, (Vec<AggCall>, Vec<Name>, usize)>,
 }
 
 fn addr(p: &Plan) -> usize {
@@ -780,11 +808,56 @@ fn rowmarks_under(p: &Plan, marks: &std::collections::HashSet<usize>) -> usize {
 
 /// The output columns of every node its consumers use (PG's reltargets), by address.
 fn needed_masks(root: &Arc<Plan>) -> HashMap<usize, Vec<bool>> {
+    needed_masks_of(root)
+}
+
+fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
     fn go(p: &Plan, needed: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>) {
         let needs = match p {
             // (A MERGE's source as its target list shows it: what the actions read, the
             // target row's ctid, and its tableoid for an inheritance tree.)
             Plan::Merge(m) if !m.members.is_empty() => vec![merge_needs(m)],
+            // (A FROM subquery planned apart computes its sort, group and DISTINCT keys
+            // whether read or not: remove_unused_subquery_outputs keeps them; its plan
+            // returns those its select list doesn't have as resjunk columns.)
+            Plan::Barrier { input, secure: false, sorted, .. } => {
+                let keys = level_keys(input, *sorted);
+                // (Nor does it remove a volatile one.)
+                let mut top: &Plan = input;
+                while let Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Filter { input, .. } = top {
+                    top = input;
+                }
+                // (An output nothing reads is a NULL in its target list, which it keeps:
+                // remove_unused_subquery_outputs.)
+                let volatile: Vec<bool> = match top {
+                    Plan::Project { exprs, input } => exprs
+                        .iter()
+                        .map(|e| {
+                            expr_volatile_deep(e)
+                                || matches!(e, Expr::Const(crate::types::Value::Null, _))
+                                    && matches!(&**input, Plan::Agg { .. })
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let mask: Vec<bool> = needed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| *n || keys.get(i).copied().unwrap_or(false) || volatile.get(i).copied().unwrap_or(false))
+                    .collect();
+                if let Some((pin, _)) = barrier_junk(input, *sorted) {
+                    let mut inner = super::paths::child_needs(input, &mask).pop().unwrap_or_default();
+                    let pkeys = level_keys(pin, *sorted);
+                    for (n, k) in inner.iter_mut().zip(pkeys) {
+                        *n |= k;
+                    }
+                    out.insert(addr(p), needed.clone());
+                    out.insert(addr(input), mask);
+                    go(pin, inner, out);
+                    return;
+                }
+                vec![mask]
+            }
             p => super::paths::child_needs(p, &needed),
         };
         // A LATERAL subquery's scan returns the columns its clauses over the outer side
@@ -834,6 +907,223 @@ fn needed_masks(root: &Arc<Plan>) -> HashMap<usize, Vec<bool>> {
     let mut out = HashMap::new();
     let w = super::binder::plan_width(root);
     go(root, vec![true; w], &mut out);
+    out
+}
+
+/// The output columns of a query level's plan that are its ORDER BY, GROUP BY or DISTINCT
+/// keys (sort group references), through its top nodes; an ordered index scan's first
+/// `sorted` keys stand for its ORDER BY.
+fn level_keys(p: &Plan, sorted: Option<usize>) -> Vec<bool> {
+    let w = super::binder::plan_width(p);
+    let mut out = vec![false; w];
+    let mark = |out: &mut Vec<bool>, e: &Expr| {
+        if let Expr::Col(j, _) = e
+            && let Some(o) = out.get_mut(*j)
+        {
+            *o = true;
+        }
+    };
+    match p {
+        Plan::Project { input, exprs } => {
+            let inner = level_keys(input, sorted);
+            // (A GiST / SP-GiST scan read in its ordering operator's order: the distance
+            // the projection computes is the sort key.)
+            let knn = matches!(&**input, Plan::Scan(s)
+                if matches!(s.access, super::plan::Access::Index { ordered: true, .. })
+                    && s.index.as_ref().is_some_and(|(ix, _)| matches!(ix.method.as_str(), "gist" | "spgist")));
+            for (i, e) in exprs.iter().enumerate() {
+                match e {
+                    Expr::Col(j, _) if inner.get(*j).copied().unwrap_or(false) => out[i] = true,
+                    Expr::Call(_, args, _) if knn && sorted.is_some() && args.len() == 2 && matches!(args[0], Expr::Col(..)) => {
+                        out[i] = true
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Plan::Sort { input, keys } => {
+            out = level_keys(input, sorted);
+            out.resize(w, false);
+            for k in keys {
+                mark(&mut out, &k.expr);
+            }
+        }
+        Plan::Limit { input, .. } | Plan::LockRows { input, .. } | Plan::Filter { input, .. } | Plan::Context { input, .. } => {
+            out = level_keys(input, sorted);
+            out.resize(w, false);
+        }
+        Plan::Distinct { input, on, .. } => {
+            out = level_keys(input, sorted);
+            out.resize(w, false);
+            match on {
+                None => out.iter_mut().for_each(|o| *o = true),
+                Some(on) => on.iter().for_each(|e| mark(&mut out, e)),
+            }
+        }
+        Plan::Agg { groups, .. } => {
+            for o in out.iter_mut().take(groups.len()) {
+                *o = true;
+            }
+        }
+        Plan::Scan(_) => {
+            if let Some(n) = sorted {
+                for c in super::paths::plan_order_cols(p).into_iter().take(n) {
+                    if let Some(o) = out.get_mut(c) {
+                        *o = true;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// A FROM subquery's plan whose own top projection drops columns its upper nodes carry
+/// (resjunk sort or group keys): that projection's input and the columns it keeps.
+fn barrier_junk(input: &Plan, sorted: Option<usize>) -> Option<(&Arc<Plan>, &Vec<Expr>)> {
+    match input {
+        Plan::Project { input: pin, exprs }
+            if exprs.len() < super::binder::plan_width(pin)
+                && exprs.iter().all(|e| matches!(e, Expr::Col(..)))
+                // (A sort, group or DISTINCT key its select list doesn't have.)
+                && level_keys(pin, sorted)
+                    .iter()
+                    .enumerate()
+                    .any(|(j, k)| *k && !exprs.iter().any(|e| matches!(e, Expr::Col(i, _) if *i == j))) =>
+        {
+            Some((pin, exprs))
+        }
+        _ => None,
+    }
+}
+
+/// The FROM subqueries planned apart (non-secure `Barrier`s) whose Subquery Scan EXPLAIN
+/// shows (setrefs' trivial_subqueryscan failing), each with whether the node above wants
+/// an exact or small target list from it (CP_EXACT_TLIST / CP_SMALL_TLIST: a query level's
+/// top, a Sort, a hash join's inner side, a Materialize or Memoize, an Append member; else
+/// it returns its physical target list): a filter over it, a projection of it that isn't
+/// all its columns in order, resjunk columns its plan carries, or that wish and columns
+/// nothing above reads.
+fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<usize, bool> {
+    fn barrier(p: &Plan) -> bool {
+        matches!(p, Plan::Barrier { secure: false, alias, .. } if !alias.is_empty())
+    }
+    // (A projection of distinct plain columns of a subquery: the subquery.)
+    fn hashed_columns_of(p: &Plan) -> Option<&Plan> {
+        let Plan::Project { input, exprs } = p else { return None };
+        let plain = exprs
+            .iter()
+            .enumerate()
+            .all(|(i, e)| matches!(e, Expr::Col(..)) && !exprs[..i].iter().any(|x| x.same_as(e)));
+        (barrier(input) && plain).then_some(&**input)
+    }
+    // A query level's top: its projection dropping the sort columns it carries (resjunk
+    // entries) isn't a node; the nodes under it that return their input's target list
+    // (Sort, Unique, Limit, LockRows) share it, and apply_tlist_labeling marks those
+    // columns resjunk in it, down to a subquery's scan whose own plan doesn't have them so.
+    fn level(p: &Plan, demand: bool, needed: &HashMap<usize, Vec<bool>>, out: &mut HashMap<usize, bool>) {
+        if let Plan::Project { input, exprs } = p
+            && exprs.iter().all(|e| matches!(e, Expr::Col(..)))
+            && exprs.len() < super::binder::plan_width(input)
+            && matches!(&**input, Plan::Sort { .. } | Plan::Limit { .. } | Plan::Distinct { .. } | Plan::LockRows { .. })
+        {
+            let w = super::binder::plan_width(input);
+            let junk: Vec<bool> = (0..w)
+                .map(|i| !exprs.iter().any(|e| matches!(e, Expr::Col(j, _) if *j == i)))
+                .collect();
+            let mut q = &**input;
+            while let Plan::Sort { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::Distinct { input, .. }
+            | Plan::LockRows { input, .. } = q
+            {
+                q = input;
+            }
+            if barrier(q) && super::binder::plan_width(q) == w && junk.iter().any(|j| *j) {
+                out.insert(addr(q), true);
+            }
+        }
+        go(p, demand, needed, out);
+    }
+    fn go(p: &Plan, demand: bool, needed: &HashMap<usize, Vec<bool>>, out: &mut HashMap<usize, bool>) {
+        let mut es = Vec::new();
+        node_exprs(p, &mut es);
+        let mut sq = Vec::new();
+        for e in es {
+            subqueries_in(e, &mut sq);
+        }
+        for s in sq {
+            level(&s.plan, true, needed, out);
+        }
+        match p {
+            Plan::Barrier { input, cols, sorted, .. } if barrier(p) => {
+                let partial = needed
+                    .get(&addr(p))
+                    .is_some_and(|m| m.iter().take(cols.len()).any(|x| !x));
+                // (A physical target list has the subquery's resjunk columns too:
+                // build_physical_tlist.)
+                if demand && (barrier_junk(input, *sorted).is_some() || partial) {
+                    out.insert(addr(p), demand);
+                }
+                match barrier_junk(input, *sorted) {
+                    Some((pin, _)) => go(pin, true, needed, out),
+                    None => level(input, true, needed, out),
+                }
+            }
+            Plan::Filter { input, .. } if barrier(input) => {
+                out.insert(addr(input), demand);
+                go(input, demand, needed, out);
+            }
+            Plan::Project { input, exprs } if barrier(input) => {
+                let w = super::binder::plan_width(input);
+                let identity = exprs.len() == w
+                    && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i));
+                if !identity {
+                    out.insert(addr(input), true);
+                }
+                go(input, false, needed, out);
+            }
+            Plan::With { ctes, body, .. } => {
+                for (_, c) in ctes {
+                    level(c, true, needed, out);
+                }
+                go(body, demand, needed, out);
+            }
+            // (A hashed DISTINCT of plain columns labels its input's physical target list:
+            // the subquery's scan is trivial then.)
+            Plan::Distinct { input, on: None, .. } if hashed_columns_of(input).is_some() => {
+                go(hashed_columns_of(input).expect("checked"), false, needed, out)
+            }
+            Plan::Sort { input, .. } => go(input, true, needed, out),
+            Plan::Limit { input, .. } | Plan::LockRows { input, .. } | Plan::Context { input, .. } => {
+                go(input, demand, needed, out)
+            }
+            Plan::Append { inputs, .. } => {
+                for i in inputs {
+                    go(i, true, needed, out);
+                }
+            }
+            Plan::Join { left, right, params, meta, .. } => {
+                go(left, false, needed, out);
+                // (A merge join's materialized inner side is its own node, no path:
+                // materialize_inner leaves the side's target list as it is.)
+                let small = params.is_empty()
+                    && !meta.swapped
+                    && (meta.method == Some(super::plan::JoinMethod::Hash)
+                        || meta.material && meta.method != Some(super::plan::JoinMethod::Merge)
+                        || meta.memoize.is_some());
+                go(right, small, needed, out);
+            }
+            p => {
+                for c in plan_inputs(p) {
+                    go(c, false, needed, out);
+                }
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    level(root, true, needed, &mut out);
     out
 }
 
@@ -965,6 +1255,7 @@ fn assign_refnames_skip(
             out.insert(addr(target.expect("checked")), base);
         }
     }
+    let shown = shown_subqueries(root, &needed_masks_of(root));
     let mut queue: Vec<&Plan> = vec![root];
     let mut qi = 0;
     // (A partition grouped partitionwise that is itself partitioned: its Append, though
@@ -1167,8 +1458,17 @@ fn assign_refnames_skip(
             }
             // (A subquery a filter keeps apart, its Subquery Scan shown: its alias is a
             // name of this level, its own relations named after this level's.)
-            if let Plan::Filter { input, .. } = p
-                && let Plan::Barrier { input: bi, alias, .. } = &**input
+            // (So does any FROM subquery whose Subquery Scan shows.)
+            let sub_shown: Option<&Plan> = match p {
+                Plan::Filter { input, .. } if matches!(&**input, Plan::Barrier { secure: true, .. }) => Some(&**input),
+                Plan::Filter { input, .. } | Plan::Project { input, .. } if shown.contains_key(&addr(input)) => {
+                    Some(&**input)
+                }
+                Plan::Barrier { .. } if shown.contains_key(&addr(p)) => Some(p),
+                _ => None,
+            };
+            if let Some(input) = sub_shown
+                && let Plan::Barrier { input: bi, alias, .. } = input
                 && !out.contains_key(&addr(input))
             {
                 let name = if used.contains_key(alias) {
@@ -1651,25 +1951,82 @@ impl Builder<'_, '_> {
         // (Without params it reads no values of its own: as the executor runs it, the
         // enclosing query's are its `Outer(1, …)` — a MIN / MAX InitPlan in a SubPlan.)
         let framed = !s.params.is_empty();
+        // (Correlated: reading values of the enclosing level — its columns, or a
+        // lateral join's row of that same level — not only those of levels further out.)
+        let level_param = s.params.iter().any(|p| {
+            let mut own = false;
+            p.walk(&mut |x| match x {
+                Expr::Col(..) => own = true,
+                Expr::Outer(d, ..) => own |= self.outer_depth.get(d - 1).is_none_or(|&l| l == self.depth),
+                _ => {}
+            });
+            own
+        });
         if framed {
             self.outer.insert(0, params);
+            self.outer_depth.insert(0, self.depth);
         }
-        let mut node = self.level(&s.plan);
+        self.depth += 1;
+        // (A user-defined operator's comparison is the test expression's: the subquery
+        // returns its column.)
+        let test = match (&*s.plan, s.test_op) {
+            (Plan::Project { input, exprs }, Some(_)) if exprs.len() == 1 => Some((input.clone(), exprs[0].clone())),
+            _ => None,
+        };
+        let mut node = match &test {
+            Some((input, _)) => self.level(input),
+            None => self.level(&s.plan),
+        };
         if s.kind == SubqueryKind::Exists {
             // simplify_EXISTS_query: the subquery returns no columns.
             node.output.clear();
             node.width = 0;
         }
+        self.depth -= 1;
         if framed {
             self.outer.remove(0);
+            self.outer_depth.remove(0);
         }
         self.pending = saved;
         self.plan_ids += 1;
         let id = self.plan_ids;
-        let correlated = !s.params.is_empty();
+        let correlated = match s.test_op {
+            Some(n) => n > 0,
+            None => level_param,
+        };
         let init = !correlated && !matches!(s.kind, SubqueryKind::Any | SubqueryKind::All);
-        let hashed =
-            !correlated && s.kind == SubqueryKind::Any && s.ops.iter().all(|o| o.name == "=");
+        let hashed = !correlated
+            && s.kind == SubqueryKind::Any
+            && match &test {
+                // (Hashable when each comparison is an `=` of the outer values with the
+                // subquery's column, in that order: Postgres can't hash one the other way
+                // round.)
+                Some((_, t)) => {
+                    let mut parts = Vec::new();
+                    conjuncts(t, &mut parts);
+                    !parts.is_empty()
+                        && parts.iter().all(|e| match e {
+                            Expr::Call(d, args, _) if d.name == "=" && args.len() == 2 => {
+                                let (a, b) = (&args[0], &args[1]);
+                                a.columns().is_empty()
+                                    && a.has_outer_refs()
+                                    && !b.has_outer_refs()
+                                    && b.columns() == vec![0]
+                                    && hashable_key(&a.ty())
+                            }
+                            _ => false,
+                        })
+                }
+                // (An anonymous record's equality isn't hashable: bug #17363.)
+                None => {
+                    s.ops.iter().all(|o| o.name == "=")
+                        && s.left.iter().all(|l| match l.ty() {
+                            DataType::Record => false,
+                            DataType::Row(r) => r.oid != 0,
+                            _ => true,
+                        })
+                }
+            };
         if !correlated
             && !init
             && !hashed
@@ -1773,7 +2130,10 @@ impl Builder<'_, '_> {
     /// A query level (the statement, a CTE or a subquery): its root carries its InitPlans.
     fn level(&mut self, p: &Arc<Plan>) -> ExNode {
         self.inits.push(Vec::new());
+        let saved_depth = std::mem::take(&mut self.proj_depth);
+        self.level_tops.insert(addr(p));
         let mut node = self.node(p).node;
+        self.proj_depth = saved_depth;
         self.settle(&mut node);
         let mut inits = self.inits.pop().unwrap_or_default();
         // SS_charge_for_initplans: the level's top node pays for its InitPlans.
@@ -1905,7 +2265,10 @@ impl Builder<'_, '_> {
             return self.node(input);
         }
         let inits_before = self.inits.last().map_or(0, |v| v.len());
+        let apart = matches!(&**p, Plan::Barrier { .. });
+        self.depth += apart as usize;
         let mut b = self.convert(p);
+        self.depth -= apart as usize;
         // (The MIN / MAX InitPlans the node's expressions run: their costs are its own.)
         if let Some(level) = self.inits.last_mut() {
             for i in level.iter_mut().skip(inits_before) {
@@ -1915,6 +2278,30 @@ impl Builder<'_, '_> {
                     b.node.total_cost += i.total_cost;
                 }
             }
+        }
+        // (A subquery planned apart: its InitPlans are its plan's top node's, and it
+        // pays for them.)
+        if matches!(&**p, Plan::Barrier { .. })
+            && let Some(level) = self.inits.last_mut()
+            && level.len() > inits_before
+        {
+            let mut moved: Vec<ExNode> = level.drain(inits_before..).collect();
+            let cost: f64 = moved.iter().filter(|i| !i.charged).map(|i| i.total_cost).sum();
+            for i in &mut moved {
+                i.charged = true;
+            }
+            b.node.startup_cost += cost;
+            b.node.total_cost += cost;
+            let target = if b.node.node_type == "Subquery Scan" && !b.node.children.is_empty() {
+                let c = &mut b.node.children[0];
+                c.startup_cost += cost;
+                c.total_cost += cost;
+                c
+            } else {
+                &mut b.node
+            };
+            moved.append(&mut target.initplans);
+            target.initplans = moved;
         }
         b.node.subplans.append(&mut self.pending);
         if b.node.key.is_none() {
@@ -1940,9 +2327,24 @@ impl Builder<'_, '_> {
             // (A Sort over a join returns what the join does: the columns needed above.)
             let sorted_join = matches!(b.node.node_type, "Sort" | "Incremental Sort")
                 && b.node.children.first().is_some_and(|c| c.is_join());
-            let mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || dummy || member || sorted_join)
+            // (A ProjectSet under an aggregation returns the group input target: what the
+            // aggregation reads, and its calls.)
+            let srf_target = b.node.node_type == "ProjectSet" && self.agg_input == Some(addr(p));
+            let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || dummy || member || sorted_join || srf_target)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
+            if srf_target
+                && let (Some(m), Plan::ProjectSet { input, exprs, .. }) = (&mut mask, &**p)
+            {
+                let iw = crate::sql::binder::plan_width(input);
+                for (i, e) in exprs.iter().enumerate() {
+                    if (e.columns().iter().any(|&c| c >= iw) || !matches!(e, Expr::Col(..)))
+                        && let Some(x) = m.get_mut(i)
+                    {
+                        *x = true;
+                    }
+                }
+            }
             b.node.output = b
                 .internal
                 .iter()
@@ -1971,6 +2373,108 @@ impl Builder<'_, '_> {
         let key = addr(p);
         match &**p {
             Plan::Context { input, .. } => self.convert(input),
+            // A subquery Postgres plans as a level of its own: its Subquery Scan shows
+            // unless trivial (setrefs' trivial_subqueryscan): it returns columns its plan
+            // computes but doesn't return (resjunk sort or group keys), or the node above
+            // wants fewer columns than the subquery has (no physical target list then).
+            Plan::Barrier { input, alias, cols, secure: false, sorted } if !alias.is_empty() => {
+                let junk = barrier_junk(input, *sorted);
+                let Some(&demand) = self.shown.get(&key) else {
+                    // (Its plan returns its resjunk columns as well, past the ones the
+                    // query above reads.)
+                    if let Some((pin, exprs)) = junk {
+                        let c = self.node(pin);
+                        let pick = |v: &Vec<Name>| -> Vec<Name> {
+                            exprs
+                                .iter()
+                                .map(|e| match e {
+                                    Expr::Col(j, _) => v.get(*j).cloned().unwrap_or_else(|| Name::same("?")),
+                                    _ => Name::same("?"),
+                                })
+                                .collect()
+                        };
+                        let (internal, exported) = (pick(&c.internal), pick(&c.exported));
+                        let mut node = c.node;
+                        if node.cols.len() == c.exported.len() {
+                            node.cols = exprs
+                                .iter()
+                                .map(|e| match e {
+                                    Expr::Col(j, _) => node.cols.get(*j).cloned().unwrap_or_default(),
+                                    _ => ColInfo::default(),
+                                })
+                                .collect();
+                        }
+                        return Built { node, internal, exported };
+                    }
+                    // (Its scan trivial, the order it offers is still the subquery's: its
+                    // ORDER BY's keys, truncate_useless_pathkeys.)
+                    let mut b = self.convert(input);
+                    if let Some(n) = sorted {
+                        b.node.order.truncate(*n);
+                    }
+                    return b;
+                };
+                let needed = self.needed.get(&key).cloned();
+                let c = match junk {
+                    Some((pin, _)) => self.node(pin),
+                    None => self.node(input),
+                };
+                let map: Vec<usize> = match junk {
+                    Some((_, exprs)) => exprs
+                        .iter()
+                        .map(|e| match e {
+                            Expr::Col(j, _) => *j,
+                            _ => 0,
+                        })
+                        .collect(),
+                    None => (0..c.exported.len()).collect(),
+                };
+                let names: Vec<Name> = cols.iter().map(|col| Name::col(alias, col)).collect();
+                let order = self.subquery_order(&c, &map, &names, *sorted, needed.as_ref());
+                // (The subquery's other path, in another order: its scan over that one, for
+                // the node above to choose from.)
+                let alt_order = c.node.alt.as_ref().map(|a| {
+                    let tmp = Built {
+                        node: (**a).clone(),
+                        internal: Vec::new(),
+                        exported: c.exported.clone(),
+                    };
+                    self.subquery_order(&tmp, &map, &names, *sorted, needed.as_ref())
+                });
+                let mut c = c;
+                let alt = c.node.alt.take();
+                let child_cols = c.node.cols.clone();
+                let info = Arc::new((alias.clone(), cols.clone()));
+                let saved = self.sub_alias.replace(info);
+                let mut b = self.subquery_scan(c, key);
+                self.sub_alias = saved;
+                if let (Some(a), Some(ao)) = (alt, alt_order) {
+                    let mut n = b.node.clone();
+                    n.startup_cost = a.startup_cost;
+                    n.total_cost = a.total_cost + a.rows * costs::CPU_TUPLE_COST;
+                    n.order = ao;
+                    n.children = vec![a.child("Subquery")];
+                    b.node.alt = Some(Box::new(n));
+                }
+                if child_cols.len() >= map.len() {
+                    b.node.cols = map.iter().map(|&j| child_cols.get(j).cloned().unwrap_or_default()).collect();
+                    if let Some(a) = &mut b.node.alt {
+                        a.cols = b.node.cols.clone();
+                    }
+                }
+                b.node.order = order;
+                if self.o.verbose {
+                    b.node.output = names
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !demand || needed.as_ref().is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
+                        .map(|(_, n)| self.pick(n, Cx::Output))
+                        .collect();
+                }
+                b.internal = names.clone();
+                b.exported = names;
+                b
+            }
             // (Without a filter above, its Subquery Scan is trivial.)
             Plan::Barrier { input, .. } => self.convert(input),
             Plan::One => Built::passthrough(self.result(1.0), Vec::new()),
@@ -2003,6 +2507,10 @@ impl Builder<'_, '_> {
                 let refname = self.refname(p);
                 let mut n = ExNode::new("Values Scan");
                 self.target(&mut n, None, None, None, &refname);
+                // (The SubPlans its lists compute are its.)
+                for e in rows.iter().flatten() {
+                    self.register(e, &[]);
+                }
                 n.rows = rows.len() as f64;
                 n.total_cost = rows.len() as f64 * 0.0125;
                 n.cols = rows[0]
@@ -2318,35 +2826,9 @@ impl Builder<'_, '_> {
                     _ => Vec::new(),
                 };
                 WINDOW_TLIST.with(|w| *w.borrow_mut() = tl);
-                // (JSON_ARRAYAGG / JSON_OBJECTAGG ... RETURNING text: the aggregate shows
-                // it, its json cast to that.)
-                let agg_of = |p: &Plan| -> Option<(usize, Vec<bool>)> {
-                    let p = match p {
-                        Plan::Filter { input, .. } => &**input,
-                        p => p,
-                    };
-                    match p {
-                        Plan::Agg { groups, aggs, sets: None, .. } => {
-                            Some((groups.len(), aggs.iter().map(|a| a.json_ctor).collect()))
-                        }
-                        _ => None,
-                    }
-                };
-                let mut casts: Vec<(usize, DataType)> = Vec::new();
-                if let Some((ng, ctor)) = agg_of(input) {
-                    for e in exprs {
-                        e.walk(&mut |x| {
-                            if let Expr::Cast(x, DataType::Json | DataType::Jsonb, to, _) = x
-                                && let Expr::Col(k, _) = &**x
-                                && *k >= ng
-                                && ctor.get(*k - ng) == Some(&true)
-                                && !casts.iter().any(|c| c.0 == *k)
-                            {
-                                casts.push((*k, to.clone()));
-                            }
-                        });
-                    }
-                }
+                // (JSON_ARRAYAGG / JSON_OBJECTAGG ... RETURNING text: the level's top
+                // projection shows the constructor, its json cast merged; below.)
+                let casts: Vec<(usize, DataType)> = Vec::new();
                 let stripped;
                 let exprs = if casts.is_empty() {
                     exprs
@@ -2372,7 +2854,18 @@ impl Builder<'_, '_> {
                     &stripped
                 };
                 let saved_casts = std::mem::replace(&mut self.json_casts, casts);
+                let top_proj = self.proj_depth == 0;
+                // (A top projection only dropping the resjunk columns the level carries
+                // isn't one: the one below computes the select list.)
+                let junk_only = exprs.len() < super::binder::plan_width(input)
+                    && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i));
+                if !junk_only {
+                    self.proj_depth += 1;
+                }
                 let mut c = self.node(input);
+                if !junk_only {
+                    self.proj_depth -= 1;
+                }
                 self.json_casts = saved_casts;
                 // A partial input stays partial through a projection of what workers can
                 // compute; else the Gather (or the serial input) computes it.
@@ -2389,8 +2882,9 @@ impl Builder<'_, '_> {
                 // The statement's own target list keeps the sort columns it carries as
                 // resjunk entries: the projection that drops them isn't a plan node.
                 if self.o.verbose
-                    && addr(p) == self.top
-                    && matches!(c.node.node_type, "Sort" | "Incremental Sort" | "Limit")
+                    && (addr(p) == self.top || self.level_tops.contains(&addr(p)))
+                    && (matches!(c.node.node_type, "Sort" | "Incremental Sort" | "Limit")
+                        || c.node.node_type == "Result" && matches!(&**input, Plan::Project { .. }))
                     && exprs.len() < c.internal.len()
                     && exprs
                         .iter()
@@ -2413,8 +2907,17 @@ impl Builder<'_, '_> {
                 // A set operation's FROM subquery (not pulled up) that the query reads
                 // other than as it is: its Subquery Scan computes that
                 // (trivial_subqueryscan).
+                // (One shown already, the Barrier's own, takes the projection.)
+                let barrier_sorted = match &**input {
+                    Plan::Barrier { secure: false, sorted, .. } => *sorted,
+                    _ => None,
+                };
                 let barrier_info = match &**input {
-                    Plan::Barrier { alias, cols, secure: false, .. } if !alias.is_empty() => {
+                    Plan::Barrier { alias, cols, secure: false, .. }
+                        if !alias.is_empty()
+                            && c.node.node_type != "Subquery Scan"
+                            && self.plain_distinct != Some(key) =>
+                    {
                         Some(Arc::new((alias.clone(), cols.clone())))
                     }
                     _ => None,
@@ -2428,10 +2931,14 @@ impl Builder<'_, '_> {
                     && !(exprs.len() == c.exported.len()
                         && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i)))
                 {
+                    let names: Vec<Name> = info.1.iter().map(|col| Name::col(&info.0, col)).collect();
+                    let map: Vec<usize> = (0..c.exported.len()).collect();
+                    let bneeded = self.needed.get(&addr(input)).cloned();
+                    let order = self.subquery_order(&c, &map, &names, barrier_sorted, bneeded.as_ref());
                     let saved = self.sub_alias.replace(info.clone());
                     c = self.subquery_scan(c, addr(p));
                     self.sub_alias = saved;
-                    let names: Vec<Name> = info.1.iter().map(|col| Name::col(&info.0, col)).collect();
+                    c.node.order = order;
                     c.internal = names.clone();
                     c.exported = names;
                 }
@@ -2466,6 +2973,64 @@ impl Builder<'_, '_> {
                 if matches!(&**input, Plan::Append { inh: Some(_), .. }) && c.node.node_type == "Append" {
                     c.internal = c.exported.clone();
                 }
+                // (JSON_ARRAYAGG / JSON_OBJECTAGG an aggregation further down computes as
+                // its aggregate: the constructor shows here, over it, its cast merged.)
+                let mut jcols: Vec<Name> = c.internal.clone();
+                let jexprs: Vec<Expr> = if self.json_aggs.is_empty() || !top_proj {
+                    exprs.to_vec()
+                } else {
+                    let ctor = |b: &mut Self, k: usize, to: Option<&DataType>| -> Option<Name> {
+                        let (key, i) = json_agg_col(input, k)?;
+                        let (calls, names, _) = b.json_aggs.get(&key)?.clone();
+                        let a = calls.get(i)?.clone();
+                        if !a.json_ctor {
+                            return None;
+                        }
+                        let agg = Expr::Agg(0, a.ty.clone());
+                        let e = match to {
+                            Some(t) => Expr::Cast(Box::new(agg), a.ty.clone(), t.clone(), true),
+                            None => agg,
+                        };
+                        Some(b.name(&e, &names, std::slice::from_ref(&a)))
+                    };
+                    let mut extra: Vec<(usize, DataType, usize)> = Vec::new();
+                    let mut out = Vec::new();
+                    for e in exprs.iter() {
+                        let e2 = e
+                            .clone()
+                            .transform(&mut |x| {
+                                Ok(match x {
+                                    Expr::Cast(inner, DataType::Json | DataType::Jsonb, to, ex)
+                                        if matches!(&*inner, Expr::Col(..)) =>
+                                    {
+                                        let Expr::Col(k, t) = *inner else { unreachable!() };
+                                        let at = extra.iter().find(|(kk, tt, _)| *kk == k && *tt == to).map(|x| x.2);
+                                        match at {
+                                            Some(m) => Expr::Col(m, to),
+                                            None => match ctor(self, k, Some(&to)) {
+                                                Some(n) => {
+                                                    let m = jcols.len();
+                                                    jcols.push(n);
+                                                    extra.push((k, to.clone(), m));
+                                                    Expr::Col(m, to)
+                                                }
+                                                None => Expr::Cast(Box::new(Expr::Col(k, t)), DataType::Json, to, ex),
+                                            },
+                                        }
+                                    }
+                                    x => x,
+                                })
+                            })
+                            .unwrap_or_else(|_| e.clone());
+                        out.push(e2);
+                    }
+                    for (k, jc) in jcols.iter_mut().enumerate().take(c.internal.len()) {
+                        if let Some(n) = ctor(self, k, None) {
+                            *jc = n;
+                        }
+                    }
+                    out
+                };
                 let saved = self.num_exec.replace(c.node.rows);
                 // JSON_ARRAYAGG / JSON_OBJECTAGG as a window function: the projection
                 // shows the constructor (`JSON_ARRAYAGG(…) OVER w1`), its cast merged.
@@ -2473,7 +3038,7 @@ impl Builder<'_, '_> {
                     Plan::Window { input: wi, calls } => Some((super::binder::plan_width(wi), calls)),
                     _ => None,
                 };
-                let internal: Vec<Name> = exprs
+                let internal: Vec<Name> = jexprs
                     .iter()
                     .map(|e| {
                         if let Some((iw, calls)) = win {
@@ -2510,7 +3075,7 @@ impl Builder<'_, '_> {
                                 };
                             }
                         }
-                        self.name(e, &c.internal, &[])
+                        self.name(e, &jcols, &[])
                     })
                     .collect();
                 self.num_exec = saved;
@@ -2983,6 +3548,8 @@ impl Builder<'_, '_> {
                 n.details.push(Detail::List("Sort Key", list.clone()));
                 n.details.push(Detail::SortInfo);
                 self.sort_costs(&mut n, &c.node);
+                // (Under enable_sort = off, the sort the plan needs anyway.)
+                n.disabled = !crate::sql::paths::Gucs::read(self.ctx).sort;
                 n.order = list.clone();
                 if self.o.verbose && matches!(&**input, Plan::Scan(_)) && c.node.is_scan() {
                     n.output = c.node.output.clone();
@@ -3052,14 +3619,33 @@ impl Builder<'_, '_> {
                 Built::passthrough(n, c.exported)
             }
             Plan::Distinct { input, on, .. } => {
+                // (Hashed: sorted, the Sort's input is the projection.)
+                let plain = on.is_none()
+                    && crate::sql::paths::Gucs::read(self.ctx).hashagg
+                    && matches!(&**input, Plan::Project { input: b, exprs }
+                        if matches!(&**b, Plan::Barrier { secure: false, alias, .. } if !alias.is_empty())
+                            && exprs.iter().enumerate().all(|(i, e)| {
+                                matches!(e, Expr::Col(..)) && !exprs[..i].iter().any(|x| x.same_as(e))
+                            }));
+                let saved_plain = std::mem::replace(&mut self.plain_distinct, plain.then(|| addr(input)));
                 let mut c = self.node(input);
+                self.plain_distinct = saved_plain;
                 // (Its partial plan: a DISTINCT in the workers first, create_partial_distinct_paths.)
                 let part = c.node.partial.clone();
                 self.settle(&mut c.node);
                 // A hashed DISTINCT reads a plain scan's physical target list (its select
                 // list of columns is the aggregate's).
+                // (A semi join's side made unique reads just the compared values.)
+                let semi_unique = self.unique_sides.contains(&key);
+                // (Sorted instead, the Sort's input is its exact target list.)
+                let exact_out = c.node.output.clone();
+                let mut physical = false;
+                if self.o.verbose && on.is_none() && semi_unique && c.node.is_scan() {
+                    c.node.output = c.internal.iter().map(|n| self.pick(n, Cx::Output)).collect();
+                }
                 if self.o.verbose
                     && on.is_none()
+                    && !semi_unique
                     && let Plan::Project { input: pin, exprs } = &**input
                     && exprs.iter().all(|e| matches!(e, Expr::Col(..)))
                     // (A column listed twice: the select list itself.)
@@ -3071,6 +3657,7 @@ impl Builder<'_, '_> {
                     && c.node.is_scan()
                 {
                     let names = self.table_names(&sc.table, &self.refname(pin));
+                    physical = true;
                     c.node.output = sc
                         .table
                         .columns
@@ -3239,6 +3826,35 @@ impl Builder<'_, '_> {
                             break;
                         }
                     }
+                    // An append relation whose members all come in an order the keys
+                    // lead: merged in it (generate_orderedappend_paths).
+                    let mut merged: Option<ExNode> = None;
+                    if ord.is_empty()
+                        && c.node.node_type == "Append"
+                        && c.node.children.len() > 1
+                        && let Some((keys, kids)) = self.merged_append_keys(&c.node, &named)
+                    {
+                        let mut ma = ExNode::new("Merge Append");
+                        let list: Vec<String> = keys.iter().map(|&i| c.exported.get(i).map_or(String::new(), |n| self.pick(n, Cx::Upper))).collect();
+                        let nk = kids.len() as f64;
+                        let cmp = 2.0 * costs::CPU_OPERATOR_COST;
+                        let logn = nk.log2();
+                        ma.details.push(Detail::List("Sort Key", list.clone()));
+                        ma.rows = c.node.rows;
+                        ma.width = c.node.width;
+                        ma.cols = c.node.cols.clone();
+                        ma.key = c.node.key;
+                        ma.output = c.node.output.clone();
+                        ma.startup_cost = kids.iter().map(|k| k.startup_cost).sum::<f64>() + cmp * nk * logn;
+                        ma.total_cost = ma.startup_cost
+                            + kids.iter().map(|k| k.total_cost - k.startup_cost).sum::<f64>()
+                            + ma.rows * cmp * logn
+                            + costs::CPU_TUPLE_COST * 0.5 * ma.rows;
+                        ma.children = kids;
+                        ma.order = list.clone();
+                        ord = list;
+                        merged = Some(ma);
+                    }
                     let common = ord.len();
                     let rest: Vec<String> = names
                         .iter()
@@ -3247,7 +3863,10 @@ impl Builder<'_, '_> {
                         .collect();
                     ord.extend(rest);
                     let g = crate::sql::paths::Gucs::read(self.ctx);
-                    let mut input_node = c.node.clone();
+                    let mut input_node = merged.unwrap_or_else(|| c.node.clone());
+                    if physical {
+                        input_node.output = exact_out.clone();
+                    }
                     if common < ord.len() {
                         let incremental = common > 0 && g.incremental_sort;
                         let mut sn = ExNode::new(if incremental { "Incremental Sort" } else { "Sort" });
@@ -3763,8 +4382,10 @@ impl Builder<'_, '_> {
                 }
                 let names: Vec<String> = params.iter().map(|e| self.name(e, &[], &[]).full).collect();
                 self.outer.insert(0, names);
+                self.outer_depth.insert(0, self.depth);
                 let b = self.node(right);
                 self.outer.remove(0);
+                self.outer_depth.remove(0);
                 b
             }
             Plan::Join { params, meta, .. } if meta.from_call.is_some() => {
@@ -3901,8 +4522,29 @@ impl Builder<'_, '_> {
             Plan::Recursive {
                 base, recursive, ..
             } => {
-                let b = self.node(base);
-                let r = self.node(recursive);
+                // (Each term is a query level of its own: its InitPlans, its CTEs', are its
+                // top node's.)
+                let term = |this: &mut Self, p: &Arc<Plan>| {
+                    let before = this.inits.last().map_or(0, |v| v.len());
+                    let mut b = this.node(p);
+                    if let Some(level) = this.inits.last_mut()
+                        && level.len() > before
+                    {
+                        let mut moved: Vec<ExNode> = level.drain(before..).collect();
+                        for i in &mut moved {
+                            if !i.charged {
+                                i.charged = true;
+                                b.node.startup_cost += i.total_cost;
+                                b.node.total_cost += i.total_cost;
+                            }
+                        }
+                        moved.append(&mut b.node.initplans);
+                        b.node.initplans = moved;
+                    }
+                    b
+                };
+                let b = term(self, base);
+                let r = term(self, recursive);
                 let mut n = ExNode::new("Recursive Union");
                 n.rows = b.node.rows * 10.0 + r.node.rows * 10.0;
                 n.width = b.node.width;
@@ -5757,6 +6399,97 @@ impl Builder<'_, '_> {
         })
     }
 
+    /// The order a subquery's rows come in (`c`'s, its plan's), by the subquery's columns
+    /// `names` (its column `i` is `c`'s column `map[i]`): convert_subquery_pathkeys, as
+    /// far as the keys are columns it returns, at most its ORDER BY's `sorted` keys.
+    fn subquery_order(
+        &self,
+        c: &Built,
+        map: &[usize],
+        names: &[Name],
+        sorted: Option<usize>,
+        needed: Option<&Vec<bool>>,
+    ) -> Vec<String> {
+        let below: Vec<String> = map
+            .iter()
+            .map(|&j| c.exported.get(j).map_or(String::new(), |n| self.pick(n, Cx::Upper)))
+            .collect();
+        let mut order = Vec::new();
+        for k in &c.node.order {
+            let hit = below.iter().enumerate().find_map(|(i, b)| {
+                if b.is_empty() {
+                    return None;
+                }
+                if k == b {
+                    Some((i, ""))
+                } else {
+                    k.strip_prefix(b.as_str()).filter(|r| r.starts_with(' ')).map(|r| (i, r))
+                }
+            });
+            // (A column the query above doesn't read: no pathkey of its.)
+            match hit {
+                Some((i, rest)) if i < names.len() && needed.is_none_or(|m| m.get(i).copied().unwrap_or(true)) => {
+                    order.push(format!("{}{rest}", self.pick(&names[i], Cx::Upper)))
+                }
+                _ => break,
+            }
+        }
+        if let Some(n) = sorted {
+            order.truncate(n);
+        }
+        order
+    }
+
+    /// An Append's members each in an order whose leading keys are its columns (the same
+    /// ones, in the same directions, for every member) among `named` (the keys wanted, by
+    /// column): those columns, as far as all members share them.
+    fn merged_append_keys(&self, append: &ExNode, named: &[(usize, String)]) -> Option<(Vec<usize>, Vec<ExNode>)> {
+        let keys_of = |k: &ExNode, names: &[String]| -> Vec<(usize, String)> {
+            let mut mine = Vec::new();
+            for o in &k.order {
+                let base = presorted_name(o);
+                let suffix = o[base.len()..].to_string();
+                match names.iter().position(|n| *n == base) {
+                    Some(i) if named.iter().any(|x| x.0 == i) && !mine.iter().any(|m: &(usize, String)| m.0 == i) => {
+                        mine.push((i, suffix))
+                    }
+                    _ => break,
+                }
+            }
+            mine
+        };
+        let mut common: Option<Vec<(usize, String)>> = None;
+        let mut kids = Vec::new();
+        for k in &append.children {
+            if k.out_names.is_empty() {
+                return None;
+            }
+            // (A member's other path when it has the order and this one doesn't.)
+            let mut chosen = k.clone();
+            let mut mine = keys_of(k, &k.out_names);
+            if mine.is_empty()
+                && let Some(a) = &k.alt
+            {
+                let am = keys_of(a, &k.out_names);
+                if !am.is_empty() {
+                    let mut a = (**a).clone();
+                    a.out_names = k.out_names.clone();
+                    a.relationship = k.relationship;
+                    chosen = a;
+                    mine = am;
+                }
+            }
+            chosen.alt = None;
+            kids.push(chosen);
+            common = Some(match common {
+                None => mine,
+                Some(c) => c.into_iter().zip(mine).take_while(|(a, b)| a == b).map(|(a, _)| a).collect(),
+            });
+        }
+        let keys: Vec<usize> = common?.into_iter().take_while(|(_, s)| s.is_empty()).map(|(i, _)| i).collect();
+        (!keys.is_empty()).then_some((keys, kids))
+    }
+
     /// A Subquery Scan (without quals) over `c`, by the subquery's alias.
     fn subquery_scan(&mut self, mut c: Built, key: usize) -> Built {
         self.settle(&mut c.node);
@@ -6018,6 +6751,10 @@ impl Builder<'_, '_> {
             .partition(|e| !having && e.columns().is_empty() && !super::paths::expr_volatile_deep(e));
         let node = &c.node;
         let scan_like = node.is_scan() || (node.node_type == "Result" && node.children.is_empty());
+        // (A subquery's scan shown already: its own quals.)
+        let subscan = setop
+            && node.node_type == "Subquery Scan"
+            && !node.details.iter().any(|d| matches!(d, Detail::Text("Filter", _)));
         if !quals.is_empty() {
             if !setop
                 && (scan_like
@@ -6101,6 +6838,22 @@ impl Builder<'_, '_> {
                     .iter()
                     .map(|e| self.show(e, &names, Cx::Upper))
                     .collect();
+                if subscan {
+                    // (Its scan computes it: the quals go on it.)
+                    let n = &mut c.node;
+                    let below = n.children.first().map_or(n.rows, |k| k.rows);
+                    let below_key = n.children.first().and_then(|k| k.key).unwrap_or(input_key);
+                    n.details
+                        .push(Detail::Text("Filter", and_text(texts).unwrap_or_default()));
+                    n.details.push(Detail::Removed(
+                        "Rows Removed by Filter",
+                        vec![Removed::Diff(below_key)],
+                    ));
+                    n.key = Some(key);
+                    n.rows = (below * 0.5).max(1.0);
+                    n.total_cost += below * 0.01 - below * costs::CPU_TUPLE_COST;
+                    n.subplans.append(&mut self.pending);
+                } else {
                 let mut n = ExNode::new("Subquery Scan");
                 let alias = sub.as_ref().map_or("unnamed_subquery", |i| i.0.as_str());
                 self.target(&mut n, None, None, None, alias);
@@ -6119,6 +6872,7 @@ impl Builder<'_, '_> {
                 let child = std::mem::take(&mut c.node);
                 n.children.push(child.child("Subquery"));
                 c.node = n;
+                }
                 // (Above it, its columns are the subquery's.)
                 if setop && sub.is_some() {
                     c.internal = names.clone();
@@ -6163,7 +6917,9 @@ impl Builder<'_, '_> {
         // (An ORDER BY above: the GROUP BY's keys in its order first, preprocess_groupclause.)
         let hint = self.group_order.take();
         let hint_full = self.group_order_full;
+        let saved_input = self.agg_input.replace(addr(input));
         let mut c = self.node(input);
+        self.agg_input = saved_input;
         let mut part_in = c.node.partial.take();
         // A scan feeding the aggregation returns only the columns it uses.
         if c.node.is_scan() && c.node.cols.len() == c.exported.len() {
@@ -6193,6 +6949,66 @@ impl Builder<'_, '_> {
             .map(|g| self.name(g, &c.exported, &[]))
             .collect();
         let ng = groups.len();
+        // make_group_input_target: a GROUP BY expression is computed below the
+        // aggregation (its input returns it, before the columns the aggregates read); the
+        // nodes above it, a Sort between, refer to it.
+        // (A column under COLLATE is the column: the planner strips the CollateExpr.)
+        let plain_col = |g: &Expr| {
+            let mut g = g;
+            while let Expr::Collate(x, ..) | Expr::Relabel(x, _) = g {
+                g = x;
+            }
+            matches!(g, Expr::Col(..) | Expr::Const(..))
+        };
+        let computed: Vec<bool> = groups
+            .iter()
+            .map(|g| !plain_col(g) && !g.columns().is_empty() && sets.is_none())
+            .collect();
+        let gref: Vec<Name> = gnames
+            .iter()
+            .zip(&computed)
+            .map(|(g, &k)| if k { g.wrapped() } else { g.clone() })
+            .collect();
+        // (A Sort over the input returns references to what the input computes.)
+        let computed_shown: Vec<(String, String)> = gnames
+            .iter()
+            .zip(&gref)
+            .zip(&computed)
+            .filter(|(_, k)| **k)
+            .map(|((g, r), _)| (self.pick(g, Cx::Output), self.pick(r, Cx::Output)))
+            .collect();
+        let sort_out = |o: &String| -> String {
+            match computed_shown.iter().find(|(g, _)| g == o) {
+                Some((_, r)) => r.clone(),
+                None => refer_to(o),
+            }
+        };
+        // (A scan computing them returns that target list, no physical one: the group
+        // keys, then the columns the aggregates read.)
+        if self.o.verbose && computed.iter().any(|k| *k) && c.node.is_scan() {
+            let mut out: Vec<String> = Vec::new();
+            for g in &gnames {
+                let t = self.pick(g, Cx::Output);
+                if !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+            let mut cols: Vec<usize> = Vec::new();
+            for a in aggs {
+                for e in a.args.iter().chain(&a.direct).chain(&a.filter).chain(a.order_by.iter().map(|k| &k.expr)) {
+                    cols.extend(e.columns());
+                }
+            }
+            for j in cols {
+                if let Some(n) = c.exported.get(j) {
+                    let t = self.pick(n, Cx::Output);
+                    if !out.contains(&t) {
+                        out.push(t);
+                    }
+                }
+            }
+            c.node.output = out;
+        }
         let casts = std::mem::take(&mut self.json_casts);
         // (The sub-selects the aggregates' arguments read: InitPlans of the level.)
         for a in aggs {
@@ -6200,6 +7016,27 @@ impl Builder<'_, '_> {
                 self.register(e, &c.exported);
             }
         }
+        // JSON_ARRAYAGG / JSON_OBJECTAGG under another node computing the select list
+        // (a WindowAgg, a Result over a Sort): the aggregation computes the aggregate
+        // itself (json_agg_strict, …), that node the constructor over it.
+        let plain_aggs: Vec<AggCall>;
+        // (The level's top node itself, no projection above: it computes them.)
+        let aggs: &[AggCall] = if aggs.iter().any(|a| a.json_ctor) && self.proj_depth > 0 {
+            if let Some(k) = my_key {
+                self.json_aggs.insert(k, (aggs.to_vec(), c.exported.clone(), ng));
+            }
+            plain_aggs = aggs
+                .iter()
+                .map(|a| {
+                    let mut a = a.clone();
+                    a.json_ctor = false;
+                    a
+                })
+                .collect();
+            &plain_aggs
+        } else {
+            aggs
+        };
         let anames: Vec<Name> = (0..aggs.len())
             .map(|i| {
                 let a = Expr::Agg(i, aggs[i].ty.clone());
@@ -6213,7 +7050,7 @@ impl Builder<'_, '_> {
                 }
             })
             .collect();
-        let mut internal = gnames.clone();
+        let mut internal = gref.clone();
         internal.extend(anames.iter().cloned());
         let mut exported: Vec<Name> = groups
             .iter()
@@ -6344,10 +7181,31 @@ impl Builder<'_, '_> {
             }
             out
         };
+        // (A key its input computes shows as that input's expression: show_agg_keys
+        // deparses the input's target list entry.)
+        let graw: Vec<Name> = groups
+            .iter()
+            .zip(&gnames)
+            .map(|(g, n)| match g {
+                Expr::Col(j, _) => match (c.internal.get(*j), c.exported.get(*j)) {
+                    (Some(i), Some(e)) if c.node.node_type == "ProjectSet" && e.full == format!("({})", i.full) => i.clone(),
+                    _ => n.clone(),
+                },
+                _ => n.clone(),
+            })
+            .collect();
         let keys = |b: &Self, idx: &[usize]| {
             idx.iter()
                 .filter(|i| !redundant.get(**i).copied().unwrap_or(false))
-                .filter_map(|i| gnames.get(*i))
+                .filter_map(|i| graw.get(*i))
+                .map(|g| b.pick(g, Cx::Upper))
+                .collect::<Vec<_>>()
+        };
+        // (Over a sort, the keys its input computes are references.)
+        let keys_ref = |b: &Self, idx: &[usize]| {
+            idx.iter()
+                .filter(|i| !redundant.get(**i).copied().unwrap_or(false))
+                .filter_map(|i| gref.get(*i))
                 .map(|g| b.pick(g, Cx::Upper))
                 .collect::<Vec<_>>()
         };
@@ -6365,7 +7223,7 @@ impl Builder<'_, '_> {
                 .borrow()
                 .get_raw("enable_presorted_aggregate")
                 .is_none_or(|v| v != "off" && v != "false");
-            let group_keys = keys(self, &(0..groups.len()).collect::<Vec<_>>());
+            let group_keys = keys_ref(self, &(0..groups.len()).collect::<Vec<_>>());
             let mut best: Vec<String> = Vec::new();
             if enabled {
                 // (Each distinct aggregate's pathkeys; none for ones that can't presort.)
@@ -6465,7 +7323,7 @@ impl Builder<'_, '_> {
                 self.sort_costs(&mut sn, &c.node);
                 sn.key = c.node.key;
                 if self.o.verbose {
-                    sn.output = c.node.output.clone();
+                    sn.output = c.node.output.iter().map(&sort_out).collect();
                 }
                 let child = std::mem::take(&mut c.node);
                 sn.children.push(child.child("Outer"));
@@ -6475,9 +7333,9 @@ impl Builder<'_, '_> {
                 n.strategy = Some("Sorted");
                 n.title = "GroupAggregate".into();
                 let all: Vec<usize> = (0..groups.len()).collect();
-                n.details.push(Detail::List("Group Key", keys(self, &all)));
+                n.details.push(Detail::List("Group Key", keys_ref(self, &all)));
                 // (Its groups come out in the keys' order.)
-                n.order = keys(self, &all);
+                n.order = keys_ref(self, &all);
                 n.rows = (c.node.rows * 0.2).clamp(1.0, 200.0);
             }
         }
@@ -6799,7 +7657,7 @@ impl Builder<'_, '_> {
         // wants, and keeps its order for that.
         let sorted_alt = if n.strategy == Some("Hashed") && sets.is_none() && !groups.is_empty() {
             let g = crate::sql::paths::Gucs::read(self.ctx);
-            let names_all: Vec<String> = gnames.iter().map(|g| self.pick(g, Cx::Upper)).collect();
+            let names_all: Vec<String> = gref.iter().map(|g| self.pick(g, Cx::Upper)).collect();
             // (Orders of the keys: per key its position and direction, as a sort key's
             // suffix.)
             let mut orders: Vec<Vec<(usize, String)>> =
@@ -6898,7 +7756,7 @@ impl Builder<'_, '_> {
                     sn.key = input.key;
                     sn.order = keys_ord.clone();
                     if self.o.verbose {
-                        sn.output = input.output.clone();
+                        sn.output = input.output.iter().map(&sort_out).collect();
                     }
                     sn.children.push(input.child("Outer"));
                     input = sn;
@@ -7610,6 +8468,11 @@ impl Builder<'_, '_> {
         params: &[Expr],
         meta: &super::plan::JoinMeta,
     ) -> Built {
+        for side in [left, right] {
+            if matches!(&**side, Plan::Distinct { .. }) {
+                self.unique_sides.insert(addr(side));
+            }
+        }
         let mut l = self.node(left);
         let lateral = !params.is_empty();
         // A scan whose row the right side reads whole, and nothing of it else: its target
@@ -7640,10 +8503,12 @@ impl Builder<'_, '_> {
                 .map(|e| self.name(e, &l.exported, &[]).full)
                 .collect();
             self.outer.insert(0, names);
+            self.outer_depth.insert(0, self.depth);
         }
         let r = self.node(right);
         if lateral {
             self.outer.remove(0);
+            self.outer_depth.remove(0);
         }
         let copy = |b: &Built| Built {
             node: b.node.clone(),
@@ -8163,18 +9028,24 @@ impl Builder<'_, '_> {
             }
             _ => t,
         };
+        let mut hash_subplans: Vec<ExNode> = Vec::new();
         for (a, b) in &keys {
             let (outer_names, inner_names) = (&l.exported, &r.exported);
             let (oa, ib) = if swapped { (b, a) } else { (a, b) };
             // (An operator's argument shows its implicit relabelling, as varchar to text.)
-            let mut side = |k: &Expr, names: &[Name]| match strip_widening(k) {
+            let side = |this: &mut Self, k: &Expr, names: &[Name]| match strip_widening(k) {
                 Expr::Cast(inner, from, to, false) if from != to && !from.same_base(to) => {
-                    format!("({})::{}", self.show(inner, names, Cx::Upper), to.typname())
+                    format!("({})::{}", this.show(inner, names, Cx::Upper), to.typname())
                 }
-                k2 => relabel(k, self.show(k2, names, Cx::Upper)),
+                k2 => relabel(k, this.show(k2, names, Cx::Upper)),
             };
-            let a = side(oa, outer_names);
-            let b = side(ib, inner_names);
+            let a = side(self, oa, outer_names);
+            let before = self.pending.len();
+            let b = side(self, ib, inner_names);
+            // (The inner keys are the Hash's to compute: their SubPlans are its.)
+            if method == JoinMethod::Hash && self.pending.len() > before {
+                hash_subplans.extend(self.pending.drain(before..));
+            }
             merge_names.push((a.clone(), b.clone()));
             keys_text.push(format!("({a} = {b})"));
         }
@@ -8294,6 +9165,7 @@ impl Builder<'_, '_> {
         n.children.push(l.node.child("Outer"));
         if method == JoinMethod::Hash {
             let mut h = ExNode::new("Hash");
+            h.subplans = std::mem::take(&mut hash_subplans);
             h.key = r.node.key;
             h.rows = r.node.rows;
             h.width = r.node.width;
@@ -8797,6 +9669,8 @@ fn merge_appended(p: &Plan) -> bool {
                 member(input, leaves)
             }
             Plan::Project { .. } | Plan::Append { .. } | Plan::SetOp { .. } => rel(p, leaves),
+            // (A leaf query planned apart: its own sort.)
+            Plan::Barrier { input, secure: false, .. } => member(input, leaves),
             _ => false,
         }
     }
@@ -8859,6 +9733,22 @@ fn find_inh_append(p: &Plan) -> Option<&Plan> {
 
 /// The FROM subquery a plan's windows belong to (below its projection, sort and limit).
 /// The plan of a FROM subquery under its projection, sort and limit.
+/// The aggregation (its address) and aggregate (its place among the Agg's calls) an
+/// input column of a node is, through sorts, limits, a HAVING, windows and projections of
+/// columns.
+fn json_agg_col(p: &Plan, k: usize) -> Option<(usize, usize)> {
+    match p {
+        Plan::Agg { groups, .. } => k.checked_sub(groups.len()).map(|i| (addr(p), i)),
+        Plan::Filter { input, .. } | Plan::Sort { input, .. } | Plan::Limit { input, .. } => json_agg_col(input, k),
+        Plan::Window { input, .. } if k < super::binder::plan_width(input) => json_agg_col(input, k),
+        Plan::Project { input, exprs } => match exprs.get(k) {
+            Some(Expr::Col(j, _)) => json_agg_col(input, *j),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn subquery_input(p: &Plan) -> &Plan {
     match p {
         Plan::Project { input, .. } | Plan::Sort { input, .. } | Plan::Limit { input, .. } => {
@@ -9483,7 +10373,15 @@ impl Render<'_> {
                     // (Past work_mem: an external merge, its runs on disk.)
                     let rows = self.stats(n.key).map_or(0, |s| s.rows / s.loops.max(1));
                     let spill = rows * (n.width as u64 + 40) > (self.jg.work_mem * 1024.0) as u64;
-                    let (method, kb, space) = if spill {
+                    // (A bounded sort past twice its bound: the top-N heap.)
+                    let input_rows = n
+                        .children
+                        .first()
+                        .and_then(|k| self.stats(k.key))
+                        .map_or(0, |s| s.rows / s.loops.max(1));
+                    let (method, kb, space) = if n.bound.is_some_and(|b| input_rows as f64 > 2.0 * b) {
+                        ("top-N heapsort", self.memory_kb(n, 25), "Memory")
+                    } else if spill {
                         ("external merge", (rows * (n.width as u64 + 8)).div_ceil(1024).max(1), "Disk")
                     } else {
                         ("quicksort", self.memory_kb(n, 25), "Memory")
@@ -10185,15 +11083,34 @@ fn hashable_key(t: &DataType) -> bool {
 
 /// Whether running `p` calls a volatile function (or a subquery).
 pub fn plan_volatile(p: &Plan) -> bool {
+    plan_volatile_by(p, &|e| e.is_volatile())
+}
+
+/// contain_volatile_functions over a planned expression: a SubPlan counts by its
+/// plan's functions, not as volatile itself.
+pub fn expr_volatile_deep(e: &Expr) -> bool {
+    let mut v = false;
+    e.walk(&mut |x| match x {
+        Expr::Call(d, ..) if d.volatility == 'v' => v = true,
+        Expr::Subquery(s) => match s.func {
+            Some(c) => v |= c == 'v',
+            None => v |= plan_volatile_by(&s.plan, &expr_volatile_deep),
+        },
+        _ => {}
+    });
+    v
+}
+
+fn plan_volatile_by(p: &Plan, vol: &dyn Fn(&Expr) -> bool) -> bool {
     let mut es = Vec::new();
     node_exprs(p, &mut es);
-    if es.iter().any(|e| e.is_volatile()) {
+    if es.iter().any(|e| vol(e)) {
         return true;
     }
     let srf_volatile = |calls: &[super::plan::SrfCall]| {
         calls
             .iter()
-            .any(|c| c.func.volatility == 'v' || c.body.as_deref().is_some_and(plan_volatile))
+            .any(|c| c.func.volatility == 'v' || c.body.as_deref().is_some_and(|b| plan_volatile_by(b, vol)))
     };
     match p {
         Plan::FunctionScan { calls, .. } | Plan::ProjectSet { srfs: calls, .. }
@@ -10205,7 +11122,7 @@ pub fn plan_volatile(p: &Plan) -> bool {
         Plan::Insert(_) | Plan::Update(_) | Plan::Delete(_) | Plan::Merge(_) => return true,
         _ => {}
     }
-    plan_inputs(p).iter().any(|c| plan_volatile(c))
+    plan_inputs(p).iter().any(|c| plan_volatile_by(c, vol))
 }
 
 /// A hashed INTERSECT / EXCEPT as the planner arranges it: whether the inputs swap
@@ -10238,6 +11155,8 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
             labels: HashMap::new(),
             plan_ids: 0,
             outer: Vec::new(),
+            outer_depth: Vec::new(),
+            depth: 0,
             pending: Vec::new(),
             inits: Vec::new(),
             params: &[],
@@ -10251,10 +11170,17 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         group_order_full: false,
         sub_alias: None,
         json_casts: Vec::new(),
+        proj_depth: 0,
+        level_tops: std::collections::HashSet::new(),
+        json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
         agg_key: None,
+        agg_input: None,
+        unique_sides: Default::default(),
+        plain_distinct: None,
+        shown: shown_subqueries(p, &needed_masks(p)),
             rowmarks: Default::default(),
         };
         let n = b.level(p);
@@ -10301,6 +11227,8 @@ pub fn set_group_estimates(
         labels: HashMap::new(),
         plan_ids: 0,
         outer: Vec::new(),
+        outer_depth: Vec::new(),
+        depth: 0,
         pending: Vec::new(),
         inits: Vec::new(),
         params: &[],
@@ -10314,10 +11242,17 @@ pub fn set_group_estimates(
         group_order_full: false,
         sub_alias: None,
         json_casts: Vec::new(),
+        proj_depth: 0,
+        level_tops: std::collections::HashSet::new(),
+        json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
         agg_key: None,
+        agg_input: None,
+        unique_sides: Default::default(),
+        plain_distinct: None,
+        shown: shown_subqueries(input, &needed_masks(input)),
         rowmarks: Default::default(),
     };
     let n = b.level(input);
@@ -10369,6 +11304,8 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         labels: HashMap::new(),
         plan_ids: 0,
         outer: Vec::new(),
+        outer_depth: Vec::new(),
+        depth: 0,
         pending: Vec::new(),
         inits: Vec::new(),
         params: &[],
@@ -10382,10 +11319,17 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         group_order_full: false,
         sub_alias: None,
         json_casts: Vec::new(),
+        proj_depth: 0,
+        level_tops: std::collections::HashSet::new(),
+        json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
         agg_key: None,
+        agg_input: None,
+        unique_sides: Default::default(),
+        plain_distinct: None,
+        shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: Default::default(),
     };
     let n = b.level(plan);
@@ -10426,6 +11370,8 @@ pub fn distinct_order(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<Vec<usize>> {
         labels: HashMap::new(),
         plan_ids: 0,
         outer: Vec::new(),
+        outer_depth: Vec::new(),
+        depth: 0,
         pending: Vec::new(),
         inits: Vec::new(),
         params: &[],
@@ -10439,10 +11385,17 @@ pub fn distinct_order(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<Vec<usize>> {
         group_order_full: false,
         sub_alias: None,
         json_casts: Vec::new(),
+        proj_depth: 0,
+        level_tops: std::collections::HashSet::new(),
+        json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
         agg_key: None,
+        agg_input: None,
+        unique_sides: Default::default(),
+        plain_distinct: None,
+        shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: Default::default(),
     };
     let n = b.level(plan);
@@ -10475,6 +11428,8 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         labels: HashMap::new(),
         plan_ids: 0,
         outer: Vec::new(),
+        outer_depth: Vec::new(),
+        depth: 0,
         pending: Vec::new(),
         inits: Vec::new(),
         params: &[],
@@ -10488,10 +11443,17 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         group_order_full: false,
         sub_alias: None,
         json_casts: Vec::new(),
+        proj_depth: 0,
+        level_tops: std::collections::HashSet::new(),
+        json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
         agg_key: None,
+        agg_input: None,
+        unique_sides: Default::default(),
+        plain_distinct: None,
+        shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: Default::default(),
     };
     let n = b.level(plan);
@@ -10560,6 +11522,8 @@ pub fn explain(
         labels: HashMap::new(),
         plan_ids: 0,
         outer: Vec::new(),
+        outer_depth: Vec::new(),
+        depth: 0,
         pending: Vec::new(),
         inits: Vec::new(),
         params,
@@ -10577,10 +11541,17 @@ pub fn explain(
         group_order_full: false,
         sub_alias: None,
         json_casts: Vec::new(),
+        proj_depth: 0,
+        level_tops: std::collections::HashSet::new(),
+        json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
         agg_key: None,
+        agg_input: None,
+        unique_sides: Default::default(),
+        plain_distinct: None,
+        shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: rowmark_scans(plan),
     };
     b.top = addr(plan);
@@ -10724,32 +11695,39 @@ pub fn explain(
 /// The group keys (positions) of an aggregation below a Sort (through a projection of
 /// columns) the sort keys are, in their order.
 fn sort_group_order(input: &Plan, keys: &[SortKey]) -> Option<Vec<(usize, String)>> {
-    let (agg, map): (&Plan, Option<&Vec<Expr>>) = match input {
-        Plan::Project { input, exprs } => (&**input, Some(exprs)),
-        p => (p, None),
-    };
-    // (Through a HAVING.)
-    let agg = match agg {
-        Plan::Filter { input, .. } => &**input,
-        a => a,
-    };
-    let Plan::Agg { groups, .. } = agg else {
-        return None;
+    // (Through projections, a HAVING, and a FROM subquery's scan the order passes.)
+    let mut cols: Vec<Option<usize>> = keys
+        .iter()
+        .map(|k| match &k.expr {
+            Expr::Col(i, _) if k.using.is_none() => Some(*i),
+            _ => None,
+        })
+        .collect();
+    let mut cur = input;
+    let groups = loop {
+        match cur {
+            Plan::Project { input, exprs } => {
+                cols = cols
+                    .into_iter()
+                    .map(|c| c.and_then(|i| match exprs.get(i) {
+                        Some(Expr::Col(j, _)) => Some(*j),
+                        _ => None,
+                    }))
+                    .collect();
+                cur = input;
+            }
+            Plan::Filter { input, .. } if matches!(&**input, Plan::Agg { .. }) => cur = input,
+            Plan::Barrier { input, secure: false, .. } => cur = input,
+            Plan::Agg { groups, .. } => break groups,
+            _ => return None,
+        }
     };
     let mut out = Vec::new();
-    for k in keys {
-        let Expr::Col(i, _) = &k.expr else { break };
-        let j = match map {
-            Some(exprs) => match exprs.get(*i) {
-                Some(Expr::Col(j, _)) => *j,
-                _ => break,
-            },
-            None => *i,
-        };
-        if j >= groups.len() || k.using.is_some() {
-            break;
+    for (k, c) in keys.iter().zip(cols) {
+        match c {
+            Some(j) if j < groups.len() => out.push((j, sort_suffix(k))),
+            _ => break,
         }
-        out.push((j, sort_suffix(k)));
     }
     (!out.is_empty()).then_some(out)
 }
@@ -10799,6 +11777,25 @@ pub(crate) fn distinct_keys_fixed(input: &Plan) -> bool {
 /// needs.
 fn limit_over(mut c: ExNode, count: f64, off: f64) -> ExNode {
     let mut n = ExNode::new("Limit");
+    // ExecSetTupleBound: the sort below (through a subquery's scan without quals) keeps
+    // only the rows the LIMIT reads, in a bounded heap.
+    if count > 0.0 && off >= 0.0 {
+        let mut t = &mut c;
+        loop {
+            match t.node_type {
+                "Sort" => {
+                    t.bound = Some(count + off);
+                    break;
+                }
+                "Subquery Scan"
+                    if !t.details.iter().any(|d| matches!(d, Detail::Text("Filter", _))) && t.children.len() == 1 =>
+                {
+                    t = &mut t.children[0];
+                }
+                _ => break,
+            }
+        }
+    }
     if c.node_type == "Sort"
         && count > 0.0
         && off >= 0.0

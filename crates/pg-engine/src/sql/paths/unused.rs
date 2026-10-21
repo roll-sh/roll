@@ -56,6 +56,22 @@ impl Planner<'_, '_> {
     /// `needed`: the columns of `p`'s row its consumers read.
     pub(super) fn drop_unused_outputs(&self, p: &mut Plan, needed: &[bool]) {
         let unused = |i: usize| !needed.get(i).copied().unwrap_or(true);
+        // (An aggregation returning its row as it is, a query level's top: a projection of
+        // it, its unread aggregates NULL, so they aren't computed.)
+        if let Plan::Agg { groups, aggs, sets: None, .. } = &*p
+            && aggs.iter().enumerate().any(|(k, a)| {
+                unused(groups.len() + k)
+                    && !a.args.iter().chain(&a.direct).chain(&a.filter).any(volatile)
+                    && !a.order_by.iter().any(|o| volatile(&o.expr))
+            })
+        {
+            let types = super::analyzejoins::col_types(p);
+            let input = std::mem::replace(p, Plan::One);
+            *p = Plan::Project {
+                input: Arc::new(input),
+                exprs: types.into_iter().enumerate().map(|(i, t)| Expr::Col(i, t)).collect(),
+            };
+        }
         match p {
             Plan::Project { input, exprs } => {
                 // (Over a ProjectSet: an expression of a call's value is set-returning.)

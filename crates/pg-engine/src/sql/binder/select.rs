@@ -104,7 +104,14 @@ impl Binder<'_, '_> {
                 None if union_all && s.limit_count.is_none() && s.sort_clause.is_empty() => saved,
                 None => None,
             };
+            let top = self.setop_leaves.is_none();
+            if top {
+                self.setop_leaves = Some(0);
+            }
             let r = self.bind_set_op(s, op);
+            if top {
+                self.setop_leaves = None;
+            }
             self.arm_limit = saved;
             let (plan, cols) = r?;
             return self.finish_over_output(plan, cols, s);
@@ -350,9 +357,23 @@ impl Binder<'_, '_> {
                 Ok(pb::CteMaterialize::Always) => false,
                 _ => refs.as_ref().and_then(|r| r.get(&cte.ctename)) == Some(&1),
             };
+            // (contain_dml: rows locked at any of its levels count as well.)
+            fn locks(p: &Plan) -> bool {
+                matches!(p, Plan::LockRows { .. })
+                    || matches!(p, Plan::Scan(s) if s.mark.is_some())
+                    || crate::sql::explain::plan_inputs(p).iter().any(|c| locks(c))
+            }
+            // (Nor one read more than once reading an enclosing recursive query's working
+            // table: contain_outer_selfref.)
+            fn self_ref(p: &Plan) -> bool {
+                matches!(p, Plan::WorkScan { .. }) || crate::sql::explain::plan_inputs(p).iter().any(|c| self_ref(c))
+            }
+            let once = refs.as_ref().and_then(|r| r.get(&cte.ctename)).is_none_or(|&n| n <= 1);
             let inline = (!self.deparse
                 && recursive_sel.is_none()
                 && select
+                && !locks(&plan)
+                && (once || !self_ref(&plan))
                 && wanted
                 && !crate::sql::paths::plan_volatile_deep(&plan)
                 && !crate::exec::reads_enclosing(&plan, 0))
@@ -929,11 +950,51 @@ impl Binder<'_, '_> {
             pb::SetOperation::SetopIntersect => (SetOpKind::Intersect, "INTERSECT"),
             _ => (SetOpKind::Except, "EXCEPT"),
         };
+        let union_all = kind == SetOpKind::Union && s.all;
         let leaf = |b: &mut Self, n: &pb::SelectStmt| {
+            let nested = !matches!(
+                pb::SetOperation::try_from(n.op).unwrap_or(pb::SetOperation::SetopNone),
+                pb::SetOperation::SetopNone | pb::SetOperation::Undefined
+            );
+            let index = if nested {
+                None
+            } else {
+                b.setop_leaves.map(|i| {
+                    b.setop_leaves = Some(i + 1);
+                    i + 1
+                })
+            };
+            // (Its own set operation's leaves are numbered apart.)
+            let outer = if nested { None } else { b.setop_leaves.take() };
             b.keep_unknown = true;
             let r = b.in_sibling(|b| b.bind_select_stmt(n));
             b.keep_unknown = false;
-            r
+            if outer.is_some() {
+                b.setop_leaves = outer;
+            }
+            // A UNION ALL's leaf query Postgres keeps a query level (`*SELECT* n`, a
+            // Subquery Scan when not trivial) rather than pulling it up.
+            let (plan, cols) = r?;
+            let plan = match index {
+                Some(i)
+                    if union_all
+                        && !b.deparse
+                        && !b.unplanned
+                        && b.deps.is_none()
+                        && b.refs.is_none()
+                        && own_query_level_stmt(n, &plan) =>
+                {
+                    Plan::Barrier {
+                        input: Arc::new(plan),
+                        alias: format!("*SELECT* {i}"),
+                        cols: cols.iter().map(|c| c.name.clone()).collect(),
+                        secure: false,
+                        sorted: (!n.sort_clause.is_empty()).then_some(n.sort_clause.len()),
+                    }
+                }
+                _ => plan,
+            };
+            Ok::<_, Error>((plan, cols))
         };
         let (lp, lcols) = leaf(self, s.larg.as_deref().unwrap())?;
         let (rp, rcols) = leaf(self, s.rarg.as_deref().unwrap())?;
@@ -2450,7 +2511,13 @@ impl Binder<'_, '_> {
             plan
         };
         // Access paths by cost, now that the level's quals, order and limit are known.
+        // (A FROM subquery planned apart: by the query above, `Planner::walk`.)
         let mut plan = plan;
+        if self.defer_level == Some(self.levels.len()) && !self.deparse {
+            self.defer_level = None;
+            self.deferred = true;
+            return Ok((plan, cols));
+        }
         if !self.deparse {
             let lim = self
                 .arm_limit
@@ -3159,16 +3226,33 @@ impl Binder<'_, '_> {
                     let nright = width(&p);
                     self.scope().check_disjoint(&scope)?;
                     self.level().scope.extend(scope.shifted(nleft));
-                    Plan::Join {
-                        kind: JoinKind::Inner,
-                        left: Arc::new(left),
-                        right: Arc::new(p),
-                        cond: None,
-                        hash: None,
-                        params,
-                        nleft,
-                        nright,
-                        meta: Default::default(),
+                    // (A join item reading the items to its left: reassociated. Not a
+                    // subquery's join: its own level reads its parameters directly.)
+                    let joined = if matches!(p, Plan::Join { .. })
+                        && matches!(inner(item), Some(NodeEnum::JoinExpr(_)))
+                        && !params.is_empty()
+                        && !self.deparse
+                    {
+                        reassociate_lateral(left, p, params)
+                    } else {
+                        Err(Box::new((left, p, params)))
+                    };
+                    match joined {
+                        Ok(j) => j,
+                        Err(b) => {
+                            let (left, p, params) = *b;
+                            Plan::Join {
+                                kind: JoinKind::Inner,
+                                left: Arc::new(left),
+                                right: Arc::new(p),
+                                cond: None,
+                                hash: None,
+                                params,
+                                nleft,
+                                nright,
+                                meta: Default::default(),
+                            }
+                        }
                     }
                 }
             });
@@ -3254,7 +3338,21 @@ impl Binder<'_, '_> {
                     (scope, n)
                 });
                 let clause = std::mem::replace(&mut self.level().clause, Clause::FromSubselect);
+                // (A plain SELECT's level: planned by the query above when it becomes a
+                // Subquery Scan's.)
+                let simple_select = matches!(inner(rs.subquery.as_deref().unwrap()), Some(NodeEnum::SelectStmt(s))
+                    if matches!(
+                        pb::SetOperation::try_from(s.op).unwrap_or(pb::SetOperation::SetopNone),
+                        pb::SetOperation::SetopNone | pb::SetOperation::Undefined
+                    ) && s.values_lists.is_empty());
+                let saved_defer = (self.defer_level.take(), std::mem::take(&mut self.deferred));
+                if simple_select && rs.alias.is_some() && !self.deparse && !self.unplanned && self.deps.is_none() && self.refs.is_none() {
+                    self.defer_level = Some(self.levels.len() + 1);
+                }
+                let sub_level = self.levels.len() + 1;
                 let r = self.bind_subquery(rs.subquery.as_deref().unwrap());
+                let deferred = std::mem::take(&mut self.deferred);
+                (self.defer_level, self.deferred) = saved_defer;
                 self.level().clause = clause;
                 if let Some((scope, n)) = hidden {
                     self.level().scope = scope;
@@ -3292,7 +3390,9 @@ impl Binder<'_, '_> {
                 // them. Set-returning or volatile outputs: is_simple_subquery keeps it a
                 // subquery, the clauses that don't read them going in.)
                 let plan = if alias.is_some()
-                    && (grouping_sets_subquery(&plan) || optimize::unsafe_outputs(&plan).iter().any(|u| *u))
+                    && (grouping_sets_subquery(&plan)
+                        || optimize::unsafe_outputs(&plan).iter().any(|u| *u)
+                        || own_query_level(rs.subquery.as_deref().unwrap(), &plan))
                     && self.deps.is_none()
                     && self.refs.is_none()
                     && !self.unplanned
@@ -3303,7 +3403,18 @@ impl Binder<'_, '_> {
                         alias: name.clone(),
                         cols: cols.iter().map(|c| c.name.clone()).collect(),
                         secure: false,
+                        sorted: match inner(rs.subquery.as_deref().unwrap()) {
+                            Some(NodeEnum::SelectStmt(s)) if !s.sort_clause.is_empty() => Some(s.sort_clause.len()),
+                            _ => None,
+                        },
                     }
+                } else if deferred {
+                    // (Not one: its level planned now, as any.)
+                    let mut plan = plan;
+                    let lim = self.arm_limit.filter(|a| a.0 == sub_level).map(|a| (a.1, a.2));
+                    self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
+                    super::check_merge_keys(self.ctx, &mut plan)?;
+                    plan
                 } else {
                     plan
                 };
@@ -3974,6 +4085,28 @@ impl Binder<'_, '_> {
                         alias: name.clone(),
                         cols: rel.cols.iter().filter(|c| !c.hidden).map(|c| c.name.clone()).collect(),
                         secure: true,
+                        sorted: None,
+                    }
+                } else if v.storage.is_none()
+                    && self.deps.is_none()
+                    && self.refs.is_none()
+                    && !self.unplanned
+                    && !self.deparse
+                    && !self.view_stack.contains(&v.oid)
+                    && let Ok(node) = ast::parse_stmt(&v.query)
+                    && (own_query_level(&node, &plan) || optimize::unsafe_outputs(&plan).iter().any(|u| *u))
+                {
+                    // (A view Postgres keeps a query level of its own: its Subquery Scan.)
+                    let sorted = match inner(&node) {
+                        Some(NodeEnum::SelectStmt(s)) if !s.sort_clause.is_empty() => Some(s.sort_clause.len()),
+                        _ => None,
+                    };
+                    Plan::Barrier {
+                        input: Arc::new(plan),
+                        alias: name.clone(),
+                        cols: rel.cols.iter().filter(|c| !c.hidden).map(|c| c.name.clone()).collect(),
+                        secure: false,
+                        sorted,
                     }
                 } else {
                     plan
@@ -5247,9 +5380,15 @@ impl Binder<'_, '_> {
             pb::JoinType::JoinFull => JoinKind::Full,
             _ => JoinKind::Inner,
         };
-        // Bind both sides with only the left visible to the right (LATERAL).
+        // Bind both sides with only the left visible to the right (LATERAL), and the FROM
+        // items left of the join (the enclosing FROM list's, or those an enclosing join's
+        // right side sees) visible to the LATERAL items of both: the left side reads them
+        // as the row the join is joined to, the right side through the join's parameters
+        // (which pass them on from the parameters of the join the item is the right side
+        // of).
         let saved = std::mem::take(&mut self.level().scope);
         let r = (|| -> Result<(Plan, Scope, Vec<Expr>)> {
+            self.level().scope = saved.clone();
             let (lp, lscope, lparams) = self.bind_from_item(j.larg.as_deref().unwrap(), locking)?;
             let mut visible = lscope.clone();
             // (A RIGHT / FULL join's right side can't reference its left one.)
@@ -5260,8 +5399,62 @@ impl Binder<'_, '_> {
                     }
                 }
             }
+            // The items further left, each of their values a parameter of the join the
+            // item is in (marked until the ones read are known).
+            let mut outer_vals: Vec<Expr> = Vec::new();
+            for r in &saved.rels {
+                let mut r = r.clone();
+                for c in &mut r.cols {
+                    let ty = c.expr.ty();
+                    outer_vals.push(std::mem::replace(&mut c.expr, Expr::Outer(1, OUTER_ITEM_MARK + outer_vals.len(), ty)));
+                }
+                // (Their row positions are the enclosing row's.)
+                r.key_col = None;
+                r.sys_col = None;
+                visible.rels.push(r);
+            }
             self.level().scope = visible;
             let (rp, rscope, rparams) = self.bind_from_item(j.rarg.as_deref().unwrap(), locking)?;
+            // The right side's references to them: the item's parameters after the left
+            // side's, renumbered; with them, the enclosing query's values it reads come
+            // through the item's parameters too (the join the item is the right side of
+            // runs it under its own).
+            let reads_items = rparams.iter().any(|e| {
+                let mut hit = false;
+                e.walk(&mut |x| hit |= matches!(x, Expr::Outer(1, k, _) if *k >= OUTER_ITEM_MARK));
+                hit
+            });
+            let (rparams, lparams) = if reads_items {
+                let mut item_params = lparams;
+                let slot = |v: Expr, item_params: &mut Vec<Expr>| -> usize {
+                    match item_params.iter().position(|x| x.same_as(&v)) {
+                        Some(i) => i,
+                        None => {
+                            item_params.push(v);
+                            item_params.len() - 1
+                        }
+                    }
+                };
+                let rparams: Vec<Expr> = rparams
+                    .into_iter()
+                    .map(|e| {
+                        e.transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Outer(1, k, t) if k >= OUTER_ITEM_MARK => {
+                                    let v = outer_vals[k - OUTER_ITEM_MARK].clone();
+                                    Expr::Outer(1, slot(v, &mut item_params), t)
+                                }
+                                Expr::Outer(1, k, t) => Expr::Outer(1, slot(Expr::Outer(1, k, t.clone()), &mut item_params), t),
+                                x => x,
+                            })
+                        })
+                        .unwrap()
+                    })
+                    .collect();
+                (rparams, item_params)
+            } else {
+                (rparams, lparams)
+            };
             // (Only a reference to the left side's columns: an enclosing query's values
             // are fixed for the join.)
             if rparams.iter().any(|e| !e.columns().is_empty())
@@ -5434,7 +5627,16 @@ impl Binder<'_, '_> {
                 self.level().scope = inner_saved;
                 let e = r?;
                 let e = self.coerce_bool_at(e, "JOIN/ON", q)?;
-                conds.push(self.simplify_where(e));
+                // (ON NULL alone stays NULL: the join's qual, not a relation's to prove
+                // empty.)
+                let e = self.simplify_where(e);
+                let e = match (&e, j.quals.as_deref().and_then(inner)) {
+                    (Expr::Const(Value::Bool(false), _), Some(NodeEnum::AConst(c))) if c.isnull => {
+                        Expr::Const(Value::Null, DataType::Bool)
+                    }
+                    _ => e,
+                };
+                conds.push(e);
             }
             // Above the join, its nullable sides' rows may be null-extended.
             let nulled = match kind {
@@ -5548,13 +5750,122 @@ impl Binder<'_, '_> {
                 }
                 c => (rp, c),
             };
-            let plan = optimize::join(&self.cat, kind, lp, rp, cond, rparams, nleft, nright);
+            // (An inner join's right side, a join reading its left side's values:
+            // reassociated, the ON clause checked over the whole.)
+            let plan = if kind == JoinKind::Inner
+                && matches!(rp, Plan::Join { .. })
+                && matches!(j.rarg.as_deref().and_then(inner), Some(NodeEnum::JoinExpr(_)))
+                && !rparams.is_empty()
+                && !self.deparse
+            {
+                match reassociate_lateral(lp, rp, rparams) {
+                    Ok(j) => match cond {
+                        Some(c) => optimize::add_filter(&self.cat, j, c),
+                        None => j,
+                    },
+                    Err(b) => {
+                        let (lp, rp, rparams) = *b;
+                        optimize::join(&self.cat, kind, lp, rp, cond, rparams, nleft, nright)
+                    }
+                }
+            } else {
+                optimize::join(&self.cat, kind, lp, rp, cond, rparams, nleft, nright)
+            };
             Ok((plan, scope, lparams))
         })();
         self.level().scope = saved;
         r
     }
 }
+
+/// Whether the plan of a FROM item reads any value of its query level's outer row (the
+/// parameters of the join it is the right side of).
+fn reads_level_outer(p: &Plan) -> bool {
+    let mut exprs = Vec::new();
+    crate::sql::explain::node_exprs(p, &mut exprs);
+    if let Plan::Scan(sp) = p {
+        exprs.extend(sp.written.iter());
+        exprs.extend(sp.phv_quals.iter());
+        exprs.extend(sp.current_of.iter());
+    }
+    if exprs.iter().any(|e| e.has_outer_refs()) {
+        return true;
+    }
+    crate::sql::explain::plan_inputs(p).into_iter().any(|c| reads_level_outer(c))
+}
+
+/// `left` joined to a join item `L ⋈ R` (inner or left) whose LATERAL references read
+/// `left`'s values (`params`, over `left`'s row, which the item reads as `Outer(1, k)`):
+/// reassociated, `(left ⨯ L) ⋈ R`, its right side reading `left`'s values directly, so no
+/// join runs inside another's parameterized side (Postgres's join tree is flat there).
+/// The item as it is (`Err`) when it isn't such a join.
+fn reassociate_lateral(left: Plan, item: Plan, params: Vec<Expr>) -> std::result::Result<Plan, Box<(Plan, Plan, Vec<Expr>)>> {
+    let Plan::Join {
+        kind: kind @ (JoinKind::Inner | JoinKind::Left),
+        left: l,
+        right: r,
+        cond,
+        hash,
+        params: rparams,
+        nleft: nl,
+        nright: nr,
+        meta,
+    } = item
+    else {
+        return Err(Box::new((left, item, params)));
+    };
+    if meta.from_call.is_some() || params.is_empty() {
+        return Err(Box::new((
+            left,
+            Plan::Join { kind, left: l, right: r, cond, hash, params: rparams, nleft: nl, nright: nr, meta },
+            params,
+        )));
+    }
+    let na = width(&left);
+    let lp = if reads_level_outer(&l) { params.clone() } else { Vec::new() };
+    let inner = Plan::Join {
+        kind: JoinKind::Inner,
+        left: Arc::new(left),
+        right: l,
+        cond: None,
+        hash: None,
+        params: lp,
+        nleft: na,
+        nright: nl,
+        meta: Default::default(),
+    };
+    let lift = |e: Expr| -> Expr {
+        e.transform(&mut |x| {
+            Ok(match x {
+                Expr::Col(i, t) => Expr::Col(na + i, t),
+                Expr::Outer(1, k, t) => params.get(k).cloned().unwrap_or(Expr::Outer(1, k, t)),
+                x => x,
+            })
+        })
+        .unwrap()
+    };
+    let rparams: Vec<Expr> = rparams.into_iter().map(lift).collect();
+    let cond = cond.map(|c| c.shift_cols(na as isize));
+    let hash = hash.map(|(lk, rk)| (lk.into_iter().map(|e| e.shift_cols(na as isize)).collect(), rk));
+    let mut meta = meta;
+    meta.kept = meta.kept.iter().map(|c| c + na).collect();
+    meta.pushed = meta.pushed.iter().map(|c| c + na).collect();
+    Ok(Plan::Join {
+        kind,
+        left: Arc::new(inner),
+        right: r,
+        cond,
+        hash,
+        params: rparams,
+        nleft: na + nl,
+        nright: nr,
+        meta,
+    })
+}
+
+/// A FROM item left of a join, as its right side's LATERAL references read it before the
+/// join's parameters are known: `Outer(1, OUTER_ITEM_MARK + i)`, value `i` of those items.
+const OUTER_ITEM_MARK: usize = 1 << 40;
 
 fn visible_names(s: &Scope) -> Vec<String> {
     s.rels
@@ -6373,6 +6684,10 @@ impl SearchCycle {
     fn not_cycle(&self, passed: &[Expr]) -> Option<Expr> {
         let c = self.cycle.as_ref()?;
         let mark = passed[usize::from(self.search.is_some())].clone();
+        // (The boolean marks true / false: NOT mark, as rewriteSearchAndCycle writes it.)
+        if matches!(c.to, Expr::Const(Value::Bool(true), _)) && matches!(c.default, Expr::Const(Value::Bool(false), _)) {
+            return Some(Expr::Not(Box::new(mark)));
+        }
         Some(Expr::Call(
             c.ne.clone(),
             vec![mark, c.to.clone()],
@@ -6462,9 +6777,14 @@ fn postpone_targets(
         });
         v
     };
+    // (An InitPlan's value is a parameter, cheap: only a SubPlan run per row counts.)
     let expensive = |e: &Expr| {
         let mut v = false;
-        e.walk(&mut |x| v |= matches!(x, Expr::Subquery(_)));
+        e.walk(&mut |x| {
+            v |= matches!(x, Expr::Subquery(s)
+                if !(s.params.is_empty() && s.func.is_none()
+                    && !matches!(s.kind, crate::sql::expr::SubqueryKind::Any | crate::sql::expr::SubqueryKind::All)))
+        });
         v
     };
     let (mut vol, mut exp) = (Vec::new(), Vec::new());
@@ -6633,6 +6953,73 @@ fn having_to_where(
 }
 
 /// A subquery aggregating by grouping sets (below its projection, sort and limit).
+/// is_simple_subquery's tests on a FROM subquery's own clauses (prepjointree.c): ORDER BY,
+/// LIMIT / OFFSET, DISTINCT, grouping, aggregates, FOR UPDATE or a WITH make it a query
+/// level of its own, which Postgres plans apart and scans (a Subquery Scan), not pulled up
+/// into the query. (Set operations and VALUES lists have their own handling; so do
+/// window functions.)
+pub(super) fn own_query_level(n: &Node, plan: &Plan) -> bool {
+    let Some(NodeEnum::SelectStmt(s)) = inner(n) else {
+        return false;
+    };
+    own_query_level_stmt(s, plan)
+}
+
+pub(super) fn own_query_level_stmt(s: &pb::SelectStmt, plan: &Plan) -> bool {
+    let op = pb::SetOperation::try_from(s.op).unwrap_or(pb::SetOperation::SetopNone);
+    // A UNION ALL whose tree has other set operations inside isn't an append relation
+    // (is_simple_union_all): a query level of its own too.
+    if op == pb::SetOperation::SetopUnion && s.all {
+        fn simple(s: &pb::SelectStmt) -> bool {
+            let op = pb::SetOperation::try_from(s.op).unwrap_or(pb::SetOperation::SetopNone);
+            match op {
+                pb::SetOperation::SetopNone | pb::SetOperation::Undefined => true,
+                pb::SetOperation::SetopUnion if s.all => {
+                    s.larg.as_deref().is_none_or(simple) && s.rarg.as_deref().is_none_or(simple)
+                }
+                _ => false,
+            }
+        }
+        return !simple(s) && matches!(plan, Plan::Append { inh: None, .. });
+    }
+    if !matches!(op, pb::SetOperation::SetopNone | pb::SetOperation::Undefined) || !s.values_lists.is_empty() {
+        return false;
+    }
+    // The level's own nodes, down to its FROM's.
+    fn top(p: &Plan, agg: &mut bool, win: &mut bool) {
+        match p {
+            Plan::Project { input, .. }
+            | Plan::Sort { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::Distinct { input, .. }
+            | Plan::LockRows { input, .. }
+            | Plan::ProjectSet { input, .. }
+            | Plan::Context { input, .. } => top(input, agg, win),
+            Plan::Filter { input, .. } if matches!(&**input, Plan::Agg { .. }) => top(input, agg, win),
+            Plan::With { body, .. } => top(body, agg, win),
+            Plan::Agg { .. } => *agg = true,
+            Plan::Window { input, .. } => {
+                *win = true;
+                top(input, agg, win)
+            }
+            _ => {}
+        }
+    }
+    let (mut agg, mut win) = (false, false);
+    top(plan, &mut agg, &mut win);
+    if win {
+        return false;
+    }
+    agg || !s.sort_clause.is_empty()
+        || s.limit_count.is_some()
+        || s.limit_offset.is_some()
+        || !s.distinct_clause.is_empty()
+        || !s.group_clause.is_empty()
+        || s.having_clause.is_some()
+        || !s.locking_clause.is_empty()
+        || s.with_clause.is_some()
+}
+
 pub(super) fn grouping_sets_subquery(p: &Plan) -> bool {
     match p {
         Plan::Project { input, .. }

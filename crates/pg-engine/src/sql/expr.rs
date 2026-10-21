@@ -50,6 +50,11 @@ pub struct Subquery {
     pub func: Option<char>,
     /// That call as EXPLAIN shows it (the planner inlines it or keeps the call).
     pub call: Option<Arc<FnShow>>,
+    /// ANY / ALL over a user-defined operator's results (`x op c` computed in the
+    /// subquery's last projection, tested against true): the subquery's own parameter
+    /// count; EXPLAIN shows the comparison as Postgres's test expression,
+    /// `x op (SubPlan n).col1`.
+    pub test_op: Option<usize>,
 }
 
 /// A call of a user-defined function run as a subquery (`Subquery::func`), as the planner

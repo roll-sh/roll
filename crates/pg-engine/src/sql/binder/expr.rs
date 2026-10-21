@@ -90,6 +90,34 @@ impl Binder<'_, '_> {
                 // Postgres's tree keeps `row IS NULL` as written; a whole-row reference's
                 // test stays whole when planned too (only a ROW() constructor is expanded).
                 // (A constant's test is folded when planned, not stored folded.)
+                // (One of a VALUES list or subquery, an anonymous row: its ROW()
+                // expanded, each field tested as a scalar — a composite one's test is
+                // IS [NOT] DISTINCT FROM NULL then.)
+                if !self.deparse
+                    && is_whole_row(&arg)
+                    && matches!(arg.ty(), DataType::Row(ref rt) if rt.oid == 0)
+                    && let Expr::Row(items, _) = &arg
+                {
+                    let mut parts = Vec::new();
+                    for i in items {
+                        let t = i.ty();
+                        if matches!(t, DataType::Row(_) | DataType::Record) {
+                            let eq = crate::sql::func::resolve_binop("=", &t, &t)?.def;
+                            parts.push(Expr::IsDistinct(
+                                Box::new(i.clone()),
+                                Box::new(Expr::Const(Value::Null, t.clone())),
+                                !not,
+                                eq,
+                            ));
+                        } else {
+                            parts.push(Expr::IsNull(Box::new(i.clone()), not));
+                        }
+                    }
+                    return Ok(match parts.len() {
+                        1 => parts.pop().unwrap(),
+                        _ => Expr::And(parts),
+                    });
+                }
                 if (self.deparse && matches!(arg, Expr::Row(..) | Expr::Const(..)))
                     || is_whole_row(&arg)
                 {
@@ -3476,6 +3504,7 @@ impl Binder<'_, '_> {
                 func: None,
 
                 call: None,
+                test_op: None,
             }))),
             T::ExprSublink => {
                 if cols.len() != 1 {
@@ -3507,6 +3536,7 @@ impl Binder<'_, '_> {
                     func: None,
 
                     call: None,
+                    test_op: None,
                 })))
             }
             T::ArraySublink => {
@@ -3537,6 +3567,7 @@ impl Binder<'_, '_> {
                     func: None,
 
                     call: None,
+                    test_op: None,
                 })))
             }
             T::AnySublink | T::AllSublink => {
@@ -3568,6 +3599,7 @@ impl Binder<'_, '_> {
                 if left.len() == 1 && !self.deparse && !self.cat.operators.is_empty() {
                     let (l, cty) = (left[0].clone(), cols[0].ty.clone());
                     let seeded = params.clone();
+                    let own_params = params.len();
                     let (test, params2) = self.in_level(|b| {
                         b.level().params = seeded;
                         let depth = b.levels.len() - 2;
@@ -3595,6 +3627,7 @@ impl Binder<'_, '_> {
                             func: None,
 
                             call: None,
+                            test_op: Some(own_params),
                         })));
                     }
                 }
@@ -3676,6 +3709,7 @@ impl Binder<'_, '_> {
                     func: None,
 
                     call: None,
+                    test_op: None,
                 })))
             }
             _ => Err(crate::error::unsupported("this kind of subquery")),
@@ -7006,6 +7040,7 @@ impl Binder<'_, '_> {
                 cost: fdef.procost() as f64,
                 inline: at.is_some_and(|c| c.fold || matches!(c.at, SqlFnAt::Inlining)),
             })),
+            test_op: None,
         }));
         // evaluate_function: an immutable call over constants is its value (a composite one
         // a constant of its type). (One that fails runs, and fails, when executed.)

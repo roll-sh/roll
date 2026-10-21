@@ -4055,8 +4055,9 @@ fn sort_group_dirs(input: &Plan, keys: &[SortKey]) -> Option<Vec<(usize, bool, b
                 cur = input;
             }
             Plan::Agg { groups, sets: None, .. } => break groups,
-            // (Through a HAVING.)
+            // (Through a HAVING, and a FROM subquery planned apart.)
             Plan::Filter { input, .. } if matches!(&**input, Plan::Agg { .. }) => cur = input,
+            Plan::Barrier { input, secure: false, .. } => cur = input,
             _ => return None,
         }
     };
@@ -4512,6 +4513,15 @@ impl Planner<'_, '_> {
                 };
                 self.plan_scan(s, needed, &want, 0);
             }
+            return;
+        }
+        // A FROM subquery planned apart: its own query level, planned for the columns read
+        // of it (remove_unused_subquery_outputs) and the LIMIT above it, if nothing else
+        // is (set_subquery_pathlist's tuple_fraction).
+        if let Plan::Barrier { input, secure: false, .. } = p {
+            let dirs = self.group_dirs.take();
+            let removed = plan_level_ordered(self.ctx, take(input), needed, lim, dirs);
+            self.removed.set(self.removed.get() + removed);
             return;
         }
         let needs = child_needs(p, needed);
@@ -5104,6 +5114,62 @@ impl Planner<'_, '_> {
             return false;
         }
         let perms = permutations(nd);
+        // A subquery below already sorted (its own ORDER BY): the permutation whose keys
+        // its order gives the most of, when that's more than the keys as written.
+        let have = plan_order(self.ctx, sin);
+        if !have.is_empty() {
+            let prefix = |k2: &[SortKey]| {
+                k2.iter()
+                    .zip(&have)
+                    .take_while(|(k, (j, desc, nf))| {
+                        matches!(&k.expr, Expr::Col(c, _) if c == j) && k.desc == *desc && k.nulls_first == *nf
+                    })
+                    .count()
+            };
+            let perm_keys = |perm: &[usize]| {
+                let mut k2: Vec<SortKey> = perm.iter().map(|&i| needed_keys[i].clone()).collect();
+                k2.extend(needed_keys[nd..].iter().cloned());
+                k2
+            };
+            let base = prefix(&perm_keys(&perms[0]));
+            let best = perms
+                .iter()
+                .skip(1)
+                .map(|perm| (prefix(&perm_keys(perm)), perm))
+                .filter(|(n, _)| *n > base)
+                .fold(None::<(usize, &Vec<usize>)>, |b, x| match b {
+                    Some(b) if b.0 >= x.0 => Some(b),
+                    _ => Some(x),
+                });
+            if let Some((_, perm)) = best {
+                let k2 = perm_keys(perm);
+                let wanted: Vec<SortKey> = keys[..order.min(keys.len())].to_vec();
+                let same = |a: &SortKey, b: &SortKey| {
+                    a.expr.same_as(&b.expr) && a.desc == b.desc && a.nulls_first == b.nulls_first
+                };
+                let satisfied = wanted.iter().zip(&k2).all(|(a, b)| same(a, b));
+                let distinct = Plan::Distinct {
+                    input: Arc::new(Plan::Sort {
+                        input: sin.clone(),
+                        keys: k2,
+                    }),
+                    on: Some(on),
+                    order: 0,
+                };
+                *p = if satisfied || wanted.is_empty() {
+                    distinct
+                } else {
+                    Plan::Sort {
+                        input: Arc::new(distinct),
+                        keys: wanted,
+                    }
+                };
+                // (Its input planned as any: the keys now in the order it has.)
+                self.walk(p, needed, lim);
+                return true;
+            }
+            return false;
+        }
         for perm in perms.iter().skip(1) {
             let mut k2: Vec<SortKey> = perm.iter().map(|&i| needed_keys[i].clone()).collect();
             k2.extend(needed_keys[nd..].iter().cloned());
@@ -5204,6 +5270,70 @@ impl Planner<'_, '_> {
     }
 }
 
+/// The order `p`'s rows come in, by its output columns (column, descending, nulls
+/// first), as far as it is known to be plain columns: a sort's, an index scan's read in
+/// order, through projections; a subquery's at most its ORDER BY's keys.
+pub(crate) fn plan_order(ctx: &ExecCtx, p: &Plan) -> Vec<(usize, bool, bool)> {
+    match p {
+        Plan::Barrier { input, sorted, .. } => {
+            let mut o = plan_order(ctx, input);
+            if let Some(n) = sorted {
+                o.truncate(*n);
+            }
+            o
+        }
+        Plan::Project { input, exprs } => {
+            let mut out = Vec::new();
+            for (j, d, n) in plan_order(ctx, input) {
+                match exprs.iter().position(|e| matches!(e, Expr::Col(c, _) if *c == j)) {
+                    Some(i) => out.push((i, d, n)),
+                    None => break,
+                }
+            }
+            out
+        }
+        Plan::Sort { keys, .. } => keys
+            .iter()
+            .map_while(|k| match &k.expr {
+                Expr::Col(j, _) if k.using.is_none() => Some((*j, k.desc, k.nulls_first)),
+                _ => None,
+            })
+            .collect(),
+        Plan::Limit { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Context { input, .. }
+        | Plan::Distinct { input, on: Some(_), .. } => plan_order(ctx, input),
+        Plan::Scan(s) if matches!(s.access, Access::Index { ordered: true, .. }) => index_order(ctx, s)
+            .iter()
+            .map_while(|k| match &k.expr {
+                Expr::Col(j, _) if k.using.is_none() => Some((*j, k.desc, k.nulls_first)),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The columns an ordered index scan's rows come in the order of (`plan_order`'s, without
+/// the directions), for a scan read in order; none otherwise.
+pub(crate) fn plan_order_cols(p: &Plan) -> Vec<usize> {
+    match p {
+        Plan::Scan(s) if matches!(s.access, Access::Index { ordered: true, .. }) => match &s.index {
+            Some((ix, _)) => ix
+                .columns
+                .iter()
+                .map_while(|c| match &c.key {
+                    crate::catalog::IndexKey::Column(j) => Some(*j),
+                    _ => None,
+                })
+                .collect(),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
 /// The permutations of 0..n, the identity first.
 fn permutations(n: usize) -> Vec<Vec<usize>> {
     fn go(prefix: &mut Vec<usize>, n: usize, out: &mut Vec<Vec<usize>>) {
@@ -5276,17 +5406,33 @@ pub fn plan_query(ctx: &ExecCtx, plan: &mut Plan) -> usize {
 
 /// `plan_query` for a LIMIT above it (a UNION ALL arm's: `lim`, its count and offset).
 pub fn plan_query_limited(ctx: &ExecCtx, plan: &mut Plan, lim: Option<(f64, f64)>) -> usize {
-    let p = Planner::new(ctx);
     let w = crate::sql::binder::plan_width(plan);
+    plan_level(ctx, plan, &vec![true; w], lim)
+}
+
+/// A query level's plan, the columns of its output its consumers read being `needed`.
+fn plan_level(ctx: &ExecCtx, plan: &mut Plan, needed: &[bool], lim: Option<(f64, f64)>) -> usize {
+    plan_level_ordered(ctx, plan, needed, lim, None)
+}
+
+/// `plan_level`, a grouping at its top wanting the order a sort above it reads its groups
+/// in (`group_dirs`).
+fn plan_level_ordered(
+    ctx: &ExecCtx,
+    plan: &mut Plan,
+    needed: &[bool],
+    lim: Option<(f64, f64)>,
+    dirs: Option<Vec<(usize, bool, bool)>>,
+) -> usize {
+    let p = Planner::new(ctx);
+    p.group_dirs.replace(dirs);
     p.pull_up_consts(plan);
     p.reduce_outer_joins(plan);
-    p.remove_useless_joins(plan, &vec![true; w]);
+    p.remove_useless_joins(plan, needed);
     p.reduce_dummies(plan);
     joinpath::whole_rows(plan, &mut p.whole_rows.borrow_mut());
-    if std::env::var_os("GC1_NO_UNUSED").is_none() {
-        p.drop_unused_outputs(plan, &vec![true; w]);
-    }
-    p.walk(plan, &vec![true; w], lim);
+    p.drop_unused_outputs(plan, needed);
+    p.walk(plan, needed, lim);
     if !p.lifted.borrow().is_empty() {
         p.lifted_into_aggs(plan);
     }
@@ -5507,6 +5653,7 @@ impl Planner<'_, '_> {
                     ty,
                     func: None,
                     call: None,
+                    test_op: None,
                 }))
             })
             .collect();

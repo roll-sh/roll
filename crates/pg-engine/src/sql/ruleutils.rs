@@ -417,11 +417,67 @@ impl Deparser<'_, '_> {
             self.buf.push_str("))");
             return Some(());
         }
+        // A user-defined operator's comparison the subquery computes: Postgres's test
+        // expression, the operator's function inlined over the left operand and the
+        // subquery's column.
+        if sq.test_op.is_some()
+            && matches!(sq.kind, K::Any | K::All)
+            && let crate::sql::plan::Plan::Project { exprs, .. } = &*sq.plan
+            && let [test] = &exprs[..]
+        {
+            let at = self.cols.len();
+            let test = test
+                .clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(0, t) => Expr::Col(at, t),
+                        x => x,
+                    })
+                })
+                .ok()?
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Outer(1, k, t) => sq.params.get(k).cloned().unwrap_or(Expr::Outer(1, k, t)),
+                        x => x,
+                    })
+                })
+                .ok()?;
+            let mut cols: Vec<String> = self.cols.to_vec();
+            cols.push(if label.init || label.hashed {
+                reference
+            } else {
+                format!("({}).col1", label.name)
+            });
+            let mut d = Deparser {
+                ctx: self.ctx,
+                cat: self.cat,
+                cols: &cols,
+                aggs: self.aggs,
+                pretty: self.pretty,
+                indent: self.indent,
+                buf: String::new(),
+                outer: self.outer,
+                subplans: self.subplans,
+                view: self.view,
+                nested: None,
+            };
+            d.expr(&test, true)?;
+            let text = d.buf;
+            self.buf.push_str(if sq.kind == K::Any { "(ANY " } else { "(ALL " });
+            self.buf.push_str(&text);
+            self.buf.push(')');
+            return Some(());
+        }
         match sq.kind {
-            K::Scalar | K::Array => self.buf.push_str(&if label.init {
+            K::Scalar => self.buf.push_str(&if label.init {
                 reference
             } else {
                 format!("({})", label.name)
+            }),
+            K::Array => self.buf.push_str(&if label.init {
+                reference
+            } else {
+                format!("ARRAY({})", label.name)
             }),
             K::Exists if label.init => self.buf.push_str(&reference),
             K::Exists => self.buf.push_str(&format!("EXISTS({})", label.name)),

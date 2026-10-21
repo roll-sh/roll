@@ -905,6 +905,9 @@ pub enum Plan {
         /// doesn't pull up (grouping sets, set-returning or volatile outputs), which takes
         /// the clauses safe to push down into it.
         secure: bool,
+        /// The subquery's ORDER BY keys, when it has one: its rows come in that order, as
+        /// many of its plan's sort keys as the query above may use (its useful pathkeys).
+        sorted: Option<usize>,
     },
     /// `input` runs inside `frame` (a SQL function's statement), which errors and notices
     /// name in their CONTEXT, once it has the privileges `perms`.

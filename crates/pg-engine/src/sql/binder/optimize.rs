@@ -714,12 +714,37 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         }
         // A security barrier: only the clauses that can't leak its rows' values go into
         // it (leakproof, not volatile); the rest stay above.
-        Plan::Barrier { input, alias, cols, secure } => {
+        Plan::Barrier { input, alias, cols, secure, sorted } => {
             // (A subquery grouping by grouping sets takes none; one not pulled up for its
             // set-returning or volatile outputs, the clauses not reading them that aren't
             // volatile themselves: subquery_is_pushdown_safe.)
-            let fence = super::select::grouping_sets_subquery(&input);
-            let unsafe_out = if secure { Vec::new() } else { unsafe_outputs(&input) };
+            // (Nor does one with a LIMIT / OFFSET; a DISTINCT ON subquery takes none on its
+            // other columns: subquery_is_pushdown_safe, check_output_expressions.)
+            let fence = super::select::grouping_sets_subquery(&input) || (!secure && limited_level(&input));
+            let mut unsafe_out = if secure { Vec::new() } else { unsafe_outputs(&input) };
+            if !secure && let Some(d) = distinct_on_unsafe(&input) {
+                for (u, x) in unsafe_out.iter_mut().zip(d) {
+                    *u |= x;
+                }
+            }
+            // (qual_is_pushdown_safe: an operator of another btree family than the
+            // grouping's equality — record_image_ops, text_pattern_ops — can tell apart
+            // rows the subquery's DISTINCT or GROUP BY merged.)
+            let grouped = !secure && grouping_level(&input);
+            // (Nor a clause comparing a column the level groups under a nondeterministic
+            // collation other than by that collation: it can tell apart rows the grouping
+            // merged.)
+            let nondet: Vec<Option<String>> = if grouped {
+                (0..width(&input))
+                    .map(|c| {
+                        output_collation(&input, c).filter(|n| {
+                            crate::types::collation::by_name(cat, n).is_some_and(|c| !c.deterministic)
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let (down, up): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|p| {
                 !fence
                     && if secure {
@@ -727,15 +752,17 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                     } else {
                         !crate::sql::paths::expr_volatile_deep(p)
                             && p.columns().iter().all(|c| !unsafe_out.get(*c).copied().unwrap_or(false))
+                            && !(grouped && foreign_family_op(p))
+                            && same_collation_tests(p, &nondet)
                     }
             });
             let input = if down.is_empty() {
                 input
             } else {
                 let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
-                Arc::new(add_filter(cat, i, Expr::And(down)))
+                Arc::new(if secure { add_filter(cat, i, Expr::And(down)) } else { push_into_level(cat, i, down) })
             };
-            let b = Plan::Barrier { input, alias, cols, secure };
+            let b = Plan::Barrier { input, alias, cols, secure, sorted };
             match and_all(up) {
                 Some(p) => Plan::Filter {
                     input: Arc::new(b),
@@ -793,6 +820,231 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
     }
 }
 
+/// Clauses pushed into a FROM subquery's level (subquery_push_qual): through its top
+/// projection (its outputs' expressions put in), sort and DISTINCT, and below its
+/// grouping when they read only its group keys (a HAVING without aggregates is a WHERE
+/// clause there); a clause over aggregates stays over the grouping (its HAVING).
+fn push_into_level(cat: &Catalog, plan: Plan, parts: Vec<Expr>) -> Plan {
+    if parts.is_empty() {
+        return plan;
+    }
+    match plan {
+        Plan::Project { input, exprs }
+            if parts.iter().all(|p| {
+                p.columns().iter().all(|&c| {
+                    exprs.get(c).is_some_and(|e| {
+                        let mut ok = !crate::sql::paths::expr_volatile_deep(e);
+                        e.walk(&mut |x| ok &= !matches!(x, Expr::Srf(..) | Expr::Window(..) | Expr::Agg(..)));
+                        ok
+                    })
+                })
+            }) =>
+        {
+            let mapped = parts
+                .into_iter()
+                .map(|p| {
+                    p.transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(c, t) => exprs.get(c).cloned().unwrap_or(Expr::Col(c, t)),
+                            x => x,
+                        })
+                    })
+                    .unwrap()
+                })
+                .collect();
+            let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
+            Plan::Project {
+                input: Arc::new(push_into_level(cat, i, mapped)),
+                exprs,
+            }
+        }
+        Plan::Sort { input, keys } => {
+            let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
+            Plan::Sort {
+                input: Arc::new(push_into_level(cat, i, parts)),
+                keys,
+            }
+        }
+        Plan::Distinct { input, on, order } => {
+            let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
+            Plan::Distinct {
+                input: Arc::new(push_into_level(cat, i, parts)),
+                on,
+                order,
+            }
+        }
+        Plan::Agg { input, groups, sets: None, aggs } if !groups.is_empty() => {
+            let ng = groups.len();
+            let (below, above): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|p| {
+                let cols = p.columns();
+                !cols.is_empty() && cols.iter().all(|&c| c < ng)
+            });
+            let below: Vec<Expr> = below
+                .into_iter()
+                .map(|p| {
+                    p.transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(c, t) => groups.get(c).cloned().unwrap_or(Expr::Col(c, t)),
+                            x => x,
+                        })
+                    })
+                    .unwrap()
+                })
+                .collect();
+            let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
+            let input = if below.is_empty() { i } else { add_filter(cat, i, Expr::And(below)) };
+            let agg = Plan::Agg {
+                input: Arc::new(input),
+                groups,
+                sets: None,
+                aggs,
+            };
+            match and_all(above) {
+                Some(p) => add_filter(cat, agg, p),
+                None => agg,
+            }
+        }
+        plan => add_filter(cat, plan, Expr::And(parts)),
+    }
+}
+
+/// A query level that merges rows (DISTINCT, DISTINCT ON, GROUP BY) at its top, or a set
+/// operation with one that does (anything but UNION ALL) among its arms.
+fn grouping_level(p: &Plan) -> bool {
+    match p {
+        Plan::Distinct { .. } | Plan::Agg { .. } | Plan::SetOp { .. } => true,
+        Plan::Append { inh: None, inputs } => inputs.iter().any(|i| grouping_level(i)),
+        Plan::Project { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Context { input, .. } => grouping_level(input),
+        Plan::With { body, .. } => grouping_level(body),
+        _ => false,
+    }
+}
+
+/// The collation of output column `c` of a query level, as far as it is a column's
+/// (through projections of it, the grouping, set operations' first arm, a scan).
+fn output_collation(p: &Plan, c: usize) -> Option<String> {
+    match p {
+        Plan::Project { input, exprs } => match exprs.get(c)? {
+            Expr::Col(j, _) => output_collation(input, *j),
+            Expr::Collate(_, name, _) => Some(name.clone()),
+            Expr::Relabel(x, _) => match &**x {
+                Expr::Col(j, _) => output_collation(input, *j),
+                _ => None,
+            },
+            _ => None,
+        },
+        Plan::Sort { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Distinct { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Barrier { input, .. }
+        | Plan::Context { input, .. } => output_collation(input, c),
+        Plan::With { body, .. } => output_collation(body, c),
+        Plan::Agg { input, groups, .. } => match groups.get(c)? {
+            Expr::Col(j, _) => output_collation(input, *j),
+            Expr::Collate(_, name, _) => Some(name.clone()),
+            _ => None,
+        },
+        Plan::SetOp { left, .. } => output_collation(left, c),
+        Plan::Append { inh: None, inputs } => output_collation(inputs.first()?, c),
+        Plan::Join { left, right, nleft, .. } => {
+            if c < *nleft {
+                output_collation(left, c)
+            } else {
+                output_collation(right, c - nleft)
+            }
+        }
+        Plan::Scan(s) => s.table.columns.get(c).filter(|col| !col.dropped).and_then(|col| col.collation.clone()),
+        _ => None,
+    }
+}
+
+/// Whether every operation in `p` over a column with a nondeterministic collation (in
+/// `nondet`, by column) compares it by that collation.
+fn same_collation_tests(p: &Expr, nondet: &[Option<String>]) -> bool {
+    if nondet.iter().all(Option::is_none) {
+        return true;
+    }
+    let reads = |e: &Expr| e.columns().iter().any(|c| nondet.get(*c).is_some_and(Option::is_some));
+    let mut ok = true;
+    p.walk(&mut |x| {
+        if let Expr::Call(d, args, _) = x
+            && args.iter().any(|a| matches!(a, Expr::Col(..) | Expr::Relabel(..) | Expr::Collate(..)) && reads(a))
+        {
+            let same = args.iter().all(|a| {
+                a.columns().iter().all(|c| match nondet.get(*c) {
+                    Some(Some(n)) => d.coll.as_ref().is_some_and(|k| k.name == *n),
+                    _ => true,
+                })
+            });
+            ok &= same;
+        }
+    });
+    ok
+}
+
+/// A clause using an operator of a btree family other than its type's default one
+/// (record_image_ops' `*=`, text_pattern_ops' `~<~`, …).
+fn foreign_family_op(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if let Expr::Call(d, args, _) = x
+            && args.len() == 2
+        {
+            found |= matches!(d.name, "*=" | "*<>" | "*<" | "*<=" | "*>" | "*>=" | "~<~" | "~<=~" | "~>=~" | "~>~");
+        }
+    });
+    found
+}
+
+/// A query level with a LIMIT / OFFSET of its own (above its FROM's nodes).
+pub(crate) fn limited_level(p: &Plan) -> bool {
+    match p {
+        Plan::Limit { .. } => true,
+        Plan::Project { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Context { input, .. } => limited_level(input),
+        Plan::With { body, .. } => limited_level(body),
+        _ => false,
+    }
+}
+
+/// A DISTINCT ON level's output columns that aren't among its DISTINCT ON keys (None: no
+/// DISTINCT ON at the level's top).
+pub(crate) fn distinct_on_unsafe(p: &Plan) -> Option<Vec<bool>> {
+    match p {
+        Plan::Project { input, exprs } => {
+            let below = distinct_on_unsafe(input)?;
+            Some(
+                exprs
+                    .iter()
+                    .map(|e| match e {
+                        Expr::Col(j, _) => below.get(*j).copied().unwrap_or(true),
+                        e => e.columns().iter().any(|j| below.get(*j).copied().unwrap_or(true)),
+                    })
+                    .collect(),
+            )
+        }
+        Plan::Sort { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Context { input, .. } => distinct_on_unsafe(input),
+        Plan::With { body, .. } => distinct_on_unsafe(body),
+        Plan::Distinct { input, on: Some(on), .. } => Some(
+            (0..width(input))
+                .map(|j| !on.iter().any(|e| matches!(e, Expr::Col(k, _) if *k == j)))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 /// The output columns of a subquery's plan whose values come from a set-returning or a
 /// volatile call (through its projections, sort and grouping): clauses reading them can't
 /// go into it (check_output_expressions).
@@ -807,8 +1059,14 @@ pub(crate) fn unsafe_outputs(p: &Plan) -> Vec<bool> {
         b
     };
     match p {
-        Plan::Project { input, exprs } | Plan::ProjectSet { input, exprs, .. } => {
+        Plan::Project { input, exprs } => {
             let below = unsafe_outputs(input);
+            exprs.iter().map(|e| bad(e, &below)).collect()
+        }
+        // (The calls' results are columns past the input's.)
+        Plan::ProjectSet { input, exprs, srfs } => {
+            let mut below = unsafe_outputs(input);
+            below.resize(width(input) + srfs.iter().map(|s| s.ncols.max(1)).sum::<usize>(), true);
             exprs.iter().map(|e| bad(e, &below)).collect()
         }
         Plan::Sort { input, .. } | Plan::Filter { input, .. } | Plan::Context { input, .. } => unsafe_outputs(input),

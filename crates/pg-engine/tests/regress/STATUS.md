@@ -3,12 +3,10 @@
 All 230 files of `src/test/regress/parallel_schedule` (REL_18_6) compared with PostgreSQL 18.6,
 unit by unit, with the harness in `crates/pg-engine/tests/pg_regress.rs` (see `REPORT.md` for the
 method). The numbers below come from one run of the whole schedule in one database, in schedule
-order (`PGREGRESS_TIMEOUT=400`, about 37 minutes), so every file sees the catalogs the files before
-it left, as `pg_regress` gives them. Three units were fixed after that run: join 780 and stats
-480, re-checked in a subset run (`create_misc`, `create_table`, `create_index`, `inherit`,
-`insert`, `join`, `stats`, `merge`, `with`, `partition_join`, `partition_prune`, `updatable_views`,
-`returning`, `groupingsets`, `subselect`) that matched the full run everywhere else, and
-test_setup 7, which failed only because the reference container already had the tablespace.
+order (`PGREGRESS_TIMEOUT=400`), so every file sees the catalogs the files before it left, as
+`pg_regress` gives them (round 12's engine; that run measured 50700 matching units). Nine units of
+collate.icu.utf8 (370–394, 606, 609: a `GROUP BY x COLLATE c` key shown as `(x)`) were fixed after
+it and re-checked in a subset run of that file; they are counted as matching below.
 
 Re-run one subset (example):
 
@@ -24,26 +22,26 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50658 (**99.04%**) |
-| units differing | 492 |
-| files fully matching | 182 |
-| engine output == expected/*.out (pg_regress "ok") | 158 files |
+| units matching | 50709 (**99.14%**) |
+| units differing | 441 |
+| files fully matching | 185 |
+| engine output == expected/*.out (pg_regress "ok") | 162 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 438 | 89.0% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 18 | 3.7% |
-| by design (server-side files, large-object import/export; a parallel plan's combine function) | 29 | 5.9% |
-| name resolution: a nested join's LATERAL reference to an earlier FROM item | 7 | 1.4% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 394 | 89.3% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 18 | 4.1% |
+| by design (server-side files, large-object import/export; a parallel plan's combine function) | 29 | 6.6% |
+| name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 438 units
-join (105), subselect (50), partition_join (48), partition_prune (38), collate.icu.utf8 (26), incremental_sort (16), select_parallel (14), updatable_views (13), groupingsets (12), with (11), memoize (10), rowtypes (9), equivclass (8), aggregates (8), privileges (8), rowsecurity (7), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), returning (3), merge (3), window (3), tuplesort (2), select_distinct (2), create_view (2), inherit (2), union (2), select_distinct_on (2), sqljson (2), gist (2), hash_index (1), limit (1), rules (1), rangefuncs (1), create_table (1), tsrf (1), insert_conflict (1), select (1), create_function_sql (1), foreign_key (1), create_index (1)
+### EXPLAIN (group C1) — 394 units
+join (99), partition_join (48), partition_prune (38), subselect (30), collate.icu.utf8 (23), incremental_sort (15), select_parallel (14), updatable_views (13), groupingsets (12), with (10), memoize (8), privileges (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (7), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -56,13 +54,9 @@ join (3), with (3), updatable_views (3), join_hash (2), partition_info (2), grou
   join_hash, memoize, subselect, stats_ext: values of EXPLAIN ANALYZE-style helpers over plans
   that differ.
 
-### Name resolution — 7 units
-join 740–745 and 791: a LATERAL item inside a parenthesized join can't see the FROM items to the
-left of that join (`tenk1 a, tenk1 b JOIN LATERAL (VALUES (a.unique1)) ss ...` fails with "missing
-FROM-clause entry for table "a""; 791's ambiguity comes out as "table name specified more than
-once"). `bind_join` binds its sides without the enclosing FROM list's scope; making those items
-visible needs LATERAL parameters that cross two join levels (the nested join's right side reading
-the outer join's left row), which `Plan::Join::params` can't express yet.
+### Name resolution — 0 units
+Fixed in round 12: join 740–743, 745 and 791 match; 744 now runs and differs only in its plan
+(counted under C1).
 
 ### By design — 29 units
 misc_functions (14), largeobject (13), copy (1), aggregates (1)
@@ -97,6 +91,101 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Fixed in round 12 (subqueries as query levels, LATERAL scope, SubPlans)
+
+Measured against the engine of commit d449c68 in round 11's subset plus `insert_conflict`,
+`create_table_like`, `tuplesort`, `gist` and `hash_index` (47 files with `test_setup`): 46 units
+fixed, none broken; the whole schedule was then run again for the numbers above.
+
+| file | differing before | after | fixed units |
+|---|---:|---:|---|
+| subselect | 49 | 31 | 168, 171, 174, 190, 193, 205, 214, 216, 234, 237, 240, 241, 247, 251, 253, 265, 273, 313 |
+| join | 115 | 102 | 125, 349, 364, 437, 448, 542, 608, 740–743, 745, 791 |
+| union | 2 | 0 | 181, 183 |
+| select_distinct_on | 2 | 0 | 15, 19 |
+| sqljson | 2 | 0 | 237, 241 |
+| memoize | 11 | 9 | 7, 9 |
+| rowtypes | 9 | 7 | 204, 215 |
+| select_distinct | 2 | 1 | 83 |
+| aggregates | 9 | 8 | 527 |
+| create_view | 2 | 1 | 331 |
+| incremental_sort | 16 | 15 | 41 |
+| with | 14 | 13 | 82 |
+| collate.icu.utf8 (full run) | 26 | 23 | 403, 407, 421 (pushdown under nondeterministic collations) |
+
+What changed:
+
+- A FROM subquery (or view) Postgres doesn't pull up — ORDER BY, LIMIT / OFFSET, DISTINCT
+  [ON], GROUP BY / HAVING / aggregates, locking, WITH, set-returning or volatile outputs, a
+  UNION ALL tree with other set operations inside — is a query level of its own
+  (`Plan::Barrier { secure: false }`, which now records its ORDER BY's key count). The planner
+  plans it apart (`paths::plan_level`, with the grouping order the level above wants), and
+  EXPLAIN shows its `Subquery Scan` unless setrefs would remove it as trivial: the scan is
+  kept when the query above reads fewer columns than the subquery returns, when the subquery's
+  plan carries resjunk sort / group keys (apply_tlist_labeling), or under a filter; a hashed
+  DISTINCT of plain columns labels the physical target list instead. Its order is offered
+  upward (convert_subquery_pathkeys, truncated to the ORDER BY): DISTINCT ON keys are reordered
+  to match it, a Merge Append merges the arms' orders, a LIMIT's bound reaches its sort
+  (ExecSetTupleBound), incremental sorts build on it. UNION ALL arms are numbered `*SELECT* n`
+  and a non-simple arm is its own level.
+- Clauses go into such a level by subquery_is_pushdown_safe / qual_is_pushdown_safe: none past
+  a LIMIT, none on DISTINCT ON's other columns or on set-returning outputs, none comparing a
+  grouped column by an operator of another btree family (`*=`) or under another collation
+  than its nondeterministic one; those that go are put through the level's projection, sort
+  and DISTINCT, and below its grouping when they read only group keys.
+  remove_unused_subquery_outputs drops an unread aggregate of a level's top aggregation too
+  (`sum(1/a)` no longer raises), shown as `NULL::type`.
+- LATERAL references across join levels: a parenthesized join's items see the FROM items to
+  its left (`a, b JOIN LATERAL (VALUES (a.x)) ss`); the reference is a parameter of the join
+  that reads it, and `A × (L ⋈ R)` with R reading A is reassociated to `(A × L) ⋈ R`, as
+  Postgres's flat join tree has it. One-row VALUES and FROM-less subqueries are pulled up
+  (pull_up_simple_values, remove_useless_result_rtes, PlaceHolderVars kept where nulled; a
+  PHV over a LATERAL value is a Memoize key); the join search takes groups with LATERAL leaves
+  and more than two members.
+- SubPlans: a SubPlan reading only values of levels further out is uncorrelated here (an
+  InitPlan, or hashed: `hashed SubPlan`); one in a join equality is a hash key, computed by the
+  Hash (listed under it); one in an IN's left operand stays in the semi join's clause; one in a
+  VALUES list is the Values Scan's; a subquery's InitPlans are its top node's, and a
+  recursive union's terms' (their CTEs') their own. An InitPlan's value is no reason to compute
+  a select list after a Sort. `ANY` over a user-defined operator shows its test expression,
+  `ARRAY(SubPlan n)` its form.
+- Smaller ones: make_group_input_target (grouping expressions computed below the aggregation,
+  a set-returning one's ProjectSet returning only what the aggregation reads); JSON_ARRAYAGG /
+  JSON_OBJECTAGG under a projection as `json_agg_strict` etc., the constructor above; CYCLE's
+  mark tested as `NOT is_cycle`; an anonymous row's `IS [NOT] NULL` tests each field (nested
+  rows by `IS [NOT] DISTINCT FROM NULL`); a CTE that locks rows, or is read twice and reads the
+  recursive query's working table, isn't inlined (contain_dml, contain_outer_selfref); a
+  semi join's unique-ified side scans just the compared values (create_unique_paths); volatile
+  outputs of a subquery stay in its target list.
+
+Goldens added: `tests/sql/gc2_subquery_scan.sql`, `gc2_plan_shapes.sql`.
+
+Still open from this round's list, and why:
+
+- inherit 445/453: a Merge Append over UNION ALL arms by an expression of their columns needs
+  equivalence members translated into each arm (445); 453 is a cost choice (Merge Join over
+  Merge Appends of index scans under a LIMIT vs. our Hash Join + Sort).
+- join 328, 343–347, 351–366: subqueries over several tables with PlaceHolderVars aren't
+  flattened into the parent's join group (only single-table and FROM-less ones are); a dummy
+  relation's Result shows `NULL` where Postgres keeps the PlaceHolderVar's expression
+  (351, 368); 744 is a plan choice now (a parameterized hash join inside the nested loop).
+- VERBOSE row marks (merge 348/458/462, returning 103/105/112): not started; the non-target
+  relations' ctid / whole-row marks would have to be carried through every node's target list;
+  rule-rewritten RETURNING runs as a CTE of the rule's actions here. A FROM subquery's
+  `FOR UPDATE` likewise: the LockRows is placed at the statement's top, not inside the
+  subquery's level (subselect 310).
+- partition_aggregate (5): parallel partitionwise aggregation (Gather over Parallel Append of
+  Partial Aggregates) isn't costed; 19: a GROUP BY key equated with a constant isn't dropped
+  (GroupAggregate without keys).
+- subselect 288 (a catalog's parameterized index path in a join), 298 (a lifted LATERAL Var's
+  place in a join's output), 189/191 (a pulled-up subquery output read twice is one SubPlan
+  here, two copies in Postgres), 186 (an EXISTS over an inheritance tree as a hashed SubPlan per
+  member), 218 (an IN subquery with a set-returning select list as a semi join), 221 (a
+  pushed-down LATERAL qual as the Subquery Scan's filter, not a One-Time Filter), 31/33/161
+  (row comparisons with a sub-select as `(SubPlan 1).col1`, constant-folded records).
+- with 52, 55, 58, 76, 77: a materialized CTE's sort order isn't offered to a merge join; the
+  recursive term's join order and the rows' order follow from it.
 
 ## Fixed in round 11 (subquery pull-up, cost-driven choices)
 
@@ -475,17 +564,17 @@ produces no units on Linux (skipped by the file itself).
 | copydml | 62 | 62 | 100% | yes | yes |  |
 | copyencoding | 22 | 22 | 100% | yes | yes |  |
 | insert | 399 | 399 | 100% | no | no |  |
-| insert_conflict | 261 | 260 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| insert_conflict | 261 | 260 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | create_function_c | 10 | 10 | 100% | no | no |  |
 | create_misc | 88 | 88 | 100% | yes | yes |  |
 | create_operator | 90 | 90 | 100% | yes | yes |  |
 | create_procedure | 115 | 115 | 100% | yes | yes |  |
-| create_table | 348 | 347 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| create_table | 348 | 347 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | create_type | 88 | 88 | 100% | no | no |  |
 | create_schema | 30 | 30 | 100% | yes | yes |  |
-| create_index | 708 | 707 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| create_index | 708 | 707 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | create_index_spgist | 202 | 202 | 100% | yes | yes |  |
-| create_view | 343 | 341 | 99% | no | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| create_view | 343 | 342 | 100% | no | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | index_including | 137 | 137 | 100% | yes | yes |  |
 | index_including_gist | 52 | 52 | 100% | yes | yes |  |
 | create_aggregate | 60 | 60 | 100% | yes | yes |  |
@@ -494,7 +583,7 @@ produces no units on Linux (skipped by the file itself).
 | constraints | 607 | 607 | 100% | yes | yes |  |
 | triggers | 1041 | 1041 | 100% | no | no |  |
 | select | 87 | 86 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
-| inherit | 934 | 932 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| inherit | 934 | 932 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | typed_table | 36 | 36 | 100% | yes | yes |  |
 | vacuum | 328 | 328 | 100% | yes | yes |  |
 | drop_if_exists | 161 | 161 | 100% | yes | yes |  |
@@ -506,15 +595,15 @@ produces no units on Linux (skipped by the file itself).
 | infinite_recurse | 8 | 8 | 100% | yes | yes |  |
 | sanity_check | 3 | 3 | 100% | yes | yes |  |
 | select_into | 67 | 67 | 100% | yes | yes |  |
-| select_distinct | 101 | 99 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
-| select_distinct_on | 23 | 21 | 91% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| select_distinct | 101 | 100 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| select_distinct_on | 23 | 23 | 100% | yes | yes |  |
 | select_implicit | 44 | 44 | 100% | yes | yes |  |
 | select_having | 23 | 23 | 100% | yes | yes |  |
-| subselect | 356 | 305 | 86% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (49) |
-| union | 198 | 196 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| subselect | 356 | 325 | 91% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (31) |
+| union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 810 | 88% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (102) |
-| aggregates | 556 | 547 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
+| join | 925 | 823 | 89% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (96) |
+| aggregates | 556 | 548 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
 | portals | 354 | 354 | 100% | yes | yes |  |
@@ -561,17 +650,17 @@ produces no units on Linux (skipped by the file itself).
 | tidscan | 49 | 49 | 100% | yes | yes |  |
 | tidrangescan | 45 | 45 | 100% | yes | yes |  |
 | collate.utf8 | 61 | 61 | 100% | yes | yes |  |
-| collate.icu.utf8 | 681 | 655 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (26) |
-| incremental_sort | 120 | 104 | 87% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
+| collate.icu.utf8 | 681 | 658 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (23) |
+| incremental_sort | 120 | 105 | 88% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |
 | generated_virtual | 489 | 483 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
-| rules | 632 | 631 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| rules | 632 | 631 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | psql | 1264 | 1264 | 100% | no | no |  |
 | psql_crosstab | 32 | 32 | 100% | yes | yes |  |
 | psql_pipeline | 362 | 362 | 100% | yes | yes |  |
 | amutils | 10 | 10 | 100% | yes | yes |  |
-| stats_ext | 878 | 877 | 99% | yes | no | wrong result `SELECT: values differ` (1) |
+| stats_ext | 878 | 877 | 100% | yes | no | wrong result `SELECT: values differ` (1) |
 | collate.linux.utf8 | 2 | 2 | 100% | yes | yes |  |
 | select_parallel | 250 | 236 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (13) |
 | write_parallel | 22 | 22 | 100% | yes | yes |  |
@@ -581,7 +670,7 @@ produces no units on Linux (skipped by the file itself).
 | subscription | 179 | 179 | 100% | no | no |  |
 | select_views | 52 | 52 | 100% | no | no |  |
 | portals_p2 | 41 | 41 | 100% | yes | yes |  |
-| foreign_key | 1267 | 1266 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| foreign_key | 1267 | 1266 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | cluster | 205 | 205 | 100% | yes | yes |  |
 | dependency | 68 | 68 | 100% | yes | yes |  |
 | guc | 222 | 222 | 100% | yes | yes |  |
@@ -602,7 +691,7 @@ produces no units on Linux (skipped by the file itself).
 | jsonpath | 224 | 224 | 100% | yes | yes |  |
 | jsonpath_encoding | 35 | 35 | 100% | yes | yes |  |
 | jsonb_jsonpath | 836 | 836 | 100% | yes | yes |  |
-| sqljson | 242 | 240 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| sqljson | 242 | 242 | 100% | yes | yes |  |
 | sqljson_queryfuncs | 318 | 318 | 100% | yes | yes |  |
 | sqljson_jsontable | 131 | 130 | 99% | yes | no | wrong result `SELECT: row order differs` (1) |
 | plancache | 97 | 97 | 100% | yes | yes |  |
@@ -611,17 +700,17 @@ produces no units on Linux (skipped by the file itself).
 | copy2 | 290 | 290 | 100% | no | no |  |
 | temp | 211 | 211 | 100% | yes | yes |  |
 | domain | 486 | 486 | 100% | no | no |  |
-| rangefuncs | 428 | 427 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| rangefuncs | 428 | 427 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | prepare | 33 | 33 | 100% | yes | yes |  |
 | conversion | 68 | 68 | 100% | no | no |  |
 | truncate | 193 | 193 | 100% | yes | yes |  |
 | alter_table | 1749 | 1749 | 100% | yes | yes |  |
 | sequence | 265 | 265 | 100% | no | no |  |
 | polymorphism | 426 | 426 | 100% | yes | yes |  |
-| rowtypes | 237 | 228 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (9) |
+| rowtypes | 237 | 230 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | returning | 145 | 142 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | largeobject | 151 | 138 | 91% | yes | no | wrong result `SELECT: row count differs` (11) |
-| with | 307 | 293 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
+| with | 307 | 294 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (10) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 566 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (48) |
 | partition_prune | 771 | 733 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (30) |
@@ -632,8 +721,8 @@ produces no units on Linux (skipped by the file itself).
 | partition_info | 73 | 71 | 97% | yes | no | wrong result `SELECT: row order differs` (2) |
 | tuplesort | 108 | 106 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | explain | 60 | 60 | 100% | yes | yes |  |
-| memoize | 73 | 62 | 85% | yes | no | wrong result `SELECT: values differ` (5) |
-| stats | 482 | 482 | 100% | yes | no |  |
+| memoize | 73 | 64 | 88% | yes | no | wrong result `SELECT: values differ` (4) |
+| stats | 482 | 482 | 100% | yes | yes |  |
 | predicate | 42 | 42 | 100% | yes | yes |  |
 | numa | 3 | 3 | 100% | yes | yes |  |
 | compression | 102 | 102 | 100% | yes | yes |  |

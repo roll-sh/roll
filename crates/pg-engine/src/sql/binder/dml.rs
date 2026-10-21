@@ -1778,6 +1778,7 @@ impl Binder<'_, '_> {
                                     ty: if one { cols[0].ty.clone() } else { DataType::Record },
                                     func: None,
                                     call: None,
+                                    test_op: None,
                                 }));
                                 let exprs = if one {
                                     vec![sq]

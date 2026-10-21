@@ -833,7 +833,16 @@ impl Planner<'_, '_> {
         for k in kids {
             self.reduce_dummies(take(k));
         }
-        let empty = |x: &Plan| matches!(x, Plan::Empty { .. });
+        // (A relation proven empty: through the projection of a subquery's select list,
+        // and a filter or sort over it.)
+        fn empty(x: &Plan) -> bool {
+            match x {
+                Plan::Empty { .. } => true,
+                Plan::Project { input, .. } => empty(input),
+                Plan::Filter { input, .. } | Plan::Sort { input, .. } => empty(input),
+                _ => false,
+            }
+        }
         let replace = match p {
             Plan::Join {
                 kind,
