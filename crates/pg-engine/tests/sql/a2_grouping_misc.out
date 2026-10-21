@@ -1,0 +1,248 @@
+> CREATE COLLATION a2_ci (provider = icu, locale = '@colStrength=secondary', deterministic = false)
+NOTICE 00000: using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+-- CREATE COLLATION
+
+> CREATE COLLATION a2_cs (provider = icu, locale = '', deterministic = true)
+NOTICE 00000: using standard form "und" for ICU locale ""
+-- CREATE COLLATION
+
+> CREATE TABLE a2_g3ci (x text COLLATE a2_ci)
+-- CREATE TABLE
+
+> INSERT INTO a2_g3ci VALUES ('abc'), ('ABC'), ('def'), ('ghi')
+-- INSERT 0 4
+
+> EXPLAIN (COSTS OFF)
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x = 'abc' COLLATE a2_cs
+QUERY PLAN:text
+HashAggregate
+  Group Key: x
+  Filter: (x = 'abc'::text COLLATE a2_cs)
+  ->  Seq Scan on a2_g3ci
+-- EXPLAIN
+
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x = 'abc' COLLATE a2_cs
+x:text | count:int8
+abc | 2
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x = 'abc' COLLATE a2_ci
+QUERY PLAN:text
+GroupAggregate
+  ->  Seq Scan on a2_g3ci
+        Filter: (x = 'abc'::text COLLATE a2_ci)
+-- EXPLAIN
+
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x = 'abc' COLLATE a2_ci
+x:text | count:int8
+abc | 2
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING upper(x) = 'ABC' COLLATE a2_ci
+QUERY PLAN:text
+HashAggregate
+  Group Key: x
+  Filter: (upper(x) = 'ABC'::text COLLATE a2_ci)
+  ->  Seq Scan on a2_g3ci
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x = 'abc' COLLATE a2_cs AND x >= 'a' COLLATE a2_ci
+QUERY PLAN:text
+HashAggregate
+  Group Key: x
+  Filter: (x = 'abc'::text COLLATE a2_cs)
+  ->  Seq Scan on a2_g3ci
+        Filter: (x >= 'a'::text COLLATE a2_ci)
+-- EXPLAIN
+
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x = 'abc' COLLATE a2_cs AND x >= 'a' COLLATE a2_ci
+x:text | count:int8
+abc | 2
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x = 'abc' COLLATE a2_ci AND x >= 'a' COLLATE a2_ci
+QUERY PLAN:text
+GroupAggregate
+  ->  Seq Scan on a2_g3ci
+        Filter: ((x >= 'a'::text COLLATE a2_ci) AND (x = 'abc'::text COLLATE a2_ci))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x <> 'abc' COLLATE a2_ci ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: x COLLATE a2_ci
+  ->  HashAggregate
+        Group Key: x
+        Filter: (x <> 'abc'::text COLLATE a2_ci)
+        ->  Seq Scan on a2_g3ci
+-- EXPLAIN
+
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x IN ('abc', 'def') ORDER BY 1
+x:text | count:int8
+abc | 2
+def | 1
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF)
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING (CASE x WHEN 'abc' COLLATE a2_cs THEN true ELSE false END)
+QUERY PLAN:text
+HashAggregate
+  Group Key: x
+  Filter: CASE x WHEN 'abc'::text COLLATE a2_cs THEN true ELSE false END
+  ->  Seq Scan on a2_g3ci
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING (CASE x WHEN 'abc' COLLATE a2_ci THEN true ELSE false END)
+QUERY PLAN:text
+HashAggregate
+  Group Key: x
+  ->  Seq Scan on a2_g3ci
+        Filter: CASE x WHEN 'abc'::text COLLATE a2_ci THEN true ELSE false END
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING ROW(x, 1) < ROW('ABC' COLLATE a2_cs, 1) ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: x COLLATE a2_ci
+  ->  HashAggregate
+        Group Key: x
+        Filter: (ROW(x, 1) < ROW('ABC'::text COLLATE a2_cs, 1))
+        ->  Seq Scan on a2_g3ci
+-- EXPLAIN
+
+> DROP TABLE a2_g3ci
+-- DROP TABLE
+
+> CREATE TEMP TABLE a2_gs3 (a integer, b integer, c integer, d integer)
+-- CREATE TABLE
+
+> INSERT INTO a2_gs3 VALUES (1, 1, 1, 1), (2, 2, 2, 2)
+-- INSERT 0 2
+
+> ALTER TABLE a2_gs3 ADD PRIMARY KEY (a)
+-- ALTER TABLE
+
+> SELECT a, d, grouping(a, b, c) FROM a2_gs3 GROUP BY GROUPING SETS ((a, b), (a, c))
+a:int4 | d:int4 | grouping:int4
+1 | 1 | 1
+1 | 1 | 2
+2 | 2 | 1
+2 | 2 | 2
+-- SELECT 4
+
+> SELECT a, d, count(*) FROM a2_gs3 GROUP BY GROUPING SETS ((a, b))
+a:int4 | d:int4 | count:int8
+1 | 1 | 1
+2 | 2 | 1
+-- SELECT 2
+
+> SET enable_sort = off
+-- SET
+
+> SELECT a, d, count(*) FROM a2_gs3 GROUP BY a, b
+a:int4 | d:int4 | count:int8
+1 | 1 | 1
+2 | 2 | 1
+-- SELECT 2
+
+> RESET enable_sort
+-- RESET
+
+> CREATE TEMP TABLE a2_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a2_i8 VALUES (1, 2), (3, 4)
+-- INSERT 0 2
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT q1 FROM (
+>   WITH t_cte AS (SELECT * FROM a2_i8 t)
+>   SELECT q1, (SELECT q2 FROM t_cte WHERE t_cte.q1 = i8.q1) AS t_sub FROM a2_i8 i8
+> ) ss
+QUERY PLAN:text
+Subquery Scan on ss
+  Output: ss.q1
+  ->  Seq Scan on pg_temp.a2_i8 i8
+        Output: i8.q1, NULL::bigint
+-- EXPLAIN
+
+> SELECT q1 FROM (SELECT q1, 1 / (q2 - q2) AS z FROM a2_i8 i8 ORDER BY q1) ss
+q1:int8
+1
+3
+-- SELECT 2
+
+> CREATE TYPE a2_int8alias
+-- CREATE TYPE
+
+> CREATE FUNCTION a2_int8aliasin(cstring) RETURNS a2_int8alias
+>   STRICT IMMUTABLE LANGUAGE internal AS 'int8in'
+NOTICE 42809: return type a2_int8alias is only a shell
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a2_int8aliasout(a2_int8alias) RETURNS cstring
+>   STRICT IMMUTABLE LANGUAGE internal AS 'int8out'
+NOTICE 42809: argument type a2_int8alias is only a shell (at 33)
+-- CREATE FUNCTION
+
+> CREATE TYPE a2_int8alias (input = a2_int8aliasin, output = a2_int8aliasout, like = int8)
+-- CREATE TYPE
+
+> CREATE CAST (int8 AS a2_int8alias) WITHOUT FUNCTION
+-- CREATE CAST
+
+> CREATE FUNCTION a2_int8aliaseq(int8, a2_int8alias) RETURNS bool
+>   STRICT IMMUTABLE LANGUAGE internal AS 'int8eq'
+-- CREATE FUNCTION
+
+> CREATE OPERATOR = (procedure = a2_int8aliaseq, leftarg = int8, rightarg = a2_int8alias,
+>                    restrict = eqsel, join = eqjoinsel)
+-- CREATE OPERATOR
+
+> CREATE TABLE a2_ec1 (ff int8 PRIMARY KEY, f1 a2_int8alias)
+-- CREATE TABLE
+
+> CREATE TABLE a2_ec2 (xf int8 PRIMARY KEY, x1 a2_int8alias)
+-- CREATE TABLE
+
+> EXPLAIN SELECT * FROM a2_ec2 WHERE '42'::int8 = x1
+QUERY PLAN:text
+Seq Scan on a2_ec2  (cost=0.00..33.12 rows=9 width=16)
+  Filter: ('42'::bigint = x1)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a2_ec1, a2_ec2 WHERE ff = x1 AND '42'::int8 = x1
+QUERY PLAN:text
+Nested Loop  (cost=0.00..311.40 rows=9 width=32)
+  Join Filter: (a2_ec1.ff = a2_ec2.x1)
+  ->  Seq Scan on a2_ec1  (cost=0.00..28.50 rows=1850 width=16)
+  ->  Materialize  (cost=0.00..33.17 rows=9 width=16)
+        ->  Seq Scan on a2_ec2  (cost=0.00..33.12 rows=9 width=16)
+              Filter: ('42'::bigint = x1)
+-- EXPLAIN
+
+> DROP TABLE a2_ec1, a2_ec2
+-- DROP TABLE
+
+> DROP TYPE a2_int8alias CASCADE
+NOTICE 00000: drop cascades to 5 other objects
+DETAIL: drop cascades to function a2_int8aliasin(cstring)
+DETAIL: drop cascades to function a2_int8aliasout(a2_int8alias)
+DETAIL: drop cascades to cast from bigint to a2_int8alias
+DETAIL: drop cascades to function a2_int8aliaseq(bigint,a2_int8alias)
+DETAIL: drop cascades to operator =(bigint,a2_int8alias)
+-- DROP TYPE
+
+> DROP COLLATION a2_ci
+-- DROP COLLATION
+
+> DROP COLLATION a2_cs
+-- DROP COLLATION
+

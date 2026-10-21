@@ -2331,6 +2331,18 @@ impl AggNode {
         }
     }
 
+    /// The keys that group nothing more (EXPLAIN's redundant keys), per key.
+    fn redundant_keys(&self, ctx: &ExecCtx) -> Vec<bool> {
+        let n = self.groups.len();
+        match self.plan.as_deref() {
+            Some(crate::sql::plan::Plan::Agg { input, groups, sets, .. }) if n >= 2 && groups.len() == n => {
+                let r = crate::sql::explain::agg_redundant_keys(input, groups, sets.as_deref(), ctx);
+                if r.len() == n { r } else { vec![false; n] }
+            }
+            _ => vec![false; n],
+        }
+    }
+
     /// The plan node this runs (for the order its groups come out in).
     pub fn planned(mut self, plan: Arc<crate::sql::plan::Plan>) -> Self {
         self.plan = Some(plan);
@@ -2404,7 +2416,15 @@ impl AggNode {
             // Plain GROUP BY (or none).
             let mut index: HashMap<Vec<Value>, usize> = HashMap::new();
             let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
-            let types: Vec<T> = self.groups.iter().map(|g| g.ty()).collect();
+            // (Keys that group nothing more aren't in the hash table's key.)
+            let red = self.redundant_keys(ctx);
+            let types: Vec<T> = self
+                .groups
+                .iter()
+                .zip(&red)
+                .filter(|(_, r)| !**r)
+                .map(|(g, _)| g.ty())
+                .collect();
             let mut hashed = super::pghash::GroupOrder::new(types, ctx);
             // Aggregates with DISTINCT / ORDER BY: the input is sorted for the first of
             // them below the aggregation (by the group keys, then its order), so that
@@ -2495,7 +2515,13 @@ impl AggNode {
                     }
                 };
                 if !self.groups.is_empty() {
-                    hashed.row(&hkey, gi);
+                    if red.iter().any(|r| *r) {
+                        let hk: Vec<Value> =
+                            hkey.iter().zip(&red).filter(|(_, r)| !**r).map(|(v, _)| v.clone()).collect();
+                        hashed.row(&hk, gi);
+                    } else {
+                        hashed.row(&hkey, gi);
+                    }
                 }
                 let states = &mut groups[gi].1;
                 for ((a, st), sh) in self.aggs.iter().zip(states.iter_mut()).zip(&share) {
@@ -2608,10 +2634,12 @@ impl AggNode {
         let mut order: Vec<(usize, Vec<usize>)> =
             (0..sets.len()).filter(|&i| sets[i].is_empty()).map(|i| (i, Vec::new())).collect();
         order.extend(hashed_sets_order(sets));
+        let red = self.redundant_keys(ctx);
         let mut out = Vec::new();
         for (si, key_cols) in order {
             let set = &key_cols;
-            let types: Vec<T> = set.iter().map(|&i| self.groups[i].ty()).collect();
+            let hset: Vec<usize> = set.iter().copied().filter(|&i| !red[i]).collect();
+            let types: Vec<T> = hset.iter().map(|&i| self.groups[i].ty()).collect();
             let mut hashed = super::pghash::GroupOrder::new(types, ctx);
             let mut index: HashMap<Vec<Value>, usize> = HashMap::new();
             let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
@@ -2628,7 +2656,7 @@ impl AggNode {
                     }
                 };
                 if !set.is_empty() {
-                    let hk: Vec<Value> = set.iter().map(|&i| hkey[i].clone()).collect();
+                    let hk: Vec<Value> = hset.iter().map(|&i| hkey[i].clone()).collect();
                     hashed.row(&hk, gi);
                 }
                 for (a, st) in self.aggs.iter().zip(groups[gi].1.iter_mut()) {

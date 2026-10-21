@@ -655,6 +655,34 @@ impl<'b, 'a> Binder<'b, 'a> {
         }
     }
 
+    /// A new scan's place in the range table (`ScanPlan::rti`): a pulled-up subquery's
+    /// relations after the query's own (by query level), then in the order bound.
+    pub(crate) fn next_rti(&mut self) -> crate::sql::plan::Rti {
+        let depth = self.levels.len();
+        crate::sql::plan::Rti((depth << 40) | (self.fresh_id() & ((1 << 40) - 1)))
+    }
+
+    /// A query bound elsewhere (an inlined CTE's) read here as a subquery: its scans take
+    /// places in the range table after this level's, keeping their order.
+    pub(crate) fn restamp_rti(&mut self, p: &mut crate::sql::plan::Plan) {
+        fn scans<'p>(p: &'p mut crate::sql::plan::Plan, out: &mut Vec<&'p mut crate::sql::plan::ScanPlan>) {
+            if let crate::sql::plan::Plan::Scan(s) = p {
+                out.push(s);
+                return;
+            }
+            for c in crate::sql::explain::plan_inputs_mut(p) {
+                scans(std::sync::Arc::make_mut(c), out);
+            }
+        }
+        let mut all = Vec::new();
+        scans(p, &mut all);
+        all.sort_by_key(|s| s.rti);
+        let depth = self.levels.len() + 1;
+        for s in all {
+            s.rti = crate::sql::plan::Rti((depth << 40) | (self.fresh_id() & ((1 << 40) - 1)));
+        }
+    }
+
     pub fn fresh_id(&mut self) -> usize {
         self.next_id += 1;
         // Unique per process run, so cached subquery results never collide across statements

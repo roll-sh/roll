@@ -58,6 +58,16 @@ pub(crate) fn type_layout(ty: &DataType) -> (isize, usize) {
         T::Line | T::Circle => (24, 8),
         T::Array(e) => (-1, if type_layout(e).1 == 8 { 8 } else { 4 }),
         T::Path | T::Polygon => (-1, 8),
+        // A user-defined base type: its typlen and typalign.
+        T::Base(b) if !b.is_shell() => {
+            let al = match b.align {
+                'c' => 1,
+                's' => 2,
+                'd' => 8,
+                _ => 4,
+            };
+            (if b.len > 0 { b.len as isize } else { -1 }, al)
+        }
         _ => (-1, 4),
     }
 }

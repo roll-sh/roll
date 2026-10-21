@@ -830,13 +830,9 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
                 // (An output nothing reads is a NULL in its target list, which it keeps:
                 // remove_unused_subquery_outputs.)
                 let volatile: Vec<bool> = match top {
-                    Plan::Project { exprs, input } => exprs
+                    Plan::Project { exprs, .. } => exprs
                         .iter()
-                        .map(|e| {
-                            expr_volatile_deep(e)
-                                || matches!(e, Expr::Const(crate::types::Value::Null, _))
-                                    && matches!(&**input, Plan::Agg { .. })
-                        })
+                        .map(|e| expr_volatile_deep(e) || matches!(e, Expr::Const(crate::types::Value::Null, _)))
                         .collect(),
                     _ => Vec::new(),
                 };
@@ -1262,10 +1258,14 @@ fn assign_refnames_skip(
     // not in the plan, takes a name before its leaves.)
     let mut mid_first: HashMap<usize, Vec<String>> = HashMap::new();
     let mut fake = usize::MAX;
+    let mut inline_barriers: std::collections::HashSet<usize> = std::collections::HashSet::new();
     while qi < queue.len() {
         let mut stack = vec![queue[qi]];
         qi += 1;
         let mut later: Vec<&Plan> = Vec::new();
+        // (Subquery levels: named before the level's SubPlans and CTEs, as setrefs reaches
+        // them in the plan, the subplans after the whole plan.)
+        let mut later_sub: Vec<&Plan> = Vec::new();
         while let Some(p) = stack.pop() {
             if let Plan::Append { inh: Some(n), inputs } = p
                 && skip.contains(&addr(p))
@@ -1456,6 +1456,13 @@ fn assign_refnames_skip(
             if matches!(p, Plan::Join { meta, .. } if meta.from_call.is_some()) {
                 inputs.clear();
             }
+            // (An INTERSECT with the input of fewer groups first: its relations are named
+            // in that order, as the plan has them.)
+            if let (Some(ctx), Plan::SetOp { kind: SetOpKind::Intersect, left, right, .. }) = (ctx, p)
+                && setop_shape(left, right, true, ctx).0
+            {
+                inputs.reverse();
+            }
             // (A subquery a filter keeps apart, its Subquery Scan shown: its alias is a
             // name of this level, its own relations named after this level's.)
             // (So does any FROM subquery whose Subquery Scan shows.)
@@ -1486,7 +1493,36 @@ fn assign_refnames_skip(
                 used.entry(name.clone()).or_insert(0);
                 out.insert(addr(input), name);
                 inputs.clear();
-                later.push(&**bi);
+                later_sub.push(&**bi);
+            } else if sub_shown.is_none()
+                && let Plan::Barrier { input: bi, .. } = p
+                && !inline_barriers.contains(&addr(p))
+            {
+                // (A subquery setrefs removes as trivial: its relations are named when
+                // setrefs reaches it, after the level's own, in plan order.)
+                inputs.clear();
+                later_sub.push(&**bi);
+            }
+            // (A set operation's arms are all subqueries of a level with no relations of
+            // its own: named in plan order as they are.)
+            if let Plan::SetOp { .. } | Plan::Append { inh: None, .. } = p {
+                for c in plan_inputs(p) {
+                    let mut a: &Plan = c;
+                    loop {
+                        match a {
+                            Plan::Barrier { input, .. } => {
+                                inline_barriers.insert(addr(a));
+                                a = input;
+                            }
+                            Plan::Project { input, .. }
+                            | Plan::Filter { input, .. }
+                            | Plan::Context { input, .. }
+                            | Plan::Sort { input, .. }
+                            | Plan::Distinct { input, .. } => a = input,
+                            _ => break,
+                        }
+                    }
+                }
             }
             if let (Some(ctx), Plan::Append { inputs: all, inh: Some(_) }) = (ctx, p)
                 && !matches!(all.first().map(|i| &**i), Some(Plan::Update(_) | Plan::Delete(_)))
@@ -1506,6 +1542,7 @@ fn assign_refnames_skip(
                 stack.push(c);
             }
         }
+        queue.extend(later_sub);
         queue.extend(later);
     }
     // Partitions joined partitionwise are numbered as their parent expands them (bound
@@ -1548,7 +1585,83 @@ fn assign_refnames_skip(
             out.insert(a, n);
         }
     }
+    // The relations of one query level that share a name (a view read twice and pulled
+    // up) take their numbers in range-table order, not in the order the joins put them.
+    let mut levels: Vec<Vec<&Plan>> = vec![Vec::new()];
+    level_scans(root, 0, &mut levels);
+    let target = target.map(addr);
+    for level in levels {
+        let mut groups: Vec<(String, Vec<(crate::sql::plan::Rti, usize)>)> = Vec::new();
+        for p in level {
+            let Plan::Scan(s) = p else { continue };
+            if s.rti.0 == 0 || Some(addr(p)) == target || !out.contains_key(&addr(p)) {
+                continue;
+            }
+            let base = s.alias.clone().unwrap_or_else(|| s.table.name.clone());
+            match groups.iter_mut().find(|(b, _)| *b == base) {
+                Some((_, v)) => v.push((s.rti, addr(p))),
+                None => groups.push((base, vec![(s.rti, addr(p))])),
+            }
+        }
+        for (base, mut v) in groups {
+            if v.len() < 2 {
+                continue;
+            }
+            let num = |n: &str| {
+                n.strip_prefix(base.as_str())
+                    .and_then(|x| x.strip_prefix('_'))
+                    .and_then(|x| x.parse::<usize>().ok())
+                    .unwrap_or(0)
+            };
+            let mut names: Vec<String> = v.iter().map(|(_, a)| out[a].clone()).collect();
+            names.sort_by_key(|n| num(n));
+            v.sort_by_key(|x| x.0);
+            for ((_, a), n) in v.into_iter().zip(names) {
+                out.insert(a, n);
+            }
+        }
+    }
     (out, results)
+}
+
+/// A grouping key that is a column, or a column carrying its nondeterministic collation
+/// (the binder's implicit COLLATE, no location).
+fn implicit_key_col(g: &Expr) -> Option<usize> {
+    match g {
+        Expr::Col(j, _) => Some(*j),
+        Expr::Collate(x, _, -1) => match &**x {
+            Expr::Col(j, _) => Some(*j),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The table scans of each query level (a level's own, not inside a subquery level or an
+/// inheritance tree).
+fn level_scans<'p>(p: &'p Plan, cur: usize, levels: &mut Vec<Vec<&'p Plan>>) {
+    match p {
+        Plan::Scan(s) if s.part.is_none() => levels[cur].push(p),
+        Plan::Append { inh: Some(_), .. } => {}
+        Plan::Barrier { input, .. } => {
+            levels.push(Vec::new());
+            let n = levels.len() - 1;
+            level_scans(input, n, levels);
+        }
+        // (A set operation's arms are subqueries: levels of their own.)
+        Plan::SetOp { .. } | Plan::Append { inh: None, .. } => {
+            for c in plan_inputs(p) {
+                levels.push(Vec::new());
+                let n = levels.len() - 1;
+                level_scans(c, n, levels);
+            }
+        }
+        _ => {
+            for c in plan_inputs(p) {
+                level_scans(c, cur, levels);
+            }
+        }
+    }
 }
 
 /// The reference names of the partitioned tables whose partitions the plan scans outside
@@ -1788,6 +1901,115 @@ fn join_type(k: JoinKind) -> &'static str {
 }
 
 impl Builder<'_, '_> {
+    /// The grouping keys that group nothing more (remove_useless_groupby_columns:
+    /// functionally dependent on a table's unique key among the keys; a key an equality
+    /// fixes; one equal to an earlier one): out of the shown keys, the sort and the hash.
+    fn redundant_keys(&self, input: &Plan, groups: &[Expr], sets: Option<&[Vec<usize>]>, cols: &[ColInfo]) -> Vec<bool> {
+        let var = |k: usize| match &groups[k] {
+            Expr::Col(j, _) => cols
+                .get(*j)
+                .and_then(|c| c.var.as_ref())
+                .filter(|v| v.expr.is_none() && (!v.inh || v.table.partkey.is_some())),
+            _ => None,
+        };
+        let common = |k: usize| sets.is_none_or(|ss| ss.iter().all(|s| s.contains(&k)));
+        let mut out = vec![false; groups.len()];
+        if groups.len() >= 2 {
+            let cat = self.ctx.catalog();
+            let mut done: Vec<u32> = Vec::new();
+            for i in 0..groups.len() {
+                let Some(v) = var(i).filter(|_| common(i)) else { continue };
+                let t = &v.table;
+                if done.contains(&t.oid) {
+                    continue;
+                }
+                done.push(t.oid);
+                // (The table's grouped columns.)
+                let grouped: Vec<usize> = (0..groups.len())
+                    .filter(|&k| common(k))
+                    .filter_map(|k| var(k).filter(|w| w.table.oid == t.oid).map(|w| w.col))
+                    .collect();
+                // (The primary key first, then the indexes.)
+                let pk_deferrable = t.constraints.iter().any(|c| {
+                    matches!(c.kind, crate::catalog::ConstraintKind::PrimaryKey { .. }) && c.deferrable
+                });
+                let mut best: Option<Vec<usize>> = t
+                    .pkey
+                    .clone()
+                    .filter(|pk| !pk_deferrable && pk.iter().all(|k| grouped.contains(k)));
+                for ix in cat.table_indexes(t) {
+                    // (Of the grouping's own equality: default operator classes.)
+                    let cols: Option<Vec<usize>> = ix
+                        .columns
+                        .iter()
+                        .map(|c| match c.key {
+                            crate::catalog::IndexKey::Column(k) if c.opclass == 0 => Some(k),
+                            _ => None,
+                        })
+                        .collect();
+                    let Some(cols) = cols else { continue };
+                    let deferrable = t
+                        .constraints
+                        .iter()
+                        .any(|c| c.kind.index() == Some(ix.oid) && c.deferrable);
+                    let not_null = ix.nulls_not_distinct
+                        || cols.iter().all(|&k| t.columns.get(k).is_some_and(|c| c.not_null));
+                    if !ix.unique
+                        || !ix.valid
+                        || deferrable
+                        || ix.predicate.is_some()
+                        || !not_null
+                        || !cols.iter().all(|k| grouped.contains(k))
+                    {
+                        continue;
+                    }
+                    if best.as_ref().is_none_or(|b| cols.len() < b.len()) {
+                        best = Some(cols);
+                    }
+                }
+                if let Some(b) = best {
+                    for (k, o) in out.iter_mut().enumerate() {
+                        if common(k) && var(k).is_some_and(|w| w.table.oid == t.oid && !b.contains(&w.col)) {
+                            *o = true;
+                        }
+                    }
+                }
+            }
+        }
+        // (A key fixed to a constant by an equality: a redundant pathkey, out of
+        // processed_groupClause.)
+        if sets.is_none() {
+            let fixed = super::paths::constant_columns(input);
+            let is_fixed = |g: &Expr| implicit_key_col(g).is_some_and(|j| fixed.get(j).copied().unwrap_or(false));
+            if !groups.iter().all(is_fixed) {
+                for (k, g) in groups.iter().enumerate() {
+                    if is_fixed(g) {
+                        out[k] = true;
+                    }
+                }
+            }
+        }
+        if sets.is_none() {
+            let classes = super::paths::column_classes(input);
+            let mut seen: Vec<usize> = Vec::new();
+            for (k, g) in groups.iter().enumerate() {
+                if out[k] {
+                    continue;
+                }
+                if let Expr::Col(j, _) = g
+                    && let Some((r, false)) = classes.get(*j).copied()
+                {
+                    if seen.contains(&r) {
+                        out[k] = true;
+                    } else {
+                        seen.push(r);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn full(&self, cx: Cx) -> bool {
         match cx {
             Cx::Scan => self.o.verbose,
@@ -2597,6 +2819,7 @@ impl Builder<'_, '_> {
                                 exprs: &[],
                                 endpoint: None,
                                 distinct: None,
+                                user: None,
                             };
                             let mut parts = Vec::new();
                             conjuncts(f, &mut parts);
@@ -6012,6 +6235,7 @@ impl Builder<'_, '_> {
                 exprs: &[],
                 endpoint: None,
                 distinct: None,
+                user: None,
             };
             let qc: f64 = rest.iter().map(costs::qual_cost).sum();
             n.total_cost += size.tuples * qc;
@@ -6025,6 +6249,7 @@ impl Builder<'_, '_> {
                 exprs: &[],
                 endpoint: None,
                 distinct: None,
+                user: None,
             };
             let conds: Vec<Expr> = index_conds.iter().map(|(e, _)| e.clone()).collect();
             let index_sel = est.clauses(&conds);
@@ -6776,6 +7001,7 @@ impl Builder<'_, '_> {
                         exprs: &[],
                         endpoint: None,
                         distinct: scan_like.then_some(&nd as &dyn Fn(usize) -> Option<f64>),
+                        user: None,
                     };
                     costs::clamp_rows(c.node.rows * est.clauses(&quals))
                 };
@@ -6810,6 +7036,7 @@ impl Builder<'_, '_> {
                     exprs: &[],
                     endpoint: None,
                     distinct: scan_like.then_some(&nd as &dyn Fn(usize) -> Option<f64>),
+                    user: None,
                 };
                 let qc: f64 = quals.iter().map(costs::qual_cost).sum();
                 c.node.total_cost += c.node.rows * qc;
@@ -6838,6 +7065,23 @@ impl Builder<'_, '_> {
                     .iter()
                     .map(|e| self.show(e, &names, Cx::Upper))
                     .collect();
+                // (Estimated over the subquery's outputs, examine_variable looking into
+                // it; cost_subqueryscan's per-tuple qual cost.)
+                let (sel, qc) = {
+                    let cat = self.ctx.catalog();
+                    let cols = c.node.cols.clone();
+                    let vars = |i: usize| cols.get(i).and_then(|c| c.var.clone());
+                    let est = costs::Est {
+                        cat: &cat,
+                        fmt: self.ctx.fmt(),
+                        vars: &vars,
+                        exprs: &[],
+                        endpoint: None,
+                        distinct: None,
+                        user: None,
+                    };
+                    (est.clauses(&quals), quals.iter().map(costs::qual_cost).sum::<f64>())
+                };
                 if subscan {
                     // (Its scan computes it: the quals go on it.)
                     let n = &mut c.node;
@@ -6850,8 +7094,8 @@ impl Builder<'_, '_> {
                         vec![Removed::Diff(below_key)],
                     ));
                     n.key = Some(key);
-                    n.rows = (below * 0.5).max(1.0);
-                    n.total_cost += below * 0.01 - below * costs::CPU_TUPLE_COST;
+                    n.rows = costs::clamp_rows(below * sel);
+                    n.total_cost += below * qc;
                     n.subplans.append(&mut self.pending);
                 } else {
                 let mut n = ExNode::new("Subquery Scan");
@@ -6864,10 +7108,10 @@ impl Builder<'_, '_> {
                     vec![Removed::Diff(input_key)],
                 ));
                 n.key = Some(key);
-                n.rows = (c.node.rows * 0.5).max(1.0);
+                n.rows = costs::clamp_rows(c.node.rows * sel);
                 n.width = c.node.width;
                 n.startup_cost = c.node.startup_cost;
-                n.total_cost = c.node.total_cost + c.node.rows * 0.01;
+                n.total_cost = c.node.total_cost + c.node.rows * (costs::CPU_TUPLE_COST + qc);
                 n.subplans.append(&mut self.pending);
                 let child = std::mem::take(&mut c.node);
                 n.children.push(child.child("Subquery"));
@@ -7055,9 +7299,10 @@ impl Builder<'_, '_> {
         let mut exported: Vec<Name> = groups
             .iter()
             .zip(&gnames)
-            .map(|(g, n)| match g {
-                Expr::Col(j, _) => c.exported.get(*j).cloned().unwrap_or_else(|| n.clone()),
-                _ => n.wrapped(),
+            .map(|(g, n)| match implicit_key_col(g) {
+                // (A key carrying its own nondeterministic collation is the column.)
+                Some(j) => c.exported.get(j).cloned().unwrap_or_else(|| n.clone()),
+                None => n.wrapped(),
             })
             .collect();
         exported.extend(anames.iter().map(Name::wrapped));
@@ -7074,113 +7319,7 @@ impl Builder<'_, '_> {
         // not-null (or nulls-not-distinct), immediate, non-partial index of the fewest
         // columns all grouped; with grouping sets, the columns grouped along for being
         // selected). Then a key equal to an earlier one (processed_groupClause).
-        let redundant: Vec<bool> = {
-            let var = |k: usize| match &groups[k] {
-                Expr::Col(j, _) => c
-                    .node
-                    .cols
-                    .get(*j)
-                    .and_then(|c| c.var.as_ref())
-                    .filter(|v| v.expr.is_none() && (!v.inh || v.table.partkey.is_some())),
-                _ => None,
-            };
-            let common = |k: usize| sets.is_none_or(|ss| ss.iter().all(|s| s.contains(&k)));
-            let mut out = vec![false; groups.len()];
-            if groups.len() >= 2 {
-                let cat = self.ctx.catalog();
-                let mut done: Vec<u32> = Vec::new();
-                for i in 0..groups.len() {
-                    let Some(v) = var(i).filter(|_| common(i)) else { continue };
-                    let t = &v.table;
-                    if done.contains(&t.oid) {
-                        continue;
-                    }
-                    done.push(t.oid);
-                    // (The table's grouped columns.)
-                    let grouped: Vec<usize> = (0..groups.len())
-                        .filter(|&k| common(k))
-                        .filter_map(|k| var(k).filter(|w| w.table.oid == t.oid).map(|w| w.col))
-                        .collect();
-                    // (The primary key first, then the indexes.)
-                    let pk_deferrable = t.constraints.iter().any(|c| {
-                        matches!(c.kind, crate::catalog::ConstraintKind::PrimaryKey { .. }) && c.deferrable
-                    });
-                    let mut best: Option<Vec<usize>> = t
-                        .pkey
-                        .clone()
-                        .filter(|pk| !pk_deferrable && pk.iter().all(|k| grouped.contains(k)));
-                    for ix in cat.table_indexes(t) {
-                        // (Of the grouping's own equality: default operator classes.)
-                        let cols: Option<Vec<usize>> = ix
-                            .columns
-                            .iter()
-                            .map(|c| match c.key {
-                                crate::catalog::IndexKey::Column(k) if c.opclass == 0 => Some(k),
-                                _ => None,
-                            })
-                            .collect();
-                        let Some(cols) = cols else { continue };
-                        let deferrable = t
-                            .constraints
-                            .iter()
-                            .any(|c| c.kind.index() == Some(ix.oid) && c.deferrable);
-                        let not_null = ix.nulls_not_distinct
-                            || cols.iter().all(|&k| t.columns.get(k).is_some_and(|c| c.not_null));
-                        if !ix.unique
-                            || !ix.valid
-                            || deferrable
-                            || ix.predicate.is_some()
-                            || !not_null
-                            || !cols.iter().all(|k| grouped.contains(k))
-                        {
-                            continue;
-                        }
-                        if best.as_ref().is_none_or(|b| cols.len() < b.len()) {
-                            best = Some(cols);
-                        }
-                    }
-                    if let Some(b) = best {
-                        for (k, o) in out.iter_mut().enumerate() {
-                            if common(k) && var(k).is_some_and(|w| w.table.oid == t.oid && !b.contains(&w.col)) {
-                                *o = true;
-                            }
-                        }
-                    }
-                }
-            }
-            // (A key fixed to a constant by an equality: a redundant pathkey, out of
-            // processed_groupClause.)
-            if sets.is_none() {
-                let fixed = super::paths::constant_columns(input);
-                let is_fixed = |g: &Expr| matches!(g, Expr::Col(j, _) if fixed.get(*j).copied().unwrap_or(false));
-                if !groups.iter().all(is_fixed) {
-                    for (k, g) in groups.iter().enumerate() {
-                        if is_fixed(g) {
-                            out[k] = true;
-                        }
-                    }
-                }
-            }
-            if sets.is_none() {
-                let classes = super::paths::column_classes(input);
-                let mut seen: Vec<usize> = Vec::new();
-                for (k, g) in groups.iter().enumerate() {
-                    if out[k] {
-                        continue;
-                    }
-                    if let Expr::Col(j, _) = g
-                        && let Some((r, false)) = classes.get(*j).copied()
-                    {
-                        if seen.contains(&r) {
-                            out[k] = true;
-                        } else {
-                            seen.push(r);
-                        }
-                    }
-                }
-            }
-            out
-        };
+        let redundant = self.redundant_keys(input, groups, sets, &c.node.cols);
         // (A key its input computes shows as that input's expression: show_agg_keys
         // deparses the input's target list entry.)
         let graw: Vec<Name> = groups
@@ -7511,7 +7650,7 @@ impl Builder<'_, '_> {
             // redundant): a GroupAggregate of one group, no keys to compare.
             None if {
                 let fixed = super::paths::constant_columns(input);
-                groups.iter().all(|g| matches!(g, Expr::Col(j, _) if fixed.get(*j).copied().unwrap_or(false)))
+                groups.iter().all(|g| implicit_key_col(g).is_some_and(|j| fixed.get(j).copied().unwrap_or(false)))
             } =>
             {
                 n.strategy = Some("Sorted");
@@ -8662,6 +8801,7 @@ impl Builder<'_, '_> {
             exprs: &[],
             endpoint: None,
             distinct: None,
+            user: None,
         };
         let other_sel = est.clauses(&others);
         let fmt = self.ctx.fmt();
@@ -11276,6 +11416,71 @@ pub fn set_group_estimates(
             b.num_groups(&cols, n.rows)
         })
         .collect()
+}
+
+/// The grouping keys of an aggregation over `input` that group nothing more (EXPLAIN's
+/// `redundant_keys`): the executor's hash tables leave them out, as Postgres's do.
+pub fn agg_redundant_keys(
+    input: &Arc<Plan>,
+    groups: &[Expr],
+    sets: Option<&[Vec<usize>]>,
+    ctx: &ExecCtx,
+) -> Vec<bool> {
+    let o = Options {
+        analyze: false,
+        verbose: false,
+        costs: true,
+        buffers: false,
+        wal: false,
+        settings: false,
+        generic_plan: false,
+        scroll: false,
+        timing: false,
+        summary: false,
+        memory: false,
+        serialize: false,
+        serialize_binary: false,
+        format: Format::Text,
+    };
+    let (refnames, _) = assign_refnames(input);
+    let mut b = Builder {
+        ctx,
+        o: &o,
+        prefix: true,
+        refnames,
+        labels: HashMap::new(),
+        plan_ids: 0,
+        outer: Vec::new(),
+        outer_depth: Vec::new(),
+        depth: 0,
+        pending: Vec::new(),
+        inits: Vec::new(),
+        params: &[],
+        ctes: HashMap::new(),
+        needed: needed_masks(input),
+        num_exec: None,
+        top: 0,
+        par: super::paths::parallel::ParCfg::read(ctx).enabled(),
+        member_scan: false,
+        group_order: None,
+        group_order_full: false,
+        sub_alias: None,
+        json_casts: Vec::new(),
+        proj_depth: 0,
+        level_tops: std::collections::HashSet::new(),
+        json_aggs: HashMap::new(),
+        having: None,
+        pw_aggs: Vec::new(),
+        pw_partial: false,
+        agg_key: None,
+        agg_input: None,
+        unique_sides: Default::default(),
+        plain_distinct: None,
+        shown: shown_subqueries(input, &needed_masks(input)),
+        rowmarks: Default::default(),
+    };
+    let n = b.level(input);
+    b.redundant_keys(input, groups, sets, &n.cols)
 }
 
 /// EXPLAIN's estimates of `plan` (no output).

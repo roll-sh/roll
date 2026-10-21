@@ -349,6 +349,8 @@ fn stand_in_scan(table: Arc<Table>, filter: Option<Expr>) -> ScanPlan {
         col_aliases: None,
         written: Vec::new(),
         phv_quals: Vec::new(),
+        check_as: None,
+        rti: Default::default(),
     }
 }
 

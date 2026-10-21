@@ -155,7 +155,7 @@ pub fn add_security_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
 }
 
 /// The pg_proc functions marked LEAKPROOF.
-fn leakproof_procs() -> &'static std::collections::HashSet<u32> {
+pub(crate) fn leakproof_procs() -> &'static std::collections::HashSet<u32> {
     static SET: std::sync::OnceLock<std::collections::HashSet<u32>> = std::sync::OnceLock::new();
     SET.get_or_init(|| {
         include_str!("../../catalog/pg_proc.tsv")
@@ -926,7 +926,7 @@ fn grouping_level(p: &Plan) -> bool {
 
 /// The collation of output column `c` of a query level, as far as it is a column's
 /// (through projections of it, the grouping, set operations' first arm, a scan).
-fn output_collation(p: &Plan, c: usize) -> Option<String> {
+pub(crate) fn output_collation(p: &Plan, c: usize) -> Option<String> {
     match p {
         Plan::Project { input, exprs } => match exprs.get(c)? {
             Expr::Col(j, _) => output_collation(input, *j),
@@ -986,6 +986,90 @@ fn same_collation_tests(p: &Expr, nondet: &[Option<String>]) -> bool {
         }
     });
     ok
+}
+
+/// expression_has_grouping_conflict (Postgres 18.6): whether `e` could tell apart rows a
+/// grouping merged. `key(k)`: column k is a grouping key, with Some(its collation's name)
+/// when that is nondeterministic. A key is safe only as a direct operand of a btree
+/// comparison under the grouping's equality (an operator of another family conflicts)
+/// and, when nondeterministic, under its own collation; any other reference to a
+/// nondeterministic key (a function over it, `<>`, LIKE, another collation) conflicts.
+pub(crate) fn grouping_conflict(e: &Expr, key: &dyn Fn(usize) -> Option<Option<String>>) -> bool {
+    fn strip(e: &Expr) -> &Expr {
+        match e {
+            Expr::Relabel(x, _) | Expr::Collate(x, ..) => strip(x),
+            e => e,
+        }
+    }
+    let coll_of = |d: &crate::sql::func::FuncDef| d.coll.as_ref().map(|c| c.name.clone());
+    let mut handled: Vec<*const Expr> = Vec::new();
+    let mut conflict = false;
+    let operand = |arg: &Expr, d: &crate::sql::func::FuncDef, handled: &mut Vec<*const Expr>| {
+        let a = strip(arg);
+        if let Expr::Col(k, _) = a
+            && let Some(nd) = key(*k)
+        {
+            if matches!(d.name, "*=" | "*<>" | "*<" | "*<=" | "*>" | "*>=" | "~<~" | "~<=~" | "~>=~" | "~>~") {
+                return true;
+            }
+            if let Some(n) = nd
+                && coll_of(d).as_deref() != Some(n.as_str())
+            {
+                return true;
+            }
+            handled.push(a as *const Expr);
+        }
+        false
+    };
+    let cmp = |d: &crate::sql::func::FuncDef| {
+        matches!(
+            d.name,
+            "=" | "<" | "<=" | ">" | ">=" | "*=" | "*<" | "*<=" | "*>" | "*>=" | "~<~" | "~<=~" | "~>=~" | "~>~"
+        )
+    };
+    e.walk(&mut |x| match x {
+        Expr::Call(d, args, _) if args.len() == 2 && cmp(d) => {
+            for a in args {
+                conflict |= operand(a, d, &mut handled);
+            }
+        }
+        Expr::ArrayOp { left, op, .. } if cmp(op) => conflict |= operand(left, op, &mut handled),
+        Expr::InList(left, items, _) => {
+            for (_, d) in items {
+                conflict |= operand(left, d, &mut handled);
+            }
+        }
+        Expr::Case { operand: Some(op), whens, .. } => {
+            let a = strip(op);
+            if let Expr::Col(k, _) = a
+                && let Some(nd) = key(*k)
+            {
+                if let Some(n) = nd {
+                    for (w, _) in whens {
+                        if let Expr::Call(d, ..) = w
+                            && coll_of(d).as_deref() != Some(n.as_str())
+                        {
+                            conflict = true;
+                        }
+                    }
+                }
+                handled.push(a as *const Expr);
+            }
+        }
+        _ => {}
+    });
+    if conflict {
+        return true;
+    }
+    e.walk(&mut |x| {
+        if let Expr::Col(k, _) = x
+            && let Some(Some(_)) = key(*k)
+            && !handled.contains(&(x as *const Expr))
+        {
+            conflict = true;
+        }
+    });
+    conflict
 }
 
 /// A clause using an operator of a btree family other than its type's default one

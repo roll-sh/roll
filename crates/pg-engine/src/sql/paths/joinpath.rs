@@ -601,6 +601,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             exprs: &[],
             endpoint: Some(&|v, min| self.pl.endpoint(v, min)),
             distinct: None,
+            user: None,
         };
         est.clause(&c.expr)
     }
@@ -3059,6 +3060,7 @@ impl Search<'_, '_, '_> {
             exprs: &[],
             endpoint: Some(&|v, min| self.pl.endpoint(v, min)),
             distinct: None,
+            user: None,
         };
         let (Some((omin, omax)), Some((imin, imax))) = (est.var_range(&ov), est.var_range(&iv))
         else {
@@ -5128,6 +5130,18 @@ impl Planner<'_, '_> {
                         s.clauses[ci].sel_div.push(or_sel);
                     }
                 }
+            }
+            // A pulled-up subquery's scan, planned for itself before: the join's paths are
+            // chosen again (parameterized ones too), as for any base relation.
+            if let Plan::Scan(sp) = &mut plan
+                && matches!(sp.access, Access::Seq | Access::Bitmap(_) | Access::Index { ordered: false, .. })
+                && sp.sample.is_none()
+                && sp.current_of.is_none()
+                && sp.table.partkey.is_none()
+            {
+                sp.access = Access::Unplanned;
+                sp.index = None;
+                sp.reverse = false;
             }
             let mut proj = None;
             let scan = match &plan {

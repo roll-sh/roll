@@ -40,6 +40,11 @@
 //! - `PGREGRESS_PORT`, `PGREGRESS_CONTAINER`: engine port (55600) and reference container.
 //! - `PGREGRESS_ENGINE_HOST`: the host name psql in the container uses for the engine
 //!   (default `host.docker.internal`).
+//! - `PGREGRESS_ENGINE_CONTAINER`: run the engine's psql in this container instead, reaching the
+//!   engine at 127.0.0.1. For hosts whose firewall drops the docker bridge's traffic to the host
+//!   (`host.docker.internal`): a container of the same image with `--network host`, `PGREGRESS_DIR`
+//!   mounted at the same path, e.g.
+//!   `docker run -d --name x --network host --user $(id -u):$(id -g) -v $D:$D --entrypoint sleep <image> infinity`.
 //! - `PGREGRESS_REPORT_DIR`: where `REPORT.md` and `hunks/` go (default `tests/regress`).
 //!
 //! The reference's database and any databases, roles and tablespaces the run created there
@@ -849,15 +854,21 @@ fn psql(
     input: &[u8],
     timeout: u64,
 ) -> (String, &'static str) {
-    let (host, port) = match target {
-        Target::Reference => ("127.0.0.1".to_string(), 5432),
-        // (PGREGRESS_ENGINE_HOST: where the container reaches the engine, when not
-        // host.docker.internal, e.g. a relay in its network namespace on a host whose
-        // firewall drops the bridge.)
-        Target::Engine(p) => (
-            std::env::var("PGREGRESS_ENGINE_HOST").unwrap_or_else(|_| "host.docker.internal".into()),
-            *p,
-        ),
+    // (PGREGRESS_ENGINE_CONTAINER: psql for the engine runs in that container, on the host's
+    // network; PGREGRESS_ENGINE_HOST: where the container reaches the engine, when not
+    // host.docker.internal, e.g. a relay in its network namespace on a host whose firewall
+    // drops the bridge.)
+    let engine_container = std::env::var("PGREGRESS_ENGINE_CONTAINER").ok();
+    let (host, port, container) = match target {
+        Target::Reference => ("127.0.0.1".to_string(), 5432, &cfg.container),
+        Target::Engine(p) => match &engine_container {
+            Some(c) => ("127.0.0.1".to_string(), *p, c),
+            None => (
+                std::env::var("PGREGRESS_ENGINE_HOST").unwrap_or_else(|_| "host.docker.internal".into()),
+                *p,
+                &cfg.container,
+            ),
+        },
     };
     let build = cfg.builddir().to_str().unwrap().to_string();
     let mut envs = vec![
@@ -880,7 +891,7 @@ fn psql(
         cmd.args(["-e", e]);
     }
     cmd.args([
-        &cfg.container,
+        container,
         "sh",
         "-c",
         &format!(

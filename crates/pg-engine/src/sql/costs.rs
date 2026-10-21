@@ -361,6 +361,53 @@ pub struct Est<'a> {
     /// A column without statistics of a small relation (a CTE's, VALUES'): its distinct
     /// count, the relation's tuples (get_variable_numdistinct).
     pub distinct: Option<&'a dyn Fn(usize) -> Option<f64>>,
+    /// What clauses of user-defined operators need (None: they get no estimate of their
+    /// own).
+    pub user: Option<&'a UserOps<'a>>,
+}
+
+/// Estimating a clause of a user-defined operator (CREATE OPERATOR ... RESTRICT = eqsel,
+/// scalarltsel, ...): selfuncs.c calls the operator's function on the statistics' values.
+pub struct UserOps<'a> {
+    pub ctx: &'a ExecCtx<'a>,
+    /// statistic_proc_security_check's acl_ok: whether a column's statistics may reach a
+    /// function that isn't leakproof (SELECT on it as the user the scan checks as, and no
+    /// row-level security policies on its table).
+    pub acl: &'a dyn Fn(&VarRef) -> bool,
+    /// Expressions with statistics only leakproof functions may see (the index expressions
+    /// of a table the user can't read whole).
+    pub hidden: &'a [(Expr, VarRef)],
+}
+
+fn nullfrac_of(s: Option<&ColStats>) -> f64 {
+    s.map_or(0.0, |s| s.nullfrac as f64)
+}
+
+/// The user-defined operator (pg_operator) a binary call shows as, with a function.
+fn user_operator<'c>(
+    cat: &'c Catalog,
+    d: &crate::sql::func::FuncDef,
+) -> Option<&'c crate::catalog::Operator> {
+    if cat.operators.is_empty() || d.args.len() != 2 || crate::sql::func::oper_row(d.name, d).oid != 0 {
+        return None;
+    }
+    let (schema, name) = match d.name.strip_prefix("OPERATOR(").and_then(|x| x.strip_suffix(')')) {
+        Some(q) => {
+            let (sc, n) = q.rsplit_once('.')?;
+            (Some(sc), n)
+        }
+        None => (None, d.name),
+    };
+    cat.operators
+        .values()
+        .find(|o| {
+            o.name == name
+                && o.func != 0
+                && o.left.as_ref().is_some_and(|l| l.same_base(&d.args[0]))
+                && o.right.same_base(&d.args[1])
+                && schema.is_none_or(|sc| cat.schema_name(o.schema) == sc)
+        })
+        .map(|o| &**o)
 }
 
 /// A comparison operator: (`<`-like?, includes equality?).
@@ -575,10 +622,17 @@ impl Est<'_> {
                     0.5
                 }
             }
-            Expr::Call(d, args, _) if args.len() == 2 => match restrict_default(d) {
-                Some(sel) => sel,
-                None => self.binary_op(d.name, &args[0], &args[1]),
-            },
+            Expr::Call(d, args, _) if args.len() == 2 => {
+                if let Some(o) = user_operator(self.cat, d)
+                    && let Some(sel) = self.user_op(self.user, o, d, &args[0], &args[1])
+                {
+                    return sel;
+                }
+                match restrict_default(d) {
+                    Some(sel) => sel,
+                    None => self.binary_op(d.name, &args[0], &args[1]),
+                }
+            }
             Expr::Call(..) => DEFAULT_INEQ_SEL,
             Expr::ArrayOp {
                 left, right, op, all,
@@ -629,6 +683,159 @@ impl Est<'_> {
             }
             _ => 0.5,
         }
+    }
+
+    /// A user-defined operator's clause by its restriction estimator: eqsel / neqsel
+    /// (var_eq_const) and scalarltsel / scalarlesel / scalargtsel / scalargesel
+    /// (scalarineqsel), the most common values and the histogram's entries tested with the
+    /// operator's function (a histogram not sorted by it: the fraction it accepts). Without
+    /// acl_ok only a leakproof function sees them. None: another estimator.
+    fn user_op(
+        &self,
+        u: Option<&UserOps<'_>>,
+        o: &crate::catalog::Operator,
+        d: &Arc<crate::sql::func::FuncDef>,
+        l: &Expr,
+        r: &Expr,
+    ) -> Option<f64> {
+        let rest = o.restrict.as_deref()?;
+        let (neg, ineq) = match rest {
+            "eqsel" => (false, false),
+            "neqsel" => (true, false),
+            "scalarltsel" | "scalarlesel" | "scalargtsel" | "scalargesel" => (false, true),
+            _ => return None,
+        };
+        let default = match (ineq, neg) {
+            (true, _) => DEFAULT_INEQ_SEL,
+            (false, false) => DEFAULT_EQ_SEL,
+            (false, true) => 1.0 - DEFAULT_EQ_SEL,
+        };
+        let var_of = |e: &Expr| {
+            self.var(e).or_else(|| {
+                let e = strip(e);
+                u?.hidden.iter().find(|(x, _)| x.same_as(e)).map(|(_, v)| v.clone())
+            })
+        };
+        let (var, c, varonleft) = match (var_of(l), constant(r)) {
+            (Some(v), Some(c)) => (v, c, true),
+            _ => match (constant(l), var_of(r)) {
+                (Some(c), Some(v)) => (v, c, false),
+                _ => return Some(default),
+            },
+        };
+        // (scalarineqsel with the var on the right: the commutator's estimate, the default
+        // without one.)
+        if ineq && !varonleft && o.commutator == 0 {
+            return Some(default);
+        }
+        // neqsel: the negator's eqsel, the default without one.
+        if neg && o.negator == 0 {
+            return Some(default);
+        }
+        let Some(c) = c else {
+            // (A value known only when run: var_eq_non_const; scalarineqsel's default.)
+            if ineq {
+                return Some(default);
+            }
+            let stats = var.stats(self.cat);
+            let sel = self.eq_const(&var, None);
+            return Some(if neg { (1.0 - sel - nullfrac_of(stats)).clamp(0.0, 1.0) } else { sel });
+        };
+        if c.is_null() {
+            return Some(0.0);
+        }
+        let leakproof = crate::sql::binder::optimize::leakproof_procs().contains(&o.func)
+            || self.cat.functions.get(&o.func).is_some_and(|f| f.leakproof);
+        let stats = var.stats(self.cat);
+        // (Without the means to call the function: as if it may not see them.)
+        let Some(u) = u else {
+            return Some(if ineq {
+                match stats {
+                    Some(s) => (1.0 - s.nullfrac as f64) * 0.5,
+                    None => DEFAULT_INEQ_SEL,
+                }
+            } else if var.unique(self.cat) && var.tuples >= 1.0 {
+                let sel = 1.0 / var.tuples;
+                if neg { 1.0 - sel - nullfrac_of(stats) } else { sel }
+            } else {
+                let sel = (1.0 / var.ndistinct(self.cat).0).clamp(0.0, 1.0);
+                if neg { (1.0 - sel - nullfrac_of(stats)).clamp(0.0, 1.0) } else { sel }
+            });
+        };
+        let allowed = stats.is_some() && (leakproof || (u.acl)(&var));
+        let cty = if varonleft { d.args[1].clone() } else { d.args[0].clone() };
+        let vty = if varonleft { d.args[0].clone() } else { d.args[1].clone() };
+        let call = |x: &Value| -> Option<bool> {
+            let (a, b) = (Expr::Const(x.clone(), vty.clone()), Expr::Const(c.clone(), cty.clone()));
+            let args = if varonleft { vec![a, b] } else { vec![b, a] };
+            match crate::sql::expr::eval(&Expr::Call(d.clone(), args, DataType::Bool), &[], u.ctx) {
+                Ok(Value::Bool(b)) => Some(b),
+                _ => None,
+            }
+        };
+        let nullfrac = stats.map_or(0.0, |s| s.nullfrac as f64);
+        if ineq {
+            let Some(s) = stats else {
+                return Some(DEFAULT_INEQ_SEL);
+            };
+            let (mut mcv_sel, mut sumcommon) = (0.0, 0.0);
+            let mut hist = -1.0;
+            if allowed {
+                if let Some((vals, nums)) = slot(s, 1, self.fmt) {
+                    for (x, n) in vals.iter().zip(&nums) {
+                        if call(x) == Some(true) {
+                            mcv_sel += n;
+                        }
+                        sumcommon += n;
+                    }
+                }
+                if let Some((vals, _)) = slot(s, 2, self.fmt)
+                    && vals.len() > 1
+                {
+                    let n = vals.len() as f64;
+                    let hits = vals.iter().filter(|x| call(x) == Some(true)).count() as f64;
+                    let cutoff = 0.01 / (n - 1.0);
+                    hist = (hits / n).clamp(cutoff, 1.0 - cutoff);
+                }
+            }
+            let mut sel = 1.0 - s.nullfrac as f64 - sumcommon;
+            sel *= if hist >= 0.0 { hist } else { 0.5 };
+            sel += mcv_sel;
+            return Some(sel.clamp(0.0, 1.0));
+        }
+        // var_eq_const.
+        let mut sel = if var.unique(self.cat) && var.tuples >= 1.0 {
+            1.0 / var.tuples
+        } else if allowed {
+            let s = stats.unwrap();
+            let mcv = slot(s, 1, self.fmt);
+            let (vals, nums) = mcv.unwrap_or_default();
+            let hit = vals.iter().position(|x| call(x).map(|b| b != neg) == Some(true));
+            match hit {
+                Some(i) => nums[i],
+                None => {
+                    let sumcommon: f64 = nums.iter().sum();
+                    let mut sel = (1.0 - sumcommon - nullfrac).clamp(0.0, 1.0);
+                    let other = var.ndistinct(self.cat).0 - nums.len() as f64;
+                    if other > 1.0 {
+                        sel /= other;
+                    }
+                    if let Some(last) = nums.last()
+                        && sel > *last
+                    {
+                        sel = *last;
+                    }
+                    sel
+                }
+            }
+        } else {
+            1.0 / var.ndistinct(self.cat).0
+        };
+        sel = sel.clamp(0.0, 1.0);
+        if neg {
+            sel = 1.0 - sel - nullfrac;
+        }
+        Some(sel.clamp(0.0, 1.0))
     }
 
     /// scalararraysel_containment: `const = ANY (array column)` estimated as `column @>

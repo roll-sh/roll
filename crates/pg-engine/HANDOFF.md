@@ -121,6 +121,11 @@ PGREGRESS_PORT=55843 PGREGRESS_REPORT_DIR=/tmp/pgregress/report \
 - Without `PGREGRESS_REPORT_DIR` a run overwrites `tests/regress/REPORT.md`.
 - `PGREGRESS_DB` must start with `regression` or `regress_`: the harness cleanup only drops
   those names, so parallel runs don't destroy each other.
+- If the container can't reach the engine through `host.docker.internal` (a host firewall
+  dropping the docker bridge's traffic, as on Linux servers that only allow a tailnet), run the
+  engine side's psql in a helper container on the host network instead: `docker run -d --name
+  <x> --network host --user $(id -u):$(id -g) -v $PGREGRESS_DIR:$PGREGRESS_DIR --entrypoint sleep
+  <the pinned image> infinity`, then `PGREGRESS_ENGINE_CONTAINER=<x>`.
 - After any build, check it **succeeded** before trusting a regress run: a failed build
   silently reuses the previous engine binary.
 - Some files are batch-dependent (catalog sizes grow with earlier files); compare like for

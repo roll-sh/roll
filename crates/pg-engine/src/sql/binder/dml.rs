@@ -2232,6 +2232,8 @@ impl Binder<'_, '_> {
                     col_aliases: None,
                     written: Vec::new(),
                     phv_quals: Vec::new(),
+                    check_as: self.check_as,
+                    rti: self.next_rti(),
                 };
                 let mut scan = scan;
                 if self.dml_inh {
@@ -2568,6 +2570,8 @@ impl Binder<'_, '_> {
                     col_aliases: None,
                     written: Vec::new(),
                     phv_quals: Vec::new(),
+                    check_as: self.check_as,
+                    rti: self.next_rti(),
                 };
                 if inh {
                     self.expand_inheritance(scan, alias)?

@@ -25,9 +25,9 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50741 (**99.20%**) |
-| units differing | 409 |
-| files fully matching | 188 |
+| units matching | 50758 (**99.23%**) |
+| units differing | 392 |
+| files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
 
@@ -35,27 +35,27 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 391 | 95.6% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 17 | 4.2% |
-| by design (a parallel plan's combine function) | 1 | 0.2% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 375 | 95.7% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 16 | 4.1% |
+| by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 391 units
-join (97), partition_join (47), partition_prune (38), subselect (30), collate.icu.utf8 (23), incremental_sort (15), select_parallel (14), updatable_views (13), groupingsets (12), with (10), memoize (8), privileges (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (7), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 375 units
+join (96), partition_join (47), partition_prune (38), subselect (30), collate.icu.utf8 (17), incremental_sort (15), select_parallel (14), updatable_views (13), groupingsets (12), with (9), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (7), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
 
-### Plan choice visible in results (C1 area) — 17 units
-join (3), with (3), updatable_views (3), join_hash (2), partition_info (2), groupingsets (1), stats_ext (1), subselect (1), sqljson_jsontable (1)
+### Plan choice visible in results (C1 area) — 16 units
+join (3), with (3), updatable_views (3), join_hash (2), partition_info (2), stats_ext (1), subselect (1), sqljson_jsontable (1)
 
 - with (3), sqljson_jsontable, partition_info (2), updatable_views MERGE / row order (3): which
-  side a hash join builds on. groupingsets: grouping-set output order. join: FULL JOIN row order.
-  join_hash, subselect, stats_ext: values of EXPLAIN ANALYZE-style helpers over plans that
-  differ.
+  side a hash join builds on. join: FULL JOIN row order.
+  join_hash, subselect, stats_ext: values of EXPLAIN ANALYZE-style helpers over plans
+  that differ.
 
 ### Name resolution — 0 units
 Fixed in round 12: join 740–743, 745 and 791 match; 744 now runs and differs only in its plan
@@ -157,6 +157,76 @@ Still open from this round's list, and why:
   without outer joins (`try_nestloop`'s `param_join`).
 - join 123/244: a parameterized path takes every equivalence-class clause; Postgres's
   generate_join_implied_equalities takes one per class (the best-scoring outer member).
+
+## Fixed in round 13, agent 2 (user-operator estimates, statistics privileges, names)
+
+Measured in subset runs of 26 files (create_misc, create_table, create_index, create_view,
+create_function_sql, inherit, select_distinct, select_distinct_on, subselect, union, join,
+aggregates, groupingsets, equivclass, rowsecurity, with, rangefuncs, memoize, partition_join,
+partition_prune, partition_aggregate, updatable_views, rules, privileges, collate.icu.utf8,
+select_views, after test_setup) against the engine of commit 687fc9b: 18 units fixed (memoize 50 also by the change
+above), none broken.
+
+| file | fixed units |
+|---|---|
+| privileges | 238, 239, 240, 251, 252, 253, 254, 258 (all) |
+| collate.icu.utf8 | 372, 382, 384, 386, 388, 392 |
+| groupingsets | 124 (hashed grouping-set output order) |
+| join | 684 |
+| memoize | 50 |
+| with | 208 |
+
+What changed:
+
+- Clauses of user-defined operators are estimated by their restriction estimator (eqsel,
+  neqsel, scalarltsel / lesel / gtsel / gesel): var_eq_const / var_eq_non_const and
+  scalarineqsel, the most common values and the histogram's entries tested with the operator's
+  function (the histogram isn't sorted by it: the fraction it accepts, clamped); scalarineqsel
+  with the variable on the right needs a commutator. statistic_proc_security_check: a function
+  that isn't leakproof sees the statistics only with all_rows_selectable — SELECT on the column
+  (or the whole table, for an index expression) as the user the scan checks as
+  (`ScanPlan::check_as`: a view's owner), and no row-level security policies on the table;
+  otherwise `(1 - nullfrac) * 0.5` / `1 / ndistinct`.
+- A pulled-up subquery's (or view's) scan, planned for itself before, gets the join's paths
+  chosen again, parameterized ones included.
+- A Subquery Scan's filter is estimated over the subquery's outputs (was a fixed 0.5) and costs
+  cost_subqueryscan's per-tuple qual cost.
+- EXPLAIN names: relations of one query level that share a name take their numbers in range-table
+  order (`ScanPlan::rti`: a pulled-up subquery's, view's or inlined CTE's relations after the
+  query's own), not join order; a subquery level's relations are named after the level's own, in
+  plan order, before its SubPlans and CTEs; set operation arms in plan order (an INTERSECT's
+  smaller input first).
+- HAVING clauses go to WHERE by Postgres 18.6's expression_has_grouping_conflict: a key under a
+  nondeterministic collation moves when it is a direct operand of a btree comparison under its
+  own collation (simple CASE, IN, row comparisons included); any other use stays. A key an
+  equality under its own nondeterministic collation fixes groups nothing (a GroupAggregate
+  without keys), and a key carrying its implicit collation shows as the column above.
+- The executor's hash tables leave out grouping keys that group nothing more (functionally
+  dependent ones grouped along, keys fixed by an equality), as EXPLAIN's keys do: hashed
+  grouping sets come out in Postgres's order.
+- Unread subquery outputs stay in its target list as NULL constants (not only over an
+  aggregation); a user-defined fixed-length base type has its typlen / typalign (widths, sizes).
+- The regress harness can run the engine's psql in a host-network container
+  (`PGREGRESS_ENGINE_CONTAINER`), for hosts whose firewall drops the docker bridge's traffic to
+  the host.
+
+Goldens added: `tests/sql/a2_userop_stats.sql`, `a2_grouping_misc.sql`.
+
+Still open in these files, and why:
+
+- collate.icu.utf8 405, 419, 611–659: a key carrying its implicit collation is computed in a
+  projection below a WindowAgg or a sort (`(x)` instead of `x`, no `COLLATE` in the Sort Key);
+  partitionwise aggregation / joins under collations (619, 622, 644); 399 / a sorted aggregation
+  under a nondeterministic collation serving the ORDER BY (the group sort's key lacks its
+  collation, so a second sort is added); 409 (DISTINCT ON pushdown); 328, 334, 366, 367 (hashed
+  grouping of a subquery, semi join over DISTINCT, index scans for `~` / LIKE under collations).
+- updatable_views: VERBOSE/target-list and DML-through-view plan shapes (rules, INSTEAD OF
+  triggers, security-barrier subqueries kept as Subquery Scans); MERGE row order.
+- groupingsets 48, 53, 55, 57, 189–201, 213: SubPlans in grouping expressions (numbering and
+  where they are computed), an index scan on an expression over a cast, constant keys shown as
+  `(1)`.
+- with 52, 55, 58, 76, 77, 79, 85: a materialized CTE's sort order offered to a merge join;
+  235, 238, 241, 283: row marks in VERBOSE target lists (another agent's item).
 
 ## Fixed in round 12 (subqueries as query levels, LATERAL scope, SubPlans)
 
@@ -668,7 +738,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 325 | 91% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (31) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 825 | 89% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (96) |
+| join | 925 | 826 | 89% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (95) |
 | aggregates | 556 | 548 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -684,7 +754,7 @@ produces no units on Linux (skipped by the file itself).
 | gin | 59 | 59 | 100% | yes | yes |  |
 | gist | 69 | 67 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | spgist | 31 | 31 | 100% | yes | yes |  |
-| privileges | 1398 | 1390 | 99% | no | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
+| privileges | 1398 | 1398 | 100% | no | no |  |
 | init_privs | 4 | 4 | 100% | yes | yes |  |
 | security_label | 28 | 28 | 100% | yes | yes |  |
 | collate | 149 | 145 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
@@ -694,7 +764,7 @@ produces no units on Linux (skipped by the file itself).
 | rowsecurity | 1226 | 1219 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | object_address | 85 | 85 | 100% | yes | yes |  |
 | tablesample | 58 | 58 | 100% | yes | yes |  |
-| groupingsets | 217 | 204 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
+| groupingsets | 217 | 205 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
 | drop_operator | 12 | 12 | 100% | yes | yes |  |
 | password | 53 | 53 | 100% | yes | yes |  |
 | identity | 288 | 288 | 100% | yes | yes |  |
@@ -716,7 +786,7 @@ produces no units on Linux (skipped by the file itself).
 | tidscan | 49 | 49 | 100% | yes | yes |  |
 | tidrangescan | 45 | 45 | 100% | yes | yes |  |
 | collate.utf8 | 61 | 61 | 100% | yes | yes |  |
-| collate.icu.utf8 | 681 | 658 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (23) |
+| collate.icu.utf8 | 681 | 664 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (17) |
 | incremental_sort | 120 | 105 | 88% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |
@@ -776,7 +846,7 @@ produces no units on Linux (skipped by the file itself).
 | rowtypes | 237 | 230 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | returning | 145 | 142 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
-| with | 307 | 294 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (10) |
+| with | 307 | 295 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (9) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 567 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (48) |
 | partition_prune | 771 | 733 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (30) |
@@ -787,7 +857,7 @@ produces no units on Linux (skipped by the file itself).
 | partition_info | 73 | 71 | 97% | yes | no | wrong result `SELECT: row order differs` (2) |
 | tuplesort | 108 | 106 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | explain | 60 | 60 | 100% | yes | yes |  |
-| memoize | 73 | 65 | 89% | yes | no | wrong result `SELECT: values differ` (4) |
+| memoize | 73 | 65 | 89% | yes | no | wrong result `SELECT: values differ` (3) |
 | stats | 482 | 482 | 100% | yes | yes |  |
 | predicate | 42 | 42 | 100% | yes | yes |  |
 | numa | 3 | 3 | 100% | yes | yes |  |

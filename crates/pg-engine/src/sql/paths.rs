@@ -256,6 +256,11 @@ struct Rel {
     booleq: Option<Arc<FuncDef>>,
     /// The restriction clauses in baserestrictinfo order (`ScanPlan::written`).
     written: Arc<Vec<Expr>>,
+    /// all_rows_selectable, for functions that aren't leakproof: the whole table (its index
+    /// expressions' statistics), and each column.
+    acl: Arc<(bool, Vec<bool>)>,
+    /// Index expressions with statistics only leakproof functions may see.
+    hidden: Arc<Vec<(Expr, VarRef)>>,
 }
 
 impl Rel {
@@ -1815,6 +1820,17 @@ impl Planner<'_, '_> {
             exprs: &rel.exprs,
             endpoint: Some(&|v, min| self.endpoint(v, min)),
             distinct: None,
+            user: Some(&costs::UserOps {
+                ctx: self.ctx,
+                acl: &|v: &VarRef| {
+                    if v.expr.is_some() {
+                        rel.acl.0
+                    } else {
+                        rel.acl.1.get(v.col).copied().unwrap_or(true)
+                    }
+                },
+                hidden: &rel.hidden,
+            }),
         };
         // (With the table's extended statistics where they cover the clauses.)
         crate::sql::extstat::ExtSel::new(self.ctx, &est, &rel.table).clauses(quals, true)
@@ -2630,6 +2646,8 @@ impl Rel {
             exprs: self.exprs.clone(),
             booleq: self.booleq.clone(),
             written: self.written.clone(),
+            acl: self.acl.clone(),
+            hidden: self.hidden.clone(),
         }
     }
 }
@@ -3156,22 +3174,66 @@ impl Planner<'_, '_> {
         let mut booleq = None;
         // examine_variable: an index expression's statistics only for a user who may read
         // the whole table (or the partitioned table the query names).
+        // (As the user the scan checks as: a view's owner.)
+        let me = s.check_as.unwrap_or_else(|| self.ctx.current_user());
+        let named = s
+            .part
+            .as_ref()
+            .and_then(|p| p.last())
+            .map(|l| l.parent.clone());
         let expr_stats_ok = {
             let cat = &self.cat;
-            let me = self.ctx.current_user();
             let dbo = self.ctx.db_owner();
             let can = |oid: u32| {
                 cat.rel_mask(oid, me, dbo)
                     .is_none_or(|(held, _)| held & crate::catalog::acl::SELECT != 0)
             };
-            can(t.oid)
-                || s.part
-                    .as_ref()
-                    .and_then(|p| p.last())
-                    .is_some_and(|l| can(l.parent.oid))
+            can(t.oid) || named.as_ref().is_some_and(|p| can(p.oid))
         };
+        let acl = {
+            let cat = &self.cat;
+            let dbo = self.ctx.db_owner();
+            // Permissions and policies are the table's the query names.
+            let top = named.clone().unwrap_or_else(|| t.clone());
+            let rls = top.rls
+                && !cat.is_superuser(me)
+                && !cat.roles.get(&me).is_some_and(|r| r.bypass_rls)
+                && (top.rls_force || !cat.has_privs_of_role(me, top.owner, dbo));
+            let table = !rls
+                && cat
+                    .rel_mask(top.oid, me, dbo)
+                    .is_none_or(|(held, _)| held & crate::catalog::acl::SELECT != 0);
+            let cols = t
+                .columns
+                .iter()
+                .map(|c| {
+                    table
+                        || (!rls
+                            && top.columns.iter().position(|x| x.name == c.name).is_some_and(|i| {
+                                cat.col_mask(top.oid, i as i32 + 1, me, dbo).0
+                                    & crate::catalog::acl::SELECT
+                                    != 0
+                            }))
+                })
+                .collect();
+            Arc::new((table, cols))
+        };
+        let mut hidden = Vec::new();
         for ii in &indexes {
             for (k, key) in ii.keys.iter().enumerate() {
+                if !matches!(key, Expr::Col(..)) && !expr_stats_ok {
+                    hidden.push((
+                        key.clone(),
+                        VarRef {
+                            table: t.clone(),
+                            col: 0,
+                            tuples: size.tuples,
+                            expr: Some((ii.ix.oid, k, key.ty())),
+                            rows: 0.0,
+                            inh: false,
+                        },
+                    ));
+                }
                 if !matches!(key, Expr::Col(..)) && expr_stats_ok {
                     exprs.push((
                         key.clone(),
@@ -3232,6 +3294,8 @@ impl Planner<'_, '_> {
             exprs,
             booleq,
             written: Arc::new(s.written.clone()),
+            acl,
+            hidden: Arc::new(hidden),
         };
         {
             let mut pq = self.phv_quals.borrow_mut();
@@ -5713,6 +5777,8 @@ pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
         exprs: Vec::new(),
         booleq: None,
         written: Default::default(),
+        acl: Default::default(),
+        hidden: Default::default(),
     };
     let mut out = Vec::new();
     for (i, k) in b.keys.iter().enumerate() {

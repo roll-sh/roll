@@ -106,6 +106,13 @@ fn col_of(e: &Expr) -> Option<usize> {
 
 /// Take in the equalities among `pred`'s conjuncts (column = column, column = constant).
 fn absorb(c: &mut Classes, pred: &Expr) {
+    absorb_in(c, pred, &|_| None)
+}
+
+/// `absorb`, knowing the columns' collations: a column equated with a constant under its
+/// own nondeterministic collation is a class with that constant (its pathkeys, of that
+/// collation, are redundant), though no class joins columns under one.
+fn absorb_in(c: &mut Classes, pred: &Expr, coll: &dyn Fn(usize) -> Option<String>) {
     let mut parts = Vec::new();
     conjuncts(pred.clone(), &mut parts);
     for q in parts {
@@ -116,6 +123,23 @@ fn absorb(c: &mut Classes, pred: &Expr) {
                 if !e.columns().is_empty() && k.columns().is_empty() && pseudo_constant(k) {
                     c.const_exprs.push(e.clone());
                 }
+            }
+            continue;
+        }
+        if def.name == "="
+            && args.len() == 2
+            && !q.is_volatile()
+            && let Some(dc) = def.coll.as_ref().filter(|c| !c.deterministic)
+        {
+            let own = |k: usize| coll(k).as_deref() == Some(dc.name.as_str());
+            match (col_of(&args[0]), col_of(&args[1])) {
+                (Some(a), None) if args[1].columns().is_empty() && pseudo_constant(&args[1]) && own(a) => {
+                    c.set_const(a)
+                }
+                (None, Some(b)) if args[0].columns().is_empty() && pseudo_constant(&args[0]) && own(b) => {
+                    c.set_const(b)
+                }
+                _ => {}
             }
             continue;
         }
@@ -208,7 +232,7 @@ fn classes(p: &Plan) -> Classes {
         Plan::Scan(s) => {
             let mut c = Classes::new(w);
             if let Some(f) = &s.filter {
-                absorb(&mut c, f);
+                absorb_in(&mut c, f, &|i| s.table.columns.get(i).and_then(|col| col.collation.clone()));
             }
             c
         }
@@ -216,7 +240,7 @@ fn classes(p: &Plan) -> Classes {
             let mut c = classes(input);
             // (A HAVING makes no equivalence classes.)
             if !matches!(&**input, Plan::Agg { .. }) {
-                absorb(&mut c, pred);
+                absorb_in(&mut c, pred, &|i| crate::sql::binder::optimize::output_collation(input, i));
             }
             c
         }

@@ -144,6 +144,24 @@ pub struct ScanPlan {
     /// Restriction clauses that read a pulled-up subquery's PlaceHolderVar (a computed
     /// output of a subquery on an outer join's nullable side): never index quals.
     pub phv_quals: Vec<Expr>,
+    /// The role privileges on the table are checked as (RTEPermissionInfo.checkAsUser: a
+    /// view's owner for the tables the view reads); None: the current user.
+    pub check_as: Option<u32>,
+    /// The scan's place in the range table: a pulled-up subquery's relations after the
+    /// query's own (by query level), then in the order bound; EXPLAIN's names of same-named
+    /// relations of one level follow it (0: not known).
+    pub rti: Rti,
+}
+
+/// A scan's place in the range table (`ScanPlan::rti`). Not part of its Debug text, by
+/// which plans are compared (the same query bound twice is the same plan).
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Rti(pub usize);
+
+impl std::fmt::Debug for Rti {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
 }
 
 /// A system catalog's scan as the planner chose it: `scan` reads a stand-in table of the

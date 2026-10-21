@@ -3641,7 +3641,9 @@ impl Binder<'_, '_> {
                             col.name = n.clone();
                         }
                         let rel = derived_rel(alias.as_deref().unwrap_or(&rv.relname), &cols, 0);
-                        return Ok(((**q).clone(), rel));
+                        let mut q = (**q).clone();
+                        self.restamp_rti(&mut q);
+                        return Ok((q, rel));
                     }
                     c.used.set(true);
                     let mut cols = c.cols.clone();
@@ -3885,6 +3887,8 @@ impl Binder<'_, '_> {
                     col_aliases: None,
                     written: Vec::new(),
                     phv_quals: Vec::new(),
+                    check_as: self.check_as,
+                    rti: self.next_rti(),
                 };
                 let mut scan = scan;
                 if !colnames.is_empty() {
@@ -3993,6 +3997,8 @@ impl Binder<'_, '_> {
                             col_aliases: None,
                             written: Vec::new(),
                             phv_quals: Vec::new(),
+                            check_as: self.check_as,
+                            rti: self.next_rti(),
                         }))
                     }
                     None if self.view_stack.contains(&v.oid) => {
@@ -6924,7 +6930,9 @@ fn having_to_where(
         let nullable = |k: &usize| sets.is_some_and(|ss| ss.iter().any(|s| !s.contains(k)));
         // (A key grouped under a nondeterministic collation: a clause over it may tell
         // apart rows of its group.)
-        let coll_conflict = cols.iter().any(|&k| matches!(key_colls.get(k), Some(Some(_))));
+        let coll_conflict = optimize::grouping_conflict(&p, &|k| {
+            (k < ng).then(|| key_colls.get(k).cloned().flatten())
+        });
         if sub
             || coll_conflict
             || p.is_volatile()
