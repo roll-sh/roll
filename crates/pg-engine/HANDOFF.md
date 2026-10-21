@@ -1,0 +1,235 @@
+# pg-engine handoff
+
+Everything a new agent needs to continue the PostgreSQL 18.6 parity work on another machine.
+Read this file, `../../AGENTS.md`, and `tests/regress/STATUS.md` before changing anything.
+
+## Goal
+
+`pg-engine` is roll's in-process PostgreSQL engine. The goal is **1:1 behaviour with
+PostgreSQL 18.6**: the same rows, row order, errors (SQLSTATE, message, DETAIL, HINT,
+CONTEXT, position), notices, catalog contents and `EXPLAIN` text, byte for byte.
+
+The measure is PostgreSQL's own regression suite (`src/test/regress` at `REL_18_6`, 230 files,
+51,150 statements), run through the engine and through a reference PostgreSQL 18.6 and
+compared statement by statement.
+
+## Where it stands
+
+As of commit `e890fb0` (2026-10-21):
+
+- **Regression suite: 50,709 of 51,150 statements match (99.14%).** 441 differ. The full
+  classified list, per file and per unit, is in `tests/regress/STATUS.md`.
+  - 394 are `EXPLAIN` plan text (89%). Query results already match.
+  - 18 are plan choices that show up in results (mostly which side a hash join builds on,
+    grouping-set output order).
+  - 29 differ **by design** (see "Decisions"), so the ceiling is about 99.94%.
+- No engine crashes or panics in a full run.
+- The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
+  files in engine and wire mode, the wire tests (including a concurrency stress test), the
+  storage-format and layout tests.
+
+## Repository layout
+
+- `crates/pg-engine`: the engine.
+  - `src/sql/parse.rs`: libpg_query-based parser (plus `scs.rs` for standard_conforming_strings).
+  - `src/sql/binder/`: name resolution, typing, coercion, SQL-function inlining, RLS, rules.
+  - `src/sql/paths*.rs`, `src/sql/paths/`, `src/sql/joins.rs`, `src/sql/costs.rs`,
+    `src/sql/extstat.rs`, `src/sql/binder/optimize.rs`, `src/sql/binder/sublink.rs`,
+    `src/sql/binder/partprune.rs`: the cost-based planner, following PostgreSQL's
+    `costsize.c` / `allpaths.c` / `joinpath.c` closely.
+  - `src/sql/explain.rs` (+ `explain/`): EXPLAIN output.
+  - `src/sql/ruleutils*.rs`, `src/sql/nodetree.rs`: deparse (`pg_get_*def`) and
+    `pg_node_tree` output.
+  - `src/exec/`: executor. `src/plpgsql/`: PL/pgSQL. `src/session/`: sessions, DDL
+    (`session/ddl/`), cursors, settings, wire protocol (`src/server.rs`).
+  - `src/catalog/`: catalogs, plus PostgreSQL-faithful size models (`heapsim.rs`, `btsim.rs`,
+    `hashidx.rs`, `gistsim.rs`, `pglz.rs`, `lz4.rs`) that give PG's `ctid`s, physical row
+    order and relation sizes.
+  - `src/types/`: datatypes (incl. `regex/`, a port of PG's regex engine; `collation/`;
+    `xml/`; `mbconv/` encodings).
+  - `src/storage/`, `src/txn/`: key-value storage and MVCC.
+  - `tests/golden.rs` + `tests/sql/*.sql|.out`: golden tests recorded from PostgreSQL 18.
+  - `tests/pg_regress.rs`: the regression-suite harness. `tests/regress/STATUS.md`: the
+    classified list of every remaining difference. `tests/regress/REPORT.md`: last run report.
+  - `tools/heavy.sh`: the one-heavy-job-at-a-time lock (see "Machine rules").
+- `crates/pg-icu`: ICU4C 78.1 built from source (exact collation behaviour; needs curl or
+  wget, tar, make and a C++17 compiler, about 60 s, cached in `target/icu4c`).
+- `crates/pg-snowball`: Snowball stemmers for full-text search.
+
+## Setting up a new machine
+
+1. Rust stable (edition 2024), Docker, `pnpm` for the web side (not needed for the engine).
+2. Start the reference PostgreSQL. It must be exactly this image (PostgreSQL 18.6, Alpine,
+   musl, ICU 78.1) and initialised with `--locale=C`:
+
+   ```sh
+   docker run -d --name roll-engine-ref -p 55499:5432 \
+     -e POSTGRES_PASSWORD=pw \
+     -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
+     postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+   ```
+
+   The goldens connect to `127.0.0.1:55499` as `postgres` / `pw`. The regress harness drives
+   the container's own `psql` with `docker exec` and reaches the engine through
+   `host.docker.internal` (on Linux, add `--add-host=host.docker.internal:host-gateway`).
+3. Build and run the tests (through the lock):
+
+   ```sh
+   crates/pg-engine/tools/heavy.sh env CARGO_BUILD_JOBS=2 cargo test -p pg-engine
+   ```
+
+## How to test
+
+**Goldens** (`tests/sql/<name>.sql` → `.out`, recorded from PostgreSQL):
+
+```sh
+# compare (all, or a subset by substring)
+GOLDEN_FILTER=<name> cargo test -q -p pg-engine --test golden
+# record a new golden from the reference: create the .sql, an empty .out, then
+: > crates/pg-engine/tests/sql/<name>.out
+GOLDEN_RECORD=127.0.0.1:55499 GOLDEN_PASSWORD=pw GOLDEN_FILTER=<name> cargo test -q -p pg-engine --test golden
+```
+
+- Use a `GOLDEN_FILTER` that matches **only** your new file: a filter like `_d` once re-recorded
+  15 unrelated goldens.
+- Never hand-edit a `.out`; always re-record from PostgreSQL.
+- Each golden runs in its own database, but roles and tablespaces are cluster-global: drop
+  any you create (start and end of the file).
+- Avoid raw OIDs and `pg_temp_N` names in outputs.
+- psql hides `CONTEXT` on NOTICE/WARNING by default, but goldens record it.
+
+**Regression suite** (`tests/pg_regress.rs`, `#[ignore]`d):
+
+```sh
+# a subset (test_setup always runs first; add prerequisites such as create_misc,create_index)
+PGREGRESS_ONLY=join,subselect PGREGRESS_DIR=/tmp/pgregress PGREGRESS_DB=regression_x \
+PGREGRESS_PORT=55843 PGREGRESS_REPORT_DIR=/tmp/pgregress/report \
+  cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
+```
+
+- A full run takes about an hour; subsets take minutes.
+- Without `PGREGRESS_REPORT_DIR` a run overwrites `tests/regress/REPORT.md`.
+- `PGREGRESS_DB` must start with `regression` or `regress_`: the harness cleanup only drops
+  those names, so parallel runs don't destroy each other.
+- After any build, check it **succeeded** before trusting a regress run: a failed build
+  silently reuses the previous engine binary.
+- Some files are batch-dependent (catalog sizes grow with earlier files); compare like for
+  like.
+
+**Probing PostgreSQL directly:**
+`docker exec -i roll-engine-ref psql -U postgres -d <scratch_db> -At < file.sql 2>&1`.
+Prefix scratch objects, and drop scratch databases and roles afterwards.
+
+## Machine rules (learned the hard way)
+
+- **At most 2 agents at a time.** Six agents each building, running a debug engine and
+  driving Docker crashed the machine (out of RAM).
+- **Every heavy command goes through `tools/heavy.sh`**: cargo build/test/clippy, regress and
+  golden runs. It allows one at a time across agents. Hold it only for the command itself.
+- **`CARGO_BUILD_JOBS=2`**, and wrap long cargo commands with a timeout.
+- **Disk:** on macOS the default `split-debuginfo = unpacked` leaves every build's `*.o` files in
+  `target/debug/deps`. 1.5 million of them (~500 GB) once filled the disk. `heavy.sh` prunes
+  ones older than 4 hours and drops `target/debug/incremental` below 15 GB free.
+- Stop any engine you start after each run; never kill processes, drop databases or delete
+  files you didn't create.
+
+## Conventions
+
+- Follow `AGENTS.md`: Rust edition 2024, dependencies in the root `[workspace.dependencies]`,
+  match the surrounding style and comment density, don't run `cargo fmt` on others' files.
+- Stored data must stay loadable. Format changes need a migration: see
+  `Catalog::index_key_format` and `Catalog::storage_format` with `Engine::upgrade_storage` in
+  `src/engine.rs` (batched, resumable, tested by `tests/storage_upgrade_batches.rs`).
+- Every fix gets a golden recorded against PostgreSQL. Correctness (results, errors, data)
+  before EXPLAIN text.
+- Commit only verified states: the whole `cargo test -p pg-engine` passes first.
+
+## Decisions already made (don't revisit)
+
+- **Server-side file access stays refused** for every role (`pg_read_file`, `pg_ls_dir`,
+  `lo_import`/`lo_export` of server paths, `COPY ... FROM '<server file>'`), with PostgreSQL's
+  exact permission errors. This is what managed services (Neon, RDS, Supabase) do. These
+  29 statements are documented as by design in STATUS.md.
+- **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
+  as a separate index, so scans return PG's order and `ctid`s match.
+- **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for
+  speed-critical tables, accepting key-order scans. `CREATE TABLE … WITH
+  (roll_pk_clustered)` without a key is accepted and waits for one (pg_dump creates keys
+  after loading data); `ALTER TABLE … SET` without a key errors. Tests: `tests/pk_clustered.rs`.
+
+## What remains
+
+All remaining work is planner/EXPLAIN (`src/sql/paths*`, `src/sql/binder/optimize.rs`,
+`src/sql/binder/sublink.rs`, `src/sql/explain.rs`, `src/sql/costs.rs`), biggest first. Unit
+numbers refer to the regress harness's per-file unit counter; `tests/regress/STATUS.md` lists
+them all with the "Fixed in round N" sections describing what was already tried.
+
+1. **Flattening subqueries over several tables with placeholders** (join 328, 343–347,
+   351–366; most of partition_join's 48 units). Only single-table and FROM-less subqueries are
+   pulled up today: extend `src/sql/paths/joinpath/lift.rs` to PostgreSQL's
+   `pull_up_subqueries` with PlaceHolderVars. For join 351/368, `Plan::Empty` must carry the
+   original expressions (PostgreSQL keeps the placeholder's expression where the engine
+   shows `NULL`). join 744 differs only in plan choice (a parameterized hash join inside a
+   nested loop).
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 99, partition_join 48,
+   partition_prune 38 units): cost-driven choices, partitionwise joins, runtime pruning.
+3. **subselect** (30 units):
+   - 189/191: a pulled-up subquery output read twice should become two SubPlans (subquery ids
+     are cached by the executor, so renumbering needs care).
+   - 186: EXISTS over an inheritance tree as a hashed SubPlan per member.
+   - 218: IN with a set-returning select list as a semi join over a Subquery Scan.
+   - 221: a filter pushed into the subquery shown as the Subquery Scan's filter.
+   - 31/33/161: row comparisons shown as `(SubPlan 1).col1`, constant records folded.
+   - 288: a system catalog's parameterized index path inside a join.
+   - 298: a lifted LATERAL column's position in the join output.
+   - 310: FOR UPDATE inside a FROM subquery needs a real LockRows node inside `Plan::Barrier`.
+4. **Row marks in VERBOSE target lists** (merge 348/458/462, returning 103/105/112): the ctid
+   and whole-row marks of non-target tables must flow through every node's output list in
+   PostgreSQL's order. Rule-rewritten RETURNING currently runs as a CTE.
+5. **collate.icu.utf8** (23), **incremental_sort** (15), **select_parallel** (14),
+   **updatable_views** (13), **groupingsets** (12, including the sorted-vs-hashed choice and
+   output order), **with** (10; 52/55/58/76/77 need a materialized CTE's sort order offered to a
+   merge join), **memoize**, **equivclass**, **privileges** (8 each), then the long tail in
+   STATUS.md.
+6. **inherit 445** (a Merge Append ordered by an expression mapped into each UNION ALL arm),
+   **inherit 453** (Merge Join over Merge Appends under a LIMIT).
+7. **partition_aggregate** (5): parallel partitionwise aggregation costing; unit 19 also needs a
+   GROUP BY key equated with a constant to be dropped.
+8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
+
+Smaller known differences that don't fail a unit today: a plain DISTINCT done by sorting shows
+the scan's full column list (Distinct arm of `explain.rs`); a NULLed-out unused subquery output
+is only shown as `NULL::type` when the projection sits directly over an aggregate.
+
+Not started and lower priority: `roll_pk_clustered` adds a primary key's duplicate check by raw
+key bytes, so duplicates that are only equal under a nondeterministic collation aren't caught
+when adding a key to a clustered table.
+
+## Starting prompt for the next agent
+
+Paste this into the new agent, from the repository root on branch
+`docs/postgres-architecture-strategy`:
+
+```text
+You are continuing work on crates/pg-engine, roll's in-process PostgreSQL engine. The goal is
+1:1 behaviour with PostgreSQL 18.6, measured by PostgreSQL's own regression suite. It is at
+99.14% (50,709 of 51,150 statements). Work autonomously and don't ask questions unless a
+decision is genuinely mine to make.
+
+First read, in this order: AGENTS.md, crates/pg-engine/HANDOFF.md (setup, testing, machine
+rules, decisions, the prioritized remaining work), and crates/pg-engine/tests/regress/STATUS.md
+(every remaining difference, per file and unit, and what earlier rounds already tried).
+
+Then:
+1. Set up the reference PostgreSQL container exactly as HANDOFF.md says (pinned image digest,
+   --locale=C, port 55499, password pw) and run the full crate test suite through
+   crates/pg-engine/tools/heavy.sh to confirm everything passes on this machine.
+2. Work through "What remains" in HANDOFF.md in order. For each item: probe PostgreSQL, fix the
+   engine, add a golden recorded from PostgreSQL, re-run the affected regress files (subset
+   runs with PGREGRESS_ONLY and PGREGRESS_REPORT_DIR), and make sure nothing that matched
+   before regresses. Results and errors before EXPLAIN text.
+3. Follow the machine rules: at most 2 agents at a time, every build/test/regress/golden run
+   through tools/heavy.sh, CARGO_BUILD_JOBS=2.
+4. After each verified batch (the whole `cargo test -p pg-engine` passes), update STATUS.md,
+   commit with a clear message, and push the branch.
+```
