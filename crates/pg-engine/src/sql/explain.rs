@@ -681,6 +681,38 @@ pub(crate) fn node_exprs<'p>(p: &'p Plan, out: &mut Vec<&'p Expr>) {
     }
 }
 
+/// `plan_inputs`, mutably (a WITH's CTEs too).
+pub(crate) fn plan_inputs_mut(p: &mut Plan) -> Vec<&mut Arc<Plan>> {
+    match p {
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Agg { input, .. }
+        | Plan::Window { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Distinct { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Barrier { input, .. }
+        | Plan::Context { input, .. } => vec![input],
+        Plan::SetOp { left, right, .. } | Plan::Join { left, right, .. } => vec![left, right],
+        Plan::Append { inputs, .. } => inputs.iter_mut().collect(),
+        Plan::Recursive {
+            base, recursive, ..
+        } => vec![base, recursive],
+        Plan::With { ctes, body, .. } => {
+            let mut v: Vec<&mut Arc<Plan>> = ctes.iter_mut().map(|(_, c)| c).collect();
+            v.push(body);
+            v
+        }
+        Plan::Insert(p) => vec![&mut p.source],
+        Plan::Update(p) => vec![&mut p.source],
+        Plan::Delete(p) => vec![&mut p.source],
+        Plan::Merge(p) => vec![&mut p.source],
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn plan_inputs(p: &Plan) -> Vec<&Arc<Plan>> {
     match p {
         Plan::Filter { input, .. }
@@ -755,6 +787,29 @@ fn needed_masks(root: &Arc<Plan>) -> HashMap<usize, Vec<bool>> {
             Plan::Merge(m) if !m.members.is_empty() => vec![merge_needs(m)],
             p => super::paths::child_needs(p, &needed),
         };
+        // A LATERAL subquery's scan returns the columns its clauses over the outer side
+        // read: join clauses, whose Vars stay in the relation's target list
+        // (attr_needed) though the parameterized scan checks them.
+        let mut needed = needed;
+        if let Plan::Project { input, exprs } = p
+            && let Plan::Scan(sc) = &**input
+            && let Some(f) = &sc.filter
+        {
+            let mut parts = Vec::new();
+            conjuncts(f, &mut parts);
+            for q in parts {
+                if !q.has_outer_refs() {
+                    continue;
+                }
+                for c in q.columns() {
+                    if let Some(i) = exprs.iter().position(|e| matches!(e, Expr::Col(j, _) if *j == c))
+                        && let Some(n) = needed.get_mut(i)
+                    {
+                        *n = true;
+                    }
+                }
+            }
+        }
         out.insert(addr(p), needed);
         let mut es = Vec::new();
         node_exprs(p, &mut es);
@@ -1019,7 +1074,7 @@ fn assign_refnames_skip(
             }
             let base = match p {
                 Plan::Scan(s) => Some(s.alias.clone().unwrap_or_else(|| s.table.name.clone())),
-                Plan::SysScan { table, .. } => Some(table.name().to_string()),
+                Plan::SysScan { table, alias, .. } => Some(alias.clone().unwrap_or_else(|| table.name().to_string())),
                 Plan::Values { rows, .. } if rows.len() > 1 => Some("*VALUES*".to_string()),
                 Plan::FunctionScan { alias, .. }
                 | Plan::CteScan { alias, .. }
@@ -1882,7 +1937,10 @@ impl Builder<'_, '_> {
             // (So does a dummy relation's Result.)
             let dummy = b.node.node_type == "Result" && b.node.children.is_empty() && matches!(&**p, Plan::Empty { .. });
             let member = b.node.is_scan() && INH_SCANS.with(|m| m.borrow().contains(&addr(p)));
-            let mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || dummy || member)
+            // (A Sort over a join returns what the join does: the columns needed above.)
+            let sorted_join = matches!(b.node.node_type, "Sort" | "Incremental Sort")
+                && b.node.children.first().is_some_and(|c| c.is_join());
+            let mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || dummy || member || sorted_join)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
             b.node.output = b
@@ -1962,7 +2020,7 @@ impl Builder<'_, '_> {
                 Built::passthrough(n, names)
             }
             Plan::Scan(s) => self.scan(p, s),
-            Plan::SysScan { table, filter, path } => {
+            Plan::SysScan { table, filter, path, .. } => {
                 if let Some(sp) = path {
                     return self.sys_path_scan(p, *table, sp);
                 }
@@ -6549,9 +6607,20 @@ impl Builder<'_, '_> {
             // (Keys the input fixes to constants need no sort.)
             let fixed = super::paths::constant_columns(input);
             let is_fixed = |i: &usize| matches!(groups.get(*i), Some(Expr::Col(j, _)) if fixed.get(*j).copied().unwrap_or(false));
+            // (Nor does input already in that order: an index scan's.)
+            let presorted = chains.first().is_some_and(|(_, cols)| {
+                let mut sk: Vec<String> = Vec::new();
+                for k in keys(self, cols) {
+                    if !sk.contains(&k) {
+                        sk.push(k);
+                    }
+                }
+                !sk.is_empty() && c.node.order.len() >= sk.len() && c.node.order[..sk.len()] == sk[..]
+            });
             if let Some((_, cols)) = chains.first()
                 && !cols.is_empty()
                 && !cols.iter().all(is_fixed)
+                && !presorted
             {
                 let mut sn = ExNode::new("Sort");
                 // (A key listed twice is one pathkey.)
@@ -8231,11 +8300,13 @@ impl Builder<'_, '_> {
             h.startup_cost = r.node.total_cost;
             h.total_cost = r.node.total_cost;
             if self.o.verbose {
-                h.output = r
-                    .internal
-                    .iter()
-                    .map(|x| self.pick(x, Cx::Output))
-                    .collect();
+                // (A Hash returns its input's values: a computed one by reference.)
+                let src = if r.exported.len() == r.internal.len() && r.node.is_scan() {
+                    &r.exported
+                } else {
+                    &r.internal
+                };
+                h.output = src.iter().map(|x| self.pick(x, Cx::Output)).collect();
                 // The hashed side's scan returns just the columns the join needs
                 // (CP_SMALL_TLIST): those used above, then the keys' and quals'.
                 if r.node.is_scan() {
@@ -8270,13 +8341,25 @@ impl Builder<'_, '_> {
                             }
                         }
                     }
+                    // (A pulled-up subquery's PlaceHolderVars come after the relation's
+                    // Vars: add_placeholders_to_base_rels adds them last.)
+                    if let Plan::Project { input: pin, exprs } = &**(if swapped { left } else { right })
+                        && matches!(&**pin, Plan::Scan(_))
+                    {
+                        order.sort_by_key(|&i| exprs.get(i).is_some_and(|e| !matches!(e, Expr::Col(..))));
+                    }
                     if !order.is_empty() && order.len() < width {
                         let small: Vec<String> = order
                             .iter()
                             .map(|&i| self.pick(&r.internal[i], Cx::Output))
                             .collect();
-                        r.node.output = small.clone();
-                        h.output = small;
+                        // (The Hash returns its input's values: a computed one by
+                        // reference.)
+                        h.output = order
+                            .iter()
+                            .map(|&i| self.pick(r.exported.get(i).unwrap_or(&r.internal[i]), Cx::Output))
+                            .collect();
+                        r.node.output = small;
                     }
                 }
             }

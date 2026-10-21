@@ -436,6 +436,7 @@ impl Planner<'_, '_> {
             let l = std::mem::replace(take(left), Plan::One);
             let r = std::mem::replace(take(right), Plan::One);
             let mut m = std::mem::take(meta);
+            m.written_kind = m.written_kind.or(Some(old));
             let old_hash = hash.take();
             let mut j = join(&self.cat, k, l, r, cond.take(), params.clone(), nl, nr);
             if let Plan::Join { meta: jm, hash: h, .. } = &mut j {

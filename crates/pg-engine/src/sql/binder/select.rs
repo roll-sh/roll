@@ -86,7 +86,27 @@ impl Binder<'_, '_> {
             pb::SetOperation::SetopNone | pb::SetOperation::Undefined
         ) {
             self.keep_unknown = false;
-            let (plan, cols) = self.bind_set_op(s, op)?;
+            // (UNION ALL under a constant LIMIT and no ORDER BY: the arms planned for it;
+            // nested UNION ALLs keep the outer one's.)
+            let union_all = op == pb::SetOperation::SetopUnion && s.all;
+            let own = s
+                .limit_count
+                .as_deref()
+                .and_then(ast::ival)
+                .filter(|_| union_all && s.sort_clause.is_empty())
+                .map(|l| {
+                    let off = s.limit_offset.as_deref().and_then(ast::ival).unwrap_or(0);
+                    (self.levels.len(), l as f64, off as f64)
+                });
+            let saved = self.arm_limit;
+            self.arm_limit = match own {
+                Some(o) => Some(o),
+                None if union_all && s.limit_count.is_none() && s.sort_clause.is_empty() => saved,
+                None => None,
+            };
+            let r = self.bind_set_op(s, op);
+            self.arm_limit = saved;
+            let (plan, cols) = r?;
             return self.finish_over_output(plan, cols, s);
         }
         if !s.values_lists.is_empty() {
@@ -2432,7 +2452,11 @@ impl Binder<'_, '_> {
         // Access paths by cost, now that the level's quals, order and limit are known.
         let mut plan = plan;
         if !self.deparse {
-            self.hidden_rtes += crate::sql::paths::plan_query(self.ctx, &mut plan);
+            let lim = self
+                .arm_limit
+                .filter(|a| a.0 == self.levels.len())
+                .map(|a| (a.1, a.2));
+            self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
             if !self.unplanned {
                 super::check_merge_keys(self.ctx, &mut plan)?;
             }
@@ -3641,6 +3665,7 @@ impl Binder<'_, '_> {
                             table: st,
                             filter: None,
                             path: None,
+                            alias: alias.clone().filter(|a| a != &rv.relname),
                         },
                         rel,
                     ));
@@ -3765,9 +3790,10 @@ impl Binder<'_, '_> {
                         self.expand_inheritance(scan, &shown)?
                     } else if t.partkey.is_some() {
                         // ONLY a partitioned table: it has no rows of its own.
+                        let names = optimize::dummy_scan_names(&scan);
                         Plan::Empty {
                             ncols: super::optimize::width(&Plan::Scan(Box::new(scan))),
-                            cols: None,
+                            cols: Some(Arc::new(names)),
                         }
                     } else {
                         if self.exclusion_mode() == "on" {
@@ -5440,6 +5466,17 @@ impl Binder<'_, '_> {
                     .flat_map(|r| r.cols.iter().filter(|c| !c.hidden && !c.merged).cloned())
                     .collect();
                 let colnames = names(&a.colnames);
+                if colnames.len() > cols.len() {
+                    return Err(Error::new(
+                        code::INVALID_COLUMN_REFERENCE,
+                        format!(
+                            "join expression \"{}\" has {} columns available but {} columns specified",
+                            a.aliasname,
+                            cols.len(),
+                            colnames.len()
+                        ),
+                    ));
+                }
                 // A join with column aliases: what they stand for, so they can follow its
                 // relations' columns.
                 if let Some(r) = rec.as_mut() {

@@ -95,6 +95,19 @@ pub(crate) fn scan_names(s: &crate::sql::plan::ScanPlan) -> Vec<String> {
         .collect()
 }
 
+/// An empty appendrel's columns (no members: a Result with a false One-Time Filter), its
+/// row identity columns too.
+pub(crate) fn dummy_scan_names(s: &crate::sql::plan::ScanPlan) -> Vec<String> {
+    let mut out = scan_names(s);
+    if s.with_key {
+        out.push("ctid".into());
+    }
+    if s.sys {
+        out.extend(["ctid", "xmin", "cmin", "xmax", "cmax", "tableoid"].map(String::from));
+    }
+    out
+}
+
 thread_local! {
     /// `add_security_filter` is adding row-level security quals.
     static SECURITY_QUALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -241,9 +254,44 @@ fn order_security_quals(cat: &Catalog, first: Vec<Expr>, rest: Vec<Expr>) -> Vec
 }
 
 /// Add a filter over `plan`'s output, pushing it as far down as is safe.
+/// eval_const_expressions' CoerceToDomain of a domain without constraints: a RelabelType,
+/// which collapses into the implicit one an operator applies to its base type (the
+/// operand is the value itself, `relname = 'x'::name`).
+fn strip_free_domains(e: Expr) -> Expr {
+    let free = |d: &crate::sql::expr::DomainCoerce| {
+        !d.tag && !d.array && !d.not_null && d.checks.is_empty() && d.base.is_none()
+    };
+    e.transform(&mut |x| {
+        Ok(match x {
+            Expr::Call(d, args, ty)
+                if !d.name.is_empty()
+                    && !d.name.chars().any(|c| c.is_alphanumeric() || c == '_')
+                    && args.iter().any(|a| matches!(a, Expr::CoerceToDomain(_, dc) if !dc.tag && !dc.array)) =>
+            {
+                // (A domain with constraints stays checked: its value relabeled to the
+                // base type, `((x)::d)::integer`.)
+                let args = args
+                    .into_iter()
+                    .map(|a| match a {
+                        Expr::CoerceToDomain(inner, dc) if free(&dc) => *inner,
+                        a @ Expr::CoerceToDomain(_, _) if !matches!(&a, Expr::CoerceToDomain(_, dc) if dc.tag || dc.array) => {
+                            let t = a.ty();
+                            Expr::Relabel(Box::new(a), t)
+                        }
+                        a => a,
+                    })
+                    .collect();
+                Expr::Call(d, args, ty)
+            }
+            x => x,
+        })
+    })
+    .unwrap()
+}
+
 pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
     let mut parts = Vec::new();
-    conjuncts(pred, &mut parts);
+    conjuncts(strip_free_domains(pred), &mut parts);
     if parts.is_empty() {
         return plan;
     }
@@ -354,7 +402,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         }
         // No rows stay no rows.
         Plan::Empty { ncols, cols } => Plan::Empty { ncols, cols },
-        Plan::SysScan { table, filter, .. } => {
+        Plan::SysScan { table, filter, alias, .. } => {
             let mut all = Vec::new();
             if let Some(f) = filter {
                 conjuncts(f, &mut all);
@@ -364,6 +412,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 table,
                 filter: and_all(all),
                 path: None,
+                alias,
             }
         }
         Plan::Filter { input, pred } => {
@@ -611,7 +660,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         // Into a plain view (or subquery) pulled up: the clauses on its plain values, a
         // volatile one too (a security barrier is a `Barrier` below); the rest above.
         Plan::Project { input, exprs }
-            if matches!(&*input, Plan::Scan(_) | Plan::Join { .. } | Plan::Project { .. })
+            if matches!(&*input, Plan::Scan(_) | Plan::SysScan { .. } | Plan::Join { .. } | Plan::Project { .. })
                 && parts.iter().any(|p| projectable(p, &exprs)) =>
         {
             let (down, up): (Vec<Expr>, Vec<Expr>) =
@@ -773,13 +822,47 @@ pub(crate) fn unsafe_outputs(p: &Plan) -> Vec<bool> {
 
 /// A clause over a projection that can go below it: the columns it reads are plain
 /// values there (no sub-select, set-returning, aggregate, window or volatile call).
+/// contain_nonstrict_functions.
+pub(crate) fn contain_nonstrict(e: &Expr) -> bool {
+    let mut ns = false;
+    e.walk(&mut |x| match x {
+        Expr::Call(d, ..) if !d.strict => ns = true,
+        Expr::Agg(..)
+        | Expr::Window(..)
+        | Expr::Grouping(..)
+        | Expr::Srf(..)
+        | Expr::IsDistinct(..)
+        | Expr::NullIf(..)
+        | Expr::And(_)
+        | Expr::Or(_)
+        | Expr::Subquery(_)
+        | Expr::Case { .. }
+        | Expr::CaseTest(_)
+        | Expr::Array(..)
+        | Expr::Row(..)
+        | Expr::RowCompare(_)
+        | Expr::Coalesce(..)
+        | Expr::MinMax(..)
+        | Expr::Xml(_)
+        | Expr::IsNull(..)
+        | Expr::BoolTest(..)
+        | Expr::Assign { .. }
+        | Expr::ArrayOp { .. }
+        | Expr::InList(..)
+        | Expr::Default(_)
+        | Expr::Param(..) => ns = true,
+        _ => {}
+    });
+    ns
+}
+
 fn projectable(p: &Expr, exprs: &[Expr]) -> bool {
     let phv = PHV_OUTPUTS.with(|f| f.get());
     p.columns().iter().all(|&c| {
         exprs.get(c).is_some_and(|e| {
             // (A PlaceHolderVar over the subquery's own columns is evaluated above its
-            // scan.)
-            if phv && !matches!(e, Expr::Col(..)) && !e.columns().is_empty() {
+            // scan; a strict expression of them needs none, pullup_replace_vars_callback.)
+            if phv && !matches!(e, Expr::Col(..)) && !e.columns().is_empty() && contain_nonstrict(e) {
                 return false;
             }
             let mut plain = !e.is_volatile();
@@ -1438,6 +1521,13 @@ pub fn join(
         }
         rest = stay;
     }
+    // An inner join's ON conditions are WHERE clauses all the same: equivalence classes
+    // give each side the constants the other side's are equated with.
+    let mut kept: Vec<usize> = Vec::new();
+    if kind == JoinKind::Inner && params.is_empty() {
+        let mut no_hash = None;
+        ec_constants(cat, &mut lpush, &mut rpush, &mut no_hash, &mut rest, nleft, (true, true), &mut kept);
+    }
     // (An outer join's ON conditions pushed into its nullable side: their columns.)
     let mut pushed: Vec<usize> = Vec::new();
     if kind == JoinKind::Right {
@@ -1489,6 +1579,7 @@ pub fn join(
         meta: Box::new(crate::sql::plan::JoinMeta {
             pushed,
             hash_swapped,
+            kept,
             ..Default::default()
         }),
     }

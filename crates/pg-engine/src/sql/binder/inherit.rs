@@ -46,9 +46,11 @@ fn expand(
         }));
     }
     if inputs.is_empty() {
+        // (A dummy relation: its columns still named.)
+        let names = super::optimize::dummy_scan_names(&scan);
         return Ok(Plan::Empty {
             ncols: super::optimize::width(&Plan::Scan(Box::new(scan))),
-            cols: None,
+            cols: Some(Arc::new(names)),
         });
     }
     Ok(Plan::Append {

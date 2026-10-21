@@ -1676,6 +1676,11 @@ struct Planner<'c, 'a> {
     /// Restriction clauses reading a PlaceHolderVar, by table (`ScanPlan::phv_quals`):
     /// never index quals.
     phv_quals: std::cell::RefCell<Vec<(u32, Expr)>>,
+    /// Planning a join group whose subqueries' outputs were lifted (`joinpath::lift`).
+    /// (Its address: a group inside it is lifted for itself.)
+    lifting: std::cell::Cell<usize>,
+    /// The projections computing lifted subquery outputs over join groups, by address.
+    lifted: std::cell::RefCell<Vec<usize>>,
 }
 
 impl<'c, 'a> Planner<'c, 'a> {
@@ -1693,6 +1698,8 @@ impl<'c, 'a> Planner<'c, 'a> {
             pw_agg_join: Default::default(),
             merge_target: Default::default(),
             phv_quals: Default::default(),
+            lifting: Default::default(),
+            lifted: Default::default(),
         }
     }
 
@@ -3142,9 +3149,25 @@ impl Planner<'_, '_> {
         let indexes = index_infos(self.ctx, &t, size.tuples);
         let mut exprs = Vec::new();
         let mut booleq = None;
+        // examine_variable: an index expression's statistics only for a user who may read
+        // the whole table (or the partitioned table the query names).
+        let expr_stats_ok = {
+            let cat = &self.cat;
+            let me = self.ctx.current_user();
+            let dbo = self.ctx.db_owner();
+            let can = |oid: u32| {
+                cat.rel_mask(oid, me, dbo)
+                    .is_none_or(|(held, _)| held & crate::catalog::acl::SELECT != 0)
+            };
+            can(t.oid)
+                || s.part
+                    .as_ref()
+                    .and_then(|p| p.last())
+                    .is_some_and(|l| can(l.parent.oid))
+        };
         for ii in &indexes {
             for (k, key) in ii.keys.iter().enumerate() {
-                if !matches!(key, Expr::Col(..)) {
+                if !matches!(key, Expr::Col(..)) && expr_stats_ok {
                     exprs.push((
                         key.clone(),
                         VarRef {
@@ -4373,8 +4396,9 @@ impl Planner<'_, '_> {
                 return self.walk(p, needed, lim);
             }
         }
-        // A group of joins: their order, methods and access paths together.
-        if matches!(p, Plan::Join { .. }) && self.plan_joins(p, needed) {
+        // A group of joins: their order, methods and access paths together (under a
+        // LIMIT, for the fraction it reads).
+        if matches!(p, Plan::Join { .. }) && self.plan_joins_limited(p, needed, lim) {
             return;
         }
         if matches!(p, Plan::Filter { .. }) && self.plan_filtered_join(p, needed) {
@@ -4425,6 +4449,15 @@ impl Planner<'_, '_> {
             Plan::Agg {
                 groups, sets: None, ..
             } if !groups.is_empty() => Some(groups.clone()),
+            // (Grouping sets: the first rollup's keys, which its sorted input wants.)
+            Plan::Agg {
+                groups,
+                sets: Some(sets),
+                ..
+            } if !groups.is_empty() => crate::exec::agg::rollup_chains(sets)
+                .first()
+                .map(|(_, cols)| cols.iter().filter_map(|&c| groups.get(c).cloned()).collect::<Vec<_>>())
+                .filter(|k| !k.is_empty()),
             Plan::Distinct { input, on: None, .. } => {
                 let w = crate::sql::binder::plan_width(input);
                 Some((0..w).map(|i| Expr::Col(i, DataType::Unknown)).collect())
@@ -4488,6 +4521,14 @@ impl Planner<'_, '_> {
                 Some((limit_est(limit, true), limit_est(offset, false)))
             }
             Plan::Project { .. } | Plan::With { .. } => lim,
+            // (A UNION ALL's arms are planned for the fraction the LIMIT reads:
+            // set_subquery_pathlist passes the tuple_fraction down.)
+            Plan::Append { inh: None, .. }
+            | Plan::SetOp {
+                kind: crate::sql::plan::SetOpKind::Union,
+                all: true,
+                ..
+            } => lim,
             // Every DISTINCT key fixed by an equality with a constant: its first row is
             // all it returns (a Limit 1, as EXPLAIN shows it).
             Plan::Distinct { input, on, .. } => {
@@ -4532,8 +4573,8 @@ impl Planner<'_, '_> {
             Plan::SetOp {
                 kind, left, right, ..
             } => {
-                visit(left, None);
-                visit(right, None);
+                visit(left, lim_in);
+                visit(right, lim_in);
                 // generate_nonunion_paths: INTERSECT puts the input with fewer groups
                 // first.
                 if *kind == crate::sql::plan::SetOpKind::Intersect
@@ -4549,7 +4590,7 @@ impl Planner<'_, '_> {
             }
             Plan::Append { inputs, .. } => {
                 for i in inputs.iter_mut() {
-                    visit(i, None);
+                    visit(i, lim_in);
                 }
             }
             Plan::Recursive {
@@ -5230,6 +5271,11 @@ fn sort_width(cat: &crate::catalog::Catalog, p: &Plan) -> u32 {
 /// whether a sort above one reads an index in order instead). The number of relations
 /// join removal took out (range table entries the plan no longer shows).
 pub fn plan_query(ctx: &ExecCtx, plan: &mut Plan) -> usize {
+    plan_query_limited(ctx, plan, None)
+}
+
+/// `plan_query` for a LIMIT above it (a UNION ALL arm's: `lim`, its count and offset).
+pub fn plan_query_limited(ctx: &ExecCtx, plan: &mut Plan, lim: Option<(f64, f64)>) -> usize {
     let p = Planner::new(ctx);
     let w = crate::sql::binder::plan_width(plan);
     p.pull_up_consts(plan);
@@ -5240,7 +5286,10 @@ pub fn plan_query(ctx: &ExecCtx, plan: &mut Plan) -> usize {
     if std::env::var_os("GC1_NO_UNUSED").is_none() {
         p.drop_unused_outputs(plan, &vec![true; w]);
     }
-    p.walk(plan, &vec![true; w], None);
+    p.walk(plan, &vec![true; w], lim);
+    if !p.lifted.borrow().is_empty() {
+        p.lifted_into_aggs(plan);
+    }
     p.minmax_aggs(plan);
     p.removed.get()
 }
@@ -5292,7 +5341,10 @@ impl Planner<'_, '_> {
         else {
             return;
         };
-        if !groups.is_empty() || sets.is_some() || aggs.is_empty() {
+        // (GROUP BY (): one empty grouping set, no grouping at all; its GROUPING()
+        // bitmask column is 0.)
+        let empty_set = matches!(sets, Some(s) if s.len() == 1 && s[0].is_empty());
+        if !groups.is_empty() || (sets.is_some() && !empty_set) || aggs.is_empty() {
             return;
         }
         // One table: its scan, or an inheritance tree's Append of its members' scans.
@@ -5458,7 +5510,10 @@ impl Planner<'_, '_> {
                 }))
             })
             .collect();
-        let exprs = which.iter().map(|&i| subs[i].clone()).collect();
+        let mut exprs: Vec<Expr> = which.iter().map(|&i| subs[i].clone()).collect();
+        if empty_set {
+            exprs.push(Expr::Const(Value::Int8(0), DataType::Int8));
+        }
         *p = Plan::Project {
             input: Arc::new(Plan::One),
             exprs,

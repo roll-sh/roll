@@ -2714,6 +2714,9 @@ impl Binder<'_, '_> {
                     && args.len() == 2
                     && args[0].same_as(&args[1])
                     && !args[0].is_volatile()
+                    // (An outer query's value is a Param here, not an equivalence class
+                    // member: the clause stays.)
+                    && !args[0].has_outer_refs()
                     && args[0].ty() == args[1].ty()
                     && (super::optimize::hashable_type(&args[0].ty())
                         || matches!(args[0].ty(), DataType::Numeric(..))) =>

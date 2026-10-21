@@ -870,8 +870,11 @@ impl Deparser<'_, '_> {
                 self.buf.push_str(&self.type_name(to));
             }
             Expr::Relabel(inner, to) => {
-                // Outside deparsing only a folded CASE keeps its type this way.
-                if !showimplicit || self.subplans.is_some() {
+                // Outside deparsing only a folded CASE keeps its type this way (and a
+                // domain's checked value read as its base type, which shows).
+                if (!showimplicit || self.subplans.is_some())
+                    && !(self.subplans.is_some() && matches!(&**inner, Expr::CoerceToDomain(_, d) if !d.tag))
+                {
                     return self.paren(inner, false, Parent::Cast);
                 }
                 self.open();

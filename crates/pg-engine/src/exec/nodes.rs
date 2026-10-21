@@ -31,7 +31,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             i: 0,
         }),
         Plan::Scan(s) => super::scan::open_scan(s, ctx)?,
-        Plan::SysScan { table, filter, path } => {
+        Plan::SysScan { table, filter, path, .. } => {
             let rows = crate::catalog::system::rows(*table, ctx)?;
             let mut deferred = crate::catalog::system::deferred_errors(*table, ctx, &rows);
             // An index path a sort relies on: the rows in that index's order.

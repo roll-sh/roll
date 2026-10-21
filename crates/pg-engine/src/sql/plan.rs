@@ -211,6 +211,9 @@ pub struct JoinMeta {
     /// equivalence class's, of the join relation) has the right side's operand first, the
     /// sides having been put the other way round.
     pub key_flipped: Vec<bool>,
+    /// An outer join reduce_outer_joins made another kind: the kind it was written as
+    /// (subquery pull-up, which comes first in Postgres, decides PlaceHolderVars by it).
+    pub written_kind: Option<JoinKind>,
 }
 
 /// A function called in FROM whose body runs (not inlined), as EXPLAIN shows it.
@@ -872,6 +875,8 @@ pub enum Plan {
         /// The access path the planner chose for it, when not a sequential scan (or
         /// when its order matters).
         path: Option<Arc<SysPath>>,
+        /// The FROM-clause alias, when it has one (EXPLAIN's reference name).
+        alias: Option<String>,
     },
     /// ROWS FROM (f(...), g(...)) [WITH ORDINALITY]
     FunctionScan {

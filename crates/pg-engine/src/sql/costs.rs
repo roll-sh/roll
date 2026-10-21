@@ -174,8 +174,8 @@ pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
             .map(|i| col_width(&cat, t, i))
             .sum();
         // MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData); the page's usable bytes
-        // to its fillfactor.
-        ((BLCKSZ as u32 - 24) * fillfactor(t) / 100 / (width + 28)) as f64
+        // to its fillfactor (integer division), at least one row on every page.
+        (((BLCKSZ as u32 - 24) * fillfactor(t) / 100 / (width + 28)) as f64).max(1.0)
     };
     RelSize {
         pages: curpages,
@@ -194,7 +194,7 @@ pub fn empty_rel_tuples(t: &Table, ctx: &ExecCtx) -> f64 {
         .filter(|&i| !t.columns[i].dropped)
         .map(|i| col_width(&cat, t, i))
         .sum();
-    let density = ((BLCKSZ as u32 - 24) * fillfactor(t) / 100 / (width + 28)) as f64;
+    let density = (((BLCKSZ as u32 - 24) * fillfactor(t) / 100 / (width + 28)) as f64).max(1.0);
     (density * 10.0).round_ties_even()
 }
 
@@ -722,6 +722,28 @@ impl Est<'_> {
                             }
                         }
                         "<>" => 1.0 - DEFAULT_EQ_SEL,
+                        // patternsel over an expression without statistics: a pattern
+                        // without a fixed prefix by its heuristic selectivity.
+                        "~~" | "~~*" | "~" | "~*" | "!~~" | "!~~*" | "!~" | "!~*"
+                            if !strip(l).columns().is_empty()
+                                && matches!(l.ty(), DataType::Text | DataType::Varchar(_) | DataType::Name | DataType::Bpchar(_))
+                                && let Some(Some(Value::Text(t))) = constant(r) =>
+                        {
+                            let negate = op.starts_with('!');
+                            let ptype = match op.trim_start_matches('!') {
+                                "~~" => Ptype::Like,
+                                "~~*" => Ptype::LikeIc,
+                                "~" => Ptype::Regex,
+                                _ => Ptype::RegexIc,
+                            };
+                            let (status, _, rest) = pattern_prefix(t.as_ref(), ptype);
+                            let sel = if status == PrefixStatus::None {
+                                rest.clamp(0.0001, 0.9999)
+                            } else {
+                                DEFAULT_MATCH_SEL
+                            };
+                            if negate { 1.0 - sel } else { sel }
+                        }
                         "~~" | "~~*" | "~" | "~*" => DEFAULT_MATCH_SEL,
                         "!~~" | "!~~*" | "!~" | "!~*" => 1.0 - DEFAULT_MATCH_SEL,
                         o if ineq(o).is_some() => DEFAULT_INEQ_SEL,

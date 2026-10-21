@@ -494,6 +494,10 @@ pub struct Binder<'b, 'a> {
     /// DATA): what fails only when it's planned or starts (folding a constant call, a merge
     /// join without a collation) doesn't.
     pub unplanned: bool,
+    /// Binding the arms of a UNION ALL under a constant LIMIT (the level they are at, the
+    /// count and the offset): each arm is planned for the rows it reads
+    /// (set_subquery_pathlist passes the tuple_fraction down).
+    pub(crate) arm_limit: Option<(usize, f64, f64)>,
     /// Binding the arms of a CASE: a constant call that fails stays a call until the CASE
     /// knows which arms are reachable (eval_const_expressions never simplifies the others).
     pub(crate) defer_fold: bool,
@@ -608,6 +612,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             hidden_rtes: 0,
             no_params: false,
             unplanned: false,
+            arm_limit: None,
             defer_fold: false,
             fold_err: None,
             sql_fn_statement: false,

@@ -10,6 +10,7 @@ use crate::sql::joins::{self, In, InKind, JoinGucs, Jt, QualCost, Semi};
 use crate::sql::plan::{JoinMeta, JoinMethod};
 use std::rc::Rc;
 
+mod lift;
 mod outerjoins;
 mod partitionwise;
 mod partmerge;
@@ -464,10 +465,27 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                 }
             }
             None => {
+                let leaves = self.leaves_of(e);
+                // examine_variable: an expression an index (or statistics object) of
+                // the table has statistics for.
+                if leaves.count_ones() == 1 {
+                    let leaf = &self.leaves[leaves.trailing_zeros() as usize];
+                    if let Some((_, r)) = &leaf.scan {
+                        let local = key_operand(e).clone().shift_cols(-(leaf.off as isize));
+                        if let Some((_, v)) = r.exprs.iter().find(|(x, _)| x.same_as(&local)) {
+                            let mut v = v.clone();
+                            v.rows = leaf.rows;
+                            return joins::JoinVar {
+                                rel_rows: leaf.rows,
+                                var: Some(v),
+                                distinct: None,
+                            };
+                        }
+                    }
+                }
                 // An expression of one table's columns without statistics:
                 // get_variable_numdistinct takes the table's tuples when fewer than the
                 // default.
-                let leaves = self.leaves_of(e);
                 let distinct = (leaves.count_ones() == 1)
                     .then(|| &self.leaves[leaves.trailing_zeros() as usize])
                     .and_then(|l| l.scan.as_ref())
@@ -1432,7 +1450,10 @@ impl Search<'_, '_, '_> {
 impl Search<'_, '_, '_> {
     /// The join clauses `col = <other leaves>` a leaf's column could be an index condition
     /// of: (leaf column, the outer expression, its leaves, the clause).
-    fn param_cands(&self, l: usize, ncols: usize) -> Vec<(usize, Expr, u32, usize)> {
+    /// The join clauses `mine = other` that could parameterize leaf `l`: `mine` over the
+    /// leaf's own columns (leaf-local; a column, or an expression of them an index may
+    /// have), `other` over the group row, the leaves it reads, the clause.
+    fn param_cands(&self, l: usize, ncols: usize) -> Vec<(Expr, Expr, u32, usize)> {
         let leaf = &self.leaves[l];
         let set = 1u32 << l;
         let mut cands = Vec::new();
@@ -1445,11 +1466,23 @@ impl Search<'_, '_, '_> {
                 if *ml != set || *ol & set != 0 {
                     continue;
                 }
-                let Some(g) = key_col(mine) else { continue };
-                if g < leaf.off || g >= leaf.off + ncols {
-                    continue;
-                }
-                cands.push((g - leaf.off, other.clone(), *ol, ci));
+                let local = match key_col(mine) {
+                    Some(g) if g >= leaf.off && g < leaf.off + ncols => {
+                        Expr::Col(g - leaf.off, key_operand(mine).ty())
+                    }
+                    Some(_) => continue,
+                    None => {
+                        let cols = mine.columns();
+                        if cols.is_empty()
+                            || mine.is_volatile()
+                            || cols.iter().any(|&g| g < leaf.off || g >= leaf.off + ncols)
+                        {
+                            continue;
+                        }
+                        mine.clone().shift_cols(-(leaf.off as isize))
+                    }
+                };
+                cands.push((local, other.clone(), *ol, ci));
             }
         }
         cands
@@ -1487,7 +1520,7 @@ impl Search<'_, '_, '_> {
         }
         let mut out = Vec::new();
         'req: for req in reqs {
-            let used: Vec<&(usize, Expr, u32, usize)> =
+            let used: Vec<&(Expr, Expr, u32, usize)> =
                 cands.iter().filter(|c| c.2 & !req == 0).collect();
             let params: Vec<Expr> = used.iter().map(|c| c.1.clone()).collect();
             let enforced: Vec<usize> = used.iter().map(|c| c.3).collect();
@@ -1496,19 +1529,48 @@ impl Search<'_, '_, '_> {
             for m in members {
                 let mut prel = m.rel.shallow_with_quals();
                 let nrq = prel.quals.len();
-                for (k, (pcol, other, _, ci)) in used.iter().enumerate() {
-                    // The leaf's column as the member has it (a column, or a UNION ALL
-                    // member's expression of its columns).
-                    let Some(Some(colx)) = m.exprs.get(*pcol) else {
-                        continue 'req;
+                for (k, (mine, other, _, ci)) in used.iter().enumerate() {
+                    // The leaf's value as the member has it (its columns: columns, or a
+                    // UNION ALL member's expressions of its columns).
+                    let mut missing = false;
+                    let colx = match mine {
+                        Expr::Col(pcol, _) => match m.exprs.get(*pcol) {
+                            Some(Some(x)) => x.clone(),
+                            _ => continue 'req,
+                        },
+                        e => e
+                            .clone()
+                            .transform(&mut |x| {
+                                Ok(match x {
+                                    Expr::Col(c, t) => match m.exprs.get(c) {
+                                        Some(Some(x)) => x.clone(),
+                                        _ => {
+                                            missing = true;
+                                            Expr::Col(c, t)
+                                        }
+                                    },
+                                    x => x,
+                                })
+                            })
+                            .unwrap(),
                     };
+                    if missing {
+                        continue 'req;
+                    }
+                    let pcol = mine.columns().first().copied().unwrap_or(0);
                     let Expr::Call(def, args, ty) = &self.clauses[*ci].expr else {
                         continue 'req;
                     };
                     let param = Expr::Outer(1, k, other.ty());
                     // (An inner join's clause from its equivalence class: the outer
                     // side's member first; an outer join's as written.)
-                    let written = key_col(&args[0]).is_some_and(|g| g == leaf.off + pcol);
+                    let written = match mine {
+                        Expr::Col(..) => key_col(&args[0]).is_some_and(|g| g == leaf.off + pcol),
+                        _ => {
+                            let c = args[0].columns();
+                            !c.is_empty() && c.iter().all(|&g| g >= leaf.off && g < leaf.off + leaf.ncols)
+                        }
+                    };
                     let mine_first = if self.kind == JoinKind::Inner
                         && !self.clauses[*ci].on
                         && args[0].ty().without_typmod() == args[1].ty().without_typmod()
@@ -1517,7 +1579,6 @@ impl Search<'_, '_, '_> {
                     } else {
                         written
                     };
-                    let colx = colx.clone();
                     prel.quals.push(if mine_first {
                         Expr::Call(def.clone(), vec![colx, param], ty.clone())
                     } else {
@@ -3799,6 +3860,7 @@ impl Search<'_, '_, '_> {
                         from_call: None,
                         hash_swapped: Vec::new(),
                         key_flipped: if kind == JoinKind::Inner { key_flipped } else { Vec::new() },
+                        written_kind: None,
                     }),
                 };
                 let layout = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
@@ -4028,6 +4090,23 @@ impl Planner<'_, '_> {
     /// the leaves' paths. False when it isn't one the search takes on.
     pub(super) fn plan_joins(&self, p: &mut Plan, needed: &[bool]) -> bool {
         self.plan_joins_ordered(p, needed, None).is_some()
+    }
+
+    /// `plan_joins` under a LIMIT (no order): the cheapest path for the rows it reads.
+    pub(super) fn plan_joins_limited(&self, p: &mut Plan, needed: &[bool], lim: Option<(f64, f64)>) -> bool {
+        match lim {
+            Some((c, off)) if c > 0.0 && off >= 0.0 => {
+                let order = Order {
+                    keys: Vec::new(),
+                    complete: true,
+                    limit: Some((c, off)),
+                    width: 0,
+                    hint: false,
+                };
+                self.plan_joins_ordered(p, needed, Some(&order)).is_some()
+            }
+            _ => self.plan_joins(p, needed),
+        }
     }
 
     /// A WHERE filter over a join tree with outer joins inside: its clauses join the
@@ -4337,6 +4416,195 @@ impl Planner<'_, '_> {
         (!out.is_empty()).then_some(out)
     }
 
+    /// `plan_joins_with` over the lifted group, its columns put back by the lifted map.
+    fn plan_lifted(
+        &self,
+        p: &mut Plan,
+        l: lift::Lifted,
+        needed: &[bool],
+        order: Option<&Order>,
+        sort_exprs: &[Expr],
+    ) -> Option<bool> {
+        let lift::Lifted { plan: mut lp, map } = l;
+        let lw = crate::sql::binder::plan_width(&lp);
+        let mut need = vec![false; lw];
+        for (i, e) in map.iter().enumerate() {
+            if needed.get(i).copied().unwrap_or(true) {
+                mark(&mut need, e);
+            }
+        }
+        // The order's keys while they stay columns.
+        let order2 = order.map(|o| {
+            let mut keys = Vec::new();
+            let mut complete = o.complete;
+            for &(g, d, nf) in &o.keys {
+                match map.get(g) {
+                    Some(Expr::Col(j, _)) => keys.push((*j, d, nf)),
+                    _ => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            Order {
+                keys,
+                complete,
+                limit: o.limit,
+                width: o.width,
+                hint: o.hint,
+            }
+        });
+        let order2 = order2.filter(|o| !o.keys.is_empty() || o.complete);
+        let sort2: Vec<Expr> = sort_exprs.iter().map(|e| lift::subst(e, &map)).collect();
+        // (WHERE clauses the group takes in: over the lifted row too.)
+        let extra = self.absorbed.take();
+        self.absorbed
+            .replace(extra.iter().map(|e| lift::subst(e, &map)).collect());
+        let orig_lp = matches!(&*p, Plan::Join { params, .. } if !params.is_empty()).then(|| lp.clone());
+        let saved = self.lifting.replace(&lp as *const Plan as usize);
+        let r = self.plan_joins_with(&mut lp, &need, order2.as_ref(), &sort2);
+        self.lifting.set(saved);
+        let Some(sorted) = r else {
+            self.absorbed.replace(extra);
+            let r = self.plan_joins_with_unlifted(p, needed, order, sort_exprs);
+            // A LATERAL join the search doesn't take on: its lifted form all the same
+            // (its scan returns the relation's columns, then its PlaceHolderVars).
+            if r.is_none()
+                && matches!(&*p, Plan::Join { params, .. } if !params.is_empty())
+                && let Some(orig) = orig_lp
+            {
+                let input = Arc::new(orig);
+                // (Not lifted again when the walk comes to it.)
+                self.lifted.borrow_mut().push(Arc::as_ptr(&input) as usize);
+                *p = Plan::Project { input, exprs: map };
+            }
+            return r;
+        };
+        let sorted = sorted && order2.as_ref().is_some_and(|o| o.complete) == order.is_some_and(|o| o.complete);
+        let computed = map.iter().any(|e| !matches!(e, Expr::Col(..)));
+        *p = match lp {
+            Plan::Project { input, exprs } => Plan::Project {
+                input,
+                exprs: map.iter().map(|e| lift::subst(e, &exprs)).collect(),
+            },
+            lp => Plan::Project {
+                input: Arc::new(lp),
+                exprs: map,
+            },
+        };
+        if computed {
+            self.lifted.borrow_mut().push(p as *const Plan as usize);
+        }
+        Some(sorted)
+    }
+
+    /// make_group_input_target: below a grouping, the joins return the columns its
+    /// aggregates' arguments read (the arguments are the Agg's to compute); a lifted
+    /// expression it groups by stays computed below.
+    pub(super) fn lifted_into_aggs(&self, p: &mut Plan) {
+        for c in crate::sql::explain::plan_inputs_mut(p) {
+            self.lifted_into_aggs(Arc::make_mut(c));
+        }
+        let Plan::Agg { input, groups, aggs, .. } = p else {
+            return;
+        };
+        if !self.lifted.borrow().contains(&(Arc::as_ptr(input) as usize)) {
+            return;
+        }
+        let Plan::Project { input: inner, exprs } = &**input else {
+            return;
+        };
+        let mut grouped: Vec<usize> = Vec::new();
+        for g in groups.iter() {
+            grouped.extend(g.columns());
+        }
+        let mut exprs2 = exprs.clone();
+        let mut repl: Vec<Option<Expr>> = vec![None; exprs.len()];
+        for (i, e) in exprs.iter().enumerate() {
+            if matches!(e, Expr::Col(..)) || grouped.contains(&i) {
+                continue;
+            }
+            // The expression over the projection's row: its input columns, added when
+            // the projection doesn't return them.
+            let over = e
+                .clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(k, t) => {
+                            let at = match exprs2.iter().position(|y| matches!(y, Expr::Col(j, _) if *j == k)) {
+                                Some(at) => at,
+                                None => {
+                                    exprs2.push(Expr::Col(k, t.clone()));
+                                    exprs2.len() - 1
+                                }
+                            };
+                            Expr::Col(at, t)
+                        }
+                        x => x,
+                    })
+                })
+                .unwrap();
+            repl[i] = Some(over);
+        }
+        if repl.iter().all(Option::is_none) {
+            return;
+        }
+        let sub = |e: &Expr| -> Expr {
+            e.clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(i, t) => match repl.get(i).cloned().flatten() {
+                            Some(r) => r,
+                            None => Expr::Col(i, t),
+                        },
+                        x => x,
+                    })
+                })
+                .unwrap()
+        };
+        for a in aggs.iter_mut() {
+            a.args = a.args.iter().map(&sub).collect();
+            a.filter = a.filter.as_ref().map(sub);
+            a.direct = a.direct.iter().map(&sub).collect();
+            for o in a.order_by.iter_mut() {
+                o.expr = sub(&o.expr);
+            }
+        }
+        // (What only the aggregates read isn't computed below any more.)
+        let mut read = vec![false; exprs2.len()];
+        for g in groups.iter() {
+            mark(&mut read, g);
+        }
+        for a in aggs.iter() {
+            for e in a.args.iter().chain(&a.direct).chain(&a.filter).chain(a.order_by.iter().map(|o| &o.expr)) {
+                mark(&mut read, e);
+            }
+        }
+        for (i, r) in repl.iter().enumerate() {
+            if r.is_some() && !read[i] {
+                exprs2[i] = Expr::Const(Value::Null, exprs2[i].ty());
+            }
+        }
+        *input = Arc::new(Plan::Project {
+            input: inner.clone(),
+            exprs: exprs2,
+        });
+    }
+
+    /// `plan_joins_with` without lifting.
+    fn plan_joins_with_unlifted(
+        &self,
+        p: &mut Plan,
+        needed: &[bool],
+        order: Option<&Order>,
+        sort_exprs: &[Expr],
+    ) -> Option<bool> {
+        let saved = self.lifting.replace(p as *const Plan as usize);
+        let r = self.plan_joins_with(p, needed, order, sort_exprs);
+        self.lifting.set(saved);
+        r
+    }
+
     fn plan_joins_ordered(&self, p: &mut Plan, needed: &[bool], order: Option<&Order>) -> Option<bool> {
         self.plan_joins_with(p, needed, order, &[])
     }
@@ -4353,6 +4621,14 @@ impl Planner<'_, '_> {
         let Plan::Join { params, .. } = &*p else {
             return None;
         };
+        // A subquery's computed outputs that need no PlaceHolderVar are evaluated above
+        // the joins: the group planned over its tables (`lift`).
+        if self.lifting.get() != p as *const Plan as usize
+            && !self.lifted.borrow().contains(&(p as *const Plan as usize))
+            && let Some(l) = lift::lift_group(p)
+        {
+            return self.plan_lifted(p, l, needed, order, sort_exprs);
+        }
         // (A LATERAL join at the top: only as part of a group with outer joins.)
         let lateral_top = !params.is_empty();
         let mut kind = match &*p {

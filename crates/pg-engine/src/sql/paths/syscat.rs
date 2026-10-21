@@ -272,7 +272,7 @@ impl Planner<'_, '_> {
         let Some((scan, mapped)) = sys_target(take(input), key_exprs) else {
             return false;
         };
-        let Plan::SysScan { table, filter, path } = scan else {
+        let Plan::SysScan { table, filter, path, .. } = scan else {
             return false;
         };
         if path.is_some() || table.is_view() || sys_indexes(*table).is_empty() {
