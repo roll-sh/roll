@@ -534,7 +534,16 @@ impl Binder<'_, '_> {
             no_returning: false,
             inline: None,
         });
+        // (The recursive term is planned seeing its worktable as ten times the non-recursive
+        // term.)
+        let work = !self.deparse;
+        if work {
+            crate::sql::explain::push_work_estimate(id, &Arc::new(base.clone()), self.ctx);
+        }
         let r = self.in_sibling(|b| b.bind_select_stmt(rarg));
+        if work {
+            crate::sql::explain::pop_cte_estimates(1);
+        }
         let def = self.ctes.last_mut().unwrap().pop().unwrap();
         let (rec, rcols) = r?;
         if !def.used.get() {

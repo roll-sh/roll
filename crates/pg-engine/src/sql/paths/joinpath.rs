@@ -844,6 +844,8 @@ impl Search<'_, '_, '_> {
                     p = input;
                 }
                 Plan::Sort { keys, .. } => break keys.clone(),
+                // (A materialized CTE's scan keeps its query's order.)
+                Plan::CteScan { name, .. } => break crate::sql::explain::cte_order(name),
                 // (A subquery's ORDER BY an index scan gives.)
                 Plan::Scan(sp) if matches!(sp.access, Access::Index { ordered: true, .. }) => {
                     break crate::sql::paths::index_order(self.pl.ctx, sp);

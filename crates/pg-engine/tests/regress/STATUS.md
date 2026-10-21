@@ -25,8 +25,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50767 (**99.25%**) |
-| units differing | 383 |
+| units matching | 50775 (**99.27%**) |
+| units differing | 375 |
 | files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
@@ -35,24 +35,24 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 366 | 95.6% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 16 | 4.2% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 360 | 96.0% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 14 | 3.7% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 366 units
-join (90), partition_join (44), partition_prune (38), subselect (30), collate.icu.utf8 (17), incremental_sort (15), select_parallel (14), updatable_views (13), groupingsets (12), with (9), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (7), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 360 units
+join (90), partition_join (44), partition_prune (38), subselect (30), collate.icu.utf8 (13), incremental_sort (15), select_parallel (14), updatable_views (13), groupingsets (11), with (8), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (7), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
 
-### Plan choice visible in results (C1 area) — 16 units
-join (3), with (3), updatable_views (3), join_hash (2), partition_info (2), stats_ext (1), subselect (1), sqljson_jsontable (1)
+### Plan choice visible in results (C1 area) — 14 units
+join (3), with (1), updatable_views (3), join_hash (2), partition_info (2), stats_ext (1), subselect (1), sqljson_jsontable (1)
 
-- with (3), sqljson_jsontable, partition_info (2), updatable_views MERGE / row order (3): which
+- with (1), sqljson_jsontable, partition_info (2), updatable_views MERGE / row order (3): which
   side a hash join builds on. join: FULL JOIN row order.
   join_hash, subselect, stats_ext: values of EXPLAIN ANALYZE-style helpers over plans
   that differ.
@@ -184,6 +184,34 @@ Still open from this round's list, and why:
   order here; Postgres's follows how distribute_qual met them, which can pick another outer
   member for a parameterized path.
 
+## Fixed in round 13, agent 2, second batch (collations in sorts, CTE orders, worktables)
+
+Same 26-file subset plus window, tsrf and sqljson, against the engine of commit b58ade6: 8 units
+fixed, none broken.
+
+| file | fixed units |
+|---|---|
+| collate.icu.utf8 | 399, 405, 419, 659 |
+| with | 52, 76, 77 (76 / 77: the recursive term's join, so its rows' order) |
+| groupingsets | 48 |
+
+What changed:
+
+- A grouping key's or window partition key's collation (its implicit COLLATE, or its column's
+  when not the default) shows in the Sort Key that groups or partitions by it (`x COLLATE ci`),
+  the key itself as the column (`PARTITION BY x`); an ORDER BY under the key's collation is the
+  sorted aggregation's order, so no second sort.
+- A materialized CTE's scan keeps its query's order (a top Sort or an ordered index scan): a
+  merge join over it needs no sort (`CTE_ORDERS` beside `CTE_ESTIMATES`).
+- cost_recursive_union (`nonrecursive + 10 * recursive` rows, a tuple cost per row); the
+  worktable is ten times the non-recursive term (set_cte_size_estimates), without statistics
+  through the self-reference, while the recursive term is planned and in EXPLAIN; a CTE
+  Scan's width counts the columns read above.
+- Binary-coercible casts there and back (`(x::oid)::integer`) are the index's column.
+- A hashed grouping set's Hash Key shows the expression its input computes, not a reference.
+
+Goldens added: `tests/sql/a2_cte_paths.sql`; `a2_grouping_misc.sql` extended.
+
 ## Fixed in round 13, agent 2 (user-operator estimates, statistics privileges, names)
 
 Measured in subset runs of 26 files (create_misc, create_table, create_index, create_view,
@@ -238,21 +266,21 @@ What changed:
 
 Goldens added: `tests/sql/a2_userop_stats.sql`, `a2_grouping_misc.sql`.
 
-Still open in these files, and why:
+Still open in these files (after both batches), and why:
 
-- collate.icu.utf8 405, 419, 611–659: a key carrying its implicit collation is computed in a
-  projection below a WindowAgg or a sort (`(x)` instead of `x`, no `COLLATE` in the Sort Key);
-  partitionwise aggregation / joins under collations (619, 622, 644); 399 / a sorted aggregation
-  under a nondeterministic collation serving the ORDER BY (the group sort's key lacks its
-  collation, so a second sort is added); 409 (DISTINCT ON pushdown); 328, 334, 366, 367 (hashed
-  grouping of a subquery, semi join over DISTINCT, index scans for `~` / LIKE under collations).
+- collate.icu.utf8 611–647: partitionwise aggregation / joins under collations (619, 622, 644:
+  partitionwise plan choice), a key declared `COLLATE "C"` shown as `(t1.c)` (a key the binder
+  only wraps for non-bytewise collations); 409 (a DISTINCT ON subquery's qual under the
+  grouping's collation not pushed down); 328, 334, 366, 367 (hashed grouping of a subquery, a
+  semi join over DISTINCT, index scans for `~` / LIKE under collations).
 - updatable_views: VERBOSE/target-list and DML-through-view plan shapes (rules, INSTEAD OF
   triggers, security-barrier subqueries kept as Subquery Scans); MERGE row order.
-- groupingsets 48, 53, 55, 57, 189–201, 213: SubPlans in grouping expressions (numbering and
-  where they are computed), an index scan on an expression over a cast, constant keys shown as
-  `(1)`.
-- with 52, 55, 58, 76, 77, 79, 85: a materialized CTE's sort order offered to a merge join;
-  235, 238, 241, 283: row marks in VERBOSE target lists (another agent's item).
+- groupingsets 53, 55, 57, 189–201, 213, 215: SubPlans in grouping expressions (numbering and
+  where they are computed), constant keys shown as `(1)`, VERBOSE target lists of a ProjectSet /
+  Values Scan under grouping sets.
+- with 55, 58, 79, 85: plan shapes over recursive CTEs (the worktable's width counts a column
+  only its filter reads); 235, 238, 241, 283: row marks in VERBOSE target lists (another agent's
+  item).
 
 ## Fixed in round 12 (subqueries as query levels, LATERAL scope, SubPlans)
 
@@ -790,7 +818,7 @@ produces no units on Linux (skipped by the file itself).
 | rowsecurity | 1226 | 1219 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | object_address | 85 | 85 | 100% | yes | yes |  |
 | tablesample | 58 | 58 | 100% | yes | yes |  |
-| groupingsets | 217 | 205 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
+| groupingsets | 217 | 206 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
 | drop_operator | 12 | 12 | 100% | yes | yes |  |
 | password | 53 | 53 | 100% | yes | yes |  |
 | identity | 288 | 288 | 100% | yes | yes |  |
@@ -812,7 +840,7 @@ produces no units on Linux (skipped by the file itself).
 | tidscan | 49 | 49 | 100% | yes | yes |  |
 | tidrangescan | 45 | 45 | 100% | yes | yes |  |
 | collate.utf8 | 61 | 61 | 100% | yes | yes |  |
-| collate.icu.utf8 | 681 | 664 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (17) |
+| collate.icu.utf8 | 681 | 668 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (13) |
 | incremental_sort | 120 | 105 | 88% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |
@@ -872,7 +900,7 @@ produces no units on Linux (skipped by the file itself).
 | rowtypes | 237 | 230 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | returning | 145 | 142 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
-| with | 307 | 295 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (9) |
+| with | 307 | 298 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 570 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (44) |
 | partition_prune | 771 | 733 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (30) |

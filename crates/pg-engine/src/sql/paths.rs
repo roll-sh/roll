@@ -523,6 +523,13 @@ fn family(t: &DataType) -> DataType {
     }
 }
 
+/// A cast pg_cast does without a function (method 'b') between integer and oid types.
+fn binary_relabel(from: &DataType, to: &DataType) -> bool {
+    use DataType as T;
+    let oidish = |t: &DataType| matches!(t, T::Oid | T::Regclass | T::Regtype | T::Regproc | T::Regprocedure);
+    (matches!(from, T::Int4) && oidish(to)) || (oidish(from) && matches!(to, T::Int4)) || (oidish(from) && oidish(to))
+}
+
 /// The index key an operand is, looking through relabelings and the binder's implicit
 /// casts to a type of the same operator family (Postgres uses a cross-type operator).
 fn key_operand(e: &Expr) -> &Expr {
@@ -531,6 +538,16 @@ fn key_operand(e: &Expr) -> &Expr {
         Expr::Cast(x, from, to, false) if family(from) == family(to) => key_operand(x),
         // A cast to the same type without a typmod (`char(16)::bpchar`) is a relabeling.
         Expr::Cast(x, from, to, true) if from.same_base(to) && to.typmod() < 0 => key_operand(x),
+        // Binary-coercible casts there and back (`(x::oid)::integer`): RelabelTypes, which
+        // eval_const_expressions collapses into one over the column.
+        Expr::Cast(inner, from, to, _)
+            if let Expr::Cast(x, f0, t0, _) = &**inner
+                && t0 == from
+                && family(f0) == family(to)
+                && binary_relabel(f0, t0) =>
+        {
+            key_operand(x)
+        }
         e => e,
     }
 }
@@ -4673,10 +4690,13 @@ impl Planner<'_, '_> {
                 }
             }
             Plan::Recursive {
-                base, recursive, ..
+                id, base, recursive, ..
             } => {
                 visit(base, None);
+                // (The recursive term's WorkTable Scan: ten times the non-recursive term.)
+                crate::sql::explain::push_work_estimate(*id, base, self.ctx);
                 visit(recursive, None);
+                crate::sql::explain::pop_cte_estimates(1);
             }
             Plan::Insert(i) => visit(&mut i.source, None),
             Plan::Update(u) => visit(&mut u.source, None),

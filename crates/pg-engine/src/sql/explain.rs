@@ -1624,6 +1624,16 @@ fn assign_refnames_skip(
     (out, results)
 }
 
+/// The collation a grouping key of an aggregation over `input` groups (and sorts) under,
+/// when it isn't the database's default: its implicit COLLATE, or its column's.
+fn group_key_collation(input: &Plan, g: &Expr) -> Option<String> {
+    match g {
+        Expr::Collate(_, n, -1) => Some(n.clone()),
+        Expr::Col(j, _) => crate::sql::binder::optimize::output_collation(input, *j),
+        _ => None,
+    }
+}
+
 /// A grouping key that is a column, or a column carrying its nondeterministic collation
 /// (the binder's implicit COLLATE, no location).
 fn implicit_key_col(g: &Expr) -> Option<usize> {
@@ -4693,7 +4703,7 @@ impl Builder<'_, '_> {
                             })
                             .collect()
                     };
-                    CTE_ESTIMATES.with(|m| m.borrow_mut().push((name.clone(), node.rows, cols.clone())));
+                    cte_push(name.clone(), node.rows, cols.clone(), plan_output_order(cte, self.ctx));
                     self.ctes.insert(name.clone(), (node.rows, cols));
                     self.plan_ids += 1;
                     node.relationship = Some("InitPlan");
@@ -4723,17 +4733,33 @@ impl Builder<'_, '_> {
                 });
                 self.target(&mut n, Some("CTE Name"), Some(name), None, &refname);
                 // cost_ctescan: two tuple costs per row (the tuplestore, the scan).
-                let known = self.ctes.get(name).cloned().or_else(|| {
-                    CTE_ESTIMATES.with(|m| {
-                        m.borrow().iter().rev().find(|x| x.0 == *name).map(|x| (x.1, x.2.clone()))
-                    })
-                });
+                let work_key = match &**p {
+                    Plan::WorkScan { id, .. } => Some(format!("\u{1}{id}")),
+                    _ => None,
+                };
+                let known = match &work_key {
+                    Some(k) => CTE_ESTIMATES.with(|m| {
+                        m.borrow().iter().rev().find(|x| x.0 == *k).map(|x| (x.1, x.2.clone()))
+                    }),
+                    None => self.ctes.get(name).cloned().or_else(|| {
+                        CTE_ESTIMATES.with(|m| {
+                            m.borrow().iter().rev().find(|x| x.0 == *name).map(|x| (x.1, x.2.clone()))
+                        })
+                    }),
+                };
                 match known.as_ref() {
-                    Some((rows, ccols)) if matches!(&**p, Plan::CteScan { .. }) => {
+                    Some((rows, ccols)) => {
                         n.rows = *rows;
                         if ccols.len() == cols.len() {
                             n.cols = ccols.clone();
-                            n.width = ccols.iter().map(|c| c.width).sum();
+                            // (The width of the columns read above: the relation's target.)
+                            let needed = self.needed.get(&key).cloned();
+                            n.width = ccols
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| needed.as_ref().is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
+                                .map(|(_, c)| c.width)
+                                .sum();
                         } else {
                             n.width = 4 * cols.len() as u32;
                         }
@@ -4744,11 +4770,17 @@ impl Builder<'_, '_> {
                     }
                 }
                 n.total_cost = n.rows * 2.0 * costs::CPU_TUPLE_COST;
-                let names = cols.iter().map(|c| Name::col(&refname, c)).collect();
+                let names: Vec<Name> = cols.iter().map(|c| Name::col(&refname, c)).collect();
+                if matches!(&**p, Plan::CteScan { .. }) {
+                    n.order = cte_order(name)
+                        .iter()
+                        .map(|k| self.show(&k.expr, &names, Cx::Upper) + &sort_suffix(k))
+                        .collect();
+                }
                 Built::passthrough(n, names)
             }
             Plan::Recursive {
-                base, recursive, ..
+                id, base, recursive, ..
             } => {
                 // (Each term is a query level of its own: its InitPlans, its CTEs', are its
                 // top node's.)
@@ -4772,11 +4804,24 @@ impl Builder<'_, '_> {
                     b
                 };
                 let b = term(self, base);
+                // (The worktable: ten times the non-recursive term, set_cte_size_estimates.)
+                let wcols: Vec<ColInfo> = b
+                    .node
+                    .cols
+                    .iter()
+                    .map(|c| ColInfo { width: c.width, var: None, distinct: None })
+                    .collect();
+                cte_push(format!("\u{1}{id}"), b.node.rows * 10.0, wcols, Vec::new());
                 let r = term(self, recursive);
+                pop_cte_estimates(1);
+                // cost_recursive_union: about ten iterations of the recursive term, and a
+                // tuple cost per row for the tuplestores.
                 let mut n = ExNode::new("Recursive Union");
-                n.rows = b.node.rows * 10.0 + r.node.rows * 10.0;
-                n.width = b.node.width;
-                n.total_cost = b.node.total_cost + r.node.total_cost * 10.0;
+                n.rows = b.node.rows + r.node.rows * 10.0;
+                n.width = b.node.width.max(r.node.width);
+                n.startup_cost = b.node.startup_cost;
+                n.total_cost = b.node.total_cost + r.node.total_cost * 10.0 + costs::CPU_TUPLE_COST * n.rows;
+                n.cols = b.node.cols.iter().map(|c| ColInfo { width: c.width, var: None, distinct: None }).collect();
                 n.children.push(b.node.child("Outer"));
                 n.children.push(r.node.child("Inner"));
                 Built::passthrough(n, b.exported)
@@ -7345,6 +7390,25 @@ impl Builder<'_, '_> {
                 .map(|g| b.pick(g, Cx::Upper))
                 .collect::<Vec<_>>()
         };
+        // (A hashed grouping set's keys read the input directly: as it computes them.)
+        let ghash: Vec<Name> = groups
+            .iter()
+            .zip(&graw)
+            .map(|(g, n)| match g {
+                Expr::Col(j, _) => match (c.internal.get(*j), c.exported.get(*j)) {
+                    (Some(i), Some(e)) if e.full == format!("({})", i.full) && n.full == e.full => i.clone(),
+                    _ => n.clone(),
+                },
+                _ => n.clone(),
+            })
+            .collect();
+        let hash_keys = |b: &Self, idx: &[usize]| {
+            idx.iter()
+                .filter(|i| !redundant.get(**i).copied().unwrap_or(false))
+                .filter_map(|i| ghash.get(*i))
+                .map(|g| b.pick(g, Cx::Upper))
+                .collect::<Vec<_>>()
+        };
         // (Over a sort, the keys its input computes are references.)
         let keys_ref = |b: &Self, idx: &[usize]| {
             idx.iter()
@@ -7577,7 +7641,7 @@ impl Builder<'_, '_> {
                 n.strategy = Some("Mixed");
                 n.title = "MixedAggregate".into();
                 for (_, cols) in hash_sets.iter().rev() {
-                    n.details.push(Detail::List("Hash Key", keys(self, cols)));
+                    n.details.push(Detail::List("Hash Key", hash_keys(self, cols)));
                 }
             }
             for (ci, (chain, cols)) in chains.iter().enumerate() {
@@ -7707,7 +7771,7 @@ impl Builder<'_, '_> {
                 }
                 .into();
                 for (_, cols) in crate::exec::agg::hashed_sets_order(sets) {
-                    n.details.push(Detail::List("Hash Key", keys(self, &cols)));
+                    n.details.push(Detail::List("Hash Key", hash_keys(self, &cols)));
                 }
                 for _ in sets.iter().filter(|s| s.is_empty()) {
                     n.details.push(Detail::List("Group Key", vec!["()".into()]));
@@ -7804,8 +7868,16 @@ impl Builder<'_, '_> {
             let names_all: Vec<String> = gref.iter().map(|g| self.pick(g, Cx::Upper)).collect();
             // (Orders of the keys: per key its position and direction, as a sort key's
             // suffix.)
+            // (A key sorted under a collation other than the default shows it.)
+            let coll_sfx: Vec<String> = groups
+                .iter()
+                .map(|g| match group_key_collation(input, g) {
+                    Some(n) => format!(" COLLATE {}", crate::catalog::quote_ident(&n)),
+                    None => String::new(),
+                })
+                .collect();
             let mut orders: Vec<Vec<(usize, String)>> =
-                vec![(0..groups.len()).map(|i| (i, String::new())).collect()];
+                vec![(0..groups.len()).map(|i| (i, coll_sfx[i].clone())).collect()];
             // The input's order, as far as group keys go.
             let mut pre: Vec<(usize, String)> = Vec::new();
             for (oi, o) in c.node.order.iter().enumerate() {
@@ -7823,7 +7895,7 @@ impl Builder<'_, '_> {
             }
             if !pre.is_empty() {
                 let mut ord = pre.clone();
-                ord.extend((0..groups.len()).filter(|i| !pre.iter().any(|p| p.0 == *i)).map(|i| (i, String::new())));
+                ord.extend((0..groups.len()).filter(|i| !pre.iter().any(|p| p.0 == *i)).map(|i| (i, coll_sfx[i].clone())));
                 if !orders.contains(&ord) {
                     orders.push(ord);
                 }
@@ -7837,7 +7909,7 @@ impl Builder<'_, '_> {
                 }
                 let rest: Vec<(usize, String)> = (0..groups.len())
                     .filter(|i| !ord.iter().any(|o| o.0 == *i))
-                    .map(|i| (i, String::new()))
+                    .map(|i| (i, coll_sfx[i].clone()))
                     .collect();
                 ord.extend(rest);
                 // (First: at equal cost, the order the ORDER BY wants.)
@@ -8111,13 +8183,31 @@ impl Builder<'_, '_> {
                 .filter(|e| !crate::sql::binder::optimize::pseudo_constant(e))
                 .filter(|e| !matches!(e, Expr::Col(j, _) if classes.get(*j).is_some_and(|c| c.1)))
                 .collect();
-            let part: Vec<String> = part_exprs.iter().map(|e| key(e)).collect();
+            // (A key carrying its column's collation is the column; its sort shows the
+            // collation.)
+            let part: Vec<String> = part_exprs
+                .iter()
+                .map(|e| match e {
+                    Expr::Collate(x, _, -1) if matches!(&**x, Expr::Col(..)) => key(x),
+                    e => key(e),
+                })
+                .collect();
+            let part_sort: Vec<String> = part_exprs
+                .iter()
+                .zip(&part)
+                .map(|(e, p)| match e {
+                    Expr::Collate(x, n, -1) if matches!(&**x, Expr::Col(..)) => {
+                        format!("{p} COLLATE {}", quote_ident(n))
+                    }
+                    _ => p.clone(),
+                })
+                .collect();
             let order: Vec<String> = call
                 .order_by
                 .iter()
                 .map(|k| key(&k.expr) + &sort_suffix(k))
                 .collect();
-            let mut keys = part.clone();
+            let mut keys = part_sort.clone();
             keys.extend(order.iter().cloned());
             let exprs = part_exprs
                 .into_iter()
@@ -9669,10 +9759,27 @@ pub(crate) fn push_cte_estimates(ctes: &[(usize, Arc<Plan>)], names: &[String], 
                 distinct: d.or((e.rows < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(e.rows))),
             })
             .collect();
-        CTE_ESTIMATES.with(|m| m.borrow_mut().push((name.clone(), e.rows, cols)));
+        cte_push(name.clone(), e.rows, cols, plan_output_order(cte, ctx));
         n += 1;
     }
     n
+}
+
+/// The planner planning a recursive union's recursive term: its worktable's estimate
+/// (set_cte_size_estimates of a self-reference: ten times the non-recursive term's rows).
+pub(crate) fn push_work_estimate(id: usize, base: &Arc<Plan>, ctx: &ExecCtx) {
+    let e = estimate(base, ctx);
+    let cols: Vec<ColInfo> = e
+        .cols
+        .iter()
+        // (No statistics through a self-reference: examine_variable doesn't look into it.)
+        .map(|(w, _, _)| ColInfo {
+            width: *w,
+            var: None,
+            distinct: None,
+        })
+        .collect();
+    cte_push(format!("\u{1}{id}"), e.rows * 10.0, cols, Vec::new());
 }
 
 pub(crate) fn pop_cte_estimates(n: usize) {
@@ -9681,6 +9788,60 @@ pub(crate) fn pop_cte_estimates(n: usize) {
         let keep = m.len().saturating_sub(n);
         m.truncate(keep);
     });
+    CTE_ORDERS.with(|m| {
+        let mut m = m.borrow_mut();
+        let keep = m.len().saturating_sub(n);
+        m.truncate(keep);
+    });
+}
+
+/// A CTE's estimate and output order, for the CTE Scans of the query being planned.
+fn cte_push(name: String, rows: f64, cols: Vec<ColInfo>, order: Vec<SortKey>) {
+    CTE_ORDERS.with(|m| m.borrow_mut().push((name.clone(), order)));
+    CTE_ESTIMATES.with(|m| m.borrow_mut().push((name, rows, cols)));
+}
+
+/// The order a materialized CTE's (or any query's) rows come out in: its top Sort's keys or
+/// an ordered index scan's, over its output columns, through projections and a LIMIT.
+fn plan_output_order(p: &Plan, ctx: &ExecCtx) -> Vec<SortKey> {
+    let w = super::binder::plan_width(p);
+    let mut map: Vec<Option<usize>> = (0..w).map(Some).collect();
+    let mut cur = p;
+    let keys = loop {
+        match cur {
+            Plan::Barrier { input, .. } | Plan::Limit { input, .. } | Plan::LockRows { input, .. } | Plan::Context { input, .. } => {
+                cur = input
+            }
+            Plan::Project { input, exprs } => {
+                map = map
+                    .iter()
+                    .map(|m| m.and_then(|i| match exprs.get(i) {
+                        Some(Expr::Col(j, _)) => Some(*j),
+                        _ => None,
+                    }))
+                    .collect();
+                cur = input;
+            }
+            Plan::Sort { keys, .. } => break keys.clone(),
+            Plan::Scan(sp) if matches!(sp.access, crate::sql::plan::Access::Index { ordered: true, .. }) => {
+                break super::paths::index_order(ctx, sp);
+            }
+            _ => return Vec::new(),
+        }
+    };
+    let mut out = Vec::new();
+    for k in keys {
+        let Expr::Col(c, _) = &k.expr else { break };
+        let Some(o) = map.iter().position(|m| *m == Some(*c)) else { break };
+        let ty = k.expr.ty();
+        out.push(SortKey { expr: Expr::Col(o, ty), ..k });
+    }
+    out
+}
+
+/// A CTE Scan's order (`plan_output_order` of its query), by the CTE's name.
+pub(crate) fn cte_order(name: &str) -> Vec<SortKey> {
+    CTE_ORDERS.with(|m| m.borrow().iter().rev().find(|x| x.0 == name).map(|x| x.1.clone()).unwrap_or_default())
 }
 
 thread_local! {
@@ -9690,6 +9851,9 @@ thread_local! {
     static WINDOW_ORDER: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The CTEs of the WITH bodies being planned (`push_cte_estimates`).
     static CTE_ESTIMATES: std::cell::RefCell<Vec<(String, f64, Vec<ColInfo>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Beside each CTE_ESTIMATES entry: the CTE's output order (its query's pathkeys, which
+    /// a CTE Scan keeps).
+    static CTE_ORDERS: std::cell::RefCell<Vec<(String, Vec<SortKey>)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Converting a filter's input that is a FROM subquery's windows.
     static FILTER_OVER_WINDOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Converting the members of a Merge Append (`merge_appended`).
@@ -11913,6 +12077,8 @@ fn sort_group_order(input: &Plan, keys: &[SortKey]) -> Option<Vec<(usize, String
         .iter()
         .map(|k| match &k.expr {
             Expr::Col(i, _) if k.using.is_none() => Some(*i),
+            // (Sorted under a collation: a key grouped under that collation.)
+            Expr::Col(i, _) if k.using.as_ref().is_some_and(|u| u.coll.is_some() && matches!(u.name, "<" | ">")) => Some(*i),
             _ => None,
         })
         .collect();
@@ -11931,14 +12097,21 @@ fn sort_group_order(input: &Plan, keys: &[SortKey]) -> Option<Vec<(usize, String
             }
             Plan::Filter { input, .. } if matches!(&**input, Plan::Agg { .. }) => cur = input,
             Plan::Barrier { input, secure: false, .. } => cur = input,
-            Plan::Agg { groups, .. } => break groups,
+            Plan::Agg { groups, input, .. } => break (groups, input),
             _ => return None,
         }
     };
+    let (groups, agg_input) = groups;
     let mut out = Vec::new();
     for (k, c) in keys.iter().zip(cols) {
+        let coll = k.using.as_ref().and_then(|u| u.coll.as_ref()).map(|c| c.name.as_str());
         match c {
-            Some(j) if j < groups.len() => out.push((j, sort_suffix(k))),
+            Some(j)
+                if j < groups.len()
+                    && coll.is_none_or(|n| group_key_collation(agg_input, &groups[j]).as_deref() == Some(n)) =>
+            {
+                out.push((j, sort_suffix(k)))
+            }
             _ => break,
         }
     }

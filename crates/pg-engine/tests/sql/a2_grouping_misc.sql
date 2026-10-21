@@ -31,7 +31,33 @@ EXPLAIN (COSTS OFF)
 SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING (CASE x WHEN 'abc' COLLATE a2_ci THEN true ELSE false END);
 EXPLAIN (COSTS OFF)
 SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING ROW(x, 1) < ROW('ABC' COLLATE a2_cs, 1) ORDER BY 1;
-DROP TABLE a2_g3ci;
+EXPLAIN (COSTS OFF)
+SELECT x, count(*) FROM a2_g3ci GROUP BY x HAVING x IN ('abc', 'def') ORDER BY 1;
+SET enable_hashagg = off;
+EXPLAIN (COSTS OFF) SELECT x, count(*) FROM a2_g3ci GROUP BY x;
+RESET enable_hashagg;
+EXPLAIN (COSTS OFF) SELECT x, count(*) OVER (PARTITION BY x) FROM a2_g3ci;
+SELECT x, count(*) OVER (PARTITION BY x) FROM a2_g3ci ORDER BY 1, 2;
+CREATE TABLE a2_g3cs (x text COLLATE a2_cs);
+INSERT INTO a2_g3cs VALUES ('abc'), ('ABC'), ('def'), ('ghi');
+EXPLAIN (COSTS OFF)
+SELECT x, count(*) FROM a2_g3cs GROUP BY x HAVING x = 'abc' COLLATE a2_ci ORDER BY 1;
+SET enable_hashagg = off;
+EXPLAIN (COSTS OFF) SELECT x, count(*) FROM a2_g3cs GROUP BY x;
+RESET enable_hashagg;
+EXPLAIN (COSTS OFF) SELECT x, count(*) OVER (PARTITION BY x) FROM a2_g3cs;
+DROP TABLE a2_g3ci, a2_g3cs;
+
+CREATE TABLE a2_tk (unique1 int, unique2 int);
+INSERT INTO a2_tk SELECT g, g FROM generate_series(0, 9999) g;
+CREATE INDEX ON a2_tk (unique1);
+ANALYZE a2_tk;
+-- (Casts there and back without functions: the index's column.)
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM (SELECT unique1::oid AS x, unique2 AS y FROM a2_tk) AS t
+WHERE x::integer = 1 GROUP BY GROUPING SETS (x, y) ORDER BY 1, 2;
+EXPLAIN (COSTS OFF) SELECT * FROM a2_tk WHERE unique1::oid = 5::oid;
+DROP TABLE a2_tk;
 
 CREATE TEMP TABLE a2_gs3 (a integer, b integer, c integer, d integer);
 INSERT INTO a2_gs3 VALUES (1, 1, 1, 1), (2, 2, 2, 2);
