@@ -161,6 +161,10 @@ fn walk(
         && absorbable(pred)
     {
         let (m, inner) = walk(input, off, virt, leaves, joins, laterals);
+        // (A pulled-up subquery's WHERE over outer joins of its own: its items are one
+        // unit to an outer join above, which can't be commuted past the clauses.)
+        let has_outer = joins.iter().any(|j| j.kind != JoinKind::Inner && j.r & m != 0);
+        let inner = if has_outer { inner | m } else { inner };
         let mut conds = Vec::new();
         conjuncts(pred.clone(), &mut conds);
         joins.push(RawJoin {

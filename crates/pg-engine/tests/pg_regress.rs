@@ -38,6 +38,8 @@
 //! - `PGREGRESS_TIMEOUT=<secs>`: psql timeout per run of a file (default 300). After an engine
 //!   crash or timeout the file resumes after the failing unit (up to 25 times, 2 timeouts).
 //! - `PGREGRESS_PORT`, `PGREGRESS_CONTAINER`: engine port (55600) and reference container.
+//! - `PGREGRESS_ENGINE_HOST`: the host name psql in the container uses for the engine
+//!   (default `host.docker.internal`).
 //! - `PGREGRESS_REPORT_DIR`: where `REPORT.md` and `hunks/` go (default `tests/regress`).
 //!
 //! The reference's database and any databases, roles and tablespaces the run created there
@@ -849,7 +851,13 @@ fn psql(
 ) -> (String, &'static str) {
     let (host, port) = match target {
         Target::Reference => ("127.0.0.1".to_string(), 5432),
-        Target::Engine(p) => ("host.docker.internal".to_string(), *p),
+        // (PGREGRESS_ENGINE_HOST: where the container reaches the engine, when not
+        // host.docker.internal, e.g. a relay in its network namespace on a host whose
+        // firewall drops the bridge.)
+        Target::Engine(p) => (
+            std::env::var("PGREGRESS_ENGINE_HOST").unwrap_or_else(|_| "host.docker.internal".into()),
+            *p,
+        ),
     };
     let build = cfg.builddir().to_str().unwrap().to_string();
     let mut envs = vec![

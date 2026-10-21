@@ -783,11 +783,69 @@ fn dummy(p: &Plan) -> Plan {
             exprs: exprs.clone(),
         };
     }
+    // (A join's sides: their projections' expressions over one empty relation of all
+    // their columns, as the dummy join rel's Result shows them.)
+    if let Plan::Join { kind, .. } = p
+        && !matches!(kind, JoinKind::Semi | JoinKind::Anti)
+    {
+        let (names, exprs) = dummy_outputs(p);
+        if exprs.iter().any(|e| !matches!(e, Expr::Col(..))) {
+            let ncols = names.len();
+            let cols = names.into_iter().collect::<Option<Vec<_>>>().map(Arc::new);
+            return Plan::Project {
+                input: Arc::new(Plan::Empty { ncols, cols }),
+                exprs,
+            };
+        }
+    }
     let ncols = plan_width(p);
     let cols = plain_names(p)
         .filter(|c| c.len() == ncols)
         .map(Arc::new);
     Plan::Empty { ncols, cols }
+}
+
+/// A plan's outputs as expressions over the relations below its projections and joins
+/// (each column's name, when a plain column has one).
+fn dummy_outputs(p: &Plan) -> (Vec<Option<String>>, Vec<Expr>) {
+    match p {
+        Plan::Project { input, exprs } => {
+            let (names, inner) = dummy_outputs(input);
+            let exprs = exprs.iter().map(|e| super::joinpath::lift_subst(e, &inner)).collect();
+            (names, exprs)
+        }
+        Plan::Filter { input, .. } | Plan::Sort { input, .. } => dummy_outputs(input),
+        Plan::Join { kind, left, right, .. } if !matches!(kind, JoinKind::Semi | JoinKind::Anti) => {
+            let (mut names, mut exprs) = dummy_outputs(left);
+            let (rn, re) = dummy_outputs(right);
+            let off = names.len() as isize;
+            names.extend(rn);
+            exprs.extend(re.into_iter().map(|e| e.shift_cols(off)));
+            (names, exprs)
+        }
+        _ => {
+            let types = col_types(p);
+            let names = plain_names(p).filter(|c| c.len() == types.len());
+            (
+                (0..types.len()).map(|i| names.as_ref().map(|n| n[i].clone())).collect(),
+                types.into_iter().enumerate().map(|(i, t)| Expr::Col(i, t)).collect(),
+            )
+        }
+    }
+}
+
+/// A relation made empty by a constant-false qual of its own (a pulled-up subquery's
+/// `WHERE false`), which Postgres places at the outer join above as its Join Filter.
+fn pseudo_false(p: &Plan) -> bool {
+    match p {
+        Plan::Filter { input, pred } => constant_false(&Some(pred.clone())) || pseudo_false(input),
+        Plan::Project { input, .. } | Plan::Sort { input, .. } => pseudo_false(input),
+        Plan::Join { kind: JoinKind::Inner, left, right, .. } => pseudo_false(left) || pseudo_false(right),
+        Plan::Join { kind: JoinKind::Left, left, .. } => pseudo_false(left),
+        // (A FROM-less query's `WHERE false`, folded already.)
+        Plan::Empty { ncols: 0, .. } => true,
+        _ => false,
+    }
 }
 
 /// A join or filter qual that is constant false or NULL (restriction_is_constant_false).
@@ -806,6 +864,7 @@ impl Planner<'_, '_> {
     /// outer join with an empty outer side is, and an outer join's constant-false
     /// condition empties its nullable side.
     pub(super) fn reduce_dummies(&self, p: &mut Plan) {
+        let right_false = matches!(p, Plan::Join { kind: JoinKind::Left, right, params, .. } if params.is_empty() && pseudo_false(right));
         let kids: Vec<&mut Arc<Plan>> = match p {
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
@@ -864,6 +923,9 @@ impl Planner<'_, '_> {
                         if empty(left) {
                             true
                         } else {
+                            if right_false && empty(right) && cond.is_none() {
+                                *cond = Some(Expr::Const(Value::Bool(false), DataType::Bool));
+                            }
                             if cf && params.is_empty() && !empty(right) {
                                 let d = dummy(right);
                                 *right = Arc::new(d);

@@ -413,7 +413,7 @@ fn lateral_one_row(p: &Plan) -> Option<Plan> {
         );
     }
     Some(Plan::Project {
-        input: left.clone(),
+        input: Arc::new(crate::sql::plan::mark_phv_eval(left)),
         exprs: out,
     })
 }

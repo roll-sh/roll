@@ -9095,6 +9095,9 @@ impl Builder<'_, '_> {
                 total_cost: m.total,
                 ..ExNode::new("Materialize")
             };
+            // (Its target list refers to its input's: a value the input computes shown
+            // parenthesized.)
+            r.internal = r.exported.clone();
             if self.o.verbose {
                 mn.output = r
                     .internal

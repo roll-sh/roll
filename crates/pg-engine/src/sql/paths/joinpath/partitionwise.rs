@@ -435,14 +435,17 @@ impl Planner<'_, '_> {
             if skip {
                 continue;
             }
-            let plans: Vec<Plan> = parted.iter().map(|p| p.parts[i].clone().unwrap()).collect();
+            // (Planned again in the child join: its own paths, parameterized ones too.)
+            let plans: Vec<Plan> = parted.iter().map(|p| super::lift::unplanned(p.parts[i].clone().unwrap())).collect();
             let mut child = if s.general {
                 substitute_general(p, &mut plans.into_iter())?
             } else {
                 substitute(p, true, &mut plans.into_iter())?
             };
             self.absorbed.replace(s.extra.clone());
+            self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
             let planned = self.plan_joins_with(&mut child, needed, None, &[]);
+            self.pw_loop_rows.take();
             self.absorbed.take();
             planned?;
             children.push(child);
@@ -676,7 +679,7 @@ impl Planner<'_, '_> {
             for (k, slot) in row.iter().enumerate() {
                 let leaf = &s.leaves[k];
                 plans.push(match slot.and_then(|j| parted[k].parts[j].clone()) {
-                    Some(pl) => pl,
+                    Some(pl) => super::lift::unplanned(pl),
                     None => Plan::Empty {
                         ncols: leaf.ncols,
                         cols: None,
@@ -689,7 +692,9 @@ impl Planner<'_, '_> {
                 substitute(p, true, &mut plans.into_iter())?
             };
             self.absorbed.replace(s.extra.clone());
+            self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
             let planned = self.plan_joins_with(&mut child, needed, None, &[]);
+            self.pw_loop_rows.take();
             self.absorbed.take();
             planned?;
             children.push(child);

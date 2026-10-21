@@ -214,6 +214,20 @@ pub struct JoinMeta {
     /// An outer join reduce_outer_joins made another kind: the kind it was written as
     /// (subquery pull-up, which comes first in Postgres, decides PlaceHolderVars by it).
     pub written_kind: Option<JoinKind>,
+    /// A projection above this join computes PlaceHolderVars at it (a pulled-up empty
+    /// relation's outputs, remove_useless_result_rtes): not a subquery's select list to
+    /// pull up again.
+    pub phv_eval: bool,
+}
+
+/// `p` with its join (if it is one) marked as computing PlaceHolderVars in the projection
+/// above it (`JoinMeta::phv_eval`).
+pub fn mark_phv_eval(p: &Plan) -> Plan {
+    let mut p = p.clone();
+    if let Plan::Join { meta, .. } = &mut p {
+        meta.phv_eval = true;
+    }
+    p
 }
 
 /// A function called in FROM whose body runs (not inlined), as EXPLAIN shows it.

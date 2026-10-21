@@ -1681,6 +1681,10 @@ struct Planner<'c, 'a> {
     lifting: std::cell::Cell<usize>,
     /// The projections computing lifted subquery outputs over join groups, by address.
     lifted: std::cell::RefCell<Vec<usize>>,
+    /// Planning a partitionwise join's child join: the parent group's leaves' rows, which
+    /// its parameterized paths' loop counts come from (a child relation's are made
+    /// parameterized by the parent relations, then reparameterized by child).
+    pw_loop_rows: std::cell::RefCell<Vec<f64>>,
 }
 
 impl<'c, 'a> Planner<'c, 'a> {
@@ -1700,6 +1704,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             phv_quals: Default::default(),
             lifting: Default::default(),
             lifted: Default::default(),
+            pw_loop_rows: Default::default(),
         }
     }
 

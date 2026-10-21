@@ -11,6 +11,11 @@ use crate::sql::plan::{JoinMeta, JoinMethod};
 use std::rc::Rc;
 
 mod lift;
+
+/// A pulled-up subquery's expression over the row it reads (`lift::subst`).
+pub(super) fn lift_subst(e: &Expr, map: &[Expr]) -> Expr {
+    lift::subst(e, map)
+}
 mod outerjoins;
 mod partitionwise;
 mod partmerge;
@@ -373,6 +378,8 @@ struct Search<'s, 'c, 'a> {
     /// Building a parameterized join path's plan: per enclosing nested loop, the values
     /// (over the group row) it passes in, which a scan inside reads as `Outer(1, k)`.
     param_stack: std::cell::RefCell<Vec<Vec<Expr>>>,
+    /// A partitionwise child join's parent leaves' rows (`Planner::pw_loop_rows`).
+    loop_rows: Vec<f64>,
 }
 
 /// The join clauses a parameterized path enforces (its scans', through its joins).
@@ -1150,10 +1157,55 @@ impl Search<'_, '_, '_> {
                 params.push(other.clone());
                 enforced.push(*ci);
             }
+            // get_baserel_parampathinfo: the other join clauses movable into the leaf with
+            // these outer leaves are the path's too (its filter), their values of the
+            // outer leaves parameters.
+            for (ci, c) in self.clauses.iter().enumerate() {
+                if enforced.contains(&ci)
+                    || c.eq.is_some()
+                    || c.leaves & set == 0
+                    || c.leaves == set
+                    || c.leaves & !(set | req) != 0
+                    || c.expr.is_volatile()
+                    || !self.movable_to(ci, l)
+                {
+                    continue;
+                }
+                let mut plain = true;
+                c.expr.walk(&mut |e| {
+                    if matches!(e, Expr::Outer(..) | Expr::Subquery(_) | Expr::Param(..)) {
+                        plain = false;
+                    }
+                });
+                if !plain {
+                    continue;
+                }
+                let Ok(q) = c.expr.clone().transform(&mut |e| {
+                    Ok(match e {
+                        Expr::Col(g, t) if self.leaf_of.get(g) == Some(&l) => Expr::Col(g - leaf.off, t),
+                        Expr::Col(g, t) => {
+                            let x = Expr::Col(g, t.clone());
+                            let k = match params.iter().position(|p| p.same_as(&x)) {
+                                Some(k) => k,
+                                None => {
+                                    params.push(x);
+                                    params.len() - 1
+                                }
+                            };
+                            Expr::Outer(1, k, t)
+                        }
+                        e => e,
+                    })
+                }) else {
+                    continue;
+                };
+                prel.quals.push(q);
+                enforced.push(ci);
+            }
             let nrq = r.quals.len();
             prel.loop_count = (0..self.leaves.len())
                 .filter(|j| req & (1 << j) != 0)
-                .map(|j| self.leaves[j].rows)
+                .map(|j| self.leaf_loop_rows(j))
                 .fold(f64::INFINITY, f64::min)
                 .max(1.0);
             if !prel.loop_count.is_finite() {
@@ -1500,11 +1552,20 @@ impl Search<'_, '_, '_> {
         cands
     }
 
+    /// A leaf's rows as an outer relation of a parameterized path: in a partitionwise
+    /// child join, its parent relation's.
+    fn leaf_loop_rows(&self, j: usize) -> f64 {
+        match self.loop_rows.get(j) {
+            Some(&r) if self.loop_rows.len() == self.leaves.len() => r,
+            _ => self.leaves[j].rows,
+        }
+    }
+
     /// The fewest rows of the leaves in `req` (get_loop_count).
     fn loop_count(&self, req: u32) -> f64 {
         let n = (0..self.leaves.len())
             .filter(|j| req & (1 << j) != 0)
-            .map(|j| self.leaves[j].rows)
+            .map(|j| self.leaf_loop_rows(j))
             .fold(f64::INFINITY, f64::min)
             .max(1.0);
         if n.is_finite() { n } else { 1.0 }
@@ -3873,6 +3934,7 @@ impl Search<'_, '_, '_> {
                         hash_swapped: Vec::new(),
                         key_flipped: if kind == JoinKind::Inner { key_flipped } else { Vec::new() },
                         written_kind: None,
+                        phv_eval: false,
                     }),
                 };
                 let layout = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
@@ -4045,6 +4107,21 @@ fn gather(
                     clauses.push((e, !inner_only));
                 }
             }
+        }
+        return;
+    }
+    // A pulled-up subquery's WHERE over its inner joins (`lift`): its clauses are the
+    // tree's.
+    if !top
+        && let Plan::Filter { input, pred } = p
+        && matches!(&**input, Plan::Join { kind: JoinKind::Inner, params, meta, .. } if params.is_empty() && meta.from_call.is_none())
+        && outerjoins::absorbable(pred)
+    {
+        gather(input, off, leaves, clauses, false);
+        let mut parts = Vec::new();
+        conjuncts(pred.clone(), &mut parts);
+        for e in parts {
+            clauses.push((e.shift_cols(off as isize), false));
         }
         return;
     }
@@ -4849,6 +4926,7 @@ impl Planner<'_, '_> {
             extra: if general { extra } else { Vec::new() },
             cur_sj: None,
             param_stack: Default::default(),
+            loop_rows: self.pw_loop_rows.take(),
         };
         s.needed.resize(gw, false);
         for (ci, (e, on)) in raw_clauses.into_iter().enumerate() {

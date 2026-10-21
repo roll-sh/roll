@@ -15,12 +15,12 @@ compared statement by statement.
 
 ## Where it stands
 
-As of commit `e890fb0` (2026-10-21), plus server-side files (below):
+As of commit `e890fb0` (2026-10-21), plus server-side files (below) and round 13 (STATUS.md):
 
-- **Regression suite: 50,737 of 51,150 statements match (99.19%).** 413 differ. The full
+- **Regression suite: 50,741 of 51,150 statements match (99.20%).** 409 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 394 are `EXPLAIN` plan text (95%). Query results already match.
-  - 18 are plan choices that show up in results (mostly which side a hash join builds on,
+  - 391 are `EXPLAIN` plan text (96%). Query results already match.
+  - 17 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
     work), so the ceiling is about 99.998%.
@@ -73,6 +73,15 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below):
    The goldens connect to `127.0.0.1:55499` as `postgres` / `pw`. The regress harness drives
    the container's own `psql` with `docker exec` and reaches the engine through
    `host.docker.internal` (on Linux, add `--add-host=host.docker.internal:host-gateway`).
+
+   On a Linux host whose firewall drops traffic from the docker bridge (ufw's default deny
+   incoming does), the container can't reach `host.docker.internal`; don't open the firewall.
+   Bind the engine to `127.0.0.1` and relay over a Unix socket instead: a sidecar sharing the
+   reference container's network namespace (`docker run -d --network container:roll-engine-ref
+   -v <dir>:/relay nginx:alpine`, with a `stream { server { listen 127.0.0.1:<port>; proxy_pass
+   unix:/relay/e<port>.sock; } }` config) and a host process accepting on `<dir>/e<port>.sock`
+   and connecting to `127.0.0.1:<port>`. Then run the harness with
+   `PGREGRESS_ENGINE_HOST=127.0.0.1`.
 3. Build and run the tests (through the lock):
 
    ```sh

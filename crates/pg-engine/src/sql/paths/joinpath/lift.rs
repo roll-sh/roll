@@ -119,6 +119,127 @@ fn subquery_leaf(p: &Plan) -> Option<(&ScanPlan, &Vec<Expr>)> {
     Some((sp, exprs))
 }
 
+/// A FROM subquery (or view) over a join, or a filter over its outputs (a WHERE clause
+/// pushed down to it): its join tree is part of the group (pull_up_simple_subquery), its
+/// outputs evaluated where they're read. One an outer join above nulls that wouldn't go
+/// NULL with the subquery's row (a PlaceHolderVar to evaluate at a join, which the plan has
+/// no place for here) keeps the subquery a leaf, unless reduce_outer_joins made those joins
+/// inner.
+fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Option<(Plan, Vec<Expr>, Vec<(u32, u64)>)> {
+    let (proj, above) = match p {
+        Plan::Filter { input, pred } if matches!(&**input, Plan::Project { .. }) && clauses_movable(pred) => {
+            (&**input, Some(pred))
+        }
+        p => (p, None),
+    };
+    let Plan::Project { input, exprs } = proj else {
+        return None;
+    };
+    if !join_subquery(input)
+        || virtual_proj(proj).is_some()
+        || reads_outer(input)
+        || !exprs.iter().all(|e| {
+            matches!(e, Expr::Col(..))
+                || movable(e)
+                    && outer_refs(e).is_empty()
+                    && (nulled == 0 || anulled == 0 || !e.columns().is_empty() && !nonstrict(e))
+        })
+    {
+        return None;
+    }
+    let (join, pred) = match &**input {
+        Plan::Filter { input, pred } => (&**input, Some(pred)),
+        j => (j, None),
+    };
+    let saved = std::mem::replace(&mut cx.in_join_subquery, true);
+    let (j2, mj, nj) = lift(join, nulled, anulled, None, cx);
+    let j2 = unplanned(j2);
+    cx.in_join_subquery = saved;
+    cx.lifted = true;
+    let map: Vec<Expr> = exprs.iter().map(|e| subst(e, &mj)).collect();
+    let mut preds = Vec::new();
+    if let Some(f) = pred {
+        conjuncts(subst(f, &mj), &mut preds);
+    }
+    if let Some(f) = above {
+        conjuncts(subst(f, &map), &mut preds);
+    }
+    let plan = match and_all(preds) {
+        Some(f) => Plan::Filter {
+            input: Arc::new(j2),
+            pred: f,
+        },
+        None => j2,
+    };
+    Some((plan, map, nj))
+}
+
+/// A join tree's scans as the group will plan them again (the subquery planned them for
+/// itself).
+pub(super) fn unplanned(p: Plan) -> Plan {
+    match p {
+        Plan::Scan(mut sp) if sp.mark.is_none() && sp.current_of.is_none() => {
+            sp.access = Access::Unplanned;
+            sp.index = None;
+            sp.reverse = false;
+            Plan::Scan(sp)
+        }
+        Plan::Join {
+            kind,
+            left,
+            right,
+            cond,
+            hash,
+            params,
+            nleft,
+            nright,
+            meta,
+        } => Plan::Join {
+            kind,
+            left: Arc::new(unplanned(Arc::unwrap_or_clone(left))),
+            right: Arc::new(unplanned(Arc::unwrap_or_clone(right))),
+            cond,
+            hash,
+            params,
+            nleft,
+            nright,
+            meta,
+        },
+        Plan::Filter { input, pred } => Plan::Filter {
+            input: Arc::new(unplanned(Arc::unwrap_or_clone(input))),
+            pred,
+        },
+        p => p,
+    }
+}
+
+/// Clauses that may become the group's: each reads some column, none volatile or a
+/// sub-select.
+fn clauses_movable(f: &Expr) -> bool {
+    let mut parts = Vec::new();
+    conjuncts(f.clone(), &mut parts);
+    super::outerjoins::absorbable(f) && parts.iter().all(|q| !q.columns().is_empty() && movable(q))
+}
+
+/// A subquery's plan below its select list that is a join tree the group can take in: a
+/// plain join (or its WHERE over one, each clause reading the subquery's columns).
+fn join_subquery(p: &Plan) -> bool {
+    let (j, pred) = match p {
+        Plan::Filter { input, pred } => (&**input, Some(pred)),
+        j => (j, None),
+    };
+    let Plan::Join { kind, meta, .. } = j else {
+        return false;
+    };
+    if !matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full)
+        || meta.from_call.is_some()
+        || meta.phv_eval
+    {
+        return false;
+    }
+    pred.is_none_or(clauses_movable)
+}
+
 /// A scan filter that doesn't stop the scan from being a plain relation of the join tree.
 fn movable_filter(f: &Expr) -> bool {
     let mut ok = true;
@@ -142,9 +263,13 @@ struct Cx {
     nrel: u32,
     /// An empty relation was pulled up or removed.
     results: bool,
+    /// Inside a subquery over a join being pulled up: a subquery's output whose nulling
+    /// outer joins were all made inner is computed where it's read.
+    in_join_subquery: bool,
 }
 
-/// `nulled`: the outer joins above `p` (in the group) that null its rows. `lateral`: the
+/// `nulled`: the outer joins above `p` (in the group) that null its rows, as written;
+/// `anulled`: those that still do after reduce_outer_joins. `lateral`: the
 /// LATERAL values of the join `p` is the right side of (over that join's left row as it
 /// becomes), with the outer joins nulling each one's relation; None when `p` isn't such a
 /// side. Returns the new plan, the map, and per new column the outer joins nulling it and
@@ -152,6 +277,7 @@ struct Cx {
 fn lift(
     p: &Plan,
     nulled: u32,
+    anulled: u32,
     lateral: Option<(&[Expr], &[(u32, u64)])>,
     cx: &mut Cx,
 ) -> (Plan, Vec<Expr>, Vec<(u32, u64)>) {
@@ -187,7 +313,9 @@ fn lift(
             let wk = meta.written_kind.unwrap_or(*kind);
             let lnull = nulled | if matches!(wk, JoinKind::Right | JoinKind::Full) { bit } else { 0 };
             let rnull = nulled | if matches!(wk, JoinKind::Left | JoinKind::Full) { bit } else { 0 };
-            let (l2, ml, nl) = lift(left, lnull, None, cx);
+            let alnull = anulled | if matches!(kind, JoinKind::Right | JoinKind::Full) { bit } else { 0 };
+            let arnull = anulled | if matches!(kind, JoinKind::Left | JoinKind::Full) { bit } else { 0 };
+            let (l2, ml, nl) = lift(left, lnull, alnull, None, cx);
             let nleft2 = crate::sql::binder::plan_width(&l2);
             let params2: Vec<Expr> = params.iter().map(|e| subst(e, &ml)).collect();
             let pnull: Vec<(u32, u64)> = params2
@@ -201,7 +329,7 @@ fn lift(
                 .collect();
             // (A side the hash keys read: its lifted values must stay over that side.)
             let lat = (!params.is_empty()).then_some((&params2[..], &pnull[..]));
-            let (r2, mr, nr) = lift(right, rnull, lat, cx);
+            let (r2, mr, nr) = lift(right, rnull, arnull, lat, cx);
             let nright2 = crate::sql::binder::plan_width(&r2);
             // The right side's columns over the combined row (its LATERAL values put in).
             let mr: Vec<Expr> = mr
@@ -305,7 +433,7 @@ fn lift(
                         let mut all: Vec<Expr> = (0..nl).map(|i| Expr::Col(i, types.get(i).cloned().unwrap_or(DataType::Unknown))).collect();
                         all.extend(exprs);
                         Plan::Project {
-                            input: Arc::new(l),
+                            input: Arc::new(crate::sql::plan::mark_phv_eval(&l)),
                             exprs: all,
                         }
                     }
@@ -444,6 +572,11 @@ fn lift(
             )
         }
         _ => {
+            if lateral.is_none()
+                && let Some(r) = flatten_join_subquery(p, nulled, anulled, cx)
+            {
+                return r;
+            }
             let Some((sp, exprs)) = subquery_leaf(p) else {
                 return identity(p, cx);
             };
@@ -465,7 +598,7 @@ fn lift(
                         return false;
                     }
                     // Not nulled by an outer join of the group: computed where it's read.
-                    if nulled == 0 {
+                    if nulled == 0 || cx.in_join_subquery && anulled == 0 {
                         return true;
                     }
                     // The relations a LATERAL reference reads are under the same lowest
@@ -925,8 +1058,9 @@ pub(super) fn lift_group(p: &Plan) -> Option<Lifted> {
         bad: false,
         nrel: 0,
         results: false,
+        in_join_subquery: false,
     };
-    let (plan, map, _) = lift(p, 0, None, &mut cx);
+    let (plan, map, _) = lift(p, 0, 0, None, &mut cx);
     if !cx.lifted || cx.bad {
         return None;
     }
