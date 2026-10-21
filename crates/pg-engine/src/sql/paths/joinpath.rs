@@ -387,9 +387,13 @@ fn enforced_of(p: &JP) -> Vec<usize> {
     match &p.node {
         JNode::Scan { enforced, .. } | JNode::Append { enforced, .. } => enforced.clone(),
         JNode::Memoize { input, .. } | JNode::Material(input) => enforced_of(input),
-        JNode::Join { outer, inner, .. } => {
+        JNode::Join { outer, inner, quals, .. } => {
             let mut v = enforced_of(outer);
             v.extend(enforced_of(inner));
+            // (A parameterized join checks the clauses joining it to its parameters.)
+            if p.req != 0 {
+                v.extend(quals.iter().copied());
+            }
             v
         }
         _ => Vec::new(),
@@ -1134,9 +1138,32 @@ impl Search<'_, '_, '_> {
             }
         }
         let mut out: Vec<JP> = Vec::new();
+        let members = self.ec_members();
         for req in reqs {
             let used: Vec<&(Expr, Expr, u32, usize)> =
                 cands.iter().filter(|c| c.2 & !req == 0).collect();
+            // generate_join_implied_equalities: one clause per equivalence class, between its
+            // first members on either side (the one the join's restriction list takes), when
+            // that is a candidate here.
+            let in_set = |g: usize, s: u32| (1u32 << self.leaf_of[g]) & s != 0;
+            let pick = |e: usize| -> Option<usize> {
+                let first = |s: u32| members.iter().copied().find(|&g| self.ec[g] == e && in_set(g, s));
+                let (x, y) = (first(req)?, first(set)?);
+                used.iter().map(|c| c.3).find(|&j| {
+                    self.clauses[j].eq.as_ref().is_some_and(|(p, q, _, _)| {
+                        let (p, q) = (key_col(p), key_col(q));
+                        (p == Some(x) && q == Some(y)) || (p == Some(y) && q == Some(x))
+                    })
+                })
+            };
+            let used: Vec<&(Expr, Expr, u32, usize)> = used
+                .iter()
+                .copied()
+                .filter(|c| match self.clause_ec(&self.clauses[c.3]) {
+                    Some(e) => pick(e).is_none_or(|j| j == c.3),
+                    None => true,
+                })
+                .collect();
             // The clauses with the outer value as a parameter.
             let mut prel = r.shallow_with_quals();
             let mut params = Vec::new();
@@ -1781,6 +1808,20 @@ struct Extra {
 }
 
 impl Search<'_, '_, '_> {
+    /// add_paths_to_joinrel's param_source_rels: the relations a path of the join of `set`
+    /// may be parameterized by, those outside the minimal right side of an outer join whose
+    /// right side the join is in.
+    fn param_source_rels(&self, set: u32) -> u32 {
+        let all = if self.leaves.len() >= 32 { u32::MAX } else { (1u32 << self.leaves.len()) - 1 };
+        let mut src = 0;
+        for sj in &self.sjs {
+            if set & sj.min_r != 0 && set & sj.min_l == 0 {
+                src |= all & !sj.min_r;
+            }
+        }
+        src
+    }
+
     /// LATERAL items can only be the inside of a nested loop whose outer side has every
     /// item they read (join_is_legal's LATERAL checks; parameterized join relations aren't
     /// made, so the item itself is that inner side).
@@ -2539,6 +2580,25 @@ impl Search<'_, '_, '_> {
                     .cloned(),
             )
             .collect();
+        // (In a group with outer joins, parameterized outer paths too: the join path is
+        // parameterized by what they read, when an outer join above allows it.)
+        if self.general && matches!(ex.jt, Jt::Inner | Jt::Left) {
+            let iset = self.rels[inner].set;
+            let pouter: Vec<JP> = self.rels[outer]
+                .param
+                .iter()
+                .filter(|p| p.req & iset == 0)
+                .cloned()
+                .collect();
+            for op in &pouter {
+                for ip in &inner_params {
+                    self.try_nestloop(ri, op, ip, Vec::new(), ex);
+                }
+                if let Some(m) = &matpath {
+                    self.try_nestloop(ri, op, m, Vec::new(), ex);
+                }
+            }
+        }
         for op in outer_paths.iter().filter(|p| p.req == 0) {
             let pk = self.join_pathkeys(ex.jt, ex.set, &op.keys);
             if nest_ok {
@@ -2801,24 +2861,86 @@ impl Search<'_, '_, '_> {
     }
 
     fn try_nestloop(&mut self, ri: usize, op: &JP, ip: &JP, keys: Vec<GKey>, ex: &Extra) {
-        // An inner path parameterized by more than the outer side: a join path itself
-        // parameterized by the rest (an inner join's nested loop, the outer side plain).
-        let param_join = ip.req & !op.set != 0;
-        if param_join
-            && !(ex.jt == Jt::Inner
-                && op.req == 0
-                && !self.general
-                && matches!(ip.node, JNode::Scan { .. } | JNode::Join { .. }))
-        {
+        // An inner (or outer) path parameterized by more than the join: a join path itself
+        // parameterized by the rest. Either an inner join's nested loop with the outer side
+        // plain (allow_star_schema_join), or, in a group with outer joins, one parameterized
+        // by relations an outer join above has on its left (param_source_rels).
+        let req_all = (ip.req | op.req) & !ex.set;
+        let param_join = req_all != 0;
+        let star = ex.jt == Jt::Inner
+            && op.req == 0
+            && !self.general
+            && matches!(ip.node, JNode::Scan { .. } | JNode::Join { .. });
+        let sourced = self.general
+            && matches!(ex.jt, Jt::Inner | Jt::Left)
+            && op.req & ip.set == 0
+            && req_all & self.param_source_rels(ex.set) != 0;
+        if param_join && !(star || sourced) {
             return;
         }
-        let enforced: Vec<usize> = enforced_of(ip.memoized());
-        let quals: Vec<usize> = ex
+        if !param_join && op.req != 0 {
+            return;
+        }
+        let mut enforced: Vec<usize> = enforced_of(ip.memoized());
+        enforced.extend(enforced_of(op));
+        let mut quals: Vec<usize> = ex
             .restrict
             .iter()
             .copied()
             .filter(|c| !enforced.contains(c))
             .collect();
+        // get_joinrel_parampathinfo's equivalence classes: a class's clause between the
+        // parameters and the join that the inner path enforces is replaced by one between
+        // the parameters and the outer side's member (else nothing would equate those).
+        if param_join {
+            let members = self.ec_members();
+            let in_set = |g: usize, s: u32| (1u32 << self.leaf_of[g]) & s != 0;
+            let mut ecs: Vec<usize> = Vec::new();
+            for &g in &members {
+                if !ecs.contains(&self.ec[g]) {
+                    ecs.push(self.ec[g]);
+                }
+            }
+            for e in ecs {
+                let first = |s: u32| members.iter().copied().find(|&g| self.ec[g] == e && in_set(g, s));
+                let (Some(x), Some(y)) = (first(req_all), first(ex.set)) else { continue };
+                if !in_set(y, ip.set) {
+                    continue;
+                }
+                let Some(z) = first(op.set) else { continue };
+                let found = (0..self.clauses.len()).find(|&j| {
+                    self.clauses[j].eq.as_ref().is_some_and(|(p, q, _, _)| {
+                        let (p, q) = (key_col(p), key_col(q));
+                        (p == Some(x) && q == Some(z)) || (p == Some(z) && q == Some(x))
+                    })
+                });
+                if let Some(j) = found
+                    && !quals.contains(&j)
+                    && !enforced.contains(&j)
+                {
+                    quals.push(j);
+                }
+            }
+        }
+        // (A join path parameterized by an outer join's left side checks the join clauses
+        // movable into it from there: get_joinrel_parampathinfo.)
+        if param_join && !star {
+            for (ci, c) in self.clauses.iter().enumerate() {
+                if quals.contains(&ci)
+                    || enforced.contains(&ci)
+                    || c.leaves & !(ex.set | req_all) != 0
+                    || c.leaves & req_all == 0
+                    || c.leaves & ex.set == 0
+                    || c.expr.is_volatile()
+                    || (0..self.leaves.len())
+                        .filter(|l| c.leaves & ex.set & (1u32 << l) != 0)
+                        .any(|l| !self.movable_to(ci, l))
+                {
+                    continue;
+                }
+                quals.push(ci);
+            }
+        }
         let qc: f64 = quals.iter().map(|&c| self.clauses[c].cost).sum();
         let indexed = ip.req != 0
             && quals.is_empty()
@@ -2850,7 +2972,7 @@ impl Search<'_, '_, '_> {
             &self.g,
         );
         if param_join {
-            let req = ip.req & !op.set;
+            let req = req_all;
             let jp = JP {
                 node: JNode::Join {
                     method: JoinMethod::NestLoop,
@@ -3456,9 +3578,22 @@ impl Search<'_, '_, '_> {
                     }
                 }
                 JNode::Memoize { input, .. } | JNode::Material(input) => walk(s, input, set, out),
-                JNode::Join { outer, inner, .. } => {
+                JNode::Join { outer, inner, quals, .. } => {
                     walk(s, outer, set, out);
                     walk(s, inner, set, out);
+                    // (A parameterized join's clauses over relations outside it.)
+                    if n.req != 0 {
+                        for &q in quals {
+                            s.clauses[q].expr.walk(&mut |x| {
+                                if let Expr::Col(g, _) = x
+                                    && s.leaf_of.get(*g).is_some_and(|&l| (1u32 << l) & set == 0)
+                                    && !out.iter().any(|y| y.same_as(x))
+                                {
+                                    out.push(x.clone());
+                                }
+                            });
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -3668,9 +3803,9 @@ impl Search<'_, '_, '_> {
                     self.param_stack.borrow_mut().pop();
                 }
                 let pos = |layout: &[usize], g: usize| layout.iter().position(|&x| x == g);
-                let remap = |e: &Expr, layout: &[usize]| -> Expr {
-                    e.clone().remap_cols(&|g| pos(layout, g).unwrap_or(g))
-                };
+                // (A parameterized join's clauses read the values from outside it as the
+                // enclosing nested loop's parameters.)
+                let remap = |e: &Expr, layout: &[usize]| -> Expr { self.param_ref(e, layout) };
                 let sorted = |plan: Plan, layout: &[usize], ks: &Option<Vec<GKey>>| -> Plan {
                     let Some(ks) = ks else { return plan };
                     let keys = ks

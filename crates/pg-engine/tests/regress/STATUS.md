@@ -8,8 +8,8 @@ order (`PGREGRESS_TIMEOUT=400`), so every file sees the catalogs the files befor
 collate.icu.utf8 (370–394, 606, 609: a `GROUP BY x COLLATE c` key shown as `(x)`) were fixed after
 it and re-checked in a subset run of that file; they are counted as matching below. So are the
 28 units of misc_functions, largeobject and copy that server-side files fixed (see "Server-side
-files" below), re-checked in subset runs, and the 4 units round 13 fixed (see "Fixed in round 13"),
-re-checked in a 24-file subset run.
+files" below), re-checked in subset runs, and the units round 13 fixed (see the two "Fixed in
+round 13" sections), re-checked in subset runs.
 
 Re-run one subset (example):
 
@@ -25,8 +25,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50758 (**99.23%**) |
-| units differing | 392 |
+| units matching | 50762 (**99.24%**) |
+| units differing | 388 |
 | files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
@@ -35,7 +35,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 375 | 95.7% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 371 | 95.6% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 16 | 4.1% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -43,8 +43,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 375 units
-join (96), partition_join (47), partition_prune (38), subselect (30), collate.icu.utf8 (17), incremental_sort (15), select_parallel (14), updatable_views (13), groupingsets (12), with (9), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (7), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 371 units
+join (92), partition_join (47), partition_prune (38), subselect (30), collate.icu.utf8 (17), incremental_sort (15), select_parallel (14), updatable_views (13), groupingsets (12), with (9), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (7), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -108,11 +108,11 @@ Measured against the engine of commit 687fc9b in a 24-file subset (`test_setup`,
 create_table, create_index, create_view, create_function_sql, inherit, updatable_views,
 select_distinct, select_distinct_on, subselect, union, join, aggregates, groupingsets, equivclass,
 rowsecurity, with, rangefuncs, memoize, partition_join, partition_prune, partition_aggregate,
-rules): 4 units fixed, none broken.
+rules): 8 units fixed, none broken.
 
 | file | fixed units |
 |---|---|
-| join | 351, 355 |
+| join | 244, 351, 355, 382, 406, 407 |
 | partition_join | 27 |
 | memoize | 50 (`explain_memoize` over a partitionwise join) |
 
@@ -141,8 +141,20 @@ What changed:
   `Join Filter: false`.
 - A nested loop's Materialize refers to its input's outputs (a value computed below shown
   parenthesized).
+- `x op ANY (SELECT <one row without FROM>)` in WHERE is the comparison `x op e`
+  (convert_ANY_sublink_to_join, the empty relation then removed), when `x` reads the query's
+  columns: a constant-false one empties the query (382).
+- Join paths parameterized by relations outside them in groups with outer joins
+  (add_paths_to_joinrel's param_source_rels: the left side of an outer join whose right side
+  the join is in), their outer side parameterized too, the join clauses movable into them from
+  there their own quals (get_joinrel_parampathinfo), read as the enclosing nested loop's
+  parameters (406/407).
+- One equivalence-class clause per parameterized path: the one between the class's first members
+  on either side, as the join's restriction list takes it (generate_join_implied_equalities);
+  a parameterized join whose inner path enforces the class's clause with the parameters checks
+  `parameter = outer member` instead (244, and 123's join order).
 
-Golden added: `tests/sql/gpu_join_subquery.sql`.
+Goldens added: `tests/sql/gpu_join_subquery.sql`, `gpu_param_joins.sql`.
 
 Still open from this round's list, and why:
 
@@ -150,13 +162,18 @@ Still open from this round's list, and why:
   nt1's scan and checks `(nt2.b1 AND (id IS NOT NULL))` (another PlaceHolderVar, unsplit) inside
   the parameterized index scan; here the clause is split and the AND is a Join Filter.
 - join 343/347 (constant PlaceHolderVars through reduced outer joins), 359 (a PlaceHolderVar as a
-  Memoize cache key), 360, 366/382 (`x IN (SELECT <one FROM-less row>)` should become `x = ...`),
-  368 (a dummy result over catalog scans naming `c.relname`), 41 of partition_join (a non-strict
-  LATERAL PlaceHolderVar evaluated at a join): PlaceHolderVars evaluated at joins.
-- join 406/410: join paths parameterized by a relation outside them are only built in groups
-  without outer joins (`try_nestloop`'s `param_join`).
-- join 123/244: a parameterized path takes every equivalence-class clause; Postgres's
-  generate_join_implied_equalities takes one per class (the best-scoring outer member).
+  Memoize cache key), 360, 368 (a dummy result over catalog scans naming `c.relname`), 41 of
+  partition_join (a non-strict LATERAL PlaceHolderVar evaluated at a join): PlaceHolderVars
+  evaluated at joins. 366: the IN's subquery is a full join of two one-row relations Postgres
+  removes.
+- join 410: the join order now differs only by cost (`b ⋈ a` parameterized by i1 and i2 joined
+  to i1, where Postgres joins `i1 ⋈ b` first).
+- join 123: plan shape and join order match; the clause between the two aggregates reads
+  `a = b` where Postgres prints `b = a` (its first derivation of the class clause, during a
+  parameterized join it considered, fixes the orientation for later uses; the engine's search
+  order differs, so that isn't emulated). Equivalence-class members are ordered by the clauses'
+  order here; Postgres's follows how distribute_qual met them, which can pick another outer
+  member for a parameterized path.
 
 ## Fixed in round 13, agent 2 (user-operator estimates, statistics privileges, names)
 
@@ -738,7 +755,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 325 | 91% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (31) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 826 | 89% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (95) |
+| join | 925 | 830 | 90% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (91) |
 | aggregates | 556 | 548 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

@@ -24,7 +24,7 @@ fn and_all(mut items: Vec<Expr>) -> Option<Expr> {
 pub(super) fn pull_up(cat: &Catalog, plan: Plan, pred: Expr) -> (Plan, Option<Expr>) {
     let mut parts = Vec::new();
     conjuncts(pred, &mut parts);
-    let parts: Vec<Expr> = parts.into_iter().map(values_to_any).collect();
+    let parts: Vec<Expr> = parts.into_iter().map(values_to_any).map(one_row_to_ops).collect();
     // The clauses that stay restrictions of the FROM items go down to them first (the join
     // planner distributes them there), below the semi / anti joins.
     let pulls = |e: &Expr, plan: &Plan| -> bool {
@@ -820,6 +820,64 @@ fn reduce_unique(cat: &Catalog, j: Plan) -> Plan {
 
 /// convert_VALUES_to_ANY: `x IN (VALUES (a), (b), ...)` of values fixed for the query
 /// (no columns, nothing volatile or a sub-select) is `x = ANY (ARRAY[a, b, ...])`.
+/// `x op ANY (SELECT e)` over one row without FROM: the semi join with the empty relation
+/// pulled up (convert_ANY_sublink_to_join, then remove_useless_result_rtes) leaves the
+/// comparison `x op e` (one per column, ANDed). The test expression must read the query's
+/// columns, as Postgres pulls up only then.
+fn one_row_to_ops(e: Expr) -> Expr {
+    let Expr::Subquery(sub) = &e else { return e };
+    if sub.kind != SubqueryKind::Any
+        || sub.left.is_empty()
+        || sub.left.len() != sub.ops.len()
+        || !sub.params.is_empty()
+        || sub.left.iter().all(|l| l.columns().is_empty())
+        || sub.left.iter().any(|l| l.is_volatile() || has_sublink(l))
+    {
+        return e;
+    }
+    // (Through the binder's projections, composed.)
+    let mut p: &Plan = &sub.plan;
+    let mut maps: Vec<&Vec<Expr>> = Vec::new();
+    while let Plan::Project { input, exprs } = p {
+        maps.push(exprs);
+        p = input;
+    }
+    if !matches!(p, Plan::One) || maps.is_empty() {
+        return e;
+    }
+    let mut row: Vec<Expr> = Vec::new();
+    for m in maps.iter().rev() {
+        row = m
+            .iter()
+            .map(|x| {
+                x.clone()
+                    .transform(&mut |y| {
+                        Ok(match y {
+                            Expr::Col(i, t) => row.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                            y => y,
+                        })
+                    })
+                    .unwrap()
+            })
+            .collect();
+    }
+    if row.len() != sub.left.len()
+        || row
+            .iter()
+            .any(|v| !v.columns().is_empty() || v.is_volatile() || has_sublink(v) || v.has_outer_refs())
+    {
+        return e;
+    }
+    let mut cmps: Vec<Expr> = sub
+        .left
+        .iter()
+        .zip(&sub.ops)
+        .zip(row)
+        .map(|((l, op), v)| Expr::Call(op.clone(), vec![l.clone(), v], crate::types::DataType::Bool))
+        .collect();
+    if cmps.len() == 1 { cmps.pop().unwrap() } else { Expr::And(cmps) }
+}
+
 fn values_to_any(e: Expr) -> Expr {
     let Expr::Subquery(sub) = &e else { return e };
     if sub.kind != SubqueryKind::Any || sub.left.len() != 1 || sub.ops.len() != 1 || !sub.params.is_empty() {
