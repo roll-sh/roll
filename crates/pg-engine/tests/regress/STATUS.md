@@ -34,8 +34,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50950 (**99.61%**) |
-| units differing | 200 |
+| units matching | 50952 (**99.61%**) |
+| units differing | 198 |
 | files fully matching | 202 |
 | engine output == expected/*.out (pg_regress "ok") | 175 files |
 | engine crashes / panics | none |
@@ -44,7 +44,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 193 | 96.5% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 191 | 96.5% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 6 | 3.0% |
 | by design (a parallel plan's combine function) | 1 | 0.5% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -52,8 +52,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 193 units
-join (74), partition_join (21), partition_prune (12), subselect (6), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (2), equivclass (6), aggregates (7), rowtypes (4), rowsecurity (2), generated_virtual (1), join_hash (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
+### EXPLAIN (group C1) — 191 units
+join (72), partition_join (21), partition_prune (12), subselect (6), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (2), equivclass (6), aggregates (7), rowtypes (4), rowsecurity (2), generated_virtual (1), join_hash (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -172,7 +172,7 @@ matches this table's counts).
 | file | fixed units |
 |---|---|
 | partition_prune | 24, 203, 414, 435, 440, 446, 485, 489, 490, 524, 526, 528, 532, 534, 544, 555, 623, 626, 633, 664, 722, 725, 729, 735, 754, 756 |
-| join | 77, 85, 349, 364, 379, 458, 459, 462, 513, 514, 515, 566, 591, 647, 844, 867, 921, 923 (90 → 74) |
+| join | 77, 85, 349, 364, 379, 458, 459, 462, 513, 514, 515, 566, 591, 647, 844, 867, 921, 923 (90 → 74); third batch: 248, 420 |
 | partition_join | 94, 134, 158, 235, 603, 604, 605; second batch: 43, 173, 256, 258, 599, 600, 601 |
 | create_index | 671 |
 
@@ -240,8 +240,23 @@ What changed:
   for a GroupAggregate; a partitionwise inner join's columns carry their partitioned tables'
   statistics (group counts above it).
 
+- Third batch (on 767acf3, subset runs of 55 files: 2 more fixed, none broken), a wrong
+  result first: a join's hash keys are rebuilt as clauses with the `=` remembered for their
+  type, and the types were collected through joins only, so a lower join under a filter
+  (`COALESCE(b.x, a.x) = 44` above two left joins, its upper join's key gone into constants)
+  lost its clause when no other join had the type, and its rows were a cross product (it
+  depended on the session's earlier queries: the operators are per thread). The types are
+  collected through every node, and a key without one resolves `=` itself rather than going.
+  Then: a join's sorted output is useful for merging when a clause between it and the rest
+  is on that class, an outer join's included (pathkeys_useful_for_merging: join 248's Merge
+  Right Join over a presorted inner join); an expression's borrowed class isn't a left join's
+  output order (its null-extended rows); an EXISTS pulled up over a subquery planned with
+  merge-input sorts sees through them; a parameterized bitmap heap scan is costed for its
+  repeated scans (compute_bitmap_pages' loop_count, the index part amortized too, and EXPLAIN
+  costs it the same way: join 420).
+
 Goldens added: `tests/sql/a5_runtime_pruning.sql`, `a5_join_misc.sql`, `a5_lifted_merge.sql`,
-`a5_pw_order.sql`.
+`a5_pw_order.sql`, `a5_merge_useful.sql`.
 
 Still open from this list, and why:
 
@@ -253,6 +268,14 @@ Still open from this list, and why:
   partitions: ordered partition scans under each arm's WindowAgg), 377–383 / 652 (parallel).
 - join 609 / 610: the equivalence class has the scan-level `t1.a = t1.b` too, so Postgres
   joins on `t1.a = t2.b`; the engine's classes come from join clauses only.
+- join 442: `(t1 LEFT JOIN t3 ON t3.f1 = 'foo') LEFT JOIN t4 ON t3.f1 = t4.f1` gives t4
+  `f1 = 'foo'` and no join clause when t3 ⋈ t4 is joined first (the clause's version without
+  the first join's nulling is in t3's class with the constant); the binder only sees constants
+  pushed with the clause, and dropping the clause is right for that join order only (also a
+  Memoize and a LATERAL filter there). join 502 / 503: the subquery's sorted path (a Group
+  over an index scan) kept beside its cheapest one for a merge join above; subqueries are
+  planned once here. An inner join's class clause in a bitmap scan's Recheck Cond is derived
+  afresh, outer member first (`a.unique1 = thousand`); the engine shows it as written.
 
 ## Fixed in round 14, agent 6 (dummy-rel classes, parallel plans, incremental sort stats)
 
@@ -1472,7 +1495,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 349 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 851 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (72) |
+| join | 925 | 853 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (70) |
 | aggregates | 556 | 548 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

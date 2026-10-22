@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 50,950 of 51,150 statements match (99.61%).** 200 differ. The full
+- **Regression suite: 50,952 of 51,150 statements match (99.61%).** 198 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 193 are `EXPLAIN` plan text (96%). Query results already match.
+  - 191 are `EXPLAIN` plan text (96%). Query results already match.
   - 6 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -205,7 +205,7 @@ them all with the "Fixed in round N" sections describing what was already tried.
    remove_useless_result_rtes (343/347), qualified names in a dummy Result over catalog scans
    (368), a full join of one-row relations removed (366). join 744 differs only in plan choice
    (a parameterized hash join inside a nested loop).
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 74, partition_join 21,
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 72, partition_join 21,
    partition_prune 12 units; round 14's agent 5 section in STATUS.md has what changed): cost-driven
    choices (join 123/410/424/450/543, partition_join 21/74), equivalence classes above outer joins
    (join 416) and with scan-level members (join 609/610), partitionwise joins with a LATERAL item
