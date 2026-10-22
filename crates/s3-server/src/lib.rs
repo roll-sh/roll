@@ -19,6 +19,7 @@ mod config;
 mod cors;
 mod ctx;
 mod error;
+mod lifecycle;
 mod logging;
 mod multipart;
 mod object;
@@ -26,6 +27,7 @@ mod policy;
 mod post;
 mod response;
 mod upload;
+mod versioning;
 mod website;
 
 use axum::Router;

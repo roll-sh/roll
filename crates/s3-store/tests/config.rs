@@ -119,7 +119,7 @@ async fn object_acls_survive_copies_branches_and_the_trash() {
     assert_eq!(extras(&s, "src", "k"), (Some(ACL.into()), Some("/r".into())));
     // A branch's frozen view keeps the old ACL when the parent's changes or is overwritten.
     s.branch_bucket("src", "snap").await.unwrap();
-    s.set_object_acl("src", "k", None).await.unwrap();
+    s.set_object_acl("src", "k", None, None).await.unwrap();
     assert_eq!(extras(&s, "src", "k"), (None, Some("/r".into())));
     assert_eq!(extras(&s, "snap", "k"), (Some(ACL.into()), Some("/r".into())));
     put_acl(&s, "src", "copy", b"v2", None, None).await;

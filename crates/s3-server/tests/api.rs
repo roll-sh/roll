@@ -703,8 +703,9 @@ async fn unsupported_features_fail_loudly() {
         .send()
         .await
         .unwrap();
-    let e = t.client.put_bucket_versioning().bucket("bkt").versioning_configuration(aws_sdk_s3::types::VersioningConfiguration::builder().status(aws_sdk_s3::types::BucketVersioningStatus::Enabled).build()).send().await.unwrap_err();
-    assert_eq!(e.raw_response().unwrap().status().as_u16(), 501);
+    let mfa = aws_sdk_s3::types::VersioningConfiguration::builder().status(aws_sdk_s3::types::BucketVersioningStatus::Enabled).mfa_delete(aws_sdk_s3::types::MfaDelete::Enabled).build();
+    let e = t.client.put_bucket_versioning().bucket("bkt").versioning_configuration(mfa).send().await.unwrap_err();
+    assert_eq!(e.raw_response().unwrap().status().as_u16(), 501, "MFA delete: no MFA devices here");
     let e = t.client.get_bucket_policy().bucket("bkt").send().await.unwrap_err();
     assert_eq!(code(&e.into_service_error()), "NoSuchBucketPolicy");
 }
@@ -1005,14 +1006,13 @@ async fn everything_else_is_not_implemented() {
         r
     };
     let ni = (501, "NotImplemented".to_string());
-    for sub in ["object-lock", "versions", "torrent", "metadataTable", "session"] {
+    for sub in ["torrent", "metadataTable", "session"] {
         assert_eq!(status_code(raw("GET", "/bkt", sub, vec![]).send(&t).await).await, ni, "?{sub}");
     }
-    for sub in ["retention", "legal-hold", "torrent", "select", "attributes", "renameObject"] {
+    for sub in ["torrent", "select", "attributes", "renameObject"] {
         assert_eq!(status_code(raw("GET", "/bkt/k", sub, vec![]).send(&t).await).await, ni, "?{sub}");
     }
     for (h, v) in [
-        ("x-amz-object-lock-mode", "GOVERNANCE"),
         ("x-amz-server-side-encryption-customer-algorithm", "AES256"),
         ("x-amz-copy-source-server-side-encryption-customer-algorithm", "AES256"),
         ("x-amz-server-side-encryption", "aws:kms:dsse"),
@@ -1027,9 +1027,6 @@ async fn everything_else_is_not_implemented() {
     let e = t.client.put_object().bucket("bkt").key("k").if_none_match(&etag).body(ByteStream::from_static(b"x")).send().await.unwrap_err();
     assert_eq!(status(&e), 501, "If-None-Match on a write is only '*'");
     assert_eq!(status(&t.client.get_object_attributes().bucket("bkt").key("k").object_attributes(aws_sdk_s3::types::ObjectAttributes::Etag).send().await.unwrap_err()), 501);
-    let e = t.client.create_bucket().bucket("locked").object_lock_enabled_for_bucket(true).send().await.unwrap_err();
-    assert_eq!(status(&e), 501);
-    assert_eq!(status(&t.client.head_bucket().bucket("locked").send().await.unwrap_err()), 404);
     // ACLs are disabled by default: the canned private ACL is accepted (see tests/config.rs).
     let policy = AccessControlPolicy::builder().owner(Owner::builder().id("roll").build()).build();
     assert_eq!(status(&t.client.put_bucket_acl().bucket("bkt").access_control_policy(policy).send().await.unwrap_err()), 400);
@@ -1050,10 +1047,11 @@ async fn everything_else_is_not_implemented() {
     let mut r = raw("PUT", "/bkt/x", "", vec![("x-amz-request-payer", "requester".into()), ("x-amz-acl", "bucket-owner-full-control".into())]);
     r.body = b"x".to_vec();
     assert_eq!(r.send(&t).await.status(), 200);
-    // Versions: only "null" exists.
-    assert_eq!(code(&t.client.get_object().bucket("bkt").key("k").version_id("3HL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY").send().await.unwrap_err()), "NoSuchKey");
+    // Versions of an unversioned bucket: only "null" exists; ids not ours are malformed.
+    assert_eq!(code(&t.client.get_object().bucket("bkt").key("k").version_id("3HL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY").send().await.unwrap_err()), "InvalidArgument");
+    assert_eq!(code(&t.client.get_object().bucket("bkt").key("k").version_id("0000000000000000aaaaaaaaaaaaaaaa").send().await.unwrap_err()), "NoSuchVersion");
     t.client.get_object().bucket("bkt").key("k").version_id("null").send().await.unwrap();
-    assert_eq!(code(&t.client.copy_object().bucket("bkt").key("c").copy_source("bkt/k?versionId=abc").send().await.unwrap_err()), "NoSuchKey");
+    assert_eq!(code(&t.client.copy_object().bucket("bkt").key("c").copy_source("bkt/k?versionId=abc").send().await.unwrap_err()), "InvalidArgument");
     // Methods S3 doesn't have.
     let r = raw("PATCH", "/bkt/k", "", vec![]).send(&t).await;
     assert_eq!(r.headers()["allow"], "GET, PUT, POST, DELETE, HEAD");
@@ -1626,13 +1624,13 @@ async fn bucket_details() {
     let token = t.client.list_objects_v2().bucket("bkt").max_keys(1).send().await.unwrap().next_continuation_token().unwrap().to_string();
     let l = t.client.list_objects_v2().bucket("bkt").start_after("b").continuation_token(token).send().await.unwrap();
     assert_eq!(l.contents().iter().filter_map(|o| o.key()).collect::<Vec<_>>(), vec!["b", "c"], "the token wins over start-after");
-    // Lifecycle: abort rules round-trip, transitions don't exist.
+    // Lifecycle: abort rules round-trip; transitions are kept but invalid ones refused.
     let abort = LifecycleRule::builder().id("mpu").status(ExpirationStatus::Enabled).filter(LifecycleRuleFilter::builder().prefix("").build()).abort_incomplete_multipart_upload(AbortIncompleteMultipartUpload::builder().days_after_initiation(3).build()).build().unwrap();
     t.client.put_bucket_lifecycle_configuration().bucket("bkt").lifecycle_configuration(BucketLifecycleConfiguration::builder().rules(abort).build().unwrap()).send().await.unwrap();
     let got = t.client.get_bucket_lifecycle_configuration().bucket("bkt").send().await.unwrap();
     assert_eq!(got.rules()[0].abort_incomplete_multipart_upload().unwrap().days_after_initiation(), Some(3));
-    let tr = LifecycleRule::builder().status(ExpirationStatus::Enabled).filter(LifecycleRuleFilter::builder().prefix("").build()).transitions(Transition::builder().days(30).storage_class(TransitionStorageClass::Glacier).build()).build().unwrap();
+    let tr = LifecycleRule::builder().status(ExpirationStatus::Enabled).filter(LifecycleRuleFilter::builder().prefix("").build()).transitions(Transition::builder().days(10).storage_class(TransitionStorageClass::StandardIa).build()).build().unwrap();
     let e = t.client.put_bucket_lifecycle_configuration().bucket("bkt").lifecycle_configuration(BucketLifecycleConfiguration::builder().rules(tr).build().unwrap()).send().await.unwrap_err();
-    assert_eq!(status(&e), 501);
+    assert_eq!(code(&e), "InvalidArgument", "STANDARD_IA needs 30 days, as on S3");
     assert_eq!(t.store.bucket("bkt").unwrap().lifecycle.len(), 1, "a refused configuration changes nothing");
 }

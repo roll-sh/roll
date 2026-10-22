@@ -332,7 +332,7 @@ async fn a_non_force_delete_of_a_branch_is_all_or_nothing() {
 async fn lifecycle_never_expires_a_version_written_after_the_cutoff() {
     let (_faulty, _backend, clock, s) = faulty_env("lcrace").await;
     s.create_bucket("lcy", BucketOptions::default()).await.unwrap();
-    let rule = LifecycleRule { id: "old".into(), prefix: "logs/".into(), enabled: true, expire_days: Some(1), abort_multipart_days: None };
+    let rule = LifecycleRule { id: "old".into(), prefix: "logs/".into(), enabled: true, expire_days: Some(1), abort_multipart_days: None, ..Default::default() };
     s.update_bucket("lcy", BucketUpdate { lifecycle: Some(vec![rule]), ..Default::default() }).await.unwrap();
     put(&s, "lcy", "logs/a", b"old").await;
     put(&s, "lcy", "logs/b", b"old").await;

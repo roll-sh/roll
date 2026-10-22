@@ -196,6 +196,81 @@ async fn aws_cli_bucket_configuration() {
     assert_eq!(reqwest::get(format!("{}/awssite/index.html", t.endpoint)).await.unwrap().status(), 200, "anonymous REST read");
 }
 
+/// Versioning with the AWS CLI's s3api, and rclone's version listing.
+#[tokio::test(flavor = "multi_thread")]
+async fn versions_with_aws_cli_and_rclone() {
+    if !docker_ok() {
+        return;
+    }
+    let t = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    fixtures(dir.path());
+    let endpoint = t.endpoint.clone();
+    let path = dir.path().to_path_buf();
+    blocking(move || {
+        let env = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
+        let aws = |args: &[&str]| {
+            let mut all = vec!["--endpoint-url", endpoint.as_str()];
+            all.extend_from_slice(args);
+            run("amazon/aws-cli", &env, &path, &all)
+        };
+        let json = |s: String| -> serde_json::Value { serde_json::from_str(&s).unwrap_or_else(|e| panic!("{e}: {s}")) };
+        aws(&["s3api", "create-bucket", "--bucket", "awsver", "--object-lock-enabled-for-bucket"]);
+        let v = json(aws(&["s3api", "get-bucket-versioning", "--bucket", "awsver"]));
+        assert_eq!(v["Status"], "Enabled", "{v}");
+        aws(&["s3api", "put-bucket-versioning", "--bucket", "awsver", "--versioning-configuration", "Status=Enabled"]);
+        let first = json(aws(&["s3api", "put-object", "--bucket", "awsver", "--key", "doc.txt", "--body", "/data/small.txt"]));
+        aws(&["s3", "cp", "/data/tree/a.txt", "s3://awsver/doc.txt"]);
+        aws(&["s3", "rm", "s3://awsver/doc.txt"]);
+        let l = json(aws(&["s3api", "list-object-versions", "--bucket", "awsver", "--prefix", "doc"]));
+        let versions = l["Versions"].as_array().unwrap();
+        let markers = l["DeleteMarkers"].as_array().unwrap();
+        assert_eq!((versions.len(), markers.len()), (2, 1), "{l}");
+        assert_eq!(markers[0]["IsLatest"], true);
+        let v1 = first["VersionId"].as_str().unwrap();
+        assert!(versions.iter().any(|v| v["VersionId"] == v1 && v["IsLatest"] == false), "{l}");
+        aws(&["s3api", "get-object", "--bucket", "awsver", "--key", "doc.txt", "--version-id", v1, "/data/v1.out"]);
+        same(&path.join("small.txt"), &path.join("v1.out"));
+        // Paged by the CLI itself.
+        let paged = json(aws(&["s3api", "list-object-versions", "--bucket", "awsver", "--page-size", "1"]));
+        assert_eq!(paged["Versions"].as_array().unwrap().len(), 2, "{paged}");
+        // Deleting the marker brings the newest version back.
+        let marker = markers[0]["VersionId"].as_str().unwrap();
+        aws(&["s3api", "delete-object", "--bucket", "awsver", "--key", "doc.txt", "--version-id", marker]);
+        aws(&["s3", "cp", "s3://awsver/doc.txt", "/data/current.out"]);
+        same(&path.join("tree/a.txt"), &path.join("current.out"));
+        // Object Lock through the CLI.
+        aws(&[
+            "s3api",
+            "put-object-lock-configuration",
+            "--bucket",
+            "awsver",
+            "--object-lock-configuration",
+            "{\"ObjectLockEnabled\":\"Enabled\",\"Rule\":{\"DefaultRetention\":{\"Mode\":\"GOVERNANCE\",\"Days\":1}}}",
+        ]);
+        let locked = json(aws(&["s3api", "put-object", "--bucket", "awsver", "--key", "locked.txt", "--body", "/data/small.txt"]));
+        let r = json(aws(&["s3api", "get-object-retention", "--bucket", "awsver", "--key", "locked.txt"]));
+        assert_eq!(r["Retention"]["Mode"], "GOVERNANCE", "{r}");
+        aws(&["s3api", "delete-object", "--bucket", "awsver", "--key", "locked.txt", "--version-id", locked["VersionId"].as_str().unwrap(), "--bypass-governance-retention"]);
+
+        // rclone lists old versions with --s3-versions.
+        let renv = [
+            ("RCLONE_CONFIG_R_TYPE", "s3".to_string()),
+            ("RCLONE_CONFIG_R_PROVIDER", "Other".to_string()),
+            ("RCLONE_CONFIG_R_ACCESS_KEY_ID", ACCESS.to_string()),
+            ("RCLONE_CONFIG_R_SECRET_ACCESS_KEY", SECRET.to_string()),
+            ("RCLONE_CONFIG_R_ENDPOINT", endpoint.clone()),
+            ("RCLONE_CONFIG_R_REGION", REGION.to_string()),
+            ("RCLONE_CONFIG_R_FORCE_PATH_STYLE", "true".to_string()),
+        ];
+        let ls = run("rclone/rclone", &renv, &path, &["lsf", "--s3-versions", "r:awsver"]);
+        let names: Vec<&str> = ls.lines().filter(|l| l.starts_with("doc")).collect();
+        assert_eq!(names.len(), 2, "the current version and a dated old one: {ls}");
+        assert!(names.contains(&"doc.txt") && names.iter().any(|n| n.starts_with("doc-v")), "{ls}");
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rclone() {
     if !docker_ok() {

@@ -141,7 +141,7 @@ async fn every_write_path_keeps_branches_frozen() {
         put(&s, "main", k, k.as_bytes()).await;
     }
     put(&s, "main", "restored", b"newer").await;
-    let rule = LifecycleRule { id: "x".into(), prefix: "expired/".into(), enabled: true, expire_days: Some(1), abort_multipart_days: None };
+    let rule = LifecycleRule { id: "x".into(), prefix: "expired/".into(), enabled: true, expire_days: Some(1), abort_multipart_days: None, ..Default::default() };
     s.update_bucket("main", BucketUpdate { lifecycle: Some(vec![rule]), ..Default::default() }).await.unwrap();
     s.branch_bucket("main", "brn").await.unwrap();
     s.update_bucket("brn", BucketUpdate { lifecycle: Some(vec![]), ..Default::default() }).await.unwrap();

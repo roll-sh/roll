@@ -345,7 +345,7 @@ pub(crate) async fn put_bucket_acl(ctx: &mut Ctx, bucket: &Bucket, body: Body) -
 
 pub(crate) fn get_object_acl(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Read)?;
-    let meta = ctx.store().get_object(&bucket.name, ctx.key_name()).s3()?;
+    let meta = ctx.store().get_object_version(&bucket.name, ctx.key_name(), ctx.q("versionId")).s3()?;
     ctx.meter(&bucket.id, Class::B);
     let a = ctx.access(&bucket.name)?;
     response::ok_xml(render(ctx.store(), &object_acl(a.acls_enabled, meta.headers.acl.as_deref())))
@@ -355,10 +355,11 @@ pub(crate) async fn put_object_acl(ctx: &mut Ctx, bucket: &Bucket, body: Body) -
     ctx.require(&bucket.name, Need::Write)?;
     ctx.meter(&bucket.id, Class::A);
     let acl = requested(ctx, body, false).await?;
-    ctx.store().get_object(&bucket.name, ctx.key_name()).s3()?;
+    let version = ctx.q("versionId").map(str::to_string);
+    ctx.store().get_object_version(&bucket.name, ctx.key_name(), version.as_deref()).s3()?;
     let stored = check_write(ctx, &bucket.name, &acl)?;
     if ctx.access(&bucket.name)?.acls_enabled {
-        ctx.store().set_object_acl(&bucket.name, ctx.key_name(), stored).await.s3()?;
+        ctx.store().set_object_acl(&bucket.name, ctx.key_name(), version.as_deref(), stored).await.s3()?;
     }
     Ok(response::empty(StatusCode::OK))
 }

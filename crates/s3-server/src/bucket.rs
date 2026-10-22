@@ -2,11 +2,12 @@
 
 use crate::auth::Need;
 use crate::ctx::{Ctx, no_content, read_small};
-use crate::error::{StoreResult, store_error};
+use crate::error::StoreResult;
 use crate::multipart::{self, encoding_type};
 use crate::acl;
 use crate::object::checksum_of;
 use crate::response::{self, Reply, set};
+use crate::versioning;
 use axum::body::Body;
 use axum::http::{Method, StatusCode};
 use base64::Engine;
@@ -27,7 +28,7 @@ pub(crate) fn list_buckets(ctx: &mut Ctx) -> Reply {
 }
 
 /// Bucket subresources S3 has and we don't.
-const UNSUPPORTED: [&str; 7] = ["object-lock", "versions", "metadataTable", "metadataConfiguration", "session", "abac", "torrent"];
+const UNSUPPORTED: [&str; 5] = ["metadataTable", "metadataConfiguration", "session", "abac", "torrent"];
 
 pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
     let name = ctx.bucket_name().to_string();
@@ -62,11 +63,9 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
             ctx.meter(&bucket.id, Class::B);
             response::ok_xml(xml::location_constraint(&ctx.server.cfg.region))
         }
-        Method::GET if ctx.has("versioning") => {
-            ctx.require(&name, Need::Read)?;
-            ctx.meter(&bucket.id, Class::B);
-            response::ok_xml(xml::versioning_configuration())
-        }
+        Method::GET if ctx.has("versioning") => versioning::get_versioning(ctx, &bucket),
+        Method::GET if ctx.has("versions") => versioning::list_versions(ctx, &bucket),
+        Method::GET if ctx.has("object-lock") => versioning::get_object_lock(ctx, &bucket),
         Method::GET if ctx.has("cors") => get_cors(ctx, &bucket),
         Method::GET if ctx.has("lifecycle") => get_lifecycle(ctx, &bucket),
         Method::GET if ctx.has("uploads") => multipart::list_uploads(ctx, &bucket),
@@ -74,7 +73,8 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
         Method::GET => list_v1(ctx, &bucket),
         Method::PUT if ctx.has("cors") => put_cors(ctx, &bucket, body).await,
         Method::PUT if ctx.has("lifecycle") => put_lifecycle(ctx, &bucket, body).await,
-        Method::PUT if ctx.has("versioning") => Err(S3Error::msg(Code::NotImplemented, "Versioning is not supported; deleted and overwritten objects are kept in the bucket's trash.")),
+        Method::PUT if ctx.has("versioning") => versioning::put_versioning(ctx, &bucket, body).await,
+        Method::PUT if ctx.has("object-lock") => versioning::put_object_lock(ctx, &bucket, body).await,
         Method::DELETE if ctx.has("cors") => {
             ctx.require(&name, Need::Admin)?;
             ctx.meter(&bucket.id, Class::Free);
@@ -93,7 +93,7 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
             ctx.store().delete_bucket(&name, false).await.s3()?;
             no_content()
         }
-        Method::POST if ctx.has("delete") => delete_objects(ctx, &bucket, body).await,
+        Method::POST if ctx.has("delete") => versioning::delete_objects(ctx, &bucket, body).await,
         _ => Err(S3Error::new(Code::MethodNotAllowed)),
     }
 }
@@ -104,9 +104,8 @@ async fn create(ctx: &mut Ctx, body: Body) -> Reply {
     if !ctx.auth.as_ref().is_some_and(|a| a.key.is_admin() && a.key.covers(&name)) {
         return Err(S3Error::new(Code::AccessDenied));
     }
-    if ctx.h("x-amz-bucket-object-lock-enabled").is_some_and(|v| v.trim().eq_ignore_ascii_case("true")) {
-        return Err(S3Error::msg(Code::NotImplemented, "Object Lock is not supported."));
-    }
+    // Object Lock (which turns versioning on) from the start.
+    let object_lock = ctx.h("x-amz-bucket-object-lock-enabled").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
     if !s3_proto::http::valid_bucket_name(&name) {
         return Err(S3Error::new(Code::InvalidBucketName).with("BucketName", name));
     }
@@ -127,7 +126,7 @@ async fn create(ctx: &mut Ctx, body: Body) -> Reply {
     }
     let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
     xml::parse_create_bucket(&raw)?;
-    let b = ctx.store().create_bucket(&name, BucketOptions::default()).await.s3()?;
+    let b = ctx.store().create_bucket(&name, BucketOptions { object_lock: Some(object_lock), ..Default::default() }).await.s3()?;
     ctx.meter(&b.id, Class::A);
     if let Some(o) = ownership.filter(|o| *o != acl::Ownership::BucketOwnerEnforced) {
         ctx.store().set_bucket_config(&name, s3_store::config::kind::OWNERSHIP, "", Some(o.as_str()), None).await.s3()?;
@@ -187,22 +186,15 @@ fn get_lifecycle(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     if bucket.lifecycle.is_empty() {
         return Err(S3Error::new(Code::NoSuchLifecycleConfiguration).with("BucketName", bucket.name.clone()));
     }
-    let rules: Vec<xml::LifecycleRule> = bucket
-        .lifecycle
-        .iter()
-        .map(|r| xml::LifecycleRule { id: Some(r.id.clone()).filter(|s| !s.is_empty()), prefix: r.prefix.clone(), enabled: r.enabled, expire_days: r.expire_days, abort_multipart_days: r.abort_multipart_days })
-        .collect();
-    response::ok_xml(xml::lifecycle_configuration(&rules))
+    let rules: Vec<s3_proto::lifecycle::Rule> = bucket.lifecycle.iter().map(crate::lifecycle::to_xml).collect();
+    response::ok_xml(s3_proto::lifecycle::render(&rules))
 }
 
 async fn put_lifecycle(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Admin)?;
     ctx.meter(&bucket.id, Class::A);
     let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
-    let rules: Vec<LifecycleRule> = xml::parse_lifecycle(&raw)?
-        .into_iter()
-        .map(|r| LifecycleRule { id: r.id.unwrap_or_default(), prefix: r.prefix, enabled: r.enabled, expire_days: r.expire_days, abort_multipart_days: r.abort_multipart_days })
-        .collect();
+    let rules: Vec<LifecycleRule> = s3_proto::lifecycle::parse(&raw)?.into_iter().map(crate::lifecycle::from_xml).collect();
     ctx.store().update_bucket(&bucket.name, BucketUpdate { lifecycle: Some(rules), ..Default::default() }).await.s3()?;
     Ok(response::empty(StatusCode::OK))
 }
@@ -292,35 +284,4 @@ fn list_v1(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         common_prefixes: page.prefixes.clone(),
     };
     response::ok_xml(xml::list_objects_v1(&l))
-}
-
-async fn delete_objects(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
-    let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
-    let req = xml::parse_delete(&raw)?;
-    // Each key is authorized on its own (a policy may protect some of them); with none
-    // allowed, the whole request is denied.
-    let mut errors = Vec::new();
-    let mut allowed = Vec::new();
-    for k in req.keys {
-        match crate::access::authorize(ctx, ctx.who(), &bucket.name, Some(&k), "s3:DeleteObject", Need::Write) {
-            Ok(()) => allowed.push(k),
-            Err(e) => errors.push(xml::DeleteError { key: k, code: e.code, message: e.message }),
-        }
-    }
-    if allowed.is_empty() && !errors.is_empty() {
-        return Err(S3Error::new(Code::AccessDenied));
-    }
-    ctx.meter(&bucket.id, Class::Free);
-    let results = ctx.store().delete_objects(&bucket.name, &allowed).await.s3()?;
-    let mut deleted = Vec::new();
-    for (key, r) in results {
-        match r {
-            Ok(_) => deleted.push(key),
-            Err(e) => {
-                let e = store_error(e);
-                errors.push(xml::DeleteError { key, code: e.code, message: e.message });
-            }
-        }
-    }
-    response::ok_xml(xml::delete_result(&deleted, &errors, req.quiet))
 }

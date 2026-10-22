@@ -228,6 +228,24 @@ pub fn parse_copy_source(header: &str) -> Result<(String, String), S3Error> {
     Ok((bucket.to_string(), key.to_string()))
 }
 
+/// `x-amz-copy-source` with its version: `[/]bucket/key[?versionId=…]` → `(bucket, key,
+/// version id)`. The version id is checked by [`crate::versioning::valid_version_id`].
+pub fn parse_copy_source_version(header: &str) -> Result<(String, String, Option<String>), S3Error> {
+    let raw = header.trim();
+    let (path, query) = raw.split_once('?').unwrap_or((raw, ""));
+    let mut version = None;
+    for (k, v) in parse_query(query) {
+        if k == "versionId" {
+            if !crate::versioning::valid_version_id(&v) {
+                return Err(S3Error::msg(Code::InvalidArgument, "Invalid version id specified").with("ArgumentName", "x-amz-copy-source").with("ArgumentValue", v));
+            }
+            version = Some(v);
+        }
+    }
+    let (bucket, key) = parse_copy_source(path)?;
+    Ok((bucket, key, version))
+}
+
 /// Conditional request headers. Dates are Unix seconds; unparseable dates are ignored, as
 /// HTTP says.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -505,6 +523,12 @@ mod tests {
         assert_eq!(parse_copy_source("/b/k%20x/y").unwrap(), ("b".into(), "k x/y".into()));
         assert_eq!(parse_copy_source("b/k?versionId=null").unwrap(), ("b".into(), "k".into()));
         assert_eq!(parse_copy_source("b/k?versionId=abc").unwrap_err().code, Code::NoSuchKey);
+        let vid = "0000000000000000abcdefghijklmnop";
+        assert_eq!(parse_copy_source_version(&format!("/b/k%20x?versionId={vid}")).unwrap(), ("b".into(), "k x".into(), Some(vid.into())));
+        assert_eq!(parse_copy_source_version("b/k?versionId=null").unwrap(), ("b".into(), "k".into(), Some("null".into())));
+        assert_eq!(parse_copy_source_version("b/k").unwrap(), ("b".into(), "k".into(), None));
+        assert_eq!(parse_copy_source_version("b/k?versionId=abc").unwrap_err().code, Code::InvalidArgument);
+        assert_eq!(parse_copy_source_version("b?versionId=null").unwrap_err().code, Code::InvalidArgument);
         assert_eq!(parse_copy_source("b").unwrap_err().code, Code::InvalidArgument);
         assert_eq!(parse_copy_source("/b/").unwrap_err().code, Code::InvalidArgument);
     }

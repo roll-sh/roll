@@ -46,14 +46,16 @@ impl Store {
         let now = self.now();
         self.barrier("sweep").await?;
 
-        // Trash rows past their bucket's window.
+        // Trash rows past their bucket's window. A version under Object Lock (one whose
+        // GOVERNANCE retention was bypassed to delete it) stays until its lock ends.
         loop {
             let n = self
                 .write(|c| {
                     let expired = c
                         .prepare(
                             "SELECT t.bucket_id, t.key, t.deleted_at, t.blob_id, t.size FROM trash t JOIN buckets b ON b.id = t.bucket_id
-                             WHERE t.deleted_at < ?1 - b.recover_days * 86400000 LIMIT 1000",
+                             WHERE t.deleted_at < ?1 - b.recover_days * 86400000
+                               AND coalesce(t.legal_hold, 0) = 0 AND NOT (t.lock_mode IS NOT NULL AND coalesce(t.lock_until, 0) > ?1) LIMIT 1000",
                         )?
                         .query_map([now], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?)))?
                         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -84,6 +86,11 @@ impl Store {
             }
             let mut deleted = Vec::with_capacity(due.len());
             for (id, size) in &due {
+                // A row still pointing at it means `refs` is wrong: never delete it.
+                if self.blob_referenced(id)? {
+                    tracing::error!(blob = id, "blob has refs = 0 but a current, noncurrent or trashed version references it; kept");
+                    continue;
+                }
                 match self.backend.delete(&ids::blob_key(id)).await {
                     Ok(()) => deleted.push((id.clone(), *size)),
                     Err(e) => tracing::warn!(error = %e, blob = id, "deleting an unreferenced blob failed; retrying next sweep"),
@@ -129,31 +136,6 @@ impl Store {
             }
         }
         Ok(st)
-    }
-
-    /// Delete (to the trash) objects that lifecycle rules have expired. Returns how many.
-    pub async fn run_lifecycle(&self) -> Result<u64> {
-        let now = self.now();
-        let mut n = 0;
-        for b in self.buckets()? {
-            for rule in b.lifecycle.iter().filter(|r| r.enabled) {
-                let Some(days) = rule.expire_days else { continue };
-                let cutoff = now - days as i64 * DAY_MS;
-                let mut after: Option<String> = None;
-                loop {
-                    let page = self.list_objects(&b.name, &ListQuery { prefix: rule.prefix.clone(), start_after: after.clone(), max_keys: 1000, ..Default::default() })?;
-                    let expired: Vec<(String, String)> = page.objects.iter().filter(|o| o.modified_at < cutoff).map(|o| (o.key.clone(), o.etag.clone())).collect();
-                    if !expired.is_empty() {
-                        n += self.expire_objects(&b.name, &expired, cutoff).await?;
-                    }
-                    if !page.truncated {
-                        break;
-                    }
-                    after = page.next;
-                }
-            }
-        }
-        Ok(n)
     }
 
     /// Delete blobs in object storage that no metadata knows about: left by a crash between a
@@ -243,8 +225,21 @@ impl Store {
         .await
     }
 
+    /// Whether the metadata knows the blob at all: a `blobs` row, an upload, or any version
+    /// (current, noncurrent or trashed) pointing at it.
     fn blob_known(&self, id: &str) -> Result<bool> {
-        self.read(|c| Ok(c.query_row("SELECT 1 FROM blobs WHERE id = ?1 UNION ALL SELECT 1 FROM uploads WHERE blob_id = ?1 LIMIT 1", [id], |_| Ok(())).optional()?.is_some()))
+        Ok(self.read(|c| Ok(c.query_row("SELECT 1 FROM blobs WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some()))? || self.blob_referenced(id)?)
+    }
+
+    /// Whether any version row (current, noncurrent, trashed) or upload points at the blob.
+    pub(crate) fn blob_referenced(&self, id: &str) -> Result<bool> {
+        self.read(|c| {
+            Ok(c.prepare_cached(
+                "SELECT 1 FROM objects WHERE blob_id = ?1 UNION ALL SELECT 1 FROM versions WHERE blob_id = ?1
+                 UNION ALL SELECT 1 FROM trash WHERE blob_id = ?1 UNION ALL SELECT 1 FROM uploads WHERE blob_id = ?1 LIMIT 1",
+            )?
+            .exists([id])?)
+        })
     }
 
     /// Check every blob the metadata knows (created before the scrub started) is in object
@@ -306,6 +301,23 @@ impl Store {
                         }
                     }
                 }
+            }
+        }
+        // Versions (current, noncurrent or trashed) whose blob has no metadata at all: their
+        // bytes could be deleted as orphans, so they count as missing.
+        let dangling: Vec<String> = self.read(|c| {
+            Ok(c.prepare(
+                "SELECT DISTINCT blob_id FROM (SELECT blob_id FROM objects WHERE blob_id IS NOT NULL UNION ALL SELECT blob_id FROM versions WHERE blob_id IS NOT NULL
+                   UNION ALL SELECT blob_id FROM trash) WHERE blob_id NOT IN (SELECT id FROM blobs) LIMIT 1000",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?)
+        })?;
+        for id in dangling {
+            report.missing += 1;
+            tracing::error!(blob = id, "a version references a blob the metadata doesn't know");
+            if report.examples.len() < 20 {
+                report.examples.push(id);
             }
         }
         *self.scrub.lock().unwrap() = report.clone();

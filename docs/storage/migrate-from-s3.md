@@ -2,7 +2,7 @@
 
 roll storage speaks the S3 API, so code moves with a new endpoint and new keys. Data moves with
 `rclone sync` or `aws s3 sync`. Check [compatibility.md](compatibility.md) first for the features
-you use: versioning, Object Lock, bucket policies, ACLs and SSE-KMS aren't supported.
+you use: bucket policies, ACLs and SSE-KMS aren't supported.
 
 ## Concept mapping
 
@@ -13,10 +13,10 @@ you use: versioning, Object Lock, bucket policies, ACLs and SSE-KMS aren't suppo
 | region | any value works; `us-east-1` is a safe default |
 | IAM user or role and its access keys | roll access key: `read`, `write` or `admin`, optionally scoped to buckets |
 | bucket policy, ACLs | the bucket's `public` flag plus scoped keys |
-| versioning | the trash: deleted and overwritten objects are recoverable for `recover_days` (0–30) |
+| versioning, Object Lock | supported, as on S3; permanently deleted versions also go to the trash for `recover_days` (0–30) |
 | a bucket copy for staging or tests | `roll storage branch <bucket> <name>`: instant, copy-on-write |
 | lifecycle transitions to IA or Glacier | not needed: everything is in Intelligent-Tiering |
-| lifecycle expiration | supported (`Expiration.Days`, prefix filter) |
+| lifecycle rules | supported: expiration (days, date, delete markers), noncurrent versions, prefix/tag/size filters; transitions are kept but not needed |
 | CORS | supported (`PutBucketCors`, or the dashboard) |
 | presigned URLs, presigned POST | supported |
 
@@ -107,4 +107,4 @@ change you need.
 - **Free copies.** `CopyObject` is instant and free at any size, because no data is copied.
 - **Write latency.** Writes take roughly one S3 PUT longer, because metadata is made durable
   before the reply.
-- **Versioning.** `versionId` parameters aren't supported.
+- **Versioning.** Supported; permanently deleted versions stay recoverable in the trash for `recover_days`.

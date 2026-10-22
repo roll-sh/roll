@@ -7,6 +7,7 @@ use crate::model::*;
 use crate::rows::{self, Entry, Merger, Row};
 use crate::store::{Store, find_bucket};
 use crate::validate::{self, bare_etag};
+use crate::versioning;
 use md5::{Digest, Md5};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeMap;
@@ -35,7 +36,8 @@ fn check_condition(cur: Option<&Row>, cond: &WriteCondition, key: &str) -> Resul
 }
 
 const UPLOAD_COLS: &str = "id, bucket_id, key, blob_id, backend_upload_id, content_type, cache_control, content_disposition, content_encoding, \
-     content_language, expires, metadata, tags, checksum_algorithm, checksum_type, created_at, acl, website_redirect";
+     content_language, expires, metadata, tags, checksum_algorithm, checksum_type, created_at, acl, website_redirect, lock_mode, lock_until, \
+     legal_hold";
 
 fn upload_row(r: &rusqlite::Row) -> rusqlite::Result<Upload> {
     let json = |i: usize| -> rusqlite::Result<BTreeMap<String, String>> {
@@ -63,6 +65,7 @@ fn upload_row(r: &rusqlite::Row) -> rusqlite::Result<Upload> {
         checksum_algorithm: r.get(13)?,
         checksum_type: r.get(14)?,
         created_at: r.get(15)?,
+        lock: ObjectLock { mode: r.get(18)?, retain_until: r.get(19)?, legal_hold: r.get::<_, Option<i64>>(20)?.map(|v| v != 0) },
     })
 }
 
@@ -128,6 +131,12 @@ impl Store {
     /// `cond` atomically. On a definite failure the blob is deleted; on `Unavailable` it's left
     /// to the orphan scan (the write may or may not have reached the log).
     pub async fn commit_put(&self, bucket: &str, key: &str, obj: NewObject, cond: &WriteCondition) -> Result<ObjectMeta> {
+        self.commit_put_with(bucket, key, obj, cond, &ObjectLock::default()).await
+    }
+
+    /// [`Self::commit_put`] with the new version's Object Lock (empty: the bucket's default
+    /// retention, if any).
+    pub async fn commit_put_with(&self, bucket: &str, key: &str, obj: NewObject, cond: &WriteCondition, lock: &ObjectLock) -> Result<ObjectMeta> {
         let checked = validate::key(key).and_then(|_| validate::headers(&obj.headers));
         if let Err(e) = checked {
             self.discard_blob(&obj.blob_id).await;
@@ -144,6 +153,8 @@ impl Store {
             parts: 0,
             part_sizes: Vec::new(),
             modified_at: now,
+            lock: lock.clone(),
+            ..Row::tombstone(key, now)
         };
         self.commit_row(bucket, row, obj.crc32c, cond).await
     }
@@ -162,11 +173,10 @@ impl Store {
             let cur = rows::resolve(c, &chain, &row.key)?.map(|(r, _)| r);
             check_condition(cur.as_ref(), cond, &row.key)?;
             rows::insert_blob(c, &blob, row.size, crc32c, now)?;
-            rows::write_key(c, &b.id, &chain, b.recover_days, &row.key, Some(&row), true, now)?;
-            Ok(())
+            versioning::put_key(c, &b, &chain, &row.key, row.clone(), now)
         });
-        let batch = match attempt {
-            Ok(((), batch)) => batch,
+        let (stored, batch) = match attempt {
+            Ok(x) => x,
             Err(e) => {
                 // Rolled back: nothing references the blob.
                 self.discard_blob(&blob).await;
@@ -174,7 +184,7 @@ impl Store {
             }
         };
         self.log.wait(batch).await?;
-        row.meta()
+        stored.meta()
     }
 
     /// Server-side copy: the destination references the source's blob (no bytes move).
@@ -190,7 +200,14 @@ impl Store {
         self.write(|c| {
             let sb = find_bucket(c, src_bucket)?;
             let schain = rows::chain(c, &sb.id)?;
-            let Some((src, _)) = rows::resolve(c, &schain, src_key)? else { return Err(StoreError::NoSuchKey(src_key.to_string())) };
+            let src = match versioning::lookup(c, &schain, src_key, opts.source_version.as_deref()) {
+                Ok((r, _)) => r,
+                Err(StoreError::DeleteMarker { specific: true, .. }) => {
+                    return Err(StoreError::InvalidRequest("The source of a copy request may not specifically refer to a delete marker by version id.".into()));
+                }
+                Err(StoreError::DeleteMarker { .. }) => return Err(StoreError::NoSuchKey(src_key.to_string())),
+                Err(e) => return Err(e),
+            };
             if let Some(m) = &opts.source_etag
                 && !etag_matches(m, &src.etag)
             {
@@ -211,61 +228,54 @@ impl Store {
             if let Some(t) = &opts.tags {
                 row.headers.tags = t.clone();
             }
+            // A copy is a new version: its own lock (or the bucket's default), never the source's.
+            row.lock = opts.lock.clone();
             rows::add_ref(c, src.blob()?, 1, now)?;
-            rows::write_key(c, &db.id, &dchain, db.recover_days, dst_key, Some(&row), true, now)?;
-            row.meta()
+            versioning::put_key(c, &db, &dchain, dst_key, row, now)?.meta()
         })
         .await
     }
 
-    /// Delete `key` (to the trash). `Ok(false)` if there was nothing to delete. `if_match`:
-    /// only if the current version has that ETag.
+    /// Delete `key` (to the trash, or a delete marker in a versioned bucket). `Ok(false)` if
+    /// there was nothing to delete. `if_match`: only if the current version has that ETag.
     pub async fn delete_object(&self, bucket: &str, key: &str, if_match: Option<&str>) -> Result<bool> {
-        let now = self.now();
-        self.write(|c| {
-            let b = find_bucket(c, bucket)?;
-            let chain = rows::chain(c, &b.id)?;
-            if let Some(m) = if_match {
-                let cur = rows::resolve(c, &chain, key)?.map(|(r, _)| r);
-                check_condition(cur.as_ref(), &WriteCondition { if_match: Some(m.to_string()), if_none_match: None }, key)?;
-            }
-            Ok(rows::write_key(c, &b.id, &chain, b.recover_days, key, None, true, now)?.is_some())
-        })
-        .await
+        Ok(self.delete_object_version(bucket, key, None, if_match, false).await?.existed)
     }
 
     /// Delete many keys in one durable write. Each result says whether the key existed.
     pub async fn delete_objects(&self, bucket: &str, keys: &[String]) -> Result<Vec<(String, Result<bool>)>> {
-        let now = self.now();
-        self.write(|c| {
-            let b = find_bucket(c, bucket)?;
-            let chain = rows::chain(c, &b.id)?;
-            let mut out = Vec::with_capacity(keys.len());
-            for k in keys {
-                let r = validate::key(k).and_then(|_| rows::write_key(c, &b.id, &chain, b.recover_days, k, None, true, now)).map(|o| o.is_some());
-                match r {
-                    Err(StoreError::Internal(e)) => return Err(StoreError::Internal(e)),
-                    r => out.push((k.clone(), r)),
-                }
-            }
-            Ok(out)
-        })
-        .await
+        let items: Vec<(String, Option<String>)> = keys.iter().map(|k| (k.clone(), None)).collect();
+        let results = self.delete_versions(bucket, &items, false).await?;
+        Ok(keys.iter().cloned().zip(results.into_iter().map(|r| r.map(|o| o.existed))).collect())
     }
 
-    /// Lifecycle expiry: delete (to the trash) each `(key, etag)` that is still that version
-    /// and was written before `cutoff`, checked in the transaction, so a version written after
-    /// the listing is never expired by it. Returns how many were deleted.
+    /// Lifecycle expiry: delete (to the trash, or behind a delete marker in a versioned
+    /// bucket) each `(key, etag)` that is still that version and was written before `cutoff`,
+    /// checked in the transaction, so a version written after the listing is never expired by
+    /// it. With a `rule`, its filter is checked again too. Versions under Object Lock that
+    /// would leave for good are skipped. Returns how many were deleted.
+    #[cfg(test)]
     pub(crate) async fn expire_objects(&self, bucket: &str, keys: &[(String, String)], cutoff: i64) -> Result<u64> {
+        self.expire_current(bucket, keys, cutoff, None).await
+    }
+
+    pub(crate) async fn expire_current(&self, bucket: &str, keys: &[(String, String)], cutoff: i64, rule: Option<&LifecycleRule>) -> Result<u64> {
         let now = self.now();
         self.write(|c| {
             let b = find_bucket(c, bucket)?;
             let chain = rows::chain(c, &b.id)?;
             let mut n = 0;
             for (key, etag) in keys {
-                let still = rows::resolve(c, &chain, key)?.is_some_and(|(r, _)| r.etag == *etag && r.modified_at < cutoff);
-                if still && rows::write_key(c, &b.id, &chain, b.recover_days, key, None, true, now)?.is_some() {
-                    n += 1;
+                let Some((r, _)) = rows::resolve(c, &chain, key)? else { continue };
+                if r.etag != *etag || r.modified_at >= cutoff || rule.is_some_and(|rule| !rule.matches(key, &r.headers.tags, r.size)) {
+                    continue;
+                }
+                // A locked version that would leave for good is kept (refused before anything
+                // changes, so the rest of the batch goes on).
+                match versioning::delete_key(c, &b, &chain, key, now) {
+                    Ok(o) if o.existed => n += 1,
+                    Ok(_) | Err(StoreError::ObjectLocked(_)) => {}
+                    Err(e) => return Err(e),
                 }
             }
             Ok(n)
@@ -328,24 +338,24 @@ impl Store {
 
     /// Replace an object's tags (not a new version: Last-Modified stays).
     pub async fn put_tags(&self, bucket: &str, key: &str, tags: BTreeMap<String, String>) -> Result<()> {
-        validate::tags(&tags)?;
-        let now = self.now();
-        self.write(|c| {
-            let b = find_bucket(c, bucket)?;
-            let chain = rows::chain(c, &b.id)?;
-            rows::update_in_place(c, &b.id, &chain, key, |r| r.headers.tags = tags, now)?;
-            Ok(())
-        })
-        .await
+        self.put_version_tags(bucket, key, None, tags).await.map(|_| ())
     }
 
     // ---- Multipart ----
 
     /// Start a multipart upload (its blob id and backend upload are recorded durably first).
     pub async fn create_upload(&self, bucket: &str, key: &str, headers: ObjectHeaders, checksum_algorithm: Option<String>, checksum_type: Option<String>) -> Result<Upload> {
+        self.create_upload_with(bucket, key, headers, checksum_algorithm, checksum_type, ObjectLock::default()).await
+    }
+
+    /// [`Self::create_upload`] with the object's Object Lock (applied when it completes).
+    pub async fn create_upload_with(&self, bucket: &str, key: &str, headers: ObjectHeaders, checksum_algorithm: Option<String>, checksum_type: Option<String>, lock: ObjectLock) -> Result<Upload> {
         validate::key(key)?;
         validate::headers(&headers)?;
         let b = self.read(|c| find_bucket(c, bucket))?;
+        if b.object_lock.is_none() && !lock.is_empty() {
+            return Err(StoreError::InvalidRequest("Bucket is missing Object Lock Configuration".into()));
+        }
         let now = self.now();
         let blob = ids::blob_id();
         let attrs = BlobAttrs { bucket_id: b.id.clone(), key: key.to_string(), content_type: headers.content_type.clone() };
@@ -360,13 +370,14 @@ impl Store {
             checksum_algorithm,
             checksum_type,
             created_at: now,
+            lock,
         };
         let u = up.clone();
         let r = self
             .write(move |c| {
                 find_bucket(c, bucket)?;
                 c.execute(
-                    &format!("INSERT INTO uploads ({UPLOAD_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"),
+                    &format!("INSERT INTO uploads ({UPLOAD_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"),
                     params![
                         u.id,
                         u.bucket_id,
@@ -385,7 +396,10 @@ impl Store {
                         u.checksum_type,
                         u.created_at,
                         u.headers.acl,
-                        u.headers.website_redirect
+                        u.headers.website_redirect,
+                        u.lock.mode,
+                        u.lock.retain_until,
+                        u.lock.legal_hold.map(i64::from)
                     ],
                 )?;
                 Ok(())
@@ -444,8 +458,29 @@ impl Store {
     /// The part's ETag is the source's when it's a whole single-PUT object, else an MD5 of
     /// where the bytes came from (we never see them).
     pub async fn copy_part(&self, upload: &Upload, part: u32, src_bucket: &str, src_key: &str, range: Option<std::ops::Range<u64>>, source_etag: Option<&str>) -> Result<Part> {
+        self.copy_part_version(upload, part, src_bucket, src_key, None, range, source_etag).await
+    }
+
+    /// [`Self::copy_part`] from a version of the source (`None`: its current one).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn copy_part_version(
+        &self,
+        upload: &Upload,
+        part: u32,
+        src_bucket: &str,
+        src_key: &str,
+        src_version: Option<&str>,
+        range: Option<std::ops::Range<u64>>,
+        source_etag: Option<&str>,
+    ) -> Result<Part> {
         validate::part_number(part)?;
-        let src = self.get_object(src_bucket, src_key)?;
+        let src = match self.get_object_version(src_bucket, src_key, src_version) {
+            Err(StoreError::DeleteMarker { specific: true, .. }) => {
+                return Err(StoreError::InvalidRequest("The source of a copy request may not specifically refer to a delete marker by version id.".into()));
+            }
+            Err(StoreError::DeleteMarker { .. }) => return Err(StoreError::NoSuchKey(src_key.to_string())),
+            r => r?,
+        };
         if let Some(m) = source_etag
             && !etag_matches(m, &src.etag)
         {
@@ -614,6 +649,8 @@ impl Store {
             parts: part_list.len() as u32,
             part_sizes: part_list.iter().map(|p| p.size).collect(),
             modified_at: now,
+            lock: up.lock.clone(),
+            ..Row::tombstone(&up.key, now)
         };
         self.log.check_open()?;
         let attempt = self.log.db.write(|c| {
@@ -623,13 +660,13 @@ impl Store {
             let cur = rows::resolve(c, &chain, &row.key)?.map(|(r, _)| r);
             check_condition(cur.as_ref(), cond, &row.key)?;
             rows::insert_blob(c, &up.blob_id, size, crc, now)?;
-            rows::write_key(c, &b.id, &chain, b.recover_days, &row.key, Some(&row), true, now)?;
+            let stored = versioning::put_key(c, &b, &chain, &row.key, row.clone(), now)?;
             c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
             c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
-            Ok(())
+            Ok(stored)
         });
-        let batch = match attempt {
-            Ok(((), b)) => b,
+        let (stored, batch) = match attempt {
+            Ok(x) => x,
             Err(StoreError::NoSuchUpload(_)) => return self.completed_already(bucket, up),
             Err(e) => {
                 // Rolled back. If the metadata knows the blob after all, something else committed
@@ -655,7 +692,7 @@ impl Store {
             }
         };
         self.log.wait(batch).await?;
-        row.meta()
+        stored.meta()
     }
 
     /// The upload is gone: if it became the key's current version, that's a completed retry.
@@ -699,13 +736,18 @@ impl Store {
             let keep = b.recover_days as i64 * 86_400_000;
             let (ak, ad) = after.map_or((prefix.to_string(), i64::MAX), |(k, d)| (k.to_string(), d));
             let mut st = c.prepare(
-                "SELECT key, size, etag, deleted_at FROM trash WHERE bucket_id = ?1 AND (key > ?2 OR (key = ?2 AND deleted_at < ?3)) AND key >= ?4
+                "SELECT key, size, etag, deleted_at, vid, is_null, lock_mode, lock_until, legal_hold FROM trash
+                 WHERE bucket_id = ?1 AND (key > ?2 OR (key = ?2 AND deleted_at < ?3)) AND key >= ?4
                  ORDER BY key, deleted_at DESC LIMIT ?5",
             )?;
             let mut out = st
                 .query_map(params![b.id, ak, ad, prefix, limit as i64 + 1], |r| {
                     let deleted_at: i64 = r.get(3)?;
-                    Ok(TrashEntry { key: r.get(0)?, size: r.get::<_, i64>(1)? as u64, etag: r.get(2)?, deleted_at, expires_at: deleted_at + keep })
+                    let version_id = if r.get::<_, i64>(5)? != 0 { "null".to_string() } else { r.get(4)? };
+                    let lock = ObjectLock { mode: r.get(6)?, retain_until: r.get(7)?, legal_hold: r.get::<_, Option<i64>>(8)?.map(|v| v != 0) };
+                    // A version under Object Lock outlives the recovery window until its lock ends.
+                    let held = if lock.mode.is_some() { lock.retain_until.unwrap_or(0) } else { 0 };
+                    Ok(TrashEntry { key: r.get(0)?, size: r.get::<_, i64>(1)? as u64, etag: r.get(2)?, deleted_at, expires_at: (deleted_at + keep).max(held), version_id })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             out.retain(|e| e.key.starts_with(prefix));
@@ -715,21 +757,20 @@ impl Store {
         })
     }
 
-    /// Bring a version back from the trash as the current one (the current one, if any, goes to
-    /// the trash in its place).
+    /// Bring a version back from the trash. In an unversioned bucket it becomes the current one
+    /// (the current one, if any, goes to the trash in its place); in a versioned one it goes back
+    /// to its place in the key's history (see `versioning::restore`).
     pub async fn restore(&self, bucket: &str, key: &str, deleted_at: i64) -> Result<ObjectMeta> {
         let now = self.now();
         self.write(|c| {
             let b = find_bucket(c, bucket)?;
-            let Some(mut row) = rows::trash_row(c, &b.id, key, deleted_at)? else {
+            let Some(row) = rows::trash_row(c, &b.id, key, deleted_at)? else {
                 return Err(StoreError::NotFound(format!("{key} deleted at {deleted_at} isn't in the trash")));
             };
-            // The trash row's reference moves to the object row.
+            // The trash row's reference moves to the restored version.
             rows::trash_delete(c, &b.id, key, deleted_at, row.size)?;
-            row.modified_at = now;
             let chain = rows::chain(c, &b.id)?;
-            rows::write_key(c, &b.id, &chain, b.recover_days, key, Some(&row), true, now)?;
-            row.meta()
+            versioning::restore(c, &b, &chain, key, row, now)?.meta()
         })
         .await
     }

@@ -206,9 +206,6 @@ fn reject_unsupported_headers(ctx: &Ctx) -> Result<(), S3Error> {
         if n.starts_with("x-amz-server-side-encryption-customer-") || n.starts_with("x-amz-copy-source-server-side-encryption-customer-") {
             return not_impl(n, "SSE-C is not supported.");
         }
-        if n.starts_with("x-amz-object-lock-") {
-            return not_impl(n, "Object Lock is not supported.");
-        }
     }
     if let Some(sse) = ctx.h("x-amz-server-side-encryption")
         && !sse.trim().eq_ignore_ascii_case("AES256")

@@ -111,7 +111,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - One customer object is one backend blob. Never pack objects together, and never compact or rewrite a blob.
     - Blobs are immutable. Every upload gets a fresh blob id; never reuse one.
     - Acknowledge a write only after its metadata log commit is in object storage. A failed commit fails the writes in it and fences the node.
-    - Never delete a blob that any `objects` or `trash` row references. Deletes go to the trash (`recover_days`), then unreferenced blobs wait in a 24 h quarantine. The orphan scan only removes blobs with no metadata, no active upload and an age over 24 h. The scrub only reports.
+    - Never delete a blob that any `objects`, `versions` or `trash` row references. A version under Object Lock is never deleted for good. Deletes go to the trash (`recover_days`), then unreferenced blobs wait in a 24 h quarantine. The orphan scan only removes blobs with no metadata, no active upload and an age over 24 h. The scrub only reports.
     - Writes to a bucket with branches push the old state down to the branches in the same transaction.
     - Never size an allocation from a count or length a peer sent. Stream bodies, and cap XML bodies.
   - After touching anything storage-related, run `pnpm test:storage`. It skips itself when nothing relevant changed and runs real S3 tools in Docker (`amazon/aws-cli`, `rclone/rclone`, MinIO's `mc` from `bitnamilegacy/minio-client`).

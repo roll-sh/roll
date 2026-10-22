@@ -38,6 +38,16 @@ pub fn upload_id(now_ms: i64) -> String {
     format!("{:012x}{}", now_ms.max(0), random_from(b"0123456789abcdef", 32))
 }
 
+/// A version id: 16 hex digits of `i64::MAX - ms` (so newer versions sort first), then 16
+/// random lowercase base32 characters. URL-safe and 32 characters, like S3's.
+pub fn version_id(now_ms: i64) -> String {
+    version_id_with_prefix((i64::MAX - now_ms.max(0)) as u64)
+}
+
+pub(crate) fn version_id_with_prefix(prefix: u64) -> String {
+    format!("{prefix:016x}{}", random_from(BASE32_LOWER, 16))
+}
+
 /// Access key ids look like AWS's: 20 characters.
 pub fn access_key_id() -> String {
     format!("RK{}", random_from(BASE32_UPPER, 18))
@@ -79,6 +89,11 @@ mod tests {
         assert!(bucket_id().starts_with("bkt_") && bucket_id().len() == 16);
         assert_ne!(blob_id(), blob_id());
         assert!(access_key_id().starts_with("RK"));
+        let (old, new) = (version_id(1_000), version_id(2_000));
+        assert!(new < old, "newer versions sort first");
+        assert_eq!(new.len(), 32);
+        assert!(new.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+        assert_ne!(version_id(5), version_id(5));
         let id = "abcdefghijklmnopqrstuvwxyz";
         assert_eq!(blob_key(id), "s3/blobs/ab/abcdefghijklmnopqrstuvwxyz");
         for bad in [

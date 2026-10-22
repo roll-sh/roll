@@ -287,13 +287,17 @@ impl Store {
         })
     }
 
-    /// Change a visible object's ACL in place (a new row; branches keep the old one).
-    pub async fn set_object_acl(&self, bucket: &str, key: &str, acl: Option<String>) -> Result<()> {
+    /// Change a version's ACL (the current one without `version_id`). Not a new version;
+    /// branches keep the old ACL.
+    pub async fn set_object_acl(&self, bucket: &str, key: &str, version_id: Option<&str>, acl: Option<String>) -> Result<()> {
         let now = self.now();
         self.write(|c| {
             let b = find_bucket(c, bucket)?;
             let chain = rows::chain(c, &b.id)?;
-            rows::update_in_place(c, &b.id, &chain, key, |r| r.headers.acl = acl, now)?;
+            crate::versioning::update_version(c, &b, &chain, key, version_id, now, |r| {
+                r.headers.acl = acl;
+                Ok(())
+            })?;
             Ok(())
         })
         .await

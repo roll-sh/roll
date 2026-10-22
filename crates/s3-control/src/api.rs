@@ -79,6 +79,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/storage/buckets/{name}", get(show_bucket).patch(update_bucket).delete(delete_bucket))
         .route("/v1/storage/buckets/{name}/branches", post(branch))
         .route("/v1/storage/buckets/{name}/objects", get(list_objects))
+        .route("/v1/storage/buckets/{name}/versions", get(list_versions))
         .route("/v1/storage/buckets/{name}/object", get(object_info).delete(delete_object))
         .route("/v1/storage/buckets/{name}/delete", post(delete_many))
         .route("/v1/storage/buckets/{name}/download", get(download))
@@ -173,25 +174,44 @@ async fn list_objects(State(c): State<AppState>, Path(name): Path<String>, Param
     Ok(Json(c.list_objects(&name, &q.prefix, q.delimiter.as_deref(), q.cursor.as_deref().filter(|s| !s.is_empty()), q.limit.unwrap_or(200))?))
 }
 
+async fn list_versions(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<ListQ>) -> ApiResult<Value> {
+    Ok(Json(c.list_versions(&name, &q.prefix, q.cursor.as_deref().filter(|s| !s.is_empty()), q.limit.unwrap_or(200))?))
+}
+
 #[derive(Deserialize)]
 struct KeyQ {
     key: Option<String>,
+    /// A version of the object (`null` or an id); none: the current one.
+    version_id: Option<String>,
 }
 
 impl KeyQ {
-    fn key(self) -> Result<String, ControlError> {
-        self.key.filter(|k| !k.is_empty()).ok_or_else(|| ControlError::Invalid("missing ?key=".into()))
+    fn key(&self) -> Result<String, ControlError> {
+        self.key.clone().filter(|k| !k.is_empty()).ok_or_else(|| ControlError::Invalid("missing ?key=".into()))
+    }
+
+    fn version(&self) -> Result<Option<&str>, ControlError> {
+        match self.version_id.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) if !s3_proto::versioning::valid_version_id(v) => Err(ControlError::Invalid(format!("invalid version id {v}"))),
+            v => Ok(v),
+        }
     }
 }
 
 async fn object_info(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
-    Ok(Json(info(&c.store.get_object(&name, &q.key()?)?)))
+    Ok(Json(info(&c.store.get_object_version(&name, &q.key()?, q.version()?)?)))
 }
 
 async fn delete_object(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
     let key = q.key()?;
-    c.delete_object(&name, &key).await?;
-    Ok(Json(json!({ "deleted": key })))
+    let o = c.delete_object(&name, &key, q.version()?).await?;
+    let mut v = json!({ "deleted": key });
+    // Versions are only mentioned where there are any.
+    if let Some(id) = o.version_id {
+        v["version_id"] = json!(id);
+        v["delete_marker"] = json!(o.delete_marker);
+    }
+    Ok(Json(v))
 }
 
 #[derive(Deserialize)]
@@ -241,7 +261,7 @@ fn attachment(key: &str) -> String {
 async fn download(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>) -> Result<Response, ControlError> {
     let key = q.key()?;
     let b = c.store.bucket(&name)?;
-    let meta = c.store.get_object(&name, &key)?;
+    let meta = c.store.get_object_version(&name, &key, q.version()?)?;
     let (len, stream) = c.store.open_blob(&meta, None).await?;
     c.store.meter.request(&b.id, s3_store::Class::B);
     let body = Body::from_stream(Metered { inner: stream, store: c.store.clone(), bucket_id: b.id, sent: 0 });

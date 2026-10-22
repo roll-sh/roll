@@ -44,6 +44,7 @@ codes! {
     InternalError 500 "We encountered an internal error. Please try again.",
     InvalidAccessKeyId 403 "The AWS Access Key Id you provided does not exist in our records.",
     InvalidArgument 400 "Invalid Argument",
+    InvalidBucketState 409 "The request is not valid with the current state of the bucket.",
     InvalidBucketName 400 "The specified bucket is not valid.",
     InvalidDigest 400 "The Content-MD5 or checksum value you specified is not valid.",
     InvalidLocationConstraint 400 "The specified location constraint is not valid.",
@@ -67,10 +68,13 @@ codes! {
     NoSuchCORSConfiguration 404 "The CORS configuration does not exist",
     NoSuchKey 404 "The specified key does not exist.",
     NoSuchLifecycleConfiguration 404 "The lifecycle configuration does not exist",
+    NoSuchObjectLockConfiguration 404 "The specified object does not have a ObjectLock configuration",
     NoSuchTagSet 404 "The TagSet does not exist",
     NoSuchUpload 404 "The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.",
     NotImplemented 501 "A header you provided implies functionality that is not implemented.",
+    NoSuchVersion 404 "The specified version does not exist.",
     NotModified 304 "Not Modified",
+    ObjectLockConfigurationNotFoundError 404 "Object Lock configuration does not exist for this bucket",
     PreconditionFailed 412 "At least one of the pre-conditions you specified did not hold",
     RequestTimeTooSkewed 403 "The difference between the request time and the server's time is too large.",
     RequestTimeout 400 "Your socket connection to the server was not read from or written to within the timeout period.",
@@ -104,11 +108,13 @@ pub struct S3Error {
     pub resource: Option<String>,
     /// Extra elements, e.g. `StringToSign` for signature mismatches.
     pub extra: Vec<(&'static str, String)>,
+    /// Response headers sent with the error (`x-amz-delete-marker`, `x-amz-version-id`, …).
+    pub headers: Vec<(&'static str, String)>,
 }
 
 impl S3Error {
     pub fn new(code: Code) -> Self {
-        Self { code, message: code.message().to_string(), resource: None, extra: Vec::new() }
+        Self { code, message: code.message().to_string(), resource: None, extra: Vec::new(), headers: Vec::new() }
     }
 
     pub fn msg(code: Code, message: impl Into<String>) -> Self {
@@ -122,6 +128,12 @@ impl S3Error {
 
     pub fn with(mut self, name: &'static str, value: impl Into<String>) -> Self {
         self.extra.push((name, value.into()));
+        self
+    }
+
+    /// Send a response header with the error.
+    pub fn with_header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.headers.push((name, value.into()));
         self
     }
 

@@ -33,11 +33,13 @@ clients fail clearly instead of silently doing the wrong thing.
 | CreateBucket, DeleteBucket (must be empty), HeadBucket | ✅ need an `admin` key |
 | GetBucketLocation | ✅ |
 | Get/Put/DeleteBucketCors | ✅ |
-| Get/Put/DeleteBucketLifecycleConfiguration | ✅ `Expiration.Days` and `AbortIncompleteMultipartUpload`, with a prefix filter |
-| GetBucketVersioning | ✅ always reports "not enabled" |
+| Get/Put/DeleteBucketLifecycleConfiguration | ✅ the full rule model: `Filter` (`Prefix`, `Tag`, `And`, `ObjectSizeGreaterThan`/`LessThan`) or the legacy `<Rule><Prefix>`; `Expiration` (`Days`, `Date`, `ExpiredObjectDeleteMarker`); `NoncurrentVersionExpiration` (`NoncurrentDays`, `NewerNoncurrentVersions`); `AbortIncompleteMultipartUpload`; `Transition` and `NoncurrentVersionTransition` (stored, see below). Validated like S3. |
+| Get/PutBucketVersioning | ✅ `Enabled` and `Suspended`. `MfaDelete=Enabled` is `NotImplemented` (there are no MFA devices; use Object Lock). |
+| ListObjectVersions | ✅ `prefix`, `delimiter`, `key-marker`, `version-id-marker`, `max-keys`, `encoding-type=url`, delete markers |
+| Get/PutObjectLockConfiguration | ✅ enable on a versioned bucket (or at CreateBucket with `x-amz-bucket-object-lock-enabled`), default retention in `Days` or `Years` |
 | ListObjectsV2, ListObjects (v1) | ✅ `prefix`, `delimiter`, `start-after`, continuation tokens, `max-keys`, `encoding-type=url` |
 | ListMultipartUploads | ✅ |
-| DeleteObjects | ✅ up to 1000 keys, quiet mode; each key is authorized on its own |
+| DeleteObjects | ✅ up to 1000 keys, `VersionId` per key, quiet mode, `DeleteMarker`/`DeleteMarkerVersionId` in the result, `x-amz-bypass-governance-retention`; each key is authorized on its own |
 | Get/Put/DeleteBucketTagging | ✅ up to 50 tags, S3's key/value rules |
 | Get/Put/DeleteBucketPolicy, GetBucketPolicyStatus | ✅ enforced (see [Policies](#policies-acls-and-public-access)) |
 | Get/Put/DeletePublicAccessBlock | ✅ enforced against ACLs, policies and the `public` flag |
@@ -56,14 +58,16 @@ clients fail clearly instead of silently doing the wrong thing.
 
 | operation | status |
 |---|---|
-| PutObject | ✅ |
-| GetObject, HeadObject | ✅ `Range`, `partNumber`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `response-*` overrides, `x-amz-checksum-mode` |
-| DeleteObject | ✅ the object goes to the bucket's trash |
-| CopyObject | ✅ `x-amz-metadata-directive`, `x-amz-copy-source-if-*`; no data is copied |
+| PutObject | ✅ returns `x-amz-version-id` in versioned buckets |
+| GetObject, HeadObject | ✅ `versionId`, `Range`, `partNumber`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `response-*` overrides, `x-amz-checksum-mode`; Object Lock headers; a delete marker answers 404 (current) or 405 (by id) with `x-amz-delete-marker: true` |
+| DeleteObject | ✅ unversioned: the object goes to the bucket's trash. Versioned: a delete marker; with `versionId`, that version is deleted for good (to the trash, see below) |
+| CopyObject | ✅ `x-amz-metadata-directive`, `x-amz-copy-source-if-*`, `?versionId=` in the source, `x-amz-copy-source-version-id`; no data is copied |
 | Conditional writes: `If-None-Match: *`, `If-Match` on PutObject and CompleteMultipartUpload | ✅ |
-| Get/Put/DeleteObjectTagging, `x-amz-tagging` | ✅ |
-| CreateMultipartUpload, UploadPart, UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts | ✅ |
-| POST Object (form upload) | ✅ including the `acl` and `x-amz-website-redirect-location` fields |
+| Get/Put/DeleteObjectTagging, `x-amz-tagging` | ✅ with `versionId` |
+| Get/PutObjectRetention, Get/PutObjectLegalHold | ✅ `versionId`, `x-amz-bypass-governance-retention` (admin keys) |
+| `x-amz-object-lock-mode`, `-retain-until-date`, `-legal-hold` | ✅ on PutObject (with `Content-MD5` or an `x-amz-checksum-*`, as S3 requires), CopyObject, CreateMultipartUpload and POST Object |
+| CreateMultipartUpload, UploadPart, UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts | ✅ UploadPartCopy takes a source `versionId`; Complete returns `x-amz-version-id` |
+| POST Object (form upload) | ✅ including the `acl`, `x-amz-website-redirect-location` and Object Lock fields |
 | RestoreObject | ✅ answers `InvalidObjectState` (403), as S3 does for objects that aren't archived: nothing ever is |
 
 ### Headers and metadata
@@ -83,8 +87,7 @@ clients fail clearly instead of silently doing the wrong thing.
 
 | feature | notes |
 |---|---|
-| Versioning (`PutBucketVersioning`, `versionId`) | Use the [trash](README.md#recovery-window-trash) for recovery, and [branches](README.md#branching-buckets) for snapshots. |
-| Object Lock, legal hold, retention | |
+| MFA Delete | No MFA devices. Object Lock protects versions instead. |
 | SSE-C (`x-amz-server-side-encryption-customer-*`) | rejected with `NotImplemented`, never ignored |
 | SSE-KMS (`x-amz-server-side-encryption: aws:kms`) | rejected. Data is encrypted at rest by the backing S3 bucket (SSE-S3). |
 | Replication (`PutBucketReplication`) | The backing bucket can be replicated by the operator. |
@@ -93,7 +96,6 @@ clients fail clearly instead of silently doing the wrong thing.
 | Inventory reports, Storage Class Analysis, CloudWatch request metrics | The configurations are stored, nothing is produced yet. |
 | S3 Select, Object Lambda | |
 | Torrent | |
-| Lifecycle transitions, `Expiration.Date`, tag and size filters | Intelligent-Tiering handles tiering. |
 | Directory buckets (S3 Express) | |
 
 ## Policies, ACLs and public access
@@ -180,6 +182,35 @@ returned but not applied.
 
 - **Overwrites and deletes are recoverable** for `recover_days` (default 7). On S3 they're gone
   unless versioning is on. Trashed bytes are billed as storage.
+- **Even permanent deletes are recoverable.** In a versioned bucket, overwrites and deletes
+  make the old version noncurrent (as on S3), and deleting a version by id, or lifecycle
+  noncurrent expiry, moves it to the trash for `recover_days` instead of destroying it. A
+  restored version goes back to its place in the key's history: behind a newer current version
+  (or delete marker) it's noncurrent again, otherwise current. Delete markers carry no data and
+  aren't kept in the trash.
+- **Version ids** are 32 lowercase letters and digits that sort newest first within a key.
+  Objects written before versioning was enabled are the `null` version, as on S3. A malformed
+  version id is `400 InvalidArgument`; a well-formed one that doesn't exist is `NoSuchVersion`
+  (and a no-op `204` for DeleteObject, as on S3).
+- **Noncurrent versions are billed** as stored bytes, as on S3 (`version_bytes` on the bucket).
+- **Lifecycle transitions are accepted, validated, stored and returned, but never move data.**
+  Every object is already in S3 Intelligent-Tiering, which moves cold data to cheaper tiers by
+  access with no retrieval fees, so a transition to `STANDARD_IA` or `GLACIER` would only add
+  cost and latency. No object ever reports a different storage class because of a transition.
+- **Lifecycle expiration days** are counted from the version's time (or from when it became
+  noncurrent), without S3's rounding to the next midnight UTC, and the job runs daily.
+  `ExpiredObjectDeleteMarker` removes markers only when the rule says so.
+- **Object Lock is enforced everywhere a version could be destroyed:** the API, lifecycle,
+  trash expiry (a version deleted with a GOVERNANCE bypass stays in the trash until its lock
+  ends), forced bucket deletes and the control plane. A bucket holding locked versions can't be
+  deleted. A default retention in `Years` counts 365 days a year. `x-amz-bypass-governance-retention` needs an `admin` key. Branches copy a version's
+  lock with the version, so a branch holding a locked version can't be deleted either. S3
+  requires `Content-MD5` for uploads into a bucket with a default retention; roll only requires
+  an integrity check when the request itself sets Object Lock headers, and verifies every body's
+  checksum anyway.
+- **Versioning and branches:** a branch inherits its parent's versioning state and Object Lock
+  configuration when it's made. Its version history is its own versions plus the current
+  version it inherits; the parent's noncurrent versions aren't part of it.
 - **Copies are free and instant,** whatever the size. On S3 a copy re-reads and re-writes the
   data.
 - **Writes have higher latency.** A write is acknowledged once its metadata log commit is in S3

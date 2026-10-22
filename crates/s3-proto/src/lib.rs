@@ -9,8 +9,10 @@ pub mod checksum;
 pub mod chunked;
 pub mod error;
 pub mod http;
+pub mod lifecycle;
 pub mod sigv4;
 pub mod time;
+pub mod versioning;
 pub mod xml;
 
 pub use error::{Code, S3Error};

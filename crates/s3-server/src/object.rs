@@ -2,17 +2,18 @@
 
 use crate::auth::Need;
 use crate::body::{Incoming, requested_checksum};
-use crate::ctx::{Ctx, no_content, read_small};
+use crate::ctx::{Ctx, read_small};
 use crate::error::{StoreResult, store_error};
 use crate::multipart;
 use crate::response::{self, Reply, set};
+use crate::versioning;
 use axum::body::Body;
 use axum::http::{Method, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
 use futures::Stream;
 use s3_proto::checksum::Algorithm;
-use s3_proto::http::{Conditions, Overrides, parse_copy_source, parse_range, parse_tagging_header, part_range, quote_etag, user_metadata, validate_key, validate_tags};
+use s3_proto::http::{Conditions, Overrides, parse_copy_source_version, parse_range, parse_tagging_header, part_range, quote_etag, user_metadata, validate_key, validate_tags};
 use s3_proto::time::http_date;
 use s3_proto::{Code, S3Error, xml};
 use s3_store::{Bucket, ByteStream, Checksum, Class, CopyOptions, NewObject, ObjectHeaders, ObjectMeta, Store, WriteCondition};
@@ -25,17 +26,13 @@ use std::task::{Context, Poll};
 pub(crate) const MAX_PUT: u64 = 5 << 30;
 
 /// Subresources S3 has that we don't implement.
-const UNSUPPORTED: [&str; 6] = ["retention", "legal-hold", "torrent", "select", "attributes", "renameObject"];
+const UNSUPPORTED: [&str; 4] = ["torrent", "select", "attributes", "renameObject"];
 
 pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
     if let Some(sub) = UNSUPPORTED.iter().find(|s| ctx.has(s)) {
         return Err(S3Error::msg(Code::NotImplemented, format!("?{sub} is not supported")));
     }
-    if let Some(v) = ctx.q("versionId")
-        && v != "null"
-    {
-        return Err(S3Error::msg(Code::NoSuchKey, "The specified version does not exist.").with("VersionId", v.to_string()));
-    }
+    versioning::version_id(ctx)?;
     validate_key(ctx.key_name())?;
     // A key that can't see the bucket learns nothing about it (a policy may still let it in).
     let bucket = match ctx.store().bucket(ctx.bucket_name()) {
@@ -50,11 +47,15 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
     match ctx.method.clone() {
         Method::GET if ctx.has("uploadId") => multipart::list_parts(ctx, &bucket),
         Method::GET if ctx.has("tagging") => get_tagging(ctx, &bucket),
+        Method::GET if ctx.has("retention") => versioning::get_retention(ctx, &bucket),
+        Method::GET if ctx.has("legal-hold") => versioning::get_legal_hold(ctx, &bucket),
         Method::GET if ctx.has("acl") => crate::acl::get_object_acl(ctx, &bucket),
         Method::GET => get(ctx, &bucket, false).await,
         Method::HEAD => get(ctx, &bucket, true).await,
         Method::PUT if ctx.has("uploadId") || ctx.has("partNumber") => multipart::upload_part(ctx, &bucket, body).await,
         Method::PUT if ctx.has("tagging") => put_tagging(ctx, &bucket, body).await,
+        Method::PUT if ctx.has("retention") => versioning::put_retention(ctx, &bucket, body).await,
+        Method::PUT if ctx.has("legal-hold") => versioning::put_legal_hold(ctx, &bucket, body).await,
         Method::PUT if ctx.has("acl") => crate::acl::put_object_acl(ctx, &bucket, body).await,
         Method::PUT if ctx.h("x-amz-copy-source").is_some() => copy(ctx, &bucket).await,
         Method::PUT => put(ctx, &bucket, body).await,
@@ -142,6 +143,10 @@ async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
     let headers = object_headers(ctx)?;
     let cond = write_condition(ctx)?;
+    let lock = versioning::lock_headers(ctx, bucket)?;
+    if !lock.is_empty() {
+        versioning::require_integrity(ctx)?;
+    }
     // Every object gets a checksum: the client's, or CRC64NVME (as S3 does by default).
     let want = requested_checksum(ctx)?.or(Some((Algorithm::Crc64Nvme, None)));
     let incoming = Incoming::new(ctx, body, want, None)?;
@@ -168,10 +173,11 @@ async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     store.meter.bytes_in(&bucket.id, len);
     let checksum = finished.checksum.map(|(a, v)| Checksum { algorithm: a.as_str().into(), kind: "FULL_OBJECT".into(), value: v });
     let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: finished.digest.etag(), headers, checksum };
-    let meta = store.commit_put(&bucket.name, &key, obj, &cond).await.s3()?;
+    let meta = store.commit_put_with(&bucket.name, &key, obj, &cond, &lock).await.s3()?;
     drop(guard);
     let mut r = response::empty(StatusCode::OK);
     set(&mut r, "etag", &quote_etag(&meta.etag));
+    versioning::set_version(&mut r, bucket, &meta.version_id, false);
     if let Some(c) = &meta.checksum {
         set_checksum(&mut r, c);
     }
@@ -268,7 +274,8 @@ impl Drop for Metered {
 
 pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     ctx.require_object_read(bucket)?;
-    let meta = ctx.store().get_object(&bucket.name, ctx.key_name()).s3()?;
+    let vid = versioning::version_id(ctx)?;
+    let meta = ctx.store().get_object_version(&bucket.name, ctx.key_name(), vid.as_deref()).s3()?;
     ctx.meter(&bucket.id, Class::B);
     let overrides = Overrides::from_query(ctx.query.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     if !overrides.is_empty() && ctx.auth.is_none() {
@@ -279,6 +286,7 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
             let mut r = response::empty(StatusCode::NOT_MODIFIED);
             set(&mut r, "etag", &quote_etag(&meta.etag));
             set(&mut r, "last-modified", &http_date(meta.modified_at));
+            versioning::set_version(&mut r, bucket, &meta.version_id, vid.is_some());
             return Ok(r);
         }
         return Err(e);
@@ -309,6 +317,8 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
         None => (StatusCode::OK, meta.size),
     };
     let mut r = object_response(&meta, &overrides, code, len);
+    versioning::set_version(&mut r, bucket, &meta.version_id, vid.is_some());
+    versioning::set_lock(&mut r, &meta.lock);
     if let Some((a, b)) = range {
         set(&mut r, "content-range", &s3_proto::http::content_range(a, b, meta.size));
     }
@@ -338,8 +348,17 @@ async fn delete(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
     ctx.meter(&bucket.id, Class::Free);
     let if_match = ctx.h("if-match").map(str::to_string);
-    ctx.store().delete_object(&bucket.name, ctx.key_name(), if_match.as_deref()).await.s3()?;
-    no_content()
+    let vid = versioning::version_id(ctx)?;
+    let bypass = versioning::bypass(ctx)?;
+    let o = ctx.store().delete_object_version(&bucket.name, ctx.key_name(), vid.as_deref(), if_match.as_deref(), bypass).await.s3()?;
+    let mut r = response::empty(StatusCode::NO_CONTENT);
+    if o.delete_marker {
+        set(&mut r, "x-amz-delete-marker", "true");
+    }
+    if let Some(v) = &o.version_id {
+        versioning::set_version(&mut r, bucket, v, vid.is_some());
+    }
+    Ok(r)
 }
 
 fn directive(ctx: &Ctx, name: &str) -> Result<bool, S3Error> {
@@ -352,13 +371,15 @@ fn directive(ctx: &Ctx, name: &str) -> Result<bool, S3Error> {
 
 async fn copy(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
-    let (src_bucket, src_key) = parse_copy_source(ctx.h("x-amz-copy-source").unwrap_or_default())?;
+    let (src_bucket, src_key, src_vid) = parse_copy_source_version(ctx.h("x-amz-copy-source").unwrap_or_default())?;
     ctx.require_source(&src_bucket, &src_key)?;
-    let src = ctx.store().get_object(&src_bucket, &src_key).s3()?;
+    let src = copy_source(ctx, &src_bucket, &src_key, src_vid.as_deref())?;
     Conditions::copy_source_from_headers(|n| ctx.h(n)).check_copy_source(&src.etag, src.modified_at)?;
     let replace = directive(ctx, "x-amz-metadata-directive")?;
     let replace_tags = directive(ctx, "x-amz-tagging-directive")?;
-    if src_bucket == bucket.name && src_key == ctx.key_name() && !replace && !replace_tags && ctx.h("x-amz-website-redirect-location").is_none() {
+    let lock = versioning::lock_headers(ctx, bucket)?;
+    // Copying an older version onto its own key is how S3 restores one.
+    if src_bucket == bucket.name && src_key == ctx.key_name() && src_vid.is_none() && !replace && !replace_tags && ctx.h("x-amz-website-redirect-location").is_none() {
         return Err(S3Error::msg(
             Code::InvalidRequest,
             "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes.",
@@ -381,39 +402,63 @@ async fn copy(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     };
     let condition = write_condition(ctx)?;
     ctx.meter(&bucket.id, Class::A);
-    let opts = CopyOptions { headers, tags, source_etag: Some(src.etag.clone()), condition };
+    // The exact version checked above is the one copied.
+    let opts = CopyOptions { headers, tags, source_etag: Some(src.etag.clone()), condition, source_version: Some(src.version_id.clone()), lock };
     let meta = ctx.store().copy_object(&src_bucket, &src_key, &bucket.name, ctx.key_name(), &opts).await.s3()?;
     let checksum = meta.checksum.as_ref().and_then(|c| checksum_of(c).map(|a| (a, c.value.as_str())));
     let mut r = response::xml(StatusCode::OK, xml::copy_object_result(&meta.etag, meta.modified_at, checksum));
     if let Some(c) = &meta.checksum {
         set_checksum(&mut r, c);
     }
+    versioning::set_version(&mut r, bucket, &meta.version_id, false);
+    let src_versioned = src_vid.is_some() || ctx.store().bucket(&src_bucket).is_ok_and(|b| b.versioning.is_some());
+    if src_versioned {
+        set(&mut r, "x-amz-copy-source-version-id", &src.version_id);
+    }
     Ok(r)
+}
+
+/// A copy's source version (`None`: the current one), as S3 reports a delete marker there.
+pub(crate) fn copy_source(ctx: &Ctx, bucket: &str, key: &str, version_id: Option<&str>) -> Result<ObjectMeta, S3Error> {
+    match ctx.store().get_object_version(bucket, key, version_id) {
+        Err(s3_store::StoreError::DeleteMarker { specific: true, .. }) => Err(S3Error::msg(Code::InvalidRequest, "The source of a copy request may not specifically refer to a delete marker by version id.")),
+        Err(s3_store::StoreError::DeleteMarker { .. }) => Err(S3Error::new(Code::NoSuchKey).with("Key", key.to_string())),
+        r => r.s3(),
+    }
 }
 
 fn get_tagging(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Read)?;
     ctx.meter(&bucket.id, Class::B);
-    let tags = ctx.store().get_tags(&bucket.name, ctx.key_name()).s3()?;
+    let vid = versioning::version_id(ctx)?;
+    let (version, tags) = ctx.store().get_version_tags(&bucket.name, ctx.key_name(), vid.as_deref()).s3()?;
     let tags: Vec<(String, String)> = tags.into_iter().collect();
-    response::ok_xml(xml::tagging(&tags))
+    let mut r = response::xml(StatusCode::OK, xml::tagging(&tags));
+    versioning::set_version(&mut r, bucket, &version, vid.is_some());
+    Ok(r)
 }
 
 async fn put_tagging(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
     ctx.meter(&bucket.id, Class::A);
+    let vid = versioning::version_id(ctx)?;
     let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
     let tags = xml::parse_tagging(&raw)?;
     validate_tags(&tags)?;
-    ctx.store().put_tags(&bucket.name, ctx.key_name(), tags.into_iter().collect()).await.s3()?;
-    Ok(response::empty(StatusCode::OK))
+    let m = ctx.store().put_version_tags(&bucket.name, ctx.key_name(), vid.as_deref(), tags.into_iter().collect()).await.s3()?;
+    let mut r = response::empty(StatusCode::OK);
+    versioning::set_version(&mut r, bucket, &m.version_id, vid.is_some());
+    Ok(r)
 }
 
 async fn delete_tagging(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
     ctx.meter(&bucket.id, Class::Free);
-    ctx.store().put_tags(&bucket.name, ctx.key_name(), BTreeMap::new()).await.s3()?;
-    no_content()
+    let vid = versioning::version_id(ctx)?;
+    let m = ctx.store().put_version_tags(&bucket.name, ctx.key_name(), vid.as_deref(), BTreeMap::new()).await.s3()?;
+    let mut r = response::empty(StatusCode::NO_CONTENT);
+    versioning::set_version(&mut r, bucket, &m.version_id, vid.is_some());
+    Ok(r)
 }
 
 /// `RestoreObject`: nothing is ever archived, so there's nothing to restore (S3's answer for an

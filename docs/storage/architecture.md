@@ -80,16 +80,27 @@ buckets (id TEXT PRIMARY KEY,           -- bkt_<12>
          cors TEXT, lifecycle TEXT,     -- JSON (see API), NULL = none
          parent_id TEXT, parent_at INTEGER,                   -- branch of, and when (ms)
          objects INTEGER NOT NULL, bytes INTEGER NOT NULL,    -- own visible rows
-         trash_bytes INTEGER NOT NULL)
+         trash_bytes INTEGER NOT NULL,
+         versioning TEXT,               -- NULL (never versioned) | 'Enabled' | 'Suspended'
+         object_lock TEXT,              -- NULL = off; JSON { mode, days, years } (default retention)
+         versions INTEGER NOT NULL, version_bytes INTEGER NOT NULL)  -- own noncurrent rows
 
-objects (bucket_id, key TEXT, blob_id TEXT,  -- blob_id NULL = tombstone (branches only)
+objects (bucket_id, key TEXT, blob_id TEXT,  -- the key's current version
          size, etag, content_type, cache_control, content_disposition, content_encoding,
          content_language, expires, metadata TEXT /* JSON map */, tags TEXT /* JSON map */,
          checksum_algorithm, checksum_type /* FULL_OBJECT|COMPOSITE */, checksum,
          parts INTEGER /* 0 = single PUT */, part_sizes TEXT /* JSON, for partNumber GETs */,
          modified_at INTEGER /* ms */,
          acl TEXT /* JSON grants; NULL = private */, website_redirect TEXT,
+         vid TEXT,                      -- version id, sorts newest first within a key ('' for tombstones)
+         is_null INTEGER,               -- the "null" version (unversioned and suspended writes)
+         delete_marker INTEGER,         -- blob_id NULL + delete_marker = a delete marker;
+                                        -- blob_id NULL alone = a tombstone (branches only)
+         lock_mode TEXT, lock_until INTEGER /* ms */, legal_hold INTEGER /* NULL = never set */,
          PRIMARY KEY (bucket_id, key)) WITHOUT ROWID
+
+versions (bucket_id, key, noncurrent_at INTEGER /* ms */, <same columns as objects>,
+          PRIMARY KEY (bucket_id, key, vid)) WITHOUT ROWID   -- noncurrent versions and markers
 
 trash   (bucket_id, key, deleted_at, blob_id, <same columns as objects>,
          PRIMARY KEY (bucket_id, key, deleted_at))
@@ -98,7 +109,9 @@ blobs   (id TEXT PRIMARY KEY, size INTEGER, crc32c INTEGER, refs INTEGER NOT NUL
          created_at INTEGER, unreferenced_at INTEGER)   -- set when refs drops to 0
 
 uploads (id TEXT PRIMARY KEY /* customer UploadId */, bucket_id, key, blob_id,
-         backend_upload_id TEXT, <object header columns>, created_at, acl, website_redirect)
+         backend_upload_id TEXT, <object header columns>, created_at, acl, website_redirect,
+         lock_mode, lock_until, legal_hold)          -- Object Lock from CreateMultipartUpload
+
 
 bucket_config (bucket_id, kind TEXT, id TEXT /* '' = one per bucket */, value TEXT,
          PRIMARY KEY (bucket_id, kind, id)) WITHOUT ROWID
@@ -131,7 +144,14 @@ Create to Complete. `CopyObject` sets them from the request, as S3 does.
 The deployment's **canonical owner id** (64 hex chars) is random, created on the first start
 and kept in `state`, so it survives restarts, recovery and moving hosts.
 
-`refs` counts every `objects` row and every `trash` row that points at the blob.
+`refs` counts every `objects`, `versions` and `trash` row that points at the blob. `objects`,
+`versions` and `trash` have an index on `blob_id`, so the GC and the orphan scan can check that
+nothing points at a blob before it goes.
+
+Migrations are append-only entries of `MIGRATIONS` in `schema.rs`; log entries carry the schema
+version they were written with and replay migrates before applying newer ones. Migration 2 added
+bucket configuration and object ACLs; migration 3 added versioning and Object Lock: rows from before it became null versions, with a `vid` made
+from their `modified_at` the same way new ids are.
 
 ### Durability: the metadata log
 
@@ -202,29 +222,111 @@ Two restrictions:
 `objects`/`bytes` on a bucket count its own non-tombstone rows; that's what it's billed for.
 Inherited objects are billed to the bucket that owns the rows.
 
+### Versioning
+
+A bucket is never versioned (`versioning` NULL), `Enabled` or `Suspended`; it can't go back to
+never versioned. `objects` holds each key's **current** version, which may be a **delete
+marker**; `versions` holds the **noncurrent** ones. A bucket only has noncurrent versions of a
+key whose current row it owns.
+
+- **Version ids** (`vid`) are 16 hex digits of `i64::MAX - ms` followed by 16 random base32
+  characters: URL-safe, 32 characters, sorting newest first. A new version's id is made
+  strictly smaller than every id the bucket has or sees for the key (one millisecond "later"
+  than the newest if the clock went back or two writes share a millisecond), so a key's history
+  is always in `vid` order with its current version first. S3 shows `null` for the null version
+  (`is_null`), which still has a `vid` for ordering.
+- **Never versioned:** as before. An overwrite or delete moves the old row to the trash.
+- **`Enabled`:** an overwrite or a DELETE moves the current row to `versions` (`noncurrent_at`
+  = now); a DELETE adds a delete marker, even for an absent key (as on S3). Nothing goes to the
+  trash.
+- **`Suspended`:** new writes and DELETE markers are the null version; the key's previous null
+  version (current or noncurrent) is replaced, which is a permanent delete (below). A non-null
+  current version becomes noncurrent.
+- **Permanent deletes** (`DELETE ?versionId=`, lifecycle noncurrent expiry, a replaced null
+  version) move the version to the bucket's trash for `recover_days` (or drop its reference if
+  `recover_days` is 0). Delete markers carry no data and simply go. If the deleted version was
+  current, the newest noncurrent one becomes current; if none is left, the key is absent there
+  (a tombstone hides the parent's in a branch).
+- **Restore from the trash** (`POST …/trash/restore`) in a versioned bucket puts the version
+  back at its place in the key's history, by `vid`: behind a newer current version (or delete
+  marker) it's noncurrent again, otherwise it's current. A restored null version replaces the
+  key's null version. In a never-versioned bucket a restore is a new write, as before.
+- **Reads:** GET/HEAD of a key whose current version is a marker is `404` with
+  `x-amz-delete-marker: true`; asking for a marker by id is `405`. `?versionId=` resolves the
+  bucket's own current row and noncurrent versions first, then the current row it inherits.
+- **Tags, retention and legal holds** change a version in place (no new version). Children keep
+  the old metadata of a current version (push-down, as for any write).
+- **ListObjectVersions** merges the bucket's view of current versions (inherited ones too, with
+  markers) with its own noncurrent versions, in key order, newest first within a key, rolling
+  keys up into common prefixes. `key-marker`/`version-id-marker` resume inside a key.
+
+**Branches.** A branch inherits its parent's versioning state and Object Lock configuration when
+it's made. Its history of a key is its own rows plus whatever current version it inherits; the
+parent's noncurrent versions aren't part of it. Push-down copies the parent's current row
+(markers included) with the same `vid`, so version ids are stable across a branch and its
+parent. A branch's own write over an inherited version copies that version into the branch's
+`versions` (a new reference) before writing.
+
+**Object Lock.** Enabled at CreateBucket (`x-amz-bucket-object-lock-enabled`, which turns
+versioning on) or with PutObjectLockConfiguration on a versioning-enabled bucket; then the
+bucket can't be suspended and Object Lock can't be turned off. A version is **locked** while it
+has a legal hold or a retention (`GOVERNANCE`/`COMPLIANCE`) that hasn't run out. New versions
+get the bucket's default retention unless the request sets one; copies get their own, never the
+source's.
+
+- A locked version is never deleted for good: not by `DELETE ?versionId=`, DeleteObjects,
+  lifecycle (skipped), trash expiry (a version whose GOVERNANCE retention was bypassed stays in
+  the trash until it runs out), a forced bucket delete or the control plane. Every one of these
+  checks the lock inside the transaction that would delete, before changing anything.
+- A DELETE without a version id still adds a delete marker, as on S3.
+- `x-amz-bypass-governance-retention: true` (admin keys only) lifts a GOVERNANCE retention for a
+  delete or a retention change. Nothing lifts COMPLIANCE or a legal hold.
+- COMPLIANCE can only be extended; GOVERNANCE can be extended or made COMPLIANCE, and shortened
+  or removed only with the bypass.
+- A bucket holding any locked row (current, noncurrent or trashed) can't be deleted, forced or
+  not. Push-down copies carry the lock, so a branch that holds a copy of a locked version
+  can't be deleted while it lasts either.
+
 ### Deletes, trash, quarantine, GC
 
-- **Delete or overwrite.** The old row moves to `trash` (if `recover_days > 0`), otherwise
-  `refs - 1`. In a branch, deleting or overwriting an inherited object puts a copy of it in
-  the branch's trash (`refs + 1`) and hides the key with a tombstone.
+- **Delete or overwrite** (never-versioned bucket). The old row moves to `trash` (if
+  `recover_days > 0`), otherwise `refs - 1`. In a branch, deleting or overwriting an inherited
+  object puts a copy of it in the branch's trash (`refs + 1`) and hides the key with a
+  tombstone. Versioned buckets keep old versions as noncurrent instead (see
+  [Versioning](#versioning)); only permanent deletes reach the trash.
 - `refs` never goes below zero, and a blob at zero is never referenced again: either would
   be a bookkeeping bug, so the write fails instead.
 - **Restore.** The trash row moves back to `objects`. Whatever is there now goes to the trash.
+  (Versioned buckets: see [Versioning](#versioning).)
 - **Sweeper (hourly).** It starts with a barrier (a durable write, which fails on a deposed
   node), then does three things:
-  - Trash rows older than `recover_days` are removed (`refs - 1`).
+  - Trash rows older than `recover_days` are removed (`refs - 1`), except versions still under
+    Object Lock.
   - Blobs with `refs = 0` and `unreferenced_at` older than 24 h are deleted from the
-    backend, then their row is removed.
+    backend, then their row is removed. Before each, the sweeper checks that no `objects`,
+    `versions`, `trash` or `uploads` row points at it; one that does means `refs` is wrong, so
+    the blob is kept and the problem logged.
   - Uploads older than the bucket's abort rule (default 7 days) are aborted.
-- **Lifecycle (daily).** `expire_days` rules delete matching objects as a normal delete,
-  so they go to the trash and are recoverable. Age and ETag are checked again inside the
-  delete transaction, so a version written after the listing is never expired.
-- **DeleteBucket.** Without `force`, the bucket's view is checked empty inside the same
-  transaction that deletes it, so a write that lands during the delete fails the delete
-  (`BucketNotEmpty`) instead of being deleted with it.
-- **Orphan scan (daily).** A blob without a `blobs` row or an active upload is left when a
-  crash hits between the blob upload and its metadata commit. That write was never
-  acknowledged. Deletion takes two scans, so a node that lost the log to another one (and
+- **Lifecycle (daily).** Rules filter by prefix, tags (all must match) and size, and do:
+  - `Expiration` `Days`/`Date`: matching current versions are deleted as a normal delete (to
+    the trash, or a delete marker in a versioned bucket).
+  - `NoncurrentVersionExpiration`: versions noncurrent for `NoncurrentDays`, beyond the newest
+    `NewerNoncurrentVersions`, are deleted for good (to the trash).
+  - `ExpiredObjectDeleteMarker`: delete markers with no noncurrent versions behind them go.
+  - `Transition`/`NoncurrentVersionTransition` are stored and returned, never acted on (data
+    is already in Intelligent-Tiering).
+
+  Everything is listed first and checked again inside the delete transaction (still that
+  version, still old enough, still matching the filter, not locked), so a version written or
+  retagged after the listing is never expired by it.
+- **DeleteBucket.** Without `force`, the bucket's view (current versions, delete markers and
+  noncurrent versions, as S3 requires) is checked empty inside the same transaction that
+  deletes it, so a write that lands during the delete fails the delete (`BucketNotEmpty`)
+  instead of being deleted with it. With `force`, current, noncurrent and trashed rows go in
+  batches. Either way, a bucket with any version under Object Lock isn't deleted.
+- **Orphan scan (daily).** A blob without a `blobs` row, an active upload or any version row
+  pointing at it is left when a crash hits between the blob upload and its metadata commit.
+  That write was never acknowledged. Deletion takes two scans, so a node that lost the log to another one (and
   doesn't know that node's new blobs) can never delete them:
   1. A scan records unknown blobs (not in flight on this node) in `orphans`, in a durable
      write, which fails on a deposed node.
@@ -234,14 +336,16 @@ Inherited objects are billed to the bucket that owns the rows.
   deleted, only logged and counted (`unexpected_orphans`).
 - **Scrub (weekly).** It compares the backend listing with the `blobs` table and logs every
   referenced blob that's missing or has the wrong size (`tracing::error!`, and a counter in
-  `GET /v1/storage`). It never deletes.
+  `GET /v1/storage`). Current, noncurrent or trashed versions pointing at a blob with no
+  `blobs` row count as missing too. It never deletes.
 
 ### Write paths
 
 - **PUT.** Upload the blob to the backend with its CRC32C. Then one metadata transaction:
   - insert the blob with `refs = 1`
   - upsert the object
-  - move the old row to the trash and push the old state down to children
+  - give it its version id (and default retention), make the old version noncurrent (versioned)
+    or move it to the trash, and push the old state down to children
   - check conditional writes (`If-None-Match: *`, `If-Match`) inside the transaction
 
   Wait for the commit, then reply. The blob stays registered as in flight until the request
@@ -278,8 +382,10 @@ Egress counts as **internal** when the peer address is inside `internal_cidrs` (
 private ranges and the docker bridge by default; set `ROLL_S3_INTERNAL_CIDRS` on AWS to the
 VPC), and as **internet** otherwise.
 
-Every 60 s the meter flushes into `usage`. It also adds `(bytes + trash_bytes) × elapsed ms`
-for every bucket, which gives storage GB-months, so restorable trash is billed as storage.
+Every 60 s the meter flushes into `usage`. It also adds
+`(bytes + trash_bytes + version_bytes) × elapsed ms` for every bucket, which gives storage
+GB-months, so restorable trash and noncurrent versions are billed as storage (as S3 bills
+noncurrent versions).
 Usage writes are relaxed: they ride the next group commit without waiting.
 
 ## S3 API (`s3-server`, `s3-proto`)
@@ -323,11 +429,10 @@ condition keys and the canonical ids. `ROLL_S3_BLOCK_PUBLIC_ACCESS` (store confi
 - **Bucket:**
   - CreateBucket, DeleteBucket (must be empty), HeadBucket and GetBucketLocation
   - Get/Put/DeleteBucketCors
-  - Get/Put/DeleteBucketLifecycleConfiguration (Expiration.Days and
-    AbortIncompleteMultipartUpload, filtered by prefix)
-  - GetBucketVersioning (always unversioned)
+  - Get/Put/DeleteBucketLifecycleConfiguration (the full rule model; transitions stored only)
+  - Get/PutBucketVersioning, ListObjectVersions, Get/PutObjectLockConfiguration
   - ListObjectsV2, ListObjects (v1), ListMultipartUploads
-  - DeleteObjects (batch, quiet mode; each key authorized on its own)
+  - DeleteObjects (batch, quiet mode, version ids; each key authorized on its own)
   - configuration (`s3-server/src/config.rs`, stored in `bucket_config`): tagging, policy and
     policy status, public access block, ownership controls, ACL, encryption, website, logging,
     accelerate, request payment, replication (not found), notifications (empty), and the
@@ -340,11 +445,13 @@ condition keys and the canonical ids. `ROLL_S3_BLOCK_PUBLIC_ACCESS` (store confi
   written as objects to the target bucket every `access_log_interval` (5 min) through the
   normal put path, so they're durable once written and billed to the target. Best effort.
 - **Object:**
-  - PutObject, GetObject and HeadObject: `Range`, `partNumber`, conditional headers,
-    `response-*` overrides and checksum mode
-  - DeleteObject
-  - CopyObject: `x-amz-metadata-directive` and copy-source conditionals
-  - Get/Put/DeleteObjectTagging, Get/PutObjectAcl, RestoreObject (`InvalidObjectState`)
+  - PutObject, GetObject and HeadObject: `versionId`, `Range`, `partNumber`, conditional
+    headers, `response-*` overrides, checksum mode and Object Lock headers
+  - DeleteObject (with `versionId`)
+  - CopyObject: `x-amz-metadata-directive`, copy-source conditionals and source `versionId`
+  - Get/Put/DeleteObjectTagging (with `versionId`), Get/PutObjectAcl, RestoreObject
+    (`InvalidObjectState`)
+  - Get/PutObjectRetention, Get/PutObjectLegalHold
 - **Multipart:** CreateMultipartUpload, UploadPart, UploadPartCopy,
   CompleteMultipartUpload, AbortMultipartUpload, ListParts.
 - **Browser uploads:** POST Object (presigned POST policy).
@@ -375,19 +482,22 @@ GET    /v1/storage
       pricing: Pricing, buckets, objects, bytes, scrub: { last_at|null, missing, mismatched } }
 
 GET    /v1/storage/buckets                       → [Bucket]
-POST   /v1/storage/buckets  { name, public?, recover_days? }   → Bucket
+POST   /v1/storage/buckets  { name, public?, recover_days?, object_lock?: bool }   → Bucket
 GET    /v1/storage/buckets/{name}                → Bucket
 PATCH  /v1/storage/buckets/{name}  { public?, recover_days?, cors?: [CorsRule], lifecycle?: [LifecycleRule],
-                                     tags?: Record<string,string> /* replaces them; {} removes */ } → Bucket
+                                     tags?: Record<string,string> /* replaces them; {} removes */,
+                                     versioning?: "Enabled" | "Suspended" } → Bucket
 DELETE /v1/storage/buckets/{name}?force=true     → { deleted }   (force: delete all objects first)
 POST   /v1/storage/buckets/{name}/branches  { name }  → Bucket
 
 GET    /v1/storage/buckets/{name}/objects?prefix=&delimiter=/&cursor=&limit=200
   → { objects: [ObjectSummary], prefixes: [string], next_cursor: string|null }
-GET    /v1/storage/buckets/{name}/object?key=    → ObjectInfo
-DELETE /v1/storage/buckets/{name}/object?key=    → { deleted: key }
+GET    /v1/storage/buckets/{name}/versions?prefix=&cursor=&limit=200
+  → { versions: [ObjectVersion], next_cursor: string|null }
+GET    /v1/storage/buckets/{name}/object?key=&version_id=    → ObjectInfo
+DELETE /v1/storage/buckets/{name}/object?key=&version_id=    → { deleted: key, version_id?, delete_marker? }
 POST   /v1/storage/buckets/{name}/delete  { keys?: [string], prefix?: string } → { deleted: n }
-GET    /v1/storage/buckets/{name}/download?key=  → the bytes (Content-Disposition: attachment)
+GET    /v1/storage/buckets/{name}/download?key=&version_id=  → the bytes (Content-Disposition: attachment)
 PUT    /v1/storage/buckets/{name}/upload?key=    (raw body, Content-Type) → ObjectInfo
 POST   /v1/storage/buckets/{name}/presign  { key, method: "GET"|"PUT", expires_s? (default 3600) }
   → { url, method, expires_at }
@@ -409,6 +519,9 @@ Bucket = { id, name, region, public, recover_days, created_at,
            parent: { id, name, at } | null, branches: [string],
            objects, bytes, trash_bytes, cors: CorsRule[], lifecycle: LifecycleRule[],
            tags: Record<string,string>, website: Website | null,
+           versioning: "Enabled" | "Suspended" | null,
+           object_lock: { mode: "GOVERNANCE" | "COMPLIANCE" | null, days: number | null, years: number | null } | null,
+           versions /* own noncurrent versions, delete markers included */, version_bytes,
            endpoint, url /* path-style */, virtual_host_url: string | null }
 Website = { index_document: string | null, error_document: string | null,
             redirect_all: { host_name, protocol: "http"|"https"|null } | null,
@@ -417,12 +530,22 @@ Website = { index_document: string | null, error_document: string | null,
 CorsRule = { id?: string | null /* S3's optional rule ID */, allowed_origins: string[],
              allowed_methods: string[], allowed_headers: string[], expose_headers: string[],
              max_age_s: number | null }
-LifecycleRule = { id, prefix, enabled, expire_days: number | null, abort_multipart_days: number | null }
+LifecycleRule = { id, prefix, enabled, expire_days: number | null, abort_multipart_days: number | null,
+                  // all optional on input:
+                  tags?: Record<string,string>, size_greater_than?: number | null, size_less_than?: number | null,
+                  expire_at?: number | null /* ms, midnight UTC */, expire_delete_markers?: boolean,
+                  noncurrent_days?: number | null, newer_noncurrent_versions?: number | null,
+                  transitions?: [{ days: number | null, date: number | null, storage_class }],
+                  noncurrent_transitions?: [{ noncurrent_days, newer_noncurrent_versions: number | null, storage_class }],
+                  legacy_prefix?: boolean /* shown as S3's <Rule><Prefix> */ }
 ObjectSummary = { key, size, etag, content_type, last_modified }
 ObjectInfo = ObjectSummary & { metadata: Record<string,string>, tags: Record<string,string>,
              cache_control, content_disposition, content_encoding, content_language, expires,
-             checksum: { algorithm, type, value } | null, parts }
-TrashEntry = { key, size, etag, deleted_at, expires_at }
+             checksum: { algorithm, type, value } | null, parts,
+             version_id /* "null" outside versioned buckets */,
+             lock: { mode, retain_until, legal_hold } | null }
+ObjectVersion = { key, version_id, is_latest, delete_marker, size, etag, last_modified }
+TrashEntry = { key, size, etag, deleted_at, expires_at, version_id }
 Key = { id /* access key id */, name, permission, buckets: string[] | null, created_at, last_used_at }
 Pricing = { usd_per_gb_month, usd_per_million_class_a, usd_per_million_class_b,
             usd_per_gb_egress_internet, usd_per_gb_egress_internal }
@@ -439,10 +562,22 @@ Details:
   `Content-Encoding`, `Content-Language`, `Expires` and `x-amz-meta-*` headers like `PutObject`,
   and returns `ObjectInfo`.
 - `POST /delete` with `{ "prefix": "" }` empties the bucket. A body with neither `keys` nor
-  `prefix` is a 400.
+  `prefix` is a 400. In a versioned bucket these deletes add delete markers.
+- `DELETE /object` without `version_id` is S3's DeleteObject (to the trash, or a delete marker
+  in a versioned bucket); a key that isn't there is a 404 and adds no marker. With
+  `version_id`, that version is deleted for good (to the trash); a missing version is a 404, a
+  malformed id a 400, and a version under Object Lock a 409. The response names `version_id`
+  and `delete_marker` only when there's a version to name.
+- `GET /versions` lists the bucket's versions like ListObjectVersions (current version first
+  within a key, delete markers included). `next_cursor` resumes after the last entry.
+- Unversioned buckets show `version_id: "null"` everywhere. The usage endpoints count
+  `version_bytes` as stored bytes. Object Lock can be turned on at creation
+  (`object_lock: true`); its default retention and per-version locks are set through the S3
+  API.
 - `/download` errors use the same JSON `{error}` body as everything else.
 - `DELETE /buckets/{name}?force=true` doesn't put the objects in a trash, because the bucket is
-  gone. Their blobs still go through the internal 24 h quarantine.
+  gone. Their blobs still go through the internal 24 h quarantine. A bucket holding versions
+  under Object Lock is a 409.
 - Presigned PUT URLs sign only `host`, so clients may send any `Content-Type`.
 - Presigned URLs are signed with the control plane's own admin key (`RKROLLCONTROLPLANE00`).
   It's created once and kept in the metadata, so URLs stay valid across restarts. It's never

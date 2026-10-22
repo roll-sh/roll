@@ -9,7 +9,7 @@ use crate::response::{self, Reply, set};
 use axum::body::Body;
 use axum::http::StatusCode;
 use s3_proto::checksum::{Algorithm, ChecksumType, b64, combine_crc, composite, crc_bytes, crc_from_bytes};
-use s3_proto::http::{Conditions, parse_copy_source, parse_copy_source_range, quote_etag, uri_encode};
+use s3_proto::http::{Conditions, parse_copy_source_range, parse_copy_source_version, quote_etag, uri_encode};
 use s3_proto::{Code, S3Error, xml};
 use s3_store::{Bucket, Checksum, Class, Part, Upload, UploadsQuery};
 use std::collections::HashMap;
@@ -57,8 +57,9 @@ pub(crate) async fn create(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     {
         return Err(invalid(format!("The {} checksum type cannot be used with the {} checksum algorithm.", t.as_str(), a.as_str())));
     }
+    let lock = crate::versioning::lock_headers(ctx, bucket)?;
     ctx.meter(&bucket.id, Class::A);
-    let up = ctx.store().create_upload(&bucket.name, ctx.key_name(), headers, alg.map(|a| a.as_str().to_string()), typ.map(|t| t.as_str().to_string())).await.s3()?;
+    let up = ctx.store().create_upload_with(&bucket.name, ctx.key_name(), headers, alg.map(|a| a.as_str().to_string()), typ.map(|t| t.as_str().to_string()), lock).await.s3()?;
     let mut r = response::xml(StatusCode::OK, xml::initiate_multipart(&bucket.name, ctx.key_name(), &up.id));
     if let (Some(a), Some(t)) = (alg, typ) {
         set(&mut r, "x-amz-checksum-algorithm", a.as_str());
@@ -111,9 +112,9 @@ pub(crate) async fn upload_part(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> R
 }
 
 async fn copy_part(ctx: &mut Ctx, up: &Upload, n: u32) -> Reply {
-    let (src_bucket, src_key) = parse_copy_source(ctx.h("x-amz-copy-source").unwrap_or_default())?;
+    let (src_bucket, src_key, src_vid) = parse_copy_source_version(ctx.h("x-amz-copy-source").unwrap_or_default())?;
     ctx.require_source(&src_bucket, &src_key)?;
-    let src = ctx.store().get_object(&src_bucket, &src_key).s3()?;
+    let src = crate::object::copy_source(ctx, &src_bucket, &src_key, src_vid.as_deref())?;
     Conditions::copy_source_from_headers(|h| ctx.h(h)).check_copy_source(&src.etag, src.modified_at)?;
     let range = match ctx.h("x-amz-copy-source-range") {
         Some(h) => {
@@ -126,8 +127,13 @@ async fn copy_part(ctx: &mut Ctx, up: &Upload, n: u32) -> Reply {
     if len > MAX_PUT {
         return Err(S3Error::new(Code::EntityTooLarge).with("ProposedSize", len.to_string()).with("MaxSizeAllowed", MAX_PUT.to_string()));
     }
-    let part = ctx.store().copy_part(up, n, &src_bucket, &src_key, range, Some(&src.etag)).await.s3()?;
-    response::ok_xml(xml::copy_part_result(&part.etag, part.created_at, None))
+    // The exact version checked above is the one copied.
+    let part = ctx.store().copy_part_version(up, n, &src_bucket, &src_key, Some(&src.version_id), range, Some(&src.etag)).await.s3()?;
+    let mut r = response::xml(StatusCode::OK, xml::copy_part_result(&part.etag, part.created_at, None));
+    if src_vid.is_some() || ctx.store().bucket(&src_bucket).is_ok_and(|b| b.versioning.is_some()) {
+        set(&mut r, "x-amz-copy-source-version-id", &src.version_id);
+    }
+    Ok(r)
 }
 
 /// The whole object's checksum from its parts' (`None` if a part has none, e.g. a copied one).
@@ -202,6 +208,7 @@ pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Repl
     if let Some(c) = &meta.checksum {
         set_checksum(&mut r, c);
     }
+    crate::versioning::set_version(&mut r, bucket, &meta.version_id, false);
     Ok(r)
 }
 

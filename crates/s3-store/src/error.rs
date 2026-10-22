@@ -33,6 +33,22 @@ pub enum StoreError {
     InvalidArgument(String),
     #[error("{0}")]
     NotFound(String),
+    /// `(key, version id)`: no such version of the key.
+    #[error("no version {1} of {0}")]
+    NoSuchVersion(String, String),
+    /// The version asked for is a delete marker: asked for by its id (`specific`), or as the
+    /// key's current version.
+    #[error("{key} is a delete marker")]
+    DeleteMarker { key: String, version_id: String, modified_at: i64, specific: bool },
+    /// Object Lock forbids it (retention or legal hold).
+    #[error("{0} is protected by Object Lock")]
+    ObjectLocked(String),
+    /// Not allowed in the bucket's state (versioning, Object Lock).
+    #[error("{0}")]
+    InvalidBucketState(String),
+    /// A well-formed request S3 refuses (`InvalidRequest`).
+    #[error("{0}")]
+    InvalidRequest(String),
     /// This node can't make writes durable any more (another node took over the metadata log,
     /// object storage failed, or it was closed). Nothing more was acknowledged; restart.
     #[error("storage unavailable: {0}")]
