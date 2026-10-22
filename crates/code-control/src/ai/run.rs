@@ -74,10 +74,15 @@ impl Code {
                 let msg = e.to_string();
                 tracing::warn!(job = %j.id, change = %j.change_id, error = %msg, "roll's reviewer");
                 let retryable = !matches!(e, Error::Invalid(_) | Error::InvalidComment(..) | Error::NotFound(_) | Error::Unprocessable(_) | Error::Forbidden(_));
-                if retryable && j.attempts < MAX_ATTEMPTS {
-                    let delay = self.config.review.retry_ms * 4i64.pow(j.attempts.saturating_sub(1));
+                // `j` was read before the claim that counted this attempt.
+                let attempt = j.attempts + 1;
+                if retryable && attempt < MAX_ATTEMPTS {
+                    let delay = self.config.review.retry_ms * 4i64.pow(attempt - 1);
                     let _ = self.db.retry_ai_job(&j.id, &msg, crate::db::now_ms() + delay);
                     return;
+                }
+                if j.kind != "review" {
+                    self.command_gave_up(&j, &msg);
                 }
                 let _ = self.db.finish_ai_job(&j.id, "failed", Some(&msg), None);
                 if j.kind == "review" {
@@ -96,6 +101,17 @@ impl Code {
             let _ = self.submit_review(&r, &c, &Reviewer::roll(), &json!({ "verdict": "comment", "body": body }), &Origin::ROLL).await;
         }
         let _ = self.finish_review_request(&c, &Reviewer::roll());
+    }
+
+    /// A command (`@roll explain`, `fix`, a question) that failed: answer in its thread, so the
+    /// person asking isn't left waiting.
+    fn command_gave_up(&self, j: &Job, msg: &str) {
+        let thread = j.command.as_ref().and_then(|c| c.get("thread")).and_then(Value::as_str).unwrap_or_default();
+        let (Ok(c), Ok(Some(th))) = (self.change_or_404(&j.change_id), self.db.thread(thread)) else { return };
+        let Ok(r) = self.repo_by_id(&c.repo_id) else { return };
+        if let Err(e) = self.roll_reply(&r, &c, &th, &format!("I couldn't answer: {msg}")) {
+            tracing::debug!(job = %j.id, error = %e, "replying to a failed command");
+        }
     }
 
     /// Settle a review job without reviewing: `skipped`, and the change no longer waits on it.
@@ -343,7 +359,9 @@ impl Code {
             }
             Err(engine::EngineError::Provider(e)) => {
                 return Err(match e {
-                    code_review::ProviderError::Rejected { status, .. } if status == 401 || status == 403 => Error::Unprocessable(e.to_string()),
+                    // The provider refused the request itself (a bad key, a bad request): asking
+                    // again won't help. Rate limits and overload were already retried.
+                    code_review::ProviderError::Rejected { status, .. } if (400..500).contains(&status) && status != 408 && status != 429 => Error::Unprocessable(e.to_string()),
                     code_review::ProviderError::Config(_) => Error::Unprocessable(e.to_string()),
                     _ => Error::Internal(anyhow::anyhow!(e.to_string())),
                 });

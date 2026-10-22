@@ -1776,7 +1776,7 @@ async fn provider_errors_403_persistent_529_and_400() {
     assert!(body.contains("kept failing") && body.contains("Overloaded"), "{body}");
     // Retried by the job (exactly 3 attempts: `a_failing_review_runs_three_times`).
     let attempts = j["attempts"].as_u64().unwrap();
-    assert!(attempts >= 3, "{j}");
+    assert_eq!(attempts, 3, "{j}");
     assert_eq!(t.m.messages().len() - before, attempts as usize * 2, "each attempt retries in the provider too");
 
     t.m.set(|s, _| (s.path == "/v1/messages").then(|| (400, json!({"type": "error", "error": {"type": "invalid_request_error", "message": "messages: bad shape"}}))));
@@ -1790,7 +1790,6 @@ async fn provider_errors_403_persistent_529_and_400() {
 /// reviews.md: "A failed attempt is retried twice with backoff (30 s, then ×4)" — three attempts
 /// in all (`MAX_ATTEMPTS`), with delays of `retry_ms` then `retry_ms × 4`.
 #[tokio::test]
-#[ignore = "run.rs off by one: run_job compares the pre-claim `j.attempts` (one attempt more, delays 1×, 1×, 4×)"]
 async fn a_failing_review_runs_three_times() {
     let t = setup(|c, _| c.review.retry_ms = 100).await;
     enable(&t, json!({ "mode": "standard" })).await;
@@ -1901,6 +1900,11 @@ async fn a_chat_with_a_bad_key_fails_without_retrying() {
     assert!(jobs[0]["error"].as_str().unwrap().contains("invalid x-api-key"));
     assert_eq!(t.m.messages().len(), 1);
     assert_eq!(ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await["totals"]["chats"], 0, "nothing metered");
+    // The thread says why instead of going quiet.
+    let th = threads(&t, &id).await.into_iter().find(|th| th["comments"][0]["body"] == "@roll explain").unwrap();
+    let last = th["comments"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["author"]["kind"], "roll", "{th}");
+    assert!(last["body"].as_str().unwrap().starts_with("I couldn't answer:") && last["body"].as_str().unwrap().contains("invalid x-api-key"), "{last}");
 }
 
 /// Modes, speeds and profiles through code-control: `auto` picks `max` for `max_paths` (with
