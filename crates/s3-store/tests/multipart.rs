@@ -64,7 +64,10 @@ async fn part_checksums_are_kept() {
     s.create_bucket("mpu", BucketOptions::default()).await.unwrap();
     let up = s.create_upload("mpu", "ck", ObjectHeaders::default(), Some("CRC32".into()), Some("COMPOSITE".into())).await.unwrap();
     let mut etags = Vec::new();
-    for (n, (data, ck)) in [(&b"hello"[..], "NhCmhg=="), (&b"world"[..], "OiF+eA==")].into_iter().enumerate() {
+    // Every part but the last is at least 5 MiB, as on S3. (The store keeps the checksums the
+    // gateway verified; these are just values to keep.)
+    let first = vec![b'h'; 5 << 20];
+    for (n, (data, ck)) in [(&first[..], "NhCmhg=="), (&b"world"[..], "OiF+eA==")].into_iter().enumerate() {
         let n = n as u32 + 1;
         let d = s.put_part_data(&up, n, bytes_body(Bytes::copy_from_slice(data)), data.len() as u64).await.unwrap();
         etags.push((n, s.commit_part(&up, n, &d, &md5_hex(data), Some(ck.into())).await.unwrap().etag));
@@ -72,7 +75,7 @@ async fn part_checksums_are_kept() {
     let checksum = Checksum { algorithm: "CRC32".into(), kind: "COMPOSITE".into(), value: "x-2".into() };
     let m = s.complete_upload("mpu", &up.id, &etags, Some(checksum), &WriteCondition::none()).await.unwrap();
     assert_eq!(m.part_checksums, ["NhCmhg==", "OiF+eA=="]);
-    assert_eq!(m.part_sizes, [5, 5]);
+    assert_eq!(m.part_sizes, [5 << 20, 5]);
 
     // Without an object checksum (or with a part that has none), nothing is kept.
     let up = s.create_upload("mpu", "plain", ObjectHeaders::default(), None, None).await.unwrap();
@@ -83,7 +86,7 @@ async fn part_checksums_are_kept() {
 
     let s2 = open(&backend, &clock).await;
     let m = s2.get_object("mpu", "ck").unwrap();
-    assert_eq!((m.part_sizes, m.part_checksums), (vec![5, 5], vec!["NhCmhg==".to_string(), "OiF+eA==".to_string()]));
+    assert_eq!((m.part_sizes, m.part_checksums), (vec![5 << 20, 5], vec!["NhCmhg==".to_string(), "OiF+eA==".to_string()]));
     let m = s2.get_object("mpu", "plain").unwrap();
     assert_eq!((m.part_sizes, m.part_checksums.len()), (vec![5], 0));
 }
