@@ -359,6 +359,15 @@ mode, and is metered to its owner each month.
   - `pause`: it isn't run, and a comment review says so
   - `byok_fallback`: it runs on the owner's own key, or pauses without one
   - `standard_only`: a `deep` or `max` review runs as `standard`, and standard reviews continue
+
+  Chat replies and commands count against the cap too; at the cap they're answered without a
+  model call (with `byok_fallback`, on the owner's key when there is one). Jobs running at the same
+  time can't overrun the cap together: each reserves its estimated price before calling the model
+  and releases it once metered, and the check counts metered spend plus what running jobs hold. A
+  review is estimated on every file it sends and metered on the files it read, so it never costs
+  more than it reserved. A public repo's free reviews are reserved the same way: a running review
+  holds the free one it counts on, and is metered as free exactly when it got one. Reservations
+  live in the daemon's memory, so this holds for one node.
 - **Who counts as a person** for the human cap: the change's author, unless the author is one of
   these:
   - an `agent:…` or `…[bot]` name

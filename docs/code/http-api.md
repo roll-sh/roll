@@ -425,6 +425,18 @@ POST  /v1/code/work/{id}/heartbeat | /release | /complete {agent?} → WorkItem
 `GET /v1/code/repos/{owner}/{repo}/events` sends the event types `landed`, `change`, `work`, `check`,
 `preview`, `queue`, `review`, `thread` and `push`. Repo webhooks get the same events with the same data.
 
+**Stream limits.** Each caller may hold at most 32 event streams open at once
+(`--code-max-streams-per-caller`, `ROLL_CODE_MAX_STREAMS_PER_CALLER`), and the server 10,000 in total
+(`--code-max-streams`). Past either limit the request answers `429 {error}` with `Retry-After: 5`
+instead of a stream; closing a stream frees its slot. MCP's event-stream answers count against the
+same slots.
+- A caller is a token (the admin token, an owner token by its name, a review app).
+- Anonymous callers, and everyone on an open daemon, are counted by client address. Behind a proxy,
+  `--code-trust-forwarded-for` counts them by the first `X-Forwarded-For` address instead; never set
+  it without a proxy that sets that header. Anonymous callers whose address is unknown share one
+  bucket bounded only by the total.
+- A refused request (401, 404) takes no slot.
+
 ```
 landed  = {changeset, git_commit: sha | null, ref, generation, message, author, change: string | null, files: number, at, count}
 change  = Change      work = WorkItem      preview = {change, preview: Preview}
@@ -516,7 +528,8 @@ POST   /v1/code/mcp     JSON-RPC: initialize (→ Mcp-Session-Id header), ping, 
                         403 a browser Origin other than the web app's or the API's.
                         Accept: text/event-stream only → 200 text/event-stream: one `message` event per
                         response, `:` keep-alive comments every 15 s while a call runs (initialize still
-                        answers JSON; notifications alone still 202)
+                        answers JSON; notifications alone still 202); 429 when the caller already holds
+                        its event streams (see "Stream limits" under Events)
 GET    /v1/code/mcp     405 (no server-sent stream)
 DELETE /v1/code/mcp     ends the session: 204, then 404
 ```

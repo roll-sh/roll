@@ -98,7 +98,9 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
     `application/json`) gets the answer as server-sent events instead: one `message` event per
     response, with `:` keep-alive comments every 15 seconds while a long call (a `land` waiting on
     a lander, say) runs. `initialize` always answers in JSON, because its session id is a header,
-    and notifications alone still get 202.
+    and notifications alone still get 202. An event-stream answer holds one of the caller's event
+    stream slots while it runs, shared with `GET …/events` (32 per caller by default); past that it
+    gets `429` with `Retry-After`, and plain JSON answers still work.
   - There's no server-initiated stream, so `GET` answers 405.
 - **Revoked tokens:** a request with a token that no longer works (revoked, or never valid) gets
   401 and ends its session, and `initialize` with one gets 401 too.
