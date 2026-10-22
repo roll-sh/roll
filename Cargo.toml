@@ -139,6 +139,8 @@ ring = "0.17"
 # Tests only: RSA keys to sign web identity tokens with, and the STS client.
 rsa = "0.9"
 aws-sdk-sts = "1"
+# Tests only: the S3 Control client (access points).
+aws-sdk-s3control = "1"
 zeroize = "1"
 s3-proto = { path = "crates/s3-proto" }
 s3-store = { path = "crates/s3-store" }

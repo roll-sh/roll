@@ -113,6 +113,17 @@ pub struct CopySource<'a> {
     pub sse: Option<&'a BlobSse>,
 }
 
+/// An object of an S3 backend, as another S3 client would name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct S3Location {
+    pub bucket: String,
+    /// The full key (with the backend's prefix).
+    pub key: String,
+    /// The custom endpoint (`None`: AWS S3).
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
+}
+
 /// One object in a listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listed {
@@ -155,6 +166,12 @@ pub trait Backend: Send + Sync + 'static {
     /// object since 2023. Only then do responses say so without being asked.
     fn encrypts_at_rest(&self) -> bool {
         false
+    }
+
+    /// Where `key` lives on S3 (`None` for a local directory): for copies by another client
+    /// with the same credentials (replication to a bucket on the same service).
+    fn s3_location(&self, _key: &str) -> Option<S3Location> {
+        None
     }
 
     /// Store a blob (with the configured storage class, encrypted as `attrs.sse` says). `len`

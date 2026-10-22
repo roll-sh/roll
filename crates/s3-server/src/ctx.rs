@@ -31,6 +31,8 @@ pub(crate) struct Ctx {
     pub website: bool,
     pub(crate) access_cache: crate::access::AccessCache,
     pub(crate) started: std::time::Instant,
+    /// Addressed to an access point (`accesspoint/`): `bucket` is then its bucket's.
+    pub(crate) access_point: Option<Arc<crate::accesspoint::ApRequest>>,
 }
 
 impl Ctx {
@@ -144,6 +146,7 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
         website,
         access_cache: Default::default(),
         started: std::time::Instant::now(),
+        access_point: None,
     };
     let result = match addressed {
         Ok((b, k, vhost)) => {
@@ -152,7 +155,10 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
             ctx.vhost = vhost;
             // Who's asking, for the events the request's changes record.
             let origin = s3_store::Origin { source_ip: peer.map(|p| p.to_string()), request_id: Some(request_id.clone()), ..Default::default() };
-            s3_store::events::with_origin(origin, run(&mut ctx, body)).await
+            match crate::accesspoint::resolve(&mut ctx) {
+                Ok(()) => s3_store::events::with_origin(origin, run(&mut ctx, body)).await,
+                Err(e) => Err(e),
+            }
         }
         Err(e) => Err(e),
     };
@@ -199,6 +205,9 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
     if ctx.method == Method::OPTIONS {
         return cors::preflight(ctx);
     }
+    if crate::accesspoint::lambda::is_write_get_object_response(ctx) {
+        return crate::accesspoint::lambda::write_get_object_response(ctx, body).await;
+    }
     if is_form_post(ctx) {
         return post::upload(ctx, body).await;
     }
@@ -207,9 +216,19 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
     if let Some(id) = ctx.auth.as_ref().and_then(|a| a.key.acting_key()) {
         ctx.store().touch_key(id);
     }
+    if crate::accesspoint::control::is_control(ctx) {
+        return crate::accesspoint::control::handle(ctx, body).await;
+    }
     crate::owner::check(ctx)?;
     let principal = ctx.auth.as_ref().map_or_else(|| "anonymous".to_string(), |a| a.key.id.clone());
     s3_store::events::set_origin(|o| o.principal = Some(principal));
+    if ctx.access_point.is_some() {
+        crate::accesspoint::check_request(ctx)?;
+        crate::accesspoint::lambda::authorize_olap(ctx)?;
+        if let Some(r) = crate::accesspoint::lambda::transform(ctx).await {
+            return r;
+        }
+    }
     match (&ctx.bucket, &ctx.key) {
         (None, _) => match ctx.method {
             Method::GET => bucket::list_buckets(ctx),

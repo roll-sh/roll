@@ -18,6 +18,7 @@
 //! let meta = store.commit_put(name, key, NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag, headers, checksum }, &cond).await?;
 //! ```
 
+pub mod access_points;
 pub mod backend;
 pub mod config;
 mod db;
@@ -35,15 +36,18 @@ mod schema;
 pub mod sse;
 mod store;
 pub mod sts;
+pub mod targets;
 pub mod validate;
 mod versioning;
 mod versions;
 
-pub use backend::{Backend, BlobAttrs, BlobSse, ByteStream, CopySource, CustomerKey, KmsParams, Listed, LocalBackend, S3Backend, SseOp, SseUnsupported, Uploaded, UploadedPart, bytes_body, from_config, sse_c_unsupported, test_backend};
+pub use backend::{Backend, BlobAttrs, BlobSse, ByteStream, CopySource, CustomerKey, KmsParams, Listed, LocalBackend, S3Backend, S3Location, SseOp, SseUnsupported, Uploaded, UploadedPart, bytes_body, from_config, sse_c_unsupported, test_backend};
 pub use config::{PublicAccessBlock, RedirectAll, Redirect, RoutingCondition, RoutingRule, WebsiteConfig};
 pub use sse::Encryption;
 pub use error::{Result, StoreError};
-pub use events::{EventRecord, InventoryEntry, NotificationConfig, NotificationTarget, Origin, PendingEvent, ReplicationConfig, ReplicationRule, Replicated, RuleFilter};
+pub use access_points::{AccessPoint, AccessPointKind, NewAccessPoint};
+pub use events::{EventRecord, InventoryEntry, NotificationConfig, NotificationTarget, Origin, PendingEvent, ReplicaSource, ReplicateTask, ReplicationBacklog, ReplicationConfig, ReplicationRule, Replicated, RuleFilter};
+pub use targets::{ReplicationTarget, Secret, TargetSpec};
 pub use ids::{blob_key, day_of, is_temporary_key_id, version_id};
 pub use log::LogStats;
 pub use meter::{Class, Counters, Meter};

@@ -59,6 +59,58 @@ pub fn client(endpoint: &str, access: &str, secret: &str) -> Client {
     Client::from_conf(conf)
 }
 
+/// Sends every request to 127.0.0.1:`port` whatever its host (`Host` stays the host the SDK
+/// made, e.g. `<access point>-<account>.localhost:<port>` or `<account>.localhost:<port>` for
+/// S3 Control), the way DNS for those names would.
+#[derive(Debug)]
+pub struct Loopback(pub u16);
+
+impl aws_sdk_s3::config::Intercept for Loopback {
+    fn name(&self) -> &'static str {
+        "Loopback"
+    }
+
+    fn modify_before_transmit(
+        &self,
+        ctx: &mut aws_sdk_s3::config::interceptors::BeforeTransmitInterceptorContextMut<'_>,
+        _rc: &aws_sdk_s3::config::RuntimeComponents,
+        _cfg: &mut aws_sdk_s3::config::ConfigBag,
+    ) -> Result<(), aws_sdk_s3::error::BoxError> {
+        let req = ctx.request_mut();
+        let uri = req.uri().to_string();
+        let rest = uri.split_once("://").map(|(_, r)| r).unwrap_or(&uri);
+        let authority = rest.split('/').next().unwrap_or_default().to_string();
+        req.headers_mut().insert("host", authority.clone());
+        let to = uri.replacen(&authority, &format!("127.0.0.1:{}", self.0), 1);
+        req.set_uri(to.as_str())?;
+        Ok(())
+    }
+}
+
+/// An S3 client that addresses buckets by host (ARNs become `<name>-<account>.localhost`).
+pub fn host_client(port: u16, access: &str, secret: &str) -> Client {
+    let conf = aws_sdk_s3::Config::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new(REGION))
+        .endpoint_url(format!("http://localhost:{port}"))
+        .credentials_provider(Credentials::new(access, secret, None, None, "test"))
+        .interceptor(Loopback(port))
+        .build();
+    Client::from_conf(conf)
+}
+
+/// An S3 Control client for the server (`<account>.localhost` hosts).
+pub fn control_client(port: u16, access: &str, secret: &str) -> aws_sdk_s3control::Client {
+    let conf = aws_sdk_s3control::Config::builder()
+        .behavior_version(aws_sdk_s3control::config::BehaviorVersion::latest())
+        .region(aws_sdk_s3control::config::Region::new(REGION))
+        .endpoint_url(format!("http://localhost:{port}"))
+        .credentials_provider(aws_sdk_s3control::config::Credentials::new(access, secret, None, None, "test"))
+        .interceptor(Loopback(port))
+        .build();
+    aws_sdk_s3control::Client::from_conf(conf)
+}
+
 pub fn sha256_hex(b: &[u8]) -> String {
     hex::encode(Sha256::digest(b))
 }

@@ -7,7 +7,7 @@
 //! the headers would otherwise store plaintext, so what it stored is deleted again and the
 //! request fails with [`SseUnsupported`].
 
-use super::{Backend, BlobAttrs, BlobSse, ByteStream, Checked, CopySource, Listed, SseUnsupported, Uploaded, UploadedPart};
+use super::{Backend, BlobAttrs, BlobSse, ByteStream, Checked, CopySource, Listed, S3Location, SseUnsupported, Uploaded, UploadedPart};
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use aws_sdk_s3::Client;
@@ -33,6 +33,7 @@ pub struct S3Backend {
     kms: bool,
     /// Real AWS S3 (no custom endpoint), which encrypts every object with SSE-S3.
     aws: bool,
+    endpoint: Option<String>,
 }
 
 /// A body of known length for the SDK (which wants `Sync`).
@@ -243,6 +244,7 @@ impl S3Backend {
             storage_class: storage_class.filter(|s| !s.is_empty()).map(StorageClass::from),
             kms: endpoint.is_none(),
             aws: endpoint.is_none(),
+            endpoint: endpoint.map(|e| e.trim_end_matches('/').to_string()),
         })
     }
 
@@ -280,6 +282,10 @@ impl Backend for S3Backend {
 
     fn encrypts_at_rest(&self) -> bool {
         self.aws
+    }
+
+    fn s3_location(&self, key: &str) -> Option<S3Location> {
+        Some(S3Location { bucket: self.bucket.clone(), key: self.full(key), endpoint: self.endpoint.clone(), region: self.client.config().region().map(|r| r.to_string()) })
     }
 
     async fn put(&self, key: &str, body: ByteStream, len: u64, attrs: &BlobAttrs) -> Result<Uploaded> {

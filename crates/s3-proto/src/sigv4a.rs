@@ -85,7 +85,7 @@ fn parse_credential(s: &str, code: Code, expect_service: &str) -> Result<Credent
     if parts[1].len() != 8 || !parts[1].bytes().all(|c| c.is_ascii_digit()) {
         return Err(bad(&format!("incorrect date format \"{}\". This date in the credential must be in the format \"yyyyMMdd\".", parts[1])));
     }
-    if parts[2] != expect_service {
+    if parts[2] != expect_service && !crate::sigv4::service_alias(expect_service, parts[2]) {
         return Err(bad(&format!("incorrect service \"{}\". This endpoint belongs to \"{expect_service}\".", parts[2])));
     }
     Ok(Credential { access_key: parts[0].into(), date: parts[1].into(), region: String::new(), service: parts[2].into() })

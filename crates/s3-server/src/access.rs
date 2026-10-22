@@ -109,6 +109,10 @@ impl Ctx {
     }
 }
 
+pub(crate) fn principal_of(ctx: &Ctx, who: Who) -> Principal {
+    principal(ctx, who)
+}
+
 fn principal(ctx: &Ctx, who: Who) -> Principal {
     match who {
         Who::Anonymous => Principal::Anonymous,
@@ -116,7 +120,7 @@ fn principal(ctx: &Ctx, who: Who) -> Principal {
     }
 }
 
-fn resource_arn(bucket: &str, key: Option<&str>) -> String {
+pub(crate) fn resource_arn(bucket: &str, key: Option<&str>) -> String {
     match key {
         Some(k) => format!("arn:aws:s3:::{bucket}/{k}"),
         None => format!("arn:aws:s3:::{bucket}"),
@@ -136,7 +140,7 @@ impl Ctx {
     }
 }
 
-fn key_allows(who: Who, bucket: &str, need: Need) -> bool {
+pub(crate) fn key_allows(who: Who, bucket: &str, need: Need) -> bool {
     match who {
         Who::Anonymous => false,
         Who::Key(k) => match need {
@@ -198,6 +202,10 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
             return Err(denied());
         }
     }
+    // Through an access point: its policy and the bucket's (`accesspoint/mod.rs`).
+    if let Some(r) = crate::accesspoint::authorize(ctx, who, &a, bucket, key, action, need, prefix) {
+        return r;
+    }
     if let Who::Key(k) = who
         && k.is_admin()
         && k.covers(bucket)
@@ -248,16 +256,16 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
 }
 
 /// Condition keys of a request.
-struct Cond<'a> {
-    ctx: &'a Ctx,
-    who: Who<'a>,
-    bucket: &'a str,
-    key: Option<&'a str>,
-    account: &'a Account,
+pub(crate) struct Cond<'a> {
+    pub ctx: &'a Ctx,
+    pub who: Who<'a>,
+    pub bucket: &'a str,
+    pub key: Option<&'a str>,
+    pub account: &'a Account,
     /// The object's current tags, read on first use.
-    tags: OnceLock<Option<BTreeMap<String, String>>>,
+    pub tags: OnceLock<Option<BTreeMap<String, String>>>,
     /// `s3:prefix` when it isn't the request's `prefix` parameter.
-    prefix: Option<&'a str>,
+    pub prefix: Option<&'a str>,
 }
 
 impl Cond<'_> {
@@ -272,6 +280,9 @@ impl Context for Cond<'_> {
         if let Who::Key(k) = self.who
             && let Some(v) = crate::temporary::condition(k, &self.account.id, key)
         {
+            return v;
+        }
+        if let Some(v) = crate::accesspoint::condition(ctx, key) {
             return v;
         }
         let one = |v: Option<String>| v.map(|v| vec![v]);

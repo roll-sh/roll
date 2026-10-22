@@ -40,7 +40,7 @@ impl IntoResponse for ControlError {
 }
 
 /// `Json` whose rejections are `{"error": ...}` 400s like every other error.
-struct JsonBody<T>(T);
+pub(crate) struct JsonBody<T>(pub T);
 
 impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequest<S> for JsonBody<T> {
     type Rejection = ControlError;
@@ -91,6 +91,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/storage/keys", get(list_keys).post(create_key))
         .route("/v1/storage/keys/{id}", delete(delete_key))
         .merge(crate::roles::routes())
+        .merge(crate::targets::routes())
         // The dashboard calls it from the browser, like the other control-plane APIs.
         .layer(CorsLayer::permissive())
         .with_state(control)
@@ -152,7 +153,9 @@ async fn update_bucket(State(c): State<AppState>, Path(name): Path<String>, Json
     if let Some(t) = &p.tags {
         s3_store::config::validate_bucket_tags(t.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
     }
-    let settings = c.prepare_settings(&b, p.update.versioning.as_deref(), p.update.public, p.settings)?;
+    let mut settings = c.prepare_settings(&b, p.update.versioning.as_deref(), p.update.public, p.settings)?;
+    // Buckets outside roll are checked over the network (their versioning), before anything.
+    c.check_replication_targets(&mut settings).await?;
     // Notifications next (their destinations are checked by sending them a test event): a
     // refused configuration leaves the rest of the PATCH unapplied.
     if let Some(n) = p.notifications {
