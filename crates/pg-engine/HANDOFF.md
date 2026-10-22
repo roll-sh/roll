@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 50,931 of 51,150 statements match (99.57%).** 219 differ. The full
+- **Regression suite: 50,938 of 51,150 statements match (99.59%).** 212 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 210 are `EXPLAIN` plan text (96%). Query results already match.
+  - 203 are `EXPLAIN` plan text (96%). Query results already match.
   - 8 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -205,14 +205,13 @@ them all with the "Fixed in round N" sections describing what was already tried.
    remove_useless_result_rtes (343/347), qualified names in a dummy Result over catalog scans
    (368), a full join of one-row relations removed (366). join 744 differs only in plan choice
    (a parameterized hash join inside a nested loop).
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 74, partition_join 28,
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 74, partition_join 21,
    partition_prune 12 units; round 14's agent 5 section in STATUS.md has what changed): cost-driven
    choices (join 123/410/424/450/543, partition_join 21/74), equivalence classes above outer joins
    (join 416) and with scan-level members (join 609/610), partitionwise joins with a LATERAL item
    (partition_join 41/43/45/46/48/204–207), IN over a partitioned subquery as a semi join
    (partition_join 86/88/92: the subquery is planned before the WHERE's sublinks are pulled up),
-   ORDER BY … LIMIT over a partitionwise join as a Merge Append of ordered child joins
-   (partition_join 599–601), a pulled-up UNION ALL's alias as a range table entry
+   a pulled-up UNION ALL's alias as a range table entry
    (partition_prune 392/393/399), partition_prune's parallel plans (377–383, 652), 265 / 410 /
    746.
 3. **subselect** (6 units; rounds 13–14 fixed the row comparisons with sub-selects, most of
