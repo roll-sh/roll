@@ -53,6 +53,22 @@ pub fn access_key_id() -> String {
     format!("RK{}", random_from(BASE32_UPPER, 18))
 }
 
+/// Temporary (STS) access key ids: `RT` and 18 base32 characters, so they can't be mistaken
+/// for a permanent key's (`RK…`), like AWS's `ASIA…` and `AKIA…`.
+pub fn temporary_key_id() -> String {
+    format!("RT{}", random_from(BASE32_UPPER, 18))
+}
+
+/// Whether an access key id has the shape of a temporary one.
+pub fn is_temporary_key_id(id: &str) -> bool {
+    id.len() == 20 && id.starts_with("RT") && id.bytes().skip(2).all(|b| BASE32_UPPER.contains(&b))
+}
+
+/// Role ids (what `aws:userid` shows for a role session, like AWS's `AROA…`).
+pub fn role_id() -> String {
+    format!("RR{}", random_from(BASE32_UPPER, 18))
+}
+
 pub fn secret_key() -> String {
     random_from(ALNUM, 40)
 }
@@ -89,6 +105,11 @@ mod tests {
         assert!(bucket_id().starts_with("bkt_") && bucket_id().len() == 16);
         assert_ne!(blob_id(), blob_id());
         assert!(access_key_id().starts_with("RK"));
+        assert!(is_temporary_key_id(&temporary_key_id()));
+        assert!(!is_temporary_key_id(&access_key_id()));
+        assert!(!is_temporary_key_id("RTshort"));
+        assert!(!is_temporary_key_id("RTabcdefghijklmnopqr"), "lowercase isn't ours");
+        assert_eq!(role_id().len(), 20);
         let (old, new) = (version_id(1_000), version_id(2_000));
         assert!(new < old, "newer versions sort first");
         assert_eq!(new.len(), 32);

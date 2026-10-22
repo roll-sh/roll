@@ -210,7 +210,8 @@ pub(crate) fn record(ctx: &Ctx, resp: &Response, request_id: &str, error: Option
     let now = store.now();
     let dash = || "-".to_string();
     let requester = ctx.auth.as_ref().map_or_else(dash, |a| store.canonical_user(&a.key.id));
-    let uri = if ctx.raw_query.is_empty() { ctx.raw_path.clone() } else { format!("{}?{}", ctx.raw_path, ctx.raw_query) };
+    // Session tokens never go into logs.
+    let uri = if ctx.raw_query.is_empty() { ctx.raw_path.clone() } else { format!("{}?{}", ctx.raw_path, crate::temporary::redact_query(&ctx.raw_query)) };
     let bytes_sent = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).filter(|v| *v != "0").map_or_else(dash, str::to_string);
     let presigned = ctx.query.iter().any(|(k, _)| k.eq_ignore_ascii_case("X-Amz-Signature"));
     let fields = [

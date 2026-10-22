@@ -30,6 +30,8 @@ mod policy;
 mod post;
 mod response;
 mod sse;
+mod sts;
+mod temporary;
 mod upload;
 mod versioning;
 mod website;
@@ -44,7 +46,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use error::store_error;
+pub use sts::oidc::{HttpFetch, JwksFetch};
 pub use upload::put_object;
+
+/// Check an IAM identity policy (a role's inline policy, or a session policy) of at most `max`
+/// bytes, and return it minified. `Err` says what's wrong.
+pub fn validate_identity_policy(doc: &str, max: usize) -> Result<String, String> {
+    policy::Policy::parse_identity(doc.as_bytes(), max).map_err(|e| e.message)?;
+    serde_json::from_str::<serde_json::Value>(doc).map(|v| v.to_string()).map_err(|e| e.to_string())
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -62,6 +72,9 @@ pub struct Config {
     /// How often buffered server access logs are written to their target buckets; `None` =
     /// only by [`Server::flush_access_logs`].
     pub access_log_interval: Option<std::time::Duration>,
+    /// Fetch OIDC providers' keys (`AssumeRoleWithWebIdentity`) over plain HTTP too. Tests
+    /// only: in production the keys must come over HTTPS.
+    pub oidc_allow_http: bool,
 }
 
 impl Default for Config {
@@ -73,6 +86,7 @@ impl Default for Config {
             spool_dir: std::env::temp_dir(),
             website_domain: None,
             access_log_interval: Some(std::time::Duration::from_secs(300)),
+            oidc_allow_http: false,
         }
     }
 }
@@ -91,11 +105,14 @@ pub struct Server {
     pub store: Arc<Store>,
     pub cfg: Config,
     logs: logging::Logs,
+    /// Verifies web identity tokens (STS `AssumeRoleWithWebIdentity`).
+    pub(crate) oidc: sts::oidc::Oidc,
 }
 
 impl Server {
     pub fn new(store: Arc<Store>, cfg: Config) -> Arc<Self> {
-        let server = Arc::new(Self { store, cfg, logs: Default::default() });
+        let oidc = sts::oidc::Oidc::new(Arc::new(HttpFetch::new(cfg.oidc_allow_http)));
+        let server = Arc::new(Self { store, cfg, logs: Default::default(), oidc });
         if let (Some(every), Ok(rt)) = (server.cfg.access_log_interval, tokio::runtime::Handle::try_current()) {
             let weak = Arc::downgrade(&server);
             rt.spawn(async move {
@@ -113,6 +130,11 @@ impl Server {
     /// written every `access_log_interval`). Returns how many log objects were written.
     pub async fn flush_access_logs(&self) -> usize {
         logging::flush(self).await
+    }
+
+    /// Fetch OIDC providers' keys with `fetch` from now on (tests serve their own keys).
+    pub fn set_jwks_fetcher(&self, fetch: Arc<dyn JwksFetch>) {
+        self.oidc.set_fetch(fetch);
     }
 
     /// Access log lines dropped because the buffer was full.

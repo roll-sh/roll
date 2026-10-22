@@ -134,6 +134,11 @@ ipnet = "2"
 # SigV4a (ECDSA P-256), and the local backend's at-rest encryption for SSE-C.
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 aes-gcm = "0.10"
+# STS web identity: RS256/ES256 JWT signatures (verification only).
+ring = "0.17"
+# Tests only: RSA keys to sign web identity tokens with, and the STS client.
+rsa = "0.9"
+aws-sdk-sts = "1"
 zeroize = "1"
 s3-proto = { path = "crates/s3-proto" }
 s3-store = { path = "crates/s3-store" }
@@ -143,6 +148,10 @@ s3-control = { path = "crates/s3-control" }
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]
 kafka-protocol = { path = "vendor/kafka-protocol" }
+
+# Tests generate RSA keys (web identity); unoptimised big-integer code makes that slow.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

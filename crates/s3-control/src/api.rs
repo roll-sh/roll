@@ -90,6 +90,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/storage/buckets/{name}/usage", get(usage))
         .route("/v1/storage/keys", get(list_keys).post(create_key))
         .route("/v1/storage/keys/{id}", delete(delete_key))
+        .merge(crate::roles::routes())
         // The dashboard calls it from the browser, like the other control-plane APIs.
         .layer(CorsLayer::permissive())
         .with_state(control)

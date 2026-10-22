@@ -224,7 +224,8 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
     }
 
     // Who's uploading: the policy's signer (SigV2 or SigV4), who must be allowed to write here.
-    let find = |ak: &str| ctx.store().access_key(ak).s3()?.ok_or_else(|| S3Error::new(Code::InvalidAccessKeyId).with("AWSAccessKeyId", ak.to_string()));
+    let token = field(&fields, "x-amz-security-token").map(str::trim).filter(|t| !t.is_empty());
+    let find = |ak: &str| crate::temporary::resolve(ctx.store(), ak, token);
     let (access, policy_b64) = match s3_proto::sigv2::parse_post_auth(&fields)? {
         Some((ak, policy, signature)) => {
             let access = find(&ak)?;
@@ -246,7 +247,9 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         None => None,
     };
     let website_redirect = field(&fields, "x-amz-website-redirect-location").map(crate::website::check_redirect).transpose()?;
-    ctx.store().touch_key(&access.id);
+    if let Some(id) = access.acting_key() {
+        ctx.store().touch_key(id);
+    }
     ctx.meter(&bucket.id, Class::A);
 
     // The object's headers from the form.

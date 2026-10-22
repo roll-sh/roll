@@ -17,6 +17,8 @@ hex.workspace = true
 ipnet.workspace = true
 memchr.workspace = true
 p256.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
+ring.workspace = true
 s3-proto.workspace = true
 s3-store.workspace = true
 serde.workspace = true
@@ -29,7 +31,10 @@ tracing.workspace = true
 [dev-dependencies]
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
+aws-sdk-sts.workspace = true
+rand.workspace = true
 aws-smithy-types.workspace = true
+rsa = { workspace = true, features = ["sha2"] }
 md-5.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 serde_json.workspace = true

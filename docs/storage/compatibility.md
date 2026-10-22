@@ -24,7 +24,8 @@ clients fail clearly instead of silently doing the wrong thing.
 | Anonymous requests | what the bucket's policy or ACLs allow, and GET/HEAD of objects in `public` buckets |
 | Bucket policies | ✅ enforced; principals are roll access keys (see [Policies](#policies-acls-and-public-access)) |
 | Website endpoint (`<bucket>.<website domain>`) | ✅ when `ROLL_S3_WEBSITE_DOMAIN` is set |
-| IAM, STS, session tokens | ❌ use roll access keys (`read`, `write`, `admin`, optionally scoped to buckets) and bucket policies |
+| STS temporary credentials (`x-amz-security-token`, `AWS_SESSION_TOKEN`) | ✅ `GetSessionToken`, `AssumeRole`, `AssumeRoleWithWebIdentity`, `GetCallerIdentity` on the same endpoint (see [STS](#sts-temporary-credentials)) |
+| IAM users, groups, managed policies | ❌ use roll access keys (`read`, `write`, `admin`, optionally scoped to buckets), roles and bucket policies |
 
 ## Operations
 
@@ -147,6 +148,59 @@ Details:
 | Torrent | |
 | Directory buckets (S3 Express) | |
 
+## STS (temporary credentials)
+
+The STS query API answers on the S3 endpoint: point an SDK's `sts` endpoint (`endpoint_url`,
+`AWS_ENDPOINT_URL_STS`, or `AWS_ENDPOINT_URL` for every service) at roll. `POST /` (or `GET`)
+with `Action=…&Version=2011-06-15`, SigV4 with service `sts` and any region; STS's XML
+responses and `<ErrorResponse>` errors.
+
+| feature | status |
+|---|---|
+| `GetSessionToken` | ✅ 900 s–36 h (default 12 h); the session acts as its key, with the key's current permission |
+| `AssumeRole` | ✅ roles trust roll keys; `DurationSeconds` 900 s up to the role's maximum (≤ 12 h) |
+| `AssumeRole` `Policy` (inline session policy) | ✅ at most 2 KB; narrows the role, never widens it |
+| `AssumeRole` `Tags`, `TransitiveTagKeys` | ✅ `aws:PrincipalTag/<key>` in policy conditions; at most 50 tags, 2 KB together |
+| `AssumeRole` `ExternalId`, `SourceIdentity` | ✅ the external id is required when the role sets one |
+| `AssumeRole` `PolicyArns` (managed session policies) | ❌ `ValidationError`: pass the policy inline |
+| `AssumeRoleWithWebIdentity` | ✅ OIDC ID tokens (RS256, ES256) from providers in the role's trust: Google, Auth0, Clerk, Cognito, GitHub Actions, Kubernetes service accounts, …; tags from `https://aws.amazon.com/tags` |
+| `GetCallerIdentity` | ✅ |
+| `x-amz-security-token` header, `X-Amz-Security-Token` in presigned URLs and POST forms | ✅ SigV4, SigV4a and SigV2 |
+| Errors | ✅ S3: `InvalidToken`, `ExpiredToken`, `InvalidAccessKeyId` (temporary key without its token); STS: `AccessDenied`, `ExpiredToken`, `ExpiredTokenException`, `InvalidIdentityToken`, `IDPCommunicationError`, `MalformedPolicyDocument`, `PackedPolicyTooLarge`, `ValidationError`, `InvalidClientTokenId` |
+| Role chaining (a role session calling `AssumeRole`) | ❌ `AccessDenied` |
+| MFA (`SerialNumber`, `TokenCode`) | ❌ `ValidationError` |
+| `AssumeRoleWithSAML`, `GetFederationToken`, `DecodeAuthorizationMessage`, `GetAccessKeyInfo`, `AssumeRoot` | ❌ `InvalidAction` |
+| `RegionDisabledException` | never: every region is accepted |
+
+**Roles** are roll's, managed with `/v1/storage/roles` and `roll storage roles …`: a trust
+(roll keys for `AssumeRole`; OIDC providers with an issuer, audiences and an optional subject
+pattern for `AssumeRoleWithWebIdentity`; an optional external id), a permission and bucket
+scope like a key's, an optional inline IAM policy, and a maximum session duration. There are no
+IAM trust policy documents: the trust is that structured list. `RoleArn` is
+`arn:aws:iam::<account id>:role/<name>`.
+
+**Better than S3:**
+- A backend can mint a role's credentials without any STS client:
+  `POST /v1/storage/roles/{name}/sessions` (or `roll storage sessions create <role> --duration
+  15m --bucket uploads`), narrowed to fewer buckets, a lower permission, a session policy and
+  tags, and as short as 60 s.
+- Browser apps can trade their users' Auth0, Clerk or Google ID tokens for scoped credentials
+  directly (`AssumeRoleWithWebIdentity` is unsigned and answers CORS), with no signing key on
+  the client.
+- Revocation is per role and immediate: `roll storage roles revoke <role>`, or changing or
+  deleting the role.
+
+**Differences from AWS:**
+- A session's policies (the role's inline policy and the session policy) bound everything it
+  does, even what a bucket policy grants to its assumed-role ARN; on AWS such a grant can go
+  beyond the session policy.
+- Changing a role (`PATCH`) ends its existing sessions; on AWS they continue with the new
+  permissions.
+- Revoked sessions (and sessions of deleted roles) get `InvalidToken`; on AWS they get
+  `AccessDenied` from the revocation policy.
+- `GetSessionToken` sessions follow their key's current permission, and end when the key is
+  deleted.
+
 ## Policies, ACLs and public access
 
 roll has no IAM: requests are signed with roll access keys, and every key belongs to the
@@ -164,6 +218,9 @@ deployment, which is the "account" that owns every bucket and object.
 - `"*"` and `{"AWS": "*"}` mean anyone, including anonymous requests.
 - `{"AWS": "<access key id>"}` and `{"AWS": "arn:aws:iam::<account id>:user/<access key id>"}` mean that key.
 - `{"AWS": "<account id>"}` and `{"AWS": "arn:aws:iam::<account id>:root"}` mean any roll key.
+- `{"AWS": "arn:aws:iam::<account id>:role/<name>"}` means any session of that role, and
+  `{"AWS": "arn:aws:sts::<account id>:assumed-role/<name>/<session>"}` one session. A
+  `GetSessionToken` session is its key.
 - `{"CanonicalUser": …}` takes the owner id (any key) or a key's canonical user id.
 - `Service` and `Federated` principals are accepted and never match.
 
@@ -179,6 +236,10 @@ deployment, which is the "account" that owns every bucket and object.
     `aws:Referer`, `aws:UserAgent`
   - `aws:username`/`aws:userid` (the access key id), `aws:PrincipalArn`, `aws:PrincipalAccount`,
     `aws:PrincipalType`
+  - temporary credentials: `aws:PrincipalTag/<key>`, `aws:TokenIssueTime`, `aws:SourceIdentity`,
+    `aws:MultiFactorAuthPresent` (`false`), `aws:FederatedProvider`, `<provider>:sub` and
+    `<provider>:aud`; for role sessions `aws:PrincipalArn` is the role's ARN, `aws:userid` is
+    `<role id>:<session>` and `aws:PrincipalType` is `AssumedRole`, as on AWS
   - `s3:prefix`, `s3:delimiter`, `s3:max-keys`, `s3:VersionId`, `s3:signatureversion`, `s3:authType`
   - every `s3:x-amz-*` request header (`s3:x-amz-acl`, `s3:x-amz-server-side-encryption`, …)
   - `s3:ExistingObjectTag/<key>`, `s3:RequestObjectTag/<key>`, `s3:RequestObjectTagKeys`

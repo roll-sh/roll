@@ -181,6 +181,9 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
     if ctx.website {
         return Ok(crate::website::serve(ctx).await);
     }
+    if crate::sts::is_sts(ctx) {
+        return Ok(crate::sts::handle(ctx, body).await);
+    }
     if ctx.method == Method::OPTIONS {
         return cors::preflight(ctx);
     }
@@ -189,8 +192,8 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
     }
     reject_unsupported_headers(ctx)?;
     ctx.auth = auth::authenticate(ctx)?;
-    if let Some(a) = &ctx.auth {
-        ctx.store().touch_key(&a.key.id);
+    if let Some(id) = ctx.auth.as_ref().and_then(|a| a.key.acting_key()) {
+        ctx.store().touch_key(id);
     }
     crate::owner::check(ctx)?;
     match (&ctx.bucket, &ctx.key) {

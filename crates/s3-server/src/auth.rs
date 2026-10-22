@@ -4,7 +4,7 @@ use crate::ctx::Ctx;
 use p256::ecdsa::VerifyingKey;
 use s3_proto::auth::Context;
 use s3_proto::sigv4::{self, Verified};
-use s3_proto::{S3Error, sigv4a};
+use s3_proto::{Code, S3Error, sigv4a};
 use s3_store::{AccessKey, Bucket};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -46,19 +46,26 @@ pub(crate) fn authenticate(ctx: &Ctx) -> Result<Option<Auth>, S3Error> {
     let headers: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let req = sigv4::Request { method: ctx.method.as_str(), path: &ctx.raw_path, query: &ctx.raw_query, headers: &headers };
     let mut found: Option<AccessKey> = None;
+    // Why the key didn't resolve (an unknown key, or a bad session token), to report instead
+    // of the generic `InvalidAccessKeyId`.
+    let mut failure: Option<S3Error> = None;
+    let token = crate::temporary::request_token(&ctx.headers, &ctx.query);
     let cx = Context { now: ctx.now_s(), vhost_bucket: ctx.vhost.then(|| ctx.bucket_name()) };
-    let verified = s3_proto::auth::authenticate(&req, &cx, |id| match ctx.store().access_key(id) {
-        Ok(Some(k)) => {
+    let verified = s3_proto::auth::authenticate(&req, &cx, |id| match crate::temporary::resolve(ctx.store(), id, token) {
+        Ok(k) => {
             let secret = k.secret.clone();
             found = Some(k);
             Some(secret)
         }
-        Ok(None) => None,
         Err(e) => {
-            tracing::warn!(error = %e, "looking up an access key failed");
+            failure = Some(e);
             None
         }
-    }, ecdsa_key)?;
+    }, ecdsa_key)
+    .map_err(|e| match failure.take() {
+        Some(f) if e.code == Code::InvalidAccessKeyId => f,
+        _ => e,
+    })?;
     Ok(match (verified, found) {
         (Some((_, verified)), Some(key)) => Some(Auth { key, verified }),
         _ => None,

@@ -469,3 +469,71 @@ async fn s3cmd_sigv2() {
     assert_eq!(r.status(), 200, "{url}");
     assert_eq!(r.bytes().await.unwrap().as_ref(), b"hello from a real tool\n");
 }
+
+/// Temporary credentials with the AWS CLI: `aws sts assume-role` against roll, then S3 with
+/// what it returned (`AWS_SESSION_TOKEN`), and the same through `get-session-token`.
+#[tokio::test(flavor = "multi_thread")]
+async fn aws_cli_sts() {
+    if !docker_ok() {
+        return;
+    }
+    let t = start().await;
+    t.client.create_bucket().bucket("ststool").send().await.unwrap();
+    t.client.put_object().bucket("ststool").key("seen.txt").body(aws_sdk_s3::primitives::ByteStream::from_static(b"hi")).send().await.unwrap();
+    t.client.create_bucket().bucket("hidden").send().await.unwrap();
+    let key = t.store.create_key("ci", s3_store::Permission::Read, None).await.unwrap();
+    let trust = s3_store::sts::Trust { keys: vec![key.id.clone()], ..Default::default() };
+    let spec = s3_store::sts::RoleSpec { description: "CI".into(), permission: s3_store::Permission::Write, buckets: Some(vec!["ststool".into()]), policy: None, trust, max_session_s: None };
+    t.store.create_role("ci-deploy", spec).await.unwrap();
+    let arn = format!("arn:aws:iam::{}:role/ci-deploy", t.store.account_id());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("up.txt"), b"deployed by a role\n").unwrap();
+    let endpoint = t.endpoint.clone();
+    let path = dir.path().to_path_buf();
+    blocking(move || {
+        let aws = |env: &[(&str, String)], args: &[&str]| {
+            let mut all = vec!["--endpoint-url", endpoint.as_str(), "--output", "json"];
+            all.extend_from_slice(args);
+            run("amazon/aws-cli", env, &path, &all)
+        };
+        let fails = |env: &[(&str, String)], args: &[&str]| {
+            let mut all = vec!["--endpoint-url", endpoint.as_str()];
+            all.extend_from_slice(args);
+            run_fails("amazon/aws-cli", env, &path, &all)
+        };
+        let long = [("AWS_ACCESS_KEY_ID", key.id.clone()), ("AWS_SECRET_ACCESS_KEY", key.secret.clone()), ("AWS_DEFAULT_REGION", REGION.to_string())];
+        let session = |out: &str| {
+            let v: serde_json::Value = serde_json::from_str(out).unwrap_or_else(|e| panic!("{e}: {out}"));
+            let c = &v["Credentials"];
+            vec![
+                ("AWS_ACCESS_KEY_ID", c["AccessKeyId"].as_str().unwrap().to_string()),
+                ("AWS_SECRET_ACCESS_KEY", c["SecretAccessKey"].as_str().unwrap().to_string()),
+                ("AWS_SESSION_TOKEN", c["SessionToken"].as_str().unwrap().to_string()),
+                ("AWS_DEFAULT_REGION", REGION.to_string()),
+            ]
+        };
+        let out = aws(&long, &["sts", "assume-role", "--role-arn", &arn, "--role-session-name", "github-actions", "--duration-seconds", "900"]);
+        assert!(out.contains("assumed-role/ci-deploy/github-actions"), "{out}");
+        let env = session(&out);
+        let who = aws(&env, &["sts", "get-caller-identity"]);
+        assert!(who.contains("assumed-role/ci-deploy/github-actions"), "{who}");
+        let ls = aws(&env, &["s3", "ls", "s3://ststool/"]);
+        assert!(ls.contains("seen.txt"), "{ls}");
+        // The role writes where the key alone couldn't, and only in its bucket.
+        aws(&env, &["s3", "cp", "/data/up.txt", "s3://ststool/up.txt"]);
+        let denied = fails(&env, &["s3", "ls", "s3://hidden/"]);
+        assert!(denied.contains("AccessDenied"), "{denied}");
+        // Without the session token the temporary key is unknown.
+        let no_token: Vec<(&str, String)> = env.iter().filter(|(k, _)| *k != "AWS_SESSION_TOKEN").cloned().collect();
+        let err = fails(&no_token, &["s3", "ls", "s3://ststool/"]);
+        assert!(err.contains("InvalidAccessKeyId"), "{err}");
+        // GetSessionToken: the key's own permission (read), temporarily.
+        let gst = session(&aws(&long, &["sts", "get-session-token", "--duration-seconds", "900"]));
+        assert!(aws(&gst, &["s3", "ls", "s3://ststool/"]).contains("up.txt"));
+        let err = fails(&gst, &["s3", "cp", "/data/up.txt", "s3://ststool/again.txt"]);
+        assert!(err.contains("AccessDenied"), "{err}");
+    })
+    .await;
+    let got = t.client.get_object().bucket("ststool").key("up.txt").send().await.unwrap();
+    assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"deployed by a role\n");
+}

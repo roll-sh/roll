@@ -33,6 +33,7 @@ mod rows;
 mod schema;
 pub mod sse;
 mod store;
+pub mod sts;
 pub mod validate;
 mod versioning;
 mod versions;
@@ -41,7 +42,7 @@ pub use backend::{Backend, BlobAttrs, BlobSse, ByteStream, CopySource, CustomerK
 pub use config::{PublicAccessBlock, RedirectAll, Redirect, RoutingCondition, RoutingRule, WebsiteConfig};
 pub use sse::Encryption;
 pub use error::{Result, StoreError};
-pub use ids::{blob_key, day_of, version_id};
+pub use ids::{blob_key, day_of, is_temporary_key_id, version_id};
 pub use log::LogStats;
 pub use meter::{Class, Counters, Meter};
 pub use model::*;

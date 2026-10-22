@@ -49,6 +49,9 @@ pub enum StoreError {
     /// A well-formed request S3 refuses (`InvalidRequest`).
     #[error("{0}")]
     InvalidRequest(String),
+    /// It already exists (a role of that name).
+    #[error("{0}")]
+    Conflict(String),
     /// This node can't make writes durable any more (another node took over the metadata log,
     /// object storage failed, or it was closed). Nothing more was acknowledged; restart.
     #[error("storage unavailable: {0}")]

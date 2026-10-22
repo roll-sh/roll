@@ -29,7 +29,7 @@ pub fn store_error(e: StoreError) -> S3Error {
         }
         StoreError::ObjectLocked(_) => S3Error::msg(Code::AccessDenied, "Access Denied because object protected by object lock."),
         StoreError::InvalidBucketState(why) => S3Error::msg(Code::InvalidBucketState, why),
-        StoreError::InvalidRequest(why) => S3Error::msg(Code::InvalidRequest, why),
+        StoreError::InvalidRequest(why) | StoreError::Conflict(why) => S3Error::msg(Code::InvalidRequest, why),
         StoreError::Unavailable(why) => {
             tracing::error!(why, "storage unavailable");
             S3Error::new(Code::ServiceUnavailable)

@@ -14,6 +14,9 @@
 //!
 //! Admin keys covering a bucket can always read, write and delete its policy, like an AWS
 //! account's root user, so a policy can't lock its owner out.
+//!
+//! Temporary credentials are bounded first: whatever allows a request, a session's policies
+//! (its role's inline policy, its session policy) must allow it too (see `temporary.rs`).
 
 use crate::acl::{self, Acl, Ownership};
 use crate::auth::Need;
@@ -109,7 +112,27 @@ impl Ctx {
 fn principal(ctx: &Ctx, who: Who) -> Principal {
     match who {
         Who::Anonymous => Principal::Anonymous,
-        Who::Key(k) => Principal::Key { id: k.id.clone(), canonical: ctx.store().canonical_user(&k.id) },
+        Who::Key(k) => crate::temporary::principal(ctx.store(), k),
+    }
+}
+
+fn resource_arn(bucket: &str, key: Option<&str>) -> String {
+    match key {
+        Some(k) => format!("arn:aws:s3:::{bucket}/{k}"),
+        None => format!("arn:aws:s3:::{bucket}"),
+    }
+}
+
+impl Ctx {
+    /// For checks outside [`authorize`] (CreateBucket, ListBuckets, bypassing governance
+    /// retention): refuse if the request's session policies don't allow `action` on the bucket
+    /// (or object), or on every bucket when `bucket` is `None`.
+    pub(crate) fn require_session(&self, action: &str, bucket: Option<&str>, key: Option<&str>) -> Result<(), S3Error> {
+        let Some(k) = self.auth.as_ref().map(|a| &a.key).filter(|k| k.is_temporary()) else { return Ok(()) };
+        let account = Account { id: self.store().account_id(), owner: self.store().owner_id() };
+        let cond = Cond { ctx: self, who: Who::Key(k), bucket: bucket.unwrap_or_default(), key, account: &account, tags: OnceLock::new() };
+        let resource = resource_arn(bucket.unwrap_or("*"), key);
+        if crate::temporary::bounded(k, &account, action, &resource, &cond) { Ok(()) } else { Err(S3Error::new(Code::AccessDenied)) }
     }
 }
 
@@ -156,6 +179,15 @@ pub(crate) fn authorize(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, ac
         Err(e) => return Err(e),
     };
     if let Who::Key(k) = who
+        && k.is_temporary()
+    {
+        let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
+        let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new() };
+        if !crate::temporary::bounded(k, &account, action, &resource_arn(bucket, key), &cond) {
+            return Err(denied());
+        }
+    }
+    if let Who::Key(k) = who
         && k.is_admin()
         && k.covers(bucket)
         && matches!(action, "s3:GetBucketPolicy" | "s3:PutBucketPolicy" | "s3:DeleteBucketPolicy" | "s3:GetBucketPolicyStatus")
@@ -168,10 +200,7 @@ pub(crate) fn authorize(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, ac
         Some(policy) => {
             let p = p();
             let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
-            let resource = match key {
-                Some(k) => format!("arn:aws:s3:::{bucket}/{k}"),
-                None => format!("arn:aws:s3:::{bucket}"),
-            };
+            let resource = resource_arn(bucket, key);
             let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new() };
             policy.evaluate(p, &account, action, &resource, &cond)
         }
@@ -227,6 +256,11 @@ impl Cond<'_> {
 impl Context for Cond<'_> {
     fn values(&self, key: &str) -> Option<Vec<String>> {
         let ctx = self.ctx;
+        if let Who::Key(k) = self.who
+            && let Some(v) = crate::temporary::condition(k, &self.account.id, key)
+        {
+            return v;
+        }
         let one = |v: Option<String>| v.map(|v| vec![v]);
         let header = |n: &str| one(ctx.h(n).map(str::to_string));
         let key_id = match self.who {

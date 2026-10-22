@@ -13,6 +13,10 @@
 //! - the account, `<account>` or `arn:aws:iam::<account>:root`: any roll key;
 //! - `{"CanonicalUser": …}` with the deployment's owner id (any key) or a key's canonical id.
 //!
+//! - a role, `arn:aws:iam::<account>:role/<name>`, or one session of it,
+//!   `arn:aws:sts::<account>:assumed-role/<name>/<session>`: that role's temporary credentials
+//!   (a `GetSessionToken` session is its key).
+//!
 //! `<account>` is the deployment's 12-digit account id ([`s3_store::Store::account_id`]).
 //! `Service` and `Federated` principals are accepted (log-delivery policies use them) and never
 //! match a request.
@@ -237,6 +241,8 @@ pub(crate) enum Principal {
         /// The key's canonical user id.
         canonical: String,
     },
+    /// A role session: its temporary key, and the role and assumed-role ARNs it answers to.
+    Session { id: String, canonical: String, arns: Vec<String> },
 }
 
 /// The deployment the policy belongs to.
@@ -255,10 +261,14 @@ pub(crate) trait Context {
 impl Principals {
     fn matches(&self, who: &Principal, account: &Account) -> bool {
         let Principals::Some { aws, canonical } = self else { return true };
-        let Principal::Key { id, canonical: key_canonical } = who else { return aws.iter().any(|a| a == "*") };
+        let (id, key_canonical, arns) = match who {
+            Principal::Key { id, canonical } => (id, canonical, &[][..]),
+            Principal::Session { id, canonical, arns } => (id, canonical, arns.as_slice()),
+            Principal::Anonymous => return aws.iter().any(|a| a == "*"),
+        };
         let user_arn = format!("arn:aws:iam::{}:user/{id}", account.id);
         let root_arn = format!("arn:aws:iam::{}:root", account.id);
-        aws.iter().any(|a| a == "*" || a == id || *a == user_arn || *a == root_arn || *a == account.id) || canonical.iter().any(|c| *c == account.owner || c == key_canonical)
+        aws.iter().any(|a| a == "*" || a == id || *a == user_arn || *a == root_arn || *a == account.id || arns.contains(a)) || canonical.iter().any(|c| *c == account.owner || c == key_canonical)
     }
 
     fn anyone(&self) -> bool {
@@ -341,7 +351,7 @@ fn principals(v: &Value) -> Result<Principals, S3Error> {
 fn valid_aws_principal(a: &str) -> bool {
     a == "*"
         || (a.len() == 12 && a.bytes().all(|b| b.is_ascii_digit()))
-        || (a.starts_with("arn:aws:iam::") && a.len() > 13 && !a.contains('*'))
+        || ((a.starts_with("arn:aws:iam::") || a.starts_with("arn:aws:sts::")) && a.len() > 13 && !a.contains('*'))
         || (!a.is_empty() && a.len() <= 128 && a.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
@@ -392,8 +402,19 @@ impl Policy {
         Self::parse_for(doc, None)
     }
 
+    /// Parse an identity policy: a role's inline policy or a session policy (no `Principal`;
+    /// any resource; other services' actions are accepted and never match). At most `max`
+    /// bytes.
+    pub(crate) fn parse_identity(doc: &[u8], max: usize) -> Result<Self, S3Error> {
+        Self::parse_as(doc, None, true, max)
+    }
+
     fn parse_for(doc: &[u8], bucket: Option<&str>) -> Result<Self, S3Error> {
-        if doc.len() > MAX_POLICY_BYTES {
+        Self::parse_as(doc, bucket, false, MAX_POLICY_BYTES)
+    }
+
+    fn parse_as(doc: &[u8], bucket: Option<&str>, identity: bool, max: usize) -> Result<Self, S3Error> {
+        if doc.len() > max {
             return Err(malformed("Policy exceeds the maximum allowed document size."));
         }
         let text = std::str::from_utf8(doc).map_err(|_| malformed("Policies must be valid JSON"))?;
@@ -438,8 +459,14 @@ impl Policy {
                 Some(e) => return Err(malformed(format!("Invalid effect: {e}"))),
                 None => return Err(malformed("Missing required field Effect")),
             };
-            let principal = m.get("Principal").map(principals).transpose()?;
-            let not_principal = m.get("NotPrincipal").map(principals).transpose()?;
+            let (principal, not_principal) = if identity {
+                if m.contains_key("Principal") || m.contains_key("NotPrincipal") {
+                    return Err(malformed("Policy document should not specify a principal."));
+                }
+                (Some(Principals::Anyone), None)
+            } else {
+                (m.get("Principal").map(principals).transpose()?, m.get("NotPrincipal").map(principals).transpose()?)
+            };
             if principal.is_some() == not_principal.is_some() {
                 return Err(malformed("Missing required field Principal"));
             }
@@ -449,7 +476,15 @@ impl Policy {
                 return Err(malformed("Missing required field Action"));
             }
             for a in action.iter().chain(not_action.iter()).flatten() {
-                validate_action(a)?;
+                match a.split_once(':') {
+                    // Another service's action in an identity policy (`sts:…`, `kms:…`).
+                    Some((svc, name)) if identity && !svc.eq_ignore_ascii_case("s3") => {
+                        if svc.is_empty() || !svc.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') || name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'*' || b == b'?') {
+                            return Err(malformed("Policy has invalid action"));
+                        }
+                    }
+                    _ => validate_action(a)?,
+                }
             }
             let resource = m.get("Resource").map(|v| strings(v, "Resource")).transpose()?;
             let not_resource = m.get("NotResource").map(|v| strings(v, "NotResource")).transpose()?;
@@ -929,5 +964,45 @@ mod tests {
         policy(with("Resource", serde_json::json!(["arn:aws:s3:::bkt", "arn:aws:s3:::b*/x", "*"])));
         policy(with("Principal", serde_json::json!({"Service": "logging.s3.amazonaws.com"})));
         policy(serde_json::json!({"Version": "2008-10-17", "Id": "x", "Statement": [base()]}));
+    }
+
+    #[test]
+    fn role_and_session_principals() {
+        let role = "arn:aws:iam::123456789012:role/uploader";
+        let session = "arn:aws:sts::123456789012:assumed-role/uploader/web-1";
+        let who = Principal::Session { id: "RTX".into(), canonical: "d".repeat(64), arns: vec![role.into(), session.into()] };
+        let r = req(&[]);
+        let allow = |p: serde_json::Value| policy(serde_json::json!({"Statement": [{"Effect": "Allow", "Principal": p, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::bkt/*"}]}));
+        assert_eq!(allow(serde_json::json!({"AWS": role})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
+        assert_eq!(allow(serde_json::json!({"AWS": session})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
+        assert_eq!(allow(serde_json::json!({"AWS": "arn:aws:sts::123456789012:assumed-role/uploader/web-2"})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::None);
+        assert_eq!(allow(serde_json::json!({"AWS": "arn:aws:iam::123456789012:role/other"})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::None);
+        assert_eq!(allow(serde_json::json!({"AWS": "123456789012"})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow, "the account");
+        assert_eq!(allow(serde_json::json!({"AWS": role})).evaluate(&key("RK1"), &acct(), "s3:GetObject", OBJ, &r), Decision::None, "a key isn't the role");
+        assert!(Policy::parse(serde_json::json!({"Statement": [{"Effect": "Allow", "Principal": {"AWS": "arn:aws:sts::1:assumed-role/*"}, "Action": "s3:*", "Resource": "*"}]}).to_string().as_bytes(), "bkt").is_err(), "no wildcards in ARNs");
+    }
+
+    #[test]
+    fn identity_policies() {
+        let id = |v: serde_json::Value| Policy::parse_identity(v.to_string().as_bytes(), 2048);
+        let p = id(serde_json::json!({"Version": "2012-10-17", "Statement": [
+            {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "kms:Decrypt"], "Resource": ["arn:aws:s3:::bkt/up/*", "arn:aws:kms:us-east-1:1:key/x"]},
+            {"Effect": "Deny", "Action": "s3:PutObject", "Resource": "*", "Condition": {"StringNotEquals": {"aws:PrincipalTag/team": "red"}}},
+        ]}))
+        .unwrap();
+        let red = req(&[("aws:principaltag/team", "red")]);
+        let blue = req(&[("aws:principaltag/team", "blue")]);
+        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:GetObject", "arn:aws:s3:::bkt/up/a", &red), Decision::Allow);
+        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:PutObject", "arn:aws:s3:::bkt/up/a", &red), Decision::Allow);
+        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:PutObject", "arn:aws:s3:::bkt/up/a", &blue), Decision::Deny);
+        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:GetObject", "arn:aws:s3:::bkt/other", &red), Decision::None);
+        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:GetObject", "arn:aws:s3:::other/up/a", &red), Decision::None, "any bucket can be named; only matching ones allow");
+        // A principal, an unknown S3 action, a malformed action and size are refused.
+        assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "Principal": "*", "Action": "s3:*", "Resource": "*"}]})).is_err());
+        assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "NotPrincipal": {"AWS": "x"}, "Action": "s3:*", "Resource": "*"}]})).is_err());
+        assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "Action": "s3:Teleport", "Resource": "*"}]})).is_err());
+        assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "Action": "not an action", "Resource": "*"}]})).is_err());
+        assert!(Policy::parse_identity(&[b' '; 2049], 2048).is_err());
+        id(serde_json::json!({"Statement": {"Effect": "Allow", "Action": "*", "Resource": "*"}})).unwrap();
     }
 }
