@@ -311,6 +311,74 @@ pub fn list_parts(l: &ListParts) -> String {
     w.finish("ListPartsResult")
 }
 
+/// One part in GetObjectAttributes' `ObjectParts`.
+#[derive(Clone, Debug)]
+pub struct AttributesPart {
+    pub number: u32,
+    pub size: u64,
+    /// `(algorithm, base64 value)`, when the part's checksum is known.
+    pub checksum: Option<(Algorithm, String)>,
+}
+
+/// GetObjectAttributes' `ObjectParts` (multipart objects only).
+#[derive(Clone, Debug, Default)]
+pub struct AttributesParts {
+    pub parts_count: u32,
+    pub part_number_marker: u32,
+    pub next_part_number_marker: Option<u32>,
+    pub max_parts: u32,
+    pub is_truncated: bool,
+    pub parts: Vec<AttributesPart>,
+}
+
+/// A GetObjectAttributes response: each field is `Some` when it was asked for (and applies).
+#[derive(Clone, Debug, Default)]
+pub struct ObjectAttributes {
+    /// Without quotes, as S3 returns it here.
+    pub etag: Option<String>,
+    /// `(algorithm, base64 value, type)`.
+    pub checksum: Option<(Algorithm, String, ChecksumType)>,
+    pub parts: Option<AttributesParts>,
+    pub storage_class: Option<String>,
+    pub size: Option<u64>,
+}
+
+pub fn get_object_attributes(a: &ObjectAttributes) -> String {
+    let mut w = W::root("GetObjectAttributesResponse");
+    w.opt("ETag", a.etag.as_deref());
+    if let Some((alg, v, t)) = &a.checksum {
+        w.open("Checksum");
+        w.el(alg.xml_element(), v);
+        w.el("ChecksumType", t.as_str());
+        w.close("Checksum");
+    }
+    if let Some(p) = &a.parts {
+        w.open("ObjectParts");
+        w.el("PartsCount", &p.parts_count.to_string());
+        w.el("PartNumberMarker", &p.part_number_marker.to_string());
+        if let Some(n) = p.next_part_number_marker {
+            w.el("NextPartNumberMarker", &n.to_string());
+        }
+        w.el("MaxParts", &p.max_parts.to_string());
+        w.el("IsTruncated", bool_str(p.is_truncated));
+        for part in &p.parts {
+            w.open("Part");
+            w.el("PartNumber", &part.number.to_string());
+            w.el("Size", &part.size.to_string());
+            if let Some((alg, v)) = &part.checksum {
+                w.el(alg.xml_element(), v);
+            }
+            w.close("Part");
+        }
+        w.close("ObjectParts");
+    }
+    w.opt("StorageClass", a.storage_class.as_deref());
+    if let Some(n) = a.size {
+        w.el("ObjectSize", &n.to_string());
+    }
+    w.finish("GetObjectAttributesResponse")
+}
+
 #[derive(Clone, Debug)]
 pub struct UploadEntry {
     pub key: String,

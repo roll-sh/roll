@@ -1009,7 +1009,7 @@ async fn everything_else_is_not_implemented() {
     for sub in ["torrent", "metadataTable", "session"] {
         assert_eq!(status_code(raw("GET", "/bkt", sub, vec![]).send(&t).await).await, ni, "?{sub}");
     }
-    for sub in ["torrent", "select", "attributes", "renameObject"] {
+    for sub in ["torrent", "select", "renameObject"] {
         assert_eq!(status_code(raw("GET", "/bkt/k", sub, vec![]).send(&t).await).await, ni, "?{sub}");
     }
     for (h, v) in [
@@ -1026,7 +1026,6 @@ async fn everything_else_is_not_implemented() {
     assert!(missing(&t, "bkt", "nope").await);
     let e = t.client.put_object().bucket("bkt").key("k").if_none_match(&etag).body(ByteStream::from_static(b"x")).send().await.unwrap_err();
     assert_eq!(status(&e), 501, "If-None-Match on a write is only '*'");
-    assert_eq!(status(&t.client.get_object_attributes().bucket("bkt").key("k").object_attributes(aws_sdk_s3::types::ObjectAttributes::Etag).send().await.unwrap_err()), 501);
     // ACLs are disabled by default: the canned private ACL is accepted (see tests/config.rs).
     let policy = AccessControlPolicy::builder().owner(Owner::builder().id("roll").build()).build();
     assert_eq!(status(&t.client.put_bucket_acl().bucket("bkt").access_control_policy(policy).send().await.unwrap_err()), 400);

@@ -299,7 +299,7 @@ pub(crate) fn action_of(ctx: &Ctx) -> &'static str {
             }
             _ if ctx.has("retention") => if read { "s3:GetObjectRetention" } else { "s3:PutObjectRetention" },
             _ if ctx.has("legal-hold") => if read { "s3:GetObjectLegalHold" } else { "s3:PutObjectLegalHold" },
-            _ if ctx.has("attributes") => "s3:GetObjectAttributes",
+            _ if ctx.has("attributes") => if versioned { "s3:GetObjectVersionAttributes" } else { "s3:GetObjectAttributes" },
             _ if ctx.has("restore") => "s3:RestoreObject",
             _ if ctx.has("torrent") => "s3:GetObjectTorrent",
             _ if ctx.has("uploadId") && read => "s3:ListMultipartUploadParts",

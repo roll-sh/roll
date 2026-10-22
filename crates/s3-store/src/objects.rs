@@ -639,6 +639,11 @@ impl Store {
         let backend_parts: Vec<(u32, String)> = part_list.iter().map(|p| (p.part_number, p.backend_etag.clone())).collect();
         self.backend.complete_multipart(&ids::blob_key(&up.blob_id), &up.backend_upload_id, &backend_parts).await?;
         let now = self.now();
+        // Kept for GetObjectAttributes when the object's checksum was made from them.
+        let part_checksums = match &checksum {
+            Some(_) => part_list.iter().map(|p| p.checksum.clone()).collect::<Option<Vec<_>>>().unwrap_or_default(),
+            None => Vec::new(),
+        };
         let row = Row {
             key: up.key.clone(),
             blob_id: Some(up.blob_id.clone()),
@@ -648,6 +653,7 @@ impl Store {
             checksum,
             parts: part_list.len() as u32,
             part_sizes: part_list.iter().map(|p| p.size).collect(),
+            part_checksums,
             modified_at: now,
             lock: up.lock.clone(),
             ..Row::tombstone(&up.key, now)

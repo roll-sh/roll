@@ -64,6 +64,7 @@ clients fail clearly instead of silently doing the wrong thing.
 | CopyObject | ✅ `x-amz-metadata-directive`, `x-amz-copy-source-if-*`, `?versionId=` in the source, `x-amz-copy-source-version-id`; no data is copied |
 | Conditional writes: `If-None-Match: *`, `If-Match` on PutObject and CompleteMultipartUpload | ✅ |
 | Get/Put/DeleteObjectTagging, `x-amz-tagging` | ✅ with `versionId` |
+| GetObjectAttributes | ✅ `ETag`, `Checksum`, `ObjectParts` (part numbers, sizes and, when the upload had checksums, each part's checksum; `x-amz-max-parts`, `x-amz-part-number-marker`), `StorageClass`, `ObjectSize`; `versionId` and the conditional headers. Parts are numbered 1..N as for `GET ?partNumber=` |
 | Get/PutObjectRetention, Get/PutObjectLegalHold | ✅ `versionId`, `x-amz-bypass-governance-retention` (admin keys) |
 | `x-amz-object-lock-mode`, `-retain-until-date`, `-legal-hold` | ✅ on PutObject (with `Content-MD5` or an `x-amz-checksum-*`, as S3 requires), CopyObject, CreateMultipartUpload and POST Object |
 | CreateMultipartUpload, UploadPart, UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts | ✅ UploadPartCopy takes a source `versionId`; Complete returns `x-amz-version-id` |

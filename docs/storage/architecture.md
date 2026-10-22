@@ -89,7 +89,8 @@ objects (bucket_id, key TEXT, blob_id TEXT,  -- the key's current version
          size, etag, content_type, cache_control, content_disposition, content_encoding,
          content_language, expires, metadata TEXT /* JSON map */, tags TEXT /* JSON map */,
          checksum_algorithm, checksum_type /* FULL_OBJECT|COMPOSITE */, checksum,
-         parts INTEGER /* 0 = single PUT */, part_sizes TEXT /* JSON, for partNumber GETs */,
+         parts INTEGER /* 0 = single PUT */,
+         part_sizes TEXT /* JSON [size, …], or { sizes, checksums } when the parts' checksums are kept */,
          modified_at INTEGER /* ms */,
          acl TEXT /* JSON grants; NULL = private */, website_redirect TEXT,
          vid TEXT,                      -- version id, sorts newest first within a key ('' for tombstones)
@@ -362,6 +363,8 @@ source's.
   - Completes of one upload run one at a time. A retry that finds the upload already
     completed into the key's current version returns that version (SDKs retry a slow
     Complete). A failed attempt never deletes a blob the metadata knows.
+  - When the object's checksum is made from its parts' (an upload with a checksum algorithm),
+    the parts' checksums are kept with the object, for GetObjectAttributes.
   - `UploadPartCopy` is server-side, so the gateway never sees the bytes. The part's ETag is
     the source's when it's a whole single-PUT object, otherwise an MD5 of the source blob
     and range.
@@ -452,6 +455,8 @@ condition keys and the canonical ids. `ROLL_S3_BLOCK_PUBLIC_ACCESS` (store confi
   - Get/Put/DeleteObjectTagging (with `versionId`), Get/PutObjectAcl, RestoreObject
     (`InvalidObjectState`)
   - Get/PutObjectRetention, Get/PutObjectLegalHold
+  - GetObjectAttributes (`versionId`, conditional headers, paging over parts with per-part
+    checksums and sizes)
 - **Multipart:** CreateMultipartUpload, UploadPart, UploadPartCopy,
   CompleteMultipartUpload, AbortMultipartUpload, ListParts.
 - **Browser uploads:** POST Object (presigned POST policy).

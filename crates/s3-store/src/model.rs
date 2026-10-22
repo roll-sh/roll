@@ -226,6 +226,10 @@ pub struct ObjectMeta {
     pub parts: u32,
     /// Sizes of the parts (for `GET ?partNumber=`).
     pub part_sizes: Vec<u64>,
+    /// The parts' checksums in the object's algorithm, in part order, when they're known (a
+    /// multipart object completed with a checksum); empty otherwise.
+    #[serde(skip)]
+    pub part_checksums: Vec<String>,
     /// Last-Modified, Unix ms.
     pub modified_at: i64,
     /// `null`, or the version id.

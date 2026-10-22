@@ -29,6 +29,9 @@ pub(crate) struct Row {
     pub checksum: Option<Checksum>,
     pub parts: u32,
     pub part_sizes: Vec<u64>,
+    /// The parts' checksums (in the object's checksum algorithm), when every part had one;
+    /// empty otherwise. Kept in the `part_sizes` column (see [`PartsCol`]).
+    pub part_checksums: Vec<String>,
     pub modified_at: i64,
     /// Version id; sorts newest first within a key. Empty for tombstones.
     pub vid: String,
@@ -49,6 +52,7 @@ impl Row {
             checksum: None,
             parts: 0,
             part_sizes: Vec::new(),
+            part_checksums: Vec::new(),
             modified_at: now,
             vid: String::new(),
             is_null: true,
@@ -89,6 +93,7 @@ impl Row {
             checksum: self.checksum.clone(),
             parts: self.parts,
             part_sizes: self.part_sizes.clone(),
+            part_checksums: self.part_checksums.clone(),
             modified_at: self.modified_at,
             version_id: self.version_id(),
             lock: self.lock.clone(),
@@ -107,6 +112,37 @@ fn json_col<T: serde::de::DeserializeOwned>(r: &rusqlite::Row, i: usize) -> rusq
     serde_json::from_str(&s).map_err(|e| rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, Box::new(e)))
 }
 
+/// The `part_sizes` column: the parts' sizes (`[n, …]`, as it always was), or, for an object
+/// whose parts' checksums are kept, `{"sizes": [n, …], "checksums": ["…", …]}`. Rows without
+/// part checksums keep the old form, so they're written exactly as before.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum PartsCol {
+    Sizes(Vec<u64>),
+    WithChecksums {
+        sizes: Vec<u64>,
+        #[serde(default)]
+        checksums: Vec<String>,
+    },
+}
+
+fn parts_col(r: &rusqlite::Row, i: usize) -> rusqlite::Result<(Vec<u64>, Vec<String>)> {
+    Ok(match json_col(r, i)? {
+        PartsCol::Sizes(s) => (s, Vec::new()),
+        // Never trust a list that doesn't line up with the sizes.
+        PartsCol::WithChecksums { sizes, checksums } if checksums.len() == sizes.len() => (sizes, checksums),
+        PartsCol::WithChecksums { sizes, .. } => (sizes, Vec::new()),
+    })
+}
+
+fn parts_text(r: &Row) -> serde_json::Result<String> {
+    if r.part_checksums.is_empty() {
+        serde_json::to_string(&r.part_sizes)
+    } else {
+        serde_json::to_string(&PartsCol::WithChecksums { sizes: r.part_sizes.clone(), checksums: r.part_checksums.clone() })
+    }
+}
+
 /// A row from `SELECT {COLS}` starting at column `o`.
 /// How many columns [`COLS`] has: the first extra column after them is at this index.
 pub(crate) const COLS_LEN: usize = 26;
@@ -115,6 +151,7 @@ pub(crate) fn row_at(r: &rusqlite::Row, o: usize) -> rusqlite::Result<Row> {
     let algorithm: Option<String> = r.get(o + 12)?;
     let kind: Option<String> = r.get(o + 13)?;
     let value: Option<String> = r.get(o + 14)?;
+    let (part_sizes, part_checksums) = parts_col(r, o + 16)?;
     Ok(Row {
         key: r.get(o)?,
         blob_id: r.get(o + 1)?,
@@ -137,7 +174,8 @@ pub(crate) fn row_at(r: &rusqlite::Row, o: usize) -> rusqlite::Result<Row> {
             _ => None,
         },
         parts: r.get::<_, i64>(o + 15)? as u32,
-        part_sizes: json_col(r, o + 16)?,
+        part_sizes,
+        part_checksums,
         modified_at: r.get(o + 17)?,
         vid: r.get(o + 20)?,
         is_null: r.get::<_, i64>(o + 21)? != 0,
@@ -173,7 +211,7 @@ fn row_values(r: &Row) -> Result<Vec<rusqlite::types::Value>> {
         opt(&r.checksum.as_ref().map(|c| c.kind.clone())),
         opt(&r.checksum.as_ref().map(|c| c.value.clone())),
         Integer(r.parts as i64),
-        Text(serde_json::to_string(&r.part_sizes)?),
+        Text(parts_text(r)?),
         Integer(r.modified_at),
         opt(&r.headers.acl),
         opt(&r.headers.website_redirect),
