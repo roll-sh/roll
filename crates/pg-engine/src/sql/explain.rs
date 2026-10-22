@@ -4562,8 +4562,24 @@ impl Builder<'_, '_> {
                     }
                 }
                 // Above an inheritance Append its columns are the parent's (the appendrel's
-                // Vars), not its first member's.
+                // Vars), not its first member's. (A partition's own partitions joined as one
+                // in a partitionwise child join, numbered as that partition: its first
+                // member's, as Postgres shows them.)
+                let deep_member = {
+                    let mut first = arms.first().map(|a| &***a);
+                    while let Some(Plan::Project { input, .. } | Plan::Sort { input, .. }) = first {
+                        first = Some(&**input);
+                    }
+                    matches!(first, Some(Plan::Scan(sc)) if sc.part.as_ref().is_some_and(|l| l.len() >= 2))
+                };
+                let sub_partition = deep_member
+                    && inh.as_ref().is_some_and(|base| {
+                        self.refnames.get(&key).is_some_and(|r| {
+                            r.strip_prefix(&format!("{}_", base)).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                        })
+                    });
                 if inh.is_some()
+                    && !sub_partition
                     && let Some(parent) = self.refnames.get(&key)
                 {
                     let parent = quote_ident(parent);

@@ -25,8 +25,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50789 (**99.29%**) |
-| units differing | 361 |
+| units matching | 50796 (**99.31%**) |
+| units differing | 354 |
 | files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
@@ -35,16 +35,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 348 | 96.4% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 12 | 3.3% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 341 | 96.3% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 12 | 3.4% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 348 units
-join (87), partition_join (42), partition_prune (38), subselect (30), collate.icu.utf8 (13), incremental_sort (15), select_parallel (14), updatable_views (7), groupingsets (11), with (8), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 341 units
+join (87), partition_join (35), partition_prune (38), subselect (30), collate.icu.utf8 (13), incremental_sort (15), select_parallel (14), updatable_views (7), groupingsets (11), with (8), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -108,12 +108,12 @@ Measured against the engine of commit 687fc9b in a 24-file subset (`test_setup`,
 create_table, create_index, create_view, create_function_sql, inherit, updatable_views,
 select_distinct, select_distinct_on, subselect, union, join, aggregates, groupingsets, equivclass,
 rowsecurity, with, rangefuncs, memoize, partition_join, partition_prune, partition_aggregate,
-rules): 18 units fixed, none broken.
+rules): 25 units fixed, none broken.
 
 | file | fixed units |
 |---|---|
 | join | 244, 351, 355, 359, 382, 399, 406, 407, 438, 455, 524 (433, a row-order unit, too) |
-| partition_join | 27, 76, 78, 80, 82, 84 |
+| partition_join | 27, 76, 78, 80, 82, 84, 194, 196, 198, 200, 202, 586, 590 |
 | memoize | 50 (`explain_memoize` over a partitionwise join) |
 
 What changed:
@@ -179,8 +179,15 @@ What changed:
   (`COALESCE(l, r)`, set_joinrel_partition_key's merged expressions), so a USING column of it
   joins the next table partitionwise (80/82, 3- and 4-way full joins).
 
+- Partitionwise joins of multi-level partitioned tables: a FROM item's partitions are the ones
+  of the deepest partitioned table all its scans are in (the named table at the top; within a
+  child join, a partition that is partitioned itself), so a partition with partitions of its
+  own joins them as one inheritance Append (or partitionwise again when the join clauses cover
+  its key); a restriction its partitions already check isn't added again; the join clauses over
+  such an Append name its first partition, as Postgres shows them (194–202, 586, 590).
+
 Goldens added: `tests/sql/gpu_join_subquery.sql`, `gpu_param_joins.sql`, `gpu_pw_targets.sql`,
-`gpu_join_quals.sql`, `gpu_full_pw.sql`.
+`gpu_join_quals.sql`, `gpu_full_pw.sql`, `gpu_multilevel_pw.sql`.
 
 Still open from this round's list, and why:
 
@@ -958,7 +965,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 298 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 572 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (42) |
+| partition_join | 614 | 579 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (35) |
 | partition_prune | 771 | 733 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (30) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |

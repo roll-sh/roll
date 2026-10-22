@@ -6,6 +6,7 @@
 use super::partmerge;
 use super::*;
 use crate::catalog::partition::{PartBound, bound_order};
+use crate::sql::plan::PartLevel;
 
 /// One FROM item as partitions: per partition (in bound order) the member plan, or None
 /// where plan-time pruning left the partition out.
@@ -163,18 +164,18 @@ impl Search<'_, '_, '_> {
         // A subquery's projection over the Append (its placeholders: constants and the
         // parent's columns) goes on each partition.
         let (proj, own);
-        let (members, inputs) = match &leaf.plan {
+        let (members, inputs, inh) = match &leaf.plan {
             Plan::Append {
                 inputs,
-                inh: Some(_),
+                inh: inh @ Some(_),
             } => {
                 proj = None;
-                (leaf.members.as_ref()?, inputs)
+                (leaf.members.as_ref()?, inputs, inh.clone())
             }
             Plan::Project { input, exprs } => {
                 let Plan::Append {
                     inputs,
-                    inh: Some(_),
+                    inh: inh @ Some(_),
                 } = &**input
                 else {
                     return None;
@@ -187,12 +188,29 @@ impl Search<'_, '_, '_> {
                 proj = Some(exprs);
                 let need = vec![true; crate::sql::binder::plan_width(input)];
                 own = self.pl.members(inputs, &need)?;
-                (&own, inputs)
+                (&own, inputs, inh.clone())
             }
             _ => return None,
         };
         let first = members.first()?;
-        let level = first.scan.part.as_ref()?.first()?.clone();
+        // (The deepest partitioned table all the members are in: the one the query names,
+        // a partition of it that is partitioned itself having its partitions' scans here,
+        // joined as one; or, for those, that partition.)
+        let in_all = |oid: u32| {
+            members
+                .iter()
+                .all(|m| m.scan.part.as_ref().is_some_and(|ls| ls.iter().any(|l| l.parent.oid == oid)))
+        };
+        let level = first
+            .scan
+            .part
+            .as_ref()?
+            .iter()
+            .find(|l| in_all(l.parent.oid))?
+            .clone();
+        let level_of = |m: &Member| -> Option<PartLevel> {
+            m.scan.part.as_ref()?.iter().find(|l| l.parent.oid == level.parent.oid).cloned()
+        };
         let parent = level.parent.clone();
         parent.partkey.as_ref()?;
         let mut bounds: Vec<PartBound> = level.siblings.clone();
@@ -229,27 +247,45 @@ impl Search<'_, '_, '_> {
             }
             keys.push(vec![mapped]);
         }
-        let mut parts: Vec<Option<Plan>> = vec![None; bounds.len()];
+        let mut groups: Vec<Vec<Arc<Plan>>> = vec![Vec::new(); bounds.len()];
         for m in members {
             if m.map != first.map {
                 return None;
             }
-            let lv = m.scan.part.as_ref()?.first()?;
+            let lv = level_of(m)?;
             if lv.parent.oid != parent.oid {
                 return None;
             }
             let i = bounds.iter().position(|b| *b == lv.bound)?;
-            if parts[i].is_some() {
+            // (A partition that isn't partitioned is one member.)
+            if !groups[i].is_empty() && m.scan.part.as_ref().is_some_and(|l| l.first().is_some_and(|f| f.parent.oid == parent.oid)) {
                 return None;
             }
-            parts[i] = Some(match proj {
-                None => member_plan(&inputs[m.input]),
-                Some(ex) => Plan::Project {
-                    input: inputs[m.input].clone(),
-                    exprs: ex.clone(),
-                },
-            });
+            groups[i].push(inputs[m.input].clone());
         }
+        let parts: Vec<Option<Plan>> = groups
+            .into_iter()
+            .map(|g| {
+                let plan = match g.len() {
+                    0 => return None,
+                    1 => match proj {
+                        None => member_plan(&g[0]),
+                        Some(_) => (*g[0]).clone(),
+                    },
+                    _ => Plan::Append {
+                        inputs: g,
+                        inh: inh.clone(),
+                    },
+                };
+                Some(match proj {
+                    None => plan,
+                    Some(ex) => Plan::Project {
+                        input: Arc::new(plan),
+                        exprs: ex.clone(),
+                    },
+                })
+            })
+            .collect();
         // Every input is a member (none is something else).
         if members.len() != inputs.iter().filter(|i| !matches!(&***i, Plan::Empty { .. })).count() {
             return None;

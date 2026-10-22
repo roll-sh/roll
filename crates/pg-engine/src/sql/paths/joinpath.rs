@@ -241,6 +241,41 @@ struct JRel {
 }
 
 /// add_path for group paths (parameterized ones keep to their own required set).
+/// Whether a FROM item's plan checks clause `q` (over its row) already: its scan's filter,
+/// every member of its Append, through a member's projection of columns.
+fn has_qual(p: &Plan, q: &Expr) -> bool {
+    let in_parts = |f: &Expr, q: &Expr| {
+        let mut parts = Vec::new();
+        conjuncts(f.clone(), &mut parts);
+        parts.iter().any(|x| {
+            x.same_as(q)
+                || matches!((x, q), (Expr::Call(_, xa, _), Expr::Call(_, qa, _))
+                    if xa.len() == 2 && xa[0].same_as(&qa[1]) && xa[1].same_as(&qa[0]))
+        })
+    };
+    match p {
+        Plan::Scan(sp) => sp.filter.as_ref().is_some_and(|f| in_parts(f, q)),
+        Plan::Filter { input, pred } => in_parts(pred, q) || has_qual(input, q),
+        Plan::Append { inputs, inh: Some(_) } => !inputs.is_empty() && inputs.iter().all(|i| has_qual(i, q)),
+        Plan::Project { input, exprs } if exprs.iter().all(|e| matches!(e, Expr::Col(..))) => {
+            let mapped = q
+                .clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(i, t) => match exprs.get(i) {
+                            Some(Expr::Col(j, _)) => Expr::Col(*j, t),
+                            _ => Expr::Col(i, t),
+                        },
+                        x => x,
+                    })
+                })
+                .unwrap();
+            has_qual(input, &mapped)
+        }
+        _ => false,
+    }
+}
+
 fn add_jpath(list: &mut Vec<JP>, new: JP, startup: bool) {
     let as_path = |p: &JP| Path {
         kind: PathKind::Seq,
@@ -5234,19 +5269,9 @@ impl Planner<'_, '_> {
                     vec![Expr::Col(pg - off, tp), Expr::Col(g - off, tg)],
                     rt.clone(),
                 );
-                // (Unless the item has it already.)
-                let has = match &leaves[l].0 {
-                    Plan::Scan(sp) => sp.filter.as_ref().is_some_and(|f| {
-                        let mut parts = Vec::new();
-                        conjuncts(f.clone(), &mut parts);
-                        parts.iter().any(|x| {
-                            x.same_as(&q)
-                                || matches!((x, &q), (Expr::Call(_, xa, _), Expr::Call(_, qa, _))
-                                    if xa.len() == 2 && xa[0].same_as(&qa[1]) && xa[1].same_as(&qa[0]))
-                        })
-                    }),
-                    _ => false,
-                };
+                // (Unless the item has it already: a partition join's partitions, their
+                // members too.)
+                let has = has_qual(&leaves[l].0, &q);
                 if !has {
                     let plan = std::mem::replace(&mut leaves[l].0, Plan::One);
                     leaves[l].0 = crate::sql::binder::optimize::add_filter(&self.cat, plan, q);

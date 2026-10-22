@@ -17,10 +17,10 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and round 13 (STATUS.md):
 
-- **Regression suite: 50,780 of 51,150 statements match (99.28%).** 370 differ. The full
+- **Regression suite: 50,796 of 51,150 statements match (99.31%).** 354 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 355 are `EXPLAIN` plan text (96%). Query results already match.
-  - 14 are plan choices that show up in results (mostly which side a hash join builds on,
+  - 341 are `EXPLAIN` plan text (96%). Query results already match.
+  - 12 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
     work), so the ceiling is about 99.998%.
@@ -193,15 +193,21 @@ All remaining work is planner/EXPLAIN (`src/sql/paths*`, `src/sql/binder/optimiz
 numbers refer to the regress harness's per-file unit counter; `tests/regress/STATUS.md` lists
 them all with the "Fixed in round N" sections describing what was already tried.
 
-1. **Flattening subqueries over several tables with placeholders** (join 328, 343–347,
-   351–366; most of partition_join's 48 units). Only single-table and FROM-less subqueries are
-   pulled up today: extend `src/sql/paths/joinpath/lift.rs` to PostgreSQL's
-   `pull_up_subqueries` with PlaceHolderVars. For join 351/368, `Plan::Empty` must carry the
-   original expressions (PostgreSQL keeps the placeholder's expression where the engine
-   shows `NULL`). join 744 differs only in plan choice (a parameterized hash join inside a
-   nested loop).
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 99, partition_join 48,
-   partition_prune 38 units): cost-driven choices, partitionwise joins, runtime pruning.
+1. **PlaceHolderVars evaluated at joins** (join 328, 343, 345, 347, 360, 362/363, 366, 368;
+   partition_join 41). Round 13 pulls subqueries over joins up into the parent's join group
+   (`lift.rs` `flatten_join_subquery`) when no output needs a PlaceHolderVar evaluated at a
+   join (or the outer joins nulling it were reduced away); join 351 now keeps the dummy
+   relation's expressions. What's left needs a plan node computing expressions at a join (a
+   PlaceHolderVar whose `ph_eval_at` is several relations), constant PlaceHolderVars through
+   remove_useless_result_rtes (343/347), qualified names in a dummy Result over catalog scans
+   (368), a full join of one-row relations removed (366). join 744 differs only in plan choice
+   (a parameterized hash join inside a nested loop).
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 87, partition_join 35,
+   partition_prune 38 units): cost-driven choices (join 123/410/424/450/458/543, partition_join
+   21/94), equivalence classes above outer joins (join 416/420), partitionwise joins with a
+   LATERAL item (partition_join 41/45/46), IN over a partitioned subquery as a semi join
+   (partition_join 86/88/92: the subquery is planned before the WHERE's sublinks are pulled up),
+   partition_prune's parallel plans (Gather / Parallel Append) and runtime pruning details.
 3. **subselect** (30 units):
    - 189/191: a pulled-up subquery output read twice should become two SubPlans (subquery ids
      are cached by the executor, so renumbering needs care).
