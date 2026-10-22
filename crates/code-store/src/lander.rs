@@ -396,7 +396,10 @@ impl Lander {
                 },
                 Cmd::SetRef { expect, new, reply } => {
                     self.flush(std::mem::replace(&mut batch, Batch::new(None, 0))).await;
-                    let r = self.set_ref(expect, new);
+                    let mut r = self.set_ref(expect, new);
+                    if r.is_ok() {
+                        r = self.store.sync_wal().await;
+                    }
                     if r.is_err() {
                         self.state = None;
                     }
@@ -408,7 +411,12 @@ impl Lander {
                 }
                 Cmd::Advance { expect, new, reply } => {
                     self.flush(std::mem::replace(&mut batch, Batch::new(None, 0))).await;
-                    let r = self.advance(expect, new);
+                    let mut r = self.advance(expect, new);
+                    if r.is_ok()
+                        && let Err(e) = self.store.sync_wal().await
+                    {
+                        r = Err(e);
+                    }
                     match &r {
                         Ok(landed) => {
                             if !self.internal() {
@@ -677,10 +685,14 @@ impl Lander {
         if batch.is_empty() {
             return;
         }
-        let result = match self.store.upload_blobs(&self.repo, &batch.blobs).await {
+        let mut result = match self.store.upload_blobs(&self.repo, &batch.blobs).await {
             Ok(()) => self.commit(&batch),
             Err(e) => Err(e),
         };
+        // Nothing is acknowledged or published before it's durable.
+        if result.is_ok() {
+            result = self.store.sync_wal().await;
+        }
         match result {
             Ok(()) => {
                 for m in batch.metas.values() {

@@ -7,11 +7,16 @@ use std::path::Path;
 pub const TABLES: &[&str] =
     &["changesets", "cs_git", "git_commits", "trees", "git_raw", "blobs", "refs", "path_index", "land_stats", "land_log", "repos"];
 
+/// WAL pages (4 KiB) the writer lets build up before it checkpoints inside a commit. The
+/// checkpointer thread (`durable.rs`) normally copies them long before; this is the backstop.
+pub const WRITER_CHECKPOINT_PAGES: u32 = 8192;
+
 pub fn open(path: &Path) -> anyhow::Result<Connection> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let conn = Connection::open(path)?;
+    conn.pragma_update(None, "wal_autocheckpoint", WRITER_CHECKPOINT_PAGES)?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
@@ -110,6 +115,13 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// A read-only connection to the same database.
+/// The checkpointer's own connection: it only runs `wal_checkpoint`.
+pub fn open_checkpointer(path: &Path) -> anyhow::Result<Connection> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+    Ok(conn)
+}
+
 pub fn open_reader(path: &Path) -> anyhow::Result<Connection> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA cache_size=-16384;")?;

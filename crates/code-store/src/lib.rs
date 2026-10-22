@@ -14,6 +14,7 @@
 mod blame;
 mod checkout;
 mod db;
+mod durable;
 pub mod git;
 pub mod ids;
 mod import;
@@ -144,6 +145,8 @@ pub struct Store {
     events: Mutex<HashMap<String, broadcast::Sender<Landed>>>,
     /// Every repo's landings, for services that watch all of them (post-merge checks, mirrors).
     all_events: broadcast::Sender<Landed>,
+    /// Landings are acknowledged only once the WAL is synced past their commit.
+    pub(crate) wal: durable::WalSync,
 }
 
 impl Store {
@@ -152,7 +155,7 @@ impl Store {
         let path = home.join("code").join("code.db");
         let db = db::open(&path)?;
         let readers = (0..READERS).map(|_| db::open_reader(&path).map(Mutex::new)).collect::<anyhow::Result<_>>()?;
-        Ok(Arc::new(Store {
+        let store = Arc::new(Store {
             db: Mutex::new(db),
             readers,
             objects,
@@ -163,7 +166,23 @@ impl Store {
             landers: Mutex::new(HashMap::new()),
             events: Mutex::new(HashMap::new()),
             all_events: broadcast::channel(4096).0,
-        }))
+            wal: durable::WalSync::new(&path),
+        });
+        durable::spawn_checkpointer(&path, Arc::downgrade(&store))?;
+        Ok(store)
+    }
+
+    /// Make every write committed so far durable (an fsync of the WAL, shared with whoever else
+    /// is waiting). Landings call this before they're acknowledged or published.
+    pub(crate) async fn sync_wal(self: &Arc<Self>) -> anyhow::Result<()> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.wal.sync()).await??;
+        Ok(())
+    }
+
+    /// Sync requests that are durable so far (tests and diagnostics).
+    pub fn wal_syncs(&self) -> u64 {
+        self.wal.synced()
     }
 
     /// A reader connection: the first free one, else this thread's.

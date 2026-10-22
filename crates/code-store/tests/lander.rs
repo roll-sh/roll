@@ -201,3 +201,38 @@ async fn ref_compare_and_swap() {
     store.delete_repo(REPO).await.unwrap();
     assert!(!store.repo_exists(REPO).unwrap());
 }
+
+/// A landing is acknowledged only after the WAL is synced past its commit, and checkpoints run
+/// in the background: these landings write far less than the writer's own checkpoint threshold,
+/// so only the checkpointer thread can have copied them into the database file.
+#[tokio::test]
+async fn landings_are_synced_before_they_are_acknowledged_and_checkpointed_in_the_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let db = dir.path().join("code").join("code.db");
+    let size = || std::fs::metadata(&db).unwrap().len();
+    let fresh = size();
+    store.create_repo(REPO).unwrap();
+    let mut base = None;
+    for i in 0..20 {
+        let c = commit(&store, REPO, base, &format!("c{i}"), vec![write(&format!("f{i}.txt"), &lines(200, |l| format!("{i} {l}")))]).await;
+        let synced = store.wal_syncs();
+        if base.is_none() {
+            store.update_ref(REPO, "main", Expect::Absent, Some(c)).await.unwrap();
+        } else {
+            store.land(REPO, "main", c).await.unwrap();
+        }
+        assert!(store.wal_syncs() > synced, "write {i} was acknowledged before a sync");
+        base = Some(c);
+    }
+    let mut checkpointed = false;
+    for _ in 0..100 {
+        if size() > fresh + 32 * 1024 {
+            checkpointed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(checkpointed, "code.db is still {} bytes (fresh: {fresh}): nothing was checkpointed", size());
+    assert_eq!(store.get_ref(REPO, "main").unwrap(), base);
+}
