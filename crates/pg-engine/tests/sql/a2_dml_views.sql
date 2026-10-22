@@ -120,3 +120,16 @@ EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM a2_dv_o o WHERE EXISTS (SELECT 1 FROM a2_dv_p p WHERE p.a > o.a + 3) OR o.a > 6;
 SELECT * FROM a2_dv_o o WHERE EXISTS (SELECT 1 FROM a2_dv_p p WHERE p.a > o.a + 3) OR o.a > 6;
 DROP TABLE a2_dv_p, a2_dv_c, a2_dv_o CASCADE;
+
+-- (WITH CHECK OPTION's sub-selects are the ModifyTable's SubPlans; the result relation has
+-- the view's alias for it.)
+CREATE TABLE a2_dv_wb (a int);
+CREATE TABLE a2_dv_wr (a int PRIMARY KEY);
+INSERT INTO a2_dv_wr SELECT * FROM generate_series(1, 10);
+CREATE VIEW a2_dv_wv AS
+  SELECT * FROM a2_dv_wb b WHERE EXISTS (SELECT 1 FROM a2_dv_wr r WHERE r.a = b.a)
+  WITH CHECK OPTION;
+INSERT INTO a2_dv_wv VALUES (5);
+INSERT INTO a2_dv_wv VALUES (15);
+EXPLAIN (COSTS OFF) INSERT INTO a2_dv_wv VALUES (5);
+DROP TABLE a2_dv_wb, a2_dv_wr CASCADE;

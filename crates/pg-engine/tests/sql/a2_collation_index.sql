@@ -38,3 +38,16 @@ SELECT count(*), min(y), max(y) FROM a2_t2ci WHERE x = 'abc7';
 SELECT y FROM a2_t2ci WHERE x = 'ABC7' ORDER BY y LIMIT 3;
 EXPLAIN (COSTS OFF) SELECT * FROM a2_t2ci WHERE x LIKE 'abc1%';
 DROP TABLE a2_t2ci; DROP COLLATION a2_ci2;
+
+-- (An ORDER BY key under an explicit COLLATE is the sort's collation; a join clause between
+-- columns of the class's collation shows no relabelling.)
+CREATE COLLATION a2_ci3 (provider = icu, locale = '@colStrength=secondary', deterministic = false);
+CREATE TABLE a2_pt3 (a text, c text COLLATE a2_ci3) PARTITION BY LIST (c COLLATE "C");
+CREATE TABLE a2_pt3_p1 PARTITION OF a2_pt3 FOR VALUES IN ('a', 'b');
+CREATE TABLE a2_pt3_p2 PARTITION OF a2_pt3 FOR VALUES IN ('B', 'A');
+INSERT INTO a2_pt3 SELECT i % 4 + 1, substr('abAB', (i % 4) + 1, 1) FROM generate_series(0, 19) i;
+ANALYZE a2_pt3;
+EXPLAIN (COSTS OFF)
+SELECT t1.c, count(t2.c) FROM a2_pt3 t1 JOIN a2_pt3 t2 ON t1.c = t2.c GROUP BY 1 ORDER BY t1.c COLLATE "C";
+SELECT t1.c, count(t2.c) FROM a2_pt3 t1 JOIN a2_pt3 t2 ON t1.c = t2.c GROUP BY 1 ORDER BY t1.c COLLATE "C";
+DROP TABLE a2_pt3; DROP COLLATION a2_ci3;

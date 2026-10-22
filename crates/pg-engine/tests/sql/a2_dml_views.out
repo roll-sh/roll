@@ -290,3 +290,37 @@ a:int4
 > DROP TABLE a2_dv_p, a2_dv_c, a2_dv_o CASCADE
 -- DROP TABLE
 
+> CREATE TABLE a2_dv_wb (a int)
+-- CREATE TABLE
+
+> CREATE TABLE a2_dv_wr (a int PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO a2_dv_wr SELECT * FROM generate_series(1, 10)
+-- INSERT 0 10
+
+> CREATE VIEW a2_dv_wv AS
+>   SELECT * FROM a2_dv_wb b WHERE EXISTS (SELECT 1 FROM a2_dv_wr r WHERE r.a = b.a)
+>   WITH CHECK OPTION
+-- CREATE VIEW
+
+> INSERT INTO a2_dv_wv VALUES (5)
+-- INSERT 0 1
+
+> INSERT INTO a2_dv_wv VALUES (15)
+ERROR 44000: new row violates check option for view "a2_dv_wv"
+DETAIL: Failing row contains (15).
+
+> EXPLAIN (COSTS OFF) INSERT INTO a2_dv_wv VALUES (5)
+QUERY PLAN:text
+Insert on a2_dv_wb b
+  ->  Result
+  SubPlan 1
+    ->  Index Only Scan using a2_dv_wr_pkey on a2_dv_wr r
+          Index Cond: (a = b.a)
+-- EXPLAIN
+
+> DROP TABLE a2_dv_wb, a2_dv_wr CASCADE
+NOTICE 00000: drop cascades to view a2_dv_wv
+-- DROP TABLE
+

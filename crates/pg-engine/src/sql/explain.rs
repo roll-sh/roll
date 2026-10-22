@@ -1442,6 +1442,12 @@ fn assign_refnames_skip(
             }
             let mut es = Vec::new();
             node_exprs(p, &mut es);
+            // (WITH CHECK OPTION's sub-selects are the ModifyTable's.)
+            match p {
+                Plan::Insert(i) => es.extend(i.rules.view_checks.iter().map(|(_, e)| e)),
+                Plan::Update(u) => es.extend(u.rules.view_checks.iter().map(|(_, e)| e)),
+                _ => {}
+            }
             let mut sq = Vec::new();
             for e in es {
                 subqueries_in(e, &mut sq);
@@ -3670,6 +3676,17 @@ impl Builder<'_, '_> {
                         if let Some(cst) = constant {
                             return self.show(&cst, &[], Cx::Upper) + &sort_suffix(k);
                         }
+                        // (A key under an explicit COLLATE: the sort's collation, not a value
+                        // computed below it.)
+                        if let (Expr::Col(i, _), Plan::Project { exprs: pe, .. }) = (&k.expr, &**input)
+                            && let Some(Expr::Collate(inner, coll, loc)) = pe.get(*i)
+                            && *loc >= 0
+                            && matches!(&**inner, Expr::Col(..))
+                            && k.using.is_none()
+                            && let Some(name) = c.internal.get(*i)
+                        {
+                            return format!("{} COLLATE {}", self.pick(name, Cx::Upper), quote_ident(coll)) + &sort_suffix(k);
+                        }
                         let t = self.show(&k.expr, &c.exported, Cx::Upper);
                         let t = if member_sort && !matches!(k.expr, Expr::Col(..)) && c.node.is_scan() {
                             format!("({t})")
@@ -4929,6 +4946,7 @@ impl Builder<'_, '_> {
                     c.node.output = out;
                 }
                 let mut n = self.modify("Insert", t, &refname, &c.node);
+                self.check_option_subplans(&mut n, &ip.rules.view_checks, t, &refname);
                 if self.o.verbose && !ip.returning.is_empty() {
                     let names = self.table_names(t, &refname);
                     // (The source is a range table entry of its own: columns qualified.)
@@ -5075,6 +5093,7 @@ impl Builder<'_, '_> {
                     c.node.output = out;
                 }
                 let mut n = self.modify("Update", t, &refname, &c.node);
+                self.check_option_subplans(&mut n, &up.rules.view_checks, t, &refname);
                 self.returning(&mut n, &up.returning, t, &c.node);
                 if self.o.verbose && !up.returning.is_empty() {
                     let mut names = self.table_names(t, &refname);
@@ -5196,6 +5215,25 @@ impl Builder<'_, '_> {
                 Built::passthrough(n, Vec::new())
             }
         }
+    }
+
+    /// WITH CHECK OPTION's sub-selects over the new row: SubPlans of the ModifyTable.
+    fn check_option_subplans(
+        &mut self,
+        n: &mut ExNode,
+        checks: &[(String, Expr)],
+        t: &crate::catalog::Table,
+        refname: &str,
+    ) {
+        let names = self.table_names(t, refname);
+        for (_, e) in checks {
+            let mut sq = Vec::new();
+            subqueries_in(e, &mut sq);
+            if !sq.is_empty() {
+                let _ = self.show(e, &names, Cx::Upper);
+            }
+        }
+        n.subplans.append(&mut self.pending);
     }
 
     fn table_names(&self, t: &crate::catalog::Table, refname: &str) -> Vec<Name> {
@@ -9334,7 +9372,16 @@ impl Builder<'_, '_> {
         // An inner join's equality comes from its equivalence class: operands whose
         // collation isn't the class's (none, when the sides' implicit collations conflict)
         // are relabelled (canonicalize_ec_expression), which shows as a cast.
-        let relabel = |k: &Expr, t: String| match k {
+        // (A key column's own collation, from its relation's column.)
+        let own_coll = |e: &Expr, cols: &[ColInfo]| -> Option<String> {
+            let Expr::Col(j, _) = e else { return None };
+            cols.get(*j)
+                .and_then(|c| c.var.as_ref())
+                .filter(|v| v.expr.is_none())
+                .and_then(|v| v.table.columns.get(v.col))
+                .and_then(|c| c.collation.clone())
+        };
+        let relabel = |k: &Expr, t: String, cols: &[ColInfo]| match k {
             Expr::Call(d, a, _)
                 if kind == JoinKind::Inner && d.name == crate::sql::binder::INDETERMINATE_HASH =>
             {
@@ -9346,7 +9393,8 @@ impl Builder<'_, '_> {
             Expr::Call(d, a, _)
                 if d.name == crate::sql::binder::NONDETERMINISTIC_HASH
                     && (matches!(a[0], Expr::Collate(..))
-                        || matches!(kind, JoinKind::Inner | JoinKind::Semi | JoinKind::Anti)) =>
+                        || (matches!(kind, JoinKind::Inner | JoinKind::Semi | JoinKind::Anti)
+                            && own_coll(&a[0], cols).as_deref() != d.coll.as_ref().map(|c| c.name.as_str()))) =>
             {
                 let t = t.strip_suffix(&format!(" COLLATE {}", d.coll.as_ref().map_or("", |c| c.name.as_str()))).unwrap_or(&t).to_string();
                 format!("({t})::{}", a[0].ty().typname())
@@ -9358,15 +9406,16 @@ impl Builder<'_, '_> {
             let (outer_names, inner_names) = (&l.exported, &r.exported);
             let (oa, ib) = if swapped { (b, a) } else { (a, b) };
             // (An operator's argument shows its implicit relabelling, as varchar to text.)
-            let side = |this: &mut Self, k: &Expr, names: &[Name]| match strip_widening(k) {
+            let (outer_cols, inner_cols) = (&l.node.cols, &r.node.cols);
+            let side = |this: &mut Self, k: &Expr, names: &[Name], cols: &[ColInfo]| match strip_widening(k) {
                 Expr::Cast(inner, from, to, false) if from != to && !from.same_base(to) => {
                     format!("({})::{}", this.show(inner, names, Cx::Upper), to.typname())
                 }
-                k2 => relabel(k, this.show(k2, names, Cx::Upper)),
+                k2 => relabel(k, this.show(k2, names, Cx::Upper), cols),
             };
-            let a = side(self, oa, outer_names);
+            let a = side(self, oa, outer_names, outer_cols);
             let before = self.pending.len();
-            let b = side(self, ib, inner_names);
+            let b = side(self, ib, inner_names, inner_cols);
             // (The inner keys are the Hash's to compute: their SubPlans are its.)
             if method == JoinMethod::Hash && self.pending.len() > before {
                 hash_subplans.extend(self.pending.drain(before..));

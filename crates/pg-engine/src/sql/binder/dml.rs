@@ -1018,7 +1018,11 @@ impl Binder<'_, '_> {
             sys: self.want_sys,
             route: self.partition_routing(&t)?,
             copy: None,
-            alias: rv.alias.as_ref().map(|a| a.aliasname.clone()),
+            // (Through an updatable view: its relation's alias in the view.)
+            alias: match &view {
+                Some(v) => v.base_alias(),
+                None => rv.alias.as_ref().map(|a| a.aliasname.clone()),
+            },
         };
         Ok((Plan::Insert(Box::new(plan)), cols))
     }
@@ -2223,7 +2227,11 @@ impl Binder<'_, '_> {
                     mark: None,
                     limit: None,
                     sys: self.want_sys,
-                    alias: (updatable.is_none() && alias != t.name).then(|| alias.to_string()),
+                    // (Through an updatable view: its relation's alias in the view.)
+                    alias: match updatable {
+                        Some(v) => v.base_alias(),
+                        None => (alias != t.name).then(|| alias.to_string()),
+                    },
                     current_of: None,
                     sample: None,
                     excl: None,

@@ -37,6 +37,19 @@ pub struct ViewBase {
 }
 
 impl ViewBase {
+    /// The innermost view's alias for its relation (`FROM base_tbl b`): the result
+    /// relation's name once the rewriter makes it the target.
+    pub fn base_alias(&self) -> Option<String> {
+        let v = self.layers.last().map_or(&self.view, |l| &l.0);
+        match ast::parse_stmt(&v.query).ok().and_then(|n| n.node) {
+            Some(NodeEnum::SelectStmt(s)) => match s.from_clause.first().and_then(inner) {
+                Some(NodeEnum::RangeVar(rv)) => rv.alias.as_ref().map(|a| a.aliasname.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Whether the innermost view reads its relation with inheritance (no ONLY).
     pub fn base_inh(&self) -> bool {
         let v = self.layers.last().map_or(&self.view, |l| &l.0);

@@ -147,3 +147,52 @@ Seq Scan on a2_t2ci
 > DROP COLLATION a2_ci2
 -- DROP COLLATION
 
+> CREATE COLLATION a2_ci3 (provider = icu, locale = '@colStrength=secondary', deterministic = false)
+NOTICE 00000: using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+-- CREATE COLLATION
+
+> CREATE TABLE a2_pt3 (a text, c text COLLATE a2_ci3) PARTITION BY LIST (c COLLATE "C")
+-- CREATE TABLE
+
+> CREATE TABLE a2_pt3_p1 PARTITION OF a2_pt3 FOR VALUES IN ('a', 'b')
+-- CREATE TABLE
+
+> CREATE TABLE a2_pt3_p2 PARTITION OF a2_pt3 FOR VALUES IN ('B', 'A')
+-- CREATE TABLE
+
+> INSERT INTO a2_pt3 SELECT i % 4 + 1, substr('abAB', (i % 4) + 1, 1) FROM generate_series(0, 19) i
+-- INSERT 0 20
+
+> ANALYZE a2_pt3
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.c, count(t2.c) FROM a2_pt3 t1 JOIN a2_pt3 t2 ON t1.c = t2.c GROUP BY 1 ORDER BY t1.c COLLATE "C"
+QUERY PLAN:text
+Sort
+  Sort Key: t1.c COLLATE "C"
+  ->  HashAggregate
+        Group Key: t1.c
+        ->  Hash Join
+              Hash Cond: (t1.c = t2.c)
+              ->  Append
+                    ->  Seq Scan on a2_pt3_p2 t1_1
+                    ->  Seq Scan on a2_pt3_p1 t1_2
+              ->  Hash
+                    ->  Append
+                          ->  Seq Scan on a2_pt3_p2 t2_1
+                          ->  Seq Scan on a2_pt3_p1 t2_2
+-- EXPLAIN
+
+> SELECT t1.c, count(t2.c) FROM a2_pt3 t1 JOIN a2_pt3 t2 ON t1.c = t2.c GROUP BY 1 ORDER BY t1.c COLLATE "C"
+c:text | count:int8
+A | 100
+B | 100
+-- SELECT 2
+
+> DROP TABLE a2_pt3
+-- DROP TABLE
+
+> DROP COLLATION a2_ci3
+-- DROP COLLATION
+

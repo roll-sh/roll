@@ -34,8 +34,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50801 (**99.32%**) |
-| units differing | 349 |
+| units matching | 50804 (**99.32%**) |
+| units differing | 346 |
 | files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
@@ -44,7 +44,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 337 | 96.6% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 334 | 96.5% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.2% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -52,8 +52,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 337 units
-join (87), partition_join (35), partition_prune (38), subselect (30), collate.icu.utf8 (10), incremental_sort (15), select_parallel (14), updatable_views (7), groupingsets (10), with (8), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 334 units
+join (87), partition_join (35), partition_prune (38), subselect (30), collate.icu.utf8 (8), incremental_sort (15), select_parallel (14), updatable_views (6), groupingsets (10), with (8), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -222,6 +222,27 @@ Still open from this round's list, and why:
   order here; Postgres's follows how distribute_qual met them, which can pick another outer
   member for a parameterized path.
 
+## Fixed in round 13, agent 2, fifth batch (collated sort keys, WITH CHECK OPTION SubPlans)
+
+Same 29-file subset, against the engine of commit 6cc6e0e: 3 units fixed, none broken.
+
+| file | fixed units |
+|---|---|
+| collate.icu.utf8 | 614, 617 |
+| updatable_views | 730 |
+
+What changed:
+
+- An ORDER BY key under an explicit COLLATE shows as the column with the sort's collation
+  (`Sort Key: t1.c COLLATE "C"`), not as a value computed below the sort.
+- A nondeterministic hash key of an inner / semi join shows a relabelling only when its
+  column's collation isn't the clause's (the equivalence class's).
+- WITH CHECK OPTION's sub-selects show as SubPlans of the INSERT / UPDATE (their relations
+  named), and a write through an updatable view names the result relation (and its scan) by the
+  view's alias for its table.
+
+Goldens extended: `tests/sql/a2_collation_index.sql`, `a2_dml_views.sql`.
+
 ## Fixed in round 13, agent 2, fourth batch (nondeterministic collations in index paths, CYCLE)
 
 Same 29-file subset, against the engine of commit 73393f3: 5 units fixed, none broken.
@@ -369,12 +390,11 @@ Goldens added: `tests/sql/a2_userop_stats.sql`, `a2_grouping_misc.sql`.
 
 Still open in these files (after both batches), and why:
 
-- collate.icu.utf8 611–647: partitionwise aggregation / joins under collations (619, 622, 644:
-  partitionwise plan choice), an ORDER BY key under an explicit COLLATE computed below the sort
-  (`(t1.c)`) and a join clause shown with relabelings; 328, 334 (hashed grouping of a subquery
-  and a semi join over DISTINCT under collations: cost choices).
-- updatable_views 730, 731 (a view's base table alias on the result relation, WITH CHECK
-  OPTION SubPlans shown under the ModifyTable, EXISTS in an UPDATE's view qual as a join),
+- collate.icu.utf8 611, 619, 622, 644: partitionwise aggregation / joins under collations
+  (plan choices); 630, 647: an equivalence class of three members under a nondeterministic
+  collation (Postgres derives the restriction `c = b` and one join clause); 328, 334 (hashed
+  grouping of a subquery and a semi join over DISTINCT under collations: cost choices).
+- updatable_views 731 (EXISTS in an UPDATE's view qual as a join),
   817, 819, 914 (conditional rules: Postgres plans each rule action as a statement of its own,
   here a CTE), 173, 174 (an equivalence class's constant reaching the other side of a join
   through a Subquery Scan's output), 848 (a security-barrier view over an inheritance tree with
@@ -881,7 +901,7 @@ produces no units on Linux (skipped by the file itself).
 | typed_table | 36 | 36 | 100% | yes | yes |  |
 | vacuum | 328 | 328 | 100% | yes | yes |  |
 | drop_if_exists | 161 | 161 | 100% | yes | yes |  |
-| updatable_views | 1109 | 1101 | 99% | no | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
+| updatable_views | 1109 | 1102 | 99% | no | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
 | roleattributes | 80 | 80 | 100% | yes | yes |  |
 | create_am | 142 | 142 | 100% | yes | yes |  |
 | hash_func | 43 | 43 | 100% | yes | yes |  |
@@ -944,7 +964,7 @@ produces no units on Linux (skipped by the file itself).
 | tidscan | 49 | 49 | 100% | yes | yes |  |
 | tidrangescan | 45 | 45 | 100% | yes | yes |  |
 | collate.utf8 | 61 | 61 | 100% | yes | yes |  |
-| collate.icu.utf8 | 681 | 671 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (10) |
+| collate.icu.utf8 | 681 | 673 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
 | incremental_sort | 120 | 105 | 88% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |
