@@ -88,7 +88,8 @@ pub(crate) struct WebsitePatch {
 pub(crate) struct Prepared {
     replication: Option<Option<ReplicationConfig>>,
     website: Option<Option<WebsiteConfig>>,
-    policy: Option<Option<String>>,
+    /// The document and the principals it names.
+    policy: Option<Option<(String, String)>>,
     public_access_block: Option<Option<PublicAccessBlock>>,
 }
 
@@ -213,7 +214,7 @@ impl Control {
             None => Value::Null,
         };
         v["notifications"]["backlog"] = backlog.notifications();
-        let policy = self.store.bucket_config(&b.name, kind::POLICY, "").ok().flatten();
+        let policy = s3_server::bucket_policy(&self.store, &b.name);
         v["policy_public"] = json!(policy.as_deref().is_some_and(|p| s3_server::validate_bucket_policy(p, &b.name).unwrap_or(false)));
         v["policy"] = policy.map(|p| serde_json::from_str(&p).unwrap_or(Value::String(p))).unwrap_or(Value::Null);
         v["public_access_block"] = json!(self.store.public_access_block(&b.id).ok().and_then(|(own, _)| own));
@@ -260,7 +261,8 @@ impl Control {
                 if public && block.block_public_policy {
                     return Err(invalid("this policy grants public access, which is blocked (BlockPublicPolicy)"));
                 }
-                Some(Some(text))
+                let principals = s3_server::bucket_policy_principals(&self.store, &text).map_err(|m| invalid(format!("invalid bucket policy: {m}")))?;
+                Some(Some((text, principals)))
             }
         };
 
@@ -376,7 +378,7 @@ impl Control {
             return Ok(());
         }
         if let Some(policy) = &p.policy {
-            self.store.set_bucket_config(bucket, kind::POLICY, "", policy.as_deref(), None).await?;
+            self.store.set_bucket_policy(bucket, policy.as_ref().map(|(d, b)| (d.as_str(), b.as_str()))).await?;
         }
         if let Some(w) = &p.website {
             let v = w.as_ref().map(serde_json::to_string).transpose().map_err(anyhow::Error::from)?;

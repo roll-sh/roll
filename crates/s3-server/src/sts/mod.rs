@@ -20,6 +20,7 @@
 //! (`<ErrorResponse><Error><Type>…<Code>…`).
 
 pub mod oidc;
+pub(crate) mod saml;
 
 use crate::ctx::Ctx;
 use crate::identity::{Identity, Kind};
@@ -37,9 +38,9 @@ use std::collections::BTreeMap;
 
 const XMLNS: &str = "https://sts.amazonaws.com/doc/2011-06-15/";
 const VERSION: &str = "2011-06-15";
-/// Largest request body: a 20 000-character web identity token, a 2 KB policy and tags fit
-/// easily.
-pub(crate) const MAX_BODY: usize = 64 * 1024;
+/// Largest request body: a 100 000-character SAML assertion (AWS's limit) and IAM's larger
+/// documents (SAML metadata, certificates) fit; read whole, at most this.
+pub(crate) const MAX_BODY: usize = 1024 * 1024;
 /// A role session assuming a role (role chaining) gets at most an hour, as on AWS.
 const CHAINED_MAX_S: i64 = 3600;
 /// The root user's GetSessionToken and GetFederationToken sessions: at most an hour.
@@ -305,7 +306,8 @@ async fn run(ctx: &mut Ctx, body: Body, request_id: &str) -> Result<String, StsE
                 _ => assume_role(ctx, &store, &caller, &id, &p).await?,
             }
         }
-        "AssumeRoleWithSAML" | "DecodeAuthorizationMessage" | "GetAccessKeyInfo" | "AssumeRoot" | "GetDelegatedAccessToken" => {
+        "AssumeRoleWithSAML" => saml::assume_role_with_saml(ctx, &store, &p).await?,
+        "DecodeAuthorizationMessage" | "GetAccessKeyInfo" | "AssumeRoot" | "GetDelegatedAccessToken" => {
             return Err(StsError::new("InvalidAction", 400, format!("{action} isn't supported by roll (see docs/storage/compatibility.md)")));
         }
         _ => return Err(StsError::new("InvalidAction", 400, format!("Could not find operation {action} for version {VERSION}"))),
@@ -517,14 +519,16 @@ struct StsCond<'a> {
     ctx: &'a Ctx,
     id: Option<&'a Identity>,
     p: &'a Params,
-    /// More keys (lowercase): web identity claims, MFA presented with the call.
+    /// More keys (lowercase; a key may repeat for more values): web identity claims, SAML
+    /// attributes, MFA presented with the call.
     extra: Vec<(String, String)>,
 }
 
 impl Context for StsCond<'_> {
     fn values(&self, key: &str) -> Option<Vec<String>> {
-        if let Some((_, v)) = self.extra.iter().find(|(k, _)| k == key) {
-            return Some(vec![v.clone()]);
+        let given: Vec<String> = self.extra.iter().filter(|(k, _)| k == key).map(|(_, v)| v.clone()).collect();
+        if !given.is_empty() {
+            return Some(given);
         }
         if let Some(id) = self.id
             && let Some(v) = id.condition(key, self.ctx.store().now())
@@ -557,10 +561,12 @@ impl Context for StsCond<'_> {
 /// How a role's trust treats a principal: `Some(via)` if it trusts it (a trust policy's
 /// `Allow` naming it, or a control-plane trust listing its key), `None` if not. An explicit
 /// `Deny` is an error.
-fn trusted(role: &Role, who: &Principal, caller_key: Option<&str>, action: &str, cond: &dyn Context) -> Result<Option<Via>, StsError> {
+pub(crate) fn trusted(store: &Store, role: &Role, who: &Principal, caller_key: Option<&str>, action: &str, cond: &dyn Context) -> Result<Option<Via>, StsError> {
     let denied = || access_denied("Not authorized to perform sts:AssumeRole");
     match &role.iam.trust_policy {
         Some(doc) => {
+            // As it reads now: a principal deleted (or replaced) since matches nobody.
+            let doc = crate::principals::rewrite(store, doc, &role.iam.trust_principals);
             let Ok(policy) = Policy::parse_trust(doc.as_bytes(), crate::iam::MAX_TRUST_POLICY_BYTES) else {
                 tracing::error!(role = role.name, "a role's trust policy doesn't parse");
                 return Err(denied());
@@ -608,7 +614,7 @@ async fn assume_role(ctx: &Ctx, store: &Store, k: &AccessKey, id: &Identity, p: 
     let via = if role.iam.trust_policy.is_some() && id.is_root() && k.session.is_none() {
         None
     } else {
-        trusted(&role, &id.principal, k.acting_key().filter(|_| !chained), "sts:AssumeRole", &cond)?
+        trusted(store, &role, &id.principal, k.acting_key().filter(|_| !chained), "sts:AssumeRole", &cond)?
     };
     let Some(via) = via else { return Err(denied()) };
     if role.iam.trust_policy.is_none()
@@ -630,7 +636,7 @@ async fn assume_role(ctx: &Ctx, store: &Store, k: &AccessKey, id: &Identity, p: 
     }
     if p.get("Tags.member.1.Key").is_some() || p.get("TransitiveTagKeys.member.1").is_some() {
         // Session tags need sts:TagSession in an IAM trust policy, as on AWS.
-        if role.iam.trust_policy.is_some() && trusted(&role, &id.principal, None, "sts:TagSession", &cond)?.is_none() {
+        if role.iam.trust_policy.is_some() && trusted(store, &role, &id.principal, None, "sts:TagSession", &cond)?.is_none() {
             return Err(access_denied(format!("User: {} is not authorized to perform: sts:TagSession on resource: {arn}", id.caller_arn)));
         }
     }
@@ -727,7 +733,7 @@ async fn assume_role_with_web_identity(ctx: &Ctx, store: &Store, p: &Params) -> 
             ("aws:federatedprovider".to_string(), provider_arn),
         ];
         let cond = StsCond { ctx, id: None, p, extra };
-        if trusted(&role, &who, None, "sts:AssumeRoleWithWebIdentity", &cond)?.is_none() {
+        if trusted(store, &role, &who, None, "sts:AssumeRoleWithWebIdentity", &cond)?.is_none() {
             return Err(denied());
         }
     }

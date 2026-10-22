@@ -167,6 +167,10 @@ struct Args {
     /// `http://<public host>:<S3 port>`.
     #[arg(long, env = "ROLL_S3_PUBLIC_ENDPOINT")]
     s3_public_endpoint: Option<String>,
+    /// More endpoints SAML assertions may be for (comma-separated `Recipient`/`Audience`
+    /// values), besides `https://signin.aws.amazon.com/saml`.
+    #[arg(long, env = "ROLL_S3_SAML_AUDIENCES")]
+    s3_saml_audiences: Option<String>,
     /// Let storage webhooks reach loopback and private addresses (single-tenant installs).
     #[arg(long, env = "ROLL_S3_WEBHOOK_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     s3_webhook_allow_private: bool,
@@ -297,7 +301,7 @@ async fn run() -> anyhow::Result<()> {
     if let Some(st) = &storage_svc {
         let sink = storage_events::RollSink { queues: queues.as_ref().map(|q| q.broker.clone()), streams: broker.clone() };
         st.server.notifier.set_sink(std::sync::Arc::new(sink));
-        st.control.set_notifier(st.server.notifier.clone());
+        st.control.set_server(st.server.clone());
     }
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
@@ -380,6 +384,7 @@ struct StorageOpts {
     s3_notify_aws_endpoints: Option<String>,
     s3_replication_metrics_cloudwatch: bool,
     s3_public_endpoint: Option<String>,
+    s3_saml_audiences: Option<String>,
     s3_webhook_allow_private: bool,
 }
 
@@ -403,6 +408,7 @@ impl From<&Args> for StorageOpts {
             s3_notify_aws_endpoints: a.s3_notify_aws_endpoints.clone(),
             s3_replication_metrics_cloudwatch: a.s3_replication_metrics_cloudwatch,
             s3_public_endpoint: a.s3_public_endpoint.clone(),
+            s3_saml_audiences: a.s3_saml_audiences.clone(),
             s3_webhook_allow_private: a.s3_webhook_allow_private,
         }
     }
@@ -436,6 +442,7 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     }
     scfg.public_endpoint = Some(args.s3_public_endpoint.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.s3.port())));
     scfg.torrent_announce = std::env::var("ROLL_S3_TORRENT_ANNOUNCE").ok().filter(|a| !a.trim().is_empty());
+    scfg.saml_audiences = args.s3_saml_audiences.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|a| !a.is_empty()).map(str::to_string).collect();
     let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
     cfg.node = args.node.clone();
     cfg.block_public_access = args.s3_block_public_access;

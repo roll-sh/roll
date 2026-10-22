@@ -144,19 +144,73 @@ pub(crate) fn managed_document(store: &Store, account: &str, arn: &str) -> Optio
     p.document().map(str::to_string)
 }
 
-/// Allowing policies from inline documents and attached ARNs.
-fn collect(store: &Store, account: &str, inline: impl IntoIterator<Item = String>, attached: &[String], into: &mut Vec<Arc<Policy>>) {
-    into.extend(inline.into_iter().filter_map(|d| parsed(&d)));
-    for arn in attached {
-        if let Some(p) = managed_document(store, account, arn).and_then(|d| parsed(&d)) {
-            into.push(p);
+/// A policy that applies to a principal, and where it comes from (what the policy simulator
+/// reports as `SourcePolicyId` and `SourcePolicyType`).
+#[derive(Clone, Debug)]
+pub(crate) struct Source {
+    /// The inline policy's name, or the managed policy's.
+    pub id: String,
+    /// IAM's `PolicySourceType`: `user`, `group`, `role`, `aws-managed`, `user-managed`, `none`.
+    pub kind: &'static str,
+    /// `None`: a managed policy that's gone.
+    pub doc: Option<String>,
+}
+
+/// Inline documents (of a `user`, `group` or `role`) and attached managed policies, as sources.
+fn sources(store: &Store, account: &str, kind: &'static str, inline: &std::collections::BTreeMap<String, String>, attached: &[String], into: &mut Vec<Source>) {
+    into.extend(inline.iter().map(|(name, doc)| Source { id: name.clone(), kind, doc: Some(doc.clone()) }));
+    into.extend(attached.iter().map(|arn| managed_source(store, account, arn)));
+}
+
+fn managed_source(store: &Store, account: &str, arn: &str) -> Source {
+    let kind = if arn.starts_with("arn:aws:iam::aws:") { "aws-managed" } else { "user-managed" };
+    Source { id: arn.rsplit('/').next().unwrap_or(arn).to_string(), kind, doc: managed_document(store, account, arn) }
+}
+
+/// Allowing policies from sources (a managed policy that's gone allows nothing).
+fn allowing(src: &[Source]) -> impl Iterator<Item = Arc<Policy>> + '_ {
+    src.iter().filter_map(|s| s.doc.as_deref().and_then(parsed))
+}
+
+/// A bound from a source: one that's gone or doesn't parse allows nothing.
+pub(crate) fn bounding(s: &Source) -> Arc<Policy> {
+    s.doc.as_deref().and_then(parsed).unwrap_or_else(nothing)
+}
+
+/// The identity policies of an IAM user (its own and its groups') and its permissions boundary.
+pub(crate) fn user_sources(store: &Store, account: &str, u: &iam::User) -> (Vec<Source>, Option<Source>) {
+    let mut out = Vec::new();
+    sources(store, account, "user", &u.policies, &u.attached, &mut out);
+    for g in &u.groups {
+        if let Ok(Some(g)) = store.iam_group(account, g) {
+            sources(store, account, "group", &g.policies, &g.attached, &mut out);
         }
     }
+    (out, u.boundary.as_deref().map(|b| managed_source(store, account, b)))
+}
+
+/// A group's policies.
+pub(crate) fn group_sources(store: &Store, account: &str, g: &iam::Group) -> Vec<Source> {
+    let mut out = Vec::new();
+    sources(store, account, "group", &g.policies, &g.attached, &mut out);
+    out
+}
+
+/// A role's identity policies, and its bounds: its permissions boundary and a control-plane
+/// role's policy.
+pub(crate) fn role_sources(store: &Store, account: &str, role: &s3_store::sts::Role) -> (Vec<Source>, Vec<Source>) {
+    let mut out = Vec::new();
+    sources(store, account, "role", &role.iam.policies, &role.iam.attached, &mut out);
+    let mut bounds: Vec<Source> = role.iam.boundary.as_deref().map(|b| managed_source(store, account, b)).into_iter().collect();
+    if let Some(p) = &role.policy {
+        bounds.push(Source { id: "roll role policy".into(), kind: "role", doc: Some(p.clone()) });
+    }
+    (out, bounds)
 }
 
 /// A bound from a managed policy ARN: one that's gone or doesn't parse allows nothing.
 fn bound(store: &Store, account: &str, arn: &str) -> Arc<Policy> {
-    managed_document(store, account, arn).and_then(|d| parsed(&d)).unwrap_or_else(nothing)
+    bounding(&managed_source(store, account, arn))
 }
 
 /// Who did it, in event records (`userIdentity.principalId`): an account key's id (the root
@@ -177,17 +231,30 @@ pub(crate) fn root_arn(account: &str) -> String {
     format!("arn:aws:iam::{account}:root")
 }
 
+pub(crate) fn saml_provider_arn(account: &str, name: &str) -> String {
+    format!("arn:aws:iam::{account}:saml-provider/{name}")
+}
+
 /// The identity policies of an IAM user and its groups, and its boundary.
 fn user_policies(store: &Store, account: &str, u: &iam::User, policies: &mut Vec<Arc<Policy>>, boundaries: &mut Vec<Arc<Policy>>) {
-    collect(store, account, u.policies.values().cloned(), &u.attached, policies);
-    for g in &u.groups {
-        if let Ok(Some(g)) = store.iam_group(account, g) {
-            collect(store, account, g.policies.values().cloned(), &g.attached, policies);
-        }
-    }
-    if let Some(b) = &u.boundary {
-        boundaries.push(bound(store, account, b));
-    }
+    let (src, boundary) = user_sources(store, account, u);
+    policies.extend(allowing(&src));
+    boundaries.extend(boundary.as_ref().map(bounding));
+}
+
+/// An IAM user's identity: `false` if the user is gone.
+fn as_user(store: &Store, acct: &str, name: &str, id: &mut Identity, req: &mut Requester) -> Result<bool, s3_store::StoreError> {
+    let Some(u) = store.iam_user(acct, name)? else { return Ok(false) };
+    let arn = user_arn(acct, &u.path, &u.name);
+    id.kind = Kind::User { name: u.name.clone(), id: u.id.clone(), arn: arn.clone() };
+    id.principal_arn = arn.clone();
+    id.caller_arn = arn.clone();
+    id.user_id = u.id.clone();
+    id.username = Some(u.name.clone());
+    id.tags = u.tags.clone();
+    req.direct = vec![arn];
+    user_policies(store, acct, &u, &mut id.policies, &mut id.boundaries);
+    Ok(true)
 }
 
 /// Resolve the identity behind `k`. `Err` only for storage failures.
@@ -236,34 +303,21 @@ pub(crate) fn resolve(store: &Store, k: &AccessKey) -> Result<Identity, s3_store
             req.direct = vec![session_arn];
             req.direct_canonical = vec![store.canonical_user(&k.id)];
             req.role = Some(role_arn);
-            req.federated = s.web.as_ref().map(|w| format!("arn:aws:iam::{acct}:oidc-provider/{}", w.provider()));
+            req.federated = s.web.as_ref().map(|w| format!("arn:aws:iam::{acct}:oidc-provider/{}", w.provider())).or_else(|| s.saml.as_ref().map(|sa| saml_provider_arn(&acct, &sa.provider)));
             if let Some(role) = &s.role_now {
-                collect(store, &acct, role.iam.policies.values().cloned(), &role.iam.attached, &mut id.policies);
-                if let Some(b) = &role.iam.boundary {
-                    id.boundaries.push(bound(store, &acct, b));
-                }
-                if let Some(p) = &role.policy {
-                    id.boundaries.push(Policy::parse_identity(p.as_bytes(), MAX_ROLE_POLICY_BYTES).map(Arc::new).unwrap_or_else(|_| nothing()));
-                }
+                let (src, bounds) = role_sources(store, &acct, role);
+                id.policies.extend(allowing(&src));
+                id.boundaries.extend(bounds.iter().map(bounding));
             }
             session_policies(store, &acct, s, &mut id.session_policies);
         }
         (session, Some(p)) => {
             match &p.user {
-                Some(name) => match store.iam_user(&acct, name)? {
-                    Some(u) => {
-                        let arn = user_arn(&acct, &u.path, &u.name);
-                        id.kind = Kind::User { name: u.name.clone(), id: u.id.clone(), arn: arn.clone() };
-                        id.principal_arn = arn.clone();
-                        id.caller_arn = arn.clone();
-                        id.user_id = u.id.clone();
-                        id.username = Some(u.name.clone());
-                        id.tags = u.tags.clone();
-                        req.direct = vec![arn];
-                        user_policies(store, &acct, &u, &mut id.policies, &mut id.boundaries);
+                Some(name) => {
+                    if !as_user(store, &acct, name, &mut id, &mut req)? {
+                        id.dead = true;
                     }
-                    None => id.dead = true,
-                },
+                }
                 None if p.is_root() => {
                     id.kind = Kind::Root;
                     id.principal_arn = root_arn(&acct);
@@ -305,6 +359,13 @@ pub(crate) fn resolve(store: &Store, k: &AccessKey) -> Result<Identity, s3_store
                     // A GetSessionToken session is its key (and its session's key canonical id).
                     req.direct_canonical.push(store.canonical_user(&k.id));
                 }
+            }
+        }
+        // A dashboard sign-in session: its IAM user (`console.rs`).
+        (Some(s), None) if s.console => {
+            let name = s.user.clone().unwrap_or_default();
+            if !as_user(store, &acct, &name, &mut id, &mut req)? || s.dead {
+                id.dead = true;
             }
         }
         // A GetSessionToken/GetFederationToken session whose key is gone.
@@ -387,8 +448,22 @@ impl Identity {
             "aws:multifactorauthpresent" => return one(Some(s.mfa_at.is_some().to_string())),
             "aws:multifactorauthage" => return one(s.mfa_at.map(|at| ((now_ms - at).max(0) / 1000).to_string())),
             "aws:sourceidentity" => return one(s.source_identity.clone()),
-            "aws:federatedprovider" => return one(s.web.as_ref().map(|w| format!("arn:aws:iam::{}:oidc-provider/{}", self.account.id, w.provider()))),
+            "aws:federatedprovider" => {
+                return one(s.web.as_ref().map(|w| format!("arn:aws:iam::{}:oidc-provider/{}", self.account.id, w.provider())).or_else(|| s.saml.as_ref().map(|sa| saml_provider_arn(&self.account.id, &sa.provider))));
+            }
             _ => {}
+        }
+        if let Some(sa) = &s.saml
+            && key.starts_with("saml:")
+        {
+            return one(match key {
+                "saml:sub" => Some(sa.subject.clone()),
+                "saml:sub_type" => Some(sa.subject_type.clone()),
+                "saml:iss" => Some(sa.issuer.clone()),
+                "saml:aud" => Some(sa.audience.clone()),
+                "saml:namequalifier" => Some(sa.name_qualifier.clone()),
+                _ => None,
+            });
         }
         if let Some(w) = &s.web {
             let provider = w.provider().to_ascii_lowercase();

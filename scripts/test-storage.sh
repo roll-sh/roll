@@ -43,8 +43,8 @@ for t in crates/s3-server/tests/*.rs; do
   cargo test -p s3-server --test "$name"
 done
 cargo test -p s3-control
-# `roll storage …` end to end.
-cargo test -p roll-cli --test storage
+# `roll storage …` end to end (and `roll storage accounts|iam …`).
+cargo test -p roll-cli --test storage --test iam
 
 if [[ $unit_only == 0 ]]; then
   if ! docker info >/dev/null 2>&1; then

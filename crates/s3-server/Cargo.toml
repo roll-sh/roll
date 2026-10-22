@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
 axum.workspace = true
@@ -24,12 +25,15 @@ ipnet.workspace = true
 md-5.workspace = true
 memchr.workspace = true
 p256.workspace = true
+pkcs1.workspace = true
+pkcs8.workspace = true
 qrcode.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 ring.workspace = true
 s3-proto.workspace = true
 s3-select.workspace = true
 s3-store.workspace = true
+sec1.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -37,13 +41,16 @@ tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
+x509-cert.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 aws-sdk-s3control.workspace = true
 aws-sdk-sts.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
-sha1.workspace = true
+rcgen.workspace = true
 aws-smithy-types.workspace = true
 rsa = { workspace = true, features = ["sha2"] }
+sha1 = { workspace = true, features = ["oid"] }
 reqwest = { workspace = true, features = ["stream"] }

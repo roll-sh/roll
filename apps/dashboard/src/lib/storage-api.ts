@@ -4,7 +4,8 @@
  * Times are Unix milliseconds. Contract: docs/storage/architecture.md.
  */
 
-import { call, ROLL_API } from "./roll-api";
+import { ROLL_API } from "./roll-api";
+import { accountQuery, assertSessionLive, clearSession, storageCall as call, storageHeaders, StorageError } from "./storage-session";
 
 export interface StoragePricing {
   usd_per_gb_month: number;
@@ -506,7 +507,7 @@ export const storageApi = {
     call<{ deleted: number }>("POST", `${bucket(name)}/delete`, sel),
   /** Direct link to the bytes (served with `Content-Disposition: attachment`). */
   downloadUrl: (name: string, key: string, versionId?: string | null) =>
-    `${ROLL_API}${bucket(name)}/download${q({ key, version_id: versionId })}`,
+    `${ROLL_API}${bucket(name)}/download${q({ key, version_id: versionId, ...accountQuery() })}`,
   presign: (name: string, key: string, method: "GET" | "PUT" = "GET", expires_s = 3600) =>
     call<{ url: string; method: string; expires_at: number }>("POST", `${bucket(name)}/presign`, { key, method, expires_s }),
 
@@ -575,6 +576,15 @@ export function uploadObject(
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", `${ROLL_API}${bucket(name)}/upload${q({ key })}`);
     if (file.type) xhr.setRequestHeader("content-type", file.type);
+    let auth: Record<string, string>;
+    try {
+      assertSessionLive();
+      auth = storageHeaders();
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    for (const [k, v] of Object.entries(auth)) xhr.setRequestHeader(k, v);
     xhr.upload.onprogress = (e) => onProgress(e.loaded, e.lengthComputable ? e.total : file.size);
     xhr.onload = () => {
       let data: { error?: string } | null = null;
@@ -584,7 +594,11 @@ export function uploadObject(
         data = null;
       }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data as ObjectInfo);
-      else reject(new Error(data?.error ?? `${xhr.status} ${xhr.statusText}`));
+      else {
+        if (xhr.status === 401 && "authorization" in auth) clearSession(true);
+        const code = (data as { code?: string } | null)?.code ?? null;
+        reject(new StorageError(data?.error ?? `${xhr.status} ${xhr.statusText}`, xhr.status, code));
+      }
     };
     xhr.onerror = () => reject(new Error("upload failed: rolld unreachable"));
     xhr.onabort = () => reject(new Error("upload cancelled"));

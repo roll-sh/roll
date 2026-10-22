@@ -111,6 +111,8 @@ pub struct Control {
     /// The S3 API's event notifier (validates notification destinations); set by
     /// [`Control::set_notifier`].
     pub(crate) notifier: std::sync::OnceLock<Arc<s3_server::Notifier>>,
+    /// The S3 API; set by [`Control::set_server`].
+    pub(crate) server: std::sync::OnceLock<Arc<s3_server::Server>>,
 }
 
 fn random_secret() -> String {
@@ -233,13 +235,20 @@ impl Control {
             Some(k) => k.secret,
             None => store.ensure_key(CONTROL_KEY_ID, &random_secret(), CONTROL_KEY_NAME).await?.secret,
         };
-        Ok(Arc::new(Self { store, cfg, presign_secret: secret, notifier: Default::default() }))
+        Ok(Arc::new(Self { store, cfg, presign_secret: secret, notifier: Default::default(), server: Default::default() }))
     }
 
     /// Connect the S3 API's notifier, so `PATCH` can set notifications (their destinations are
     /// validated, and sent a test event, as through the S3 API).
     pub fn set_notifier(&self, n: Arc<s3_server::Notifier>) {
         let _ = self.notifier.set(n);
+    }
+
+    /// Connect the S3 API (its notifier too): the dashboard's sign-in, IAM and what signed-in
+    /// users may do go through it (`console.rs`).
+    pub fn set_server(&self, s: Arc<s3_server::Server>) {
+        self.set_notifier(s.notifier.clone());
+        let _ = self.server.set(s);
     }
 
     /// Replace a bucket's notifications (`configurations` empty and no EventBridge: none).

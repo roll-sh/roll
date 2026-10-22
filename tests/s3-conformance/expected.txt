@@ -169,13 +169,15 @@ test_s3.py::test_put_bucket_ownership_bucket_owner_enforced  aws-default: ACLs a
 test_s3.py::test_versioned_object_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_versioned_object_acl_no_version_specified  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 
-# roll answers as S3 does; the suite expects RGW's answer. (10)
+# roll answers as S3 does; the suite expects RGW's answer. (12)
+test_s3.py::test_block_public_policy_with_principal  aws: its principal arn:aws:iam::s3tenant1:root names an RGW tenant, not an account; S3 refuses it as MalformedPolicy (Invalid principal in policy)
 test_s3.py::test_copy_part_enc[sse-c-sse-c-STANDARD-STANDARD-8388608]  aws: a part copy with another SSE-C key than its upload is 403 AccessDenied, as a wrong key on a read (RGW says 400)
 test_s3.py::test_copy_part_enc[sse-s3-sse-c-STANDARD-STANDARD-8388608]  aws: a part copy with another SSE-C key than its upload is 403 AccessDenied, as a wrong key on a read (RGW says 400)
 test_s3.py::test_encryption_sse_c_multipart_bad_download  aws: a read with the wrong SSE-C key is 403 AccessDenied on S3 (RGW says 400)
 test_s3.py::test_encryption_sse_c_multipart_invalid_chunks_1  aws: a part with another SSE-C key than its upload is 403 AccessDenied, as a wrong key on a read (RGW says 400)
 test_s3.py::test_encryption_sse_c_other_key  aws: a read with the wrong SSE-C key is 403 AccessDenied on S3 (RGW says 400)
 test_s3.py::test_get_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
+test_s3.py::test_get_nonpublicpolicy_principal_bucket_policy_status  aws: its principal arn:aws:iam::s3tenant1:root names an RGW tenant, not an account; S3 refuses it as MalformedPolicy (Invalid principal in policy)
 test_s3.py::test_get_nonpublicpolicy_acl_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
 test_s3.py::test_get_publicpolicy_acl_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
 test_s3.py::test_post_object_upload_checksum  aws: every POST form field (x-amz-checksum-* too) must have a policy condition, as S3 documents; the test's policy has none for it

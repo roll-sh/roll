@@ -14,11 +14,11 @@ without Ceph's extensions (RGW's append API, IAM/STS/SNS, cloud tiering, lifecyc
 classes, RGW's logging journal and rollover). It runs on two backends:
 
 - **local** (`pnpm test:s3-conformance`): blobs in a local directory, so no SSE-KMS and no
-  encryption at rest. **479 of 681 tests pass (70.4%).**
+  encryption at rest. **477 of 681 tests pass (70.1%).**
 - **LocalStack** (`pnpm test:s3-conformance-localstack`): the backing bucket on LocalStack S3
   with keys from LocalStack KMS (`ROLL_S3_KMS`), and `ROLL_S3_SSE_S3_AT_REST` set, since
   LocalStack's S3 encrypts every object at rest as AWS S3 does. This is how roll runs on AWS.
-  **539 of 681 tests pass (79.3%).**
+  **537 of 681 tests pass (79.0%).**
 
 One more test is skipped by the suite in both. The suite's "alt" and "tenant" users are real
 separate accounts. Every other test is listed with its reason in
@@ -344,7 +344,11 @@ root user's key too.
 - An account's **root user** is an account key with `admin` over every bucket (what
   `ROLL_S3_ACCESS_KEY` and the control plane's account creation make). Like AWS's root user it may
   do anything to its account's resources and call every IAM action; unlike AWS's it signs
-  requests with access keys (roll has no console).
+  requests with access keys (it has no console password: the dashboard without a sign-in is the
+  operator's, acting as an account's root user).
+- **Account aliases** (`CreateAccountAlias`, `ListAccountAliases`, `DeleteAccountAlias`): one
+  per account, unique across the deployment, as across AWS; IAM users sign in to the dashboard
+  with the account's id or alias.
 
 ## IAM
 
@@ -366,11 +370,39 @@ IAM, and `GetSessionToken` sessions only with MFA, as on AWS.
 | Managed policies: `CreatePolicy`, `GetPolicy`, `ListPolicies`, `DeletePolicy`, `CreatePolicyVersion`, `GetPolicyVersion`, `ListPolicyVersions`, `SetDefaultPolicyVersion`, `DeletePolicyVersion`, `ListEntitiesForPolicy` | ✅ five versions; AWS's `AmazonS3FullAccess` and `AmazonS3ReadOnlyAccess` are built in |
 | `Attach`/`Detach`/`ListAttached` `UserPolicies`, `GroupPolicies`, `RolePolicies` | ✅ ten per entity |
 | Permissions boundaries: `Put/DeleteUserPermissionsBoundary`, `Put/DeleteRolePermissionsBoundary`, `PermissionsBoundary` on create | ✅ |
-| Roles: `CreateRole`, `GetRole`, `ListRoles`, `UpdateRole`, `UpdateRoleDescription`, `UpdateAssumeRolePolicy`, `DeleteRole`, `TagRole`, `UntagRole`, `ListRoleTags` | ✅ trust policies (`AssumeRolePolicyDocument`) with `AWS` (accounts, users, roles) and `Federated` (OIDC providers) principals and conditions; control-plane roles show their trust as the equivalent document |
+| Roles: `CreateRole`, `GetRole`, `ListRoles`, `UpdateRole`, `UpdateRoleDescription`, `UpdateAssumeRolePolicy`, `DeleteRole`, `TagRole`, `UntagRole`, `ListRoleTags` | ✅ trust policies (`AssumeRolePolicyDocument`) with `AWS` (accounts, users, roles) and `Federated` (OIDC and SAML providers) principals and conditions; control-plane roles show their trust as the equivalent document |
 | OIDC providers: `CreateOpenIDConnectProvider`, `GetOpenIDConnectProvider`, `ListOpenIDConnectProviders`, `DeleteOpenIDConnectProvider` | ✅ `AssumeRoleWithWebIdentity` verifies tokens with the provider's discovery document and client ids; thumbprints are stored (the provider's TLS certificate is checked by the usual trust roots) |
+| SAML providers: `CreateSAMLProvider`, `GetSAMLProvider`, `ListSAMLProviders`, `UpdateSAMLProvider`, `DeleteSAMLProvider`, `TagSAMLProvider`, `UntagSAMLProvider`, `ListSAMLProviderTags` | ✅ the IdP's metadata document (an `entityID` and RSA signing certificates; `validUntil` is `ValidUntil`); see [`AssumeRoleWithSAML`](#sts-temporary-credentials) |
+| Login profiles: `CreateLoginProfile`, `GetLoginProfile`, `UpdateLoginProfile`, `DeleteLoginProfile`, `ChangePassword` | ✅ passwords hashed with argon2id, checked against the password policy on set and change (`PasswordPolicyViolation`), `PasswordResetRequired`; users sign in to the [dashboard](#dashboard-sign-in) with them |
+| Password policy: `GetAccountPasswordPolicy`, `UpdateAccountPasswordPolicy`, `DeleteAccountPasswordPolicy` | ✅ every setting (length, character kinds, `AllowUsersToChangePassword`, `MaxPasswordAge`, `PasswordReusePrevention`, `HardExpiry`); without one, AWS's default policy |
+| Account aliases: `CreateAccountAlias`, `ListAccountAliases`, `DeleteAccountAlias` | ✅ one per account, unique across the deployment |
+| Server certificates: `UploadServerCertificate`, `GetServerCertificate`, `ListServerCertificates`, `UpdateServerCertificate`, `DeleteServerCertificate`, `Tag`/`Untag`/`ListServerCertificateTags` | ✅ the certificate must be valid and its private key (RSA or EC; PKCS#1, PKCS#8, SEC1) must match (`KeyPairMismatch`); twenty per account |
+| Signing certificates: `UploadSigningCertificate`, `ListSigningCertificates`, `UpdateSigningCertificate`, `DeleteSigningCertificate` | ✅ users' and (without `UserName`) the root user's; two per user, no duplicates in the account |
+| SSH public keys: `UploadSSHPublicKey`, `GetSSHPublicKey` (`SSH` or `PEM`), `ListSSHPublicKeys`, `UpdateSSHPublicKey`, `DeleteSSHPublicKey` | ✅ RSA, 2048-16384 bits, five per user; MD5 fingerprints |
+| Policy simulation: `SimulatePrincipalPolicy`, `SimulateCustomPolicy`, `GetContextKeysForPrincipalPolicy`, `GetContextKeysForCustomPolicy` | ✅ on the evaluator requests are decided with: `PolicyInputList`, `PermissionsBoundaryPolicyInputList`, `ResourcePolicy`, `ResourceOwner`, `CallerArn`, `ContextEntries`; `EvaluationResults` with `MatchedStatements` (positions in the policy's text), `MissingContextValues`, `PermissionsBoundaryDecisionDetail`, `EvalDecisionDetails` |
+| `GetAccountAuthorizationDetails` | ✅ users, groups, roles, the account's policies and AWS's that are in use, with their documents; `Filter`, paging |
+| Credential report: `GenerateCredentialReport`, `GetCredentialReport` | ✅ AWS's CSV (root and users: passwords, MFA, access keys, signing certificates); a report is current for four hours (`ReportExpired`) |
 | Virtual MFA devices | ✅ see [MFA](#mfa-and-mfa-delete) |
-| `GetAccountSummary`, `ListAccountAliases` | ✅ (no aliases) |
-| Login profiles, SSH keys, signing and server certificates, SAML providers, service-linked roles, instance profiles, access advisor, policy simulation | ❌ `InvalidAction` |
+| `GetAccountSummary` | ✅ |
+| Service-linked roles, instance profiles, access advisor (`GenerateServiceLastAccessedDetails`, …), organizations' SCPs | ❌ `InvalidAction`: they belong to AWS services roll doesn't have |
+
+**Principals in policies are checked**, as AWS checks them: a bucket policy, an access point
+policy or a role's trust policy whose principal ARN names a user, role or account that doesn't
+exist (or an IAM ARN that can't be a principal, or an OIDC or SAML provider that doesn't exist)
+is `MalformedPolicy` / `MalformedPolicyDocument`, `Invalid principal in policy`. A principal
+whose user or role is deleted afterwards reads as its unique id (`AIDA…`, `AROA…`) in
+`GetBucketPolicy` and `GetRole`, and matches nobody, so a new user or role of the same name
+doesn't inherit the old one's access; a renamed user reads with its new ARN.
+
+### Dashboard sign-in
+
+IAM users with a login profile sign in to the roll dashboard (`/dashboard/storage/-/signin`) with
+the account's id or alias, their user name and password, and a code of their MFA device if they
+have one, as at the AWS console's IAM-user sign-in. A password that must be reset (or has
+expired) is changed there. The storage UI then acts as the user: every operation is authorized
+by the user's IAM permissions, bucket policies and ACLs, exactly as the S3 request it stands
+for. The IAM pages call IAM as the user. Ten wrong passwords in five minutes lock a user's
+sign-in for the rest of them. See [architecture](architecture.md#dashboard-sign-in).
 
 **Evaluation** is AWS's
 ([policy evaluation logic](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html),
@@ -419,7 +451,8 @@ before.
   of it, and only if its step is newer than the last one accepted for the device, so a code can't
   be replayed; the accepted step is stored durably before the request goes on. After 10 wrong
   codes within 5 minutes a device refuses every code for the rest of those 5 minutes, so codes
-  can't be guessed.
+  can't be guessed. The count is kept in the metadata, so the lock survives a restart and holds
+  across a takeover.
 - **MFA-authenticated sessions:** `GetSessionToken` and `AssumeRole` take `SerialNumber` and
   `TokenCode` (the caller's own device); their sessions set `aws:MultiFactorAuthPresent` (`true`)
   and `aws:MultiFactorAuthAge`. Other sessions set `aws:MultiFactorAuthPresent` to `false`;
@@ -466,7 +499,8 @@ responses and `<ErrorResponse>` errors.
 | `GetCallerIdentity` | ✅ the root user is `arn:aws:iam::<account>:root`, an account key `arn:aws:iam::<account>:user/<key id>` |
 | `x-amz-security-token` header, `X-Amz-Security-Token` in presigned URLs and POST forms | ✅ SigV4, SigV4a and SigV2 |
 | Errors | ✅ S3: `InvalidToken` (a malformed, tampered or retired token), `ExpiredToken`, `InvalidAccessKeyId` (temporary key without its token), `AccessDenied` (a revoked session, or one whose role is gone, as on AWS); STS: `AccessDenied`, `ExpiredToken`, `ExpiredTokenException`, `InvalidIdentityToken`, `IDPCommunicationError`, `MalformedPolicyDocument`, `PackedPolicyTooLarge`, `ValidationError`, `InvalidParameterValue`, `InvalidClientTokenId` |
-| `AssumeRoleWithSAML`, `DecodeAuthorizationMessage`, `GetAccessKeyInfo`, `AssumeRoot` | ❌ `InvalidAction` |
+| `AssumeRoleWithSAML` | ✅ SAML 2.0 responses signed by the IdP of an IAM SAML provider (enveloped XML signature, exclusive canonicalization, RSA-SHA256 or RSA-SHA1, verified with the metadata's certificates; wrapping attacks refused); `Issuer`, `Audience` and `Recipient` (`https://signin.aws.amazon.com/saml`), `NotBefore`/`NotOnOrAfter`, the `Role` attribute (role and provider ARNs), `RoleSessionName`, `PrincipalTag:*`, `TransitiveTagKeys`, `SourceIdentity`; `DurationSeconds` up to the role's maximum and `SessionNotOnOrAfter`; trust policy conditions on `saml:aud`, `saml:iss`, `saml:sub`, `saml:sub_type`, `saml:namequalifier` and the eduPerson/X.500 attribute keys, and `${saml:sub}` in the role's policies |
+| `DecodeAuthorizationMessage`, `GetAccessKeyInfo`, `AssumeRoot` | ❌ `InvalidAction` |
 | `RegionDisabledException` | never: every region is accepted |
 
 **Sessions act with their role as it is now**, as on AWS: changing a role's policies (through
@@ -499,6 +533,14 @@ permissions boundary. Through IAM they show their trust as the equivalent trust 
 - The root user may assume a control-plane role whose trust lists its key (a roll extension); a
   role with an IAM trust policy refuses the root user, as on AWS.
 - Session tokens sealed with a session-token key retired by two rotations are `InvalidToken`.
+- SAML: encrypted assertions (`EncryptedAssertion`, `AssertionEncryptionMode=Required`, provider
+  private keys) aren't supported; signatures must use exclusive canonicalization (all current
+  IdPs do) and RSA. Besides AWS's sign-in endpoints, a deployment may accept its own
+  (`ROLL_S3_SAML_AUDIENCES`).
+- IAM: a server certificate's private key is checked against the certificate and not kept (IAM
+  never returns it, and nothing in roll serves TLS with it). `CanonicalUser` principals aren't
+  checked for existence. `ChangePassword` with a wrong old password is `AccessDenied`.
+  `CreateAccountAlias` refuses 12-digit aliases (they'd read as account ids at sign-in).
 
 ## Policies, ACLs and public access
 
@@ -524,7 +566,9 @@ permissions boundary. Through IAM they show their trust as the equivalent trust 
   one session (not bounded), `arn:aws:sts::<account id>:federated-user/<name>` a federated user.
   A `GetSessionToken` session is its key.
 - `Service` principals are accepted and never match; `Federated` principals match web identities
-  in trust policies.
+  and SAML providers in trust policies.
+- Each one must exist when the policy is put (`Invalid principal in policy`); one deleted later
+  reads as its unique id (see [IAM](#iam)).
 
 **What policies support.**
 - `Version` `2012-10-17` or `2008-10-17`; `Statement` as one object or an array; `Sid`.

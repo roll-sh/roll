@@ -18,6 +18,7 @@ import {
 } from "@/lib/storage-api";
 import { AppShell } from "../app-shell";
 import { btn, Connecting, EmptyPanel, ErrorNote, input, Offline, panel, primary, Stats } from "../ui";
+import { ACCOUNTS_HREF, IAM_HREF, StorageIdentity, useConsoleSession, useScope } from "./console";
 import { KeysTab } from "./keys";
 import { RolesTab } from "./roles";
 import { Field, PublicBadge, Segmented, TabNav, useAction, useHashTab, useStorage } from "./shared";
@@ -31,13 +32,15 @@ const TABS = [
 ] as const;
 type Tab = (typeof TABS)[number]["value"];
 const TAB_VALUES = TABS.map((t) => t.value);
+/** rolld's own keys and roles are operator-only: hidden while an IAM user is signed in. */
+const OPERATOR_TABS: readonly Tab[] = ["keys", "roles"];
 
 /** Days of the current UTC month so far, for month-to-date usage. */
 function monthDays() {
   return Math.max(1, new Date().getUTCDate());
 }
 
-function useMonthToDate() {
+function useMonthToDate(scope: string) {
   const [usage, setUsage] = useState<StorageUsageAll | null>(null);
   useEffect(() => {
     let alive = true;
@@ -48,17 +51,21 @@ function useMonthToDate() {
       alive = false;
       clearInterval(t);
     };
-  }, []);
+  }, [scope]);
   return usage;
 }
 
 export function StorageHome() {
   const router = useRouter();
-  const { info, buckets, offline, refresh } = useStorage();
+  const { info, buckets, offline, denied, refresh } = useStorage();
   const { busy, error, setError, run } = useAction(refresh);
-  const [tab, setTabRaw] = useHashTab<Tab>(TAB_VALUES, "buckets");
+  const [tabRaw, setTabRaw] = useHashTab<Tab>(TAB_VALUES, "buckets");
   const [creating, setCreating] = useState(false);
-  const mtd = useMonthToDate();
+  const session = useConsoleSession();
+  const scope = useScope();
+  const mtd = useMonthToDate(scope);
+  const tabs = session ? TABS.filter((t) => !OPERATOR_TABS.includes(t.value)) : TABS;
+  const tab = session && OPERATOR_TABS.includes(tabRaw) ? "buckets" : tabRaw;
   const setTab = (t: Tab) => {
     setTabRaw(t);
     setError(null);
@@ -87,22 +94,34 @@ export function StorageHome() {
             S3-compatible object storage — any S3 SDK or tool, instant branches, deletes recoverable for days.
           </p>
         </div>
-        {info && (
-          <p className="font-mono text-[11px] text-subtle">
-            {info.region} · {info.storage_class.toLowerCase()} · {info.storage}
-          </p>
-        )}
+        <div className="flex flex-col items-start gap-1 sm:items-end">
+          <StorageIdentity />
+          {info && (
+            <p className="font-mono text-[11px] text-subtle">
+              {info.region} · {info.storage_class.toLowerCase()} · {info.storage}
+            </p>
+          )}
+        </div>
       </div>
 
       {offline ? (
         <Offline />
+      ) : !info && denied ? (
+        <ErrorNote error={denied} />
       ) : !info || !buckets ? (
         <Connecting />
       ) : (
         <>
-          <TabNav tabs={TABS} tab={tab} onChange={setTab} label="Storage sections" counts={{ buckets: buckets.length }} />
-          <ErrorNote error={error} />
-          <div className="mt-6">
+          <TabNav
+            tabs={tabs}
+            tab={tab}
+            onChange={setTab}
+            label="Storage sections"
+            counts={{ buckets: buckets.length }}
+            links={session ? [{ href: IAM_HREF, label: "IAM" }] : [{ href: IAM_HREF, label: "IAM" }, { href: ACCOUNTS_HREF, label: "Accounts" }]}
+          />
+          <ErrorNote error={error ?? (tab === "buckets" ? denied : null)} />
+          <div className="mt-6" key={scope}>
             {tab === "buckets" && (
               <>
                 {creating && (

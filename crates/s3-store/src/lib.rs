@@ -42,6 +42,7 @@ pub mod sse;
 mod store;
 pub mod sts;
 pub mod targets;
+mod throttle;
 pub mod torrent;
 pub mod validate;
 mod versioning;

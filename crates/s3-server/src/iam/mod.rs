@@ -13,10 +13,21 @@
 //!   `AmazonS3FullAccess` and `AmazonS3ReadOnlyAccess` are built in.
 //! - [`roles`]: roles with trust policies (`AssumeRolePolicyDocument`).
 //! - [`account`]: virtual MFA devices, OpenID Connect providers, `GetAccountSummary`.
+//! - [`login`]: login profiles (console passwords), the password policy, `ChangePassword`,
+//!   account aliases, and signing in with a password (`console.rs`).
+//! - [`saml`]: SAML identity providers (`AssumeRoleWithSAML` is `sts/saml.rs`).
+//! - [`certs`]: server and signing certificates, SSH public keys.
+//! - [`simulate`]: the policy simulator, on the real evaluator.
+//! - [`report`]: `GetAccountAuthorizationDetails` and the credential report.
 
 mod account;
+mod certs;
+pub(crate) mod login;
 mod policies;
-mod roles;
+mod report;
+pub(crate) mod roles;
+mod saml;
+mod simulate;
 mod users;
 
 use crate::ctx::Ctx;
@@ -279,6 +290,16 @@ async fn run(ctx: &mut Ctx, body: Body, request_id: &str) -> Result<String, StsE
     let key = crate::sts::authenticate(ctx, &body, "iam")?;
     let store = ctx.store().clone();
     let id = crate::identity::resolve(&store, &key).map_err(crate::sts::store_failure)?;
+    let result = execute(ctx, &store, &id, &p, &action).await?;
+    Ok(match result {
+        Some(r) => format!("<{action}Response xmlns=\"{XMLNS}\"><{action}Result>{r}</{action}Result><ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata></{action}Response>"),
+        None => format!("<{action}Response xmlns=\"{XMLNS}\"><ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata></{action}Response>"),
+    })
+}
+
+/// Run an IAM action for `id` (authenticated already): its `Result` element's content, `None`
+/// for actions without one. The dashboard's IAM pages come through here too (`console.rs`).
+pub(crate) async fn execute(ctx: &Ctx, store: &Arc<Store>, id: &Identity, p: &Params, action: &str) -> Result<Option<String>, StsError> {
     // Who may call IAM at all, as on AWS.
     if matches!(id.kind, Kind::Federated { .. }) || id.dead {
         return Err(access_denied(format!("User: {} is not authorized to call IAM", id.caller_arn)));
@@ -286,10 +307,12 @@ async fn run(ctx: &mut Ctx, body: Body, request_id: &str) -> Result<String, StsE
     if let Some(s) = &id.session
         && s.role.is_none()
         && s.mfa_at.is_none()
+        && !s.console
     {
         return Err(StsError::new("InvalidClientTokenId", 403, "The security token included in the request is invalid: GetSessionToken credentials can call IAM only when MFA authenticated."));
     }
-    let call = Call { ctx, store: &store, id: &id, p: &p, account: id.account.id.clone() };
+    let action = action.to_string();
+    let call = Call { ctx, store, id, p, account: id.account.id.clone() };
     let result = match action.as_str() {
         "CreateUser" | "GetUser" | "ListUsers" | "DeleteUser" | "UpdateUser" | "TagUser" | "UntagUser" | "ListUserTags" | "PutUserPermissionsBoundary" | "DeleteUserPermissionsBoundary" | "CreateGroup" | "GetGroup"
         | "ListGroups" | "DeleteGroup" | "AddUserToGroup" | "RemoveUserFromGroup" | "ListGroupsForUser" | "CreateAccessKey" | "ListAccessKeys" | "UpdateAccessKey" | "DeleteAccessKey" | "GetAccessKeyLastUsed"
@@ -300,13 +323,18 @@ async fn run(ctx: &mut Ctx, body: Body, request_id: &str) -> Result<String, StsE
         "CreateRole" | "GetRole" | "ListRoles" | "DeleteRole" | "UpdateRole" | "UpdateRoleDescription" | "UpdateAssumeRolePolicy" | "PutRolePolicy" | "GetRolePolicy" | "ListRolePolicies" | "DeleteRolePolicy"
         | "PutRolePermissionsBoundary" | "DeleteRolePermissionsBoundary" | "TagRole" | "UntagRole" | "ListRoleTags" => roles::run(&call, &action).await?,
         "CreateVirtualMFADevice" | "EnableMFADevice" | "DeactivateMFADevice" | "ListMFADevices" | "ListVirtualMFADevices" | "DeleteVirtualMFADevice" | "ResyncMFADevice" | "CreateOpenIDConnectProvider"
-        | "GetOpenIDConnectProvider" | "ListOpenIDConnectProviders" | "DeleteOpenIDConnectProvider" | "GetAccountSummary" | "ListAccountAliases" => account::run(&call, &action).await?,
+        | "GetOpenIDConnectProvider" | "ListOpenIDConnectProviders" | "DeleteOpenIDConnectProvider" | "GetAccountSummary" => account::run(&call, &action).await?,
+        "CreateLoginProfile" | "GetLoginProfile" | "UpdateLoginProfile" | "DeleteLoginProfile" | "ChangePassword" | "GetAccountPasswordPolicy" | "UpdateAccountPasswordPolicy" | "DeleteAccountPasswordPolicy"
+        | "CreateAccountAlias" | "ListAccountAliases" | "DeleteAccountAlias" => login::run(&call, &action).await?,
+        "CreateSAMLProvider" | "GetSAMLProvider" | "ListSAMLProviders" | "UpdateSAMLProvider" | "DeleteSAMLProvider" | "TagSAMLProvider" | "UntagSAMLProvider" | "ListSAMLProviderTags" => saml::run(&call, &action).await?,
+        "UploadServerCertificate" | "GetServerCertificate" | "ListServerCertificates" | "UpdateServerCertificate" | "DeleteServerCertificate" | "TagServerCertificate" | "UntagServerCertificate"
+        | "ListServerCertificateTags" | "UploadSigningCertificate" | "ListSigningCertificates" | "UpdateSigningCertificate" | "DeleteSigningCertificate" | "UploadSSHPublicKey" | "GetSSHPublicKey"
+        | "ListSSHPublicKeys" | "UpdateSSHPublicKey" | "DeleteSSHPublicKey" => certs::run(&call, &action).await?,
+        "SimulatePrincipalPolicy" | "SimulateCustomPolicy" | "GetContextKeysForPrincipalPolicy" | "GetContextKeysForCustomPolicy" => simulate::run(&call, &action).await?,
+        "GetAccountAuthorizationDetails" | "GenerateCredentialReport" | "GetCredentialReport" => report::run(&call, &action).await?,
         _ => return Err(StsError::new("InvalidAction", 400, format!("Could not find operation {action} for version {VERSION} (roll's IAM: see docs/storage/compatibility.md)"))),
     };
-    Ok(match result {
-        Some(r) => format!("<{action}Response xmlns=\"{XMLNS}\"><{action}Result>{r}</{action}Result><ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata></{action}Response>"),
-        None => format!("<{action}Response xmlns=\"{XMLNS}\"><ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata></{action}Response>"),
-    })
+    Ok(result)
 }
 
 #[cfg(test)]

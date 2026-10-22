@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
+mod accounts;
 mod events;
+mod iam;
 mod roles;
 
 #[derive(Subcommand)]
@@ -155,6 +157,18 @@ pub enum Storage {
     Sessions {
         #[command(subcommand)]
         action: roles::SessionsCmd,
+    },
+    /// List the deployment's accounts, manage one, or switch the account `roll storage` acts
+    /// in (`accounts use <id|alias>`).
+    Accounts {
+        #[command(subcommand)]
+        action: Option<accounts::AccountsCmd>,
+    },
+    /// IAM users, groups, policies and roles, and the policy simulator (as the account's root
+    /// user).
+    Iam {
+        #[command(subcommand)]
+        action: iam::IamCmd,
     },
     /// A bucket's event notifications (`notify <bucket>`), or add / remove one, or its webhook
     /// secret.
@@ -430,10 +444,13 @@ fn walk(dir: &Path) -> anyhow::Result<Vec<(PathBuf, String)>> {
 impl Api {
     /// A request whose response isn't JSON (uploads and downloads); errors still are.
     async fn raw(&self, req: reqwest::RequestBuilder) -> anyhow::Result<reqwest::Response> {
-        let req = match &self.key {
+        let mut req = match &self.key {
             Some(k) => req.bearer_auth(k),
             None => req,
         };
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
         let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         if !res.status().is_success() {
             let status = res.status();
@@ -669,7 +686,24 @@ fn usage_table() -> Table {
 }
 
 pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
+    // The account `roll storage accounts use` chose (accounts themselves are the deployment's).
+    let scoped;
+    let api = match accounts::current() {
+        Some(a) if !matches!(cmd, Storage::Accounts { .. }) => {
+            scoped = Api { base: api.base.clone(), http: api.http.clone(), key: api.key.clone(), headers: vec![("x-roll-account".into(), a)] };
+            &scoped
+        }
+        _ => api,
+    };
     let out = match cmd {
+        Storage::Accounts { action } => match accounts::accounts(api, as_json, action).await? {
+            Some(v) => v,
+            None => return Ok(()),
+        },
+        Storage::Iam { action } => match iam::iam(api, as_json, action).await? {
+            Some(v) => v,
+            None => return Ok(()),
+        },
         Storage::Info => {
             let v = api.get("/v1/storage").await?;
             if !as_json {
