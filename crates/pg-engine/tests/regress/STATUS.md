@@ -34,8 +34,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50826 (**99.37%**) |
-| units differing | 324 |
+| units matching | 50834 (**99.38%**) |
+| units differing | 316 |
 | files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
@@ -44,16 +44,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 312 | 96.3% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.4% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 304 | 96.2% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.5% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 313 units
-join (87), partition_join (35), partition_prune (38), subselect (18), collate.icu.utf8 (8), incremental_sort (15), select_parallel (13), updatable_views (5), groupingsets (9), with (5), memoize (8), equivclass (8), aggregates (7), rowtypes (6), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (2), merge (2), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 304 units
+join (87), partition_join (35), partition_prune (38), subselect (10), collate.icu.utf8 (8), incremental_sort (15), select_parallel (13), updatable_views (5), groupingsets (9), with (5), memoize (8), equivclass (8), aggregates (7), rowtypes (6), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (2), merge (2), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -221,6 +221,53 @@ Still open from this round's list, and why:
   order differs, so that isn't emulated). Equivalence-class members are ordered by the clauses'
   order here; Postgres's follows how distribute_qual met them, which can pick another outer
   member for a parameterized path.
+
+## Fixed in round 13, agent 3, second batch (sub-select copies, reltarget order, per-member EXISTS)
+
+Measured in subset runs against the engine of 433cb26 (the first batch's files plus
+rangefuncs, tsrf, window, join_hash, collate.icu.utf8, incremental_sort, groupingsets, union,
+select_distinct and 30 more): 8 units fixed, none broken.
+
+| file | fixed units |
+|---|---|
+| subselect | 186, 189, 191, 298, 312, 329, 353, 354 |
+
+What changed:
+
+- A pulled-up subquery's sub-select that two entries of a projection read (pullup_replace_vars
+  puts a copy in each place) is two SubPlans / InitPlans in EXPLAIN, the copy's relations range
+  table entries of their own (`q2_1`); a planner-made MIN / MAX InitPlan stays one parameter.
+  EXPLAIN without ANALYZE only: the executor runs one.
+- An ORDER BY key that is a pulled-up output constant for the query (an InitPlan's value) is
+  dropped like any pseudoconstant key.
+- A WHERE clause reading no column of the query (pseudoconstant, not volatile) gates the whole
+  join (distribute_qual_to_rels gives it the full qualscope), not the first scan; `now() =
+  now()` stays as written (only a clause over columns becomes `IS NOT NULL`); a join under a
+  gating Result returns the columns needed above it.
+- Target lists below a query level's top node in Postgres's order (`tlist_layout`): a scan
+  under a Sort, Hash, Materialize or Memoize (CP_SMALL_TLIST) returning plain columns returns
+  them as its reltarget has them, what the level's target list reads first in that order, then
+  what its clauses read; a join each relation's columns in that order (the relations where
+  they are); a Sort / Hash / Materialize / Memoize / Limit / Unique its input's order. Scans
+  returning computed values, and physical target lists, are as before.
+- A correlated EXISTS with a hashed alternative (AlternativeSubPlan) picks one per place
+  reading it, by how often it runs there (fix_alternative_subplan): an inheritance tree's
+  members each their own (`EXISTS(SubPlan 1)` in one, `ANY (c1 = (hashed SubPlan 2).col1)` in
+  the next, the hashed copy's members `t2_4`, `t2_5`). The hashed form works over an
+  inheritance tree (an Append of its members), in the executor too.
+- `x IN (VALUES (...), (outer column))`: a LATERAL semi join with the VALUES list (its values
+  over the row as the join's parameters; reading only queries further up, those values in
+  place). A LATERAL item that is a join Postgres would have pulled up gets no Memoize (a join
+  relation has no lateral_vars to cache by).
+- An equivalence class's clause in a parameterized scan is written outer member first
+  (generate_join_implied_equalities), unless its column is an index key: index matching
+  generated that one column first (generate_implied_equalities_for_column), so a Bitmap Heap
+  Scan's Recheck Cond keeps it so.
+
+Goldens added: `tests/sql/a3_plan_targets.sql`; `a3_sublink_pullup.sql` extended.
+
+Still open in subselect: 218, 221, 288, 310, 322, 326, 327, 328, 332, 342, 350 (see the first
+batch's list; 350 is the LATERAL VALUES case with a correlated sub-select inside the list).
 
 ## Fixed in round 13, agent 3 (row comparisons with sub-selects, IN pull-up, DML row marks)
 
@@ -1024,7 +1071,7 @@ produces no units on Linux (skipped by the file itself).
 | select_distinct_on | 23 | 23 | 100% | yes | yes |  |
 | select_implicit | 44 | 44 | 100% | yes | yes |  |
 | select_having | 23 | 23 | 100% | yes | yes |  |
-| subselect | 356 | 337 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (19) |
+| subselect | 356 | 345 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
 | join | 925 | 835 | 90% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (86) |

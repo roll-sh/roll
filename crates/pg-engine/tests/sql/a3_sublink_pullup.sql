@@ -2,7 +2,7 @@
 -- `x = ANY ('{...}')` (convert_VALUES_to_ANY; not over a FROM subquery's VALUES or
 -- non-constant items), other uncorrelated subqueries (VALUES lists, LIMIT / ORDER BY) as
 -- semi joins, a correlated IN's own WHERE clauses before its comparison, sublinks in an
--- inner join's ON clause.
+-- inner join's ON clause; IN over a VALUES list reading the outer row as a LATERAL semi join.
 CREATE TABLE a3_sp_a (id int PRIMARY KEY, grp int, odd int, v text);
 CREATE TABLE a3_sp_b (id int, grp int, odd int);
 INSERT INTO a3_sp_a SELECT g, g % 100, g % 2, 'v' || g FROM generate_series(1, 1000) g;
@@ -32,4 +32,18 @@ SELECT count(*) FROM a3_sp_a a JOIN a3_sp_b b ON a.grp IN (SELECT c.grp FROM a3_
 WHERE a.id < 50 AND b.id < 50;
 SELECT count(*) FROM a3_sp_a a JOIN a3_sp_b b ON a.id = b.id AND NOT EXISTS (SELECT 1 FROM a3_sp_b c WHERE c.id = a.id + 1)
 WHERE a.id < 50;
-DROP TABLE a3_sp_a, a3_sp_b;
+CREATE TABLE a3_sp_o (unique1 int, unique2 int, ten int);
+INSERT INTO a3_sp_o SELECT g, 1001 - g, g % 10 FROM generate_series(1, 1000) g;
+CREATE UNIQUE INDEX ON a3_sp_o (unique1);
+ANALYZE a3_sp_o;
+EXPLAIN (COSTS OFF)
+SELECT * FROM a3_sp_o WHERE (unique1, ten) IN (VALUES (1,1), (20,0), (99,9), (17,99)) ORDER BY unique1;
+EXPLAIN (COSTS OFF)
+SELECT ten FROM a3_sp_o t WHERE unique1 IN (VALUES (0), (unique2));
+SELECT count(*) FROM a3_sp_o t WHERE unique1 IN (VALUES (0), (unique2));
+SELECT ten FROM a3_sp_o t WHERE unique1 IN (VALUES (0), (unique2 - 500)) ORDER BY 1 LIMIT 3;
+EXPLAIN (COSTS OFF)
+SELECT * FROM a3_sp_o t1, LATERAL (SELECT * FROM a3_sp_o t2 WHERE t2.ten IN (VALUES (t1.ten), (1))) ss;
+SELECT count(*) FROM a3_sp_o t1, LATERAL (SELECT * FROM a3_sp_o t2 WHERE t2.ten IN (VALUES (t1.ten), (1))) ss
+WHERE t1.unique1 < 20;
+DROP TABLE a3_sp_a, a3_sp_b, a3_sp_o;

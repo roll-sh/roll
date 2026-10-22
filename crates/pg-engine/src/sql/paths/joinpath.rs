@@ -1215,6 +1215,18 @@ impl Search<'_, '_, '_> {
                 let mine_first = args[0].clone().shift_cols(-(leaf.off as isize)).same_as(col)
                     || key_col(&args[0]).is_some_and(|g| matches!(col, Expr::Col(c, _) if g == leaf.off + c));
                 let colx = col.clone();
+                // (A clause of an equivalence class is generated outer member first
+                // (generate_join_implied_equalities), unless the column is an index's key:
+                // then index matching made it first, the column first
+                // (generate_implied_equalities_for_column).)
+                let index_key = r.indexes.iter().any(|ii| {
+                    ii.keys.iter().any(|k| matches!((k, col), (Expr::Col(a, _), Expr::Col(b, _)) if a == b))
+                });
+                let symmetric = self.clause_ec(&self.clauses[*ci]).is_some()
+                    && args.len() == 2
+                    && args[0].ty() == args[1].ty()
+                    && def.name == "=";
+                let mine_first = if symmetric { index_key } else { mine_first };
                 let q = if mine_first {
                     Expr::Call(def.clone(), vec![colx, param], ty.clone())
                 } else {
@@ -2781,10 +2793,13 @@ impl Search<'_, '_, '_> {
             return None;
         }
         // A LATERAL item: cached by the values it reads, compared as bytes.
-        if let JNode::Opaque { params, .. } = &ip.node
+        if let JNode::Opaque { params, leaf, .. } = &ip.node
             && !params.is_empty()
         {
             if params.iter().any(|e| e.is_volatile() || !memo_hashable(&e.ty())) {
+                return None;
+            }
+            if lateral_join_leaf(&self.leaves[*leaf].plan) {
                 return None;
             }
             let mut keys: Vec<Expr> = Vec::new();
@@ -5586,4 +5601,19 @@ impl Planner<'_, '_> {
         *p = out;
         Some(sorted)
     }
+}
+
+/// A LATERAL item that is a join Postgres would have pulled up into the query: a join
+/// relation has no lateral_vars to cache it by (get_memoize_path).
+pub(super) fn lateral_join_leaf(p: &Plan) -> bool {
+    let mut q: &Plan = p;
+    while let Plan::Project { input, exprs } = q
+        && !exprs.iter().any(Expr::is_volatile)
+    {
+        q = input;
+    }
+    while let Plan::Filter { input, .. } = q {
+        q = input;
+    }
+    matches!(q, Plan::Join { .. })
 }

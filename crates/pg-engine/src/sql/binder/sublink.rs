@@ -478,6 +478,23 @@ fn values_clean(p: &Plan) -> bool {
     })
 }
 
+/// A VALUES list reading the outer query's values (one level up) and nothing worse: no
+/// sub-selects, set-returning or volatile calls.
+fn values_outer(p: &Plan) -> bool {
+    let Plan::Values { rows, .. } = p else { return false };
+    let mut outer = false;
+    let ok = rows.iter().flatten().all(|e| {
+        let mut ok = !e.is_volatile();
+        e.walk(&mut |x| match x {
+            Expr::Outer(1, ..) => outer = true,
+            Expr::Outer(..) | Expr::Srf(..) | Expr::Subquery(_) => ok = false,
+            _ => {}
+        });
+        ok
+    });
+    ok && outer
+}
+
 /// convert_EXISTS_sublink_to_join.
 fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option<Plan> {
     // simplify_EXISTS_query: the select list and a positive constant LIMIT don't matter.
@@ -670,6 +687,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         });
         p = input;
     }
+    let mut lateral: Vec<Expr> = Vec::new();
     let (corr, rhs, types, scan_limited) = match sub_rel(p) {
         Some(x) => x,
         // Any other uncorrelated subquery joins as it is: a VALUES list pulled up
@@ -702,6 +720,22 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
                 },
             };
             (Vec::new(), rhs, types, false)
+        }
+        // A VALUES list reading the outer row: a LATERAL one (its values over the row as
+        // the join's parameters); reading only queries further up, their values in place.
+        None if !sub.params.is_empty() && values_outer(p) => {
+            let Plan::Values { rows, ncols } = p else { unreachable!() };
+            let level_only = sub.params.iter().all(|e| e.columns().is_empty() && !e.is_volatile() && !has_sublink(e));
+            let rows = if level_only {
+                rows.iter()
+                    .map(|r| r.iter().map(|e| outer_to_params(e.clone(), &sub.params)).collect::<Option<Vec<_>>>())
+                    .collect::<Option<Vec<_>>>()?
+            } else {
+                lateral = sub.params.clone();
+                rows.clone()
+            };
+            let types = rows[0].iter().map(Expr::ty).collect();
+            (Vec::new(), Plan::Values { rows, ncols: *ncols }, types, false)
         }
         None => return None,
     };
@@ -790,7 +824,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         plan.clone(),
         rhs,
         and_all(cond),
-        Vec::new(),
+        lateral,
         nleft,
         nright,
     ))

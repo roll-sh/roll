@@ -2723,6 +2723,8 @@ impl Binder<'_, '_> {
                     && args.len() == 2
                     && args[0].same_as(&args[1])
                     && !args[0].is_volatile()
+                    // (A pseudoconstant clause is no equivalence class's: it gates the plan.)
+                    && !args[0].columns().is_empty()
                     // (An outer query's value is a Param here, not an equivalence class
                     // member: the clause stays.)
                     && !args[0].has_outer_refs()

@@ -445,6 +445,16 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                     above.push(p);
                     continue;
                 }
+                // (So is one that reads none at all: distribute_qual_to_rels gives a
+                // pseudoconstant clause the whole join's scope, a gating qual of the join.)
+                if p.columns().is_empty() && !matches!(p, Expr::Const(..)) {
+                    if kind == JoinKind::Inner {
+                        cond_parts.push(p);
+                    } else {
+                        above.push(p);
+                    }
+                    continue;
+                }
                 match side(&p, nleft) {
                     Side::Left | Side::None if kind != JoinKind::Right => lpush.push(p),
                     Side::Right if kind != JoinKind::Left && right_pushable(&p, &params) => {

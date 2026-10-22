@@ -4447,6 +4447,7 @@ impl Planner<'_, '_> {
             || !matches!(kind, JoinKind::Inner | JoinKind::Left)
             || crate::sql::explain::plan_volatile(right)
             || params.iter().any(|e| e.is_volatile() || !joinpath::memo_hashable(&e.ty()))
+            || joinpath::lateral_join_leaf(right)
         {
             return;
         }

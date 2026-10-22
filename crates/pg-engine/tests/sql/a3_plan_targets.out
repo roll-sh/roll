@@ -1,0 +1,260 @@
+> CREATE TABLE a3_pt (f1 int, f2 int, f3 float8)
+-- CREATE TABLE
+
+> INSERT INTO a3_pt VALUES (1, 2, 3), (2, 3, 4), (3, 4, 5), (1, 1, 1)
+-- INSERT 0 4
+
+> CREATE TABLE a3_px (x int, y int, z int)
+-- CREATE TABLE
+
+> CREATE TABLE a3_py (x int, y int, z int)
+-- CREATE TABLE
+
+> CREATE TABLE a3_pz (x int, y int, z int)
+-- CREATE TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT x, x FROM (SELECT (SELECT now()) AS x FROM (VALUES (1), (2)) v(y)) ss
+QUERY PLAN:text
+Values Scan on "*VALUES*"
+  Output: (InitPlan 1).col1, (InitPlan 2).col1
+  InitPlan 1
+    ->  Result
+          Output: now()
+  InitPlan 2
+    ->  Result
+          Output: now()
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT x, x FROM (SELECT (SELECT now() WHERE y = y) AS x FROM (VALUES (1), (2)) v(y)) ss
+QUERY PLAN:text
+Values Scan on "*VALUES*"
+  Output: (SubPlan 1), (SubPlan 2)
+  SubPlan 1
+    ->  Result
+          Output: now()
+          One-Time Filter: ("*VALUES*".column1 = "*VALUES*".column1)
+  SubPlan 2
+    ->  Result
+          Output: now()
+          One-Time Filter: ("*VALUES*".column1 = "*VALUES*".column1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT x, x + interval '1 day' FROM (SELECT (SELECT now()) AS x FROM (VALUES (1), (2)) v(y)) ss
+QUERY PLAN:text
+Values Scan on "*VALUES*"
+  Output: (InitPlan 1).col1, ((InitPlan 2).col1 + '1 day'::interval)
+  InitPlan 1
+    ->  Result
+          Output: now()
+  InitPlan 2
+    ->  Result
+          Output: now()
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT x FROM (SELECT (SELECT now()) AS x FROM (VALUES (1), (2)) v(y)) ss ORDER BY x
+QUERY PLAN:text
+Values Scan on "*VALUES*"
+  Output: (InitPlan 1).col1
+  InitPlan 1
+    ->  Result
+          Output: now()
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT x, x FROM (SELECT (SELECT max(f2) FROM a3_pt q2 WHERE q2.f1 = q1.f1) AS x FROM a3_pt q1) ss
+QUERY PLAN:text
+Seq Scan on public.a3_pt q1
+  Output: (SubPlan 1), (SubPlan 2)
+  SubPlan 1
+    ->  Aggregate
+          Output: max(q2.f2)
+          ->  Seq Scan on public.a3_pt q2
+                Output: q2.f1, q2.f2, q2.f3
+                Filter: (q2.f1 = q1.f1)
+  SubPlan 2
+    ->  Aggregate
+          Output: max(q2_1.f2)
+          ->  Seq Scan on public.a3_pt q2_1
+                Output: q2_1.f1, q2_1.f2, q2_1.f3
+                Filter: (q2_1.f1 = q1.f1)
+-- EXPLAIN
+
+> SELECT x, x FROM (SELECT (SELECT max(f2) FROM a3_pt q2 WHERE q2.f1 = q1.f1) AS x FROM a3_pt q1) ss ORDER BY 1
+x:int4 | x:int4
+2 | 2
+2 | 2
+3 | 3
+4 | 4
+-- SELECT 4
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT (SELECT 1), (SELECT 1) FROM a3_pt
+QUERY PLAN:text
+Seq Scan on public.a3_pt
+  Output: (InitPlan 1).col1, (InitPlan 2).col1
+  InitPlan 1
+    ->  Result
+          Output: 1
+  InitPlan 2
+    ->  Result
+          Output: 1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH x AS NOT MATERIALIZED (SELECT * FROM (SELECT f1, now() AS n FROM a3_pt) ss)
+> SELECT * FROM x, x x2 WHERE x.n = x2.n
+QUERY PLAN:text
+Result
+  Output: a3_pt.f1, now(), a3_pt_1.f1, now()
+  One-Time Filter: (now() = now())
+  ->  Nested Loop
+        Output: a3_pt.f1, a3_pt_1.f1
+        ->  Seq Scan on public.a3_pt
+              Output: a3_pt.f1, a3_pt.f2, a3_pt.f3
+        ->  Materialize
+              Output: a3_pt_1.f1
+              ->  Seq Scan on public.a3_pt a3_pt_1
+                    Output: a3_pt_1.f1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a3_pt a, a3_pt b WHERE now() = now()
+QUERY PLAN:text
+Result
+  Output: a.f1, a.f2, a.f3, b.f1, b.f2, b.f3
+  One-Time Filter: (now() = now())
+  ->  Nested Loop
+        Output: a.f1, a.f2, a.f3, b.f1, b.f2, b.f3
+        ->  Seq Scan on public.a3_pt a
+              Output: a.f1, a.f2, a.f3
+        ->  Materialize
+              Output: b.f1, b.f2, b.f3
+              ->  Seq Scan on public.a3_pt b
+                    Output: b.f1, b.f2, b.f3
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT a.f1, b.f2 FROM a3_pt a, a3_pt b WHERE a.f1 = b.f1 AND now() = now()
+QUERY PLAN:text
+Result
+  Output: a.f1, b.f2
+  One-Time Filter: (now() = now())
+  ->  Merge Join
+        Output: a.f1, b.f2
+        Merge Cond: (a.f1 = b.f1)
+        ->  Sort
+              Output: a.f1
+              Sort Key: a.f1
+              ->  Seq Scan on public.a3_pt a
+                    Output: a.f1
+        ->  Sort
+              Output: b.f2, b.f1
+              Sort Key: b.f1
+              ->  Seq Scan on public.a3_pt b
+                    Output: b.f2, b.f1
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_pt a, a3_pt b WHERE a.f1 = b.f1 AND now() = now()
+count:int8
+6
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT a3_px.z, a3_px.y, a3_py.z FROM a3_px JOIN a3_py ON a3_px.x = a3_py.x JOIN a3_pz ON a3_pz.y = a3_py.y
+QUERY PLAN:text
+Merge Join
+  Output: a3_px.z, a3_px.y, a3_py.z
+  Merge Cond: (a3_pz.y = a3_py.y)
+  ->  Sort
+        Output: a3_pz.y
+        Sort Key: a3_pz.y
+        ->  Seq Scan on public.a3_pz
+              Output: a3_pz.y
+  ->  Sort
+        Output: a3_px.z, a3_px.y, a3_py.z, a3_py.y
+        Sort Key: a3_py.y
+        ->  Merge Join
+              Output: a3_px.z, a3_px.y, a3_py.z, a3_py.y
+              Merge Cond: (a3_px.x = a3_py.x)
+              ->  Sort
+                    Output: a3_px.z, a3_px.y, a3_px.x
+                    Sort Key: a3_px.x
+                    ->  Seq Scan on public.a3_px
+                          Output: a3_px.z, a3_px.y, a3_px.x
+              ->  Sort
+                    Output: a3_py.z, a3_py.x, a3_py.y
+                    Sort Key: a3_py.x
+                    ->  Seq Scan on public.a3_py
+                          Output: a3_py.z, a3_py.x, a3_py.y
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT a3_px.z, a3_px.y, a3_py.z, a3_px.ctid FROM a3_px JOIN a3_py ON a3_px.x = a3_py.x
+QUERY PLAN:text
+Merge Join
+  Output: a3_px.z, a3_px.y, a3_py.z, a3_px.ctid
+  Merge Cond: (a3_px.x = a3_py.x)
+  ->  Sort
+        Output: a3_px.z, a3_px.y, a3_px.ctid, a3_px.x
+        Sort Key: a3_px.x
+        ->  Seq Scan on public.a3_px
+              Output: a3_px.z, a3_px.y, a3_px.ctid, a3_px.x
+  ->  Sort
+        Output: a3_py.z, a3_py.x
+        Sort Key: a3_py.x
+        ->  Seq Scan on public.a3_py
+              Output: a3_py.z, a3_py.x
+-- EXPLAIN
+
+> CREATE TABLE a3_pe (c1 int, c2 int, c3 int) PARTITION BY LIST (c1)
+-- CREATE TABLE
+
+> CREATE TABLE a3_pe_null PARTITION OF a3_pe FOR VALUES IN (NULL)
+-- CREATE TABLE
+
+> CREATE TABLE a3_pe_def PARTITION OF a3_pe DEFAULT
+-- CREATE TABLE
+
+> INSERT INTO a3_pe SELECT x, x / 2, x + 1 FROM generate_series(0, 10) x
+-- INSERT 0 11
+
+> ANALYZE a3_pe
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_pe t1 WHERE (EXISTS (SELECT 1 FROM a3_pe t2 WHERE t1.c1 = t2.c2) OR c3 < 0)
+QUERY PLAN:text
+Append
+  ->  Seq Scan on a3_pe_null t1_1
+        Filter: (EXISTS(SubPlan 1) OR (c3 < 0))
+        SubPlan 1
+          ->  Append
+                ->  Seq Scan on a3_pe_null t2_1
+                      Filter: (t1_1.c1 = c2)
+                ->  Seq Scan on a3_pe_def t2_2
+                      Filter: (t1_1.c1 = c2)
+  ->  Seq Scan on a3_pe_def t1_2
+        Filter: ((ANY (c1 = (hashed SubPlan 2).col1)) OR (c3 < 0))
+        SubPlan 2
+          ->  Append
+                ->  Seq Scan on a3_pe_null t2_4
+                ->  Seq Scan on a3_pe_def t2_5
+-- EXPLAIN
+
+> SELECT * FROM a3_pe t1 WHERE (EXISTS (SELECT 1 FROM a3_pe t2 WHERE t1.c1 = t2.c2) OR c3 < 0) ORDER BY 1
+c1:int4 | c2:int4 | c3:int4
+0 | 0 | 1
+1 | 0 | 2
+2 | 1 | 3
+3 | 1 | 4
+4 | 2 | 5
+5 | 2 | 6
+-- SELECT 6
+
+> DROP TABLE a3_pt, a3_px, a3_py, a3_pz, a3_pe
+-- DROP TABLE
+

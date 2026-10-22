@@ -163,6 +163,66 @@ count:int8
 0
 -- SELECT 1
 
-> DROP TABLE a3_sp_a, a3_sp_b
+> CREATE TABLE a3_sp_o (unique1 int, unique2 int, ten int)
+-- CREATE TABLE
+
+> INSERT INTO a3_sp_o SELECT g, 1001 - g, g % 10 FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> CREATE UNIQUE INDEX ON a3_sp_o (unique1)
+-- CREATE INDEX
+
+> ANALYZE a3_sp_o
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_sp_o WHERE (unique1, ten) IN (VALUES (1,1), (20,0), (99,9), (17,99)) ORDER BY unique1
+QUERY PLAN:text
+Sort
+  Sort Key: a3_sp_o.unique1
+  ->  Hash Semi Join
+        Hash Cond: ((a3_sp_o.unique1 = "*VALUES*".column1) AND (a3_sp_o.ten = "*VALUES*".column2))
+        ->  Seq Scan on a3_sp_o
+        ->  Hash
+              ->  Values Scan on "*VALUES*"
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT ten FROM a3_sp_o t WHERE unique1 IN (VALUES (0), (unique2))
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on a3_sp_o t
+  ->  Values Scan on "*VALUES*"
+        Filter: (t.unique1 = column1)
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_o t WHERE unique1 IN (VALUES (0), (unique2))
+count:int8
+0
+-- SELECT 1
+
+> SELECT ten FROM a3_sp_o t WHERE unique1 IN (VALUES (0), (unique2 - 500)) ORDER BY 1 LIMIT 3
+ten:int4
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_sp_o t1, LATERAL (SELECT * FROM a3_sp_o t2 WHERE t2.ten IN (VALUES (t1.ten), (1))) ss
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a3_sp_o t1
+  ->  Hash Semi Join
+        Hash Cond: (t2.ten = "*VALUES*".column1)
+        ->  Seq Scan on a3_sp_o t2
+        ->  Hash
+              ->  Values Scan on "*VALUES*"
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_o t1, LATERAL (SELECT * FROM a3_sp_o t2 WHERE t2.ten IN (VALUES (t1.ten), (1))) ss
+> WHERE t1.unique1 < 20
+count:int8
+3600
+-- SELECT 1
+
+> DROP TABLE a3_sp_a, a3_sp_b, a3_sp_o
 -- DROP TABLE
 

@@ -2252,10 +2252,24 @@ impl Binder<'_, '_> {
         // Keys that are constant for the query (or that the WHERE clause equates to a
         // constant) don't order anything; Postgres drops them.
         let fixed = optimize::fixed_columns(&plan);
+        // (A pulled-up subquery's output that is constant for the query, an InitPlan's
+        // value, counts as well.)
+        fn output_constant(p: &Plan, i: usize) -> bool {
+            match p {
+                Plan::Project { exprs, input } => match exprs.get(i) {
+                    Some(Expr::Col(j, _)) => output_constant(input, *j),
+                    Some(e) => optimize::pseudo_constant(e) && !crate::sql::explain::expr_volatile_deep(e),
+                    None => false,
+                },
+                Plan::Filter { input, .. } => output_constant(input, i),
+                _ => false,
+            }
+        }
+        let const_out: Vec<usize> = (0..width(&plan)).filter(|&i| output_constant(&plan, i)).collect();
         let constant_key = |k: &SortKey| {
             matches!(&k.expr, Expr::Col(c, _)
                 if optimize::pseudo_constant(&proj[*c])
-                    || matches!(&proj[*c], Expr::Col(i, _) if fixed.contains(i)))
+                    || matches!(&proj[*c], Expr::Col(i, _) if fixed.contains(i) || const_out.contains(i)))
         };
         let needed: Vec<SortKey> = sort_keys
             .iter()
