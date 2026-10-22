@@ -350,6 +350,12 @@ Still open from this list, and why:
   over an index scan) kept beside its cheapest one for a merge join above; subqueries are
   planned once here. An inner join's class clause in a bitmap scan's Recheck Cond is derived
   afresh, outer member first (`a.unique1 = thousand`); the engine shows it as written.
+- join 374: `t1.a IS NOT NULL` (t1.a NOT NULL, on the preserved side) pushed into a LATERAL
+  UNION ALL arm is always true there (restriction_is_always_true over the outer Var); the
+  arms take the WHERE in the planner (push_into_union_all), which doesn't know which of the
+  join's params come from such columns. (Dropping the test where the binder pushes it, a
+  LATERAL subquery without UNION ALL, was tried and works; the arms need the params' nullability
+  carried to the planner's leaf planning.)
 
 ## Fixed in round 14, agent 6 (dummy-rel classes, parallel plans, incremental sort stats)
 
