@@ -10,6 +10,7 @@ pub mod auth;
 pub mod checksum;
 pub mod chunked;
 pub mod error;
+pub mod eventstream;
 pub mod http;
 pub mod lifecycle;
 pub mod sigv2;
@@ -17,6 +18,7 @@ pub mod sigv4;
 pub mod sigv4a;
 pub mod sse;
 pub mod time;
+pub mod torrent;
 pub mod versioning;
 pub mod xml;
 

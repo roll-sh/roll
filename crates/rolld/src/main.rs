@@ -435,6 +435,7 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
         scfg.notify.aws_endpoints.insert(service.trim().to_string(), url.trim().to_string());
     }
     scfg.public_endpoint = Some(args.s3_public_endpoint.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.s3.port())));
+    scfg.torrent_announce = std::env::var("ROLL_S3_TORRENT_ANNOUNCE").ok().filter(|a| !a.trim().is_empty());
     let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
     cfg.node = args.node.clone();
     cfg.block_public_access = args.s3_block_public_access;

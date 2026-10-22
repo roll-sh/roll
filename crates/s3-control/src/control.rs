@@ -40,7 +40,7 @@ impl From<StoreError> for ControlError {
             | StoreError::Conflict(_)
             | StoreError::LimitExceeded(_)
             | StoreError::DeleteConflict(_) => Self::Conflict(e.to_string()),
-            StoreError::InvalidRequest(_) => Self::Invalid(e.to_string()),
+            StoreError::InvalidRequest(_) | StoreError::Refused { .. } => Self::Invalid(e.to_string()),
             StoreError::InvalidPart(_)
             | StoreError::InvalidPartOrder
             | StoreError::EntityTooSmall(_)

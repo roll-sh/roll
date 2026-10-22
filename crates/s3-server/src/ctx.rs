@@ -123,8 +123,18 @@ fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Opti
         let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|c| c.is_ascii_digit())).map_or(host.as_str(), |(h, _)| h);
         if let Some(b) = host.strip_suffix(domain.to_ascii_lowercase().as_str()).and_then(|h| h.strip_suffix('.')).filter(|b| !b.is_empty()) {
-            let key = Some(percent_decode_path(path)?).filter(|k| !k.is_empty());
-            return Ok((Some(b.to_string()), key, true));
+            // S3 Express endpoints: `s3express-control.<domain>` is path style (bucket
+            // administration, ListDirectoryBuckets); `<bucket>.s3express-<zone>.<domain>` is the
+            // bucket's zonal endpoint.
+            let b = match b.rsplit_once('.') {
+                Some((bucket, zonal)) if zonal.starts_with("s3express-") => Some(bucket),
+                None if b.starts_with("s3express-") => None,
+                _ => Some(b),
+            };
+            if let Some(b) = b {
+                let key = Some(percent_decode_path(path)?).filter(|k| !k.is_empty());
+                return Ok((Some(b.to_string()), key, true));
+            }
         }
     }
     if path.is_empty() {
@@ -256,12 +266,19 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
     }
     match (&ctx.bucket, &ctx.key) {
         (None, _) => match ctx.method {
+            Method::GET if ctx.q("x-id") == Some("ListDirectoryBuckets") || express_control(ctx) || crate::directory::signed_for_express(ctx) => crate::directory::list(ctx),
             Method::GET => bucket::list_buckets(ctx),
             _ => Err(S3Error::new(Code::MethodNotAllowed)),
         },
         (Some(_), None) => bucket::route(ctx, body).await,
         (Some(_), Some(_)) => object::route(ctx, body).await,
     }
+}
+
+/// Addressed to the `s3express-control` endpoint (`s3express-control.<region>.amazonaws.com`, or
+/// under `ROLL_S3_DOMAIN`), where `GET /` is ListDirectoryBuckets.
+fn express_control(ctx: &Ctx) -> bool {
+    ctx.h("host").is_some_and(|h| h.trim().to_ascii_lowercase().starts_with("s3express-control."))
 }
 
 /// Header values S3 itself refuses.
@@ -272,7 +289,7 @@ fn reject_unsupported_headers(ctx: &Ctx) -> Result<(), S3Error> {
         return Err(S3Error::new(Code::InvalidArgument).with("ArgumentName", "x-amz-request-payer"));
     }
     if let Some(class) = ctx.h("x-amz-storage-class") {
-        const CLASSES: [&str; 9] = ["STANDARD", "REDUCED_REDUNDANCY", "STANDARD_IA", "ONEZONE_IA", "INTELLIGENT_TIERING", "GLACIER", "DEEP_ARCHIVE", "GLACIER_IR", "OUTPOSTS"];
+        const CLASSES: [&str; 10] = ["STANDARD", "REDUCED_REDUNDANCY", "STANDARD_IA", "ONEZONE_IA", "INTELLIGENT_TIERING", "GLACIER", "DEEP_ARCHIVE", "GLACIER_IR", "OUTPOSTS", "EXPRESS_ONEZONE"];
         if !CLASSES.contains(&class.trim()) {
             return Err(S3Error::new(Code::InvalidStorageClass).with("StorageClassRequested", class.to_string()));
         }

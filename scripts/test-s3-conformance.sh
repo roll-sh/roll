@@ -26,22 +26,22 @@ cd "$(dirname "$0")/.."
 # ceph/s3-tests, pinned. Bump it on purpose and update expected.txt in the same change.
 S3TESTS_COMMIT=5b3987116eca0b4b8fa57d6b10f3db57bab196b6
 # What real-AWS-compatible implementations run: no tests AWS itself fails (`fails_on_aws`), no
-# Ceph extensions (append, S3 Select, IAM/STS/SNS, cloud tiering, storage classes for
-# transitions, RGW's logging journal and rollover).
-MARKS="not fails_on_aws and not appendobject and not s3select and not lifecycle_transition \
+# Ceph extensions (RGW's append API, IAM/STS/SNS, cloud tiering, storage classes for
+# transitions, RGW's logging journal and rollover). S3 Select's tests run (test_s3select.py).
+MARKS="not fails_on_aws and not appendobject and not lifecycle_transition \
 and not cloud_transition and not cloud_restore and not target_by_bucket and not bucket_logging_cleanup \
 and not fails_without_logging_rollover and not sns and not s3control and not iam_account and not iam_user \
 and not iam_role and not iam_cross_account and not iam_tenant and not user_policy and not role_policy \
 and not group and not group_policy and not session_policy and not test_of_sts and not webidentity_test \
 and not abac_test"
-SUITE=(s3tests/functional/test_s3.py s3tests/functional/test_headers.py)
+SUITE=(s3tests/functional/test_s3.py s3tests/functional/test_headers.py s3tests/functional/test_s3select.py)
 # Tests that see every bucket of the main key, so they can't share the server with other
 # workers' buckets: they run first, one at a time, on the fresh server.
 SERIAL=(s3tests/functional/test_s3.py::test_list_buckets_paginated)
 # The same LocalStack as scripts/test-storage-aws.sh.
 LOCALSTACK_IMAGE=localstack/localstack:4.9
 
-PATHS=(crates/s3-proto crates/s3-store crates/s3-server Cargo.toml Cargo.lock tests/s3-conformance scripts/test-s3-conformance.sh)
+PATHS=(crates/s3-proto crates/s3-select crates/s3-store crates/s3-server Cargo.toml Cargo.lock tests/s3-conformance scripts/test-s3-conformance.sh)
 
 force=0
 backend=${S3_CONFORMANCE_BACKEND:-local}

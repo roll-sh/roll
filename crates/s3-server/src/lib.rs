@@ -14,6 +14,7 @@
 mod access;
 mod accesspoint;
 mod acl;
+mod append;
 mod attributes;
 mod auth;
 mod body;
@@ -21,13 +22,14 @@ mod bucket;
 mod config;
 mod cors;
 mod ctx;
+mod directory;
 mod error;
 mod iam;
 mod identity;
 mod inventory;
 mod lifecycle;
-mod mfa;
 mod logging;
+mod mfa;
 mod multipart;
 mod notification;
 pub mod notify;
@@ -35,12 +37,15 @@ mod object;
 mod owner;
 mod policy;
 mod post;
+mod rename;
 mod replicate_ext;
 mod replication;
 mod response;
+mod select;
 mod sse;
 mod sts;
 mod temporary;
+mod torrent;
 mod upload;
 mod versioning;
 mod website;
@@ -100,6 +105,9 @@ pub struct Config {
     /// How Object Lambda functions reach this deployment (`inputS3Url`), e.g.
     /// `https://s3.example.com`; `None`: the request's own host.
     pub public_endpoint: Option<String>,
+    /// The tracker GetObjectTorrent's files announce to (`ROLL_S3_TORRENT_ANNOUNCE`); `None`:
+    /// none (trackerless).
+    pub torrent_announce: Option<String>,
 }
 
 impl Default for Config {
@@ -114,6 +122,7 @@ impl Default for Config {
             notify: NotifyConfig::default(),
             oidc_allow_http: false,
             public_endpoint: None,
+            torrent_announce: None,
         }
     }
 }
@@ -138,6 +147,8 @@ pub struct Server {
     pub(crate) oidc: sts::oidc::Oidc,
     /// Object Lambda `GetObject`s waiting for their `WriteGetObjectResponse`.
     pub(crate) lambda: accesspoint::lambda::Routes,
+    /// RenameObject's recent client tokens (idempotent retries).
+    pub(crate) renames: rename::Tokens,
 }
 
 impl Server {
@@ -145,7 +156,7 @@ impl Server {
         let notifier = Notifier::new(store.clone(), cfg.notify.clone(), cfg.region.clone());
         notifier.spawn();
         let oidc = sts::oidc::Oidc::new(Arc::new(HttpFetch::new(cfg.oidc_allow_http)));
-        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc, lambda: Default::default() });
+        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc, lambda: Default::default(), renames: Default::default() });
         if let (Some(every), Ok(rt)) = (server.cfg.notify.inventory_interval, tokio::runtime::Handle::try_current()) {
             let weak = Arc::downgrade(&server);
             rt.spawn(async move {

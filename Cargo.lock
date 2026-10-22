@@ -1093,6 +1093,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bzip2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
+dependencies = [
+ "libbz2-rs-sys",
+]
+
+[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2940,6 +2949,12 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 dependencies = [
  "spin 0.9.9",
 ]
+
+[[package]]
+name = "libbz2-rs-sys"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
 
 [[package]]
 name = "libc"
@@ -5057,6 +5072,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "s3-select"
+version = "0.1.0"
+dependencies = [
+ "bzip2",
+ "chrono",
+ "flate2",
+ "memchr",
+ "quick-xml",
+ "serde_json",
+]
+
+[[package]]
 name = "s3-server"
 version = "0.1.0"
 dependencies = [
@@ -5086,9 +5113,11 @@ dependencies = [
  "ring",
  "rsa",
  "s3-proto",
+ "s3-select",
  "s3-store",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "tempfile",
  "tokio",

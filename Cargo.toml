@@ -148,6 +148,9 @@ s3-proto = { path = "crates/s3-proto" }
 s3-store = { path = "crates/s3-store" }
 s3-server = { path = "crates/s3-server" }
 s3-control = { path = "crates/s3-control" }
+s3-select = { path = "crates/s3-select" }
+# S3 Select: BZIP2 input (pure Rust, libbz2-rs-sys).
+bzip2 = "0.6"
 
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]

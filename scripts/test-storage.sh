@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PATHS=(crates/s3-proto crates/s3-store crates/s3-server crates/s3-control crates/pg-storage crates/rolld crates/roll-cli
+PATHS=(crates/s3-proto crates/s3-select crates/s3-store crates/s3-server crates/s3-control crates/pg-storage crates/rolld crates/roll-cli
        Cargo.toml Cargo.lock scripts/test-storage.sh .github/workflows/storage.yml)
 STAMP=target/.test-storage.hash
 
@@ -27,10 +27,11 @@ if [[ $force == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]]; then
   exit 0
 fi
 
-CRATES=(-p s3-proto -p s3-store -p s3-server -p s3-control)
+CRATES=(-p s3-proto -p s3-select -p s3-store -p s3-server -p s3-control)
 cargo build "${CRATES[@]}" -p rolld -p roll-cli
 cargo clippy "${CRATES[@]}" -p rolld -p roll-cli --all-targets -- -D warnings
 cargo test -p s3-proto
+cargo test -p s3-select
 cargo test -p s3-store
 # Everything except the Docker tools suite.
 cargo test -p s3-server --lib

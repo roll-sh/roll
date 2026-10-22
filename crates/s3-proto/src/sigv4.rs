@@ -99,10 +99,12 @@ impl Payload {
     }
 }
 
-/// Requests to S3 may also be signed for `s3-object-lambda` (S3 Object Lambda access points
-/// and `WriteGetObjectResponse`, which share S3's endpoint).
-pub(crate) fn service_alias(expected: &str, given: &str) -> bool {
-    expected == "s3" && given == "s3-object-lambda"
+/// Whether a credential scope's `service` is right for an endpoint of `expected`. The S3
+/// endpoint also answers S3 Express (directory buckets: SDKs sign those requests, and
+/// CreateSession, with `s3express`) and S3 Object Lambda (access points and
+/// `WriteGetObjectResponse`, signed with `s3-object-lambda`).
+pub fn service_matches(scope: &str, expected: &str) -> bool {
+    scope == expected || (expected == "s3" && (scope == "s3express" || scope == "s3-object-lambda"))
 }
 
 /// `<access key>/<yyyymmdd>/<region>/<service>/aws4_request`.
@@ -132,7 +134,7 @@ impl Credential {
         if parts[1].len() != 8 || !parts[1].bytes().all(|c| c.is_ascii_digit()) {
             return Err(bad(&format!("incorrect date format \"{}\". This date in the credential must be in the format \"yyyyMMdd\".", parts[1])));
         }
-        if parts[3] != service && !service_alias(service, parts[3]) {
+        if !service_matches(parts[3], service) {
             return Err(bad(&format!("incorrect service \"{}\". This endpoint belongs to \"{service}\".", parts[3])));
         }
         Ok(Self { access_key: parts[0].into(), date: parts[1].into(), region: parts[2].into(), service: parts[3].into() })

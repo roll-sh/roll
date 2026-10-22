@@ -22,11 +22,32 @@ pub(crate) fn request_token<'a>(headers: &'a axum::http::HeaderMap, query: &'a [
     h.or_else(q).map(str::trim).filter(|t| !t.is_empty())
 }
 
+/// An S3 Express session token (`CreateSession`): the `x-amz-s3session-token` header, or the
+/// query parameter of a presigned URL.
+pub(crate) fn express_token<'a>(headers: &'a axum::http::HeaderMap, query: &'a [(String, String)]) -> Option<&'a str> {
+    let h = headers.get("x-amz-s3session-token").and_then(|v| v.to_str().ok());
+    let q = || query.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-amz-s3session-token")).map(|(_, v)| v.as_str());
+    h.or_else(q).map(str::trim).filter(|t| !t.is_empty())
+}
+
 /// The key `access_key_id` names, with `token` its session token if the request has one.
+/// S3 Express session tokens are refused here (see [`resolve_as`]).
 pub(crate) fn resolve(store: &Store, access_key_id: &str, token: Option<&str>) -> Result<AccessKey, S3Error> {
+    resolve_as(store, access_key_id, token, false)
+}
+
+/// [`resolve`], with `express`: whether `token` came as `x-amz-s3session-token`. An S3 Express
+/// session's token works only there, and only an S3 Express session's does.
+pub(crate) fn resolve_as(store: &Store, access_key_id: &str, token: Option<&str>, express: bool) -> Result<AccessKey, S3Error> {
     let unknown = || S3Error::new(Code::InvalidAccessKeyId).with("AWSAccessKeyId", access_key_id.to_string());
     match token {
-        Some(t) if is_temporary_key_id(access_key_id) => store.session_key(access_key_id, t).map_err(session_error),
+        Some(t) if is_temporary_key_id(access_key_id) => {
+            let k = store.session_key(access_key_id, t).map_err(session_error)?;
+            if k.session.as_ref().is_some_and(|s| s.express.is_some()) != express {
+                return Err(S3Error::new(Code::InvalidToken));
+            }
+            Ok(k)
+        }
         Some(_) => Err(S3Error::new(Code::InvalidToken)),
         None => match store.access_key(access_key_id) {
             Ok(Some(k)) if k.active => Ok(k),
@@ -53,7 +74,7 @@ fn session_error(e: SessionError) -> S3Error {
 pub(crate) fn redact_query(raw: &str) -> String {
     raw.split('&')
         .map(|p| match p.split_once('=') {
-            Some((k, _)) if k.eq_ignore_ascii_case("x-amz-security-token") => format!("{k}=REDACTED"),
+            Some((k, _)) if k.eq_ignore_ascii_case("x-amz-security-token") || k.eq_ignore_ascii_case("x-amz-s3session-token") => format!("{k}=REDACTED"),
             _ => p.to_string(),
         })
         .collect::<Vec<_>>()

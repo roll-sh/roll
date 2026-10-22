@@ -181,10 +181,7 @@ test_s3.py::test_get_publicpolicy_acl_bucket_policy_status  aws: GetBucketPolicy
 test_s3.py::test_post_object_upload_checksum  aws: every POST form field (x-amz-checksum-* too) must have a policy condition, as S3 documents; the test's policy has none for it
 test_s3.py::test_put_bucket_logging_policy_wildcard  aws: its log-delivery policy repeats a Sid, which S3 refuses as MalformedPolicy; and S3 refuses a target bucket another account owns (InvalidTargetBucketForLogging)
 
-# Features roll doesn't have: BitTorrent. (1)
-test_s3.py::test_get_object_torrent  gap: no BitTorrent (S3 dropped it in 2024): NotImplemented
-
-# The suite itself: RGW-specific expectations or tests that can't pass on S3 as written. (34)
+# The suite itself: RGW-specific expectations or tests that can't pass on S3 as written.
 test_headers.py::test_bucket_create_bad_authorization_empty  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
 test_headers.py::test_bucket_create_bad_authorization_invalid_aws2  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
 test_headers.py::test_bucket_create_bad_authorization_none  suite: botocore signs after the test's header hook, so the request is valid (fails_on_rgw too)
@@ -219,3 +216,12 @@ test_s3.py::test_object_set_get_unicode_metadata  suite: roll returns non-ASCII 
 test_s3.py::test_object_write_with_chunked_transfer_encoding  suite: a PUT with Transfer-Encoding: chunked and no length; S3 needs Content-Length (or aws-chunked with x-amz-decoded-content-length) too
 test_s3.py::test_put_bucket_logging_errors  suite: RGW answers NoSuchKey for a missing target bucket; S3 (and roll) answer InvalidTargetBucketForLogging
 test_s3.py::test_put_bucket_logging_permissions  suite: RGW checks the target bucket's policy at PutBucketLogging; roll writes logs as the deployment (no logging service principal to grant)
+test_s3.py::test_get_object_torrent  suite: decodes the torrent as UTF-8 text; a metainfo file's SHA-1 pieces are binary (S3's too), so a real torrent fails the test's own decode
+
+# S3 Select: the suite's Ceph-RGW dialect where it disagrees with AWS S3 Select. (6)
+test_s3select.py::test_count_json_operation  suite: expects RGW's bare value (`1`) from a JSON-output query; AWS S3 Select writes JSON records ({"_1":1})
+test_s3select.py::test_json_column_sum_min_max  suite: expects RGW's bare values from JSON-output aggregates; AWS S3 Select writes JSON records ({"_1":…})
+test_s3select.py::test_csv_parser  suite: expects RGW's text `null` for empty CSV fields; AWS S3 Select writes an empty field
+test_s3select.py::test_in_expressions  suite: compares with `_1 like "_3"`, where a double-quoted "_3" is column 3 in S3 Select (RGW reads it as a string)
+test_s3select.py::test_like_expressions  suite: LIKE '%y[y-z]' uses RGW's bracket character classes; SQL and S3 Select LIKE have only % and _
+test_s3select.py::test_schema_definition  suite: expects RGW's own error messages ("alias {c11} or column not exist in schema", ProcessingTimeError); S3 Select answers with its codes (MissingHeaders)

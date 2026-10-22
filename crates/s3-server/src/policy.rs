@@ -486,11 +486,16 @@ fn validate_action(a: &str) -> Result<(), S3Error> {
         return Ok(());
     }
     let invalid = || malformed("Policy has invalid action");
-    let name = a.strip_prefix("s3:").or_else(|| a.strip_prefix("S3:")).ok_or_else(invalid)?;
+    // `s3express:` for directory buckets (S3 Express One Zone).
+    let (name, known) = match a.split_once(':') {
+        Some((service, name)) if service.eq_ignore_ascii_case("s3") => (name, ACTIONS),
+        Some((service, name)) if service.eq_ignore_ascii_case("s3express") => (name, crate::directory::ACTIONS),
+        _ => return Err(invalid()),
+    };
     if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'*' || b == b'?') {
         return Err(invalid());
     }
-    if !name.contains(['*', '?']) && !ACTIONS.iter().any(|k| k.eq_ignore_ascii_case(name)) {
+    if !name.contains(['*', '?']) && !known.iter().any(|k| k.eq_ignore_ascii_case(name)) {
         return Err(invalid());
     }
     Ok(())
@@ -508,8 +513,16 @@ fn validate_resource(r: &str, bucket: &str) -> Result<(), S3Error> {
     if partition.is_empty() || !partition.bytes().all(|b| b.is_ascii_lowercase() || b == b'-' || b == b'*') {
         return Err(invalid());
     }
-    let path = rest.strip_prefix("s3:::").ok_or_else(invalid)?;
-    let b = path.split('/').next().unwrap_or_default();
+    // A directory bucket: `arn:aws:s3express:<region>:<account>:bucket/<bucket>`.
+    let b = match rest.strip_prefix("s3express:") {
+        Some(express) => {
+            let (_region, rest) = express.split_once(':').ok_or_else(invalid)?;
+            let (_account, rest) = rest.split_once(':').ok_or_else(invalid)?;
+            let name = rest.strip_prefix("bucket/").ok_or_else(invalid)?;
+            name.split('/').next().unwrap_or_default()
+        }
+        None => rest.strip_prefix("s3:::").ok_or_else(invalid)?.split('/').next().unwrap_or_default(),
+    };
     // The resource must be (able to be) this bucket.
     if b.is_empty() || !wildcard(b, bucket, false) {
         return Err(invalid());

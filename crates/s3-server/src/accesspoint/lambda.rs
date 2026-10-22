@@ -223,7 +223,7 @@ pub(crate) fn authorize_olap(ctx: &Ctx) -> Result<(), S3Error> {
     let who = ctx.who();
     let resource = crate::access::resource_arn(&r.ap.bucket, ctx.key.as_deref());
     let owner = ctx.access(&r.ap.bucket)?.owner().to_string();
-    let cond = crate::access::Cond { ctx, who, bucket: &r.ap.bucket, key: ctx.key.as_deref(), resource_account: owner.clone(), tags: Default::default(), prefix: None, ap: ctx.access_point.as_deref() };
+    let cond = crate::access::Cond { ctx, who, bucket: &r.ap.bucket, key: ctx.key.as_deref(), resource_account: owner.clone(), tags: Default::default(), prefix: None, ap: ctx.access_point.as_deref(), mode: None };
     let decision = match policy {
         Some(p) => p.evaluate(who.principal(), action, arn, &cond).decision(),
         None => crate::policy::Decision::None,

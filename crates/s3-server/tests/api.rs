@@ -1061,11 +1061,10 @@ async fn everything_else_is_not_implemented() {
         r
     };
     let ni = (501, "NotImplemented".to_string());
+    // CreateSession is for directory buckets only. (GetObjectTorrent, SelectObjectContent and
+    // RenameObject are implemented: tests/express.rs, tests/select.rs.)
     for sub in ["torrent", "metadataTable", "session"] {
         assert_eq!(status_code(raw("GET", "/bkt", sub, vec![]).send(&t).await).await, ni, "?{sub}");
-    }
-    for sub in ["torrent", "select", "renameObject"] {
-        assert_eq!(status_code(raw("GET", "/bkt/k", sub, vec![]).send(&t).await).await, ni, "?{sub}");
     }
     for (h, v) in [
         ("x-amz-server-side-encryption", "aws:kms:dsse"),

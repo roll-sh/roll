@@ -28,6 +28,7 @@ qrcode.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 ring.workspace = true
 s3-proto.workspace = true
+s3-select.workspace = true
 s3-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +43,7 @@ aws-sdk-s3control.workspace = true
 aws-sdk-sts.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
+sha1.workspace = true
 aws-smithy-types.workspace = true
 rsa = { workspace = true, features = ["sha2"] }
 reqwest = { workspace = true, features = ["stream"] }

@@ -121,14 +121,12 @@ async fn get_session_token_and_caller_identity() {
     assert_eq!(id.arn(), Some(format!("arn:aws:iam::{account}:root").as_str()));
     assert_eq!(id.user_id(), Some(account.as_str()));
 
-    let before = now_s();
     let out = admin.get_session_token().duration_seconds(900).send().await.unwrap();
-    let after = now_s();
     let c = out.credentials().unwrap();
     assert!(c.access_key_id().starts_with("RT") && c.access_key_id().len() == 20);
-    // Issued during the call (however slow a loaded machine makes it), for 900 s.
+    // 900 s from now on the store's clock (the test moves it by hand; wall time doesn't count).
     let exp = c.expiration().secs();
-    assert!((before + 900 - 1..=after + 900 + 1).contains(&exp), "{exp} not within {before}..={after} + 900");
+    assert_eq!(exp, e.clock.load(Ordering::SeqCst) / 1000 + 900);
     let s3 = s3_with(&t.endpoint, c);
     put(&s3, "gst", "a.txt").await.unwrap();
     let got = s3.get_object().bucket("gst").key("a.txt").send().await.unwrap();

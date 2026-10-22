@@ -167,9 +167,26 @@ impl Ctx {
     /// `level`: whether its roll permission level does.
     pub(crate) fn require_identity(&self, action: &str, bucket: Option<&str>, level: bool) -> Result<(), S3Error> {
         let Who::Key(_, id) = self.who() else { return Err(S3Error::new(Code::AccessDenied)) };
-        let b = bucket.unwrap_or("*");
-        let cond = Cond { ctx: self, who: self.who(), bucket: bucket.unwrap_or_default(), key: None, resource_account: id.account.id.clone(), tags: OnceLock::new(), prefix: None, ap: self.access_point.as_deref() };
-        if id.verdict(action, &resource_arn(b, None), &cond, level).allowed() { Ok(()) } else { Err(S3Error::new(Code::AccessDenied)) }
+        // Bucket administration needs a ReadWrite S3 Express session on that very bucket.
+        if !express_scope_allows(self.who(), bucket, Need::Write) {
+            return Err(S3Error::new(Code::AccessDenied));
+        }
+        let resource = match bucket {
+            Some(b) if crate::directory::is_directory(b) => crate::directory::bucket_arn(self, b),
+            b => resource_arn(b.unwrap_or("*"), None),
+        };
+        let cond = Cond { ctx: self, who: self.who(), bucket: bucket.unwrap_or_default(), key: None, resource_account: id.account.id.clone(), tags: OnceLock::new(), prefix: None, ap: self.access_point.as_deref(), mode: None };
+        if id.verdict(action, &resource, &cond, level).allowed() { Ok(()) } else { Err(S3Error::new(Code::AccessDenied)) }
+    }
+}
+
+/// Whether an S3 Express session's scope (its bucket, and `ReadOnly`) allows `need` on `bucket`.
+/// Every other requester: yes.
+fn express_scope_allows(who: Who, bucket: Option<&str>, need: Need) -> bool {
+    let Who::Key(k, _) = who else { return true };
+    match k.session.as_ref().and_then(|s| s.express.as_ref()) {
+        Some(x) => bucket == Some(x.bucket.as_str()) && (need == Need::Read || !x.read_only),
+        None => true,
     }
 }
 
@@ -248,6 +265,12 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
         Err(e) if e.code == Code::NoSuchBucket => return Err(if who.scoped_out(bucket) { denied() } else { e }),
         Err(e) => return Err(e),
     };
+    // An S3 Express session (CreateSession) reaches its one bucket, and a ReadOnly one only
+    // reads, whatever its creator may do. (A directory bucket's policy can't tell reads from
+    // writes: both are `s3express:CreateSession`.)
+    if !express_scope_allows(who, Some(bucket), need) {
+        return Err(denied());
+    }
     // Through an access point: its policy and the bucket's (`accesspoint/mod.rs`).
     if let Some(r) = crate::accesspoint::authorize(ctx, who, &a, bucket, key, action, need, prefix) {
         return r;
@@ -276,15 +299,22 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
         }
         object_acl = Some(acl);
     }
-    let resource = resource_arn(bucket, key);
-    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix, ap: ctx.access_point.as_deref() };
+    // Directory buckets' policies (and identity policies about them) speak S3 Express: data
+    // operations are `s3express:CreateSession` (with `s3express:SessionMode`), on the bucket's
+    // `s3express` ARN.
+    let (policy_action, resource, mode) = if crate::directory::is_directory(bucket) {
+        (crate::directory::express_action(action), crate::directory::bucket_arn(ctx, bucket), Some(crate::directory::session_mode(ctx, need)))
+    } else {
+        (action, resource_arn(bucket, key), None)
+    };
+    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix, ap: ctx.access_point.as_deref(), mode };
     let principal = who.principal();
-    let bucket_policy = a.policy.as_ref().map(|p| p.evaluate(principal, action, &resource, &cond)).unwrap_or_default();
+    let bucket_policy = a.policy.as_ref().map(|p| p.evaluate(principal, policy_action, &resource, &cond)).unwrap_or_default();
     if bucket_policy.deny {
         return Err(denied());
     }
     let own = match who {
-        Who::Key(k, id) => Some(id.verdict(action, &resource, &cond, key_allows(k, bucket, need))),
+        Who::Key(k, id) => Some(id.verdict(policy_action, &resource, &cond, key_allows(k, bucket, need))),
         Who::Anonymous => None,
     };
     if own.is_some_and(|v| v.deny) {
@@ -346,6 +376,8 @@ pub(crate) struct Cond<'a> {
     pub prefix: Option<&'a str>,
     /// The access point the resource is reached through (its condition keys), if any.
     pub ap: Option<&'a crate::accesspoint::ApRequest>,
+    /// `s3express:SessionMode` (directory buckets).
+    pub mode: Option<&'static str>,
 }
 
 impl Cond<'_> {
@@ -366,6 +398,9 @@ impl Context for Cond<'_> {
             return v;
         }
         let one = |v: Option<String>| v.map(|v| vec![v]);
+        if key == "s3express:sessionmode" {
+            return one(self.mode.map(str::to_string));
+        }
         let header = |n: &str| one(ctx.h(n).map(str::to_string));
         match key {
             "aws:sourceip" => one(ctx.peer.map(|p| p.to_string())),

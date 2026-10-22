@@ -26,12 +26,9 @@ use std::task::{Context, Poll};
 /// Largest single PUT (S3's limit).
 pub(crate) const MAX_PUT: u64 = 5 << 30;
 
-/// Subresources S3 has that we don't implement.
-const UNSUPPORTED: [&str; 3] = ["torrent", "select", "renameObject"];
-
 pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
-    if let Some(sub) = UNSUPPORTED.iter().find(|s| ctx.has(s)) {
-        return Err(S3Error::msg(Code::NotImplemented, format!("?{sub} is not supported")));
+    if crate::directory::is_directory(ctx.bucket_name()) {
+        crate::directory::check_object_request(ctx)?;
     }
     versioning::version_id(ctx)?;
     validate_key(ctx.key_name())?;
@@ -47,6 +44,7 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
         Method::GET if ctx.has("legal-hold") => versioning::get_legal_hold(ctx, &bucket),
         Method::GET if ctx.has("acl") => crate::acl::get_object_acl(ctx, &bucket),
         Method::GET if ctx.has("attributes") => crate::attributes::get_attributes(ctx, &bucket),
+        Method::GET if ctx.has("torrent") => crate::torrent::get(ctx, &bucket).await,
         Method::GET => get(ctx, &bucket, false).await,
         Method::HEAD => get(ctx, &bucket, true).await,
         Method::PUT if ctx.has("uploadId") || ctx.has("partNumber") => multipart::upload_part(ctx, &bucket, body).await,
@@ -54,11 +52,14 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
         Method::PUT if ctx.has("retention") => versioning::put_retention(ctx, &bucket, body).await,
         Method::PUT if ctx.has("legal-hold") => versioning::put_legal_hold(ctx, &bucket, body).await,
         Method::PUT if ctx.has("acl") => crate::acl::put_object_acl(ctx, &bucket, body).await,
+        Method::PUT if ctx.has("renameObject") => crate::rename::rename(ctx, &bucket).await,
+        Method::PUT if ctx.h("x-amz-write-offset-bytes").is_some() => crate::append::append(ctx, &bucket, body).await,
         Method::PUT if ctx.h("x-amz-copy-source").is_some() => copy(ctx, &bucket).await,
         Method::PUT => put(ctx, &bucket, body).await,
         Method::POST if ctx.has("uploads") => multipart::create(ctx, &bucket).await,
         Method::POST if ctx.has("uploadId") => multipart::complete(ctx, &bucket, body).await,
         Method::POST if ctx.has("restore") => restore(ctx, &bucket),
+        Method::POST if ctx.has("select") => crate::select::select(ctx, &bucket, body).await,
         Method::DELETE if ctx.has("uploadId") => multipart::abort(ctx, &bucket).await,
         Method::DELETE if ctx.has("tagging") => delete_tagging(ctx, &bucket).await,
         Method::DELETE => delete(ctx, &bucket).await,
@@ -341,6 +342,9 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
         None => (StatusCode::OK, meta.size),
     };
     let mut r = object_response(&meta, &overrides, code, len);
+    if crate::directory::is_directory(&bucket.name) {
+        set(&mut r, "x-amz-storage-class", "EXPRESS_ONEZONE");
+    }
     versioning::set_version(&mut r, bucket, &meta.version_id, vid.is_some());
     if vid.is_none() {
         crate::lifecycle::set_expiration(&mut r, bucket, &meta);

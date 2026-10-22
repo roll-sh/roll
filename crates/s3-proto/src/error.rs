@@ -110,6 +110,11 @@ codes! {
     LambdaTimeout 400 "The Lambda function did not respond in the allowed time.",
     LambdaRuntimeError 400 "The Lambda function failed during execution.",
     ValidationError 400 "The request was not valid.",
+    // Directory buckets (S3 Express One Zone): appends and RenameObject.
+    EncryptionTypeMismatch 400 "The existing object was created with a different encryption type.",
+    IdempotencyParameterMismatch 400 "Parameters on this idempotent request are inconsistent with parameters used in previous request(s).",
+    InvalidWriteOffset 400 "The write offset value that you specified does not match the current object size.",
+    TooManyParts 400 "You have attempted to add more parts than the maximum of 10000 that are allowed for this object.",
 }
 
 /// An S3 error response.

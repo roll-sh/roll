@@ -683,3 +683,78 @@ async fn aws_cli_iam() {
     let got = t.client.get_object().bucket("iamtool").key("up.txt").send().await.unwrap();
     assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"uploaded by an IAM user\n");
 }
+
+/// S3 Express with the AWS CLI: a directory bucket, `create-session`, writes and reads signed
+/// with the CLI's own sessions, an append and a rename; and `select-object-content` and
+/// `get-object-torrent` on a general purpose bucket.
+#[tokio::test(flavor = "multi_thread")]
+async fn aws_cli_express_select_and_torrent() {
+    if !docker_ok() {
+        return;
+    }
+    let t = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("small.txt"), b"hello from a real tool\n").unwrap();
+    std::fs::write(dir.path().join("more.txt"), b"and more\n").unwrap();
+    std::fs::write(dir.path().join("people.csv"), b"name,city,age\nada,london,36\nalan,london,41\ngrace,arlington,85\n").unwrap();
+    std::fs::write(dir.path().join("film.bin"), data(600_000, 4)).unwrap();
+    let endpoint = t.endpoint.clone();
+    let path = dir.path().to_path_buf();
+    let bucket = "cli--use1-az4--x-s3";
+    blocking(move || {
+        let env = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
+        let aws = |args: &[&str]| {
+            let mut all = vec!["--endpoint-url", endpoint.as_str(), "--output", "json"];
+            all.extend_from_slice(args);
+            run("amazon/aws-cli", &env, &path, &all)
+        };
+        let fails = |args: &[&str]| {
+            let mut all = vec!["--endpoint-url", endpoint.as_str()];
+            all.extend_from_slice(args);
+            run_fails("amazon/aws-cli", &env, &path, &all)
+        };
+        aws(&["s3api", "create-bucket", "--bucket", bucket, "--create-bucket-configuration", "Location={Type=AvailabilityZone,Name=use1-az4},Bucket={DataRedundancy=SingleAvailabilityZone,Type=Directory}"]);
+        let dirs = aws(&["s3api", "list-directory-buckets"]);
+        assert!(dirs.contains(bucket), "{dirs}");
+        let s = aws(&["s3api", "create-session", "--bucket", bucket, "--session-mode", "ReadOnly"]);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|e| panic!("{e}: {s}"));
+        assert!(v["Credentials"]["SessionToken"].as_str().is_some_and(|t| !t.is_empty()), "{s}");
+        assert!(v["Credentials"]["AccessKeyId"].as_str().is_some_and(|k| k.starts_with("RT")), "{s}");
+        aws(&["s3api", "put-object", "--bucket", bucket, "--key", "logs/app.log", "--body", "/data/small.txt"]);
+        let a = aws(&["s3api", "put-object", "--bucket", bucket, "--key", "logs/app.log", "--body", "/data/more.txt", "--write-offset-bytes", "23"]);
+        assert!(a.contains("\"Size\": 32"), "{a}");
+        aws(&["s3api", "rename-object", "--bucket", bucket, "--key", "logs/renamed.log", "--rename-source", "logs/app.log"]);
+        aws(&["s3api", "get-object", "--bucket", bucket, "--key", "logs/renamed.log", "/data/got.log"]);
+        assert_eq!(std::fs::read(path.join("got.log")).unwrap(), b"hello from a real tool\nand more\n");
+        let ls = aws(&["s3api", "list-objects-v2", "--bucket", bucket, "--prefix", "logs/"]);
+        assert!(ls.contains("logs/renamed.log") && !ls.contains("logs/app.log"), "{ls}");
+        let e = fails(&["s3api", "put-bucket-versioning", "--bucket", bucket, "--versioning-configuration", "Status=Enabled"]);
+        assert!(e.contains("NotImplemented"), "{e}");
+        // S3 Select and torrents, on a general purpose bucket.
+        aws(&["s3", "mb", "s3://selects"]);
+        aws(&["s3", "cp", "/data/people.csv", "s3://selects/people.csv"]);
+        aws(&[
+            "s3api",
+            "select-object-content",
+            "--bucket",
+            "selects",
+            "--key",
+            "people.csv",
+            "--expression",
+            "SELECT s.name, s.age FROM S3Object s WHERE s.city = 'london' AND CAST(s.age AS INT) > 37",
+            "--expression-type",
+            "SQL",
+            "--input-serialization",
+            "{\"CSV\": {\"FileHeaderInfo\": \"USE\"}, \"CompressionType\": \"NONE\"}",
+            "--output-serialization",
+            "{\"CSV\": {}}",
+            "/data/selected.csv",
+        ]);
+        assert_eq!(std::fs::read_to_string(path.join("selected.csv")).unwrap(), "alan,41\n");
+        aws(&["s3", "cp", "/data/film.bin", "s3://selects/film.bin"]);
+        aws(&["s3api", "get-object-torrent", "--bucket", "selects", "--key", "film.bin", "/data/film.torrent"]);
+        let torrent = std::fs::read(path.join("film.torrent")).unwrap();
+        assert!(torrent.starts_with(b"d4:infod6:lengthi600000e4:name8:film.bin12:piece lengthi262144e6:pieces60:"), "{}", String::from_utf8_lossy(&torrent[..80.min(torrent.len())]));
+    })
+    .await;
+}
