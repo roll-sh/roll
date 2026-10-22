@@ -83,6 +83,13 @@ impl Env {
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("roll {args:?}: not JSON ({e}): {out}"))
     }
 
+    /// Run `roll`, expect exit `code`; its stderr.
+    async fn fails(&self, args: &[&str], code: i32) -> String {
+        let out = self.run(args, None).await;
+        assert_eq!(out.status.code(), Some(code), "roll {args:?}:\n{}\n{}", stdout(&out), stderr(&out));
+        stderr(&out)
+    }
+
     fn write(&self, path: &str, content: &str) {
         let p = self.work.join(path);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -767,4 +774,382 @@ async fn a_closed_pipe_ends_quietly() {
     .await
     .unwrap();
     assert!(!stderr(&out).contains("panicked"), "{}", stderr(&out));
+}
+
+/// Owners, repos and `land` flags the other tests don't use (`--user`, `ls-repos`, `--github`,
+/// `--ref`, `show --json`), every `land` usage error, `token` errors, usage errors exiting 1
+/// (2 means a conflict), and an API that isn't running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repo_land_and_usage_edges() {
+    let e = env(None).await;
+    let o = e.json(&["code", "owners", "create", "ada", "--user", "--display-name", "Ada L"]).await;
+    assert_eq!(o["kind"], "user");
+    assert!(e.ok(&["code", "owners"]).await.contains("Ada L"));
+    assert!(e.ok(&["code", "owners", "create", "acme", "--org"]).await.contains("claimed acme (org)"));
+    e.fails(&["code", "owners", "create", "acme"], 1).await;
+    e.fails(&["code", "owners", "create", "x_y"], 1).await;
+    let made = e.ok(&["code", "create", "acme/api", "-d", "The API"]).await;
+    assert!(made.contains("acme/api") && made.contains("main (empty)") && made.contains("The API"), "{made}");
+    assert!(e.ok(&["code", "ls-repos", "--owner", "acme"]).await.contains("acme/api"));
+    assert!(e.json(&["code", "repos", "--owner", "ada"]).await.as_array().unwrap().is_empty());
+    let repo = e.ok(&["code", "repo", "acme/api"]).await;
+    assert!(repo.contains("git clone") && repo.contains("landing  post-merge checks") && repo.contains("0 changesets"), "{repo}");
+    e.fails(&["code", "repo", "acme"], 1).await;
+
+    // --github takes owner/repo and needs a GitHub App that can see it.
+    let err = e.fails(&["code", "create", "acme/gh", "--github", "noslash", "--installation", "1"], 1).await;
+    assert!(err.contains("expected owner/repo"), "{err}");
+    e.fails(&["code", "create", "acme/gh", "--github", "octo/gh", "--installation", "1"], 1).await;
+    assert_eq!(e.json(&["code", "repos", "--owner", "acme"]).await.as_array().unwrap().len(), 1, "nothing created");
+
+    // --ref lands on a branch; the default branch doesn't change.
+    e.write("a.txt", "a\n");
+    e.ok(&["code", "land", "acme/api", "--base", "main", "-m", "init", "a.txt"]).await;
+    e.write("b.txt", "b\n");
+    let out = e.ok(&["code", "land", "acme/api", "--base", "main", "-m", "on a branch", "--ref", "feature/x", "b.txt"]).await;
+    assert!(out.contains("✓ landed cs_") && out.contains("on feature/x"), "{out}");
+    assert_eq!(e.ok(&["code", "cat", "acme/api@feature/x", "b.txt"]).await, "b\n");
+    e.fails(&["code", "cat", "acme/api", "b.txt"], 1).await;
+    assert!(e.ok(&["code", "log", "acme/api@feature/x", "-n", "1"]).await.contains("on a branch"));
+    assert!(!e.ok(&["code", "log", "acme/api"]).await.contains("on a branch"));
+    assert!(e.ok(&["code", "ls", "acme/api@feature/x"]).await.contains("b.txt"));
+    let log = e.json(&["code", "log", "acme/api", "-n", "1"]).await;
+    let cs = log["items"][0]["id"].as_str().unwrap().to_string();
+    let show = e.json(&["code", "show", "acme/api", &cs]).await;
+    assert_eq!((show["id"].as_str(), show["files"][0]["path"].as_str()), (Some(cs.as_str()), Some("a.txt")));
+    e.fails(&["code", "show", "acme/api", "cs_00000000"], 1).await;
+
+    // land usage errors, each with what's wrong.
+    for (args, want) in [
+        (vec!["-m", "x", "a.txt"], "--base is required"),
+        (vec!["--base", "main", "-m", "x"], "nothing to write"),
+        (vec!["--base", "main", "-m", "x", "missing.txt"], "can't read"),
+        (vec!["--base", "main", "-m", "x", "--author", "nobody", "a.txt"], "Name <email>"),
+        (vec!["--base", "main", "-m", "x", "a.txt", "--delete", "a.txt"], "given twice"),
+        (vec!["--base", "main", "-m", "x", "/etc/hostname"], "relative"),
+    ] {
+        let mut all = vec!["code", "land", "acme/api"];
+        all.extend(args);
+        let err = e.fails(&all, 1).await;
+        assert!(err.contains(want), "{all:?}: {err}");
+    }
+    for (stdin, want) in [("nope", "stdin is not JSON"), ("[1]", "must be an object"), (r#"{"files": [1]}"#, "`files` must be an object")] {
+        let out = e.run(&["code", "land", "acme/api", "--base", "main", "-m", "x", "--stdin-json"], Some(stdin)).await;
+        assert_eq!(out.status.code(), Some(1), "{stdin}");
+        assert!(stderr(&out).contains(want), "{stdin}: {}", stderr(&out));
+    }
+    // An unknown ref to build on is the API's error.
+    e.fails(&["code", "land", "acme/api", "--base", "no-such-branch", "-m", "x", "a.txt"], 1).await;
+
+    // Usage errors exit 1, since agents read 2 as a conflict and 3 as no work; help exits 0.
+    let err = e.fails(&["code", "land", "acme/api", "--bogus"], 1).await;
+    assert!(err.contains("--bogus"), "{err}");
+    e.fails(&["code", "change", "frobnicate"], 1).await;
+    e.fails(&["code", "work", "claim", "acme/api"], 1).await;
+    e.fails(&["--token", "t", "--json", "code", "change", "land"], 1).await;
+    e.fails(&["code"], 1).await;
+    let help = e.run(&["code", "--help"], None).await;
+    assert_eq!(help.status.code(), Some(0));
+    assert!(stdout(&help).contains("land"));
+
+    // Tokens: an unknown owner, an unknown token.
+    e.fails(&["code", "token", "create", "nobody", "t"], 1).await;
+    e.fails(&["code", "token", "revoke", "acme", "tok_nope"], 1).await;
+    assert!(e.json(&["code", "token", "list", "acme"]).await.as_array().unwrap().is_empty());
+
+    // rename onto a taken name, delete what isn't there.
+    e.ok(&["code", "create", "acme/web"]).await;
+    e.fails(&["code", "rename", "acme/web", "api"], 1).await;
+    let err = e.fails(&["code", "delete", "acme/nope", "--yes"], 1).await;
+    assert!(err.contains("not found"), "{err}");
+
+    // No API at the address: exit 1 and a hint.
+    let out = e.cmd(&["code", "repos"]).env("ROLL_API_URL", "http://127.0.0.1:1").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("is rolld running?"), "{}", stderr(&out));
+}
+
+/// `change` and `work` flags the other tests don't use: `--work` (id and number), `revise
+/// --changeset`, the `ls` aliases, `--state`, `ROLL_AGENT`, every lease command's text, and
+/// the errors: priority bounds, someone else's or no lease, landing a landed or closed change
+/// (exit 1, not the conflict exit 2), dequeueing what isn't queued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn change_and_work_edges() {
+    let e = env(None).await;
+    e.ok(&["code", "owners", "create", "acme", "--org"]).await;
+    e.ok(&["code", "create", "acme/api"]).await;
+    e.write("a.txt", "a\n");
+    e.ok(&["code", "land", "acme/api", "--base", "main", "-m", "init", "a.txt"]).await;
+
+    // Work.
+    let out = e.ok(&["code", "work", "create", "acme/api", "Fix it", "--label", "bug"]).await;
+    assert!(out.contains("#1 · Fix it"), "{out}");
+    let docs = e.json(&["code", "work", "create", "acme/api", "Docs", "-p", "3"]).await;
+    let err = e.fails(&["code", "work", "create", "acme/api", "Too low", "-p", "4"], 1).await;
+    assert!(err.contains("--priority is 0"), "{err}");
+    assert_eq!(e.json(&["code", "work", "ls", "acme/api"]).await.as_array().unwrap().len(), 2);
+    assert!(e.json(&["code", "work", "list", "acme/api", "--state", "done"]).await.as_array().unwrap().is_empty());
+    let list = e.ok(&["code", "work", "list", "acme/api"]).await;
+    assert!(list.contains("P3") && list.contains("[bug]"), "{list}");
+    // ROLL_AGENT stands in for --agent.
+    let out = e.cmd(&["code", "work", "claim", "acme/api", "--label", "bug"]).env("ROLL_AGENT", "env-bot").output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let id = stdout(&out).trim().to_string();
+    assert!(stderr(&out).contains("claimed #1"), "{}", stderr(&out));
+    let shown = e.ok(&["code", "work", "show", "acme/api#1"]).await;
+    assert!(shown.contains("claimed by env-bot, lease") && shown.contains("labels bug"), "{shown}");
+    let out = e.cmd(&["code", "work", "heartbeat", &id]).env("ROLL_AGENT", "env-bot").output().unwrap();
+    assert!(out.status.success() && stdout(&out).contains("lease renewed"), "{}", stderr(&out));
+    assert!(e.ok(&["code", "work", "heartbeat", "acme/api#1", "--agent", "env-bot"]).await.contains("lease renewed"));
+    e.fails(&["code", "work", "release", &id, "--agent", "intruder"], 1).await;
+    assert!(e.ok(&["code", "work", "release", "acme/api#1", "--agent", "env-bot"]).await.contains("released"));
+    let err = e.fails(&["code", "work", "heartbeat", &id, "--agent", "env-bot"], 1).await;
+    assert!(err.contains("isn't claimed"), "{err}");
+    e.ok(&["code", "work", "claim", "acme/api", "--agent", "a1", "--label", "bug"]).await;
+    assert!(e.ok(&["code", "work", "complete", "acme/api#1", "--agent", "a1"]).await.contains("· done"));
+    assert!(e.ok(&["code", "work", "show", &id]).await.contains("worked on by a1"));
+    e.fails(&["code", "work", "show", "wi_nope"], 1).await;
+    let err = e.fails(&["code", "work", "show", "acme/api#x"], 1).await;
+    assert!(err.contains("expected owner/repo#number"), "{err}");
+    e.fails(&["code", "work", "complete", "acme/api"], 1).await;
+
+    // A change for a work item, by id and by number: the item goes to review.
+    let wid = docs["id"].as_str().unwrap().to_string();
+    e.write("doc.md", "d\n");
+    let c = e.json(&["code", "change", "create", "acme/api", "-t", "Docs", "--base", "main", "--work", &wid, "doc.md"]).await;
+    assert_eq!(c["work_item"], wid.as_str());
+    assert_eq!(e.json(&["code", "work", "show", &wid]).await["state"], "review");
+    let num = format!("acme/api#{}", c["number"]);
+    let shown = e.ok(&["code", "change", "show", &num]).await;
+    assert!(shown.contains(&format!("resolves {wid}")) && shown.contains("Docs") && shown.contains("revision 1"), "{shown}");
+    let third = e.json(&["code", "work", "create", "acme/api", "Third"]).await;
+    let c2 = e.json(&["code", "change", "create", "acme/api", "-t", "Third", "--changeset", "main", "--work", &third["number"].to_string()]).await;
+    assert_eq!(c2["work_item"], third["id"]);
+    e.fails(&["code", "change", "create", "acme/api", "-t", "x", "--changeset", "main", "--work", "99"], 1).await;
+    assert_eq!(e.json(&["code", "change", "ls", "acme/api", "--state", "open"]).await.as_array().unwrap().len(), 2);
+
+    // revise --changeset points a change at an existing changeset (a branch's head); revise
+    // from files takes the title as the message.
+    e.write("b.txt", "b\n");
+    let br = e.json(&["code", "land", "acme/api", "--base", "main", "-m", "topic", "--ref", "topic", "b.txt"]).await;
+    let r = e.json(&["code", "change", "revise", c["id"].as_str().unwrap(), "--changeset", br["changeset"].as_str().unwrap()]).await;
+    assert_eq!((r["revision"].as_u64(), r["head"].as_str()), (Some(2), br["changeset"].as_str()), "{r}");
+    e.write("doc.md", "d2\n");
+    let out = e.ok(&["code", "change", "revise", &num, "--base", "main", "doc.md"]).await;
+    assert!(out.contains("revision 3"), "{out}");
+
+    // check by number, and what show prints of it.
+    let out = e.ok(&["code", "check", &num, "lint", "running", "--summary", "linting", "--url", "https://ci.example/9"]).await;
+    assert!(out.contains("lint running"), "{out}");
+    let shown = e.ok(&["code", "change", "show", &num]).await;
+    assert!(shown.contains("check lint") && shown.contains("running") && shown.contains("linting") && shown.contains("https://ci.example/9"), "{shown}");
+    e.fails(&["code", "check", "chg_nope", "lint", "success"], 1).await;
+
+    // Not queued: dequeue refuses. A draft can't land; ready, it lands; again is exit 1.
+    e.fails(&["code", "change", "dequeue", &num], 1).await;
+    assert!(e.ok(&["code", "change", "draft", &num]).await.contains("is a draft"));
+    let err = e.fails(&["code", "change", "land", &num], 1).await;
+    assert!(err.contains("draft"), "{err}");
+    assert!(e.ok(&["code", "change", "ready", &num]).await.contains("is ready"));
+    assert!(e.ok(&["code", "change", "land", &num]).await.contains("✓ landed"));
+    let err = e.fails(&["code", "change", "land", &num], 1).await;
+    assert!(!err.contains("conflict on"), "a landed change isn't a conflict: {err}");
+    let out = e.run(&["--json", "code", "change", "land", &num], None).await;
+    assert_eq!(out.status.code(), Some(1));
+    // Closed: text, then landing it is exit 1 too; a closed change can't be revised.
+    let c2n = format!("acme/api#{}", c2["number"]);
+    assert!(e.ok(&["code", "change", "close", &c2n]).await.contains(&format!("closed {c2n}").replace('#', " #")));
+    e.fails(&["code", "change", "land", &c2n], 1).await;
+    e.fails(&["code", "change", "revise", &c2n, "--changeset", "main"], 1).await;
+    e.fails(&["code", "change", "show", "acme/api#99"], 1).await;
+}
+
+/// `roll code queue <repo> --watch`: the queue, then its events as they happen; with `--json`,
+/// one JSON event per line. Following a repo that doesn't exist fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queue_watch_follows_the_queue() {
+    let e = env(None).await;
+    e.ok(&["code", "owners", "create", "acme", "--org"]).await;
+    e.ok(&["code", "create", "acme/api"]).await;
+    e.write("a.txt", "a\n");
+    e.ok(&["code", "land", "acme/api", "--base", "main", "-m", "init", "a.txt"]).await;
+    e._code.update_repo(&code_control::Caller::Admin, "acme", "api", &json!({ "land_policy": "queue" })).await.unwrap();
+    e.fails(&["code", "queue", "acme/nope", "--watch"], 1).await;
+    e.fails(&["code", "watch", "acme/nope"], 1).await;
+
+    let follow = |args: &[&str]| {
+        let mut child = e.cmd(args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let out = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        (child, rx)
+    };
+    let next = |rx: &std::sync::mpsc::Receiver<String>, want: &dyn Fn(&str) -> bool| {
+        let mut seen = Vec::new();
+        loop {
+            let line = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or_else(|_| panic!("no matching line in {seen:?}"));
+            if want(&line) {
+                return line;
+            }
+            seen.push(line);
+        }
+    };
+
+    let (mut child, rx) = follow(&["code", "queue", "acme/api", "--watch"]);
+    let first = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the queue first");
+    assert!(first.starts_with("acme/api · ") && first.contains("0 queued"), "{first}");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    e.write("b.txt", "b\n");
+    assert!(e.ok(&["code", "land", "acme/api", "--base", "main", "-m", "add b", "b.txt"]).await.contains("queued"));
+    let line = next(&rx, &|l| l.starts_with("· change #1 queued") || l.starts_with("· queue "));
+    assert!(line.contains("queued"), "{line}");
+    child.kill().unwrap();
+    let _ = child.wait();
+
+    let (mut child, rx) = follow(&["--json", "code", "queue", "acme/api", "--watch"]);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    e.write("c.txt", "c\n");
+    e.ok(&["code", "land", "acme/api", "--base", "main", "-m", "add c", "c.txt"]).await;
+    let line = next(&rx, &|l| l.contains("add c"));
+    let v: Value = serde_json::from_str(&line).unwrap_or_else(|_| panic!("not JSON: {line}"));
+    assert!(v["event"].is_string() && v["data"].is_object(), "{v}");
+    child.kill().unwrap();
+    let _ = child.wait();
+}
+
+/// Reviewer, billing, provider, learnings, search, webhook, thread, review-app and review flags
+/// and errors the other tests don't reach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reviewer_webhook_and_thread_edges() {
+    let e = env_with(|c| {
+        c.review.secret_key = Some("0123456789abcdef0123456789abcdef".into());
+        c.allow_private_webhooks = Some(true);
+    })
+    .await;
+    e.ok(&["code", "owners", "create", "acme", "--org"]).await;
+    e.ok(&["code", "create", "acme/api"]).await;
+    e.write("notes.txt", "1\n2\n3\n");
+    e.write("src/x.rs", "Two two\n");
+    e.write("docs/y.md", "two\n");
+    e.ok(&["code", "land", "acme/api", "--base", "main", "-m", "init", "notes.txt", "src/x.rs", "docs/y.md"]).await;
+
+    // reviewer: --disable, and its usage and value errors.
+    assert_eq!(e.json(&["code", "reviewer", "acme/api", "--enable"]).await["effective"]["enabled"], true);
+    assert!(e.ok(&["code", "reviewer", "acme/api", "--disable"]).await.contains("enabled      false"));
+    e.fails(&["code", "reviewer", "acme/api", "--enable", "--disable"], 1).await;
+    e.fails(&["code", "reviewer", "acme/api", "--speed", "warp"], 1).await;
+    let err = e.fails(&["code", "reviewer", "acme/api", "--set", "novalue"], 1).await;
+    assert!(err.contains("expected key=value"), "{err}");
+    e.fails(&["code", "reviewer", "acme/nope"], 1).await;
+
+    // billing: shown without flags; a bad --on-cap.
+    assert!(e.ok(&["code", "billing", "acme"]).await.contains("acme: no cap"));
+    e.fails(&["code", "billing", "acme", "--on-cap", "explode"], 1).await;
+    assert_eq!(e.json(&["code", "billing", "acme", "--on-cap", "pause"]).await["on_cap"], "pause");
+    e.fails(&["code", "usage", "nobody"], 1).await;
+
+    // provider: OpenAI-compatible with a base URL and models, the key from ROLL_REVIEW_API_KEY.
+    let out = e
+        .cmd(&["code", "provider", "set", "acme", "--provider", "openai_compatible", "--base-url", "https://llm.example.com/v1", "--model", "m-large", "--secondary-model", "m-small"])
+        .env("ROLL_REVIEW_API_KEY", "sk-env-key-0000-9876")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("openai_compatible · m-large · key …9876") && !text.contains("sk-env"), "{text}");
+    let p = e.json(&["code", "provider", "show", "acme"]).await;
+    assert_eq!((p["model"].as_str(), p["key_last4"].as_str()), (Some("m-large"), Some("9876")), "{p}");
+    assert!(!p.to_string().contains("sk-env-key"));
+    e.fails(&["code", "provider", "set", "acme", "--provider", "openai_compatible", "--api-key", "sk-x-1234"], 1).await;
+    e.fails(&["code", "provider", "set", "acme", "--provider", "gemini", "--api-key", "sk-x-1234"], 1).await;
+    let out = e.cmd(&["code", "provider", "set", "acme"]).env_remove("ROLL_REVIEW_API_KEY").output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "no key: {}", stderr(&out));
+
+    // learnings: a repo-wide one, and forgetting what isn't there.
+    let l = e.json(&["code", "learnings", "add", "acme/api", "Prefer early returns"]).await;
+    assert!(l["path"].is_null());
+    assert!(e.ok(&["code", "learnings", "list", "acme/api"]).await.contains("Prefer early returns"));
+    e.fails(&["code", "learnings", "rm", "acme/api", "lrn_nope"], 1).await;
+
+    // search: --case and --path.
+    assert_eq!(e.ok(&["code", "search", "acme/api", "Two", "--case"]).await.trim(), "src/x.rs:1: Two two");
+    assert_eq!(e.ok(&["code", "search", "acme/api", "two", "--path", "docs/**"]).await.trim(), "docs/y.md:1: two");
+    assert_eq!(e.ok(&["code", "search", "acme/api", "two", "--path", "nowhere/**"]).await.trim(), "");
+    e.fails(&["code", "search", "acme/nope", "two"], 1).await;
+
+    // webhooks: none yet; your own secret (not printed back) and created paused; refusals.
+    assert!(e.ok(&["code", "webhooks", "list", "acme/api"]).await.contains("no webhooks"));
+    let out = e.run(&["code", "webhooks", "create", "acme/api", "http://127.0.0.1:9/h", "--secret", "my-own-secret-123456", "--inactive"], None).await;
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("paused") && !stdout(&out).contains("my-own-secret") && !stderr(&out).contains("shown once"), "{}", stdout(&out));
+    let hooks = e.json(&["code", "webhooks", "list", "acme/api"]).await;
+    let hid = hooks[0]["id"].as_str().unwrap().to_string();
+    assert_eq!((hooks[0]["active"].as_bool(), hooks[0]["events"].clone()), (Some(false), json!(["landed"])), "the default event");
+    e.fails(&["code", "webhooks", "create", "acme/api", "http://127.0.0.1:9/h", "--secret", "short"], 1).await;
+    e.fails(&["code", "webhooks", "create", "acme/api", "http://127.0.0.1:9/h", "--event", "nope"], 1).await;
+    let v = e.json(&["code", "webhooks", "update", "acme/api", &hid, "--url", "http://127.0.0.1:9/other", "--secret", "another-secret-123456"]).await;
+    assert_eq!(v["url"], "http://127.0.0.1:9/other");
+    e.fails(&["code", "webhooks", "update", "acme/api", &hid, "--pause", "--resume"], 1).await;
+    for args in [vec!["ping", "acme/api", "wh_nope"], vec!["delete", "acme/api", "wh_nope"], vec!["deliveries", "acme/api", "wh_nope"], vec!["redeliver", "acme/api", hid.as_str(), "dl_nope"]] {
+        let mut all = vec!["code", "webhooks"];
+        all.extend(args);
+        e.fails(&all, 1).await;
+    }
+
+    // threads: a range on the old side; applying one comment's suggestion out of two.
+    e.write("notes.txt", "1\ntwo\n3\n");
+    let c = e.json(&["code", "change", "create", "acme/api", "-t", "Two", "--base", "main", "-m", "two", "notes.txt"]).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let t = e.json(&["code", "thread", "open", &id, "--path", "notes.txt", "--line", "2", "--start-line", "1", "--side", "old", "-m", "was 1-2"]).await;
+    assert_eq!((t["start_line"].as_u64(), t["line"].as_u64(), t["side"].as_str()), (Some(1), Some(2), Some("old")), "{t}");
+    assert!(e.ok(&["code", "thread", "list", &id]).await.contains("notes.txt:1-2 (old)  open"));
+    let opened = e.ok(&["code", "thread", "open", &id, "--path", "notes.txt", "--line", "3", "-m", "three?"]).await;
+    assert!(opened.contains("notes.txt:3  open") && opened.contains("three?"), "{opened}");
+    let th = e.json(&["code", "thread", "open", &id, "--path", "notes.txt", "--line", "2", "-m", "```suggestion\nTWO\n```"]).await;
+    let th_id = th["id"].as_str().unwrap().to_string();
+    let first = th["comments"][0]["id"].as_str().unwrap().to_string();
+    e.ok(&["code", "thread", "reply", &th_id, "-m", "```suggestion\nDos\n```"]).await;
+    e.fails(&["code", "thread", "apply", &th_id, "--comment", "cm_nope"], 1).await;
+    let applied = e.ok(&["code", "thread", "apply", &th_id, "--comment", &first]).await;
+    assert!(applied.contains("applied: change #1 is at revision 2"), "{applied}");
+    let head = e.json(&["code", "change", "show", &id]).await["head"].as_str().unwrap().to_string();
+    assert_eq!(e.ok(&["code", "cat", &format!("acme/api@{head}"), "notes.txt"]).await, "1\nTWO\n3\n", "the first suggestion, not the latest");
+    assert!(e.ok(&["code", "thread", "resolve", &th_id]).await.contains("resolved"));
+    assert!(!e.ok(&["code", "thread", "list", &id, "--open"]).await.contains(&th_id));
+    // Unresolved again; its line changed with the suggestion, so it's outdated now.
+    let un = e.ok(&["code", "thread", "unresolve", &th_id]).await;
+    assert!(un.contains("notes.txt:2  outdated"), "{un}");
+    for args in [vec!["reply", "th_nope", "-m", "x"], vec!["resolve", "th_nope"], vec!["list", "chg_nope"]] {
+        let mut all = vec!["code", "thread"];
+        all.extend(args);
+        e.fails(&all, 1).await;
+    }
+
+    // review: what request and dismiss need, an unknown review, an unknown change.
+    assert!(e.fails(&["code", "review", &id, "request"], 1).await.contains("whom?"));
+    e.fails(&["code", "review", &id, "dismiss", "rv_nope"], 1).await;
+    e.fails(&["code", "review", "chg_nope"], 1).await;
+    e.fails(&["code", "review", &id, "approve", "--comment", "nocolon"], 1).await;
+    let out = e.ok(&["code", "review", &id, "comment", "-m", "a note", "--comment", "old:notes.txt:2=was 2"]).await;
+    assert!(out.contains("comment by") && out.contains("with 1 comment"), "{out}");
+    assert!(e.ok(&["code", "review", &id, "request", "@ada"]).await.contains("requested a review from @ada"));
+    e.fails(&["code", "review-settings", "acme/api", "--set", "novalue"], 1).await;
+    e.fails(&["code", "jobs", "acme/api#99"], 1).await;
+    e.fails(&["code", "status", "acme/api", "no-such-branch"], 1).await;
+    e.fails(&["code", "blame", "acme/nope", "notes.txt"], 1).await;
+
+    // review apps: --active false, and refusals.
+    let app = e.json(&["code", "review-apps", "create", "acme", "bot", "--url", "http://127.0.0.1:9/h"]).await;
+    let app_id = app["app"]["id"].as_str().unwrap().to_string();
+    let v = e.json(&["code", "review-apps", "update", &app_id, "--active", "false", "--url", "http://127.0.0.1:9/new", "--repo", "api"]).await;
+    assert_eq!((v["active"].as_bool(), v["webhook_url"].as_str()), (Some(false), Some("http://127.0.0.1:9/new")), "{v}");
+    e.fails(&["code", "review-apps", "show", "app_nope"], 1).await;
+    e.fails(&["code", "review-apps", "create", "acme", "x", "--url", "http://127.0.0.1:9/h", "--event", "bogus"], 1).await;
+    e.fails(&["code", "review-apps", "list", "nobody"], 1).await;
 }

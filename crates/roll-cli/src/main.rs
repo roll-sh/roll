@@ -288,10 +288,35 @@ fn reset_sigpipe() {
     }
 }
 
+/// The subcommand `roll` was asked for (`code`, `db`, …): the first argument that isn't a
+/// global flag or a global flag's value.
+fn subcommand_name() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a.starts_with('-') {
+            if matches!(a.as_str(), "--api" | "--tasks-url" | "--token" | "--api-key") {
+                args.next();
+            }
+            continue;
+        }
+        return Some(a);
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     reset_sigpipe();
-    let matches = Cli::command().get_matches();
+    let matches = match Cli::command().try_get_matches() {
+        Ok(m) => m,
+        // `roll code` promises agents 2 = land conflict and 3 = no work, so its usage errors
+        // exit 1 like every other failure instead of clap's 2. Help and --version still exit 0.
+        Err(e) if e.use_stderr() && subcommand_name().as_deref() == Some("code") => {
+            let _ = e.print();
+            std::process::exit(1);
+        }
+        Err(e) => e.exit(),
+    };
     let token_flag = matches.value_source("token") == Some(ValueSource::CommandLine);
     let cli = Cli::from_arg_matches(&matches)?;
     let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key };

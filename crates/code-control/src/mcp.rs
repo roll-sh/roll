@@ -392,7 +392,7 @@ pub fn tools() -> Vec<Value> {
             "create_change",
             "Create a change",
             "Open a change (like a pull request) from file edits on a base revision.",
-            json!({ "repo": repo, "title": s("Title"), "body": s("Description (markdown)"), "base": s("Revision the edits are based on"), "message": s("Commit message (default: the title)"), "files": files_schema(), "work_item": s("Work item this change does (wi_… or a number)"), "draft": boolean("Open as a draft") }),
+            json!({ "repo": repo, "title": s("Title"), "body": s("Description (markdown)"), "base": s("Revision the edits are based on"), "message": s("Commit message (default: the title)"), "files": files_schema(), "work_item": s("Work item this change does: wi_…, owner/repo#N or its number"), "draft": boolean("Open as a draft") }),
             &["repo", "title", "base", "files"],
             false,
         ),
@@ -751,6 +751,14 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             if body.get("message").is_none() {
                 body["message"] = args["title"].clone();
             }
+            // The route takes the item's id; the tool also takes its number or "owner/repo#N".
+            if let Some(w) = opt(args, "work_item") {
+                let id = match w.parse::<u64>() {
+                    Ok(n) => c.by_number(&format!("{}#{n}", str_arg(args, "repo").unwrap_or_default()), "work").await?,
+                    Err(_) => c.by_number(&w, "work").await?,
+                };
+                body["work_item"] = json!(id);
+            }
             pass(c.post(&format!("{base}/changes"), body).await)
         }
         "revise_change" => {
@@ -812,8 +820,11 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
         "comment" => {
             if let Some(th) = str_arg(args, "thread") {
                 pass(c.post(&format!("/v1/code/threads/{}/comments", seg(th)), json!({ "body": args.get("body") })).await)
+            } else if str_arg(args, "change").is_none() {
+                return Err(fail("comment needs a thread to reply in, or a change, path and line"));
             } else {
-                let Ok(id) = c.change_id(args).await else { return Err(fail("comment needs a thread to reply in, or a change, path and line")) };
+                // A change that doesn't exist (or is malformed) says so.
+                let id = c.change_id(args).await?;
                 pass(c.post(&format!("/v1/code/changes/{}/threads", seg(&id)), body_of(args, &["change", "thread"])).await)
             }
         }
