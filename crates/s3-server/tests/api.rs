@@ -943,19 +943,34 @@ async fn xml_bodies_are_capped_and_checked() {
     bucket(&t, "bkt").await;
     put(&t, "bkt", "k", b"v").await;
     let max = s3_proto::xml::MAX_XML_BYTES;
-    // One byte over the cap: by Content-Length, and streamed without one.
+    // One byte over the cap: by Content-Length, and streamed without one. The server answers
+    // as soon as it knows and closes the connection, as S3 does, so a client still sending
+    // may see the connection go before it reads the answer: either way, nothing is applied.
+    let refused = |r: Result<reqwest::Response, reqwest::Error>| async move {
+        match r {
+            Ok(resp) => assert_eq!(status_code(resp).await, (400, "MaxMessageLengthExceeded".into())),
+            Err(e) => assert!(e.is_request() || e.is_body(), "{e:?}"),
+        }
+    };
     let mut r = Raw::new("PUT", "/bkt/k");
     r.query = "tagging";
     r.payload_hash = Some(UNSIGNED_PAYLOAD.into());
     r.body = vec![b' '; max + 1];
-    assert_eq!(status_code(r.send(&t).await).await, (400, "MaxMessageLengthExceeded".into()));
+    let body = r.body.clone();
+    refused(r.request(&t, ACCESS, SECRET).body(body).send().await).await;
     let mut r = Raw::new("POST", "/bkt");
     r.query = "delete";
     r.payload_hash = Some(UNSIGNED_PAYLOAD.into());
     let mut chunks: Vec<Result<bytes::Bytes, std::io::Error>> = (0..max >> 16).map(|_| Ok(bytes::Bytes::from(vec![b' '; 1 << 16]))).collect();
     chunks.push(Ok(bytes::Bytes::from_static(b" ")));
-    let resp = r.request(&t, ACCESS, SECRET).body(reqwest::Body::wrap_stream(futures::stream::iter(chunks))).send().await.unwrap();
-    assert_eq!(status_code(resp).await, (400, "MaxMessageLengthExceeded".into()));
+    refused(r.request(&t, ACCESS, SECRET).body(reqwest::Body::wrap_stream(futures::stream::iter(chunks))).send().await).await;
+    assert_eq!(get(&t, "bkt", "k").await, b"v", "nothing was deleted");
+    // The answer itself, without the race: headers only, the body never sent.
+    let mut r = Raw::new("PUT", "/bkt/k");
+    r.query = "tagging";
+    r.payload_hash = Some(UNSIGNED_PAYLOAD.into());
+    let (st, body) = r.send_tcp(&t, max as u64 + 1, true).await;
+    assert_eq!((st, error_code(&body)), (400, "MaxMessageLengthExceeded".into()));
     // Content-MD5 on an XML body is verified before anything happens.
     let delete = |md5_of: &'static [u8]| {
         let mut r = Raw::new("POST", "/bkt");
