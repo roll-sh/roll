@@ -67,7 +67,8 @@ roll code cat acme/web src/app.js
 roll code log acme/web -n 20
 ```
 
-`roll code land` exits 2 on a conflict. Every command takes `--json`.
+`roll code land` exits 2 on a conflict; any other failure, a usage error included, exits 1.
+Every command takes `--json`.
 
 ### An agent loop
 

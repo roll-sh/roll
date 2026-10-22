@@ -1,7 +1,8 @@
 //! `roll code …`: source control for agents, over the HTTP API (docs/code/http-api.md).
 //!
 //! Exit codes agents can branch on: 2 = land conflict, 3 = `work claim` found nothing,
-//! 1 = `name` is unavailable (and every other error).
+//! 1 = `name` is unavailable (and every other error, usage errors included: `main` maps clap's
+//! exit 2 to 1 for `roll code`).
 
 use crate::{Api, ago, s};
 use anyhow::{Context, bail};
@@ -952,9 +953,10 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-/// Print a land result; exits 2 on conflict.
+/// Print a land result; exits 2 on conflict. Only a 409 with conflicting `paths` is one: a 409
+/// for a change that's already landed or closed is an error (exit 1), not "rebase and retry".
 fn land_result(json_out: bool, status: StatusCode, v: &Value) -> anyhow::Result<()> {
-    let conflict = status == StatusCode::CONFLICT || v["status"] == "conflict";
+    let conflict = (status == StatusCode::CONFLICT && v["paths"].is_array()) || v["status"] == "conflict";
     if !conflict && !status.is_success() {
         bail!("{}", err(status, v));
     }
