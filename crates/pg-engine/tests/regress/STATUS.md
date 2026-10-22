@@ -11,6 +11,15 @@ it and re-checked in a subset run of that file; they are counted as matching bel
 files" below), re-checked in subset runs, and the units round 13 fixed (see the two "Fixed in
 round 13" sections), re-checked in subset runs.
 
+A full run of commit 286306f (2026-10-22, the whole schedule in one database,
+`PGREGRESS_TIMEOUT=600`) measured 50792. It confirms every file's count below except three:
+join 836 (its row-order unit 433 matches in that run), test_setup 78 (the shared reference
+cluster already had `regress_tblspace` from a concurrent run, so the reference errored) and
+alter_table 1745 (`ALTER TABLE tt7 DROP q` stalled past the 600 s psql timeout in that run and
+the 4 units after it differ; the file matches in 84 s in a subset run with the files before it in
+its schedule group, so the stall needs state from earlier in the full schedule: not yet
+explained).
+
 Re-run one subset (example):
 
 ```sh

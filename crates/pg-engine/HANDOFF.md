@@ -24,7 +24,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and round 13
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
     work), so the ceiling is about 99.998%.
-- No engine crashes or panics in a full run.
+- No engine crashes or panics in a full run. A full run of 286306f measured 50,792: STATUS's
+  per-file counts hold except that run's artifacts (see STATUS.md). One is open: in that full
+  run `ALTER TABLE tt7 DROP q` in alter_table stalled past the 600 s psql timeout, which doesn't
+  reproduce in a subset run.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
