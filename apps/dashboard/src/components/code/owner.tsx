@@ -3,7 +3,7 @@
 import { HorizonMark } from "@roll/brand";
 import { ChevronDown, ChevronRight, ExternalLink, Plus, RotateCw, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { codeApi, isNotFound, type CodeInfo, type Owner, type Repo, type ReviewApp, type ReviewAppSecrets } from "@/lib/code-api";
 import { canWrite } from "@/lib/queue";
 import { ago, btn, Confirm, Connecting, CopyButton, EmptyPanel, ErrorNote, input, Offline, panel, Panel, primary, useCopy } from "../ui";
@@ -178,12 +178,16 @@ function SecretsOnce({ title, secrets, onDone }: { title: string; secrets: Revie
  * Review apps: external reviewers (any vendor) that get signed webhooks for changes and post
  * reviews and comments with their token.
  */
-function ReviewApps({ owner, repos, manage, busy, run }: { owner: string; repos: Repo[]; manage: boolean; busy: string | null; run: Run }) {
+export function ReviewApps({ owner, repos, manage, busy, run }: { owner: string; repos: Repo[]; manage: boolean; busy: string | null; run: Run }) {
   const [apps, setApps] = useState<ReviewApp[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [secrets, setSecrets] = useState<{ title: string; value: ReviewAppSecrets } | null>(null);
   const [version, setVersion] = useState(0);
+
+  // Credentials are shown once: Next keeps visited pages alive but hidden (<Activity>,
+  // cacheComponents), so drop them when this page is hidden or left, not only when it unmounts.
+  useLayoutEffect(() => () => setSecrets(null), []);
 
   useEffect(() => {
     if (!manage) return;

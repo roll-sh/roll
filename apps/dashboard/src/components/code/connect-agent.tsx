@@ -1,7 +1,7 @@
 "use client";
 
 import { KeyRound, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { codeApi, type CodeInfo, type OwnerTokenInfo } from "@/lib/code-api";
 import { mcpCommand, mcpJson, tokenLine } from "@/lib/ci";
 import { ago, btn, CopyButton, input, Panel, useCopy } from "../ui";
@@ -31,8 +31,12 @@ export function ConnectAgent({
   const url = codeApi.mcpUrl();
   // An open local daemon needs no token at all; otherwise the snippet carries one (or a placeholder).
   const open = info ? !info.auth.required : false;
-  const shown = open && !token ? null : token;
+  const shown = token ?? (open ? null : undefined);
   const snippet = format === "claude" ? mcpCommand(url, shown) : mcpJson(url, shown);
+
+  // Shown once: Next keeps visited pages alive but hidden (<Activity>, cacheComponents), so drop
+  // the token when this page is hidden or left, not only when it unmounts.
+  useLayoutEffect(() => () => setToken(null), []);
 
   const make = async () => {
     setMaking(true);

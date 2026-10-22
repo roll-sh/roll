@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronRight, Plus, Send, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { codeApi, WEBHOOK_EVENTS, type Repo, type Webhook } from "@/lib/code-api";
 import {
   CI_SYSTEMS,
@@ -30,6 +30,10 @@ export function WebhooksPanel({ repo, writer, busy, run }: { repo: Repo; writer:
   const [adding, setAdding] = useState(false);
   const [created, setCreated] = useState<{ url: string; secret: string | null } | null>(null);
   const [version, setVersion] = useState(0);
+
+  // The secret is shown once: Next keeps visited pages alive but hidden (<Activity>,
+  // cacheComponents), so drop it when this page is hidden or left, not only when it unmounts.
+  useLayoutEffect(() => () => setCreated(null), []);
 
   useEffect(() => {
     if (!writer) return;

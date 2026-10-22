@@ -46,7 +46,8 @@ for c in "${CRATES[@]}"; do
   cargo test -p "$c"
 done
 cargo test -p roll-cli
-# The dashboard's pure logic: API client, event stream, live rate, diffs, git proxy, 404 proxy.
+# The dashboard: pure logic (API client, event stream, diffs, git proxy, 404 proxy) in node, and
+# components (diff review, markdown, queue, blame, tokens) in jsdom.
 pnpm --filter dashboard test
 
 if [[ $unit_only == 0 ]]; then
