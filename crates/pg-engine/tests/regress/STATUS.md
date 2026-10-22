@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50952 (**99.61%**) |
-| units differing | 198 |
+| units matching | 50953 (**99.61%**) |
+| units differing | 197 |
 | files fully matching | 202 |
 | engine output == expected/*.out (pg_regress "ok") | 175 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 191 | 96.5% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 190 | 96.4% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 6 | 3.0% |
 | by design (a parallel plan's combine function) | 1 | 0.5% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 191 units
-join (72), partition_join (21), partition_prune (12), subselect (6), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (2), equivclass (6), aggregates (7), rowtypes (4), rowsecurity (2), generated_virtual (1), join_hash (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
+### EXPLAIN (group C1) — 190 units
+join (71), partition_join (21), partition_prune (12), subselect (6), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (2), equivclass (6), aggregates (7), rowtypes (4), rowsecurity (2), generated_virtual (1), join_hash (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -237,7 +237,7 @@ matches this table's counts).
 | file | fixed units |
 |---|---|
 | partition_prune | 24, 203, 414, 435, 440, 446, 485, 489, 490, 524, 526, 528, 532, 534, 544, 555, 623, 626, 633, 664, 722, 725, 729, 735, 754, 756 |
-| join | 77, 85, 349, 364, 379, 458, 459, 462, 513, 514, 515, 566, 591, 647, 844, 867, 921, 923 (90 → 74); third batch: 248, 420 |
+| join | 77, 85, 349, 364, 379, 458, 459, 462, 513, 514, 515, 566, 591, 647, 844, 867, 921, 923 (90 → 74); third batch: 248, 420; fourth: 416 |
 | partition_join | 94, 134, 158, 235, 603, 604, 605; second batch: 43, 173, 256, 258, 599, 600, 601 |
 | create_index | 671 |
 
@@ -320,8 +320,17 @@ What changed:
   repeated scans (compute_bitmap_pages' loop_count, the index part amortized too, and EXPLAIN
   costs it the same way: join 420).
 
+- Fourth batch (subset runs of 26 files: join 416 fixed, none broken): a WHERE's equalities
+  left above a left join, read in its nullable side, make one equivalence class with the
+  WHERE's other equalities (process_equivalence, in their order), and its clauses are the ones
+  Postgres derives at the join (generate_join_implied_equalities_normal): the members only the
+  join computes equated in turn, the last with the first outer side member, a written clause
+  over the same two members reused as written; after the other quals. Only classes of three
+  or more members of one btree family without constants, and not when a qual is strict for
+  the nullable side (the join is reduced to an inner one first in Postgres).
+
 Goldens added: `tests/sql/a5_runtime_pruning.sql`, `a5_join_misc.sql`, `a5_lifted_merge.sql`,
-`a5_pw_order.sql`, `a5_merge_useful.sql`.
+`a5_pw_order.sql`, `a5_merge_useful.sql`, `a5_oj_classes.sql`.
 
 Still open from this list, and why:
 
@@ -1560,7 +1569,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 349 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 853 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (70) |
+| join | 925 | 854 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (69) |
 | aggregates | 556 | 548 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
