@@ -174,6 +174,11 @@ roll storage restore assets/img/logo.png --at <deleted_at>
   with heavy churn.
 - `roll storage delete <bucket> --force` deletes a bucket with everything in it. Those objects
   don't go to a trash, because the bucket is gone.
+- **Versioned buckets** (`PutBucketVersioning`) keep overwritten and deleted objects as
+  noncurrent versions instead, as on S3. Deleting a version for good (`DELETE ?versionId=`, or
+  a lifecycle rule) still moves it to the trash, so even that is recoverable. Restoring it puts
+  it back in the key's history. Object Lock (retention and legal holds) works as on S3, and a
+  locked version is never deleted by anything.
 
 Below the trash, roll keeps unreferenced data for another 24 hours before it really deletes it.
 That's a safety net for roll's own bugs, not something you can use.
@@ -194,16 +199,19 @@ That's a safety net for roll's own bugs, not something you can use.
 
 ## Lifecycle
 
-`PutBucketLifecycleConfiguration`, or the bucket settings in the dashboard, supports these rules,
-each filtered by prefix:
+`PutBucketLifecycleConfiguration`, or the bucket settings in the dashboard, supports S3's rules,
+filtered by prefix, tags and object size:
 
-- **Expiration.Days:** objects older than N days are deleted. They go to the trash like any other
-  delete, so they're still recoverable for `recover_days`.
+- **Expiration** (`Days` or `Date`): objects are deleted. They go to the trash like any other
+  delete (or get a delete marker in a versioned bucket), so they're still recoverable.
+- **NoncurrentVersionExpiration:** noncurrent versions older than N days (beyond the newest
+  `NewerNoncurrentVersions`) are deleted for good, to the trash.
+- **ExpiredObjectDeleteMarker:** delete markers with nothing left behind them are removed.
 - **AbortIncompleteMultipartUpload.DaysAfterInitiation:** unfinished multipart uploads are
   aborted. With no rule, they're aborted after 7 days.
 
-Transitions to other storage classes aren't supported or needed. roll stores everything in
-S3 Intelligent-Tiering, which moves cold data to cheaper tiers by itself.
+Transitions are accepted and kept, but never needed: roll stores everything in S3
+Intelligent-Tiering, which moves cold data to cheaper tiers by itself.
 
 ## Durability
 

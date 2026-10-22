@@ -140,14 +140,19 @@ pub(crate) struct BucketRow {
     pub objects: u64,
     pub bytes: u64,
     pub trash_bytes: u64,
+    pub versioning: Option<String>,
+    pub object_lock: Option<ObjectLockConfig>,
+    pub versions: u64,
+    pub version_bytes: u64,
 }
 
-const BUCKET_COLS: &str = "id, name, region, created_at, public, recover_days, cors, lifecycle, parent_id, parent_at, objects, bytes, trash_bytes";
+const BUCKET_COLS: &str = "id, name, region, created_at, public, recover_days, cors, lifecycle, parent_id, parent_at, objects, bytes, trash_bytes, versioning, object_lock, versions, version_bytes";
 
 fn bucket_row(r: &rusqlite::Row) -> rusqlite::Result<BucketRow> {
     let parse = |i: usize| -> rusqlite::Result<Option<String>> { r.get(i) };
     let cors: Option<String> = parse(6)?;
     let lifecycle: Option<String> = parse(7)?;
+    let object_lock: Option<String> = parse(14)?;
     let bad = |i: usize, e: serde_json::Error| rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, Box::new(e));
     Ok(BucketRow {
         id: r.get(0)?,
@@ -163,6 +168,10 @@ fn bucket_row(r: &rusqlite::Row) -> rusqlite::Result<BucketRow> {
         objects: r.get::<_, i64>(10)?.max(0) as u64,
         bytes: r.get::<_, i64>(11)?.max(0) as u64,
         trash_bytes: r.get::<_, i64>(12)?.max(0) as u64,
+        versioning: r.get(13)?,
+        object_lock: object_lock.map(|s| serde_json::from_str(&s)).transpose().map_err(|e| bad(14, e))?,
+        versions: r.get::<_, i64>(15)?.max(0) as u64,
+        version_bytes: r.get::<_, i64>(16)?.max(0) as u64,
     })
 }
 
@@ -171,6 +180,25 @@ pub(crate) fn find_bucket(c: &Connection, name: &str) -> Result<BucketRow> {
         .query_row([name], bucket_row)
         .optional()?
         .ok_or_else(|| StoreError::NoSuchBucket(name.to_string()))
+}
+
+/// S3's rule for deleting a bucket: no objects, no delete markers and no noncurrent versions in
+/// its view.
+fn bucket_empty(c: &Connection, bucket_id: &str) -> Result<bool> {
+    if c.prepare_cached("SELECT 1 FROM versions WHERE bucket_id = ?1 LIMIT 1")?.exists([bucket_id])? {
+        return Ok(false);
+    }
+    let chain = rows::chain(c, bucket_id)?;
+    Ok(rows::Merger::current(c, &chain, "", "", true).next_entry()?.is_none())
+}
+
+/// Whether any of the bucket's rows (current, noncurrent or trashed) is under Object Lock.
+pub(crate) fn holds_locked(c: &Connection, bucket_id: &str, now: i64) -> Result<bool> {
+    const LOCKED: &str = "bucket_id = ?1 AND (legal_hold = 1 OR (lock_mode IS NOT NULL AND lock_until > ?2))";
+    Ok(c.prepare_cached(&format!(
+        "SELECT 1 FROM objects WHERE {LOCKED} UNION ALL SELECT 1 FROM versions WHERE {LOCKED} UNION ALL SELECT 1 FROM trash WHERE {LOCKED} LIMIT 1"
+    ))?
+    .exists(params![bucket_id, now])?)
 }
 
 pub(crate) fn find_bucket_id(c: &Connection, id: &str) -> Result<Option<BucketRow>> {
@@ -203,6 +231,10 @@ fn bucket_view(c: &Connection, b: BucketRow) -> Result<Bucket> {
         objects: b.objects,
         bytes: b.bytes,
         trash_bytes: b.trash_bytes,
+        versioning: b.versioning,
+        object_lock: b.object_lock,
+        versions: b.versions,
+        version_bytes: b.version_bytes,
     })
 }
 
@@ -338,13 +370,16 @@ impl Store {
         let id = ids::bucket_id();
         let region = self.cfg.region.clone();
         let public = opts.public.unwrap_or(false);
+        // Object Lock needs versioning, so it turns it on.
+        let locked = opts.object_lock.unwrap_or(false);
+        let (versioning, lock) = if locked { (Some("Enabled"), Some(rows::json(&ObjectLockConfig::default())?)) } else { (None, None) };
         self.write(|c| {
             if c.query_row("SELECT 1 FROM buckets WHERE name = ?1", [name], |_| Ok(())).optional()?.is_some() {
                 return Err(StoreError::BucketExists(name.to_string()));
             }
             c.execute(
-                &format!("INSERT INTO buckets ({BUCKET_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, 0, 0, 0)"),
-                params![id, name, region, now, public as i64, recover_days as i64],
+                &format!("INSERT INTO buckets ({BUCKET_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, 0, 0, 0, ?7, ?8, 0, 0)"),
+                params![id, name, region, now, public as i64, recover_days as i64, versioning, lock],
             )?;
             Ok(())
         })
@@ -377,8 +412,20 @@ impl Store {
         if let Some(r) = u.lifecycle.as_mut() {
             validate::lifecycle(r)?;
         }
+        if let Some(v) = &u.versioning
+            && v != "Enabled"
+            && v != "Suspended"
+        {
+            return Err(StoreError::InvalidArgument("versioning is Enabled or Suspended".into()));
+        }
         self.write(|c| {
             let b = find_bucket(c, name)?;
+            if let Some(v) = &u.versioning {
+                if v == "Suspended" && b.object_lock.is_some() {
+                    return Err(StoreError::InvalidBucketState("An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.".into()));
+                }
+                c.execute("UPDATE buckets SET versioning = ?2 WHERE id = ?1", params![b.id, v])?;
+            }
             if let Some(p) = u.public {
                 c.execute("UPDATE buckets SET public = ?2 WHERE id = ?1", params![b.id, p as i64])?;
             }
@@ -410,7 +457,9 @@ impl Store {
                 return Err(StoreError::BucketExists(name.to_string()));
             }
             c.execute(
-                &format!("INSERT INTO buckets ({BUCKET_COLS}) SELECT ?1, ?2, region, ?3, public, recover_days, cors, lifecycle, id, ?3, 0, 0, 0 FROM buckets WHERE id = ?4"),
+                &format!(
+                    "INSERT INTO buckets ({BUCKET_COLS}) SELECT ?1, ?2, region, ?3, public, recover_days, cors, lifecycle, id, ?3, 0, 0, 0, versioning, object_lock, 0, 0 FROM buckets WHERE id = ?4"
+                ),
                 params![id, name, now, p.id],
             )?;
             Ok(())
@@ -426,11 +475,14 @@ impl Store {
         if !self.read(|c| rows::children(c, &b.id))?.is_empty() {
             return Err(StoreError::BucketHasBranches(name.to_string()));
         }
-        if !force {
-            let page = self.list_objects(name, &ListQuery { max_keys: 1, ..Default::default() })?;
-            if !page.objects.is_empty() || !page.prefixes.is_empty() {
-                return Err(StoreError::BucketNotEmpty(name.to_string()));
-            }
+        if !force && !self.read(|c| bucket_empty(c, &b.id))? {
+            return Err(StoreError::BucketNotEmpty(name.to_string()));
+        }
+        // Versions under Object Lock (retention or legal hold) are never deleted, so neither is
+        // their bucket. Checked up front, and again for every row deleted below.
+        let now = self.now();
+        if self.read(|c| holds_locked(c, &b.id, now))? {
+            return Err(StoreError::ObjectLocked(format!("bucket {name} holds versions under Object Lock")));
         }
         // Uploads first (each aborts its backend upload), then rows in batches, then the bucket.
         loop {
@@ -447,42 +499,61 @@ impl Store {
                 }
             }
         }
-        let now = self.now();
         // Without `force` everything goes in one transaction that checks the view is empty
         // first: a write may have landed since the check above, and it must not be deleted
         // along with the bucket. (Its own rows are then only tombstones, which are small.)
         let batch: i64 = if force { 1000 } else { i64::MAX };
+        let locked = || StoreError::ObjectLocked(format!("bucket {name} holds versions under Object Lock"));
         loop {
             let done = self
                 .write(|c| {
                     if !rows::children(c, &b.id)?.is_empty() {
                         return Err(StoreError::BucketHasBranches(name.to_string()));
                     }
-                    if !force {
-                        let chain = rows::chain(c, &b.id)?;
-                        if rows::Merger::new(c, &chain, "", None, None).next_entry()?.is_some() {
-                            return Err(StoreError::BucketNotEmpty(name.to_string()));
-                        }
+                    if !force && !bucket_empty(c, &b.id)? {
+                        return Err(StoreError::BucketNotEmpty(name.to_string()));
                     }
                     let own = c
                         .prepare(&format!("SELECT {} FROM objects WHERE bucket_id = ?1 LIMIT ?2", rows::COLS))?
                         .query_map(params![&b.id, batch], |r| rows::row_at(r, 0))?
                         .collect::<rusqlite::Result<Vec<Row>>>()?;
                     for r in &own {
+                        if r.lock.locked(now) {
+                            return Err(locked());
+                        }
                         rows::delete_own_row(c, &b.id, &r.key)?;
                         if let Some(blob) = &r.blob_id {
                             rows::add_ref(c, blob, -1, now)?;
                         }
                     }
+                    let versions = c
+                        .prepare(&format!("SELECT {} FROM versions WHERE bucket_id = ?1 LIMIT ?2", rows::COLS))?
+                        .query_map(params![&b.id, batch], |r| rows::row_at(r, 0))?
+                        .collect::<rusqlite::Result<Vec<Row>>>()?;
+                    for r in &versions {
+                        if r.lock.locked(now) {
+                            return Err(locked());
+                        }
+                        rows::version_delete(c, &b.id, r)?;
+                        if let Some(blob) = &r.blob_id {
+                            rows::add_ref(c, blob, -1, now)?;
+                        }
+                    }
                     let trash = c
-                        .prepare("SELECT key, deleted_at, blob_id, size FROM trash WHERE bucket_id = ?1 LIMIT ?2")?
-                        .query_map(params![&b.id, batch], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))?
+                        .prepare("SELECT key, deleted_at, blob_id, size, legal_hold, lock_mode, lock_until FROM trash WHERE bucket_id = ?1 LIMIT ?2")?
+                        .query_map(params![&b.id, batch], |r| {
+                            let lock = ObjectLock { legal_hold: r.get::<_, Option<i64>>(4)?.map(|v| v != 0), mode: r.get(5)?, retain_until: r.get(6)? };
+                            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, lock))
+                        })?
                         .collect::<rusqlite::Result<Vec<_>>>()?;
-                    for (key, at, blob, size) in &trash {
+                    for (key, at, blob, size, lock) in &trash {
+                        if lock.locked(now) {
+                            return Err(locked());
+                        }
                         rows::trash_delete(c, &b.id, key, *at, *size as u64)?;
                         rows::add_ref(c, blob, -1, now)?;
                     }
-                    if (own.is_empty() && trash.is_empty()) || !force {
+                    if (own.is_empty() && versions.is_empty() && trash.is_empty()) || !force {
                         let uploads: i64 = c.query_row("SELECT count(*) FROM uploads WHERE bucket_id = ?1", [&b.id], |r| r.get(0))?;
                         if uploads > 0 {
                             return Err(StoreError::Unavailable("uploads started while the bucket was being deleted; retry".into()));
@@ -588,7 +659,7 @@ impl Store {
         let day = ids::day_of(now);
         let result = self.write_relaxed(|c| {
             let sizes: Vec<(String, i64)> =
-                c.prepare("SELECT id, bytes + trash_bytes FROM buckets")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                c.prepare("SELECT id, bytes + trash_bytes + version_bytes FROM buckets")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let known: HashSet<&str> = sizes.iter().map(|(id, _)| id.as_str()).collect();
             let mut st = c.prepare_cached(
                 "INSERT INTO usage (bucket_id, day, class_a, class_b, bytes_in, egress_internet, egress_internal, byte_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)

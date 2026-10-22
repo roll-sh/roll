@@ -441,7 +441,7 @@ async fn restore_edge_cases() {
 #[tokio::test]
 async fn bucket_lookups_and_validation() {
     let (_b, _c, s) = env("bucketval").await;
-    let b = s.create_bucket("zeta", BucketOptions { public: Some(true), recover_days: Some(0) }).await.unwrap();
+    let b = s.create_bucket("zeta", BucketOptions { public: Some(true), recover_days: Some(0), ..Default::default() }).await.unwrap();
     assert_eq!(b.region, s.cfg.region);
     assert!(b.public && b.recover_days == 0 && b.parent.is_none() && b.branches.is_empty());
     assert!(matches!(s.create_bucket("alpha", BucketOptions { recover_days: Some(31), ..Default::default() }).await, Err(StoreError::InvalidArgument(_))));
@@ -450,13 +450,13 @@ async fn bucket_lookups_and_validation() {
     assert_eq!(s.bucket_by_id(&b.id).unwrap().unwrap().name, "zeta");
     assert!(s.bucket_by_id("bkt_nope").unwrap().is_none());
     assert!(matches!(s.update_bucket("nobucket", BucketUpdate::default()).await, Err(StoreError::NoSuchBucket(_))));
-    let lc = |expire, abort| vec![LifecycleRule { id: String::new(), prefix: String::new(), enabled: true, expire_days: expire, abort_multipart_days: abort }];
+    let lc = |expire, abort| vec![LifecycleRule { id: String::new(), prefix: String::new(), enabled: true, expire_days: expire, abort_multipart_days: abort, ..Default::default() }];
     for bad in [lc(Some(0), None), lc(None, None)] {
         assert!(matches!(s.update_bucket("zeta", BucketUpdate { lifecycle: Some(bad), ..Default::default() }).await, Err(StoreError::InvalidArgument(_))));
     }
     let mut cors = vec![CorsRule { allowed_origins: vec!["https://app.dev".into()], allowed_methods: vec!["GET".into()], ..Default::default() }];
     let lifecycle = lc(Some(5), Some(2));
-    s.update_bucket("zeta", BucketUpdate { cors: Some(cors.clone()), lifecycle: Some(lifecycle), recover_days: Some(4), public: Some(false) }).await.unwrap();
+    s.update_bucket("zeta", BucketUpdate { cors: Some(cors.clone()), lifecycle: Some(lifecycle), recover_days: Some(4), public: Some(false), ..Default::default() }).await.unwrap();
     // A branch starts with its parent's settings.
     let br = s.branch_bucket("zeta", "zeta-dev").await.unwrap();
     assert_eq!((br.public, br.recover_days, br.cors.clone(), br.lifecycle.len(), br.region.clone()), (false, 4, cors.clone(), 1, s.cfg.region.clone()));

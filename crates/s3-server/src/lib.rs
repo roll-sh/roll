@@ -16,11 +16,13 @@ mod bucket;
 mod cors;
 mod ctx;
 mod error;
+mod lifecycle;
 mod multipart;
 mod object;
 mod post;
 mod response;
 mod upload;
+mod versioning;
 
 use axum::Router;
 use axum::extract::{ConnectInfo, Request, State};

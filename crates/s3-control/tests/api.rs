@@ -955,3 +955,109 @@ async fn bucket_settings_are_validated() {
     let br = t.ok("POST", "/v1/storage/buckets/settings/branches", Some(json!({ "name": "settings-br" }))).await;
     assert_eq!((br["public"].as_bool(), br["recover_days"].as_u64()), (Some(true), Some(2)));
 }
+
+#[tokio::test]
+async fn versioning_versions_and_object_lock() {
+    let t = start().await;
+    let b = t.bucket("ver").await;
+    assert_eq!((b["versioning"].clone(), b["object_lock"].clone(), b["versions"].clone(), b["version_bytes"].clone()), (Value::Null, Value::Null, json!(0), json!(0)));
+    let b = t.ok("PATCH", "/v1/storage/buckets/ver", Some(json!({ "versioning": "Enabled" }))).await;
+    assert_eq!(b["versioning"], "Enabled");
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/ver", Some(json!({ "versioning": "On" }))).await, StatusCode::BAD_REQUEST);
+    let v1 = t.upload("ver", "k", b"one", &[]).await["version_id"].as_str().unwrap().to_string();
+    let v2 = t.upload("ver", "k", b"twotwo", &[]).await["version_id"].as_str().unwrap().to_string();
+    assert_ne!(v1, v2);
+    let b = t.ok("GET", "/v1/storage/buckets/ver", None).await;
+    assert_eq!((b["objects"].as_u64(), b["bytes"].as_u64(), b["versions"].as_u64(), b["version_bytes"].as_u64()), (Some(1), Some(6), Some(1), Some(3)));
+    // Noncurrent versions are stored bytes.
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/ver/usage", None).await["storage_bytes"], 9);
+
+    // A version: its info and its bytes.
+    let i = t.ok("GET", &format!("/v1/storage/buckets/ver/object?key=k&version_id={v1}"), None).await;
+    assert_eq!((i["version_id"].as_str(), i["size"].as_u64()), (Some(v1.as_str()), Some(3)));
+    let r = t.http.get(t.url(&format!("/v1/storage/buckets/ver/download?key=k&version_id={v1}"))).send().await.unwrap();
+    assert_eq!(r.bytes().await.unwrap().as_ref(), b"one");
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/ver/object?key=k", None).await["version_id"], v2.as_str());
+    for bad in ["nope", "3HL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY"] {
+        assert_eq!(t.err("GET", &format!("/v1/storage/buckets/ver/object?key=k&version_id={}", q(bad)), None).await, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(t.err("GET", "/v1/storage/buckets/ver/object?key=k&version_id=0000000000000000aaaaaaaaaaaaaaaa", None).await, StatusCode::NOT_FOUND);
+
+    // A delete without a version adds a marker; one for a key that isn't there adds nothing.
+    let d = t.ok("DELETE", "/v1/storage/buckets/ver/object?key=k", None).await;
+    assert_eq!((d["deleted"].as_str(), d["delete_marker"].as_bool()), (Some("k"), Some(true)));
+    let marker = d["version_id"].as_str().unwrap().to_string();
+    assert_eq!(t.err("DELETE", "/v1/storage/buckets/ver/object?key=never", None).await, StatusCode::NOT_FOUND);
+    assert_eq!(t.err("GET", "/v1/storage/buckets/ver/object?key=k", None).await, StatusCode::NOT_FOUND);
+
+    // The versions listing, whole and a page at a time.
+    let l = t.ok("GET", "/v1/storage/buckets/ver/versions", None).await;
+    assert_eq!(l["next_cursor"], Value::Null);
+    let vs = l["versions"].as_array().unwrap();
+    let ids: Vec<&str> = vs.iter().map(|v| v["version_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, [marker.as_str(), v2.as_str(), v1.as_str()]);
+    assert_eq!((vs[0]["is_latest"].as_bool(), vs[0]["delete_marker"].as_bool()), (Some(true), Some(true)));
+    assert_eq!((vs[1]["key"].as_str(), vs[1]["size"].as_u64(), vs[1]["etag"].as_str(), vs[1]["is_latest"].as_bool()), (Some("k"), Some(6), Some(md5_hex(b"twotwo").as_str()), Some(false)));
+    assert!(vs[2]["last_modified"].as_i64().is_some());
+    let mut paged = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let path = match &cursor {
+            Some(c) => format!("/v1/storage/buckets/ver/versions?limit=1&prefix=k&cursor={c}"),
+            None => "/v1/storage/buckets/ver/versions?limit=1&prefix=k".to_string(),
+        };
+        let page = t.ok("GET", &path, None).await;
+        paged.extend(page["versions"].as_array().unwrap().iter().map(|v| v["version_id"].as_str().unwrap().to_string()));
+        match page["next_cursor"].as_str() {
+            Some(c) => cursor = Some(c.to_string()),
+            None => break,
+        }
+    }
+    assert_eq!(paged, ids);
+    assert_eq!(t.err("GET", "/v1/storage/buckets/ver/versions?cursor=%25%25", None).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.err("GET", "/v1/storage/buckets/nope/versions", None).await, StatusCode::NOT_FOUND);
+    assert!(t.ok("GET", "/v1/storage/buckets/ver/versions?prefix=zzz", None).await["versions"].as_array().unwrap().is_empty());
+
+    // A version deleted for good goes to the trash, with its id.
+    let d = t.ok("DELETE", &format!("/v1/storage/buckets/ver/object?key=k&version_id={v1}"), None).await;
+    assert_eq!((d["version_id"].as_str(), d["delete_marker"].as_bool()), (Some(v1.as_str()), Some(false)));
+    let trash = t.ok("GET", "/v1/storage/buckets/ver/trash", None).await;
+    assert_eq!(trash["objects"][0]["version_id"], v1.as_str());
+    assert_eq!(t.err("DELETE", &format!("/v1/storage/buckets/ver/object?key=k&version_id={v1}"), None).await, StatusCode::NOT_FOUND);
+    // Restored behind the newer versions.
+    let restored = t.ok("POST", "/v1/storage/buckets/ver/trash/restore", Some(json!({ "key": "k", "deleted_at": trash["objects"][0]["deleted_at"] }))).await;
+    assert_eq!(restored["version_id"], v1.as_str());
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/ver/versions", None).await["versions"].as_array().unwrap().len(), 3);
+    // Deleting the marker brings v2 back.
+    t.ok("DELETE", &format!("/v1/storage/buckets/ver/object?key=k&version_id={marker}"), None).await;
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/ver/object?key=k", None).await["version_id"], v2.as_str());
+
+    // Object Lock: at creation, it turns versioning on; locked versions can't be deleted for good.
+    let l = t.ok("POST", "/v1/storage/buckets", Some(json!({ "name": "locked", "object_lock": true }))).await;
+    assert_eq!((l["versioning"].as_str(), l["object_lock"].clone()), (Some("Enabled"), json!({ "mode": null, "days": null, "years": null })));
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/locked", Some(json!({ "versioning": "Suspended" }))).await, StatusCode::CONFLICT);
+    let lv = t.upload("locked", "k", b"x", &[]).await["version_id"].as_str().unwrap().to_string();
+    t.store.put_legal_hold("locked", "k", Some(&lv), true).await.unwrap();
+    assert!(t.ok("GET", "/v1/storage/buckets/locked/object?key=k", None).await["lock"]["legal_hold"].as_bool().unwrap());
+    assert_eq!(t.err("DELETE", &format!("/v1/storage/buckets/locked/object?key=k&version_id={lv}"), None).await, StatusCode::CONFLICT);
+    assert_eq!(t.err("DELETE", "/v1/storage/buckets/locked?force=true", None).await, StatusCode::CONFLICT);
+    assert_eq!(t.ok("POST", "/v1/storage/buckets/locked/delete", Some(json!({ "prefix": "" }))).await["deleted"], 1, "a delete marker is fine");
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/locked/versions", None).await["versions"].as_array().unwrap().len(), 2);
+    t.store.put_legal_hold("locked", "k", Some(&lv), false).await.unwrap();
+    t.ok("DELETE", "/v1/storage/buckets/locked?force=true", None).await;
+
+    // The lifecycle JSON takes the full model; the old shape keeps working (other tests).
+    let rules = json!([{
+        "id": "all", "prefix": "logs/", "enabled": true, "expire_days": null, "abort_multipart_days": null,
+        "tags": { "tier": "tmp" }, "size_greater_than": 10, "size_less_than": null, "expire_at": null, "expire_delete_markers": false,
+        "noncurrent_days": 30, "newer_noncurrent_versions": 2,
+        "transitions": [{ "days": 30, "date": null, "storage_class": "GLACIER" }],
+        "noncurrent_transitions": [{ "noncurrent_days": 10, "newer_noncurrent_versions": null, "storage_class": "DEEP_ARCHIVE" }]
+    }]);
+    let b = t.ok("PATCH", "/v1/storage/buckets/ver", Some(json!({ "lifecycle": rules }))).await;
+    assert_eq!(b["lifecycle"], rules);
+    let bad = json!({ "lifecycle": [{ "id": "x", "prefix": "", "enabled": true, "transitions": [{ "days": 1, "storage_class": "NOPE" }] }] });
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/ver", Some(bad)).await, StatusCode::BAD_REQUEST);
+    // Branches inherit the versioning state.
+    assert_eq!(t.ok("POST", "/v1/storage/buckets/ver/branches", Some(json!({ "name": "ver-br" }))).await["versioning"], "Enabled");
+}

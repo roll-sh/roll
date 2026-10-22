@@ -4,19 +4,24 @@
 //! recursively. Writes to a bucket push the old view down to children that don't have their
 //! own row first, so a branch's view never changes under it.
 //!
-//! `blobs.refs` counts every `objects` and `trash` row pointing at the blob. All changes to it
-//! go through [`add_ref`], which refuses to go below zero or to revive an unreferenced blob:
-//! either would mean a bookkeeping bug, and failing the write beats losing data.
+//! `blobs.refs` counts every `objects`, `versions` and `trash` row pointing at the blob. All
+//! changes to it go through [`add_ref`], which refuses to go below zero or to revive an
+//! unreferenced blob: either would mean a bookkeeping bug, and failing the write beats losing
+//! data.
+//!
+//! A row is a live version (it has a blob), a delete marker (no blob, `delete_marker`), or a
+//! tombstone (neither: "absent here", only in branches). `objects` holds each key's current
+//! row; `versions` the noncurrent ones (see `versioning`).
 
 use crate::error::{Result, StoreError};
-use crate::model::{Checksum, ObjectHeaders, ObjectMeta};
+use crate::model::{Checksum, ObjectHeaders, ObjectLock, ObjectMeta};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {
     pub key: String,
-    /// `None`: a tombstone.
+    /// `None`: a tombstone or a delete marker.
     pub blob_id: Option<String>,
     pub size: u64,
     pub etag: String,
@@ -25,6 +30,12 @@ pub(crate) struct Row {
     pub parts: u32,
     pub part_sizes: Vec<u64>,
     pub modified_at: i64,
+    /// Version id; sorts newest first within a key. Empty for tombstones.
+    pub vid: String,
+    /// The "null" version (unversioned and suspended writes).
+    pub is_null: bool,
+    pub delete_marker: bool,
+    pub lock: ObjectLock,
 }
 
 impl Row {
@@ -39,7 +50,29 @@ impl Row {
             parts: 0,
             part_sizes: Vec::new(),
             modified_at: now,
+            vid: String::new(),
+            is_null: true,
+            delete_marker: false,
+            lock: ObjectLock::default(),
         }
+    }
+
+    pub fn marker(key: &str, vid: String, is_null: bool, now: i64) -> Self {
+        Self { vid, is_null, delete_marker: true, ..Self::tombstone(key, now) }
+    }
+
+    pub fn is_tombstone(&self) -> bool {
+        self.blob_id.is_none() && !self.delete_marker
+    }
+
+    /// The id S3 shows: `null` or the vid.
+    pub fn version_id(&self) -> String {
+        if self.is_null { "null".to_string() } else { self.vid.clone() }
+    }
+
+    /// Whether this is the version S3 calls `version_id`.
+    pub fn is_version(&self, version_id: &str) -> bool {
+        if version_id == "null" { self.is_null } else { !self.is_null && self.vid == version_id }
     }
 
     pub fn blob(&self) -> Result<&str> {
@@ -57,13 +90,17 @@ impl Row {
             parts: self.parts,
             part_sizes: self.part_sizes.clone(),
             modified_at: self.modified_at,
+            version_id: self.version_id(),
+            lock: self.lock.clone(),
         })
     }
 }
 
-/// Object columns after `bucket_id` (the trash adds `deleted_at` before them).
+/// Object columns after `bucket_id` (the trash adds `deleted_at` before them, `versions`
+/// `noncurrent_at`).
 pub(crate) const COLS: &str = "key, blob_id, size, etag, content_type, cache_control, content_disposition, content_encoding, \
-     content_language, expires, metadata, tags, checksum_algorithm, checksum_type, checksum, parts, part_sizes, modified_at";
+     content_language, expires, metadata, tags, checksum_algorithm, checksum_type, checksum, parts, part_sizes, modified_at, \
+     vid, is_null, delete_marker, lock_mode, lock_until, legal_hold";
 
 fn json_col<T: serde::de::DeserializeOwned>(r: &rusqlite::Row, i: usize) -> rusqlite::Result<T> {
     let s: String = r.get(i)?;
@@ -97,6 +134,10 @@ pub(crate) fn row_at(r: &rusqlite::Row, o: usize) -> rusqlite::Result<Row> {
         parts: r.get::<_, i64>(o + 15)? as u32,
         part_sizes: json_col(r, o + 16)?,
         modified_at: r.get(o + 17)?,
+        vid: r.get(o + 18)?,
+        is_null: r.get::<_, i64>(o + 19)? != 0,
+        delete_marker: r.get::<_, i64>(o + 20)? != 0,
+        lock: ObjectLock { mode: r.get(o + 21)?, retain_until: r.get(o + 22)?, legal_hold: r.get::<_, Option<i64>>(o + 23)?.map(|v| v != 0) },
     })
 }
 
@@ -129,6 +170,12 @@ fn row_values(r: &Row) -> Result<Vec<rusqlite::types::Value>> {
         Integer(r.parts as i64),
         Text(serde_json::to_string(&r.part_sizes)?),
         Integer(r.modified_at),
+        Text(r.vid.clone()),
+        Integer(r.is_null as i64),
+        Integer(r.delete_marker as i64),
+        opt(&r.lock.mode),
+        r.lock.retain_until.map_or(Null, Integer),
+        r.lock.legal_hold.map_or(Null, |h| Integer(h as i64)),
     ])
 }
 
@@ -166,6 +213,66 @@ pub(crate) fn resolve(c: &Connection, chain: &[String], key: &str) -> Result<Opt
         }
     }
     Ok(None)
+}
+
+/// Like [`resolve`], but a delete marker counts: the key's current version, live or a marker.
+pub(crate) fn resolve_current(c: &Connection, chain: &[String], key: &str) -> Result<Option<(Row, usize)>> {
+    for (i, b) in chain.iter().enumerate() {
+        if let Some(r) = own_row(c, b, key)? {
+            return Ok(if r.is_tombstone() { None } else { Some((r, i)) });
+        }
+    }
+    Ok(None)
+}
+
+/// The bucket's view of `key` is about to change: children without their own row keep the old
+/// view (a copy of its current version, or a tombstone if it had none).
+pub(crate) fn push_down(c: &Connection, bucket_id: &str, chain: &[String], key: &str, now: i64) -> Result<()> {
+    let kids = children(c, bucket_id)?;
+    if kids.is_empty() {
+        return Ok(());
+    }
+    let old = resolve_current(c, chain, key)?;
+    for child in kids {
+        if own_row(c, &child, key)?.is_none() {
+            match &old {
+                Some((r, _)) => {
+                    if let Some(b) = &r.blob_id {
+                        add_ref(c, b, 1, now)?;
+                    }
+                    insert_row(c, &child, r)?;
+                }
+                None => insert_row(c, &child, &Row::tombstone(key, now))?,
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Noncurrent versions of `key` the bucket owns, newest first, with when each became noncurrent.
+pub(crate) fn own_versions(c: &Connection, bucket_id: &str, key: &str) -> Result<Vec<(Row, i64)>> {
+    let mut st = c.prepare_cached(&format!("SELECT {COLS}, noncurrent_at FROM versions WHERE bucket_id = ?1 AND key = ?2 ORDER BY vid"))?;
+    let rows = st.query_map(params![bucket_id, key], |r| Ok((row_at(r, 0)?, r.get(24)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Add a noncurrent version (references are the caller's business).
+pub(crate) fn version_insert(c: &Connection, bucket_id: &str, r: &Row, noncurrent_at: i64) -> Result<()> {
+    let mut values = vec![rusqlite::types::Value::Text(bucket_id.to_string()), rusqlite::types::Value::Integer(noncurrent_at)];
+    values.extend(row_values(r)?);
+    c.prepare_cached(&insert_sql("versions", "noncurrent_at"))?.execute(rusqlite::params_from_iter(values))?;
+    c.prepare_cached("UPDATE buckets SET versions = versions + 1, version_bytes = version_bytes + ?2 WHERE id = ?1")?.execute(params![bucket_id, r.size as i64])?;
+    Ok(())
+}
+
+/// Remove a noncurrent version (references are the caller's business).
+pub(crate) fn version_delete(c: &Connection, bucket_id: &str, r: &Row) -> Result<()> {
+    let n = c.prepare_cached("DELETE FROM versions WHERE bucket_id = ?1 AND key = ?2 AND vid = ?3")?.execute(params![bucket_id, r.key, r.vid])?;
+    if n != 1 {
+        return Err(StoreError::internal(format!("noncurrent version {} of {} vanished", r.vid, r.key)));
+    }
+    c.prepare_cached("UPDATE buckets SET versions = versions - 1, version_bytes = version_bytes - ?2 WHERE id = ?1")?.execute(params![bucket_id, r.size as i64])?;
+    Ok(())
 }
 
 fn counters(c: &Connection, bucket_id: &str, objects: i64, bytes: i64) -> Result<()> {
@@ -252,17 +359,15 @@ pub(crate) fn write_key(c: &Connection, bucket_id: &str, chain: &[String], recov
     if new.is_none() && old.is_none() {
         return Ok(None);
     }
-    for child in children(c, bucket_id)? {
-        if own_row(c, &child, key)?.is_none() {
-            match &old {
-                Some((r, _)) => {
-                    add_ref(c, r.blob()?, 1, now)?;
-                    insert_row(c, &child, r)?;
-                }
-                None => insert_row(c, &child, &Row::tombstone(key, now))?,
-            }
-        }
+    // Dropping a locked version for good (no trash to keep it in) isn't allowed; checked before
+    // anything changes.
+    if let Some((r, 0)) = &old
+        && !(trash && recover_days > 0)
+        && r.lock.locked(now)
+    {
+        return Err(StoreError::ObjectLocked(key.to_string()));
     }
+    push_down(c, bucket_id, chain, key, now)?;
     if let Some((r, owner)) = &old {
         let owned = *owner == 0;
         if trash && recover_days > 0 {
@@ -295,25 +400,6 @@ pub(crate) fn write_key(c: &Connection, bucket_id: &str, chain: &[String], recov
     Ok(old.map(|(r, _)| r))
 }
 
-/// Change a visible object's metadata (tags) without a new version: children keep the old.
-pub(crate) fn update_in_place(c: &Connection, bucket_id: &str, chain: &[String], key: &str, f: impl FnOnce(&mut Row), now: i64) -> Result<Row> {
-    let Some((old, owner)) = resolve(c, chain, key)? else { return Err(StoreError::NoSuchKey(key.to_string())) };
-    let mut new = old.clone();
-    f(&mut new);
-    for child in children(c, bucket_id)? {
-        if own_row(c, &child, key)?.is_none() {
-            add_ref(c, old.blob()?, 1, now)?;
-            insert_row(c, &child, &old)?;
-        }
-    }
-    if owner == 0 {
-        delete_own_row(c, bucket_id, key)?;
-    } else {
-        add_ref(c, old.blob()?, 1, now)?;
-    }
-    insert_row(c, bucket_id, &new)?;
-    Ok(new)
-}
 
 /// A key past every key starting with `prefix` (keys are at most 1024 bytes, so 256 copies of
 /// the largest code point sort after any of them).
@@ -388,9 +474,25 @@ pub(crate) struct Merger<'a> {
     cursors: Vec<Cursor>,
     prefix: String,
     delimiter: Option<String>,
+    /// Yield delete markers too (version listings).
+    markers: bool,
 }
 
 impl<'a> Merger<'a> {
+    /// Current versions (delete markers included) from `from` on, no roll-up: the version
+    /// listing does its own.
+    pub(crate) fn current(c: &'a Connection, chain: &[String], prefix: &str, from: &str, inclusive: bool) -> Self {
+        let cursors = chain.iter().map(|b| Cursor { bucket: b.clone(), buf: VecDeque::new(), from: from.to_string(), inclusive, done: false }).collect();
+        Self { c, cursors, prefix: prefix.to_string(), delimiter: None, markers: true }
+    }
+
+    /// Continue from `from` (inclusive), e.g. past a common prefix.
+    pub(crate) fn seek(&mut self, from: &str) {
+        for cur in &mut self.cursors {
+            cur.seek(from);
+        }
+    }
+
     pub(crate) fn new(c: &'a Connection, chain: &[String], prefix: &str, delimiter: Option<&str>, start_after: Option<&str>) -> Self {
         let delimiter = delimiter.filter(|d| !d.is_empty()).map(str::to_string);
         let (from, inclusive) = match start_after {
@@ -402,7 +504,7 @@ impl<'a> Merger<'a> {
             _ => (prefix.to_string(), true),
         };
         let cursors = chain.iter().map(|b| Cursor { bucket: b.clone(), buf: VecDeque::new(), from: from.clone(), inclusive, done: false }).collect();
-        Self { c, cursors, prefix: prefix.to_string(), delimiter }
+        Self { c, cursors, prefix: prefix.to_string(), delimiter, markers: false }
     }
 
     pub(crate) fn next_entry(&mut self) -> Result<Option<Entry>> {
@@ -420,7 +522,7 @@ impl<'a> Merger<'a> {
                 }
             }
             let row = winner.expect("some cursor had the key");
-            if row.blob_id.is_none() {
+            if row.is_tombstone() || (row.delete_marker && !self.markers) {
                 continue;
             }
             if let Some(cp) = common_prefix(&row.key, &self.prefix, self.delimiter.as_deref()) {

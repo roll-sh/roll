@@ -260,6 +260,7 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         metadata: user_metadata(meta_fields)?,
         tags,
     };
+    let lock = crate::versioning::lock_from(|n| field(&fields, n), bucket.object_lock.is_some(), ctx.store().now())?;
 
     // Spool the file, hashing it, then store it.
     let spool = tempfile::NamedTempFile::new_in(&ctx.server.cfg.spool_dir).map_err(|e| {
@@ -299,8 +300,9 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
     store.meter.bytes_in(&bucket.id, len);
     let checksum = finished.checksum.map(|(a, v)| Checksum { algorithm: a.as_str().into(), kind: "FULL_OBJECT".into(), value: v });
     let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: finished.digest.etag(), headers, checksum };
-    let meta = store.commit_put(&bucket.name, &key, obj, &WriteCondition::none()).await.s3()?;
+    let meta = store.commit_put_with(&bucket.name, &key, obj, &WriteCondition::none(), &lock).await.s3()?;
     drop(guard);
+    let version = bucket.versioning.is_some().then(|| meta.version_id.clone());
 
     let etag = quote_etag(&meta.etag);
     let host = ctx.h("host").unwrap_or("localhost");
@@ -311,6 +313,9 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         let mut r = response::empty(StatusCode::SEE_OTHER);
         set(&mut r, "location", &target);
         set(&mut r, "etag", &etag);
+        if let Some(v) = &version {
+            set(&mut r, "x-amz-version-id", v);
+        }
         return Ok(r);
     }
     let mut r = match field(&fields, "success_action_status") {
@@ -328,6 +333,9 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         _ => response::empty(StatusCode::NO_CONTENT),
     };
     set(&mut r, "etag", &etag);
+    if let Some(v) = &version {
+        set(&mut r, "x-amz-version-id", v);
+    }
     set(&mut r, "location", &location);
     Ok(r)
 }

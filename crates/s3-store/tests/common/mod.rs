@@ -134,15 +134,22 @@ fn rows<T: rusqlite::types::FromSql>(c: &rusqlite::Connection, sql: &str) -> Vec
     c.prepare(sql).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
 }
 
-/// The bookkeeping invariants: `refs` counts exactly the `objects` and `trash` rows pointing at
-/// each blob, `unreferenced_at` is set exactly when it's zero, no row points at a blob without
-/// metadata, bucket counters match their rows, tombstones only exist in branches, nothing
-/// dangles, and every referenced blob is in object storage with the recorded size.
+/// The bookkeeping invariants: `refs` counts exactly the `objects`, `versions` and `trash` rows
+/// pointing at each blob, `unreferenced_at` is set exactly when it's zero, no row points at a
+/// blob without metadata, bucket counters match their rows, tombstones only exist in branches,
+/// noncurrent versions only exist behind a current version the bucket owns, a key has at most
+/// one null version, nothing dangles, and every referenced blob is in object storage with the
+/// recorded size.
 pub async fn assert_consistent(store: &Store, backend: &Arc<dyn Backend>) {
     let c = meta_db(store);
     let refs: std::collections::BTreeMap<String, i64> = rows(&c, "SELECT id, refs FROM blobs").into_iter().collect();
-    let counted: std::collections::BTreeMap<String, i64> =
-        rows(&c, "SELECT blob_id, count(*) FROM (SELECT blob_id FROM objects WHERE blob_id IS NOT NULL UNION ALL SELECT blob_id FROM trash) GROUP BY blob_id").into_iter().collect();
+    let counted: std::collections::BTreeMap<String, i64> = rows(
+        &c,
+        "SELECT blob_id, count(*) FROM (SELECT blob_id FROM objects WHERE blob_id IS NOT NULL UNION ALL SELECT blob_id FROM versions WHERE blob_id IS NOT NULL
+           UNION ALL SELECT blob_id FROM trash) GROUP BY blob_id",
+    )
+    .into_iter()
+    .collect();
     for (blob, n) in &counted {
         assert_eq!(refs.get(blob), Some(n), "blob {blob}: refs vs rows pointing at it");
     }
@@ -153,22 +160,34 @@ pub async fn assert_consistent(store: &Store, backend: &Arc<dyn Backend>) {
     assert!(bad.is_empty(), "unreferenced_at out of step with refs: {bad:?}");
     let counters: Vec<(String, String)> = rows(
         &c,
-        "SELECT b.name, b.objects || ' ' || b.bytes || ' ' || b.trash_bytes || ' / ' ||
+        "SELECT b.name, b.objects || ' ' || b.bytes || ' ' || b.trash_bytes || ' ' || b.versions || ' ' || b.version_bytes || ' / ' ||
                 (SELECT count(*) FROM objects o WHERE o.bucket_id = b.id AND o.blob_id IS NOT NULL) || ' ' ||
                 (SELECT coalesce(sum(size), 0) FROM objects o WHERE o.bucket_id = b.id AND o.blob_id IS NOT NULL) || ' ' ||
-                (SELECT coalesce(sum(size), 0) FROM trash t WHERE t.bucket_id = b.id) FROM buckets b",
+                (SELECT coalesce(sum(size), 0) FROM trash t WHERE t.bucket_id = b.id) || ' ' ||
+                (SELECT count(*) FROM versions v WHERE v.bucket_id = b.id) || ' ' ||
+                (SELECT coalesce(sum(size), 0) FROM versions v WHERE v.bucket_id = b.id) FROM buckets b",
     );
     for (name, v) in counters {
         let (stored, actual) = v.split_once(" / ").unwrap();
-        assert_eq!(stored, actual, "bucket {name}: objects bytes trash_bytes counters vs rows");
+        assert_eq!(stored, actual, "bucket {name}: objects bytes trash_bytes versions version_bytes counters vs rows");
     }
     let dangling: Vec<(String, String)> = rows(
         &c,
         "SELECT 'object', bucket_id || '/' || key FROM objects WHERE bucket_id NOT IN (SELECT id FROM buckets)
+         UNION ALL SELECT 'version', bucket_id || '/' || key FROM versions WHERE bucket_id NOT IN (SELECT id FROM buckets)
          UNION ALL SELECT 'trash', bucket_id || '/' || key FROM trash WHERE bucket_id NOT IN (SELECT id FROM buckets)
          UNION ALL SELECT 'upload', id FROM uploads WHERE bucket_id NOT IN (SELECT id FROM buckets)
          UNION ALL SELECT 'part', upload_id FROM parts WHERE upload_id NOT IN (SELECT id FROM uploads)
-         UNION ALL SELECT 'tombstone', bucket_id || '/' || key FROM objects WHERE blob_id IS NULL AND bucket_id IN (SELECT id FROM buckets WHERE parent_id IS NULL)",
+         UNION ALL SELECT 'tombstone', bucket_id || '/' || key FROM objects WHERE blob_id IS NULL AND delete_marker = 0 AND bucket_id IN (SELECT id FROM buckets WHERE parent_id IS NULL)
+         UNION ALL SELECT 'version without its current one', v.bucket_id || '/' || v.key FROM versions v
+           WHERE NOT EXISTS (SELECT 1 FROM objects o WHERE o.bucket_id = v.bucket_id AND o.key = v.key AND (o.blob_id IS NOT NULL OR o.delete_marker = 1))
+         UNION ALL SELECT 'two null versions', bucket_id || '/' || key FROM (SELECT bucket_id, key FROM objects WHERE is_null = 1 AND (blob_id IS NOT NULL OR delete_marker = 1)
+           UNION ALL SELECT bucket_id, key FROM versions WHERE is_null = 1) GROUP BY bucket_id, key HAVING count(*) > 1
+         UNION ALL SELECT 'version without an id', bucket_id || '/' || key FROM objects WHERE vid = '' AND (blob_id IS NOT NULL OR delete_marker = 1)
+         UNION ALL SELECT 'version without an id', bucket_id || '/' || key FROM versions WHERE vid = ''
+         UNION ALL SELECT 'trashed delete marker', bucket_id || '/' || key FROM trash WHERE delete_marker = 1
+         UNION ALL SELECT 'live delete marker', bucket_id || '/' || key FROM objects WHERE delete_marker = 1 AND blob_id IS NOT NULL
+         UNION ALL SELECT 'noncurrent newer than current', v.bucket_id || '/' || v.key FROM versions v JOIN objects o ON o.bucket_id = v.bucket_id AND o.key = v.key WHERE v.vid <= o.vid",
     );
     assert!(dangling.is_empty(), "dangling rows: {dangling:?}");
     let live: Vec<(String, i64)> = rows(&c, "SELECT id, size FROM blobs WHERE refs > 0");

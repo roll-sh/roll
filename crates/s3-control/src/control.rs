@@ -3,7 +3,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use s3_store::{AccessKey, Bucket, ByteStream, ListQuery, ObjectHeaders, ObjectMeta, Permission, Store, StoreError, UsageDay, WriteCondition};
+use s3_store::{AccessKey, Bucket, ByteStream, DeleteOutcome, ListQuery, ObjectHeaders, ObjectMeta, Permission, Store, StoreError, UsageDay, VersionsQuery, WriteCondition};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -28,8 +28,16 @@ pub type Result<T> = std::result::Result<T, ControlError>;
 impl From<StoreError> for ControlError {
     fn from(e: StoreError) -> Self {
         match e {
-            StoreError::NoSuchBucket(_) | StoreError::NoSuchKey(_) | StoreError::NoSuchUpload(_) | StoreError::NotFound(_) => Self::NotFound(e.to_string()),
-            StoreError::BucketExists(_) | StoreError::BucketNotEmpty(_) | StoreError::BucketHasBranches(_) | StoreError::PreconditionFailed => Self::Conflict(e.to_string()),
+            StoreError::NoSuchBucket(_) | StoreError::NoSuchKey(_) | StoreError::NoSuchUpload(_) | StoreError::NotFound(_) | StoreError::NoSuchVersion(..) | StoreError::DeleteMarker { .. } => {
+                Self::NotFound(e.to_string())
+            }
+            StoreError::BucketExists(_)
+            | StoreError::BucketNotEmpty(_)
+            | StoreError::BucketHasBranches(_)
+            | StoreError::PreconditionFailed
+            | StoreError::ObjectLocked(_)
+            | StoreError::InvalidBucketState(_) => Self::Conflict(e.to_string()),
+            StoreError::InvalidRequest(_) => Self::Invalid(e.to_string()),
             StoreError::InvalidPart(_)
             | StoreError::InvalidPartOrder
             | StoreError::EntityTooSmall(_)
@@ -126,6 +134,8 @@ pub fn info(o: &ObjectMeta) -> Value {
         "content_language": h.content_language, "expires": h.expires,
         "checksum": o.checksum.as_ref().map(|c| json!({ "algorithm": c.algorithm, "type": c.kind, "value": c.value })),
         "parts": o.parts,
+        "version_id": o.version_id,
+        "lock": if o.lock.is_empty() { Value::Null } else { json!({ "mode": o.lock.mode, "retain_until": o.lock.retain_until, "legal_hold": o.lock.legal_hold }) },
     })
 }
 
@@ -262,11 +272,53 @@ impl Control {
         Ok(deleted)
     }
 
-    pub async fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {
-        if !self.store.delete_object(bucket, key, None).await? {
-            return Err(ControlError::NotFound(format!("no object {key} in {bucket}")));
+    /// Delete an object (to the trash, or behind a delete marker in a versioned bucket), or with
+    /// `version_id` that version for good (to the trash; never one under Object Lock).
+    pub async fn delete_object(&self, bucket: &str, key: &str, version_id: Option<&str>) -> Result<DeleteOutcome> {
+        let missing = || ControlError::NotFound(format!("no object {key} in {bucket}"));
+        match version_id {
+            Some(v) => {
+                if !s3_proto::versioning::valid_version_id(v) {
+                    return Err(ControlError::Invalid(format!("invalid version id {v}")));
+                }
+                let o = self.store.delete_object_version(bucket, key, Some(v), None, false).await?;
+                if !o.existed {
+                    return Err(ControlError::NotFound(format!("no version {v} of {key} in {bucket}")));
+                }
+                Ok(o)
+            }
+            None => {
+                // Never leave a delete marker for a key that wasn't there.
+                match self.store.get_object(bucket, key) {
+                    Err(StoreError::NoSuchKey(_)) => return Err(missing()),
+                    r => r?,
+                };
+                let o = self.store.delete_object_version(bucket, key, None, None, false).await?;
+                if !o.existed {
+                    return Err(missing());
+                }
+                Ok(o)
+            }
         }
-        Ok(())
+    }
+
+    /// A page of the bucket's versions (newest first within a key). The cursor is the last
+    /// `(key, version_id)` of the previous page.
+    pub fn list_versions(&self, bucket: &str, prefix: &str, cursor: Option<&str>, limit: usize) -> Result<Value> {
+        let (key_marker, version_id_marker) = match cursor {
+            Some(c) => {
+                let (k, v): (String, String) = serde_json::from_str(&decode_cursor(c)?).map_err(|_| ControlError::Invalid("invalid cursor".into()))?;
+                (Some(k), Some(v))
+            }
+            None => (None, None),
+        };
+        let q = VersionsQuery { prefix: prefix.to_string(), delimiter: None, key_marker, version_id_marker, max_keys: limit.clamp(1, 1000) };
+        let page = self.store.list_versions(bucket, &q)?;
+        let next = match (page.truncated, &page.next_key_marker, &page.next_version_id_marker) {
+            (true, Some(k), Some(v)) => Some(encode_cursor(&serde_json::to_string(&(k, v)).unwrap_or_default())),
+            _ => None,
+        };
+        Ok(json!({ "versions": page.versions, "next_cursor": next }))
     }
 
     /// An upload from the dashboard or the CLI: the same path as PutObject.
@@ -404,7 +456,7 @@ impl Control {
     }
 
     fn bucket_usage(&self, b: &Bucket, rows: &[&UsageDay], days: i64) -> Usage {
-        let storage_bytes = b.bytes + b.trash_bytes;
+        let storage_bytes = b.bytes + b.trash_bytes + b.version_bytes;
         let (daily, cost, [a, bb, bin, ei, en], gb_months) = self.price(rows, days, storage_bytes);
         Usage {
             bucket: b.name.clone(),
@@ -435,7 +487,7 @@ impl Control {
         let rows = self.store.usage(None, &self.since_day(days))?;
         let buckets = self.store.buckets()?;
         let per = buckets.iter().map(|b| self.bucket_usage(b, &rows.iter().filter(|r| r.bucket_id == b.id).collect::<Vec<_>>(), days)).collect();
-        let stored: u64 = buckets.iter().map(|b| b.bytes + b.trash_bytes).sum();
+        let stored: u64 = buckets.iter().map(|b| b.bytes + b.trash_bytes + b.version_bytes).sum();
         let (daily, cost, _, _) = self.price(&rows.iter().collect::<Vec<_>>(), days, stored);
         Ok(UsageAll { days, cost, daily, buckets: per })
     }

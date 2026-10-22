@@ -24,6 +24,75 @@ pub struct Bucket {
     pub bytes: u64,
     /// Bytes in the trash (restorable, also billed).
     pub trash_bytes: u64,
+    /// `Enabled` or `Suspended`; `None` for a bucket that was never versioned.
+    pub versioning: Option<String>,
+    /// Object Lock, if enabled, with its default retention (if any).
+    pub object_lock: Option<ObjectLockConfig>,
+    /// Own noncurrent versions (delete markers included) and their bytes (billed, as on S3).
+    pub versions: u64,
+    pub version_bytes: u64,
+}
+
+/// A bucket's Object Lock configuration: the default retention of new versions, if any
+/// (`mode` with `days` or `years`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObjectLockConfig {
+    /// `GOVERNANCE` or `COMPLIANCE`.
+    pub mode: Option<String>,
+    pub days: Option<u32>,
+    pub years: Option<u32>,
+}
+
+/// One version's Object Lock state.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObjectLock {
+    /// `GOVERNANCE` or `COMPLIANCE`.
+    pub mode: Option<String>,
+    /// Unix ms.
+    pub retain_until: Option<i64>,
+    /// `None`: never set (S3 reports no legal hold configuration).
+    pub legal_hold: Option<bool>,
+}
+
+impl ObjectLock {
+    /// Under a retention that hasn't run out.
+    pub fn retained(&self, now: i64) -> bool {
+        self.mode.is_some() && self.retain_until.is_some_and(|u| u > now)
+    }
+
+    /// Can't be permanently deleted (without a governance bypass, for a GOVERNANCE retention).
+    pub fn locked(&self, now: i64) -> bool {
+        self.legal_hold == Some(true) || self.retained(now)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mode.is_none() && self.retain_until.is_none() && self.legal_hold.is_none()
+    }
+}
+
+/// A lifecycle transition. Stored and returned, never acted on: Intelligent-Tiering already
+/// moves data by access.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Transition {
+    pub days: Option<u32>,
+    /// Unix ms (midnight UTC).
+    pub date: Option<i64>,
+    pub storage_class: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NoncurrentTransition {
+    pub noncurrent_days: u32,
+    pub newer_noncurrent_versions: Option<u32>,
+    pub storage_class: String,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -56,6 +125,36 @@ pub struct LifecycleRule {
     pub expire_days: Option<u32>,
     /// Abort multipart uploads started this many days ago.
     pub abort_multipart_days: Option<u32>,
+    /// Applies only to versions with all of these tags.
+    pub tags: BTreeMap<String, String>,
+    /// … and larger than this many bytes.
+    pub size_greater_than: Option<u64>,
+    /// … and smaller than this many bytes.
+    pub size_less_than: Option<u64>,
+    /// Expire current versions on this date (Unix ms, midnight UTC).
+    pub expire_at: Option<i64>,
+    /// Remove delete markers that have no noncurrent versions behind them.
+    pub expire_delete_markers: bool,
+    /// Permanently delete (to the trash) versions noncurrent for this many days …
+    pub noncurrent_days: Option<u32>,
+    /// … except the newest this many noncurrent ones.
+    pub newer_noncurrent_versions: Option<u32>,
+    /// Stored and returned like S3, but never acted on.
+    pub transitions: Vec<Transition>,
+    pub noncurrent_transitions: Vec<NoncurrentTransition>,
+    /// Shown in S3's legacy form (`<Rule><Prefix>`, no `<Filter>`).
+    #[serde(skip_serializing_if = "is_false")]
+    pub legacy_prefix: bool,
+}
+
+impl LifecycleRule {
+    /// Whether the rule's filter matches a version of `key` with these tags and size.
+    pub fn matches(&self, key: &str, tags: &BTreeMap<String, String>, size: u64) -> bool {
+        key.starts_with(&self.prefix)
+            && self.tags.iter().all(|(k, v)| tags.get(k) == Some(v))
+            && self.size_greater_than.is_none_or(|n| size > n)
+            && self.size_less_than.is_none_or(|n| size < n)
+    }
 }
 
 /// Settings at creation.
@@ -63,6 +162,9 @@ pub struct LifecycleRule {
 pub struct BucketOptions {
     pub public: Option<bool>,
     pub recover_days: Option<u32>,
+    /// Enable Object Lock (and versioning, which it needs) from the start.
+    #[serde(default)]
+    pub object_lock: Option<bool>,
 }
 
 /// Settings to change; `None` leaves a setting as it is. `cors: Some(vec![])` removes CORS.
@@ -72,6 +174,9 @@ pub struct BucketUpdate {
     pub recover_days: Option<u32>,
     pub cors: Option<Vec<CorsRule>>,
     pub lifecycle: Option<Vec<LifecycleRule>>,
+    /// `Enabled` or `Suspended` (a bucket can't go back to never versioned).
+    #[serde(default)]
+    pub versioning: Option<String>,
 }
 
 /// Standard headers stored with an object, its user metadata (`x-amz-meta-*`, names
@@ -116,6 +221,56 @@ pub struct ObjectMeta {
     pub part_sizes: Vec<u64>,
     /// Last-Modified, Unix ms.
     pub modified_at: i64,
+    /// `null`, or the version id.
+    pub version_id: String,
+    pub lock: ObjectLock,
+}
+
+/// One entry of a version listing: a version or a delete marker.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ObjectVersion {
+    pub key: String,
+    pub version_id: String,
+    pub is_latest: bool,
+    pub delete_marker: bool,
+    pub size: u64,
+    pub etag: String,
+    pub last_modified: i64,
+    #[serde(skip)]
+    pub checksum: Option<Checksum>,
+}
+
+/// S3's ListObjectVersions.
+#[derive(Clone, Debug, Default)]
+pub struct VersionsQuery {
+    pub prefix: String,
+    pub delimiter: Option<String>,
+    /// Start after this key (or common prefix) …
+    pub key_marker: Option<String>,
+    /// … or, with it, after this version of it.
+    pub version_id_marker: Option<String>,
+    pub max_keys: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VersionsPage {
+    /// Newest first within a key.
+    pub versions: Vec<ObjectVersion>,
+    pub prefixes: Vec<String>,
+    pub truncated: bool,
+    pub next_key_marker: Option<String>,
+    pub next_version_id_marker: Option<String>,
+}
+
+/// What a delete did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeleteOutcome {
+    /// Something was visible (or the version named existed).
+    pub existed: bool,
+    /// The version deleted, or the delete marker created (`null` in a suspended bucket).
+    pub version_id: Option<String>,
+    /// A delete marker was created, or the version deleted was one.
+    pub delete_marker: bool,
 }
 
 /// A new object version whose blob is already uploaded.
@@ -154,6 +309,10 @@ pub struct CopyOptions {
     /// The source must have this ETag (`x-amz-copy-source-if-match`).
     pub source_etag: Option<String>,
     pub condition: WriteCondition,
+    /// Copy this version of the source (`?versionId=`) instead of its current one.
+    pub source_version: Option<String>,
+    /// The copy's Object Lock; empty: the bucket's default retention.
+    pub lock: ObjectLock,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -187,6 +346,8 @@ pub struct Upload {
     pub checksum_algorithm: Option<String>,
     pub checksum_type: Option<String>,
     pub created_at: i64,
+    /// The object's Object Lock (from CreateMultipartUpload's headers).
+    pub lock: ObjectLock,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -225,8 +386,11 @@ pub struct TrashEntry {
     pub size: u64,
     pub etag: String,
     pub deleted_at: i64,
-    /// When it's gone for good (Unix ms).
+    /// When it's gone for good (Unix ms). A version under Object Lock stays until its lock
+    /// ends too.
     pub expires_at: i64,
+    /// The version it was (`null` outside versioned buckets).
+    pub version_id: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

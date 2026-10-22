@@ -136,7 +136,7 @@ async fn a_stale_node_never_deletes_the_new_writers_blobs() {
 }
 
 fn rule(prefix: &str, enabled: bool, expire: Option<u32>, abort: Option<u32>) -> LifecycleRule {
-    LifecycleRule { id: String::new(), prefix: prefix.into(), enabled, expire_days: expire, abort_multipart_days: abort }
+    LifecycleRule { id: String::new(), prefix: prefix.into(), enabled, expire_days: expire, abort_multipart_days: abort, ..Default::default() }
 }
 
 #[tokio::test]

@@ -117,17 +117,81 @@ pub fn lifecycle(rules: &mut [LifecycleRule]) -> Result<()> {
         if r.id.is_empty() {
             r.id = format!("rule-{}", i + 1);
         }
-        if r.expire_days == Some(0) || r.abort_multipart_days == Some(0) {
-            return Err(StoreError::InvalidArgument("lifecycle days must be positive".into()));
-        }
-        if r.expire_days.is_none() && r.abort_multipart_days.is_none() {
-            return Err(StoreError::InvalidArgument(format!("lifecycle rule {} has no action", r.id)));
-        }
+        lifecycle_rule(r)?;
     }
     let mut ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
     ids.sort_unstable();
     if ids.windows(2).any(|w| w[0] == w[1]) {
         return Err(StoreError::InvalidArgument("lifecycle rule ids must be unique".into()));
+    }
+    Ok(())
+}
+
+/// Storage classes a lifecycle transition may name (S3's).
+pub const TRANSITION_CLASSES: [&str; 6] = ["GLACIER", "STANDARD_IA", "ONEZONE_IA", "INTELLIGENT_TIERING", "DEEP_ARCHIVE", "GLACIER_IR"];
+
+/// One lifecycle rule, by S3's rules (the S3 API checks the XML the same way first).
+fn lifecycle_rule(r: &LifecycleRule) -> Result<()> {
+    let bad = |why: &str| Err(StoreError::InvalidArgument(format!("lifecycle rule {}: {why}", r.id)));
+    if r.id.len() > 255 {
+        return bad("IDs are at most 255 characters");
+    }
+    if [r.expire_days, r.abort_multipart_days, r.noncurrent_days].contains(&Some(0)) {
+        return Err(StoreError::InvalidArgument("lifecycle days must be positive".into()));
+    }
+    let actions = r.expire_days.is_some()
+        || r.expire_at.is_some()
+        || r.expire_delete_markers
+        || r.noncurrent_days.is_some()
+        || r.abort_multipart_days.is_some()
+        || !r.transitions.is_empty()
+        || !r.noncurrent_transitions.is_empty();
+    if !actions {
+        return bad("no action");
+    }
+    if r.expire_days.is_some() && r.expire_at.is_some() {
+        return bad("expire by days or by date, not both");
+    }
+    if r.expire_delete_markers && (r.expire_days.is_some() || r.expire_at.is_some()) {
+        return bad("expire_delete_markers can't be combined with expire_days or expire_at");
+    }
+    if r.expire_delete_markers && !r.tags.is_empty() {
+        return bad("expire_delete_markers can't be used with a tag filter");
+    }
+    if r.abort_multipart_days.is_some() && (!r.tags.is_empty() || r.size_greater_than.is_some() || r.size_less_than.is_some()) {
+        return bad("abort_multipart_days can't be used with tag or size filters");
+    }
+    if r.expire_at.is_some_and(|d| d.rem_euclid(86_400_000) != 0) {
+        return bad("expire_at must be midnight UTC");
+    }
+    if r.newer_noncurrent_versions.is_some() && r.noncurrent_days.is_none() {
+        return bad("newer_noncurrent_versions needs noncurrent_days");
+    }
+    let newer_ok = |n: Option<u32>| n.is_none_or(|n| (1..=100).contains(&n));
+    if !newer_ok(r.newer_noncurrent_versions) || !r.noncurrent_transitions.iter().all(|t| newer_ok(t.newer_noncurrent_versions)) {
+        return bad("newer_noncurrent_versions is 1-100");
+    }
+    if let (Some(gt), Some(lt)) = (r.size_greater_than, r.size_less_than)
+        && gt >= lt
+    {
+        return bad("size_greater_than must be less than size_less_than");
+    }
+    tags(&r.tags)?;
+    for t in &r.transitions {
+        if !TRANSITION_CLASSES.contains(&t.storage_class.as_str()) {
+            return bad(&format!("unknown storage class {}", t.storage_class));
+        }
+        if t.days.is_some() == t.date.is_some() {
+            return bad("a transition has days or a date");
+        }
+        if t.date.is_some_and(|d| d.rem_euclid(86_400_000) != 0) {
+            return bad("transition dates must be midnight UTC");
+        }
+    }
+    for t in &r.noncurrent_transitions {
+        if !TRANSITION_CLASSES.contains(&t.storage_class.as_str()) {
+            return bad(&format!("unknown storage class {}", t.storage_class));
+        }
     }
     Ok(())
 }
@@ -187,7 +251,7 @@ mod tests {
         assert!(cors(&[rule(&["https://*.*.dev"], &["GET"])]).is_err());
         assert!(cors(&vec![rule(&["*"], &["GET"]); 101]).is_err());
 
-        let lc = |id: &str, expire: Option<u32>, abort: Option<u32>| LifecycleRule { id: id.into(), prefix: String::new(), enabled: true, expire_days: expire, abort_multipart_days: abort };
+        let lc = |id: &str, expire: Option<u32>, abort: Option<u32>| LifecycleRule { id: id.into(), prefix: String::new(), enabled: true, expire_days: expire, abort_multipart_days: abort, ..Default::default() };
         let mut ok = vec![lc("", Some(1), None), lc("", None, Some(2)), lc("named", Some(3), Some(3))];
         lifecycle(&mut ok).unwrap();
         assert_eq!(ok.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["rule-1", "rule-2", "named"]);

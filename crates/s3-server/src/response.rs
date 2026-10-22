@@ -42,5 +42,8 @@ pub(crate) fn error(e: &S3Error, request_id: &str, head: bool) -> Response {
     if code == StatusCode::METHOD_NOT_ALLOWED {
         set(&mut r, "allow", "GET, PUT, POST, DELETE, HEAD");
     }
+    for (name, value) in &e.headers {
+        set(&mut r, name, value);
+    }
     r
 }

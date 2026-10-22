@@ -31,10 +31,10 @@ pub fn escape(s: &str) -> String {
 }
 
 /// A tiny XML writer.
-struct W(String);
+pub(crate) struct W(pub(crate) String);
 
 impl W {
-    fn root(name: &str) -> Self {
+    pub(crate) fn root(name: &str) -> Self {
         let mut s = String::with_capacity(1024);
         s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<");
         s.push_str(name);
@@ -44,41 +44,41 @@ impl W {
         W(s)
     }
 
-    fn open(&mut self, name: &str) {
+    pub(crate) fn open(&mut self, name: &str) {
         self.0.push('<');
         self.0.push_str(name);
         self.0.push('>');
     }
 
-    fn close(&mut self, name: &str) {
+    pub(crate) fn close(&mut self, name: &str) {
         self.0.push_str("</");
         self.0.push_str(name);
         self.0.push('>');
     }
 
-    fn el(&mut self, name: &str, text: &str) {
+    pub(crate) fn el(&mut self, name: &str, text: &str) {
         self.open(name);
         self.0.push_str(&escape(text));
         self.close(name);
     }
 
-    fn opt(&mut self, name: &str, text: Option<&str>) {
+    pub(crate) fn opt(&mut self, name: &str, text: Option<&str>) {
         if let Some(t) = text {
             self.el(name, t);
         }
     }
 
-    fn finish(mut self, root: &str) -> String {
+    pub(crate) fn finish(mut self, root: &str) -> String {
         self.close(root);
         self.0
     }
 }
 
-fn enc(s: &str, url: bool) -> String {
+pub(crate) fn enc(s: &str, url: bool) -> String {
     if url { url_encode_listing(s) } else { s.to_string() }
 }
 
-fn bool_str(b: bool) -> &'static str {
+pub(crate) fn bool_str(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
 
@@ -89,7 +89,7 @@ pub struct Owner {
     pub display_name: String,
 }
 
-fn owner(w: &mut W, tag: &str, o: &Owner) {
+pub(crate) fn owner(w: &mut W, tag: &str, o: &Owner) {
     w.open(tag);
     w.el("ID", &o.id);
     w.el("DisplayName", &o.display_name);
@@ -429,11 +429,6 @@ pub fn location_constraint(region: &str) -> String {
     w.finish("LocationConstraint")
 }
 
-/// `GetBucketVersioning` of a bucket that was never versioned.
-pub fn versioning_configuration() -> String {
-    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<VersioningConfiguration xmlns=\"{XMLNS}\"/>")
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CorsRule {
     pub id: Option<String>,
@@ -467,39 +462,6 @@ pub fn cors_configuration(rules: &[CorsRule]) -> String {
         w.close("CORSRule");
     }
     w.finish("CORSConfiguration")
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LifecycleRule {
-    pub id: Option<String>,
-    pub prefix: String,
-    pub enabled: bool,
-    pub expire_days: Option<u32>,
-    pub abort_multipart_days: Option<u32>,
-}
-
-pub fn lifecycle_configuration(rules: &[LifecycleRule]) -> String {
-    let mut w = W::root("LifecycleConfiguration");
-    for r in rules {
-        w.open("Rule");
-        w.opt("ID", r.id.as_deref());
-        w.open("Filter");
-        w.el("Prefix", &r.prefix);
-        w.close("Filter");
-        w.el("Status", if r.enabled { "Enabled" } else { "Disabled" });
-        if let Some(d) = r.expire_days {
-            w.open("Expiration");
-            w.el("Days", &d.to_string());
-            w.close("Expiration");
-        }
-        if let Some(d) = r.abort_multipart_days {
-            w.open("AbortIncompleteMultipartUpload");
-            w.el("DaysAfterInitiation", &d.to_string());
-            w.close("AbortIncompleteMultipartUpload");
-        }
-        w.close("Rule");
-    }
-    w.finish("LifecycleConfiguration")
 }
 
 pub fn tagging(tags: &[(String, String)]) -> String {
@@ -537,7 +499,7 @@ impl Node {
     }
 }
 
-fn malformed() -> S3Error {
+pub(crate) fn malformed() -> S3Error {
     S3Error::new(Code::MalformedXML)
 }
 
@@ -628,7 +590,7 @@ pub fn parse(body: &[u8]) -> Result<Node, S3Error> {
     root.ok_or_else(malformed)
 }
 
-fn expect_root(body: &[u8], name: &str) -> Result<Node, S3Error> {
+pub(crate) fn expect_root(body: &[u8], name: &str) -> Result<Node, S3Error> {
     let n = parse(body)?;
     if n.name != name {
         return Err(malformed());
@@ -683,16 +645,20 @@ pub fn check_part_order(parts: &[CompletePart]) -> Result<(), S3Error> {
 pub struct DeleteRequest {
     pub quiet: bool,
     pub keys: Vec<String>,
+    /// Each key's `<VersionId>`, if given (same order as `keys`).
+    pub version_ids: Vec<Option<String>>,
 }
 
 pub fn parse_delete(body: &[u8]) -> Result<DeleteRequest, S3Error> {
     let n = expect_root(body, "Delete")?;
     let quiet = n.text_of("Quiet").is_some_and(|q| q.trim().eq_ignore_ascii_case("true"));
-    let keys: Vec<String> = n.all("Object").map(|o| o.text_of("Key").map(str::to_string).ok_or_else(malformed)).collect::<Result<_, _>>()?;
-    if keys.is_empty() || keys.len() > 1000 {
+    let objects: Vec<(String, Option<String>)> =
+        n.all("Object").map(|o| Ok((o.text_of("Key").map(str::to_string).ok_or_else(malformed)?, o.text_of("VersionId").map(|v| v.trim().to_string())))).collect::<Result<_, S3Error>>()?;
+    if objects.is_empty() || objects.len() > 1000 {
         return Err(malformed());
     }
-    Ok(DeleteRequest { quiet, keys })
+    let (keys, version_ids) = objects.into_iter().unzip();
+    Ok(DeleteRequest { quiet, keys, version_ids })
 }
 
 const CORS_METHODS: [&str; 5] = ["GET", "PUT", "POST", "DELETE", "HEAD"];
@@ -726,81 +692,6 @@ pub fn parse_cors(body: &[u8]) -> Result<Vec<CorsRule>, S3Error> {
     }
     if rules.is_empty() || rules.len() > 100 {
         return Err(malformed());
-    }
-    Ok(rules)
-}
-
-fn days(n: &Node, name: &str) -> Result<Option<u32>, S3Error> {
-    match n.text_of(name) {
-        Some(s) => {
-            let d: u32 = s.trim().parse().map_err(|_| malformed())?;
-            if d == 0 {
-                return Err(S3Error::msg(Code::InvalidArgument, format!("'{name}' for a lifecycle rule must be a positive integer")));
-            }
-            Ok(Some(d))
-        }
-        None => Ok(None),
-    }
-}
-
-fn not_implemented(what: &str) -> S3Error {
-    S3Error::msg(Code::NotImplemented, format!("Lifecycle {what} is not supported (storage tiering is automatic)"))
-}
-
-/// `LifecycleConfiguration`: `Expiration.Days` and `AbortIncompleteMultipartUpload`, filtered
-/// by prefix. Version-related actions are accepted and ignored (buckets aren't versioned);
-/// transitions, dates and tag or size filters are `NotImplemented`.
-pub fn parse_lifecycle(body: &[u8]) -> Result<Vec<LifecycleRule>, S3Error> {
-    let n = expect_root(body, "LifecycleConfiguration")?;
-    let mut rules = Vec::new();
-    for r in n.all("Rule") {
-        let enabled = match r.text_of("Status").map(str::trim) {
-            Some("Enabled") => true,
-            Some("Disabled") => false,
-            _ => return Err(malformed()),
-        };
-        if r.child("Transition").is_some() {
-            return Err(not_implemented("transitions"));
-        }
-        let mut prefix = r.text_of("Prefix").unwrap_or_default().to_string();
-        if let Some(f) = r.child("Filter") {
-            if f.child("Tag").is_some() || f.child("And").is_some() || f.child("ObjectSizeGreaterThan").is_some() || f.child("ObjectSizeLessThan").is_some() {
-                return Err(not_implemented("filters other than Prefix"));
-            }
-            if let Some(p) = f.text_of("Prefix") {
-                prefix = p.to_string();
-            }
-        }
-        let expire_days = match r.child("Expiration") {
-            Some(e) => {
-                if e.child("Date").is_some() {
-                    return Err(not_implemented("expiration dates"));
-                }
-                days(e, "Days")?
-            }
-            None => None,
-        };
-        let abort_multipart_days = match r.child("AbortIncompleteMultipartUpload") {
-            Some(a) => Some(days(a, "DaysAfterInitiation")?.ok_or_else(malformed)?),
-            None => None,
-        };
-        let ignorable = r.child("NoncurrentVersionExpiration").is_some() || r.child("NoncurrentVersionTransition").is_some() || r.child("Expiration").is_some_and(|e| e.child("ExpiredObjectDeleteMarker").is_some());
-        if expire_days.is_none() && abort_multipart_days.is_none() && !ignorable {
-            return Err(malformed());
-        }
-        let id = r.text_of("ID").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        if id.as_ref().is_some_and(|i| i.len() > 255) {
-            return Err(S3Error::msg(Code::InvalidArgument, "ID length should not exceed allowed limit of 255"));
-        }
-        rules.push(LifecycleRule { id, prefix, enabled, expire_days, abort_multipart_days });
-    }
-    if rules.is_empty() || rules.len() > 1000 {
-        return Err(malformed());
-    }
-    let mut ids: Vec<&str> = rules.iter().filter_map(|r| r.id.as_deref()).collect();
-    ids.sort();
-    if ids.windows(2).any(|w| w[0] == w[1]) {
-        return Err(S3Error::msg(Code::InvalidArgument, "Rule ID must be unique. Found same ID for more than one rule"));
     }
     Ok(rules)
 }
@@ -884,7 +775,7 @@ mod tests {
     #[test]
     fn delete_documents() {
         let d = parse_delete(b"<Delete><Quiet>true</Quiet><Object><Key> a </Key></Object><Object><Key>b&amp;c</Key><VersionId>null</VersionId></Object></Delete>").unwrap();
-        assert_eq!(d, DeleteRequest { quiet: true, keys: vec![" a ".into(), "b&c".into()] });
+        assert_eq!(d, DeleteRequest { quiet: true, keys: vec![" a ".into(), "b&c".into()], version_ids: vec![None, Some("null".into())] });
         assert_eq!(parse_delete(b"<Delete></Delete>").unwrap_err().code, Code::MalformedXML);
         let many: String = (0..1001).map(|i| format!("<Object><Key>{i}</Key></Object>")).collect();
         assert_eq!(parse_delete(format!("<Delete>{many}</Delete>").as_bytes()).unwrap_err().code, Code::MalformedXML);
@@ -899,21 +790,6 @@ mod tests {
         assert_eq!(parse_cors(cors_configuration(&cors).as_bytes()).unwrap(), cors);
         assert_eq!(parse_cors(b"<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>PATCH</AllowedMethod></CORSRule></CORSConfiguration>").unwrap_err().code, Code::InvalidRequest);
         assert_eq!(parse_cors(b"<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin></CORSRule></CORSConfiguration>").unwrap_err().code, Code::MalformedXML);
-        let lc = vec![
-            LifecycleRule { id: Some("logs".into()), prefix: "logs/".into(), enabled: true, expire_days: Some(30), abort_multipart_days: Some(7) },
-            LifecycleRule { id: None, prefix: "".into(), enabled: false, expire_days: None, abort_multipart_days: Some(1) },
-        ];
-        assert_eq!(parse_lifecycle(lifecycle_configuration(&lc).as_bytes()).unwrap(), lc);
-        let legacy = parse_lifecycle(b"<LifecycleConfiguration><Rule><ID>x</ID><Prefix>tmp/</Prefix><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>").unwrap();
-        assert_eq!(legacy[0].prefix, "tmp/");
-        let ignored = parse_lifecycle(b"<LifecycleConfiguration><Rule><Filter/><Status>Enabled</Status><NoncurrentVersionExpiration><NoncurrentDays>3</NoncurrentDays></NoncurrentVersionExpiration></Rule></LifecycleConfiguration>").unwrap();
-        assert_eq!(ignored[0], LifecycleRule { enabled: true, ..Default::default() });
-        let err = |b: &[u8]| parse_lifecycle(b).unwrap_err().code;
-        assert_eq!(err(b"<LifecycleConfiguration><Rule><Status>Enabled</Status><Transition><Days>30</Days><StorageClass>GLACIER</StorageClass></Transition></Rule></LifecycleConfiguration>"), Code::NotImplemented);
-        assert_eq!(err(b"<LifecycleConfiguration><Rule><Filter><Tag><Key>a</Key><Value>b</Value></Tag></Filter><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"), Code::NotImplemented);
-        assert_eq!(err(b"<LifecycleConfiguration><Rule><Status>Enabled</Status><Expiration><Days>0</Days></Expiration></Rule></LifecycleConfiguration>"), Code::InvalidArgument);
-        assert_eq!(err(b"<LifecycleConfiguration><Rule><Status>On</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"), Code::MalformedXML);
-        assert_eq!(err(b"<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>2</Days></Expiration></Rule></LifecycleConfiguration>"), Code::InvalidArgument);
         let tags = vec![("k".to_string(), "v<".to_string()), ("e".to_string(), "".to_string())];
         assert_eq!(parse_tagging(tagging(&tags).as_bytes()).unwrap(), tags);
         assert_eq!(parse_tagging(b"<Tagging><TagSet><Tag><Key>a</Key><Value>1</Value></Tag><Tag><Key>a</Key><Value>2</Value></Tag></TagSet></Tagging>").unwrap_err().code, Code::InvalidTag);
@@ -921,7 +797,6 @@ mod tests {
         assert_eq!(parse_create_bucket(b"<CreateBucketConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>").unwrap(), Some("eu-west-1".into()));
         assert!(location_constraint("us-east-1").ends_with("/>"));
         assert!(location_constraint("eu-west-1").contains(">eu-west-1</LocationConstraint>"));
-        assert!(versioning_configuration().contains("VersioningConfiguration"));
     }
 
     #[test]
@@ -970,7 +845,12 @@ mod tests {
         assert_eq!(parse_delete(b"<Delete><Object><VersionId>null</VersionId></Object></Delete>").map_err(|e| e.code).unwrap_err(), mal);
         assert_eq!(parse_delete(b"<Remove><Object><Key>a</Key></Object></Remove>").map_err(|e| e.code).unwrap_err(), mal);
         let thousand: String = (0..1000).map(|i| format!("<Object><Key>{i}</Key></Object>")).collect();
-        assert_eq!(parse_delete(format!("<Delete><Quiet>TRUE</Quiet>{thousand}</Delete>").as_bytes()).unwrap(), DeleteRequest { quiet: true, keys: (0..1000).map(|i| i.to_string()).collect() });
+        assert_eq!(
+            parse_delete(format!("<Delete><Quiet>TRUE</Quiet>{thousand}</Delete>").as_bytes()).unwrap(),
+            DeleteRequest { quiet: true, keys: (0..1000).map(|i| i.to_string()).collect(), version_ids: vec![None; 1000] }
+        );
+        let versioned = parse_delete(b"<Delete><Object><Key>a</Key><VersionId> v1 </VersionId></Object><Object><Key>b</Key></Object></Delete>").unwrap();
+        assert_eq!(versioned.version_ids, vec![Some("v1".to_string()), None]);
         assert!(!parse_delete(b"<Delete><Quiet>1</Quiet><Object><Key>a</Key></Object></Delete>").unwrap().quiet);
         assert_eq!(parse_delete(b"<Delete><Object><Key></Key></Object></Delete>").unwrap().keys, vec![String::new()]);
         // CompleteMultipartUpload.
@@ -993,26 +873,6 @@ mod tests {
         assert_eq!(cors(&rule("").repeat(101)).unwrap_err(), mal);
         assert_eq!(cors("<CORSRule><AllowedMethod>GET</AllowedMethod></CORSRule>").unwrap_err(), mal);
         assert_eq!(cors("<CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>get</AllowedMethod></CORSRule>").unwrap_err(), Code::InvalidRequest, "methods are case-sensitive, as on S3");
-        // Lifecycle.
-        let lc = |rules: &str| parse_lifecycle(format!("<LifecycleConfiguration>{rules}</LifecycleConfiguration>").as_bytes()).map_err(|e| e.code);
-        let ni = Code::NotImplemented;
-        let r = |body: &str| format!("<Rule><Status>Enabled</Status>{body}</Rule>");
-        assert_eq!(lc(&r("<Expiration><Date>2030-01-01T00:00:00Z</Date></Expiration>")).unwrap_err(), ni);
-        assert_eq!(lc(&r("<Filter><And><Prefix>a</Prefix></And></Filter><Expiration><Days>1</Days></Expiration>")).unwrap_err(), ni);
-        assert_eq!(lc(&r("<Filter><ObjectSizeGreaterThan>5</ObjectSizeGreaterThan></Filter><Expiration><Days>1</Days></Expiration>")).unwrap_err(), ni);
-        assert_eq!(lc(&r("<Filter><ObjectSizeLessThan>5</ObjectSizeLessThan></Filter><Expiration><Days>1</Days></Expiration>")).unwrap_err(), ni);
-        assert_eq!(lc(&r("<AbortIncompleteMultipartUpload></AbortIncompleteMultipartUpload>")).unwrap_err(), mal);
-        assert_eq!(lc(&r("<AbortIncompleteMultipartUpload><DaysAfterInitiation>0</DaysAfterInitiation></AbortIncompleteMultipartUpload>")).unwrap_err(), Code::InvalidArgument);
-        assert_eq!(lc(&r("<Expiration><Days>x</Days></Expiration>")).unwrap_err(), mal);
-        assert_eq!(lc(&r("")).unwrap_err(), mal, "a rule that does nothing");
-        assert_eq!(lc("<Rule><Expiration><Days>1</Days></Expiration></Rule>").unwrap_err(), mal, "no Status");
-        assert_eq!(lc("").unwrap_err(), mal);
-        assert_eq!(lc(&r(&format!("<ID>{}</ID><Expiration><Days>1</Days></Expiration>", "i".repeat(256)))).unwrap_err(), Code::InvalidArgument);
-        assert_eq!(lc(&r(&format!("<ID>{}</ID><Expiration><Days>1</Days></Expiration>", "i".repeat(255)))).unwrap()[0].id.as_ref().unwrap().len(), 255);
-        assert_eq!(lc(&r("<Expiration><ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker></Expiration>")).unwrap()[0].expire_days, None, "ignorable: buckets aren't versioned");
-        assert_eq!(lc(&r("<Prefix>old/</Prefix><Filter><Prefix>new/</Prefix></Filter><Expiration><Days>2</Days></Expiration>")).unwrap()[0].prefix, "new/");
-        let two_unnamed = r("<Expiration><Days>1</Days></Expiration>").repeat(2);
-        assert_eq!(lc(&two_unnamed).unwrap().len(), 2, "rules without IDs don't collide");
         // Tagging.
         let tg = |b: &str| parse_tagging(b.as_bytes()).map_err(|e| e.code);
         assert_eq!(tg("<Tagging></Tagging>").unwrap_err(), mal);
@@ -1084,10 +944,8 @@ mod tests {
         well_formed(&quiet, "DeleteResult");
         assert_eq!(well_formed(&location_constraint(""), "LocationConstraint").text, "");
         assert_eq!(well_formed(&location_constraint("a<b"), "LocationConstraint").text, "a<b");
-        well_formed(&versioning_configuration(), "VersioningConfiguration");
         well_formed(&tagging(&[]), "Tagging");
         well_formed(&cors_configuration(&[CorsRule::default()]), "CORSConfiguration");
-        well_formed(&lifecycle_configuration(&[]), "LifecycleConfiguration");
         assert!(list_buckets(&owner, &[BucketEntry { name: "b".into(), created_ms: 0, region: None }]).contains("</CreationDate></Bucket>"));
     }
 }

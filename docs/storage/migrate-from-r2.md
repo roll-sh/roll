@@ -13,9 +13,9 @@ use.
 | R2 API token (Object Read, Object Read & Write, Admin), optionally per bucket | roll access key: `read`, `write` or `admin`, optionally scoped to buckets |
 | public bucket (`r2.dev` or a custom domain) | the bucket's `public` flag: anonymous GET and HEAD on the S3 endpoint |
 | CORS policy | `PutBucketCors`, or the dashboard |
-| object lifecycle rules | `Expiration.Days` and `AbortIncompleteMultipartUpload`, with a prefix filter |
+| object lifecycle rules | S3's full lifecycle model: expiration, noncurrent versions, aborts, prefix/tag/size filters |
 | Infrequent Access storage class | not needed: Intelligent-Tiering moves cold data down by itself |
-| bucket locks | not supported |
+| bucket locks | S3 Object Lock (retention and legal holds) |
 | event notifications, Workers bindings | not supported; use the S3 API from your code |
 | — | branches: an instant copy-on-write copy of a bucket |
 | — | the trash: deleted and overwritten objects are recoverable for `recover_days` |

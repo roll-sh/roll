@@ -33,7 +33,7 @@ async fn state(s: &Store) -> Vec<String> {
 
 async fn workload(s: &Store) {
     s.create_bucket("alpha", BucketOptions::default()).await.unwrap();
-    s.create_bucket("beta", BucketOptions { public: Some(true), recover_days: Some(0) }).await.unwrap();
+    s.create_bucket("beta", BucketOptions { public: Some(true), recover_days: Some(0), ..Default::default() }).await.unwrap();
     for i in 0..20 {
         put(s, "alpha", &format!("dir/{i:02}"), format!("value {i}").as_bytes()).await;
     }
@@ -260,7 +260,7 @@ async fn an_idle_deposed_node_stops_serving() {
 fn dump(s: &Store) -> Vec<String> {
     let c = meta_db(s);
     let mut out = Vec::new();
-    for t in ["buckets", "objects", "trash", "blobs", "uploads", "parts", "keys", "usage", "orphans", "state"] {
+    for t in ["buckets", "objects", "versions", "trash", "blobs", "uploads", "parts", "keys", "usage", "orphans", "state"] {
         let mut st = c.prepare(&format!("SELECT * FROM {t}")).unwrap();
         let n = st.column_count();
         let mut rows: Vec<String> = st
@@ -296,6 +296,23 @@ async fn recovery_rebuilds_the_metadata_exactly() {
     let k = s.create_key("used", Permission::Read, None).await.unwrap();
     s.touch_key(&k.id);
     s.create_bucket("last", BucketOptions::default()).await.unwrap();
+    // Versions, delete markers, null versions, Object Lock and a branch of a versioned bucket.
+    s.create_bucket("vers", BucketOptions { object_lock: Some(true), ..Default::default() }).await.unwrap();
+    s.put_object_lock("vers", ObjectLockConfig { mode: Some("GOVERNANCE".into()), days: Some(1), years: None }).await.unwrap();
+    let v1 = put(&s, "vers", "k", b"1").await;
+    put(&s, "vers", "k", b"2").await;
+    s.put_legal_hold("vers", "k", Some(&v1.version_id), true).await.unwrap();
+    s.put_retention("vers", "k", None, Some(("COMPLIANCE".into(), s.now() + 2 * DAY)), false).await.unwrap();
+    s.branch_bucket("vers", "vers-branch").await.unwrap();
+    s.delete_object("vers", "k", None).await.unwrap();
+    s.put_version_tags("vers-branch", "k", None, [("t".to_string(), "1".to_string())].into()).await.unwrap();
+    s.update_bucket("beta", BucketUpdate { versioning: Some("Suspended".into()), ..Default::default() }).await.unwrap();
+    put(&s, "beta", "suspended", b"s").await;
+    s.update_bucket("alpha", BucketUpdate { versioning: Some("Enabled".into()), ..Default::default() }).await.unwrap();
+    let a = put(&s, "alpha", "dir/01", b"new").await;
+    s.delete_object_version("alpha", "dir/01", Some(&a.version_id), None, false).await.unwrap();
+    s.delete_object("alpha", "dir/02", None).await.unwrap();
+    assert!(s.bucket("vers").unwrap().version_bytes > 0);
     assert_consistent(&s, &backend).await;
     let before = dump(&s);
     let s2 = open(&backend, &clock).await;

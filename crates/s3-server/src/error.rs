@@ -21,6 +21,15 @@ pub fn store_error(e: StoreError) -> S3Error {
         StoreError::MetadataTooLarge => S3Error::new(Code::MetadataTooLarge),
         StoreError::InvalidArgument(why) => S3Error::msg(Code::InvalidArgument, why),
         StoreError::NotFound(why) => S3Error::msg(Code::NoSuchKey, why),
+        StoreError::NoSuchVersion(k, v) => S3Error::new(Code::NoSuchVersion).with("Key", k).with("VersionId", v),
+        // S3: 405 for a marker asked for by its id, else a 404; both say it's a marker.
+        StoreError::DeleteMarker { key, version_id, modified_at, specific } => {
+            let e = if specific { S3Error::new(Code::MethodNotAllowed) } else { S3Error::new(Code::NoSuchKey).with("Key", key) };
+            e.with_header("x-amz-delete-marker", "true").with_header("x-amz-version-id", version_id).with_header("last-modified", s3_proto::time::http_date(modified_at))
+        }
+        StoreError::ObjectLocked(_) => S3Error::msg(Code::AccessDenied, "Access Denied because object protected by object lock."),
+        StoreError::InvalidBucketState(why) => S3Error::msg(Code::InvalidBucketState, why),
+        StoreError::InvalidRequest(why) => S3Error::msg(Code::InvalidRequest, why),
         StoreError::Unavailable(why) => {
             tracing::error!(why, "storage unavailable");
             S3Error::new(Code::ServiceUnavailable)
