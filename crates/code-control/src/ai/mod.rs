@@ -137,7 +137,14 @@ pub struct Ai {
     pub(crate) building: parking_lot::Mutex<std::collections::HashMap<String, tokio::sync::watch::Receiver<bool>>>,
     /// Hosted spend reserved by reviews and chats still running, per owner: checked together
     /// with the month's metered spend, so concurrent jobs can't overrun a cap.
-    pub(crate) reserved: parking_lot::Mutex<std::collections::HashMap<String, f64>>,
+    pub(crate) reserved: parking_lot::Mutex<std::collections::HashMap<String, Held>>,
+}
+
+/// What running jobs hold for one owner: spend, and free public reviews they claimed.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Held {
+    usd: f64,
+    free: u32,
 }
 
 /// Spend held for a running job; released when dropped (after the job is metered).
@@ -145,14 +152,18 @@ pub(crate) struct Reservation<'a> {
     ai: &'a Ai,
     owner_id: String,
     usd: f64,
+    /// It claimed one of the month's free public reviews: it's metered as free, and nothing
+    /// else can claim that one while it runs.
+    pub free: bool,
 }
 
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
         let mut m = self.ai.reserved.lock();
-        if let Some(v) = m.get_mut(&self.owner_id) {
-            *v -= self.usd;
-            if *v <= 1e-9 {
+        if let Some(h) = m.get_mut(&self.owner_id) {
+            h.usd -= self.usd;
+            h.free -= u32::from(self.free);
+            if h.usd <= 1e-9 && h.free == 0 {
                 m.remove(&self.owner_id);
             }
         }
@@ -160,24 +171,41 @@ impl Drop for Reservation<'_> {
 }
 
 impl Ai {
-    /// Reserve `usd` of the owner's hosted spend if `spent` (metered this month, read by
-    /// `spent`) plus what running jobs hold plus `usd` stays within `cap`. The check and the
-    /// reservation happen under one lock.
-    pub(crate) fn reserve(&self, owner_id: &str, cap: Option<f64>, usd: f64, spent: impl FnOnce() -> Result<f64>) -> Result<Option<Reservation<'_>>> {
+    /// Reserve a job's price for the owner if the month's metered spend plus what running jobs
+    /// hold plus the price stays within `cap` (`None`: no cap). `spent` reads the month's metered
+    /// spend and free public reviews used; `price` prices the job given the free reviews used,
+    /// counting the ones running jobs claimed, so two jobs can't both take the last free one.
+    /// The check and the reservation happen under one lock.
+    pub(crate) fn reserve(
+        &self,
+        owner_id: &str,
+        cap: Option<f64>,
+        spent: impl FnOnce() -> Result<(f64, u32)>,
+        price: impl FnOnce(u32) -> pricing::Price,
+    ) -> Result<Option<Reservation<'_>>> {
         let mut m = self.reserved.lock();
-        let held = m.get(owner_id).copied().unwrap_or(0.0);
+        let held = m.get(owner_id).copied().unwrap_or_default();
+        let (spent, free_used) = spent()?;
+        let p = price(free_used.saturating_add(held.free));
         if let Some(cap) = cap
-            && spent()? + held + usd > cap + 1e-9
+            && spent + held.usd + p.charged_usd > cap + 1e-9
         {
             return Ok(None);
         }
-        *m.entry(owner_id.to_string()).or_insert(0.0) += usd;
-        Ok(Some(Reservation { ai: self, owner_id: owner_id.to_string(), usd }))
+        let h = m.entry(owner_id.to_string()).or_default();
+        h.usd += p.charged_usd;
+        h.free += u32::from(p.free);
+        Ok(Some(Reservation { ai: self, owner_id: owner_id.to_string(), usd: p.charged_usd, free: p.free }))
     }
 
     /// Spend held by running jobs for this owner.
     pub fn reserved_usd(&self, owner_id: &str) -> f64 {
-        self.reserved.lock().get(owner_id).copied().unwrap_or(0.0)
+        self.reserved.lock().get(owner_id).map(|h| h.usd).unwrap_or(0.0)
+    }
+
+    /// Free public reviews claimed by running jobs for this owner.
+    pub fn reserved_free(&self, owner_id: &str) -> u32 {
+        self.reserved.lock().get(owner_id).map(|h| h.free).unwrap_or(0)
     }
 }
 
@@ -816,5 +844,55 @@ mod tests {
         assert!(AiConfig::from_lookup(|_| None).hosted.is_none());
         assert_eq!(month_of(0), "1970-01");
         assert_eq!(month_of(1_792_540_800), "2026-10");
+    }
+
+    /// Many jobs reserving at once never hold more than the cap, nor more free reviews than
+    /// are left, even when reading the month's spend is slow; dropping releases both.
+    #[test]
+    fn reservations_hold_the_cap_and_the_free_reviews_under_contention() {
+        use code_review::pricing::{Month, PriceInput, price};
+        use std::sync::Barrier;
+        let mut config = crate::Config::local(std::env::temp_dir());
+        config.review.index = false;
+        let ai = Ai::new(&config);
+        let rates = Rates { public_free_reviews: 5, ..Rates::default() };
+        // 2 of the month's 5 free reviews are used and $0.25 is spent; the cap is $2.
+        let review = |free_used: u32| {
+            let input = PriceInput { kind: pricing::Kind::Review, mode: Mode::Standard, key: KeySource::Hosted, files: 1, public_repo: true, human_author: false };
+            price(&rates, &input, &Month { public_free_used: free_used, author_standard_charged: 0.0 })
+        };
+        let spent = || {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            Ok((0.25, 2))
+        };
+        let barrier = Barrier::new(32);
+        let granted: Vec<(bool, f64)> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..32)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        let g = ai.reserve("own_1", Some(2.0), spent, review).unwrap();
+                        let out = g.as_ref().map(|g| (g.free, g.usd));
+                        // Hold every reservation until all 32 have tried.
+                        barrier.wait();
+                        out
+                    })
+                })
+                .collect();
+            hs.into_iter().filter_map(|h| h.join().unwrap()).collect()
+        });
+        let free = granted.iter().filter(|g| g.0).count();
+        let paid: f64 = granted.iter().map(|g| g.1).sum();
+        assert_eq!(free, 3, "the 3 free reviews left, no more");
+        assert_eq!(granted.len() - free, 7, "$1.75 of room at $0.25 each");
+        assert!(0.25 + paid <= 2.0 + 1e-9, "spent {paid}");
+        assert_eq!(ai.reserved_usd("own_1"), 0.0, "released on drop");
+        assert_eq!(ai.reserved_free("own_1"), 0);
+        // No cap: everything is granted, still counting free reviews.
+        let a = ai.reserve("own_1", None, || Ok((0.0, 4)), review).unwrap().unwrap();
+        let b = ai.reserve("own_1", None, || Ok((0.0, 4)), review).unwrap().unwrap();
+        assert!(a.free && !b.free, "the 5th free review is taken by a running job");
+        drop((a, b));
+        assert_eq!(ai.reserved_free("own_1"), 0);
     }
 }

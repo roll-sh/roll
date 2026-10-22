@@ -185,7 +185,6 @@ impl Code {
         let human = human_author(self, &c);
         let public = Self::is_public(&r);
         let month = month_of(crate::db::now());
-        let (_, free_used, author_std) = self.db.usage_month(&r.owner_id, &month, &c.author)?;
         let billing = self.db.billing(&r.owner_id)?;
         let mut chosen = self.choose_provider(&r.owner_id, false)?.ok_or_else(|| Error::Unprocessable("roll's reviewer has no model provider: set one for the owner (PUT /v1/code/owners/{owner}/review-provider) or on the server (ROLL_REVIEW_PROVIDER)".into()))?;
 
@@ -194,14 +193,26 @@ impl Code {
         let mut choice = self.choose_mode(&r, &c, &settings, &files, forced, &cfg, &chosen).await;
         // Hosted spend is reserved before the model is called and released once the review is
         // metered, so reviews running at the same time can't overrun the owner's cap together.
+        // The estimate prices every file sent; the review is metered on the files it read, and
+        // with the author's human cap read again then, so it never costs more than it reserved.
         let mut reservation = None;
         if chosen.key == KeySource::Hosted {
-            let estimate = |mode: Mode| {
-                pricing::price(&self.config.review.rates, &price_input(Kind::Review, mode, KeySource::Hosted, files.len() as u32, public, human), &Month { public_free_used: free_used, author_standard_charged: author_std })
-                    .charged_usd
+            let spent_now = || {
+                let (spent, free_used, _) = self.db.usage_month(&r.owner_id, &month, &c.author)?;
+                Ok((spent, free_used))
             };
-            let spent_now = || Ok(self.db.usage_month(&r.owner_id, &month, &c.author)?.0);
-            match self.ai.reserve(&r.owner_id, billing.monthly_cap_usd, estimate(choice.mode), spent_now)? {
+            let author_std = self.db.usage_month(&r.owner_id, &month, &c.author)?.2;
+            let sent = files.len() as u32;
+            let estimate = |mode: Mode| {
+                move |free_used: u32| {
+                    pricing::price(
+                        &self.config.review.rates,
+                        &price_input(Kind::Review, mode, KeySource::Hosted, sent, public, human),
+                        &Month { public_free_used: free_used, author_standard_charged: author_std },
+                    )
+                }
+            };
+            match self.ai.reserve(&r.owner_id, billing.monthly_cap_usd, spent_now, estimate(choice.mode))? {
                 Some(g) => reservation = Some(g),
                 None => {
                     let cap = billing.monthly_cap_usd.unwrap_or_default();
@@ -216,14 +227,14 @@ impl Code {
                                 choice.reasons.push(format!("the monthly cap (${cap:.2}) is reached: standard only"));
                             }
                             // Standard reviews go on past the cap; still held, so the others see them.
-                            reservation = self.ai.reserve(&r.owner_id, None, estimate(Mode::Standard), || Ok(0.0))?;
+                            reservation = self.ai.reserve(&r.owner_id, None, spent_now, estimate(Mode::Standard))?;
                         }
                         _ => return self.capped(&r, &c, cap).await,
                     }
                 }
             }
         }
-        let _reservation = reservation;
+        let reservation = reservation;
 
         // The prompt.
         let default_head = self.head(&r)?;
@@ -379,7 +390,13 @@ impl Code {
         }
         let cost = models.iter().map(|(m, u)| pricing::provider_cost(m, u, &self.config.review.model_rates)).try_fold(0.0, |a, x| x.map(|x| a + x));
         // The month's counters again: other reviews may have been metered while this one ran.
+        // A hosted review is free exactly when its reservation claimed a free public review.
         let (_, free_used, author_std) = self.db.usage_month(&r.owner_id, &month, &c.author)?;
+        let free_used = match &reservation {
+            Some(g) if g.free => 0,
+            Some(_) => u32::MAX,
+            None => free_used,
+        };
         let price = pricing::price(
             &self.config.review.rates,
             &price_input(Kind::Review, choice.mode, chosen.key, result.files_reviewed.max(1), public, human),
@@ -620,9 +637,12 @@ impl Code {
         let mut reservation = None;
         if chosen.key == KeySource::Hosted {
             let billing = self.db.billing(&r.owner_id)?;
-            let estimate = pricing::price(&self.config.review.rates, &price_input(Kind::Chat, Mode::Standard, KeySource::Hosted, 0, public, human), &Month::default()).charged_usd;
-            let spent_now = || Ok(self.db.usage_month(&r.owner_id, &month, &c.author)?.0);
-            match self.ai.reserve(&r.owner_id, billing.monthly_cap_usd, estimate, spent_now)? {
+            let estimate = |_| pricing::price(&self.config.review.rates, &price_input(Kind::Chat, Mode::Standard, KeySource::Hosted, 0, public, human), &Month::default());
+            let spent_now = || {
+                let (spent, free_used, _) = self.db.usage_month(&r.owner_id, &month, &c.author)?;
+                Ok((spent, free_used))
+            };
+            match self.ai.reserve(&r.owner_id, billing.monthly_cap_usd, spent_now, estimate)? {
                 Some(g) => reservation = Some(g),
                 None => {
                     let cap = billing.monthly_cap_usd.unwrap_or_default();
