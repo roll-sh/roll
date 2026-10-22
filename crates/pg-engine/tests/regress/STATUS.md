@@ -251,9 +251,6 @@ Still open from this list, and why:
   the outer level's). 265 (a SubPlan copied into each index condition), 410 (an index entry
   for a dead tuple: `Heap Blocks: exact=1` with no row), 746 (window functions over
   partitions: ordered partition scans under each arm's WindowAgg), 377–383 / 652 (parallel).
-- subselect 329 differs again in the second batch's runs: 96d4656 made a parameterized scan
-  reuse a written equivalence-class clause as written; Postgres derives it outer member first
-  (sources aren't reused: their parent_ec is NULL), as round 13 had it.
 - join 609 / 610: the equivalence class has the scan-level `t1.a = t1.b` too, so Postgres
   joins on `t1.a = t2.b`; the engine's classes come from join clauses only.
 
