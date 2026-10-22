@@ -5850,6 +5850,24 @@ impl Planner<'_, '_> {
             // A partitioned table's Append: its columns are the parent's (whose unique
             // indexes the planner knows), over the members' tuples.
             let mut cols = cols;
+            // (A system catalog's columns: its stand-in table's, whose unique indexes are
+            // the catalog's.)
+            if let Plan::SysScan { table, .. } = &plan {
+                let t = super::sys_table(*table);
+                let tuples = crate::sql::explain::sys_tuples(*table, self.ctx);
+                for (k, c) in cols.iter_mut().enumerate() {
+                    if c.1.is_none() && k < t.columns.len() {
+                        c.1 = Some(VarRef {
+                            table: t.clone(),
+                            col: k,
+                            tuples,
+                            expr: None,
+                            rows,
+                            inh: false,
+                        });
+                    }
+                }
+            }
             // (An inheritance tree's tableoid: one value per table all the same.)
             if let Some(ms) = &members {
                 let sp = &ms[0].scan;

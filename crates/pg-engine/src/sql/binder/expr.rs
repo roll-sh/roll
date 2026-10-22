@@ -2439,18 +2439,42 @@ impl Binder<'_, '_> {
         if let Expr::Row(..) = l {
             // (transformAExprIn: an unknown literal takes a named row type's.)
             let lty = l.ty();
-            let parts = items
+            let items = items
                 .into_iter()
                 .map(|it| {
-                    let it = if matches!(it.ty(), DataType::Unknown)
+                    if matches!(it.ty(), DataType::Unknown)
                         && matches!(&lty, DataType::Row(rt) if rt.oid != 0)
                     {
-                        self.coerce_implicit(it, &lty)?
+                        self.coerce_implicit(it, &lty)
                     } else {
-                        it
-                    };
-                    self.binop(if not { "<>" } else { "=" }, l.clone(), it, loc)
+                        Ok(it)
+                    }
                 })
+                .collect::<Result<Vec<_>>>()?;
+            // A whole-row Var (not a ROW() constructor) against constants of its type: one
+            // `= ANY (array)` (transformAExprIn's ScalarArrayOpExpr).
+            if !self.deparse
+                && items.len() > 1
+                && crate::sql::binder::is_whole_row(&l)
+                && matches!(&lty, DataType::Row(rt) if rt.oid != 0)
+                && items.iter().all(|it| matches!(it, Expr::Const(_, t) if *t == lty))
+            {
+                let vals: Vec<Value> = items
+                    .iter()
+                    .map(|it| match it {
+                        Expr::Const(v, _) => v.clone(),
+                        _ => Value::Null,
+                    })
+                    .collect();
+                let arr = Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(lty.clone(), vals)));
+                let right = Expr::Const(arr, DataType::array_of(lty.clone()));
+                if let Ok(e) = self.array_op(if not { "<>" } else { "=" }, l.clone(), right, not, loc) {
+                    return Ok(e);
+                }
+            }
+            let parts = items
+                .into_iter()
+                .map(|it| self.binop(if not { "<>" } else { "=" }, l.clone(), it, loc))
                 .collect::<Result<Vec<_>>>()?;
             return Ok(if not {
                 Expr::And(parts)

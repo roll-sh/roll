@@ -830,7 +830,16 @@ fn needed_masks(root: &Arc<Plan>) -> HashMap<usize, Vec<bool>> {
         while let Plan::Limit { input, .. } | Plan::LockRows { input, .. } = q {
             q = input;
         }
-        matches!(q, Plan::Project { input: pi, .. } if matches!(&**pi, Plan::Scan(_)))
+        // (Or a grouping read in the ORDER BY's order, whose target list computes them,
+        // through the sort it needs no more.)
+        let below = |p: &Plan| -> bool {
+            let mut p = p;
+            while let Plan::Sort { input, .. } | Plan::Project { input, .. } = p {
+                p = input;
+            }
+            matches!(p, Plan::Agg { sets: None, .. })
+        };
+        matches!(q, Plan::Project { input: pi, .. } if matches!(&**pi, Plan::Scan(_)) || below(pi))
     };
     if let Plan::Project { input, exprs } = &**root
         && scan_proj(input)
@@ -2309,6 +2318,47 @@ impl Builder<'_, '_> {
 
     /// `e` over columns `cols`, deparsed bare and qualified.
     fn name(&mut self, e: &Expr, cols: &[Name], aggs: &[AggCall]) -> Name {
+        // A relation's whole row (`ROW(...)` of all its columns, of its row type): the
+        // whole-row Var `rel.*`, which ruleutils always qualifies.
+        let whole_row_of = |x: &Expr| -> Option<String> {
+            // (Null-extended above an outer join: the same Var.)
+            let x = crate::sql::binder::nullable_whole_row(x).unwrap_or(x);
+            let Expr::Row(items, DataType::Row(rt)) = x else { return None };
+            // (A relation of a named row type; a VALUES list's or a subquery's whole row is
+            // a ROW() of its columns by then.)
+            if items.is_empty() || rt.oid == 0 || rt.fields.len() != items.len() || !crate::sql::binder::is_whole_row(x) {
+                return None;
+            }
+            let mut qual: Option<String> = None;
+            for (item, (fname, _)) in items.iter().zip(&rt.fields) {
+                let Expr::Col(j, _) = item else { return None };
+                let n = cols.get(*j)?;
+                let q = n.full.strip_suffix(&format!(".{}", quote_ident(fname)))?;
+                if n.plain != quote_ident(fname) || qual.as_deref().is_some_and(|p| p != q) {
+                    return None;
+                }
+                qual = Some(q.to_string());
+            }
+            qual
+        };
+        let mut whole = false;
+        e.walk(&mut |x| whole |= whole_row_of(x).is_some());
+        if whole {
+            // (Top down: a null-extended row is replaced whole.)
+            fn top_down(e: Expr, f: &mut dyn FnMut(&Expr) -> Option<Expr>) -> Expr {
+                if let Some(r) = f(&e) {
+                    return r;
+                }
+                e.map_children(&mut |c| Ok(top_down(c, f))).expect("top_down")
+            }
+            let mut more: Vec<Name> = cols.to_vec();
+            let e = top_down(e.clone(), &mut |x| {
+                let q = whole_row_of(x)?;
+                more.push(Name::same(format!("{q}.*")));
+                Some(Expr::Col(more.len() - 1, x.ty()))
+            });
+            return self.name(&e, &more, aggs);
+        }
         // A column a stored view reads that has been dropped since: by the name the view
         // knows it by (its RTE's column names), qualified as the relation's others are.
         let is_dropped = |x: &Expr| {
@@ -12478,7 +12528,15 @@ fn sys_index_scan(
                         any = true;
                     }
                     "~" | "~~" if col_of(&args[0]) == Some(col) => {
-                        let Expr::Const(crate::types::Value::Text(patt), _) = &args[1] else {
+                        // (A byte-ordered collation on the pattern: the catalog's "C" index
+                        // still serves it, match_pattern_prefix.)
+                        let mut pe = &args[1];
+                        while let Expr::Collate(x, c, _) = pe
+                            && matches!(c.as_str(), "C" | "POSIX" | "default")
+                        {
+                            pe = x;
+                        }
+                        let Expr::Const(crate::types::Value::Text(patt), _) = pe else {
                             continue;
                         };
                         let ptype = if d.name == "~" {
