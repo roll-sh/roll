@@ -40,6 +40,8 @@ pub(crate) fn expr_volatile_deep(e: &Expr) -> bool {
 }
 mod mergeappend;
 pub use mergeappend::{PartOrder, count_members, partition_order, plan_ordered_append};
+mod rowmarks;
+pub use rowmarks::level_scans;
 mod syscat;
 pub use syscat::{sys_index_order, sys_size, sys_table};
 pub(crate) use syscat::sys_unique_col;
@@ -4270,11 +4272,11 @@ pub fn child_needs(p: &Plan, needed: &[bool]) -> Vec<Vec<bool>> {
     let pw = |p: &Plan| crate::sql::binder::plan_width(p);
     match p {
         Plan::Limit { .. } | Plan::Context { .. } | Plan::Barrier { .. } => vec![pass(&[])],
-        Plan::LockRows { input, keys, .. } => {
+        Plan::LockRows { input, marks, .. } => {
             let mut n = pass(&[]);
             n.resize(pw(input), false);
-            for (k, _) in keys {
-                if let Some(x) = n.get_mut(*k) {
+            for m in marks.iter() {
+                if let Some(x) = n.get_mut(m.col) {
                     *x = true;
                 }
             }
@@ -5708,6 +5710,7 @@ fn plan_level_ordered(
     }
     p.push_pw_targets(plan);
     p.minmax_aggs(plan);
+    rowmarks::hoist(plan);
     p.removed.get()
 }
 

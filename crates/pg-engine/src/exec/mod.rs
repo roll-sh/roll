@@ -129,7 +129,14 @@ pub struct ExecCtx<'a> {
     /// (their permission checks note them): a view column Postgres computes with a function
     /// that can fail (pg_relation_is_updatable) fails only when read.
     pub sys_cols: RefCell<HashMap<u32, std::collections::BTreeSet<i16>>>,
+    /// EvalPlanQual: while a LockRows rechecks a row a concurrent update changed, the test
+    /// row each of its level's scans returns instead of reading its table (by the scan's
+    /// address; None: no row).
+    pub epq: RefCell<Option<Rc<EpqRows>>>,
 }
+
+/// EvalPlanQual's test rows (`ExecCtx::epq`): per scan, its row's key and stored data.
+pub type EpqRows = HashMap<usize, Option<(Vec<u8>, bytes::Bytes)>>;
 
 /// A correlated scalar subquery's rows by the values of the columns its parameters
 /// equal (read once instead of a scan per outer row).
@@ -397,6 +404,7 @@ impl<'a> ExecCtx<'a> {
             exists_hash: RefCell::default(),
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),
+            epq: RefCell::new(None),
         }
     }
 
@@ -464,6 +472,7 @@ impl<'a> ExecCtx<'a> {
             exists_hash: RefCell::default(),
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),
+            epq: RefCell::new(None),
         }
     }
 

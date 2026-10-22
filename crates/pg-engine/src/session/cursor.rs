@@ -1250,26 +1250,48 @@ pub fn keyed_plan(plan: &Plan) -> Option<(Plan, u32)> {
                     None,
                 )
             }
+            // The level's rows locked at its top: its locked relations' keys are there
+            // already (a row mark's, execCurrentOf), one or several (`marked_keyed_plan`).
             Plan::LockRows {
                 input,
-                keys,
-                mark,
-                wait,
+                marks,
+                width,
             } => {
-                let (i, oid, key, sh) = go(input)?;
-                if sh.is_some() {
-                    return None;
+                let locked: Vec<&crate::sql::plan::LockMark> =
+                    marks.iter().filter(|m| m.lock.is_some()).collect();
+                let (key, oid) = match locked.as_slice() {
+                    [] => return None,
+                    [m] => (Expr::Col(m.col, DataType::Bytea), m.tables.first()?.oid),
+                    _ => (
+                        Expr::Array(
+                            locked.iter().map(|m| Expr::Col(m.col, DataType::Bytea)).collect(),
+                            DataType::Array(Box::new(DataType::Bytea)),
+                        ),
+                        0,
+                    ),
+                };
+                let mut exprs: Vec<Expr> = (0..*width).map(|i| Expr::Col(i, DataType::Text)).collect();
+                exprs.push(key);
+                let mut keyed = Vec::with_capacity(marks.len());
+                for m in marks.iter() {
+                    keyed.push(crate::sql::plan::LockMark {
+                        col: exprs.len(),
+                        ..m.clone()
+                    });
+                    exprs.push(Expr::Col(m.col, DataType::Bytea));
                 }
                 (
                     Plan::LockRows {
-                        input: Arc::new(i),
-                        keys: keys.clone(),
-                        mark: *mark,
-                        wait: *wait,
+                        input: Arc::new(Plan::Project {
+                            input: input.clone(),
+                            exprs,
+                        }),
+                        marks: Arc::new(keyed),
+                        width: width + 1,
                     },
                     oid,
-                    key,
-                    sh,
+                    *width,
+                    None,
                 )
             }
             _ => return None,

@@ -812,6 +812,12 @@ fn rowmark_scans(root: &Arc<Plan>) -> std::collections::HashSet<usize> {
     out
 }
 
+thread_local! {
+    /// How many LockRows the node being built is under: a scan there returning its row's
+    /// key (a row mark's ctid) builds no physical target list.
+    static UNDER_LOCK_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// How many row-marked scans are under `p`.
 fn rowmarks_under(p: &Plan, marks: &std::collections::HashSet<usize>) -> usize {
     (marks.contains(&addr(p)) as usize)
@@ -1117,7 +1123,7 @@ fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<
                     while let Plan::Project { input, .. } | Plan::Filter { input, .. } = q {
                         q = input;
                     }
-                    matches!(q, Plan::Scan(sc) if sc.mark.is_some())
+                    matches!(q, Plan::Scan(sc) if sc.mark.is_some()) || matches!(q, Plan::LockRows { .. })
                 };
                 if demand && (barrier_junk(input, *sorted).is_some() || partial || locked) {
                     out.insert(addr(p), demand);
@@ -1302,6 +1308,20 @@ impl AltSubPlan {
 /// columns, then its inner side's (build_joinrel_tlist); a node passing its input's rows on
 /// keeps that order. (Other scans return their physical target list, in column order.)
 fn tlist_layout(top: &mut ExNode) {
+    tlist_layout_at(top, false)
+}
+
+/// `tlist_layout`. `locked`: the level's rows are locked at its top, a LockRows over the
+/// node computing its target list (whose list it is then, the row marks' ctids last), and
+/// every scan returns its reltarget, no physical target list (a row mark's ctid is a system
+/// column: use_physical_tlist refuses).
+fn tlist_layout_at(top: &mut ExNode, locked: bool) {
+    if top.node_type == "LockRows" {
+        if let Some(c) = top.children.first_mut() {
+            tlist_layout_at(c, true);
+        }
+        return;
+    }
     fn small(t: &str) -> bool {
         matches!(t, "Sort" | "Incremental Sort" | "Hash" | "Materialize" | "Memoize")
     }
@@ -1312,14 +1332,20 @@ fn tlist_layout(top: &mut ExNode) {
         }
         o.rsplit_once('.').map(|(r, _)| r)
     }
-    fn go(n: &mut ExNode, top: &[String], small_parent: bool) {
+    fn go(n: &mut ExNode, top: &[String], small_parent: bool, locked: bool) {
         if matches!(n.node_type, "Append" | "Merge Append" | "Subquery Scan" | "Gather" | "Gather Merge") {
+            return;
+        }
+        if n.node_type == "LockRows" {
+            if let Some(c) = n.children.first_mut() {
+                tlist_layout_at(c, true);
+            }
             return;
         }
         let s = small(n.node_type);
         for c in &mut n.children {
             if matches!(c.relationship, Some("Outer" | "Inner")) {
-                go(c, top, s);
+                go(c, top, s, locked);
             }
         }
         if n.output.len() < 2 {
@@ -1329,7 +1355,7 @@ fn tlist_layout(top: &mut ExNode) {
         if n.is_scan() {
             // (Only a scan returning plain columns: one computing values returns them
             // as the level's target list has them.)
-            if small_parent && n.node_type != "Index Only Scan" && n.output.iter().all(|o| rel_of(o).is_some()) {
+            if (small_parent || locked) && n.node_type != "Index Only Scan" && n.output.iter().all(|o| rel_of(o).is_some()) {
                 n.output.sort_by_key(rank);
             }
             return;
@@ -1383,7 +1409,7 @@ fn tlist_layout(top: &mut ExNode) {
     }
     for c in &mut top.children {
         if matches!(c.relationship, Some("Outer" | "Inner")) {
-            go(c, &t, s);
+            go(c, &t, s, locked);
         }
     }
 }
@@ -2973,7 +2999,9 @@ impl Builder<'_, '_> {
             // aggregation reads, and its calls.)
             let srf_target = b.node.node_type == "ProjectSet" && self.agg_input == Some(addr(p));
             // (A row-marked scan returns its ctid: no physical target list either.)
-            let marked = b.node.is_scan() && self.rowmarks.contains(&addr(p));
+            let marked = b.node.is_scan()
+                && (self.rowmarks.contains(&addr(p))
+                    || matches!(&**p, Plan::Scan(s) if s.with_key && UNDER_LOCK_ROWS.with(|u| u.get() > 0)));
             let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || dummy || member || sorted_join || srf_target || marked)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
@@ -3596,7 +3624,7 @@ impl Builder<'_, '_> {
                 // resjunk entries: the projection that drops them isn't a plan node.
                 if self.o.verbose
                     && (addr(p) == self.top || self.level_tops.contains(&addr(p)))
-                    && (matches!(c.node.node_type, "Sort" | "Incremental Sort" | "Limit")
+                    && (matches!(c.node.node_type, "Sort" | "Incremental Sort" | "Limit" | "LockRows")
                         || c.node.node_type == "Result" && matches!(&**input, Plan::Project { .. })
                         // (A scan read in the ORDER BY's order computing its keys.)
                         || matches!(&**input, Plan::Project { input: pi, .. } if matches!(&**pi, Plan::Scan(_))))
@@ -5589,7 +5617,9 @@ impl Builder<'_, '_> {
                 Built::passthrough(n, names)
             }
             Plan::LockRows { input, .. } => {
+                UNDER_LOCK_ROWS.with(|u| u.set(u.get() + 1));
                 let c = self.node(input);
+                UNDER_LOCK_ROWS.with(|u| u.set(u.get() - 1));
                 Built::passthrough(lock_rows(c.node), c.exported)
             }
             Plan::Insert(ip) => {

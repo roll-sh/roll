@@ -396,16 +396,130 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
                 .unwrap_or_default();
             Box::new(RcNode { rows, i: 0 })
         }
-        Plan::LockRows { input, .. } => {
+        Plan::LockRows {
+            input,
+            marks,
+            width,
+        } => {
             // (Row marks: ExecutorStart takes es_output_cid.)
             ctx.txn.borrow_mut().output_cid();
-            open(input, ctx)?
+            Box::new(LockRowsNode {
+                node: open(input, ctx)?,
+                plan: input.clone(),
+                marks: marks.clone(),
+                width: *width,
+            })
         }
         Plan::Insert(p) => Box::new(super::dml::InsertNode::new(p.clone(), ctx)?),
         Plan::Update(p) => Box::new(super::dml::UpdateNode::new(p.clone(), ctx)?),
         Plan::Delete(p) => Box::new(super::dml::DeleteNode::new(p.clone(), ctx)?),
         Plan::Merge(p) => Box::new(super::merge::MergeNode::new(p.clone(), ctx)?),
     })
+}
+
+/// ExecLockRows: each row the level returns has its locked relations' rows locked (in row
+/// mark order); a row whose lock is skipped (SKIP LOCKED, deleted concurrently) goes, and
+/// one a concurrent update changed is rechecked (EvalPlanQual): the level's plan run again
+/// over the newest version of the locked rows and the same rows of the others, giving the
+/// row to return, or none when it no longer qualifies.
+struct LockRowsNode {
+    node: BoxNode,
+    plan: Arc<Plan>,
+    marks: Arc<Vec<crate::sql::plan::LockMark>>,
+    width: usize,
+}
+
+/// A row mark's test row for EvalPlanQual: its key, and its newest version when the lock
+/// found one (else the version the statement read).
+type EpqTest = Option<(Vec<u8>, Option<bytes::Bytes>)>;
+
+fn key_table(key: &[u8]) -> u32 {
+    key.get(..4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+impl LockRowsNode {
+    fn recheck(&self, tests: Vec<EpqTest>, ctx: &ExecCtx) -> Result<Option<Row>> {
+        let groups = crate::sql::paths::level_scans(&self.plan);
+        if groups.len() != tests.len() {
+            return Err(crate::error::internal("LockRows: row marks and scans differ"));
+        }
+        let snap = ctx.snapshot();
+        let mut rows = super::EpqRows::new();
+        for (scans, test) in groups.iter().zip(tests) {
+            let test = match test {
+                None => None,
+                Some((k, Some(b))) => Some((k, b)),
+                Some((k, None)) => {
+                    let b = match snap.as_deref() {
+                        Some(s) => ctx.txn.borrow().get_snap(&k, s)?,
+                        None => ctx.txn.borrow().get(&k)?,
+                    };
+                    b.map(|b| (k, b))
+                }
+            };
+            for s in scans {
+                let mine = test.clone().filter(|(k, _)| key_table(k) == s.table.oid);
+                rows.insert(*s as *const crate::sql::plan::ScanPlan as usize, mine);
+            }
+        }
+        let prev = ctx.epq.replace(Some(Rc::new(rows)));
+        // (Not counted in EXPLAIN ANALYZE's numbers.)
+        let instr = ctx.instr.borrow_mut().take();
+        let r = open(&self.plan, ctx).and_then(|mut n| n.next(ctx));
+        *ctx.instr.borrow_mut() = instr;
+        *ctx.epq.borrow_mut() = prev;
+        r
+    }
+}
+
+impl Node for LockRowsNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        use super::scan::{Locked, lock_row};
+        'rows: loop {
+            let Some(row) = self.node.next(ctx)? else {
+                return Ok(None);
+            };
+            let mut tests: Vec<EpqTest> = Vec::with_capacity(self.marks.len());
+            let mut changed = false;
+            for m in self.marks.iter() {
+                let key = match row.get(m.col) {
+                    Some(Value::Bytea(k)) => k.to_vec(),
+                    // (The nullable side of an outer join: no row to lock.)
+                    _ => {
+                        tests.push(None);
+                        continue;
+                    }
+                };
+                let Some((mark, wait)) = m.lock else {
+                    tests.push(Some((key, None)));
+                    continue;
+                };
+                let oid = key_table(&key);
+                let Some(t) = m.tables.iter().find(|t| t.oid == oid).or(m.tables.first()) else {
+                    tests.push(Some((key, None)));
+                    continue;
+                };
+                match lock_row(t, &key, mark, wait, ctx)? {
+                    Locked::Skip => continue 'rows,
+                    Locked::Same => tests.push(Some((key, None))),
+                    Locked::Newer(b) => {
+                        changed = true;
+                        tests.push(Some((key, Some(b))));
+                    }
+                }
+            }
+            let mut row = if changed {
+                match self.recheck(tests, ctx)? {
+                    Some(r) => r,
+                    None => continue,
+                }
+            } else {
+                row
+            };
+            row.truncate(self.width);
+            return Ok(Some(row));
+        }
+    }
 }
 
 pub struct VecNode {

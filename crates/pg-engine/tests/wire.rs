@@ -1049,3 +1049,80 @@ fn concurrent_connects_and_closes() {
     });
     s.engine.shutdown();
 }
+
+/// The rows of a simple query's last result, each as its columns joined by `|`.
+async fn lines(c: &Client, sql: &str) -> Result<Vec<String>, tokio_postgres::Error> {
+    let mut out = Vec::new();
+    for m in c.simple_query(sql).await? {
+        if let SimpleQueryMessage::Row(r) = m {
+            out.push((0..r.len()).map(|i| r.get(i).unwrap_or("NULL")).collect::<Vec<_>>().join("|"));
+        }
+    }
+    Ok(out)
+}
+
+/// SELECT ... FOR UPDATE / SHARE locks the rows its query level returns once they are
+/// joined, filtered, sorted and limited (Postgres's LockRows at the level's top), not every
+/// row its scans read; a row a concurrent update changed is rechecked against the whole
+/// level (EvalPlanQual), joins included.
+#[test]
+fn row_locks_at_the_query_level_top() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE lq (id int PRIMARY KEY, x int, note text);
+             CREATE TABLE lr (id int PRIMARY KEY, y int);
+             INSERT INTO lq SELECT g, g, 'n' || g FROM generate_series(1, 10) g;
+             INSERT INTO lr SELECT g, g FROM generate_series(1, 5) g;",
+        )
+        .await
+        .unwrap();
+        // A job queue: each worker takes the first row no one holds.
+        let take = "SELECT id FROM lq ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED";
+        a.batch_execute("BEGIN").await.unwrap();
+        b.batch_execute("BEGIN").await.unwrap();
+        assert_eq!(lines(&a, take).await.unwrap(), ["1"]);
+        assert_eq!(lines(&b, take).await.unwrap(), ["2"]);
+        assert_eq!(lines(&a, take).await.unwrap(), ["1"]);
+        b.batch_execute("ROLLBACK").await.unwrap();
+        a.batch_execute("ROLLBACK").await.unwrap();
+        // Over a join: only the rows that join are locked, and only the named table's.
+        a.batch_execute("BEGIN").await.unwrap();
+        assert_eq!(
+            lines(&a, "SELECT lq.id FROM lq JOIN lr ON lq.x = lr.y WHERE lq.id > 2 ORDER BY 1 FOR UPDATE OF lq")
+                .await
+                .unwrap(),
+            ["3", "4", "5"]
+        );
+        assert_eq!(
+            lines(&b, "SELECT id FROM lq WHERE id IN (6, 9) FOR UPDATE NOWAIT").await.unwrap(),
+            ["6", "9"]
+        );
+        assert_eq!(lines(&b, "SELECT id FROM lr WHERE id = 4 FOR UPDATE NOWAIT").await.unwrap(), ["4"]);
+        let err = lines(&b, "SELECT id FROM lq WHERE id = 4 FOR UPDATE NOWAIT").await.unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("55P03"));
+        a.batch_execute("ROLLBACK").await.unwrap();
+        // EvalPlanQual: the locked row changed while waiting for its lock; the join is
+        // checked again over its new version (row 2 no longer joins, row 3's note is new).
+        a.batch_execute(
+            "BEGIN; UPDATE lq SET x = 100 WHERE id = 2; UPDATE lq SET note = 'changed' WHERE id = 3",
+        )
+        .await
+        .unwrap();
+        let waiter = tokio::spawn(async move {
+            let r = lines(
+                &b,
+                "SELECT lq.id, lq.note, lr.id FROM lq JOIN lr ON lq.x = lr.y WHERE lq.id IN (2, 3) ORDER BY 1 FOR UPDATE OF lq",
+            )
+            .await;
+            (b, r)
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (_b, r) = waiter.await.unwrap();
+        assert_eq!(r.unwrap(), ["3|changed|3"]);
+    });
+    s.engine.shutdown();
+}

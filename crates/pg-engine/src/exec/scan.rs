@@ -288,6 +288,10 @@ fn ranges(
 }
 
 pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
+    let epq = ctx.epq.borrow().clone();
+    if let Some(test) = epq.as_ref().and_then(|m| m.get(&(s as *const ScanPlan as usize))) {
+        return epq_scan(s, test.as_ref(), ctx);
+    }
     if let Some(v) = ctx.catalog().views.get(&s.table.oid)
         && !v.populated
     {
@@ -1151,26 +1155,110 @@ impl ScanNode {
 impl ScanNode {
     /// A stored row as this scan emits it: columns, then the key and system columns if asked.
     fn full_row(&self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
-        let mut row = decode_table_row_at(&self.plan.table, Some(key), bytes)?;
-        if self.plan.with_key {
-            row.push(Value::Bytea(Arc::from(key)));
-        }
-        if self.plan.sys {
-            let mut sys = sys_values(key, row_xmin(bytes)?, 0, self.plan.table.oid);
-            // The heap TID the version was written at, when it was modelled, and the
-            // command id its tuple header holds (cmin and cmax both read t_cid).
-            if let Some((b, o)) = stored_tid(bytes) {
-                sys[0] = Value::Tid(b, o);
-                if let Some(c) = super::sizing::raw_cid(self.plan.table.oid, (b, o), &ctx.sess.db)
-                {
-                    sys[2] = Value::Oid(c);
-                    sys[4] = Value::Oid(c);
-                }
-            }
-            row.extend(sys);
-        }
-        Ok(row)
+        scan_row(&self.plan, key, bytes, ctx)
     }
+}
+
+/// A stored row as scan `plan` emits it: columns, then the key and system columns if asked.
+fn scan_row(plan: &ScanPlan, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
+    let mut row = decode_table_row_at(&plan.table, Some(key), bytes)?;
+    if plan.with_key {
+        row.push(Value::Bytea(Arc::from(key)));
+    }
+    if plan.sys {
+        let mut sys = sys_values(key, row_xmin(bytes)?, 0, plan.table.oid);
+        // The heap TID the version was written at, when it was modelled, and the
+        // command id its tuple header holds (cmin and cmax both read t_cid).
+        if let Some((b, o)) = stored_tid(bytes) {
+            sys[0] = Value::Tid(b, o);
+            if let Some(c) = super::sizing::raw_cid(plan.table.oid, (b, o), &ctx.sess.db) {
+                sys[2] = Value::Oid(c);
+                sys[4] = Value::Oid(c);
+            }
+        }
+        row.extend(sys);
+    }
+    Ok(row)
+}
+
+/// EvalPlanQual (a LockRows rechecking a row a concurrent update changed): the scan returns
+/// its test row, if it has one and it passes the scan's own conditions (its filter, and
+/// the index or TID conditions it reads by: ExecScanFetch's recheck), else nothing.
+fn epq_scan(s: &ScanPlan, test: Option<&(Vec<u8>, bytes::Bytes)>, ctx: &ExecCtx) -> Result<BoxNode> {
+    fn bitmap_ok(q: &crate::sql::plan::BitmapQual, row: &Row, ctx: &ExecCtx) -> Result<bool> {
+        use crate::sql::plan::BitmapQual as B;
+        Ok(match q {
+            B::Index { quals, .. } => {
+                for x in quals {
+                    if !eval_bool(&x.orig, row, ctx)? {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
+            B::And(list) => {
+                for x in list {
+                    if !bitmap_ok(x, row, ctx)? {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
+            B::Or(list) => {
+                for x in list {
+                    if bitmap_ok(x, row, ctx)? {
+                        return Ok(true);
+                    }
+                }
+                false
+            }
+        })
+    }
+    let Some((key, bytes)) = test else {
+        return Ok(Box::new(super::nodes::VecNode::new(Vec::new())));
+    };
+    let row = scan_row(s, key, bytes, ctx)?;
+    let mut ok = match &s.filter {
+        Some(f) => eval_bool(f, &row, ctx)?,
+        None => true,
+    };
+    if ok {
+        ok = match &s.access {
+            Access::Index { quals, .. } => {
+                let mut all = true;
+                for q in quals {
+                    if !eval_bool(&q.orig, &row, ctx)? {
+                        all = false;
+                        break;
+                    }
+                }
+                all
+            }
+            Access::Bitmap(q, _) => bitmap_ok(q, &row, ctx)?,
+            Access::Tid { quals, .. } => {
+                let mut any = quals.is_empty();
+                for q in quals {
+                    if eval_bool(q, &row, ctx)? {
+                        any = true;
+                        break;
+                    }
+                }
+                any
+            }
+            Access::TidRange(quals) => {
+                let mut all = true;
+                for q in quals {
+                    if !eval_bool(q, &row, ctx)? {
+                        all = false;
+                        break;
+                    }
+                }
+                all
+            }
+            Access::Seq | Access::Unplanned => true,
+        };
+    }
+    Ok(Box::new(super::nodes::VecNode::new(if ok { vec![row] } else { Vec::new() })))
 }
 
 impl Node for ScanNode {

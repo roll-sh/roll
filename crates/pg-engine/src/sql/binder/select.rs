@@ -1658,8 +1658,9 @@ impl Binder<'_, '_> {
                 }
             };
             let pred = self.simplify_where(pred);
-            // EXISTS / IN sublinks become semi / anti joins (pull_up_sublinks).
-            let pred = if self.deparse || locking.is_some() {
+            // EXISTS / IN sublinks become semi / anti joins (pull_up_sublinks); with FOR
+            // UPDATE too, its rows locked above the joins (`paths::rowmarks`).
+            let pred = if self.deparse {
                 Some(pred)
             } else {
                 let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, plan, pred);

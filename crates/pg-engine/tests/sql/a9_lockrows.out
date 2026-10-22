@@ -1,0 +1,257 @@
+> CREATE TABLE a9a (id int PRIMARY KEY, x int, note text)
+-- CREATE TABLE
+
+> CREATE TABLE a9b (id int PRIMARY KEY, y int)
+-- CREATE TABLE
+
+> INSERT INTO a9a SELECT g, g, 'n' || g FROM generate_series(1, 10) g
+-- INSERT 0 10
+
+> INSERT INTO a9b SELECT g, g FROM generate_series(1, 5) g
+-- INSERT 0 5
+
+> ANALYZE a9a
+-- ANALYZE
+
+> ANALYZE a9b
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a9a JOIN a9b ON a9a.x = a9b.y FOR UPDATE
+QUERY PLAN:text
+LockRows
+  ->  Hash Join
+        Hash Cond: (a9a.x = a9b.y)
+        ->  Seq Scan on a9a
+        ->  Hash
+              ->  Seq Scan on a9b
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM a9a JOIN a9b ON a9a.x = a9b.y FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: a9a.id, a9a.x, a9a.note, a9b.id, a9b.y, a9a.ctid, a9b.ctid
+  ->  Hash Join
+        Output: a9a.id, a9a.x, a9a.note, a9b.id, a9b.y, a9a.ctid, a9b.ctid
+        Hash Cond: (a9a.x = a9b.y)
+        ->  Seq Scan on public.a9a
+              Output: a9a.id, a9a.x, a9a.note, a9a.ctid
+        ->  Hash
+              Output: a9b.id, a9b.y, a9b.ctid
+              ->  Seq Scan on public.a9b
+                    Output: a9b.id, a9b.y, a9b.ctid
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT a9a.x FROM a9a JOIN a9b ON a9a.x = a9b.y FOR UPDATE OF a9a
+QUERY PLAN:text
+LockRows
+  Output: a9a.x, a9a.ctid, a9b.ctid
+  ->  Hash Join
+        Output: a9a.x, a9a.ctid, a9b.ctid
+        Hash Cond: (a9a.x = a9b.y)
+        ->  Seq Scan on public.a9a
+              Output: a9a.x, a9a.ctid
+        ->  Hash
+              Output: a9b.ctid, a9b.y
+              ->  Seq Scan on public.a9b
+                    Output: a9b.ctid, a9b.y
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT a9a.x FROM a9a, a9b WHERE a9a.x = a9b.y AND a9b.y < 3 FOR SHARE OF a9b NOWAIT
+QUERY PLAN:text
+LockRows
+  Output: a9a.x, a9b.ctid, a9a.ctid
+  ->  Hash Join
+        Output: a9a.x, a9b.ctid, a9a.ctid
+        Hash Cond: (a9a.x = a9b.y)
+        ->  Seq Scan on public.a9a
+              Output: a9a.x, a9a.ctid
+        ->  Hash
+              Output: a9b.ctid, a9b.y
+              ->  Seq Scan on public.a9b
+                    Output: a9b.ctid, a9b.y
+                    Filter: (a9b.y < 3)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a9a LEFT JOIN a9b ON a9a.x = a9b.y FOR UPDATE OF a9a
+QUERY PLAN:text
+LockRows
+  ->  Hash Left Join
+        Hash Cond: (a9a.x = a9b.y)
+        ->  Seq Scan on a9a
+        ->  Hash
+              ->  Seq Scan on a9b
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a9a JOIN a9b ON a9a.x = a9b.y ORDER BY a9a.id LIMIT 2 FOR UPDATE
+QUERY PLAN:text
+Limit
+  ->  LockRows
+        ->  Sort
+              Sort Key: a9a.id
+              ->  Hash Join
+                    Hash Cond: (a9a.x = a9b.y)
+                    ->  Seq Scan on a9a
+                    ->  Hash
+                          ->  Seq Scan on a9b
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a9a ORDER BY x FOR UPDATE
+QUERY PLAN:text
+LockRows
+  ->  Sort
+        Sort Key: x
+        ->  Seq Scan on a9a
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a9a WHERE id < 3 ORDER BY x LIMIT 1 FOR UPDATE SKIP LOCKED
+QUERY PLAN:text
+Limit
+  ->  LockRows
+        ->  Sort
+              Sort Key: x
+              ->  Seq Scan on a9a
+                    Filter: (id < 3)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT x + 1 FROM a9a ORDER BY x FOR SHARE
+QUERY PLAN:text
+LockRows
+  Output: ((x + 1)), x, ctid
+  ->  Sort
+        Output: ((x + 1)), x, ctid
+        Sort Key: a9a.x
+        ->  Seq Scan on public.a9a
+              Output: (x + 1), x, ctid
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM a9a WHERE x = 3 FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: id, x, note, ctid
+  ->  Seq Scan on public.a9a
+        Output: id, x, note, ctid
+        Filter: (a9a.x = 3)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT 1 FROM a9a a, a9a b WHERE a.id = b.id FOR UPDATE OF b
+QUERY PLAN:text
+LockRows
+  Output: 1, b.ctid, a.ctid
+  ->  Hash Join
+        Output: 1, b.ctid, a.ctid
+        Inner Unique: true
+        Hash Cond: (a.id = b.id)
+        ->  Seq Scan on public.a9a a
+              Output: a.ctid, a.id
+        ->  Hash
+              Output: b.ctid, b.id
+              ->  Seq Scan on public.a9a b
+                    Output: b.ctid, b.id
+-- EXPLAIN
+
+> SELECT * FROM a9a JOIN a9b ON a9a.x = a9b.y ORDER BY a9a.id FOR UPDATE
+id:int4 | x:int4 | note:text | id:int4 | y:int4
+1 | 1 | n1 | 1 | 1
+2 | 2 | n2 | 2 | 2
+3 | 3 | n3 | 3 | 3
+4 | 4 | n4 | 4 | 4
+5 | 5 | n5 | 5 | 5
+-- SELECT 5
+
+> SELECT a9a.id, a9b.id FROM a9a LEFT JOIN a9b ON a9a.x = a9b.y WHERE a9a.id > 3 ORDER BY 1 FOR UPDATE OF a9a
+id:int4 | id:int4
+4 | 4
+5 | 5
+6 | NULL
+7 | NULL
+8 | NULL
+9 | NULL
+10 | NULL
+-- SELECT 7
+
+> SELECT id FROM a9a ORDER BY id DESC LIMIT 3 FOR UPDATE SKIP LOCKED
+id:int4
+10
+9
+8
+-- SELECT 3
+
+> SELECT a.id, b.note FROM a9a a JOIN a9a b ON a.id = b.x + 1 WHERE a.id < 4 ORDER BY 1 FOR NO KEY UPDATE OF a FOR SHARE OF b
+id:int4 | note:text
+2 | n1
+3 | n2
+-- SELECT 2
+
+> SELECT x, count(*) FROM (SELECT x FROM a9a JOIN a9b ON x = y FOR UPDATE) s GROUP BY x ORDER BY x
+x:int4 | count:int8
+1 | 1
+2 | 1
+3 | 1
+4 | 1
+5 | 1
+-- SELECT 5
+
+> WITH l AS (SELECT a9a.id FROM a9a JOIN a9b ON a9a.x = a9b.y WHERE a9b.id > 3 FOR UPDATE) SELECT * FROM l ORDER BY 1
+id:int4
+4
+5
+-- SELECT 2
+
+> SELECT a9a.id, g FROM a9a, generate_series(1, 2) g WHERE g = a9a.x FOR UPDATE OF a9a
+id:int4 | g:int4
+1 | 1
+2 | 2
+-- SELECT 2
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT a9a.id, a9b.y FROM a9a JOIN a9b ON a9a.x = a9b.y ORDER BY a9a.id FOR UPDATE OF a9a
+-- DECLARE CURSOR
+
+> FETCH 2 FROM c
+id:int4 | y:int4
+1 | 1
+2 | 2
+-- FETCH 2
+
+> UPDATE a9a SET note = 'via cursor' WHERE CURRENT OF c RETURNING *
+id:int4 | x:int4 | note:text
+2 | 2 | via cursor
+-- UPDATE 1
+
+> UPDATE a9b SET y = y WHERE CURRENT OF c
+ERROR 24000: cursor "c" does not have a FOR UPDATE/SHARE reference to table "a9b"
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT a9a.id, a9b.y FROM a9a JOIN a9b ON a9a.x = a9b.y ORDER BY a9a.id FOR UPDATE
+-- DECLARE CURSOR
+
+> FETCH 3 FROM c
+id:int4 | y:int4
+1 | 1
+2 | 2
+3 | 3
+-- FETCH 3
+
+> DELETE FROM a9b WHERE CURRENT OF c RETURNING *
+id:int4 | y:int4
+3 | 3
+-- DELETE 1
+
+> UPDATE a9a SET note = 'both' WHERE CURRENT OF c RETURNING id, note
+id:int4 | note:text
+3 | both
+-- UPDATE 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP TABLE a9a, a9b
+-- DROP TABLE
+

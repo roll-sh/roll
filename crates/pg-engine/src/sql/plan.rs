@@ -83,6 +83,17 @@ pub enum RowMark {
     KeyShare,
 }
 
+/// A row mark of a LockRows (PlanRowMark): one relation of the query level (a table, or an
+/// inheritance tree's members), the position of its rows' storage key in the LockRows's
+/// input (NULL: no row, the nullable side of an outer join), and the lock its rows take
+/// (None: ROW_MARK_REFERENCE, the row only re-read when a locked row changed concurrently).
+#[derive(Clone, Debug)]
+pub struct LockMark {
+    pub col: usize,
+    pub tables: Vec<Arc<Table>>,
+    pub lock: Option<(RowMark, Wait)>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wait {
     Block,
@@ -1098,12 +1109,14 @@ pub enum Plan {
         /// Column names (after any column aliases).
         cols: Vec<String>,
     },
-    /// SELECT ... FOR UPDATE over a non-scan input: lock rows by the keys at these positions.
+    /// SELECT ... FOR UPDATE / SHARE: the query level's rows locked once joined and filtered,
+    /// at the level's top (Postgres's LockRows over its row marks). `input`'s row is the
+    /// level's `width` columns, then the storage key of each relation's row (`marks`), which
+    /// isn't returned.
     LockRows {
         input: Arc<Plan>,
-        keys: Vec<(usize, u32)>,
-        mark: RowMark,
-        wait: Wait,
+        marks: Arc<Vec<LockMark>>,
+        width: usize,
     },
     Insert(Box<InsertPlan>),
     Update(Box<UpdatePlan>),
