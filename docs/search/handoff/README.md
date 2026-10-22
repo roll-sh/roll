@@ -26,7 +26,7 @@ Design: [../architecture.md](../architecture.md), [../contracts.md](../contracts
 
 ## Next phases
 
-1. Finish phase B:
+1. Finish phase B (`workflow-phase-c1.js` and `workflow-phase-c2.js` are ready-made scripts for steps 2 and 4; they read reports from `~/.cache/roll-search/reports/`, so copy `docs/search/handoff/*.json` there first):
    - painless round 2/3, then review and fix;
    - aggs round 3, then review and fix;
    - reviews of codec and analysis.
