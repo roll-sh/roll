@@ -101,6 +101,8 @@ struct Counted {
     inner: Mutex<ByteStream>,
     len: u64,
     seen: u64,
+    /// The inner stream ended (or failed): it's never polled again.
+    done: bool,
     crc: Arc<(AtomicU64, AtomicU32)>,
 }
 
@@ -110,11 +112,15 @@ impl http_body::Body for Counted {
 
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<http_body::Frame<Bytes>, std::io::Error>>> {
         let this = self.get_mut();
+        if this.done {
+            return Poll::Ready(None);
+        }
         let inner = this.inner.get_mut().unwrap_or_else(|e| e.into_inner());
         match Pin::new(inner).poll_next(cx) {
             Poll::Ready(Some(Ok(b))) => {
                 this.seen += b.len() as u64;
                 if this.seen > this.len {
+                    this.done = true;
                     return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the blob is longer than its metadata says"))));
                 }
                 let crc = crc32c::crc32c_append(this.crc.1.load(Ordering::SeqCst), &b);
@@ -122,11 +128,23 @@ impl http_body::Body for Counted {
                 this.crc.0.store(this.seen, Ordering::SeqCst);
                 Poll::Ready(Some(Ok(http_body::Frame::data(b))))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) if this.seen != this.len => Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the blob ended early")))),
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(Some(Err(e))) => {
+                this.done = true;
+                Poll::Ready(Some(Err(e)))
+            }
+            Poll::Ready(None) => {
+                this.done = true;
+                if this.seen != this.len {
+                    return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the blob ended early"))));
+                }
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
@@ -137,7 +155,7 @@ impl http_body::Body for Counted {
 /// `(body, (bytes seen, CRC32C))` for a stream of `len` bytes.
 fn counted(stream: ByteStream, len: u64) -> (SdkStream, Arc<(AtomicU64, AtomicU32)>) {
     let crc = Arc::new((AtomicU64::new(0), AtomicU32::new(0)));
-    let body = Counted { inner: Mutex::new(stream), len, seen: 0, crc: crc.clone() };
+    let body = Counted { inner: Mutex::new(stream), len, seen: 0, done: false, crc: crc.clone() };
     (SdkStream::new(SdkBody::from_body_1_x(body)), crc)
 }
 

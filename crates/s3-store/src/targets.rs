@@ -23,7 +23,8 @@ const KEY_STATE: &str = "replication_target_key";
 const KEY_ID: u32 = 1;
 
 /// A secret access key in memory: wiped on drop, never printed.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
 pub struct Secret(String);
 
 impl Secret {
@@ -80,7 +81,7 @@ pub struct TargetSpec {
     pub access_key_id: Option<String>,
     /// Required with `access_key_id` on create; on update, omitted keeps the stored one.
     #[serde(default)]
-    pub secret_access_key: Option<String>,
+    pub secret_access_key: Option<Secret>,
     #[serde(default)]
     pub path_style: Option<bool>,
     #[serde(default)]
@@ -90,14 +91,6 @@ pub struct TargetSpec {
 impl std::fmt::Debug for TargetSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TargetSpec").field("endpoint", &self.endpoint).field("region", &self.region).field("access_key_id", &self.access_key_id).field("buckets", &self.buckets).finish_non_exhaustive()
-    }
-}
-
-impl Drop for TargetSpec {
-    fn drop(&mut self) {
-        if let Some(s) = &mut self.secret_access_key {
-            s.zeroize();
-        }
     }
 }
 
@@ -171,7 +164,7 @@ impl TargetSpec {
         if key.as_ref().is_some_and(|k| k.len() > 128 || !k.bytes().all(|b| b.is_ascii_graphic())) {
             return Err(invalid("invalid access_key_id"));
         }
-        if self.secret_access_key.as_ref().is_some_and(|s| s.is_empty() || s.len() > 256) {
+        if self.secret_access_key.as_ref().is_some_and(|s| s.0.is_empty() || s.0.len() > 256) {
             return Err(invalid("secret_access_key must be 1-256 characters"));
         }
         if self.buckets.len() > 100 {
@@ -241,7 +234,7 @@ impl Store {
         validate_target_name(name).map_err(invalid)?;
         let (endpoint, region, key, path_style, buckets) = spec.check()?;
         let master = self.ensure_target_key().await?;
-        let sealed = spec.secret_access_key.as_ref().map(|s| crate::sts::seal(KEY_ID, &master, s.as_bytes()));
+        let sealed = spec.secret_access_key.as_ref().map(|s| crate::sts::seal(KEY_ID, &master, s.0.as_bytes()));
         let now = self.now();
         let buckets_json = rows::json(&buckets)?;
         self.write(|c| {
@@ -309,7 +302,7 @@ mod tests {
         assert!(TargetSpec { endpoint: Some("ftp://x".into()), ..Default::default() }.check().is_err());
         assert!(TargetSpec { endpoint: Some("https://u:p@x".into()), ..Default::default() }.check().is_err());
         assert!(TargetSpec { buckets: vec!["Bad_Name".into()], ..Default::default() }.check().is_err());
-        let s = TargetSpec { secret_access_key: Some("supersecret".into()), ..Default::default() };
+        let s = TargetSpec { secret_access_key: Some(Secret::new("supersecret")), ..Default::default() };
         assert!(!format!("{s:?}").contains("supersecret"));
         assert_eq!(format!("{:?}", Secret::new("supersecret")), "Secret(REDACTED)");
     }

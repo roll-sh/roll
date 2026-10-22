@@ -347,11 +347,12 @@ async fn replication_end_to_end() {
     versioned(&t, "rsrc").await;
     bucket(&t, "rdst").await;
     let cfg = |dest: &str| ReplicationConfiguration::builder().role("arn:aws:iam::123456789012:role/replication").rules(replication_rule(dest, "", true)).build().unwrap();
-    // Like S3: versioning on both sides; a destination outside roll isn't supported.
+    // Like S3: versioning on both sides, and the destination must exist (a bucket outside roll
+    // needs a replication target: tests/targets.rs).
     let e = c.put_bucket_replication().bucket("rsrc").replication_configuration(cfg("rdst")).send().await.unwrap_err();
     assert_eq!(code(&e), "InvalidRequest");
     let e = c.put_bucket_replication().bucket("rsrc").replication_configuration(cfg("some-aws-bucket")).send().await.unwrap_err();
-    assert_eq!(code(&e), "NotImplemented");
+    assert_eq!(code(&e), "InvalidRequest");
     c.put_bucket_versioning()
         .bucket("rdst")
         .versioning_configuration(VersioningConfiguration::builder().status(aws_sdk_s3::types::BucketVersioningStatus::Enabled).build())
