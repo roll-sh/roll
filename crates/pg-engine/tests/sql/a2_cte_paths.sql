@@ -73,3 +73,14 @@ WITH RECURSIVE search_graph(f, t, label) AS (
   SELECT g.* FROM a2_graph0 g, search_graph sg WHERE g.f = sg.t
 ) SEARCH DEPTH FIRST BY f, t SET seq
 SELECT * FROM search_graph ORDER BY seq;
+
+-- (A FROM subquery's output nothing reads is a NULL in its target list, also when the
+-- subquery has a WITH.)
+CREATE TEMP TABLE a2_i8 (q1 bigint, q2 bigint);
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT q1 FROM
+(
+  WITH t_cte AS MATERIALIZED (SELECT * FROM a2_i8 t)
+  SELECT q1, (SELECT q2 FROM t_cte WHERE t_cte.q1 = i8.q1) AS t_sub
+  FROM a2_i8 i8
+) ss;

@@ -34,8 +34,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50825 (**99.36%**) |
-| units differing | 325 |
+| units matching | 50826 (**99.37%**) |
+| units differing | 324 |
 | files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
@@ -44,7 +44,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 313 | 96.3% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 312 | 96.3% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.4% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -287,6 +287,26 @@ Still open in these files, and why:
 - merge 348 (the source subquery's sub-select copied into each action), 462 (an empty
   partitioned target: its dummy Result's names and Inner Unique); returning 103 / 105
   (rule-rewritten statements run as a CTE of the rule's actions).
+
+## Fixed in round 13, agent 2, seventh batch (unread outputs under a WITH)
+
+Same subset, against the engine of commit 80a37d3: 1 unit fixed, none broken.
+
+| file | fixed units |
+|---|---|
+| with | 210 |
+
+What changed:
+
+- A FROM subquery that has its own WITH keeps a NULL for each output nothing above reads in
+  its target list, as one without a WITH does (the With node no longer hides its top
+  projection).
+
+Tried and reverted: substituting a pulled-up one-row VALUES / FROM-less subquery's constants
+into the query above (groupingsets 199 / 201). With the outer join's nullable sides and set
+operation arms excluded it still broke join 349 / 364 / 379, so those two stay open.
+
+Golden extended: `tests/sql/a2_cte_paths.sql`.
 
 ## Fixed in round 13, agent 2, sixth batch (DML sublinks, small target lists)
 
@@ -1115,7 +1135,7 @@ produces no units on Linux (skipped by the file itself).
 | rowtypes | 237 | 231 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
 | returning | 145 | 143 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
-| with | 307 | 302 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (5) |
+| with | 307 | 303 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 579 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (35) |
 | partition_prune | 771 | 733 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (30) |

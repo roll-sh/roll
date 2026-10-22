@@ -826,7 +826,11 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
                 let keys = level_keys(input, *sorted);
                 // (Nor does it remove a volatile one.)
                 let mut top: &Plan = input;
-                while let Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Filter { input, .. } = top {
+                while let Plan::Sort { input, .. }
+                | Plan::Limit { input, .. }
+                | Plan::Filter { input, .. }
+                | Plan::With { body: input, .. } = top
+                {
                     top = input;
                 }
                 // (An output nothing reads is a NULL in its target list, which it keeps:
