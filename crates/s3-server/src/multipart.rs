@@ -67,7 +67,7 @@ pub(crate) async fn create(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         .await
         .s3()?;
     let mut r = response::xml(StatusCode::OK, xml::initiate_multipart(&bucket.name, ctx.key_name(), &up.id));
-    sse::set_headers(&mut r, target.encryption().as_ref(), target.s3);
+    sse::set_headers(&mut r, target.encryption().as_ref(), target.s3 || ctx.store().sse_s3_at_rest());
     if let (Some(a), Some(t)) = (alg, typ) {
         set(&mut r, "x-amz-checksum-algorithm", a.as_str());
         set(&mut r, "x-amz-checksum-type", t.as_str());
@@ -114,7 +114,7 @@ pub(crate) async fn upload_part(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> R
     store.commit_part(&up, n, &data, &etag, checksum.as_ref().map(|(_, v)| v.clone())).await.s3()?;
     let mut r = response::empty(StatusCode::OK);
     set(&mut r, "etag", &quote_etag(&etag));
-    sse::set_headers(&mut r, enc.as_ref(), false);
+    sse::set_headers(&mut r, enc.as_ref(), ctx.store().sse_s3_at_rest());
     if let Some((a, v)) = &checksum {
         set(&mut r, a.header(), v);
     }
@@ -145,7 +145,7 @@ async fn copy_part(ctx: &mut Ctx, up: &Upload, n: u32, enc: Option<&s3_store::En
     if src_vid.is_some() || ctx.store().bucket(&src_bucket).is_ok_and(|b| b.versioning.is_some()) {
         set(&mut r, "x-amz-copy-source-version-id", &src.version_id);
     }
-    sse::set_headers(&mut r, enc, false);
+    sse::set_headers(&mut r, enc, ctx.store().sse_s3_at_rest());
     Ok(r)
 }
 
@@ -224,7 +224,7 @@ pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Repl
         set_checksum(&mut r, c);
     }
     crate::versioning::set_version(&mut r, bucket, &meta.version_id, false);
-    sse::set_headers(&mut r, enc.as_ref(), false);
+    sse::set_headers(&mut r, enc.as_ref(), ctx.store().sse_s3_at_rest());
     Ok(r)
 }
 

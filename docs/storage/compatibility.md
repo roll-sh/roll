@@ -95,7 +95,7 @@ never stored; the metadata keeps their MD5 to tell a right key from a wrong one.
 
 | feature | status |
 |---|---|
-| SSE-S3 (`x-amz-server-side-encryption: AES256`) | ✅ echoed; everything is encrypted at rest by the backing bucket anyway |
+| SSE-S3 (`x-amz-server-side-encryption: AES256`) | ✅ on AWS S3 every object is encrypted at rest, so every write and read reports `AES256`, as S3 does since 2023. On other backends it's reported only when asked for. |
 | SSE-C (`x-amz-server-side-encryption-customer-*`) on PUT, GET, HEAD, CreateMultipartUpload, UploadPart, CompleteMultipartUpload, POST Object | ✅ |
 | SSE-C copy sources (`x-amz-copy-source-server-side-encryption-customer-*`) on CopyObject and UploadPartCopy | ✅ |
 | SSE-KMS (`aws:kms`, `aws:kms:dsse`, `-aws-kms-key-id`, `-context`, `-bucket-key-enabled`) | ✅ on AWS S3 backends; `NotImplemented` elsewhere (see below) |

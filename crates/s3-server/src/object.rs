@@ -184,7 +184,7 @@ async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     if let Some(c) = &meta.checksum {
         set_checksum(&mut r, c);
     }
-    sse::set_headers(&mut r, enc.as_ref(), target.s3);
+    sse::set_headers(&mut r, enc.as_ref(), target.s3 || ctx.store().sse_s3_at_rest());
     Ok(r)
 }
 
@@ -321,7 +321,7 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     let mut r = object_response(&meta, &overrides, code, len);
     versioning::set_version(&mut r, bucket, &meta.version_id, vid.is_some());
     versioning::set_lock(&mut r, &meta.lock);
-    sse::set_headers(&mut r, enc.as_ref(), false);
+    sse::set_headers(&mut r, enc.as_ref(), ctx.store().sse_s3_at_rest());
     if let Some((a, b)) = range {
         set(&mut r, "content-range", &s3_proto::http::content_range(a, b, meta.size));
     }
@@ -430,7 +430,7 @@ async fn copy(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     if src_versioned {
         set(&mut r, "x-amz-copy-source-version-id", &src.version_id);
     }
-    sse::set_headers(&mut r, target.encryption().as_ref(), target.s3);
+    sse::set_headers(&mut r, target.encryption().as_ref(), target.s3 || ctx.store().sse_s3_at_rest());
     Ok(r)
 }
 

@@ -31,6 +31,8 @@ pub struct S3Backend {
     storage_class: Option<StorageClass>,
     /// SSE-KMS requests are passed through (real AWS: on by default without a custom endpoint).
     kms: bool,
+    /// Real AWS S3 (no custom endpoint), which encrypts every object with SSE-S3.
+    aws: bool,
 }
 
 /// A body of known length for the SDK (which wants `Sync`).
@@ -240,6 +242,7 @@ impl S3Backend {
             prefix,
             storage_class: storage_class.filter(|s| !s.is_empty()).map(StorageClass::from),
             kms: endpoint.is_none(),
+            aws: endpoint.is_none(),
         })
     }
 
@@ -273,6 +276,10 @@ impl Backend for S3Backend {
 
     fn supports_kms(&self) -> bool {
         self.kms
+    }
+
+    fn encrypts_at_rest(&self) -> bool {
+        self.aws
     }
 
     async fn put(&self, key: &str, body: ByteStream, len: u64, attrs: &BlobAttrs) -> Result<Uploaded> {

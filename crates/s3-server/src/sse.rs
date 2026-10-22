@@ -122,8 +122,8 @@ pub(crate) fn key_for(ctx: &Ctx, enc: Option<&Encryption>, used: Use) -> Result<
     }
 }
 
-/// The response headers of an object (or upload) encrypted as `enc`; `s3`: SSE-S3 was asked
-/// for.
+/// The response headers of an object (or upload) encrypted as `enc`; `s3`: SSE-S3 applies (it
+/// was asked for, or the backing store encrypts everything at rest, as AWS S3 does).
 pub(crate) fn set_headers(r: &mut Response, enc: Option<&Encryption>, s3: bool) {
     match enc {
         Some(Encryption::Customer { key_md5 }) => {

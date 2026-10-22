@@ -151,6 +151,12 @@ pub trait Backend: Send + Sync + 'static {
         false
     }
 
+    /// Whether every blob is encrypted at rest with SSE-S3 (AES256), as AWS S3 does for every
+    /// object since 2023. Only then do responses say so without being asked.
+    fn encrypts_at_rest(&self) -> bool {
+        false
+    }
+
     /// Store a blob (with the configured storage class, encrypted as `attrs.sse` says). `len`
     /// must be the body's exact length; a body that is shorter, longer or ends in an error
     /// stores nothing. The CRC32C is of the bytes given (the plaintext).

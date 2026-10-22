@@ -333,7 +333,7 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         if let Some(v) = &version {
             set(&mut r, "x-amz-version-id", v);
         }
-        crate::sse::set_headers(&mut r, enc.as_ref(), sse_s3);
+        crate::sse::set_headers(&mut r, enc.as_ref(), sse_s3 || ctx.store().sse_s3_at_rest());
         return Ok(r);
     }
     let mut r = match field(&fields, "success_action_status") {
@@ -355,7 +355,7 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         set(&mut r, "x-amz-version-id", v);
     }
     set(&mut r, "location", &location);
-    crate::sse::set_headers(&mut r, enc.as_ref(), sse_s3);
+    crate::sse::set_headers(&mut r, enc.as_ref(), sse_s3 || ctx.store().sse_s3_at_rest());
     Ok(r)
 }
 
