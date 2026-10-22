@@ -1,0 +1,115 @@
+name: nosql
+
+# Runs only when nosql-related code changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/nosql-*/**"
+      - "crates/pg-storage/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/test-nosql.sh"
+      - "scripts/nosql-conformance.sh"
+      - "scripts/nosql-conformance/**"
+      - "deploy/nosql/**"
+      - ".github/workflows/nosql.yml"
+  workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
+
+concurrency:
+  group: nosql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/test-nosql.sh --force --unit
+
+  references:
+    runs-on: ubuntu-latest
+    # Includes building the roll/nosql image and its image, tool and driver suites.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo sysctl -w fs.aio-max-nr=1048576
+      - run: docker pull -q scylladb/scylla:2026.3.3 && docker pull -q cassandra:5.0.9
+      - name: Differential, driver and cqlsh tests against ScyllaDB and Cassandra
+        run: scripts/test-nosql.sh --force
+
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      # The per-row TTL tests poll until rows expire; until roll expires them, each runs into this.
+      ROLL_CONFORMANCE_TIMEOUT: 600
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Fails on a test that passes on the reference, fails on roll and is not a listed known
+      # failure (or when roll panics or exits). Listed tests that pass now are printed for pruning.
+      - name: ScyllaDB cqlpy suite against roll (scylla dialect)
+        run: |
+          d=crates/nosql-server/tests/conformance
+          scripts/nosql-conformance.sh --roll scylla --compare $d/reference-scylla-cqlpy.txt \
+            --known-failures $d/roll-known-failures-scylla.txt
+      - name: ScyllaDB cqlpy suite against roll (cassandra dialect)
+        if: ${{ !cancelled() }}
+        run: |
+          d=crates/nosql-server/tests/conformance
+          scripts/nosql-conformance.sh --roll cassandra --compare $d/reference-cassandra-cqlpy.txt \
+            --known-failures $d/roll-known-failures-cassandra.txt
+      - name: ScyllaDB alternator suite against roll
+        if: ${{ !cancelled() }}
+        run: |
+          d=crates/nosql-server/tests/conformance
+          scripts/nosql-conformance.sh --roll scylla --suite alternator \
+            --compare $d/reference-scylla-alternator.txt \
+            --known-failures $d/roll-known-failures-scylla-alternator.txt
+      - name: Keep the conformance logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nosql-conformance
+          path: |
+            target/nosql-conformance/*.txt
+            target/nosql-conformance/out/*.log
+
+  s3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_ACCESS_KEY_ID: roll
+      AWS_SECRET_ACCESS_KEY: roll
+      AWS_REGION: us-east-1
+      ROLL_E2E_S3_BUCKET: roll-e2e
+      ROLL_E2E_S3_ENDPOINT: http://127.0.0.1:8333
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: S3 object store (SeaweedFS)
+        run: |
+          docker run -d --name seaweed -p 8333:8333 chrislusf/seaweedfs server -s3
+          for i in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && break; sleep 1; done
+          docker exec seaweed sh -c 'echo "s3.bucket.create -name roll-e2e" | weed shell'
+      - name: Storage, branches, restore, the servers, the control plane and rolld on S3
+        run: |
+          cargo test -p nosql-storage
+          cargo test -p nosql-server --test node --test rest --test http --test alternator --test drivers
+          cargo test -p nosql-alternator --tests
+          cargo test -p nosql-control --tests
+          cargo test -p rolld --test nosql
+          cargo test -p roll-cli --features roll-server-tests --test nosql_api --test cqlsh_roll

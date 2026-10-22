@@ -1,0 +1,5 @@
+#!/bin/sh
+# NODETOOL for Cassandra targets: the suites call `$NODETOOL -h <host> <command...>`, but the
+# reference's JMX only listens inside its container, so drop -h and run nodetool there.
+if [ "$1" = "-h" ]; then shift 2; fi
+exec docker exec "$ROLL_NODETOOL_CONTAINER" nodetool "$@"
