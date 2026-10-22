@@ -306,6 +306,19 @@ fn shape(v: &Value) -> Value {
     }
 }
 
+/// Same JSON shape, where an empty array matches any array: lists of running work (active
+/// compactions, pending tasks) depend on what the server happens to be doing.
+fn same_shape(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Array(x), Value::Array(y)) if x.is_empty() || y.is_empty() => true,
+        (Value::Array(x), Value::Array(y)) => same_shape(&x[0], &y[0]),
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same_shape(v, w)))
+        }
+        _ => shape(a) == shape(b),
+    }
+}
+
 /// Every endpoint answers with the reference's status and JSON shape.
 #[tokio::test]
 async fn shapes_match_the_reference() {
@@ -398,7 +411,7 @@ async fn shapes_match_the_reference() {
         let (rs, rb) = get(r.base.clone()).await;
         let (fs, fb) = get(format!("http://{reference}")).await;
         // Error texts must match too.
-        let same = rs == fs && shape(&rb) == shape(&fb) && (rs < 300 || rb == fb);
+        let same = rs == fs && same_shape(&rb, &fb) && (rs < 300 || rb == fb);
         if !same {
             diffs.push(format!("{p}: roll {rs} {rb}\n  ref {fs} {fb}"));
         }
