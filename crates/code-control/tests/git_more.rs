@@ -251,3 +251,83 @@ async fn git_auth_for_other_owners_and_anonymous() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("not found") || err.contains("404"), "{err}");
 }
+
+/// A git request with `x:{token}` as Basic credentials; its status and `WWW-Authenticate`.
+async fn git_status(a: &App, method: &str, path: &str, token: Option<&str>) -> (axum::http::StatusCode, Option<String>) {
+    use base64::Engine;
+    let mut b = axum::http::Request::builder().method(method).uri(path);
+    if let Some(t) = token {
+        b = b.header("authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("x:{t}"))));
+    }
+    let r = a.send(b.body(axum::body::Body::empty()).unwrap()).await;
+    (r.status(), r.headers().get("www-authenticate").map(|v| v.to_str().unwrap().to_string()))
+}
+
+/// The auth matrix over git's smart HTTP, status by status: reads are `git-upload-pack`, writes
+/// `git-receive-pack`. Unlike the API, an anonymous read of a private repo is a 401 with a Basic
+/// challenge, because git only sends credentials once it's asked for them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_auth_matrix_over_smart_http() {
+    use axum::http::StatusCode;
+    let a = app(Some("admin"));
+    let mut tokens = Vec::new();
+    for owner in ["acme", "other"] {
+        assert!(a.req("POST", "/v1/code/owners", Some(json!({ "name": owner })), Some("admin")).await.0.is_success());
+        tokens.push(a.req("POST", &format!("/v1/code/owners/{owner}/tokens"), Some(json!({})), Some("admin")).await.1["token"].as_str().unwrap().to_string());
+    }
+    let (_, old) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "old" })), Some("admin")).await;
+    a.req("DELETE", &format!("/v1/code/owners/acme/tokens/{}", old["id"].as_str().unwrap()), None, Some("admin")).await;
+    for (name, vis) in [("pub", "public"), ("priv", "private")] {
+        assert!(a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": name, "visibility": vis })), Some("admin")).await.0.is_success());
+    }
+    let refs = |repo: &str, service: &str| format!("/git/acme/{repo}.git/info/refs?service=git-{service}-pack");
+    let (ok, nf, un, fb) = (StatusCode::OK, StatusCode::NOT_FOUND, StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN);
+    // [read public, read private, write public, write private]
+    let rows: [(&str, Option<&str>, [StatusCode; 4]); 8] = [
+        ("admin", Some("admin"), [ok; 4]),
+        ("owner", Some(tokens[0].as_str()), [ok; 4]),
+        ("another owner", Some(tokens[1].as_str()), [ok, nf, fb, nf]),
+        ("anonymous", None, [ok, un, un, un]),
+        ("unknown token", Some("rlc_0000"), [un; 4]),
+        ("garbage token", Some("hunter2"), [un; 4]),
+        ("revoked token", old["token"].as_str(), [un; 4]),
+        ("an empty password", Some(""),[ok, un, un, un]),
+    ];
+    for (who, token, want) in rows {
+        let got = [
+            git_status(&a, "GET", &refs("pub", "upload"), token).await,
+            git_status(&a, "GET", &refs("priv", "upload"), token).await,
+            git_status(&a, "GET", &refs("pub", "receive"), token).await,
+            git_status(&a, "GET", &refs("priv", "receive"), token).await,
+        ];
+        assert_eq!(got.iter().map(|g| g.0).collect::<Vec<_>>(), want, "{who}");
+        for (status, challenge) in &got {
+            if *status == un {
+                assert_eq!(challenge.as_deref(), Some("Basic realm=\"roll code\""), "{who}: a 401 asks for credentials");
+            }
+        }
+    }
+    // The pack endpoints check the same way as the advertisement.
+    assert_eq!(git_status(&a, "POST", "/git/acme/priv.git/git-upload-pack", None).await.0, un);
+    assert_eq!(git_status(&a, "POST", "/git/acme/priv.git/git-upload-pack", Some(&tokens[1])).await.0, nf);
+    assert_eq!(git_status(&a, "POST", "/git/acme/pub.git/git-receive-pack", Some(&tokens[1])).await.0, fb);
+    assert_eq!(git_status(&a, "POST", "/git/acme/pub.git/git-receive-pack", None).await.0, un);
+    // Not git endpoints, or the dumb protocol.
+    assert_eq!(git_status(&a, "POST", "/git/acme/pub.git/info/refs", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(git_status(&a, "GET", "/git/acme/pub.git/HEAD", None).await.0, nf);
+    assert_eq!(git_status(&a, "GET", "/git/acme/pub.git/info/refs", None).await.0, fb);
+    assert_eq!(git_status(&a, "GET", &refs("nope", "upload"), None).await.0, nf);
+    // A renamed repo is still served under its old name.
+    a.req("PATCH", "/v1/code/repos/acme/pub", Some(json!({ "name": "moved" })), Some("admin")).await;
+    assert_eq!(git_status(&a, "GET", &refs("pub", "upload"), None).await.0, ok);
+
+    // Open mode: every caller is the admin, with any token or none.
+    let open = app(None);
+    open.repo("acme", "priv").await;
+    open.ok("PATCH", "/v1/code/repos/acme/priv", Some(json!({ "visibility": "private" }))).await;
+    for token in [None, Some("hunter2")] {
+        for service in ["upload", "receive"] {
+            assert_eq!(git_status(&open, "GET", &refs("priv", service), token).await.0, ok, "{token:?} {service}");
+        }
+    }
+}

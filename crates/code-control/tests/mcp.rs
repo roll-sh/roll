@@ -355,3 +355,59 @@ async fn responses_as_server_sent_events() {
     assert!(resp.headers().contains_key("mcp-session-id"));
     assert!(resp.headers()["content-type"].to_str().unwrap().starts_with("application/json"));
 }
+
+/// The auth matrix through MCP tools: every caller × read and write, public and private, as the
+/// routes answer them; and a bad token gets no session. Open mode lets any token in.
+#[tokio::test]
+async fn tools_follow_the_whole_auth_matrix() {
+    let a = common::app(Some("root"));
+    let mut tokens = Vec::new();
+    for owner in ["acme", "other"] {
+        a.req("POST", "/v1/code/owners", Some(json!({ "name": owner, "kind": "org" })), Some("root")).await;
+        let (_, t) = a.req("POST", &format!("/v1/code/owners/{owner}/tokens"), Some(json!({ "name": "t" })), Some("root")).await;
+        tokens.push(t["token"].as_str().unwrap().to_string());
+    }
+    for (name, vis) in [("pub", "public"), ("priv", "private")] {
+        let (s, v) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": name, "visibility": vis })), Some("root")).await;
+        assert!(s.is_success(), "{v}");
+        let (s, v) = a.req("POST", &format!("/v1/code/repos/acme/{name}/land"), Some(json!({ "message": "m", "files": { "a.txt": { "content": "a\n" } } })), Some("root")).await;
+        assert!(s.is_success(), "{v}");
+    }
+    // None: the tool works; Some(text): it fails, saying that.
+    type Outcomes<'a> = [Option<&'a str>; 4];
+    let rows: [(&str, Option<&str>, Outcomes); 4] = [
+        ("admin", Some("root"), [None; 4]),
+        ("owner", Some(tokens[0].as_str()), [None; 4]),
+        ("another owner", Some(tokens[1].as_str()), [None, Some("not found"), Some("not allowed"), Some("not found")]),
+        ("anonymous", None, [None, Some("not found"), Some("this needs a token"), Some("not found")]),
+    ];
+    for (who, token, want) in rows {
+        let mut c = Client::new(&a, token);
+        c.initialize("2025-06-18").await;
+        for (i, (tool, repo)) in [("read_file", "acme/pub"), ("read_file", "acme/priv"), ("create_work", "acme/pub"), ("create_work", "acme/priv")].into_iter().enumerate() {
+            let args = if tool == "read_file" { json!({ "repo": repo, "path": "a.txt" }) } else { json!({ "repo": repo, "title": format!("by {who}") }) };
+            match want[i] {
+                None if tool == "read_file" => assert_eq!(c.tool(tool, args).await["content"], "a\n", "{who} {tool} {repo}"),
+                None => assert_eq!(c.tool(tool, args).await["title"], format!("by {who}"), "{who} {tool} {repo}"),
+                Some(msg) => {
+                    let err = c.tool_err(tool, args).await;
+                    assert!(err.contains(msg), "{who} {tool} {repo}: {err}");
+                }
+            }
+        }
+    }
+    // Unknown and garbage tokens: no session (401), so no tool runs.
+    let init = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } });
+    for token in ["rlc_0000", "hunter2"] {
+        let (s, _, v) = Client::new(&a, Some(token)).post(init.clone(), &[]).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{token}: {v}");
+    }
+    // DELETE needs the session header.
+    assert_eq!(a.send(Request::builder().method("DELETE").uri(MCP).body(Body::empty()).unwrap()).await.status(), StatusCode::BAD_REQUEST);
+    // Open mode: every caller is the admin, whatever token it sends.
+    let open = app(None);
+    open.repo("acme", "x").await;
+    let mut c = Client::new(&open, Some("hunter2"));
+    c.initialize("2025-06-18").await;
+    assert_eq!(c.tool("create_work", json!({ "repo": "acme/x", "title": "t" })).await["title"], "t");
+}

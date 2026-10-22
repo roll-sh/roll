@@ -101,8 +101,11 @@ impl Code {
     }
 
     pub fn create_owner(&self, caller: &Caller, name: &str, kind: OwnerKind, display_name: Option<&str>) -> Result<Owner> {
-        if *caller != Caller::Admin {
-            return Err(Error::Forbidden("creating owners needs the admin token".into()));
+        match caller {
+            Caller::Admin => {}
+            // Without a token: a sign-in prompt (401), as for every other write.
+            Caller::Anonymous => return Err(Error::Unauthorized),
+            _ => return Err(Error::Forbidden("creating owners needs the admin token".into())),
         }
         let name = names::owner(name).map_err(|(_, msg)| Error::Unprocessable(msg))?;
         let o = Owner {
@@ -148,11 +151,18 @@ impl Code {
         }
     }
 
+    /// [`Self::manages`] as an error for writes to an owner: 401 without a token, 403 otherwise.
+    fn check_manages_owner(&self, caller: &Caller, o: &Owner, what: &str) -> Result<()> {
+        match caller {
+            Caller::Anonymous => Err(Error::Unauthorized),
+            c if !Self::manages(c, &o.id) => Err(Error::Forbidden(format!("not allowed to {what} {}", o.name))),
+            _ => Ok(()),
+        }
+    }
+
     pub fn update_owner(&self, caller: &Caller, name: &str, patch: &Value) -> Result<Owner> {
         let o = self.owner_or_404(name)?;
-        if !Self::manages(caller, &o.id) {
-            return Err(Error::Forbidden(format!("not allowed to change {}", o.name)));
-        }
+        self.check_manages_owner(caller, &o, "change")?;
         let s = |k: &str| patch.get(k).and_then(Value::as_str).map(|v| v.trim().chars().take(500).collect::<String>());
         let display = s("display_name").filter(|d| !d.is_empty());
         self.db.update_owner(&o.id, display.as_deref(), s("bio").as_deref(), s("url").as_deref())?;
@@ -161,9 +171,7 @@ impl Code {
 
     pub fn create_token(&self, caller: &Caller, owner: &str, name: &str) -> Result<Value> {
         let o = self.owner_or_404(owner)?;
-        if !Self::manages(caller, &o.id) {
-            return Err(Error::Forbidden(format!("not allowed to create tokens for {}", o.name)));
-        }
+        self.check_manages_owner(caller, &o, "create tokens for")?;
         let token = new_token();
         let name = if name.trim().is_empty() { "token" } else { name.trim() };
         let id = crate::new_id("tok");
@@ -186,11 +194,7 @@ impl Code {
     /// request (API, git, MCP) looks the token up.
     pub fn revoke_token(&self, caller: &Caller, owner: &str, id: &str) -> Result<()> {
         let o = self.owner_or_404(owner)?;
-        match caller {
-            Caller::Anonymous => return Err(Error::Unauthorized),
-            c if !Self::manages(c, &o.id) => return Err(Error::Forbidden(format!("not allowed to revoke tokens of {}", o.name))),
-            _ => {}
-        }
+        self.check_manages_owner(caller, &o, "revoke tokens of")?;
         if !self.db.delete_token(&o.id, id)? {
             return Err(Error::NotFound(format!("token {id}")));
         }

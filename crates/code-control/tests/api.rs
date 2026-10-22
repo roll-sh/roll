@@ -43,7 +43,7 @@ async fn repos_rename_and_visibility() {
     let a = app(Some("admin-secret"));
     let admin = Some("admin-secret");
     let (s, _) = a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme" })), None).await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "no token: sign in");
     let (s, _) = a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), admin).await;
     assert_eq!(s, StatusCode::CREATED);
     let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "ci" })), admin).await;
