@@ -317,6 +317,7 @@ pub(crate) async fn upsert_pr(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, 
                 "body": d.body,
                 "changeset": cs_id(&cs),
                 "author": d.author.clone().unwrap_or_else(|| "github".into()),
+                "draft": d.draft,
             });
             let branch = same_repo.then_some(d.head_ref.as_str());
             // A fork's PR is code from outside the repo: no automatic checks or previews.
@@ -330,17 +331,25 @@ pub(crate) async fn upsert_pr(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, 
             if c.head != cs_id(&cs) && c.state != ChangeState::Landed {
                 code.revise_change(r, &Caller::Admin, &code.change_or_404(&c.id)?, &json!({ "changeset": cs_id(&cs) })).await?;
             }
+            // Draft on GitHub, draft in roll (marking a queued change draft dequeues it).
+            let now_c = code.change_or_404(&c.id)?;
+            if now_c.draft != d.draft && now_c.state != ChangeState::Landed {
+                code.update_change(r, &now_c, &json!({ "draft": d.draft }))?;
+            }
             c.id
         }
         (PrState::Closed, Some(c)) => {
             if !matches!(c.state, ChangeState::Landed | ChangeState::Closed) {
-                code.db.set_change_state(&c.id, ChangeState::Closed, None, None)?;
+                // Through close_change, so a queued change leaves the queue (and its batch).
+                code.close_change(&c)?;
             }
             c.id
         }
         // Merged on GitHub: the push to the default branch brings the commits.
         (PrState::Merged, Some(c)) => {
             if c.state != ChangeState::Landed {
+                // It mustn't land a second time from the merge queue.
+                code.queued_change_moved(r, &c, false)?;
                 code.db.set_change_state(&c.id, ChangeState::Landed, None, None)?;
                 super::set_mark(code, &format!("pr-landed:{}", c.id), "github")?;
             }

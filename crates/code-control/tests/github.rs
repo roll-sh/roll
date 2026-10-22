@@ -1199,3 +1199,433 @@ async fn review_events_every_action_against_the_rules() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!g.mock.calls.lock().iter().any(|(m, p, _)| m == "GRAPHQL" && p != "reviewThreads"), "nothing echoed to GitHub");
 }
+
+const ZERO: &str = "0000000000000000000000000000000000000000";
+
+/// Connect acme/app (installation 7) and wait for the import.
+async fn connect(a: &App) -> String {
+    a.ok("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" }))).await;
+    let repo = a
+        .ok("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "app", "source": { "github": { "installation_id": INSTALLATION, "owner": "acme", "repo": "app" } } })))
+        .await;
+    until("import", || async { a.ok("GET", "/v1/code/repos/acme/app", None).await["import"]["state"] == "done" }).await;
+    repo["id"].as_str().unwrap().to_string()
+}
+
+fn quiet_mirror() -> MirrorConfig {
+    MirrorConfig { debounce: Duration::from_secs(600), max_delay: Duration::from_secs(600), ..fast_mirror() }
+}
+
+fn rev(home: &std::path::Path, w: &std::path::Path, r: &str) -> String {
+    git(home, w, &["rev-parse", r]).trim().to_string()
+}
+
+/// A change's head as a git commit id.
+fn head_git(a: &App, repo_id: &str, c: &Value) -> String {
+    let cs = a.code.store.resolve(repo_id, c["head"].as_str().unwrap()).unwrap().unwrap();
+    a.code.store.derive_git(repo_id, &cs).unwrap().0.hex()
+}
+
+fn mark(a: &App, key: &str) -> Option<String> {
+    a.code.db.lock().query_row("SELECT value FROM github_marks WHERE key = ?", [key], |r| r.get(0)).ok()
+}
+
+/// Push webhooks beyond the default branch's fast-forward and merge: a pushed branch opens its
+/// change and later pushes revise it (a repeat doesn't), deleting the branch closes it (unless a
+/// PR owns it), tags (annotated and lightweight) come and go, roll's own bot echo is ignored, a
+/// rewritten default branch pauses the mirror, and pushes to repos roll doesn't know do nothing.
+/// The mirror reports `pending` while roll is ahead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn push_webhooks_for_branches_tags_and_echoes() {
+    let g = github_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let w = seed(home, &format!("{}/git/acme/app.git", g.base));
+    g.mock.pulls.lock().insert(3, pr_json(&g.mock, 3, "feature", &rev(home, &w, "feature"), &rev(home, &w, "main")));
+    let a = app(None);
+    enable(&a, &g, quiet_mirror());
+    let repo_id = connect(&a).await;
+    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await[0]["id"].as_str().unwrap().to_string();
+    let push = |r: &str, before: &str, after: &str, sender: &str| {
+        json!({
+            "ref": r, "before": before, "after": after, "created": before == ZERO, "deleted": after == ZERO,
+            "repository": repo_json(&g.mock), "sender": { "login": sender, "id": 5 }, "installation": { "id": INSTALLATION },
+        })
+    };
+    let mirror = || async { a.ok("GET", "/v1/code/repos/acme/app", None).await["github"]["mirror"].clone() };
+
+    // roll lands; the quiet mirror hasn't pushed it: pending, one behind.
+    until("mirror ok after the import", || async { mirror().await["state"] == "ok" }).await;
+    a.ok("POST", "/v1/code/repos/acme/app/land", Some(json!({ "message": "roll ahead", "files": { "ahead.txt": { "content": "a\n" } } }))).await;
+    until("mirror pending", || async {
+        let m = mirror().await;
+        m["state"] == "pending" && m["behind"].as_u64().unwrap_or(0) >= 1 && m["error"].is_null()
+    })
+    .await;
+
+    // A branch pushed to GitHub opens a change from its commit.
+    git(home, &w, &["checkout", "-qb", "agent/x"]);
+    write(&w, "agent.txt", "one\n");
+    git(home, &w, &["add", "-A"]);
+    git(home, &w, &["commit", "-qm", "agent work", "-m", "the body"]);
+    git(home, &w, &["push", "-q", "origin", "agent/x"]);
+    let x1 = rev(home, &w, "agent/x");
+    assert_eq!(hook(&a, "push", "b-1", &push("refs/heads/agent/x", ZERO, &x1, "human"), SECRET).await, StatusCode::OK);
+    let changes = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await;
+    let cx = changes.as_array().unwrap().iter().find(|c| c["branch"] == "agent/x").cloned().expect("a change for the pushed branch");
+    assert_eq!((cx["title"].as_str(), cx["body"].as_str(), cx["author"].as_str()), (Some("agent work"), Some("the body"), Some("human")));
+    assert_eq!(head_git(&a, &repo_id, &cx), x1);
+    let cx_id = cx["id"].as_str().unwrap().to_string();
+    // Another push revises it; the same head again doesn't.
+    write(&w, "agent.txt", "two\n");
+    git(home, &w, &["commit", "-qam", "agent work v2"]);
+    git(home, &w, &["push", "-q", "origin", "agent/x"]);
+    let x2 = rev(home, &w, "agent/x");
+    assert_eq!(hook(&a, "push", "b-2", &push("refs/heads/agent/x", &x1, &x2, "human"), SECRET).await, StatusCode::OK);
+    let cx = a.ok("GET", &format!("/v1/code/changes/{cx_id}"), None).await;
+    assert_eq!((cx["revision"].as_u64(), head_git(&a, &repo_id, &cx)), (Some(2), x2.clone()));
+    assert_eq!(hook(&a, "push", "b-3", &push("refs/heads/agent/x", &x1, &x2, "human"), SECRET).await, StatusCode::OK);
+    assert_eq!(a.ok("GET", &format!("/v1/code/changes/{cx_id}"), None).await["revision"], 2);
+    // Deleting the branch closes its change and drops the ref.
+    git(home, &w, &["checkout", "-q", "main"]);
+    git(home, &w, &["push", "-q", "origin", ":agent/x"]);
+    assert_eq!(hook(&a, "push", "b-4", &push("refs/heads/agent/x", &x2, ZERO, "human"), SECRET).await, StatusCode::OK);
+    assert_eq!(a.ok("GET", &format!("/v1/code/changes/{cx_id}"), None).await["state"], "closed");
+    let ref_names = || async {
+        a.ok("GET", "/v1/code/repos/acme/app/refs", None).await.as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    assert!(!ref_names().await.iter().any(|n| n.ends_with("agent/x")));
+    // A branch that a PR owns: the ref goes, the change stays (the PR decides).
+    assert_eq!(hook(&a, "push", "b-5", &push("refs/heads/feature", &rev(home, &w, "feature"), ZERO, "human"), SECRET).await, StatusCode::OK);
+    assert!(!ref_names().await.iter().any(|n| n == "feature"));
+    assert_eq!(a.ok("GET", &format!("/v1/code/changes/{c3}"), None).await["state"], "open");
+
+    // Tags: annotated and lightweight, created and deleted.
+    git(home, &w, &["tag", "-a", "v2", "-m", "release 2"]);
+    git(home, &w, &["tag", "v3"]);
+    git(home, &w, &["push", "-q", "origin", "v2", "v3"]);
+    let (v2, v3) = (rev(home, &w, "v2"), rev(home, &w, "v3"));
+    assert_ne!(v2, v3, "v2 is a tag object");
+    assert_eq!(hook(&a, "push", "t-1", &push("refs/tags/v2", ZERO, &v2, "human"), SECRET).await, StatusCode::OK);
+    assert_eq!(hook(&a, "push", "t-2", &push("refs/tags/v3", ZERO, &v3, "human"), SECRET).await, StatusCode::OK);
+    let names = ref_names().await;
+    assert!(names.iter().any(|n| n.ends_with("v2")) && names.iter().any(|n| n.ends_with("v3")), "{names:?}");
+    assert_eq!(hook(&a, "push", "t-3", &push("refs/tags/v2", &v2, ZERO, "human"), SECRET).await, StatusCode::OK);
+    let names = ref_names().await;
+    assert!(!names.iter().any(|n| n.ends_with("v2")) && names.iter().any(|n| n.ends_with("v3")), "{names:?}");
+
+    // roll's own push coming back isn't ingested (here GitHub's main even has a commit roll lacks).
+    let roll_head = a.ok("GET", "/v1/code/repos/acme/app", None).await["head_git"].clone();
+    let main_before = rev(home, &w, "main");
+    write(&w, "bot.txt", "bot\n");
+    git(home, &w, &["add", "-A"]);
+    git(home, &w, &["commit", "-qm", "as the bot"]);
+    git(home, &w, &["push", "-q", "origin", "main"]);
+    let bot = rev(home, &w, "main");
+    assert_eq!(hook(&a, "push", "e-1", &push("refs/heads/main", &main_before, &bot, "roll-test[bot]"), SECRET).await, StatusCode::OK);
+    assert_eq!(a.ok("GET", "/v1/code/repos/acme/app", None).await["head_git"], roll_head);
+    assert_eq!(a.raw("GET", "/v1/code/repos/acme/app/blob/main/bot.txt", None, None).await.0, StatusCode::NOT_FOUND);
+
+    // A push to a repository roll doesn't have connected: nothing.
+    let mut other = push("refs/heads/main", &main_before, &bot, "human");
+    other["repository"]["full_name"] = json!("acme/other");
+    other["repository"]["name"] = json!("other");
+    assert_eq!(hook(&a, "push", "o-1", &other, SECRET).await, StatusCode::OK);
+    assert_eq!(a.ok("GET", "/v1/code/repos/acme/app", None).await["head_git"], roll_head);
+
+    // GitHub's main rewritten (no common history): the mirror pauses and says why.
+    git(home, &w, &["checkout", "-q", "--orphan", "fresh"]);
+    git(home, &w, &["rm", "-rqf", "."]);
+    write(&w, "fresh.txt", "fresh\n");
+    git(home, &w, &["add", "-A"]);
+    git(home, &w, &["commit", "-qm", "start over"]);
+    // (The mock refuses unrelated history on an existing ref; GitHub only needs to serve it.)
+    git(home, &w, &["push", "-q", "origin", "fresh"]);
+    let fresh = rev(home, &w, "fresh");
+    let mut forced = push("refs/heads/main", &bot, &fresh, "human");
+    forced["forced"] = json!(true);
+    assert_eq!(hook(&a, "push", "r-1", &forced, SECRET).await, StatusCode::OK);
+    until("mirror paused on rewritten history", || async {
+        let m = mirror().await;
+        m["state"] == "paused" && m["error"].as_str().is_some_and(|e| e.contains("rewritten"))
+    })
+    .await;
+    assert_eq!(a.ok("GET", "/v1/code/repos/acme/app", None).await["head_git"], roll_head, "nothing was landed");
+}
+
+/// Pull request and issue actions end to end, the queue included: edits, draft and ready, a
+/// close or a draft dequeues a queued change, reopen, merged on GitHub (landed, dequeued, not
+/// echoed), PRs into other branches ignored, draft PRs; issues unlabeled, issue events about
+/// PRs ignored, closed without a reason; installations suspended, unsuspended, repos removed and
+/// added, events for other installations and repos; deliveries that fail aren't recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_request_issue_and_installation_actions() {
+    let g = github_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let w = seed(home, &format!("{}/git/acme/app.git", g.base));
+    let (main_sha, feature_sha) = (rev(home, &w, "main"), rev(home, &w, "feature"));
+    g.mock.pulls.lock().insert(3, pr_json(&g.mock, 3, "feature", &feature_sha, &main_sha));
+    let a = app(None);
+    enable(&a, &g, quiet_mirror());
+    let a = &a;
+    connect(a).await;
+    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await[0]["id"].as_str().unwrap().to_string();
+    let repo = repo_json(&g.mock);
+    let inst = json!({ "id": INSTALLATION });
+    let pr_ev = |action: &str, pr: &Value| json!({ "action": action, "number": pr["number"], "pull_request": pr, "repository": repo, "installation": inst });
+    let change = |id: &str| {
+        let path = format!("/v1/code/changes/{id}");
+        async move { a.ok("GET", &path, None).await }
+    };
+    let depth = || async { a.ok("GET", "/v1/code/repos/acme/app/queue", None).await["stats"]["depth"].as_u64().unwrap() };
+    let enqueue = |id: &str| {
+        let id = id.to_string();
+        async move { a.req("POST", &format!("/v1/code/changes/{id}/enqueue"), None, None).await }
+    };
+    // The queue holds what's enqueued (nothing lands while paused).
+    a.ok("POST", "/v1/code/repos/acme/app/queue/pause", None).await;
+
+    // edited: title and body follow; no new revision.
+    let mut pr3 = pr_json(&g.mock, 3, "feature", &feature_sha, &main_sha);
+    pr3["title"] = json!("Renamed on GitHub");
+    pr3["body"] = json!("new body");
+    assert_eq!(hook(a, "pull_request", "p-1", &pr_ev("edited", &pr3), SECRET).await, StatusCode::OK);
+    let c = change(&c3).await;
+    assert_eq!((c["title"].as_str(), c["body"].as_str(), c["revision"].as_u64()), (Some("Renamed on GitHub"), Some("new body"), Some(1)));
+    // converted_to_draft / ready_for_review.
+    pr3["draft"] = json!(true);
+    assert_eq!(hook(a, "pull_request", "p-2", &pr_ev("converted_to_draft", &pr3), SECRET).await, StatusCode::OK);
+    assert_eq!(change(&c3).await["draft"], true);
+    pr3["draft"] = json!(false);
+    assert_eq!(hook(a, "pull_request", "p-3", &pr_ev("ready_for_review", &pr3), SECRET).await, StatusCode::OK);
+    assert_eq!(change(&c3).await["draft"], false);
+    // Back to draft while queued: it leaves the queue.
+    assert_eq!(enqueue(&c3).await.0, StatusCode::ACCEPTED);
+    assert_eq!(depth().await, 1);
+    pr3["draft"] = json!(true);
+    assert_eq!(hook(a, "pull_request", "p-4", &pr_ev("converted_to_draft", &pr3), SECRET).await, StatusCode::OK);
+    let c = change(&c3).await;
+    assert_eq!((c["state"].as_str(), c["draft"].as_bool(), depth().await), (Some("open"), Some(true), 0));
+    // Closed on GitHub while queued: closed, and out of the queue.
+    pr3["draft"] = json!(false);
+    hook(a, "pull_request", "p-5", &pr_ev("ready_for_review", &pr3), SECRET).await;
+    assert_eq!(enqueue(&c3).await.0, StatusCode::ACCEPTED);
+    pr3["state"] = json!("closed");
+    assert_eq!(hook(a, "pull_request", "p-6", &pr_ev("closed", &pr3), SECRET).await, StatusCode::OK);
+    let c = change(&c3).await;
+    assert_eq!((c["state"].as_str(), depth().await), (Some("closed"), 0), "{c}");
+    assert!(c["queue"].is_null(), "{c}");
+    // Reopened: open again.
+    pr3["state"] = json!("open");
+    assert_eq!(hook(a, "pull_request", "p-7", &pr_ev("reopened", &pr3), SECRET).await, StatusCode::OK);
+    assert_eq!(change(&c3).await["state"], "open");
+
+    // Merged on GitHub while queued: landed, dequeued, and nothing said back to GitHub.
+    git(home, &w, &["checkout", "-qb", "topic"]);
+    write(&w, "topic.txt", "topic\n");
+    git(home, &w, &["add", "-A"]);
+    git(home, &w, &["commit", "-qm", "topic work"]);
+    git(home, &w, &["push", "-q", "origin", "topic", "side"]);
+    git(home, &w, &["checkout", "-q", "main"]);
+    let mut pr5 = pr_json(&g.mock, 5, "topic", &rev(home, &w, "topic"), &main_sha);
+    g.mock.pulls.lock().insert(5, pr5.clone());
+    assert_eq!(hook(a, "pull_request", "p-8", &pr_ev("opened", &pr5), SECRET).await, StatusCode::OK);
+    let find = |n: u64| async move { a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().iter().find(|c| c["github_pr"] == n).cloned() };
+    let c5 = find(5).await.expect("PR 5's change")["id"].as_str().unwrap().to_string();
+    assert_eq!(enqueue(&c5).await.0, StatusCode::ACCEPTED);
+    pr5["state"] = json!("closed");
+    pr5["merged"] = json!(true);
+    pr5["merged_at"] = json!("2026-10-22T10:00:00Z");
+    assert_eq!(hook(a, "pull_request", "p-9", &pr_ev("closed", &pr5), SECRET).await, StatusCode::OK);
+    assert_eq!((change(&c5).await["state"].as_str(), depth().await), (Some("landed"), 0));
+
+    // Into another branch: not a change. A draft PR: a draft change.
+    let mut pr6 = pr_json(&g.mock, 6, "feature", &feature_sha, &main_sha);
+    pr6["base"]["ref"] = json!("release");
+    assert_eq!(hook(a, "pull_request", "p-10", &pr_ev("opened", &pr6), SECRET).await, StatusCode::OK);
+    assert!(find(6).await.is_none());
+    let mut pr7 = pr_json(&g.mock, 7, "side", &rev(home, &w, "side"), &main_sha);
+    pr7["draft"] = json!(true);
+    assert_eq!(hook(a, "pull_request", "p-11", &pr_ev("opened", &pr7), SECRET).await, StatusCode::OK);
+    let c7 = find(7).await.expect("PR 7's change");
+    assert_eq!(c7["draft"], true);
+    assert!(c7["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "draft"), "{c7}");
+    // Nothing went back to GitHub for any of it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(g.mock.calls.lock().iter().all(|(_, p, _)| !p.contains("/pulls/") && !p.contains("/issues/")), "{:?}", g.mock.calls.lock());
+
+    // Issues: unlabeled, an issue event about a PR, closed with no reason, deleted.
+    let issue_ev = |action: &str, issue: Value| json!({ "action": action, "issue": issue, "repository": repo, "installation": inst });
+    hook(a, "issues", "i-1", &issue_ev("opened", issue_json(9, "Perf", "open", &["P1", "perf"])), SECRET).await;
+    assert_eq!(hook(a, "issues", "i-2", &issue_ev("unlabeled", issue_json(9, "Perf", "open", &["perf"])), SECRET).await, StatusCode::OK);
+    let item = || async { a.ok("GET", "/v1/code/repos/acme/app/work", None).await.as_array().unwrap().iter().find(|w| w["source"] == "github#9").cloned().unwrap() };
+    let w9 = item().await;
+    assert_eq!((w9["priority"].as_i64(), w9["labels"].clone()), (Some(2), json!(["perf"])));
+    let mut about_pr = issue_json(3, "PR 3", "open", &[]);
+    about_pr["pull_request"] = json!({ "url": "https://api.github.com/repos/acme/app/pulls/3" });
+    assert_eq!(hook(a, "issues", "i-3", &issue_ev("opened", about_pr), SECRET).await, StatusCode::OK);
+    assert!(!a.ok("GET", "/v1/code/repos/acme/app/work", None).await.as_array().unwrap().iter().any(|w| w["source"] == "github#3"));
+    assert_eq!(hook(a, "issues", "i-4", &issue_ev("closed", issue_json(9, "Perf", "closed", &["perf"])), SECRET).await, StatusCode::OK);
+    assert_eq!(item().await["state"], "done", "closed without a reason is completed");
+    assert_eq!(hook(a, "issues", "i-5", &issue_ev("deleted", issue_json(9, "Perf", "closed", &["perf"])), SECRET).await, StatusCode::OK);
+    assert_eq!(item().await["state"], "done", "deleted is ignored");
+
+    // Installations: other installations and repos don't matter; suspend / unsuspend; the repo
+    // removed from the installation and added back.
+    let gh = || async { a.ok("GET", "/v1/code/repos/acme/app", None).await["github"].clone() };
+    let account = json!({ "login": "acme", "id": 1, "type": "Organization" });
+    let installation = |action: &str, id: u64| json!({ "action": action, "installation": { "id": id, "account": account } });
+    let repos = |action: &str, full_name: &str| {
+        let mut r = repo_json(&g.mock);
+        r["full_name"] = json!(full_name);
+        let (added, removed) = if action == "added" { (vec![r], vec![]) } else { (vec![], vec![r]) };
+        json!({ "action": action, "installation": { "id": INSTALLATION, "account": account }, "repositories_added": added, "repositories_removed": removed })
+    };
+    assert_eq!(hook(a, "installation_repositories", "x-1", &repos("removed", "acme/infra"), SECRET).await, StatusCode::OK);
+    assert_eq!(hook(a, "installation", "x-2", &installation("deleted", 8), SECRET).await, StatusCode::OK);
+    assert_eq!(gh().await["connected"], true);
+    assert_eq!(hook(a, "installation", "x-3", &installation("suspend", INSTALLATION), SECRET).await, StatusCode::OK);
+    let l = gh().await;
+    assert_eq!((l["connected"].as_bool(), l["mirror"]["state"].as_str()), (Some(false), Some("paused")), "{l}");
+    assert!(l["mirror"]["error"].as_str().unwrap().contains("suspended"), "{l}");
+    assert_eq!(hook(a, "installation", "x-4", &installation("new_permissions_accepted", INSTALLATION), SECRET).await, StatusCode::OK);
+    assert_eq!(gh().await["connected"], false, "new permissions don't reconnect");
+    assert_eq!(hook(a, "installation", "x-5", &installation("unsuspend", INSTALLATION), SECRET).await, StatusCode::OK);
+    until("reconnected and unpaused", || async {
+        let l = gh().await;
+        l["connected"] == true && l["mirror"]["state"] != "paused" && l["mirror"]["error"].is_null()
+    })
+    .await;
+    assert_eq!(hook(a, "installation_repositories", "x-6", &repos("removed", "acme/app"), SECRET).await, StatusCode::OK);
+    let l = gh().await;
+    assert_eq!((l["connected"].as_bool(), l["mirror"]["state"].as_str()), (Some(false), Some("paused")), "{l}");
+    assert!(l["mirror"]["error"].as_str().unwrap().contains("lost access"), "{l}");
+    // Disconnected: webhooks for it are ignored.
+    hook(a, "issues", "x-7", &issue_ev("opened", issue_json(10, "While away", "open", &[])), SECRET).await;
+    assert!(!a.ok("GET", "/v1/code/repos/acme/app/work", None).await.as_array().unwrap().iter().any(|w| w["source"] == "github#10"));
+    assert_eq!(hook(a, "installation_repositories", "x-8", &repos("added", "acme/app"), SECRET).await, StatusCode::OK);
+    assert_eq!(gh().await["connected"], true);
+
+    // Deliveries: unsigned 401, unparseable 400, and a failed one isn't recorded, so GitHub's
+    // redelivery is processed again.
+    use tower::ServiceExt;
+    let unsigned = axum::http::Request::post("/v1/code/github/webhook").header("x-github-event", "ping").body(axum::body::Body::from("{}")).unwrap();
+    assert_eq!(a.router.clone().oneshot(unsigned).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let bad = "{not json";
+    let req = axum::http::Request::post("/v1/code/github/webhook")
+        .header("x-github-event", "push")
+        .header("x-hub-signature-256", code_github::webhook::sign(SECRET.as_bytes(), bad.as_bytes()))
+        .body(axum::body::Body::from(bad))
+        .unwrap();
+    assert_eq!(a.router.clone().oneshot(req).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    let missing = json!({ "ref": "refs/heads/ghost", "before": ZERO, "after": "1234567890123456789012345678901234567890", "created": true, "repository": repo, "sender": { "login": "human", "id": 5 }, "installation": inst });
+    let first = hook(a, "push", "f-1", &missing, SECRET).await;
+    assert!(first.is_server_error() || first.is_client_error(), "{first}");
+    assert_eq!(hook(a, "push", "f-1", &missing, SECRET).await, first, "the redelivery is processed, not deduplicated");
+}
+
+/// roll → GitHub: every check status becomes the matching check run; GitHub's own checks and
+/// changes without a PR aren't sent; landing a PR whose PR GitHub already closed writes nothing;
+/// a landed PR is commented on once however often its change is updated; an item closed in
+/// roll closes its issue as not planned; an issue GitHub already closed isn't written to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outbound_notifications_once_each() {
+    let g = github_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let w = seed(home, &format!("{}/git/acme/app.git", g.base));
+    let (main_sha, feature_sha) = (rev(home, &w, "main"), rev(home, &w, "feature"));
+    g.mock.pulls.lock().insert(3, pr_json(&g.mock, 3, "feature", &feature_sha, &main_sha));
+    let a = app(None);
+    enable(&a, &g, fast_mirror());
+    let a = &a;
+    connect(a).await;
+    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await[0]["id"].as_str().unwrap().to_string();
+    let check = |change: &str, body: Value| {
+        let change = change.to_string();
+        async move { a.ok("POST", &format!("/v1/code/changes/{change}/checks"), Some(body)).await }
+    };
+    let runs = || g.mock.calls.lock().iter().filter(|(m, p, _)| m == "POST" && p.ends_with("/check-runs")).map(|(_, _, b)| b.clone()).collect::<Vec<_>>();
+
+    // Not sent: a check GitHub reported, and a check on a change that isn't a PR.
+    check(&c3, json!({ "name": "from-github", "status": "success", "source": "github" })).await;
+    let native = a.ok("POST", "/v1/code/repos/acme/app/changes", Some(json!({ "title": "native", "message": "native", "files": { "n.txt": { "content": "n\n" } } }))).await;
+    check(native["id"].as_str().unwrap(), json!({ "name": "native-check", "status": "success" })).await;
+    // Every status, mapped.
+    let want = [
+        ("q", "queued", "queued", Value::Null),
+        ("r", "running", "in_progress", Value::Null),
+        ("s", "success", "completed", json!("success")),
+        ("f", "failure", "completed", json!("failure")),
+        ("c", "cancelled", "completed", json!("cancelled")),
+        ("k", "skipped", "completed", json!("skipped")),
+    ];
+    for (name, status, _, _) in &want {
+        check(&c3, json!({ "name": name, "status": status })).await;
+    }
+    until("six check runs", || async { runs().len() >= 6 }).await;
+    let runs = runs();
+    assert_eq!(runs.len(), 6, "{runs:?}");
+    for (name, _, status, conclusion) in &want {
+        let run = runs.iter().find(|r| r["name"] == *name).unwrap_or_else(|| panic!("check run {name}"));
+        assert_eq!((&run["status"], run.get("conclusion").unwrap_or(&Value::Null)), (&json!(status), conclusion), "{name}: {run}");
+        assert_eq!(run["head_sha"], feature_sha);
+        assert_eq!(run["external_id"], c3.as_str());
+    }
+
+    // GitHub already closed PR 3 (a webhook roll missed): landing writes nothing to it.
+    g.mock.pulls.lock().get_mut(&3).unwrap()["state"] = json!("closed");
+    a.ok("POST", &format!("/v1/code/changes/{c3}/land"), None).await;
+    until("PR 3's notification handled", || async { mark(a, &format!("pr-landed:{c3}")).as_deref() == Some("done") }).await;
+    assert!(!g.mock.calls.lock().iter().any(|(_, p, _)| p == "/repos/acme/app/issues/3/comments" || p == "/repos/acme/app/pulls/3"));
+
+    // An open PR's change lands: one comment and one close, however often the change is updated.
+    git(home, &w, &["checkout", "-qb", "topic"]);
+    write(&w, "topic.txt", "topic\n");
+    git(home, &w, &["add", "-A"]);
+    git(home, &w, &["commit", "-qm", "topic work"]);
+    git(home, &w, &["push", "-q", "origin", "topic"]);
+    git(home, &w, &["checkout", "-q", "main"]);
+    let pr5 = pr_json(&g.mock, 5, "topic", &rev(home, &w, "topic"), &main_sha);
+    g.mock.pulls.lock().insert(5, pr5.clone());
+    let ev = json!({ "action": "opened", "number": 5, "pull_request": pr5, "repository": repo_json(&g.mock), "installation": { "id": INSTALLATION } });
+    assert_eq!(hook(a, "pull_request", "o-1", &ev, SECRET).await, StatusCode::OK);
+    let c5 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().iter().find(|c| c["github_pr"] == 5).unwrap()["id"].as_str().unwrap().to_string();
+    a.ok("POST", &format!("/v1/code/changes/{c5}/land"), None).await;
+    until("PR 5 closed", || async { g.mock.calls.lock().iter().any(|(m, p, _)| m == "PATCH" && p == "/repos/acme/app/pulls/5") }).await;
+    a.ok("PATCH", &format!("/v1/code/changes/{c5}"), Some(json!({ "title": "renamed after landing" }))).await;
+    // A later notification (a check run) shows the update's event was handled.
+    let n = g.mock.check_runs.load(Ordering::SeqCst);
+    let c7 = a.ok("POST", "/v1/code/repos/acme/app/changes", Some(json!({ "title": "x", "message": "x", "files": { "x.txt": { "content": "x\n" } } }))).await;
+    a.code.db.lock().execute("UPDATE changes SET github_pr = 77 WHERE id = ?", [c7["id"].as_str().unwrap()]).unwrap();
+    check(c7["id"].as_str().unwrap(), json!({ "name": "later", "status": "running" })).await;
+    until("the later check run", || async { g.mock.check_runs.load(Ordering::SeqCst) > n }).await;
+    let calls = g.mock.calls.lock().clone();
+    assert_eq!(calls.iter().filter(|(_, p, _)| p == "/repos/acme/app/issues/5/comments").count(), 1, "{calls:?}");
+    assert_eq!(calls.iter().filter(|(_, p, _)| p == "/repos/acme/app/pulls/5").count(), 1, "{calls:?}");
+
+    // Issues: closed in roll → closed as not planned; already closed on GitHub → untouched.
+    g.mock.issues.lock().extend([issue_json(11, "Won't do", "open", &[]), issue_json(12, "Done elsewhere", "open", &[])]);
+    let repo = repo_json(&g.mock);
+    for (d, n) in [("w-1", 11), ("w-2", 12)] {
+        let ev = json!({ "action": "opened", "issue": issue_json(n, "t", "open", &[]), "repository": repo, "installation": { "id": INSTALLATION } });
+        assert_eq!(hook(a, "issues", d, &ev, SECRET).await, StatusCode::OK);
+    }
+    let work = a.ok("GET", "/v1/code/repos/acme/app/work", None).await;
+    let wid = |n: u64| work.as_array().unwrap().iter().find(|w| w["source"] == format!("github#{n}")).unwrap()["id"].as_str().unwrap().to_string();
+    let (w11, w12) = (wid(11), wid(12));
+    a.ok("PATCH", &format!("/v1/code/work/{w11}"), Some(json!({ "state": "closed" }))).await;
+    until("issue 11 closed as not planned", || async {
+        g.mock.calls.lock().iter().any(|(m, p, b)| m == "PATCH" && p == "/repos/acme/app/issues/11" && b["state"] == "closed" && b["state_reason"] == "not_planned")
+    })
+    .await;
+    assert!(g.mock.calls.lock().iter().any(|(_, p, b)| p == "/repos/acme/app/issues/11/comments" && b["body"] == "Closed in roll."));
+    g.mock.issues.lock().iter_mut().find(|i| i["number"] == 12).unwrap()["state"] = json!("closed");
+    a.ok("POST", &format!("/v1/code/work/{w12}/complete"), None).await;
+    until("issue 12's notification handled", || async { mark(a, &format!("issue-closed:{w12}")).as_deref() == Some("done") }).await;
+    assert!(!g.mock.calls.lock().iter().any(|(_, p, _)| p.starts_with("/repos/acme/app/issues/12")));
+}

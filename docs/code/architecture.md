@@ -255,9 +255,12 @@ flight (speculative depth 1):
 
 The batch size adapts: halved after a red batch, doubled after a green one, never above
 `batch_size`. Dequeueing, revising or closing a change in the batch makes the worker throw the
-batch away and rebuild it. If the default branch moves under a batch (an admin bypass), the
-compare-and-swap fails and the batch is rebuilt on the new head. Pausing stops new batches; the
-one being tested finishes.
+batch away and rebuild it. Just before landing, every change is checked again: still queued, at
+the head that was tested, and still mergeable (a required check that went red meanwhile sends
+the batch back in line, and the change is ejected when it's rebuilt). If the default branch
+moves under a batch (an admin bypass), the compare-and-swap fails and the batch is rebuilt on
+the new head. Pausing stops new batches; the one being tested finishes. A step that fails (the
+runner erroring, say) puts the batch back in line and is retried with a growing delay.
 
 **Restarts.** Queue state lives in control.db. When a new process starts (`Code::start_queues`,
 called once the runner is plugged in), batches that were being tested go back in line and are
@@ -407,18 +410,23 @@ Setting up the App is described in [github-app.md](github-app.md); the code is i
 - **Inbound** (webhooks):
   - Verified with `X-Hub-Signature-256` and deduplicated by `X-GitHub-Delivery`. A failed
     delivery can be redelivered.
-  - Pushes to other branches update the branch and open or revise its change.
+  - Pushes to other branches update the branch and open or revise its change. Deleting a
+    branch closes its change, unless a PR owns it. Tags follow GitHub's.
   - PRs into the default branch become changes. A same-repo PR adopts its branch's change.
-    PRs into other branches are ignored, because roll lands on the default branch.
+    PRs into other branches are ignored, because roll lands on the default branch. Title,
+    body and draft follow the PR (`edited`, `ready_for_review`, `converted_to_draft`); a PR
+    going back to draft takes its change out of the merge queue.
   - A PR from a fork becomes an untrusted change (`trusted: false`). Its author has no write
     access, so roll doesn't run its checks or start its preview on its own: both run the PR's
     code with the repo's data. A writer can still start a preview.
-  - A PR closed on GitHub closes the change. One merged on GitHub marks it landed, and the push
-    brings the commits.
+  - A PR closed on GitHub closes the change; reopening it reopens the change. One merged on
+    GitHub marks it landed, and the push brings the commits. Either way the change leaves the
+    merge queue.
   - Issues create, update and close work items.
     - Labels `P0`–`P3` set the priority.
     - Reopening puts the item back in the queue.
-    - Comments are ignored for now.
+    - Comments on issues are ignored. `@roll` commands in a PR's conversation are run for
+      writers (see [reviews.md](reviews.md)).
   - Uninstalling or suspending the App, or removing the repo from it, disconnects the repo and
     pauses the mirror. Reinstalling resumes it.
 - **A direct push to the default branch on GitHub** is ingested as landed history:

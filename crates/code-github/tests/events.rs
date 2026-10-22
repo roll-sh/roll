@@ -4,7 +4,7 @@
 use code_github::mapping::{issue_draft, pull_request_draft, push_draft};
 use code_github::webhook::{CommentAction, InstallationAction, IssueAction, PullRequestAction, RepositoriesAction};
 use code_github::webhook::sign;
-use code_github::{AppConfig, Event, verify_signature};
+use code_github::{AppConfig, DraftState, Event, PrState, verify_signature};
 use serde_json::Value;
 
 fn fixture(name: &str) -> Value {
@@ -25,6 +25,8 @@ fn every_pull_request_action() {
         ("closed", PullRequestAction::Closed),
         ("reopened", PullRequestAction::Reopened),
         ("edited", PullRequestAction::Edited),
+        ("ready_for_review", PullRequestAction::ReadyForReview),
+        ("converted_to_draft", PullRequestAction::ConvertedToDraft),
     ] {
         let Event::PullRequest(pr) = Event::parse("pull_request", &with_action("pull_request_opened", action)).unwrap() else {
             panic!("{action}")
@@ -34,7 +36,7 @@ fn every_pull_request_action() {
         assert_eq!(d.github_pr, pr.number);
         assert!(!d.head_sha.is_empty() && !d.head_ref.is_empty());
     }
-    for ignored in ["labeled", "assigned", "review_requested", "converted_to_draft"] {
+    for ignored in ["labeled", "unlabeled", "assigned", "review_requested", "locked", "auto_merge_enabled", "enqueued"] {
         assert!(matches!(Event::parse("pull_request", &with_action("pull_request_opened", ignored)).unwrap(), Event::Ignored { .. }), "{ignored}");
     }
 }
@@ -54,7 +56,10 @@ fn every_issue_action() {
         let d = issue_draft(&i.issue);
         assert_eq!(d.external_id, format!("github#{}", d.number));
     }
-    assert!(matches!(Event::parse("issues", &with_action("issues_labeled", "pinned")).unwrap(), Event::Ignored { .. }));
+    for ignored in ["pinned", "deleted", "transferred", "assigned", "milestoned", "locked"] {
+        assert!(matches!(Event::parse("issues", &with_action("issues_labeled", ignored)).unwrap(), Event::Ignored { .. }), "{ignored}");
+    }
+    assert!(matches!(Event::parse("issue_comment", &with_action("issue_comment_created", "pinned")).unwrap(), Event::Ignored { .. }));
     for (action, want) in [("created", CommentAction::Created), ("edited", CommentAction::Edited), ("deleted", CommentAction::Deleted)] {
         let Event::IssueComment(c) = Event::parse("issue_comment", &with_action("issue_comment_created", action)).unwrap() else { panic!() };
         assert_eq!(c.action, want);
@@ -82,6 +87,68 @@ fn installation_actions() {
     };
     assert_eq!(action, RepositoriesAction::Removed);
     assert!(added.is_empty() && !removed.is_empty());
+    // Actions roll doesn't act on, and installation events carry no repository or sender.
+    assert!(matches!(Event::parse("installation", &with_action("installation_created", "renamed")).unwrap(), Event::Ignored { .. }));
+    assert!(matches!(Event::parse("installation_repositories", &with_action("installation_repositories_added", "changed")).unwrap(), Event::Ignored { .. }));
+    let ev = Event::parse("installation", &with_action("installation_created", "suspend")).unwrap();
+    assert!(ev.installation_id().is_some() && ev.repository().is_none() && ev.sender().is_none());
+}
+
+/// Where a pull request or issue stands once mapped, each event's installation, repository and
+/// sender, and a forced push.
+#[test]
+fn states_and_accessors() {
+    let pr = |f: &dyn Fn(&mut Value)| {
+        let mut v = fixture("pull_request_opened");
+        f(&mut v);
+        let Event::PullRequest(e) = Event::parse("pull_request", &serde_json::to_vec(&v).unwrap()).unwrap() else { panic!() };
+        e
+    };
+    let open = pr(&|_| {});
+    assert_eq!((pull_request_draft(&open.pull_request).state, pull_request_draft(&open.pull_request).draft), (PrState::Open, false));
+    let closed = pull_request_draft(&pr(&|v| v["pull_request"]["state"] = "closed".into()).pull_request);
+    assert_eq!(closed.state, PrState::Closed, "closed without merging");
+    let merged = pull_request_draft(&pr(&|v| {
+        v["pull_request"]["state"] = "closed".into();
+        v["pull_request"]["merged"] = Value::Null;
+        v["pull_request"]["merged_at"] = "2026-01-01T00:00:00Z".into();
+    }).pull_request);
+    assert_eq!(merged.state, PrState::Merged, "merged_at alone means merged");
+    let draft = pull_request_draft(&pr(&|v| v["pull_request"]["draft"] = true.into()).pull_request);
+    assert!(draft.draft);
+    let gone_fork = pull_request_draft(&pr(&|v| v["pull_request"]["head"]["repo"] = Value::Null).pull_request);
+    assert_eq!((gone_fork.fork, gone_fork.head_clone_url), (None, None), "a deleted fork");
+    assert_eq!(open.installation.as_ref().map(|i| i.id), Some(61234567));
+
+    let issue = |state: &str, reason: Value| {
+        let mut v = fixture("issues_labeled");
+        v["issue"]["state"] = state.into();
+        v["issue"]["state_reason"] = reason;
+        let Event::Issues(e) = Event::parse("issues", &serde_json::to_vec(&v).unwrap()).unwrap() else { panic!() };
+        issue_draft(&e.issue).state
+    };
+    assert_eq!(issue("open", Value::Null), DraftState::Open);
+    assert_eq!(issue("open", "reopened".into()), DraftState::Open);
+    assert_eq!(issue("closed", "completed".into()), DraftState::Completed);
+    assert_eq!(issue("closed", Value::Null), DraftState::Completed, "no reason counts as completed");
+    assert_eq!(issue("closed", "not_planned".into()), DraftState::NotPlanned);
+
+    for (event, name) in [("push", "push"), ("pull_request", "pull_request_opened"), ("issues", "issues_labeled"), ("issue_comment", "issue_comment_created")] {
+        let ev = Event::parse(event, &serde_json::to_vec(&fixture(name)).unwrap()).unwrap();
+        assert!(ev.installation_id().is_some(), "{event}");
+        assert!(ev.repository().is_some(), "{event}");
+        assert!(ev.sender().is_some(), "{event}");
+    }
+    let ping = Event::parse("ping", &serde_json::to_vec(&fixture("ping")).unwrap()).unwrap();
+    assert!(ping.installation_id().is_none() && ping.repository().is_none() && ping.sender().is_none());
+    let ignored = Event::parse("star", br#"{"action":"created"}"#).unwrap();
+    assert_eq!(ignored, Event::Ignored { event: "star".into(), action: Some("created".into()) });
+    assert!(ignored.installation_id().is_none() && ignored.repository().is_none());
+
+    let mut forced = fixture("push");
+    forced["forced"] = true.into();
+    let Event::Push(p) = Event::parse("push", &serde_json::to_vec(&forced).unwrap()).unwrap() else { panic!() };
+    assert!(push_draft(&p).forced);
 }
 
 #[test]

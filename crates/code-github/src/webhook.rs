@@ -86,6 +86,10 @@ pub enum PullRequestAction {
     Closed,
     Reopened,
     Edited,
+    /// A draft was marked ready for review.
+    ReadyForReview,
+    /// An open pull request went back to draft.
+    ConvertedToDraft,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,6 +391,8 @@ impl Event {
                     "closed" => PullRequestAction::Closed,
                     "reopened" => PullRequestAction::Reopened,
                     "edited" => PullRequestAction::Edited,
+                    "ready_for_review" => PullRequestAction::ReadyForReview,
+                    "converted_to_draft" => PullRequestAction::ConvertedToDraft,
                     _ => return Ok(ignored()),
                 };
                 let p: PrPayload = decode(event, value)?;
