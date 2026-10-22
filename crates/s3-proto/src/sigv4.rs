@@ -16,6 +16,9 @@ pub const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 pub const STREAMING_PAYLOAD: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
 pub const STREAMING_PAYLOAD_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
 pub const STREAMING_UNSIGNED_TRAILER: &str = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
+/// SigV4a's signed `aws-chunked` payloads (ECDSA chunk signatures).
+pub const STREAMING_ECDSA_PAYLOAD: &str = "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD";
+pub const STREAMING_ECDSA_PAYLOAD_TRAILER: &str = "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER";
 /// SHA-256 of nothing.
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 /// Allowed clock difference for header-signed requests.
@@ -50,6 +53,8 @@ pub enum Payload {
     Sha256(String),
     /// `aws-chunked`, every chunk signed; `trailer`: with signed trailers.
     Streaming { trailer: bool },
+    /// The same signed with SigV4a: ECDSA chunk (and trailer) signatures.
+    StreamingEcdsa { trailer: bool },
     /// `aws-chunked`, unsigned chunks, trailers.
     StreamingUnsignedTrailer,
 }
@@ -60,10 +65,11 @@ impl Payload {
             UNSIGNED_PAYLOAD => Payload::Unsigned,
             STREAMING_PAYLOAD => Payload::Streaming { trailer: false },
             STREAMING_PAYLOAD_TRAILER => Payload::Streaming { trailer: true },
+            STREAMING_ECDSA_PAYLOAD => Payload::StreamingEcdsa { trailer: false },
+            STREAMING_ECDSA_PAYLOAD_TRAILER => Payload::StreamingEcdsa { trailer: true },
             STREAMING_UNSIGNED_TRAILER => Payload::StreamingUnsignedTrailer,
-            s if s.starts_with("STREAMING-AWS4-ECDSA") => return Err(S3Error::msg(Code::NotImplemented, "SigV4a is not supported").with("Header", "x-amz-content-sha256")),
             s if s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()) => Payload::Sha256(s.to_ascii_lowercase()),
-            _ => return Err(S3Error::msg(Code::InvalidArgument, "x-amz-content-sha256 must be UNSIGNED-PAYLOAD, STREAMING-AWS4-HMAC-SHA256-PAYLOAD, STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER, STREAMING-UNSIGNED-PAYLOAD-TRAILER or a valid sha256 value.").with("ArgumentName", "x-amz-content-sha256")),
+            _ => return Err(S3Error::msg(Code::InvalidArgument, "x-amz-content-sha256 must be UNSIGNED-PAYLOAD, STREAMING-AWS4-HMAC-SHA256-PAYLOAD, STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER, STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD, STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER, STREAMING-UNSIGNED-PAYLOAD-TRAILER or a valid sha256 value.").with("ArgumentName", "x-amz-content-sha256")),
         })
     }
 
@@ -73,13 +79,23 @@ impl Payload {
             Payload::Sha256(h) => h,
             Payload::Streaming { trailer: false } => STREAMING_PAYLOAD,
             Payload::Streaming { trailer: true } => STREAMING_PAYLOAD_TRAILER,
+            Payload::StreamingEcdsa { trailer: false } => STREAMING_ECDSA_PAYLOAD,
+            Payload::StreamingEcdsa { trailer: true } => STREAMING_ECDSA_PAYLOAD_TRAILER,
             Payload::StreamingUnsignedTrailer => STREAMING_UNSIGNED_TRAILER,
         }
     }
 
     /// The body is `aws-chunked`.
     pub fn is_chunked(&self) -> bool {
-        matches!(self, Payload::Streaming { .. } | Payload::StreamingUnsignedTrailer)
+        matches!(self, Payload::Streaming { .. } | Payload::StreamingEcdsa { .. } | Payload::StreamingUnsignedTrailer)
+    }
+
+    /// Signed chunks (HMAC or ECDSA): `Some(with trailers)`.
+    pub fn signed_chunks(&self) -> Option<bool> {
+        match self {
+            Payload::Streaming { trailer } | Payload::StreamingEcdsa { trailer } => Some(*trailer),
+            _ => None,
+        }
     }
 }
 
@@ -144,10 +160,50 @@ pub struct Verified {
 /// The chunk-signing context: the seed (request) signature and its key and scope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamSigning {
-    pub signing_key: [u8; 32],
+    pub key: ChunkKey,
     pub seed_signature: String,
     pub amz_date: String,
     pub scope: String,
+}
+
+/// What checks chunk signatures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChunkKey {
+    /// SigV4: the request's HMAC signing key.
+    Hmac([u8; 32]),
+    /// SigV4a: the public key of the access key's derived ECDSA key.
+    Ecdsa(p256::ecdsa::VerifyingKey),
+}
+
+impl StreamSigning {
+    /// SigV4 (HMAC) chunk signing.
+    pub fn hmac(signing_key: [u8; 32], seed_signature: String, amz_date: String, scope: String) -> Self {
+        Self { key: ChunkKey::Hmac(signing_key), seed_signature, amz_date, scope }
+    }
+
+    /// The HMAC signing key (`None` for SigV4a).
+    pub fn signing_key(&self) -> Option<&[u8; 32]> {
+        match &self.key {
+            ChunkKey::Hmac(k) => Some(k),
+            ChunkKey::Ecdsa(_) => None,
+        }
+    }
+
+    /// Check one chunk's signature (`previous`: the signature it chains from).
+    pub fn verify_chunk(&self, previous: &str, chunk_sha256_hex: &str, signature: &str) -> bool {
+        match &self.key {
+            ChunkKey::Hmac(k) => constant_time_eq(&chunk_signature(k, &self.amz_date, &self.scope, previous, chunk_sha256_hex), signature),
+            ChunkKey::Ecdsa(vk) => crate::sigv4a::verify_chunk(vk, &self.amz_date, &self.scope, previous, chunk_sha256_hex, signature),
+        }
+    }
+
+    /// Check the trailers' signature.
+    pub fn verify_trailer(&self, previous: &str, trailers: &[(String, String)], signature: &str) -> bool {
+        match &self.key {
+            ChunkKey::Hmac(k) => constant_time_eq(&trailer_signature(k, &self.amz_date, &self.scope, previous, trailers), signature),
+            ChunkKey::Ecdsa(vk) => crate::sigv4a::verify_trailer(vk, &self.amz_date, &self.scope, previous, trailers, signature),
+        }
+    }
 }
 
 fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
@@ -170,16 +226,17 @@ pub fn sign(signing_key: &[u8; 32], data: &str) -> String {
     hex::encode(hmac(signing_key, data.as_bytes()))
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn malformed(why: impl Into<String>) -> S3Error {
+pub(crate) fn malformed(why: impl Into<String>) -> S3Error {
     S3Error::msg(Code::AuthorizationHeaderMalformed, why)
 }
 
-/// Parse how a request is signed: `None` for anonymous requests. Doesn't check the clock or
-/// the signature.
+/// Parse how a SigV4 request is signed: `None` for requests that carry no SigV4 signature
+/// (anonymous, or another scheme: see [`crate::auth::scheme`]). Doesn't check the clock or the
+/// signature.
 pub fn parse(req: &Request) -> Result<Option<Signed>, S3Error> {
     if let Some(auth) = req.header("authorization") {
         return parse_header(req, auth).map(Some);
@@ -190,17 +247,14 @@ pub fn parse(req: &Request) -> Result<Option<Signed>, S3Error> {
         return parse_presigned(&query).map(Some);
     }
     if q("Signature").is_some() && q("AWSAccessKeyId").is_some() {
-        return Err(S3Error::msg(Code::InvalidRequest, "Signature Version 2 is not supported; use AWS4-HMAC-SHA256."));
+        return Err(S3Error::msg(Code::InvalidRequest, "This is a Signature Version 2 request, not AWS4-HMAC-SHA256."));
     }
     Ok(None)
 }
 
-fn parse_header(req: &Request, auth: &str) -> Result<Signed, S3Error> {
-    let auth = auth.trim();
-    if auth.starts_with("AWS ") {
-        return Err(S3Error::msg(Code::InvalidRequest, "Signature Version 2 is not supported; use AWS4-HMAC-SHA256."));
-    }
-    let rest = auth.strip_prefix(ALGORITHM).ok_or_else(|| malformed("Unsupported authorization type"))?;
+/// The `Credential=`, `SignedHeaders=` and `Signature=` components of a SigV4(a)
+/// `Authorization` value (after the algorithm).
+pub(crate) fn components(rest: &str) -> Result<(&str, Vec<String>, String), S3Error> {
     let (mut cred, mut signed_headers, mut signature) = (None, None, None);
     for part in rest.split(',') {
         let part = part.trim();
@@ -215,24 +269,43 @@ fn parse_header(req: &Request, auth: &str) -> Result<Signed, S3Error> {
             _ => {}
         }
     }
-    let credential = Credential::parse(cred.ok_or_else(|| malformed("The authorization header is malformed; missing Credential."))?, Code::AuthorizationHeaderMalformed)?;
+    let cred = cred.ok_or_else(|| malformed("The authorization header is malformed; missing Credential."))?;
     let signed_headers: Vec<String> = signed_headers.ok_or_else(|| malformed("The authorization header is malformed; missing SignedHeaders."))?.split(';').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
     let signature = signature.ok_or_else(|| malformed("The authorization header is malformed; missing Signature."))?.to_ascii_lowercase();
     if !signed_headers.iter().any(|h| h == "host") {
         return Err(S3Error::msg(Code::AccessDenied, "There were headers present in the request which were not signed").with("HeadersNotSigned", "host"));
     }
-    let (amz_date, timestamp) = match req.header("x-amz-date") {
-        Some(d) => (d.trim().to_string(), time::parse_amz_date(d.trim()).ok_or_else(|| S3Error::msg(Code::AccessDenied, "AWS authentication requires a valid Date or x-amz-date header"))?),
+    Ok((cred, signed_headers, signature))
+}
+
+/// The request time of a header-signed request: `x-amz-date`, else `Date`.
+pub(crate) fn request_time(req: &Request) -> Result<(String, i64), S3Error> {
+    let bad = || S3Error::msg(Code::AccessDenied, "AWS authentication requires a valid Date or x-amz-date header");
+    Ok(match req.header("x-amz-date") {
+        Some(d) => (d.trim().to_string(), time::parse_amz_date(d.trim()).ok_or_else(bad)?),
         None => {
-            let d = req.header("date").ok_or_else(|| S3Error::msg(Code::AccessDenied, "AWS authentication requires a valid Date or x-amz-date header"))?;
-            let t = time::parse_http_date(d).ok_or_else(|| S3Error::msg(Code::AccessDenied, "AWS authentication requires a valid Date or x-amz-date header"))?;
+            let t = time::parse_http_date(req.header("date").ok_or_else(bad)?).ok_or_else(bad)?;
             (time::amz_date(t), t)
         }
-    };
+    })
+}
+
+fn parse_header(req: &Request, auth: &str) -> Result<Signed, S3Error> {
+    let auth = auth.trim();
+    if auth.starts_with("AWS ") {
+        return Err(S3Error::msg(Code::InvalidRequest, "This is a Signature Version 2 request, not AWS4-HMAC-SHA256."));
+    }
+    let rest = auth.strip_prefix(ALGORITHM).ok_or_else(|| malformed("Unsupported authorization type"))?;
+    let (cred, signed_headers, signature) = components(rest)?;
+    let credential = Credential::parse(cred, Code::AuthorizationHeaderMalformed)?;
+    let (amz_date, timestamp) = request_time(req)?;
     if amz_date[..8] != credential.date {
         return Err(malformed(format!("The authorization header is malformed; Invalid credential date \"{}\". This date is not the same as X-Amz-Date: \"{}\".", credential.date, &amz_date[..8])));
     }
     let payload = Payload::parse(req.header("x-amz-content-sha256").ok_or_else(|| S3Error::msg(Code::InvalidRequest, "Missing required header for this request: x-amz-content-sha256"))?)?;
+    if matches!(payload, Payload::StreamingEcdsa { .. }) {
+        return Err(S3Error::msg(Code::InvalidRequest, "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD needs an AWS4-ECDSA-P256-SHA256 signature.").with("Header", "x-amz-content-sha256"));
+    }
     Ok(Signed { credential, signed_headers, signature, amz_date, timestamp, payload, presigned_expires: None })
 }
 
@@ -240,12 +313,22 @@ fn parse_presigned(query: &[(String, String)]) -> Result<Signed, S3Error> {
     let q = |name: &str| query.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
     let missing = || S3Error::msg(Code::AuthorizationQueryParametersError, "Query-string authentication version 4 requires the X-Amz-Algorithm, X-Amz-Credential, X-Amz-Signature, X-Amz-Date, X-Amz-SignedHeaders, and X-Amz-Expires parameters.");
     if q("X-Amz-Algorithm").ok_or_else(missing)? != ALGORITHM {
-        return Err(S3Error::msg(Code::AuthorizationQueryParametersError, "X-Amz-Algorithm only supports \"AWS4-HMAC-SHA256\""));
+        return Err(S3Error::msg(Code::AuthorizationQueryParametersError, "X-Amz-Algorithm only supports \"AWS4-HMAC-SHA256\" and \"AWS4-ECDSA-P256-SHA256\""));
     }
     let credential = Credential::parse(q("X-Amz-Credential").ok_or_else(missing)?, Code::AuthorizationQueryParametersError)?;
+    let mut s = presigned_rest(query, &credential.date)?;
+    s.credential = credential;
+    Ok(s)
+}
+
+/// The parts of a presigned query string after the algorithm and credential (`credential` left
+/// for the caller to fill in).
+pub(crate) fn presigned_rest(query: &[(String, String)], credential_date: &str) -> Result<Signed, S3Error> {
+    let q = |name: &str| query.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+    let missing = || S3Error::msg(Code::AuthorizationQueryParametersError, "Query-string authentication version 4 requires the X-Amz-Algorithm, X-Amz-Credential, X-Amz-Signature, X-Amz-Date, X-Amz-SignedHeaders, and X-Amz-Expires parameters.");
     let amz_date = q("X-Amz-Date").ok_or_else(missing)?.to_string();
     let timestamp = time::parse_amz_date(&amz_date).ok_or_else(|| S3Error::msg(Code::AuthorizationQueryParametersError, "X-Amz-Date must be in the ISO8601 Long Format \"yyyyMMdd'T'HHmmss'Z'\""))?;
-    if amz_date[..8] != credential.date {
+    if amz_date[..8] != *credential_date {
         return Err(S3Error::msg(Code::AuthorizationQueryParametersError, "Invalid credential date. This date is not the same as X-Amz-Date."));
     }
     let expires: i64 = q("X-Amz-Expires").ok_or_else(missing)?.parse().map_err(|_| S3Error::msg(Code::AuthorizationQueryParametersError, "X-Amz-Expires should be a number"))?;
@@ -267,6 +350,7 @@ fn parse_presigned(query: &[(String, String)]) -> Result<Signed, S3Error> {
     if payload.is_chunked() {
         return Err(S3Error::msg(Code::InvalidRequest, "Streaming payloads can't be presigned"));
     }
+    let credential = Credential { access_key: String::new(), date: credential_date.to_string(), region: String::new(), service: String::new() };
     Ok(Signed { credential, signed_headers, signature, amz_date, timestamp, payload, presigned_expires: Some(expires) })
 }
 
@@ -366,12 +450,13 @@ pub fn verify(req: &Request, s: &Signed, signing_key: &[u8; 32]) -> Result<Verif
             .with("SignatureProvided", s.signature.clone())
             .with("CanonicalRequest", canonical));
     }
-    let stream = matches!(s.payload, Payload::Streaming { .. }).then(|| StreamSigning { signing_key: *signing_key, seed_signature: s.signature.clone(), amz_date: s.amz_date.clone(), scope: s.credential.scope() });
+    let stream = matches!(s.payload, Payload::Streaming { .. }).then(|| StreamSigning::hmac(*signing_key, s.signature.clone(), s.amz_date.clone(), s.credential.scope()));
     Ok(Verified { access_key: s.credential.access_key.clone(), payload: s.payload.clone(), stream })
 }
 
-/// Everything in one call: `Ok(None)` for anonymous requests; `lookup` maps an access key to
-/// its secret (`InvalidAccessKeyId` if it returns `None`).
+/// Everything in one call for SigV4 requests: `Ok(None)` for requests without a SigV4
+/// signature; `lookup` maps an access key to its secret (`InvalidAccessKeyId` if it returns
+/// `None`). [`crate::auth::authenticate`] handles every scheme.
 pub fn authenticate(req: &Request, now: i64, lookup: impl FnOnce(&str) -> Option<String>) -> Result<Option<Verified>, S3Error> {
     let Some(s) = parse(req)? else { return Ok(None) };
     let secret = lookup(&s.credential.access_key).ok_or_else(|| S3Error::new(Code::InvalidAccessKeyId).with("AWSAccessKeyId", s.credential.access_key.clone()))?;
@@ -527,10 +612,11 @@ pub fn verify_post_signature(auth: &PostAuth, signing_key: &[u8; 32]) -> Result<
     }
 }
 
-/// Fields that never need a policy condition.
+/// Fields that never need a policy condition (`signature` and `AWSAccessKeyId` are a SigV2
+/// form's).
 fn exempt(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n == "x-amz-signature" || n == "file" || n == "policy" || n.starts_with("x-ignore-")
+    n == "x-amz-signature" || n == "file" || n == "policy" || n == "signature" || n == "awsaccesskeyid" || n.starts_with("x-ignore-")
 }
 
 /// Check a POST policy (base64 JSON) against the form's fields (`key` with `${filename}`
@@ -794,7 +880,7 @@ pub(crate) mod tests {
         let st = v.stream.unwrap();
         assert_eq!(st.seed_signature, "4f232c4386841ef735655705268965c44a0e4690baa4adea153f7db9fa80a0a9");
         assert_eq!(st.scope, "20130524/us-east-1/s3/aws4_request");
-        let first = chunk_signature(&st.signing_key, &st.amz_date, &st.scope, &st.seed_signature, &crate::checksum::sha256_hex(&[b'a'; 65536]));
+        let first = chunk_signature(st.signing_key().unwrap(), &st.amz_date, &st.scope, &st.seed_signature, &crate::checksum::sha256_hex(&[b'a'; 65536]));
         assert_eq!(first, "ad80c730a21e5b8d04586a2213dd63b9a0e99e0e2307b0ade35a65485a288648");
     }
 
@@ -885,10 +971,10 @@ pub(crate) mod tests {
         let s = p(ok, ("date", "Fri, 24 May 2013 00:00:00 GMT"), UNSIGNED_PAYLOAD).unwrap().unwrap();
         assert_eq!((s.amz_date.as_str(), s.timestamp), ("20130524T000000Z", T));
         // Payload hashes.
-        assert_eq!(p(ok, d, "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD"), Err(Code::NotImplemented));
+        assert_eq!(p(ok, d, STREAMING_ECDSA_PAYLOAD), Err(Code::InvalidRequest), "ECDSA chunks need a SigV4a signature");
         assert_eq!(p(ok, d, &EMPTY_SHA256.to_uppercase()).unwrap().unwrap().payload, Payload::Sha256(EMPTY_SHA256.into()));
         assert_eq!(p(ok, d, &EMPTY_SHA256[1..]), Err(Code::InvalidArgument));
-        for v in [UNSIGNED_PAYLOAD, STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER, STREAMING_UNSIGNED_TRAILER, EMPTY_SHA256] {
+        for v in [UNSIGNED_PAYLOAD, STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER, STREAMING_ECDSA_PAYLOAD, STREAMING_ECDSA_PAYLOAD_TRAILER, STREAMING_UNSIGNED_TRAILER, EMPTY_SHA256] {
             let pl = Payload::parse(v).unwrap();
             assert_eq!(pl.as_str(), v);
             assert_eq!(pl.is_chunked(), v.starts_with("STREAMING"));

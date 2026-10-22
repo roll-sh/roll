@@ -72,7 +72,22 @@ CREATE TABLE usage (
 CREATE TABLE state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
 CREATE TABLE orphans (blob_key TEXT PRIMARY KEY, size INTEGER NOT NULL, found_at INTEGER NOT NULL);
-"#];
+"#,
+    // Server-side encryption (SSE-C, SSE-KMS) of a blob, done by the backing object store. No
+    // row: the backing bucket's default. Keyed by blob: a blob's encryption never changes, and
+    // every row sharing the blob (copies, branches, the trash) shares it. The row is written with
+    // the upload's or the blob's own row and removed with them. Never holds a customer key, only
+    // its MD5.
+    r#"
+CREATE TABLE blob_sse (
+  blob_id TEXT PRIMARY KEY,
+  algorithm TEXT NOT NULL,
+  customer_key_md5 TEXT,
+  kms_key_id TEXT, kms_context TEXT, bucket_key INTEGER,
+  created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+"#,
+];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;
 

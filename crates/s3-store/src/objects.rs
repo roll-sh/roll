@@ -1,6 +1,6 @@
 //! Objects, listing, multipart uploads, tags and the trash.
 
-use crate::backend::{BlobAttrs, ByteStream, UploadedPart};
+use crate::backend::{BlobAttrs, BlobSse, ByteStream, UploadedPart};
 use crate::error::{Result, StoreError};
 use crate::ids;
 use crate::model::*;
@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Whether `etag` satisfies an `If-Match`/`If-None-Match` value (`*` matches anything).
-fn etag_matches(cond: &str, etag: &str) -> bool {
+pub(crate) fn etag_matches(cond: &str, etag: &str) -> bool {
     cond.split(',').map(bare_etag).any(|c| c == "*" || c == etag)
 }
 
@@ -126,6 +126,11 @@ impl Store {
     /// `cond` atomically. On a definite failure the blob is deleted; on `Unavailable` it's left
     /// to the orphan scan (the write may or may not have reached the log).
     pub async fn commit_put(&self, bucket: &str, key: &str, obj: NewObject, cond: &WriteCondition) -> Result<ObjectMeta> {
+        self.commit_put_sse(bucket, key, obj, cond, None).await
+    }
+
+    /// [`Self::commit_put`] of a blob uploaded with server-side encryption `enc`.
+    pub async fn commit_put_sse(&self, bucket: &str, key: &str, obj: NewObject, cond: &WriteCondition, enc: Option<&crate::sse::Encryption>) -> Result<ObjectMeta> {
         let checked = validate::key(key).and_then(|_| validate::headers(&obj.headers));
         if let Err(e) = checked {
             self.discard_blob(&obj.blob_id).await;
@@ -143,11 +148,11 @@ impl Store {
             part_sizes: Vec::new(),
             modified_at: now,
         };
-        self.commit_row(bucket, row, obj.crc32c, cond).await
+        self.commit_row(bucket, row, obj.crc32c, cond, enc).await
     }
 
-    /// Insert `row` (whose blob is new) as the key's version.
-    async fn commit_row(&self, bucket: &str, row: Row, crc32c: u32, cond: &WriteCondition) -> Result<ObjectMeta> {
+    /// Insert `row` (whose blob is new, encrypted as `enc`) as the key's version.
+    pub(crate) async fn commit_row(&self, bucket: &str, row: Row, crc32c: u32, cond: &WriteCondition, enc: Option<&crate::sse::Encryption>) -> Result<ObjectMeta> {
         let blob = row.blob()?.to_string();
         // Whatever happens from here (even the caller's future being dropped), the blob stops
         // being in flight; an uncommitted one is then the orphan scan's.
@@ -160,6 +165,9 @@ impl Store {
             let cur = rows::resolve(c, &chain, &row.key)?.map(|(r, _)| r);
             check_condition(cur.as_ref(), cond, &row.key)?;
             rows::insert_blob(c, &blob, row.size, crc32c, now)?;
+            if let Some(e) = enc {
+                crate::sse::insert(c, &blob, e, now)?;
+            }
             rows::write_key(c, &b.id, &chain, b.recover_days, &row.key, Some(&row), true, now)?;
             Ok(())
         });
@@ -341,12 +349,19 @@ impl Store {
 
     /// Start a multipart upload (its blob id and backend upload are recorded durably first).
     pub async fn create_upload(&self, bucket: &str, key: &str, headers: ObjectHeaders, checksum_algorithm: Option<String>, checksum_type: Option<String>) -> Result<Upload> {
+        self.create_upload_sse(bucket, key, headers, checksum_algorithm, checksum_type, None).await
+    }
+
+    /// [`Self::create_upload`] with server-side encryption (recorded with the upload).
+    pub async fn create_upload_sse(&self, bucket: &str, key: &str, headers: ObjectHeaders, checksum_algorithm: Option<String>, checksum_type: Option<String>, sse: Option<&BlobSse>) -> Result<Upload> {
         validate::key(key)?;
         validate::headers(&headers)?;
+        self.check_sse_supported(sse)?;
         let b = self.read(|c| find_bucket(c, bucket))?;
         let now = self.now();
         let blob = ids::blob_id();
-        let attrs = BlobAttrs { bucket_id: b.id.clone(), key: key.to_string(), content_type: headers.content_type.clone() };
+        let enc = sse.map(crate::sse::Encryption::of);
+        let attrs = BlobAttrs { bucket_id: b.id.clone(), key: key.to_string(), content_type: headers.content_type.clone(), sse: sse.cloned() };
         let backend_id = self.backend.create_multipart(&ids::blob_key(&blob), &attrs).await?;
         let up = Upload {
             id: ids::upload_id(now),
@@ -384,6 +399,9 @@ impl Store {
                         u.created_at
                     ],
                 )?;
+                if let Some(e) = &enc {
+                    crate::sse::insert(c, &u.blob_id, e, now)?;
+                }
                 Ok(())
             })
             .await;
@@ -410,8 +428,14 @@ impl Store {
 
     /// Upload a part's bytes to the backend; commit it with [`Self::commit_part`].
     pub async fn put_part_data(&self, upload: &Upload, part: u32, body: ByteStream, len: u64) -> Result<UploadedPart> {
+        self.put_part_data_sse(upload, part, body, len, None).await
+    }
+
+    /// [`Self::put_part_data`] with the request's SSE-C key (an SSE-C upload's parts need it).
+    pub async fn put_part_data_sse(&self, upload: &Upload, part: u32, body: ByteStream, len: u64, sse: Option<&BlobSse>) -> Result<UploadedPart> {
         validate::part_number(part)?;
-        Ok(self.backend.upload_part(&ids::blob_key(&upload.blob_id), &upload.backend_upload_id, part, body, len).await?)
+        let key = self.upload_key(upload, sse)?;
+        Ok(self.backend.upload_part(&ids::blob_key(&upload.blob_id), &upload.backend_upload_id, part, body, len, key.as_ref()).await?)
     }
 
     /// Record an uploaded part. `etag` is the part's MD5 hex (S3's part ETag), `checksum` its
@@ -440,6 +464,12 @@ impl Store {
     /// The part's ETag is the source's when it's a whole single-PUT object, else an MD5 of
     /// where the bytes came from (we never see them).
     pub async fn copy_part(&self, upload: &Upload, part: u32, src_bucket: &str, src_key: &str, range: Option<std::ops::Range<u64>>, source_etag: Option<&str>) -> Result<Part> {
+        self.copy_part_sse(upload, part, src_bucket, src_key, range, source_etag, None, None).await
+    }
+
+    /// [`Self::copy_part`] with the source's SSE-C key (`src_sse`) and the upload's (`sse`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn copy_part_sse(&self, upload: &Upload, part: u32, src_bucket: &str, src_key: &str, range: Option<std::ops::Range<u64>>, source_etag: Option<&str>, src_sse: Option<&BlobSse>, sse: Option<&BlobSse>) -> Result<Part> {
         validate::part_number(part)?;
         let src = self.get_object(src_bucket, src_key)?;
         if let Some(m) = source_etag
@@ -452,7 +482,7 @@ impl Store {
         {
             return Err(StoreError::InvalidArgument("copy range outside the source object".into()));
         }
-        let data = self.backend.upload_part_copy(&ids::blob_key(&upload.blob_id), &upload.backend_upload_id, part, &ids::blob_key(&src.blob_id), range.clone()).await?;
+        let data = self.backend_part_copy(upload, part, &src, range.clone(), src_sse, sse).await?;
         let whole = range.as_ref().is_none_or(|r| r.start == 0 && r.end == src.size);
         let etag = if whole && src.parts == 0 { src.etag.clone() } else { md5_hex(format!("{}:{:?}", src.blob_id, range).as_bytes()) };
         self.commit_part(upload, part, &data, &etag, None).await
@@ -534,11 +564,18 @@ impl Store {
     /// completed into the current version of its key gets that version back (S3 SDKs retry a
     /// slow Complete), and a failed attempt never deletes a blob the metadata knows.
     pub async fn complete_upload(&self, bucket: &str, upload_id: &str, parts: &[(u32, String)], checksum: Option<Checksum>, cond: &WriteCondition) -> Result<ObjectMeta> {
+        self.complete_upload_sse(bucket, upload_id, parts, checksum, cond, None).await
+    }
+
+    /// [`Self::complete_upload`] with the request's SSE-C key (S3 needs it to complete an SSE-C
+    /// upload whose parts carry checksums, as the backend's always do).
+    pub async fn complete_upload_sse(&self, bucket: &str, upload_id: &str, parts: &[(u32, String)], checksum: Option<Checksum>, cond: &WriteCondition, sse: Option<&BlobSse>) -> Result<ObjectMeta> {
         let up = self.upload(bucket, upload_id)?;
+        let key = self.upload_key(&up, sse)?;
         let lock = self.completing.lock().unwrap().entry(upload_id.to_string()).or_default().clone();
         let result = {
             let _serial = lock.lock().await;
-            self.complete_locked(bucket, &up, parts, checksum, cond).await
+            self.complete_locked(bucket, &up, parts, checksum, cond, key.as_ref()).await
         };
         {
             let mut map = self.completing.lock().unwrap();
@@ -550,7 +587,7 @@ impl Store {
         result
     }
 
-    async fn complete_locked(&self, bucket: &str, up: &Upload, parts: &[(u32, String)], checksum: Option<Checksum>, cond: &WriteCondition) -> Result<ObjectMeta> {
+    async fn complete_locked(&self, bucket: &str, up: &Upload, parts: &[(u32, String)], checksum: Option<Checksum>, cond: &WriteCondition, sse: Option<&BlobSse>) -> Result<ObjectMeta> {
         let upload_id = up.id.as_str();
         // An earlier attempt (this one's retry target) may have finished while this one waited.
         match self.read(|c| find_upload(c, upload_id)) {
@@ -598,7 +635,7 @@ impl Store {
         let etag = multipart_etag(&part_list);
         let _inflight = self.inflight_guard(&up.blob_id);
         let backend_parts: Vec<(u32, String)> = part_list.iter().map(|p| (p.part_number, p.backend_etag.clone())).collect();
-        self.backend.complete_multipart(&ids::blob_key(&up.blob_id), &up.backend_upload_id, &backend_parts).await?;
+        self.backend.complete_multipart(&ids::blob_key(&up.blob_id), &up.backend_upload_id, &backend_parts, sse).await?;
         let now = self.now();
         let row = Row {
             key: up.key.clone(),
@@ -638,6 +675,7 @@ impl Store {
                     .write(|c| {
                         c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
                         c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
+                        crate::sse::forget_if_unused(c, &up.blob_id)?;
                         Ok(())
                     })
                     .await;
@@ -670,6 +708,7 @@ impl Store {
                 let u = find_upload(c, upload_id)?;
                 c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
                 c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
+                crate::sse::forget_if_unused(c, &u.blob_id)?;
                 Ok(u)
             })
             .await?;

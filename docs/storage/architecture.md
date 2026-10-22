@@ -27,7 +27,10 @@ Design goal, in order:
   The whole metadata database can be rebuilt from object storage alone.
 - **Branches are copy-on-write and instant.** A branch shares its parent's blobs; nothing is
   copied when it's created.
-- **Copies are free.** `CopyObject` adds a reference to the same blob.
+- **Copies are free.** `CopyObject` adds a reference to the same blob (unless it changes the
+  encryption; see [Server-side encryption](#server-side-encryption)).
+- **Encryption is the object store's.** SSE-C and SSE-KMS parameters are passed through on the
+  blob's own requests and S3 does the crypto; roll never re-encrypts bytes on an S3 backend.
 - **Checksums end to end.**
   - client → gateway: `Content-MD5` and the `x-amz-checksum-*` headers and trailers are verified.
   - gateway → S3: every backend upload carries a CRC32C that S3 verifies.
@@ -36,7 +39,7 @@ Design goal, in order:
 
 | crate | what |
 |---|---|
-| `s3-proto` | Wire protocol, no I/O: SigV4 (header, presigned, chunked/streaming payloads with trailers), XML bodies, S3 error codes, checksums, ETags, ranges and conditional headers. |
+| `s3-proto` | Wire protocol, no I/O: SigV4, SigV4a and SigV2 (header, presigned, chunked/streaming payloads with trailers, POST policies), SSE request headers, XML bodies, S3 error codes, checksums, ETags, ranges and conditional headers. |
 | `s3-store` | Metadata (SQLite + durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (S3 via `aws-sdk-s3`, or a local directory), the GC/scrub jobs. No HTTP. |
 | `s3-server` | The S3 HTTP API: routing (path and virtual-host style), auth, handlers, streaming to and from the backend, CORS and public buckets. |
 | `s3-control` | Control-plane API `/v1/storage/...` (merged into rolld's API): buckets, branches, keys, browsing/upload/download for the dashboard, presigning, trash, usage and pricing. |
@@ -66,6 +69,8 @@ s3/meta/pruned                              log entries up to here are deleted
 - Customer multipart uploads map 1:1 to a backend multipart upload of the blob (same part
   numbers), so a 5 TiB object is still one S3 object. `UploadPartCopy` uses the backend's
   `UploadPartCopy`, so the copy happens server-side.
+- SSE-C and SSE-KMS blobs are encrypted by S3 itself. Reading an SSE-C blob (and HEADing it) needs
+  the customer's key; listing and deleting don't, so the GC jobs never need keys.
 
 ## Metadata (`s3-store`)
 
@@ -114,9 +119,20 @@ usage   (bucket_id, day TEXT /* YYYY-MM-DD UTC */, class_a, class_b, bytes_in,
 
 orphans (blob_key TEXT PRIMARY KEY, size, found_at)   -- orphan-scan candidates
 state   (k TEXT PRIMARY KEY, v TEXT)                  -- scrub report, job barriers
+
+blob_sse (blob_id TEXT PRIMARY KEY,                   -- no row: the backing bucket's default
+          algorithm TEXT /* SSE-C | aws:kms | aws:kms:dsse */,
+          customer_key_md5 TEXT /* SSE-C: base64 MD5 of the key, never the key */,
+          kms_key_id, kms_context, bucket_key, created_at)  -- migration 2
 ```
 
 `refs` counts every `objects` row and every `trash` row that points at the blob.
+
+A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
+shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
+`trash` or `uploads` changes. The row is written in the transaction that records the blob (PUT,
+copy) or its upload (CreateMultipartUpload), and removed with the blob's row (sweeper) or the
+upload (abort).
 
 ### Durability: the metadata log
 
@@ -247,7 +263,10 @@ Inherited objects are billed to the bucket that owns the rows.
     the source's when it's a whole single-PUT object, otherwise an MD5 of the source blob
     and range.
 - **Copy.** `refs + 1` on the source blob, then the new object row (with `REPLACE`d
-  metadata, if asked). No data moves.
+  metadata, if asked). No data moves. A copy whose encryption differs from the source's can't
+  share the blob: the backend copies it into a new blob (S3 `CopyObject`, or a multipart
+  `UploadPartCopy` beyond 5 GiB), the new blob's CRC32C must equal the source's, and then it's
+  committed like a PUT.
 
 ### Metering
 
@@ -275,12 +294,49 @@ Usage writes are relaxed: they ride the next group commit without waiting.
 
 **Auth.**
 - SigV4: the `Authorization` header and presigned query strings (max 7 days).
-- Payloads: `UNSIGNED-PAYLOAD`, a hex SHA-256, `STREAMING-AWS4-HMAC-SHA256-PAYLOAD(-TRAILER)`
-  and `STREAMING-UNSIGNED-PAYLOAD-TRAILER` (current SDKs send CRC trailers by default).
+- SigV4a (`AWS4-ECDSA-P256-SHA256`): the same canonical request, signed with an ECDSA P-256 key
+  derived from the secret (NIST SP 800-108 HMAC-SHA256 in counter mode, retried until the
+  candidate is at most n − 2). Its public key is cached per access key. Any
+  `x-amz-region-set` is accepted.
+- SigV2 (`AWS key:signature`, presigned `AWSAccessKeyId`/`Expires`/`Signature`, POST policy v2):
+  HMAC-SHA1 of the documented string to sign, with the bucket in the resource for
+  virtual-host requests. Clients differ on the date line when `x-amz-date` is sent and on the
+  signed subresources, so each variant they produce is accepted.
+- Payloads: `UNSIGNED-PAYLOAD`, a hex SHA-256, `STREAMING-AWS4-HMAC-SHA256-PAYLOAD(-TRAILER)`,
+  `STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD(-TRAILER)` and `STREAMING-UNSIGNED-PAYLOAD-TRAILER`
+  (current SDKs send CRC trailers by default).
 - The credential scope's region is accepted as given (any region; R2 does the same). The
   service must be `s3`.
-- Clock skew is limited to 15 minutes.
+- Clock skew is limited to 15 minutes (header-signed SigV2 too); presigned URLs until they
+  expire.
 - Anonymous requests are allowed only for GET/HEAD of objects in `public` buckets.
+- `x-amz-expected-bucket-owner` must be the deployment's owner id when sent.
+
+### Server-side encryption
+
+- **The backing object store does the crypto.** The `Backend` trait takes the SSE parameters
+  on every call that writes or reads a blob's bytes (`BlobAttrs::sse` for `put`,
+  `create_multipart` and `copy`; an argument for `get_blob`, `upload_part`, `upload_part_copy`
+  and `complete_multipart`; a `CopySource` carries the source's). `S3Backend` puts SSE-C
+  (customer key and key MD5) and SSE-KMS (key id, context, bucket key) on the request, so
+  durability and integrity are exactly S3's, and checksums stay those of the plaintext.
+- **Never silently unencrypted.** Every encrypted write checks that the service confirmed the
+  encryption in its response. An S3-compatible service that ignores the headers would store
+  plaintext, so what it stored is deleted (or the upload aborted) and the request fails with
+  `NotImplemented`.
+- **Keys are never stored.** The metadata records how each blob is encrypted (`blob_sse`), with
+  only the MD5 of an SSE-C key. The gateway checks a request's key against it before any bytes
+  move (missing: `InvalidRequest`, wrong: `AccessDenied`); the store checks again.
+- **SSE-KMS** is on for AWS S3 without a custom endpoint and off otherwise (`ROLL_S3_KMS`).
+- **The local directory backend** (dev and tests) encrypts SSE-C blobs itself: AES-256-GCM in
+  64 KiB chunks with per-segment random salts and keys derived from the customer key, chunk
+  indexes as nonces and the index, last-chunk flag and length as associated data. A sidecar
+  (`.s3-sse/<key>.json`, written before the blob) holds the salts, lengths and a key check, so
+  ranges decrypt only the chunks they touch and listings report plaintext sizes. Each multipart
+  part is its own segment, so completing an upload needs no re-encryption. SSE-KMS is refused.
+- **GC, the orphan scan and the scrub** need no keys: deleting and listing work on any blob, and
+  listings report plaintext sizes on S3 (checked against SeaweedFS too), so the scrub's size
+  comparison holds for encrypted blobs.
 
 **Permissions.**
 - `read`: GET, HEAD, List*

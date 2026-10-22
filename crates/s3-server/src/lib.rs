@@ -1,6 +1,7 @@
 //! roll storage: the S3-compatible HTTP API.
 //!
-//! [`Server`] answers S3 requests over [`s3_store::Store`]: SigV4 auth with roll access keys,
+//! [`Server`] answers S3 requests over [`s3_store::Store`]: SigV4, SigV4a and SigV2 auth with
+//! roll access keys, SSE-C and SSE-KMS passed through to the backing object store,
 //! path- and virtual-host-style addressing, streaming bodies both ways (bounded memory),
 //! checksums verified before anything is committed, CORS, public buckets and metering. The wire
 //! format (signatures, `aws-chunked`, XML, error codes) is `s3-proto`'s.
@@ -18,8 +19,10 @@ mod ctx;
 mod error;
 mod multipart;
 mod object;
+mod owner;
 mod post;
 mod response;
+mod sse;
 mod upload;
 
 use axum::Router;

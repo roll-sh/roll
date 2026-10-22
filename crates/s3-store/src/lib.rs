@@ -29,10 +29,12 @@ mod model;
 mod objects;
 mod rows;
 mod schema;
+pub mod sse;
 mod store;
 pub mod validate;
 
-pub use backend::{Backend, BlobAttrs, ByteStream, Listed, LocalBackend, S3Backend, Uploaded, UploadedPart, bytes_body, from_config, test_backend};
+pub use backend::{Backend, BlobAttrs, BlobSse, ByteStream, CopySource, CustomerKey, KmsParams, Listed, LocalBackend, S3Backend, SseOp, SseUnsupported, Uploaded, UploadedPart, bytes_body, from_config, sse_c_unsupported, test_backend};
+pub use sse::Encryption;
 pub use error::{Result, StoreError};
 pub use ids::{blob_key, day_of};
 pub use log::LogStats;

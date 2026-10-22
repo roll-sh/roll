@@ -123,6 +123,10 @@ struct Args {
     /// loopback and the private ranges).
     #[arg(long, env = "ROLL_S3_INTERNAL_CIDRS")]
     s3_internal_cidrs: Option<String>,
+    /// Pass SSE-KMS requests through to the backing bucket (default: on for AWS S3 without a
+    /// custom endpoint, off otherwise; a local directory can't).
+    #[arg(long, env = "ROLL_S3_KMS")]
+    s3_kms: Option<bool>,
     /// An admin access key to create at startup (local dev and tests), with ROLL_S3_SECRET_KEY.
     #[arg(long, env = "ROLL_S3_ACCESS_KEY", requires = "s3_secret_key")]
     s3_access_key: Option<String>,
@@ -321,6 +325,7 @@ struct StorageOpts {
     s3_domain: Option<String>,
     s3_storage_class: Option<String>,
     s3_internal_cidrs: Option<String>,
+    s3_kms: Option<bool>,
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
 }
@@ -334,6 +339,7 @@ impl From<&Args> for StorageOpts {
             s3_domain: a.s3_domain.clone(),
             s3_storage_class: a.s3_storage_class.clone(),
             s3_internal_cidrs: a.s3_internal_cidrs.clone(),
+            s3_kms: a.s3_kms,
             s3_access_key: a.s3_access_key.clone(),
             s3_secret_key: a.s3_secret_key.clone(),
         }
@@ -354,6 +360,7 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
     cfg.node = args.node.clone();
     cfg.region = scfg.region.clone();
+    cfg.kms = args.s3_kms;
     let store = s3_store::Store::open(cfg, backend).await?;
     if let (Some(id), Some(secret)) = (&args.s3_access_key, &args.s3_secret_key) {
         store.ensure_key(id, secret, "ROLL_S3_ACCESS_KEY").await?;

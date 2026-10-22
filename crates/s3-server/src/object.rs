@@ -6,6 +6,7 @@ use crate::ctx::{Ctx, no_content, read_small};
 use crate::error::{StoreResult, store_error};
 use crate::multipart;
 use crate::response::{self, Reply, set};
+use crate::sse;
 use axum::body::Body;
 use axum::http::{Method, StatusCode};
 use axum::response::Response;
@@ -15,7 +16,7 @@ use s3_proto::checksum::Algorithm;
 use s3_proto::http::{Conditions, Overrides, parse_copy_source, parse_range, parse_tagging_header, part_range, quote_etag, user_metadata, validate_key, validate_tags};
 use s3_proto::time::http_date;
 use s3_proto::{Code, S3Error, xml};
-use s3_store::{Bucket, ByteStream, Checksum, Class, CopyOptions, NewObject, ObjectHeaders, ObjectMeta, Store, WriteCondition};
+use s3_store::{Bucket, ByteStream, Checksum, Class, CopyOptions, Encryption, NewObject, ObjectHeaders, ObjectMeta, Store, WriteCondition};
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -132,6 +133,7 @@ async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     let cond = write_condition(ctx)?;
     // Every object gets a checksum: the client's, or CRC64NVME (as S3 does by default).
     let want = requested_checksum(ctx)?.or(Some((Algorithm::Crc64Nvme, None)));
+    let target = sse::target(ctx, bucket)?;
     let incoming = Incoming::new(ctx, body, want, None)?;
     let len = incoming.len().ok_or_else(|| S3Error::new(Code::MissingContentLength))?;
     if len > MAX_PUT {
@@ -144,7 +146,7 @@ async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     let result = incoming.result();
     let guard = InflightBlob::new(&store);
     let blob = guard.id.clone();
-    let uploaded = store.put_blob(&blob, &bucket.id, &key, incoming.into_stream(), len, headers.content_type.as_deref()).await;
+    let uploaded = store.put_blob_sse(&blob, &bucket.id, &key, incoming.into_stream(), len, headers.content_type.as_deref(), target.sse.as_ref()).await;
     let (up, finished) = match (uploaded, result.get()) {
         (Ok(u), Ok(f)) => (u, f),
         (Err(e), body) => return Err(body.err().unwrap_or_else(|| store_error(e))),
@@ -155,17 +157,16 @@ async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     };
     store.meter.bytes_in(&bucket.id, len);
     let checksum = finished.checksum.map(|(a, v)| Checksum { algorithm: a.as_str().into(), kind: "FULL_OBJECT".into(), value: v });
-    let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: finished.digest.etag(), headers, checksum };
-    let meta = store.commit_put(&bucket.name, &key, obj, &cond).await.s3()?;
+    let enc = target.encryption();
+    let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: sse::etag(enc.as_ref(), finished.digest.etag()), headers, checksum };
+    let meta = store.commit_put_sse(&bucket.name, &key, obj, &cond, enc.as_ref()).await.s3()?;
     drop(guard);
     let mut r = response::empty(StatusCode::OK);
     set(&mut r, "etag", &quote_etag(&meta.etag));
     if let Some(c) = &meta.checksum {
         set_checksum(&mut r, c);
     }
-    if ctx.h("x-amz-server-side-encryption").is_some() {
-        set(&mut r, "x-amz-server-side-encryption", "AES256");
-    }
+    sse::set_headers(&mut r, enc.as_ref(), target.s3);
     Ok(r)
 }
 
@@ -253,8 +254,9 @@ impl Drop for Metered {
 
 async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     ctx.require_object_read(bucket)?;
-    let meta = ctx.store().get_object(&bucket.name, ctx.key_name()).s3()?;
+    let (meta, enc) = ctx.store().get_object_encryption(&bucket.name, ctx.key_name()).s3()?;
     ctx.meter(&bucket.id, Class::B);
+    let key = sse::key_for(ctx, enc.as_ref(), sse::Use::Read)?;
     let overrides = Overrides::from_query(ctx.query.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     if !overrides.is_empty() && ctx.auth.is_none() {
         return Err(S3Error::msg(Code::InvalidRequest, "Request specific response headers cannot be used for anonymous GET requests."));
@@ -294,6 +296,7 @@ async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
         None => (StatusCode::OK, meta.size),
     };
     let mut r = object_response(&meta, &overrides, code, len);
+    sse::set_headers(&mut r, enc.as_ref(), false);
     if let Some((a, b)) = range {
         set(&mut r, "content-range", &s3_proto::http::content_range(a, b, meta.size));
     }
@@ -310,7 +313,7 @@ async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     if head || len == 0 {
         return Ok(r);
     }
-    let (_, stream) = ctx.store().open_blob(&meta, range.map(|(a, b)| a..b + 1)).await.s3()?;
+    let (_, stream) = ctx.store().open_blob_sse(&meta, range.map(|(a, b)| a..b + 1), key.as_ref()).await.s3()?;
     let metered = Metered { inner: stream, store: ctx.store().clone(), bucket_id: bucket.id.clone(), internal: ctx.internal(), sent: 0 };
     let headers = std::mem::take(r.headers_mut());
     let mut out = Response::new(Body::from_stream(metered));
@@ -339,11 +342,16 @@ async fn copy(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
     let (src_bucket, src_key) = parse_copy_source(ctx.h("x-amz-copy-source").unwrap_or_default())?;
     ctx.require(&src_bucket, Need::Read)?;
-    let src = ctx.store().get_object(&src_bucket, &src_key).s3()?;
+    let (src, src_enc) = ctx.store().get_object_encryption(&src_bucket, &src_key).s3()?;
+    let src_sse = sse::key_for(ctx, src_enc.as_ref(), sse::Use::CopySource)?;
     Conditions::copy_source_from_headers(|n| ctx.h(n)).check_copy_source(&src.etag, src.modified_at)?;
     let replace = directive(ctx, "x-amz-metadata-directive")?;
     let replace_tags = directive(ctx, "x-amz-tagging-directive")?;
-    if src_bucket == bucket.name && src_key == ctx.key_name() && !replace && !replace_tags {
+    // A copy is encrypted as its own request says (or the bucket's default), never as its
+    // source was: S3 doesn't carry encryption over.
+    let target = sse::target(ctx, bucket)?;
+    let encrypting = target.sse.is_some() || target.s3;
+    if src_bucket == bucket.name && src_key == ctx.key_name() && !replace && !replace_tags && !encrypting {
         return Err(S3Error::msg(
             Code::InvalidRequest,
             "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes.",
@@ -359,12 +367,19 @@ async fn copy(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     let condition = write_condition(ctx)?;
     ctx.meter(&bucket.id, Class::A);
     let opts = CopyOptions { headers, tags, source_etag: Some(src.etag.clone()), condition };
-    let meta = ctx.store().copy_object(&src_bucket, &src_key, &bucket.name, ctx.key_name(), &opts).await.s3()?;
+    // The same encryption shares the blob (free); another one needs a new blob, copied inside
+    // object storage.
+    let meta = if Encryption::same(src_enc.as_ref(), target.sse.as_ref()) {
+        ctx.store().copy_object(&src_bucket, &src_key, &bucket.name, ctx.key_name(), &opts).await.s3()?
+    } else {
+        ctx.store().copy_object_new_blob(&src_bucket, &src_key, &bucket.name, ctx.key_name(), &opts, src_sse.as_ref(), target.sse.as_ref()).await.s3()?
+    };
     let checksum = meta.checksum.as_ref().and_then(|c| checksum_of(c).map(|a| (a, c.value.as_str())));
     let mut r = response::xml(StatusCode::OK, xml::copy_object_result(&meta.etag, meta.modified_at, checksum));
     if let Some(c) = &meta.checksum {
         set_checksum(&mut r, c);
     }
+    sse::set_headers(&mut r, target.encryption().as_ref(), target.s3);
     Ok(r)
 }
 

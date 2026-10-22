@@ -1,9 +1,39 @@
-//! Who is asking (SigV4 with roll access keys) and what they may do.
+//! Who is asking (SigV4, SigV4a or SigV2 with roll access keys) and what they may do.
 
 use crate::ctx::Ctx;
+use p256::ecdsa::VerifyingKey;
+use s3_proto::auth::Context;
 use s3_proto::sigv4::{self, Verified};
-use s3_proto::{Code, S3Error};
+use s3_proto::{Code, S3Error, sigv4a};
 use s3_store::{AccessKey, Bucket};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+/// Access key → (SHA-256 of the secret, public key).
+type KeyCache = Mutex<HashMap<String, ([u8; 32], VerifyingKey)>>;
+
+/// SigV4a public keys by access key (with a hash of the secret they came from, so a changed
+/// secret derives a new one). The derivation is a few HMACs and a scalar multiplication: cheap,
+/// but not per request.
+fn ecdsa_key(access_key: &str, secret: &str) -> VerifyingKey {
+    const MAX: usize = 10_000;
+    static CACHE: OnceLock<KeyCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let tag: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+    if let Some((t, k)) = cache.lock().unwrap().get(access_key)
+        && *t == tag
+    {
+        return *k;
+    }
+    let k = sigv4a::verifying_key(access_key, secret);
+    let mut c = cache.lock().unwrap();
+    if c.len() >= MAX {
+        c.clear();
+    }
+    c.insert(access_key.to_string(), (tag, k));
+    k
+}
 
 pub(crate) struct Auth {
     pub key: AccessKey,
@@ -16,7 +46,8 @@ pub(crate) fn authenticate(ctx: &Ctx) -> Result<Option<Auth>, S3Error> {
     let headers: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let req = sigv4::Request { method: ctx.method.as_str(), path: &ctx.raw_path, query: &ctx.raw_query, headers: &headers };
     let mut found: Option<AccessKey> = None;
-    let verified = sigv4::authenticate(&req, ctx.now_s(), |id| match ctx.store().access_key(id) {
+    let cx = Context { now: ctx.now_s(), vhost_bucket: ctx.vhost.then(|| ctx.bucket_name()) };
+    let verified = s3_proto::auth::authenticate(&req, &cx, |id| match ctx.store().access_key(id) {
         Ok(Some(k)) => {
             let secret = k.secret.clone();
             found = Some(k);
@@ -27,9 +58,9 @@ pub(crate) fn authenticate(ctx: &Ctx) -> Result<Option<Auth>, S3Error> {
             tracing::warn!(error = %e, "looking up an access key failed");
             None
         }
-    })?;
+    }, ecdsa_key)?;
     Ok(match (verified, found) {
-        (Some(verified), Some(key)) => Some(Auth { key, verified }),
+        (Some((_, verified)), Some(key)) => Some(Auth { key, verified }),
         _ => None,
     })
 }

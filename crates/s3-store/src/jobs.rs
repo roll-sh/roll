@@ -94,6 +94,7 @@ impl Store {
                     let mut n = 0;
                     for (id, _) in &deleted {
                         n += c.execute("DELETE FROM blobs WHERE id = ?1 AND refs = 0", [id])?;
+                        crate::sse::forget_if_unused(c, id)?;
                     }
                     Ok(n)
                 })

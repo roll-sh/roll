@@ -1,13 +1,19 @@
 //! AWS S3 (or an S3-compatible service) through `aws-sdk-s3`. Every blob and part carries a
 //! CRC32C that S3 verifies on receipt, so bytes can't be corrupted between the gateway and S3.
+//!
+//! Server-side encryption is passed through: SSE-C keys (per request, never kept) and SSE-KMS
+//! parameters go on the blob's own requests, and S3 does the crypto. Every write checks that
+//! the service confirmed the encryption it was asked for: an S3-compatible service that ignores
+//! the headers would otherwise store plaintext, so what it stored is deleted again and the
+//! request fails with [`SseUnsupported`].
 
-use super::{Backend, BlobAttrs, ByteStream, Checked, Listed, Uploaded, UploadedPart};
+use super::{Backend, BlobAttrs, BlobSse, ByteStream, Checked, CopySource, Listed, SseUnsupported, Uploaded, UploadedPart};
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::{ByteStream as SdkStream, SdkBody};
-use aws_sdk_s3::types::{ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart, StorageClass};
+use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode, CompletedMultipartUpload, CompletedPart, MetadataDirective, ServerSideEncryption, StorageClass};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::Bytes;
@@ -23,6 +29,8 @@ pub struct S3Backend {
     /// `""` or `"<prefix>/"`.
     prefix: String,
     storage_class: Option<StorageClass>,
+    /// SSE-KMS requests are passed through (real AWS: on by default without a custom endpoint).
+    kms: bool,
 }
 
 /// A body of known length for the SDK (which wants `Sync`).
@@ -93,6 +101,105 @@ fn copy_source(bucket: &str, key: &str) -> String {
     out
 }
 
+/// SSE-C headers for the object itself, on any request builder that has them.
+macro_rules! customer_key {
+    ($req:expr, $sse:expr) => {{
+        let mut r = $req;
+        if let Some(k) = $sse.and_then(BlobSse::customer) {
+            r = r.sse_customer_algorithm("AES256").sse_customer_key(k.b64()).sse_customer_key_md5(k.md5_b64());
+        }
+        r
+    }};
+}
+
+/// SSE-C headers for a copy's source.
+macro_rules! copy_source_key {
+    ($req:expr, $sse:expr) => {{
+        let mut r = $req;
+        if let Some(k) = $sse.and_then(BlobSse::customer) {
+            r = r.copy_source_sse_customer_algorithm("AES256").copy_source_sse_customer_key(k.b64()).copy_source_sse_customer_key_md5(k.md5_b64());
+        }
+        r
+    }};
+}
+
+/// SSE-KMS headers on a write.
+macro_rules! kms_params {
+    ($req:expr, $sse:expr) => {{
+        let mut r = $req;
+        if let Some(BlobSse::Kms(p)) = $sse {
+            r = r
+                .server_side_encryption(if p.dsse { ServerSideEncryption::AwsKmsDsse } else { ServerSideEncryption::AwsKms })
+                .set_ssekms_key_id(p.key_id.clone())
+                .set_ssekms_encryption_context(p.context.clone())
+                .set_bucket_key_enabled(p.bucket_key);
+        }
+        r
+    }};
+}
+
+/// Whether a write's response confirms the encryption asked for.
+fn confirmed(want: Option<&BlobSse>, customer_algorithm: Option<&str>, customer_md5: Option<&str>, sse: Option<&ServerSideEncryption>) -> bool {
+    match want {
+        None => true,
+        Some(BlobSse::Customer(k)) => customer_algorithm == Some("AES256") && customer_md5.is_none_or(|m| m == k.md5_b64()),
+        Some(BlobSse::Kms(p)) => sse == Some(if p.dsse { &ServerSideEncryption::AwsKmsDsse } else { &ServerSideEncryption::AwsKms }),
+    }
+}
+
+fn unconfirmed(what: &str, want: Option<&BlobSse>) -> anyhow::Error {
+    let kind = match want {
+        Some(BlobSse::Kms(_)) => "SSE-KMS",
+        _ => "SSE-C",
+    };
+    SseUnsupported(format!("the backing object store didn't confirm {kind} for a {what}; it doesn't support it")).into()
+}
+
+/// A refusal of the encryption itself (S3-compatible services without SSE answer 501, or 400
+/// naming it) is [`SseUnsupported`]; anything else stays an error.
+fn sse_err<E: std::error::Error + Send + Sync + 'static>(what: &str, want: Option<&BlobSse>, e: SdkError<E, aws_sdk_s3::config::http::HttpResponse>) -> anyhow::Error {
+    let code = status(&e);
+    let text = format!("{}", aws_sdk_s3::error::DisplayErrorContext(e));
+    if want.is_some() && (code == Some(501) || (code == Some(400) && (text.contains("ncryption") || text.contains("SSE")))) {
+        return SseUnsupported(format!("the backing object store refused server-side encryption for a {what}: {text}")).into();
+    }
+    anyhow!("{what}: {text}")
+}
+
+/// Some S3-compatible services (SeaweedFS) repeat SSE response headers, which the SDK refuses
+/// for a header it expects once. Exact duplicates are collapsed; S3 itself never sends them.
+#[derive(Debug)]
+struct OneSseHeader;
+
+impl aws_sdk_s3::config::Intercept for OneSseHeader {
+    fn name(&self) -> &'static str {
+        "OneSseHeader"
+    }
+
+    fn modify_before_deserialization(
+        &self,
+        ctx: &mut aws_sdk_s3::config::interceptors::BeforeDeserializationInterceptorContextMut<'_>,
+        _rc: &aws_sdk_s3::config::RuntimeComponents,
+        _cfg: &mut aws_sdk_s3::config::ConfigBag,
+    ) -> std::result::Result<(), aws_sdk_s3::error::BoxError> {
+        let headers = ctx.response_mut().headers_mut();
+        for name in [
+            "x-amz-server-side-encryption",
+            "x-amz-server-side-encryption-customer-algorithm",
+            "x-amz-server-side-encryption-customer-key-md5",
+            "x-amz-server-side-encryption-aws-kms-key-id",
+            "x-amz-server-side-encryption-context",
+            "x-amz-server-side-encryption-bucket-key-enabled",
+        ] {
+            let values: Vec<String> = headers.get_all(name).map(str::to_string).collect();
+            if values.len() > 1 && values.iter().all(|v| *v == values[0]) {
+                headers.insert(name, values[0].clone());
+            }
+        }
+        Ok(())
+    }
+}
+
 fn crc_b64(crc: u32) -> String {
     STANDARD.encode(crc.to_be_bytes())
 }
@@ -119,7 +226,7 @@ impl S3Backend {
             loader = loader.region(aws_config::Region::new(r.to_string()));
         }
         let sdk = loader.load().await;
-        let mut b = aws_sdk_s3::config::Builder::from(&sdk);
+        let mut b = aws_sdk_s3::config::Builder::from(&sdk).interceptor(OneSseHeader);
         if sdk.region().is_none() {
             b = b.region(aws_config::Region::new("us-east-1"));
         }
@@ -132,7 +239,14 @@ impl S3Backend {
             bucket: bucket.to_string(),
             prefix,
             storage_class: storage_class.filter(|s| !s.is_empty()).map(StorageClass::from),
+            kms: endpoint.is_none(),
         })
+    }
+
+    /// Pass SSE-KMS through or not (default: only on real AWS, without a custom endpoint).
+    pub fn with_kms(mut self, on: bool) -> Self {
+        self.kms = on;
+        self
     }
 
     fn full(&self, key: &str) -> String {
@@ -157,6 +271,10 @@ impl Backend for S3Backend {
         format!("s3://{}/{}", self.bucket, self.prefix.trim_end_matches('/'))
     }
 
+    fn supports_kms(&self) -> bool {
+        self.kms
+    }
+
     async fn put(&self, key: &str, body: ByteStream, len: u64, attrs: &BlobAttrs) -> Result<Uploaded> {
         let (body, state) = sdk_body(body, len);
         let mut req = self
@@ -174,7 +292,14 @@ impl Backend for S3Backend {
         if let Some(ct) = &attrs.content_type {
             req = req.content_type(ct);
         }
-        req.send().await.map_err(|e| err("put", e))?;
+        let sse = attrs.sse.as_ref();
+        let req = kms_params!(customer_key!(req, sse), sse);
+        let out = req.send().await.map_err(|e| sse_err("put", sse, e))?;
+        if !confirmed(sse, out.sse_customer_algorithm(), out.sse_customer_key_md5(), out.server_side_encryption()) {
+            // Stored, but not encrypted as asked: never keep that.
+            let _ = self.delete(key).await;
+            return Err(unconfirmed("put", sse));
+        }
         let (size, crc32c) = state.result().context("body incomplete after upload")?;
         Ok(Uploaded { size, crc32c })
     }
@@ -192,13 +317,13 @@ impl Backend for S3Backend {
         }
     }
 
-    async fn get(&self, key: &str, range: Option<Range<u64>>) -> Result<Option<(u64, ByteStream)>> {
+    async fn get_blob(&self, key: &str, range: Option<Range<u64>>, sse: Option<&BlobSse>) -> Result<Option<(u64, ByteStream)>> {
         if let Some(r) = &range
             && r.start >= r.end
         {
             return Ok(self.head(key).await?.map(|_| (0, futures::stream::empty().boxed())));
         }
-        let mut req = self.client.get_object().bucket(&self.bucket).key(self.full(key));
+        let mut req = customer_key!(self.client.get_object().bucket(&self.bucket).key(self.full(key)), sse);
         if let Some(r) = &range {
             req = req.range(format!("bytes={}-{}", r.start, r.end - 1));
         }
@@ -222,6 +347,14 @@ impl Backend for S3Backend {
                 modified_ms: out.last_modified().and_then(|t| t.to_millis().ok()).unwrap_or(0),
             })),
             Err(e) if e.as_service_error().is_some_and(|s| s.is_not_found()) || status(&e) == Some(404) => Ok(None),
+            // An SSE-C object can't be HEADed without its key; its listing entry says the same.
+            Err(e) if status(&e) == Some(400) => {
+                let (page, _) = self.list_page(key, None, 1).await?;
+                match page.into_iter().next().filter(|l| l.key == key) {
+                    Some(l) => Ok(Some(l)),
+                    None => Err(err("head", e)),
+                }
+            }
             Err(e) => Err(err("head", e)),
         }
     }
@@ -270,13 +403,20 @@ impl Backend for S3Backend {
         if let Some(ct) = &attrs.content_type {
             req = req.content_type(ct);
         }
-        let out = req.send().await.map_err(|e| err("create multipart upload", e))?;
-        out.upload_id().map(str::to_string).context("no upload id in CreateMultipartUpload response")
+        let sse = attrs.sse.as_ref();
+        let req = kms_params!(customer_key!(req, sse), sse);
+        let out = req.send().await.map_err(|e| sse_err("multipart upload", sse, e))?;
+        let id = out.upload_id().map(str::to_string).context("no upload id in CreateMultipartUpload response")?;
+        if !confirmed(sse, out.sse_customer_algorithm(), out.sse_customer_key_md5(), out.server_side_encryption()) {
+            let _ = self.abort_multipart(key, &id).await;
+            return Err(unconfirmed("multipart upload", sse));
+        }
+        Ok(id)
     }
 
-    async fn upload_part(&self, key: &str, upload_id: &str, part: u32, body: ByteStream, len: u64) -> Result<UploadedPart> {
+    async fn upload_part(&self, key: &str, upload_id: &str, part: u32, body: ByteStream, len: u64, sse: Option<&BlobSse>) -> Result<UploadedPart> {
         let (body, state) = sdk_body(body, len);
-        let out = self
+        let req = self
             .client
             .upload_part()
             .bucket(&self.bucket)
@@ -285,10 +425,11 @@ impl Backend for S3Backend {
             .part_number(part as i32)
             .content_length(len as i64)
             .checksum_algorithm(ChecksumAlgorithm::Crc32C)
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| err("upload part", e))?;
+            .body(body);
+        let out = customer_key!(req, sse).send().await.map_err(|e| sse_err("upload part", sse, e))?;
+        if sse.and_then(BlobSse::customer).is_some() && !confirmed(sse, out.sse_customer_algorithm(), out.sse_customer_key_md5(), None) {
+            return Err(unconfirmed("part", sse));
+        }
         let (size, crc32c) = state.result().context("part body incomplete after upload")?;
         if let Some(c) = out.checksum_crc32_c() {
             anyhow::ensure!(crc_from_b64(c)? == crc32c, "S3 stored part {part} with another CRC32C");
@@ -297,8 +438,7 @@ impl Backend for S3Backend {
         Ok(UploadedPart { etag: part_token(etag, crc32c), size, crc32c })
     }
 
-    async fn upload_part_copy(&self, key: &str, upload_id: &str, part: u32, src_key: &str, range: Option<Range<u64>>) -> Result<UploadedPart> {
-        let src = self.head(src_key).await?.with_context(|| format!("copy source {src_key} not found"))?;
+    async fn upload_part_copy(&self, key: &str, upload_id: &str, part: u32, src: &CopySource<'_>, sse: Option<&BlobSse>) -> Result<UploadedPart> {
         let mut req = self
             .client
             .upload_part_copy()
@@ -306,8 +446,8 @@ impl Backend for S3Backend {
             .key(self.full(key))
             .upload_id(upload_id)
             .part_number(part as i32)
-            .copy_source(copy_source(&self.bucket, &self.full(src_key)));
-        let size = match &range {
+            .copy_source(copy_source(&self.bucket, &self.full(src.key)));
+        let size = match &src.range {
             Some(r) => {
                 anyhow::ensure!(r.start < r.end && r.end <= src.size, "copy range outside the source");
                 req = req.copy_source_range(format!("bytes={}-{}", r.start, r.end - 1));
@@ -315,28 +455,67 @@ impl Backend for S3Backend {
             }
             None => src.size,
         };
-        let out = req.send().await.map_err(|e| err("upload part copy", e))?;
+        let req = copy_source_key!(customer_key!(req, sse), src.sse);
+        let out = req.send().await.map_err(|e| sse_err("upload part copy", sse.or(src.sse), e))?;
+        if sse.and_then(BlobSse::customer).is_some() && !confirmed(sse, out.sse_customer_algorithm(), out.sse_customer_key_md5(), None) {
+            return Err(unconfirmed("part copy", sse));
+        }
         let res = out.copy_part_result().context("no CopyPartResult")?;
         let etag = res.e_tag().context("no ETag for copied part")?;
         let crc32c = crc_from_b64(res.checksum_crc32_c().context("no CRC32C for copied part")?)?;
         Ok(UploadedPart { etag: part_token(etag, crc32c), size, crc32c })
     }
 
-    async fn complete_multipart(&self, key: &str, upload_id: &str, parts: &[(u32, String)]) -> Result<()> {
+    async fn copy(&self, src: &CopySource<'_>, key: &str, attrs: &BlobAttrs) -> Result<Uploaded> {
+        anyhow::ensure!(src.range.is_none(), "a whole-object copy has no range");
+        let mut req = self
+            .client
+            .copy_object()
+            .bucket(&self.bucket)
+            .key(self.full(key))
+            .copy_source(copy_source(&self.bucket, &self.full(src.key)))
+            .metadata_directive(MetadataDirective::Replace)
+            .set_metadata(Some(Self::meta(attrs)))
+            .checksum_algorithm(ChecksumAlgorithm::Crc32C);
+        if let Some(c) = &self.storage_class {
+            req = req.storage_class(c.clone());
+        }
+        if let Some(ct) = &attrs.content_type {
+            req = req.content_type(ct);
+        }
+        let sse = attrs.sse.as_ref();
+        let req = copy_source_key!(kms_params!(customer_key!(req, sse), sse), src.sse);
+        let out = req.send().await.map_err(|e| sse_err("copy", sse.or(src.sse), e))?;
+        if !confirmed(sse, out.sse_customer_algorithm(), out.sse_customer_key_md5(), out.server_side_encryption()) {
+            let _ = self.delete(key).await;
+            return Err(unconfirmed("copy", sse));
+        }
+        let crc = match out.copy_object_result().and_then(|r| r.checksum_crc32_c()) {
+            Some(c) => crc_from_b64(c)?,
+            // Not in the copy's result: S3 keeps it with the object.
+            None => {
+                let head = customer_key!(self.client.head_object().bucket(&self.bucket).key(self.full(key)).checksum_mode(ChecksumMode::Enabled), sse);
+                let h = head.send().await.map_err(|e| err("head of a copy", e))?;
+                crc_from_b64(h.checksum_crc32_c().context("no CRC32C for the copied object")?)?
+            }
+        };
+        Ok(Uploaded { size: src.size, crc32c: crc })
+    }
+
+    async fn complete_multipart(&self, key: &str, upload_id: &str, parts: &[(u32, String)], sse: Option<&BlobSse>) -> Result<()> {
         let mut done = Vec::with_capacity(parts.len());
         for (n, token) in parts {
             let (etag, crc) = split_token(token)?;
             done.push(CompletedPart::builder().part_number(*n as i32).e_tag(etag).checksum_crc32_c(crc).build());
         }
-        self.client
+        let req = self
+            .client
             .complete_multipart_upload()
             .bucket(&self.bucket)
             .key(self.full(key))
             .upload_id(upload_id)
-            .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(done)).build())
-            .send()
-            .await
-            .map_err(|e| err("complete multipart upload", e))?;
+            .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(done)).build());
+        customer_key!(req, sse).send().await.map_err(|e| err("complete multipart upload", e))?;
         Ok(())
     }
 

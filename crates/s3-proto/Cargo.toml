@@ -1,6 +1,6 @@
 [package]
 name = "s3-proto"
-description = "roll storage: S3 wire protocol (SigV4, chunked payloads, XML, checksums), no I/O"
+description = "roll storage: S3 wire protocol (SigV2, SigV4, SigV4a, chunked payloads, XML, checksums), no I/O"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,7 +14,9 @@ hex.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
 md-5.workspace = true
+p256.workspace = true
 quick-xml.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
 sha2.workspace = true
+zeroize.workspace = true

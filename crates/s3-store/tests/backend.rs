@@ -26,7 +26,7 @@ async fn get(b: &Arc<dyn Backend>, key: &str, range: Option<std::ops::Range<u64>
 #[tokio::test]
 async fn objects_ranges_and_deletes() {
     let b = test_backend("contract-objects").await;
-    let attrs = BlobAttrs { bucket_id: "bkt_x".into(), key: "a/ключ".into(), content_type: Some("text/plain".into()) };
+    let attrs = BlobAttrs { bucket_id: "bkt_x".into(), key: "a/ключ".into(), content_type: Some("text/plain".into()), sse: None };
     assert!(get(&b, "s3/t/missing", None).await.is_none());
     assert!(b.head("s3/t/missing").await.unwrap().is_none());
     b.delete("s3/t/missing").await.unwrap();
@@ -95,7 +95,7 @@ async fn listing_pages_in_key_order() {
     }
     // Multipart staging is never listed.
     let id = b.create_multipart("s3/l/pending", &BlobAttrs::default()).await.unwrap();
-    b.upload_part("s3/l/pending", &id, 1, body(b"p"), 1).await.unwrap();
+    b.upload_part("s3/l/pending", &id, 1, body(b"p"), 1, None).await.unwrap();
     let mut got = Vec::new();
     let mut after: Option<String> = None;
     loop {
@@ -123,21 +123,21 @@ async fn multipart_uploads_assemble_one_object() {
     let big: &'static [u8] = Box::leak(vec![b'1'; 5 << 20].into_boxed_slice());
     b.put("s3/t/src", body(b"0123456789"), 10, &a).await.unwrap();
     let id = b.create_multipart("s3/t/obj", &a).await.unwrap();
-    let p3 = b.upload_part("s3/t/obj", &id, 3, body(b"tail"), 4).await.unwrap();
-    let stale = b.upload_part("s3/t/obj", &id, 1, body(b"stale"), 5).await.unwrap();
-    let p1 = b.upload_part("s3/t/obj", &id, 1, body(big), big.len() as u64).await.unwrap();
+    let p3 = b.upload_part("s3/t/obj", &id, 3, body(b"tail"), 4, None).await.unwrap();
+    let stale = b.upload_part("s3/t/obj", &id, 1, body(b"stale"), 5, None).await.unwrap();
+    let p1 = b.upload_part("s3/t/obj", &id, 1, body(big), big.len() as u64, None).await.unwrap();
     assert_eq!((p1.size, p1.crc32c), (big.len() as u64, crc32c::crc32c(big)));
     assert_ne!(p1.etag, stale.etag);
-    let p2 = b.upload_part_copy("s3/t/obj", &id, 2, "s3/t/src", None).await.unwrap();
+    let p2 = b.upload_part_copy("s3/t/obj", &id, 2, &CopySource { key: "s3/t/src", size: 10, range: None, sse: None }, None).await.unwrap();
     assert_eq!((p2.size, p2.crc32c), (10, crc32c::crc32c(b"0123456789")));
     // A whole source must be 5 MiB to be a non-last part on S3; copy a range into the last slot instead.
-    let p3c = b.upload_part_copy("s3/t/obj", &id, 3, "s3/t/src", Some(2..5)).await.unwrap();
+    let p3c = b.upload_part_copy("s3/t/obj", &id, 3, &CopySource { key: "s3/t/src", size: 10, range: Some(2..5), sse: None }, None).await.unwrap();
     assert_eq!((p3c.size, p3c.crc32c), (3, crc32c::crc32c(b"234")));
     assert_ne!(p3c.etag, p3.etag);
-    assert!(b.upload_part_copy("s3/t/obj", &id, 4, "s3/t/nope", None).await.is_err());
+    assert!(b.upload_part_copy("s3/t/obj", &id, 4, &CopySource { key: "s3/t/nope", size: 10, range: None, sse: None }, None).await.is_err());
     assert!(b.head("s3/t/obj").await.unwrap().is_none(), "nothing visible before completion");
     // The 10-byte copy can't be a middle part on S3, so complete with parts 1 and 3.
-    b.complete_multipart("s3/t/obj", &id, &[(1, p1.etag.clone()), (3, p3c.etag.clone())]).await.unwrap();
+    b.complete_multipart("s3/t/obj", &id, &[(1, p1.etag.clone()), (3, p3c.etag.clone())], None).await.unwrap();
     let got = get(&b, "s3/t/obj", None).await.unwrap();
     assert_eq!(got.len(), big.len() + 3);
     assert_eq!(&got[big.len()..], b"234");
@@ -146,13 +146,13 @@ async fn multipart_uploads_assemble_one_object() {
 
     // A part list that doesn't match what was uploaded stores nothing.
     let id = b.create_multipart("s3/t/bad", &a).await.unwrap();
-    let p = b.upload_part("s3/t/bad", &id, 1, body(b"x"), 1).await.unwrap();
-    assert!(b.complete_multipart("s3/t/bad", &id, &[(1, stale.etag.clone())]).await.is_err());
-    assert!(b.complete_multipart("s3/t/bad", &id, &[(2, p.etag.clone())]).await.is_err());
+    let p = b.upload_part("s3/t/bad", &id, 1, body(b"x"), 1, None).await.unwrap();
+    assert!(b.complete_multipart("s3/t/bad", &id, &[(1, stale.etag.clone())], None).await.is_err());
+    assert!(b.complete_multipart("s3/t/bad", &id, &[(2, p.etag.clone())], None).await.is_err());
     assert!(b.head("s3/t/bad").await.unwrap().is_none());
     b.abort_multipart("s3/t/bad", &id).await.unwrap();
     b.abort_multipart("s3/t/bad", &id).await.unwrap();
-    assert!(b.complete_multipart("s3/t/bad", &id, &[(1, p.etag)]).await.is_err(), "an aborted upload can't complete");
+    assert!(b.complete_multipart("s3/t/bad", &id, &[(1, p.etag)], None).await.is_err(), "an aborted upload can't complete");
     assert!(b.head("s3/t/bad").await.unwrap().is_none());
 }
 
@@ -171,14 +171,14 @@ async fn local_keys_cant_escape_the_root() {
     }
     assert_eq!(std::fs::read(dir.path().join("outside")).unwrap(), b"secret");
     for id in ["", "../x", "zz", "ab/cd"] {
-        assert!(local.upload_part("s3/t/k", id, 1, body(b"x"), 1).await.is_err(), "{id:?}");
+        assert!(local.upload_part("s3/t/k", id, 1, body(b"x"), 1, None).await.is_err(), "{id:?}");
         assert!(local.abort_multipart("s3/t/k", id).await.is_err(), "{id:?}");
     }
     // An upload belongs to its key.
     let id = local.create_multipart("s3/t/k", &BlobAttrs::default()).await.unwrap();
-    assert!(local.upload_part("s3/t/other", &id, 1, body(b"x"), 1).await.is_err());
-    let p = local.upload_part("s3/t/k", &id, 1, body(b"x"), 1).await.unwrap();
-    assert!(local.complete_multipart("s3/t/other", &id, &[(1, p.etag.clone())]).await.is_err());
-    local.complete_multipart("s3/t/k", &id, &[(1, p.etag)]).await.unwrap();
+    assert!(local.upload_part("s3/t/other", &id, 1, body(b"x"), 1, None).await.is_err());
+    let p = local.upload_part("s3/t/k", &id, 1, body(b"x"), 1, None).await.unwrap();
+    assert!(local.complete_multipart("s3/t/other", &id, &[(1, p.etag.clone())], None).await.is_err());
+    local.complete_multipart("s3/t/k", &id, &[(1, p.etag)], None).await.unwrap();
     assert!(local.describe().starts_with("file://"));
 }

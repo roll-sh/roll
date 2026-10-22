@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 mod local;
+mod local_sse;
 mod s3;
 
 pub use local::LocalBackend;
@@ -21,12 +22,95 @@ pub use s3::S3Backend;
 /// A body: chunks of bytes, or the I/O error that ended it.
 pub type ByteStream = BoxStream<'static, std::io::Result<Bytes>>;
 
-/// What a blob is, for the record (`x-amz-meta-roll-bucket` / `-key` on S3).
+/// What a blob is, for the record (`x-amz-meta-roll-bucket` / `-key` on S3), and how the
+/// backend encrypts it.
 #[derive(Clone, Debug, Default)]
 pub struct BlobAttrs {
     pub bucket_id: String,
     pub key: String,
     pub content_type: Option<String>,
+    /// Server-side encryption the backend applies (`None`: the backing bucket's default).
+    pub sse: Option<BlobSse>,
+}
+
+/// An SSE-C key: the customer's AES-256 key, held in memory for one request only (wiped on
+/// drop, never stored or logged).
+#[derive(Clone, PartialEq, Eq)]
+pub struct CustomerKey(zeroize::Zeroizing<[u8; 32]>);
+
+impl CustomerKey {
+    pub fn new(key: [u8; 32]) -> Self {
+        Self(zeroize::Zeroizing::new(key))
+    }
+
+    pub fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn b64(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(*self.0)
+    }
+
+    /// Base64 MD5 of the key (what S3 echoes and the metadata keeps to recognise it).
+    pub fn md5_b64(&self) -> String {
+        use base64::Engine;
+        use md5::Digest;
+        base64::engine::general_purpose::STANDARD.encode(md5::Md5::digest(*self.0))
+    }
+}
+
+impl std::fmt::Debug for CustomerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CustomerKey(md5 {})", self.md5_b64())
+    }
+}
+
+/// SSE-KMS parameters, passed through to S3.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KmsParams {
+    /// `aws:kms:dsse` (dual-layer) instead of `aws:kms`.
+    pub dsse: bool,
+    /// `None`: the account's `aws/s3` key.
+    pub key_id: Option<String>,
+    /// Base64 JSON encryption context.
+    pub context: Option<String>,
+    pub bucket_key: Option<bool>,
+}
+
+/// How a blob is encrypted by the backend, beyond the backing bucket's default (SSE-S3 on
+/// AWS). Reads of an SSE-C blob need the key again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlobSse {
+    Customer(CustomerKey),
+    Kms(KmsParams),
+}
+
+impl BlobSse {
+    pub fn customer(&self) -> Option<&CustomerKey> {
+        match self {
+            BlobSse::Customer(k) => Some(k),
+            BlobSse::Kms(_) => None,
+        }
+    }
+}
+
+/// A backend refused (or silently ignored) server-side encryption it was asked for. Whatever it
+/// stored for the request has been removed again. `s3-server` answers `NotImplemented`.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct SseUnsupported(pub String);
+
+/// The source of a server-side copy.
+#[derive(Clone, Debug)]
+pub struct CopySource<'a> {
+    pub key: &'a str,
+    /// The source's size (from the metadata).
+    pub size: u64,
+    /// Part copies: the bytes to copy (within `size`).
+    pub range: Option<Range<u64>>,
+    /// The source's SSE-C key, if it has one.
+    pub sse: Option<&'a BlobSse>,
 }
 
 /// One object in a listing.
@@ -53,12 +137,23 @@ pub struct UploadedPart {
     pub crc32c: u32,
 }
 
+/// Server-side encryption (SSE-C, SSE-KMS) is the backend's: S3 does the crypto, so a blob's
+/// durability and integrity stay exactly S3's. Every call that writes or reads an encrypted
+/// blob's bytes takes its [`BlobSse`]; deleting and listing never need it, and listings report
+/// plaintext sizes, as S3 does. A backend that can't honour an encryption request fails with
+/// [`SseUnsupported`] and keeps nothing it wrote for it.
 #[async_trait]
 pub trait Backend: Send + Sync + 'static {
     fn describe(&self) -> String;
 
-    /// Store a blob (with the configured storage class). `len` must be the body's exact length;
-    /// a body that is shorter, longer or ends in an error stores nothing.
+    /// Whether SSE-KMS requests can be passed through (real AWS S3).
+    fn supports_kms(&self) -> bool {
+        false
+    }
+
+    /// Store a blob (with the configured storage class, encrypted as `attrs.sse` says). `len`
+    /// must be the body's exact length; a body that is shorter, longer or ends in an error
+    /// stores nothing. The CRC32C is of the bytes given (the plaintext).
     async fn put(&self, key: &str, body: ByteStream, len: u64, attrs: &BlobAttrs) -> Result<Uploaded>;
 
     /// A small object (metadata snapshots, markers), overwriting. Standard storage class.
@@ -67,8 +162,15 @@ pub trait Backend: Send + Sync + 'static {
     /// Create `key` only if it doesn't exist (`If-None-Match: *`). `Ok(false)`: it exists.
     async fn put_create_only(&self, key: &str, data: Bytes) -> Result<bool>;
 
-    /// The object (or `range` of it, clamped to its size) and how many bytes the stream holds.
-    async fn get(&self, key: &str, range: Option<Range<u64>>) -> Result<Option<(u64, ByteStream)>>;
+    /// An unencrypted object (or `range` of it, clamped to its size) and how many bytes the
+    /// stream holds.
+    async fn get(&self, key: &str, range: Option<Range<u64>>) -> Result<Option<(u64, ByteStream)>> {
+        self.get_blob(key, range, None).await
+    }
+
+    /// [`Self::get`] of a blob with its encryption (an SSE-C blob needs its key; reading one
+    /// without it, or with another, is an error).
+    async fn get_blob(&self, key: &str, range: Option<Range<u64>>, sse: Option<&BlobSse>) -> Result<Option<(u64, ByteStream)>>;
 
     async fn get_bytes(&self, key: &str) -> Result<Option<Bytes>> {
         let Some((len, mut body)) = self.get(key, None).await? else { return Ok(None) };
@@ -88,16 +190,25 @@ pub trait Backend: Send + Sync + 'static {
     /// whether there are more.
     async fn list_page(&self, prefix: &str, start_after: Option<&str>, max: usize) -> Result<(Vec<Listed>, bool)>;
 
-    /// Start a multipart upload of `key`; returns the backend's upload id.
+    /// Start a multipart upload of `key` (encrypted as `attrs.sse` says); returns the backend's
+    /// upload id.
     async fn create_multipart(&self, key: &str, attrs: &BlobAttrs) -> Result<String>;
 
-    async fn upload_part(&self, key: &str, upload_id: &str, part: u32, body: ByteStream, len: u64) -> Result<UploadedPart>;
+    /// `sse`: the upload's encryption (SSE-C parts need the key again).
+    async fn upload_part(&self, key: &str, upload_id: &str, part: u32, body: ByteStream, len: u64, sse: Option<&BlobSse>) -> Result<UploadedPart>;
 
     /// A part copied from (a range of) another object, server-side where the backend can.
-    async fn upload_part_copy(&self, key: &str, upload_id: &str, part: u32, src_key: &str, range: Option<Range<u64>>) -> Result<UploadedPart>;
+    /// `sse`: the upload's encryption.
+    async fn upload_part_copy(&self, key: &str, upload_id: &str, part: u32, src: &CopySource<'_>, sse: Option<&BlobSse>) -> Result<UploadedPart>;
 
-    /// `parts`: `(part number, backend etag)` in ascending order.
-    async fn complete_multipart(&self, key: &str, upload_id: &str, parts: &[(u32, String)]) -> Result<()>;
+    /// A whole object copied into a new blob `key`, server-side where the backend can (on S3 a
+    /// single `CopyObject`: at most 5 GiB, larger copies go part by part). Encrypted as
+    /// `attrs.sse` says, whatever the source's encryption.
+    async fn copy(&self, src: &CopySource<'_>, key: &str, attrs: &BlobAttrs) -> Result<Uploaded>;
+
+    /// `parts`: `(part number, backend etag)` in ascending order. `sse`: the upload's
+    /// encryption (S3 needs an SSE-C key again because the parts carry checksums).
+    async fn complete_multipart(&self, key: &str, upload_id: &str, parts: &[(u32, String)], sse: Option<&BlobSse>) -> Result<()>;
 
     /// Idempotent.
     async fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<()>;
@@ -205,6 +316,46 @@ impl Stream for Checked {
 /// A body from bytes in memory.
 pub fn bytes_body(data: Bytes) -> ByteStream {
     futures::stream::once(async move { Ok(data) }).boxed()
+}
+
+/// An SSE-C operation, for [`sse_c_unsupported`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SseOp {
+    Put,
+    Multipart,
+    Copy,
+}
+
+/// Why `backend` can't do `op` with SSE-C, or `None` if it can (tests skip on S3-compatible
+/// services that lack some, and say why). Probes under `s3/probe/` and cleans up.
+pub async fn sse_c_unsupported(backend: &dyn Backend, op: SseOp) -> Option<String> {
+    let sse = BlobSse::Customer(CustomerKey::new([0x5a; 32]));
+    let attrs = BlobAttrs { sse: Some(sse.clone()), ..Default::default() };
+    let unsupported = |e: anyhow::Error| match e.downcast_ref::<SseUnsupported>() {
+        Some(u) => Some(format!("{} ({op:?}): {u}", backend.describe())),
+        None => panic!("probing SSE-C {op:?} on {} failed: {e:#}", backend.describe()),
+    };
+    let probe = format!("s3/probe/sse-c-{}", crate::ids::blob_id());
+    let out = match op {
+        SseOp::Put => backend.put(&probe, bytes_body(Bytes::from_static(b"probe")), 5, &attrs).await.err().and_then(unsupported),
+        SseOp::Multipart => match backend.create_multipart(&probe, &attrs).await {
+            Ok(id) => {
+                let _ = backend.abort_multipart(&probe, &id).await;
+                None
+            }
+            Err(e) => unsupported(e),
+        },
+        SseOp::Copy => {
+            let src = format!("{probe}-src");
+            backend.put(&src, bytes_body(Bytes::from_static(b"probe")), 5, &BlobAttrs::default()).await.expect("a plain probe object");
+            let from = CopySource { key: &src, size: 5, range: None, sse: None };
+            let r = backend.copy(&from, &probe, &attrs).await.err().and_then(unsupported);
+            let _ = backend.delete(&src).await;
+            r
+        }
+    };
+    let _ = backend.delete(&probe).await;
+    out
 }
 
 /// Object storage for tests: S3 under a unique prefix when `ROLL_E2E_S3_BUCKET` is set (with

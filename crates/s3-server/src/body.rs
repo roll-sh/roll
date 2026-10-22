@@ -79,7 +79,7 @@ impl Incoming {
         let (decoder, len) = if payload.is_chunked() {
             let len = header_u64(ctx, "x-amz-decoded-content-length")?.ok_or_else(|| S3Error::new(Code::MissingContentLength))?;
             let mode = match (&payload, ctx.auth.as_ref().and_then(|a| a.verified.stream.clone())) {
-                (Payload::Streaming { trailer }, Some(signing)) => Mode::Signed { signing, trailer: *trailer },
+                (Payload::Streaming { trailer } | Payload::StreamingEcdsa { trailer }, Some(signing)) => Mode::Signed { signing, trailer: *trailer },
                 (Payload::StreamingUnsignedTrailer, _) => Mode::UnsignedTrailer,
                 _ => return Err(S3Error::msg(Code::InvalidRequest, "streaming payload without a signature")),
             };

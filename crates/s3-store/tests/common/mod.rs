@@ -168,6 +168,7 @@ pub async fn assert_consistent(store: &Store, backend: &Arc<dyn Backend>) {
          UNION ALL SELECT 'trash', bucket_id || '/' || key FROM trash WHERE bucket_id NOT IN (SELECT id FROM buckets)
          UNION ALL SELECT 'upload', id FROM uploads WHERE bucket_id NOT IN (SELECT id FROM buckets)
          UNION ALL SELECT 'part', upload_id FROM parts WHERE upload_id NOT IN (SELECT id FROM uploads)
+         UNION ALL SELECT 'encryption', blob_id FROM blob_sse WHERE blob_id NOT IN (SELECT id FROM blobs) AND blob_id NOT IN (SELECT blob_id FROM uploads)
          UNION ALL SELECT 'tombstone', bucket_id || '/' || key FROM objects WHERE blob_id IS NULL AND bucket_id IN (SELECT id FROM buckets WHERE parent_id IS NULL)",
     );
     assert!(dangling.is_empty(), "dangling rows: {dangling:?}");
