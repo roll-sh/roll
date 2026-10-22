@@ -1,0 +1,379 @@
+> CreateTable {"TableName":"alt_upd_au","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_au","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_upd_au_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_au_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# PUT creates the item and attribute; PUT replaces; DELETE removes an attribute
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"a"}},"AttributeUpdates":{"x":{"Action":"PUT","Value":{"S":"hello"}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"x":{"S":"hello"}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"a"}},"AttributeUpdates":{"x":{"Action":"PUT","Value":{"M":{"m":{"L":[{"N":"1"}]}}}},"y":{"Action":"PUT","Value":{"N":"2"}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"x":{"M":{"m":{"L":[{"N":"1"}]}}},"y":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"a"}},"AttributeUpdates":{"x":{"Action":"DELETE"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"y":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"a"}},"AttributeUpdates":{"y":{"Action":"DELETE"},"z":{"Action":"DELETE"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"}}}
+# invalid Action values (case-sensitive)
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"x":{"Action":"NONEXISTENT","Value":{"S":"v"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown Action value 'NONEXISTENT' in AttributeUpdates"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"x":{"Action":"put","Value":{"S":"v"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown Action value 'put' in AttributeUpdates"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"x":{"Action":"","Value":{"S":"v"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown Action value '' in AttributeUpdates"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"x":{"Action":5,"Value":{"S":"v"}}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string_view expects a string value, got: kNumberType)"}
+# malformed AttributeValueUpdate / AttributeUpdates
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"x":{"Action":"PUT","Value":{"S":5}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: improperly formatted value '{\"S\":5}'"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"x":{"Action":"PUT","Value":{"X":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: unknown type X for value {\"X\":\"1\"}"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"x":{"Action":"PUT","Value":{"N":"abc"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: abc"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"x":{"Action":"PUT","Value":{"S":"v"},"Extra":1}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates must be an object"}
+# empty attribute name; attribute names are literal (dots and brackets are not paths)
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"":{"Action":"PUT","Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"in AttributeUpdates - Empty attribute name"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"AttributeUpdates":{"a.b":{"Action":"PUT","Value":{"N":"3"}},"c[0]":{"Action":"PUT","Value":{"N":"4"}},"#x":{"Action":"PUT","Value":{"N":"5"}},":y":{"Action":"PUT","Value":{"N":"6"}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"b"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"b"},"#x":{"N":"5"},":y":{"N":"6"},"a.b":{"N":"3"},"c[0]":{"N":"4"},"x":{"S":"v"}}}
+# empty sets rejected; empty list, map, string, binary allowed
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"e"}},"AttributeUpdates":{"c":{"Action":"PUT","Value":{"SS":[]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: empty set not allowed"}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"e"}},"ConsistentRead":true}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"e"}},"AttributeUpdates":{"d":{"Action":"PUT","Value":{"L":[]}},"e":{"Action":"PUT","Value":{"M":{}}},"f":{"Action":"PUT","Value":{"S":""}},"g":{"Action":"PUT","Value":{"B":""}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"e"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"e"},"d":{"L":[]},"e":{"M":{}},"f":{"S":""},"g":{"B":""}}}
+# AttributeUpdates {} and no update at all create an empty item
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"empty1"}},"AttributeUpdates":{}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"empty1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"empty1"}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"empty2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"empty2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"empty2"}}}
+# an update that only deletes attributes does not create a missing item
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"nodel"}},"AttributeUpdates":{"a":{"Action":"DELETE"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"nodel"}},"ConsistentRead":true}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"nodel"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"SS":["x"]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"nodel"}},"ConsistentRead":true}
+< 200 {}
+# deleting a missing attribute of an existing item is a no-op
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d0"},"a":{"S":"hello"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d0"}},"AttributeUpdates":{"b":{"Action":"DELETE"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"d0"},"a":{"S":"hello"}}}
+# DELETE with a Value: only sets; scalar/list/map values rejected
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"S":"v"}}}
+< 200 {}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"S":"b"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"S":"b"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates DELETE operation with Value only valid for sets, got type S"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"N":"3"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"N":"3"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates DELETE operation with Value only valid for sets, got type N"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"B":"Yg=="}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"B":"Yg=="}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates DELETE operation with Value only valid for sets, got type B"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"BOOL":true}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"BOOL":true}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates DELETE operation with Value only valid for sets, got type BOOL"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"BOOL":false}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"BOOL":false}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates DELETE operation with Value only valid for sets, got type BOOL"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"NULL":true}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"NULL":true}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates DELETE operation with Value only valid for sets, got type NULL"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"L":[{"N":"2"},{"N":"3"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"L":[{"N":"2"},{"N":"3"}]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates DELETE operation with Value only valid for sets, got type L"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"M":{"a":{"N":"3"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"M":{"a":{"N":"3"}}}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates DELETE operation with Value only valid for sets, got type M"}
+# DELETE a set from a non-set attribute / mismatched set type
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"NS":["1","2"]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Set DELETE type mismatch: M and NS"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d1"},"a":{"NS":["1","2","3","4","5"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"SS":["hi"]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Set DELETE type mismatch: NS and SS"}
+# DELETE set elements for NS, SS, BS
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"NS":["2","4"]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"d1"},"a":{"NS":["1","3","5"]}}}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d2"},"a":{"SS":["dog","cat","lion"]},"b":{"BS":["ZG9n","Y2F0","bGlvbg=="]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d2"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"SS":["dog"]}},"b":{"Action":"DELETE","Value":{"BS":["Y2F0"]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"d2"},"a":{"SS":["cat","lion"]},"b":{"BS":["ZG9n","bGlvbg=="]}}}
+# DELETE with an empty set; DELETE all elements removes the attribute; missing elements ignored
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"d3"},"a":{"NS":["1","2","3"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d3"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"NS":[]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: empty set not allowed"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d3"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"NS":["4"]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"d3"},"a":{"NS":["1","2","3"]}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d3"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"NS":["2","5"]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"d3"},"a":{"NS":["1","3"]}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d3"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"NS":["1","3"]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"d3"}}}
+# DELETE a set from a missing attribute of an existing item
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d3"}},"AttributeUpdates":{"zz":{"Action":"DELETE","Value":{"NS":["1"]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"d3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"d3"}}}
+# ADD numbers: increment, decimal, missing attribute counts as 0
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"n1"},"a":{"N":"7"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"n1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"2"}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"n1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"-3.5"}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"n1"}},"AttributeUpdates":{"b":{"Action":"ADD","Value":{"N":"2"}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"a":{"N":"5.5"},"b":{"N":"2"}}}
+# ADD sets: union; missing attribute counts as empty set (all set types)
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"s1"},"a":{"NS":["1","2"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"s1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"NS":["3","4"]}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"s1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"NS":["3","5"]}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"s1"}},"AttributeUpdates":{"b":{"Action":"ADD","Value":{"NS":["7"]}},"c":{"Action":"ADD","Value":{"SS":["a","b"]}},"d":{"Action":"ADD","Value":{"BS":["eA=="]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"s1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"s1"},"a":{"NS":["1","2","3","4","5"]},"b":{"NS":["7"]},"c":{"SS":["a","b"]},"d":{"BS":["eA=="]}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"s1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"SS":["a"]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected NS, got SS"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"s1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"NS":[]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: empty set not allowed"}
+# ADD lists: appends (undocumented); missing attribute counts as empty list
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"l1"},"a":{"L":[{"N":"1"},{"N":"2"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"l1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"L":[{"N":"3"},{"N":"4"}]}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"l1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"L":[{"N":"3"},{"N":"5"}]}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"l1"}},"AttributeUpdates":{"b":{"Action":"ADD","Value":{"L":[{"N":"7"}]}},"c":{"Action":"ADD","Value":{"L":[{"S":"a"},{"S":"b"}]}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"l1"}},"AttributeUpdates":{"c":{"Action":"ADD","Value":{"L":[{"N":"3"}]}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"l1"}},"AttributeUpdates":{"e":{"Action":"ADD","Value":{"L":[]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"l1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l1"},"a":{"L":[{"N":"1"},{"N":"2"},{"N":"3"},{"N":"4"},{"N":"3"},{"N":"5"}]},"b":{"L":[{"N":"7"}]},"c":{"L":[{"S":"a"},{"S":"b"},{"N":"3"}]},"e":{"L":[]}}}
+# ADD with unsupported value types
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"t1"},"a":{"S":"dog"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"S":"s"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An operand in the AttributeUpdates ADD has an incorrect data type: {\"S\":\"dog\"}"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"t1"},"a":{"M":{"x":{"N":"1"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"M":{"y":{"N":"2"}}}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An operand in the AttributeUpdates ADD has an incorrect data type: {\"M\":{\"x\":{\"N\":\"1\"}}}"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"t1"},"a":{"SS":["dog"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"S":"cat"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected SS, got S"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"BOOL":true}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected SS, got BOOL"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"NULL":true}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected SS, got NULL"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"B":"eA=="}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected SS, got B"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t1"}},"AttributeUpdates":{"zz":{"Action":"ADD","Value":{"S":"s"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An operand in the AttributeUpdates ADD has an incorrect data type: {\"S\":\"s\"}"}
+# ADD with mismatched attribute / value types
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"t2"},"a":{"SS":["dog"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"2"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected SS, got N"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"L":[{"S":"cat"}]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected SS, got L"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"t2"},"a":{"L":[{"S":"dog"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"SS":["cat"]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected L, got SS"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"3"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected L, got N"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"t2"},"a":{"N":"2"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"L":[{"S":"dog"}]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected N, got L"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"SS":["dog"]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected N, got SS"}
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"t2"},"a":{"S":"str"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected S, got N"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"t2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"L":[{"N":"1"}]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected S, got L"}
+# ADD creates a missing item for each supported type
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new0"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"3"}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"new0"},"a":{"N":"3"}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new1"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"NS":["1","2"]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"new1"},"a":{"NS":["1","2"]}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"SS":["a","b"]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"new2"},"a":{"SS":["a","b"]}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new3"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"L":[{"N":"1"},{"N":"2"}]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"new3"},"a":{"L":[{"N":"1"},{"N":"2"}]}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new4"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"BS":["eg=="]}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"new4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"new4"},"a":{"BS":["eg=="]}}}
+# ADD number overflow
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"n2"},"a":{"N":"9e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"n2"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"9e125"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000. Attempting to store a number with magnitude larger than supported range."}
+# AttributeUpdates on key attributes (hash and range), any action
+> UpdateItem {"TableName":"alt_upd_au_ss","Key":{"p":{"S":"k"},"c":{"S":"k"}},"AttributeUpdates":{"p":{"Action":"PUT","Value":{"S":"x"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column p"}
+> UpdateItem {"TableName":"alt_upd_au_ss","Key":{"p":{"S":"k"},"c":{"S":"k"}},"AttributeUpdates":{"c":{"Action":"PUT","Value":{"S":"x"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column c"}
+> UpdateItem {"TableName":"alt_upd_au_ss","Key":{"p":{"S":"k"},"c":{"S":"k"}},"AttributeUpdates":{"p":{"Action":"DELETE"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column p"}
+> UpdateItem {"TableName":"alt_upd_au_ss","Key":{"p":{"S":"k"},"c":{"S":"k"}},"AttributeUpdates":{"c":{"Action":"ADD","Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column c"}
+> UpdateItem {"TableName":"alt_upd_au_ss","Key":{"p":{"S":"k"},"c":{"S":"k"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"N":"1"}},"p":{"Action":"PUT","Value":{"S":"k"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column p"}
+> UpdateItem {"TableName":"alt_upd_au_ss","Key":{"p":{"S":"k"},"c":{"S":"k"}},"AttributeUpdates":{"c":{"Action":"PUT","Value":{"S":"k"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column c"}
+> GetItem {"TableName":"alt_upd_au_ss","Key":{"p":{"S":"k"},"c":{"S":"k"}},"ConsistentRead":true}
+< 200 {}
+# many attributes in one AttributeUpdates
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"many"}},"AttributeUpdates":{"m0":{"Action":"PUT","Value":{"N":"0"}},"m1":{"Action":"PUT","Value":{"N":"1"}},"m2":{"Action":"PUT","Value":{"N":"2"}},"m3":{"Action":"PUT","Value":{"N":"3"}},"m4":{"Action":"PUT","Value":{"N":"4"}},"m5":{"Action":"PUT","Value":{"N":"5"}},"m6":{"Action":"PUT","Value":{"N":"6"}},"m7":{"Action":"PUT","Value":{"N":"7"}},"m8":{"Action":"PUT","Value":{"N":"8"}},"m9":{"Action":"PUT","Value":{"N":"9"}},"m10":{"Action":"PUT","Value":{"N":"10"}},"m11":{"Action":"PUT","Value":{"N":"11"}},"m12":{"Action":"PUT","Value":{"N":"12"}},"m13":{"Action":"PUT","Value":{"N":"13"}},"m14":{"Action":"PUT","Value":{"N":"14"}},"m15":{"Action":"PUT","Value":{"N":"15"}},"m16":{"Action":"PUT","Value":{"N":"16"}},"m17":{"Action":"PUT","Value":{"N":"17"}},"m18":{"Action":"PUT","Value":{"N":"18"}},"m19":{"Action":"PUT","Value":{"N":"19"}},"m20":{"Action":"PUT","Value":{"N":"20"}},"m21":{"Action":"PUT","Value":{"N":"21"}},"m22":{"Action":"PUT","Value":{"N":"22"}},"m23":{"Action":"PUT","Value":{"N":"23"}},"m24":{"Action":"PUT","Value":{"N":"24"}},"m25":{"Action":"PUT","Value":{"N":"25"}},"m26":{"Action":"PUT","Value":{"N":"26"}},"m27":{"Action":"PUT","Value":{"N":"27"}},"m28":{"Action":"PUT","Value":{"N":"28"}},"m29":{"Action":"PUT","Value":{"N":"29"}},"m30":{"Action":"PUT","Value":{"N":"30"}},"m31":{"Action":"PUT","Value":{"N":"31"}},"m32":{"Action":"PUT","Value":{"N":"32"}},"m33":{"Action":"PUT","Value":{"N":"33"}},"m34":{"Action":"PUT","Value":{"N":"34"}},"m35":{"Action":"PUT","Value":{"N":"35"}},"m36":{"Action":"PUT","Value":{"N":"36"}},"m37":{"Action":"PUT","Value":{"N":"37"}},"m38":{"Action":"PUT","Value":{"N":"38"}},"m39":{"Action":"PUT","Value":{"N":"39"}},"m40":{"Action":"PUT","Value":{"N":"40"}},"m41":{"Action":"PUT","Value":{"N":"41"}},"m42":{"Action":"PUT","Value":{"N":"42"}},"m43":{"Action":"PUT","Value":{"N":"43"}},"m44":{"Action":"PUT","Value":{"N":"44"}},"m45":{"Action":"PUT","Value":{"N":"45"}},"m46":{"Action":"PUT","Value":{"N":"46"}},"m47":{"Action":"PUT","Value":{"N":"47"}},"m48":{"Action":"PUT","Value":{"N":"48"}},"m49":{"Action":"PUT","Value":{"N":"49"}},"m50":{"Action":"PUT","Value":{"N":"50"}},"m51":{"Action":"PUT","Value":{"N":"51"}},"m52":{"Action":"PUT","Value":{"N":"52"}},"m53":{"Action":"PUT","Value":{"N":"53"}},"m54":{"Action":"PUT","Value":{"N":"54"}},"m55":{"Action":"PUT","Value":{"N":"55"}},"m56":{"Action":"PUT","Value":{"N":"56"}},"m57":{"Action":"PUT","Value":{"N":"57"}},"m58":{"Action":"PUT","Value":{"N":"58"}},"m59":{"Action":"PUT","Value":{"N":"59"}},"m60":{"Action":"PUT","Value":{"N":"60"}},"m61":{"Action":"PUT","Value":{"N":"61"}},"m62":{"Action":"PUT","Value":{"N":"62"}},"m63":{"Action":"PUT","Value":{"N":"63"}},"m64":{"Action":"PUT","Value":{"N":"64"}},"m65":{"Action":"PUT","Value":{"N":"65"}},"m66":{"Action":"PUT","Value":{"N":"66"}},"m67":{"Action":"PUT","Value":{"N":"67"}},"m68":{"Action":"PUT","Value":{"N":"68"}},"m69":{"Action":"PUT","Value":{"N":"69"}},"m70":{"Action":"PUT","Value":{"N":"70"}},"m71":{"Action":"PUT","Value":{"N":"71"}},"m72":{"Action":"PUT","Value":{"N":"72"}},"m73":{"Action":"PUT","Value":{"N":"73"}},"m74":{"Action":"PUT","Value":{"N":"74"}},"m75":{"Action":"PUT","Value":{"N":"75"}},"m76":{"Action":"PUT","Value":{"N":"76"}},"m77":{"Action":"PUT","Value":{"N":"77"}},"m78":{"Action":"PUT","Value":{"N":"78"}},"m79":{"Action":"PUT","Value":{"N":"79"}},"m80":{"Action":"PUT","Value":{"N":"80"}},"m81":{"Action":"PUT","Value":{"N":"81"}},"m82":{"Action":"PUT","Value":{"N":"82"}},"m83":{"Action":"PUT","Value":{"N":"83"}},"m84":{"Action":"PUT","Value":{"N":"84"}},"m85":{"Action":"PUT","Value":{"N":"85"}},"m86":{"Action":"PUT","Value":{"N":"86"}},"m87":{"Action":"PUT","Value":{"N":"87"}},"m88":{"Action":"PUT","Value":{"N":"88"}},"m89":{"Action":"PUT","Value":{"N":"89"}},"m90":{"Action":"PUT","Value":{"N":"90"}},"m91":{"Action":"PUT","Value":{"N":"91"}},"m92":{"Action":"PUT","Value":{"N":"92"}},"m93":{"Action":"PUT","Value":{"N":"93"}},"m94":{"Action":"PUT","Value":{"N":"94"}},"m95":{"Action":"PUT","Value":{"N":"95"}},"m96":{"Action":"PUT","Value":{"N":"96"}},"m97":{"Action":"PUT","Value":{"N":"97"}},"m98":{"Action":"PUT","Value":{"N":"98"}},"m99":{"Action":"PUT","Value":{"N":"99"}},"m100":{"Action":"PUT","Value":{"N":"100"}},"m101":{"Action":"PUT","Value":{"N":"101"}},"m102":{"Action":"PUT","Value":{"N":"102"}},"m103":{"Action":"PUT","Value":{"N":"103"}},"m104":{"Action":"PUT","Value":{"N":"104"}},"m105":{"Action":"PUT","Value":{"N":"105"}},"m106":{"Action":"PUT","Value":{"N":"106"}},"m107":{"Action":"PUT","Value":{"N":"107"}},"m108":{"Action":"PUT","Value":{"N":"108"}},"m109":{"Action":"PUT","Value":{"N":"109"}},"m110":{"Action":"PUT","Value":{"N":"110"}},"m111":{"Action":"PUT","Value":{"N":"111"}},"m112":{"Action":"PUT","Value":{"N":"112"}},"m113":{"Action":"PUT","Value":{"N":"113"}},"m114":{"Action":"PUT","Value":{"N":"114"}},"m115":{"Action":"PUT","Value":{"N":"115"}},"m116":{"Action":"PUT","Value":{"N":"116"}},"m117":{"Action":"PUT","Value":{"N":"117"}},"m118":{"Action":"PUT","Value":{"N":"118"}},"m119":{"Action":"PUT","Value":{"N":"119"}},"m120":{"Action":"PUT","Value":{"N":"120"}},"m121":{"Action":"PUT","Value":{"N":"121"}},"m122":{"Action":"PUT","Value":{"N":"122"}},"m123":{"Action":"PUT","Value":{"N":"123"}},"m124":{"Action":"PUT","Value":{"N":"124"}},"m125":{"Action":"PUT","Value":{"N":"125"}},"m126":{"Action":"PUT","Value":{"N":"126"}},"m127":{"Action":"PUT","Value":{"N":"127"}},"m128":{"Action":"PUT","Value":{"N":"128"}},"m129":{"Action":"PUT","Value":{"N":"129"}},"m130":{"Action":"PUT","Value":{"N":"130"}},"m131":{"Action":"PUT","Value":{"N":"131"}},"m132":{"Action":"PUT","Value":{"N":"132"}},"m133":{"Action":"PUT","Value":{"N":"133"}},"m134":{"Action":"PUT","Value":{"N":"134"}},"m135":{"Action":"PUT","Value":{"N":"135"}},"m136":{"Action":"PUT","Value":{"N":"136"}},"m137":{"Action":"PUT","Value":{"N":"137"}},"m138":{"Action":"PUT","Value":{"N":"138"}},"m139":{"Action":"PUT","Value":{"N":"139"}},"m140":{"Action":"PUT","Value":{"N":"140"}},"m141":{"Action":"PUT","Value":{"N":"141"}},"m142":{"Action":"PUT","Value":{"N":"142"}},"m143":{"Action":"PUT","Value":{"N":"143"}},"m144":{"Action":"PUT","Value":{"N":"144"}},"m145":{"Action":"PUT","Value":{"N":"145"}},"m146":{"Action":"PUT","Value":{"N":"146"}},"m147":{"Action":"PUT","Value":{"N":"147"}},"m148":{"Action":"PUT","Value":{"N":"148"}},"m149":{"Action":"PUT","Value":{"N":"149"}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"many"}},"ConsistentRead":true,"ProjectionExpression":"m0, m149"}
+< 200 {"Item":{"m0":{"N":"0"},"m149":{"N":"149"}}}
+# AttributeUpdates together with UpdateExpression
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"mix"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"N":"3"}}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem does not allow both AttributeUpdates and UpdateExpression to be given together"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"mix"}},"AttributeUpdates":{},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem does not allow both AttributeUpdates and UpdateExpression to be given together"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"mix"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"N":"3"}}},"UpdateExpression":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression '': syntax error at char 0"}
+# AttributeUpdates with ExpressionAttributeNames / Values but no expression
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"mix"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"S":"dog"}}},"ExpressionAttributeNames":{"#n":"x"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#n', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"mix"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"S":"dog"}}},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':v', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"mix"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"S":"dog"}}},"ExpressionAttributeNames":{}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"mix"}},"ExpressionAttributeNames":{"#n":"x"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#n', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"mix"}},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':v', not used in UpdateItem"}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"mix"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"mix"},"a":{"S":"dog"}}}
+# AttributeUpdates with ConditionExpression
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"ce"},"a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ce"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"ConditionExpression":"a = :one","ExpressionAttributeValues":{":one":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem does not allow both old-style AttributeUpdates and new-style ConditionExpression to be given together"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ce"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem does not allow both old-style AttributeUpdates and new-style ConditionExpression to be given together"}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ce"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"ce"},"a":{"N":"1"}}}
+# AttributeUpdates with Expected: success, failure, Exists=false on missing item
+> PutItem {"TableName":"alt_upd_au","Item":{"p":{"S":"ex"},"a":{"N":"1"},"s":{"SS":["x"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"Expected":{"a":{"Value":{"N":"1"}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"3"}}},"Expected":{"a":{"Value":{"N":"2"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"3"}}},"Expected":{"a":{"Value":{"N":"2"}}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"ex"},"a":{"N":"1"},"b":{"N":"2"},"s":{"SS":["x"]}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"ADD","Value":{"N":"3"}}},"Expected":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"0"}]},"zz":{"Exists":false}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"ADD","Value":{"N":"3"}}},"Expected":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"0"}]},"zz":{"Exists":false}},"ConditionalOperator":"OR"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"ADD","Value":{"N":"3"}}},"Expected":{"a":{"Exists":false},"s":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"S":"x"}]}},"ConditionalOperator":"OR"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"a":{"Action":"DELETE"}},"Expected":{"a":{"Exists":true,"Value":{"N":"1"}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"ex"},"b":{"N":"11"},"s":{"SS":["x"]}}}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex-new"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"N":"1"}}},"Expected":{"a":{"Exists":false}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex-new"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"N":"1"}}},"Expected":{"a":{"Exists":false}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex-new2"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"N":"1"}}},"Expected":{"a":{"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex-new"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"ex-new"},"a":{"N":"1"}}}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex-new2"}},"ConsistentRead":true}
+< 200 {}
+# Expected on a key attribute
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"c":{"Action":"PUT","Value":{"N":"1"}}},"Expected":{"p":{"Value":{"S":"ex"}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex-missing"}},"AttributeUpdates":{"c":{"Action":"PUT","Value":{"N":"1"}}},"Expected":{"p":{"Exists":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Exists!=false requires Value"}
+# Expected mixed with ConditionExpression / UpdateExpression
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"Expected":{"a":{"Exists":false}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem does not allow both old-style AttributeUpdates and new-style ConditionExpression to be given together"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"Expected":{"zz":{"Exists":false}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem does not allow both old-style Expected and new-style UpdateExpression to be given together"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"Expected":{"zz":{"Exists":false}},"ConditionExpression":"attribute_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem does not allow both old-style Expected and new-style UpdateExpression to be given together"}
+# ConditionalOperator without Expected; invalid ConditionalOperator; malformed Expected
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"ConditionalOperator":"AND"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty Expression"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"Expected":{"a":{"Exists":true}},"ConditionalOperator":"XOR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter must be AND, OR or missing. Found XOR."}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"Expected":{"a":{"Exists":false,"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Value with Exists!=true"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"Expected":{"a":{"Exists":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Exists!=false requires Value"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"Expected":{"a":{"ComparisonOperator":"EQ"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"With ComparisonOperator, AttributeValueList must be given and an array"}
+> UpdateItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"2"}}},"Expected":{}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_au","Key":{"p":{"S":"ex"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"ex"},"b":{"N":"2"},"c":{"N":"1"},"s":{"SS":["x"]}}}
+> DeleteTable {"TableName":"alt_upd_au"}
+< 200 {"TableDescription":{"TableName":"alt_upd_au","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_au:scylla:table/alt_upd_au","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_upd_au_ss"}
+< 200 {"TableDescription":{"TableName":"alt_upd_au_ss","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_au_ss:scylla:table/alt_upd_au_ss","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

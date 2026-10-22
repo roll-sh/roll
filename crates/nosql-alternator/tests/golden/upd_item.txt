@@ -1,0 +1,216 @@
+> CreateTable {"TableName":"alt_upd_item","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_item","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_upd_item_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_item_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_upd_item_n","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_item_n","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_upd_item_sb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_item_sb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# upsert vs. existing item; no update method creates an empty item
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u1"}}}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"u1"},"c":{"S":"x"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"u1"},"c":{"S":"x"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u1"},"c":{"S":"x"}}}
+# an update that removes every non-key attribute leaves the item (key only)
+> PutItem {"TableName":"alt_upd_item","Item":{"p":{"S":"u2"},"a":{"N":"1"},"b":{"N":"2"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u2"}},"UpdateExpression":"REMOVE a, b"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u2"}}}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u2"}},"AttributeUpdates":{"x":{"Action":"PUT","Value":{"N":"1"}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u2"}},"AttributeUpdates":{"x":{"Action":"DELETE"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u2"}}}
+> PutItem {"TableName":"alt_upd_item","Item":{"p":{"S":"u2b"},"s":{"SS":["a"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u2b"}},"UpdateExpression":"DELETE s :v","ExpressionAttributeValues":{":v":{"SS":["a"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u2b"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u2b"}}}
+# REMOVE / DELETE on a missing item does not create it; SET does
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u3"}},"UpdateExpression":"REMOVE a, b"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u3"}},"ConsistentRead":true}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u3"}},"UpdateExpression":"REMOVE a SET b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u3"},"b":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u4"}},"UpdateExpression":"SET a = if_not_exists(a, :v)","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u4"},"a":{"N":"1"}}}
+# an item whose attributes are removed can be re-populated
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u2"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"9"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"u2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u2"},"a":{"N":"9"}}}
+# Key validation: missing hash key, missing range key, extra attributes
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"c":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"x"},"c":{"S":"x"},"spurious":{"S":"y"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"x"},"c":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"q":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+# Key validation: wrong key types
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"N":"3"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"B":"eA=="}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"B\""}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"SS":["x"]}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"SS\""}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"L":[{"S":"x"}]}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"L\""}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"x"},"c":{"N":"3.14"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column c, got type \"N\""}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"B":"eA=="},"c":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"B\""}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"N":"1"},"c":{"N":"2"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> UpdateItem {"TableName":"alt_upd_item_n","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column p, got type \"S\""}
+> UpdateItem {"TableName":"alt_upd_item_sb","Key":{"p":{"S":"x"},"c":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type B for key column c, got type \"S\""}
+# Key validation: empty string / binary keys
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":""}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":""}},"AttributeUpdates":{"v":{"Action":"PUT","Value":{"S":"abc"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"abc"},"c":{"S":""}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> UpdateItem {"TableName":"alt_upd_item_sb","Key":{"p":{"S":"abc"},"c":{"B":""}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+# Key validation: malformed key values and Key parameter
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":5}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":5}"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"X":"a"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"X\""}
+> UpdateItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"abc"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: abc"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":"a"},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: \"a\""}
+> UpdateItem {"TableName":"alt_upd_item","UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem requires a Key parameter"}
+# key error vs. expression error: which is reported first
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v SET"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"x"}},"UpdateExpression":"SET p = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"N":"1"},"c":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"},":w":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"x"},"c":{"S":"x"}},"UpdateExpression":"SET a = :v SET","ReturnValues":"BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BAD"}
+# number hash keys are NOT normalised: 1 and 1e0 are one item, 1.0 and 10E-1 another (SCYLLADB-1575)
+> UpdateItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":"one"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"1.0"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"two"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"N":"1.0"},"b":{"S":"two"}}}
+> UpdateItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"1e0"}},"UpdateExpression":"SET c = :v","ExpressionAttributeValues":{":v":{"S":"three"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"N":"1"},"a":{"S":"one"}}}
+> UpdateItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"10E-1"}},"UpdateExpression":"REMOVE c","ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"N":"1"},"b":{"S":"two"}}}
+> GetItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"1"},"a":{"S":"one"},"c":{"S":"three"}}}
+> GetItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"1.0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"1"},"b":{"S":"two"}}}
+> GetItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"1.00"}},"ConsistentRead":true}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"-0"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":"zero"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"N":"-0"},"a":{"S":"zero"}}}
+> UpdateItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"1e126"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e126. Attempting to store a number with magnitude larger than supported range."}
+> UpdateItem {"TableName":"alt_upd_item_n","Key":{"p":{"N":"123456789012345678901234567890123456789"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+# table errors: missing table, bad table name, missing TableName
+> UpdateItem {"TableName":"alt_upd_item_nosuch","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_upd_item_nosuch not found"}
+> UpdateItem {"TableName":"ab","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> UpdateItem {"TableName":"bad name!","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> UpdateItem {"Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> UpdateItem {"TableName":5,"Key":{"p":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+# missing table vs. bad expression: which wins
+> UpdateItem {"TableName":"alt_upd_item_nosuch","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v SET"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_upd_item_nosuch not found"}
+> UpdateItem {"TableName":"alt_upd_item_nosuch","Key":{"p":{"N":"1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_upd_item_nosuch not found"}
+# unknown top-level parameters, ReturnConsumedCapacity, ReturnItemCollectionMetrics
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"Foo":1}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnConsumedCapacity":"TOTAL"}
+< 200 {"ConsumedCapacity":{"CapacityUnits":1.0}}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnConsumedCapacity":"INDEXES"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"INDEXES consumed capacity is not supported"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnConsumedCapacity":"NONE"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown consumed capacity NONE"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnConsumedCapacity":"BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown consumed capacity BAD"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnItemCollectionMetrics":"SIZE"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnItemCollectionMetrics":"BAD"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnConsumedCapacity":"TOTAL","ReturnValues":"ALL_NEW"}
+< 200 {"ConsumedCapacity":{"CapacityUnits":1.0},"Attributes":{"p":{"S":"x"},"a":{"N":"1"}}}
+# item size: no 400 KB limit is enforced by UpdateItem (item grows past 400 KB)
+> PutItem {"TableName":"alt_upd_item","Item":{"p":{"S":"big"},"a":{"S":"$repeat(x,300000)"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"big"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"$repeat(y,200000)"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"big"}},"ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big"}}}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"big"}},"UpdateExpression":"SET c = list_append(if_not_exists(c, :e), :l)","ExpressionAttributeValues":{":e":{"L":[]},":l":{"L":[{"S":"$repeat(z,100000)"}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"big"}},"ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big"}}}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"big2"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":"$repeat(q,409700)"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"big3"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"S":"$repeat(r,409700)"}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"big2"}},"ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big2"}}}
+> GetItem {"TableName":"alt_upd_item","Key":{"p":{"S":"big3"}},"ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big3"}}}
+# attribute name length limit (65535 bytes) through UpdateItem
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"nm"}},"UpdateExpression":"SET #n = :v","ExpressionAttributeNames":{"#n":"$repeat(n,65535)"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"nm"}},"UpdateExpression":"SET #n = :v","ExpressionAttributeNames":{"#n":"$repeat(n,65536)"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Attribute name is too large, must be less than 65536 bytes"}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"nm"}},"AttributeUpdates":{"$repeat(m,65536)":{"Action":"PUT","Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"in AttributeUpdates - Attribute name is too large, must be less than 65536 bytes"}
+# key size limits through UpdateItem (hash 2048, range 1024)
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"$repeat(k,2048)"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item","Key":{"p":{"S":"$repeat(k,2049)"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"k"},"c":{"S":"$repeat(c,1024)"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_item_ss","Key":{"p":{"S":"k"},"c":{"S":"$repeat(c,1025)"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> DeleteTable {"TableName":"alt_upd_item"}
+< 200 {"TableDescription":{"TableName":"alt_upd_item","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_item:scylla:table/alt_upd_item","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_upd_item_ss"}
+< 200 {"TableDescription":{"TableName":"alt_upd_item_ss","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_item_ss:scylla:table/alt_upd_item_ss","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_upd_item_n"}
+< 200 {"TableDescription":{"TableName":"alt_upd_item_n","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_item_n:scylla:table/alt_upd_item_n","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_upd_item_sb"}
+< 200 {"TableDescription":{"TableName":"alt_upd_item_sb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_item_sb:scylla:table/alt_upd_item_sb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

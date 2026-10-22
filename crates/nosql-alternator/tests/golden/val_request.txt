@@ -1,0 +1,311 @@
+# Request JSON parsing and top-level parameter validation for PutItem/GetItem/DeleteItem/UpdateItem.
+> CreateTable {"TableName":"alt_val_req","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_req","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# JSON syntax errors: 'Parsing JSON failed: <rapidjson message> at <byte offset>'
+> PutItem 
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document is empty. at 0"}
+> PutItem  
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document is empty. at 1"}
+> PutItem {
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 1"}
+> PutItem }
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 0"}
+> PutItem {broken json
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 1"}
+> PutItem {"a":1}x
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document root must not be followed by other values. at 7"}
+> PutItem {"a":1}{}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document root must not be followed by other values. at 7"}
+> PutItem {}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document root must not be followed by other values. at 2"}
+> PutItem {"a":1,}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 7"}
+> PutItem {"a" 1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a colon after a name of object member. at 5"}
+> PutItem {"a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a colon after a name of object member. at 4"}
+> PutItem {"a":}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 5"}
+> PutItem {a:1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 1"}
+> PutItem {'a':1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 1"}
+> PutItem {"a":tru}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 8"}
+> PutItem {"a":nul}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 8"}
+> PutItem {"a":fals}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 9"}
+> PutItem {"a":"abc
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a closing quotation mark in string. at 9"}
+> PutItem {"a":01}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a comma or '}' after an object member. at 6"}
+> PutItem {"a":1.}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Miss fraction part in number. at 7"}
+> PutItem {"a":.5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 5"}
+> PutItem {"a":-}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 6"}
+> PutItem {"a":+1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 5"}
+> PutItem {"a":1e}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Miss exponent in number. at 7"}
+> PutItem {"a":1e+}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Miss exponent in number. at 8"}
+> PutItem {"a":1e999}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Number too big to be stored in double. at 5"}
+> PutItem {"a":-1e999}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Number too big to be stored in double. at 5"}
+> PutItem {"a":NaN}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 5"}
+> PutItem {"a":Infinity}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 5"}
+> PutItem {"a":[1,]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 8"}
+> PutItem {"a":[1 2]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a comma or ']' after an array element. at 8"}
+> PutItem {"a":[}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 6"}
+> PutItem {,}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 1"}
+> PutItem {"a":1,,"b":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 7"}
+> PutItem {"a":1 "b":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a comma or '}' after an object member. at 7"}
+> PutItem /*c*/{}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 0"}
+> PutItem ﻿{}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 0"}
+> PutItem nul
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 3"}
+> PutItem tru
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 3"}
+> PutItem fals
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 4"}
+> PutItem {"TableName":"x",
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 17"}
+> PutItem {"a":"\x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid escape character in string. at 6"}
+> PutItem {"a":"\u12"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Incorrect hex digit after \\u escape in string. at 6"}
+> PutItem {"a":"\ud800"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The surrogate pair in string is invalid. at 6"}
+> PutItem {"a":"a	b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid encoding in string. at 7"}
+> PutItem {"a":"ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid encoding in string. at 7"}
+> PutItem {"a":"ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+# Valid JSON accepted by the parser: trailing whitespace, huge integers, escaped slash, surrogate pairs
+> PutItem {"a":1} 
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> PutItem {"a":1}	 
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> PutItem 	 {"a":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> PutItem {"a":123456789012345678901234567890}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> PutItem {"a":"\/"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> PutItem {"a":"\uD83D\uDE00"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> PutItem {"a":-0.0e-0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+# The same parse errors from other operations (parsing happens before dispatch), and an unknown operation is reported before parsing
+> GetItem {
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 1"}
+> DeleteItem {"a":}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 5"}
+> UpdateItem {"a":1}x
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document root must not be followed by other values. at 7"}
+> ListTables {
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 1"}
+> NoSuchOperation {
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation NoSuchOperation"}
+# Payload that is valid JSON but not an object
+> PutItem []
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> PutItem [1,2]
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> PutItem "str"
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> PutItem 7
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> PutItem -1.5
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> PutItem null
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> PutItem true
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> PutItem false
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> GetItem null
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> ListTables []
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+# TableName: missing, wrong JSON type, too short/long, bad characters, unknown table
+> PutItem {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> PutItem {"Item":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> PutItem {"tablename":"alt_val_req","Item":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> PutItem {"TableName":1,"Item":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> PutItem {"TableName":null,"Item":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> PutItem {"TableName":true}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> PutItem {"TableName":["alt_val_req"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> PutItem {"TableName":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> PutItem {"TableName":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> PutItem {"TableName":"ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> PutItem {"TableName":"abc$"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> PutItem {"TableName":"a b c"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> PutItem {"TableName":"alt_val_é"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> PutItem {"TableName":"ab$"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> PutItem {"TableName":"$repeat(x,193)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> PutItem {"TableName":"$repeat(x,222)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> PutItem {"TableName":"$repeat(x,192)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx not found"}
+> PutItem {"TableName":"a.b-c_D9"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: a.b-c_D9 not found"}
+> PutItem {"TableName":"alt_val_req_nonexist","Item":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+> PutItem {"TableName":"ALT_VAL_REQ","Item":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: ALT_VAL_REQ not found"}
+> GetItem {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> GetItem {"TableName":7}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> GetItem {"TableName":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> GetItem {"TableName":"alt_val_req_nonexist","Key":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+> DeleteItem {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> DeleteItem {"TableName":7}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> DeleteItem {"TableName":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> DeleteItem {"TableName":"alt_val_req_nonexist","Key":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+> UpdateItem {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> UpdateItem {"TableName":7}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> UpdateItem {"TableName":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> UpdateItem {"TableName":"alt_val_req_nonexist","Key":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+# Order: an unknown table is reported before a missing or malformed Item/Key
+> PutItem {"TableName":"alt_val_req_nonexist"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+> PutItem {"TableName":"alt_val_req_nonexist","Item":{"p":{"X":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+> GetItem {"TableName":"alt_val_req_nonexist"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+> DeleteItem {"TableName":"alt_val_req_nonexist","Key":{"p":{"N":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+> UpdateItem {"TableName":"alt_val_req_nonexist"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+# Missing Item / Key
+> PutItem {"TableName":"alt_val_req"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter Item not found"}
+> PutItem {"TableName":"alt_val_req","item":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter Item not found"}
+> DeleteItem {"TableName":"alt_val_req"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter Key not found"}
+> UpdateItem {"TableName":"alt_val_req"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem requires a Key parameter"}
+> UpdateItem {"TableName":"alt_val_req","UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem requires a Key parameter"}
+# Duplicate top-level members: the first one wins
+> PutItem {"TableName":"alt_val_req","TableName":"alt_val_req_nonexist","Item":{"p":{"S":"dupt"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_req_nonexist","TableName":"alt_val_req","Item":{"p":{"S":"dupt"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_val_req_nonexist not found"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"dupi1"}},"Item":{"p":{"S":"dupi2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"S":"dupi1"}},"Key":{"p":{"S":"dupi2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"dupi1"}}}
+# Unknown extra parameters are ignored, whatever their type
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"x"}},"Bogus":1,"Other":{"a":[null,true]},"item":"x"}
+< 200 {}
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"S":"x"}},"Bogus":"y","ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"x"}}}
+> DeleteItem {"TableName":"alt_val_req","Key":{"p":{"S":"x"}},"Bogus":[],"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"x"}}}
+> UpdateItem {"TableName":"alt_val_req","Key":{"p":{"S":"x"}},"Bogus":null}
+< 200 {}
+# Optional parameters with the wrong JSON type
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"ConsistentRead":"yes"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"ConsistentRead":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"ConsistentRead":null}
+< 200 {}
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"ConsistentRead":false}
+< 200 {}
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"ProjectionExpression":"#a","ExpressionAttributeNames":{"#a":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#a' required by expression"}
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"ReturnConsumedCapacity":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string ReturnConsumedCapacity field in request"}
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"ReturnConsumedCapacity":"X"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown consumed capacity X"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"ConditionExpression":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must be a string"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"ExpressionAttributeValues":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues cannot be used without ConditionExpression"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"ReturnValues":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for ReturnValues, got: 1"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"ReturnValues":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for ReturnValues, got: null"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"ReturnValues":"ALL_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem supports only NONE or ALL_OLD for ReturnValues"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"ReturnValues":"BOGUS"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BOGUS"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"Expected":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'Expected' parameter, if given, must be an object"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"ReturnItemCollectionMetrics":5}
+< 200 {}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"ReturnValuesOnConditionCheckFailure":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for ReturnValuesOnConditionCheckFailure, got: 5"}
+> UpdateItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"UpdateExpression":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression must be a string"}
+> UpdateItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"AttributeUpdates":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates must be an object"}
+> DeleteItem {"TableName":"alt_val_req","Key":{"p":{"S":"a"}},"ConditionExpression":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must be a string"}
+# Order: TableName problems are reported before anything else in the body
+> PutItem {"TableName":"ab","Item":[],"ReturnValues":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> PutItem {"TableName":5,"Item":{"p":{"X":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+# Order: Item validation vs other parameters
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"X":"a"}},"ReturnValues":"BOGUS"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BOGUS"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"},"a":{"X":"a"}},"ReturnValues":"BOGUS"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BOGUS"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"},"a":{"X":"a"}},"ConditionExpression":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type X for value {\"X\":\"a\"}"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"},"a":{"X":"a"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"X":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type X for value {\"X\":\"a\"}"}
+> PutItem {"TableName":"alt_val_req","Item":{"p":{"S":"a"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"X":"1"}},"ReturnValues":"BOGUS"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BOGUS"}
+> GetItem {"TableName":"alt_val_req","Key":{"p":{"X":"a"}},"ConsistentRead":"yes"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+> UpdateItem {"TableName":"alt_val_req","Key":{"p":{"X":"a"}},"UpdateExpression":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"X\""}
+> DeleteTable {"TableName":"alt_val_req"}
+< 200 {"TableDescription":{"TableName":"alt_val_req","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_req:scylla:table/alt_val_req","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

@@ -1,0 +1,300 @@
+# Key validation in PutItem (Item), GetItem/DeleteItem/UpdateItem (Key).
+> CreateTable {"TableName":"alt_val_key_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_key_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_val_key_sn","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_key_sn","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_val_key_bb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_key_bb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# Missing hash key, missing range key, empty key object
+> PutItem {"TableName":"alt_val_key_s","Item":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> GetItem {"TableName":"alt_val_key_s","Key":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> DeleteItem {"TableName":"alt_val_key_s","Key":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> UpdateItem {"TableName":"alt_val_key_s","Key":{},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> PutItem {"TableName":"alt_val_key_s","Item":{"q":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"q":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> DeleteItem {"TableName":"alt_val_key_s","Key":{"q":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> UpdateItem {"TableName":"alt_val_key_s","Key":{"q":{"S":"a"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"c":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"c":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"c":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"c":{"N":"1"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+# Extra attributes in Key (PutItem Item may of course hold other attributes)
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"S":"a"},"x":{"S":"b"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"},"x":{"S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> DeleteItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"},"x":{"S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> UpdateItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"},"x":{"S":"b"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{"N":"1"},"x":{"S":"b"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"N":"1"},"x":{"S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"N":"1"},"x":{"S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"N":"1"},"x":{"S":"b"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+# Extra attribute whose own value is malformed
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"S":"a"},"x":{"X":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type X for value {\"X\":\"b\"}"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"},"x":{"X":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> DeleteItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"},"x":{"X":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> UpdateItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"},"x":{"X":"b"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+# Hash key of the wrong type: every other type tag, and an unknown tag
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"B\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"B\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"BOOL":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"BOOL\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"BOOL":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"BOOL\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"NULL":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"NULL\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"NULL":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"NULL\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"M":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"M\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"M":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"M\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"L":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"L\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"L":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"L\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"SS":["a"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"SS\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"SS":["a"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"SS\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"NS":["1"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"NS\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"NS":["1"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"NS\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"BS":["AA=="]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"BS\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"BS":["AA=="]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"BS\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"X":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"X\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"X":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"X\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"s":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"s\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"s":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"s\""}
+# Malformed key value shapes
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {}"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {}"}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: \"a\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: \"a\""}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: 1"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: 1"}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":null}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: null"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":null}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: null"}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":[]}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: []"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":[]}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: []"}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"S":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":1}"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"S":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":1}"}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"S":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":null}"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"S":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":null}"}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"S":"a","N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":\"a\",\"N\":\"1\"}"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a","N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":\"a\",\"N\":\"1\"}"}
+> PutItem {"TableName":"alt_val_key_s","Item":{"p":{"S":"a","S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":\"a\",\"S\":\"b\"}"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a","S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":\"a\",\"S\":\"b\"}"}
+# Range key of the wrong type / malformed
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"B\""}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"B\""}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{"BOOL":false}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"BOOL\""}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"BOOL":false}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"BOOL\""}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{"NS":["1"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"NS\""}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"NS":["1"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"NS\""}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{"X":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"X\""}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"X":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"X\""}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: {}"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: {}"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{"N":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: {\"N\":1}"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"N":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: {\"N\":1}"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{"N":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: {\"N\":null}"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"N":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: {\"N\":null}"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":"1"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: \"1\""}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":"1"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: \"1\""}
+# Binary keys of the wrong type / malformed / bad base64
+> PutItem {"TableName":"alt_val_key_bb","Item":{"p":{"S":"AA=="},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type B for key column p, got type \"S\""}
+> GetItem {"TableName":"alt_val_key_bb","Key":{"p":{"B":"AA=="},"c":{"S":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type B for key column c, got type \"S\""}
+> PutItem {"TableName":"alt_val_key_bb","Item":{"p":{"B":1},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"B\":1}"}
+> GetItem {"TableName":"alt_val_key_bb","Key":{"p":{"B":"AA=="},"c":{"B":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: {\"B\":1}"}
+> PutItem {"TableName":"alt_val_key_bb","Item":{"p":{"B":"A"},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_key_bb","Key":{"p":{"B":"AA=="},"c":{"B":"A"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> PutItem {"TableName":"alt_val_key_bb","Item":{"p":{"BS":["AA=="]},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type B for key column p, got type \"BS\""}
+> GetItem {"TableName":"alt_val_key_bb","Key":{"p":{"B":"AA=="},"c":{"BS":["AA=="]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type B for key column c, got type \"BS\""}
+# Order between several key problems: the hash key is checked first, then the range key, then extra attributes
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"N":"1"},"c":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"N":"1"},"c":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"p":{"N":"1"},"c":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"p":{"N":"1"},"c":{"S":"x"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"c":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"c":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"c":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"c":{"S":"x"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":""},"c":{"N":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":""},"c":{"N":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":""},"c":{"N":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":""},"c":{"N":"x"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"c":{"N":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: x"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"N":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: x"}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"N":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: x"}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"N":"x"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: x"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"x":{"S":"1"},"c":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"x":{"S":"1"},"c":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"x":{"S":"1"},"c":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"x":{"S":"1"},"c":{"N":"1"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"x":{"S":"1"},"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"x":{"S":"1"},"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"x":{"S":"1"},"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"x":{"S":"1"},"p":{"S":"a"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> PutItem {"TableName":"alt_val_key_sn","Item":{"p":{"S":"a"},"x":{"S":"1"},"c":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"x":{"S":"1"},"c":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> DeleteItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"x":{"S":"1"},"c":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"x":{"S":"1"},"c":{"S":"1"}},"UpdateExpression":"SET z = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+# Key problems vs other parameters: an invalid ReturnValues is reported first, then key errors, then expression syntax errors
+> UpdateItem {"TableName":"alt_val_key_s","Key":{"p":{"N":"1"}},"UpdateExpression":"BAD BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> UpdateItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"}},"UpdateExpression":"BAD BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'BAD BAD': syntax error at char 0"}
+> DeleteItem {"TableName":"alt_val_key_s","Key":{"p":{"N":"1"}},"ReturnValues":"BOGUS"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BOGUS"}
+> DeleteItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"}},"ReturnValues":"BOGUS"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BOGUS"}
+> DeleteItem {"TableName":"alt_val_key_s","Key":{"p":{"N":"1"}},"ConditionExpression":"BAD BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> DeleteItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"}},"ConditionExpression":"BAD BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'BAD BAD': syntax error at char 0"}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"N":"1"}},"ProjectionExpression":"BAD BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> GetItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"}},"ProjectionExpression":"BAD BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'BAD BAD': syntax error at char 4"}
+# Updating a key attribute
+> UpdateItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"}},"UpdateExpression":"SET p = :v","ExpressionAttributeValues":{":v":{"S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column p"}
+> UpdateItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"}},"UpdateExpression":"REMOVE p"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column p"}
+> UpdateItem {"TableName":"alt_val_key_s","Key":{"p":{"S":"a"}},"AttributeUpdates":{"p":{"Value":{"S":"b"},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column p"}
+> UpdateItem {"TableName":"alt_val_key_sn","Key":{"p":{"S":"a"},"c":{"N":"1"}},"UpdateExpression":"SET c = :v","ExpressionAttributeValues":{":v":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column c"}
+# Successful round trips with every key type; key attributes come back first in GetItem
+> PutItem {"TableName":"alt_val_key_sn","Item":{"z":{"S":"1"},"c":{"N":"01.10"},"a":{"S":"2"},"p":{"S":"k"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_key_sn","Key":{"c":{"N":"1.1"},"p":{"S":"k"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k"},"c":{"N":"1.1"},"a":{"S":"2"},"z":{"S":"1"}}}
+> PutItem {"TableName":"alt_val_key_bb","Item":{"c":{"B":"AAEC"},"p":{"B":"/w=="},"b":{"B":"AA=="}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_key_bb","Key":{"p":{"B":"/w=="},"c":{"B":"AAEC"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"B":"/w=="},"c":{"B":"AAEC"},"b":{"B":"AA=="}}}
+> DeleteTable {"TableName":"alt_val_key_s"}
+< 200 {"TableDescription":{"TableName":"alt_val_key_s","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_key_s:scylla:table/alt_val_key_s","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_val_key_sn"}
+< 200 {"TableDescription":{"TableName":"alt_val_key_sn","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_key_sn:scylla:table/alt_val_key_sn","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_val_key_bb"}
+< 200 {"TableDescription":{"TableName":"alt_val_key_bb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_key_bb:scylla:table/alt_val_key_bb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

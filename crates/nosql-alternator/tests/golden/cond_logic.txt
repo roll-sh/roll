@@ -1,0 +1,156 @@
+# Setup: item a=1, b=2 and a nested document
+> CreateTable {"TableName":"alt_cond_lg_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_cond_lg_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}}}
+< 200 {}
+# AND / OR truth tables (a = :t is true, a = :f is false)
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t AND a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t OR a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t AND a = :f","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t OR a = :f","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :f AND a = :t","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :f OR a = :t","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :f AND a = :f","ExpressionAttributeValues":{":f":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :f OR a = :f","ExpressionAttributeValues":{":f":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# NOT
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT a = :f","ExpressionAttributeValues":{":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT NOT a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT (a = :t)","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT attribute_exists(missing)"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT begins_with(missing, :v)","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT missing = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+# Keywords are case-insensitive
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t and a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :f oR a = :t","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"not a = :f","ExpressionAttributeValues":{":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t AnD NoT a = :f","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 200 {}
+# Precedence: NOT binds tighter than AND, AND tighter than OR
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t OR a = :f AND a = :f","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"(a = :t OR a = :f) AND a = :f","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :f AND a = :f OR a = :t","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :f AND (a = :f OR a = :t)","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT a = :t AND a = :f","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT (a = :t AND a = :f)","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT a = :f OR a = :f","ExpressionAttributeValues":{":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT (a = :f OR a = :t)","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# BETWEEN's AND binds before the logical AND
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a BETWEEN :t AND :f AND b = :b","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"},":b":{"N":"2"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a BETWEEN :t AND :f AND b = :b","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"},":b":{"N":"3"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"b = :b AND a BETWEEN :t AND :f","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"},":b":{"N":"2"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a BETWEEN :t AND :f OR b = :b","ExpressionAttributeValues":{":t":{"N":"5"},":f":{"N":"9"},":b":{"N":"2"}}}
+< 200 {}
+# Parentheses: redundant, nested, around comparisons and functions
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"(a = :t)","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"((((a = :t))))","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"(a = :t) AND (b = :b)","ExpressionAttributeValues":{":t":{"N":"1"},":b":{"N":"2"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"((a = :t) OR (b = :b)) AND ((NOT a = :b))","ExpressionAttributeValues":{":t":{"N":"1"},":b":{"N":"2"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"(attribute_exists(a))"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT(attribute_exists(missing))"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"((((((((((((((((((((((((((((((((((((((((((((((((((a = :t))))))))))))))))))))))))))))))))))))))))))))))))))","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((a = :t))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+# Parenthesised operands are not allowed in comparisons
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"(a) = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression '(a) = :t': Single value must be a function"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = (:t)","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = (:t)': syntax error at char 4"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"(a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression '(a = :t': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t)","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :t)': syntax error at char 6"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"()"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression '()': syntax error at char 1"}
+# Long chains of AND/OR
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :f OR a = :t","ExpressionAttributeValues":{":t":{"N":"1"},":f":{"N":"9"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t AND a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression expression size 4395 exceeds allowed maximum 4096."}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT NOT a = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# Nested paths in conditions
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"doc.x[0] = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"doc.x[1].y = :v","ExpressionAttributeValues":{":v":{"S":"z"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"doc.x[1] = :v","ExpressionAttributeValues":{":v":{"M":{"y":{"S":"z"}}}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"doc.x[2] = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"doc.x.y = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"doc[0] = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"#d.#x[0] = :t","ExpressionAttributeValues":{":t":{"N":"1"}},"ExpressionAttributeNames":{"#d":"doc","#x":"x"}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"doc.x[1].y = doc.x[1].y"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"doc.x[1] = doc.x[1]"}
+< 200 {}
+# Condition path depth: 32 levels allowed, 33 rejected
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"attribute_not_exists(a.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b)"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"attribute_not_exists(a.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'attribute_not_exists(a.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b)': Document path exceeded 32 nesting levels"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0] = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0] = :t': Document path exceeded 32 nesting levels"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a[2147483647] = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"a[2147483648] = :t","ExpressionAttributeValues":{":t":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a[2147483648] = :t': list index out of integer range"}
+# Conditions on key attributes
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"p = :v","ExpressionAttributeValues":{":v":{"S":"k"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"p <> :v","ExpressionAttributeValues":{":v":{"S":"k"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"attribute_not_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"attribute_exists(p) AND p = :v","ExpressionAttributeValues":{":v":{"S":"k"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_lg_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"N":"2"},"doc":{"M":{"x":{"L":[{"N":"1"},{"M":{"y":{"S":"z"}}}]}}}},"ConditionExpression":"begins_with(p, :v)","ExpressionAttributeValues":{":v":{"S":"k"}}}
+< 200 {}
+> DeleteTable {"TableName":"alt_cond_lg_s"}
+< 200 {"TableDescription":{"TableName":"alt_cond_lg_s","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_cond_lg_s:scylla:table/alt_cond_lg_s","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
