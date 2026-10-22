@@ -149,6 +149,114 @@ LockRows
                     Output: b.ctid, b.id
 -- EXPLAIN
 
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM a9a WHERE x IN (SELECT y FROM a9b) FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: a9a.id, a9a.x, a9a.note, a9a.ctid, a9b.ctid
+  ->  Hash Semi Join
+        Output: a9a.id, a9a.x, a9a.note, a9a.ctid, a9b.ctid
+        Hash Cond: (a9a.x = a9b.y)
+        ->  Seq Scan on public.a9a
+              Output: a9a.id, a9a.x, a9a.note, a9a.ctid
+        ->  Hash
+              Output: a9b.ctid, a9b.y
+              ->  Seq Scan on public.a9b
+                    Output: a9b.ctid, a9b.y
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM a9a WHERE NOT EXISTS (SELECT FROM a9b WHERE y = x) FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: a9a.id, a9a.x, a9a.note, a9a.ctid, a9b.ctid
+  ->  Hash Anti Join
+        Output: a9a.id, a9a.x, a9a.note, a9a.ctid, a9b.ctid
+        Hash Cond: (a9a.x = a9b.y)
+        ->  Seq Scan on public.a9a
+              Output: a9a.id, a9a.x, a9a.note, a9a.ctid
+        ->  Hash
+              Output: a9b.ctid, a9b.y
+              ->  Seq Scan on public.a9b
+                    Output: a9b.ctid, a9b.y
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM a9a, generate_series(1,2) g WHERE g = a9a.x FOR UPDATE OF a9a
+QUERY PLAN:text
+LockRows
+  Output: a9a.id, a9a.x, a9a.note, g.g, a9a.ctid, g.*
+  ->  Hash Join
+        Output: a9a.id, a9a.x, a9a.note, g.g, a9a.ctid, g.*
+        Hash Cond: (a9a.x = g.g)
+        ->  Seq Scan on public.a9a
+              Output: a9a.id, a9a.x, a9a.note, a9a.ctid
+        ->  Hash
+              Output: g.g, g.*
+              ->  Function Scan on pg_catalog.generate_series g
+                    Output: g.g, g.*
+                    Function Call: generate_series(1, 2)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM a9a, (VALUES (1),(2)) v(c) WHERE v.c = a9a.x FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: a9a.id, a9a.x, a9a.note, "*VALUES*".column1, a9a.ctid, "*VALUES*".*
+  ->  Hash Join
+        Output: a9a.id, a9a.x, a9a.note, "*VALUES*".column1, a9a.ctid, "*VALUES*".*
+        Hash Cond: (a9a.x = "*VALUES*".column1)
+        ->  Seq Scan on public.a9a
+              Output: a9a.id, a9a.x, a9a.note, a9a.ctid
+        ->  Hash
+              Output: "*VALUES*".column1, "*VALUES*".*
+              ->  Values Scan on "*VALUES*"
+                    Output: "*VALUES*".column1, "*VALUES*".*
+-- EXPLAIN
+
+> CREATE TABLE a9p (id int, v int) PARTITION BY RANGE (id)
+-- CREATE TABLE
+
+> CREATE TABLE a9p1 PARTITION OF a9p FOR VALUES FROM (0) TO (5)
+-- CREATE TABLE
+
+> CREATE TABLE a9p2 PARTITION OF a9p FOR VALUES FROM (5) TO (100)
+-- CREATE TABLE
+
+> INSERT INTO a9p SELECT g, g FROM generate_series(1,10) g
+-- INSERT 0 10
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM a9a JOIN a9p ON a9a.x = a9p.v FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: a9a.id, a9a.x, a9a.note, a9p.id, a9p.v, a9a.ctid, a9p.ctid, a9p.tableoid
+  ->  Hash Join
+        Output: a9a.id, a9a.x, a9a.note, a9p.id, a9p.v, a9a.ctid, a9p.ctid, a9p.tableoid
+        Hash Cond: (a9p.v = a9a.x)
+        ->  Append
+              ->  Seq Scan on public.a9p1 a9p_1
+                    Output: a9p_1.id, a9p_1.v, a9p_1.ctid, a9p_1.tableoid
+              ->  Seq Scan on public.a9p2 a9p_2
+                    Output: a9p_2.id, a9p_2.v, a9p_2.ctid, a9p_2.tableoid
+        ->  Hash
+              Output: a9a.id, a9a.x, a9a.note, a9a.ctid
+              ->  Seq Scan on public.a9a
+                    Output: a9a.id, a9a.x, a9a.note, a9a.ctid
+-- EXPLAIN
+
+> SELECT a9p.id, a9a.note FROM a9a JOIN a9p ON a9a.x = a9p.v WHERE a9p.id BETWEEN 3 AND 6 ORDER BY 1 FOR UPDATE
+id:int4 | note:text
+3 | n3
+4 | n4
+5 | n5
+6 | n6
+-- SELECT 4
+
+> SELECT * FROM a9a WHERE x IN (SELECT y FROM a9b WHERE y > 3) ORDER BY id FOR SHARE
+id:int4 | x:int4 | note:text
+4 | 4 | n4
+5 | 5 | n5
+-- SELECT 2
+
+> DROP TABLE a9p
+-- DROP TABLE
+
 > SELECT * FROM a9a JOIN a9b ON a9a.x = a9b.y ORDER BY a9a.id FOR UPDATE
 id:int4 | x:int4 | note:text | id:int4 | y:int4
 1 | 1 | n1 | 1 | 1

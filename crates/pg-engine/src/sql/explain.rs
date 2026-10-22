@@ -812,6 +812,145 @@ fn rowmark_scans(root: &Arc<Plan>) -> std::collections::HashSet<usize> {
     out
 }
 
+/// The row marks of a LockRows's query level that have no key column in the plan: the
+/// table scans on a semi / anti join's inner side (their ctids, `semi`), and the sources of
+/// no table's rows (functions, VALUES, CTEs: their whole rows, `copies`), by address.
+fn lock_level_marks<'p>(p: &'p Plan, inner: bool, semi: &mut Vec<usize>, copies: &mut Vec<(usize, &'p Plan)>) {
+    match p {
+        Plan::Scan(_) => {
+            if inner {
+                semi.push(addr(p));
+            }
+        }
+        Plan::FunctionScan { .. } | Plan::Values { .. } | Plan::CteScan { .. } => {
+            if !inner {
+                copies.push((addr(p), p));
+            }
+        }
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Context { input, .. }
+        | Plan::With { body: input, .. } => lock_level_marks(input, inner, semi, copies),
+        Plan::Join { kind, left, right, .. } => {
+            lock_level_marks(left, inner, semi, copies);
+            let semi_join = matches!(kind, JoinKind::Semi | JoinKind::Anti);
+            lock_level_marks(right, inner || semi_join, semi, copies);
+        }
+        _ => {}
+    }
+}
+
+thread_local! {
+    /// The RETURNING list a rule's action computes the statement's with (`rule_returning`),
+    /// for the data-modifying node built next to show.
+    static RULE_RETURNING: std::cell::RefCell<Option<Vec<Expr>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The RETURNING list a data-modifying node shows: `own`, or the one `rule_returning` left.
+fn shown_returning(own: &[Expr]) -> Vec<Expr> {
+    RULE_RETURNING.with(|r| r.borrow_mut().take()).unwrap_or_else(|| own.to_vec())
+}
+
+/// Projections over a data-modifying statement's RETURNING rows (a rule's action computing
+/// the statement's RETURNING): the statement, and them composed into its RETURNING list.
+fn rule_returning(p: &Plan) -> Option<(&Arc<Plan>, Vec<Expr>)> {
+    let mut stack: Vec<&Vec<Expr>> = Vec::new();
+    let mut q = p;
+    let mut arc = None;
+    while let Plan::Project { input, exprs } = q {
+        stack.push(exprs);
+        arc = Some(input);
+        q = input;
+    }
+    let returning = match q {
+        Plan::Update(u) => &u.returning,
+        Plan::Delete(d) => &d.returning,
+        Plan::Insert(i) => &i.returning,
+        _ => return None,
+    };
+    if stack.is_empty() || returning.is_empty() {
+        return None;
+    }
+    let mut list = returning.clone();
+    for exprs in stack.into_iter().rev() {
+        let below = list;
+        list = exprs
+            .iter()
+            .map(|e| {
+                e.clone().transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(i, _) if i < below.len() => below[i].clone(),
+                        x => x,
+                    })
+                })
+            })
+            .collect::<Result<Vec<Expr>>>()
+            .ok()?;
+    }
+    Some((arc?, list))
+}
+
+/// The inheritance trees of a LockRows's query level whose members return their row marks:
+/// (the parent's reference name, the member scans).
+fn inherited_marks<'p>(p: &'p Plan, out: &mut Vec<(String, Vec<&'p Plan>)>) {
+    match p {
+        Plan::Append { inputs, inh: Some(parent) } => {
+            let members: Vec<&Plan> = inputs
+                .iter()
+                .map(|i| match &**i {
+                    Plan::Project { input, .. } => &**input,
+                    x => x,
+                })
+                .filter(|m| matches!(m, Plan::Scan(s) if s.with_key))
+                .collect();
+            if !members.is_empty() {
+                out.push((parent.clone(), members));
+            }
+        }
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Context { input, .. }
+        | Plan::With { body: input, .. } => inherited_marks(input, out),
+        Plan::Join { kind, left, right, .. } => {
+            inherited_marks(left, out);
+            if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                inherited_marks(right, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `n`'s target lists with an inheritance tree's tableoid row mark: a member's scan after
+/// its ctid, the nodes above at the end.
+fn add_tableoid(n: &mut ExNode, parent: &str, members: &[String]) {
+    for c in &mut n.children {
+        add_tableoid(c, parent, members);
+    }
+    if n.is_scan() {
+        for m in members {
+            let ctid = format!("{m}.ctid");
+            if let Some(i) = n.output.iter().position(|o| *o == ctid) {
+                let t = format!("{m}.tableoid");
+                if !n.output.contains(&t) {
+                    n.output.insert(i + 1, t);
+                }
+            }
+        }
+    } else if n.output.contains(&format!("{parent}.ctid")) {
+        let t = format!("{parent}.tableoid");
+        if !n.output.contains(&t) {
+            n.output.push(t);
+        }
+    }
+}
+
 thread_local! {
     /// How many LockRows the node being built is under: a scan there returning its row's
     /// key (a row mark's ctid) builds no physical target list.
@@ -3550,6 +3689,15 @@ impl Builder<'_, '_> {
                 self.sub_alias = saved;
                 out
             }
+            // The statement's RETURNING a rule's action computes (rewriteRuleAction puts it
+            // in the action's own RETURNING list): over the action's.
+            Plan::Project { .. } if rule_returning(p).is_some() => {
+                let (dml, list) = rule_returning(p).expect("checked");
+                RULE_RETURNING.with(|r| *r.borrow_mut() = Some(list));
+                let b = self.node(dml);
+                RULE_RETURNING.with(|r| r.borrow_mut().take());
+                b
+            }
             Plan::Project { input, exprs } => {
                 let under_filter = FILTER_OVER_WINDOW.with(|f| f.replace(false));
                 // (The target list over windows: the input columns it reads, in order.)
@@ -5184,7 +5332,8 @@ impl Builder<'_, '_> {
             {
                 let members: Vec<Arc<crate::catalog::Table>> =
                     up.members.iter().map(|m| m.rules.table.clone()).collect();
-                self.inherited_dml(key, "Update", &up.rules.table, &members, &up.sets, &up.returning, up.old_new.as_ref(), up.sys, &up.source)
+                let returning = shown_returning(&up.returning);
+                self.inherited_dml(key, "Update", &up.rules.table, &members, &up.sets, &returning, up.old_new.as_ref(), up.sys, &up.source)
             }
             Plan::Delete(dp)
                 if dp.inh
@@ -5193,7 +5342,8 @@ impl Builder<'_, '_> {
             {
                 let members: Vec<Arc<crate::catalog::Table>> =
                     dp.members.iter().map(|m| m.table.clone()).collect();
-                self.inherited_dml(key, "Delete", &dp.table, &members, &[], &dp.returning, dp.old_new.as_ref(), dp.sys, &dp.source)
+                let returning = shown_returning(&dp.returning);
+                self.inherited_dml(key, "Delete", &dp.table, &members, &[], &returning, dp.old_new.as_ref(), dp.sys, &dp.source)
             }
             // A single member needs no Append (Postgres removes it).
             Plan::Append {
@@ -5441,6 +5591,16 @@ impl Builder<'_, '_> {
                 params,
                 meta,
             ),
+            // A statement a rule made of another command (a DELETE done as an UPDATE) that
+            // returns the statement's RETURNING rows: Postgres runs it as the query (its count
+            // isn't the statement's: the engine reads it as a CTE for that).
+            Plan::With { ctes, body, names }
+                if names.len() == 1
+                    && names[0] == "*RULE*"
+                    && matches!(&**body, Plan::CteScan { id, .. } if ctes.first().is_some_and(|c| c.0 == *id)) =>
+            {
+                self.node(&ctes[0].1)
+            }
             Plan::With { ctes, body, names } => {
                 for ((_, cte), name) in ctes.iter().zip(names) {
                     let mut node = self.level(cte);
@@ -5617,12 +5777,46 @@ impl Builder<'_, '_> {
                 Built::passthrough(n, names)
             }
             Plan::LockRows { input, .. } => {
+                // The level's other row marks, which the engine needs no column for: a semi
+                // join's inner relation's ctid (ROW_MARK_REFERENCE), a function's, VALUES'
+                // or a CTE's whole row (ROW_MARK_COPY), resjunk up to the LockRows.
+                let mut semi = Vec::new();
+                let mut copies = Vec::new();
+                if self.o.verbose {
+                    lock_level_marks(input, false, &mut semi, &mut copies);
+                    self.rowmarks.extend(semi.iter().copied());
+                }
                 UNDER_LOCK_ROWS.with(|u| u.set(u.get() + 1));
-                let c = self.node(input);
+                let mut c = self.node(input);
                 UNDER_LOCK_ROWS.with(|u| u.set(u.get() - 1));
+                // An inheritance tree's row mark has its tableoid too (expand_inherited_rtentry
+                // adds it after the target list's other junk), from each member's scan up.
+                if self.o.verbose {
+                    let mut trees = Vec::new();
+                    inherited_marks(input, &mut trees);
+                    for (parent, members) in trees {
+                        let members: Vec<String> =
+                            members.into_iter().map(|m| quote_ident(&self.refname(m))).collect();
+                        add_tableoid(&mut c.node, &quote_ident(&parent), &members);
+                    }
+                }
+                if self.o.verbose && (!semi.is_empty() || !copies.is_empty()) {
+                    for (a, p) in copies {
+                        let name = format!("{}.*", quote_ident(&self.refname(p)));
+                        self.rowmark_junk.insert(a, vec![((2, super::plan::Rti(usize::MAX)), name)]);
+                    }
+                    let junk = junk_in(&c.node, &self.rowmark_junk);
+                    let mut top = c.node.output.clone();
+                    top.extend(junk.iter().filter(|j| !c.node.output.contains(j)).cloned());
+                    for ch in &mut c.node.children {
+                        junk_layout(ch, &top, &[], &self.rowmark_junk);
+                    }
+                    c.node.output = top;
+                }
                 Built::passthrough(lock_rows(c.node), c.exported)
             }
             Plan::Insert(ip) => {
+                let returning = shown_returning(&ip.returning);
                 let mut c = self.node(&ip.source);
                 let refname = self.refname(p);
                 let t = &ip.rules.table;
@@ -5650,13 +5844,12 @@ impl Builder<'_, '_> {
                 }
                 let mut n = self.modify("Insert", t, &refname, &c.node);
                 self.check_option_subplans(&mut n, &ip.rules.view_checks, t, &refname);
-                if self.o.verbose && !ip.returning.is_empty() {
+                if self.o.verbose && !returning.is_empty() {
                     let names = self.table_names(t, &refname);
                     // (The source is a range table entry of its own: columns qualified.)
                     let names: Vec<Name> = names.into_iter().map(|n| Name::same(n.full)).collect();
                     let names = old_new_names(names, ip.old_new.as_ref(), t);
-                    n.output = ip
-                        .returning
+                    n.output = returning
                         .iter()
                         .map(|e| self.show(&old_new_rows(e, ip.old_new.as_ref()), &names, Cx::Output))
                         .collect();
@@ -5691,11 +5884,12 @@ impl Builder<'_, '_> {
                         n.details.push(Detail::Text("Conflict Filter", text));
                     }
                 }
-                self.returning(&mut n, &ip.returning, t, &c.node);
+                self.returning(&mut n, &returning, t, &c.node);
                 n.children.push(c.node.child("Outer"));
                 Built::passthrough(n, Vec::new())
             }
             Plan::Update(up) => {
+                let returning = shown_returning(&up.returning);
                 let mut c = self.node(&up.source);
                 let t = &up.rules.table;
                 // (No row of it read: the name the statement gives it.)
@@ -5826,8 +6020,8 @@ impl Builder<'_, '_> {
                 }
                 let mut n = self.modify("Update", t, &refname, &c.node);
                 self.check_option_subplans(&mut n, &up.rules.view_checks, t, &refname);
-                self.returning(&mut n, &up.returning, t, &c.node);
-                if self.o.verbose && !up.returning.is_empty() {
+                self.returning(&mut n, &returning, t, &c.node);
+                if self.o.verbose && !returning.is_empty() {
                     let mut names = self.table_names(t, &refname);
                     if inherited {
                         names = names.into_iter().map(|n| Name::same(n.full)).collect();
@@ -5835,8 +6029,7 @@ impl Builder<'_, '_> {
                     names.extend(c.exported.iter().skip(t.columns.len() + 1).cloned());
                     let names = old_new_names(names, up.old_new.as_ref(), t);
                     let cx = if up.old_new.is_some() { Cx::Upper } else { Cx::Output };
-                    n.output = up
-                        .returning
+                    n.output = returning
                         .iter()
                         .map(|e| self.show(&old_new_rows(e, up.old_new.as_ref()), &names, cx))
                         .collect();
@@ -5845,6 +6038,7 @@ impl Builder<'_, '_> {
                 Built::passthrough(n, Vec::new())
             }
             Plan::Delete(dp) => {
+                let returning = shown_returning(&dp.returning);
                 let mut c = self.node(&dp.source);
                 let t = &dp.table;
                 let refname = target_scan(&dp.source, t.oid)
@@ -5881,8 +6075,8 @@ impl Builder<'_, '_> {
                     c.node.output = vec!["NULL::oid".into(), "NULL::tid".into()];
                 }
                 let mut n = self.modify("Delete", t, &refname, &c.node);
-                self.returning(&mut n, &dp.returning, t, &c.node);
-                if self.o.verbose && !dp.returning.is_empty() {
+                self.returning(&mut n, &returning, t, &c.node);
+                if self.o.verbose && !returning.is_empty() {
                     let exported = if none_read {
                         let mut names: Vec<Name> = t
                             .columns
@@ -5901,8 +6095,7 @@ impl Builder<'_, '_> {
                     };
                     let names = old_new_names(exported, dp.old_new.as_ref(), t);
                     let cx = if dp.old_new.is_some() { Cx::Upper } else { Cx::Output };
-                    n.output = dp
-                        .returning
+                    n.output = returning
                         .iter()
                         .map(|e| self.show(&old_new_rows(e, dp.old_new.as_ref()), &names, cx))
                         .collect();
@@ -14006,7 +14199,14 @@ fn backward_ok(n: &ExNode) -> bool {
 fn old_new_names(mut base: Vec<Name>, on: Option<&super::plan::OldNew>, t: &crate::catalog::Table) -> Vec<Name> {
     let Some(on) = on else { return base };
     base.resize(on.width, Name::same("?"));
-    for side in [on.old_alias, on.new_alias] {
+    // (A rule action's own OLD / NEW rows, which the statement's RETURNING reads as its
+    // old and new: rules.rs's internal names.)
+    let shown = |a: &'static str| match a {
+        "*OLD ROW*" => "old",
+        "*NEW ROW*" => "new",
+        a => a,
+    };
+    for side in [shown(on.old_alias), shown(on.new_alias)] {
         let mut cols: Vec<Name> = t
             .columns
             .iter()
