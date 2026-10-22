@@ -115,11 +115,12 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - Writes to a bucket with branches push the old state down to the branches in the same transaction.
     - Never size an allocation from a count or length a peer sent. Stream bodies, and cap XML bodies.
     - SSE-C and SSE-KMS are the backing object store's: pass them through on the blob's requests, never re-encrypt bytes on S3, and never store a customer key (only its MD5). An encrypted write the backend doesn't confirm fails and keeps nothing.
+    - A change S3 can notify about records its events in its own transaction (`events::emit`), and the dispatcher only delivers rows `Store::due_events` returns (they're durable). Replication shares blobs (a new reference), never copies them.
   - After touching anything storage-related, run `pnpm test:storage`. It skips itself when nothing relevant changed and runs real S3 tools in Docker (`amazon/aws-cli`, `rclone/rclone`, MinIO's `mc` from `bitnamilegacy/minio-client`, `d3fk/s3cmd` for SigV2).
   - Put new tests in the matching place:
     - protocol vectors and parsers: unit tests in `s3-proto`
     - metadata, durability, branching and GC: `crates/s3-store/tests/`
-    - the S3 API through the AWS SDK: `crates/s3-server/tests/`
+    - the S3 API through the AWS SDK: `crates/s3-server/tests/` (notifications, replication and inventory: `tests/events.rs`)
     - real tools: `crates/s3-server/tests/tools.rs`
     - `/v1/storage`: `crates/s3-control/tests/`
   - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the store and server tests against S3.

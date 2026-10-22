@@ -21,13 +21,17 @@ mod config;
 mod cors;
 mod ctx;
 mod error;
+mod inventory;
 mod lifecycle;
 mod logging;
 mod multipart;
+mod notification;
+pub mod notify;
 mod object;
 mod owner;
 mod policy;
 mod post;
+mod replication;
 mod response;
 mod sse;
 mod upload;
@@ -44,6 +48,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use error::store_error;
+pub use notify::{Delivery, EventSink, EventStats, Notifier, NotifyConfig, NotifyError, RollDestination};
 pub use upload::put_object;
 
 #[derive(Clone, Debug)]
@@ -62,6 +67,8 @@ pub struct Config {
     /// How often buffered server access logs are written to their target buckets; `None` =
     /// only by [`Server::flush_access_logs`].
     pub access_log_interval: Option<std::time::Duration>,
+    /// Event notifications, replication and inventory reports.
+    pub notify: NotifyConfig,
 }
 
 impl Default for Config {
@@ -73,6 +80,7 @@ impl Default for Config {
             spool_dir: std::env::temp_dir(),
             website_domain: None,
             access_log_interval: Some(std::time::Duration::from_secs(300)),
+            notify: NotifyConfig::default(),
         }
     }
 }
@@ -91,11 +99,25 @@ pub struct Server {
     pub store: Arc<Store>,
     pub cfg: Config,
     logs: logging::Logs,
+    /// Delivers events and validates notification destinations.
+    pub notifier: Arc<Notifier>,
 }
 
 impl Server {
     pub fn new(store: Arc<Store>, cfg: Config) -> Arc<Self> {
-        let server = Arc::new(Self { store, cfg, logs: Default::default() });
+        let notifier = Notifier::new(store.clone(), cfg.notify.clone(), cfg.region.clone());
+        notifier.spawn();
+        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier });
+        if let (Some(every), Ok(rt)) = (server.cfg.notify.inventory_interval, tokio::runtime::Handle::try_current()) {
+            let weak = Arc::downgrade(&server);
+            rt.spawn(async move {
+                loop {
+                    tokio::time::sleep(every).await;
+                    let Some(s) = weak.upgrade() else { return };
+                    inventory::run(&s, false).await;
+                }
+            });
+        }
         if let (Some(every), Ok(rt)) = (server.cfg.access_log_interval, tokio::runtime::Handle::try_current()) {
             let weak = Arc::downgrade(&server);
             rt.spawn(async move {
@@ -113,6 +135,12 @@ impl Server {
     /// written every `access_log_interval`). Returns how many log objects were written.
     pub async fn flush_access_logs(&self) -> usize {
         logging::flush(self).await
+    }
+
+    /// Write the inventory reports that are due now (all enabled ones, with `force`). They're
+    /// otherwise checked every `notify.inventory_interval`. Returns how many were written.
+    pub async fn run_inventory(&self, force: bool) -> usize {
+        inventory::run(self, force).await
     }
 
     /// Access log lines dropped because the buffer was full.

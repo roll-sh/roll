@@ -53,16 +53,17 @@ clients fail clearly instead of silently doing the wrong thing.
 | Get/PutBucketLogging | ✅ server access logs delivered to the target bucket every 5 minutes, best effort |
 | Get/PutBucketAccelerateConfiguration | ✅ stored and returned; a no-op (there's one endpoint) |
 | Get/PutBucketRequestPayment | ✅ `BucketOwner`; `Requester` is `NotImplemented` |
-| GetBucketReplication | ✅ `ReplicationConfigurationNotFoundError`; Put/Delete are `NotImplemented` for now |
-| Get/PutBucketNotificationConfiguration | ✅ empty configurations; anything else is `NotImplemented` for now |
-| Analytics, metrics, inventory and intelligent-tiering configurations (Get/Put/Delete/List) | ✅ validated and stored. Inventory reports aren't generated, analytics aren't computed and metrics aren't published yet. Intelligent-tiering archive tiers are `NotImplemented` (nothing is ever archived). |
+| Get/Put/DeleteBucketReplication | ✅ between roll buckets, metadata-only (see [Replication](#replication)); a destination outside roll is `NotImplemented` |
+| Get/PutBucketNotificationConfiguration | ✅ Topic, Queue, CloudFunction and EventBridge configurations, event wildcards, `prefix`/`suffix` filter rules, `x-amz-skip-destination-validation`, `s3:TestEvent` (see [Event notifications](#event-notifications)) |
+| Inventory configurations (Get/Put/Delete/List) | ✅ reports generated Daily/Weekly as CSV (see [Inventory](#inventory-reports)); ORC and Parquet are `NotImplemented` |
+| Analytics, metrics and intelligent-tiering configurations (Get/Put/Delete/List) | ✅ validated and stored. Analytics aren't computed and metrics aren't published yet. Intelligent-tiering archive tiers are `NotImplemented` (nothing is ever archived). |
 
 ### Objects
 
 | operation | status |
 |---|---|
 | PutObject | ✅ returns `x-amz-version-id` in versioned buckets |
-| GetObject, HeadObject | ✅ `versionId`, `Range`, `partNumber`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `response-*` overrides, `x-amz-checksum-mode`; Object Lock headers; a delete marker answers 404 (current) or 405 (by id) with `x-amz-delete-marker: true` |
+| GetObject, HeadObject | ✅ `versionId`, `Range`, `partNumber`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `response-*` overrides, `x-amz-checksum-mode`; Object Lock headers; `x-amz-replication-status`; a delete marker answers 404 (current) or 405 (by id) with `x-amz-delete-marker: true` |
 | DeleteObject | ✅ unversioned: the object goes to the bucket's trash. Versioned: a delete marker; with `versionId`, that version is deleted for good (to the trash, see below) |
 | CopyObject | ✅ `x-amz-metadata-directive`, `x-amz-copy-source-if-*`, `?versionId=` in the source, `x-amz-copy-source-version-id`; no data is copied |
 | Conditional writes: `If-None-Match: *`, `If-Match` on PutObject and CompleteMultipartUpload | ✅ |
@@ -139,10 +140,11 @@ Details:
 | feature | notes |
 |---|---|
 | MFA Delete | No MFA devices. Object Lock protects versions instead. |
-| Replication (`PutBucketReplication`) | The backing bucket can be replicated by the operator. |
-| Event notifications (non-empty `NotificationConfiguration`) | |
+| Replication to buckets outside roll (real AWS S3 buckets, other deployments) | `NotImplemented`, with a message saying so. The backing bucket can be replicated by the operator. |
+| Replication Time Control, replica modification sync, `SourceSelectionCriteria` (SSE-KMS objects) | stored and returned, not acted on (replication between roll buckets is immediate, and copies no data) |
 | Requester Pays | |
-| Inventory reports, Storage Class Analysis, CloudWatch request metrics | The configurations are stored, nothing is produced yet. |
+| ORC and Parquet inventory reports | `NotImplemented` when the configuration is put; CSV works |
+| Storage Class Analysis, CloudWatch request metrics | The configurations are stored, nothing is produced yet. |
 | S3 Select, Object Lambda | |
 | Torrent | |
 | Directory buckets (S3 Express) | |
@@ -226,6 +228,129 @@ target bucket every 5 minutes. Keys are `SimplePrefix` (`<prefix>YYYY-mm-DD-HH-M
 access log format. Like S3's, delivery is best effort: lines in memory when the process stops are
 lost. The objects are ordinary writes, billed to the target bucket. `TargetGrants` are stored and
 returned but not applied.
+
+## Event notifications
+
+`PutBucketNotificationConfiguration` takes S3's full XML: `TopicConfiguration`,
+`QueueConfiguration`, `CloudFunctionConfiguration` and `EventBridgeConfiguration`, `Event` lists
+with wildcards (`s3:ObjectCreated:*`), `Filter`/`S3Key`/`FilterRule` `prefix` and `suffix`, and
+`Id` (generated when missing). S3's rules apply: unknown event types, two rules of the same
+name, and configurations that overlap (a shared event type with overlapping prefix and suffix
+filters) are `InvalidArgument`. An empty configuration removes it.
+
+**Events.** Every change S3 notifies about records its event in the same metadata transaction as
+the change, so an event exists if and only if the write was acknowledged:
+
+| event | when |
+|---|---|
+| `s3:ObjectCreated:Put`, `:Post`, `:Copy`, `:CompleteMultipartUpload` | PutObject (and control-plane uploads), POST Object, CopyObject, CompleteMultipartUpload |
+| `s3:ObjectRemoved:Delete`, `:DeleteMarkerCreated` | DeleteObject(s) of an object or a version; a new delete marker |
+| `s3:LifecycleExpiration:Delete`, `:DeleteMarkerCreated` | lifecycle expiration (current, noncurrent, expired delete markers) |
+| `s3:ObjectTagging:Put`, `:Delete` | Put/DeleteObjectTagging |
+| `s3:ObjectAcl:Put` | PutObjectAcl |
+| `s3:ObjectRestore:Completed` | **roll's trash restore** (`POST /v1/storage/buckets/{name}/trash/restore`): the version is readable again. There's no `s3:ObjectRestore:Post` (nothing is archived, so RestoreObject never starts a restore), and the restore never expires, so `glacierEventData` has no `lifecycleRestorationExpiryTime`. |
+| `s3:Replication:OperationFailedReplication` | a version couldn't be replicated (see [Replication](#replication)) |
+| `s3:TestEvent` | sent to each destination when a configuration is put (unless validation is skipped) |
+
+Records are S3's JSON: `Records[]` with `eventVersion` (2.1; 2.2 for replication events; 2.3
+for lifecycle, tagging and ACL events, as S3 documents), `eventSource` `aws:s3`, `awsRegion`,
+`eventTime`, `eventName` without `s3:`, `userIdentity.principalId` (the access key id, or
+`anonymous`; `roll` for changes outside a request, `roll:replication` for replicas),
+`requestParameters.sourceIPAddress`, `responseElements` (`x-amz-request-id`, `x-amz-id-2`),
+`s3.configurationId`, `s3.bucket.name`/`ownerIdentity`/`arn`, and `s3.object.key` (URL-encoded
+like S3's: `red flower.jpg` is `red+flower.jpg`), `size` and `eTag` (not for removals),
+`versionId` (versioned buckets) and `sequencer`. Sequencers are 18 hex digits that grow with
+every change, so a key's events order by comparing them as strings.
+
+**Destinations**, by ARN:
+
+| ARN | delivery |
+|---|---|
+| `arn:roll:queues:<vhost>:<queue>` | published into the roll queue (persistent, `content-type: application/json`, `type` = the event name, `message-id` = a delivery id), confirmed before it counts. `<vhost>` may be percent-encoded (`%2F` for `/`). |
+| `arn:roll:streams:<stream>:<topic>` | produced to the roll stream's topic (Kafka), keyed by the object key, so a key's events stay in one partition in order; headers `s3-event`, `s3-bucket`, `delivery-id`; durable (`acks=all`) before it counts |
+| `arn:roll:webhook:<url>` | an HTTP(S) POST of the JSON, signed: `X-Roll-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`, plus `X-Roll-Event` and `X-Roll-Delivery` (stable across retries). The secret is per bucket, created with the first webhook, shown (and rotated) in the control plane. Redirects aren't followed. Loopback, private, link-local (cloud metadata) and CGNAT addresses are refused unless `ROLL_S3_WEBHOOK_ALLOW_PRIVATE` is set. Any 2xx counts as delivered. |
+| `arn:aws:sqs:…`, `arn:aws:sns:…`, `arn:aws:lambda:…`, `EventBridgeConfiguration` | real AWS, SigV4-signed with the deployment's AWS credentials (the default chain), when `ROLL_S3_NOTIFY_AWS` is on: SQS `SendMessage`, SNS `Publish` (subject `Amazon S3 Notification`), Lambda `Invoke` (`Event`), EventBridge `PutEvents` on the default bus in the deployment's region (source `roll.s3`, since `aws.s3` is reserved for AWS). Otherwise these fail destination validation. |
+
+**Validation.** Unless `x-amz-skip-destination-validation: true`, each destination is checked
+and sent an `s3:TestEvent` before the configuration is stored, as S3 does: a roll queue or stream
+must exist, a webhook must answer 2xx, and AWS destinations need AWS delivery enabled. Failures
+are S3's `InvalidArgument` *Unable to validate the following destination configurations*, with
+`ArgumentName1`/`ArgumentValue1`… naming each ARN and why.
+
+**Delivery** is at least once. A dispatcher hands out an event only once its write is durable,
+retries failures with exponential backoff (1 s doubling to 10 min, with jitter), and keeps a
+key's events for one destination in order (a later one waits while an earlier one is retried).
+Events still failing after 3 days are dropped, counted and logged. Without any notification or
+replication configuration on a bucket, nothing is recorded at all.
+
+Branches don't inherit their parent's notification or replication configuration (or its webhook
+secret); a branch can have its own.
+
+## Replication
+
+`PutBucketReplication` takes S3's `ReplicationConfiguration`: `Role` (accepted, returned, not
+needed), and rules with `ID`, `Priority`, `Status`, `Filter` (`Prefix`, `Tag`, or `And`) or the
+legacy rule `Prefix`, `DeleteMarkerReplication`, `Destination` (`Bucket` ARN, `StorageClass`,
+`Account`, `AccessControlTranslation`; `EncryptionConfiguration`, `ReplicationTime` and `Metrics`
+are stored and returned), `ExistingObjectReplication` and `SourceSelectionCriteria` (stored). As
+on S3, the source and every destination need versioning `Enabled` (`InvalidRequest` otherwise),
+priorities must be unique, V2 rules need `DeleteMarkerReplication`, and the destination can't be
+the source.
+
+- **The destination is a roll bucket** of the same deployment, named by `arn:aws:s3:::<bucket>`.
+  A name that isn't a roll bucket would be a real AWS bucket: that's `NotImplemented`.
+- **Metadata-only.** A replica shares the source version's blob (one more reference): it's
+  instant whatever the size, and copies no bytes. It keeps the source's version id and
+  `Last-Modified`, and takes its place in the destination's history by version id. Deleting the
+  source version later doesn't affect the replica.
+- **Asynchronous,** through the event outbox: the source version is `PENDING`, then `COMPLETED`
+  once every destination has it (or `FAILED`, with an `s3:Replication:OperationFailedReplication`
+  event, if a destination can't take it: it was deleted, its versioning was suspended, or a
+  replica would replace a locked null version). GET and HEAD return `x-amz-replication-status`;
+  replicas say `REPLICA`. Replicas aren't replicated again (no chains, no loops).
+- **Delete markers** replicate when `DeleteMarkerReplication` is `Enabled` (always, for legacy
+  `Prefix` rules), as on S3. Lifecycle delete markers and deletes of a version by id never
+  replicate.
+- **`ExistingObjectReplication` `Enabled`** replicates the versions already in the bucket (S3
+  needs a support case or Batch Replication for that): a background walk queues every version in
+  scope that has no replication status yet.
+- `AccessControlTranslation` `Owner=Destination` makes replicas private; otherwise they keep the
+  source's ACL. Object Lock retention and legal holds replicate if the destination has Object
+  Lock enabled, and are dropped otherwise. `StorageClass` is stored but has no effect.
+- **Branches.** Replication *from* a branch replicates the branch's own writes (a branch doesn't
+  inherit its parent's configuration). Replication *to* a branch writes the replica into the
+  branch like any write: the branch's own branches keep their view (push-down), and the parent
+  doesn't see it.
+- `DeleteBucketReplication` stops new versions from replicating; ones already queued still go.
+
+## Inventory reports
+
+Enabled inventory configurations produce reports on their `Schedule` (`Daily` or `Weekly`,
+checked hourly; the first report comes within the hour), in S3's layout in the destination
+bucket (`arn:aws:s3:::<roll bucket>`):
+
+```text
+<prefix>/<source-bucket>/<config-id>/data/<uuid>.csv.gz
+<prefix>/<source-bucket>/<config-id>/<YYYY-MM-DDTHH-MMZ>/manifest.json
+<prefix>/<source-bucket>/<config-id>/<YYYY-MM-DDTHH-MMZ>/manifest.checksum
+<prefix>/<source-bucket>/<config-id>/hive/dt=<YYYY-MM-DD-HH-MM>/symlink.txt
+```
+
+- CSV only (ORC and Parquet are `NotImplemented` when the configuration is put), every field
+  quoted, keys URL-encoded as S3 does. Columns: `Bucket`, `Key`, then `VersionId`, `IsLatest`
+  and `IsDeleteMarker` with `IncludedObjectVersions` `All`, then the `OptionalFields` asked for,
+  in S3's order.
+- Filled fields: `Size`, `LastModifiedDate`, `ETag`, `StorageClass` (`STANDARD`, what the API
+  reports), `IsMultipartUploaded`, `ReplicationStatus`, `EncryptionStatus` (`SSE-S3`),
+  `ObjectLockRetainUntilDate`, `ObjectLockMode`, `ObjectLockLegalHoldStatus`, `BucketKeyStatus`
+  (`DISABLED`), `ChecksumAlgorithm` and `ObjectOwner`. `IntelligentTieringAccessTier` and
+  `ObjectAccessControlList` are empty.
+- `Filter` `Prefix` applies. `manifest.json` has S3's fields (`sourceBucket`,
+  `destinationBucket`, `version` `2016-11-30`, `creationTimestamp`, `fileFormat`, `fileSchema`,
+  `files` with `key`, `size`, `MD5checksum`); `manifest.checksum` is the manifest's MD5.
+- Files are written through the normal put path: durable once written, billed to the destination
+  bucket, and they trigger the destination's own notifications. Data files are split every
+  16 MiB compressed. A report that fails is retried at the next hourly check.
 
 ## Behaviour differences
 

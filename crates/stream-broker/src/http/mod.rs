@@ -40,6 +40,20 @@ pub struct Api {
 
 type S = State<Arc<Api>>;
 
+/// Produce one record to a topic from inside the process (roll storage's event notifications),
+/// exactly as the HTTP data plane does: a keyed record goes to its key's partition, and this
+/// returns once it's durable.
+pub async fn produce_one(b: &Arc<Broker>, stream: &Arc<Stream>, topic: &Arc<Topic>, key: Option<bytes::Bytes>, value: bytes::Bytes, headers: Vec<(String, bytes::Bytes)>, timeout: std::time::Duration) -> Result<(), String> {
+    let api = Api { b: b.clone(), leases: leases::Leases::default(), rr: AtomicUsize::new(0) };
+    let record = stream_log::batch::NewRecord { key, value: Some(value), headers: headers.into_iter().map(|(k, v)| (k, Some(v))).collect(), timestamp: None };
+    let out = data::produce_records(&api, stream, topic, vec![data::Incoming { partition: None, record }], data::Acks::All, timeout).await;
+    match out.into_iter().next() {
+        Some(Ok(_)) => Ok(()),
+        Some(Err(e)) => Err(e.message),
+        None => Err("nothing was produced".into()),
+    }
+}
+
 pub fn router(b: Arc<Broker>) -> Router {
     let api = Arc::new(Api { b, leases: leases::Leases::default(), rr: AtomicUsize::new(0) });
     Router::new()

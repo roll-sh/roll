@@ -22,6 +22,7 @@ pub mod backend;
 pub mod config;
 mod db;
 mod error;
+pub mod events;
 mod ids;
 mod jobs;
 mod lifecycle;
@@ -41,6 +42,7 @@ pub use backend::{Backend, BlobAttrs, BlobSse, ByteStream, CopySource, CustomerK
 pub use config::{PublicAccessBlock, RedirectAll, Redirect, RoutingCondition, RoutingRule, WebsiteConfig};
 pub use sse::Encryption;
 pub use error::{Result, StoreError};
+pub use events::{EventRecord, InventoryEntry, NotificationConfig, NotificationTarget, Origin, PendingEvent, ReplicationConfig, ReplicationRule, Replicated, RuleFilter};
 pub use ids::{blob_key, day_of, version_id};
 pub use log::LogStats;
 pub use meter::{Class, Counters, Meter};

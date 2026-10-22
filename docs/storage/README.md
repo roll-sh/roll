@@ -48,6 +48,11 @@ Other settings:
   [compatibility](compatibility.md#server-side-encryption).
 - `ROLL_S3_BUCKET`, `ROLL_S3_PREFIX`, `ROLL_S3_ENDPOINT`: the backing store, shared with the
   other roll products. Without a bucket, a directory under `.roll/` stands in.
+- `ROLL_S3_NOTIFY_AWS`: deliver event notifications to real AWS destinations (SQS, SNS, Lambda,
+  EventBridge) with this host's AWS credentials. Off by default: roll queues, roll streams and
+  webhooks work without it.
+- `ROLL_S3_WEBHOOK_ALLOW_PRIVATE`: let notification webhooks reach loopback and private
+  addresses (single-tenant installs, local development).
 - `--no-storage` / `ROLL_NO_STORAGE`: don't run roll storage.
 
 The roll API on `:7070` has no authentication. Keep it private.
@@ -283,3 +288,26 @@ These are the same as S3:
 | keys per list page, per `DeleteObjects` | 1000 |
 | presigned URL lifetime | 7 days |
 | request clock skew | 15 minutes |
+
+## Events into roll queues and streams
+
+A bucket can send its S3 event notifications straight into roll queues, roll streams or a
+webhook, with the S3 API (any SDK) or the control plane:
+
+```sh
+aws --endpoint-url http://127.0.0.1:59000 s3api put-bucket-notification-configuration --bucket assets \
+  --notification-configuration '{"QueueConfigurations": [{"QueueArn": "arn:roll:queues:%2F:uploads",
+    "Events": ["s3:ObjectCreated:*"], "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "img/"}]}}}]}'
+```
+
+The queue (`uploads` in vhost `/`) must exist; it receives an `s3:TestEvent` right away, then one
+message (S3's event JSON) per upload under `img/`. Use `arn:roll:streams:<stream>:<topic>` for a
+Kafka topic (keyed by the object key) and `arn:roll:webhook:https://…` for an HTTP endpoint
+(signed with the bucket's webhook secret, shown by `GET /v1/storage/buckets/assets`). See
+[compatibility](compatibility.md#event-notifications), and for replication and inventory reports
+the sections after it.
+
+Manual check against a running `rolld`: create the queue (`roll queues` or the management API),
+put the configuration above, upload `img/a.png`, and read the queue: the second message's
+`Records[0].eventName` is `ObjectCreated:Put` (the first is the test event). The rolld unit test
+`storage_events::tests::a_roll_queue_receives_storage_events` does the same in process.

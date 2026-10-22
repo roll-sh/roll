@@ -259,6 +259,8 @@ impl Store {
             row.checksum = Some(Checksum { algorithm: "CRC32C".into(), kind: "FULL_OBJECT".into(), value: base64::engine::general_purpose::STANDARD.encode(crc.to_be_bytes()) });
         }
         let dst_enc = dst_sse.map(Encryption::of);
+        // Reported as the copy it is (`ObjectCreated:Copy`), like copies that share the blob.
+        crate::events::set_origin(|o| o.create = Some("Copy"));
         self.commit_row(dst_bucket, row, crc, &opts.condition, dst_enc.as_ref()).await
     }
 

@@ -88,6 +88,8 @@ impl Store {
                             }
                             rows::version_delete(c, &b.id, &v)?;
                             versioning::retire(c, &b, &v, true, now)?;
+                            let o = DeleteOutcome { existed: true, version_id: Some(v.version_id()), delete_marker: v.delete_marker };
+                            crate::events::emit_delete(c, &b, key, &o, true, "LifecycleExpiration", now)?;
                             n += 1;
                         }
                     }
@@ -129,7 +131,8 @@ impl Store {
                         if !r.delete_marker || !rows::own_versions(c, &b.id, key)?.is_empty() {
                             continue;
                         }
-                        versioning::delete_version(c, &b, &chain, key, &r.version_id(), false, now)?;
+                        let o = versioning::delete_version(c, &b, &chain, key, &r.version_id(), false, now)?;
+                        crate::events::emit_delete(c, &b, key, &o, true, "LifecycleExpiration", now)?;
                         n += 1;
                     }
                     Ok(n)

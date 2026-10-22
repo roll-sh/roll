@@ -3,6 +3,7 @@
 //! in `versioning`.
 
 use crate::error::{Result, StoreError};
+use crate::events;
 use crate::model::*;
 use crate::rows;
 use crate::store::{Store, find_bucket};
@@ -45,10 +46,12 @@ impl Store {
                     Some(_) => {}
                 }
             }
-            match version_id {
+            let o = match version_id {
                 None => versioning::delete_key(c, &b, &chain, key, now),
                 Some(v) => versioning::delete_version(c, &b, &chain, key, v, bypass, now),
-            }
+            }?;
+            events::emit_delete(c, &b, key, &o, version_id.is_some(), "ObjectRemoved", now)?;
+            Ok(o)
         })
         .await
     }
@@ -67,6 +70,9 @@ impl Store {
                     None => versioning::delete_key(c, &b, &chain, k, now),
                     Some(v) => versioning::delete_version(c, &b, &chain, k, v, bypass, now),
                 });
+                if let Ok(o) = &r {
+                    events::emit_delete(c, &b, k, o, v.is_some(), "ObjectRemoved", now)?;
+                }
                 match r {
                     Err(StoreError::Internal(e)) => return Err(StoreError::Internal(e)),
                     r => out.push(r),
@@ -100,14 +106,16 @@ impl Store {
     pub async fn put_version_tags(&self, bucket: &str, key: &str, version_id: Option<&str>, tags: BTreeMap<String, String>) -> Result<ObjectMeta> {
         validate::tags(&tags)?;
         let now = self.now();
+        let name = if tags.is_empty() { "ObjectTagging:Delete" } else { "ObjectTagging:Put" };
         self.write(|c| {
             let b = find_bucket(c, bucket)?;
             let chain = rows::chain(c, &b.id)?;
-            versioning::update_version(c, &b, &chain, key, version_id, now, |r| {
+            let r = versioning::update_version(c, &b, &chain, key, version_id, now, |r| {
                 r.headers.tags = tags;
                 Ok(())
-            })?
-            .meta()
+            })?;
+            events::emit_update(c, &b, name, &r, now)?;
+            r.meta()
         })
         .await
     }

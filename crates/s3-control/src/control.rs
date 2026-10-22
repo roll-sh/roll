@@ -103,6 +103,9 @@ pub struct Control {
     pub store: Arc<Store>,
     pub cfg: ControlConfig,
     presign_secret: String,
+    /// The S3 API's event notifier (validates notification destinations); set by
+    /// [`Control::set_notifier`].
+    notifier: std::sync::OnceLock<Arc<s3_server::Notifier>>,
 }
 
 fn random_secret() -> String {
@@ -199,7 +202,38 @@ impl Control {
             Some(k) => k.secret,
             None => store.ensure_key(CONTROL_KEY_ID, &random_secret(), CONTROL_KEY_NAME).await?.secret,
         };
-        Ok(Arc::new(Self { store, cfg, presign_secret: secret }))
+        Ok(Arc::new(Self { store, cfg, presign_secret: secret, notifier: Default::default() }))
+    }
+
+    /// Connect the S3 API's notifier, so `PATCH` can set notifications (their destinations are
+    /// validated, and sent a test event, as through the S3 API).
+    pub fn set_notifier(&self, n: Arc<s3_server::Notifier>) {
+        let _ = self.notifier.set(n);
+    }
+
+    /// Replace a bucket's notifications (`configurations` empty and no EventBridge: none).
+    pub async fn set_notifications(&self, bucket: &str, cfg: s3_store::NotificationConfig, skip_validation: bool) -> Result<()> {
+        let b = self.store.bucket(bucket)?;
+        if cfg.is_empty() {
+            self.store.set_notifications(bucket, None).await?;
+            return Ok(());
+        }
+        let n = self.notifier.get().ok_or_else(|| ControlError::Unavailable("notifications need the S3 API, which isn't running".into()))?;
+        n.put_config(&b, cfg, skip_validation).await.map_err(|e| match e {
+            s3_server::NotifyError::Invalid(m) => ControlError::Invalid(m),
+            s3_server::NotifyError::Destinations(f) => {
+                ControlError::Invalid(format!("Unable to validate the following destination configurations: {}", f.iter().map(|(a, w)| format!("{a}: {w}")).collect::<Vec<_>>().join("; ")))
+            }
+            s3_server::NotifyError::Store(e) => e.into(),
+        })?;
+        Ok(())
+    }
+
+    /// The `notifications` of a bucket view.
+    fn notifications_view(&self, b: &Bucket) -> Value {
+        let cfg = self.store.notifications(&b.name).ok().flatten().unwrap_or_default();
+        let secret = self.store.bucket_config(&b.name, s3_store::config::kind::WEBHOOK_SECRET, "").ok().flatten();
+        json!({ "configurations": cfg.configurations, "event_bridge": cfg.event_bridge, "webhook_secret": secret })
     }
 
     pub fn info(&self) -> Result<Value> {
@@ -235,6 +269,7 @@ impl Control {
         let endpoint = self.cfg.endpoint.trim_end_matches('/');
         v["tags"] = json!(self.store.bucket_tags(&b.name).unwrap_or_default());
         v["website"] = json!(self.store.bucket_website(&b.name).ok().flatten());
+        v["notifications"] = self.notifications_view(b);
         v["endpoint"] = json!(endpoint);
         v["url"] = json!(format!("{endpoint}/{}", b.name));
         v["virtual_host_url"] = json!(self.virtual_host_url(&b.name));

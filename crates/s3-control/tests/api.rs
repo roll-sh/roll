@@ -31,11 +31,13 @@ async fn start_with(store_cfg: impl FnOnce(&mut StoreConfig), control_cfg: impl 
     let s3_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let s3 = format!("http://127.0.0.1:{}", s3_listener.local_addr().unwrap().port());
     let server = s3_server::Server::new(store.clone(), s3_server::Config { spool_dir: dir.path().to_path_buf(), ..Default::default() });
+    let notifier = server.notifier.clone();
     tokio::spawn(async move { s3_server::serve(s3_listener, server).await.unwrap() });
 
     let mut cc = ControlConfig::local(s3.clone());
     control_cfg(&mut cc);
     let control = Control::new(store.clone(), cc).await.unwrap();
+    control.set_notifier(notifier);
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", api_listener.local_addr().unwrap().port());
     tokio::spawn(async move { axum::serve(api_listener, s3_control::api::router(control)).await.unwrap() });
@@ -1104,4 +1106,36 @@ async fn versioning_versions_and_object_lock() {
     assert_eq!(t.err("PATCH", "/v1/storage/buckets/ver", Some(bad)).await, StatusCode::BAD_REQUEST);
     // Branches inherit the versioning state.
     assert_eq!(t.ok("POST", "/v1/storage/buckets/ver/branches", Some(json!({ "name": "ver-br" }))).await["versioning"], "Enabled");
+}
+
+#[tokio::test]
+async fn bucket_notifications() {
+    let t = start().await;
+    t.bucket("notified").await;
+    let b = t.ok("GET", "/v1/storage/buckets/notified", None).await;
+    assert_eq!(b["notifications"], json!({ "configurations": [], "event_bridge": false, "webhook_secret": null }));
+    // Destinations are validated as through the S3 API: no roll queue answers here.
+    let queue = json!({ "destination": "arn:roll:queues:/:orders", "events": ["s3:ObjectCreated:*"], "prefix": "img/" });
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/notified", Some(json!({ "notifications": { "configurations": [queue] } }))).await, StatusCode::BAD_REQUEST);
+    // A bad configuration: nothing in the PATCH is applied.
+    let bad = json!({ "destination": "arn:roll:queues:/:orders", "events": ["s3:Nope"] });
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/notified", Some(json!({ "tags": { "a": "b" }, "notifications": { "configurations": [bad] } }))).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/notified", None).await["tags"], json!({}));
+    let hook = json!({ "id": "hook", "destination": "arn:roll:webhook:https://example.com/s3", "events": ["s3:ObjectRemoved:*"] });
+    let b = t.ok("PATCH", "/v1/storage/buckets/notified", Some(json!({ "notifications": { "configurations": [queue, hook], "skip_destination_validation": true } }))).await;
+    let n = &b["notifications"];
+    assert_eq!(n["configurations"].as_array().unwrap().len(), 2);
+    assert_eq!(n["configurations"][0]["type"], "queue", "the type follows the ARN");
+    assert_eq!(n["configurations"][0]["prefix"], "img/");
+    assert!(!n["configurations"][0]["id"].as_str().unwrap().is_empty(), "ids are generated");
+    assert_eq!(n["configurations"][1]["type"], "topic");
+    let secret = n["webhook_secret"].as_str().unwrap().to_string();
+    assert!(secret.starts_with("whsec_"), "{secret}");
+    // The S3 API sees the same configuration.
+    assert_eq!(t.store.notifications("notified").unwrap().unwrap().configurations.len(), 2);
+    let b = t.ok("PATCH", "/v1/storage/buckets/notified", Some(json!({ "notifications": { "configurations": [hook], "skip_destination_validation": true, "rotate_webhook_secret": true } }))).await;
+    assert_ne!(b["notifications"]["webhook_secret"].as_str().unwrap(), secret, "rotated");
+    let b = t.ok("PATCH", "/v1/storage/buckets/notified", Some(json!({ "notifications": { "configurations": [] } }))).await;
+    assert_eq!(b["notifications"]["configurations"], json!([]));
+    assert!(t.store.notifications("notified").unwrap().is_none());
 }

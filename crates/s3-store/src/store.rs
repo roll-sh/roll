@@ -137,6 +137,7 @@ pub struct Store {
     pub(crate) last_flush: Mutex<i64>,
     pub(crate) scrub: Mutex<ScrubReport>,
     pub(crate) unexpected_orphans: std::sync::atomic::AtomicU64,
+    pub(crate) events: crate::events::EventState,
 }
 
 /// A bucket's row.
@@ -301,8 +302,10 @@ impl Store {
             last_flush: Mutex::new(now),
             scrub: Mutex::new(scrub),
             unexpected_orphans: Default::default(),
+            events: Default::default(),
         });
         store.ensure_owner().await?;
+        store.load_event_state()?;
         store.start_jobs();
         Ok(store)
     }

@@ -16,6 +16,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 mod queues;
+mod storage_events;
 
 /// roll daemon: serverless Postgres, serverless Redis, S3-compatible storage, Kafka-compatible streams, tasks and RabbitMQ-compatible queues on
 /// your machine (or an EC2 host).
@@ -139,6 +140,13 @@ struct Args {
     s3_access_key: Option<String>,
     #[arg(long, env = "ROLL_S3_SECRET_KEY", requires = "s3_access_key", hide_env_values = true)]
     s3_secret_key: Option<String>,
+    /// Deliver storage event notifications to AWS (SQS, SNS, Lambda, EventBridge) with this
+    /// host's AWS credentials. Off, AWS destinations fail validation.
+    #[arg(long, env = "ROLL_S3_NOTIFY_AWS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_notify_aws: bool,
+    /// Let storage webhooks reach loopback and private addresses (single-tenant installs).
+    #[arg(long, env = "ROLL_S3_WEBHOOK_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_webhook_allow_private: bool,
     /// Don't run roll storage (the S3 API).
     #[arg(long, env = "ROLL_NO_STORAGE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     no_storage: bool,
@@ -262,6 +270,12 @@ async fn run() -> anyhow::Result<()> {
     }
     broker.txns.recover(&broker).await?;
     let kafka = tokio::net::TcpListener::bind(args.kafka).await?;
+    // Storage event notifications into roll queues and streams, in process.
+    if let Some(st) = &storage_svc {
+        let sink = storage_events::RollSink { queues: queues.as_ref().map(|q| q.broker.clone()), streams: broker.clone() };
+        st.server.notifier.set_sink(std::sync::Arc::new(sink));
+        st.control.set_notifier(st.server.notifier.clone());
+    }
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
@@ -337,6 +351,8 @@ struct StorageOpts {
     s3_kms: Option<bool>,
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
+    s3_notify_aws: bool,
+    s3_webhook_allow_private: bool,
 }
 
 impl From<&Args> for StorageOpts {
@@ -353,6 +369,8 @@ impl From<&Args> for StorageOpts {
             s3_kms: a.s3_kms,
             s3_access_key: a.s3_access_key.clone(),
             s3_secret_key: a.s3_secret_key.clone(),
+            s3_notify_aws: a.s3_notify_aws,
+            s3_webhook_allow_private: a.s3_webhook_allow_private,
         }
     }
 }
@@ -373,6 +391,8 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
         spool_dir: home.join("storage").join("spool"),
         ..Default::default()
     };
+    scfg.notify.aws = args.s3_notify_aws;
+    scfg.notify.webhook_allow_private = args.s3_webhook_allow_private;
     let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
     cfg.node = args.node.clone();
     cfg.block_public_access = args.s3_block_public_access;

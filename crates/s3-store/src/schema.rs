@@ -148,6 +148,23 @@ CREATE TABLE blob_sse (
   created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 "#,
+// Event notifications and replication (`events.rs`): the outbox, one row per delivery, written
+// in the same transaction as the change it reports (`seq` comes from a counter in `state`, so
+// it's never reused), and each version's replication status.
+r#"
+CREATE TABLE events (
+  seq INTEGER PRIMARY KEY, bucket_id TEXT NOT NULL, key TEXT NOT NULL, dest TEXT NOT NULL,
+  kind TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL, next_at INTEGER NOT NULL, error TEXT
+);
+CREATE INDEX events_due ON events (next_at);
+CREATE INDEX events_order ON events (dest, key, seq);
+CREATE INDEX events_bucket ON events (bucket_id, key);
+CREATE TABLE replication_status (
+  bucket_id TEXT NOT NULL, key TEXT NOT NULL, version_id TEXT NOT NULL, status TEXT NOT NULL,
+  PRIMARY KEY (bucket_id, key, version_id)
+) WITHOUT ROWID;
+"#,
 ];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;
