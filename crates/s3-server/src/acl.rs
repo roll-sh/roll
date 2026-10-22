@@ -3,10 +3,10 @@
 //! **Ownership.** A bucket's `ObjectOwnership` is `BucketOwnerEnforced` unless set otherwise
 //! (S3's default since 2023): ACLs are then disabled, the bucket owner owns every object, reads
 //! of an ACL show the owner's full control, and writes carrying any ACL but
-//! `bucket-owner-full-control` (or `private` from the bucket owner's own account, or grants to
-//! the bucket owner only) fail with `AccessControlListNotSupported`. With `BucketOwnerPreferred`
-//! an object written with `bucket-owner-full-control` is the bucket owner's and any other is its
-//! writer's account's; with `ObjectWriter` (or no controls, after DeleteBucketOwnershipControls)
+//! `bucket-owner-full-control` (or `private` from the bucket owner's own account, or an XML ACL
+//! that gives the bucket owner full control and nobody anything) fail with
+//! `AccessControlListNotSupported`. With `BucketOwnerPreferred` an object written with
+//! `bucket-owner-full-control` is the bucket owner's and any other is its writer's account's; with `ObjectWriter` (or no controls, after DeleteBucketOwnershipControls)
 //! every object is its writer's. An object's owner is kept in its ACL document (S3's
 //! `AccessControlPolicy` has an `Owner`), so every copy of the row carries it.
 //!
@@ -361,7 +361,9 @@ fn enforced_ok(ctx: &Ctx, bucket_owner: &str, r: &Requested) -> bool {
         None => {
             let mut acl = r.acl.clone();
             acl.normalize(bucket_owner);
-            acl.owner_only()
+            // S3 accepts the bucket owner's full control and nothing else: an ACL that grants
+            // nobody anything (or the owner less) isn't `bucket-owner-full-control` either.
+            acl.owner_only() && acl.grants.iter().any(|g| g.grantee == Grantee::Owner && g.permission == "FULL_CONTROL")
         }
     }
 }

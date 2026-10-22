@@ -5,90 +5,81 @@
 # Categories: bug (a real incompatibility, not fixed yet), env (the test environment),
 # deliberate (an invariant wins), aws-default / aws (roll does what S3 does), gap (a feature
 # roll doesn't have), suite (the test or its RGW expectations).
+#
+# The script runs on two backends (`--backend local|localstack`). A category ending in
+# `@local` or `@localstack` (`env@local:`) only applies to that backend; the rest to both.
 
 
-# The conformance environment: a local directory backend, no AWS KMS. (62)
-test_s3.py::test_bucket_policy_put_obj_kms_noenc  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-1024]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-1048576]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-1]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-1024]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-1048576]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-1]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-8388608]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-1024]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-1048576]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-1]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-1024]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-1048576]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-1]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-1024]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-1048576]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-1]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-1024]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-1048576]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-1]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-1024]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-1048576]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-1]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-8388608]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_copy_part_enc[sse-c-sse-kms-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_part_enc[sse-c-sse-s3-STANDARD-STANDARD-8388608]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_copy_part_enc[sse-kms-sse-c-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_part_enc[sse-kms-sse-kms-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_part_enc[sse-kms-sse-s3-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_part_enc[sse-s3-sse-kms-STANDARD-STANDARD-8388608]  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_copy_part_enc[sse-s3-sse-s3-STANDARD-STANDARD-8388608]  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_kms_default_post_object_authenticated_request  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_default_upload_1b  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_default_upload_1kb  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_default_upload_1mb  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_default_upload_8mb  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_method_head  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_multipart_invalid_chunks_1  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_multipart_invalid_chunks_2  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_multipart_upload  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_post_object_authenticated_request  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_present  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_transfer_13b  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_transfer_1MB  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_transfer_1b  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_kms_transfer_1kb  env: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
-test_s3.py::test_sse_s3_default_method_head  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_default_multipart_upload  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_default_post_object_authenticated_request  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_default_upload_1b  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_default_upload_1kb  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_default_upload_1mb  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_default_upload_8mb  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_encrypted_upload_1b  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_encrypted_upload_1kb  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_encrypted_upload_1mb  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
-test_s3.py::test_sse_s3_encrypted_upload_8mb  env: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+# The local backend (`@local`): a local directory, with no AWS KMS behind it and no encryption
+# at rest. The LocalStack backend runs all of these. (62)
+test_s3.py::test_bucket_policy_put_obj_kms_noenc  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-1024]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-1048576]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-1]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-1024]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-1048576]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-1]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_part_enc[sse-c-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-c-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_part_enc[sse-kms-sse-c-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-kms-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-kms-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-s3-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-s3-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_kms_default_post_object_authenticated_request  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_default_upload_1b  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_default_upload_1kb  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_default_upload_1mb  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_default_upload_8mb  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_method_head  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_multipart_invalid_chunks_1  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_multipart_invalid_chunks_2  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_multipart_upload  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_post_object_authenticated_request  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_present  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_transfer_13b  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_transfer_1MB  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_transfer_1b  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_transfer_1kb  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_s3_default_method_head  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_multipart_upload  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_post_object_authenticated_request  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_upload_1b  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_upload_1kb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_upload_1mb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_upload_8mb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_encrypted_upload_1b  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_encrypted_upload_1kb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_encrypted_upload_1mb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_encrypted_upload_8mb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
 
-# Deliberate: roll's reliability invariants win over S3's behaviour. (15)
-test_s3.py::test_object_lock_changing_mode_from_governance_without_bypass  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_delete_multipart_object_with_retention  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_delete_object_with_retention  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_delete_object_with_retention_and_marker  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_get_obj_metadata  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_get_obj_retention  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_get_obj_retention_iso8601  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_multi_delete_object_with_retention  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_put_obj_retention  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_put_obj_retention_increase_period  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_put_obj_retention_override_default_retention  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_put_obj_retention_shorten_period  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_put_obj_retention_shorten_period_bypass  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_put_obj_retention_versionid  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
-test_s3.py::test_object_lock_uploading_obj  deliberate: a version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted yet (S3 destroys it at once)
+# The LocalStack backend (`@localstack`): LocalStack's S3 and KMS standing in for AWS. (2)
+test_s3.py::test_copy_part_enc[sse-kms-sse-c-STANDARD-STANDARD-8388608]  env@localstack: LocalStack's UploadPartCopy ignores SSE-C (its provider leaves it a TODO), so roll refuses the unconfirmed encrypted part (NotImplemented) and keeps nothing
+test_s3.py::test_sse_kms_no_key  aws@localstack: aws:kms without a key id uses the AWS managed key (aws/s3), as on S3; RGW refuses it (on the local backend every SSE-KMS request is NotImplemented)
 
-# S3's current defaults, which the suite predates. (87)
+# S3's current defaults, which the suite predates. (88)
 test_headers.py::test_object_acl_create_contentlength_none  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_100_continue  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_access_bucket_private_object_publicread  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
@@ -106,7 +97,7 @@ test_s3.py::test_block_public_put_bucket_acls  aws-default: ACLs are off by defa
 test_s3.py::test_bucket_acl_canned  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_bucket_acl_canned_authenticatedread  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_bucket_acl_canned_publicreadwrite  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
-test_s3.py::test_bucket_acl_revoke_all  aws-default: with ACLs off (BucketOwnerEnforced) the owner always has FULL_CONTROL
+test_s3.py::test_bucket_acl_revoke_all  aws-default: with ACLs off (BucketOwnerEnforced) S3 only accepts an ACL giving the bucket owner full control: one with no grants is AccessControlListNotSupported
 test_s3.py::test_bucket_concurrent_set_canned_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_bucket_list_objects_anonymous  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_bucket_listv2_objects_anonymous  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
@@ -173,6 +164,7 @@ test_s3.py::test_post_object_set_success_code  aws-default: ACLs are off by defa
 test_s3.py::test_post_object_success_redirect_action  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_post_object_tags_anonymous_request  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_put_bucket_acl_grant_group_read  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_put_bucket_logging  aws-default: a target bucket with ACLs off (BucketOwnerEnforced, the default) takes no TargetGrants: S3 refuses them ("Target grants not allowed for bucket owner enforced buckets")
 test_s3.py::test_put_bucket_ownership_bucket_owner_enforced  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_versioned_object_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_versioned_object_acl_no_version_specified  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
@@ -192,7 +184,7 @@ test_s3.py::test_put_bucket_logging_policy_wildcard  aws: its log-delivery polic
 # Features roll doesn't have: BitTorrent. (1)
 test_s3.py::test_get_object_torrent  gap: no BitTorrent (S3 dropped it in 2024): NotImplemented
 
-# The suite itself: RGW-specific expectations or tests that can't fail as written. (36)
+# The suite itself: RGW-specific expectations or tests that can't pass on S3 as written. (34)
 test_headers.py::test_bucket_create_bad_authorization_empty  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
 test_headers.py::test_bucket_create_bad_authorization_invalid_aws2  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
 test_headers.py::test_bucket_create_bad_authorization_none  suite: botocore signs after the test's header hook, so the request is valid (fails_on_rgw too)
@@ -205,12 +197,11 @@ test_headers.py::test_object_create_bad_contentlength_none  suite: the HTTP stac
 test_headers.py::test_object_create_bad_date_none_aws2  suite: SigV2 requests carry a Date header besides x-amz-date, so removing x-amz-date leaves a valid request (fails_on_rgw too)
 test_s3.py::test_bucket_list_prefix_unreadable  suite: S3 url-encodes Prefix in ListObjects (v1) with encoding-type=url, which botocore doesn't decode
 test_s3.py::test_bucket_logging_owner  suite: puts a policy statement without Resource, which S3 refuses as MalformedPolicy
-test_s3.py::test_bucket_policy_allow_notprincipal  suite: RGW refuses Allow with NotPrincipal; IAM accepts it (and advises against it), and so does roll
 test_s3.py::test_bucket_policy_different_tenant  suite: RGW tenants (`:bucket` and `tenant:bucket` names); AWS has no tenant-qualified bucket names (names are global), so this is RGW-only
 test_s3.py::test_bucket_policy_put_obj_request_obj_tag  suite: the test adds x-amz-tagging to the main client, not to alt's request it checks (see its TODO)
 test_s3.py::test_bucket_policy_set_condition_operator_end_with_IfExists  suite: expects the bucket owner to be refused when an Allow statement doesn't match; on S3 (and roll) the owner's own permission still allows it
 test_s3.py::test_bucket_policy_tenanted_bucket  suite: RGW tenants (`:bucket` and `tenant:bucket` names); AWS has no tenant-qualified bucket names (names are global), so this is RGW-only
-test_s3.py::test_delete_marker_expiration  suite: needs RGW's accelerated lifecycle clock (lc_debug_interval); roll's lifecycle job runs daily
+test_s3.py::test_delete_marker_expiration  suite: needs RGW's accelerated lifecycle clock (lc_debug_interval); lifecycle runs daily on S3 and roll, so it can't pass on S3 either
 test_s3.py::test_delete_marker_nonversioned  suite: RGW sends x-amz-delete-marker: false for missing keys in unversioned buckets; S3 and roll send no such header
 test_s3.py::test_multipart_get_part  suite: RGW answers 400 InvalidPart for a partNumber past the last part; S3 and roll answer 416 (not satisfiable)
 test_s3.py::test_multipart_resend_first_finishes_last  suite: lists part 1 twice in CompleteMultipartUpload, which S3 refuses as InvalidPartOrder (parts must ascend)
@@ -223,9 +214,8 @@ test_s3.py::test_object_checksum_sha256  suite: expects BadDigest for a malforme
 test_s3.py::test_object_lock_put_obj_lock_invalid_days  suite: expects RGW's InvalidRetentionPeriod for a zero default retention; roll answers InvalidArgument (400)
 test_s3.py::test_object_lock_put_obj_lock_invalid_years  suite: expects RGW's InvalidRetentionPeriod for a zero default retention; roll answers InvalidArgument (400)
 test_s3.py::test_object_raw_put_authenticated_expired  suite: a presigned URL with a negative X-Amz-Expires is malformed (400 AuthorizationQueryParametersError), as on S3, not expired (403)
-test_s3.py::test_object_read_unreadable  suite: RGW refuses a key with C1 control characters as an unparseable URI; S3 and roll accept any UTF-8 key
+test_s3.py::test_object_read_unreadable  suite: written for Python 2, where the key went out as raw Latin-1 bytes (not UTF-8, which S3 and roll refuse as InvalidURI); botocore sends it as UTF-8 (C1 control characters), a valid key: 404
 test_s3.py::test_object_set_get_unicode_metadata  suite: roll returns non-ASCII metadata as the UTF-8 bytes it got; botocore reads response headers as Latin-1 (S3 RFC 2047-encodes them, which botocore doesn't decode either)
 test_s3.py::test_object_write_with_chunked_transfer_encoding  suite: a PUT with Transfer-Encoding: chunked and no length; S3 needs Content-Length (or aws-chunked with x-amz-decoded-content-length) too
-test_s3.py::test_put_bucket_logging  suite: RGW drops TargetGrants; roll stores and returns them, as S3 does
 test_s3.py::test_put_bucket_logging_errors  suite: RGW answers NoSuchKey for a missing target bucket; S3 (and roll) answer InvalidTargetBucketForLogging
 test_s3.py::test_put_bucket_logging_permissions  suite: RGW checks the target bucket's policy at PutBucketLogging; roll writes logs as the deployment (no logging service principal to grant)

@@ -260,6 +260,15 @@ pub(crate) fn delete_version(c: &Connection, b: &BucketRow, chain: &[String], ke
         return Ok(DeleteOutcome { existed: false, version_id: Some(version_id.to_string()), delete_marker: false });
     };
     check_deletable(&r, now, bypass)?;
+    // A GOVERNANCE retention lifted with the bypass is gone, as on S3: the trash keeps the
+    // version for the bucket's recovery window like any other permanent delete, but no longer
+    // under a lock (so it doesn't hold the bucket). Push-down copies in branches keep theirs.
+    let mut r = r;
+    // (`check_deletable` already refused anything else; this never lifts COMPLIANCE.)
+    if r.lock.retained(now) && bypass && r.lock.mode.as_deref() == Some("GOVERNANCE") {
+        r.lock.mode = None;
+        r.lock.retain_until = None;
+    }
     match place {
         Place::Noncurrent => {
             rows::version_delete(c, &b.id, &r)?;

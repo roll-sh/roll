@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
-use s3_proto::http::{parse_query, percent_decode_utf8};
+use s3_proto::http::{parse_query, percent_decode_path};
 use s3_proto::{Code, S3Error};
 use s3_store::{Class, Store};
 use std::net::IpAddr;
@@ -116,14 +116,14 @@ fn request_id() -> String {
 fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Option<String>, Option<String>, bool), S3Error> {
     let path = raw_path.strip_prefix('/').unwrap_or(raw_path);
     if let Some(b) = crate::website::host_bucket(server, headers) {
-        return Ok((Some(b), Some(percent_decode_utf8(path)?), true));
+        return Ok((Some(b), Some(percent_decode_path(path)?), true));
     }
     if let Some(domain) = &server.cfg.virtual_host_domain {
         // Host names are case-insensitive.
         let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|c| c.is_ascii_digit())).map_or(host.as_str(), |(h, _)| h);
         if let Some(b) = host.strip_suffix(domain.to_ascii_lowercase().as_str()).and_then(|h| h.strip_suffix('.')).filter(|b| !b.is_empty()) {
-            let key = Some(percent_decode_utf8(path)?).filter(|k| !k.is_empty());
+            let key = Some(percent_decode_path(path)?).filter(|k| !k.is_empty());
             return Ok((Some(b.to_string()), key, true));
         }
     }
@@ -131,8 +131,8 @@ fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Opti
         return Ok((None, None, false));
     }
     let (b, k) = path.split_once('/').unwrap_or((path, ""));
-    let bucket = percent_decode_utf8(b)?;
-    let key = Some(percent_decode_utf8(k)?).filter(|k| !k.is_empty());
+    let bucket = percent_decode_path(b)?;
+    let key = Some(percent_decode_path(k)?).filter(|k| !k.is_empty());
     Ok((Some(bucket), key, false))
 }
 

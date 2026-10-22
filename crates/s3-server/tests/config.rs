@@ -10,7 +10,7 @@ use aws_sdk_s3::types::{
     InventoryIncludedObjectVersions, InventoryS3BucketDestination, InventorySchedule, LoggingEnabled, MetricsConfiguration, MetricsFilter, NotificationConfiguration, ObjectCannedAcl, ObjectIdentifier,
     ObjectOwnership, Owner, OwnershipControls, OwnershipControlsRule, PartitionDateSource, PartitionedPrefix, Payer, Permission, PublicAccessBlockConfiguration, Redirect, RedirectAllRequestsTo,
     RequestPaymentConfiguration, RoutingRule, ServerSideEncryption, ServerSideEncryptionByDefault, ServerSideEncryptionConfiguration, ServerSideEncryptionRule, StorageClassAnalysis, Tag, Tagging,
-    TargetObjectKeyFormat, Tiering, Type, WebsiteConfiguration,
+    BucketLogsPermission, TargetGrant, TargetObjectKeyFormat, Tiering, Type, WebsiteConfiguration,
 };
 use common::*;
 use s3_store::{BucketUpdate, Permission as KeyPermission};
@@ -377,6 +377,17 @@ async fn ownership_and_acls() {
     assert_eq!(err(t.client.put_bucket_acl().bucket("acl").acl(BucketCannedAcl::PublicRead).send().await.unwrap_err()), (400, "AccessControlListNotSupported".into()));
     assert_eq!(err(t.client.put_object().bucket("acl").key("g").grant_read("uri=\"http://acs.amazonaws.com/groups/global/AllUsers\"").body(ByteStream::from_static(b"x")).send().await.unwrap_err()).1, "AccessControlListNotSupported");
     t.client.put_object().bucket("acl").key("o").grant_full_control(format!("id=\"{owner}\"")).body(ByteStream::from_static(b"x")).send().await.unwrap();
+    // Only the bucket owner's full control is accepted: not less for the owner, not an empty ACL.
+    assert_eq!(err(t.client.put_object().bucket("acl").key("r").grant_read(format!("id=\"{owner}\"")).body(ByteStream::from_static(b"x")).send().await.unwrap_err()).1, "AccessControlListNotSupported");
+    let mut r = Raw::new("PUT", "/acl");
+    r.query = "acl";
+    r.body = format!("<AccessControlPolicy><Owner><ID>{owner}</ID></Owner><AccessControlList/></AccessControlPolicy>").into_bytes();
+    assert_eq!(status_code(r.send(&t).await).await, (400, "AccessControlListNotSupported".into()), "an ACL with no grants");
+    let full = AccessControlPolicy::builder()
+        .owner(Owner::builder().id(&owner).build())
+        .grants(Grant::builder().grantee(Grantee::builder().r#type(Type::CanonicalUser).id(&owner).build().unwrap()).permission(Permission::FullControl).build())
+        .build();
+    t.client.put_bucket_acl().bucket("acl").access_control_policy(full).send().await.unwrap();
     assert_eq!(err(t.client.create_bucket().bucket("acl2").acl(BucketCannedAcl::PublicRead).send().await.unwrap_err()), (400, "InvalidBucketAclWithObjectOwnership".into()));
     // ACLs on.
     ownership(&t, "acl", ObjectOwnership::BucketOwnerPreferred).await;
@@ -701,4 +712,16 @@ async fn access_logs_are_delivered() {
     assert!(t.client.get_bucket_logging().bucket("src").send().await.unwrap().logging_enabled().is_none());
     t.client.head_object().bucket("src").key("a.txt").send().await.unwrap();
     assert_eq!(server.flush_access_logs().await, 0);
+    // Target grants need a target with ACLs on (S3 refuses them for BucketOwnerEnforced).
+    bucket(&t, "src2").await;
+    bucket(&t, "logs2").await;
+    let owner = t.store.owner_id();
+    let grant = TargetGrant::builder().grantee(Grantee::builder().r#type(Type::CanonicalUser).id(&owner).build().unwrap()).permission(BucketLogsPermission::FullControl).build();
+    let with_grants = |g: TargetGrant| BucketLoggingStatus::builder().logging_enabled(LoggingEnabled::builder().target_bucket("logs2").target_prefix("g/").target_grants(g).build().unwrap()).build();
+    let e = t.client.put_bucket_logging().bucket("src2").bucket_logging_status(with_grants(grant.clone())).send().await.unwrap_err();
+    assert_eq!(err(e), (400, "InvalidTargetBucketForLogging".into()));
+    ownership(&t, "logs2", ObjectOwnership::BucketOwnerPreferred).await;
+    t.client.put_bucket_logging().bucket("src2").bucket_logging_status(with_grants(grant)).send().await.unwrap();
+    assert_eq!(t.client.get_bucket_logging().bucket("src2").send().await.unwrap().logging_enabled().unwrap().target_grants().len(), 1);
+    t.client.put_bucket_logging().bucket("src2").bucket_logging_status(BucketLoggingStatus::builder().build()).send().await.unwrap();
 }

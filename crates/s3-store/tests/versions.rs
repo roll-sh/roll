@@ -319,14 +319,15 @@ async fn object_lock_protects_versions_from_every_deletion() {
     assert!(matches!(s.delete_object_version("lck", "h", Some(&h.version_id), None, true).await, Err(StoreError::ObjectLocked(_))));
     s.put_legal_hold("lck", "h", Some(&h.version_id), false).await.unwrap();
 
-    // A bypassed GOVERNANCE delete goes to the trash, which keeps it while it's locked.
+    // A bypassed GOVERNANCE delete removes the lock, as on S3: the version goes to the trash
+    // for the recovery window like any other permanent delete, unlocked.
     s.delete_object_version("lck", "h", Some(&h.version_id), None, true).await.unwrap();
     let held = trash(&s, "lck");
     assert_eq!(held.len(), 1);
-    assert!(held[0].expires_at > s.now() + 9 * DAY, "the trash keeps it until its lock ends");
-    clock.advance(3 * DAY);
+    assert!(held[0].expires_at <= s.now() + DAY, "kept for the recovery window, not until the lifted lock would have ended");
+    clock.advance(2 * DAY);
     s.sweep().await.unwrap();
-    assert_eq!(trash(&s, "lck").len(), 1, "past the recovery window, still locked");
+    assert!(trash(&s, "lck").is_empty(), "expired from the trash after the recovery window");
 
     // Lifecycle skips locked versions.
     s.update_bucket("lck", BucketUpdate { lifecycle: Some(vec![LifecycleRule { enabled: true, noncurrent_days: Some(1), ..Default::default() }]), ..Default::default() }).await.unwrap();
@@ -347,6 +348,70 @@ async fn object_lock_protects_versions_from_every_deletion() {
     s.sweep().await.unwrap();
     assert!(trash(&s, "lck").iter().all(|t| t.key != "h"), "expired from the trash once unlocked");
     s.delete_bucket("lck", true).await.unwrap();
+    assert_consistent(&s, &backend).await;
+}
+
+#[tokio::test]
+async fn governance_bypass_removes_the_lock_as_on_s3() {
+    let (backend, clock, s) = env("ver-bypass").await;
+    let gov = ObjectLockConfig { mode: Some("GOVERNANCE".into()), days: Some(10), years: None };
+    s.create_bucket("gov", BucketOptions { object_lock: Some(true), recover_days: Some(7), ..Default::default() }).await.unwrap();
+    s.put_object_lock("gov", gov.clone()).await.unwrap();
+    let a1 = put(&s, "gov", "a", b"one").await;
+    let a2 = put(&s, "gov", "a", b"two").await;
+    let comp = ObjectLock { mode: Some("COMPLIANCE".into()), retain_until: Some(s.now() + 5 * DAY), legal_hold: None };
+    let c = put_with_lock(&s, "gov", "c", b"comp", &[], comp).await.unwrap();
+
+    // Without the bypass, nothing; with it, the version goes to the trash without its lock.
+    assert!(matches!(s.delete_object_version("gov", "a", Some(&a1.version_id), None, false).await, Err(StoreError::ObjectLocked(_))));
+    s.delete_object_version("gov", "a", Some(&a1.version_id), None, true).await.unwrap();
+    let t = trash(&s, "gov");
+    assert_eq!(t.len(), 1);
+    assert!(t[0].expires_at <= s.now() + 7 * DAY, "kept for the recovery window only");
+    // Still recoverable: it comes back unlocked (the lock was lifted), and can then go without a bypass.
+    let back = s.restore("gov", "a", t[0].deleted_at).await.unwrap();
+    assert_eq!(back.version_id, a1.version_id);
+    assert!(back.lock.mode.is_none() && back.lock.retain_until.is_none(), "the bypass removed the retention for good");
+    s.delete_object_version("gov", "a", Some(&a1.version_id), None, false).await.unwrap();
+    // DeleteObjects with the bypass does the same.
+    let r = s.delete_versions("gov", &[("a".into(), Some(a2.version_id.clone())), ("c".into(), Some(c.version_id.clone()))], true).await.unwrap();
+    assert!(r[0].is_ok());
+    assert!(matches!(r[1], Err(StoreError::ObjectLocked(_))), "COMPLIANCE is never bypassed");
+    assert_eq!(trash(&s, "gov").len(), 2);
+
+    // COMPLIANCE still holds the bucket, forced or not.
+    assert!(matches!(s.delete_bucket("gov", false).await, Err(StoreError::BucketNotEmpty(_))));
+    assert!(matches!(s.delete_bucket("gov", true).await, Err(StoreError::ObjectLocked(_))));
+    assert!(s.get_object_version("gov", "c", Some(&c.version_id)).is_ok());
+
+    // A bucket emptied with bypassed deletes can be deleted at once, as on S3; its trash goes
+    // with it, and the blobs wait out the quarantine.
+    s.create_bucket("gone", BucketOptions { object_lock: Some(true), recover_days: Some(7), ..Default::default() }).await.unwrap();
+    s.put_object_lock("gone", gov).await.unwrap();
+    let g = put(&s, "gone", "k", b"locked").await;
+    let marker = s.delete_object_version("gone", "k", None, None, false).await.unwrap();
+    s.delete_object_version("gone", "k", Some(&marker.version_id.unwrap()), None, false).await.unwrap();
+    s.delete_object_version("gone", "k", Some(&g.version_id), None, true).await.unwrap();
+    assert_eq!(trash(&s, "gone").len(), 1);
+    s.delete_bucket("gone", false).await.unwrap();
+    let (_, _, refs, unreferenced) = blob_row(&s, &g.blob_id).unwrap();
+    assert_eq!((refs, unreferenced.is_some()), (0, true), "quarantined, not deleted");
+    assert_eq!(s.sweep().await.unwrap().blobs_deleted, 0);
+    assert_consistent(&s, &backend).await;
+    clock.advance(DAY + 60_000);
+    assert!(s.sweep().await.unwrap().blobs_deleted >= 1);
+    assert!(blob_row(&s, &g.blob_id).is_none());
+
+    // A branch's push-down copy keeps its own lock: the parent's bypass doesn't reach it.
+    s.create_bucket("par", BucketOptions { object_lock: Some(true), recover_days: Some(7), ..Default::default() }).await.unwrap();
+    s.put_object_lock("par", ObjectLockConfig { mode: Some("GOVERNANCE".into()), days: Some(10), years: None }).await.unwrap();
+    let p = put(&s, "par", "k", b"parent").await;
+    s.branch_bucket("par", "par-br").await.unwrap();
+    s.delete_object_version("par", "k", Some(&p.version_id), None, true).await.unwrap();
+    let copy = s.get_object_version("par-br", "k", Some(&p.version_id)).unwrap();
+    assert_eq!(copy.lock.mode.as_deref(), Some("GOVERNANCE"));
+    assert!(matches!(s.delete_object_version("par-br", "k", Some(&p.version_id), None, false).await, Err(StoreError::ObjectLocked(_))));
+    assert!(matches!(s.delete_bucket("par-br", true).await, Err(StoreError::ObjectLocked(_))));
     assert_consistent(&s, &backend).await;
 }
 

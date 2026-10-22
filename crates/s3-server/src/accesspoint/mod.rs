@@ -36,7 +36,7 @@ use crate::ctx::Ctx;
 use crate::error::StoreResult;
 use crate::policy::{Decision, Policy};
 use axum::http::Method;
-use s3_proto::http::percent_decode_utf8;
+use s3_proto::http::percent_decode_path;
 use s3_proto::{Code, S3Error};
 use s3_store::{AccessPoint, AccessPointKind};
 use std::sync::{Arc, OnceLock};
@@ -116,17 +116,17 @@ fn named(ctx: &Ctx, account: &str) -> Result<Option<Named>, S3Error> {
     }
     let path = ctx.raw_path.strip_prefix('/').unwrap_or(&ctx.raw_path);
     let (first, rest) = path.split_once('/').unwrap_or((path, ""));
-    let first = percent_decode_utf8(first)?;
+    let first = percent_decode_path(first)?;
     if first.starts_with("arn:") {
         // `/arn:…:accesspoint/<name>/<key>`, the ARN's slash encoded or not.
         let (arn, rest) = if first.contains("accesspoint/") {
             (first.clone(), rest.to_string())
         } else {
             let (n, r) = rest.split_once('/').unwrap_or((rest, ""));
-            (format!("{first}/{}", percent_decode_utf8(n)?), r.to_string())
+            (format!("{first}/{}", percent_decode_path(n)?), r.to_string())
         };
         let (kind, acct, name) = parse_arn(&arn).ok_or_else(|| S3Error::msg(Code::InvalidAccessPoint, "The access point ARN is not valid").with("AccessPointArn", arn.clone()))?;
-        let key = Some(percent_decode_utf8(&rest)?).filter(|k| !k.is_empty());
+        let key = Some(percent_decode_path(&rest)?).filter(|k| !k.is_empty());
         return Ok(Some(Named::Arn { kind, account: acct, name, key }));
     }
     if let Some(b) = &ctx.bucket
@@ -156,7 +156,7 @@ pub(crate) fn resolve(ctx: &mut Ctx) -> Result<(), S3Error> {
     let Some(n) = named(ctx, &account)? else { return Ok(()) };
     let path_key = || -> Result<Option<String>, S3Error> {
         let p = ctx.raw_path.strip_prefix('/').unwrap_or(&ctx.raw_path);
-        Ok(Some(percent_decode_utf8(p)?).filter(|k| !k.is_empty()))
+        Ok(Some(percent_decode_path(p)?).filter(|k| !k.is_empty()))
     };
     let no_such = |name: &str| S3Error::msg(Code::NoSuchAccessPoint, format!("The specified accesspoint does not exist: {name}"));
     let (found, key) = match n {

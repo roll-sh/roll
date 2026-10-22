@@ -40,7 +40,8 @@ pub(crate) struct LoggingConfig {
     /// `None`: `SimplePrefix`; else `PartitionedPrefix` with this `PartitionDateSource`
     /// (`EventTime` or `DeliveryTime`).
     pub partition_date_source: Option<String>,
-    /// `TargetGrants` as given (stored and returned; the target's own ACL decides access).
+    /// `TargetGrants` as given, only for a target with ACLs enabled (stored and returned; the
+    /// target's own ACL decides access).
     pub target_grants: Option<String>,
 }
 
@@ -112,6 +113,12 @@ pub(crate) async fn put_config(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Re
             if crate::access::authorize(ctx, ctx.who(), &target, None, "s3:PutObject", crate::auth::Need::Write).is_err() {
                 return Err(S3Error::msg(Code::InvalidTargetBucketForLogging, "You must be able to write to the target bucket").with("TargetBucket", target.clone()));
             }
+            // As on S3, a target with ACLs disabled (BucketOwnerEnforced, the default) takes no
+            // target grants: access to its logs is the target's policy's business.
+            let grants = le.child("TargetGrants").filter(|g| g.child("Grant").is_some());
+            if grants.is_some() && !ctx.access(&target)?.acls_enabled {
+                return Err(S3Error::msg(Code::InvalidTargetBucketForLogging, "Target grants not allowed for bucket owner enforced buckets").with("TargetBucket", target.clone()));
+            }
             let partition_date_source = match le.child("TargetObjectKeyFormat") {
                 None => None,
                 Some(f) => match (f.child("SimplePrefix"), f.child("PartitionedPrefix")) {
@@ -120,7 +127,7 @@ pub(crate) async fn put_config(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Re
                     _ => return Err(malformed()),
                 },
             };
-            let c = LoggingConfig { target_bucket: target, target_prefix: prefix, partition_date_source, target_grants: le.child("TargetGrants").map(node_xml) };
+            let c = LoggingConfig { target_bucket: target, target_prefix: prefix, partition_date_source, target_grants: grants.map(node_xml) };
             Some(serde_json::to_string(&c).map_err(|_| S3Error::new(Code::InternalError))?)
         }
     };

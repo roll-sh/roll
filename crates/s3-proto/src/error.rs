@@ -57,6 +57,7 @@ codes! {
     InvalidStorageClass 400 "The storage class you specified is not valid.",
     InvalidTag 400 "The tag provided was not a valid tag.",
     InvalidToken 400 "The provided token is malformed or otherwise invalid.",
+    InvalidURI 400 "Couldn't parse the specified URI.",
     KeyTooLongError 400 "Your key is too long.",
     MalformedPOSTRequest 400 "The body of your POST request is not well-formed multipart/form-data.",
     MalformedXML 400 "The XML you provided was not well-formed or did not validate against our published schema.",

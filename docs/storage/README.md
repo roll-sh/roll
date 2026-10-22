@@ -46,6 +46,12 @@ Other settings:
   default is on for AWS S3 without `ROLL_S3_ENDPOINT` and off otherwise (requests then get
   `NotImplemented`). SSE-C works on any backend that supports it; see
   [compatibility](compatibility.md#server-side-encryption).
+- `ROLL_S3_SSE_S3_AT_REST`: declare that the backing store encrypts every object at rest, so
+  objects without SSE-C or SSE-KMS report `x-amz-server-side-encryption: AES256` (SSE-S3), as
+  S3 does. roll doesn't encrypt or verify anything here: you vouch for your backing store (for
+  example a MinIO with auto-encryption, or a local directory on an encrypted disk). The default
+  is on for AWS S3 without `ROLL_S3_ENDPOINT` (which encrypts every object since 2023) and off
+  otherwise.
 - `ROLL_S3_BUCKET`, `ROLL_S3_PREFIX`, `ROLL_S3_ENDPOINT`: the backing store, shared with the
   other roll products. Without a bucket, a directory under `.roll/` stands in.
 - `ROLL_S3_NOTIFY_AWS`: deliver event notifications to real AWS destinations (SQS, SNS, Lambda,
@@ -190,7 +196,9 @@ roll storage restore assets/img/logo.png --at <deleted_at>
   noncurrent versions instead, as on S3. Deleting a version for good (`DELETE ?versionId=`, or
   a lifecycle rule) still moves it to the trash, so even that is recoverable. Restoring it puts
   it back in the key's history. Object Lock (retention and legal holds) works as on S3, and a
-  locked version is never deleted by anything.
+  locked version is never deleted by anything. As on S3, a delete with
+  `x-amz-bypass-governance-retention` lifts a GOVERNANCE retention (never COMPLIANCE or a legal
+  hold): the version still goes to the trash, unlocked.
 
 ```sh
 roll storage update assets --versioning on      # off = Suspended; never back to unversioned

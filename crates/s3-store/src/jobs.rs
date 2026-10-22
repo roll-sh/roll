@@ -46,8 +46,9 @@ impl Store {
         let now = self.now();
         self.barrier("sweep").await?;
 
-        // Trash rows past their bucket's window. A version under Object Lock (one whose
-        // GOVERNANCE retention was bypassed to delete it) stays until its lock ends.
+        // Trash rows past their bucket's window. A trashed row still under Object Lock stays
+        // until its lock ends (a GOVERNANCE bypass removes the lock before the version reaches
+        // the trash; rows trashed with one by earlier versions of roll keep it).
         loop {
             let n = self
                 .write(|c| {

@@ -117,14 +117,16 @@ fn random_etag() -> String {
 }
 
 impl Store {
-    /// Whether SSE-KMS can be used: `StoreConfig::kms` (`ROLL_S3_KMS`), else whether the backend
-    /// can pass it through (real AWS S3).
-    /// Whether objects without SSE-C or SSE-KMS are encrypted at rest with SSE-S3 by the backing
-    /// store (real AWS S3), so responses report `x-amz-server-side-encryption: AES256` as S3 does.
+    /// Whether objects without SSE-C or SSE-KMS are encrypted at rest by the backing store, so
+    /// responses report `x-amz-server-side-encryption: AES256` as S3 does:
+    /// `StoreConfig::sse_s3_at_rest` (`ROLL_S3_SSE_S3_AT_REST`, the operator's word for it), else
+    /// whether the backend is real AWS S3.
     pub fn sse_s3_at_rest(&self) -> bool {
-        self.backend.encrypts_at_rest()
+        self.cfg.sse_s3_at_rest.unwrap_or_else(|| self.backend.encrypts_at_rest())
     }
 
+    /// Whether SSE-KMS can be used: `StoreConfig::kms` (`ROLL_S3_KMS`), else whether the backend
+    /// can pass it through (real AWS S3).
     pub fn kms_enabled(&self) -> bool {
         self.cfg.kms.unwrap_or_else(|| self.backend.supports_kms())
     }
