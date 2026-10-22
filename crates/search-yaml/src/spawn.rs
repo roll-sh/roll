@@ -157,6 +157,13 @@ impl SpawnCommand {
 }
 
 impl Spawned {
+    /// Whether the server still accepts TCP connections at its URL.
+    async fn accepts_connections(&self) -> bool {
+        let Ok(ep) = Endpoint::parse(&self.url) else { return true };
+        let connect = tokio::net::TcpStream::connect((ep.host.as_str(), ep.port));
+        matches!(tokio::time::timeout(Duration::from_secs(1), connect).await, Ok(Ok(_)))
+    }
+
     fn kill_group(&mut self) {
         #[cfg(unix)]
         if let Some(pid) = self.child.id() {
@@ -172,10 +179,20 @@ impl Spawned {
     /// Kills the process (and its group) and waits for it. A process that had already exited
     /// (it crashed during the run) keeps its log, renamed so the worker's next process doesn't
     /// overwrite it; that path is returned. Otherwise the log is removed.
+    ///
+    /// A server that crashes while answering closes the connection before it has finished
+    /// exiting, and the shell only exits after it, so `try_wait` alone can miss the crash. A
+    /// server that no longer accepts connections is dead: the shell gets a moment to exit with
+    /// its status before the group is killed. A healthy server costs one connect. Whatever status
+    /// other than our own SIGKILL the wait returns also counts as a crash.
     pub async fn stop(mut self) -> Option<(std::process::ExitStatus, PathBuf)> {
-        let crashed = self.child.try_wait().ok().flatten();
+        let mut exited = self.child.try_wait().ok().flatten();
+        if exited.is_none() && !self.accepts_connections().await {
+            exited = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await.ok().and_then(Result::ok);
+        }
         self.kill_group();
-        let _ = self.child.wait().await;
+        let waited = self.child.wait().await.ok();
+        let crashed = exited.or(waited.filter(|s| !killed_by_us(s)));
         match crashed {
             Some(status) => {
                 let kept = self.log.with_file_name(format!("{}.crash.log", self.name));
@@ -196,6 +213,21 @@ impl Drop for Spawned {
         if matches!(self.child.try_wait(), Ok(None)) {
             self.kill_group();
         }
+    }
+}
+
+/// Whether a stopped process ended by the SIGKILL `kill_group` sends (elsewhere: any status,
+/// since there is no signal to tell it apart).
+fn killed_by_us(status: &std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal() == Some(libc::SIGKILL)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        true
     }
 }
 
