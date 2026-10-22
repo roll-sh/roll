@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # roll storage test suite: build, clippy, the unit and integration tests of the s3 crates, and a
-# compatibility suite with real S3 tools in Docker (aws cli, rclone, mc).
+# compatibility suite with real S3 tools in Docker (aws cli, rclone, mc, s3cmd).
 #
 # Only runs when something storage-related changed since the last green run. `--force` runs
 # regardless; `--unit` skips the Docker tools suite. Set ROLL_E2E_S3_BUCKET (+ ROLL_E2E_S3_ENDPOINT,
@@ -49,7 +49,7 @@ if [[ $unit_only == 0 ]]; then
     echo "storage: Docker is not running; start it or pass --unit" >&2
     exit 1
   fi
-  for img in amazon/aws-cli rclone/rclone "${ROLL_MC_IMAGE:-bitnamilegacy/minio-client}"; do
+  for img in amazon/aws-cli rclone/rclone "${ROLL_MC_IMAGE:-bitnamilegacy/minio-client}" d3fk/s3cmd; do
     docker image inspect "$img" >/dev/null 2>&1 || docker pull -q "$img"
   done
   ROLL_COMPAT_REQUIRED=1 cargo test -p s3-server --test tools

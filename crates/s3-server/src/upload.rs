@@ -78,7 +78,8 @@ pub async fn put_object(store: &Arc<Store>, bucket: &Bucket, key: &str, headers:
     let stream = Hashing { inner: body, hasher: Some(BodyHasher::new(Some(Algorithm::Crc64Nvme), false)), len, seen: 0, outcome: outcome.clone() }.boxed();
     let guard = InflightBlob::new(store);
     let blob = guard.id.clone();
-    let uploaded = store.put_blob(&blob, &bucket.id, key, stream, len, headers.content_type.as_deref()).await;
+    let sse = crate::sse::default_sse(store, bucket);
+    let uploaded = store.put_blob_sse(&blob, &bucket.id, key, stream, len, headers.content_type.as_deref(), sse.as_ref()).await;
     let result = outcome.lock().unwrap().take();
     let (up, digest) = match (uploaded, result) {
         (Ok(u), Some(Ok(d))) => (u, d),
@@ -90,8 +91,9 @@ pub async fn put_object(store: &Arc<Store>, bucket: &Bucket, key: &str, headers:
         (Err(e), _) => return Err(e),
     };
     let checksum = digest.checksum_b64().map(|(a, v)| Checksum { algorithm: a.as_str().into(), kind: "FULL_OBJECT".into(), value: v });
-    let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: digest.etag(), headers, checksum };
-    let meta = store.commit_put(&bucket.name, key, obj, cond).await?;
+    let enc = sse.as_ref().map(s3_store::Encryption::of);
+    let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: crate::sse::etag(enc.as_ref(), digest.etag()), headers, checksum };
+    let meta = store.commit_put_sse(&bucket.name, key, obj, cond, enc.as_ref()).await?;
     drop(guard);
     Ok(meta)
 }

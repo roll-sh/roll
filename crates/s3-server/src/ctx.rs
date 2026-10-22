@@ -23,6 +23,8 @@ pub(crate) struct Ctx {
     pub headers: HeaderMap,
     pub bucket: Option<String>,
     pub key: Option<String>,
+    /// The bucket came from the `Host` header (virtual-host style).
+    pub vhost: bool,
     pub peer: Option<IpAddr>,
     pub auth: Option<Auth>,
     /// Addressed to the bucket's website endpoint (`<bucket>.<website_domain>`).
@@ -92,11 +94,11 @@ fn request_id() -> String {
     hex::encode_upper(b)
 }
 
-/// Bucket and key from the `Host` header (virtual-host style) or the path.
-fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Option<String>, Option<String>), S3Error> {
+/// Bucket and key from the `Host` header (virtual-host style, `true`) or the path.
+fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Option<String>, Option<String>, bool), S3Error> {
     let path = raw_path.strip_prefix('/').unwrap_or(raw_path);
     if let Some(b) = crate::website::host_bucket(server, headers) {
-        return Ok((Some(b), Some(percent_decode_utf8(path)?)));
+        return Ok((Some(b), Some(percent_decode_utf8(path)?), true));
     }
     if let Some(domain) = &server.cfg.virtual_host_domain {
         // Host names are case-insensitive.
@@ -104,16 +106,16 @@ fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Opti
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|c| c.is_ascii_digit())).map_or(host.as_str(), |(h, _)| h);
         if let Some(b) = host.strip_suffix(domain.to_ascii_lowercase().as_str()).and_then(|h| h.strip_suffix('.')).filter(|b| !b.is_empty()) {
             let key = Some(percent_decode_utf8(path)?).filter(|k| !k.is_empty());
-            return Ok((Some(b.to_string()), key));
+            return Ok((Some(b.to_string()), key, true));
         }
     }
     if path.is_empty() {
-        return Ok((None, None));
+        return Ok((None, None, false));
     }
     let (b, k) = path.split_once('/').unwrap_or((path, ""));
     let bucket = percent_decode_utf8(b)?;
     let key = Some(percent_decode_utf8(k)?).filter(|k| !k.is_empty());
-    Ok((Some(bucket), key))
+    Ok((Some(bucket), key, false))
 }
 
 pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Request) -> Response {
@@ -133,6 +135,7 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
         headers: parts.headers,
         bucket: None,
         key: None,
+        vhost: false,
         peer,
         auth: None,
         website,
@@ -140,9 +143,10 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
         started: std::time::Instant::now(),
     };
     let result = match addressed {
-        Ok((b, k)) => {
+        Ok((b, k, vhost)) => {
             ctx.bucket = b;
             ctx.key = k;
+            ctx.vhost = vhost;
             run(&mut ctx, body).await
         }
         Err(e) => Err(e),
@@ -188,6 +192,7 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
     if let Some(a) = &ctx.auth {
         ctx.store().touch_key(&a.key.id);
     }
+    crate::owner::check(ctx)?;
     match (&ctx.bucket, &ctx.key) {
         (None, _) => match ctx.method {
             Method::GET => bucket::list_buckets(ctx),
@@ -198,20 +203,8 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
     }
 }
 
-/// Features we don't have must fail loudly, never be ignored.
+/// Header values S3 itself refuses.
 fn reject_unsupported_headers(ctx: &Ctx) -> Result<(), S3Error> {
-    let not_impl = |h: &str, why: &str| Err(S3Error::msg(Code::NotImplemented, why.to_string()).with("Header", h.to_string()));
-    for (name, _) in ctx.headers.iter() {
-        let n = name.as_str();
-        if n.starts_with("x-amz-server-side-encryption-customer-") || n.starts_with("x-amz-copy-source-server-side-encryption-customer-") {
-            return not_impl(n, "SSE-C is not supported.");
-        }
-    }
-    if let Some(sse) = ctx.h("x-amz-server-side-encryption")
-        && !sse.trim().eq_ignore_ascii_case("AES256")
-    {
-        return not_impl("x-amz-server-side-encryption", "Only AES256 (SSE-S3) server-side encryption is supported.");
-    }
     if let Some(rp) = ctx.h("x-amz-request-payer")
         && !rp.eq_ignore_ascii_case("requester")
     {

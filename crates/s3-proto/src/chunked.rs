@@ -14,7 +14,7 @@
 //! whatever sizes the peer claims.
 
 use crate::error::{Code, S3Error};
-use crate::sigv4::{self, StreamSigning};
+use crate::sigv4::{self, ChunkKey, StreamSigning};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
@@ -145,11 +145,15 @@ impl Decoder {
                 sig = Some(s.trim().to_ascii_lowercase());
             }
         }
-        if self.signing().is_some() {
+        if let Some(signing) = self.signing() {
             let s = sig.ok_or_else(|| S3Error::msg(Code::SignatureDoesNotMatch, "Chunk is missing its chunk-signature"))?;
-            if s.len() != 64 {
-                return Err(S3Error::msg(Code::SignatureDoesNotMatch, "Malformed chunk-signature"));
-            }
+            let s = match signing.key {
+                ChunkKey::Hmac(_) if s.len() == 64 => s,
+                // SigV4a: a DER signature in hex, padded with `*` to 144 characters by some
+                // clients (so the body length is known up front); the padding isn't signed.
+                ChunkKey::Ecdsa(_) if (1..=144).contains(&s.trim_end_matches('*').len()) => s.trim_end_matches('*').to_string(),
+                _ => return Err(S3Error::msg(Code::SignatureDoesNotMatch, "Malformed chunk-signature")),
+            };
             self.chunk_sig = s;
             self.chunk_sha = Some(Sha256::new());
         }
@@ -172,8 +176,7 @@ impl Decoder {
         let sha = self.chunk_sha.take();
         let Some(signing) = self.signing() else { return Ok(()) };
         let hash = hex::encode(sha.unwrap_or_default().finalize());
-        let expected = sigv4::chunk_signature(&signing.signing_key, &signing.amz_date, &signing.scope, &self.prev_sig, &hash);
-        if expected != self.chunk_sig {
+        if !signing.verify_chunk(&self.prev_sig, &hash, &self.chunk_sig) {
             return Err(S3Error::msg(Code::SignatureDoesNotMatch, "The chunk signature we calculated does not match the signature you provided."));
         }
         self.prev_sig = std::mem::take(&mut self.chunk_sig);
@@ -206,8 +209,7 @@ impl Decoder {
             && !self.trailers.is_empty()
         {
             let got = self.trailer_sig.as_deref().ok_or_else(|| S3Error::msg(Code::SignatureDoesNotMatch, "Missing x-amz-trailer-signature"))?;
-            let expected = sigv4::trailer_signature(&signing.signing_key, &signing.amz_date, &signing.scope, &self.prev_sig, &self.trailers);
-            if expected != got {
+            if !signing.verify_trailer(&self.prev_sig, &self.trailers, got.trim_end_matches('*')) {
                 return Err(S3Error::msg(Code::SignatureDoesNotMatch, "The trailer signature we calculated does not match the signature you provided."));
             }
         }
@@ -272,19 +274,41 @@ impl Decoder {
     }
 }
 
-/// Encode a body as `aws-chunked` (tests and clients). With `signing`, chunks are signed and
-/// trailers too; `chunk` is the payload size per chunk.
+/// Encode a body as `aws-chunked` (tests and clients). With `signing` (SigV4, HMAC), chunks are
+/// signed and trailers too; `chunk` is the payload size per chunk. SigV4a bodies:
+/// [`crate::sigv4a::encode_chunked`].
 pub fn encode(payload: &[u8], chunk: usize, signing: Option<&StreamSigning>, trailers: &[(String, String)]) -> Vec<u8> {
+    let key = signing.map(|s| *s.signing_key().expect("encode signs with HMAC (SigV4) keys"));
+    encode_with(payload, chunk, signing.map(|s| s.seed_signature.as_str()), trailers, |prev, hash| {
+        let s = signing.expect("only called when signing");
+        sigv4::chunk_signature(key.as_ref().expect("key"), &s.amz_date, &s.scope, prev, hash)
+    }, |prev, trailers| {
+        let s = signing.expect("only called when signing");
+        sigv4::trailer_signature(key.as_ref().expect("key"), &s.amz_date, &s.scope, prev, trailers)
+    })
+}
+
+/// [`encode`] with any signer: `chunk_sig(previous, chunk sha256 hex)` and
+/// `trailer_sig(previous, trailers)` give each signature (as sent); `seed`: the request's
+/// signature, `None` for unsigned chunks.
+pub(crate) fn encode_with(
+    payload: &[u8],
+    chunk: usize,
+    seed: Option<&str>,
+    trailers: &[(String, String)],
+    chunk_sig: impl Fn(&str, &str) -> String,
+    trailer_sig: impl Fn(&str, &[(String, String)]) -> String,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 256);
-    let mut prev = signing.map(|s| s.seed_signature.clone()).unwrap_or_default();
+    let mut prev = seed.unwrap_or_default().to_string();
     let mut pieces: Vec<&[u8]> = payload.chunks(chunk.max(1)).collect();
     pieces.push(&[]);
     for p in pieces {
         out.extend_from_slice(format!("{:x}", p.len()).as_bytes());
-        if let Some(s) = signing {
-            let sig = sigv4::chunk_signature(&s.signing_key, &s.amz_date, &s.scope, &prev, &hex::encode(Sha256::digest(p)));
+        if seed.is_some() {
+            let sig = chunk_sig(&prev, &hex::encode(Sha256::digest(p)));
             out.extend_from_slice(format!(";chunk-signature={sig}").as_bytes());
-            prev = sig;
+            prev = sig.trim_end_matches('*').to_string();
         }
         out.extend_from_slice(b"\r\n");
         if !p.is_empty() {
@@ -295,8 +319,8 @@ pub fn encode(payload: &[u8], chunk: usize, signing: Option<&StreamSigning>, tra
     for (k, v) in trailers {
         out.extend_from_slice(format!("{k}:{v}\r\n").as_bytes());
     }
-    if let (Some(s), false) = (signing, trailers.is_empty()) {
-        let sig = sigv4::trailer_signature(&s.signing_key, &s.amz_date, &s.scope, &prev, trailers);
+    if seed.is_some() && !trailers.is_empty() {
+        let sig = trailer_sig(&prev, trailers);
         out.extend_from_slice(format!("x-amz-trailer-signature:{sig}\r\n").as_bytes());
     }
     out.extend_from_slice(b"\r\n");
@@ -392,7 +416,7 @@ mod tests {
     #[test]
     fn signed_trailers() {
         let signing = StreamSigning {
-            signing_key: signing_key("secret", "20240101", "auto", "s3"),
+            key: ChunkKey::Hmac(signing_key("secret", "20240101", "auto", "s3")),
             seed_signature: "a".repeat(64),
             amz_date: "20240101T000000Z".into(),
             scope: "20240101/auto/s3/aws4_request".into(),
@@ -467,7 +491,7 @@ mod tests {
 
     #[test]
     fn signed_trailer_signature_required() {
-        let signing = StreamSigning { signing_key: signing_key("secret", "20240101", "auto", "s3"), seed_signature: "b".repeat(64), amz_date: "20240101T000000Z".into(), scope: "20240101/auto/s3/aws4_request".into() };
+        let signing = StreamSigning { key: ChunkKey::Hmac(signing_key("secret", "20240101", "auto", "s3")), seed_signature: "b".repeat(64), amz_date: "20240101T000000Z".into(), scope: "20240101/auto/s3/aws4_request".into() };
         let mode = || Mode::Signed { signing: signing.clone(), trailer: true };
         let payload = b"hello trailers".to_vec();
         let trailers = vec![("x-amz-checksum-crc32".to_string(), crate::checksum::b64(&crate::checksum::Algorithm::Crc32.checksum(&payload)))];

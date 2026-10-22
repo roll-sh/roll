@@ -34,6 +34,7 @@ pub fn store_error(e: StoreError) -> S3Error {
             tracing::error!(why, "storage unavailable");
             S3Error::new(Code::ServiceUnavailable)
         }
+        StoreError::Internal(e) if e.downcast_ref::<s3_store::SseUnsupported>().is_some() => S3Error::msg(Code::NotImplemented, e.to_string()).with("Header", "x-amz-server-side-encryption"),
         StoreError::Internal(e) => {
             tracing::error!(error = %e, "storage error");
             S3Error::new(Code::InternalError)

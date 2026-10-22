@@ -173,7 +173,7 @@ async fn signed_chunked_uploads() {
             let amz_date = headers.iter().find(|(k, _)| k == "x-amz-date").unwrap().1.clone();
             let date = &amz_date[..8];
             let signing = s3_proto::sigv4::StreamSigning {
-                signing_key: s3_proto::sigv4::signing_key(SECRET, date, REGION, "s3"),
+                key: s3_proto::sigv4::ChunkKey::Hmac(s3_proto::sigv4::signing_key(SECRET, date, REGION, "s3")),
                 seed_signature: seed,
                 amz_date: amz_date.clone(),
                 scope: format!("{date}/{REGION}/s3/aws4_request"),
@@ -685,7 +685,7 @@ async fn unsupported_features_fail_loudly() {
         .send()
         .await
         .unwrap_err();
-    assert_eq!(e.raw_response().unwrap().status().as_u16(), 501);
+    assert_eq!((e.raw_response().unwrap().status().as_u16(), code(&e)), (400, "InvalidArgument".to_string()), "SSE-C is supported; that key MD5 isn't the key's");
     let e = t.client.put_object().bucket("bkt").key("k").server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::AwsKms).body(ByteStream::from_static(b"x")).send().await.unwrap_err();
     assert_eq!(e.raw_response().unwrap().status().as_u16(), 501);
     // ACLs are off by default (BucketOwnerEnforced), as on S3.
@@ -773,7 +773,7 @@ async fn auth_failures() {
     let v4 = |scope: &str| format!("AWS4-HMAC-SHA256 Credential={ACCESS}/{scope}/aws4_request, SignedHeaders=host;x-amz-date, Signature={}", "0".repeat(64));
     let base = |auth: String| vec![("authorization", auth.into_bytes()), ("x-amz-date", amz_date.clone().into_bytes()), ("x-amz-content-sha256", UNSIGNED_PAYLOAD.as_bytes().to_vec())];
     let err = |s: u16, c: &str| (s, c.to_string());
-    assert_eq!(send(base(format!("AWS {ACCESS}:c2ln"))).await, err(400, "InvalidRequest"), "SigV2");
+    assert_eq!(send(base(format!("AWS {ACCESS}:c2ln"))).await, err(403, "SignatureDoesNotMatch"), "SigV2 is checked like the rest");
     assert_eq!(send(base("Bearer x".into())).await, err(400, "AuthorizationHeaderMalformed"));
     assert_eq!(send(base(v4(&format!("{date}/{REGION}/sqs")))).await, err(400, "AuthorizationHeaderMalformed"));
     assert_eq!(send(base(v4(&format!("{date}/{REGION}/s3")))).await, err(403, "SignatureDoesNotMatch"));
@@ -786,7 +786,7 @@ async fn auth_failures() {
         h
     };
     assert_eq!(send(with(2, b"junk")).await, err(400, "InvalidArgument"));
-    assert_eq!(send(with(2, b"STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD")).await, err(501, "NotImplemented"), "SigV4a");
+    assert_eq!(send(with(2, b"STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD")).await, err(400, "InvalidRequest"), "ECDSA-signed chunks under an HMAC signature");
     assert_eq!(send(with(1, "201é524T000000Z".as_bytes())).await, err(403, "AccessDenied"), "a non-ASCII date is refused, not a crash");
     // Clock skew: 15 minutes either way.
     for (skew, want) in [(-20 * 60, 403), (20 * 60, 403), (-10 * 60, 200), (10 * 60, 200)] {
@@ -814,7 +814,7 @@ async fn auth_failures() {
     assert_eq!(status_code(http.get(presign(60, "wrong-secret", now_s())).send().await.unwrap()).await, err(403, "SignatureDoesNotMatch"));
     assert_eq!(status_code(http.get(presign(60, SECRET, now_s() + 3600)).send().await.unwrap()).await, err(403, "AccessDenied"), "not valid yet");
     assert_eq!(status_code(http.get(format!("{}&X-Amz-Content-Sha256={STREAMING_UNSIGNED_TRAILER}", presign(60, SECRET, now_s()))).send().await.unwrap()).await, err(400, "InvalidRequest"));
-    assert_eq!(status_code(http.get(format!("{url}?AWSAccessKeyId={ACCESS}&Signature=x&Expires=1")).send().await.unwrap()).await, err(400, "InvalidRequest"), "SigV2 query auth");
+    assert_eq!(status_code(http.get(format!("{url}?AWSAccessKeyId={ACCESS}&Signature=x&Expires=1")).send().await.unwrap()).await, err(403, "AccessDenied"), "an expired SigV2 URL");
     // Error documents: code, resource and the request id; HEAD errors have no body.
     let r = Raw::new("GET", "/bkt/missing").send(&t).await;
     let id = r.headers()["x-amz-request-id"].to_str().unwrap().to_string();
@@ -1013,8 +1013,6 @@ async fn everything_else_is_not_implemented() {
         assert_eq!(status_code(raw("GET", "/bkt/k", sub, vec![]).send(&t).await).await, ni, "?{sub}");
     }
     for (h, v) in [
-        ("x-amz-server-side-encryption-customer-algorithm", "AES256"),
-        ("x-amz-copy-source-server-side-encryption-customer-algorithm", "AES256"),
         ("x-amz-server-side-encryption", "aws:kms:dsse"),
     ] {
         let mut r = raw("PUT", "/bkt/nope", "", vec![(h, v.into())]);

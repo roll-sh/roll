@@ -124,6 +124,13 @@ impl Backend for Faulty {
         self.inner.get(key, range).await
     }
 
+    async fn get_blob(&self, key: &str, range: Option<Range<u64>>, sse: Option<&BlobSse>) -> anyhow::Result<Option<(u64, ByteStream)>> {
+        match sse {
+            None => self.get(key, range).await,
+            Some(_) => self.inner.get_blob(key, range, sse).await,
+        }
+    }
+
     async fn head(&self, key: &str) -> anyhow::Result<Option<Listed>> {
         self.inner.head(key).await
     }
@@ -140,20 +147,24 @@ impl Backend for Faulty {
         self.inner.create_multipart(key, attrs).await
     }
 
-    async fn upload_part(&self, key: &str, upload_id: &str, part: u32, body: ByteStream, len: u64) -> anyhow::Result<UploadedPart> {
-        self.inner.upload_part(key, upload_id, part, body, len).await
+    async fn upload_part(&self, key: &str, upload_id: &str, part: u32, body: ByteStream, len: u64, sse: Option<&BlobSse>) -> anyhow::Result<UploadedPart> {
+        self.inner.upload_part(key, upload_id, part, body, len, sse).await
     }
 
-    async fn upload_part_copy(&self, key: &str, upload_id: &str, part: u32, src_key: &str, range: Option<Range<u64>>) -> anyhow::Result<UploadedPart> {
-        self.inner.upload_part_copy(key, upload_id, part, src_key, range).await
+    async fn upload_part_copy(&self, key: &str, upload_id: &str, part: u32, src: &CopySource<'_>, sse: Option<&BlobSse>) -> anyhow::Result<UploadedPart> {
+        self.inner.upload_part_copy(key, upload_id, part, src, sse).await
     }
 
-    async fn complete_multipart(&self, key: &str, upload_id: &str, parts: &[(u32, String)]) -> anyhow::Result<()> {
+    async fn copy(&self, src: &CopySource<'_>, key: &str, attrs: &BlobAttrs) -> anyhow::Result<Uploaded> {
+        self.inner.copy(src, key, attrs).await
+    }
+
+    async fn complete_multipart(&self, key: &str, upload_id: &str, parts: &[(u32, String)], sse: Option<&BlobSse>) -> anyhow::Result<()> {
         sleep_ms(self.complete_delay_ms.load(Ordering::SeqCst)).await;
         if self.completed.lock().unwrap().contains(upload_id) {
             return Ok(());
         }
-        self.inner.complete_multipart(key, upload_id, parts).await?;
+        self.inner.complete_multipart(key, upload_id, parts, sse).await?;
         self.completed.lock().unwrap().insert(upload_id.to_string());
         Ok(())
     }

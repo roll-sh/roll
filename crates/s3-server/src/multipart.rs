@@ -6,6 +6,7 @@ use crate::ctx::{Ctx, no_content, read_small_object_checksum};
 use crate::error::{StoreResult, store_error};
 use crate::object::{InflightBlob, MAX_PUT, object_headers, precheck, set_checksum, write_condition};
 use crate::response::{self, Reply, set};
+use crate::sse;
 use axum::body::Body;
 use axum::http::StatusCode;
 use s3_proto::checksum::{Algorithm, ChecksumType, b64, combine_crc, composite, crc_bytes, crc_from_bytes};
@@ -58,9 +59,15 @@ pub(crate) async fn create(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         return Err(invalid(format!("The {} checksum type cannot be used with the {} checksum algorithm.", t.as_str(), a.as_str())));
     }
     let lock = crate::versioning::lock_headers(ctx, bucket)?;
+    let target = sse::target(ctx, bucket)?;
     ctx.meter(&bucket.id, Class::A);
-    let up = ctx.store().create_upload_with(&bucket.name, ctx.key_name(), headers, alg.map(|a| a.as_str().to_string()), typ.map(|t| t.as_str().to_string()), lock).await.s3()?;
+    let up = ctx
+        .store()
+        .create_upload_full(&bucket.name, ctx.key_name(), headers, alg.map(|a| a.as_str().to_string()), typ.map(|t| t.as_str().to_string()), lock, target.sse.as_ref())
+        .await
+        .s3()?;
     let mut r = response::xml(StatusCode::OK, xml::initiate_multipart(&bucket.name, ctx.key_name(), &up.id));
+    sse::set_headers(&mut r, target.encryption().as_ref(), target.s3);
     if let (Some(a), Some(t)) = (alg, typ) {
         set(&mut r, "x-amz-checksum-algorithm", a.as_str());
         set(&mut r, "x-amz-checksum-type", t.as_str());
@@ -73,8 +80,10 @@ pub(crate) async fn upload_part(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> R
     let n = part_number(ctx)?;
     let up = find_upload(ctx, bucket)?;
     ctx.meter(&bucket.id, Class::A);
+    let enc = ctx.store().blob_encryption(&up.blob_id).s3()?;
+    let key = sse::key_for(ctx, enc.as_ref(), sse::Use::Part)?;
     if ctx.h("x-amz-copy-source").is_some() {
-        return copy_part(ctx, &up, n).await;
+        return copy_part(ctx, &up, n, enc.as_ref(), key.as_ref()).await;
     }
     let declared = upload_checksum(&up).map(|(a, _)| a);
     let want = match (declared, requested_checksum(ctx)?) {
@@ -92,7 +101,7 @@ pub(crate) async fn upload_part(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> R
     }
     let store = ctx.store().clone();
     let result = incoming.result();
-    let uploaded = store.put_part_data(&up, n, incoming.into_stream(), len).await;
+    let uploaded = store.put_part_data_sse(&up, n, incoming.into_stream(), len, key.as_ref()).await;
     // A part that failed its checks is never recorded: a retry of the part replaces it.
     let (data, finished) = match (uploaded, result.get()) {
         (Ok(d), Ok(f)) => (d, f),
@@ -100,21 +109,24 @@ pub(crate) async fn upload_part(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> R
         (Ok(_), Err(e)) => return Err(e),
     };
     store.meter.bytes_in(&bucket.id, len);
-    let etag = finished.digest.etag();
+    let etag = sse::etag(enc.as_ref(), finished.digest.etag());
     let checksum = finished.checksum.clone();
     store.commit_part(&up, n, &data, &etag, checksum.as_ref().map(|(_, v)| v.clone())).await.s3()?;
     let mut r = response::empty(StatusCode::OK);
     set(&mut r, "etag", &quote_etag(&etag));
+    sse::set_headers(&mut r, enc.as_ref(), false);
     if let Some((a, v)) = &checksum {
         set(&mut r, a.header(), v);
     }
     Ok(r)
 }
 
-async fn copy_part(ctx: &mut Ctx, up: &Upload, n: u32) -> Reply {
+async fn copy_part(ctx: &mut Ctx, up: &Upload, n: u32, enc: Option<&s3_store::Encryption>, key: Option<&s3_store::BlobSse>) -> Reply {
     let (src_bucket, src_key, src_vid) = parse_copy_source_version(ctx.h("x-amz-copy-source").unwrap_or_default())?;
     ctx.require_source(&src_bucket, &src_key)?;
     let src = crate::object::copy_source(ctx, &src_bucket, &src_key, src_vid.as_deref())?;
+    let src_enc = ctx.store().blob_encryption(&src.blob_id).s3()?;
+    let src_sse = sse::key_for(ctx, src_enc.as_ref(), sse::Use::CopySource)?;
     Conditions::copy_source_from_headers(|h| ctx.h(h)).check_copy_source(&src.etag, src.modified_at)?;
     let range = match ctx.h("x-amz-copy-source-range") {
         Some(h) => {
@@ -128,11 +140,12 @@ async fn copy_part(ctx: &mut Ctx, up: &Upload, n: u32) -> Reply {
         return Err(S3Error::new(Code::EntityTooLarge).with("ProposedSize", len.to_string()).with("MaxSizeAllowed", MAX_PUT.to_string()));
     }
     // The exact version checked above is the one copied.
-    let part = ctx.store().copy_part_version(up, n, &src_bucket, &src_key, Some(&src.version_id), range, Some(&src.etag)).await.s3()?;
+    let part = ctx.store().copy_part_full(up, n, &src_bucket, &src_key, Some(&src.version_id), range, Some(&src.etag), src_sse.as_ref(), key).await.s3()?;
     let mut r = response::xml(StatusCode::OK, xml::copy_part_result(&part.etag, part.created_at, None));
     if src_vid.is_some() || ctx.store().bucket(&src_bucket).is_ok_and(|b| b.versioning.is_some()) {
         set(&mut r, "x-amz-copy-source-version-id", &src.version_id);
     }
+    sse::set_headers(&mut r, enc, false);
     Ok(r)
 }
 
@@ -179,6 +192,8 @@ fn object_checksum(ctx: &Ctx, up: &Upload, chosen: &[&Part], sent: &[xml::Comple
 pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
     let up = find_upload(ctx, bucket)?;
+    let enc = ctx.store().blob_encryption(&up.blob_id).s3()?;
+    let key = sse::key_for(ctx, enc.as_ref(), sse::Use::Complete)?;
     let raw = read_small_object_checksum(ctx, body, xml::MAX_XML_BYTES).await?;
     let sent = xml::parse_complete_multipart(&raw)?;
     xml::check_part_order(&sent)?;
@@ -199,7 +214,7 @@ pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Repl
     // The store marks the blob in flight while it completes; release it even if the client
     // goes away mid-way.
     let guard = InflightBlob::adopt(ctx.store(), up.blob_id.clone());
-    let meta = ctx.store().complete_upload(&bucket.name, &up.id, &parts, checksum, &cond).await.s3()?;
+    let meta = ctx.store().complete_upload_sse(&bucket.name, &up.id, &parts, checksum, &cond, key.as_ref()).await.s3()?;
     drop(guard);
     let host = ctx.h("host").unwrap_or("localhost").to_string();
     let location = format!("http://{host}/{}/{}", bucket.name, uri_encode(&meta.key, false));
@@ -209,6 +224,7 @@ pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Repl
         set_checksum(&mut r, c);
     }
     crate::versioning::set_version(&mut r, bucket, &meta.version_id, false);
+    sse::set_headers(&mut r, enc.as_ref(), false);
     Ok(r)
 }
 

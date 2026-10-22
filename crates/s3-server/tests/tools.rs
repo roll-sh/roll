@@ -1,6 +1,6 @@
-//! Real S3 tools in Docker against an in-process server: the AWS CLI, rclone and the MinIO
-//! client. Skipped when Docker isn't available, unless `ROLL_COMPAT_REQUIRED=1`. Containers run
-//! one at a time, on the host network.
+//! Real S3 tools in Docker against an in-process server: the AWS CLI (also with SSE-C), rclone,
+//! the MinIO client and s3cmd (SigV2). Skipped when Docker isn't available, unless
+//! `ROLL_COMPAT_REQUIRED=1`. Containers run one at a time, on the host network.
 
 mod common;
 
@@ -32,6 +32,21 @@ fn mc_image() -> String {
 
 /// Run a container with `dir` mounted at `/data`; returns stdout, panics with stderr on failure.
 fn run(image: &str, env: &[(&str, String)], dir: &Path, args: &[&str]) -> String {
+    match try_run(image, env, dir, args) {
+        Ok(out) => out,
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// [`run`] for a command that must fail: returns what it printed.
+fn run_fails(image: &str, env: &[(&str, String)], dir: &Path, args: &[&str]) -> String {
+    match try_run(image, env, dir, args) {
+        Ok(out) => panic!("{image} {args:?} succeeded, but must fail:\n{out}"),
+        Err(e) => e,
+    }
+}
+
+fn try_run(image: &str, env: &[(&str, String)], dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("docker");
     cmd.args(["run", "--rm", "--network", "host", "--user", &uid_gid(), "-e", "HOME=/tmp", "-v"]).arg(format!("{}:/data", dir.display()));
     if image == mc_image() {
@@ -44,9 +59,9 @@ fn run(image: &str, env: &[(&str, String)], dir: &Path, args: &[&str]) -> String
     let out = cmd.output().expect("docker run");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
-        panic!("{image} {args:?} failed ({}):\nstdout:\n{stdout}\nstderr:\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+        return Err(format!("{image} {args:?} failed ({}):\nstdout:\n{stdout}\nstderr:\n{}", out.status, String::from_utf8_lossy(&out.stderr)));
     }
-    stdout
+    Ok(stdout)
 }
 
 /// One container at a time, across the tests in this file.
@@ -351,4 +366,106 @@ async fn minio_client() {
         assert!(ls.contains("big.bin") && !ls.contains("tree/") && !ls.contains("small.txt"), "{ls}");
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn aws_cli_sse_c() {
+    if !docker_ok() {
+        return;
+    }
+    let t = start().await;
+    for op in [s3_store::SseOp::Put, s3_store::SseOp::Multipart, s3_store::SseOp::Copy] {
+        if let Some(why) = s3_store::sse_c_unsupported(&**t.store.backend(), op).await {
+            eprintln!("skipping: the backing object store doesn't support SSE-C here: {why}");
+            return;
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    fixtures(dir.path());
+    // The CLI takes raw 32-byte keys (and base64s them itself).
+    std::fs::write(dir.path().join("key1.bin"), b"0123456789abcdef0123456789abcdef").unwrap();
+    std::fs::write(dir.path().join("key2.bin"), b"fedcba9876543210fedcba9876543210").unwrap();
+    let endpoint = t.endpoint.clone();
+    let path = dir.path().to_path_buf();
+    blocking(move || {
+        let env = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
+        let with_endpoint = |a: &[&str]| {
+            let mut all = vec!["--endpoint-url".to_string(), endpoint.clone()];
+            all.extend(a.iter().map(|s| s.to_string()));
+            all
+        };
+        let aws = |a: &[&str]| run("amazon/aws-cli", &env, &path, &with_endpoint(a).iter().map(String::as_str).collect::<Vec<_>>());
+        let aws_fails = |a: &[&str]| run_fails("amazon/aws-cli", &env, &path, &with_endpoint(a).iter().map(String::as_str).collect::<Vec<_>>());
+        let k1 = ["--sse-c", "AES256", "--sse-c-key", "fileb:///data/key1.bin"];
+        let k2 = ["--sse-c", "AES256", "--sse-c-key", "fileb:///data/key2.bin"];
+        aws(&["s3", "mb", "s3://ssec"]);
+        aws(&[&["s3", "cp", "/data/small.txt", "s3://ssec/small.txt"][..], &k1].concat());
+        // 21 MiB: a multipart upload, every part (and the completion) with the key.
+        aws(&[&["s3", "cp", "/data/big.bin", "s3://ssec/big.bin"][..], &k1].concat());
+        aws(&[&["s3", "cp", "s3://ssec/big.bin", "/data/big.out"][..], &k1].concat());
+        same(&path.join("big.bin"), &path.join("big.out"));
+        let head = aws(&["s3api", "head-object", "--bucket", "ssec", "--key", "small.txt", "--sse-customer-algorithm", "AES256", "--sse-customer-key", "fileb:///data/key1.bin"]);
+        assert!(head.contains("\"SSECustomerAlgorithm\": \"AES256\"") && head.contains("\"ContentLength\": 23"), "{head}");
+        // Without the key, or with another one, nothing comes back.
+        let e = aws_fails(&["s3", "cp", "s3://ssec/small.txt", "/data/nokey.out"]);
+        assert!(e.contains("400"), "{e}");
+        let e = aws_fails(&[&["s3", "cp", "s3://ssec/small.txt", "/data/wrong.out"][..], &k2].concat());
+        assert!(e.contains("403"), "{e}");
+        assert!(!path.join("nokey.out").exists() && !path.join("wrong.out").exists());
+        // A copy to another key, done server-side.
+        aws(&[&["s3", "cp", "s3://ssec/small.txt", "s3://ssec/small2.txt", "--sse-c-copy-source", "AES256", "--sse-c-copy-source-key", "fileb:///data/key1.bin"][..], &k2].concat());
+        aws(&[&["s3", "cp", "s3://ssec/small2.txt", "/data/small2.out"][..], &k2].concat());
+        same(&path.join("small.txt"), &path.join("small2.out"));
+        let ls = aws(&["s3", "ls", "s3://ssec/"]);
+        assert!(ls.contains("22020096 big.bin") && ls.contains("23 small.txt"), "plaintext sizes:\n{ls}");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn s3cmd_sigv2() {
+    if !docker_ok() {
+        return;
+    }
+    let t = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    fixtures(dir.path());
+    let host = format!("127.0.0.1:{}", t.port);
+    let cfg = format!("[default]\naccess_key = {ACCESS}\nsecret_key = {SECRET}\nhost_base = {host}\nhost_bucket = {host}\nuse_https = False\nsignature_v2 = True\nbucket_location = {REGION}\n");
+    std::fs::write(dir.path().join("s3cfg"), cfg).unwrap();
+    let path = dir.path().to_path_buf();
+    let url = blocking(move || {
+        let s3cmd = |a: &[&str]| {
+            let mut all = vec!["-c", "/data/s3cfg"];
+            all.extend_from_slice(a);
+            run("d3fk/s3cmd", &[], &path, &all)
+        };
+        s3cmd(&["mb", "s3://s3cmd"]);
+        s3cmd(&["put", "/data/small.txt", "s3://s3cmd/small.txt"]);
+        // 21 MiB: s3cmd's multipart upload (15 MiB chunks), signed with SigV2 throughout.
+        s3cmd(&["put", "/data/big.bin", "s3://s3cmd/big.bin"]);
+        s3cmd(&["sync", "/data/tree/", "s3://s3cmd/tree/"]);
+        let ls = s3cmd(&["ls", "--recursive", "s3://s3cmd/"]);
+        for k in ["small.txt", "big.bin", "tree/a.txt", "tree/b with space.txt", "tree/nested/deeper/d+e.txt"] {
+            assert!(ls.contains(k), "{k} missing from:\n{ls}");
+        }
+        s3cmd(&["get", "s3://s3cmd/big.bin", "/data/big.out"]);
+        same(&path.join("big.bin"), &path.join("big.out"));
+        std::fs::create_dir_all(path.join("down")).unwrap();
+        s3cmd(&["sync", "s3://s3cmd/tree/", "/data/down/"]);
+        same(&path.join("tree/nested/deeper/d+e.txt"), &path.join("down/nested/deeper/d+e.txt"));
+        let info = s3cmd(&["info", "s3://s3cmd/small.txt"]);
+        assert!(info.contains("23"), "{info}");
+        let url = s3cmd(&["signurl", "s3://s3cmd/small.txt", "+300"]);
+        s3cmd(&["del", "s3://s3cmd/big.bin"]);
+        s3cmd(&["del", "--recursive", "s3://s3cmd/tree/"]);
+        let ls = s3cmd(&["ls", "--recursive", "s3://s3cmd/"]);
+        assert!(!ls.contains("big.bin") && !ls.contains("tree/") && ls.contains("small.txt"), "{ls}");
+        url.trim().to_string()
+    })
+    .await;
+    // s3cmd's presigned URL (SigV2 query-string auth).
+    let r = reqwest::get(&url).await.unwrap();
+    assert_eq!(r.status(), 200, "{url}");
+    assert_eq!(r.bytes().await.unwrap().as_ref(), b"hello from a real tool\n");
 }

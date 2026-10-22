@@ -42,6 +42,10 @@ Other settings:
   SeaweedFS). It's ignored for a local directory.
 - `ROLL_S3_INTERNAL_CIDRS`: peers counted as "inside roll" for egress pricing. The default is
   loopback, the private ranges and the Docker bridge. On AWS, set it to the VPC.
+- `ROLL_S3_KMS`: pass SSE-KMS (`aws:kms`, `aws:kms:dsse`) through to the backing bucket. The
+  default is on for AWS S3 without `ROLL_S3_ENDPOINT` and off otherwise (requests then get
+  `NotImplemented`). SSE-C works on any backend that supports it; see
+  [compatibility](compatibility.md#server-side-encryption).
 - `ROLL_S3_BUCKET`, `ROLL_S3_PREFIX`, `ROLL_S3_ENDPOINT`: the backing store, shared with the
   other roll products. Without a bucket, a directory under `.roll/` stands in.
 - `--no-storage` / `ROLL_NO_STORAGE`: don't run roll storage.

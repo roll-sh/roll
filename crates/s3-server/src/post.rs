@@ -223,16 +223,23 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         }
     }
 
-    // Who's uploading: the policy's signer, who must be allowed to write here.
-    let auth = parse_post_auth(&fields)?.ok_or_else(|| S3Error::msg(Code::AccessDenied, "Anonymous POST uploads are not allowed."))?;
-    let access = ctx
-        .store()
-        .access_key(&auth.credential.access_key)
-        .s3()?
-        .ok_or_else(|| S3Error::new(Code::InvalidAccessKeyId).with("AWSAccessKeyId", auth.credential.access_key.clone()))?;
-    let c = &auth.credential;
-    verify_post_signature(&auth, &signing_key(&access.secret, &c.date, &c.region, &c.service))?;
-    let policy = check_post_policy(&auth.policy, &fields, &bucket.name, ctx.store().now())?;
+    // Who's uploading: the policy's signer (SigV2 or SigV4), who must be allowed to write here.
+    let find = |ak: &str| ctx.store().access_key(ak).s3()?.ok_or_else(|| S3Error::new(Code::InvalidAccessKeyId).with("AWSAccessKeyId", ak.to_string()));
+    let (access, policy_b64) = match s3_proto::sigv2::parse_post_auth(&fields)? {
+        Some((ak, policy, signature)) => {
+            let access = find(&ak)?;
+            s3_proto::sigv2::verify_post_signature(&ak, &policy, &signature, &access.secret)?;
+            (access, policy)
+        }
+        None => {
+            let auth = parse_post_auth(&fields)?.ok_or_else(|| S3Error::msg(Code::AccessDenied, "Anonymous POST uploads are not allowed."))?;
+            let access = find(&auth.credential.access_key)?;
+            let c = &auth.credential;
+            verify_post_signature(&auth, &signing_key(&access.secret, &c.date, &c.region, &c.service))?;
+            (access, auth.policy)
+        }
+    };
+    let policy = check_post_policy(&policy_b64, &fields, &bucket.name, ctx.store().now())?;
     crate::access::authorize(ctx, crate::access::Who::Key(&access), &bucket.name, Some(&key), "s3:PutObject", crate::auth::Need::Write)?;
     let acl = match field(&fields, "acl") {
         Some(c) => crate::acl::check_write(ctx, &bucket.name, &crate::acl::Acl::canned(c, false)?)?,
@@ -267,6 +274,9 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
     };
     let lock = crate::versioning::lock_from(|n| field(&fields, n), bucket.object_lock.is_some(), ctx.store().now())?;
 
+    // Encryption, from the form's fields as from a PUT's headers.
+    let target = crate::sse::target_from(ctx.store(), &bucket, |n| field(&fields, n))?;
+
     // Spool the file, hashing it, then store it.
     let spool = tempfile::NamedTempFile::new_in(&ctx.server.cfg.spool_dir).map_err(|e| {
         tracing::error!(error = %e, "creating a spool file failed");
@@ -300,15 +310,17 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
     let store = ctx.store().clone();
     let guard = InflightBlob::new(&store);
     let blob = guard.id.clone();
-    let up = store.put_blob(&blob, &bucket.id, &key, stream, len, headers.content_type.as_deref()).await.map_err(store_error)?;
+    let up = store.put_blob_sse(&blob, &bucket.id, &key, stream, len, headers.content_type.as_deref(), target.sse.as_ref()).await.map_err(store_error)?;
     drop(spool);
     store.meter.bytes_in(&bucket.id, len);
     let checksum = finished.checksum.map(|(a, v)| Checksum { algorithm: a.as_str().into(), kind: "FULL_OBJECT".into(), value: v });
-    let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: finished.digest.etag(), headers, checksum };
-    let meta = store.commit_put_with(&bucket.name, &key, obj, &WriteCondition::none(), &lock).await.s3()?;
+    let enc = target.encryption();
+    let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: crate::sse::etag(enc.as_ref(), finished.digest.etag()), headers, checksum };
+    let meta = store.commit_put_full(&bucket.name, &key, obj, &WriteCondition::none(), &lock, enc.as_ref()).await.s3()?;
     drop(guard);
     let version = bucket.versioning.is_some().then(|| meta.version_id.clone());
 
+    let sse_s3 = target.s3;
     let etag = quote_etag(&meta.etag);
     let host = ctx.h("host").unwrap_or("localhost");
     let location = format!("http://{host}/{}/{}", bucket.name, uri_encode(&key, false));
@@ -321,6 +333,7 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         if let Some(v) = &version {
             set(&mut r, "x-amz-version-id", v);
         }
+        crate::sse::set_headers(&mut r, enc.as_ref(), sse_s3);
         return Ok(r);
     }
     let mut r = match field(&fields, "success_action_status") {
@@ -342,6 +355,7 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         set(&mut r, "x-amz-version-id", v);
     }
     set(&mut r, "location", &location);
+    crate::sse::set_headers(&mut r, enc.as_ref(), sse_s3);
     Ok(r)
 }
 

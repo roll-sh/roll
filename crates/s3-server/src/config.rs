@@ -397,7 +397,12 @@ struct EncryptionRule {
 /// SSE-KMS work, which makes new objects honour a KMS default.
 #[allow(dead_code)]
 pub(crate) fn default_encryption(ctx: &Ctx, bucket: &Bucket) -> Option<(String, Option<String>, bool)> {
-    let v = ctx.store().bucket_config(&bucket.name, kind::ENCRYPTION, "").ok()??;
+    default_encryption_of(ctx.store(), bucket)
+}
+
+/// [`default_encryption`] for writes without a request context (the control plane's uploads).
+pub(crate) fn default_encryption_of(store: &s3_store::Store, bucket: &Bucket) -> Option<(String, Option<String>, bool)> {
+    let v = store.bucket_config(&bucket.name, kind::ENCRYPTION, "").ok()??;
     let r: EncryptionRule = serde_json::from_str(&v).ok()?;
     Some((r.algorithm, r.kms_key_id, r.bucket_key_enabled))
 }

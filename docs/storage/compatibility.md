@@ -15,9 +15,12 @@ clients fail clearly instead of silently doing the wrong thing.
 | `UNSIGNED-PAYLOAD`, hex SHA-256 payloads | ✅ |
 | `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and `-TRAILER` (aws-chunked) | ✅ chunk signatures verified |
 | `STREAMING-UNSIGNED-PAYLOAD-TRAILER` (current SDK default) | ✅ |
-| Presigned POST policy (browser form upload) | ✅ |
+| SigV4a (`AWS4-ECDSA-P256-SHA256`) header and presigned URLs | ✅ any `x-amz-region-set` is accepted |
+| `STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD` and `-TRAILER` | ✅ ECDSA chunk signatures verified, `*`-padded ones too |
+| SigV2 (`Authorization: AWS key:signature`) | ✅ including virtual-host style; clock skew 15 minutes |
+| SigV2 presigned URLs (`AWSAccessKeyId`, `Expires`, `Signature`) | ✅ no 7-day cap, as on S3 |
+| Presigned POST policy (browser form upload) | ✅ SigV4 and SigV2 (`AWSAccessKeyId`, `signature`) |
 | Any region in the credential scope | ✅ accepted as given, like R2's `auto` |
-| SigV2, SigV4a | ❌ |
 | Anonymous requests | what the bucket's policy or ACLs allow, and GET/HEAD of objects in `public` buckets |
 | Bucket policies | ✅ enforced; principals are roll access keys (see [Policies](#policies-acls-and-public-access)) |
 | Website endpoint (`<bucket>.<website domain>`) | ✅ when `ROLL_S3_WEBSITE_DOMAIN` is set |
@@ -82,14 +85,59 @@ clients fail clearly instead of silently doing the wrong thing.
 | ETags | ✅ MD5 for single PUTs; `md5-of-md5s-N` for multipart, as on S3 |
 | `x-amz-storage-class` | accepted; everything is stored in Intelligent-Tiering, so no other class is needed |
 | `x-amz-website-redirect-location` | ✅ on PutObject, CopyObject and CreateMultipartUpload; stored, returned, and followed by the website endpoint |
+| `x-amz-expected-bucket-owner`, `x-amz-source-expected-bucket-owner` | ✅ `AccessDenied` unless it's the deployment's 12-digit account id (`account_id` in `GET /v1/storage`) |
+
+### Server-side encryption
+
+The backing object store does the encryption: roll passes the SSE parameters through on the
+object's own requests to S3, so durability and integrity are exactly S3's. Customer keys are
+never stored; the metadata keeps their MD5 to tell a right key from a wrong one.
+
+| feature | status |
+|---|---|
+| SSE-S3 (`x-amz-server-side-encryption: AES256`) | ✅ echoed; everything is encrypted at rest by the backing bucket anyway |
+| SSE-C (`x-amz-server-side-encryption-customer-*`) on PUT, GET, HEAD, CreateMultipartUpload, UploadPart, CompleteMultipartUpload, POST Object | ✅ |
+| SSE-C copy sources (`x-amz-copy-source-server-side-encryption-customer-*`) on CopyObject and UploadPartCopy | ✅ |
+| SSE-KMS (`aws:kms`, `aws:kms:dsse`, `-aws-kms-key-id`, `-context`, `-bucket-key-enabled`) | ✅ on AWS S3 backends; `NotImplemented` elsewhere (see below) |
+| The bucket's default encryption | ✅ applied to writes without SSE headers |
+| Ranges, `partNumber`, conditional reads, checksums on encrypted objects | ✅ checksums are of the plaintext, as on S3 |
+
+S3's errors, as S3 sends them:
+
+- GET or HEAD of an SSE-C object without its key: `400 InvalidRequest`. With another key:
+  `403 AccessDenied`. A key whose MD5 doesn't match `-key-MD5`: `400 InvalidArgument`.
+- SSE-C headers for an object that isn't SSE-C: `400 InvalidRequest`.
+- A part upload without the upload's key: `400 InvalidRequest`; with another: `403 AccessDenied`.
+- SSE-C together with `x-amz-server-side-encryption`, an unknown algorithm or a malformed key or
+  context: `400 InvalidArgument`.
+
+Details:
+
+- **ETags.** SSE-C and SSE-KMS objects (and their parts) get opaque ETags that aren't the MD5 of
+  the data, as on S3; multipart ones still end in `-<parts>`. SSE-S3 ETags are MD5s.
+- **Listings** show the plaintext size.
+- **Copies.** A copy is encrypted as its request says (or the bucket's default), never as its
+  source was, as on S3. If that's the source's encryption, the copy shares the source's data and
+  is free. Otherwise the data is copied inside object storage (S3 `CopyObject`, part by part
+  beyond 5 GiB), never through roll; the copy's CRC32C must match the source's before it's
+  committed. A copy to itself that changes the encryption is allowed.
+- **HTTPS.** S3 refuses SSE-C over plain HTTP. roll doesn't enforce it (it usually sits behind a
+  TLS-terminating proxy), but customer keys should only ever be sent over HTTPS.
+- **SSE-KMS** needs AWS KMS behind the backing bucket: it's on by default for AWS S3 without a
+  custom endpoint, and off (`NotImplemented`) for S3-compatible services and the local
+  directory backend. `ROLL_S3_KMS=true|false` overrides it.
+- **S3-compatible backends.** Every encrypted write checks that the backing service confirmed the
+  encryption. One that ignores SSE headers (or doesn't confirm them for an operation, as
+  SeaweedFS does for multipart uploads and copies with SSE-C) gets `NotImplemented` for that
+  operation, and nothing it stored for the request is kept: data is never stored unencrypted
+  when encryption was asked for.
+- **The control plane** (`/v1/storage`, the dashboard) can't read SSE-C objects: it has no key.
 
 ## Not supported
 
 | feature | notes |
 |---|---|
 | MFA Delete | No MFA devices. Object Lock protects versions instead. |
-| SSE-C (`x-amz-server-side-encryption-customer-*`) | rejected with `NotImplemented`, never ignored |
-| SSE-KMS (`x-amz-server-side-encryption: aws:kms`) | rejected. Data is encrypted at rest by the backing S3 bucket (SSE-S3). |
 | Replication (`PutBucketReplication`) | The backing bucket can be replicated by the operator. |
 | Event notifications (non-empty `NotificationConfiguration`) | |
 | Requester Pays | |
@@ -211,8 +259,15 @@ returned but not applied.
 - **Versioning and branches:** a branch inherits its parent's versioning state and Object Lock
   configuration when it's made. Its version history is its own versions plus the current
   version it inherits; the parent's noncurrent versions aren't part of it.
-- **Copies are free and instant,** whatever the size. On S3 a copy re-reads and re-writes the
-  data.
+- **Copies are free and instant,** whatever the size, unless they change the encryption. On S3 a
+  copy re-reads and re-writes the data.
+- **Completing an SSE-C multipart upload needs the key** (`x-amz-server-side-encryption-customer-*`
+  on CompleteMultipartUpload). S3 asks for it only when the upload uses checksums; roll's uploads
+  to the backing bucket always do. Current SDKs and the AWS CLI send it.
+- **SSE-KMS responses name the KMS key only if the request did.** S3 also names the default
+  `aws/s3` key.
+- **SigV2 clients disagree on a few details** (the date line with `x-amz-date`, the list of
+  signed subresources); roll accepts each variant real clients produce.
 - **Writes have higher latency.** A write is acknowledged once its metadata log commit is in S3
   too, which adds roughly one S3 PUT of latency.
 - **One region per deployment.** `GetBucketLocation` returns the deployment's region, and

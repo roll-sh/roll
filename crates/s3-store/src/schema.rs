@@ -133,7 +133,22 @@ CREATE INDEX versions_age ON versions (bucket_id, noncurrent_at);
 CREATE INDEX objects_blob ON objects (blob_id) WHERE blob_id IS NOT NULL;
 CREATE INDEX versions_blob ON versions (blob_id) WHERE blob_id IS NOT NULL;
 CREATE INDEX trash_blob ON trash (blob_id);
-"#];
+"#,
+// Server-side encryption (SSE-C, SSE-KMS) of a blob, done by the backing object store. No
+// row: the backing bucket's default. Keyed by blob: a blob's encryption never changes, and
+// every row sharing the blob (copies, branches, the trash) shares it. The row is written with
+// the upload's or the blob's own row and removed with them. Never holds a customer key, only
+// its MD5.
+r#"
+CREATE TABLE blob_sse (
+  blob_id TEXT PRIMARY KEY,
+  algorithm TEXT NOT NULL,
+  customer_key_md5 TEXT,
+  kms_key_id TEXT, kms_context TEXT, bucket_key INTEGER,
+  created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+"#,
+];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;
 

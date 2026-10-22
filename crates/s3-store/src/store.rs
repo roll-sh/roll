@@ -58,6 +58,14 @@ pub struct StoreConfig {
     /// Block public access everywhere (`ROLL_S3_BLOCK_PUBLIC_ACCESS`): all four S3 Block Public
     /// Access settings apply to every bucket, on top of the bucket's own.
     pub block_public_access: bool,
+    /// SSE-KMS on or off (`ROLL_S3_KMS`); `None`: whatever the backend can pass through (real
+    /// AWS S3 without a custom endpoint).
+    pub kms: Option<bool>,
+    /// Copies that need a new blob (encryption changes) go in one backend copy up to this size
+    /// (S3's 5 GiB CopyObject limit), part by part beyond it …
+    pub max_single_copy: u64,
+    /// … in parts of this size (at least `size / 10 000`).
+    pub copy_part_size: u64,
 }
 
 impl StoreConfig {
@@ -84,6 +92,9 @@ impl StoreConfig {
             scrub_interval: Some(Duration::from_secs(7 * 86_400)),
             clock: system_clock(),
             block_public_access: false,
+            kms: None,
+            max_single_copy: 5 << 30,
+            copy_part_size: 512 << 20,
         }
     }
 
@@ -757,7 +768,18 @@ impl Store {
     /// Upload a new object's bytes (the blob from [`Self::new_blob`]); commit it with
     /// [`Self::commit_put`].
     pub async fn put_blob(&self, blob: &str, bucket_id: &str, key: &str, body: ByteStream, len: u64, content_type: Option<&str>) -> Result<Uploaded> {
-        let attrs = BlobAttrs { bucket_id: bucket_id.to_string(), key: key.to_string(), content_type: content_type.map(str::to_string) };
+        self.put_blob_sse(blob, bucket_id, key, body, len, content_type, None).await
+    }
+
+    /// [`Self::put_blob`] with server-side encryption; commit it with
+    /// [`Self::commit_put_sse`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_blob_sse(&self, blob: &str, bucket_id: &str, key: &str, body: ByteStream, len: u64, content_type: Option<&str>, sse: Option<&crate::backend::BlobSse>) -> Result<Uploaded> {
+        if let Err(e) = self.check_sse_supported(sse) {
+            self.release_blob(blob);
+            return Err(e);
+        }
+        let attrs = BlobAttrs { bucket_id: bucket_id.to_string(), key: key.to_string(), content_type: content_type.map(str::to_string), sse: sse.cloned() };
         match self.backend.put(&ids::blob_key(blob), body, len, &attrs).await {
             Ok(u) => Ok(u),
             Err(e) => {
@@ -787,7 +809,14 @@ impl Store {
 
     /// An object's bytes (or `range` of them, clamped to its size), and how many there are.
     pub async fn open_blob(&self, meta: &ObjectMeta, range: Option<std::ops::Range<u64>>) -> Result<(u64, ByteStream)> {
-        match self.backend.get(&ids::blob_key(&meta.blob_id), range).await? {
+        self.open_blob_sse(meta, range, None).await
+    }
+
+    /// [`Self::open_blob`] with the request's SSE-C key: an SSE-C object can only be read with
+    /// its own key (`InvalidArgument` otherwise).
+    pub async fn open_blob_sse(&self, meta: &ObjectMeta, range: Option<std::ops::Range<u64>>, sse: Option<&crate::backend::BlobSse>) -> Result<(u64, ByteStream)> {
+        let key = crate::sse::key_for(self.blob_encryption(&meta.blob_id)?.as_ref(), sse, &meta.key)?;
+        match self.backend.get_blob(&ids::blob_key(&meta.blob_id), range, key.as_ref()).await? {
             Some(x) => Ok(x),
             None => {
                 tracing::error!(blob = meta.blob_id, key = meta.key, "blob missing from object storage");

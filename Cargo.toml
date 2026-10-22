@@ -46,6 +46,8 @@ url = "2"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1"
+# Tests only: endpoints that make the SDK sign with SigV4a.
+aws-smithy-types = "1"
 lambda_http = { version = "1", default-features = false, features = ["apigw_http", "apigw_rest", "alb"] }
 tasks = { path = "crates/tasks" }
 kafka-protocol = { version = "0.18", features = ["messages_enums"] }
@@ -129,6 +131,10 @@ httpdate = "1"
 http-body-util = "0.1"
 http-body = "1"
 ipnet = "2"
+# SigV4a (ECDSA P-256), and the local backend's at-rest encryption for SSE-C.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+aes-gcm = "0.10"
+zeroize = "1"
 s3-proto = { path = "crates/s3-proto" }
 s3-store = { path = "crates/s3-store" }
 s3-server = { path = "crates/s3-server" }
