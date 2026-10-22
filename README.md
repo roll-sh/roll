@@ -6,7 +6,7 @@ Serverless infrastructure for everything.
 
 ```
 apps/
-  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/databases, /dashboard/streams, /dashboard/tasks)
+  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/databases, /dashboard/streams, /dashboard/tasks, /dashboard/storage)
 packages/
   brand/            @roll/brand — logo geometry, animation engine, React components, SVG assets
   tasks/            @roll/tasks — TypeScript SDK: client, pull consumer, signature verification, workflows
@@ -20,7 +20,11 @@ crates/
   stream-log/       Kafka-format partition log: segments, group commit, idempotence, transactions
   stream-broker/    Kafka-compatible broker: wire protocol, coordinators, tiering, compaction, HTTP API
   tasks/            roll tasks: messages, queues, schedules, workflows (SQLite, its own S3 log store, or DynamoDB)
-  rolld/            Daemon: proxy + API + reconciler + Redis + Kafka listener (+ roll tasks on /v1/tasks)
+  s3-proto/         S3 wire protocol: SigV4 (headers, presigned, aws-chunked + trailers), XML, checksums, errors
+  s3-store/         roll storage metadata: SQLite + durable log on S3, branching, refcounts, trash, GC, blob backend
+  s3-server/        S3-compatible HTTP API: routing, auth, handlers, streaming to and from S3
+  s3-control/       roll storage control plane: buckets, branches, keys, browsing, usage and pricing (/v1/storage)
+  rolld/            Daemon: proxy + API + reconciler + Redis + Kafka listener + S3 API (+ roll tasks on /v1/tasks)
   roll-cli/         `roll` CLI
 deploy/aws/         roll tasks on AWS: Dockerfile + CloudFormation
 ```
@@ -524,3 +528,62 @@ single-tenant rows of the cost table, and `multi_tenant_cost_profile` the shared
 It skips itself when nothing tasks-related changed. `--force` runs anyway, and `--unit` skips Docker.
 CI is `.github/workflows/tasks.yml` (through `ci.yml` for pull requests and the merge queue). The SDK has its own suite against the real binary:
 `pnpm --filter @roll/tasks test`.
+
+## Storage
+
+roll storage is S3-compatible object storage: any S3 SDK or tool (`aws`, boto3, the JS v3 SDK,
+rclone, `mc`) works against `rolld` on `:59000`. It adds two things S3 doesn't have: **branching
+buckets** (an instant copy-on-write copy of a bucket) and a **recovery window** (deleted and
+overwritten objects stay restorable for 7 days by default). Prices are S3 Standard list prices.
+
+```sh
+cargo run -p rolld                                        # S3 API on :59000, roll API on :7070
+roll storage create assets
+roll storage keys create laptop --permission write        # AWS_ACCESS_KEY_ID / _SECRET / AWS_ENDPOINT_URL
+aws s3 cp ./logo.png s3://assets/img/logo.png
+roll storage branch assets assets-pr-42                   # instant, no data copied
+roll storage trash assets                                 # recently deleted, restorable
+roll storage usage assets
+```
+
+`/dashboard/storage` has buckets, an object browser with drag-and-drop upload, recently deleted
+objects, branches, CORS and lifecycle settings, access keys and usage. Docs:
+[docs/storage](docs/storage/README.md).
+
+How it works:
+
+- **One object, one blob.** Every customer object is exactly one object in S3, written once and
+  never modified. There's no packing and no compaction, so every byte has S3's own durability, and
+  roll's code never rewrites stored data.
+- **Durable metadata.** Metadata lives in SQLite. Every change goes to S3 as a create-only
+  group-commit log entry before the request is acknowledged: the tasks log-store pattern, with
+  fencing, snapshots and recovery from S3 alone.
+- **Branches.** A branch shares its parent's blobs. A write to a parent first pushes the old state
+  down to its branches, so each branch stays frozen at its creation. Creating one costs one row.
+- **Delayed deletes.**
+  - Deletes and overwrites go to a trash that customers can restore from for `recover_days`.
+  - Below that, an unreferenced blob waits 24 hours more before it's really deleted.
+  - A daily orphan scan removes blobs left by crashed uploads.
+  - A weekly scrub checks that every referenced blob is still in S3.
+- **Checksums end to end.** `Content-MD5` and `x-amz-checksum-*` (headers or trailers) are
+  verified on the way in, and every upload to S3 carries a CRC32C that S3 checks.
+- **Free copies.** `CopyObject` adds a reference instead of copying bytes.
+- **Margin without risk.** Blobs are stored in S3 Intelligent-Tiering, so cold data costs roll
+  less while customers pay the Standard price (see [pricing notes](docs/storage/pricing.md)).
+
+### Tests
+
+`pnpm test:storage` (or `scripts/test-storage.sh`) runs the following:
+
+1. Build and `clippy -D warnings`.
+2. The unit and integration tests of `s3-proto`, `s3-store`, `s3-server` and `s3-control`. These
+   cover:
+   - AWS's SigV4 test vectors
+   - metadata recovery from object storage, fencing, branching, trash, GC
+   - the S3 API through the AWS SDK
+3. A compatibility suite with real tools in Docker: `amazon/aws-cli`, `rclone/rclone` and
+   MinIO's `mc` (`bitnamilegacy/minio-client`).
+
+It skips itself when nothing storage-related changed. `--force` runs anyway, and `--unit` skips
+Docker. CI is `.github/workflows/storage.yml`, which also runs the store and server suites
+against S3 (SeaweedFS). To do that locally, set `ROLL_E2E_S3_BUCKET` and `ROLL_E2E_S3_ENDPOINT`.

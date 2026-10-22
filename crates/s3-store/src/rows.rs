@@ -1,0 +1,441 @@
+//! Rows and the copy-on-write rules, inside a transaction.
+//!
+//! A bucket's view of a key: its own row (a tombstone means "absent"), else its parent's view,
+//! recursively. Writes to a bucket push the old view down to children that don't have their
+//! own row first, so a branch's view never changes under it.
+//!
+//! `blobs.refs` counts every `objects` and `trash` row pointing at the blob. All changes to it
+//! go through [`add_ref`], which refuses to go below zero or to revive an unreferenced blob:
+//! either would mean a bookkeeping bug, and failing the write beats losing data.
+
+use crate::error::{Result, StoreError};
+use crate::model::{Checksum, ObjectHeaders, ObjectMeta};
+use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::VecDeque;
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Row {
+    pub key: String,
+    /// `None`: a tombstone.
+    pub blob_id: Option<String>,
+    pub size: u64,
+    pub etag: String,
+    pub headers: ObjectHeaders,
+    pub checksum: Option<Checksum>,
+    pub parts: u32,
+    pub part_sizes: Vec<u64>,
+    pub modified_at: i64,
+}
+
+impl Row {
+    pub fn tombstone(key: &str, now: i64) -> Self {
+        Self {
+            key: key.to_string(),
+            blob_id: None,
+            size: 0,
+            etag: String::new(),
+            headers: ObjectHeaders::default(),
+            checksum: None,
+            parts: 0,
+            part_sizes: Vec::new(),
+            modified_at: now,
+        }
+    }
+
+    pub fn blob(&self) -> Result<&str> {
+        self.blob_id.as_deref().ok_or_else(|| StoreError::internal("tombstone used as an object"))
+    }
+
+    pub fn meta(&self) -> Result<ObjectMeta> {
+        Ok(ObjectMeta {
+            key: self.key.clone(),
+            blob_id: self.blob()?.to_string(),
+            size: self.size,
+            etag: self.etag.clone(),
+            headers: self.headers.clone(),
+            checksum: self.checksum.clone(),
+            parts: self.parts,
+            part_sizes: self.part_sizes.clone(),
+            modified_at: self.modified_at,
+        })
+    }
+}
+
+/// Object columns after `bucket_id` (the trash adds `deleted_at` before them).
+pub(crate) const COLS: &str = "key, blob_id, size, etag, content_type, cache_control, content_disposition, content_encoding, \
+     content_language, expires, metadata, tags, checksum_algorithm, checksum_type, checksum, parts, part_sizes, modified_at";
+
+fn json_col<T: serde::de::DeserializeOwned>(r: &rusqlite::Row, i: usize) -> rusqlite::Result<T> {
+    let s: String = r.get(i)?;
+    serde_json::from_str(&s).map_err(|e| rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, Box::new(e)))
+}
+
+/// A row from `SELECT {COLS}` starting at column `o`.
+pub(crate) fn row_at(r: &rusqlite::Row, o: usize) -> rusqlite::Result<Row> {
+    let algorithm: Option<String> = r.get(o + 12)?;
+    let kind: Option<String> = r.get(o + 13)?;
+    let value: Option<String> = r.get(o + 14)?;
+    Ok(Row {
+        key: r.get(o)?,
+        blob_id: r.get(o + 1)?,
+        size: r.get::<_, i64>(o + 2)? as u64,
+        etag: r.get(o + 3)?,
+        headers: ObjectHeaders {
+            content_type: r.get(o + 4)?,
+            cache_control: r.get(o + 5)?,
+            content_disposition: r.get(o + 6)?,
+            content_encoding: r.get(o + 7)?,
+            content_language: r.get(o + 8)?,
+            expires: r.get(o + 9)?,
+            metadata: json_col(r, o + 10)?,
+            tags: json_col(r, o + 11)?,
+        },
+        checksum: match (algorithm, kind, value) {
+            (Some(algorithm), Some(kind), Some(value)) => Some(Checksum { algorithm, kind, value }),
+            _ => None,
+        },
+        parts: r.get::<_, i64>(o + 15)? as u32,
+        part_sizes: json_col(r, o + 16)?,
+        modified_at: r.get(o + 17)?,
+    })
+}
+
+fn insert_sql(table: &str, extra: &str) -> String {
+    let n = COLS.split(',').count() + 1 + usize::from(!extra.is_empty());
+    let marks: Vec<String> = (1..=n).map(|i| format!("?{i}")).collect();
+    let extra_col = if extra.is_empty() { String::new() } else { format!("{extra}, ") };
+    format!("INSERT INTO {table} (bucket_id, {extra_col}{COLS}) VALUES ({})", marks.join(", "))
+}
+
+fn row_values(r: &Row) -> Result<Vec<rusqlite::types::Value>> {
+    use rusqlite::types::Value::{Integer, Null, Text};
+    let opt = |v: &Option<String>| v.clone().map_or(Null, Text);
+    Ok(vec![
+        Text(r.key.clone()),
+        opt(&r.blob_id),
+        Integer(r.size as i64),
+        Text(r.etag.clone()),
+        opt(&r.headers.content_type),
+        opt(&r.headers.cache_control),
+        opt(&r.headers.content_disposition),
+        opt(&r.headers.content_encoding),
+        opt(&r.headers.content_language),
+        opt(&r.headers.expires),
+        Text(serde_json::to_string(&r.headers.metadata)?),
+        Text(serde_json::to_string(&r.headers.tags)?),
+        opt(&r.checksum.as_ref().map(|c| c.algorithm.clone())),
+        opt(&r.checksum.as_ref().map(|c| c.kind.clone())),
+        opt(&r.checksum.as_ref().map(|c| c.value.clone())),
+        Integer(r.parts as i64),
+        Text(serde_json::to_string(&r.part_sizes)?),
+        Integer(r.modified_at),
+    ])
+}
+
+/// The bucket and its ancestors, nearest first.
+pub(crate) fn chain(c: &Connection, bucket_id: &str) -> Result<Vec<String>> {
+    let mut out = vec![bucket_id.to_string()];
+    let mut cur = bucket_id.to_string();
+    while let Some(p) = c.query_row("SELECT parent_id FROM buckets WHERE id = ?1", [&cur], |r| r.get::<_, Option<String>>(0)).optional()?.flatten() {
+        if out.contains(&p) || out.len() > 1000 {
+            return Err(StoreError::internal(format!("bucket ancestry loops at {p}")));
+        }
+        out.push(p.clone());
+        cur = p;
+    }
+    Ok(out)
+}
+
+pub(crate) fn children(c: &Connection, bucket_id: &str) -> Result<Vec<String>> {
+    let mut st = c.prepare_cached("SELECT id FROM buckets WHERE parent_id = ?1 ORDER BY id")?;
+    let rows = st.query_map([bucket_id], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn own_row(c: &Connection, bucket_id: &str, key: &str) -> Result<Option<Row>> {
+    let mut st = c.prepare_cached(&format!("SELECT {COLS} FROM objects WHERE bucket_id = ?1 AND key = ?2"))?;
+    Ok(st.query_row(params![bucket_id, key], |r| row_at(r, 0)).optional()?)
+}
+
+/// The visible row of `key` in the first bucket of `chain`, and the index of the bucket that
+/// owns it.
+pub(crate) fn resolve(c: &Connection, chain: &[String], key: &str) -> Result<Option<(Row, usize)>> {
+    for (i, b) in chain.iter().enumerate() {
+        if let Some(r) = own_row(c, b, key)? {
+            return Ok(if r.blob_id.is_some() { Some((r, i)) } else { None });
+        }
+    }
+    Ok(None)
+}
+
+fn counters(c: &Connection, bucket_id: &str, objects: i64, bytes: i64) -> Result<()> {
+    if objects != 0 || bytes != 0 {
+        c.execute("UPDATE buckets SET objects = objects + ?2, bytes = bytes + ?3 WHERE id = ?1", params![bucket_id, objects, bytes])?;
+    }
+    Ok(())
+}
+
+/// Insert a row the bucket doesn't have yet. References are the caller's business.
+pub(crate) fn insert_row(c: &Connection, bucket_id: &str, r: &Row) -> Result<()> {
+    let mut values = vec![rusqlite::types::Value::Text(bucket_id.to_string())];
+    values.extend(row_values(r)?);
+    c.prepare_cached(&insert_sql("objects", ""))?.execute(rusqlite::params_from_iter(values))?;
+    if r.blob_id.is_some() {
+        counters(c, bucket_id, 1, r.size as i64)?;
+    }
+    Ok(())
+}
+
+/// Remove the bucket's own row (references are the caller's business).
+pub(crate) fn delete_own_row(c: &Connection, bucket_id: &str, key: &str) -> Result<Option<Row>> {
+    let Some(r) = own_row(c, bucket_id, key)? else { return Ok(None) };
+    c.prepare_cached("DELETE FROM objects WHERE bucket_id = ?1 AND key = ?2")?.execute(params![bucket_id, key])?;
+    if r.blob_id.is_some() {
+        counters(c, bucket_id, -1, -(r.size as i64))?;
+    }
+    Ok(Some(r))
+}
+
+/// Change a blob's reference count.
+pub(crate) fn add_ref(c: &Connection, blob: &str, delta: i64, now: i64) -> Result<()> {
+    let refs: Option<i64> = c.prepare_cached("SELECT refs FROM blobs WHERE id = ?1")?.query_row([blob], |r| r.get(0)).optional()?;
+    let Some(refs) = refs else { return Err(StoreError::internal(format!("blob {blob} has no metadata"))) };
+    if refs == 0 && delta > 0 {
+        return Err(StoreError::internal(format!("blob {blob} is unreferenced and may be deleted; refusing to reference it again")));
+    }
+    let n = refs + delta;
+    if n < 0 {
+        return Err(StoreError::internal(format!("blob {blob} would have {n} references")));
+    }
+    c.prepare_cached("UPDATE blobs SET refs = ?2, unreferenced_at = CASE WHEN ?2 = 0 THEN ?3 ELSE NULL END WHERE id = ?1")?.execute(params![blob, n, now])?;
+    Ok(())
+}
+
+pub(crate) fn insert_blob(c: &Connection, blob: &str, size: u64, crc32c: u32, now: i64) -> Result<()> {
+    c.prepare_cached("INSERT INTO blobs (id, size, crc32c, refs, created_at, unreferenced_at) VALUES (?1, ?2, ?3, 1, ?4, NULL)")?
+        .execute(params![blob, size as i64, crc32c as i64, now])?;
+    Ok(())
+}
+
+/// Put a version into the bucket's trash (the caller moves or adds its reference).
+pub(crate) fn trash_insert(c: &Connection, bucket_id: &str, r: &Row, now: i64) -> Result<i64> {
+    let mut at = now;
+    while c.prepare_cached("SELECT 1 FROM trash WHERE bucket_id = ?1 AND key = ?2 AND deleted_at = ?3")?.exists(params![bucket_id, r.key, at])? {
+        at += 1;
+    }
+    let mut values = vec![rusqlite::types::Value::Text(bucket_id.to_string()), rusqlite::types::Value::Integer(at)];
+    values.extend(row_values(r)?);
+    c.prepare_cached(&insert_sql("trash", "deleted_at"))?.execute(rusqlite::params_from_iter(values))?;
+    c.execute("UPDATE buckets SET trash_bytes = trash_bytes + ?2 WHERE id = ?1", params![bucket_id, r.size as i64])?;
+    Ok(at)
+}
+
+pub(crate) fn trash_row(c: &Connection, bucket_id: &str, key: &str, deleted_at: i64) -> Result<Option<Row>> {
+    Ok(c.prepare_cached(&format!("SELECT {COLS} FROM trash WHERE bucket_id = ?1 AND key = ?2 AND deleted_at = ?3"))?
+        .query_row(params![bucket_id, key, deleted_at], |r| row_at(r, 0))
+        .optional()?)
+}
+
+/// Remove a trash row (the caller moves or drops its reference).
+pub(crate) fn trash_delete(c: &Connection, bucket_id: &str, key: &str, deleted_at: i64, size: u64) -> Result<()> {
+    c.prepare_cached("DELETE FROM trash WHERE bucket_id = ?1 AND key = ?2 AND deleted_at = ?3")?.execute(params![bucket_id, key, deleted_at])?;
+    c.execute("UPDATE buckets SET trash_bytes = trash_bytes - ?2 WHERE id = ?1", params![bucket_id, size as i64])?;
+    Ok(())
+}
+
+/// The bucket's view of `key` changes from what it is to `new` (`None`: deleted). Children
+/// keep their view; the old version goes to the trash if `trash` (and the bucket keeps one).
+/// `new`'s blob reference is the caller's. Returns the old view.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_key(c: &Connection, bucket_id: &str, chain: &[String], recover_days: u32, key: &str, new: Option<&Row>, trash: bool, now: i64) -> Result<Option<Row>> {
+    let old = resolve(c, chain, key)?;
+    if new.is_none() && old.is_none() {
+        return Ok(None);
+    }
+    for child in children(c, bucket_id)? {
+        if own_row(c, &child, key)?.is_none() {
+            match &old {
+                Some((r, _)) => {
+                    add_ref(c, r.blob()?, 1, now)?;
+                    insert_row(c, &child, r)?;
+                }
+                None => insert_row(c, &child, &Row::tombstone(key, now))?,
+            }
+        }
+    }
+    if let Some((r, owner)) = &old {
+        let owned = *owner == 0;
+        if trash && recover_days > 0 {
+            if !owned {
+                add_ref(c, r.blob()?, 1, now)?;
+            }
+            trash_insert(c, bucket_id, r, now)?;
+            if owned {
+                delete_own_row(c, bucket_id, key)?;
+            }
+        } else if owned {
+            delete_own_row(c, bucket_id, key)?;
+            add_ref(c, r.blob()?, -1, now)?;
+        }
+    }
+    // What's left of the bucket's own row is a tombstone.
+    if let Some(own) = delete_own_row(c, bucket_id, key)?
+        && own.blob_id.is_some()
+    {
+        return Err(StoreError::internal(format!("unexpected live row for {key}")));
+    }
+    match new {
+        Some(r) => insert_row(c, bucket_id, r)?,
+        None => {
+            if chain.len() > 1 && resolve(c, &chain[1..], key)?.is_some() {
+                insert_row(c, bucket_id, &Row::tombstone(key, now))?;
+            }
+        }
+    }
+    Ok(old.map(|(r, _)| r))
+}
+
+/// Change a visible object's metadata (tags) without a new version: children keep the old.
+pub(crate) fn update_in_place(c: &Connection, bucket_id: &str, chain: &[String], key: &str, f: impl FnOnce(&mut Row), now: i64) -> Result<Row> {
+    let Some((old, owner)) = resolve(c, chain, key)? else { return Err(StoreError::NoSuchKey(key.to_string())) };
+    let mut new = old.clone();
+    f(&mut new);
+    for child in children(c, bucket_id)? {
+        if own_row(c, &child, key)?.is_none() {
+            add_ref(c, old.blob()?, 1, now)?;
+            insert_row(c, &child, &old)?;
+        }
+    }
+    if owner == 0 {
+        delete_own_row(c, bucket_id, key)?;
+    } else {
+        add_ref(c, old.blob()?, 1, now)?;
+    }
+    insert_row(c, bucket_id, &new)?;
+    Ok(new)
+}
+
+/// A key past every key starting with `prefix` (keys are at most 1024 bytes, so 256 copies of
+/// the largest code point sort after any of them).
+pub(crate) fn past_prefix(prefix: &str) -> String {
+    let mut s = String::with_capacity(prefix.len() + 1024);
+    s.push_str(prefix);
+    for _ in 0..256 {
+        s.push(char::MAX);
+    }
+    s
+}
+
+/// The common prefix `key` rolls up into, if any.
+pub(crate) fn common_prefix<'a>(key: &'a str, prefix: &str, delimiter: Option<&str>) -> Option<&'a str> {
+    let d = delimiter.filter(|d| !d.is_empty())?;
+    let rest = key.get(prefix.len()..)?;
+    rest.find(d).map(|i| &key[..prefix.len() + i + d.len()])
+}
+
+struct Cursor {
+    bucket: String,
+    buf: VecDeque<Row>,
+    from: String,
+    inclusive: bool,
+    done: bool,
+}
+
+const PAGE: usize = 256;
+
+impl Cursor {
+    fn fill(&mut self, c: &Connection, prefix: &str) -> Result<()> {
+        if !self.buf.is_empty() || self.done {
+            return Ok(());
+        }
+        let op = if self.inclusive { ">=" } else { ">" };
+        let mut st = c.prepare_cached(&format!("SELECT {COLS} FROM objects WHERE bucket_id = ?1 AND key {op} ?2 ORDER BY key LIMIT ?3"))?;
+        let rows = st.query_map(params![self.bucket, self.from, PAGE as i64], |r| row_at(r, 0))?.collect::<rusqlite::Result<Vec<Row>>>()?;
+        if rows.len() < PAGE {
+            self.done = true;
+        }
+        if let Some(last) = rows.last() {
+            self.from = last.key.clone();
+            self.inclusive = false;
+        }
+        for r in rows {
+            if !r.key.starts_with(prefix) {
+                self.done = true;
+                break;
+            }
+            self.buf.push_back(r);
+        }
+        Ok(())
+    }
+
+    fn seek(&mut self, from: &str) {
+        self.buf.clear();
+        self.from = from.to_string();
+        self.inclusive = true;
+        self.done = false;
+    }
+}
+
+pub(crate) enum Entry {
+    Object(Box<Row>),
+    Prefix(String),
+}
+
+/// Lists a bucket's view in key order: its rows merged with its ancestors' (nearer buckets
+/// win, tombstones hide), with keys rolled up into common prefixes.
+pub(crate) struct Merger<'a> {
+    c: &'a Connection,
+    cursors: Vec<Cursor>,
+    prefix: String,
+    delimiter: Option<String>,
+}
+
+impl<'a> Merger<'a> {
+    pub(crate) fn new(c: &'a Connection, chain: &[String], prefix: &str, delimiter: Option<&str>, start_after: Option<&str>) -> Self {
+        let delimiter = delimiter.filter(|d| !d.is_empty()).map(str::to_string);
+        let (from, inclusive) = match start_after {
+            Some(s) if s >= prefix => match common_prefix(s, prefix, delimiter.as_deref()) {
+                // Resuming after a common prefix skips everything in it.
+                Some(cp) if cp == s => (past_prefix(s), true),
+                _ => (s.to_string(), false),
+            },
+            _ => (prefix.to_string(), true),
+        };
+        let cursors = chain.iter().map(|b| Cursor { bucket: b.clone(), buf: VecDeque::new(), from: from.clone(), inclusive, done: false }).collect();
+        Self { c, cursors, prefix: prefix.to_string(), delimiter }
+    }
+
+    pub(crate) fn next_entry(&mut self) -> Result<Option<Entry>> {
+        loop {
+            for cur in &mut self.cursors {
+                cur.fill(self.c, &self.prefix)?;
+            }
+            let Some(key) = self.cursors.iter().filter_map(|c| c.buf.front().map(|r| &r.key)).min().cloned() else { return Ok(None) };
+            let mut winner = None;
+            for cur in &mut self.cursors {
+                if let Some(r) = cur.buf.pop_front_if(|r| r.key == key)
+                    && winner.is_none()
+                {
+                    winner = Some(r);
+                }
+            }
+            let row = winner.expect("some cursor had the key");
+            if row.blob_id.is_none() {
+                continue;
+            }
+            if let Some(cp) = common_prefix(&row.key, &self.prefix, self.delimiter.as_deref()) {
+                let cp = cp.to_string();
+                let past = past_prefix(&cp);
+                for cur in &mut self.cursors {
+                    cur.seek(&past);
+                }
+                return Ok(Some(Entry::Prefix(cp)));
+            }
+            return Ok(Some(Entry::Object(Box::new(row))));
+        }
+    }
+}
+
+pub(crate) fn json<T: serde::Serialize>(v: &T) -> Result<String> {
+    Ok(serde_json::to_string(v)?)
+}

@@ -1,0 +1,245 @@
+//! One request: addressing, auth, routing and the common response headers.
+
+use crate::auth::{self, Auth};
+use crate::response::{self, Reply};
+use crate::{Server, bucket, cors, object, post};
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::Response;
+use s3_proto::http::{parse_query, percent_decode_utf8};
+use s3_proto::{Code, S3Error};
+use s3_store::{Class, Store};
+use std::net::IpAddr;
+use std::sync::Arc;
+
+pub(crate) struct Ctx {
+    pub server: Arc<Server>,
+    pub method: Method,
+    /// As on the request line (percent-encoded), and the raw query.
+    pub raw_path: String,
+    pub raw_query: String,
+    pub query: Vec<(String, String)>,
+    pub headers: HeaderMap,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub peer: Option<IpAddr>,
+    pub auth: Option<Auth>,
+}
+
+impl Ctx {
+    pub fn store(&self) -> &Arc<Store> {
+        &self.server.store
+    }
+
+    /// A query parameter's (decoded) value.
+    pub fn q(&self, name: &str) -> Option<&str> {
+        self.query.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
+    /// Whether a query parameter (subresource) is present.
+    pub fn has(&self, name: &str) -> bool {
+        self.query.iter().any(|(k, _)| k == name)
+    }
+
+    pub fn h(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).and_then(|v| v.to_str().ok())
+    }
+
+    /// Every header as text (lossy), for signing and metadata.
+    pub fn header_pairs(&self) -> Vec<(String, String)> {
+        self.headers.iter().map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect()
+    }
+
+    pub fn bucket_name(&self) -> &str {
+        self.bucket.as_deref().unwrap_or_default()
+    }
+
+    pub fn key_name(&self) -> &str {
+        self.key.as_deref().unwrap_or_default()
+    }
+
+    /// `/bucket/key`, for error bodies.
+    pub fn resource(&self) -> String {
+        match (&self.bucket, &self.key) {
+            (Some(b), Some(k)) => format!("/{b}/{k}"),
+            (Some(b), None) => format!("/{b}"),
+            _ => "/".into(),
+        }
+    }
+
+    pub fn internal(&self) -> bool {
+        self.peer.is_some_and(|ip| self.server.is_internal(ip))
+    }
+
+    pub fn meter(&self, bucket_id: &str, class: Class) {
+        self.store().meter.request(bucket_id, class);
+    }
+
+    /// Unix seconds now (the store's clock, so tests can move it).
+    pub fn now_s(&self) -> i64 {
+        self.store().now().div_euclid(1000)
+    }
+}
+
+fn request_id() -> String {
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).expect("os randomness");
+    hex::encode_upper(b)
+}
+
+/// Bucket and key from the `Host` header (virtual-host style) or the path.
+fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Option<String>, Option<String>), S3Error> {
+    let path = raw_path.strip_prefix('/').unwrap_or(raw_path);
+    if let Some(domain) = &server.cfg.virtual_host_domain {
+        let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default();
+        let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
+        if let Some(b) = host.strip_suffix(domain.as_str()).and_then(|h| h.strip_suffix('.')).filter(|b| !b.is_empty()) {
+            let key = Some(percent_decode_utf8(path)?).filter(|k| !k.is_empty());
+            return Ok((Some(b.to_ascii_lowercase()), key));
+        }
+    }
+    if path.is_empty() {
+        return Ok((None, None));
+    }
+    let (b, k) = path.split_once('/').unwrap_or((path, ""));
+    let bucket = percent_decode_utf8(b)?;
+    let key = Some(percent_decode_utf8(k)?).filter(|k| !k.is_empty());
+    Ok((Some(bucket), key))
+}
+
+pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let raw_path = parts.uri.path().to_string();
+    let raw_query = parts.uri.query().unwrap_or_default().to_string();
+    let head = parts.method == Method::HEAD;
+    let request_id = request_id();
+    let addressed = address(&server, &parts.headers, &raw_path);
+    let mut ctx = Ctx {
+        server,
+        method: parts.method,
+        query: parse_query(&raw_query),
+        raw_path,
+        raw_query,
+        headers: parts.headers,
+        bucket: None,
+        key: None,
+        peer,
+        auth: None,
+    };
+    let result = match addressed {
+        Ok((b, k)) => {
+            ctx.bucket = b;
+            ctx.key = k;
+            run(&mut ctx, body).await
+        }
+        Err(e) => Err(e),
+    };
+    let mut resp = match result {
+        Ok(r) => r,
+        Err(e) => {
+            if e.code == Code::InternalError || e.code == Code::ServiceUnavailable {
+                tracing::warn!(code = e.code.as_str(), message = e.message, method = %ctx.method, resource = ctx.resource(), "s3 request failed");
+            }
+            let e = if e.resource.is_none() { e.with_resource(ctx.resource()) } else { e };
+            response::error(&e, &request_id, head)
+        }
+    };
+    response::set(&mut resp, "x-amz-request-id", &request_id);
+    response::set(&mut resp, "x-amz-id-2", &request_id);
+    response::set(&mut resp, "server", "roll");
+    if ctx.method != Method::OPTIONS {
+        cors::decorate(&ctx, &mut resp);
+    }
+    resp
+}
+
+fn is_form_post(ctx: &Ctx) -> bool {
+    ctx.method == Method::POST && ctx.key.is_none() && ctx.bucket.is_some() && ctx.h("content-type").is_some_and(|c| c.to_ascii_lowercase().starts_with("multipart/form-data"))
+}
+
+async fn run(ctx: &mut Ctx, body: Body) -> Reply {
+    if ctx.method == Method::OPTIONS {
+        return cors::preflight(ctx);
+    }
+    if is_form_post(ctx) {
+        return post::upload(ctx, body).await;
+    }
+    reject_unsupported_headers(ctx)?;
+    ctx.auth = auth::authenticate(ctx)?;
+    if let Some(a) = &ctx.auth {
+        ctx.store().touch_key(&a.key.id);
+    }
+    match (&ctx.bucket, &ctx.key) {
+        (None, _) => match ctx.method {
+            Method::GET => bucket::list_buckets(ctx),
+            _ => Err(S3Error::new(Code::MethodNotAllowed)),
+        },
+        (Some(_), None) => bucket::route(ctx, body).await,
+        (Some(_), Some(_)) => object::route(ctx, body).await,
+    }
+}
+
+/// Features we don't have must fail loudly, never be ignored.
+fn reject_unsupported_headers(ctx: &Ctx) -> Result<(), S3Error> {
+    let not_impl = |h: &str, why: &str| Err(S3Error::msg(Code::NotImplemented, why.to_string()).with("Header", h.to_string()));
+    for (name, _) in ctx.headers.iter() {
+        let n = name.as_str();
+        if n.starts_with("x-amz-server-side-encryption-customer-") || n.starts_with("x-amz-copy-source-server-side-encryption-customer-") {
+            return not_impl(n, "SSE-C is not supported.");
+        }
+        if n.starts_with("x-amz-object-lock-") {
+            return not_impl(n, "Object Lock is not supported.");
+        }
+        if n.starts_with("x-amz-grant-") {
+            return not_impl(n, "ACL grants are not supported; use the bucket's public flag and scoped keys.");
+        }
+        if n == "x-amz-website-redirect-location" {
+            return not_impl(n, "Website hosting is not supported.");
+        }
+    }
+    if let Some(sse) = ctx.h("x-amz-server-side-encryption")
+        && !sse.trim().eq_ignore_ascii_case("AES256")
+    {
+        return not_impl("x-amz-server-side-encryption", "Only AES256 (SSE-S3) server-side encryption is supported.");
+    }
+    if let Some(acl) = ctx.h("x-amz-acl")
+        && acl.trim() != "private"
+        && !(acl.trim() == "bucket-owner-full-control")
+    {
+        return not_impl("x-amz-acl", "ACLs are not supported; use the bucket's public flag and scoped keys. x-amz-acl: private is accepted.");
+    }
+    if let Some(rp) = ctx.h("x-amz-request-payer")
+        && !rp.eq_ignore_ascii_case("requester")
+    {
+        return Err(S3Error::new(Code::InvalidArgument).with("ArgumentName", "x-amz-request-payer"));
+    }
+    if let Some(class) = ctx.h("x-amz-storage-class") {
+        const CLASSES: [&str; 9] = ["STANDARD", "REDUCED_REDUNDANCY", "STANDARD_IA", "ONEZONE_IA", "INTELLIGENT_TIERING", "GLACIER", "DEEP_ARCHIVE", "GLACIER_IR", "OUTPOSTS"];
+        if !CLASSES.contains(&class.trim()) {
+            return Err(S3Error::new(Code::InvalidStorageClass).with("StorageClassRequested", class.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// Read a small request body (XML) completely, refusing anything over `limit` bytes.
+pub(crate) async fn read_small(ctx: &Ctx, body: Body, limit: usize) -> Result<bytes::Bytes, S3Error> {
+    use futures::StreamExt;
+    let mut decoded = crate::body::Incoming::new(ctx, body, crate::body::requested_checksum(ctx)?, Some(limit as u64))?;
+    let mut out = Vec::new();
+    while let Some(chunk) = decoded.next().await {
+        let chunk = chunk.map_err(|_| decoded.error().unwrap_or_else(|| S3Error::new(Code::IncompleteBody)))?;
+        if out.len() + chunk.len() > limit {
+            return Err(S3Error::new(Code::MaxMessageLengthExceeded));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    let f = decoded.finished()?;
+    f.digest.verify_content_md5(ctx.h("content-md5"))?;
+    Ok(out.into())
+}
+
+pub(crate) fn no_content() -> Reply {
+    Ok(response::empty(StatusCode::NO_CONTENT))
+}

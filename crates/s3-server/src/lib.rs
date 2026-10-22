@@ -1,0 +1,105 @@
+//! roll storage: the S3-compatible HTTP API.
+//!
+//! [`Server`] answers S3 requests over [`s3_store::Store`]: SigV4 auth with roll access keys,
+//! path- and virtual-host-style addressing, streaming bodies both ways (bounded memory),
+//! checksums verified before anything is committed, CORS, public buckets and metering. The wire
+//! format (signatures, `aws-chunked`, XML, error codes) is `s3-proto`'s.
+//!
+//! ```ignore
+//! let server = Server::new(store, Config::default());
+//! s3_server::serve(tokio::net::TcpListener::bind("127.0.0.1:59000").await?, server).await?;
+//! ```
+
+mod auth;
+mod body;
+mod bucket;
+mod cors;
+mod ctx;
+mod error;
+mod multipart;
+mod object;
+mod post;
+mod response;
+mod upload;
+
+use axum::Router;
+use axum::extract::{ConnectInfo, Request, State};
+use axum::response::Response;
+use ipnet::IpNet;
+use s3_store::Store;
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+pub use error::store_error;
+pub use upload::put_object;
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// `<bucket>.<domain>` addresses a bucket (virtual-host style). Path style always works.
+    pub virtual_host_domain: Option<String>,
+    /// Peers in these ranges are inside roll: their egress is free.
+    pub internal_cidrs: Vec<IpNet>,
+    /// Region reported by `GetBucketLocation` and `x-amz-bucket-region` (any region is accepted
+    /// in signatures).
+    pub region: String,
+    /// Where browser form uploads (POST Object, length unknown up front) are spooled.
+    pub spool_dir: PathBuf,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            virtual_host_domain: None,
+            internal_cidrs: default_internal_cidrs(),
+            region: "us-east-1".into(),
+            spool_dir: std::env::temp_dir(),
+        }
+    }
+}
+
+/// Loopback, the private IPv4 ranges (VPCs, the docker bridge) and IPv6 ULAs.
+pub fn default_internal_cidrs() -> Vec<IpNet> {
+    ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"].iter().map(|s| s.parse().expect("valid CIDR")).collect()
+}
+
+/// Parse a comma-separated CIDR list (`ROLL_S3_INTERNAL_CIDRS`).
+pub fn parse_cidrs(s: &str) -> anyhow::Result<Vec<IpNet>> {
+    s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(|p| p.parse::<IpNet>().map_err(|e| anyhow::anyhow!("{p}: {e}"))).collect()
+}
+
+pub struct Server {
+    pub store: Arc<Store>,
+    pub cfg: Config,
+}
+
+impl Server {
+    pub fn new(store: Arc<Store>, cfg: Config) -> Arc<Self> {
+        Arc::new(Self { store, cfg })
+    }
+
+    /// Whether traffic to `ip` is inside roll (free egress).
+    pub fn is_internal(&self, ip: IpAddr) -> bool {
+        let ip = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+            v4 => v4,
+        };
+        self.cfg.internal_cidrs.iter().any(|n| n.contains(&ip))
+    }
+}
+
+/// The S3 API as an axum router. Serve it with connect info (see [`serve`]): egress is
+/// classified by the peer address.
+pub fn router(server: Arc<Server>) -> Router {
+    Router::new().fallback(handle).with_state(server)
+}
+
+/// Serve the S3 API on `listener` until it fails.
+pub async fn serve(listener: tokio::net::TcpListener, server: Arc<Server>) -> std::io::Result<()> {
+    axum::serve(listener, router(server).into_make_service_with_connect_info::<SocketAddr>()).await
+}
+
+async fn handle(State(server): State<Arc<Server>>, req: Request) -> Response {
+    let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
+    ctx::dispatch(server, peer, req).await
+}

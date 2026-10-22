@@ -109,6 +109,28 @@ struct Args {
     /// Run only roll queues (no Postgres control plane or proxy): broker nodes on AWS.
     #[arg(long, env = "ROLL_QUEUES_ONLY", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     queues_only: bool,
+    /// S3-compatible storage listen address.
+    #[arg(long, env = "ROLL_S3", default_value = "127.0.0.1:59000")]
+    s3: SocketAddr,
+    /// `<bucket>.<domain>` addresses a bucket (virtual-host style); path style always works.
+    #[arg(long, env = "ROLL_S3_DOMAIN")]
+    s3_domain: Option<String>,
+    /// Storage class of stored objects (default: INTELLIGENT_TIERING on AWS S3, STANDARD on a
+    /// custom endpoint; ignored for a local directory).
+    #[arg(long, env = "ROLL_S3_STORAGE_CLASS")]
+    s3_storage_class: Option<String>,
+    /// Peers in these comma-separated CIDRs are inside roll: their egress is free (default:
+    /// loopback and the private ranges).
+    #[arg(long, env = "ROLL_S3_INTERNAL_CIDRS")]
+    s3_internal_cidrs: Option<String>,
+    /// An admin access key to create at startup (local dev and tests), with ROLL_S3_SECRET_KEY.
+    #[arg(long, env = "ROLL_S3_ACCESS_KEY", requires = "s3_secret_key")]
+    s3_access_key: Option<String>,
+    #[arg(long, env = "ROLL_S3_SECRET_KEY", requires = "s3_access_key", hide_env_values = true)]
+    s3_secret_key: Option<String>,
+    /// Don't run roll storage (the S3 API).
+    #[arg(long, env = "ROLL_NO_STORAGE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    no_storage: bool,
     #[command(flatten)]
     queues: queues::QueuesArgs,
 }
@@ -130,11 +152,13 @@ async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info".into()),
+                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info,s3_store=info,s3_server=info,s3_control=info".into()),
         )
         .init();
     let args = Args::parse();
     let home = std::path::absolute(&args.home)?;
+    let home_abs = home.clone();
+    let storage_opts = StorageOpts::from(&args);
 
     let queues = if args.queues.disabled { None } else { Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host).await?) };
     if args.queues_only {
@@ -212,6 +236,8 @@ async fn run() -> anyhow::Result<()> {
     info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
     let redis_opts = redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol };
 
+    let storage_svc = if args.no_storage { None } else { Some(start_storage(&storage_opts, &home_abs, &storage).await?) };
+
     let broker = stream_broker::Broker::new(stream_config).await?;
     if let Some(name) = &broker.config.default_stream
         && broker.find_stream(name).is_none()
@@ -230,6 +256,19 @@ async fn run() -> anyhow::Result<()> {
     if let Some(q) = &queues {
         router = router.merge(q.router());
     }
+    if let Some(st) = &storage_svc {
+        router = router.merge(s3_control::api::router(st.control.clone()));
+    }
+    let s3_serve = storage_svc.as_ref().map(|st| (st.server.clone(), st.listener.clone()));
+    let storage_serve = async move {
+        match s3_serve {
+            Some((server, listener)) => match listener.lock().await.take() {
+                Some(l) => s3_server::serve(l, server).await,
+                None => std::future::pending().await,
+            },
+            None => std::future::pending().await,
+        }
+    };
     let queues_serve = async {
         match &queues {
             Some(q) => q.serve().await,
@@ -243,6 +282,7 @@ async fn run() -> anyhow::Result<()> {
         r = redis_server::net::serve(redis_listener, redis_dir.clone(), redis_opts) => r?,
         r = redis_server::http::serve_http(redis_http, redis_dir) => r?,
         r = queues_serve => r?,
+        r = storage_serve => r?,
         r = stream_broker::server::serve_on(broker.clone(), kafka) => r?,
         _ = reconciler::run(control.clone()) => {}
         _ = broker.clone().run() => {}
@@ -256,9 +296,76 @@ async fn run() -> anyhow::Result<()> {
     if let Some(q) = &queues {
         q.shutdown().await;
     }
+    if let Some(st) = &storage_svc {
+        // Commit pending metadata and usage before exiting.
+        st.server.store.close().await;
+    }
     tasks_worker.shutdown().await;
     broker.sync_all().await;
     Ok(())
+}
+
+/// roll storage: its store (metadata under `<home>/storage`, blobs next to everything else's
+/// durable state), the S3 API and the control plane.
+struct Storage {
+    server: std::sync::Arc<s3_server::Server>,
+    control: std::sync::Arc<s3_control::Control>,
+    listener: std::sync::Arc<tokio::sync::Mutex<Option<tokio::net::TcpListener>>>,
+}
+
+/// rolld's storage flags (taken before the other products consume theirs).
+struct StorageOpts {
+    s3: SocketAddr,
+    public_host: String,
+    node: String,
+    s3_domain: Option<String>,
+    s3_storage_class: Option<String>,
+    s3_internal_cidrs: Option<String>,
+    s3_access_key: Option<String>,
+    s3_secret_key: Option<String>,
+}
+
+impl From<&Args> for StorageOpts {
+    fn from(a: &Args) -> Self {
+        Self {
+            s3: a.s3,
+            public_host: a.public_host.clone(),
+            node: a.node.clone(),
+            s3_domain: a.s3_domain.clone(),
+            s3_storage_class: a.s3_storage_class.clone(),
+            s3_internal_cidrs: a.s3_internal_cidrs.clone(),
+            s3_access_key: a.s3_access_key.clone(),
+            s3_secret_key: a.s3_secret_key.clone(),
+        }
+    }
+}
+
+async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<Storage> {
+    let class = args.s3_storage_class.clone().or_else(|| match storage {
+        StorageConfig::S3 { endpoint: None, .. } => Some("INTELLIGENT_TIERING".into()),
+        StorageConfig::S3 { endpoint: Some(_), .. } => Some("STANDARD".into()),
+        StorageConfig::Local(_) => None,
+    });
+    let class = class.filter(|_| matches!(storage, StorageConfig::S3 { .. }));
+    let backend = s3_store::from_config(storage, class.as_deref()).await?;
+    let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
+    cfg.node = args.node.clone();
+    let store = s3_store::Store::open(cfg, backend).await?;
+    if let (Some(id), Some(secret)) = (&args.s3_access_key, &args.s3_secret_key) {
+        store.ensure_key(id, secret, "ROLL_S3_ACCESS_KEY").await?;
+    }
+    let mut scfg = s3_server::Config { virtual_host_domain: args.s3_domain.clone(), spool_dir: home.join("storage").join("spool"), ..Default::default() };
+    std::fs::create_dir_all(&scfg.spool_dir)?;
+    if let Some(c) = &args.s3_internal_cidrs {
+        scfg.internal_cidrs = s3_server::parse_cidrs(c)?;
+    }
+    let endpoint = format!("http://{}:{}", args.public_host, args.s3.port());
+    let ccfg = s3_control::ControlConfig { endpoint, region: scfg.region.clone(), virtual_host_domain: args.s3_domain.clone(), storage_class: class, pricing: Default::default() };
+    let control = s3_control::Control::new(store.clone(), ccfg).await?;
+    let server = s3_server::Server::new(store, scfg);
+    let listener = tokio::net::TcpListener::bind(args.s3).await?;
+    info!(s3 = %args.s3, storage = %server.store.describe(), "storage (S3 API) listening");
+    Ok(Storage { server, control, listener: std::sync::Arc::new(tokio::sync::Mutex::new(Some(listener))) })
 }
 
 /// Ctrl-C, or SIGTERM from a supervisor (systemd, ECS, Kubernetes) during a rolling upgrade.

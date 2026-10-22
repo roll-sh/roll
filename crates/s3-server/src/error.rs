@@ -1,0 +1,44 @@
+//! Store errors as S3 errors.
+
+use s3_proto::{Code, S3Error};
+use s3_store::StoreError;
+
+/// The S3 error for a store error. Client mistakes map to 4xx; only real failures are 5xx.
+pub fn store_error(e: StoreError) -> S3Error {
+    match e {
+        StoreError::NoSuchBucket(b) => S3Error::new(Code::NoSuchBucket).with("BucketName", b),
+        StoreError::BucketExists(b) => S3Error::new(Code::BucketAlreadyOwnedByYou).with("BucketName", b),
+        StoreError::BucketNotEmpty(b) => S3Error::new(Code::BucketNotEmpty).with("BucketName", b),
+        StoreError::BucketHasBranches(b) => S3Error::msg(Code::BucketNotEmpty, format!("Bucket {b} has branches; delete them first.")).with("BucketName", b),
+        StoreError::NoSuchKey(k) => S3Error::new(Code::NoSuchKey).with("Key", k),
+        StoreError::NoSuchUpload(u) => S3Error::new(Code::NoSuchUpload).with("UploadId", u),
+        StoreError::PreconditionFailed => S3Error::new(Code::PreconditionFailed),
+        StoreError::InvalidPart(n) => S3Error::new(Code::InvalidPart).with("PartNumber", n.to_string()),
+        StoreError::InvalidPartOrder => S3Error::new(Code::InvalidPartOrder),
+        StoreError::EntityTooSmall(n) => S3Error::new(Code::EntityTooSmall).with("PartNumber", n.to_string()),
+        StoreError::InvalidBucketName(why) => S3Error::msg(Code::InvalidBucketName, format!("The specified bucket is not valid: {why}")),
+        StoreError::KeyTooLong => S3Error::new(Code::KeyTooLongError),
+        StoreError::MetadataTooLarge => S3Error::new(Code::MetadataTooLarge),
+        StoreError::InvalidArgument(why) => S3Error::msg(Code::InvalidArgument, why),
+        StoreError::NotFound(why) => S3Error::msg(Code::NoSuchKey, why),
+        StoreError::Unavailable(why) => {
+            tracing::error!(why, "storage unavailable");
+            S3Error::new(Code::ServiceUnavailable)
+        }
+        StoreError::Internal(e) => {
+            tracing::error!(error = %e, "storage error");
+            S3Error::new(Code::InternalError)
+        }
+    }
+}
+
+/// `?` on store results inside handlers.
+pub(crate) trait StoreResult<T> {
+    fn s3(self) -> Result<T, S3Error>;
+}
+
+impl<T> StoreResult<T> for Result<T, StoreError> {
+    fn s3(self) -> Result<T, S3Error> {
+        self.map_err(store_error)
+    }
+}

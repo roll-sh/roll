@@ -9,7 +9,8 @@
     "test:redis": "scripts/test-redis.sh",
     "test:tasks": "scripts/test-tasks.sh",
     "test:stream": "scripts/test-stream.sh",
-    "test:queues": "scripts/test-queues.sh"
+    "test:queues": "scripts/test-queues.sh",
+    "test:storage": "scripts/test-storage.sh"
   },
   "packageManager": "pnpm@12.10.1"
 }

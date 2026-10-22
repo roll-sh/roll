@@ -122,6 +122,18 @@ redis-engine = { path = "crates/redis-engine" }
 redis-server = { path = "crates/redis-server" }
 redis-control = { path = "crates/redis-control" }
 
+# roll storage (S3-compatible object storage).
+quick-xml = "0.41"
+crc-fast = "1"
+httpdate = "1"
+http-body-util = "0.1"
+http-body = "1"
+ipnet = "2"
+s3-proto = { path = "crates/s3-proto" }
+s3-store = { path = "crates/s3-store" }
+s3-server = { path = "crates/s3-server" }
+s3-control = { path = "crates/s3-control" }
+
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]
 kafka-protocol = { path = "vendor/kafka-protocol" }

@@ -4549,6 +4549,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+ "tokio-util",
  "urlencoding",
 ]
 
@@ -4583,6 +4584,9 @@ dependencies = [
  "pg-storage",
  "redis-control",
  "redis-server",
+ "s3-control",
+ "s3-server",
+ "s3-store",
  "stream-broker",
  "tasks",
  "tokio",
@@ -4828,6 +4832,101 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "s3-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "getrandom 0.4.3",
+ "reqwest",
+ "s3-proto",
+ "s3-server",
+ "s3-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower-http 0.7.1",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "s3-proto"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "crc-fast",
+ "hex",
+ "hmac 0.12.1",
+ "httpdate",
+ "md-5",
+ "quick-xml",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "s3-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "ipnet",
+ "md-5",
+ "memchr",
+ "reqwest",
+ "s3-proto",
+ "s3-store",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "s3-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "base64 0.22.1",
+ "bytes",
+ "crc32c",
+ "futures",
+ "getrandom 0.4.3",
+ "http-body 1.1.0",
+ "md-5",
+ "pg-storage",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "zstd 0.14.3",
+]
 
 [[package]]
 name = "salsa20"

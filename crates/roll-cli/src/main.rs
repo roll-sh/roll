@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 mod redis;
 mod queues;
+mod storage;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -48,6 +49,9 @@ enum Cmd {
     /// RabbitMQ-compatible message queues.
     #[command(alias = "q")]
     Queues(queues::Queues),
+    /// S3-compatible object storage.
+    #[command(subcommand, alias = "s3")]
+    Storage(storage::Storage),
 }
 
 #[derive(Subcommand)]
@@ -293,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
+        Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
     };
     let out = match cmd {
         Db::List => {

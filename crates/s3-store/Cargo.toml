@@ -1,0 +1,31 @@
+[package]
+name = "s3-store"
+description = "roll storage: metadata with a durable log in object storage, branching, refcounts, trash, blobs backend, GC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+base64.workspace = true
+bytes.workspace = true
+crc32c.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+http-body.workspace = true
+md-5.workspace = true
+pg-storage.workspace = true
+rusqlite = { workspace = true, features = ["session", "backup"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

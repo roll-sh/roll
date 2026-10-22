@@ -103,6 +103,25 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - compaction: `tests/compaction.rs`
   - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the broker tests against S3.
   - `roll stream …` in `crates/roll-cli` and `/dashboard/streams` both use the HTTP API.
+- **Storage (S3-compatible):**
+  - `crates/s3-proto` is the wire protocol with no I/O: SigV4 (headers, presigned, aws-chunked with trailers, POST policies), XML, checksums, ranges and conditionals, S3 error codes.
+  - `crates/s3-store` is the metadata (SQLite plus a durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (`aws-sdk-s3` or a local directory) and the GC/scrub jobs. It has no HTTP.
+  - `crates/s3-server` is the S3 HTTP API. `crates/s3-control` is `/v1/storage`, used by `roll storage …` and `/dashboard/storage`.
+  - The design is in `docs/storage/architecture.md`. Reliability comes first; keep these invariants:
+    - One customer object is one backend blob. Never pack objects together, and never compact or rewrite a blob.
+    - Blobs are immutable. Every upload gets a fresh blob id; never reuse one.
+    - Acknowledge a write only after its metadata log commit is in object storage. A failed commit fails the writes in it and fences the node.
+    - Never delete a blob that any `objects` or `trash` row references. Deletes go to the trash (`recover_days`), then unreferenced blobs wait in a 24 h quarantine. The orphan scan only removes blobs with no metadata, no active upload and an age over 24 h. The scrub only reports.
+    - Writes to a bucket with branches push the old state down to the branches in the same transaction.
+    - Never size an allocation from a count or length a peer sent. Stream bodies, and cap XML bodies.
+  - After touching anything storage-related, run `pnpm test:storage`. It skips itself when nothing relevant changed and runs real S3 tools in Docker (`amazon/aws-cli`, `rclone/rclone`, MinIO's `mc` from `bitnamilegacy/minio-client`).
+  - Put new tests in the matching place:
+    - protocol vectors and parsers: unit tests in `s3-proto`
+    - metadata, durability, branching and GC: `crates/s3-store/tests/`
+    - the S3 API through the AWS SDK: `crates/s3-server/tests/`
+    - real tools: `crates/s3-server/tests/tools.rs`
+    - `/v1/storage`: `crates/s3-control/tests/`
+  - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the store and server tests against S3.
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.
   - Test Postgres with `docker run --rm postgres:18-alpine psql "postgres://...@host.docker.internal:55432/main?options=endpoint%3D<ep>"`, because there is no local psql.
