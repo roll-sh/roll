@@ -1885,6 +1885,31 @@ pub struct Catalog {
     /// CREATE EVENT TRIGGER event triggers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub event_triggers: BTreeMap<u32, Arc<EventTrigger>>,
+    /// Counts the copies of catalogs made on this thread (`catalog_copies`).
+    #[serde(skip)]
+    pub copies: CopyTally,
+}
+
+thread_local! {
+    static COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A field of `Catalog` counting its copies: a copy costs as much as the catalog is big, so
+/// a statement's copies mustn't grow with the objects the catalog holds (ALTER TABLE once
+/// copied it for every table, minutes per statement over a large catalog).
+#[derive(Debug, Default)]
+pub struct CopyTally;
+
+impl Clone for CopyTally {
+    fn clone(&self) -> Self {
+        COPIES.with(|c| c.set(c.get() + 1));
+        CopyTally
+    }
+}
+
+/// How many catalogs this thread has copied so far.
+pub fn catalog_copies() -> u64 {
+    COPIES.with(|c| c.get())
 }
 
 /// A relation found by name.

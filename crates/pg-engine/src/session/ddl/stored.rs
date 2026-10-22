@@ -358,9 +358,31 @@ fn words(before: &Catalog, c: &Change) -> Vec<String> {
     w.into_iter().collect()
 }
 
-/// Whether `text` may name something in `words`.
+/// Whether `text` may name something in `words`: one of them as a whole word (not inside a
+/// longer identifier), in any letter case. A one-letter table name (`t`) is in nearly every
+/// text as a letter, and each text that may name it is bound again: with many stored objects
+/// every ALTER TABLE of it rebound them all.
 fn mentions(text: &str, words: &[String]) -> bool {
-    words.iter().any(|w| text.contains(w.as_str()))
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii();
+    let lower = text.to_ascii_lowercase();
+    words.iter().any(|w| {
+        let w = w.to_ascii_lowercase();
+        if w.is_empty() {
+            return false;
+        }
+        let mut from = 0;
+        while let Some(i) = lower[from..].find(&w) {
+            let start = from + i;
+            let end = start + w.len();
+            let before = lower[..start].chars().next_back();
+            let after = lower[end..].chars().next();
+            if before.is_none_or(|c| !ident(c)) && after.is_none_or(|c| !ident(c)) {
+                return true;
+            }
+            from = start + lower[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        false
+    })
 }
 
 /// The edits renaming what changed in one recorded text.

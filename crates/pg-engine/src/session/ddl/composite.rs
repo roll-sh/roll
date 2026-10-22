@@ -471,9 +471,19 @@ impl Ddl<'_, '_> {
         });
         // An index's expression column of the type counts too (named as
         // FigureIndexColname named it).
+        // (One binder for them all, and only tables with an expression index: every ALTER
+        // TABLE asks this, and a binder holds a copy of the catalog.)
         let mut ix_col: Option<(u32, String, String)> = None;
+        let mut binder = None;
         for t in &tables {
-            let Ok(bixs) = self.binder().bound_indexes_all(t) else {
+            let has_expr = self.cat.table_indexes(t).iter().any(|ix| {
+                ix.columns.iter().any(|c| matches!(c.key, crate::catalog::IndexKey::Expr(_)))
+            });
+            if !has_expr {
+                continue;
+            }
+            let b = binder.get_or_insert_with(|| self.binder());
+            let Ok(bixs) = b.bound_indexes_all(t) else {
                 continue;
             };
             for b in bixs {

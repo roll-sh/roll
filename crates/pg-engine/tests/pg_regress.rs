@@ -35,8 +35,10 @@
 //! - `PGREGRESS_ONLY=a,b,c`: run only these files (plus `test_setup`, always first).
 //! - `PGREGRESS_REPORT_ONLY=1`: don't run anything, rebuild the report from saved outputs
 //!   (`$PGREGRESS_DIR/out`).
-//! - `PGREGRESS_TIMEOUT=<secs>`: psql timeout per run of a file (default 300). After an engine
-//!   crash or timeout the file resumes after the failing unit (up to 25 times, 2 timeouts).
+//! - `PGREGRESS_TIMEOUT=<secs>`: how long one statement may run (psql printing nothing) before
+//!   it counts as stalled (default 300). `PGREGRESS_FILE_TIMEOUT=<secs>`: the cap on a whole run
+//!   of a file (default 3600). After an engine crash or stall the file resumes after the failing
+//!   unit (up to 25 times, 2 timeouts).
 //! - `PGREGRESS_PORT`, `PGREGRESS_CONTAINER`: engine port (55600) and reference container.
 //! - `PGREGRESS_ENGINE_HOST`: the host name psql in the container uses for the engine
 //!   (default `host.docker.internal`).
@@ -895,7 +897,8 @@ fn psql(
         "sh",
         "-c",
         &format!(
-            "cd {build} && exec timeout -s KILL {timeout} psql -X -a -q -d {db} -v HIDE_TABLEAM=on -v HIDE_TOAST_COMPRESSION=on 2>&1"
+            "cd {build} && exec timeout -s KILL {cap} psql -X -a -q -d {db} -v HIDE_TABLEAM=on -v HIDE_TOAST_COMPRESSION=on 2>&1",
+            cap = file_timeout(timeout),
         ),
     ]);
     cmd.stdin(Stdio::piped())
@@ -908,25 +911,54 @@ fn psql(
         let _ = stdin.write_all(&input);
     });
     let mut stdout = child.stdout.take().unwrap();
-    let reader = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = stdout.read_to_end(&mut v);
-        v
-    });
+    // psql -a echoes and flushes every statement as it starts it, so output that stops
+    // coming for `timeout` seconds is one statement stalling, however long the file runs.
     let started = Instant::now();
+    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let reader = {
+        let progress = progress.clone();
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                v.extend_from_slice(&buf[..n]);
+                progress.store(started.elapsed().as_secs(), std::sync::atomic::Ordering::Relaxed);
+            }
+            v
+        })
+    };
+    let mut stalled = false;
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
             break s;
         }
-        if started.elapsed() > Duration::from_secs(timeout + 30) {
+        let elapsed = started.elapsed().as_secs();
+        let idle = elapsed.saturating_sub(progress.load(std::sync::atomic::Ordering::Relaxed));
+        if idle > timeout || elapsed > file_timeout(timeout) + 30 {
+            stalled = true;
             let _ = child.kill();
             break child.wait().unwrap();
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    if stalled && matches!(target, Target::Reference) {
+        // Killing `docker exec` leaves psql running in the container: end its session.
+        psql(
+            cfg,
+            target,
+            "postgres",
+            "pg_regress",
+            format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '{app}';\n").as_bytes(),
+            20,
+        );
+    }
     let _ = writer.join();
     let out = String::from_utf8_lossy(&reader.join().unwrap()).into_owned();
     let st = match status.code() {
+        _ if stalled => "timeout",
         Some(0) => "ok",
         Some(124) | Some(137) | None => "timeout",
         Some(2) => "connection lost",
@@ -934,6 +966,16 @@ fn psql(
         Some(_) => "error",
     };
     (out, st)
+}
+
+/// The cap on a whole run of a file (`PGREGRESS_FILE_TIMEOUT`, default 3600 s, at least the
+/// per-statement `timeout`): `join` alone takes about 400 s on a loaded machine.
+fn file_timeout(timeout: u64) -> u64 {
+    std::env::var("PGREGRESS_FILE_TIMEOUT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3600)
+        .max(timeout)
 }
 
 /// The variables pg_regress exports for the scripts (`\getenv abs_srcdir PG_ABS_SRCDIR`).
@@ -1017,6 +1059,19 @@ fn cleanup_reference(cfg: &Config, before: &BTreeSet<String>) {
     if out.contains("ERROR") {
         eprintln!("cleanup on the reference reported:\n{out}");
     }
+}
+
+/// Tablespaces are cluster-global: when another run sharing the reference cluster already made
+/// test_setup's `regress_tblspace`, the reference's `CREATE TABLESPACE` fails where a fresh
+/// cluster's succeeds silently. Drop just that error line (the engine is still compared with the
+/// fresh cluster's output); the run's tablespace is then the other run's.
+fn shared_tablespace(test: &str, before: &BTreeSet<String>, out: String) -> String {
+    const ERR: &str = "ERROR:  tablespace \"regress_tblspace\" already exists\n";
+    if test != "test_setup" || !before.contains("ts:regress_tblspace") || !out.contains(ERR) {
+        return out;
+    }
+    eprintln!("test_setup: regress_tblspace already existed on the reference (another run's)");
+    out.replacen(ERR, "", 1)
 }
 
 fn last_marker(out: &str) -> Option<usize> {
@@ -1170,6 +1225,7 @@ fn run_all(cfg: &Config, schedule: &[String]) {
         let t0 = Instant::now();
         let (ref_out, ref_st) = psql(cfg, &Target::Reference, db_name(), &app, p.text.as_bytes(), cfg.timeout);
         let ref_secs = t0.elapsed().as_secs_f64();
+        let ref_out = shared_tablespace(test, &before, ref_out);
         std::fs::write(cfg.out.join("ref").join(format!("{test}.out")), &ref_out).unwrap();
 
         let log_start = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
