@@ -226,3 +226,38 @@ pub async fn test_backend(name: &str) -> Arc<dyn Backend> {
     };
     from_config(&cfg, Some("STANDARD")).await.expect("test object storage")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn drain(chunks: Vec<std::io::Result<Bytes>>, expected: u64) -> (Vec<std::io::Result<Bytes>>, Option<(u64, u32)>) {
+        let (checked, state) = Checked::new(futures::stream::iter(chunks).boxed(), expected);
+        let out = checked.collect::<Vec<_>>().await;
+        (out, state.result())
+    }
+
+    #[tokio::test]
+    async fn checked_bodies_only_complete_at_their_declared_length() {
+        let ok = |s: &'static str| Ok(Bytes::from_static(s.as_bytes()));
+        let (out, r) = drain(vec![ok("hello "), ok("world")], 11).await;
+        assert!(out.iter().all(|c| c.is_ok()));
+        assert_eq!(r, Some((11, crc32c::crc32c(b"hello world"))));
+        let (out, r) = drain(vec![], 0).await;
+        assert!(out.is_empty());
+        assert_eq!(r, Some((0, 0)));
+        // Shorter: an error at the end, never "complete".
+        let (out, r) = drain(vec![ok("hello")], 11).await;
+        assert_eq!(out.last().unwrap().as_ref().unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(r, None);
+        // Longer: the extra chunk is never passed on.
+        let (out, r) = drain(vec![ok("hello"), ok(" world")], 5).await;
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].as_ref().unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(r, None);
+        // A failing body stops at the error.
+        let (out, r) = drain(vec![ok("hel"), Err(std::io::Error::other("gone")), ok("lo")], 5).await;
+        assert_eq!(out.len(), 2);
+        assert_eq!(r, None);
+    }
+}

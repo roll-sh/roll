@@ -16,6 +16,14 @@ base64.workspace = true
 clap.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 urlencoding.workspace = true
+
+[dev-dependencies]
+aws-sdk-s3.workspace = true
+axum.workspace = true
+s3-control.workspace = true
+s3-server.workspace = true
+s3-store.workspace = true

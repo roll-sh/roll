@@ -367,8 +367,9 @@ Bucket = { id, name, region, public, recover_days, created_at,
            parent: { id, name, at } | null, branches: [string],
            objects, bytes, trash_bytes, cors: CorsRule[], lifecycle: LifecycleRule[],
            endpoint, url /* path-style */, virtual_host_url: string | null }
-CorsRule = { allowed_origins: string[], allowed_methods: string[], allowed_headers: string[],
-             expose_headers: string[], max_age_s: number | null }
+CorsRule = { id?: string | null /* S3's optional rule ID */, allowed_origins: string[],
+             allowed_methods: string[], allowed_headers: string[], expose_headers: string[],
+             max_age_s: number | null }
 LifecycleRule = { id, prefix, enabled, expire_days: number | null, abort_multipart_days: number | null }
 ObjectSummary = { key, size, etag, content_type, last_modified }
 ObjectInfo = ObjectSummary & { metadata: Record<string,string>, tags: Record<string,string>,
@@ -404,8 +405,8 @@ Details:
 - Uploads and downloads through the control plane are metered like S3 requests (class A for
   an upload and class B for a download). Download bytes count as egress inside roll, because
   the control plane can't tell where its caller is.
-- Invalid JSON bodies are 400s with the usual `{error}` body. A closed or fenced store answers
-  503.
+- Invalid JSON bodies and query parameters are 400s with the usual `{error}` body. A closed or
+  fenced store answers 503.
 
 `ROLL_S3_ACCESS_KEY` and `ROLL_S3_SECRET_KEY`, if set, create (or update) an `admin` key with
 that id and secret at startup, the way MinIO's root user works. This is for local dev and

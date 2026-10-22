@@ -941,4 +941,153 @@ mod tests {
         assert_eq!(n.name, "a");
         assert_eq!(n.text_of("b"), Some("1A<<raw>"));
     }
+
+    #[test]
+    fn parser_limits() {
+        let err = |b: &[u8]| parse(b).unwrap_err().code;
+        // Element count and depth caps, just inside and just past.
+        assert_eq!(parse(format!("<a>{}</a>", "<b/>".repeat(MAX_NODES - 1)).as_bytes()).unwrap().children.len(), MAX_NODES - 1);
+        assert_eq!(err(format!("<a>{}</a>", "<b/>".repeat(MAX_NODES)).as_bytes()), Code::MalformedXML);
+        let nest = |n: usize| "<a>".repeat(n) + &"</a>".repeat(n);
+        parse(nest(MAX_DEPTH).as_bytes()).unwrap();
+        assert_eq!(err(nest(MAX_DEPTH + 1).as_bytes()), Code::MalformedXML);
+        assert_eq!(parse(&vec![b' '; MAX_XML_BYTES - 4].into_iter().chain(*b"<a/>").collect::<Vec<u8>>()).unwrap().name, "a", "exactly the cap is fine");
+        for bad in [&b"x<a/>"[..], b"<a/>x", b"</a>", b"<a>&#0;</a>", b"<a>&#xD800;</a>", b"<a>&#xZZ;</a>", b"<a><![CDATA[x</a>", b"<a></b>", b"<?xml version=\"1.0\"?>"] {
+            assert_eq!(err(bad), Code::MalformedXML, "{}", String::from_utf8_lossy(bad));
+        }
+        assert_eq!(parse(b" \n<a/>\n ").unwrap().name, "a");
+        assert_eq!(parse(b"<a>x<b/>y<?pi?></a>").unwrap().text, "xy");
+    }
+
+    #[test]
+    fn request_bodies() {
+        let mal = Code::MalformedXML;
+        // CreateBucket.
+        assert_eq!(parse_create_bucket(b" \r\n\t").unwrap(), None);
+        assert_eq!(parse_create_bucket(b"<CreateBucketConfiguration><LocationConstraint> </LocationConstraint></CreateBucketConfiguration>").unwrap(), None);
+        assert_eq!(parse_create_bucket(b"<Other/>").map_err(|e| e.code).unwrap_err(), mal);
+        // Delete.
+        assert_eq!(parse_delete(b"<Delete><Object><VersionId>null</VersionId></Object></Delete>").map_err(|e| e.code).unwrap_err(), mal);
+        assert_eq!(parse_delete(b"<Remove><Object><Key>a</Key></Object></Remove>").map_err(|e| e.code).unwrap_err(), mal);
+        let thousand: String = (0..1000).map(|i| format!("<Object><Key>{i}</Key></Object>")).collect();
+        assert_eq!(parse_delete(format!("<Delete><Quiet>TRUE</Quiet>{thousand}</Delete>").as_bytes()).unwrap(), DeleteRequest { quiet: true, keys: (0..1000).map(|i| i.to_string()).collect() });
+        assert!(!parse_delete(b"<Delete><Quiet>1</Quiet><Object><Key>a</Key></Object></Delete>").unwrap().quiet);
+        assert_eq!(parse_delete(b"<Delete><Object><Key></Key></Object></Delete>").unwrap().keys, vec![String::new()]);
+        // CompleteMultipartUpload.
+        let cmu = |parts: &str| parse_complete_multipart(format!("<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>").as_bytes()).map_err(|e| e.code);
+        assert_eq!(cmu("<Part><PartNumber>1</PartNumber></Part>").unwrap_err(), mal);
+        assert_eq!(cmu("<Part><PartNumber>x</PartNumber><ETag>a</ETag></Part>").unwrap_err(), mal);
+        assert_eq!(cmu("<Part><PartNumber>10001</PartNumber><ETag>a</ETag></Part>").unwrap_err(), Code::InvalidArgument);
+        assert_eq!(cmu("<Part><PartNumber> 10000 </PartNumber><ETag>W/\"a\"</ETag><ChecksumSHA1> x </ChecksumSHA1><Other>y</Other></Part>").unwrap(), vec![CompletePart { number: 10_000, etag: "a".into(), checksums: vec![(Algorithm::Sha1, "x".into())] }]);
+        let dup = cmu("<Part><PartNumber>1</PartNumber><ETag>a</ETag></Part><Part><PartNumber>1</PartNumber><ETag>b</ETag></Part>").unwrap();
+        assert_eq!(check_part_order(&dup).unwrap_err().code, Code::InvalidPartOrder, "duplicates are out of order");
+        assert_eq!(cmu("").unwrap_err(), Code::MalformedXML);
+        // CORS.
+        let cors = |rules: &str| parse_cors(format!("<CORSConfiguration>{rules}</CORSConfiguration>").as_bytes()).map_err(|e| e.code);
+        let rule = |extra: &str| format!("<CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>GET</AllowedMethod>{extra}</CORSRule>");
+        assert_eq!(cors(&rule("<AllowedOrigin>https://*.*.example</AllowedOrigin>")).unwrap_err(), Code::InvalidRequest);
+        assert_eq!(cors(&rule("<AllowedHeader>x-*-*</AllowedHeader>")).unwrap_err(), Code::InvalidRequest);
+        assert_eq!(cors(&rule("<MaxAgeSeconds>-1</MaxAgeSeconds>")).unwrap_err(), mal);
+        assert_eq!(cors("").unwrap_err(), mal);
+        assert_eq!(cors(&rule("").repeat(100)).unwrap().len(), 100);
+        assert_eq!(cors(&rule("").repeat(101)).unwrap_err(), mal);
+        assert_eq!(cors("<CORSRule><AllowedMethod>GET</AllowedMethod></CORSRule>").unwrap_err(), mal);
+        assert_eq!(cors("<CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>get</AllowedMethod></CORSRule>").unwrap_err(), Code::InvalidRequest, "methods are case-sensitive, as on S3");
+        // Lifecycle.
+        let lc = |rules: &str| parse_lifecycle(format!("<LifecycleConfiguration>{rules}</LifecycleConfiguration>").as_bytes()).map_err(|e| e.code);
+        let ni = Code::NotImplemented;
+        let r = |body: &str| format!("<Rule><Status>Enabled</Status>{body}</Rule>");
+        assert_eq!(lc(&r("<Expiration><Date>2030-01-01T00:00:00Z</Date></Expiration>")).unwrap_err(), ni);
+        assert_eq!(lc(&r("<Filter><And><Prefix>a</Prefix></And></Filter><Expiration><Days>1</Days></Expiration>")).unwrap_err(), ni);
+        assert_eq!(lc(&r("<Filter><ObjectSizeGreaterThan>5</ObjectSizeGreaterThan></Filter><Expiration><Days>1</Days></Expiration>")).unwrap_err(), ni);
+        assert_eq!(lc(&r("<Filter><ObjectSizeLessThan>5</ObjectSizeLessThan></Filter><Expiration><Days>1</Days></Expiration>")).unwrap_err(), ni);
+        assert_eq!(lc(&r("<AbortIncompleteMultipartUpload></AbortIncompleteMultipartUpload>")).unwrap_err(), mal);
+        assert_eq!(lc(&r("<AbortIncompleteMultipartUpload><DaysAfterInitiation>0</DaysAfterInitiation></AbortIncompleteMultipartUpload>")).unwrap_err(), Code::InvalidArgument);
+        assert_eq!(lc(&r("<Expiration><Days>x</Days></Expiration>")).unwrap_err(), mal);
+        assert_eq!(lc(&r("")).unwrap_err(), mal, "a rule that does nothing");
+        assert_eq!(lc("<Rule><Expiration><Days>1</Days></Expiration></Rule>").unwrap_err(), mal, "no Status");
+        assert_eq!(lc("").unwrap_err(), mal);
+        assert_eq!(lc(&r(&format!("<ID>{}</ID><Expiration><Days>1</Days></Expiration>", "i".repeat(256)))).unwrap_err(), Code::InvalidArgument);
+        assert_eq!(lc(&r(&format!("<ID>{}</ID><Expiration><Days>1</Days></Expiration>", "i".repeat(255)))).unwrap()[0].id.as_ref().unwrap().len(), 255);
+        assert_eq!(lc(&r("<Expiration><ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker></Expiration>")).unwrap()[0].expire_days, None, "ignorable: buckets aren't versioned");
+        assert_eq!(lc(&r("<Prefix>old/</Prefix><Filter><Prefix>new/</Prefix></Filter><Expiration><Days>2</Days></Expiration>")).unwrap()[0].prefix, "new/");
+        let two_unnamed = r("<Expiration><Days>1</Days></Expiration>").repeat(2);
+        assert_eq!(lc(&two_unnamed).unwrap().len(), 2, "rules without IDs don't collide");
+        // Tagging.
+        let tg = |b: &str| parse_tagging(b.as_bytes()).map_err(|e| e.code);
+        assert_eq!(tg("<Tagging></Tagging>").unwrap_err(), mal);
+        assert_eq!(tg("<Tagging><TagSet><Tag><Value>v</Value></Tag></TagSet></Tagging>").unwrap_err(), mal);
+        assert_eq!(tg("<Tagging><TagSet><Tag><Key>k</Key></Tag></TagSet></Tagging>"), Ok(vec![("k".into(), "".into())]));
+        assert_eq!(tg("<Tagging><TagSet/></Tagging>"), Ok(vec![]));
+        let eleven: String = (0..11).map(|i| format!("<Tag><Key>k{i}</Key><Value>v</Value></Tag>")).collect();
+        assert_eq!(tg(&format!("<Tagging><TagSet>{eleven}</TagSet></Tagging>")).unwrap_err(), Code::InvalidTag);
+        assert_eq!(tg("<Other><TagSet/></Other>").unwrap_err(), mal);
+    }
+
+    #[test]
+    fn response_documents() {
+        assert_eq!(escape("a\"b'c\t\u{1f}<&>é"), "a&quot;b&apos;c&#x9;&#x1F;&lt;&amp;&gt;é");
+        let odd = "x\r\n\t\u{1}\"'<&>é";
+        assert_eq!(parse(format!("<a>{}</a>", escape(odd)).as_bytes()).unwrap().text, odd, "escaping round-trips");
+        let well_formed = |doc: &str, root: &str| {
+            let n = parse(doc.as_bytes()).unwrap_or_else(|e| panic!("{doc}: {e}"));
+            assert_eq!(n.name, root);
+            assert!(doc.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"));
+            n
+        };
+        let owner = Owner { id: "o".into(), display_name: "d".into() };
+        let e = ObjectEntry { checksum: Some((Algorithm::Crc64Nvme, ChecksumType::FullObject)), owner: Some(owner.clone()), ..entry("a b+c") };
+        let v1 = list_objects_v1(&ListV1 { name: "b".into(), prefix: "a b".into(), marker: "m n".into(), next_marker: Some("c+d".into()), delimiter: Some(" ".into()), max_keys: 7, is_truncated: true, url_encode: true, contents: vec![e.clone()], common_prefixes: vec!["p q ".into()] });
+        assert!(v1.contains("<Prefix>a+b</Prefix><Marker>m+n</Marker><NextMarker>c%2Bd</NextMarker><MaxKeys>7</MaxKeys><Delimiter>+</Delimiter><EncodingType>url</EncodingType><IsTruncated>true</IsTruncated>"), "{v1}");
+        assert!(v1.contains("<Key>a+b%2Bc</Key>") && v1.contains("<Prefix>p+q+</Prefix>"));
+        assert!(v1.contains("<ChecksumAlgorithm>CRC64NVME</ChecksumAlgorithm><ChecksumType>FULL_OBJECT</ChecksumType><Size>5</Size><Owner><ID>o</ID><DisplayName>d</DisplayName></Owner><StorageClass>STANDARD</StorageClass>"), "{v1}");
+        well_formed(&v1, "ListBucketResult");
+        let v2 = list_objects_v2(&ListV2 { name: "b".into(), continuation_token: Some("t<".into()), start_after: Some("s t".into()), contents: vec![entry("a b")], ..Default::default() });
+        assert!(v2.contains("<KeyCount>1</KeyCount><IsTruncated>false</IsTruncated><ContinuationToken>t&lt;</ContinuationToken><StartAfter>s t</StartAfter>"), "{v2}");
+        assert!(!v2.contains("EncodingType") && !v2.contains("Delimiter") && !v2.contains("NextContinuationToken") && !v2.contains("<Owner>"));
+        well_formed(&v2, "ListBucketResult");
+        let lu = list_uploads(&ListUploads {
+            bucket: "b".into(),
+            key_marker: "k m".into(),
+            next_key_marker: Some("n k".into()),
+            next_upload_id_marker: Some("u2".into()),
+            url_encode: true,
+            uploads: vec![UploadEntry { key: "a b".into(), upload_id: "u".into(), initiated_ms: 0, checksum: Some((Algorithm::Crc32, ChecksumType::Composite)) }],
+            common_prefixes: vec!["d ".into()],
+            is_truncated: true,
+            owner: owner.clone(),
+            ..Default::default()
+        });
+        assert!(lu.contains("<KeyMarker>k+m</KeyMarker><UploadIdMarker></UploadIdMarker><NextKeyMarker>n+k</NextKeyMarker><NextUploadIdMarker>u2</NextUploadIdMarker>"), "{lu}");
+        assert!(lu.contains("<Key>a+b</Key>") && lu.contains("<ChecksumAlgorithm>CRC32</ChecksumAlgorithm><ChecksumType>COMPOSITE</ChecksumType></Upload><CommonPrefixes><Prefix>d+</Prefix></CommonPrefixes>"), "{lu}");
+        well_formed(&lu, "ListMultipartUploadsResult");
+        let lp = list_parts(&ListParts {
+            next_part_number_marker: Some(3),
+            part_number_marker: 2,
+            is_truncated: true,
+            checksum: Some((Algorithm::Sha256, ChecksumType::Composite)),
+            parts: vec![PartEntry { number: 3, last_modified_ms: 0, etag: "e".into(), size: 1, checksum: Some((Algorithm::Sha256, "c".into())) }],
+            ..Default::default()
+        });
+        assert!(lp.contains("<PartNumberMarker>2</PartNumberMarker><NextPartNumberMarker>3</NextPartNumberMarker><MaxParts>0</MaxParts><IsTruncated>true</IsTruncated><ChecksumAlgorithm>SHA256</ChecksumAlgorithm><ChecksumType>COMPOSITE</ChecksumType>"), "{lp}");
+        assert!(lp.contains("<Size>1</Size><ChecksumSHA256>c</ChecksumSHA256></Part>"));
+        well_formed(&lp, "ListPartsResult");
+        let c = complete_multipart("http://h/b/a%20b", "b", "a b", "e-2", Some((Algorithm::Crc64Nvme, "AAAAAAAAAAA=", ChecksumType::FullObject)));
+        assert!(c.contains("<ChecksumCRC64NVME>AAAAAAAAAAA=</ChecksumCRC64NVME><ChecksumType>FULL_OBJECT</ChecksumType>"));
+        assert_eq!(well_formed(&c, "CompleteMultipartUploadResult").text_of("ETag"), Some("\"e-2\""));
+        assert!(!complete_multipart("l", "b", "k", "e", None).contains("Checksum"));
+        well_formed(&initiate_multipart("b", "k", "u"), "InitiateMultipartUploadResult");
+        well_formed(&copy_object_result("e", 0, Some((Algorithm::Crc32c, "x"))), "CopyObjectResult");
+        well_formed(&copy_part_result("e", 0, None), "CopyPartResult");
+        let quiet = delete_result(&["a".into()], &[DeleteError { key: "b<".into(), code: Code::InternalError, message: "m".into() }], true);
+        assert!(!quiet.contains("Deleted") && quiet.contains("<Key>b&lt;</Key><Code>InternalError</Code>"));
+        well_formed(&quiet, "DeleteResult");
+        assert_eq!(well_formed(&location_constraint(""), "LocationConstraint").text, "");
+        assert_eq!(well_formed(&location_constraint("a<b"), "LocationConstraint").text, "a<b");
+        well_formed(&versioning_configuration(), "VersioningConfiguration");
+        well_formed(&tagging(&[]), "Tagging");
+        well_formed(&cors_configuration(&[CorsRule::default()]), "CORSConfiguration");
+        well_formed(&lifecycle_configuration(&[]), "LifecycleConfiguration");
+        assert!(list_buckets(&owner, &[BucketEntry { name: "b".into(), created_ms: 0, region: None }]).contains("</CreationDate></Bucket>"));
+    }
 }

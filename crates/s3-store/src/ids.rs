@@ -76,6 +76,20 @@ mod tests {
         assert_eq!(access_key_id().len(), 20);
         assert_eq!(secret_key().len(), 40);
         assert!(upload_id(1) < upload_id(2));
+        assert!(bucket_id().starts_with("bkt_") && bucket_id().len() == 16);
+        assert_ne!(blob_id(), blob_id());
+        assert!(access_key_id().starts_with("RK"));
+        let id = "abcdefghijklmnopqrstuvwxyz";
+        assert_eq!(blob_key(id), "s3/blobs/ab/abcdefghijklmnopqrstuvwxyz");
+        for bad in [
+            "s3/blobs/ab/ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string(),
+            format!("s3/blobs/ab/{id}x"),
+            format!("s3/meta/ab/{id}"),
+            format!("s3/blobs/{id}"),
+            "s3/blobs/ab/abcdefghijklmnopqrstuvwxy1".to_string(),
+        ] {
+            assert_eq!(blob_of_key(&bad), None, "{bad}");
+        }
     }
 
     #[test]

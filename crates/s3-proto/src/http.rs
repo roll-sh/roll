@@ -350,7 +350,8 @@ enum Outcome {
 pub fn user_metadata<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<BTreeMap<String, String>, S3Error> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in headers {
-        if name.len() < META_PREFIX.len() || !name[..META_PREFIX.len()].eq_ignore_ascii_case(META_PREFIX) {
+        // POST form field names are arbitrary UTF-8: never slice inside a character.
+        if !name.get(..META_PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(META_PREFIX)) {
             continue;
         }
         let key = name[META_PREFIX.len()..].to_ascii_lowercase();
@@ -577,5 +578,99 @@ mod tests {
         assert_eq!(parse_tagging_header("aws:x=1").unwrap_err().code, Code::InvalidTag);
         let many: Vec<String> = (0..11).map(|i| format!("k{i}=v")).collect();
         assert_eq!(parse_tagging_header(&many.join("&")).unwrap_err().code, Code::InvalidTag);
+        assert_eq!(parse_tagging_header(&many[..10].join("&")).unwrap().len(), 10);
+        let t = |k: &str, v: &str| validate_tags(&[(k.to_string(), v.to_string())]).map_err(|e| e.code);
+        assert_eq!(t("", "v"), Err(Code::InvalidTag));
+        assert_eq!(t(&"é".repeat(MAX_TAG_KEY), &"é".repeat(MAX_TAG_VALUE)), Ok(()), "limits count characters");
+        assert_eq!(t(&"k".repeat(MAX_TAG_KEY + 1), "v"), Err(Code::InvalidTag));
+        assert_eq!(t("k", &"v".repeat(MAX_TAG_VALUE + 1)), Err(Code::InvalidTag));
+        assert_eq!(parse_tagging_header("").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn metadata_from_any_names() {
+        // POST form field names are arbitrary UTF-8 and reach this unfiltered (never a panic).
+        let m = user_metadata([("x-ignore-aé", "1"), ("x-amz-metaé", "1"), ("é", "x"), ("X-AMZ-META-é", "v"), ("x-amz-meta", "no")]).unwrap();
+        assert_eq!(m.into_iter().collect::<Vec<_>>(), vec![("é".to_string(), "v".to_string())]);
+        // 2 KB of names plus values, in bytes.
+        user_metadata([("x-amz-meta-ab", "v".repeat(2046).as_str())]).unwrap();
+        assert_eq!(user_metadata([("x-amz-meta-ab", "é".repeat(1024).as_str())]).unwrap_err().code, Code::MetadataTooLarge);
+        assert_eq!(user_metadata([("x-amz-meta-a", "v".repeat(1024).as_str()), ("x-amz-meta-b", "v".repeat(1023).as_str())]).unwrap_err().code, Code::MetadataTooLarge);
+    }
+
+    #[test]
+    fn parsing_edges() {
+        assert_eq!(percent_decode("%"), b"%");
+        assert_eq!(percent_decode("%41%4a%4A"), b"AJJ");
+        assert_eq!(percent_decode_utf8("%ff").unwrap_err().code, Code::InvalidArgument);
+        assert_eq!(percent_decode_utf8("%C3%A9").unwrap(), "é");
+        assert_eq!(parse_query("%ff=%fe"), vec![("\u{fffd}".into(), "\u{fffd}".into())]);
+        assert_eq!(parse_query("a=b=c"), vec![("a".into(), "b=c".into())]);
+        assert_eq!(uri_encode("~-_.!*'()", true), "~-_.%21%2A%27%28%29");
+        // Copy sources.
+        assert_eq!(parse_copy_source("%ff/k").unwrap_err().code, Code::InvalidArgument);
+        assert_eq!(parse_copy_source("//k").unwrap_err().code, Code::InvalidArgument);
+        assert_eq!(parse_copy_source(" b/k/ ").unwrap(), ("b".into(), "k/".into()));
+        assert_eq!(parse_copy_source("b/a%3Fb?x=1&versionId=null").unwrap(), ("b".into(), "a?b".into()));
+        for bad in ["0-9", "bytes=9-0", "bytes=a-1", "bytes=1", "bytes=-5"] {
+            assert_eq!(parse_copy_source_range(bad, 100).unwrap_err().code, Code::InvalidArgument, "{bad}");
+        }
+        assert_eq!(parse_copy_source_range(" bytes=0-0 ", 1).unwrap(), (0, 0));
+        assert_eq!(parse_copy_source_range("bytes=0-0", 0).unwrap_err().code, Code::InvalidRange);
+        // Ranges.
+        let r = |h: &str, size: u64| parse_range(Some(h), size).map_err(|e| e.code);
+        assert_eq!(r(" bytes= 0 - 4 ", 10), Ok(Some((0, 4))));
+        assert_eq!(r("bytes=0-0", 1), Ok(Some((0, 0))));
+        assert_eq!(r("bytes=-1", 1), Ok(Some((0, 0))));
+        for ignored in ["bytes=-", "bytes=-a", "bytes=4", "bytes=", "bytes=99999999999999999999999-", "bytes=-99999999999999999999999", "Bytes=0-1"] {
+            assert_eq!(r(ignored, 10), Ok(None), "{ignored}");
+        }
+        assert_eq!(part_range(&[5, 0], 2), None);
+        assert_eq!(part_range(&[], 1), None);
+        // Bucket names.
+        for ok in ["a.b.c", "1.2.3", "1.2.3.4.5", "a-b-c"] {
+            assert!(valid_bucket_name(ok), "{ok}");
+        }
+        for bad in ["sthree-x", "abc--x-s3", "abc.mrap", "amzn-s3-demo-x", "a-.b", "abc--ol-s3", "abc--table-s3", "a b", "abé", "abc."] {
+            assert!(!valid_bucket_name(bad), "{bad}");
+        }
+        validate_key(&"é".repeat(512)).unwrap();
+        assert_eq!(validate_key(&"é".repeat(513)).unwrap_err().code, Code::KeyTooLongError, "1026 bytes");
+        assert_eq!(unquote_etag("\""), "\"");
+        assert_eq!(unquote_etag(" \"a\" "), "a");
+    }
+
+    #[test]
+    fn overrides_and_condition_edges() {
+        let all = [
+            ("response-content-type", "t"),
+            ("response-content-language", "l"),
+            ("response-expires", "e"),
+            ("response-cache-control", "c"),
+            ("response-content-disposition", "d"),
+            ("response-content-encoding", "g"),
+            ("Response-Content-Type", "ignored"),
+        ];
+        let o = Overrides::from_query(all);
+        assert_eq!(o, Overrides { content_type: Some("t".into()), content_language: Some("l".into()), expires: Some("e".into()), cache_control: Some("c".into()), content_disposition: Some("d".into()), content_encoding: Some("g".into()) });
+        let get = |h: &'static [(&'static str, &'static str)]| move |n: &str| h.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, v)| *v);
+        assert!(Conditions::from_headers(get(&[("if-match", "  "), ("if-none-match", ""), ("if-modified-since", "x")])).is_empty());
+        let t = 1_445_412_480;
+        let lm = t * 1000;
+        let c = |ims: Option<i64>, ius: Option<i64>| Conditions { if_modified_since: ims, if_unmodified_since: ius, ..Default::default() };
+        assert_eq!(c(Some(t + 1), None).check_copy_source("e", lm).unwrap_err().code, Code::PreconditionFailed);
+        assert_eq!(c(None, Some(t - 1)).check_copy_source("e", lm).unwrap_err().code, Code::PreconditionFailed);
+        c(Some(t - 1), Some(t)).check_copy_source("e", lm).unwrap();
+        let weak = Conditions { if_match: Some("W/\"e\"".into()), ..Default::default() };
+        weak.check_read("e", lm).unwrap();
+        weak.check_write(Some("\"e\"")).unwrap();
+        let failed = Conditions { if_unmodified_since: Some(t - 1), ..Default::default() }.check_read("e", lm).unwrap_err();
+        assert!(failed.extra.contains(&("Condition", "If-Unmodified-Since".into())));
+        // If-None-Match: * on a read is "not modified" for any existing object.
+        assert_eq!(Conditions { if_none_match: Some("*".into()), ..Default::default() }.check_read("e", lm).unwrap_err().code, Code::NotModified);
+        // Both write conditions: the key must not exist and must match, so it always fails.
+        let both = Conditions { if_match: Some("e".into()), if_none_match: Some("*".into()), ..Default::default() };
+        assert_eq!(both.check_write(None).unwrap_err().code, Code::NoSuchKey);
+        assert_eq!(both.check_write(Some("e")).unwrap_err().code, Code::PreconditionFailed);
     }
 }

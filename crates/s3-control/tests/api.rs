@@ -145,6 +145,8 @@ async fn bucket_lifecycle_and_errors() {
     let b = t.bucket("photos").await;
     assert!(b["id"].as_str().unwrap().starts_with("bkt_"));
     assert_eq!(b["name"], "photos");
+    // The region the S3 API reports.
+    assert_eq!(b["region"], t.ok("GET", "/v1/storage", None).await["region"]);
     assert_eq!(b["public"], false);
     assert_eq!(b["recover_days"], 7);
     assert_eq!(b["parent"], Value::Null);
@@ -742,4 +744,214 @@ async fn cors_allows_the_dashboard() {
         .unwrap();
     assert!(r.status().is_success());
     assert!(r.headers().contains_key("access-control-allow-origin"));
+}
+
+#[tokio::test]
+async fn usage_all_sums_buckets_per_day() {
+    let t0 = 20_100 * DAY + DAY / 2;
+    let (clock, now) = manual_clock(t0);
+    let t = start_with(|c| c.clock = clock, |_| {}).await;
+    t.bucket("one-1").await;
+    t.bucket("two-2").await;
+    let (one, two) = (t.store.bucket("one-1").unwrap().id, t.store.bucket("two-2").unwrap().id);
+    let meter = |id: &str, a: u64, b: u64, out: u64| {
+        for _ in 0..a {
+            t.store.meter.request(id, s3_store::Class::A);
+        }
+        for _ in 0..b {
+            t.store.meter.request(id, s3_store::Class::B);
+        }
+        t.store.meter.egress(id, out, false);
+    };
+    // Day one: both buckets. Day two: only the first.
+    meter(&one, 10, 100, 1_000_000_000);
+    meter(&two, 30, 300, 3_000_000_000);
+    t.store.flush_meter().unwrap();
+    now.store(t0 + DAY, Ordering::SeqCst);
+    meter(&one, 5, 50, 0);
+    t.store.flush_meter().unwrap();
+
+    let all = t.ok("GET", "/v1/storage/usage?days=2", None).await;
+    let daily = all["daily"].as_array().unwrap();
+    let days: Vec<&str> = daily.iter().map(|d| d["day"].as_str().unwrap()).collect();
+    assert_eq!(days, [s3_store::day_of(t0), s3_store::day_of(t0 + DAY)]);
+    assert_eq!((daily[0]["class_a"].as_u64(), daily[0]["class_b"].as_u64(), daily[0]["egress_bytes"].as_u64()), (Some(40), Some(400), Some(4_000_000_000)));
+    assert_eq!((daily[1]["class_a"].as_u64(), daily[1]["class_b"].as_u64(), daily[1]["egress_bytes"].as_u64()), (Some(5), Some(50), Some(0)));
+    // Each summed day costs what the buckets' own rows for that day cost.
+    for (i, d) in daily.iter().enumerate() {
+        let per_bucket: f64 = all["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b["daily"].as_array().unwrap().iter().find(|x| x["day"] == d["day"]))
+            .map(|x| x["usd"].as_f64().unwrap())
+            .sum();
+        assert!((d["usd"].as_f64().unwrap() - per_bucket).abs() < 2e-6, "day {i}: {} != {per_bucket}", d["usd"]);
+    }
+    // $5/M class A, $0.40/M class B, $0.09/GB to the internet.
+    let want = 45.0 / 1e6 * 5.0 + 450.0 / 1e6 * 0.4 + 4.0 * 0.09;
+    assert!((all["cost"]["total_usd"].as_f64().unwrap() - want).abs() < 2e-6, "{}", all["cost"]);
+    // The total is the sum of the buckets.
+    let sum: f64 = all["buckets"].as_array().unwrap().iter().map(|b| b["cost"]["total_usd"].as_f64().unwrap()).sum();
+    assert!((all["cost"]["total_usd"].as_f64().unwrap() - sum).abs() < 2e-6);
+    // A one-day window only sees today.
+    let today = t.ok("GET", "/v1/storage/usage?days=1", None).await;
+    assert_eq!(today["daily"].as_array().unwrap().len(), 1);
+    assert_eq!(today["daily"][0]["class_a"], 5);
+    // Nothing metered at all: empty series, zero cost.
+    let fresh = start().await;
+    let v = fresh.ok("GET", "/v1/storage/usage", None).await;
+    assert_eq!((v["days"].as_i64(), v["daily"].clone(), v["buckets"].clone()), (Some(30), json!([]), json!([])));
+    assert_eq!(v["cost"]["total_usd"], 0.0);
+}
+
+#[tokio::test]
+async fn upload_size_limits() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let t = start().await;
+    t.bucket("limits").await;
+    let addr = t.api.trim_start_matches("http://").to_string();
+    // Refused from the headers alone, before any body is read.
+    for (len, want) in [("5368709121", "5 GiB"), ("abc", "Content-Length"), ("-1", "Content-Length")] {
+        let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        s.write_all(format!("PUT /v1/storage/buckets/limits/upload?key=k HTTP/1.1\r\nhost: {addr}\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(10), s.read_to_end(&mut out)).await.expect("answered without the body").unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.starts_with("HTTP/1.1 400"), "{len}: {text}");
+        if len != "abc" && len != "-1" {
+            assert!(text.contains(want), "{len}: {text}");
+        }
+    }
+    assert_eq!(t.err("GET", "/v1/storage/buckets/limits/object?key=k", None).await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn restore_puts_the_current_version_in_the_trash() {
+    let t = start().await;
+    t.bucket("docs-r").await;
+    t.upload("docs-r", "page", b"old", &[]).await;
+    t.upload("docs-r", "page", b"new", &[]).await;
+    let trash = t.ok("GET", "/v1/storage/buckets/docs-r/trash", None).await;
+    let e = &trash["objects"][0];
+    assert_eq!(e["etag"], md5_hex(b"old"));
+    let restored = t.ok("POST", "/v1/storage/buckets/docs-r/trash/restore", Some(json!({ "key": "page", "deleted_at": e["deleted_at"] }))).await;
+    assert_eq!(restored["etag"], md5_hex(b"old"));
+    assert_eq!(t.download("docs-r", "page").await.bytes().await.unwrap().as_ref(), b"old");
+    // The version it replaced is now the one in the trash, and can come back too.
+    let trash = t.ok("GET", "/v1/storage/buckets/docs-r/trash", None).await;
+    let entries = trash["objects"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["etag"], md5_hex(b"new"));
+    t.ok("POST", "/v1/storage/buckets/docs-r/trash/restore", Some(json!({ "key": "page", "deleted_at": entries[0]["deleted_at"] }))).await;
+    assert_eq!(t.download("docs-r", "page").await.bytes().await.unwrap().as_ref(), b"new");
+
+    // With recover_days 0 nothing goes to the trash.
+    t.ok("POST", "/v1/storage/buckets", Some(json!({ "name": "no-trash", "recover_days": 0 }))).await;
+    t.upload("no-trash", "x", b"1", &[]).await;
+    t.ok("DELETE", "/v1/storage/buckets/no-trash/object?key=x", None).await;
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/no-trash/trash", None).await, json!({ "objects": [], "next_cursor": null }));
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/no-trash", None).await["trash_bytes"], 0);
+}
+
+#[tokio::test]
+async fn presigned_urls_for_unusual_keys() {
+    let t = start().await;
+    t.bucket("odd-keys").await;
+    for key in ["a+b=c&d.txt", "ünïcödé/日本語.txt", "spaces  and%20percent", "trailing/", "~tilde*star'quote(paren)"] {
+        let p = t.ok("POST", "/v1/storage/buckets/odd-keys/presign", Some(json!({ "key": key, "method": "PUT" }))).await;
+        let r = t.http.put(p["url"].as_str().unwrap()).body(key.as_bytes().to_vec()).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "PUT {key}: {}", r.text().await.unwrap());
+        let p = t.ok("POST", "/v1/storage/buckets/odd-keys/presign", Some(json!({ "key": key }))).await;
+        let r = t.http.get(p["url"].as_str().unwrap()).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "GET {key}");
+        assert_eq!(r.bytes().await.unwrap().as_ref(), key.as_bytes(), "{key}");
+        // The control plane sees the same key.
+        assert_eq!(t.ok("GET", &format!("/v1/storage/buckets/odd-keys/object?key={}", q(key)), None).await["key"], key);
+    }
+    // An expired URL is refused.
+    let (clock, now) = manual_clock(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64);
+    let t = start_with(|c| c.clock = clock, |_| {}).await;
+    t.bucket("expiring").await;
+    t.upload("expiring", "k", b"v", &[]).await;
+    let p = t.ok("POST", "/v1/storage/buckets/expiring/presign", Some(json!({ "key": "k", "expires_s": 60 }))).await;
+    let url = p["url"].as_str().unwrap();
+    assert_eq!(t.http.get(url).send().await.unwrap().status(), StatusCode::OK);
+    // Valid for a minute; two minutes later it isn't.
+    now.fetch_add(120_000, Ordering::SeqCst);
+    assert_eq!(t.http.get(url).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn lost_blobs_are_json_500s_and_show_in_the_scrub() {
+    let (clock, now) = manual_clock(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64);
+    let t = start_with(|c| c.clock = clock, |_| {}).await;
+    t.bucket("scrubbed").await;
+    t.upload("scrubbed", "gone", b"bytes that vanish", &[]).await;
+    t.upload("scrubbed", "kept", b"still here", &[]).await;
+    let meta = t.store.get_object("scrubbed", "gone").unwrap();
+    t.store.backend().delete(&s3_store::blob_key(&meta.blob_id)).await.unwrap();
+
+    let r = t.download("scrubbed", "gone").await;
+    assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(r.headers()["content-type"].to_str().unwrap().starts_with("application/json"));
+    assert!(r.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("missing"));
+    assert_eq!(t.download("scrubbed", "kept").await.bytes().await.unwrap().as_ref(), b"still here");
+
+    // The scrub skips blobs from its last minute (they may still be in flight).
+    now.fetch_add(120_000, Ordering::SeqCst);
+    t.store.scrub().await.unwrap();
+    let scrub = &t.ok("GET", "/v1/storage", None).await["scrub"];
+    assert_eq!((scrub["missing"].as_u64(), scrub["mismatched"].as_u64()), (Some(1), Some(0)));
+    assert!(scrub["last_at"].as_i64().unwrap() > 0);
+    // The scrub only reports: the metadata is untouched.
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/scrubbed/object?key=gone", None).await["size"], 17);
+}
+
+#[tokio::test]
+async fn list_limits_are_clamped() {
+    let t = start().await;
+    t.bucket("many").await;
+    for i in 0..3 {
+        t.upload("many", &format!("k{i}"), b"x", &[]).await;
+    }
+    let one = t.ok("GET", "/v1/storage/buckets/many/objects?limit=0", None).await;
+    assert_eq!(one["objects"].as_array().unwrap().len(), 1);
+    assert!(one["next_cursor"].is_string());
+    let all = t.ok("GET", "/v1/storage/buckets/many/objects?limit=100000", None).await;
+    assert_eq!(all["objects"].as_array().unwrap().len(), 3);
+    // Malformed query parameters are JSON errors too.
+    assert_eq!(t.err("GET", "/v1/storage/buckets/many/objects?limit=-1", None).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.err("GET", "/v1/storage/buckets/many/usage?days=soon", None).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.err("DELETE", "/v1/storage/buckets/many?force=maybe", None).await, StatusCode::BAD_REQUEST);
+    t.ok("DELETE", "/v1/storage/buckets/many/object?key=k0", None).await;
+    t.ok("DELETE", "/v1/storage/buckets/many/object?key=k1", None).await;
+    let trash = t.ok("GET", "/v1/storage/buckets/many/trash?limit=0", None).await;
+    assert_eq!(trash["objects"].as_array().unwrap().len(), 1);
+    assert!(trash["next_cursor"].is_string());
+}
+
+#[tokio::test]
+async fn bucket_settings_are_validated() {
+    let t = start().await;
+    t.bucket("settings").await;
+    let bad = [
+        json!({ "lifecycle": [{ "id": "x", "prefix": "", "enabled": true, "expire_days": 0, "abort_multipart_days": null }] }),
+        json!({ "lifecycle": [{ "id": "x", "prefix": "", "enabled": true, "expire_days": null, "abort_multipart_days": null }] }),
+        json!({ "cors": [{ "allowed_origins": ["*"], "allowed_methods": ["FETCH"], "allowed_headers": [], "expose_headers": [], "max_age_s": null }] }),
+        json!({ "public": "yes" }),
+        json!({ "recover_days": -1 }),
+    ];
+    for body in bad {
+        assert_eq!(t.err("PATCH", "/v1/storage/buckets/settings", Some(body.clone())).await, StatusCode::BAD_REQUEST, "{body}");
+    }
+    // Nothing changed.
+    let b = t.ok("GET", "/v1/storage/buckets/settings", None).await;
+    assert_eq!((b["cors"].clone(), b["lifecycle"].clone(), b["public"].clone()), (json!([]), json!([]), json!(false)));
+    // An empty PATCH changes nothing and succeeds.
+    assert_eq!(t.ok("PATCH", "/v1/storage/buckets/settings", Some(json!({}))).await["recover_days"], 7);
+    // Branches inherit the parent's settings at creation.
+    t.ok("PATCH", "/v1/storage/buckets/settings", Some(json!({ "public": true, "recover_days": 2 }))).await;
+    let br = t.ok("POST", "/v1/storage/buckets/settings/branches", Some(json!({ "name": "settings-br" }))).await;
+    assert_eq!((br["public"].as_bool(), br["recover_days"].as_u64()), (Some(true), Some(2)));
 }

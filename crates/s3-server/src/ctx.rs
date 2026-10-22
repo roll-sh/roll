@@ -92,11 +92,12 @@ fn request_id() -> String {
 fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Option<String>, Option<String>), S3Error> {
     let path = raw_path.strip_prefix('/').unwrap_or(raw_path);
     if let Some(domain) = &server.cfg.virtual_host_domain {
-        let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default();
-        let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
-        if let Some(b) = host.strip_suffix(domain.as_str()).and_then(|h| h.strip_suffix('.')).filter(|b| !b.is_empty()) {
+        // Host names are case-insensitive.
+        let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
+        let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|c| c.is_ascii_digit())).map_or(host.as_str(), |(h, _)| h);
+        if let Some(b) = host.strip_suffix(domain.to_ascii_lowercase().as_str()).and_then(|h| h.strip_suffix('.')).filter(|b| !b.is_empty()) {
             let key = Some(percent_decode_utf8(path)?).filter(|k| !k.is_empty());
-            return Ok((Some(b.to_ascii_lowercase()), key));
+            return Ok((Some(b.to_string()), key));
         }
     }
     if path.is_empty() {
@@ -223,10 +224,21 @@ fn reject_unsupported_headers(ctx: &Ctx) -> Result<(), S3Error> {
     Ok(())
 }
 
-/// Read a small request body (XML) completely, refusing anything over `limit` bytes.
+/// Read a small request body (XML) completely, refusing anything over `limit` bytes. Its
+/// `Content-MD5` and `x-amz-checksum-*` headers are checked against it.
 pub(crate) async fn read_small(ctx: &Ctx, body: Body, limit: usize) -> Result<bytes::Bytes, S3Error> {
+    read_small_as(ctx, body, limit, crate::body::requested_checksum(ctx)?).await
+}
+
+/// [`read_small`] for CompleteMultipartUpload, whose `x-amz-checksum-*` headers are the whole
+/// object's checksum, not the body's (`Content-MD5` is still checked).
+pub(crate) async fn read_small_object_checksum(ctx: &Ctx, body: Body, limit: usize) -> Result<bytes::Bytes, S3Error> {
+    read_small_as(ctx, body, limit, None).await
+}
+
+async fn read_small_as(ctx: &Ctx, body: Body, limit: usize, checksum: Option<(s3_proto::checksum::Algorithm, Option<String>)>) -> Result<bytes::Bytes, S3Error> {
     use futures::StreamExt;
-    let mut decoded = crate::body::Incoming::new(ctx, body, crate::body::requested_checksum(ctx)?, Some(limit as u64))?;
+    let mut decoded = crate::body::Incoming::new(ctx, body, checksum, Some(limit as u64))?;
     let mut out = Vec::new();
     while let Some(chunk) = decoded.next().await {
         let chunk = chunk.map_err(|_| decoded.error().unwrap_or_else(|| S3Error::new(Code::IncompleteBody)))?;

@@ -65,6 +65,7 @@ async fn recovers_everything_from_object_storage_alone() {
     // The node dies (no clean close); a new one starts with an empty local disk.
     let s2 = open(&backend, &clock).await;
     assert_eq!(state(&s2).await, before);
+    assert_consistent(&s2, &backend).await;
     // And it keeps working.
     put(&s2, "alpha", "after", b"x").await;
     let s3 = open(&backend, &clock).await;
@@ -233,6 +234,7 @@ async fn concurrent_writes_group_commit_and_snapshot_while_writing() {
     assert_eq!(keys(&s, "busy").len(), 8 * (40 - 6));
     let s2 = open(&backend, &clock).await;
     assert_eq!(state(&s2).await, before);
+    assert_consistent(&s2, &backend).await;
 }
 
 #[tokio::test]
@@ -251,4 +253,61 @@ async fn an_idle_deposed_node_stops_serving() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert!(matches!(old.bucket("idl"), Err(StoreError::Unavailable(_))), "stale reads stop without a write");
+}
+
+/// Every metadata row, table by table: what a rebuild must reproduce exactly (refcounts and
+/// quarantine times included, or the sweeper would delete on the wrong schedule).
+fn dump(s: &Store) -> Vec<String> {
+    let c = meta_db(s);
+    let mut out = Vec::new();
+    for t in ["buckets", "objects", "trash", "blobs", "uploads", "parts", "keys", "usage", "orphans", "state"] {
+        let mut st = c.prepare(&format!("SELECT * FROM {t}")).unwrap();
+        let n = st.column_count();
+        let mut rows: Vec<String> = st
+            .query_map([], |r| Ok((0..n).map(|i| format!("{:?}", r.get::<_, rusqlite::types::Value>(i).unwrap())).collect::<Vec<_>>().join("|")))
+            .unwrap()
+            .map(|r| format!("{t}: {}", r.unwrap()))
+            .collect();
+        rows.sort();
+        out.extend(rows);
+    }
+    out
+}
+
+#[tokio::test]
+async fn recovery_rebuilds_the_metadata_exactly() {
+    let backend = test_backend("exact").await;
+    let clock = TestClock::default();
+    let s = open(&backend, &clock).await;
+    workload(&s).await;
+    s.snapshot_now().await.unwrap();
+    // Quarantine, trash, an orphan candidate, a scrub report, usage and key times.
+    s.delete_object("beta", "copied", None).await.unwrap();
+    s.delete_object("alpha", "dir/08", None).await.unwrap();
+    s.restore("alpha", "dir/03", s.list_trash("alpha", "dir/03", None, 1).unwrap().0[0].deleted_at).await.unwrap();
+    backend.put(&blob_key("zzorphanorphanorphanorphan"), bytes_body(Bytes::from_static(b"o")), 1, &BlobAttrs::default()).await.unwrap();
+    s.orphan_scan().await.unwrap();
+    s.sweep().await.unwrap();
+    clock.advance(120_000);
+    s.scrub().await.unwrap();
+    let b = s.bucket("alpha").unwrap();
+    s.meter.request(&b.id, Class::A);
+    s.flush_meter().unwrap();
+    let k = s.create_key("used", Permission::Read, None).await.unwrap();
+    s.touch_key(&k.id);
+    s.create_bucket("last", BucketOptions::default()).await.unwrap();
+    assert_consistent(&s, &backend).await;
+    let before = dump(&s);
+    let s2 = open(&backend, &clock).await;
+    let after = dump(&s2);
+    assert_eq!(after, before);
+    assert_consistent(&s2, &backend).await;
+    // And without the snapshot: replaying the whole log gives the same.
+    for l in s3_store::backend::list_all(&*backend, "s3/meta/snap/").await.unwrap() {
+        backend.delete(&l.key).await.unwrap();
+    }
+    let wal = list_all(&backend, "s3/meta/wal/").await;
+    assert_eq!(seq(&wal[0]), 1, "one snapshot never prunes");
+    let s3 = open(&backend, &clock).await;
+    assert_eq!(dump(&s3), before);
 }

@@ -113,3 +113,76 @@ pub async fn blobs(backend: &Arc<dyn Backend>) -> Vec<String> {
         }
     }
 }
+
+/// The store's metadata database (a read-only view of the working copy).
+pub fn meta_db(store: &Store) -> rusqlite::Connection {
+    let c = rusqlite::Connection::open_with_flags(store.cfg.dir.join("meta.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    c.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    c
+}
+
+/// `(size, crc32c, refs, unreferenced_at)` of a blob's row.
+pub fn blob_row(store: &Store, id: &str) -> Option<(u64, u32, i64, Option<i64>)> {
+    use rusqlite::OptionalExtension;
+    meta_db(store)
+        .query_row("SELECT size, crc32c, refs, unreferenced_at FROM blobs WHERE id = ?1", [id], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u32, r.get(2)?, r.get(3)?)))
+        .optional()
+        .unwrap()
+}
+
+fn rows<T: rusqlite::types::FromSql>(c: &rusqlite::Connection, sql: &str) -> Vec<(String, T)> {
+    c.prepare(sql).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+
+/// The bookkeeping invariants: `refs` counts exactly the `objects` and `trash` rows pointing at
+/// each blob, `unreferenced_at` is set exactly when it's zero, no row points at a blob without
+/// metadata, bucket counters match their rows, tombstones only exist in branches, nothing
+/// dangles, and every referenced blob is in object storage with the recorded size.
+pub async fn assert_consistent(store: &Store, backend: &Arc<dyn Backend>) {
+    let c = meta_db(store);
+    let refs: std::collections::BTreeMap<String, i64> = rows(&c, "SELECT id, refs FROM blobs").into_iter().collect();
+    let counted: std::collections::BTreeMap<String, i64> =
+        rows(&c, "SELECT blob_id, count(*) FROM (SELECT blob_id FROM objects WHERE blob_id IS NOT NULL UNION ALL SELECT blob_id FROM trash) GROUP BY blob_id").into_iter().collect();
+    for (blob, n) in &counted {
+        assert_eq!(refs.get(blob), Some(n), "blob {blob}: refs vs rows pointing at it");
+    }
+    for (blob, n) in &refs {
+        assert_eq!(counted.get(blob).copied().unwrap_or(0), *n, "blob {blob}: refs vs rows pointing at it");
+    }
+    let bad: Vec<(String, i64)> = rows(&c, "SELECT id, refs FROM blobs WHERE (refs = 0) != (unreferenced_at IS NOT NULL) OR refs < 0");
+    assert!(bad.is_empty(), "unreferenced_at out of step with refs: {bad:?}");
+    let counters: Vec<(String, String)> = rows(
+        &c,
+        "SELECT b.name, b.objects || ' ' || b.bytes || ' ' || b.trash_bytes || ' / ' ||
+                (SELECT count(*) FROM objects o WHERE o.bucket_id = b.id AND o.blob_id IS NOT NULL) || ' ' ||
+                (SELECT coalesce(sum(size), 0) FROM objects o WHERE o.bucket_id = b.id AND o.blob_id IS NOT NULL) || ' ' ||
+                (SELECT coalesce(sum(size), 0) FROM trash t WHERE t.bucket_id = b.id) FROM buckets b",
+    );
+    for (name, v) in counters {
+        let (stored, actual) = v.split_once(" / ").unwrap();
+        assert_eq!(stored, actual, "bucket {name}: objects bytes trash_bytes counters vs rows");
+    }
+    let dangling: Vec<(String, String)> = rows(
+        &c,
+        "SELECT 'object', bucket_id || '/' || key FROM objects WHERE bucket_id NOT IN (SELECT id FROM buckets)
+         UNION ALL SELECT 'trash', bucket_id || '/' || key FROM trash WHERE bucket_id NOT IN (SELECT id FROM buckets)
+         UNION ALL SELECT 'upload', id FROM uploads WHERE bucket_id NOT IN (SELECT id FROM buckets)
+         UNION ALL SELECT 'part', upload_id FROM parts WHERE upload_id NOT IN (SELECT id FROM uploads)
+         UNION ALL SELECT 'tombstone', bucket_id || '/' || key FROM objects WHERE blob_id IS NULL AND bucket_id IN (SELECT id FROM buckets WHERE parent_id IS NULL)",
+    );
+    assert!(dangling.is_empty(), "dangling rows: {dangling:?}");
+    let live: Vec<(String, i64)> = rows(&c, "SELECT id, size FROM blobs WHERE refs > 0");
+    for (id, size) in live {
+        let found = backend.head(&blob_key(&id)).await.unwrap();
+        assert_eq!(found.map(|l| l.size), Some(size as u64), "referenced blob {id} in object storage");
+    }
+}
+
+/// A body that yields `chunks`, then fails with an I/O error if `fail`.
+pub fn chunked_body(chunks: Vec<&'static [u8]>, fail: bool) -> ByteStream {
+    let mut items: Vec<std::io::Result<Bytes>> = chunks.into_iter().map(|c| Ok(Bytes::from_static(c))).collect();
+    if fail {
+        items.push(Err(std::io::Error::other("client went away")));
+    }
+    futures::stream::iter(items).boxed()
+}

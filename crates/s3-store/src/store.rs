@@ -26,6 +26,7 @@ pub fn system_clock() -> Clock {
 pub struct StoreConfig {
     /// Local working directory (the metadata database cache).
     pub dir: PathBuf,
+    /// The region recorded on new buckets; the same one the S3 API reports.
     pub region: String,
     pub node: String,
     pub recover_days_default: u32,
@@ -60,7 +61,7 @@ impl StoreConfig {
     pub fn new(dir: PathBuf) -> Self {
         Self {
             dir,
-            region: "local".into(),
+            region: "us-east-1".into(),
             node: "local".into(),
             recover_days_default: 7,
             quarantine: Duration::from_secs(86_400),
@@ -682,8 +683,18 @@ impl Store {
         }
     }
 
-    /// Delete an uploaded blob that was never committed.
+    /// Delete an uploaded blob that was never committed. A blob the metadata knows (an object,
+    /// the trash, quarantine or an upload references it) is never deleted here, whatever the
+    /// caller thinks: it's left to the sweeper and the orphan scan.
     pub async fn discard_blob(&self, blob: &str) {
+        let known = self.log.db.read(|c| {
+            Ok(c.query_row("SELECT 1 FROM blobs WHERE id = ?1 UNION ALL SELECT 1 FROM uploads WHERE blob_id = ?1 LIMIT 1", [blob], |_| Ok(())).optional()?.is_some())
+        });
+        if !matches!(known, Ok(false)) {
+            tracing::error!(blob, "not discarding a blob the metadata references");
+            self.release_blob(blob);
+            return;
+        }
         if let Err(e) = self.backend.delete(&ids::blob_key(blob)).await {
             tracing::warn!(error = %e, blob, "discarding an uncommitted blob failed; the orphan scan will");
         }

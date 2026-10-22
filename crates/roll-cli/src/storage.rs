@@ -178,13 +178,15 @@ fn bucket_path(bucket: &str, rest: &str) -> String {
 fn duration(v: &str) -> anyhow::Result<i64> {
     let (n, unit) = v.split_at(v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len()));
     let n: i64 = n.parse().with_context(|| format!("bad duration {v:?}: e.g. 90s, 15m, 1h, 7d"))?;
-    Ok(n * match unit {
+    let unit = match unit {
         "s" | "" => 1,
         "m" => 60,
         "h" => 3600,
         "d" => 86_400,
         _ => bail!("bad duration {v:?}: e.g. 90s, 15m, 1h, 7d"),
-    })
+    };
+    // Huge values are out of range, not an overflow.
+    Ok(n.saturating_mul(unit))
 }
 
 /// Unix ms → "YYYY-MM-DD HH:MM" (UTC).
@@ -281,27 +283,40 @@ impl Api {
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
             let msg = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["error"].as_str().map(String::from));
-            bail!("{}", msg.unwrap_or_else(|| format!("{status}: {text}")));
+            match msg {
+                Some(m) => bail!("{m}"),
+                None if text.trim().is_empty() => bail!("{status}"),
+                None => bail!("{status}: {}", text.trim()),
+            }
         }
         Ok(res)
     }
 }
 
+/// Upload `file`, or stdin when `None`. The API needs a Content-Length, so stdin is spooled to a
+/// temporary file first.
 async fn upload(api: &Api, bucket: &str, key: &str, file: Option<&Path>, content_type: Option<&str>) -> anyhow::Result<Value> {
-    let url = format!("{}{}?key={}", api.base, bucket_path(bucket, "/upload"), enc(key));
-    let mut req = api.http.put(url);
-    req = match file {
+    let (f, content_type, _spool) = match file {
         Some(p) => {
             let f = tokio::fs::File::open(p).await.with_context(|| format!("can't open {}", p.display()))?;
-            let len = f.metadata().await?.len();
-            req.header(reqwest::header::CONTENT_TYPE, content_type.unwrap_or_else(|| guess_type(p)))
-                .header(reqwest::header::CONTENT_LENGTH, len)
-                .body(reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(f)))
+            (f, content_type.unwrap_or_else(|| guess_type(p)), None)
         }
-        None => req
-            .header(reqwest::header::CONTENT_TYPE, content_type.unwrap_or("application/octet-stream"))
-            .body(reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(tokio::io::stdin()))),
+        None => {
+            let spool = tempfile::NamedTempFile::new().context("can't create a temporary file for stdin")?;
+            let mut f = tokio::fs::File::create(spool.path()).await?;
+            tokio::io::copy(&mut tokio::io::stdin(), &mut f).await.context("can't read stdin")?;
+            f.flush().await?;
+            (tokio::fs::File::open(spool.path()).await?, content_type.unwrap_or("application/octet-stream"), Some(spool))
+        }
     };
+    let len = f.metadata().await?.len();
+    let url = format!("{}{}?key={}", api.base, bucket_path(bucket, "/upload"), enc(key));
+    let req = api
+        .http
+        .put(url)
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .header(reqwest::header::CONTENT_LENGTH, len)
+        .body(reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(f)));
     Ok(api.raw(req).await?.json().await?)
 }
 
@@ -516,9 +531,12 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
         }
         Storage::Delete { bucket, force } => {
             let q = if force { "?force=true" } else { "" };
-            api.call(Method::DELETE, &bucket_path(&bucket, q), None).await?;
-            println!("deleted bucket {bucket}");
-            return Ok(());
+            let v = api.call(Method::DELETE, &bucket_path(&bucket, q), None).await?;
+            if !as_json {
+                println!("deleted bucket {bucket}");
+                return Ok(());
+            }
+            v
         }
         Storage::Branch { bucket, name } => {
             let v = api.post(&bucket_path(&bucket, "/branches"), json!({ "name": name })).await?;
@@ -815,9 +833,12 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
             v
         }
         Storage::Keys { action: Some(KeysCmd::Delete { id }) } => {
-            api.call(Method::DELETE, &format!("/v1/storage/keys/{}", enc(&id)), None).await?;
-            println!("deleted key {id}");
-            return Ok(());
+            let v = api.call(Method::DELETE, &format!("/v1/storage/keys/{}", enc(&id)), None).await?;
+            if !as_json {
+                println!("deleted key {id}");
+                return Ok(());
+            }
+            v
         }
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
@@ -872,6 +893,8 @@ mod tests {
         assert_eq!(duration("7d").unwrap(), 604_800);
         assert!(duration("1w").is_err());
         assert!(duration("h").is_err());
+        assert!(duration("-5m").is_err());
+        assert_eq!(duration("999999999999999d").unwrap(), i64::MAX);
         assert_eq!(when(&json!(1_760_968_980_000i64)), "2025-10-20 14:03");
         assert_eq!(when(&Value::Null), "-");
     }

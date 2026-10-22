@@ -92,6 +92,8 @@ pub(crate) struct MetaLog {
     force_snapshot: AtomicBool,
     /// Newest verified snapshot.
     snapshots: watch::Sender<u64>,
+    /// Snapshot attempts that failed (so `snapshot_now` reports them instead of waiting).
+    snapshot_failures: std::sync::atomic::AtomicU64,
     /// Verified snapshots in object storage, and other snapshot objects to delete.
     snaps: Mutex<(BTreeSet<u64>, BTreeSet<u64>)>,
     /// Entries in object storage.
@@ -371,6 +373,7 @@ impl MetaLog {
             stopping: AtomicBool::new(false),
             force_snapshot: AtomicBool::new(false),
             snapshots: watch::channel(base).0,
+            snapshot_failures: Default::default(),
             snaps: Mutex::new((good, bad)),
             wal: Mutex::new(all_wal),
             stats: Mutex::new(LogStats { seq, pruned, last_snapshot_seq: base, ..Default::default() }),
@@ -460,6 +463,7 @@ impl MetaLog {
         if *rx.borrow_and_update() >= target {
             return Ok(*rx.borrow());
         }
+        let failures = self.snapshot_failures.load(Ordering::SeqCst);
         self.force_snapshot.store(true, Ordering::SeqCst);
         self.kick.notify_one();
         loop {
@@ -468,11 +472,19 @@ impl MetaLog {
                 return Ok(v);
             }
             self.check_open()?;
+            if self.snapshot_failures.load(Ordering::SeqCst) != failures {
+                return Err(StoreError::internal("the metadata snapshot failed (see the log); try again"));
+            }
             tokio::select! {
                 r = rx.changed() => r.map_err(|_| StoreError::Unavailable("metadata log closed".into()))?,
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
         }
+    }
+
+    fn snapshot_failed(&self) {
+        self.snapshot_failures.fetch_add(1, Ordering::SeqCst);
+        self.snapshots.send_modify(|_| {});
     }
 
     pub(crate) fn stats(&self) -> LogStats {
@@ -636,6 +648,7 @@ async fn committer(log: Arc<MetaLog>, mut next_seq: u64, mut since_entries: u64,
                     Err(e) => {
                         warn!(error = %e, "metadata snapshot failed");
                         log.db.snapshot_abort();
+                        log.snapshot_failed();
                         copying = None;
                         break;
                     }
@@ -708,8 +721,9 @@ async fn committer(log: Arc<MetaLog>, mut next_seq: u64, mut since_entries: u64,
             since_bytes = 0;
             let log2 = log.clone();
             snapshot_task = Some(tokio::spawn(async move {
-                if let Err(e) = log2.upload_snapshot(file, at).await {
+                if let Err(e) = log2.clone().upload_snapshot(file, at).await {
                     warn!(error = %e, seq = at, "metadata snapshot upload failed");
+                    log2.snapshot_failed();
                 }
             }));
         }
@@ -719,7 +733,10 @@ async fn committer(log: Arc<MetaLog>, mut next_seq: u64, mut since_entries: u64,
             let file = cfg.dir.join("snapshots").join(format!("{next_seq}.db"));
             match log.db.snapshot_begin(&file) {
                 Ok(()) => copying = Some(file),
-                Err(e) => warn!(error = %e, "can't start a metadata snapshot"),
+                Err(e) => {
+                    warn!(error = %e, "can't start a metadata snapshot");
+                    log.snapshot_failed();
+                }
             }
         }
 
@@ -730,5 +747,51 @@ async fn committer(log: Arc<MetaLog>, mut next_seq: u64, mut since_entries: u64,
             log.fence("closed".into());
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entries_round_trip_and_damage_is_detected() {
+        let e = encode(42, "commit", "n1", b"patch bytes");
+        let d = decode(&e).unwrap();
+        assert_eq!((d.seq, d.schema, d.patch.as_slice()), (42, schema::LATEST, &b"patch bytes"[..]));
+        assert!(decode(&encode(7, "takeover", "n", &[])).unwrap().patch.is_empty());
+        let err = |b: &[u8]| decode(b).err().expect("must be rejected").to_string();
+        assert!(err(b"").contains("not a roll storage"));
+        assert!(err(&e[..MAGIC.len() + 7]).contains("not a roll storage"));
+        assert!(err(&[b"XXXXXXX\n", &e[MAGIC.len()..]].concat()).contains("not a roll storage"));
+        for i in [MAGIC.len(), MAGIC.len() + 6, e.len() - 5, e.len() - 1] {
+            let mut bad = e.clone();
+            bad[i] ^= 1;
+            assert!(err(&bad).contains("checksum"), "byte {i}");
+        }
+        // Well-formed CRC over a broken body: a header length past the end, a bad header, no seq.
+        let seal = |body: Vec<u8>| {
+            let mut b = body;
+            let crc = crc32c::crc32c(&b);
+            b.extend_from_slice(&crc.to_be_bytes());
+            b
+        };
+        assert!(err(&seal([MAGIC, &u32::MAX.to_be_bytes()[..], b"{}"].concat())).contains("truncated"));
+        assert!(err(&seal([MAGIC, &3u32.to_be_bytes()[..], b"{x}"].concat())).contains("bad header"));
+        assert!(err(&seal([MAGIC, &2u32.to_be_bytes()[..], b"{}"].concat())).contains("no seq"));
+        // Entries from before the schema field are schema 1.
+        let d = decode(&seal([MAGIC, &10u32.to_be_bytes()[..], br#"{"seq": 3}"#, b"p"].concat())).unwrap();
+        assert_eq!((d.seq, d.schema, d.patch.as_slice()), (3, 1, &b"p"[..]));
+    }
+
+    #[test]
+    fn keys_and_sequence_numbers() {
+        assert_eq!(wal_key("s3/meta", 5), "s3/meta/wal/00000000000000000005");
+        assert_eq!(snap_key("s3/meta", 5), "s3/meta/snap/00000000000000000005.db.zst");
+        assert_eq!(seq_of(&wal_key("p", 123)), Some(123));
+        assert_eq!(seq_of(&snap_key("p", 9)), Some(9));
+        assert_eq!(seq_of("s3/meta/wal/junk"), None);
+        // Zero-padded keys list in sequence order.
+        assert!(wal_key("p", 9) < wal_key("p", 10));
     }
 }

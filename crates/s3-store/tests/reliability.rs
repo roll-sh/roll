@@ -30,6 +30,14 @@ struct Faulty {
     completed: Mutex<HashSet<String>>,
     /// Aborting a multipart upload waits this long.
     abort_delay_ms: AtomicU64,
+    /// The next log entry write finds its slot taken by another writer's (valid, empty) entry.
+    steal_wal: AtomicBool,
+    /// Log entry writes fail this many times (`u32::MAX`: for good).
+    fail_wal: AtomicU32,
+    /// Log entry writes panic.
+    panic_wal: AtomicBool,
+    /// Reads of snapshots return garbage this many times.
+    corrupt_snap_reads: AtomicU32,
 }
 
 impl Faulty {
@@ -43,6 +51,10 @@ impl Faulty {
             complete_delay_ms: AtomicU64::new(0),
             completed: Mutex::new(HashSet::new()),
             abort_delay_ms: AtomicU64::new(0),
+            steal_wal: AtomicBool::new(false),
+            fail_wal: AtomicU32::new(0),
+            panic_wal: AtomicBool::new(false),
+            corrupt_snap_reads: AtomicU32::new(0),
         })
     }
 
@@ -74,6 +86,14 @@ impl Backend for Faulty {
     async fn put_create_only(&self, key: &str, data: Bytes) -> anyhow::Result<bool> {
         if key.contains("/wal/") {
             sleep_ms(self.wal_delay_ms.load(Ordering::SeqCst)).await;
+            assert!(!self.panic_wal.load(Ordering::SeqCst), "injected panic writing {key}");
+            if self.fail_wal.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n > 0).then(|| if n == u32::MAX { n } else { n - 1 })).is_ok() {
+                anyhow::bail!("injected failure writing {key}");
+            }
+            if self.steal_wal.swap(false, Ordering::SeqCst) {
+                let seq: u64 = key.rsplit('/').next().unwrap().parse().unwrap();
+                self.inner.put_create_only(key, entry(seq, 1, &[])).await?;
+            }
         }
         if self.ignore_create_only.load(Ordering::SeqCst) {
             self.inner.put_small(key, data).await?;
@@ -97,6 +117,9 @@ impl Backend for Faulty {
                 *n -= 1;
                 anyhow::bail!("injected read failure of {key}");
             }
+        }
+        if key.contains("/snap/") && self.corrupt_snap_reads.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+            return Ok(Some((7, bytes_body(Bytes::from_static(b"garbage")))));
         }
         self.inner.get(key, range).await
     }
@@ -204,7 +227,9 @@ async fn a_retried_complete_returns_the_committed_object() {
     let (faulty, backend, clock, s) = faulty_env("retrycomplete").await;
     s.create_bucket("mpu", BucketOptions::default()).await.unwrap();
     let up = s.create_upload("mpu", "obj", ObjectHeaders::default(), None, None).await.unwrap();
-    let p1 = part(&s, &up, 1, b"hello ").await;
+    // Real S3 wants 5 MiB for every part but the last.
+    let first = [&b"hello "[..], &vec![b'.'; 5 << 20]].concat();
+    let p1 = part(&s, &up, 1, &first).await;
     let p2 = part(&s, &up, 2, b"world").await;
     let list = [(1, p1.etag.clone()), (2, p2.etag.clone())];
     // The first attempt is slow; the client retries while it's still running.
@@ -219,7 +244,7 @@ async fn a_retried_complete_returns_the_committed_object() {
     // Once it's over, the upload is gone for good.
     assert!(matches!(s.complete_upload("mpu", &up.id, &list, None, &none).await, Err(StoreError::NoSuchUpload(_))));
     collect_everything(&s, &clock).await;
-    assert_eq!(read(&s, "mpu", "obj").await.unwrap(), b"hello world");
+    assert!(read(&s, "mpu", "obj").await.unwrap() == [&first[..], b"world"].concat());
     assert!(blobs(&backend).await.contains(&blob_key(&a.blob_id)));
 }
 
@@ -523,4 +548,237 @@ async fn a_blob_whose_commit_failed_definitely_is_deleted_at_once() {
     let only_new = WriteCondition { if_match: None, if_none_match: Some("*".into()) };
     assert!(matches!(put_with(&s, "dfn", "k", b"second", &only_new).await, Err(StoreError::PreconditionFailed)));
     assert_eq!(blobs(&backend).await, before);
+}
+
+// ---- Failed commits ----
+
+#[tokio::test]
+async fn a_failed_complete_on_a_deposed_node_keeps_the_blob() {
+    let (faulty, backend, clock, a) = faulty_env("deposedcomplete").await;
+    a.create_bucket("mpu", BucketOptions::default()).await.unwrap();
+    let up = a.create_upload("mpu", "obj", ObjectHeaders::default(), None, None).await.unwrap();
+    let p1 = part(&a, &up, 1, b"assembled").await;
+    let list = [(1, p1.etag.clone())];
+    let only_new = WriteCondition { if_match: None, if_none_match: Some("*".into()) };
+    // While the parts are assembled, a put takes the key (so the commit fails its condition)
+    // and another node takes over the log (so dropping the upload can't commit either).
+    faulty.complete_delay_ms.store(500, Ordering::SeqCst);
+    let (r, b) = tokio::join!(a.complete_upload("mpu", &up.id, &list, None, &only_new), async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        put(&a, "mpu", "obj", b"racing put").await;
+        open(&backend, &clock).await
+    });
+    faulty.complete_delay_ms.store(0, Ordering::SeqCst);
+    assert!(matches!(r, Err(StoreError::PreconditionFailed)), "{r:?}");
+    // The new writer still has the upload, so the blob it references must still be there.
+    b.upload("mpu", &up.id).unwrap();
+    assert!(blobs(&backend).await.contains(&blob_key(&up.blob_id)), "the deposed node deleted a blob the metadata references");
+    // The racing object goes away and the client retries the Complete on the new writer.
+    b.delete_object("mpu", "obj", None).await.unwrap();
+    let m = b.complete_upload("mpu", &up.id, &list, None, &only_new).await.unwrap();
+    assert_eq!(m.blob_id, up.blob_id);
+    collect_everything(&b, &clock).await;
+    assert_eq!(read(&b, "mpu", "obj").await.unwrap(), b"assembled");
+    assert_consistent(&b, &backend).await;
+}
+
+#[tokio::test]
+async fn a_group_commit_that_loses_its_slot_fails_every_write_in_it() {
+    let (faulty, backend, clock, s) = faulty_env("groupfail").await;
+    s.create_bucket("grp", BucketOptions::default()).await.unwrap();
+    put(&s, "grp", "before", b"1").await;
+    let b = s.bucket("grp").unwrap();
+    let mut objs = Vec::new();
+    for i in 0..8 {
+        let blob = s.new_blob();
+        let up = s.put_blob(&blob, &b.id, "k", bytes_body(Bytes::from_static(b"v")), 1, None).await.unwrap();
+        objs.push((format!("k{i}"), NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: md5_hex(b"v"), headers: ObjectHeaders::default(), checksum: None }));
+    }
+    faulty.wal_delay_ms.store(100, Ordering::SeqCst);
+    faulty.steal_wal.store(true, Ordering::SeqCst);
+    let tasks: Vec<_> = objs
+        .into_iter()
+        .map(|(k, o)| {
+            let s = s.clone();
+            tokio::spawn(async move { s.commit_put("grp", &k, o, &WriteCondition::none()).await })
+        })
+        .collect();
+    for t in tasks {
+        let r = tokio::time::timeout(Duration::from_secs(10), t).await.expect("hung").unwrap();
+        assert!(matches!(r, Err(StoreError::Unavailable(_))), "{r:?}");
+    }
+    assert!(s.stats().is_err(), "fenced");
+    // Whether those commits landed isn't known here, so their blobs are kept.
+    assert_eq!(blobs(&backend).await.len(), 9);
+    faulty.wal_delay_ms.store(0, Ordering::SeqCst);
+    let s2 = open(&backend, &clock).await;
+    assert_eq!(keys(&s2, "grp"), ["before"], "nothing unacknowledged appears");
+    assert_consistent(&s2, &backend).await;
+    collect_everything(&s2, &clock).await;
+    assert_eq!(blobs(&backend).await.len(), 1, "the new writer's orphan scan collects them");
+    assert_eq!(read(&s2, "grp", "before").await.unwrap(), b"1");
+}
+
+#[tokio::test]
+async fn transient_commit_failures_are_retried_without_fencing() {
+    let (faulty, backend, clock, s) = faulty_env("walretry").await;
+    s.create_bucket("wrt", BucketOptions::default()).await.unwrap();
+    faulty.fail_wal.store(3, Ordering::SeqCst);
+    put(&s, "wrt", "k", b"v").await;
+    assert_eq!(faulty.fail_wal.load(Ordering::SeqCst), 0);
+    assert!(s.stats().unwrap().log.fenced.is_none());
+    let s2 = open(&backend, &clock).await;
+    assert_eq!(keys(&s2, "wrt"), ["k"]);
+}
+
+#[tokio::test]
+async fn object_storage_refusing_commits_fences_the_node() {
+    let (faulty, backend, clock, s) = faulty_env("walfail").await;
+    let bkt = s.create_bucket("wfl", BucketOptions::default()).await.unwrap();
+    // The blob is uploaded first, so the put's commit is in the pipeline before the delete's
+    // (however slow the backend is).
+    let blob = s.new_blob();
+    let up = s.put_blob(&blob, &bkt.id, "a", bytes_body(Bytes::from_static(b"1")), 1, None).await.unwrap();
+    let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: md5_hex(b"1"), headers: ObjectHeaders::default(), checksum: None };
+    faulty.fail_wal.store(u32::MAX, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let none = WriteCondition::none();
+    let (a, b) = tokio::join!(s.commit_put("wfl", "a", obj, &none), async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        s.delete_bucket("wfl", true).await
+    });
+    assert!(matches!(a, Err(StoreError::Unavailable(_))), "{a:?}");
+    assert!(matches!(b, Err(StoreError::Unavailable(_))), "{b:?}");
+    assert!(started.elapsed() > Duration::from_secs(20), "retried for a while first");
+    assert!(matches!(s.bucket("wfl"), Err(StoreError::Unavailable(_))));
+    faulty.fail_wal.store(0, Ordering::SeqCst);
+    let s2 = open(&backend, &clock).await;
+    assert!(keys(&s2, "wfl").is_empty());
+}
+
+#[tokio::test]
+async fn a_committer_panic_fences_instead_of_hanging() {
+    let (faulty, backend, clock, s) = faulty_env("panic").await;
+    s.create_bucket("pnc", BucketOptions::default()).await.unwrap();
+    put(&s, "pnc", "before", b"1").await;
+    faulty.panic_wal.store(true, Ordering::SeqCst);
+    let r = tokio::time::timeout(Duration::from_secs(10), put_with(&s, "pnc", "lost", b"2", &WriteCondition::none())).await.expect("a write hung on a dead committer");
+    assert!(matches!(r, Err(StoreError::Unavailable(_))), "{r:?}");
+    assert!(matches!(s.bucket("pnc"), Err(StoreError::Unavailable(_))), "reads stop too");
+    assert!(matches!(s.create_bucket("other", BucketOptions::default()).await, Err(StoreError::Unavailable(_))));
+    faulty.panic_wal.store(false, Ordering::SeqCst);
+    let s2 = open(&backend, &clock).await;
+    assert_eq!(keys(&s2, "pnc"), ["before"]);
+}
+
+#[tokio::test]
+async fn a_takeover_racing_another_writer_replays_its_entry() {
+    let (faulty, backend, clock, a) = faulty_env("takeoverrace").await;
+    a.create_bucket("tko", BucketOptions::default()).await.unwrap();
+    put(&a, "tko", "k", b"v").await;
+    let last = *wal_seqs(&backend).await.last().unwrap();
+    // Between the new node's listing and its takeover, someone else writes the next entry.
+    faulty.steal_wal.store(true, Ordering::SeqCst);
+    let b = open(&backend, &clock).await;
+    assert_eq!(b.stats().unwrap().log.seq, last + 2, "replayed the entry in its slot, then claimed the next");
+    assert_eq!(read(&b, "tko", "k").await.unwrap(), b"v");
+    put(&b, "tko", "after", b"x").await;
+    assert!(matches!(put_with(&a, "tko", "stale", b"x", &WriteCondition::none()).await, Err(StoreError::Unavailable(_))));
+    let c = open(&backend, &clock).await;
+    assert_eq!(keys(&c, "tko"), ["after", "k"]);
+}
+
+// ---- Snapshots ----
+
+fn snap_seqs(listed: Vec<Listed>) -> Vec<u64> {
+    listed.iter().map(|l| l.key.rsplit('/').next().unwrap().split('.').next().unwrap().parse().unwrap()).collect()
+}
+
+#[tokio::test]
+async fn a_snapshot_failing_its_check_never_counts_or_prunes() {
+    let (faulty, backend, clock, s) = faulty_env("badverify").await;
+    s.create_bucket("bvf", BucketOptions::default()).await.unwrap();
+    put(&s, "bvf", "a", b"1").await;
+    let first = s.snapshot_now().await.unwrap();
+    put(&s, "bvf", "b", b"2").await;
+    let second = s.snapshot_now().await.unwrap();
+    put(&s, "bvf", "c", b"3").await;
+    let wal_before = wal_seqs(&backend).await;
+    // The upload reads back corrupt.
+    faulty.corrupt_snap_reads.store(1, Ordering::SeqCst);
+    let r = tokio::time::timeout(Duration::from_secs(10), s.snapshot_now()).await.expect("snapshot_now hung on a failed snapshot");
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(faulty.corrupt_snap_reads.load(Ordering::SeqCst), 0);
+    // Deleted, never counted, and nothing more pruned.
+    assert_eq!(snap_seqs(s3_store::backend::list_all(&*backend, "s3/meta/snap/").await.unwrap()), [first, second]);
+    let st = s.stats().unwrap().log;
+    assert_eq!((st.pruned, st.last_snapshot_seq), (first, second));
+    let wal_after = wal_seqs(&backend).await;
+    assert!(wal_before.iter().all(|q| wal_after.contains(q)), "no log entry deleted");
+    let s2 = open(&backend, &clock).await;
+    assert_eq!(s2.stats().unwrap().log.last_snapshot_seq, second);
+    assert_eq!(keys(&s2, "bvf"), ["a", "b", "c"]);
+    put(&s2, "bvf", "d", b"4").await;
+    assert!(s2.snapshot_now().await.unwrap() > second, "the next one works");
+}
+
+#[tokio::test]
+async fn without_a_usable_snapshot_a_pruned_log_refuses_to_start() {
+    let (_faulty, backend, clock, s) = faulty_env("allbad").await;
+    s.create_bucket("alb", BucketOptions::default()).await.unwrap();
+    put(&s, "alb", "a", b"1").await;
+    let first = s.snapshot_now().await.unwrap();
+    put(&s, "alb", "b", b"2").await;
+    let second = s.snapshot_now().await.unwrap();
+    put(&s, "alb", "c", b"3").await;
+    assert_eq!(s.stats().unwrap().log.pruned, first);
+    for seq in [first, second] {
+        backend.put_small(&format!("s3/meta/snap/{seq:020}.db.zst"), Bytes::from_static(b"rotten")).await.unwrap();
+    }
+    // Replaying what's left of the log from nothing would silently lose data.
+    refuses(Store::open(config(&clock), backend.clone()).await, "pruned");
+}
+
+// ---- Multipart races ----
+
+#[tokio::test]
+async fn an_abort_during_a_slow_complete_never_acknowledges() {
+    let (faulty, backend, clock, s) = faulty_env("abortcomplete").await;
+    s.create_bucket("mpu", BucketOptions::default()).await.unwrap();
+    let up = s.create_upload("mpu", "obj", ObjectHeaders::default(), None, None).await.unwrap();
+    let p1 = part(&s, &up, 1, b"one").await;
+    // The backend assembles the object; the abort's metadata commit lands before the Complete's.
+    faulty.complete_delay_ms.store(300, Ordering::SeqCst);
+    faulty.abort_delay_ms.store(600, Ordering::SeqCst);
+    let (list, none) = ([(1, p1.etag.clone())], WriteCondition::none());
+    let (r, aborted) = tokio::join!(s.complete_upload("mpu", &up.id, &list, None, &none), async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        s.abort_bucket_upload("mpu", &up.id).await
+    });
+    aborted.unwrap();
+    assert!(matches!(r, Err(StoreError::NoSuchUpload(_))), "{r:?}");
+    assert!(read(&s, "mpu", "obj").await.is_none());
+    assert_consistent(&s, &backend).await;
+    collect_everything(&s, &clock).await;
+    assert!(!blobs(&backend).await.contains(&blob_key(&up.blob_id)), "the assembled blob is collected");
+}
+
+#[tokio::test]
+async fn a_complete_losing_its_condition_after_assembly_drops_the_upload_and_blob() {
+    let (faulty, backend, _clock, s) = faulty_env("lostcond").await;
+    s.create_bucket("mpu", BucketOptions::default()).await.unwrap();
+    let up = s.create_upload("mpu", "obj", ObjectHeaders::default(), None, None).await.unwrap();
+    let p1 = part(&s, &up, 1, b"one").await;
+    faulty.complete_delay_ms.store(300, Ordering::SeqCst);
+    let only_new = WriteCondition { if_match: None, if_none_match: Some("*".into()) };
+    let list = [(1, p1.etag.clone())];
+    let (r, ()) = tokio::join!(s.complete_upload("mpu", &up.id, &list, None, &only_new), async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        put(&s, "mpu", "obj", b"winner").await;
+    });
+    assert!(matches!(r, Err(StoreError::PreconditionFailed)), "{r:?}");
+    assert!(matches!(s.upload("mpu", &up.id), Err(StoreError::NoSuchUpload(_))), "assembled, so it can't be retried");
+    assert!(!blobs(&backend).await.contains(&blob_key(&up.blob_id)), "never acknowledged: deleted at once");
+    assert_eq!(read(&s, "mpu", "obj").await.unwrap(), b"winner");
+    assert_consistent(&s, &backend).await;
 }

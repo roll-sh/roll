@@ -433,4 +433,57 @@ mod tests {
         let body = format!("0\r\n{many}\r\n");
         assert!(run(&mut Decoder::new(Mode::UnsignedTrailer, None), body.as_bytes(), |_| 100).is_err());
     }
+
+    #[test]
+    fn malformed_framing() {
+        let err = |mode: Mode, body: &[u8]| run(&mut Decoder::new(mode, None), body, |_| 100).unwrap_err().code;
+        let u = || Mode::UnsignedTrailer;
+        for bad in [&b"zz\r\n"[..], b";x\r\n", b"\xff\r\n", b"3\nabc", b"3\r\nabc\rX", b"3\r\nabcd", b"0\r\nno-colon\r\n\r\n", b"0\r\n\xff:x\r\n\r\n", b"3\r\nabc\r\n0\r\n\r\nX"] {
+            assert_eq!(err(u(), bad), Code::IncompleteBody, "{}", String::from_utf8_lossy(bad));
+        }
+        let long_trailer = format!("0\r\nx-amz-checksum-crc32:{}\r\n\r\n", "A".repeat(MAX_LINE + 1));
+        assert_eq!(err(u(), long_trailer.as_bytes()), Code::IncompleteBody);
+        // Unsigned mode ignores chunk extensions.
+        let mut d = Decoder::new(u(), Some(3));
+        assert_eq!(run(&mut d, b"3;chunk-signature=zz;x=y\r\nabc\r\n0\r\n\r\n", |_| 2).unwrap(), b"abc");
+        assert_eq!(d.decoded(), 3);
+        assert!(d.is_done());
+        d.finish().unwrap();
+        // Signed mode: a signature on every chunk, 64 hex characters.
+        let s = || Mode::Signed { signing: example_signing(), trailer: false };
+        assert_eq!(err(s(), b"3;chunk-signature=abcd\r\n"), Code::SignatureDoesNotMatch);
+        assert_eq!(err(s(), b"3\r\n"), Code::SignatureDoesNotMatch);
+        // Signatures chain from the seed: the example's second chunk can't come first.
+        let mut swapped = b"400;chunk-signature=0055627c9e194cb4542bae2aa5492e3c1575bbb81b612b7d234b86a503ef5497\r\n".to_vec();
+        swapped.extend_from_slice(&[b'a'; 1024]);
+        swapped.extend_from_slice(b"\r\n");
+        assert_eq!(err(s(), &swapped), Code::SignatureDoesNotMatch);
+        // A body that stops before the final chunk never finishes.
+        let mut d = Decoder::new(u(), None);
+        run(&mut d, b"3\r\nabc\r\n", |_| 100).unwrap();
+        assert!(!d.is_done());
+        assert_eq!(d.finish().unwrap_err().code, Code::IncompleteBody);
+    }
+
+    #[test]
+    fn signed_trailer_signature_required() {
+        let signing = StreamSigning { signing_key: signing_key("secret", "20240101", "auto", "s3"), seed_signature: "b".repeat(64), amz_date: "20240101T000000Z".into(), scope: "20240101/auto/s3/aws4_request".into() };
+        let mode = || Mode::Signed { signing: signing.clone(), trailer: true };
+        let payload = b"hello trailers".to_vec();
+        let trailers = vec![("x-amz-checksum-crc32".to_string(), crate::checksum::b64(&crate::checksum::Algorithm::Crc32.checksum(&payload)))];
+        let body = encode(&payload, 5, Some(&signing), &trailers);
+        let at = body.windows(24).position(|w| w == b"x-amz-trailer-signature:").unwrap();
+        let end = at + body[at..].windows(2).position(|w| w == b"\r\n").unwrap() + 2;
+        let mut stripped = body[..at].to_vec();
+        stripped.extend_from_slice(&body[end..]);
+        assert_eq!(run(&mut Decoder::new(mode(), None), &stripped, |_| 7).unwrap_err().code, Code::SignatureDoesNotMatch);
+        // Without trailers no trailer signature is needed.
+        let mut d = Decoder::new(mode(), Some(payload.len() as u64));
+        assert_eq!(run(&mut d, &encode(&payload, 5, Some(&signing), &[]), |_| 7).unwrap(), payload);
+        assert_eq!(d.finish().unwrap(), vec![]);
+        // Trailer names are lowercased, values trimmed.
+        let mut d = Decoder::new(Mode::UnsignedTrailer, Some(0));
+        run(&mut d, b"0\r\nX-Amz-Checksum-CRC32 :  AAAAAA== \r\nx-amz-trailer-signature:ignored\r\n\r\n", |_| 4).unwrap();
+        assert_eq!(d.finish().unwrap(), vec![("x-amz-checksum-crc32".to_string(), "AAAAAA==".to_string())]);
+    }
 }

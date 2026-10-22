@@ -1,0 +1,19 @@
+// Compiles test/ (and what it imports) to CommonJS in .test-build for `node --test`. The package
+// has no "type", so the output is CommonJS and extensionless imports ("./roll-api") resolve.
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": false,
+    "incremental": false,
+    "rootDir": ".",
+    "outDir": ".test-build"
+  },
+  "include": ["test/**/*.ts"]
+}

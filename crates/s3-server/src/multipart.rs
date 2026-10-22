@@ -2,7 +2,7 @@
 
 use crate::auth::Need;
 use crate::body::{Incoming, requested_checksum};
-use crate::ctx::{Ctx, no_content, read_small};
+use crate::ctx::{Ctx, no_content, read_small_object_checksum};
 use crate::error::{StoreResult, store_error};
 use crate::object::{InflightBlob, MAX_PUT, object_headers, precheck, set_checksum, write_condition};
 use crate::response::{self, Reply, set};
@@ -177,7 +177,7 @@ fn object_checksum(ctx: &Ctx, up: &Upload, chosen: &[&Part], sent: &[xml::Comple
 pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
     let up = find_upload(ctx, bucket)?;
-    let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
+    let raw = read_small_object_checksum(ctx, body, xml::MAX_XML_BYTES).await?;
     let sent = xml::parse_complete_multipart(&raw)?;
     xml::check_part_order(&sent)?;
     let cond = write_condition(ctx)?;
@@ -234,6 +234,8 @@ pub(crate) fn list_parts(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     };
     let max = max_param(ctx, "max-parts")?;
     let (parts, more) = ctx.store().list_parts(&bucket.name, &up.id, marker, max as usize).s3()?;
+    // An empty page asked for (`max-parts=0`) isn't truncated: there'd be no marker to go on from.
+    let more = more && max > 0;
     let ck = upload_checksum(&up);
     let entries: Vec<xml::PartEntry> = parts
         .iter()
@@ -274,16 +276,17 @@ pub(crate) fn list_uploads(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         max_uploads: max as usize,
     };
     let page = ctx.store().list_uploads(&bucket.name, &q).s3()?;
+    let truncated = page.truncated && max > 0;
     let l = xml::ListUploads {
         bucket: bucket.name.clone(),
         key_marker: q.key_marker.clone().unwrap_or_default(),
         upload_id_marker: q.upload_id_marker.clone().unwrap_or_default(),
-        next_key_marker: page.next_key_marker.clone(),
-        next_upload_id_marker: page.next_upload_id_marker.clone(),
+        next_key_marker: page.next_key_marker.clone().filter(|_| truncated),
+        next_upload_id_marker: page.next_upload_id_marker.clone().filter(|_| truncated),
         prefix: q.prefix.clone(),
         delimiter: q.delimiter.clone(),
         max_uploads: max,
-        is_truncated: page.truncated,
+        is_truncated: truncated,
         url_encode,
         uploads: page.uploads.iter().map(|u| xml::UploadEntry { key: u.key.clone(), upload_id: u.id.clone(), initiated_ms: u.created_at, checksum: upload_checksum(u) }).collect(),
         common_prefixes: page.prefixes.clone(),

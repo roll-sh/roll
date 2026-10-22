@@ -63,7 +63,7 @@ fn checked(y: i64, mo: i64, d: i64, h: i64, mi: i64, s: i64) -> Option<i64> {
 /// Unix seconds of `20130524T000000Z`.
 pub fn parse_amz_date(s: &str) -> Option<i64> {
     let b = s.as_bytes();
-    if b.len() != 16 || b[8] != b'T' || b[15] != b'Z' {
+    if b.len() != 16 || !s.is_ascii() || b[8] != b'T' || b[15] != b'Z' {
         return None;
     }
     checked(num(&s[0..4])?, num(&s[4..6])?, num(&s[6..8])?, num(&s[9..11])?, num(&s[11..13])?, num(&s[13..15])?)
@@ -139,5 +139,26 @@ mod tests {
             let (y, m, d) = civil_from_days(days);
             assert_eq!(days_from_civil(y, m, d), days);
         }
+    }
+
+    #[test]
+    fn rejects_bad_timestamps() {
+        // 16 bytes with a multi-byte character across a field boundary: rejected, never a panic.
+        assert_eq!("201é524T000000Z".len(), 16);
+        assert_eq!(parse_amz_date("201é524T000000Z"), None);
+        for bad in ["20130524T240000Z", "20130524T006000Z", "20130524T000061Z", "20130500T000000Z", "2013052XT000000Z", "20130524X000000Z", "+0130524T000000Z", ""] {
+            assert_eq!(parse_amz_date(bad), None, "{bad}");
+        }
+        assert_eq!(parse_amz_date("20130524T235960Z"), Some(1_369_353_600 + 86_400), "a leap second is accepted");
+        for bad in ["2009-10-12T17:50:30", "2009-10-12T17:50:30.Z", "2009-10-12T17:50:30.1234567890Z", "2009-10-12T17:50:30.x1Z", "2009-13-12T17:50:30Z", "2009/10/12T17:50:30Z", "2009-10-1é17:50:30Z"] {
+            assert_eq!(parse_iso8601(bad), None, "{bad}");
+        }
+        assert_eq!(parse_iso8601("2009-10-12T17:50:30.123456789Z"), Some(1_255_369_830_123));
+        assert_eq!(parse_iso8601(&iso8601_ms(-1)), Some(-1));
+        assert_eq!(iso8601_ms(-1), "1969-12-31T23:59:59.999Z");
+        assert_eq!(parse_http_date("Wednesday, 21-Oct-15 07:28:00 GMT"), Some(1_445_412_480), "RFC 850");
+        assert_eq!(parse_http_date("Wed Oct 21 07:28:00 2015"), Some(1_445_412_480), "asctime");
+        assert_eq!(parse_http_date(" Wed, 21 Oct 2015 07:28:00 GMT "), Some(1_445_412_480));
+        assert!(now_ms() > 1_700_000_000_000);
     }
 }

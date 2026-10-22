@@ -4544,10 +4544,16 @@ name = "roll-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-s3",
+ "axum",
  "base64 0.22.1",
  "clap",
  "reqwest",
+ "s3-control",
+ "s3-server",
+ "s3-store",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "urlencoding",

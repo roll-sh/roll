@@ -103,3 +103,32 @@ async fn handle(State(server): State<Arc<Server>>, req: Request) -> Response {
     let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
     ctx::dispatch(server, peer, req).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cidr_lists() {
+        assert_eq!(parse_cidrs(" 10.0.0.0/8, ::1/128 ,,").unwrap().len(), 2);
+        assert!(parse_cidrs("").unwrap().is_empty());
+        assert!(parse_cidrs("10.0.0.0/33").is_err());
+        assert!(parse_cidrs("example.com").is_err());
+    }
+
+    #[tokio::test]
+    async fn internal_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(s3_store::StoreConfig::new(dir.path().join("meta")).manual(), s3_store::test_backend("s3-server-lib").await).await.unwrap();
+        let server = Server::new(store.clone(), Config::default());
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for inside in ["127.0.0.1", "10.1.2.3", "172.17.0.2", "172.31.255.255", "192.168.1.1", "::1", "fd00::1", "::ffff:10.1.2.3", "::ffff:127.0.0.1"] {
+            assert!(server.is_internal(ip(inside)), "{inside}");
+        }
+        for outside in ["8.8.8.8", "172.32.0.1", "100.64.0.1", "2001:db8::1", "::ffff:8.8.8.8"] {
+            assert!(!server.is_internal(ip(outside)), "{outside}");
+        }
+        let none = Server::new(store, Config { internal_cidrs: Vec::new(), ..Config::default() });
+        assert!(!none.is_internal(ip("127.0.0.1")));
+    }
+}

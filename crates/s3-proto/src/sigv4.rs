@@ -856,4 +856,218 @@ pub(crate) mod tests {
         let p2 = crate::checksum::b64(br#"{"conditions":[]}"#);
         assert_eq!(check_post_policy(&p2, &fields, "b", 0).unwrap_err().code, Code::InvalidPolicyDocument);
     }
+
+    #[test]
+    fn credential_errors() {
+        let c = |s: &str| Credential::parse(s, Code::AuthorizationHeaderMalformed).map_err(|e| e.code);
+        assert_eq!(c(" AK/20130524/us-east-1/s3/aws4_request ").unwrap().scope(), "20130524/us-east-1/s3/aws4_request");
+        for bad in ["AK/20130524/us-east-1/s3", "AK/20130524/us-east-1/s3/aws4", "/20130524/us-east-1/s3/aws4_request", "AK/2013052/us-east-1/s3/aws4_request", "AK/2013O524/us-east-1/s3/aws4_request", "AK/20130524/us-east-1/s3/aws4_request/x", ""] {
+            assert_eq!(c(bad), Err(Code::AuthorizationHeaderMalformed), "{bad:?}");
+        }
+        assert_eq!(Credential::parse("x", Code::AuthorizationQueryParametersError).unwrap_err().code, Code::AuthorizationQueryParametersError);
+    }
+
+    #[test]
+    fn header_components_and_dates() {
+        let p = |auth: &str, date: (&str, &str), sha: &str| parse(&Request { method: "GET", path: "/", query: "", headers: &[("host", "h"), date, ("x-amz-content-sha256", sha), ("authorization", auth)] }).map_err(|e| e.code);
+        let ok = "AWS4-HMAC-SHA256 Credential=AK/20130524/r/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=ab";
+        let d = ("x-amz-date", "20130524T000000Z");
+        assert!(p(ok, d, UNSIGNED_PAYLOAD).unwrap().is_some());
+        assert_eq!(p("AWS4-HMAC-SHA256 SignedHeaders=host, Signature=ab", d, UNSIGNED_PAYLOAD), Err(Code::AuthorizationHeaderMalformed));
+        assert_eq!(p("AWS4-HMAC-SHA256 Credential=AK/20130524/r/s3/aws4_request, Signature=ab", d, UNSIGNED_PAYLOAD), Err(Code::AuthorizationHeaderMalformed));
+        assert_eq!(p("AWS4-HMAC-SHA256 Credential=AK/20130524/r/s3/aws4_request, SignedHeaders, Signature=ab", d, UNSIGNED_PAYLOAD), Err(Code::AuthorizationHeaderMalformed));
+        let s = p("AWS4-HMAC-SHA256 Credential=AK/20130524/r/s3/aws4_request,,Foo=bar, SignedHeaders=Host; X-Amz-Date, Signature=ab", d, UNSIGNED_PAYLOAD).unwrap().unwrap();
+        assert_eq!(s.signed_headers, vec!["host", "x-amz-date"], "unknown components are ignored, names lowercased");
+        // Dates: x-amz-date, else Date; anything unparseable is refused (never a panic).
+        for bad in [("x-amz-date", "2013-05-24"), ("x-amz-date", "201é524T000000Z"), ("date", "garbage"), ("x-other", "")] {
+            assert_eq!(p(ok, bad, UNSIGNED_PAYLOAD), Err(Code::AccessDenied), "{bad:?}");
+        }
+        let s = p(ok, ("date", "Fri, 24 May 2013 00:00:00 GMT"), UNSIGNED_PAYLOAD).unwrap().unwrap();
+        assert_eq!((s.amz_date.as_str(), s.timestamp), ("20130524T000000Z", T));
+        // Payload hashes.
+        assert_eq!(p(ok, d, "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD"), Err(Code::NotImplemented));
+        assert_eq!(p(ok, d, &EMPTY_SHA256.to_uppercase()).unwrap().unwrap().payload, Payload::Sha256(EMPTY_SHA256.into()));
+        assert_eq!(p(ok, d, &EMPTY_SHA256[1..]), Err(Code::InvalidArgument));
+        for v in [UNSIGNED_PAYLOAD, STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER, STREAMING_UNSIGNED_TRAILER, EMPTY_SHA256] {
+            let pl = Payload::parse(v).unwrap();
+            assert_eq!(pl.as_str(), v);
+            assert_eq!(pl.is_chunked(), v.starts_with("STREAMING"));
+        }
+    }
+
+    #[test]
+    fn presigned_parameter_errors() {
+        type Q = Vec<(&'static str, &'static str)>;
+        let base: Q = vec![
+            ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
+            ("X-Amz-Credential", "AK%2F20130524%2Fr%2Fs3%2Faws4_request"),
+            ("X-Amz-Date", "20130524T000000Z"),
+            ("X-Amz-Expires", "60"),
+            ("X-Amz-SignedHeaders", "host"),
+            ("X-Amz-Signature", "ab"),
+        ];
+        let pq = |f: &dyn Fn(&mut Q)| {
+            let mut v = base.clone();
+            f(&mut v);
+            let query = v.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
+            parse(&Request { method: "GET", path: "/", query: &query, headers: &[("host", "h")] }).map(Option::unwrap).map_err(|e| e.code)
+        };
+        let set = |k: &'static str, val: &'static str| {
+            move |v: &mut Q| {
+                v.retain(|(n, _)| *n != k);
+                v.push((k, val));
+            }
+        };
+        let without = |k: &'static str| move |v: &mut Q| v.retain(|(n, _)| *n != k);
+        assert_eq!(pq(&|_| {}).unwrap().presigned_expires, Some(60));
+        let qpe = Err(Code::AuthorizationQueryParametersError);
+        assert_eq!(pq(&set("X-Amz-Algorithm", "AWS4-HMAC-SHA1")), qpe);
+        assert_eq!(pq(&set("X-Amz-Date", "20130524")), qpe);
+        assert_eq!(pq(&set("X-Amz-Date", "201%C3%A9524T000000Z")), qpe);
+        assert_eq!(pq(&set("X-Amz-Date", "20130525T000000Z")), qpe, "credential date differs");
+        assert_eq!(pq(&set("X-Amz-Expires", "soon")), qpe);
+        assert_eq!(pq(&set("X-Amz-Expires", "0")), qpe);
+        assert_eq!(pq(&set("X-Amz-Expires", "-5")), qpe);
+        assert_eq!(pq(&set("X-Amz-Expires", "604800")).unwrap().presigned_expires, Some(MAX_PRESIGN_S));
+        assert_eq!(pq(&set("X-Amz-Credential", "AK%2F20130524%2Fr%2Fsqs%2Faws4_request")), qpe);
+        assert_eq!(pq(&set("X-Amz-SignedHeaders", "x-amz-date")), Err(Code::AccessDenied));
+        for k in ["X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires", "X-Amz-SignedHeaders", "X-Amz-Signature"] {
+            assert_eq!(pq(&without(k)), qpe, "{k}");
+        }
+        assert_eq!(pq(&set("X-Amz-Content-Sha256", STREAMING_PAYLOAD)), Err(Code::InvalidRequest));
+        assert_eq!(pq(&set("X-Amz-Content-Sha256", STREAMING_UNSIGNED_TRAILER)), Err(Code::InvalidRequest));
+        assert_eq!(pq(&set("X-Amz-Content-Sha256", EMPTY_SHA256)).unwrap().payload, Payload::Sha256(EMPTY_SHA256.into()));
+        assert_eq!(pq(&set("X-Amz-Content-Sha256", "junk")), Err(Code::InvalidArgument));
+    }
+
+    #[test]
+    fn clock_checks() {
+        let s = |presigned: Option<i64>| Signed {
+            credential: Credential { access_key: AK.into(), date: "20130524".into(), region: "r".into(), service: "s3".into() },
+            signed_headers: vec!["host".into()],
+            signature: String::new(),
+            amz_date: time::amz_date(T),
+            timestamp: T,
+            payload: Payload::Unsigned,
+            presigned_expires: presigned,
+        };
+        let at = |p: Option<i64>, now: i64| check_time(&s(p), now).map_err(|e| e.code);
+        assert_eq!(at(None, T + MAX_SKEW_S), Ok(()));
+        assert_eq!(at(None, T - MAX_SKEW_S), Ok(()));
+        assert_eq!(at(None, T + MAX_SKEW_S + 1), Err(Code::RequestTimeTooSkewed), "too old");
+        assert_eq!(at(None, T - MAX_SKEW_S - 1), Err(Code::RequestTimeTooSkewed), "from the future");
+        let e = check_time(&s(None), T + 3600).unwrap_err();
+        assert!(e.extra.contains(&("MaxAllowedSkewMilliseconds", "900000".into())));
+        assert_eq!(at(Some(60), T + 60), Ok(()));
+        assert_eq!(at(Some(60), T + 61), Err(Code::AccessDenied));
+        assert_eq!(at(Some(60), T - MAX_SKEW_S), Ok(()), "a little ahead of the server is fine");
+        assert_eq!(at(Some(60), T - MAX_SKEW_S - 1), Err(Code::AccessDenied), "not valid yet");
+    }
+
+    #[test]
+    fn verify_covers_signed_parts() {
+        let headers = [("host", "h:9000"), ("x-amz-date", "20130524T000000Z"), ("x-amz-content-sha256", UNSIGNED_PAYLOAD), ("x-amz-meta-a", " 1  2 ")];
+        let auth = authorization("PUT", "/b/a%20k", "x=1&y", &headers, AK, SK, "eu-west-1");
+        let mut with = headers.to_vec();
+        with.push(("authorization", auth.as_str()));
+        let req = Request { method: "PUT", path: "/b/a%20k", query: "x=1&y", headers: &with };
+        let auth_at = |r: &Request| authenticate(r, T, |_| Some(SK.into())).map_err(|e| e.code);
+        let v = auth_at(&req).unwrap().unwrap();
+        assert_eq!((v.access_key.as_str(), v.payload.clone(), v.stream.is_none()), (AK, Payload::Unsigned, true));
+        // Unsigned headers can change; everything signed can't.
+        let mut extra = with.clone();
+        extra.push(("x-unsigned", "z"));
+        assert!(auth_at(&Request { headers: &extra, ..req }).is_ok());
+        let missing: Vec<_> = with.iter().filter(|(k, _)| *k != "x-amz-meta-a").copied().collect();
+        assert_eq!(auth_at(&Request { headers: &missing, ..req }), Err(Code::SignatureDoesNotMatch));
+        let changed: Vec<_> = with.iter().map(|(k, v)| if *k == "x-amz-meta-a" { (*k, "1 2") } else { (*k, *v) }).collect();
+        assert!(auth_at(&Request { headers: &changed, ..req }).is_ok(), "whitespace is folded");
+        let sha: Vec<_> = with.iter().map(|(k, v)| if *k == "x-amz-content-sha256" { (*k, EMPTY_SHA256) } else { (*k, *v) }).collect();
+        assert_eq!(auth_at(&Request { headers: &sha, ..req }), Err(Code::SignatureDoesNotMatch), "the payload hash is signed");
+        assert_eq!(auth_at(&Request { query: "x=2&y", ..req }), Err(Code::SignatureDoesNotMatch));
+        assert_eq!(auth_at(&Request { path: "/b/a%20j", ..req }), Err(Code::SignatureDoesNotMatch));
+        assert_eq!(auth_at(&Request { method: "POST", ..req }), Err(Code::SignatureDoesNotMatch));
+        assert_eq!(authenticate(&req, T, |_| Some("wrong".into())).unwrap_err().code, Code::SignatureDoesNotMatch);
+        // The key is checked before the clock, so an unknown key says so even when stale.
+        assert_eq!(authenticate(&req, T + 3600, |_| None).unwrap_err().code, Code::InvalidAccessKeyId);
+        let e = authenticate(&req, T, |_| Some("wrong".into())).unwrap_err();
+        assert!(e.extra.iter().any(|(k, _)| *k == "CanonicalRequest") && e.extra.iter().any(|(k, _)| *k == "StringToSign"));
+        // Signed chunked payloads carry their signing context; unsigned-trailer ones don't need one.
+        for (payload, stream) in [(STREAMING_PAYLOAD, true), (STREAMING_PAYLOAD_TRAILER, true), (STREAMING_UNSIGNED_TRAILER, false)] {
+            let h = [("host", "h"), ("x-amz-date", "20130524T000000Z"), ("x-amz-content-sha256", payload)];
+            let auth = authorization("PUT", "/b/k", "", &h, AK, SK, "auto");
+            let mut with = h.to_vec();
+            with.push(("authorization", auth.as_str()));
+            let v = auth_at(&Request { method: "PUT", path: "/b/k", query: "", headers: &with }).unwrap().unwrap();
+            assert_eq!(v.stream.is_some(), stream, "{payload}");
+            assert!(v.payload.is_chunked());
+        }
+    }
+
+    #[test]
+    fn presign_hosts_and_lifetimes() {
+        for (endpoint, host) in [("http://example.com:80", "example.com"), ("https://example.com:443/", "example.com"), ("http://example.com:8080", "example.com:8080"), ("https://example.com:80", "example.com:80"), ("example.com", "example.com")] {
+            let url = presign_url(&Presign { method: "GET", endpoint, path: "/b/k", query: &[], access_key: AK, secret: SK, region: "auto", now: T, expires_s: 10 * MAX_PRESIGN_S });
+            let (_, query) = url.split_once("/b/k?").unwrap();
+            assert!(query.contains("X-Amz-Expires=604800"), "clamped to a week: {url}");
+            let headers = [("host", host)];
+            authenticate(&Request { method: "GET", path: "/b/k", query, headers: &headers }, T + 10, |_| Some(SK.into())).unwrap().unwrap();
+        }
+        let url = presign_url(&Presign { method: "GET", endpoint: "http://h", path: "/b/k", query: &[], access_key: AK, secret: SK, region: "auto", now: T, expires_s: 0 });
+        assert!(url.contains("X-Amz-Expires=1&"), "at least a second: {url}");
+    }
+
+    #[test]
+    fn post_auth_fields() {
+        let full: Vec<(String, String)> = [("policy", "p"), ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"), ("x-amz-credential", "AK/20130524/r/s3/aws4_request"), ("x-amz-date", "20130524T000000Z"), ("x-amz-signature", "AB")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let a = parse_post_auth(&full).unwrap().unwrap();
+        assert_eq!((a.signature.as_str(), a.credential.region.as_str(), a.policy.as_str()), ("ab", "r", "p"));
+        for i in 1..full.len() {
+            let mut f = full.clone();
+            f.remove(i);
+            assert_eq!(parse_post_auth(&f).unwrap_err().code, Code::InvalidArgument, "without {}", full[i].0);
+        }
+        let mut f = full.clone();
+        f[1].1 = "AWS4-ECDSA-P256-SHA256".into();
+        assert_eq!(parse_post_auth(&f).unwrap_err().code, Code::InvalidArgument);
+        let mut f = full.clone();
+        f[2].1 = "AK/x".into();
+        assert_eq!(parse_post_auth(&f).unwrap_err().code, Code::InvalidArgument);
+    }
+
+    #[test]
+    fn post_policy_conditions() {
+        let owned = |f: &[(&str, &str)]| f.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+        let fields = owned(&[("key", "uploads/a.txt"), ("Content-Type", "text/plain"), ("x-amz-meta-a", "1"), ("file", ""), ("policy", "p"), ("x-amz-signature", "s"), ("X-Ignore-Me", "1")]);
+        let doc = |conds: &str| crate::checksum::b64(format!(r#"{{"expiration":"2030-01-01T00:00:00.000Z","conditions":[{conds}]}}"#).as_bytes());
+        let check = |conds: &str, fields: &[(String, String)], now: i64| check_post_policy(&doc(conds), fields, "b", now).map(|p| p.content_length_range).map_err(|e| e.code);
+        let all = r#"{"bucket":"b"},["starts-with","$key","uploads/"],["eq","$Content-Type","text/plain"],{"x-amz-meta-a":"1"}"#;
+        assert_eq!(check(all, &fields, 0), Ok(None), "file, policy, x-amz-signature and x-ignore-* need no condition");
+        assert_eq!(check(r#"["starts-with","$KEY","uploads/"],["EQ","$content-type","text/plain"],["starts-with","$X-Amz-Meta-A",""]"#, &fields, 0), Ok(None), "names and operators are case-insensitive");
+        assert_eq!(check(&format!(r#"{all},["content-length-range",0,5]"#), &fields, 0), Ok(Some((0, 5))));
+        let exp = time::parse_iso8601("2030-01-01T00:00:00Z").unwrap();
+        assert_eq!(check(all, &fields, exp), Ok(None));
+        let denied = Err(Code::AccessDenied);
+        assert_eq!(check(all, &fields, exp + 1), denied, "expired");
+        assert_eq!(check(r#"{"bucket":"other"},["starts-with","$key",""],["starts-with","$content-type",""],{"x-amz-meta-a":"1"}"#, &fields, 0), denied);
+        assert_eq!(check(r#"["starts-with","$key","other/"],["starts-with","$content-type",""],{"x-amz-meta-a":"1"}"#, &fields, 0), denied);
+        assert_eq!(check(r#"["starts-with","$key",""],["eq","$content-type","text/html"],{"x-amz-meta-a":"1"}"#, &fields, 0), denied);
+        assert_eq!(check(r#"["starts-with","$key",""],["starts-with","$content-type",""]"#, &fields, 0), denied, "x-amz-meta-a has no condition");
+        assert_eq!(check(&format!(r#"{all},["starts-with","$missing","x"]"#), &fields, 0), denied);
+        assert_eq!(check(&format!(r#"{all},["starts-with","$missing",""]"#), &fields, 0), Ok(None), "an empty prefix allows a missing field");
+        assert_eq!(check(&format!(r#"{all},["eq","$missing",""]"#), &fields, 0), denied);
+        let invalid = Err(Code::InvalidPolicyDocument);
+        for bad in [r#"{"key":1}"#, r#"["in","$key","x"]"#, r#"["eq","key","x"]"#, r#"["eq","$key"]"#, r#"["content-length-range","a",10]"#, r#"["content-length-range",1]"#, r#""key""#, r#"[]"#, r#"[1,"$key","x"]"#] {
+            assert_eq!(check(bad, &fields, 0), invalid, "{bad}");
+        }
+        let raw = |s: &str| check_post_policy(&crate::checksum::b64(s.as_bytes()), &fields, "b", 0).map(|p| p.content_length_range).map_err(|e| e.code);
+        assert_eq!(raw(r#"{"expiration":"tomorrow","conditions":[]}"#), invalid);
+        assert_eq!(raw(r#"{"expiration":5,"conditions":[]}"#), invalid);
+        assert_eq!(raw(r#"{"expiration":"2030-01-01T00:00:00Z","conditions":{}}"#), invalid);
+        assert_eq!(raw("not json"), invalid);
+        assert_eq!(raw("[]"), invalid);
+    }
 }

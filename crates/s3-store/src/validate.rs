@@ -162,4 +162,40 @@ mod tests {
         assert!(matches!(headers(&h), Err(StoreError::MetadataTooLarge)));
         assert_eq!(bare_etag("W/\"abc\""), "abc");
     }
+
+    #[test]
+    fn rules_and_ranges() {
+        let mut t = BTreeMap::new();
+        t.insert("k".repeat(128), "v".repeat(256));
+        assert!(tags(&t).is_ok());
+        for (k, v) in [(String::new(), "v".to_string()), ("k".repeat(129), "v".into()), ("k".into(), "v".repeat(257))] {
+            assert!(tags(&BTreeMap::from([(k.clone(), v)])).is_err(), "{k}");
+        }
+        let mut h = ObjectHeaders::default();
+        h.tags.insert(String::new(), "x".into());
+        assert!(matches!(headers(&h), Err(StoreError::InvalidArgument(_))), "headers check their tags");
+        assert!(part_number(0).is_err() && part_number(10_001).is_err());
+        assert!(part_number(1).is_ok() && part_number(10_000).is_ok());
+        assert!(recover_days(30).is_ok() && recover_days(31).is_err());
+        assert!(matches!(key(""), Err(StoreError::InvalidArgument(_))));
+
+        let rule = |o: &[&str], m: &[&str]| CorsRule { allowed_origins: o.iter().map(|s| s.to_string()).collect(), allowed_methods: m.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        assert!(cors(&[rule(&["https://*.x.dev"], &["GET", "PUT", "POST", "DELETE", "HEAD"])]).is_ok());
+        assert!(cors(&[rule(&[], &["GET"])]).is_err());
+        assert!(cors(&[rule(&["*"], &[])]).is_err());
+        assert!(cors(&[rule(&["*"], &["PATCH"])]).is_err());
+        assert!(cors(&[rule(&["https://*.*.dev"], &["GET"])]).is_err());
+        assert!(cors(&vec![rule(&["*"], &["GET"]); 101]).is_err());
+
+        let lc = |id: &str, expire: Option<u32>, abort: Option<u32>| LifecycleRule { id: id.into(), prefix: String::new(), enabled: true, expire_days: expire, abort_multipart_days: abort };
+        let mut ok = vec![lc("", Some(1), None), lc("", None, Some(2)), lc("named", Some(3), Some(3))];
+        lifecycle(&mut ok).unwrap();
+        assert_eq!(ok.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["rule-1", "rule-2", "named"]);
+        assert!(lifecycle(&mut [lc("a", Some(0), None)]).is_err());
+        assert!(lifecycle(&mut [lc("a", None, Some(0))]).is_err());
+        assert!(lifecycle(&mut [lc("a", None, None)]).is_err());
+        assert!(lifecycle(&mut [lc("a", Some(1), None), lc("a", Some(2), None)]).is_err());
+        assert!(lifecycle(&mut [lc("rule-2", Some(1), None), lc("", Some(2), None)]).is_err(), "a generated id can collide too");
+        assert!(lifecycle(&mut vec![lc("", Some(1), None); 1001]).is_err());
+    }
 }

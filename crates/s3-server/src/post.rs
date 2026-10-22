@@ -270,10 +270,13 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
     let mut hasher = BodyHasher::new(Some(Algorithm::Crc64Nvme), false);
     let max = policy.content_length_range.map_or(MAX_PUT, |(_, hi)| hi.min(MAX_PUT));
     let len = form.copy_file(&mut out, &mut hasher, max).await?;
-    if let Some((lo, hi)) = policy.content_length_range
-        && (len < lo || len > hi)
-    {
-        return Err(S3Error::msg(Code::EntityTooLarge, "Your proposed upload exceeds the maximum allowed size").with("ProposedSize", len.to_string()));
+    if let Some((lo, hi)) = policy.content_length_range {
+        if len < lo {
+            return Err(S3Error::msg(Code::EntityTooSmall, "Your proposed upload is smaller than the minimum allowed size").with("ProposedSize", len.to_string()).with("MinSizeAllowed", lo.to_string()));
+        }
+        if len > hi {
+            return Err(S3Error::msg(Code::EntityTooLarge, "Your proposed upload exceeds the maximum allowed size").with("ProposedSize", len.to_string()).with("MaxSizeAllowed", hi.to_string()));
+        }
     }
     let digest = hasher.finish();
     let finished = Finished { checksum: digest.checksum_b64(), digest };

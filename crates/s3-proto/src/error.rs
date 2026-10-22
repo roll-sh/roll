@@ -167,4 +167,40 @@ mod tests {
         assert_eq!(Code::InvalidRange.status(), 416);
         assert_eq!(Code::NotModified.status(), 304);
     }
+
+    #[test]
+    fn codes_statuses_and_bodies() {
+        for (c, s) in [
+            (Code::MethodNotAllowed, 405),
+            (Code::MissingContentLength, 411),
+            (Code::ServiceUnavailable, 503),
+            (Code::SlowDown, 503),
+            (Code::InternalError, 500),
+            (Code::NotImplemented, 501),
+            (Code::PreconditionFailed, 412),
+            (Code::NoSuchUpload, 404),
+            (Code::NoSuchBucket, 404),
+            (Code::BucketNotEmpty, 409),
+            (Code::SignatureDoesNotMatch, 403),
+            (Code::RequestTimeTooSkewed, 403),
+            (Code::InvalidAccessKeyId, 403),
+            (Code::AccessForbidden, 403),
+            (Code::KeyTooLongError, 400),
+            (Code::EntityTooSmall, 400),
+            (Code::XAmzContentSHA256Mismatch, 400),
+        ] {
+            assert_eq!(c.status(), s, "{c:?}");
+            assert_eq!(Code::parse(c.as_str()), Some(c));
+            assert!(!c.message().is_empty());
+        }
+        assert_eq!(Code::parse("nosuchkey"), None);
+        let e: S3Error = Code::SlowDown.into();
+        assert_eq!(e.message, Code::SlowDown.message());
+        assert_eq!(e.to_string(), "SlowDown: Please reduce your request rate.");
+        let e = S3Error::msg(Code::InvalidArgument, "bad \"x\" & <y>").with("ArgumentName", "a&b");
+        let x = e.to_xml("r&1");
+        assert!(!x.contains("<Resource>"));
+        let n = crate::xml::parse(x.as_bytes()).unwrap();
+        assert_eq!((n.name.as_str(), n.text_of("Code"), n.text_of("Message"), n.text_of("ArgumentName"), n.text_of("RequestId")), ("Error", Some("InvalidArgument"), Some("bad \"x\" & <y>"), Some("a&b"), Some("r&1")));
+    }
 }

@@ -260,15 +260,17 @@ fn list_v2(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     let start_after = ctx.q("start-after").filter(|s| !s.is_empty()).map(str::to_string);
     let q = ListQuery { prefix: ctx.q("prefix").unwrap_or_default().to_string(), delimiter: delimiter(ctx), start_after: from_token.or_else(|| start_after.clone()), max_keys: max as usize };
     let page = ctx.store().list_objects(&bucket.name, &q).s3()?;
+    // `max-keys=0` asks for nothing, and S3 says there's nothing to continue from.
+    let truncated = page.truncated && max > 0;
     let fetch_owner = ctx.q("fetch-owner") == Some("true");
     let l = xml::ListV2 {
         name: bucket.name.clone(),
         prefix: q.prefix.clone(),
         delimiter: q.delimiter.clone(),
         max_keys: max,
-        is_truncated: page.truncated,
+        is_truncated: truncated,
         continuation_token: token,
-        next_continuation_token: page.next.as_ref().filter(|_| page.truncated).map(|n| URL_SAFE_NO_PAD.encode(n.as_bytes())),
+        next_continuation_token: page.next.as_ref().filter(|_| truncated).map(|n| URL_SAFE_NO_PAD.encode(n.as_bytes())),
         start_after,
         url_encode,
         contents: page.objects.iter().map(|m| entry(m, fetch_owner)).collect(),
@@ -285,14 +287,15 @@ fn list_v1(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     let marker = ctx.q("marker").unwrap_or_default().to_string();
     let q = ListQuery { prefix: ctx.q("prefix").unwrap_or_default().to_string(), delimiter: delimiter(ctx), start_after: Some(marker.clone()).filter(|m| !m.is_empty()), max_keys: max as usize };
     let page = ctx.store().list_objects(&bucket.name, &q).s3()?;
+    let truncated = page.truncated && max > 0;
     let l = xml::ListV1 {
         name: bucket.name.clone(),
         prefix: q.prefix.clone(),
         marker,
-        next_marker: page.next.clone().filter(|_| page.truncated && q.delimiter.is_some()),
+        next_marker: page.next.clone().filter(|_| truncated && q.delimiter.is_some()),
         delimiter: q.delimiter.clone(),
         max_keys: max,
-        is_truncated: page.truncated,
+        is_truncated: truncated,
         url_encode,
         contents: page.objects.iter().map(|m| entry(m, true)).collect(),
         common_prefixes: page.prefixes.clone(),

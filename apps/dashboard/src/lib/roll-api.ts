@@ -74,8 +74,14 @@ export async function call<T>(method: string, path: string, body?: unknown): Pro
     cache: "no-store",
   });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`);
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    // Not the API (a proxy's error page, say): report the status, not a JSON syntax error.
+    if (res.ok) throw new Error(`${method} ${path}: the response isn't JSON`);
+  }
+  if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
   return data as T;
 }
 

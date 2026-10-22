@@ -30,6 +30,8 @@ export interface StorageInfo {
 }
 
 export interface CorsRule {
+  /** S3's optional rule ID (`null` when unset; may be left out when writing). */
+  id?: string | null;
   allowed_origins: string[];
   allowed_methods: string[];
   allowed_headers: string[];
@@ -217,6 +219,10 @@ export function uploadObject(
   signal?: AbortSignal,
 ): Promise<ObjectInfo> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("upload cancelled"));
+      return;
+    }
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", `${ROLL_API}${bucket(name)}/upload${q({ key })}`);
     if (file.type) xhr.setRequestHeader("content-type", file.type);
@@ -233,19 +239,31 @@ export function uploadObject(
     };
     xhr.onerror = () => reject(new Error("upload failed: rolld unreachable"));
     xhr.onabort = () => reject(new Error("upload cancelled"));
-    signal?.addEventListener("abort", () => xhr.abort());
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
     xhr.send(file);
   });
 }
 
-/** S3 bucket naming rules: 3–63 chars of a-z, 0-9, `-` and `.`, starting and ending alphanumeric. */
+const RESERVED_PREFIXES = ["xn--", "sthree-", "amzn-s3-demo-"];
+const RESERVED_SUFFIXES = ["-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"];
+
+/** A dotted-quad IPv4 address, as Rust's `Ipv4Addr` parses it: 0–255, no leading zeros. */
+const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+
+/**
+ * S3 bucket naming rules: 3–63 chars of a-z, 0-9, `-` and `.`, starting and ending alphanumeric.
+ * Mirrors the server's check (crates/s3-store/src/validate.rs `bucket_name`).
+ */
 export function bucketNameError(name: string): string | null {
   if (name.length < 3 || name.length > 63) return "Use 3–63 characters.";
   if (!/^[a-z0-9.-]+$/.test(name)) return "Only lowercase letters, digits, - and . are allowed.";
   if (!/^[a-z0-9]/.test(name) || !/[a-z0-9]$/.test(name)) return "Start and end with a letter or digit.";
   if (name.includes("..")) return "No two adjacent periods.";
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(name)) return "Can't look like an IP address.";
-  if (name.startsWith("xn--") || name.endsWith("-s3alias")) return "That prefix or suffix is reserved.";
+  if (IPV4.test(name)) return "Can't look like an IP address.";
+  const prefix = RESERVED_PREFIXES.find((p) => name.startsWith(p));
+  if (prefix) return `Can't start with ${prefix} (reserved).`;
+  const suffix = RESERVED_SUFFIXES.find((x) => name.endsWith(x));
+  if (suffix) return `Can't end with ${suffix} (reserved).`;
   return null;
 }
 

@@ -172,13 +172,21 @@ impl Api {
         let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
         let text = res.text().await?;
-        let value: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text)? };
         if !status.is_success() {
+            // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             // Batch endpoints report per-record errors.
             let per_record = value["offsets"].as_array().and_then(|o| o.iter().find_map(|r| r["error"].as_str()));
-            bail!("{}", value["error"].as_str().or(per_record).unwrap_or(&text));
+            match value["error"].as_str().or(per_record) {
+                Some(e) => bail!("{e}"),
+                None if text.trim().is_empty() => bail!("{status}"),
+                None => bail!("{status}: {}", text.trim()),
+            }
         }
-        Ok(value)
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))
     }
     /// The cell's root (for `/_roll/…`), from a tasks URL that may name a tenant
     /// (`…/t/<tenant>/v1/tasks`).

@@ -549,4 +549,71 @@ mod tests {
         .is_err());
         assert_eq!(requested(|_| None).unwrap(), None);
     }
+
+    #[test]
+    fn requested_checksum_conflicts() {
+        let crc = b64(&Algorithm::Crc32.checksum(b"x"));
+        let req = |pairs: &[(&'static str, &str)]| {
+            let pairs: Vec<(&str, String)> = pairs.iter().map(|(k, v)| (*k, v.to_string())).collect();
+            requested(|n| pairs.iter().find(|(k, _)| *k == n).map(|(_, v)| v.as_str())).map_err(|e| e.code)
+        };
+        let bad = Err(Code::InvalidRequest);
+        assert_eq!(req(&[("x-amz-checksum-crc32", crc.as_str()), ("x-amz-trailer", "x-amz-checksum-crc32")]), bad, "header and trailer");
+        assert_eq!(req(&[("x-amz-trailer", "x-amz-checksum-md5")]), bad);
+        assert_eq!(req(&[("x-amz-trailer", "x-amz-checksum-crc32, x-amz-checksum-sha1")]), bad);
+        assert_eq!(req(&[("x-amz-sdk-checksum-algorithm", "md5")]), bad);
+        assert_eq!(req(&[("x-amz-checksum-sha256", crc.as_str())]), bad, "wrong length for the algorithm");
+        assert_eq!(req(&[("x-amz-checksum-crc32", crc.as_str()), ("x-amz-sdk-checksum-algorithm", "SHA256")]), Ok(Some((Algorithm::Crc32, Some(crc.clone())))), "a value beats the hint");
+        assert_eq!(req(&[("x-amz-trailer", " x-amz-checksum-crc32c ,")]), Ok(Some((Algorithm::Crc32c, None))));
+        assert_eq!(req(&[("x-amz-trailer", "")]), Ok(None));
+        assert_eq!(req(&[("x-amz-checksum-crc32", format!(" {crc} ").as_str())]), Ok(Some((Algorithm::Crc32, Some(crc.clone())))));
+    }
+
+    #[test]
+    fn names_lengths_and_edges() {
+        for a in ALGORITHMS {
+            assert_eq!(Algorithm::parse(&format!(" {} ", a.as_str().to_lowercase())), Some(a));
+            assert_eq!(Algorithm::from_header(&a.header().to_uppercase()), Some(a));
+            assert_eq!(Algorithm::from_xml_element(a.xml_element()), Some(a));
+            let raw = a.checksum(b"data");
+            assert_eq!(raw.len(), a.digest_len());
+            assert_eq!(a.decode(&b64(&raw)).unwrap(), raw);
+            assert_eq!(a.decode(&b64(&[0u8; 3])).unwrap_err().code, Code::InvalidRequest);
+            assert_eq!(a.decode("!!").unwrap_err().code, Code::InvalidRequest);
+            assert_eq!(a.is_crc(), crc_from_bytes(a, &raw).is_some());
+            for t in [ChecksumType::FullObject, ChecksumType::Composite] {
+                assert_eq!(ChecksumType::parse(&t.as_str().to_lowercase()), Some(t));
+                assert_eq!(a.supports(t), if t == ChecksumType::FullObject { a.is_crc() } else { a != Algorithm::Crc64Nvme }, "{a:?} {t:?}");
+            }
+            assert!(a.supports(a.default_multipart_type()));
+        }
+        assert_eq!(Algorithm::parse("md5"), None);
+        assert_eq!(Algorithm::from_xml_element("checksumcrc32"), None);
+        assert_eq!(ChecksumType::parse("PARTIAL"), None);
+        assert_eq!(crc_from_bytes(Algorithm::Crc32, &[0; 8]), None);
+        assert_eq!(crc_from_bytes(Algorithm::Crc64Nvme, &[0; 4]), None);
+        assert_eq!(combine_crc(Algorithm::Crc32, &[]).map(|c| crc_bytes(Algorithm::Crc32, c)), Some(Algorithm::Crc32.checksum(b"")));
+        let one = u32::from_be_bytes(Algorithm::Crc32c.checksum(b"abc").try_into().unwrap()) as u64;
+        assert_eq!(combine_crc(Algorithm::Crc32c, &[(one, 3)]), Some(one));
+        assert_eq!(multipart_etag_from_etags(&["abcd"]).unwrap_err().code, Code::InvalidPart);
+        assert_eq!(multipart_etag_from_etags::<&str>(&[]).unwrap(), format!("{}-0", hex::encode(md5(b""))));
+        // A body hashed without a checksum or SHA-256 can't verify one.
+        let mut h = BodyHasher::new(None, false);
+        assert!(h.is_empty());
+        h.update(b"abc");
+        assert_eq!(h.len(), 3);
+        let d = h.finish();
+        assert_eq!((d.checksum_b64(), d.crc, d.sha256), (None, None, None));
+        assert_eq!(d.etag(), hex::encode(md5(b"abc")));
+        assert_eq!(d.verify_checksum(Algorithm::Crc32, &b64(&Algorithm::Crc32.checksum(b"abc"))).unwrap_err().code, Code::InternalError);
+        assert_eq!(d.verify_sha256(&sha256_hex(b"abc")).unwrap_err().code, Code::InternalError);
+        d.verify_content_md5(None).unwrap();
+        assert_eq!(d.verify_content_md5(Some(&hex::encode(md5(b"abc")))).unwrap_err().code, Code::InvalidDigest, "hex is not base64 of 16 bytes");
+        assert_eq!(d.verify_content_md5(Some(&b64(&[0u8; 15]))).unwrap_err().code, Code::InvalidDigest);
+        let d = BodyHasher::new(Some(Algorithm::Sha1), false).finish();
+        assert_eq!(d.verify_checksum(Algorithm::Crc32, &b64(&[0; 4])).unwrap_err().code, Code::InternalError, "a different algorithm was computed");
+        assert_eq!(d.crc, None);
+        assert_eq!(b64_decode(" AAAA "), Some(vec![0, 0, 0]));
+        assert_eq!(b64_decode("@"), None);
+    }
 }

@@ -2,7 +2,7 @@
 
 use crate::control::{Control, ControlError, Usage, UsageAll, info};
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -55,6 +55,20 @@ impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequest<S> for JsonBody
 
 fn json_error(e: JsonRejection) -> String {
     e.body_text()
+}
+
+/// `Query` whose rejections (`?limit=-1`) are `{"error": ...}` 400s too.
+struct Params<T>(T);
+
+impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequestParts<S> for Params<T> {
+    type Rejection = ControlError;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(v)) => Ok(Self(v)),
+            Err(e) => Err(ControlError::Invalid(e.body_text())),
+        }
+    }
 }
 
 pub fn router(control: Arc<Control>) -> Router {
@@ -115,7 +129,7 @@ struct ForceQuery {
     force: bool,
 }
 
-async fn delete_bucket(State(c): State<AppState>, Path(name): Path<String>, Query(q): Query<ForceQuery>) -> ApiResult<Value> {
+async fn delete_bucket(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<ForceQuery>) -> ApiResult<Value> {
     c.store.delete_bucket(&name, q.force).await?;
     Ok(Json(json!({ "deleted": name })))
 }
@@ -139,7 +153,7 @@ struct ListQ {
     limit: Option<usize>,
 }
 
-async fn list_objects(State(c): State<AppState>, Path(name): Path<String>, Query(q): Query<ListQ>) -> ApiResult<Value> {
+async fn list_objects(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<ListQ>) -> ApiResult<Value> {
     Ok(Json(c.list_objects(&name, &q.prefix, q.delimiter.as_deref(), q.cursor.as_deref().filter(|s| !s.is_empty()), q.limit.unwrap_or(200))?))
 }
 
@@ -154,11 +168,11 @@ impl KeyQ {
     }
 }
 
-async fn object_info(State(c): State<AppState>, Path(name): Path<String>, Query(q): Query<KeyQ>) -> ApiResult<Value> {
+async fn object_info(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
     Ok(Json(info(&c.store.get_object(&name, &q.key()?)?)))
 }
 
-async fn delete_object(State(c): State<AppState>, Path(name): Path<String>, Query(q): Query<KeyQ>) -> ApiResult<Value> {
+async fn delete_object(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
     let key = q.key()?;
     c.delete_object(&name, &key).await?;
     Ok(Json(json!({ "deleted": key })))
@@ -208,7 +222,7 @@ fn attachment(key: &str) -> String {
     format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{}", s3_proto::http::uri_encode(name, true))
 }
 
-async fn download(State(c): State<AppState>, Path(name): Path<String>, Query(q): Query<KeyQ>) -> Result<Response, ControlError> {
+async fn download(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>) -> Result<Response, ControlError> {
     let key = q.key()?;
     let b = c.store.bucket(&name)?;
     let meta = c.store.get_object(&name, &key)?;
@@ -250,7 +264,7 @@ fn upload_headers(h: &HeaderMap) -> Result<ObjectHeaders, ControlError> {
     })
 }
 
-async fn upload(State(c): State<AppState>, Path(name): Path<String>, Query(q): Query<KeyQ>, headers: HeaderMap, body: Body) -> ApiResult<Value> {
+async fn upload(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>, headers: HeaderMap, body: Body) -> ApiResult<Value> {
     let key = q.key()?;
     // Without a Content-Length, only a body the server knows is empty (no body at all) will do.
     let len: u64 = match headers.get(header::CONTENT_LENGTH) {
@@ -279,7 +293,7 @@ async fn presign(State(c): State<AppState>, Path(name): Path<String>, JsonBody(r
     Ok(Json(json!({ "url": url, "method": method, "expires_at": expires_at })))
 }
 
-async fn trash(State(c): State<AppState>, Path(name): Path<String>, Query(q): Query<ListQ>) -> ApiResult<Value> {
+async fn trash(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<ListQ>) -> ApiResult<Value> {
     Ok(Json(c.list_trash(&name, &q.prefix, q.cursor.as_deref().filter(|s| !s.is_empty()), q.limit.unwrap_or(200))?))
 }
 
@@ -298,11 +312,11 @@ struct DaysQ {
     days: Option<i64>,
 }
 
-async fn usage(State(c): State<AppState>, Path(name): Path<String>, Query(q): Query<DaysQ>) -> ApiResult<Usage> {
+async fn usage(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<DaysQ>) -> ApiResult<Usage> {
     Ok(Json(c.usage(&name, q.days.unwrap_or(30))?))
 }
 
-async fn usage_all(State(c): State<AppState>, Query(q): Query<DaysQ>) -> ApiResult<UsageAll> {
+async fn usage_all(State(c): State<AppState>, Params(q): Params<DaysQ>) -> ApiResult<UsageAll> {
     Ok(Json(c.usage_all(q.days.unwrap_or(30))?))
 }
 

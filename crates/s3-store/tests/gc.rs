@@ -134,3 +134,142 @@ async fn a_stale_node_never_deletes_the_new_writers_blobs() {
     assert_eq!(read(&new, "stg", "b").await.unwrap(), b"b");
     assert_eq!(new.orphan_scan().await.unwrap().candidates, 0);
 }
+
+fn rule(prefix: &str, enabled: bool, expire: Option<u32>, abort: Option<u32>) -> LifecycleRule {
+    LifecycleRule { id: String::new(), prefix: prefix.into(), enabled, expire_days: expire, abort_multipart_days: abort }
+}
+
+#[tokio::test]
+async fn upload_expiry_follows_enabled_rules_capped_at_the_default() {
+    let (backend, clock, s) = env("abortrules").await;
+    s.create_bucket("abr", BucketOptions::default()).await.unwrap();
+    let rules = vec![rule("off/", false, None, Some(1)), rule("long/", true, None, Some(30)), rule("", true, Some(9), None)];
+    s.update_bucket("abr", BucketUpdate { lifecycle: Some(rules), ..Default::default() }).await.unwrap();
+    let off = s.create_upload("abr", "off/x", ObjectHeaders::default(), None, None).await.unwrap();
+    let long = s.create_upload("abr", "long/x", ObjectHeaders::default(), None, None).await.unwrap();
+    clock.advance(2 * DAY);
+    assert_eq!(s.sweep().await.unwrap().uploads_aborted, 0, "a disabled rule does nothing");
+    clock.advance(5 * DAY + 1000);
+    assert_eq!(s.sweep().await.unwrap().uploads_aborted, 2, "nothing outlives the 7-day default");
+    for u in [off, long] {
+        assert!(matches!(s.upload("abr", &u.id), Err(StoreError::NoSuchUpload(_))));
+    }
+    assert_eq!(s.sweep().await.unwrap().uploads_aborted, 0);
+    assert_consistent(&s, &backend).await;
+}
+
+#[tokio::test]
+async fn trash_expiry_follows_the_buckets_current_window() {
+    let (backend, clock, s) = env("trashwindow").await;
+    s.create_bucket("twn", BucketOptions { recover_days: Some(30), ..Default::default() }).await.unwrap();
+    put(&s, "twn", "k", b"1").await;
+    put(&s, "twn", "k", b"2").await;
+    clock.advance(3 * DAY);
+    assert_eq!(s.sweep().await.unwrap().trash_expired, 0);
+    s.update_bucket("twn", BucketUpdate { recover_days: Some(2), ..Default::default() }).await.unwrap();
+    assert_eq!(s.sweep().await.unwrap().trash_expired, 1);
+    assert_eq!(s.bucket("twn").unwrap().trash_bytes, 0);
+    assert_consistent(&s, &backend).await;
+}
+
+#[tokio::test]
+async fn lifecycle_rule_details() {
+    let (backend, clock, s) = env("lcdetails").await;
+    s.create_bucket("lcd", BucketOptions { recover_days: Some(0), ..Default::default() }).await.unwrap();
+    let rules = vec![rule("off/", false, Some(1), None), rule("abort/", true, None, Some(1)), rule("gone/", true, Some(1), None)];
+    s.update_bucket("lcd", BucketUpdate { lifecycle: Some(rules), ..Default::default() }).await.unwrap();
+    for k in ["off/a", "abort/a", "gone/a", "gone/b", "gonex"] {
+        put(&s, "lcd", k, b"x").await;
+    }
+    s.branch_bucket("lcd", "lcd-dev").await.unwrap();
+    // The parent's rule goes; the branch keeps its copy.
+    s.update_bucket("lcd", BucketUpdate { lifecycle: Some(vec![]), ..Default::default() }).await.unwrap();
+    clock.advance(2 * DAY);
+    assert_eq!(s.run_lifecycle().await.unwrap(), 2);
+    assert_eq!(keys(&s, "lcd-dev"), ["abort/a", "gonex", "off/a"]);
+    assert_eq!(keys(&s, "lcd").len(), 5, "the parent is untouched");
+    assert!(s.list_trash("lcd-dev", "", None, 10).unwrap().0.is_empty(), "no trash with recover_days 0");
+    assert_consistent(&s, &backend).await;
+    clock.advance(2 * DAY);
+    assert_eq!(s.sweep().await.unwrap().blobs_deleted, 0, "the parent still references them");
+    assert_eq!(s.run_lifecycle().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn orphan_scan_edge_cases() {
+    let (backend, clock, s) = env("orphanedge").await;
+    s.create_bucket("oed", BucketOptions { recover_days: Some(1), ..Default::default() }).await.unwrap();
+    put(&s, "oed", "trashed", b"t").await;
+    s.delete_object("oed", "trashed", None).await.unwrap();
+    s.update_bucket("oed", BucketUpdate { recover_days: Some(0), ..Default::default() }).await.unwrap();
+    put(&s, "oed", "quarantined", b"q").await;
+    s.delete_object("oed", "quarantined", None).await.unwrap();
+    // Not blob keys: never touched, whatever their age.
+    for k in ["s3/blobs/ab/short", "s3/blobs/readme.txt", "s3/blobs/zz/ZZUPPERCASEUPPERCASEUPPERC"] {
+        backend.put_small(k, Bytes::from_static(b"?")).await.unwrap();
+    }
+    // A blob whose client was slow: recorded as unknown, then committed before the second scan.
+    let b = s.bucket("oed").unwrap();
+    let slow = s.new_blob();
+    let up = s.put_blob(&slow, &b.id, "slow", bytes_body(Bytes::from_static(b"slow")), 4, None).await.unwrap();
+    s.release_blob(&slow);
+    // One that vanishes after it's recorded, and comes back.
+    let vanishing = "zxvanishedvanishedvanished";
+    backend.put(&blob_key(vanishing), bytes_body(Bytes::from_static(b"v")), 1, &BlobAttrs::default()).await.unwrap();
+    let st = s.orphan_scan().await.unwrap();
+    assert_eq!(st.candidates, 2, "only the slow and the vanishing blob");
+    let obj = NewObject { blob_id: slow.clone(), size: up.size, crc32c: up.crc32c, etag: md5_hex(b"slow"), headers: ObjectHeaders::default(), checksum: None };
+    s.commit_put("oed", "slow", obj, &WriteCondition::none()).await.unwrap();
+    backend.delete(&blob_key(vanishing)).await.unwrap();
+    s.orphan_scan().await.unwrap();
+    backend.put(&blob_key(vanishing), bytes_body(Bytes::from_static(b"v")), 1, &BlobAttrs::default()).await.unwrap();
+    clock.advance(DAY + 60_000);
+    let st = s.orphan_scan().await.unwrap();
+    assert_eq!(st.deleted, 0, "the committed one is known now, and the vanished one starts over");
+    assert_eq!(st.candidates, 1);
+    assert_eq!(read(&s, "oed", "slow").await.unwrap(), b"slow");
+    clock.advance(DAY + 60_000);
+    assert_eq!(s.orphan_scan().await.unwrap().deleted, 1);
+    let left = blobs(&backend).await;
+    assert!(!left.contains(&blob_key(vanishing)));
+    for k in ["s3/blobs/ab/short", "s3/blobs/readme.txt", "s3/blobs/zz/ZZUPPERCASEUPPERCASEUPPERC"] {
+        assert!(left.contains(&k.to_string()), "{k}");
+    }
+    // The trash and quarantine kept theirs until the sweeper's turn.
+    assert_consistent(&s, &backend).await;
+    assert_eq!(s.stats().unwrap().blobs, 3);
+    // Unexpected orphans are counted per scan, not forever.
+    clock.advance(30 * DAY);
+    let ancient = "zyancientancientancientanc";
+    backend.put(&blob_key(ancient), bytes_body(Bytes::from_static(b"a")), 1, &BlobAttrs::default()).await.unwrap();
+    s.orphan_scan().await.unwrap();
+    assert_eq!(s.stats().unwrap().unexpected_orphans, 1);
+    assert!(blobs(&backend).await.contains(&blob_key(ancient)), "kept");
+    backend.delete(&blob_key(ancient)).await.unwrap();
+    s.orphan_scan().await.unwrap();
+    assert_eq!(s.stats().unwrap().unexpected_orphans, 0);
+    assert_consistent(&s, &backend).await;
+}
+
+#[tokio::test]
+async fn scrub_details() {
+    let (backend, clock, s) = env("scrubdetail").await;
+    s.create_bucket("scd", BucketOptions { recover_days: Some(0), ..Default::default() }).await.unwrap();
+    let m = put(&s, "scd", "k", b"data").await;
+    let r = s.scrub().await.unwrap();
+    assert_eq!(r.checked, 0, "blobs newer than a minute are skipped (their upload may still be settling)");
+    put(&s, "scd", "q", b"quarantined").await;
+    s.delete_object("scd", "q", None).await.unwrap();
+    clock.advance(120_000);
+    backend.delete(&blob_key(&m.blob_id)).await.unwrap();
+    let r = s.scrub().await.unwrap();
+    assert_eq!((r.checked, r.missing, r.mismatched), (2, 1, 0), "quarantined blobs are checked too");
+    assert_eq!(r.examples, std::slice::from_ref(&m.blob_id));
+    assert!(r.last_at.is_some());
+    // Never deletes anything, and the report survives a restart.
+    assert_eq!(s.get_object("scd", "k").unwrap().blob_id, m.blob_id);
+    assert_eq!(s.stats().unwrap().blobs, 2);
+    s.create_bucket("barrier", BucketOptions::default()).await.unwrap();
+    let s2 = open(&backend, &clock).await;
+    assert_eq!(s2.stats().unwrap().scrub, r);
+}

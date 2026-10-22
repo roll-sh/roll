@@ -634,14 +634,17 @@ impl Store {
                     return Err(e);
                 }
                 // The backend upload is complete, so the upload can't be retried: drop it.
-                let _ = self
+                let dropped = self
                     .write(|c| {
                         c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
                         c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
                         Ok(())
                     })
                     .await;
-                if !self.blob_committed(&up.blob_id)? {
+                // Only once the upload is durably gone: if dropping it didn't commit (a deposed
+                // node), the upload still references the blob, and a retry of the Complete on
+                // the new writer would commit an object whose bytes were deleted.
+                if dropped.is_ok() && !self.blob_committed(&up.blob_id)? {
                     self.discard_blob(&up.blob_id).await;
                 }
                 return Err(e);
@@ -725,5 +728,79 @@ impl Store {
             row.meta()
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::StoreConfig;
+
+    #[test]
+    fn etag_conditions() {
+        assert!(etag_matches("*", "abc"));
+        assert!(etag_matches("\"abc\"", "abc"));
+        assert!(etag_matches("\"x\", W/\"abc\"", "abc"));
+        assert!(!etag_matches("\"abcd\"", "abc"));
+        let cur = Row { etag: "e1".into(), ..Row::tombstone("k", 0) };
+        let cond = |m: Option<&str>, n: Option<&str>| WriteCondition { if_match: m.map(str::to_string), if_none_match: n.map(str::to_string) };
+        assert!(check_condition(None, &cond(None, None), "k").is_ok());
+        assert!(check_condition(None, &cond(None, Some("*")), "k").is_ok());
+        assert!(matches!(check_condition(None, &cond(Some("*"), None), "k"), Err(StoreError::NoSuchKey(_))));
+        assert!(matches!(check_condition(Some(&cur), &cond(None, Some("*")), "k"), Err(StoreError::PreconditionFailed)));
+        assert!(matches!(check_condition(Some(&cur), &cond(None, Some("\"e1\"")), "k"), Err(StoreError::PreconditionFailed)));
+        assert!(check_condition(Some(&cur), &cond(None, Some("\"e2\"")), "k").is_ok());
+        assert!(check_condition(Some(&cur), &cond(Some("e1"), None), "k").is_ok());
+        assert!(matches!(check_condition(Some(&cur), &cond(Some("e2"), None), "k"), Err(StoreError::PreconditionFailed)));
+        assert!(matches!(check_condition(Some(&cur), &cond(Some("e1"), Some("e1")), "k"), Err(StoreError::PreconditionFailed)));
+    }
+
+    #[test]
+    fn multipart_etags() {
+        let part = |etag: &str| Part { part_number: 1, size: 1, etag: etag.into(), checksum: None, backend_etag: String::new(), created_at: 0 };
+        let a = md5_hex(b"a");
+        let mut h = Md5::new();
+        h.update(Md5::digest(b"a"));
+        let want: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(multipart_etag(&[part(&a)]), format!("{want}-1"));
+        // Non-MD5 ETags (copied parts) still give a stable, distinct result.
+        assert_ne!(multipart_etag(&[part("zz")]), multipart_etag(&[part("zy")]));
+        assert!(multipart_etag(&[part(&a), part(&a)]).ends_with("-2"));
+    }
+
+    async fn store() -> Arc<Store> {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let mut cfg = StoreConfig::new(dir).manual();
+        cfg.commit_ms = 2;
+        Store::open(cfg, crate::backend::test_backend("unit-expire").await).await.unwrap()
+    }
+
+    async fn put(s: &Store, bucket: &str, key: &str, data: &'static [u8]) -> ObjectMeta {
+        let b = s.bucket(bucket).unwrap();
+        let blob = s.new_blob();
+        let up = s.put_blob(&blob, &b.id, key, crate::backend::bytes_body(bytes::Bytes::from_static(data)), data.len() as u64, None).await.unwrap();
+        let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: md5_hex(data), headers: ObjectHeaders::default(), checksum: None };
+        s.commit_put(bucket, key, obj, &WriteCondition::none()).await.unwrap()
+    }
+
+    /// Lifecycle lists first and deletes later: the delete re-checks each version itself.
+    #[tokio::test]
+    async fn expiry_rechecks_the_version_inside_the_delete() {
+        let s = store().await;
+        s.create_bucket("exp", BucketOptions::default()).await.unwrap();
+        let old = put(&s, "exp", "a", b"old").await;
+        let fresh = put(&s, "exp", "b", b"b").await;
+        let later = s.now() + 1;
+        // Overwritten since the listing: a different ETag.
+        put(&s, "exp", "a", b"new").await;
+        assert_eq!(s.expire_objects("exp", &[("a".into(), old.etag.clone())], later).await.unwrap(), 0);
+        // Same ETag but written after the cutoff (rewritten with identical bytes).
+        put(&s, "exp", "b", b"b").await;
+        assert_eq!(s.expire_objects("exp", &[("b".into(), fresh.etag.clone())], fresh.modified_at + 1).await.unwrap(), 0);
+        // Gone since the listing.
+        assert_eq!(s.expire_objects("exp", &[("gone".into(), "x".into())], later).await.unwrap(), 0);
+        assert_eq!(s.get_object("exp", "a").unwrap().etag, md5_hex(b"new"));
+        assert_eq!(s.expire_objects("exp", &[("b".into(), fresh.etag.clone())], s.now() + 1).await.unwrap(), 1);
+        assert_eq!(s.list_trash("exp", "", None, 10).unwrap().0.len(), 3, "expiry is a normal delete: recoverable");
     }
 }

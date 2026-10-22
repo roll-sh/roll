@@ -439,3 +439,79 @@ impl<'a> Merger<'a> {
 pub(crate) fn json<T: serde::Serialize>(v: &T) -> Result<String> {
     Ok(serde_json::to_string(v)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&c, crate::schema::LATEST).unwrap();
+        c
+    }
+
+    #[test]
+    fn refs_never_go_negative_and_a_dead_blob_stays_dead() {
+        let c = db();
+        insert_blob(&c, "b1", 10, 0, 100).unwrap();
+        assert!(insert_blob(&c, "b1", 10, 0, 100).is_err(), "blob ids are never reused");
+        let refs = |c: &Connection| c.query_row("SELECT refs, unreferenced_at FROM blobs WHERE id = 'b1'", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))).unwrap();
+        assert_eq!(refs(&c), (1, None));
+        add_ref(&c, "b1", 2, 200).unwrap();
+        assert_eq!(refs(&c), (3, None));
+        assert!(add_ref(&c, "b1", -4, 300).is_err());
+        assert_eq!(refs(&c), (3, None), "a refused change changes nothing");
+        add_ref(&c, "b1", -3, 400).unwrap();
+        assert_eq!(refs(&c), (0, Some(400)), "the quarantine starts at the last reference");
+        let err = add_ref(&c, "b1", 1, 500).unwrap_err().to_string();
+        assert!(err.contains("refusing"), "{err}");
+        assert!(add_ref(&c, "b1", -1, 500).is_err());
+        assert_eq!(refs(&c), (0, Some(400)));
+        assert!(add_ref(&c, "nope", 1, 0).unwrap_err().to_string().contains("no metadata"));
+    }
+
+    #[test]
+    fn ancestry_loops_are_refused() {
+        let c = db();
+        for (id, parent) in [("a", None), ("b", Some("a")), ("x", Some("y")), ("y", Some("x"))] {
+            c.execute(
+                "INSERT INTO buckets (id, name, region, created_at, public, recover_days, parent_id, parent_at, objects, bytes, trash_bytes) VALUES (?1, ?1, 'r', 0, 0, 7, ?2, 0, 0, 0, 0)",
+                params![id, parent],
+            )
+            .unwrap();
+        }
+        assert_eq!(chain(&c, "b").unwrap(), ["b", "a"]);
+        assert_eq!(children(&c, "a").unwrap(), ["b"]);
+        assert!(chain(&c, "x").unwrap_err().to_string().contains("loops"));
+    }
+
+    #[test]
+    fn write_key_refuses_to_bury_a_live_row() {
+        let c = db();
+        c.execute("INSERT INTO buckets (id, name, region, created_at, public, recover_days, objects, bytes, trash_bytes) VALUES ('a', 'a', 'r', 0, 0, 0, 0, 0, 0)", []).unwrap();
+        insert_blob(&c, "b1", 1, 0, 0).unwrap();
+        let mut r = Row::tombstone("k", 0);
+        r.blob_id = Some("b1".into());
+        r.size = 1;
+        insert_row(&c, "a", &r).unwrap();
+        // A chain that doesn't start with the bucket (a caller bug) must not orphan its row.
+        assert!(write_key(&c, "a", &["elsewhere".into()], 0, "k", None, true, 1).is_ok(), "nothing visible: nothing to do");
+        let err = write_key(&c, "a", &["elsewhere".into()], 0, "k", Some(&Row { blob_id: Some("b1".into()), ..Row::tombstone("k", 1) }), true, 1).unwrap_err();
+        assert!(err.to_string().contains("unexpected live row"), "{err}");
+    }
+
+    #[test]
+    fn prefixes() {
+        assert_eq!(common_prefix("a/b/c", "", Some("/")), Some("a/"));
+        assert_eq!(common_prefix("a/b/c", "a/", Some("/")), Some("a/b/"));
+        assert_eq!(common_prefix("a/b", "a/", Some("/")), None);
+        assert_eq!(common_prefix("a--b--c", "", Some("--")), Some("a--"));
+        assert_eq!(common_prefix("a/b", "", Some("")), None);
+        assert_eq!(common_prefix("a/b", "", None), None);
+        // Past every key under the prefix, even the longest with the highest code points.
+        let longest = format!("p/{}", "\u{10FFFF}".repeat(255));
+        assert!(longest.len() <= 1024);
+        assert!(past_prefix("p/") > longest);
+        assert!(past_prefix("p/").as_str() < "p0");
+    }
+}

@@ -17,7 +17,7 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 mod queues;
 
-/// roll daemon: serverless Postgres, serverless Redis, Kafka-compatible streams, tasks and RabbitMQ-compatible queues on
+/// roll daemon: serverless Postgres, serverless Redis, S3-compatible storage, Kafka-compatible streams, tasks and RabbitMQ-compatible queues on
 /// your machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
@@ -236,7 +236,12 @@ async fn run() -> anyhow::Result<()> {
     info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
     let redis_opts = redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol };
 
-    let storage_svc = if args.no_storage { None } else { Some(start_storage(&storage_opts, &home_abs, &storage).await?) };
+    let (storage_svc, s3_listener) = if args.no_storage {
+        (None, None)
+    } else {
+        let (st, l) = start_storage(&storage_opts, &home_abs, &storage).await?;
+        (Some(st), Some(l))
+    };
 
     let broker = stream_broker::Broker::new(stream_config).await?;
     if let Some(name) = &broker.config.default_stream
@@ -259,14 +264,10 @@ async fn run() -> anyhow::Result<()> {
     if let Some(st) = &storage_svc {
         router = router.merge(s3_control::api::router(st.control.clone()));
     }
-    let s3_serve = storage_svc.as_ref().map(|st| (st.server.clone(), st.listener.clone()));
-    let storage_serve = async move {
-        match s3_serve {
-            Some((server, listener)) => match listener.lock().await.take() {
-                Some(l) => s3_server::serve(l, server).await,
-                None => std::future::pending().await,
-            },
-            None => std::future::pending().await,
+    let storage_serve = async {
+        match (&storage_svc, s3_listener) {
+            (Some(st), Some(l)) => s3_server::serve(l, st.server.clone()).await,
+            _ => std::future::pending().await,
         }
     };
     let queues_serve = async {
@@ -310,7 +311,6 @@ async fn run() -> anyhow::Result<()> {
 struct Storage {
     server: std::sync::Arc<s3_server::Server>,
     control: std::sync::Arc<s3_control::Control>,
-    listener: std::sync::Arc<tokio::sync::Mutex<Option<tokio::net::TcpListener>>>,
 }
 
 /// rolld's storage flags (taken before the other products consume theirs).
@@ -340,21 +340,24 @@ impl From<&Args> for StorageOpts {
     }
 }
 
-async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<Storage> {
+async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<(Storage, tokio::net::TcpListener)> {
     let class = args.s3_storage_class.clone().or_else(|| match storage {
         StorageConfig::S3 { endpoint: None, .. } => Some("INTELLIGENT_TIERING".into()),
         StorageConfig::S3 { endpoint: Some(_), .. } => Some("STANDARD".into()),
         StorageConfig::Local(_) => None,
     });
     let class = class.filter(|_| matches!(storage, StorageConfig::S3 { .. }));
+    // Bind first: a node that can't serve shouldn't take over the metadata log.
+    let listener = tokio::net::TcpListener::bind(args.s3).await?;
     let backend = s3_store::from_config(storage, class.as_deref()).await?;
+    let mut scfg = s3_server::Config { virtual_host_domain: args.s3_domain.clone(), spool_dir: home.join("storage").join("spool"), ..Default::default() };
     let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
     cfg.node = args.node.clone();
+    cfg.region = scfg.region.clone();
     let store = s3_store::Store::open(cfg, backend).await?;
     if let (Some(id), Some(secret)) = (&args.s3_access_key, &args.s3_secret_key) {
         store.ensure_key(id, secret, "ROLL_S3_ACCESS_KEY").await?;
     }
-    let mut scfg = s3_server::Config { virtual_host_domain: args.s3_domain.clone(), spool_dir: home.join("storage").join("spool"), ..Default::default() };
     std::fs::create_dir_all(&scfg.spool_dir)?;
     if let Some(c) = &args.s3_internal_cidrs {
         scfg.internal_cidrs = s3_server::parse_cidrs(c)?;
@@ -363,9 +366,8 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     let ccfg = s3_control::ControlConfig { endpoint, region: scfg.region.clone(), virtual_host_domain: args.s3_domain.clone(), storage_class: class, pricing: Default::default() };
     let control = s3_control::Control::new(store.clone(), ccfg).await?;
     let server = s3_server::Server::new(store, scfg);
-    let listener = tokio::net::TcpListener::bind(args.s3).await?;
     info!(s3 = %args.s3, storage = %server.store.describe(), "storage (S3 API) listening");
-    Ok(Storage { server, control, listener: std::sync::Arc::new(tokio::sync::Mutex::new(Some(listener))) })
+    Ok((Storage { server, control }, listener))
 }
 
 /// Ctrl-C, or SIGTERM from a supervisor (systemd, ECS, Kubernetes) during a rolling upgrade.
