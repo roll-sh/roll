@@ -130,7 +130,7 @@ async fn owners_repos_and_reading() {
     let repos = e.json(&["code", "repos", "--owner", "acme"]).await;
     assert_eq!(repos.as_array().unwrap().len(), 2);
     assert!(e.ok(&["code", "repos"]).await.contains("acme/web"));
-    assert_eq!(e.ok(&["code", "clone-url", "acme/web.git"]).await.trim(), format!("http://127.0.0.1:7070/git/acme/web.git"));
+    assert_eq!(e.ok(&["code", "clone-url", "acme/web.git"]).await.trim(), "http://127.0.0.1:7070/git/acme/web.git");
     assert!(e.ok(&["code", "repo", "acme/web"]).await.contains("acme/web"));
 
     // Land from local files (path and local=repo/path), then read it back every way.
