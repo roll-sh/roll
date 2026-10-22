@@ -1,0 +1,1 @@
+{"action":"labeled","number":42,"label":{"name":"agent"},"pull_request":{"number":42,"state":"open","title":"x","head":{"ref":"a","sha":"b"},"base":{"ref":"main","sha":"c"}},"repository":{"id":70001,"name":"api","full_name":"acme/api"},"installation":{"id":61234567}}
