@@ -589,12 +589,14 @@ impl Db {
         Ok(())
     }
 
-    /// Required reviews still owed for `head`.
+    /// Required reviews still owed for `head` (a deleted or disabled review app owes nothing:
+    /// it can't review, and nobody else can clear its request).
     pub fn pending_reviews(&self, change_id: &str, head: &str) -> Result<Vec<Reviewer>> {
         let db = self.lock();
         let mut st = db.prepare(
             "SELECT reviewer_kind, reviewer_name, reviewer_app FROM review_requests \
-             WHERE change_id = ? AND head = ? AND required = 1 AND done_at IS NULL ORDER BY rowid",
+             WHERE change_id = ? AND head = ? AND required = 1 AND done_at IS NULL \
+             AND (reviewer_app = '' OR reviewer_app IN (SELECT id FROM review_apps WHERE active = 1)) ORDER BY rowid",
         )?;
         let rows = st.query_map(params![change_id, head], |r| Ok(reviewer(r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)

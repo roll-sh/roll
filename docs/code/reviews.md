@@ -147,7 +147,8 @@ named), `changes_requested`, `unresolved_threads` (when required, outdated threa
   token, secret}`. The app then:
   - receives signed `change.opened`, `change.revised` and `thread.comment` webhooks, each
     carrying the diff, compare and blob URLs, scoped to the repos it was installed on
-  - receives `review.requested` if it's `required`, and then owes every new head a review
+  - receives `review.requested` if it's `required`, and then owes every new head a review (a
+    disabled or deleted app owes nothing)
   - posts reviews and comments with its token through the same `/reviews` and `/threads`
     endpoints people use
   - reads its repos, private ones included, and can't write code
