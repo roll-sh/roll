@@ -228,19 +228,11 @@ pub(crate) async fn route(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
             response::ok_xml(Doc::new("RequestPaymentConfiguration").el("Payer", "BucketOwner").clone_finish("RequestPaymentConfiguration"))
         }
         "requestPayment" if put => put_request_payment(ctx, bucket, body).await,
-        "replication" if get => {
-            reading(ctx, bucket)?;
-            Err(S3Error::new(Code::ReplicationConfigurationNotFoundError).with("BucketName", bucket.name.clone()))
-        }
-        "replication" => {
-            writing(ctx, bucket)?;
-            Err(S3Error::msg(Code::NotImplemented, "Replication is not supported yet; the backing bucket can be replicated by the operator."))
-        }
-        "notification" if get => {
-            reading(ctx, bucket)?;
-            response::ok_xml(empty_doc("NotificationConfiguration"))
-        }
-        "notification" if put => put_notification(ctx, bucket, body).await,
+        "replication" if get => crate::replication::get(ctx, bucket),
+        "replication" if put => crate::replication::put(ctx, bucket, body).await,
+        "replication" => crate::replication::delete(ctx, bucket).await,
+        "notification" if get => crate::notification::get(ctx, bucket),
+        "notification" if put => crate::notification::put(ctx, bucket, body).await,
         "analytics" | "metrics" | "inventory" | "intelligent-tiering" => {
             let spec = IdConfigSpec::of(sub);
             if get && ctx.q("id").is_none() {
@@ -468,15 +460,6 @@ async fn put_request_payment(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Repl
     }
 }
 
-async fn put_notification(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
-    writing(ctx, bucket)?;
-    let n = read_xml(ctx, body, "NotificationConfiguration").await?;
-    if !n.children.is_empty() {
-        return Err(S3Error::msg(Code::NotImplemented, "Event notifications are not supported yet; only an empty NotificationConfiguration is accepted."));
-    }
-    ok()
-}
-
 // ---- Analytics, metrics, inventory, intelligent-tiering ----
 
 #[derive(Clone, Copy)]
@@ -645,6 +628,17 @@ fn validate_inventory(n: &Node) -> Result<(), S3Error> {
     validate_filter(n)?;
     parse_bool(n, "IsEnabled")?.ok_or_else(malformed)?;
     validate_destination(n.child("Destination").ok_or_else(malformed)?, &["CSV", "ORC", "Parquet"])?;
+    let format = n.child("Destination").and_then(|d| d.child("S3BucketDestination")).and_then(|d| d.text_of("Format")).unwrap_or_default().trim();
+    if format != "CSV" {
+        return Err(S3Error::msg(Code::NotImplemented, format!("{format} inventory reports are not supported; use CSV.")));
+    }
+    if let Some(o) = n.child("OptionalFields") {
+        for f in o.all("Field") {
+            if !crate::inventory::FIELDS.contains(&f.text.trim()) {
+                return Err(malformed());
+            }
+        }
+    }
     if !n.text_of("IncludedObjectVersions").is_some_and(|v| matches!(v.trim(), "All" | "Current")) {
         return Err(malformed());
     }

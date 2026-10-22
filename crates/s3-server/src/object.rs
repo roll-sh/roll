@@ -319,6 +319,7 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     let mut r = object_response(&meta, &overrides, code, len);
     versioning::set_version(&mut r, bucket, &meta.version_id, vid.is_some());
     versioning::set_lock(&mut r, &meta.lock);
+    crate::replication::set_status(ctx, bucket, &meta.key, &meta.version_id, &mut r);
     if let Some((a, b)) = range {
         set(&mut r, "content-range", &s3_proto::http::content_range(a, b, meta.size));
     }

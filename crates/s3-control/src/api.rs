@@ -126,11 +126,32 @@ struct BucketPatch {
     #[serde(flatten)]
     update: BucketUpdate,
     tags: Option<BTreeMap<String, String>>,
+    notifications: Option<NotificationsPatch>,
+}
+
+/// `notifications` in a bucket `PATCH`: the whole configuration, replaced.
+#[derive(Deserialize)]
+struct NotificationsPatch {
+    #[serde(flatten)]
+    config: s3_store::NotificationConfig,
+    /// S3's `x-amz-skip-destination-validation`.
+    #[serde(default)]
+    skip_destination_validation: bool,
+    /// Replace the bucket's webhook signing secret.
+    #[serde(default)]
+    rotate_webhook_secret: bool,
 }
 
 async fn update_bucket(State(c): State<AppState>, Path(name): Path<String>, JsonBody(p): JsonBody<BucketPatch>) -> ApiResult<Value> {
     if let Some(t) = &p.tags {
         s3_store::config::validate_bucket_tags(t.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
+    }
+    // Notifications first: a refused configuration leaves the rest of the PATCH unapplied.
+    if let Some(n) = p.notifications {
+        if n.rotate_webhook_secret {
+            c.store.webhook_secret(&name, true).await?;
+        }
+        c.set_notifications(&name, n.config, n.skip_destination_validation).await?;
     }
     let mut b = c.store.update_bucket(&name, p.update).await?;
     if let Some(t) = &p.tags {

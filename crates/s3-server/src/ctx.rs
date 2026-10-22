@@ -143,7 +143,9 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
         Ok((b, k)) => {
             ctx.bucket = b;
             ctx.key = k;
-            run(&mut ctx, body).await
+            // Who's asking, for the events the request's changes record.
+            let origin = s3_store::Origin { source_ip: peer.map(|p| p.to_string()), request_id: Some(request_id.clone()), ..Default::default() };
+            s3_store::events::with_origin(origin, run(&mut ctx, body)).await
         }
         Err(e) => Err(e),
     };
@@ -188,6 +190,8 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
     if let Some(a) = &ctx.auth {
         ctx.store().touch_key(&a.key.id);
     }
+    let principal = ctx.auth.as_ref().map_or_else(|| "anonymous".to_string(), |a| a.key.id.clone());
+    s3_store::events::set_origin(|o| o.principal = Some(principal));
     match (&ctx.bucket, &ctx.key) {
         (None, _) => match ctx.method {
             Method::GET => bucket::list_buckets(ctx),

@@ -108,6 +108,15 @@ impl Db {
         Ok((out, inner.open_batch))
     }
 
+    /// [`Self::read`], and the batch that makes everything it saw durable (the open one if it
+    /// holds changes, else the last one cut).
+    pub(crate) fn read_seen<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<(T, u64)> {
+        let inner = self.lock();
+        let out = f(&inner.conn)?;
+        let batch = if inner.dirty { inner.open_batch } else { inner.open_batch - 1 };
+        Ok((out, batch))
+    }
+
     pub(crate) fn is_dirty(&self) -> bool {
         self.lock().dirty
     }

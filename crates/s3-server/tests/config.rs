@@ -471,14 +471,15 @@ async fn small_configurations() {
     c.put_bucket_request_payment().bucket("cfg").request_payment_configuration(RequestPaymentConfiguration::builder().payer(Payer::BucketOwner).build().unwrap()).send().await.unwrap();
     let e = c.put_bucket_request_payment().bucket("cfg").request_payment_configuration(RequestPaymentConfiguration::builder().payer(Payer::Requester).build().unwrap()).send().await.unwrap_err();
     assert_eq!(err(e), (501, "NotImplemented".into()));
-    // Notifications: only the empty configuration for now.
+    // Notifications: an AWS destination fails validation unless the deployment delivers to AWS
+    // (see tests/events.rs for the rest).
     c.put_bucket_notification_configuration().bucket("cfg").notification_configuration(NotificationConfiguration::builder().build()).send().await.unwrap();
     let mut r = Raw::new("PUT", "/cfg");
     r.query = "notification";
     r.body = b"<NotificationConfiguration><QueueConfiguration><Queue>arn:aws:sqs:us-east-1:1:q</Queue><Event>s3:ObjectCreated:*</Event></QueueConfiguration></NotificationConfiguration>".to_vec();
-    assert_eq!(status_code(r.send(&t).await).await, (501, "NotImplemented".into()));
-    // Replication: not yet.
-    assert_eq!(err(c.delete_bucket_replication().bucket("cfg").send().await.unwrap_err()).0, 501);
+    assert_eq!(status_code(r.send(&t).await).await, (400, "InvalidArgument".into()));
+    // Replication: deleting none is fine (see tests/events.rs).
+    c.delete_bucket_replication().bucket("cfg").send().await.unwrap();
     // RestoreObject: nothing is archived.
     put(&t, "cfg", "k", b"v").await;
     assert_eq!(err(c.restore_object().bucket("cfg").key("k").send().await.unwrap_err()), (403, "InvalidObjectState".into()));

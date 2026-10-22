@@ -234,6 +234,10 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
     verify_post_signature(&auth, &signing_key(&access.secret, &c.date, &c.region, &c.service))?;
     let policy = check_post_policy(&auth.policy, &fields, &bucket.name, ctx.store().now())?;
     crate::access::authorize(ctx, crate::access::Who::Key(&access), &bucket.name, Some(&key), "s3:PutObject", crate::auth::Need::Write)?;
+    s3_store::events::set_origin(|o| {
+        o.principal = Some(access.id.clone());
+        o.create = Some("Post");
+    });
     let acl = match field(&fields, "acl") {
         Some(c) => crate::acl::check_write(ctx, &bucket.name, &crate::acl::Acl::canned(c, false)?)?,
         None => None,

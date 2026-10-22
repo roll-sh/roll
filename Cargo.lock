@@ -4565,7 +4565,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "clap",
+ "futures",
  "futures-util",
  "lapin",
  "libc",
@@ -4595,6 +4597,7 @@ dependencies = [
  "s3-store",
  "stream-broker",
  "tasks",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4892,9 +4895,11 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "futures",
  "getrandom 0.4.3",
  "hex",
+ "hmac 0.12.1",
  "ipnet",
  "md-5",
  "memchr",
@@ -4907,6 +4912,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@
 
 use crate::backend::{BlobAttrs, ByteStream, UploadedPart};
 use crate::error::{Result, StoreError};
+use crate::events;
 use crate::ids;
 use crate::model::*;
 use crate::rows::{self, Entry, Merger, Row};
@@ -173,7 +174,9 @@ impl Store {
             let cur = rows::resolve(c, &chain, &row.key)?.map(|(r, _)| r);
             check_condition(cur.as_ref(), cond, &row.key)?;
             rows::insert_blob(c, &blob, row.size, crc32c, now)?;
-            versioning::put_key(c, &b, &chain, &row.key, row.clone(), now)
+            let stored = versioning::put_key(c, &b, &chain, &row.key, row.clone(), now)?;
+            events::emit(c, &b, events::Change::version(&events::created(), &stored), now)?;
+            Ok(stored)
         });
         let (stored, batch) = match attempt {
             Ok(x) => x,
@@ -231,7 +234,9 @@ impl Store {
             // A copy is a new version: its own lock (or the bucket's default), never the source's.
             row.lock = opts.lock.clone();
             rows::add_ref(c, src.blob()?, 1, now)?;
-            versioning::put_key(c, &db, &dchain, dst_key, row, now)?.meta()
+            let stored = versioning::put_key(c, &db, &dchain, dst_key, row, now)?;
+            events::emit(c, &db, events::Change::version("ObjectCreated:Copy", &stored), now)?;
+            stored.meta()
         })
         .await
     }
@@ -273,7 +278,10 @@ impl Store {
                 // A locked version that would leave for good is kept (refused before anything
                 // changes, so the rest of the batch goes on).
                 match versioning::delete_key(c, &b, &chain, key, now) {
-                    Ok(o) if o.existed => n += 1,
+                    Ok(o) if o.existed => {
+                        events::emit_delete(c, &b, key, &o, false, "LifecycleExpiration", now)?;
+                        n += 1;
+                    }
                     Ok(_) | Err(StoreError::ObjectLocked(_)) => {}
                     Err(e) => return Err(e),
                 }
@@ -661,6 +669,7 @@ impl Store {
             check_condition(cur.as_ref(), cond, &row.key)?;
             rows::insert_blob(c, &up.blob_id, size, crc, now)?;
             let stored = versioning::put_key(c, &b, &chain, &row.key, row.clone(), now)?;
+            events::emit(c, &b, events::Change::version("ObjectCreated:CompleteMultipartUpload", &stored), now)?;
             c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
             c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
             Ok(stored)
@@ -770,7 +779,10 @@ impl Store {
             // The trash row's reference moves to the restored version.
             rows::trash_delete(c, &b.id, key, deleted_at, row.size)?;
             let chain = rows::chain(c, &b.id)?;
-            versioning::restore(c, &b, &chain, key, row, now)?.meta()
+            let stored = versioning::restore(c, &b, &chain, key, row, now)?;
+            // roll's trash restore, reported as S3's restore-completed event.
+            events::emit(c, &b, events::Change::version("ObjectRestore:Completed", &stored), now)?;
+            stored.meta()
         })
         .await
     }

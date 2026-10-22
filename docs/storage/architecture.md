@@ -116,9 +116,10 @@ uploads (id TEXT PRIMARY KEY /* customer UploadId */, bucket_id, key, blob_id,
 bucket_config (bucket_id, kind TEXT, id TEXT /* '' = one per bucket */, value TEXT,
          PRIMARY KEY (bucket_id, kind, id)) WITHOUT ROWID
          -- kind: tagging, policy, public_access_block, ownership, acl, encryption, website,
-         -- logging, accelerate (one per bucket); analytics, metrics, inventory,
-         -- intelligent_tiering (by id). Branches copy their parent's, except the policy (its
-         -- resources name the parent); deleted buckets drop theirs.
+         -- logging, accelerate, notification, replication, webhook_secret (one per bucket);
+         -- analytics, metrics, inventory, intelligent_tiering (by id). Branches copy their
+         -- parent's, except the policy (its resources name the parent), notifications,
+         -- replication and the webhook secret; deleted buckets drop theirs.
 parts   (upload_id, part_number, size, etag, checksum, backend_etag, created_at, crc32c,
          PRIMARY KEY (upload_id, part_number))
 
@@ -134,7 +135,16 @@ usage   (bucket_id, day TEXT /* YYYY-MM-DD UTC */, class_a, class_b, bytes_in,
          PRIMARY KEY (bucket_id, day))
 
 orphans (blob_key TEXT PRIMARY KEY, size, found_at)   -- orphan-scan candidates
-state   (k TEXT PRIMARY KEY, v TEXT)                  -- scrub report, job barriers, canonical owner id
+state   (k TEXT PRIMARY KEY, v TEXT)                  -- scrub report, job barriers, canonical owner id,
+                                                      -- event_seq (the outbox's counter), job:inventory:*
+
+events  (seq INTEGER PRIMARY KEY /* the sequencer; from state.event_seq, never reused */,
+         bucket_id, key, dest TEXT /* destination ARN | replicate:<bucket> | backfill:<rule> */,
+         kind TEXT /* notify | replicate | backfill */, body TEXT /* JSON */, created_at,
+         attempts, next_at, error)                    -- the event outbox (see below)
+replication_status (bucket_id, key, version_id /* S3's: 'null' or the vid */,
+         status TEXT /* PENDING | COMPLETED | FAILED | REPLICA */,
+         PRIMARY KEY (bucket_id, key, version_id)) WITHOUT ROWID
 ```
 
 Object ACLs and website redirects live in the row, so every row copy carries them: branch
@@ -151,7 +161,8 @@ nothing points at a blob before it goes.
 Migrations are append-only entries of `MIGRATIONS` in `schema.rs`; log entries carry the schema
 version they were written with and replay migrates before applying newer ones. Migration 2 added
 bucket configuration and object ACLs; migration 3 added versioning and Object Lock: rows from before it became null versions, with a `vid` made
-from their `modified_at` the same way new ids are.
+from their `modified_at` the same way new ids are. Migration 4 added the event outbox and
+replication statuses.
 
 ### Durability: the metadata log
 
@@ -339,6 +350,59 @@ source's.
   `GET /v1/storage`). Current, noncurrent or trashed versions pointing at a blob with no
   `blobs` row count as missing too. It never deletes.
 
+### Events: notifications, replication, inventory
+
+Event notifications and replication run off a **durable outbox** (`events.rs`), with these
+rules:
+
+- **Same transaction.** Every change S3 can notify about (`ObjectCreated:*`, `ObjectRemoved:*`,
+  `LifecycleExpiration:*`, `ObjectTagging:*`, `ObjectAcl:Put`, `ObjectRestore:Completed` for a
+  trash restore, `Replication:OperationFailedReplication`) calls `events::emit` inside the
+  transaction that makes it. A write that fails or is fenced rolls its events back with it; one
+  that commits has them in the log, so they survive restarts and recovery. Who made the change
+  (access key, source IP, request id, `Put` or `Post`) comes from a task-local `Origin` that
+  `s3-server` sets per request, so no store signature changed.
+- **Free when unused.** `emit` reads the bucket's `notification` and `replication`
+  configurations (one primary-key lookup) and writes nothing unless a configuration matches the
+  event name and key filter (or a replication rule's prefix and tags).
+- **One row per delivery,** all rows of one change sharing its sequencer. `seq` comes from a
+  counter in `state` (`event_seq`), so it only grows, even after rows are deleted or the node
+  recovers: S3's per-key `sequencer` comparison holds.
+- **Only durable rows go out.** `Store::due_events` reads due rows with the batch that would make
+  what it read durable (`Db::read_seen`), and waits for that batch before returning: a
+  dispatcher never delivers an event whose write may still fail. A row is only handed out when
+  no older row exists for the same destination and key, so each destination gets a key's events
+  in order.
+- **At least once.** Delivered rows are deleted with relaxed writes; failures update `attempts`
+  and `next_at` (relaxed too). A lost relaxed write means a redelivery, never a lost event. Rows
+  failing past the retention window (3 days) are dropped by the dispatcher, counted and logged.
+- **Replication** rows are applied by `Store::replicate` in one durable transaction that also
+  deletes the row: find the source version (`find_version`), add a reference to its blob, and
+  place a copy with the same version id in the destination's history (`versioning::restore`'s
+  placement), then set the statuses (`COMPLETED` once no other destination waits, `REPLICA` on
+  the destination). Every refusal (destination gone, unversioned, a locked null version in the
+  way) is checked before anything changes and makes the source `FAILED` with an
+  `OperationFailedReplication` event. Running a row twice is a no-op (the row is gone, or the
+  replica exists). Refs invariants hold: the replica is one more `objects`/`versions` row, so one
+  more reference.
+- **Backfill** rows (`ExistingObjectReplication`) walk the bucket's versions 500 at a time,
+  queueing replication for those without a status, keeping their cursor in the row.
+
+The dispatcher, event JSON and delivery are `s3-server`'s (`notify.rs`): every 250 ms it takes up
+to 256 due rows, handles up to 32 at once (deliveries, or `replicate`/`backfill` in the store),
+then deletes the delivered ones and reschedules failures (1 s doubling to 10 min, with jitter).
+Roll queues and streams are reached through the `EventSink` trait, which rolld implements in
+process with mq-core (publish to the queue, confirmed) and stream-broker (produce, keyed by the
+object key, `acks=all`); the s3 crates don't depend on either. Webhooks go out over HTTPS with a
+resolver that refuses internal addresses; AWS destinations are SigV4-signed calls with the
+deployment's credentials. See [compatibility](compatibility.md#event-notifications).
+
+**Inventory reports** (`s3-server/src/inventory.rs`) are checked hourly: each enabled inventory
+configuration whose last run (`state` `job:inventory:<bucket id>:<id>`) is a day (or week) old
+gets a report, listed with `Store::inventory_page` and written as gzip CSV data files, a
+manifest, its checksum and a Hive symlink file through the normal put path. A report is
+recorded as done only once its manifest is written.
+
 ### Write paths
 
 - **PUT.** Upload the blob to the backend with its CRC32C. Then one metadata transaction:
@@ -435,8 +499,10 @@ condition keys and the canonical ids. `ROLL_S3_BLOCK_PUBLIC_ACCESS` (store confi
   - DeleteObjects (batch, quiet mode, version ids; each key authorized on its own)
   - configuration (`s3-server/src/config.rs`, stored in `bucket_config`): tagging, policy and
     policy status, public access block, ownership controls, ACL, encryption, website, logging,
-    accelerate, request payment, replication (not found), notifications (empty), and the
-    analytics, metrics, inventory and intelligent-tiering configurations with List*.
+    accelerate, request payment, and the analytics, metrics, inventory and intelligent-tiering
+    configurations with List*
+  - Get/PutBucketNotificationConfiguration (`notification.rs`, `notify.rs`) and
+    Get/Put/DeleteBucketReplication (`replication.rs`), see [Events](#events-notifications-replication-inventory)
     `config::default_encryption(ctx, &bucket) -> Option<(algorithm, kms_key_id, bucket_key_enabled)>`
     is the bucket's configured default encryption rule (`None`: the default SSE-S3), for SSE-KMS.
 - **Website endpoint** (`website.rs`): `<bucket>.<website_domain>` (`ROLL_S3_WEBSITE_DOMAIN`)
@@ -486,7 +552,10 @@ POST   /v1/storage/buckets  { name, public?, recover_days?, object_lock?: bool }
 GET    /v1/storage/buckets/{name}                → Bucket
 PATCH  /v1/storage/buckets/{name}  { public?, recover_days?, cors?: [CorsRule], lifecycle?: [LifecycleRule],
                                      tags?: Record<string,string> /* replaces them; {} removes */,
-                                     versioning?: "Enabled" | "Suspended" } → Bucket
+                                     versioning?: "Enabled" | "Suspended",
+                                     notifications?: { configurations: [NotificationConfig] /* replaces them; [] removes */,
+                                                       event_bridge?: boolean, skip_destination_validation?: boolean,
+                                                       rotate_webhook_secret?: boolean } } → Bucket
 DELETE /v1/storage/buckets/{name}?force=true     → { deleted }   (force: delete all objects first)
 POST   /v1/storage/buckets/{name}/branches  { name }  → Bucket
 
@@ -522,7 +591,13 @@ Bucket = { id, name, region, public, recover_days, created_at,
            versioning: "Enabled" | "Suspended" | null,
            object_lock: { mode: "GOVERNANCE" | "COMPLIANCE" | null, days: number | null, years: number | null } | null,
            versions /* own noncurrent versions, delete markers included */, version_bytes,
+           notifications: { configurations: [NotificationConfig], event_bridge: boolean,
+                            webhook_secret: string | null /* signs arn:roll:webhook deliveries */ },
            endpoint, url /* path-style */, virtual_host_url: string | null }
+NotificationConfig = { id /* generated when empty */, type: "queue" | "topic" | "function" /* from the ARN when omitted */,
+                       destination /* arn:roll:queues:<vhost>:<queue> | arn:roll:streams:<stream>:<topic> |
+                                      arn:roll:webhook:<url> | arn:aws:sqs|sns|lambda:… */,
+                       events: string[] /* s3:ObjectCreated:*, … */, prefix: string | null, suffix: string | null }
 Website = { index_document: string | null, error_document: string | null,
             redirect_all: { host_name, protocol: "http"|"https"|null } | null,
             routing_rules: [{ condition: { key_prefix_equals: string|null, http_error_code_returned_equals: number|null } | null,
@@ -594,6 +669,10 @@ Details:
   is a 400 when the bucket's public access block (or `ROLL_S3_BLOCK_PUBLIC_ACCESS`) blocks
   public policies.
 - `website` is set through the S3 API (`PutBucketWebsite`); the control plane shows it.
+- `notifications` are validated exactly as `PutBucketNotificationConfiguration` validates them:
+  each destination must exist and take an `s3:TestEvent` unless `skip_destination_validation`.
+  A refused configuration is a 400 and nothing in the PATCH is applied. The webhook secret is
+  created with the first webhook destination; `rotate_webhook_secret` replaces it.
 
 `ROLL_S3_ACCESS_KEY` and `ROLL_S3_SECRET_KEY`, if set, create (or update) an `admin` key with
 that id and secret at startup, the way MinIO's root user works. This is for local dev and

@@ -9,7 +9,9 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+bytes.workspace = true
 clap.workspace = true
+futures.workspace = true
 libc.workspace = true
 libmimalloc-sys.workspace = true
 mimalloc.workspace = true
@@ -41,6 +43,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 futures-util.workspace = true
 lapin.workspace = true
 parking_lot.workspace = true

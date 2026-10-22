@@ -33,6 +33,7 @@ pub mod kind {
     pub const METRICS: &str = "metrics";
     pub const INVENTORY: &str = "inventory";
     pub const INTELLIGENT_TIERING: &str = "intelligent_tiering";
+    pub use crate::events::kind::{NOTIFICATION, REPLICATION, WEBHOOK_SECRET};
 }
 
 /// S3's Block Public Access settings for a bucket.
@@ -147,15 +148,17 @@ pub(crate) fn check_may_be_public(c: &Connection, bucket_id: &str, name: &str, d
 /// A deleted bucket's configuration goes with it.
 pub(crate) fn drop_bucket_config(c: &Connection, bucket_id: &str) -> Result<()> {
     c.execute("DELETE FROM bucket_config WHERE bucket_id = ?1", [bucket_id])?;
+    crate::events::drop_bucket(c, bucket_id)?;
     Ok(())
 }
 
-/// A new branch starts with its parent's configuration, except the policy: its resources name
-/// the parent bucket.
+/// A new branch starts with its parent's configuration, except the policy (its resources name
+/// the parent bucket), and notifications, replication and the webhook secret: a branch's writes
+/// don't go to its parent's destinations unless it's configured to.
 pub(crate) fn copy_bucket_config(c: &Connection, from: &str, to: &str) -> Result<()> {
     c.execute(
-        "INSERT INTO bucket_config (bucket_id, kind, id, value) SELECT ?2, kind, id, value FROM bucket_config WHERE bucket_id = ?1 AND kind <> ?3",
-        params![from, to, kind::POLICY],
+        "INSERT INTO bucket_config (bucket_id, kind, id, value) SELECT ?2, kind, id, value FROM bucket_config WHERE bucket_id = ?1 AND kind NOT IN (?3, ?4, ?5, ?6)",
+        params![from, to, kind::POLICY, kind::NOTIFICATION, kind::REPLICATION, kind::WEBHOOK_SECRET],
     )?;
     Ok(())
 }
@@ -294,10 +297,11 @@ impl Store {
         self.write(|c| {
             let b = find_bucket(c, bucket)?;
             let chain = rows::chain(c, &b.id)?;
-            crate::versioning::update_version(c, &b, &chain, key, version_id, now, |r| {
+            let r = crate::versioning::update_version(c, &b, &chain, key, version_id, now, |r| {
                 r.headers.acl = acl;
                 Ok(())
             })?;
+            crate::events::emit_update(c, &b, "ObjectAcl:Put", &r, now)?;
             Ok(())
         })
         .await
