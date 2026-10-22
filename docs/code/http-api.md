@@ -5,7 +5,11 @@ are listed in [architecture.md](architecture.md#http-api-v1code).
 
 - Timestamps are Unix seconds.
 - Ids are strings: changesets `cs_…` (full 64-hex ids are accepted too), git commits are 40-hex.
-- Errors are `{error: string}` with a matching status: 400, 401, 403, 404, 409 or 422.
+- Errors are `{error: string}` with a matching status: 400, 401, 403, 404, 409 or 422 (and 429 for
+  too many event streams, 503 while a repo's search index is first built). A bad query string is a
+  400 too.
+- Writes without a token answer 401 (the dashboard's sign-in prompt), with a token that may not
+  do it 403; reads of what the caller can't see answer 404.
 
 ## Info and names
 
@@ -30,9 +34,10 @@ GET /v1/code/names/{name} → {name, available: bool, reason: null | "taken" | "
 Owner = {name, kind: "user" | "org", display_name, bio: string | null, url: string | null,
          created_at, repos_count}
 GET  /v1/code/owners → Owner[]
-POST /v1/code/owners {name, kind, display_name?} → Owner          409 when the name is taken, 422 when reserved or invalid
+POST /v1/code/owners {name, kind, display_name?} → Owner          admin only (401 without a token, 403 with another);
+                                                                  409 when the name is taken, 422 when reserved or invalid
 GET  /v1/code/owners/{owner} → Owner & {repos: Repo[]}            only public repos without a token
-PATCH /v1/code/owners/{owner} {display_name?, bio?, url?} → Owner
+PATCH /v1/code/owners/{owner} {display_name?, bio?, url?} → Owner the owner's own token or admin (401 without a token, 403 others)
 ```
 
 ## Repos
@@ -558,7 +563,8 @@ The browser calls `/v1/code/*` directly: reads, SSE and raw blob links. Allow an
 
 - The local daemon is open, like the rest of the local API, unless `ROLL_CODE_TOKEN` is set.
 - Owner tokens are created with `POST /v1/code/owners/{owner}/tokens {name}` →
-  `{token /* rlc_…, shown once */, id /* tok_… */, prefix /* the token's first 8 characters */, name, owner, created_at}`.
+  `{token /* rlc_…, shown once */, id /* tok_… */, prefix /* the token's first 8 characters */, name, owner, created_at}`
+  (the owner or admin; 401 anonymous, 403 another owner).
   They're sent as `Authorization: Bearer`, or as the git password.
 - `GET /v1/code/owners/{owner}/tokens` → `[{id, name, created_at, last_used_at: number | null, prefix: string | null}]`,
   newest first, never the tokens (the owner's own token or admin; anyone else 404). `last_used_at`

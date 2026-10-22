@@ -2064,3 +2064,14 @@ async fn a_deep_review_reports_indexing_while_the_index_is_built() {
     assert!(!r[0]["ai"]["reasons"].to_string().contains("still being built"), "it waited for the index");
     assert!(t.m.messages().last().unwrap().user().contains("# Repository context"));
 }
+
+/// A query string that doesn't parse is a JSON 400 on the reviewer's routes too.
+#[tokio::test]
+async fn bad_query_strings_are_json_400s() {
+    let t = setup(|_, _| {}).await;
+    for path in ["/v1/code/repos/acme/api/search?q=x&limit=lots", "/v1/code/repos/acme/api/search?q=x&regex=maybe", "/v1/code/owners/acme/usage?month=1&month=2"] {
+        let (s, v) = call(&t.a, "GET", path, None, Some(ROOT)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{path}: {v}");
+        assert!(v["error"].is_string(), "{path}: {v}");
+    }
+}

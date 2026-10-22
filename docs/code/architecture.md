@@ -444,16 +444,23 @@ commit id. The exact response shapes are in [http-api.md](http-api.md).
 ```
 GET    /v1/code                                    info + stats (merges today, merges/s, queue depth)
 GET    /v1/code/names/{name}                       {available, reason?: "taken" | "reserved" | "invalid"}
+GET    /v1/code/names/{owner}/{repo}               the same, for a repo name
 GET    /v1/code/owners · POST {name, kind, display_name?}
-GET    /v1/code/owners/{owner}                     profile + repos (public only without a token)
+GET    /v1/code/owners/{owner}                     profile + repos (public only without a token) · PATCH
+POST   /v1/code/owners/{owner}/tokens              {name} → token (shown once) · GET: list (no secrets)
+DELETE /v1/code/owners/{owner}/tokens/{id}         revoke
 GET    /v1/code/repos?owner=                       list
 POST   /v1/code/repos                              {owner, name, visibility?, description?, source: "native" | {github: {installation_id, owner, repo}}, default_branch?}
 GET    /v1/code/repos/{owner}/{repo}                       detail (head, stats, clone urls, github link)
+PATCH  /v1/code/repos/{owner}/{repo}                       {name?, description?, visibility?, land_policy?, required_checks?, default_branch?}
 DELETE /v1/code/repos/{owner}/{repo}
 
 GET    /v1/code/repos/{owner}/{repo}/refs
 GET    /v1/code/repos/{owner}/{repo}/tree/{rev}/{*path}    directory listing
 GET    /v1/code/repos/{owner}/{repo}/blob/{rev}/{*path}    raw file
+GET    /v1/code/repos/{owner}/{repo}/readme/{rev}?path=    rendered README
+GET    /v1/code/repos/{owner}/{repo}/blame/{rev}/{*path}   first-parent blame
+GET    /v1/code/repos/{owner}/{repo}/paths/{rev}           every file path (the file finder)
 GET    /v1/code/repos/{owner}/{repo}/log?rev=&path=&limit=&cursor=
 GET    /v1/code/repos/{owner}/{repo}/changesets/{id}       metadata + file diff
 GET    /v1/code/repos/{owner}/{repo}/compare/{base}...{head}
@@ -462,6 +469,7 @@ POST   /v1/code/repos/{owner}/{repo}/land                  {base, message, files
 
 GET    /v1/code/repos/{owner}/{repo}/changes?state=
 POST   /v1/code/repos/{owner}/{repo}/changes               {title, body, changeset | (base + files), work_item?}
+GET    /v1/code/repos/{owner}/{repo}/changes/{number}      by number, #number or id
 GET    /v1/code/changes/{id}
 POST   /v1/code/changes/{id}/revise                {changeset | (base + files)}
 POST   /v1/code/changes/{id}/land                  {bypass?, lane?} → landed | conflict | 202 queued
@@ -472,21 +480,35 @@ POST   /v1/code/changes/{id}/preview  · DELETE
 GET    /v1/code/repos/{owner}/{repo}/work?state=&label=
 POST   /v1/code/repos/{owner}/{repo}/work                  {title, body, labels, priority}
 POST   /v1/code/repos/{owner}/{repo}/work/claim            {agent, labels?, lease_s?} → item | 204
+GET    /v1/code/repos/{owner}/{repo}/work/{number}         by number, #number or id
 GET    /v1/code/work/{id} · PATCH
 POST   /v1/code/work/{id}/heartbeat · /release · /complete
 
-GET    /v1/code/repos/{owner}/{repo}/events                SSE: landed, change, work, check, preview, queue
+GET    /v1/code/repos/{owner}/{repo}/events                SSE: landed, change, work, check, preview, queue, review, thread, push
+
+GET    /v1/code/repos/{owner}/{repo}/webhooks · POST       repo webhooks (the same events)
+GET    /v1/code/repos/{owner}/{repo}/webhooks/{id} · PATCH · DELETE
+POST   /v1/code/repos/{owner}/{repo}/webhooks/{id}/ping
+GET    /v1/code/repos/{owner}/{repo}/webhooks/{id}/deliveries
+POST   /v1/code/repos/{owner}/{repo}/webhooks/{id}/deliveries/{did}/redeliver
+GET    /v1/code/repos/{owner}/{repo}/statuses/{rev} · POST commit statuses from external CI
 
 GET    /v1/code/repos/{owner}/{repo}/queue                 the merge queue: batch, entries, stats, settings
 POST   /v1/code/repos/{owner}/{repo}/queue/pause · /resume
 GET    /v1/code/repos/{owner}/{repo}/audit                 bypasses, pauses, approved runs (writers)
-POST   /v1/code/changes/{id}/enqueue {lane?} · DELETE      queue / dequeue
+POST   /v1/code/changes/{id}/enqueue {lane?} · DELETE      queue / dequeue · PATCH {lane}: change lanes
 POST   /v1/code/changes/{id}/approve-run                   run an untrusted change's head
 PATCH  /v1/code/changes/{id}                               {title?, body?, draft?}
 
 GET    /v1/code/github                             app configured? install url
 GET    /v1/code/github/installations               repos the App can see (to connect)
 POST   /v1/code/github/webhook                     X-Hub-Signature-256 verified
+GET    /v1/code/github/setup                       the App's setup URL: back to the dashboard
+
+POST   /v1/code/mcp · GET (405) · DELETE              MCP server (Streamable HTTP; mcp.md)
+
+                                                   reviews, threads, review apps and roll's reviewer:
+                                                   http-api.md ("Reviews", "roll's reviewer")
 
 GET    /git/{owner}/{repo}.git/info/refs?service=…  smart HTTP
 POST   /git/{owner}/{repo}.git/git-upload-pack

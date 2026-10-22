@@ -682,3 +682,227 @@ async fn failing_statuses_auto_revert() {
     }
     panic!("the revert never landed");
 }
+
+/// Reads `GET …/events`: every event in the order it came; `next(kind)` is the oldest event of
+/// `kind` not returned yet.
+struct Sse {
+    body: std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, axum::Error>> + Send>>,
+    buf: String,
+    all: Vec<(String, Value)>,
+    taken: Vec<bool>,
+}
+
+impl Sse {
+    async fn open(a: &App, path: &str) -> Sse {
+        let r = a.send(axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap()).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()["content-type"], "text/event-stream");
+        Sse { body: Box::pin(r.into_body().into_data_stream()), buf: String::new(), all: Vec::new(), taken: Vec::new() }
+    }
+
+    async fn next(&mut self, kind: &str) -> Value {
+        use futures::StreamExt;
+        loop {
+            if let Some(i) = (0..self.all.len()).find(|&i| !self.taken[i] && self.all[i].0 == kind) {
+                self.taken[i] = true;
+                return self.all[i].1.clone();
+            }
+            while let Some(end) = self.buf.find("\n\n") {
+                let block: String = self.buf.drain(..end + 2).collect();
+                let (mut ev, mut data) = (String::new(), String::new());
+                for line in block.lines() {
+                    if let Some(e) = line.strip_prefix("event: ") {
+                        ev = e.to_string();
+                    } else if let Some(d) = line.strip_prefix("data: ") {
+                        data.push_str(d);
+                    }
+                }
+                if !ev.is_empty() {
+                    self.all.push((ev, serde_json::from_str(&data).unwrap()));
+                    self.taken.push(false);
+                }
+            }
+            if self.all.iter().zip(&self.taken).any(|((k, _), t)| !t && k == kind) {
+                continue;
+            }
+            let chunk = tokio::time::timeout(Duration::from_secs(10), self.body.next())
+                .await
+                .unwrap_or_else(|_| panic!("no {kind} event; got {:?}", self.all.iter().map(|e| &e.0).collect::<Vec<_>>()))
+                .unwrap()
+                .unwrap();
+            self.buf.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    }
+}
+
+struct Previews;
+
+#[async_trait::async_trait]
+impl code_control::PreviewBackend for Previews {
+    async fn create(&self, _r: &code_control::model::RepoRow, c: &code_control::model::Change, _dir: &std::path::Path) -> anyhow::Result<code_control::model::Preview> {
+        Ok(code_control::model::Preview {
+            state: code_control::model::PreviewState::Running,
+            url: Some(format!("http://{}.preview.test", c.id)),
+            postgres: None,
+            redis: None,
+            error: None,
+            created_at: 1,
+        })
+    }
+    async fn delete(&self, _r: &code_control::model::RepoRow, _c: &code_control::model::Change) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+fn keys(v: &Value) -> Vec<&str> {
+    let mut k: Vec<&str> = v.as_object().unwrap_or_else(|| panic!("not an object: {v}")).keys().map(String::as_str).collect();
+    k.sort();
+    k
+}
+
+fn sorted(mut k: Vec<&str>) -> Vec<&str> {
+    k.sort();
+    k
+}
+
+/// Every event kind on `GET …/events`, with the shape docs/code/http-api.md gives it, and the
+/// same data in a `"*"` webhook's deliveries (`{event, delivery, webhook, repo, data}`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
+    let a = setup().await;
+    a.code.set_preview_backend(Arc::new(Previews));
+    let rx = receiver().await;
+    let created = a.ok("POST", &format!("{P}/webhooks"), Some(json!({ "url": rx.url, "events": ["*"] }))).await;
+    let hook = created["webhook"]["id"].as_str().unwrap().to_string();
+    rx.wait("ping", |_| true).await;
+    let mut ev = Sse::open(&a, &format!("{P}/events")).await;
+
+    // work = WorkItem
+    let w = a.ok("POST", &format!("{P}/work"), Some(json!({ "title": "next", "labels": ["ui"], "priority": 1 }))).await;
+    let got = ev.next("work").await;
+    assert_eq!(got, w);
+    assert_eq!(
+        keys(&got),
+        sorted(vec!["id", "repo_id", "repo", "number", "title", "body", "labels", "priority", "state", "source", "github_url", "claimed_by", "lease_until", "changes", "created_at", "updated_at"])
+    );
+
+    // change = Change
+    let c = a
+        .ok("POST", &format!("{P}/changes"), Some(json!({ "title": "c", "work_item": w["id"], "message": "c", "files": { "c.txt": { "content": "one\ntwo\n" } } })))
+        .await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let got = ev.next("change").await;
+    assert_eq!(got["id"], id);
+    for k in [
+        "id", "repo_id", "repo", "number", "title", "body", "author", "state", "base", "head", "revision", "work_item", "branch", "github_pr", "github_url", "trusted",
+        "run_approved", "draft", "checks", "preview", "landed_as", "conflict", "queue", "blockers", "review", "created_at", "updated_at",
+    ] {
+        assert!(got.get(k).is_some(), "Change.{k}: {got}");
+    }
+    assert_eq!(ev.next("work").await["state"], "review");
+
+    // check = {change, check: Check}
+    a.ok("POST", &format!("/v1/code/changes/{id}/checks"), Some(json!({ "name": "test", "status": "success", "url": "https://ci/1", "summary": "ok" }))).await;
+    let got = ev.next("check").await;
+    assert_eq!(keys(&got), ["change", "check"]);
+    assert_eq!(got["change"], id);
+    assert_eq!(keys(&got["check"]), sorted(vec!["name", "status", "source", "url", "summary", "started_at", "finished_at"]));
+    assert_eq!((got["check"]["status"].as_str(), got["check"]["source"].as_str()), (Some("success"), Some("external")));
+
+    // check = {changeset, status: Status}: a commit status (on main, the head of no change).
+    let posted = a.ok("POST", &format!("{P}/statuses/main"), Some(json!({ "state": "pending", "context": "ci/x", "target_url": "https://ci/2", "description": "d" }))).await;
+    let got = ev.next("check").await;
+    assert_eq!(keys(&got), ["changeset", "status"]);
+    assert_eq!(got["changeset"], posted["changeset"]);
+    assert_eq!(got["status"], posted["status"]);
+    assert_eq!(keys(&got["status"]), sorted(vec!["context", "state", "target_url", "description", "creator", "created_at", "updated_at"]));
+    assert_eq!((got["status"]["context"].as_str(), got["status"]["state"].as_str()), (Some("ci/x"), Some("pending")));
+
+    // preview = {change, preview: Preview | null}
+    a.ok("POST", &format!("/v1/code/changes/{id}/preview"), None).await;
+    let got = ev.next("preview").await;
+    assert_eq!(keys(&got), ["change", "preview"]);
+    assert_eq!(got["change"], id);
+    assert_eq!(keys(&got["preview"]), sorted(vec!["state", "url", "postgres", "redis", "error", "created_at"]));
+    assert_eq!(got["preview"]["state"], "running");
+    a.ok("DELETE", &format!("/v1/code/changes/{id}/preview"), None).await;
+    assert_eq!(ev.next("preview").await, json!({ "change": id, "preview": null }));
+
+    // review = Review, thread = Thread
+    let r = a
+        .ok("POST", &format!("/v1/code/changes/{id}/reviews"), Some(json!({ "verdict": "comment", "body": "a note", "comments": [{ "path": "c.txt", "line": 2, "body": "why two?" }] })))
+        .await;
+    let got = ev.next("review").await;
+    assert_eq!(got["id"], r["id"]);
+    assert_eq!(
+        keys(&got),
+        sorted(vec!["id", "change", "revision", "head", "reviewer", "verdict", "body", "source", "url", "stale", "dismissed", "dismissed_by", "dismiss_reason", "created_at", "updated_at", "ai"])
+    );
+    let got = ev.next("thread").await;
+    assert_eq!(got["id"], r["threads"][0]["id"]);
+    assert_eq!((got["review"].as_str(), got["path"].as_str(), got["line"].as_u64()), (r["id"].as_str(), Some("c.txt"), Some(2)));
+    assert_eq!(
+        keys(&got),
+        sorted(vec![
+            "id", "change", "review", "path", "side", "line", "start_line", "revision", "original_line", "original_start_line", "original_revision", "outdated", "resolved",
+            "resolved_by", "resolved_at", "source", "created_at", "updated_at", "comments",
+        ])
+    );
+    assert_eq!(got["comments"][0]["body"], "why two?");
+
+    // queue = {state, paused, depth, batch}
+    a.ok("POST", &format!("{P}/queue/pause"), None).await;
+    assert_eq!(ev.next("queue").await, json!({ "state": "paused", "paused": true, "depth": 0, "batch": null }));
+    a.ok("POST", &format!("{P}/queue/resume"), None).await;
+    assert_eq!(ev.next("queue").await, json!({ "state": "idle", "paused": false, "depth": 0, "batch": null }));
+
+    // landed = {changeset, git_commit, ref, generation, message, author, change, files, at, count}
+    let landed = a.ok("POST", &format!("/v1/code/changes/{id}/land"), None).await;
+    let got = ev.next("landed").await;
+    assert_eq!(keys(&got), sorted(vec!["changeset", "git_commit", "ref", "generation", "message", "author", "change", "files", "at", "count"]));
+    assert_eq!((&got["changeset"], &got["git_commit"], &got["generation"]), (&landed["changeset"], &landed["git_commit"], &landed["generation"]));
+    assert_eq!(
+        (got["change"].as_str(), got["ref"].as_str(), got["message"].as_str(), got["files"].as_u64(), got["count"].as_u64()),
+        (Some(id.as_str()), Some("main"), Some("c"), Some(1), Some(1))
+    );
+
+    // push = {ref, before, after, pusher, accepted, reason}: created, refused, deleted.
+    let base = a.serve().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_path_buf();
+    git(&home, &home, &["clone", "-q", &format!("{base}/git/acme/api.git"), "w"]);
+    let wd = home.join("w");
+    write(&wd, "p.txt", "p\n");
+    git(&home, &wd, &["add", "-A"]);
+    git(&home, &wd, &["commit", "-qm", "p"]);
+    let sha = git(&home, &wd, &["rev-parse", "HEAD"]).trim().to_string();
+    git(&home, &wd, &["push", "-q", "origin", "HEAD:refs/heads/feature"]);
+    let got = ev.next("push").await;
+    assert_eq!(keys(&got), sorted(vec!["ref", "before", "after", "pusher", "accepted", "reason"]));
+    assert!(got["pusher"].is_string(), "{got}");
+    assert_eq!(got, json!({ "ref": "refs/heads/feature", "before": null, "after": sha, "pusher": got["pusher"], "accepted": true, "reason": null }));
+    let out = common::git_raw(&home, &wd, &["push", "-q", "origin", "HEAD:refs/notes/x"]);
+    assert!(!out.status.success());
+    let got = ev.next("push").await;
+    assert_eq!((got["ref"].as_str(), got["accepted"].as_bool()), (Some("refs/notes/x"), Some(false)));
+    assert!(got["reason"].as_str().unwrap().contains("only branches"), "{got}");
+    git(&home, &wd, &["push", "-q", "origin", ":refs/heads/feature"]);
+    let got = ev.next("push").await;
+    assert_eq!(
+        (got["ref"].as_str(), got["before"].as_str(), &got["after"], got["accepted"].as_bool()),
+        (Some("refs/heads/feature"), Some(sha.as_str()), &Value::Null, Some(true))
+    );
+
+    // Every kind came, and each event reached the webhook with the same data.
+    let mut kinds: Vec<&str> = ev.all.iter().map(|(k, _)| k.as_str()).collect();
+    kinds.sort();
+    kinds.dedup();
+    assert_eq!(kinds, sorted(code_control::webhooks::EVENTS.to_vec()));
+    for (kind, data) in &ev.all {
+        let g = rx.wait(kind, |g| g.body["data"] == *data).await;
+        assert_eq!(keys(&g.body), ["data", "delivery", "event", "repo", "webhook"]);
+        assert_eq!((g.body["event"].as_str(), g.body["webhook"].as_str()), (Some(kind.as_str()), Some(hook.as_str())));
+        assert_eq!(g.body["delivery"], g.headers["x-roll-delivery"].to_str().unwrap());
+        assert_eq!(keys(&g.body["repo"]), ["default_branch", "full_name", "id", "visibility"]);
+    }
+}

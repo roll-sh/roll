@@ -64,6 +64,17 @@ impl<St: Send + Sync> axum::extract::FromRequest<St> for Body {
     }
 }
 
+/// The query string, or a JSON 400 (axum's own `Query` rejection is plain text).
+pub(crate) struct Q<T>(pub(crate) T);
+
+impl<T: serde::de::DeserializeOwned, St: Send + Sync> FromRequestParts<St> for Q<T> {
+    type Rejection = Error;
+
+    async fn from_request_parts(parts: &mut Parts, state: &St) -> Result<Self, Self::Rejection> {
+        Query::<T>::from_request_parts(parts, state).await.map(|Query(q)| Q(q)).map_err(|e| Error::Invalid(e.body_text()))
+    }
+}
+
 /// The browser calls the API directly. `Access-Control-Allow-Headers: *` doesn't cover
 /// `Authorization`, so requested headers are mirrored.
 fn cors() -> CorsLayer {
@@ -248,7 +259,7 @@ struct OwnerQuery {
     owner: Option<String>,
 }
 
-async fn list_repos(State(code): S, caller: Caller, Query(q): Query<OwnerQuery>) -> Result<Json<Vec<Repo>>> {
+async fn list_repos(State(code): S, caller: Caller, Q(q): Q<OwnerQuery>) -> Result<Json<Vec<Repo>>> {
     let owner_id = match q.owner.as_deref().filter(|o| !o.is_empty()) {
         Some(o) => Some(code.owner_or_404(o)?.id),
         None => None,
@@ -413,7 +424,7 @@ async fn readme(
     State(code): S,
     caller: Caller,
     Path((owner, repo, rev)): Path<(String, String, String)>,
-    Query(q): Query<PathQuery>,
+    Q(q): Q<PathQuery>,
 ) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
     Ok(Json(code.readme(&r, &rev, q.path.as_deref()).await?))
@@ -432,7 +443,7 @@ struct LogQuery {
     cursor: Option<String>,
 }
 
-async fn log(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, Query(q): Query<LogQuery>) -> Result<Json<Value>> {
+async fn log(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, Q(q): Q<LogQuery>) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
     Ok(Json(code.log_view(&r, q.rev.as_deref(), q.path.as_deref(), q.limit.unwrap_or(0), q.cursor.as_deref())?))
 }
@@ -452,7 +463,7 @@ async fn compare(
     State(code): S,
     caller: Caller,
     Path((owner, repo, spec)): Path<(String, String, String)>,
-    Query(q): Query<FormatQuery>,
+    Q(q): Q<FormatQuery>,
 ) -> Result<Response> {
     let r = code.readable(&caller, &owner, &repo)?;
     let (base, head) = spec.split_once("...").ok_or_else(|| Error::Invalid("compare takes base...head".into()))?;
@@ -543,7 +554,7 @@ async fn list_changes(
     State(code): S,
     caller: Caller,
     Path((owner, repo)): Path<(String, String)>,
-    Query(q): Query<StateQuery>,
+    Q(q): Q<StateQuery>,
 ) -> Result<Json<Vec<Change>>> {
     let r = code.readable(&caller, &owner, &repo)?;
     let state = match q.state.as_deref().filter(|s| !s.is_empty()) {
@@ -657,7 +668,7 @@ async fn list_work(
     State(code): S,
     caller: Caller,
     Path((owner, repo)): Path<(String, String)>,
-    Query(q): Query<StateQuery>,
+    Q(q): Q<StateQuery>,
 ) -> Result<Json<Vec<WorkItem>>> {
     let r = code.readable(&caller, &owner, &repo)?;
     let state = match q.state.as_deref().filter(|s| !s.is_empty()) {

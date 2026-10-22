@@ -3,7 +3,7 @@
 
 use crate::api::Body as B;
 use crate::{Caller, Code, Error, Result};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -81,7 +81,7 @@ struct SearchQuery {
     rev: Option<String>,
 }
 
-async fn search(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, Query(q): Query<SearchQuery>) -> Result<Json<Value>> {
+async fn search(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, crate::api::Q(q): crate::api::Q<SearchQuery>) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
     let text = q.q.unwrap_or_default();
     Ok(Json(code.search_code(&r, &text, q.regex.unwrap_or(false), q.case.unwrap_or(false), q.path.as_deref().filter(|p| !p.is_empty()), q.limit.unwrap_or(100), q.rev.as_deref()).await?))
@@ -133,6 +133,6 @@ struct MonthQuery {
     month: Option<String>,
 }
 
-async fn usage(State(code): S, caller: Caller, Path(owner): Path<String>, Query(q): Query<MonthQuery>) -> Result<Json<Value>> {
+async fn usage(State(code): S, caller: Caller, Path(owner): Path<String>, crate::api::Q(q): crate::api::Q<MonthQuery>) -> Result<Json<Value>> {
     Ok(Json(code.usage_view(&caller, &owner, q.month.as_deref())?))
 }
