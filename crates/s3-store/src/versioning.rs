@@ -367,17 +367,20 @@ pub(crate) fn check_retention_change(old: &ObjectLock, new: Option<(&str, i64)>,
         return Ok(());
     }
     let old_until = old.retain_until.unwrap_or(0);
-    let weaker = match new {
+    let governance = old.mode.as_deref() == Some("GOVERNANCE");
+    // Changing a GOVERNANCE retention other than by extending it (shortening, removing, or
+    // turning it into COMPLIANCE, which nobody could then lift) needs the bypass, as on S3.
+    let needs_bypass = match new {
         None => true,
-        Some((mode, until)) => until < old_until || (old.mode.as_deref() == Some("COMPLIANCE") && mode != "COMPLIANCE"),
+        Some((mode, until)) => until < old_until || (old.mode.as_deref() == Some("COMPLIANCE") && mode != "COMPLIANCE") || (governance && mode != "GOVERNANCE"),
     };
-    if !weaker {
+    if !needs_bypass {
         return Ok(());
     }
-    if old.mode.as_deref() == Some("GOVERNANCE") && bypass {
+    if governance && bypass {
         return Ok(());
     }
-    Err(StoreError::ObjectLocked("the version's retention can't be shortened or removed".into()))
+    Err(StoreError::ObjectLocked("the version's retention can only be extended without a governance bypass".into()))
 }
 
 /// One page of S3's ListObjectVersions over a bucket's view: for each key in order, its current

@@ -283,3 +283,46 @@ async fn versions() {
     let e = t.client.get_object_attributes().bucket("ver").key("k").version_id("0".repeat(32)).object_attributes(ObjectAttributes::Etag).send().await.unwrap_err();
     assert_eq!(code(&e), "NoSuchVersion");
 }
+
+/// With checksum mode (current SDKs always send it), `GET ?partNumber=` answers that part's own
+/// checksum with the object's checksum type, for both types.
+#[tokio::test(flavor = "multi_thread")]
+async fn part_gets_return_the_part_checksum() {
+    let t = start().await;
+    t.client.create_bucket().bucket("part-cksum").send().await.unwrap();
+    for (alg, kind) in [(ChecksumAlgorithm::Sha256, ChecksumType::Composite), (ChecksumAlgorithm::Crc32, ChecksumType::FullObject)] {
+        let key = format!("mp-{}", alg.as_str());
+        let (checksums, _, _) = multipart(&t, "part-cksum", &key, &[5 << 20, 1000], Some(alg.clone()), Some(kind.clone())).await;
+        for (i, want) in checksums.iter().enumerate() {
+            let r = t.client.get_object().bucket("part-cksum").key(&key).part_number(i as i32 + 1).checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled).send().await.unwrap();
+            let got = match alg {
+                ChecksumAlgorithm::Sha256 => r.checksum_sha256(),
+                _ => r.checksum_crc32(),
+            };
+            assert_eq!(got, Some(want.as_str()), "{key} part {}", i + 1);
+            assert_eq!(r.checksum_type(), Some(&kind), "{key} part {}", i + 1);
+            let h = t.client.head_object().bucket("part-cksum").key(&key).part_number(i as i32 + 1).checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled).send().await.unwrap();
+            assert_eq!(h.checksum_type(), Some(&kind));
+        }
+    }
+}
+
+/// An SSE-C object's attributes need its key (400 without it), as GET does.
+#[tokio::test(flavor = "multi_thread")]
+async fn sse_c_attributes_need_the_key() {
+    use base64::Engine;
+    let t = start().await;
+    t.client.create_bucket().bucket("ssec-attr").send().await.unwrap();
+    let key = [7u8; 32];
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let md5 = {
+        use md5::Digest;
+        md5::Md5::digest(key).to_vec()
+    };
+    let (k, m) = (b64(&key), b64(&md5));
+    t.client.put_object().bucket("ssec-attr").key("o").sse_customer_algorithm("AES256").sse_customer_key(&k).sse_customer_key_md5(&m).body(ByteStream::from_static(b"secret")).send().await.unwrap();
+    let e = t.client.get_object_attributes().bucket("ssec-attr").key("o").set_object_attributes(Some(ALL.to_vec())).send().await.unwrap_err();
+    assert_eq!(status(&e), 400, "{}", code(&e));
+    let r = t.client.get_object_attributes().bucket("ssec-attr").key("o").set_object_attributes(Some(ALL.to_vec())).sse_customer_algorithm("AES256").sse_customer_key(&k).sse_customer_key_md5(&m).send().await.unwrap();
+    assert_eq!(r.object_size(), Some(6));
+}

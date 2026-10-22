@@ -300,7 +300,9 @@ pub(crate) fn request_time(req: &Request) -> Result<(String, i64), S3Error> {
     Ok(match req.header("x-amz-date") {
         Some(d) => (d.trim().to_string(), time::parse_amz_date(d.trim()).ok_or_else(bad)?),
         None => {
-            let t = time::parse_http_date(req.header("date").ok_or_else(bad)?).ok_or_else(bad)?;
+            // botocore signs with a `Date` like `Thu, 22 Oct 2026 10:33:26 -0000` when the
+            // request has one: numeric zones are allowed, as in SigV2.
+            let t = crate::sigv2::parse_date(req.header("date").ok_or_else(bad)?).ok_or_else(bad)?;
             (time::amz_date(t), t)
         }
     })
@@ -675,6 +677,9 @@ pub fn check_post_policy(policy_b64: &str, fields: &[(String, String)], bucket: 
     for c in conditions {
         match c {
             serde_json::Value::Object(m) => {
+                if m.len() != 1 {
+                    return Err(invalid(format!("Invalid Policy: Invalid Simple-Condition: Simple-Conditions must have exactly one property specified: {c}")));
+                }
                 for (k, v) in m {
                     let want = v.as_str().ok_or_else(|| invalid(format!("Invalid Policy: Invalid Simple-Condition: value must be a string: {c}")))?;
                     if value_of(k).as_deref() != Some(want) {
@@ -1032,6 +1037,9 @@ pub(crate) mod tests {
         }
         let s = p(ok, ("date", "Fri, 24 May 2013 00:00:00 GMT"), UNSIGNED_PAYLOAD).unwrap().unwrap();
         assert_eq!((s.amz_date.as_str(), s.timestamp), ("20130524T000000Z", T));
+        // botocore's `Date` when the request already has one (numeric zone).
+        let s = p(ok, ("date", "Fri, 24 May 2013 00:00:00 -0000"), UNSIGNED_PAYLOAD).unwrap().unwrap();
+        assert_eq!((s.amz_date.as_str(), s.timestamp), ("20130524T000000Z", T));
         // Payload hashes.
         assert_eq!(p(ok, d, STREAMING_ECDSA_PAYLOAD), Err(Code::InvalidRequest), "ECDSA chunks need a SigV4a signature");
         assert_eq!(p(ok, d, &EMPTY_SHA256.to_uppercase()).unwrap().unwrap().payload, Payload::Sha256(EMPTY_SHA256.into()));
@@ -1196,6 +1204,9 @@ pub(crate) mod tests {
         assert_eq!(check(all, &fields, 0), Ok(None), "file, policy, x-amz-signature and x-ignore-* need no condition");
         assert_eq!(check(r#"["starts-with","$KEY","uploads/"],["EQ","$content-type","text/plain"],["starts-with","$X-Amz-Meta-A",""]"#, &fields, 0), Ok(None), "names and operators are case-insensitive");
         assert_eq!(check(&format!(r#"{all},["content-length-range",0,5]"#), &fields, 0), Ok(Some((0, 5))));
+        // A simple condition is one name and value.
+        assert_eq!(check(&format!("{all},{{}}"), &fields, 0), Err(Code::InvalidPolicyDocument));
+        assert_eq!(check(r#"{"bucket":"b","key":"uploads/a.txt"}"#, &fields, 0), Err(Code::InvalidPolicyDocument));
         let exp = time::parse_iso8601("2030-01-01T00:00:00Z").unwrap();
         assert_eq!(check(all, &fields, exp), Ok(None));
         let denied = Err(Code::AccessDenied);

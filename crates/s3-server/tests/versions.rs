@@ -166,7 +166,7 @@ async fn versioning_through_the_sdk() {
     // Suspended: null versions.
     enable(&t, "ver", BucketVersioningStatus::Suspended).await;
     assert_eq!(t.client.get_bucket_versioning().bucket("ver").send().await.unwrap().status(), Some(&BucketVersioningStatus::Suspended));
-    assert_eq!(put(&t, "ver", "k", b"null").await, "null");
+    assert_eq!(put(&t, "ver", "k", b"null").await, "", "a write that makes the null version sends no x-amz-version-id, as on S3");
     assert_eq!(get_version(&t, "ver", "k", "null").await, b"null");
     assert_eq!(t.client.delete_object().bucket("ver").key("k").send().await.unwrap().version_id(), Some("null"));
 
@@ -202,6 +202,8 @@ async fn listing_object_versions() {
     assert_eq!(r.common_prefixes().iter().map(|p| p.prefix().unwrap()).collect::<Vec<_>>(), ["b/"]);
     assert_eq!(r.versions().len(), 3 + 2 + 2);
     assert!(r.delete_markers().is_empty());
+    let owner = t.store.owner_id();
+    assert!(r.versions().iter().all(|v| v.owner().and_then(|o| o.id()) == Some(owner.as_str())), "the canonical owner id, as in ListObjects and ACLs");
     let r = t.client.list_object_versions().bucket("lst").prefix("b/").send().await.unwrap();
     assert_eq!((r.versions().len(), r.delete_markers().len()), (3, 1));
     let r = t.client.list_object_versions().bucket("lst").max_keys(2).send().await.unwrap();
@@ -217,7 +219,7 @@ async fn listing_object_versions() {
         r
     };
     let body = raw("encoding-type=url&prefix=c&versions").send(&t).await.text().await.unwrap();
-    assert!(body.contains("<Key>c+d</Key>") && body.contains("<EncodingType>url</EncodingType>"), "{body}");
+    assert!(body.contains("<Key>c%20d</Key>") && body.contains("<EncodingType>url</EncodingType>"), "{body}");
     // Errors.
     assert_eq!(status_code(raw("versions&version-id-marker=null").send(&t).await).await, (400, "InvalidArgument".into()), "a version-id marker needs a key marker");
     assert_eq!(status_code(raw("versions&key-marker=a&version-id-marker=nope").send(&t).await).await, (400, "InvalidArgument".into()));

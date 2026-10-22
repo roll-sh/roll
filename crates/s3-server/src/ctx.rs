@@ -123,6 +123,9 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
     let raw_path = parts.uri.path().to_string();
     let raw_query = parts.uri.query().unwrap_or_default().to_string();
     let head = parts.method == Method::HEAD;
+    // Whether the request has a body an error answer may leave unread (see below).
+    let has_body = parts.headers.contains_key("transfer-encoding")
+        || parts.headers.get("content-length").and_then(|v| v.to_str().ok()).is_some_and(|v| v.trim() != "0");
     let request_id = request_id();
     let addressed = address(&server, &parts.headers, &raw_path);
     let website = crate::website::host_bucket(&server, &parts.headers).is_some();
@@ -162,7 +165,14 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
                 tracing::warn!(code = e.code.as_str(), message = e.message, method = %ctx.method, resource = ctx.resource(), "s3 request failed");
             }
             let e = if e.resource.is_none() { e.with_resource(ctx.resource()) } else { e };
-            response::error(&e, &request_id, head)
+            let mut r = response::error(&e, &request_id, head);
+            // An error can come before the body is read (often with `Expect: 100-continue`, the
+            // client still waiting to send it). A client that sends it anyway after its wait
+            // times out must not have those bytes read as its next request: close instead.
+            if has_body {
+                response::set(&mut r, "connection", "close");
+            }
+            r
         }
     };
     response::set(&mut resp, "x-amz-request-id", &request_id);

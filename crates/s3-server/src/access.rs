@@ -130,7 +130,7 @@ impl Ctx {
     pub(crate) fn require_session(&self, action: &str, bucket: Option<&str>, key: Option<&str>) -> Result<(), S3Error> {
         let Some(k) = self.auth.as_ref().map(|a| &a.key).filter(|k| k.is_temporary()) else { return Ok(()) };
         let account = Account { id: self.store().account_id(), owner: self.store().owner_id() };
-        let cond = Cond { ctx: self, who: Who::Key(k), bucket: bucket.unwrap_or_default(), key, account: &account, tags: OnceLock::new() };
+        let cond = Cond { ctx: self, who: Who::Key(k), bucket: bucket.unwrap_or_default(), key, account: &account, tags: OnceLock::new(), prefix: None };
         let resource = resource_arn(bucket.unwrap_or("*"), key);
         if crate::temporary::bounded(k, &account, action, &resource, &cond) { Ok(()) } else { Err(S3Error::new(Code::AccessDenied)) }
     }
@@ -165,6 +165,17 @@ fn acl_permission(action: &str) -> Option<(bool, &'static str)> {
 /// May `who` do `action` (an IAM action name) on `bucket` (and `key`)? `need` is the key
 /// permission that allows it without any policy or ACL.
 pub(crate) fn authorize(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &str, need: Need) -> Result<(), S3Error> {
+    authorize_as(ctx, who, bucket, key, action, need, None)
+}
+
+/// Whether `who` may list `bucket` with `prefix` (`s3:ListBucket`, the policy's `s3:prefix`
+/// being `prefix`): S3 tells such a requester that a key it can't read doesn't exist (404)
+/// rather than 403, since a listing would show that anyway.
+pub(crate) fn may_list_prefix(ctx: &Ctx, who: Who, bucket: &str, prefix: &str) -> bool {
+    authorize_as(ctx, who, bucket, None, "s3:ListBucket", Need::Read, Some(prefix)).is_ok()
+}
+
+fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &str, need: Need, prefix: Option<&str>) -> Result<(), S3Error> {
     let denied = || S3Error::new(Code::AccessDenied);
     let a = match ctx.access(bucket) {
         Ok(a) => a,
@@ -182,7 +193,7 @@ pub(crate) fn authorize(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, ac
         && k.is_temporary()
     {
         let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
-        let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new() };
+        let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new(), prefix };
         if !crate::temporary::bounded(k, &account, action, &resource_arn(bucket, key), &cond) {
             return Err(denied());
         }
@@ -201,7 +212,7 @@ pub(crate) fn authorize(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, ac
             let p = p();
             let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
             let resource = resource_arn(bucket, key);
-            let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new() };
+            let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new(), prefix };
             policy.evaluate(p, &account, action, &resource, &cond)
         }
         None => Decision::None,
@@ -245,6 +256,8 @@ struct Cond<'a> {
     account: &'a Account,
     /// The object's current tags, read on first use.
     tags: OnceLock<Option<BTreeMap<String, String>>>,
+    /// `s3:prefix` when it isn't the request's `prefix` parameter.
+    prefix: Option<&'a str>,
 }
 
 impl Cond<'_> {
@@ -278,6 +291,7 @@ impl Context for Cond<'_> {
             "aws:principalaccount" => one(key_id.map(|_| self.account.id.clone())),
             "aws:principalarn" => one(key_id.map(|k| format!("arn:aws:iam::{}:user/{k}", self.account.id))),
             "aws:principaltype" => one(Some(if key_id.is_some() { "User" } else { "Anonymous" }.into())),
+            "s3:prefix" if self.prefix.is_some() => one(self.prefix.map(str::to_string)),
             "s3:prefix" | "s3:delimiter" | "s3:max-keys" => one(ctx.q(&key[3..]).map(str::to_string)),
             "s3:versionid" => one(ctx.q("versionId").map(str::to_string)),
             "s3:signatureversion" => one(ctx.auth.as_ref().map(|_| "AWS4-HMAC-SHA256".to_string())),

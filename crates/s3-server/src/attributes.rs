@@ -96,7 +96,9 @@ pub(crate) fn get_attributes(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     let max = int_header(ctx, "x-amz-max-parts", 1000)?.min(1000);
     let marker = int_header(ctx, "x-amz-part-number-marker", 0)?;
     let vid = versioning::version_id(ctx)?;
-    let meta = ctx.store().get_object_version(&bucket.name, ctx.key_name(), vid.as_deref()).s3()?;
+    let (meta, enc) = ctx.store().get_version_encryption(&bucket.name, ctx.key_name(), vid.as_deref()).s3()?;
+    // An SSE-C object's attributes need its key, as its bytes do.
+    crate::sse::key_for(ctx, enc.as_ref(), crate::sse::Use::Read)?;
     ctx.meter(&bucket.id, Class::B);
     if let Err(e) = Conditions::from_headers(|n| ctx.h(n)).check_read(&meta.etag, meta.modified_at) {
         if e.code == Code::NotModified {

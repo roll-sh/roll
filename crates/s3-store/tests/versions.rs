@@ -306,7 +306,11 @@ async fn object_lock_protects_versions_from_every_deletion() {
     let shorter = Some(("GOVERNANCE".to_string(), s.now() + DAY));
     assert!(matches!(s.put_retention("lck", "g2", None, shorter.clone(), false).await, Err(StoreError::ObjectLocked(_))));
     s.put_retention("lck", "g2", None, shorter, true).await.unwrap();
-    s.put_retention("lck", "g2", None, Some(("COMPLIANCE".into(), s.now() + 2 * DAY)), false).await.unwrap();
+    // Turning GOVERNANCE into COMPLIANCE (which nobody can lift) needs the bypass too.
+    assert!(matches!(s.put_retention("lck", "g2", None, Some(("COMPLIANCE".into(), s.now() + 2 * DAY)), false).await, Err(StoreError::ObjectLocked(_))));
+    let longer = Some(("GOVERNANCE".to_string(), s.now() + 2 * DAY));
+    s.put_retention("lck", "g2", None, longer, false).await.unwrap();
+    s.put_retention("lck", "g2", None, Some(("COMPLIANCE".into(), s.now() + 2 * DAY)), true).await.unwrap();
     assert!(matches!(s.put_retention("lck", "g2", None, None, true).await, Err(StoreError::ObjectLocked(_))), "now COMPLIANCE");
 
     // A legal hold blocks even a bypass.

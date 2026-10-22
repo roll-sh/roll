@@ -10,7 +10,8 @@
     "test:tasks": "scripts/test-tasks.sh",
     "test:stream": "scripts/test-stream.sh",
     "test:queues": "scripts/test-queues.sh",
-    "test:storage": "scripts/test-storage.sh"
+    "test:storage": "scripts/test-storage.sh",
+    "test:s3-conformance": "scripts/test-s3-conformance.sh"
   },
   "packageManager": "pnpm@12.10.1"
 }

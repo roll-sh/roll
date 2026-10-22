@@ -100,17 +100,24 @@ fn md5_hex(data: &[u8]) -> String {
 
 /// S3's multipart ETag: MD5 of the parts' binary MD5s, then `-<count>`.
 fn multipart_etag(parts: &[Part]) -> String {
+    multipart_etag_of(parts.iter().map(|p| p.etag.as_str()))
+}
+
+/// The ETag of a multipart object from its parts' ETags (unquoted), in order: S3's
+/// `md5(md5s)-<parts>`.
+pub fn multipart_etag_of<'a>(etags: impl ExactSizeIterator<Item = &'a str>) -> String {
+    let n = etags.len();
     let mut h = Md5::new();
-    for p in parts {
-        let bytes: Vec<u8> = (0..p.etag.len() / 2).filter_map(|i| u8::from_str_radix(p.etag.get(2 * i..2 * i + 2)?, 16).ok()).collect();
+    for etag in etags {
+        let bytes: Vec<u8> = (0..etag.len() / 2).filter_map(|i| u8::from_str_radix(etag.get(2 * i..2 * i + 2)?, 16).ok()).collect();
         if bytes.len() == 16 {
             h.update(&bytes);
         } else {
-            h.update(p.etag.as_bytes());
+            h.update(etag.as_bytes());
         }
     }
     let digest: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    format!("{digest}-{}", parts.len())
+    format!("{digest}-{n}")
 }
 
 impl Store {

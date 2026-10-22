@@ -289,6 +289,15 @@ async fn policy_conditions() {
     // A source-IP pin that doesn't match denies anonymous reads.
     set_policy(&t, "cond", json!({"Statement": {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::cond/*", "Condition": {"IpAddress": {"aws:SourceIp": "203.0.113.0/24"}}}})).await;
     assert_eq!(anon(&t, "GET", "/cond/k").await, 403);
+    // Missing keys: 404 for a requester who may list them (s3:prefix is the key), else 403.
+    set_policy(&t, "cond", json!({"Statement": {"Effect": "Allow", "Principal": "*", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::cond", "Condition": {"StringLike": {"s3:prefix": "public/*"}}}})).await;
+    let other = t.store.create_key("other", KeyPermission::Read, Some(Vec::new())).await.unwrap();
+    let oc = client(&t.endpoint, &other.id, &other.secret);
+    let head = |k: &'static str| oc.head_object().bucket("cond").key(k).send();
+    assert_eq!(head("public/missing").await.unwrap_err().raw_response().unwrap().status().as_u16(), 404);
+    assert_eq!(head("private/missing").await.unwrap_err().raw_response().unwrap().status().as_u16(), 403);
+    assert_eq!(head("k").await.unwrap_err().raw_response().unwrap().status().as_u16(), 403, "an object it can't read");
+    assert_eq!(anon(&t, "HEAD", "/cond/public/missing").await, 404);
 }
 
 #[tokio::test(flavor = "multi_thread")]

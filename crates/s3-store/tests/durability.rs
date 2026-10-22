@@ -307,7 +307,7 @@ async fn recovery_rebuilds_the_metadata_exactly() {
     let v1 = put(&s, "vers", "k", b"1").await;
     put(&s, "vers", "k", b"2").await;
     s.put_legal_hold("vers", "k", Some(&v1.version_id), true).await.unwrap();
-    s.put_retention("vers", "k", None, Some(("COMPLIANCE".into(), s.now() + 2 * DAY)), false).await.unwrap();
+    s.put_retention("vers", "k", None, Some(("COMPLIANCE".into(), s.now() + 2 * DAY)), true).await.unwrap();
     s.branch_bucket("vers", "vers-branch").await.unwrap();
     s.delete_object("vers", "k", None).await.unwrap();
     s.put_version_tags("vers-branch", "k", None, [("t".to_string(), "1".to_string())].into()).await.unwrap();

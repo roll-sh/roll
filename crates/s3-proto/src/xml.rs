@@ -105,7 +105,15 @@ pub struct BucketEntry {
 
 /// `ListAllMyBucketsResult`.
 pub fn list_buckets(o: &Owner, buckets: &[BucketEntry]) -> String {
+    list_buckets_page(o, buckets, None, None)
+}
+
+/// `ListAllMyBucketsResult` of a page (`max-buckets`): `next` is the `ContinuationToken` of the
+/// next page, `prefix` the request's.
+pub fn list_buckets_page(o: &Owner, buckets: &[BucketEntry], next: Option<&str>, prefix: Option<&str>) -> String {
     let mut w = W::root("ListAllMyBucketsResult");
+    w.opt("ContinuationToken", next);
+    w.opt("Prefix", prefix);
     owner(&mut w, "Owner", o);
     w.open("Buckets");
     for b in buckets {
@@ -796,12 +804,12 @@ mod tests {
             ..Default::default()
         };
         let x = list_objects_v2(&l);
-        assert!(x.contains("<Name>b</Name><Prefix>a+b/</Prefix><Delimiter>/</Delimiter><MaxKeys>1000</MaxKeys><EncodingType>url</EncodingType>"), "{x}");
-        assert!(x.contains("<Key>a+b/x%26y.txt</Key>"));
+        assert!(x.contains("<Name>b</Name><Prefix>a%20b/</Prefix><Delimiter>/</Delimiter><MaxKeys>1000</MaxKeys><EncodingType>url</EncodingType>"), "{x}");
+        assert!(x.contains("<Key>a%20b/x%26y.txt</Key>"));
         assert!(x.contains("<ETag>&quot;abc&quot;</ETag>"));
         assert!(x.contains("<KeyCount>2</KeyCount>"));
         assert!(x.contains("<NextContinuationToken>tok</NextContinuationToken>"));
-        assert!(x.contains("<CommonPrefixes><Prefix>a+b/dir/</Prefix></CommonPrefixes>"));
+        assert!(x.contains("<CommonPrefixes><Prefix>a%20b/dir/</Prefix></CommonPrefixes>"));
         assert!(x.contains("<LastModified>2009-10-12T17:50:30.000Z</LastModified>"));
         // It parses back.
         let n = parse(x.as_bytes()).unwrap();
@@ -966,8 +974,8 @@ mod tests {
         let owner = Owner { id: "o".into(), display_name: "d".into() };
         let e = ObjectEntry { checksum: Some((Algorithm::Crc64Nvme, ChecksumType::FullObject)), owner: Some(owner.clone()), ..entry("a b+c") };
         let v1 = list_objects_v1(&ListV1 { name: "b".into(), prefix: "a b".into(), marker: "m n".into(), next_marker: Some("c+d".into()), delimiter: Some(" ".into()), max_keys: 7, is_truncated: true, url_encode: true, contents: vec![e.clone()], common_prefixes: vec!["p q ".into()] });
-        assert!(v1.contains("<Prefix>a+b</Prefix><Marker>m+n</Marker><NextMarker>c%2Bd</NextMarker><MaxKeys>7</MaxKeys><Delimiter>+</Delimiter><EncodingType>url</EncodingType><IsTruncated>true</IsTruncated>"), "{v1}");
-        assert!(v1.contains("<Key>a+b%2Bc</Key>") && v1.contains("<Prefix>p+q+</Prefix>"));
+        assert!(v1.contains("<Prefix>a%20b</Prefix><Marker>m%20n</Marker><NextMarker>c%2Bd</NextMarker><MaxKeys>7</MaxKeys><Delimiter>%20</Delimiter><EncodingType>url</EncodingType><IsTruncated>true</IsTruncated>"), "{v1}");
+        assert!(v1.contains("<Key>a%20b%2Bc</Key>") && v1.contains("<Prefix>p%20q%20</Prefix>"));
         assert!(v1.contains("<ChecksumAlgorithm>CRC64NVME</ChecksumAlgorithm><ChecksumType>FULL_OBJECT</ChecksumType><Size>5</Size><Owner><ID>o</ID><DisplayName>d</DisplayName></Owner><StorageClass>STANDARD</StorageClass>"), "{v1}");
         well_formed(&v1, "ListBucketResult");
         let v2 = list_objects_v2(&ListV2 { name: "b".into(), continuation_token: Some("t<".into()), start_after: Some("s t".into()), contents: vec![entry("a b")], ..Default::default() });
@@ -986,8 +994,8 @@ mod tests {
             owner: owner.clone(),
             ..Default::default()
         });
-        assert!(lu.contains("<KeyMarker>k+m</KeyMarker><UploadIdMarker></UploadIdMarker><NextKeyMarker>n+k</NextKeyMarker><NextUploadIdMarker>u2</NextUploadIdMarker>"), "{lu}");
-        assert!(lu.contains("<Key>a+b</Key>") && lu.contains("<ChecksumAlgorithm>CRC32</ChecksumAlgorithm><ChecksumType>COMPOSITE</ChecksumType></Upload><CommonPrefixes><Prefix>d+</Prefix></CommonPrefixes>"), "{lu}");
+        assert!(lu.contains("<KeyMarker>k%20m</KeyMarker><UploadIdMarker></UploadIdMarker><NextKeyMarker>n%20k</NextKeyMarker><NextUploadIdMarker>u2</NextUploadIdMarker>"), "{lu}");
+        assert!(lu.contains("<Key>a%20b</Key>") && lu.contains("<ChecksumAlgorithm>CRC32</ChecksumAlgorithm><ChecksumType>COMPOSITE</ChecksumType></Upload><CommonPrefixes><Prefix>d%20</Prefix></CommonPrefixes>"), "{lu}");
         well_formed(&lu, "ListMultipartUploadsResult");
         let lp = list_parts(&ListParts {
             next_part_number_marker: Some(3),

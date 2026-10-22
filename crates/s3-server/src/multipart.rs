@@ -189,9 +189,48 @@ fn object_checksum(ctx: &Ctx, up: &Upload, chosen: &[&Part], sent: &[xml::Comple
     Ok(Some(Checksum { algorithm: a.as_str().into(), kind: t.as_str().into(), value }))
 }
 
+/// The answer to a CompleteMultipartUpload of an upload that's gone: a retry (SDKs retry a
+/// completion whose answer was lost) gets the same answer as the first attempt, as on S3, if the
+/// key's current version is what completing these parts made (same multipart ETag). Nothing
+/// is written.
+async fn completed_already(ctx: &Ctx, bucket: &Bucket, body: Body, gone: S3Error) -> Reply {
+    let raw = read_small_object_checksum(ctx, body, xml::MAX_XML_BYTES).await?;
+    let Ok(sent) = xml::parse_complete_multipart(&raw) else { return Err(gone) };
+    if sent.is_empty() {
+        return Err(gone);
+    }
+    let expected = s3_store::multipart_etag_of(sent.iter().map(|p| p.etag.as_str()));
+    let (meta, enc) = match ctx.store().get_version_encryption(&bucket.name, ctx.key_name(), None) {
+        Ok(found) => found,
+        Err(_) => return Err(gone),
+    };
+    if meta.etag != expected || meta.parts as usize != sent.len() {
+        return Err(gone);
+    }
+    complete_response(ctx, bucket, &meta, enc.as_ref())
+}
+
+fn complete_response(ctx: &Ctx, bucket: &Bucket, meta: &s3_store::ObjectMeta, enc: Option<&s3_store::Encryption>) -> Reply {
+    let host = ctx.h("host").unwrap_or("localhost").to_string();
+    let location = format!("http://{host}/{}/{}", bucket.name, uri_encode(&meta.key, false));
+    let c = meta.checksum.as_ref().and_then(|c| Some((Algorithm::parse(&c.algorithm)?, c.value.as_str(), ChecksumType::parse(&c.kind)?)));
+    let mut r = response::xml(StatusCode::OK, xml::complete_multipart(&location, &bucket.name, &meta.key, &meta.etag, c));
+    if let Some(c) = &meta.checksum {
+        set_checksum(&mut r, c);
+    }
+    crate::versioning::set_written_version(&mut r, bucket, &meta.version_id);
+    crate::lifecycle::set_expiration(&mut r, bucket, meta);
+    sse::set_headers(&mut r, enc, ctx.store().sse_s3_at_rest());
+    Ok(r)
+}
+
 pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
-    let up = find_upload(ctx, bucket)?;
+    let up = match find_upload(ctx, bucket) {
+        Ok(up) => up,
+        Err(e) if e.code == Code::NoSuchUpload => return completed_already(ctx, bucket, body, e).await,
+        Err(e) => return Err(e),
+    };
     let enc = ctx.store().blob_encryption(&up.blob_id).s3()?;
     let key = sse::key_for(ctx, enc.as_ref(), sse::Use::Complete)?;
     let raw = read_small_object_checksum(ctx, body, xml::MAX_XML_BYTES).await?;
@@ -216,16 +255,7 @@ pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Repl
     let guard = InflightBlob::adopt(ctx.store(), up.blob_id.clone());
     let meta = ctx.store().complete_upload_sse(&bucket.name, &up.id, &parts, checksum, &cond, key.as_ref()).await.s3()?;
     drop(guard);
-    let host = ctx.h("host").unwrap_or("localhost").to_string();
-    let location = format!("http://{host}/{}/{}", bucket.name, uri_encode(&meta.key, false));
-    let c = meta.checksum.as_ref().and_then(|c| Some((Algorithm::parse(&c.algorithm)?, c.value.as_str(), ChecksumType::parse(&c.kind)?)));
-    let mut r = response::xml(StatusCode::OK, xml::complete_multipart(&location, &bucket.name, &meta.key, &meta.etag, c));
-    if let Some(c) = &meta.checksum {
-        set_checksum(&mut r, c);
-    }
-    crate::versioning::set_version(&mut r, bucket, &meta.version_id, false);
-    sse::set_headers(&mut r, enc.as_ref(), ctx.store().sse_s3_at_rest());
-    Ok(r)
+    complete_response(ctx, bucket, &meta, enc.as_ref())
 }
 
 pub(crate) async fn abort(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
