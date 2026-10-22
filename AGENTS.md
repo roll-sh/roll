@@ -116,6 +116,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - Never size an allocation from a count or length a peer sent. Stream bodies, and cap XML bodies.
     - SSE-C and SSE-KMS are the backing object store's: pass them through on the blob's requests, never re-encrypt bytes on S3, and never store a customer key (only its MD5). An encrypted write the backend doesn't confirm fails and keeps nothing.
   - After touching anything storage-related, run `pnpm test:storage`. It skips itself when nothing relevant changed and runs real S3 tools in Docker (`amazon/aws-cli`, `rclone/rclone`, MinIO's `mc` from `bitnamilegacy/minio-client`, `d3fk/s3cmd` for SigV2).
+  - `pnpm test:s3-conformance` runs the S3 conformance suite (ceph/s3-tests, pinned) in Docker against a fresh server (`crates/s3-server/examples/serve.rs`) and compares the outcome with `tests/s3-conformance/expected.txt`, which lists every test known not to pass and why. It fails on a regression and on an unexpected pass: after fixing something, remove its lines. Run it after changing S3 behaviour; it skips itself when nothing relevant changed.
   - Put new tests in the matching place:
     - protocol vectors and parsers: unit tests in `s3-proto`
     - metadata, durability, branching and GC: `crates/s3-store/tests/`

@@ -4,6 +4,29 @@ roll storage implements the part of the S3 API that SDKs and tools actually use.
 listed under "supported" returns `501 NotImplemented` with the standard S3 XML error body, so
 clients fail clearly instead of silently doing the wrong thing.
 
+## Conformance (ceph/s3-tests)
+
+[ceph/s3-tests](https://github.com/ceph/s3-tests) is the S3 conformance suite most S3-compatible
+stores measure themselves with. `pnpm test:s3-conformance` runs it (pinned, in Docker) against a
+fresh roll server on a local directory backend, with the selection AWS-compatible
+implementations use: `test_s3.py` and `test_headers.py` without the tests AWS itself fails
+(`fails_on_aws`) and without Ceph's extensions (append, S3 Select, IAM/STS/SNS, cloud tiering,
+lifecycle transitions between storage classes, RGW's logging journal and rollover).
+
+**413 of 646 tests pass (63.9%).** Every other one is listed with its reason in
+[`tests/s3-conformance/expected.txt`](../../tests/s3-conformance/expected.txt), and the script
+fails if anything changes either way:
+
+| tests | why they don't pass |
+|---|---|
+| 78 | **S3's current defaults, which the suite predates.** New buckets are `BucketOwnerEnforced` (ACLs off), as on S3 since April 2023, so tests that set ACLs without `ObjectOwnership` get `InvalidBucketAclWithObjectOwnership`/`AccessControlListNotSupported`, as they would on S3. `GetBucketEncryption` returns the default `AES256` rule. |
+| 62 | **The test environment.** SSE-KMS needs AWS KMS behind the backing bucket (`NotImplemented` on a local directory), and SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3). On an AWS S3 backend these behave as on S3. |
+| 34 | **The suite.** Expectations specific to Ceph RGW (error codes S3 doesn't use, `x-amz-delete-marker: false`, its accelerated lifecycle clock, dropping `TargetGrants`) and tests that can't fail as written (botocore re-signs after the test changes the `Authorization` header). |
+| 22 | **Other accounts and tenants.** roll has one account per deployment; the suite's "alt" user is a roll key scoped to no bucket. Tests that need objects owned by another account, buckets the other account creates, or RGW tenants can't pass. BitTorrent isn't supported (S3 dropped it in 2024). |
+| 15 | **Deliberate (reliability).** A version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted until then; S3 destroys the version at once. |
+| 13 | **GetObjectAttributes**, not implemented yet. |
+| 9 | **roll answers as S3 does where RGW differs:** a wrong SSE-C key is `403 AccessDenied`, `GetBucketPolicyStatus` without a policy is `NoSuchBucketPolicy`. |
+
 ## Addressing and auth
 
 | feature | status |
@@ -32,15 +55,15 @@ clients fail clearly instead of silently doing the wrong thing.
 
 | operation | status |
 |---|---|
-| ListBuckets | ✅ filtered to the key's buckets |
-| CreateBucket, DeleteBucket (must be empty), HeadBucket | ✅ need an `admin` key |
+| ListBuckets | ✅ filtered to the key's buckets; `max-buckets` and `continuation-token` pages, `prefix`, `bucket-region` |
+| CreateBucket, DeleteBucket (must be empty), HeadBucket | ✅ need an `admin` key. Creating a bucket you already have is a no-op `200` in `us-east-1` and `BucketAlreadyOwnedByYou` in other regions, as on S3 (S3 also resets the bucket's ACL; roll changes nothing). |
 | GetBucketLocation | ✅ |
 | Get/Put/DeleteBucketCors | ✅ |
 | Get/Put/DeleteBucketLifecycleConfiguration | ✅ the full rule model: `Filter` (`Prefix`, `Tag`, `And`, `ObjectSizeGreaterThan`/`LessThan`) or the legacy `<Rule><Prefix>`; `Expiration` (`Days`, `Date`, `ExpiredObjectDeleteMarker`); `NoncurrentVersionExpiration` (`NoncurrentDays`, `NewerNoncurrentVersions`); `AbortIncompleteMultipartUpload`; `Transition` and `NoncurrentVersionTransition` (stored, see below). Validated like S3. |
 | Get/PutBucketVersioning | ✅ `Enabled` and `Suspended`. `MfaDelete=Enabled` is `NotImplemented` (there are no MFA devices; use Object Lock). |
 | ListObjectVersions | ✅ `prefix`, `delimiter`, `key-marker`, `version-id-marker`, `max-keys`, `encoding-type=url`, delete markers |
 | Get/PutObjectLockConfiguration | ✅ enable on a versioned bucket (or at CreateBucket with `x-amz-bucket-object-lock-enabled`), default retention in `Days` or `Years` |
-| ListObjectsV2, ListObjects (v1) | ✅ `prefix`, `delimiter`, `start-after`, continuation tokens, `max-keys`, `encoding-type=url` |
+| ListObjectsV2, ListObjects (v1) | ✅ `prefix`, `delimiter`, `start-after`, continuation tokens, `max-keys`, `encoding-type=url` (a space is `%20`; S3 sends `+`; SDKs decode both) |
 | ListMultipartUploads | ✅ |
 | DeleteObjects | ✅ up to 1000 keys, `VersionId` per key, quiet mode, `DeleteMarker`/`DeleteMarkerVersionId` in the result, `x-amz-bypass-governance-retention`; each key is authorized on its own |
 | Get/Put/DeleteBucketTagging | ✅ up to 50 tags, S3's key/value rules |
@@ -61,15 +84,15 @@ clients fail clearly instead of silently doing the wrong thing.
 
 | operation | status |
 |---|---|
-| PutObject | ✅ returns `x-amz-version-id` in versioned buckets |
-| GetObject, HeadObject | ✅ `versionId`, `Range`, `partNumber`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `response-*` overrides, `x-amz-checksum-mode`; Object Lock headers; a delete marker answers 404 (current) or 405 (by id) with `x-amz-delete-marker: true` |
+| PutObject | ✅ returns `x-amz-version-id` in versioned buckets (not for the `null` version a suspended bucket writes, as on S3), and `x-amz-expiration` when a lifecycle rule will expire the object |
+| GetObject, HeadObject | ✅ `versionId`, `Range`, `partNumber`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `response-*` overrides, `x-amz-checksum-mode`; Object Lock headers; `x-amz-expiration` when a lifecycle rule will expire the object; a delete marker answers 404 (current) or 405 (by id) with `x-amz-delete-marker: true`. A missing key is a 404 for a requester who may list it (`s3:ListBucket`, with `s3:prefix` the key) and a 403 otherwise, as on S3. `x-amz-server-side-encryption` on a read is `400 InvalidArgument`. |
 | DeleteObject | ✅ unversioned: the object goes to the bucket's trash. Versioned: a delete marker; with `versionId`, that version is deleted for good (to the trash, see below) |
 | CopyObject | ✅ `x-amz-metadata-directive`, `x-amz-copy-source-if-*`, `?versionId=` in the source, `x-amz-copy-source-version-id`; no data is copied |
-| Conditional writes: `If-None-Match: *`, `If-Match` on PutObject and CompleteMultipartUpload | ✅ |
+| Conditional writes: `If-None-Match: *`, `If-Match` on PutObject and CompleteMultipartUpload | ✅ `If-Match` on a missing key is `404 NoSuchKey`. `If-None-Match` also takes ETags (S3 only `*`): the write fails if the object there has one of them. |
 | Get/Put/DeleteObjectTagging, `x-amz-tagging` | ✅ with `versionId` |
-| Get/PutObjectRetention, Get/PutObjectLegalHold | ✅ `versionId`, `x-amz-bypass-governance-retention` (admin keys) |
+| Get/PutObjectRetention, Get/PutObjectLegalHold | ✅ `versionId`, `x-amz-bypass-governance-retention` (admin keys). A GOVERNANCE retention can be extended freely; shortening it, removing it or turning it into COMPLIANCE needs the bypass. |
 | `x-amz-object-lock-mode`, `-retain-until-date`, `-legal-hold` | ✅ on PutObject (with `Content-MD5` or an `x-amz-checksum-*`, as S3 requires), CopyObject, CreateMultipartUpload and POST Object |
-| CreateMultipartUpload, UploadPart, UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts | ✅ UploadPartCopy takes a source `versionId`; Complete returns `x-amz-version-id` |
+| CreateMultipartUpload, UploadPart, UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts | ✅ UploadPartCopy takes a source `versionId`; Complete returns `x-amz-version-id`. Completing an upload again (an SDK retrying a completion whose answer was lost) gets the same answer, as on S3, as long as the key still holds what those parts made. |
 | POST Object (form upload) | ✅ including the `acl`, `x-amz-website-redirect-location` and Object Lock fields |
 | RestoreObject | ✅ answers `InvalidObjectState` (403), as S3 does for objects that aren't archived: nothing ever is |
 

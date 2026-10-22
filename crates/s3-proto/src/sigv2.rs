@@ -127,7 +127,7 @@ pub fn parse_date(s: &str) -> Option<i64> {
     let (d, y) = (num(day)?, num(year)?);
     let mut t = hms.split(':');
     let (h, mi, sec) = (num(t.next()?)?, num(t.next()?)?, num(t.next()?)?);
-    if t.next().is_some() || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+    if t.next().is_some() || !(1..=31).contains(&d) || !(1970..=9999).contains(&y) || h > 23 || mi > 59 || sec > 60 {
         return None;
     }
     let offset = match *zone {
@@ -170,10 +170,10 @@ pub fn parse(req: &Request) -> Result<Option<SignedV2>, S3Error> {
 /// Header-signed requests within 15 minutes of `now`; presigned URLs not past `Expires`.
 pub fn check_time(s: &SignedV2, now: i64) -> Result<(), S3Error> {
     match s.expires {
-        Some(e) if now > e => Err(denied("Request has expired").with("Expires", time::iso8601_ms(e * 1000)).with("ServerTime", time::iso8601_ms(now * 1000))),
+        Some(e) if now > e => Err(denied("Request has expired").with("Expires", time::iso8601_ms(e.max(0).saturating_mul(1000))).with("ServerTime", time::iso8601_ms(now * 1000))),
         Some(_) => Ok(()),
-        None if (s.timestamp - now).abs() > MAX_SKEW_S => Err(S3Error::new(Code::RequestTimeTooSkewed)
-            .with("RequestTime", time::http_date(s.timestamp * 1000))
+        None if s.timestamp.saturating_sub(now).saturating_abs() > MAX_SKEW_S => Err(S3Error::new(Code::RequestTimeTooSkewed)
+            .with("RequestTime", time::http_date(s.timestamp.saturating_mul(1000)))
             .with("ServerTime", time::iso8601_ms(now * 1000))
             .with("MaxAllowedSkewMilliseconds", (MAX_SKEW_S * 1000).to_string())),
         None => Ok(()),
@@ -254,7 +254,13 @@ pub fn candidates(req: &Request, s: &SignedV2, vhost_bucket: Option<&str>) -> Ve
         }
         (None, None) => dates.push((req.header("date").unwrap_or_default().trim().to_string(), false)),
     }
-    let resources = [canonical_resource(req, vhost_bucket, SUBRESOURCES, false), canonical_resource(req, vhost_bucket, SUBRESOURCES_MINIO, true)];
+    let mut resources = vec![canonical_resource(req, vhost_bucket, SUBRESOURCES, false), canonical_resource(req, vhost_bucket, SUBRESOURCES_MINIO, true)];
+    // botocore signs a path-style bucket request (`/bucket`) as `/bucket/`.
+    let bare_bucket = vhost_bucket.is_none() && req.path.len() > 1 && !req.path[1..].contains('/');
+    if bare_bucket {
+        let slashed = Request { path: &format!("{}/", req.path), ..*req };
+        resources.push(canonical_resource(&slashed, None, SUBRESOURCES, false));
+    }
     let mut out: Vec<String> = Vec::new();
     for (date, skip) in &dates {
         let amz = canonical_amz_headers(req, *skip);
@@ -494,6 +500,36 @@ mod tests {
         assert_eq!(p(&[], "AWSAccessKeyId=a&Signature=b&Expires=later"), Err(Code::AccessDenied));
         assert_eq!(p(&[], "Signature=b&Expires=1"), Err(Code::AccessDenied));
         assert_eq!(p(&[], "prefix=a"), Ok(false));
+        assert_eq!(parse_date("Tue, 27 Mar 99999999999 19:36:42 +0000"), None, "years beyond 9999");
+    }
+
+    #[test]
+    fn botocore_signs_path_style_buckets_with_a_slash() {
+        let headers = [("date", "Thu, 22 Oct 2026 10:34:12 GMT")];
+        let signed_as = Request { method: "PUT", path: "/v2bucket/", query: "", headers: &headers };
+        let auth = authorization(&signed_as, "AK", "secret", None);
+        let sent = Request { method: "PUT", path: "/v2bucket", query: "", headers: &headers };
+        let s = SignedV2 { access_key: "AK".into(), signature: auth.rsplit(':').next().unwrap().into(), expires: None, timestamp: 0 };
+        assert!(verify(&sent, &s, "secret", None).is_ok());
+        // Only a bare bucket: an object's path is signed as sent.
+        let obj = Request { method: "PUT", path: "/v2bucket/key/", query: "", headers: &headers };
+        let s = SignedV2 { signature: authorization(&obj, "AK", "secret", None).rsplit(':').next().unwrap().into(), ..s };
+        assert!(verify(&Request { path: "/v2bucket/key", ..obj }, &s, "secret", None).is_err());
+    }
+
+    #[test]
+    fn extreme_times_are_errors_not_panics() {
+        let at = |timestamp: i64, expires: Option<i64>| check_time(&SignedV2 { access_key: "a".into(), signature: "s".into(), expires, timestamp }, 1_700_000_000).map_err(|e| e.code);
+        // A `Date` before the epoch (s3-tests sends 1950) isn't a valid date: AccessDenied.
+        assert_eq!(parse_date("Tue, 07 Jul 1950 21:41:00 GMT"), None);
+        let p = |date: &str| parse(&Request { method: "PUT", path: "/b", query: "", headers: &[("authorization", "AWS ak:sig"), ("x-amz-date", date)] }).map(|_| ()).map_err(|e| e.code);
+        assert_eq!(p("Tue, 07 Jul 1950 21:53:04 GMT"), Err(Code::AccessDenied));
+        assert_eq!(p("Tue, 07 Jul 1970 21:53:04 GMT"), Ok(()));
+        assert_eq!(at(-1_000_000_000, None), Err(Code::RequestTimeTooSkewed));
+        assert_eq!(at(i64::MIN, None), Err(Code::RequestTimeTooSkewed));
+        assert_eq!(at(i64::MAX, None), Err(Code::RequestTimeTooSkewed));
+        assert_eq!(at(i64::MIN, Some(i64::MIN)), Err(Code::AccessDenied));
+        assert_eq!(at(0, Some(i64::MAX)), Ok(()));
     }
 
     #[test]

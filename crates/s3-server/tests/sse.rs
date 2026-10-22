@@ -295,6 +295,12 @@ async fn sse_s3_and_kms_requests() {
     ] {
         assert_eq!(status_code(raw_put(h.clone()).send(&t).await).await, (400, "InvalidArgument".into()), "{h:?}");
     }
+    // Reads can't ask for server-side encryption.
+    for (h, v) in [("x-amz-server-side-encryption", "aws:kms"), ("x-amz-server-side-encryption", "AES256"), ("x-amz-server-side-encryption-aws-kms-key-id", "k")] {
+        let mut r = Raw::new("GET", "/enc/s3");
+        r.headers = vec![(h, v.to_string())];
+        assert_eq!(status_code(r.send(&t).await).await, (400, "InvalidArgument".into()), "{h}: {v}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

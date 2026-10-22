@@ -97,9 +97,11 @@ fn system_time(ms: i64) -> SystemTime {
     if ms >= 0 { UNIX_EPOCH + Duration::from_millis(ms as u64) } else { UNIX_EPOCH - Duration::from_millis(ms.unsigned_abs()) }
 }
 
-/// `Wed, 21 Oct 2015 07:28:00 GMT` (`Last-Modified`, `Date`).
+/// `Wed, 21 Oct 2015 07:28:00 GMT` (`Last-Modified`, `Date`). Times outside 1970-9999, which
+/// an HTTP date can't show (a peer can send one), are clamped into that range.
 pub fn http_date(ms: i64) -> String {
-    httpdate::fmt_http_date(system_time(ms.div_euclid(1000) * 1000))
+    const MAX_S: i64 = 253_402_300_799; // 9999-12-31T23:59:59Z
+    httpdate::fmt_http_date(system_time(ms.div_euclid(1000).clamp(0, MAX_S) * 1000))
 }
 
 /// Unix seconds of an HTTP date (any of the three formats HTTP allows).
@@ -119,6 +121,15 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_dates_out_of_range_dont_panic() {
+        // A SigV2 `Date` before the epoch is echoed as the request time of its error.
+        let before = days_from_civil(1950, 7, 7) * 86_400;
+        assert_eq!(http_date(before * 1000), "Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(http_date(i64::MIN), "Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(http_date(i64::MAX), "Fri, 31 Dec 9999 23:59:59 GMT");
+    }
 
     #[test]
     fn round_trips() {

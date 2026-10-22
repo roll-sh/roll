@@ -45,4 +45,5 @@ pub use ids::{blob_key, day_of, version_id};
 pub use log::LogStats;
 pub use meter::{Class, Counters, Meter};
 pub use model::*;
+pub use objects::multipart_etag_of;
 pub use store::{Clock, Store, StoreConfig, StoreStats, system_clock};

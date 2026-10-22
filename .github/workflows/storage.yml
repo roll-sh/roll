@@ -15,6 +15,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/test-storage.sh"
+      - "scripts/test-s3-conformance.sh"
+      - "tests/s3-conformance/**"
       - ".github/workflows/storage.yml"
   workflow_dispatch:
   # Pull requests and the merge queue run this through ci.yml.
@@ -48,6 +50,23 @@ jobs:
           docker pull -q bitnamilegacy/minio-client
       - name: Real S3 tools (aws cli, rclone, mc) against roll storage
         run: ROLL_COMPAT_REQUIRED=1 cargo test -p s3-server --test tools
+
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: ceph/s3-tests against roll storage (compared with tests/s3-conformance/expected.txt)
+        run: scripts/test-s3-conformance.sh --force
+      - name: Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-conformance
+          path: target/s3-conformance/
+          if-no-files-found: ignore
 
   s3:
     runs-on: ubuntu-latest

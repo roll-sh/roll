@@ -73,8 +73,13 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
 /// `Content-Encoding` without the transport-only `aws-chunked`.
 fn content_encoding(ctx: &Ctx) -> Option<String> {
     let v = ctx.h("content-encoding")?;
-    let kept: Vec<&str> = v.split(',').map(str::trim).filter(|e| !e.is_empty() && !e.eq_ignore_ascii_case("aws-chunked")).collect();
-    (!kept.is_empty()).then(|| kept.join(","))
+    let all: Vec<&str> = v.split(',').map(str::trim).filter(|e| !e.is_empty()).collect();
+    let kept: Vec<&str> = all.iter().copied().filter(|e| !e.eq_ignore_ascii_case("aws-chunked")).collect();
+    if kept.is_empty() {
+        return None;
+    }
+    // Stored as sent unless `aws-chunked` had to come out (`deflate, gzip` stays as it is).
+    Some(if kept.len() == all.len() { v.trim().to_string() } else { kept.join(", ") })
 }
 
 /// A write's ACL (`x-amz-acl`, `x-amz-grant-*`; `None` = private) and website redirect.
@@ -180,7 +185,8 @@ async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     drop(guard);
     let mut r = response::empty(StatusCode::OK);
     set(&mut r, "etag", &quote_etag(&meta.etag));
-    versioning::set_version(&mut r, bucket, &meta.version_id, false);
+    versioning::set_written_version(&mut r, bucket, &meta.version_id);
+    crate::lifecycle::set_expiration(&mut r, bucket, &meta);
     if let Some(c) = &meta.checksum {
         set_checksum(&mut r, c);
     }
@@ -274,7 +280,22 @@ impl Drop for Metered {
 }
 
 pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
-    ctx.require_object_read(bucket)?;
+    if let Err(e) = ctx.require_object_read(bucket) {
+        // As on S3: a missing key is a 404 for a requester who may list it, a 403 otherwise.
+        if e.code == Code::AccessDenied
+            && matches!(ctx.store().get_object(&bucket.name, ctx.key_name()), Err(s3_store::StoreError::NoSuchKey(_)))
+            && crate::access::may_list_prefix(ctx, ctx.who(), &bucket.name, ctx.key_name())
+        {
+            return Err(S3Error::new(Code::NoSuchKey).with("Key", ctx.key_name().to_string()));
+        }
+        return Err(e);
+    }
+    // A read can't ask for server-side encryption (only SSE-C keys come with reads), as on S3.
+    for h in ["x-amz-server-side-encryption", "x-amz-server-side-encryption-aws-kms-key-id"] {
+        if ctx.h(h).is_some() {
+            return Err(S3Error::msg(Code::InvalidArgument, format!("{h} header is not supported for this operation.")).with("ArgumentName", h.to_string()));
+        }
+    }
     let vid = versioning::version_id(ctx)?;
     let (meta, enc) = ctx.store().get_version_encryption(&bucket.name, ctx.key_name(), vid.as_deref()).s3()?;
     ctx.meter(&bucket.id, Class::B);
@@ -320,6 +341,9 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     };
     let mut r = object_response(&meta, &overrides, code, len);
     versioning::set_version(&mut r, bucket, &meta.version_id, vid.is_some());
+    if vid.is_none() {
+        crate::lifecycle::set_expiration(&mut r, bucket, &meta);
+    }
     versioning::set_lock(&mut r, &meta.lock);
     sse::set_headers(&mut r, enc.as_ref(), ctx.store().sse_s3_at_rest());
     if let Some((a, b)) = range {
@@ -425,7 +449,8 @@ async fn copy(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     if let Some(c) = &meta.checksum {
         set_checksum(&mut r, c);
     }
-    versioning::set_version(&mut r, bucket, &meta.version_id, false);
+    versioning::set_written_version(&mut r, bucket, &meta.version_id);
+    crate::lifecycle::set_expiration(&mut r, bucket, &meta);
     let src_versioned = src_vid.is_some() || ctx.store().bucket(&src_bucket).is_ok_and(|b| b.versioning.is_some());
     if src_versioned {
         set(&mut r, "x-amz-copy-source-version-id", &src.version_id);

@@ -77,9 +77,10 @@ pub fn parse_query(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `encoding-type=url` in listings: like a query component (space as `+`), keeping `/`.
+/// `encoding-type=url` in listings: percent-encoding, keeping `/`. A space is `%20`, which every
+/// decoder reads back right (S3 sends `+`, which only form decoders read as a space).
 pub fn url_encode_listing(s: &str) -> String {
-    s.split(' ').map(|part| uri_encode(part, false)).collect::<Vec<_>>().join("+")
+    uri_encode(s, false)
 }
 
 /// `"<etag>"`.
@@ -300,24 +301,23 @@ impl Conditions {
         }
     }
 
-    /// Conditional writes: `If-None-Match: *` (fails if the key exists) and `If-Match: <etag>`
-    /// (fails if it doesn't, 404, or holds something else, 412). `current` is the ETag of the
-    /// object there now.
+    /// Conditional writes: `If-Match: <etag>` (fails if the key doesn't exist, 404, or holds
+    /// something else, 412) and `If-None-Match: *` (fails if the key exists, 412). S3 only takes
+    /// `*` in `If-None-Match`; roll also takes ETags (fails if the object there has one of them),
+    /// as HTTP defines it. `current` is the ETag of the object there now.
     pub fn check_write(&self, current: Option<&str>) -> Result<(), S3Error> {
-        if let Some(inm) = &self.if_none_match {
-            if inm.trim() != "*" {
-                return Err(S3Error::msg(Code::NotImplemented, "If-None-Match only supports '*' on writes").with("Header", "If-None-Match"));
-            }
-            if current.is_some() {
-                return Err(S3Error::new(Code::PreconditionFailed).with("Condition", "If-None-Match"));
-            }
-        }
         if let Some(im) = &self.if_match {
             match current {
                 None => return Err(S3Error::new(Code::NoSuchKey)),
                 Some(e) if !etag_list_matches(im, e) => return Err(S3Error::new(Code::PreconditionFailed).with("Condition", "If-Match")),
                 _ => {}
             }
+        }
+        if let Some(inm) = &self.if_none_match
+            && let Some(e) = current
+            && etag_list_matches(inm, e)
+        {
+            return Err(S3Error::new(Code::PreconditionFailed).with("Condition", "If-None-Match"));
         }
         Ok(())
     }
@@ -468,8 +468,8 @@ mod tests {
         assert_eq!(percent_decode("a%20b%2fc%zz%4"), b"a b/c%zz%4");
         assert_eq!(percent_decode("a+b"), b"a+b");
         assert_eq!(parse_query("a=1&b&c=x%20y&&d=%2B+"), vec![("a".into(), "1".into()), ("b".into(), "".into()), ("c".into(), "x y".into()), ("d".into(), "++".into())]);
-        assert_eq!(url_encode_listing("a b/c+d"), "a+b/c%2Bd");
-        assert_eq!(url_encode_listing(" x "), "+x+");
+        assert_eq!(url_encode_listing("a b/c+d"), "a%20b/c%2Bd");
+        assert_eq!(url_encode_listing(" x "), "%20x%20");
         assert_eq!(quote_etag("abc"), "\"abc\"");
         assert_eq!(quote_etag("\"abc\""), "\"abc\"");
         assert_eq!(unquote_etag("W/\"abc\""), "abc");
@@ -567,7 +567,10 @@ mod tests {
         let w = |c: Conditions, cur: Option<&str>| c.check_write(cur).map_err(|e| e.code);
         assert_eq!(w(c(None, Some("*"), None, None), None), Ok(()));
         assert_eq!(w(c(None, Some("*"), None, None), Some("abc")), Err(Code::PreconditionFailed));
-        assert_eq!(w(c(None, Some("\"abc\""), None, None), None), Err(Code::NotImplemented));
+        // ETags in If-None-Match (S3 only takes `*`): fails only if the object there has one.
+        assert_eq!(w(c(None, Some("\"abc\""), None, None), None), Ok(()));
+        assert_eq!(w(c(None, Some("\"x\", \"abc\""), None, None), Some("abc")), Err(Code::PreconditionFailed));
+        assert_eq!(w(c(None, Some("\"x\""), None, None), Some("abc")), Ok(()));
         assert_eq!(w(c(Some("abc"), None, None, None), None), Err(Code::NoSuchKey));
         assert_eq!(w(c(Some("abc"), None, None, None), Some("\"abc\"")), Ok(()));
         assert_eq!(w(c(Some("abc"), None, None, None), Some("def")), Err(Code::PreconditionFailed));

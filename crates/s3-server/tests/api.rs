@@ -50,12 +50,32 @@ async fn buckets() {
     bucket(&t, "beta").await;
     let names: Vec<String> = t.client.list_buckets().send().await.unwrap().buckets().iter().filter_map(|b| b.name().map(str::to_string)).collect();
     assert_eq!(names, vec!["alpha", "beta"]);
+    // Pages, as the SDKs' ListBuckets paginators ask for them.
+    let page = t.client.list_buckets().max_buckets(1).send().await.unwrap();
+    assert_eq!(page.buckets().iter().filter_map(|b| b.name()).collect::<Vec<_>>(), vec!["alpha"]);
+    let token = page.continuation_token().expect("more to come").to_string();
+    let page = t.client.list_buckets().max_buckets(1).continuation_token(token).send().await.unwrap();
+    assert_eq!(page.buckets().iter().filter_map(|b| b.name()).collect::<Vec<_>>(), vec!["beta"]);
+    assert!(page.continuation_token().is_none(), "the last page");
+    assert!(t.client.list_buckets().max_buckets(2).send().await.unwrap().continuation_token().is_none());
+    let page = t.client.list_buckets().prefix("b").send().await.unwrap();
+    assert_eq!((page.buckets().len(), page.prefix()), (1, Some("b")));
+    assert!(t.client.list_buckets().bucket_region("eu-west-1").send().await.unwrap().buckets().is_empty());
+    assert_eq!(code(&t.client.list_buckets().max_buckets(0).send().await.unwrap_err().into_service_error()), "InvalidArgument");
     t.client.head_bucket().bucket("alpha").send().await.unwrap();
     let e = t.client.head_bucket().bucket("nope").send().await.unwrap_err();
     assert_eq!(e.raw_response().unwrap().status().as_u16(), 404);
     let loc = t.client.get_bucket_location().bucket("alpha").send().await.unwrap();
     assert!(loc.location_constraint().is_none_or(|l| l.as_str().is_empty()));
-    let e = t.client.create_bucket().bucket("alpha").send().await.unwrap_err();
+    // Creating a bucket you own again: a no-op 200 in us-east-1 (S3's legacy behaviour there),
+    // BucketAlreadyOwnedByYou everywhere else.
+    put(&t, "alpha", "kept", b"kept").await;
+    t.client.create_bucket().bucket("alpha").send().await.unwrap();
+    assert_eq!(t.client.list_objects_v2().bucket("alpha").send().await.unwrap().key_count(), Some(1), "nothing changed");
+    t.client.delete_object().bucket("alpha").key("kept").send().await.unwrap();
+    let eu = start_with(|c| c.region = "eu-west-1".into()).await;
+    bucket(&eu, "alpha").await;
+    let e = eu.client.create_bucket().bucket("alpha").send().await.unwrap_err();
     assert_eq!(code(&e.into_service_error()), "BucketAlreadyOwnedByYou");
     let e = t.client.create_bucket().bucket("Bad_Name").send().await.unwrap_err();
     assert_eq!(code(&e.into_service_error()), "InvalidBucketName");
@@ -279,7 +299,7 @@ async fn listing() {
     let l = t.client.list_objects_v2().bucket("bkt").start_after("c").send().await.unwrap();
     assert_eq!(l.contents().iter().filter_map(|o| o.key()).collect::<Vec<_>>(), vec!["d e+f", "z/9"]);
     let l = t.client.list_objects_v2().bucket("bkt").prefix("d").encoding_type(aws_sdk_s3::types::EncodingType::Url).send().await.unwrap();
-    assert_eq!(l.contents()[0].key(), Some("d+e%2Bf"), "keys come back url-encoded, as S3 does it");
+    assert_eq!(l.contents()[0].key(), Some("d%20e%2Bf"), "keys come back url-encoded (a space as %20, which any decoder reads right)");
     // v1 with markers.
     let l = t.client.list_objects().bucket("bkt").marker("a/b/3").send().await.unwrap();
     assert_eq!(l.contents().iter().filter_map(|o| o.key()).collect::<Vec<_>>(), vec!["c", "d e+f", "z/9"]);
@@ -371,8 +391,13 @@ async fn multipart_round(t: &TestServer, key: &str, alg: Option<ChecksumAlgorith
     assert_eq!(lp.parts().len(), 4);
     let ups = t.client.list_multipart_uploads().bucket("bkt").send().await.unwrap();
     assert!(ups.uploads().iter().any(|u| u.upload_id() == Some(id.as_str())));
-    let r = t.client.complete_multipart_upload().bucket("bkt").key(key).upload_id(&id).multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(done)).build()).send().await.unwrap();
+    let complete = || t.client.complete_multipart_upload().bucket("bkt").key(key).upload_id(&id).multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(done.clone())).build()).send();
+    let r = complete().await.unwrap();
     assert!(r.e_tag().unwrap().ends_with("-4\""), "{:?}", r.e_tag());
+    // A retried completion (its first answer lost) gets the same answer and changes nothing.
+    let again = complete().await.unwrap();
+    assert_eq!((again.e_tag(), again.checksum_crc32(), again.checksum_crc64_nvme()), (r.e_tag(), r.checksum_crc32(), r.checksum_crc64_nvme()));
+    assert_eq!(t.client.head_object().bucket("bkt").key(key).send().await.unwrap().e_tag(), r.e_tag());
     parts.concat()
 }
 
@@ -665,7 +690,18 @@ async fn lifecycle_configuration() {
     assert_eq!(got.rules()[0].id(), Some("tmp"));
     assert_eq!(got.rules()[0].expiration().unwrap().days(), Some(3));
     assert_eq!(t.store.bucket("bkt").unwrap().lifecycle[0].expire_days, Some(3));
+    // `x-amz-expiration` (the SDKs' `Expiration`) on writes and reads of matching objects.
+    let r = t.client.put_object().bucket("bkt").key("tmp/a").body(ByteStream::from_static(b"x")).send().await.unwrap();
+    let head = t.client.head_object().bucket("bkt").key("tmp/a").send().await.unwrap();
+    let modified = t.store.get_object("bkt", "tmp/a").unwrap().modified_at;
+    let want = format!("expiry-date=\"{}\", rule-id=\"tmp\"", s3_proto::time::http_date(modified + 3 * 86_400_000 + 999));
+    assert_eq!((r.expiration(), head.expiration()), (Some(want.as_str()), Some(want.as_str())));
+    let g = t.client.get_object().bucket("bkt").key("tmp/a").send().await.unwrap();
+    assert_eq!(g.expiration(), Some(want.as_str()));
+    let other = t.client.put_object().bucket("bkt").key("keep/a").body(ByteStream::from_static(b"x")).send().await.unwrap();
+    assert!(other.expiration().is_none(), "the rule doesn't match");
     t.client.delete_bucket_lifecycle().bucket("bkt").send().await.unwrap();
+    assert!(t.client.head_object().bucket("bkt").key("tmp/a").send().await.unwrap().expiration().is_none());
     assert!(t.store.bucket("bkt").unwrap().lifecycle.is_empty());
 }
 
@@ -863,6 +899,10 @@ async fn body_length_and_digest_errors() {
     assert_eq!(g.checksum_crc32(), Some(crc(&payload).as_str()), "the trailer's checksum is stored");
     assert_eq!(g.content_encoding(), Some("gzip"), "aws-chunked is transport-only");
     assert_eq!(g.body.collect().await.unwrap().into_bytes().to_vec(), payload);
+    for (sent, stored) in [("deflate, gzip", Some("deflate, gzip")), ("deflate, aws-chunked,gzip", Some("deflate, gzip")), ("aws-chunked, aws-chunked", None)] {
+        t.client.put_object().bucket("bkt").key("enc").content_encoding(sent).body(ByteStream::from_static(b"x")).send().await.unwrap();
+        assert_eq!(t.client.head_object().bucket("bkt").key("enc").send().await.unwrap().content_encoding(), stored, "{sent}");
+    }
     assert_eq!(status_code(trailer("/bkt/bad", &payload, payload.len(), crc(b"other"), "aws-chunked").send(&t).await).await, (400, "BadDigest".into()));
     assert_eq!(status_code(trailer("/bkt/bad", &payload, payload.len() - 1, crc(&payload), "aws-chunked").send(&t).await).await.0, 400, "longer than declared");
     assert_eq!(status_code(trailer("/bkt/bad", &payload, payload.len() + 1, crc(&payload), "aws-chunked").send(&t).await).await.0, 400, "shorter than declared");
@@ -1022,8 +1062,12 @@ async fn everything_else_is_not_implemented() {
         assert!(resp.text().await.unwrap().contains(&format!("<Header>{h}</Header>")), "{h}");
     }
     assert!(missing(&t, "bkt", "nope").await);
+    // If-None-Match with ETags on a write (S3 only takes '*'): fails only if the object has one.
     let e = t.client.put_object().bucket("bkt").key("k").if_none_match(&etag).body(ByteStream::from_static(b"x")).send().await.unwrap_err();
-    assert_eq!(status(&e), 501, "If-None-Match on a write is only '*'");
+    assert_eq!(status(&e), 412, "the object there has that ETag");
+    t.client.put_object().bucket("bkt").key("k").if_none_match("\"0123456789abcdef0123456789abcdef\"").body(ByteStream::from_static(b"x")).send().await.unwrap();
+    let e = t.client.put_object().bucket("bkt").key("absent").if_match("*").body(ByteStream::from_static(b"x")).send().await.unwrap_err();
+    assert_eq!((status(&e), code(&e).as_str()), (404, "NoSuchKey"), "If-Match on a missing key");
     assert_eq!(status(&t.client.get_object_attributes().bucket("bkt").key("k").object_attributes(aws_sdk_s3::types::ObjectAttributes::Etag).send().await.unwrap_err()), 501);
     // ACLs are disabled by default: the canned private ACL is accepted (see tests/config.rs).
     let policy = AccessControlPolicy::builder().owner(Owner::builder().id("roll").build()).build();
@@ -1279,7 +1323,10 @@ async fn multipart_errors() {
     assert_eq!(status(&complete("mp", vec![cp(1, &p1), cp(2, &p2b)]).if_match("\"wrong\"").send().await.unwrap_err()), 412);
     complete("mp", vec![cp(1, &p1), cp(2, &p2b)]).if_match(&existing).send().await.unwrap();
     assert_eq!(get(&t, "bkt", "mp").await, [part.clone(), b"tail2".to_vec()].concat());
-    assert_eq!(code(&complete("mp", vec![cp(1, &p1), cp(2, &p2b)]).send().await.unwrap_err()), "NoSuchUpload", "completed uploads are gone");
+    // Completing it again only answers for the parts that made the object there.
+    complete("mp", vec![cp(1, &p1), cp(2, &p2b)]).send().await.unwrap();
+    assert_eq!(code(&complete("mp", vec![cp(1, &p1), cp(2, &p2)]).send().await.unwrap_err()), "NoSuchUpload");
+    assert_eq!(code(&complete("mp", vec![cp(1, &p1)]).send().await.unwrap_err()), "NoSuchUpload");
     assert_eq!(code(&t.client.get_object().bucket("bkt").key("mp").part_number(3).send().await.unwrap_err()), "InvalidRange");
     // Aborted uploads are gone.
     let ab = create("ab").await;
@@ -1631,4 +1678,34 @@ async fn bucket_details() {
     let e = t.client.put_bucket_lifecycle_configuration().bucket("bkt").lifecycle_configuration(BucketLifecycleConfiguration::builder().rules(tr).build().unwrap()).send().await.unwrap_err();
     assert_eq!(code(&e), "InvalidArgument", "STANDARD_IA needs 30 days, as on S3");
     assert_eq!(t.store.bucket("bkt").unwrap().lifecycle.len(), 1, "a refused configuration changes nothing");
+}
+
+/// An error answered before the body is read (`Expect: 100-continue`, no 100 sent) closes the
+/// connection, so a client that sends the body anyway after its wait times out doesn't have it
+/// read as its next request (botocore does this under load).
+#[tokio::test(flavor = "multi_thread")]
+async fn early_errors_close_the_connection() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let t = start().await;
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", t.port)).await.unwrap();
+    let head = format!("PUT /nobucket/k HTTP/1.1\r\nhost: 127.0.0.1:{}\r\ncontent-length: 5\r\nexpect: 100-continue\r\n\r\n", t.port);
+    s.write_all(head.as_bytes()).await.unwrap();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(10), s.read(&mut buf)).await.unwrap().unwrap();
+        assert!(n > 0, "the server answers");
+        got.extend_from_slice(&buf[..n]);
+    }
+    let text = String::from_utf8_lossy(&got).to_ascii_lowercase();
+    assert!(text.starts_with("http/1.1 404") || text.starts_with("http/1.1 403"), "{text}");
+    assert!(text.contains("connection: close"), "{text}");
+    // The late body (here, something that looks like a request) is never served.
+    let _ = s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    let mut rest = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), s.read_to_end(&mut rest)).await.expect("the server closes");
+    assert!(!String::from_utf8_lossy(&rest).contains("HTTP/1.1"), "no second response");
+    // Requests without a body keep their connection.
+    let r = reqwest::Client::new().get(format!("{}/nobucket", t.endpoint)).send().await.unwrap();
+    assert!(r.headers().get("connection").is_none());
 }

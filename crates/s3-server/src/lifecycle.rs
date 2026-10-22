@@ -50,3 +50,32 @@ pub(crate) fn to_xml(r: &LifecycleRule) -> Rule {
         abort_multipart_days: r.abort_multipart_days,
     }
 }
+
+/// `x-amz-expiration` of the current version `meta`: when the earliest enabled `Expiration`
+/// rule matching it (by prefix, tags and size) makes it eligible, as roll counts it (`Days`
+/// from the version's time, without S3's rounding to midnight, or the rule's `Date`).
+pub(crate) fn expiration_header(bucket: &s3_store::Bucket, meta: &s3_store::ObjectMeta) -> Option<String> {
+    const DAY_MS: i64 = 86_400_000;
+    bucket
+        .lifecycle
+        .iter()
+        .filter(|r| r.enabled && r.matches(&meta.key, &meta.headers.tags, meta.size))
+        .filter_map(|r| {
+            let at = match (r.expire_days, r.expire_at) {
+                (Some(days), _) => meta.modified_at.saturating_add(i64::from(days) * DAY_MS),
+                (None, Some(at)) => at,
+                _ => return None,
+            };
+            Some((at, r.id.as_str()))
+        })
+        .min()
+        // HTTP dates are whole seconds: round up, never showing a time before the real one.
+        .map(|(at, id)| format!("expiry-date=\"{}\", rule-id=\"{id}\"", s3_proto::time::http_date(at.saturating_add(999))))
+}
+
+/// Set `x-amz-expiration` on a response about the current version `meta`.
+pub(crate) fn set_expiration(r: &mut axum::response::Response, bucket: &s3_store::Bucket, meta: &s3_store::ObjectMeta) {
+    if let Some(v) = expiration_header(bucket, meta) {
+        crate::response::set(r, "x-amz-expiration", &v);
+    }
+}

@@ -18,13 +18,40 @@ use s3_store::{Bucket, BucketOptions, BucketUpdate, Class, CorsRule, LifecycleRu
 
 pub(crate) fn list_buckets(ctx: &mut Ctx) -> Reply {
     let Some(a) = &ctx.auth else { return Err(S3Error::new(Code::AccessDenied)) };
-    let buckets = ctx.store().buckets().s3()?;
-    let entries: Vec<xml::BucketEntry> = buckets
+    // Pages (`max-buckets`, `continuation-token`), `prefix` and `bucket-region`, as S3 has
+    // since 2024. Buckets come in name order; the token is the last name of the page.
+    let invalid = |name: &str, msg: &str| S3Error::msg(Code::InvalidArgument, msg.to_string()).with("ArgumentName", name.to_string());
+    let max = match ctx.q("max-buckets") {
+        None => None,
+        Some(v) => Some(v.parse::<usize>().ok().filter(|n| (1..=10_000).contains(n)).ok_or_else(|| invalid("max-buckets", "max-buckets must be an integer between 1 and 10000"))?),
+    };
+    let after = match ctx.q("continuation-token") {
+        None => None,
+        Some(t) => Some(URL_SAFE_NO_PAD.decode(t).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| invalid("continuation-token", "The continuation token provided is incorrect"))?),
+    };
+    let prefix = ctx.q("prefix").filter(|p| !p.is_empty()).map(str::to_string);
+    let region = ctx.server.cfg.region.clone();
+    if ctx.q("bucket-region").is_some_and(|r| r != region) {
+        return response::ok_xml(xml::list_buckets_page(&acl::owner(ctx.store()), &[], None, prefix.as_deref()));
+    }
+    let mut entries: Vec<xml::BucketEntry> = ctx
+        .store()
+        .buckets()
+        .s3()?
         .into_iter()
         .filter(|b| a.key.covers(&b.name))
-        .map(|b| xml::BucketEntry { name: b.name, created_ms: b.created_at, region: Some(ctx.server.cfg.region.clone()) })
+        .filter(|b| prefix.as_ref().is_none_or(|p| b.name.starts_with(p.as_str())))
+        .filter(|b| after.as_ref().is_none_or(|t| b.name.as_str() > t.as_str()))
+        .map(|b| xml::BucketEntry { name: b.name, created_ms: b.created_at, region: Some(region.clone()) })
         .collect();
-    response::ok_xml(xml::list_buckets(&acl::owner(ctx.store()), &entries))
+    let next = match max {
+        Some(n) if entries.len() > n => {
+            entries.truncate(n);
+            entries.last().map(|b| URL_SAFE_NO_PAD.encode(b.name.as_bytes()))
+        }
+        _ => None,
+    };
+    response::ok_xml(xml::list_buckets_page(&acl::owner(ctx.store()), &entries, next.as_deref(), prefix.as_deref()))
 }
 
 /// Bucket subresources S3 has and we don't.
@@ -126,6 +153,13 @@ async fn create(ctx: &mut Ctx, body: Body) -> Reply {
     }
     let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
     xml::parse_create_bucket(&raw)?;
+    // In us-east-1, S3 answers creating a bucket you already own with a 200 and changes
+    // nothing (every other region says BucketAlreadyOwnedByYou).
+    if ctx.server.cfg.region == "us-east-1" && ctx.store().bucket(&name).is_ok() {
+        let mut r = response::empty(StatusCode::OK);
+        set(&mut r, "location", &format!("/{name}"));
+        return Ok(r);
+    }
     let b = ctx.store().create_bucket(&name, BucketOptions { object_lock: Some(object_lock), ..Default::default() }).await.s3()?;
     ctx.meter(&b.id, Class::A);
     if let Some(o) = ownership.filter(|o| *o != acl::Ownership::BucketOwnerEnforced) {

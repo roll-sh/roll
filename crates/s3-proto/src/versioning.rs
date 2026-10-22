@@ -329,11 +329,11 @@ mod tests {
         let doc = list_versions(&l);
         let n = parse(doc.as_bytes()).unwrap();
         assert_eq!(n.name, "ListVersionsResult");
-        assert_eq!((n.text_of("NextKeyMarker"), n.text_of("NextVersionIdMarker"), n.text_of("EncodingType")), (Some("n+k"), Some("v2"), Some("url")));
+        assert_eq!((n.text_of("NextKeyMarker"), n.text_of("NextVersionIdMarker"), n.text_of("EncodingType")), (Some("n%20k"), Some("v2"), Some("url")));
         let dm = n.child("DeleteMarker").unwrap();
         assert_eq!((dm.text_of("VersionId"), dm.text_of("IsLatest"), dm.text_of("ETag")), (Some("v1"), Some("true"), None));
         let v = n.child("Version").unwrap();
-        assert_eq!((v.text_of("Key"), v.text_of("ETag"), v.text_of("Size"), v.text_of("IsLatest"), v.text_of("ChecksumAlgorithm")), (Some("a+b"), Some("\"e\""), Some("3"), Some("false"), Some("CRC32")));
+        assert_eq!((v.text_of("Key"), v.text_of("ETag"), v.text_of("Size"), v.text_of("IsLatest"), v.text_of("ChecksumAlgorithm")), (Some("a%20b"), Some("\"e\""), Some("3"), Some("false"), Some("CRC32")));
         assert!(doc.find("<DeleteMarker>").unwrap() < doc.find("<Version>").unwrap(), "entries keep their order");
         assert_eq!(n.child("CommonPrefixes").unwrap().text_of("Prefix"), Some("d/"));
         let empty = list_versions(&ListVersions::default());

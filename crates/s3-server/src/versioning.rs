@@ -17,10 +17,6 @@ use s3_proto::versioning::{self as v, invalid_version_id, valid_version_id};
 use s3_proto::{Code, S3Error, xml};
 use s3_store::{Bucket, BucketUpdate, Class, ObjectLock, ObjectLockConfig, VersionsQuery};
 
-fn owner() -> xml::Owner {
-    xml::Owner { id: "roll".into(), display_name: "roll".into() }
-}
-
 /// `?versionId=`, if given. A malformed one is S3's `InvalidArgument`.
 pub(crate) fn version_id(ctx: &Ctx) -> Result<Option<String>, S3Error> {
     match ctx.q("versionId") {
@@ -34,6 +30,14 @@ pub(crate) fn version_id(ctx: &Ctx) -> Result<Option<String>, S3Error> {
 pub(crate) fn set_version(r: &mut Response, bucket: &Bucket, version_id: &str, asked: bool) {
     if bucket.versioning.is_some() || asked {
         set(r, "x-amz-version-id", version_id);
+    }
+}
+
+/// `x-amz-version-id` of a write (PUT, copy, CompleteMultipartUpload): as S3, a write that made
+/// the `null` version (versioning suspended) doesn't send one.
+pub(crate) fn set_written_version(r: &mut Response, bucket: &Bucket, version_id: &str) {
+    if version_id != "null" {
+        set_version(r, bucket, version_id, false);
     }
 }
 
@@ -193,7 +197,8 @@ pub(crate) fn list_versions(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
             })
             .collect(),
         common_prefixes: page.prefixes.clone(),
-        owner: owner(),
+        // The deployment's canonical owner id, as in every other listing and ACL.
+        owner: crate::acl::owner(ctx.store()),
     };
     response::ok_xml(v::list_versions(&l))
 }
