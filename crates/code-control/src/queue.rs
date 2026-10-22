@@ -668,11 +668,18 @@ impl Code {
     /// `false` if the default branch moved meanwhile: they go back in line to be rebuilt.
     async fn land_members(&self, r: &RepoRow, head: Option<ChangesetId>, members: &[Member], batch: &str, w: &Worker) -> anyhow::Result<bool> {
         let tip = members.last().map(|m| m.tip).expect("non-empty");
-        // Each one must still be queued, at the head that was tested.
+        let settings = self.settings(r).await;
+        // Each one must still be queued, at the head that was tested, and still mergeable (a
+        // required check may have gone red, or the change been closed, while the batch tested).
         for m in members {
             let entry = self.db.entry_for_change(&m.change.id)?;
             let current = self.db.change(&m.change.id)?;
-            if entry.is_none_or(|e| e.id != m.entry.id || !e.state.active()) || current.is_none_or(|c| c.head != m.change.head) {
+            let moved = entry.is_none_or(|e| e.id != m.entry.id || !e.state.active()) || current.as_ref().is_none_or(|c| c.head != m.change.head);
+            let blocked = match current {
+                Some(c) if !moved => !Self::base_blockers(r, &self.change_view(c)?, &settings).is_empty(),
+                _ => false,
+            };
+            if moved || blocked {
                 for m in members {
                     self.db.set_entry(&m.entry.id, EntryState::Waiting, None, None)?;
                 }
@@ -686,6 +693,7 @@ impl Code {
             self.db.set_entry(&m.entry.id, EntryState::Landing, Some(batch), Some(&cs_id(&m.tip)))?;
             self.landing_changes.put((r.id.clone(), m.tip), m.change.id.clone());
         }
+        self.emit_queue(r);
         match self.store.advance(&r.id, &r.default_branch, head, tip).await {
             Ok(_) => {}
             Err(e) => {
