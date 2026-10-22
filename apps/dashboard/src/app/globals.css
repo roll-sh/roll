@@ -112,11 +112,226 @@ body {
   animation: drawer-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+
+/* roll code: syntax highlighting (shiki css-variables tokens, see lib/highlight.ts). Monochrome:
+   structure reads through weight and shade, not colour. */
+.code {
+  color: color-mix(in srgb, var(--fg) 86%, var(--bg));
+}
+.sh-keyword {
+  color: var(--fg);
+  font-weight: 600;
+}
+.sh-function {
+  color: var(--fg);
+}
+.sh-constant {
+  color: color-mix(in srgb, var(--fg) 76%, var(--bg));
+}
+.sh-string,
+.sh-string-expression {
+  color: color-mix(in srgb, var(--fg) 58%, var(--bg));
+}
+.sh-parameter {
+  color: color-mix(in srgb, var(--fg) 72%, var(--bg));
+  font-style: italic;
+}
+.sh-punctuation {
+  color: var(--muted);
+}
+.sh-comment {
+  color: var(--subtle);
+  font-style: italic;
+}
+.sh-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sh-inserted {
+  color: var(--ok);
+}
+.sh-deleted {
+  color: var(--danger);
+}
+
+/* roll code: rendered README / markdown (server-rendered, sanitized HTML). */
+.markdown {
+  font-size: 14px;
+  line-height: 1.75;
+  color: color-mix(in srgb, var(--fg) 88%, var(--bg));
+  overflow-wrap: anywhere;
+}
+/* Review comments: the same styles at comment size, with headings toned down. */
+.markdown.markdown-sm {
+  font-size: 13px;
+  line-height: 1.65;
+}
+.markdown.markdown-sm :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1.25em 0 0.5em;
+  padding-bottom: 0;
+  border-bottom: 0;
+  font-size: 13px;
+}
+.markdown.markdown-sm :is(p, ul, ol, blockquote, pre, table, details) {
+  margin: 0 0 0.75em;
+}
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+.markdown :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--fg);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+  margin: 2em 0 0.75em;
+  scroll-margin-top: 5rem;
+}
+.markdown h1 {
+  font-size: 1.75rem;
+  letter-spacing: -0.045em;
+  padding-bottom: 0.4em;
+  border-bottom: 1px solid var(--line);
+}
+.markdown h2 {
+  font-size: 1.3rem;
+  letter-spacing: -0.04em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid var(--line);
+}
+.markdown h3 {
+  font-size: 1.05rem;
+}
+.markdown :is(h4, h5, h6) {
+  font-size: 0.95rem;
+}
+.markdown :is(p, ul, ol, blockquote, pre, table, details) {
+  margin: 0 0 1em;
+}
+.markdown a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.markdown a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.markdown strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+.markdown :is(ul, ol) {
+  padding-left: 1.5em;
+}
+.markdown ul {
+  list-style: disc;
+}
+.markdown ol {
+  list-style: decimal;
+}
+.markdown li + li {
+  margin-top: 0.25em;
+}
+.markdown li > :is(ul, ol) {
+  margin: 0.25em 0 0;
+}
+.markdown li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.4em;
+}
+.markdown input[type="checkbox"] {
+  margin-right: 0.5em;
+  accent-color: var(--accent);
+  vertical-align: -0.1em;
+}
+.markdown :not(pre) > code {
+  font-family: var(--font-geist-mono);
+  font-size: 0.85em;
+  padding: 0.15em 0.4em;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+}
+.markdown pre {
+  font-family: var(--font-geist-mono);
+  font-size: 12.5px;
+  line-height: 1.65;
+  padding: 1rem 1.1rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  overflow-x: auto;
+}
+.markdown pre code {
+  font: inherit;
+}
+.markdown blockquote {
+  padding-left: 1em;
+  border-left: 2px solid var(--line-2);
+  color: var(--muted);
+}
+.markdown hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 2em 0;
+}
+.markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.markdown :is(th, td) {
+  border: 1px solid var(--line);
+  padding: 0.4em 0.8em;
+}
+.markdown th {
+  font-weight: 600;
+  background: var(--panel-2);
+}
+.markdown img {
+  max-width: 100%;
+  border-radius: 8px;
+  display: inline;
+}
+.markdown kbd {
+  font-family: var(--font-geist-mono);
+  font-size: 0.8em;
+  padding: 0.1em 0.4em;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+}
+.markdown details summary {
+  cursor: pointer;
+  color: var(--fg);
+}
+
+/* A landing on the live strip: one small accent pulse. */
+@keyframes landing-pulse {
+  from {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(3.2);
+    opacity: 0;
+  }
+}
+
+.landing-pulse {
+  animation: landing-pulse 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .shimmer,
   .caret::after,
   .rise,
-  .drawer-in {
+  .drawer-in,
+  .landing-pulse {
     animation: none;
   }
   .shimmer {

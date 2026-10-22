@@ -109,6 +109,45 @@ struct Args {
     /// Run only roll queues (no Postgres control plane or proxy): broker nodes on AWS.
     #[arg(long, env = "ROLL_QUEUES_ONLY", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     queues_only: bool,
+    /// Admin token for roll code (`/v1/code`, `/git`); without one the code API is open, like
+    /// the rest of the local API.
+    #[arg(long, env = "ROLL_CODE_TOKEN")]
+    code_token: Option<String>,
+    /// Where the API is reachable from outside, for roll code links (default:
+    /// http://<public host>:<API port>).
+    #[arg(long, env = "ROLL_CODE_PUBLIC_URL")]
+    code_public_url: Option<String>,
+    /// Base of roll code clone URLs (default: <public URL>/git; `https://roll.sh` behind the web app).
+    #[arg(long, env = "ROLL_CODE_GIT_URL")]
+    code_git_url: Option<String>,
+    /// Where the web app serves roll code's public pages.
+    #[arg(long, env = "ROLL_WEB_URL", default_value = "http://localhost:3000")]
+    web_url: String,
+    /// Let roll code's webhooks and review apps reach loopback and private addresses (local
+    /// development only). Unset: allowed only on an open daemon (no ROLL_CODE_TOKEN).
+    #[arg(long, env = "ROLL_CODE_WEBHOOK_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true")]
+    code_webhook_allow_private: Option<bool>,
+    /// Let owners' own reviewer providers (`base_url`) be loopback or private addresses (a
+    /// self-hosted model on the operator's network). Unset: only on an open daemon.
+    #[arg(long, env = "ROLL_CODE_PROVIDER_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true")]
+    code_provider_allow_private: Option<bool>,
+    /// roll code previews answer on `<change>.<this domain>` (on the API port).
+    #[arg(long, env = "ROLL_CODE_PREVIEW_DOMAIN", default_value = "preview.localhost")]
+    code_preview_domain: String,
+    /// roll code checks running at once on this host (each in its own container).
+    #[arg(long, env = "ROLL_CODE_RUNNER_CONCURRENCY", default_value_t = 2)]
+    code_runner_concurrency: usize,
+    /// roll code event streams (`/events`, MCP) one caller may hold open: a token, or an
+    /// anonymous client address.
+    #[arg(long, env = "ROLL_CODE_MAX_STREAMS_PER_CALLER", default_value_t = 32)]
+    code_max_streams_per_caller: usize,
+    /// roll code event streams open at once, for everyone.
+    #[arg(long, env = "ROLL_CODE_MAX_STREAMS", default_value_t = 10_000)]
+    code_max_streams: usize,
+    /// Count anonymous roll code event streams by the first X-Forwarded-For address (only behind
+    /// a proxy that sets it).
+    #[arg(long, env = "ROLL_CODE_TRUST_FORWARDED_FOR", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    code_trust_forwarded_for: bool,
     #[command(flatten)]
     queues: queues::QueuesArgs,
 }
@@ -130,7 +169,7 @@ async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info".into()),
+                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,code_control=info,code_store=info,code_git=info,code_review=info,code_index=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info".into()),
         )
         .init();
     let args = Args::parse();
@@ -221,15 +260,59 @@ async fn run() -> anyhow::Result<()> {
     broker.txns.recover(&broker).await?;
     let kafka = tokio::net::TcpListener::bind(args.kafka).await?;
 
+    // roll code: same object storage, its own metadata under <home>/code.
+    let code_public = args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port()));
+    let code_config = code_control::Config {
+        home: std::path::absolute(&args.home)?,
+        admin_token: args.code_token.clone().filter(|t| !t.is_empty()),
+        git_url: args.code_git_url.clone().unwrap_or_else(|| format!("{}/git", code_public.trim_end_matches('/'))),
+        api_url: code_public,
+        web_url: args.web_url.clone(),
+        storage: control.objects.description.clone(),
+        allow_private_webhooks: args.code_webhook_allow_private,
+        allow_private_providers: args.code_provider_allow_private,
+        // roll's reviewer: ROLL_REVIEW_PROVIDER, ROLL_REVIEW_ANTHROPIC_API_KEY, ROLL_SECRET_KEY, … (docs/code/reviews.md).
+        review: code_control::ai::AiConfig::from_env(),
+        max_streams_per_caller: args.code_max_streams_per_caller,
+        max_streams: args.code_max_streams,
+        trust_forwarded_for: args.code_trust_forwarded_for,
+        ..code_control::Config::local(std::path::absolute(&args.home)?)
+    };
+    let code = code_control::Code::open(code_config, pg_storage::Objects::new(&storage)?)?;
+    code.start_reviewer();
+    // Webhook deliveries pick up where they left off (landings while the daemon was down too).
+    code.start_webhooks();
+    match &code.config.review.hosted {
+        Some(h) => info!(provider = %h.provider, "roll code: hosted reviewer configured"),
+        None => info!("roll code: no hosted reviewer (owners can bring their own key)"),
+    }
+    // GitHub-connected repos, when ROLL_GITHUB_APP_ID and friends are set (docs/code/github-app.md).
+    if code_control::github::enable_from_env(&code)? {
+        info!("roll code: GitHub App configured");
+    }
+    // Checks and previews: containers, with previews branching roll Postgres and Redis.
+    let previews = code_preview::Previews::new(
+        code_preview::PreviewConfig {
+            domain: args.code_preview_domain.trim_matches('.').to_ascii_lowercase(),
+            port: Some(args.api.port()),
+            ..Default::default()
+        },
+        Some(std::sync::Arc::new(code_preview::RollData { postgres: control.clone(), redis: redis.clone() })),
+    );
+    let _code_checks = code_preview::start(&code, std::sync::Arc::new(code_preview::DockerRunner::new(args.code_runner_concurrency)), previews.clone());
+
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
     let mut router = api::router(control.clone())
         .merge(redis_control::api::router(redis.clone()))
         .merge(stream_broker::http::router(broker.clone()))
-        .merge(tasks::api::router(tasks.clone()));
+        .merge(tasks::api::router(tasks.clone()))
+        .merge(code_control::api::router(code.clone()));
     if let Some(q) = &queues {
         router = router.merge(q.router());
     }
+    // Requests for preview hosts go to the preview's container; everything else to the API.
+    let router = router.layer(axum::middleware::from_fn_with_state(previews, code_preview::route));
     let queues_serve = async {
         match &queues {
             Some(q) => q.serve().await,
@@ -239,7 +322,8 @@ async fn run() -> anyhow::Result<()> {
 
     tokio::select! {
         r = proxy.serve() => r?,
-        r = axum::serve(listener, router) => r?,
+        // Client addresses reach handlers (roll code counts anonymous event streams per address).
+        r = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
         r = redis_server::net::serve(redis_listener, redis_dir.clone(), redis_opts) => r?,
         r = redis_server::http::serve_http(redis_http, redis_dir) => r?,
         r = queues_serve => r?,

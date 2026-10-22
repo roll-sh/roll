@@ -1,0 +1,1 @@
+{"zen":"Design for failure.","hook_id":512345678,"hook":{"type":"App","id":512345678,"name":"web","active":true,"events":["issues","pull_request","push"],"config":{"content_type":"json","insecure_ssl":"0","url":"https://code.roll.sh/v1/code/github/webhook"},"app_id":901234},"sender":{"login":"meszmate","id":1001,"type":"User"}}

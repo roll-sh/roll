@@ -1,8 +1,9 @@
+mod code;
 mod stream;
 mod tasks;
 
 use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, parser::ValueSource};
 use serde_json::{Value, json};
 
 mod redis;
@@ -18,7 +19,8 @@ struct Cli {
     /// roll tasks API (default: `<api>/v1/tasks`, served by rolld).
     #[arg(long, env = "ROLL_TASKS_URL", global = true)]
     tasks_url: Option<String>,
-    /// roll tasks token (admin token or API key).
+    /// roll tasks token (admin token or API key). For `roll code`, an owner or admin token
+    /// (default: `ROLL_CODE_TOKEN`).
     #[arg(long, env = "ROLL_TASKS_TOKEN", global = true, hide_env_values = true)]
     token: Option<String>,
     /// Print raw JSON.
@@ -33,6 +35,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Source control for agents: repos, changes, work items, landing.
+    #[command(subcommand)]
+    Code(code::Code),
     /// Serverless Postgres.
     #[command(subcommand, alias = "pg")]
     Db(Db),
@@ -211,7 +216,7 @@ fn bytes(n: f64) -> String {
         n /= 1024.0;
         i += 1;
     }
-    format!("{n:.1} {}", units[i])
+    if i == 0 { format!("{n:.0} B") } else { format!("{n:.1} {}", units[i]) }
 }
 
 fn print_project(p: &Value) {
@@ -274,12 +279,30 @@ async fn project(api: &Api, key: &str) -> anyhow::Result<Value> {
         .with_context(|| format!("no database named {key}"))
 }
 
+/// Exit quietly when the reader goes away (`roll code queue … | head`) instead of panicking in
+/// `println!`: Rust ignores SIGPIPE by default, which turns a closed pipe into a write error.
+fn reset_sigpipe() {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    reset_sigpipe();
+    let matches = Cli::command().get_matches();
+    let token_flag = matches.value_source("token") == Some(ValueSource::CommandLine);
+    let cli = Cli::from_arg_matches(&matches)?;
     let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
+        Cmd::Code(cmd) => {
+            // `--token` on the command line wins; otherwise ROLL_CODE_TOKEN (not the tasks token).
+            let token = if token_flag { cli.token } else { std::env::var("ROLL_CODE_TOKEN").ok() };
+            let code_api = Api { base: api.base.clone(), http: api.http.clone(), key: token.filter(|t| !t.is_empty()) };
+            return code::run(&code_api, cli.json, cmd).await;
+        }
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
         Cmd::Stream(cmd) => {
             if let Some(out) = stream::run(&api, cli.json, cmd).await? {

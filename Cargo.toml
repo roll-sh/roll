@@ -122,6 +122,25 @@ redis-engine = { path = "crates/redis-engine" }
 redis-server = { path = "crates/redis-server" }
 redis-control = { path = "crates/redis-control" }
 
+# roll code.
+diffy = "0.5"
+serde_yaml_ng = "0.10"
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
+code-store = { path = "crates/code-store" }
+code-git = { path = "crates/code-git" }
+code-github = { path = "crates/code-github" }
+code-control = { path = "crates/code-control" }
+code-preview = { path = "crates/code-preview" }
+code-index = { path = "crates/code-index" }
+code-review = { path = "crates/code-review" }
+aes-gcm = "0.10"
+toml = "1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+comrak = { version = "0.56", default-features = false }
+ammonia = "4"
+
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]
 kafka-protocol = { path = "vendor/kafka-protocol" }

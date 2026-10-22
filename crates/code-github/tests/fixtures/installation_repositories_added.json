@@ -1,0 +1,1 @@
+{"action":"added","installation":{"id":61234567,"account":{"login":"acme","id":2002,"type":"Organization"},"app_slug":"roll-code"},"repository_selection":"selected","repositories_added":[{"id":70003,"node_id":"R_kgDOC","name":"infra","full_name":"acme/infra","private":true}],"repositories_removed":[],"requester":null,"sender":{"login":"meszmate","id":1001,"type":"User"}}
