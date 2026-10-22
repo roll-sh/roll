@@ -1256,8 +1256,9 @@ impl Deparser<'_, '_> {
                 ));
                 self.paren(right, true, Parent::Other)?;
                 // A bare scalar sub-SELECT would read back as an ANY/ALL sublink: Postgres
-                // adds a dummy coercion.
-                if let Expr::Subquery(sq) = &**right
+                // adds a dummy coercion. (A plan's SubPlan or InitPlan Param isn't one.)
+                if self.subplans.is_none()
+                    && let Expr::Subquery(sq) = &**right
                     && matches!(sq.kind, crate::sql::expr::SubqueryKind::Scalar)
                 {
                     let ty = self.type_name(&sq.ty);
@@ -1359,7 +1360,17 @@ impl Deparser<'_, '_> {
             Expr::Row(_, ty) if self.subplans.is_some() && const_row(e).is_some() => {
                 self.constant(&const_row(e)?, ty, 0);
             }
-            Expr::Row(items, _) => match self.whole_row(e) {
+            Expr::Row(items, ty) => match self.whole_row(e) {
+                // (A partitioned table's whole row in a plan: its partition's row converted
+                // to the parent's type, a ConvertRowtypeExpr.)
+                Some(name)
+                    if self.subplans.is_some()
+                        && matches!(ty, DataType::Row(rt) if rt.oid != 0
+                            && self.cat.tables.values().any(|t| t.rowtype == rt.oid && t.partkey.is_some())) =>
+                {
+                    let tn = self.type_name(ty);
+                    self.buf.push_str(&format!("(({}.*)::{tn})", quote_ident(&name)));
+                }
                 Some(name) => {
                     self.buf.push_str(&quote_ident(&name));
                     self.buf.push_str(".*");

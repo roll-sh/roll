@@ -241,7 +241,8 @@ fn run_windows(
                         true
                     }
                 };
-                order = super::pgsort::incremental_sort(order, None, &mut cf, &mut cs, &mut same);
+                let mut stats = super::pgsort::IncrStats::default();
+                order = super::pgsort::incremental_sort(order, None, &mut cf, &mut cs, &mut same, &mut stats);
                 if let Some(e) = err.or(cs.err) {
                     return Err(e);
                 }

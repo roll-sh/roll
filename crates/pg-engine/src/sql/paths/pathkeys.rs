@@ -236,6 +236,17 @@ fn classes(p: &Plan) -> Classes {
             }
             c
         }
+        // (A relation found empty keeps the classes its quals made.)
+        Plan::Empty { info: Some(d), .. } if d.ec.len() == w => {
+            let mut c = Classes::new(w);
+            for (i, &(r, k)) in d.ec.iter().enumerate() {
+                c.union(r, i);
+                if k {
+                    c.set_const(i);
+                }
+            }
+            c
+        }
         Plan::Filter { input, pred } => {
             let mut c = classes(input);
             // (A HAVING makes no equivalence classes.)
@@ -275,6 +286,13 @@ fn classes(p: &Plan) -> Classes {
                 }
             }
             c
+        }
+        // A grouping's keys keep their classes (the aggregates make none).
+        Plan::Agg { input, groups, sets: None, .. } => {
+            let mut inner = classes(input);
+            let mut map: Vec<Option<usize>> = groups.iter().map(col_of).collect();
+            map.resize(w, None);
+            Classes::mapped(&mut inner, &map)
         }
         Plan::Project { input, exprs } => {
             let mut inner = classes(input);

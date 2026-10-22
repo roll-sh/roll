@@ -165,6 +165,12 @@ impl Builder<'_, '_> {
     pub(super) fn gather_merge_of(&self, part: &ExNode) -> ExNode {
         let cfg = self.par.as_ref().expect("parallel settings");
         let rows = costs::clamp_rows(part.rows * cfg.divisor(part.workers));
+        self.gather_merge_rows(part, rows)
+    }
+
+    /// `gather_merge_of` returning `rows` (create_gather_merge_path's own row count).
+    pub(super) fn gather_merge_rows(&self, part: &ExNode, rows: f64) -> ExNode {
+        let cfg = self.par.as_ref().expect("parallel settings");
         let mut g = ExNode::new("Gather Merge");
         g.rows = rows;
         g.width = part.width;
@@ -215,6 +221,9 @@ impl Builder<'_, '_> {
         if self.par.is_none() {
             return;
         }
+        // (create_gather_path takes the relation's rows here, which is the same up to the
+        // partial plan's rounding, except for an Append that run-time pruning cuts down: its
+        // costs here are the members left's only, where Postgres's are all of them.)
         let g = self.gather_of(&part);
         if parallel_wins(&g, n) {
             *n = g;
@@ -334,17 +343,12 @@ impl Builder<'_, '_> {
                 .sum::<usize>() as f64;
         let combine = costs::CPU_OPERATOR_COST * aggs.len() as f64;
         let group_ops = costs::CPU_OPERATOR_COST * groups.len() as f64;
-        let gcols: Vec<ColInfo> = groups
+        // (The group expressions the grouping targets compute, per group: create_agg_path.)
+        let gexpr: f64 = groups
             .iter()
-            .map(|g| match g {
-                Expr::Col(j, _) if *j < part.cols.len() => part.cols[*j].clone(),
-                g => ColInfo {
-                    width: type_width(&g.ty()),
-                    var: None,
-                    distinct: None,
-                },
-            })
-            .collect();
+            .filter(|g| !matches!(g, Expr::Col(..)))
+            .map(costs::qual_cost)
+            .sum();
         let in_rows = part.rows;
         let workers = part.workers;
         let g = crate::sql::paths::Gucs::read(self.ctx);
@@ -361,7 +365,7 @@ impl Builder<'_, '_> {
         } else {
             Vec::new()
         };
-        let keys: Vec<String> = serial
+        let serial_keys: Vec<String> = serial
             .details
             .iter()
             .find_map(|d| match d {
@@ -369,6 +373,23 @@ impl Builder<'_, '_> {
                 _ => None,
             })
             .unwrap_or_default();
+        // The keys (those the serial grouping shows) as a hashed partial grouping computes
+        // them, and as the nodes over a computed one refer to it.
+        let mut hkeys: Vec<String> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        for (g, n) in groups.iter().zip(gnames) {
+            let bare = self.pick(n, Cx::Upper);
+            let computed = !matches!(g, Expr::Col(..)) && !g.columns().is_empty();
+            let wrapped = if computed { self.pick(&n.wrapped(), Cx::Upper) } else { bare.clone() };
+            if serial_keys.contains(&bare) || serial_keys.contains(&wrapped) {
+                hkeys.push(bare);
+                keys.push(wrapped);
+            }
+        }
+        if hkeys.len() != serial_keys.len() {
+            hkeys = serial_keys.clone();
+            keys = serial_keys.clone();
+        }
         // An aggregation node like `serial`, of `kind` ("Plain", "Hashed", "Sorted") in
         // `mode` ("Partial", "Finalize"), over `input`.
         let make = |kind: &'static str, mode: &'static str, input: ExNode| -> ExNode {
@@ -392,6 +413,8 @@ impl Builder<'_, '_> {
             if !keys.is_empty() {
                 let shown = if mode == "Finalize" {
                     keys.iter().map(|k| refer_to(k)).collect()
+                } else if kind == "Hashed" {
+                    hkeys.clone()
                 } else {
                     keys.clone()
                 };
@@ -443,13 +466,14 @@ impl Builder<'_, '_> {
             f.rows = 1.0;
             finals.push(f);
         } else {
-            let pgroups = self.num_groups(&gcols, in_rows);
+            // (estimate_num_groups over the keys, expressions by their columns.)
+            let pgroups = self.group_num_groups(groups, &part.cols, in_rows);
             let ngroups = serial.rows;
             // The partial groups by hashing, and by sorting the input.
             let mut ph = make("Hashed", "Partial", part.clone());
             ph.rows = pgroups;
             ph.startup_cost = part.total_cost + in_rows * (trans + group_ops);
-            ph.total_cost = ph.startup_cost + pgroups * costs::CPU_TUPLE_COST;
+            ph.total_cost = ph.startup_cost + pgroups * (costs::CPU_TUPLE_COST + gexpr);
             ph.output = partial_out.clone();
             let si = sorted(self, part.clone());
             let mut ps = make("Sorted", "Partial", si);
@@ -457,7 +481,7 @@ impl Builder<'_, '_> {
             ps.rows = pgroups;
             ps.startup_cost = sic.startup_cost;
             ps.total_cost =
-                sic.total_cost + in_rows * (trans + group_ops) + pgroups * costs::CPU_TUPLE_COST;
+                sic.total_cost + in_rows * (trans + group_ops) + pgroups * (costs::CPU_TUPLE_COST + gexpr);
             ps.output = partial_out.clone();
             let gathered = |b: &Self, pa: &ExNode, merge: bool| -> ExNode {
                 let mut gt = if merge { b.gather_merge_of(pa) } else { b.gather_of(pa) };
@@ -481,7 +505,7 @@ impl Builder<'_, '_> {
                 let mut f = make("Hashed", "Finalize", gt);
                 let gi = &f.children[0];
                 f.startup_cost = gi.total_cost + gi.rows * (combine + group_ops);
-                f.total_cost = f.startup_cost + ngroups * costs::CPU_TUPLE_COST;
+                f.total_cost = f.startup_cost + ngroups * (costs::CPU_TUPLE_COST + gexpr);
                 f.rows = ngroups;
                 f
             };
@@ -491,7 +515,7 @@ impl Builder<'_, '_> {
                 f.startup_cost = gi.startup_cost;
                 f.total_cost = gi.total_cost
                     + gi.rows * (combine + group_ops)
-                    + ngroups * costs::CPU_TUPLE_COST;
+                    + ngroups * (costs::CPU_TUPLE_COST + gexpr);
                 f.rows = ngroups;
                 f
             };

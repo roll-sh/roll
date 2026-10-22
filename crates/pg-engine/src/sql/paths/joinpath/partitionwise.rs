@@ -736,6 +736,7 @@ impl Planner<'_, '_> {
                     None => Plan::Empty {
                         ncols: leaf.ncols,
                         cols: None,
+                        info: None,
                     },
                 });
             }

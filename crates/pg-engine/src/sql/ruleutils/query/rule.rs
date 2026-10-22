@@ -48,6 +48,7 @@ pub(in crate::sql::ruleutils) fn rule_def(ctx: &ExecCtx, r: &Rule, pretty: bool)
         plan: Arc::new(Plan::Empty {
             ncols: 2 * n,
             cols: None,
+            info: None,
         }),
         table: table.clone(),
         old: Some(0),

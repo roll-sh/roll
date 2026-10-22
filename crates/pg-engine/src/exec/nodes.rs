@@ -158,6 +158,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             let bound = ctx.sort_bound.take();
             Box::new(SortNode {
                 presorted: super::pghash::presorted_keys(plan, ctx).min(keys.len()),
+                key: Arc::as_ptr(plan) as usize,
                 input: Some(open(input, ctx)?),
                 keys: keys.clone(),
                 out: Vec::new().into_iter(),
@@ -801,22 +802,39 @@ pub fn sort_rows_bounded(
     Ok(sorted.into_iter().map(|(_, r)| r).collect())
 }
 
-/// An Incremental Sort's rows: the input sorted on the first `presorted` keys already.
+/// An Incremental Sort's rows: the input sorted on the first `presorted` keys already, read
+/// only as far as the sort needs (a LIMIT above may stop it early). `key`: the node's, for
+/// EXPLAIN ANALYZE's counts of its sorts.
 fn incremental_sort_rows(
-    rows: Vec<Row>,
+    input: &mut BoxNode,
     keys: &[SortKey],
     presorted: usize,
     bound: Option<usize>,
+    key: usize,
     ctx: &ExecCtx,
 ) -> Result<Vec<Row>> {
-    let mut keyed: Vec<(Vec<Value>, Row)> = Vec::with_capacity(rows.len());
-    for r in rows {
-        let k = keys
-            .iter()
-            .map(|k| eval(&k.expr, &r, ctx))
-            .collect::<Result<Vec<_>>>()?;
-        keyed.push((k, r));
-    }
+    let mut read_err: Option<crate::error::Error> = None;
+    let keyed = std::iter::from_fn(|| {
+        if read_err.is_some() {
+            return None;
+        }
+        let r = (|| -> Result<Option<(Vec<Value>, Row)>> {
+            let Some(r) = input.next(ctx)? else { return Ok(None) };
+            ctx.check()?;
+            let k = keys
+                .iter()
+                .map(|k| eval(&k.expr, &r, ctx))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Some((k, r)))
+        })();
+        match r {
+            Ok(x) => x,
+            Err(e) => {
+                read_err = Some(e);
+                None
+            }
+        }
+    });
     let cmp_range = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row), from: usize, to: usize| {
         for (i, k) in keys.iter().enumerate().take(to).skip(from) {
             match compare_values(&a.0[i], &b.0[i], k, ctx)? {
@@ -839,10 +857,19 @@ fn incremental_sort_rows(
     };
     let mut cf = super::pgsort::Cmp::new(&mut full);
     let mut cs = super::pgsort::Cmp::new(&mut suffix);
-    let out = super::pgsort::incremental_sort(keyed, bound, &mut cf, &mut cs, &mut same);
-    if let Some(e) = err.or(cf.err).or(cs.err) {
+    let mut stats = super::pgsort::IncrStats::default();
+    let out = super::pgsort::incremental_sort(keyed, bound, &mut cf, &mut cs, &mut same, &mut stats);
+    if let Some(e) = read_err.or(err).or(cf.err).or(cs.err) {
         return Err(e);
     }
+    ctx.count(key, |st| {
+        for g in 0..2 {
+            st.incr.groups[g] += stats.groups[g];
+            st.incr.methods[g] |= stats.methods[g];
+            st.incr.kept_total[g] += stats.kept_total[g];
+            st.incr.kept_max[g] = st.incr.kept_max[g].max(stats.kept_max[g]);
+        }
+    });
     Ok(out.into_iter().map(|(_, r)| r).collect())
 }
 
@@ -854,6 +881,8 @@ struct SortNode {
     bound: Option<usize>,
     /// An Incremental Sort: the leading keys the input is sorted on already.
     presorted: usize,
+    /// The plan node's address (EXPLAIN ANALYZE's key).
+    key: usize,
 }
 
 impl Node for SortNode {
@@ -872,14 +901,14 @@ impl Node for SortNode {
                 )
                 .hint("Use the COLLATE clause to set the collation explicitly."));
             }
-            let mut rows = Vec::new();
-            while let Some(r) = input.next(ctx)? {
-                ctx.check()?;
-                rows.push(r);
-            }
             self.out = if self.presorted > 0 {
-                incremental_sort_rows(rows, &self.keys, self.presorted, self.bound, ctx)?
+                incremental_sort_rows(&mut input, &self.keys, self.presorted, self.bound, self.key, ctx)?
             } else {
+                let mut rows = Vec::new();
+                while let Some(r) = input.next(ctx)? {
+                    ctx.check()?;
+                    rows.push(r);
+                }
                 sort_rows_bounded(rows, &self.keys, self.bound, ctx)?
             }
             .into_iter();

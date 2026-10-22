@@ -260,6 +260,16 @@ pub fn tuplesort<T>(mut items: Vec<T>, bound: Option<usize>, cmp: &mut Cmp<T>) -
     heap
 }
 
+/// An incremental sort's sorts, full ones (0) and of presorted prefix groups (1): how many,
+/// the methods used (1 top-N heapsort, 2 quicksort), and the rows each kept.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IncrStats {
+    pub groups: [u64; 2],
+    pub methods: [u8; 2],
+    pub kept_total: [u64; 2],
+    pub kept_max: [u64; 2],
+}
+
 /// DEFAULT_MIN_GROUP_SIZE and DEFAULT_MAX_FULL_SORT_GROUP_SIZE.
 const MIN_GROUP: usize = 32;
 const MAX_FULL_SORT_GROUP: usize = 2 * MIN_GROUP;
@@ -268,12 +278,15 @@ const MAX_FULL_SORT_GROUP: usize = 2 * MIN_GROUP;
 /// batches of at least 32 rows (to the end of the prefix group then reached) sorted on all
 /// keys (`full`), and once such a batch grows past 64 rows, each prefix group (`same`)
 /// sorted on the rest (`suffix`) on its own. `bound`: a LIMIT above wants only that many.
+/// `input` is read only as far as that takes; `stats` counts the sorts done
+/// (instrumentSortedGroup).
 pub fn incremental_sort<T: Clone>(
-    input: Vec<T>,
+    input: impl IntoIterator<Item = T>,
     bound: Option<usize>,
     full: &mut Cmp<T>,
     suffix: &mut Cmp<T>,
     same: &mut dyn FnMut(&T, &T) -> bool,
+    stats: &mut IncrStats,
 ) -> Vec<T> {
     #[derive(PartialEq)]
     enum St {
@@ -293,9 +306,15 @@ pub fn incremental_sort<T: Clone>(
     let mut fullsorted: std::vec::IntoIter<T> = Vec::new().into_iter();
     let mut prefix: Vec<T> = Vec::new();
     let mut prefixsorted: std::vec::IntoIter<T> = Vec::new().into_iter();
-    // tuplesort with an optional bound: (rows, whether the bounded heap was used).
-    let sort = |rows: Vec<T>, b: Option<usize>, c: &mut Cmp<T>| -> (Vec<T>, bool) {
+    // tuplesort with an optional bound: (rows, whether the bounded heap was used), counted
+    // as a full sort's group (0) or a prefix sort's (1).
+    let sort = |rows: Vec<T>, b: Option<usize>, c: &mut Cmp<T>, st: &mut IncrStats, g: usize| -> (Vec<T>, bool) {
         let used = b.is_some_and(|b| rows.len() > b.saturating_mul(2));
+        let kept = (if used { b.unwrap_or(0).min(rows.len()) } else { rows.len() }) as u64;
+        st.groups[g] += 1;
+        st.methods[g] |= if used { 1 } else { 2 };
+        st.kept_total[g] += kept;
+        st.kept_max[g] = st.kept_max[g].max(kept);
         (tuplesort(rows, b, c), used)
     };
     // switchToPresortedPrefixMode.
@@ -307,7 +326,8 @@ pub fn incremental_sort<T: Clone>(
                   prefixsorted: &mut std::vec::IntoIter<T>,
                   bound_done: &mut usize,
                   suffix: &mut Cmp<T>,
-                  same: &mut dyn FnMut(&T, &T) -> bool|
+                  same: &mut dyn FnMut(&T, &T) -> bool,
+                  stats: &mut IncrStats|
      -> St {
         prefix.clear();
         let mut n = 0;
@@ -337,7 +357,7 @@ pub fn incremental_sort<T: Clone>(
             St::LoadPrefix
         } else {
             let b = bound.map(|b| b.saturating_sub(*bound_done));
-            let (rows, _) = sort(std::mem::take(prefix), b, suffix);
+            let (rows, _) = sort(std::mem::take(prefix), b, suffix, stats, 1);
             *prefixsorted = rows.into_iter();
             if let Some(bd) = bound {
                 *bound_done = bd.min(*bound_done + n);
@@ -365,7 +385,7 @@ pub fn incremental_sort<T: Clone>(
                 loop {
                     let Some(t) = input.next() else {
                         outer_done = true;
-                        let (rows, _) = sort(std::mem::take(&mut batch), set_bound, full);
+                        let (rows, _) = sort(std::mem::take(&mut batch), set_bound, full, stats, 0);
                         fullsorted = rows.into_iter();
                         st = St::ReadFull;
                         break;
@@ -382,7 +402,7 @@ pub fn incremental_sort<T: Clone>(
                         if let Some(b) = bound {
                             bound_done = b.min(bound_done + batch.len());
                         }
-                        let (rows, _) = sort(std::mem::take(&mut batch), set_bound, full);
+                        let (rows, _) = sort(std::mem::take(&mut batch), set_bound, full, stats, 0);
                         fullsorted = rows.into_iter();
                         st = St::ReadFull;
                         break;
@@ -390,7 +410,7 @@ pub fn incremental_sort<T: Clone>(
                     if batch.len() > MAX_FULL_SORT_GROUP {
                         pivot = None;
                         let n = batch.len();
-                        let (rows, used) = sort(std::mem::take(&mut batch), set_bound, full);
+                        let (rows, used) = sort(std::mem::take(&mut batch), set_bound, full, stats, 0);
                         fullsorted = rows.into_iter();
                         remaining = if used {
                             cur_bound.map_or(n, |c| c.min(n))
@@ -407,6 +427,7 @@ pub fn incremental_sort<T: Clone>(
                             &mut bound_done,
                             suffix,
                             same,
+                            stats,
                         );
                         break;
                     }
@@ -436,6 +457,7 @@ pub fn incremental_sort<T: Clone>(
                         &mut bound_done,
                         suffix,
                         same,
+                        stats,
                     )
                 } else {
                     St::LoadFull
@@ -457,7 +479,7 @@ pub fn incremental_sort<T: Clone>(
                     }
                 }
                 let b = bound.map(|b| b.saturating_sub(bound_done));
-                let (rows, _) = sort(std::mem::take(&mut prefix), b, suffix);
+                let (rows, _) = sort(std::mem::take(&mut prefix), b, suffix, stats, 1);
                 prefixsorted = rows.into_iter();
                 st = St::ReadPrefix;
                 if let Some(bd) = bound {

@@ -440,6 +440,7 @@ fn plan_clean(p: &Plan) -> bool {
             | Plan::Sort { .. }
             | Plan::Join { .. }
             | Plan::Agg { .. }
+            | Plan::Window { .. }
             | Plan::Limit { .. }
             | Plan::Distinct { .. }
             | Plan::Append { .. }
@@ -585,13 +586,21 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
         if anti {
             return Some(plan.clone());
         }
-        let cols = match plan {
-            Plan::Scan(s) => Some(Arc::new(super::optimize::scan_names(s))),
-            _ => None,
+        let (cols, info) = match plan {
+            Plan::Scan(s) => {
+                let names = super::optimize::scan_names(s);
+                let rels = vec![Some(super::optimize::scan_refname(s)); names.len()];
+                (
+                    Some(Arc::new(names)),
+                    Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new() })),
+                )
+            }
+            _ => (None, None),
         };
         return Some(Plan::Empty {
             ncols: width(plan),
             cols,
+            info,
         });
     }
     let (corr, rhs, _, scan_limited) = match sub_rel(p) {

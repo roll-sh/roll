@@ -151,6 +151,20 @@ pub struct ScanPlan {
     /// query's own (by query level), then in the order bound; EXPLAIN's names of same-named
     /// relations of one level follow it (0: not known).
     pub rti: Rti,
+    /// The orderings the planner found useful for the scan (the query's pathkeys, merge
+    /// join columns), which its partial paths are built for too.
+    pub useful: ScanUseful,
+}
+
+/// `ScanPlan::useful`: the pathkeys (as `sql::paths` builds them) and merge columns. Not
+/// part of its Debug text.
+#[derive(Clone, Default)]
+pub struct ScanUseful(pub Option<Arc<(Vec<crate::sql::paths::PathKey>, Vec<Expr>)>>);
+
+impl std::fmt::Debug for ScanUseful {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
 }
 
 /// A scan's place in the range table (`ScanPlan::rti`). Not part of its Debug text, by
@@ -884,6 +898,17 @@ impl MergePlan {
     }
 }
 
+/// A relation proven empty (a dummy rel), as the planner left it.
+#[derive(Clone, Debug, Default)]
+pub struct DummyInfo {
+    /// Per column, the relation it was read from (EXPLAIN qualifies its name with it).
+    pub rels: Vec<Option<String>>,
+    /// The equivalence classes its quals made before it was found empty (per column: its
+    /// class's representative column, and whether the class holds a constant), empty when
+    /// unknown: group and sort keys they make redundant stay so.
+    pub ec: Vec<(usize, bool)>,
+}
+
 #[derive(Clone, Debug)]
 pub enum Plan {
     /// One row with no columns (SELECT without FROM).
@@ -894,6 +919,8 @@ pub enum Plan {
         /// A relation proven empty (a dummy rel): its columns' names, as an expression
         /// above shows them.
         cols: Option<Arc<Vec<String>>>,
+        /// What else is known of the relation found empty.
+        info: Option<Arc<DummyInfo>>,
     },
     Values {
         rows: Vec<Vec<Expr>>,

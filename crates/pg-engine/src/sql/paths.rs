@@ -4898,7 +4898,7 @@ impl Planner<'_, '_> {
                     }
                     let ncols = crate::sql::binder::plan_width(p);
                     return Some(Arc::new(match inputs.len() {
-                        0 => Plan::Empty { ncols, cols: None },
+                        0 => Plan::Empty { ncols, cols: None, info: None },
                         1 => Arc::try_unwrap(inputs.pop().unwrap()).unwrap_or_else(|a| (*a).clone()),
                         _ => Plan::Append { inputs, inh: None },
                     }));
@@ -4924,7 +4924,7 @@ impl Planner<'_, '_> {
                 }
                 let ncols = crate::sql::binder::plan_width(p);
                 Some(Arc::new(match out.len() {
-                    0 => Plan::Empty { ncols, cols: None },
+                    0 => Plan::Empty { ncols, cols: None, info: None },
                     1 if drop => Arc::try_unwrap(out.pop().unwrap()).unwrap_or_else(|a| (*a).clone()),
                     _ => Plan::Append { inputs: out, inh: None },
                 }))
@@ -4969,7 +4969,7 @@ impl Planner<'_, '_> {
                 let q = self.simplify_consts(q);
                 if drop && crate::sql::binder::refute::always_false(&q) {
                     let ncols = crate::sql::binder::plan_width(p);
-                    return Some(Arc::new(Plan::Empty { ncols, cols: None }));
+                    return Some(Arc::new(Plan::Empty { ncols, cols: None, info: None }));
                 }
                 if matches!(q, Expr::Const(Value::Bool(true), _)) {
                     return Some(p.clone());
@@ -5150,6 +5150,11 @@ impl Planner<'_, '_> {
 
     /// Plan a scan for `want`; whether the path chosen delivers its order.
     fn plan_scan(&self, s: &mut ScanPlan, needed: &[bool], want: &Want, width: u32) -> bool {
+        // (Its partial paths are built for the same orderings.)
+        s.useful = crate::sql::plan::ScanUseful(
+            (!want.keys.is_empty() || !want.merge.is_empty())
+                .then(|| Arc::new((want.keys.clone(), want.merge.clone()))),
+        );
         let Some(rel) = self.rel(s, needed) else {
             return false;
         };

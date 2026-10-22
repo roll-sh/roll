@@ -3983,6 +3983,7 @@ impl Binder<'_, '_> {
                     phv_quals: Vec::new(),
                     check_as: self.check_as,
                     rti: self.next_rti(),
+                    useful: Default::default(),
                 };
                 let mut scan = scan;
                 if !colnames.is_empty() {
@@ -4000,9 +4001,11 @@ impl Binder<'_, '_> {
                     } else if t.partkey.is_some() {
                         // ONLY a partitioned table: it has no rows of its own.
                         let names = optimize::dummy_scan_names(&scan);
+                        let rels = vec![Some(shown.clone()); names.len()];
                         Plan::Empty {
                             ncols: super::optimize::width(&Plan::Scan(Box::new(scan))),
                             cols: Some(Arc::new(names)),
+                            info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new() })),
                         }
                     } else {
                         if self.exclusion_mode() == "on" {
@@ -4093,6 +4096,7 @@ impl Binder<'_, '_> {
                             phv_quals: Vec::new(),
                             check_as: self.check_as,
                             rti: self.next_rti(),
+                            useful: Default::default(),
                         }))
                     }
                     None if self.view_stack.contains(&v.oid) => {
@@ -4111,6 +4115,7 @@ impl Binder<'_, '_> {
                         Plan::Empty {
                             ncols: cols.len(),
                             cols: None,
+                            info: None,
                         }
                     }
                     None => {
@@ -4657,7 +4662,7 @@ impl Binder<'_, '_> {
                 // one).
                 if fdef.ret == DataType::Void {
                     let plan = if fdef.returns_set {
-                        Plan::Empty { ncols: 1, cols: None }
+                        Plan::Empty { ncols: 1, cols: None, info: None }
                     } else {
                         // A body run when called (PL/pgSQL, statements) still runs.
                         let input = if matches!(body, Plan::PlCall { .. }) {

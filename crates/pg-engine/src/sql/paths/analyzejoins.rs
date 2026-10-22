@@ -722,23 +722,23 @@ impl Planner<'_, '_> {
 /// The bare names of a plan's columns (as EXPLAIN would show them unqualified), when they
 /// are plain columns.
 fn plain_names(p: &Plan) -> Option<Vec<String>> {
+    plain_cols(p).map(|v| v.into_iter().map(|(n, _)| n).collect())
+}
+
+/// `plain_names`, with the relation each column is read from.
+fn plain_cols(p: &Plan) -> Option<Vec<(String, Option<String>)>> {
     match p {
-        Plan::Scan(s) => Some(
-            s.table
-                .columns
-                .iter()
-                .map(|c| {
-                    let n = s
-                        .col_aliases
-                        .as_ref()
-                        .and_then(|a| a.iter().find(|(o, _)| *o == c.name).map(|(_, a)| a.clone()))
-                        .unwrap_or_else(|| c.name.clone());
-                    crate::catalog::quote_ident(&n)
-                })
-                .collect(),
-        ),
+        Plan::Scan(s) => {
+            let rel = crate::sql::binder::optimize::scan_refname(s);
+            Some(
+                crate::sql::binder::optimize::scan_names(s)
+                    .into_iter()
+                    .map(|n| (n, Some(rel.clone())))
+                    .collect(),
+            )
+        }
         Plan::Project { input, exprs } => {
-            let inner = plain_names(input)?;
+            let inner = plain_cols(input)?;
             exprs
                 .iter()
                 .map(|e| match e {
@@ -750,21 +750,30 @@ fn plain_names(p: &Plan) -> Option<Vec<String>> {
         Plan::Join {
             kind, left, right, ..
         } => {
-            let mut v = plain_names(left)?;
+            let mut v = plain_cols(left)?;
             if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
-                v.extend(plain_names(right)?);
+                v.extend(plain_cols(right)?);
             }
             Some(v)
         }
         Plan::Filter { input, .. }
         | Plan::Sort { input, .. }
         | Plan::Limit { input, .. }
-        | Plan::Barrier { input, .. } | Plan::Context { input, .. } => plain_names(input),
+        | Plan::Barrier { input, .. } | Plan::Context { input, .. } => plain_cols(input),
+        // (Its members' columns are the parent's.)
         Plan::Append {
             inputs,
-            inh: Some(_),
-        } => inputs.first().and_then(|i| plain_names(i)),
-        Plan::Empty { cols: Some(c), .. } => Some((**c).clone()),
+            inh: Some(n),
+        } => inputs
+            .first()
+            .and_then(|i| plain_cols(i))
+            .map(|v| v.into_iter().map(|(c, _)| (c, Some(n.clone()))).collect()),
+        Plan::Empty { cols: Some(c), info, .. } => Some(
+            c.iter()
+                .enumerate()
+                .map(|(i, n)| (n.clone(), info.as_ref().and_then(|d| d.rels.get(i).cloned().flatten())))
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -793,16 +802,18 @@ fn dummy(p: &Plan) -> Plan {
             let ncols = names.len();
             let cols = names.into_iter().collect::<Option<Vec<_>>>().map(Arc::new);
             return Plan::Project {
-                input: Arc::new(Plan::Empty { ncols, cols }),
+                input: Arc::new(Plan::Empty { ncols, cols, info: None }),
                 exprs,
             };
         }
     }
     let ncols = plan_width(p);
-    let cols = plain_names(p)
-        .filter(|c| c.len() == ncols)
-        .map(Arc::new);
-    Plan::Empty { ncols, cols }
+    let named = plain_cols(p).filter(|c| c.len() == ncols);
+    let rels = named.as_ref().map_or_else(Vec::new, |v| v.iter().map(|(_, r)| r.clone()).collect());
+    let cols = named.map(|v| Arc::new(v.into_iter().map(|(n, _)| n).collect()));
+    // (The classes its quals made stay.)
+    let ec = super::column_classes(p);
+    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec })) }
 }
 
 /// A plan's outputs as expressions over the relations below its projections and joins

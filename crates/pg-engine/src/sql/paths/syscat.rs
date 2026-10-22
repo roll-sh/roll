@@ -352,6 +352,7 @@ fn stand_in_scan(table: Arc<Table>, filter: Option<Expr>) -> ScanPlan {
         phv_quals: Vec::new(),
         check_as: None,
         rti: Default::default(),
+        useful: Default::default(),
     }
 }
 

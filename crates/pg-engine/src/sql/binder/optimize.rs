@@ -95,6 +95,11 @@ pub(crate) fn scan_names(s: &crate::sql::plan::ScanPlan) -> Vec<String> {
         .collect()
 }
 
+/// The name EXPLAIN qualifies a scan's columns with (before making it unique).
+pub(crate) fn scan_refname(s: &crate::sql::plan::ScanPlan) -> String {
+    s.alias.clone().unwrap_or_else(|| s.table.name.clone())
+}
+
 /// An empty appendrel's columns (no members: a Result with a false One-Time Filter), its
 /// row identity columns too.
 pub(crate) fn dummy_scan_names(s: &crate::sql::plan::ScanPlan) -> Vec<String> {
@@ -369,10 +374,12 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             // (A constant false qual: a dummy rel, its columns still named.)
             if all.iter().any(super::refute::always_false) {
                 let names = scan_names(&s);
+                let rels = vec![Some(scan_refname(&s)); names.len()];
                 let ncols = width(&Plan::Scan(s));
                 return Plan::Empty {
                     ncols,
                     cols: Some(Arc::new(names)),
+                    info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new() })),
                 };
             }
             if super::partprune::const_conflict(&all)
@@ -386,8 +393,17 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                     (0..l.len()).any(|i| super::partprune::level_pruned(&all, l, i))
                 })
             {
-                let ncols = width(&Plan::Scan(s));
-                return Plan::Empty { ncols, cols: None };
+                // (Its columns still named, and the classes its quals made: a key equated
+                // with a constant stays redundant.)
+                let names = scan_names(&s);
+                let rels = vec![Some(scan_refname(&s)); names.len()];
+                s.filter = and_all(all);
+                let scan = Plan::Scan(s);
+                let ec = crate::sql::paths::column_classes(&scan);
+                let ncols = width(&scan);
+                let cols = (names.len() == ncols).then(|| Arc::new(names));
+                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec }));
+                return Plan::Empty { ncols, cols, info };
             }
             s.filter = and_all(all);
             // New quals: the access path is chosen again (unless a sort relies on it).
@@ -401,7 +417,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             Plan::Scan(s)
         }
         // No rows stay no rows.
-        Plan::Empty { ncols, cols } => Plan::Empty { ncols, cols },
+        Plan::Empty { ncols, cols, info } => Plan::Empty { ncols, cols, info },
         Plan::SysScan { table, filter, alias, .. } => {
             let mut all = Vec::new();
             if let Some(f) = filter {
@@ -570,11 +586,22 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 _ => None,
             });
             let cols = names.map(Arc::new);
+            // (Its columns the parent's.)
+            let rels = vec![inh.clone(); ncols];
             // A constant false filter excludes every member whatever constraint_exclusion
             // says.
             if parts.iter().any(super::refute::always_false) {
-                return Plan::Empty { ncols, cols };
+                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new() }));
+                return Plan::Empty { ncols, cols, info };
             }
+            // (The classes the parent's quals make, should no member be left.)
+            let ec = {
+                let f = Plan::Filter {
+                    input: Arc::new(Plan::Empty { ncols, cols: None, info: None }),
+                    pred: and_all(parts.clone()).unwrap(),
+                };
+                crate::sql::paths::column_classes(&f)
+            };
             let pred = and_all(parts).unwrap();
             let inputs: Vec<Arc<Plan>> = inputs
                 .into_iter()
@@ -588,7 +615,8 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 .filter(|p| !super::inherit::excluded(p))
                 .collect();
             if inputs.is_empty() {
-                return Plan::Empty { ncols, cols };
+                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec }));
+                return Plan::Empty { ncols, cols, info };
             }
             Plan::Append { inputs, inh }
         }

@@ -8342,7 +8342,7 @@ pub(crate) fn check_merge_keys(ctx: &crate::exec::ExecCtx, plan: &mut Plan) -> R
         {
             if has_indeterminate_keys(input) {
                 let ncols = super::plan_width(input);
-                *plan = Plan::Empty { ncols, cols: None };
+                *plan = Plan::Empty { ncols, cols: None, info: None };
             }
             Ok(())
         }

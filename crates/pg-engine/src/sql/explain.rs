@@ -341,6 +341,8 @@ enum Detail {
     /// "Rows Removed by …" under ANALYZE.
     Removed(&'static str, Vec<Removed>),
     SortInfo,
+    /// An Incremental Sort's full-sort and presorted groups under ANALYZE.
+    IncSortInfo,
     HashAggInfo,
     HashInfo,
     /// An index scan's descents (by its `ScanPlan`).
@@ -366,6 +368,7 @@ impl Detail {
         matches!(
             self,
             Detail::SortInfo
+                | Detail::IncSortInfo
                 | Detail::HashAggInfo
                 | Detail::HashInfo
                 | Detail::IndexSearches(_)
@@ -450,6 +453,9 @@ struct ExNode {
     /// This node's output as a partial plan (rows spread over parallel workers), when
     /// one can make it: what a Gather above would run (`parallel`).
     partial: Option<Box<ExNode>>,
+    /// A node with a Gather in it: the cheapest plan of the same rows a worker could run
+    /// (get_cheapest_parallel_safe_total_inner), for a Parallel Append to share out whole.
+    safe_alt: Option<Box<ExNode>>,
     /// A Sort a LIMIT above bounds (ExecSetTupleBound): the rows it keeps.
     bound: Option<f64>,
 }
@@ -1606,6 +1612,14 @@ fn assign_refnames_skip(
                 Plan::PlCall { func, .. } => Some(func.name.clone()),
                 Plan::One => {
                     results += 1;
+                    None
+                }
+                // (A relation proven empty is still in the range table, unnamed.)
+                Plan::Empty { info: Some(d), .. } => {
+                    let mut rels: Vec<&String> = d.rels.iter().flatten().collect();
+                    rels.sort();
+                    rels.dedup();
+                    results += rels.len();
                     None
                 }
                 Plan::Insert(i) => Some(i.alias.clone().unwrap_or_else(|| i.rules.table.name.clone())),
@@ -2985,7 +2999,7 @@ impl Builder<'_, '_> {
             // (Without a filter above, its Subquery Scan is trivial.)
             Plan::Barrier { input, .. } => self.convert(input),
             Plan::One => Built::passthrough(self.result(1.0), Vec::new()),
-            Plan::Empty { ncols, cols } => {
+            Plan::Empty { ncols, cols, info } => {
                 let mut n = ExNode {
                     total_cost: 0.0,
                     rows: 0.0,
@@ -2993,8 +3007,27 @@ impl Builder<'_, '_> {
                 };
                 n.details
                     .push(Detail::Text("One-Time Filter", "false".into()));
+                // (Qualified by the relation each was read from, which has a name only when
+                // the plan scans no relation at all: set_rtable_names names just the
+                // relations scanned, or every one when none is.)
+                let named = self.refnames.is_empty();
+                let rel = |i: usize| {
+                    info.as_ref()
+                        .filter(|_| named)
+                        .and_then(|d| d.rels.get(i).cloned().flatten())
+                };
                 let names = match cols {
-                    Some(c) if c.len() == *ncols => c.iter().map(|x| Name::same(x.clone())).collect(),
+                    Some(c) if c.len() == *ncols => c
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| match rel(i) {
+                            Some(r) => Name {
+                                plain: x.clone(),
+                                full: format!("{}.{}", quote_ident(&r), x),
+                            },
+                            None => Name::same(x.clone()),
+                        })
+                        .collect(),
                     _ => vec![Name::same("NULL"); *ncols],
                 };
                 Built::passthrough(n, names)
@@ -3457,6 +3490,24 @@ impl Builder<'_, '_> {
                         e.walk(&mut |x| postponed |= matches!(x, Expr::Subquery(s) if s.call.is_none()));
                         postponed
                     });
+                // (Over a Gather Merge of the sorted partial plan, values computed after the
+                // sort that workers can compute are: apply_projection_to_path pushes the
+                // projection under it, a Result over the Sort.)
+                let into_gather = matches!(&**input, Plan::Sort { .. })
+                    && c.node.node_type == "Gather Merge"
+                    && c.node
+                        .children
+                        .first()
+                        .is_some_and(|ch| matches!(ch.node_type, "Sort" | "Incremental Sort"))
+                    && exprs.iter().any(|e| {
+                        let mut postponed = e.is_volatile();
+                        e.walk(&mut |x| postponed |= matches!(x, Expr::Subquery(s) if s.call.is_none()));
+                        postponed
+                    })
+                    && {
+                        let cat = self.ctx.catalog();
+                        exprs.iter().all(|e| super::paths::parallel::hazard(e, &cat) == 's')
+                    };
                 if sort_above
                     || append_above
                     || matches!(&**input, Plan::ProjectSet { .. })
@@ -3595,7 +3646,15 @@ impl Builder<'_, '_> {
                         _ => n.wrapped(),
                     })
                     .collect();
-                c.node.subplans.append(&mut self.pending);
+                if c.node.node_type == "Aggregate" {
+                    // (ExecInitAgg initializes the projection before the aggregates'
+                    // arguments: its SubPlans come first.)
+                    let mut tl = std::mem::take(&mut self.pending);
+                    tl.append(&mut c.node.subplans);
+                    c.node.subplans = tl;
+                } else {
+                    c.node.subplans.append(&mut self.pending);
+                }
                 // The target list's widths, and its evaluation per row (cost_qual_eval).
                 let cols: Vec<ColInfo> = exprs
                     .iter()
@@ -3627,12 +3686,30 @@ impl Builder<'_, '_> {
                     .collect();
                 // (Only the columns read above count.)
                 let mask = self.needed.get(&addr(p));
+                // (Over a grouping, its target list holds the group keys the select list
+                // doesn't, as resjunk entries.)
+                let agg_groups = match &**input {
+                    Plan::Agg { groups, sets: None, .. } => Some(groups.len()),
+                    Plan::Filter { input: fi, .. } => match &**fi {
+                        Plan::Agg { groups, sets: None, .. } => Some(groups.len()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let junk_keys: u32 = match agg_groups {
+                    Some(ng) if c.node.node_type == "Aggregate" => (0..ng)
+                        .filter(|j| !exprs.iter().any(|e| matches!(e, Expr::Col(k, _) if k == j)))
+                        .filter_map(|j| c.node.cols.get(j).map(|x| x.width))
+                        .sum(),
+                    _ => 0,
+                };
                 c.node.width = cols
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| mask.is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
                     .map(|(_, c)| c.width)
-                    .sum();
+                    .sum::<u32>()
+                    + junk_keys;
                 if let Some(pt) = &mut c.node.partial {
                     pt.width = c.node.width;
                     pt.cols = cols.clone();
@@ -3695,6 +3772,22 @@ impl Builder<'_, '_> {
                             }
                         }
                     }
+                }
+                if into_gather {
+                    let gm = &mut c.node;
+                    let child = gm.children.remove(0);
+                    let mut r = ExNode::new("Result");
+                    r.rows = child.rows;
+                    r.width = gm.width;
+                    r.cols = gm.cols.clone();
+                    r.startup_cost = child.startup_cost;
+                    r.total_cost = child.total_cost + child.rows * (costs::CPU_TUPLE_COST + per);
+                    r.key = child.key;
+                    r.workers = child.workers;
+                    r.output = std::mem::take(&mut gm.output);
+                    gm.output = r.output.iter().map(|o| refer_to(o)).collect();
+                    r.children.push(child.child("Outer"));
+                    gm.children.insert(0, r.child("Outer"));
                 }
                 let built = Built {
                     node: c.node,
@@ -4055,6 +4148,7 @@ impl Builder<'_, '_> {
                         "Presorted Key",
                         list[..common].iter().map(|k| presorted_name(k)).collect(),
                     ));
+                    n.details.push(Detail::IncSortInfo);
                     let pre: Vec<ColInfo> = keys[..common]
                         .iter()
                         .map(|k| match &k.expr {
@@ -4110,7 +4204,13 @@ impl Builder<'_, '_> {
                         sn.output = pt.output.clone();
                     }
                     sn.children.push(pt.child("Outer"));
-                    let mut gm = self.gather_merge_of(&sn);
+                    // (Over a relation's partial plan sorted for the query's order:
+                    // generate_useful_gather_paths, the relation's rows.)
+                    let mut gm = if matches!(&**input, Plan::Scan(_) | Plan::Join { .. }) {
+                        self.gather_merge_rows(&sn, n.rows)
+                    } else {
+                        self.gather_merge_of(&sn)
+                    };
                     if parallel::par_beats(&gm, &n) {
                         gm.alt = Some(Box::new(n));
                         return Built::passthrough(gm, c.exported);
@@ -4224,10 +4324,17 @@ impl Builder<'_, '_> {
                         }),
                         _ => false,
                     };
-                    // (A hashed grouping shows a computed key as the expression itself.)
+                    // (A hashed grouping shows a computed key as the expression itself: a
+                    // window function's result too.)
+                    let windowed = |p: &Plan, j: usize| {
+                        matches!(p, Plan::Window { input: wi, .. } if j >= super::binder::plan_width(wi))
+                    };
                     let computed = |i: usize| match &**input {
-                        Plan::Project { exprs, .. } => exprs.get(i).is_some_and(|e| !matches!(e, Expr::Col(..))),
-                        _ => false,
+                        Plan::Project { exprs, input: pin } => exprs.get(i).is_some_and(|e| match e {
+                            Expr::Col(j, _) => windowed(pin, *j),
+                            _ => true,
+                        }),
+                        p => windowed(p, i),
                     };
                     // (A key listed twice is one key: remove_redundant pathkeys.)
                     let dup = |i: usize| match &**input {
@@ -6429,12 +6536,16 @@ impl Builder<'_, '_> {
         let mut members = Vec::new();
         let mut member_tuples: Vec<f64> = Vec::new();
         for (i, a) in arms.iter().enumerate() {
-            let saved = std::mem::replace(&mut self.member_scan, inh);
+            // (A UNION ALL arm reading one table is an appendrel member too.)
+            let one_table = match &***a {
+                Plan::Scan(_) => true,
+                Plan::Project { input, .. } => matches!(&**input, Plan::Scan(_)),
+                _ => false,
+            };
+            let saved = std::mem::replace(&mut self.member_scan, inh || one_table);
             let mut c = self.node(a);
             self.member_scan = saved;
-            if inh {
-                members.push(c.node.clone());
-            }
+            members.push(c.node.clone());
             c.node.partial = None;
             c.node.out_names = c.exported.iter().map(|k| self.pick(k, Cx::Upper)).collect();
             if i == 0 {
@@ -6469,31 +6580,43 @@ impl Builder<'_, '_> {
                 .any(|m| m.table.inherits.contains(&s.table.oid))
                 .then(|| s.table.clone())
         });
+        // (The Append of a sub-partitioned partition's own members: that partition's.)
+        let common = first.and_then(|s| s.part.as_ref()).and_then(|l| {
+            let others: Vec<Vec<u32>> = arms
+                .iter()
+                .skip(1)
+                .filter_map(|a| pwagg::member_scan_of(a))
+                .map(|m| m.part.as_ref().map_or_else(Vec::new, |l| l.iter().map(|x| x.parent.oid).collect()))
+                .collect();
+            l.iter()
+                .map(|x| x.parent.clone())
+                .find(|p| others.iter().all(|o| o.contains(&p.oid)))
+        });
+        let top = first.and_then(|s| s.part.as_ref()).and_then(|l| l.last()).map(|l| l.parent.clone());
         if inh
-            && let Some(parent) = first
-                .and_then(|s| s.part.as_ref())
-                .and_then(|l| l.last())
-                .map(|l| l.parent.clone())
-                .or(plain_parent)
+            && let Some(parent) = common.clone().or(top.clone()).or(plain_parent)
         {
             let tuples: f64 = member_tuples.iter().sum();
+            // (The Append's columns are the top parent's: the same names in this one.)
+            let layout = top.unwrap_or_else(|| parent.clone());
             for (k, c) in n.cols.iter_mut().enumerate() {
-                if k < parent.columns.len() && !parent.columns[k].dropped {
-                    c.var = Some(costs::VarRef {
-                        table: parent.clone(),
-                        col: k,
-                        tuples,
-                        expr: None,
-                        rows: n.rows,
-                        inh: true,
-                    });
-                }
+                let Some(lc) = layout.columns.get(k).filter(|c| !c.dropped) else { continue };
+                let Some(pk) = parent.columns.iter().position(|pc| !pc.dropped && pc.name == lc.name) else {
+                    continue;
+                };
+                c.var = Some(costs::VarRef {
+                    table: parent.clone(),
+                    col: pk,
+                    tuples,
+                    expr: None,
+                    rows: n.rows,
+                    inh: true,
+                });
             }
         }
-        if inh {
-            n.par_safe = !members.is_empty() && members.iter().all(|m| m.par_safe);
-            n.partial = self.partial_append(&n, &members).map(Box::new);
-        }
+        // (A UNION ALL's arms in parallel too, an Append of their partial plans.)
+        n.par_safe = !members.is_empty() && members.iter().all(|m| m.par_safe);
+        n.partial = self.partial_append(&n, &members).map(Box::new);
         Built::passthrough(n, names.unwrap_or_default())
     }
 
@@ -7523,6 +7646,11 @@ impl Builder<'_, '_> {
                 } else {
                     ("Filter", "Rows Removed by Filter")
                 };
+                // (A gathered grouping's serial form checks its HAVING too.)
+                if let Some(sa) = &mut c.node.safe_alt {
+                    sa.add_qual(label, removed, text.clone(), Some(Removed::Diff(input_key)));
+                    sa.key = Some(key);
+                }
                 c.node
                     .add_qual(label, removed, text, Some(Removed::Diff(input_key)));
                 c.node.key = Some(key);
@@ -7540,8 +7668,13 @@ impl Builder<'_, '_> {
                     user: None,
                 };
                 let qc: f64 = quals.iter().map(costs::qual_cost).sum();
+                let sel = est.clauses(&quals);
                 c.node.total_cost += c.node.rows * qc;
-                c.node.rows = costs::clamp_rows(c.node.rows * est.clauses(&quals));
+                c.node.rows = costs::clamp_rows(c.node.rows * sel);
+                if let Some(sa) = &mut c.node.safe_alt {
+                    sa.total_cost += sa.rows * qc;
+                    sa.rows = costs::clamp_rows(sa.rows * sel);
+                }
                 // (A relation's distinct counts are no more than its rows.)
                 if scan_like {
                     let rows = c.node.rows;
@@ -7698,6 +7831,19 @@ impl Builder<'_, '_> {
                 .sum();
             if let Some(pi) = &mut part_in {
                 pi.width = c.node.width;
+            }
+        }
+        // The group expressions, computed below the aggregation for each row (the input's
+        // target list): in the workers too.
+        let gexpr: f64 = groups
+            .iter()
+            .filter(|g| !matches!(g, Expr::Col(..)))
+            .map(costs::qual_cost)
+            .sum();
+        if gexpr > 0.0 {
+            c.node.total_cost += c.node.rows * gexpr;
+            if let Some(pi) = &mut part_in {
+                pi.total_cost += pi.rows * gexpr;
             }
         }
         // The input run serially, or gathered from workers.
@@ -8263,28 +8409,32 @@ impl Builder<'_, '_> {
                 },
             })
             .collect();
-        // The group expressions, computed below the aggregation for each row (the input's
-        // target list).
-        let gexpr: f64 = groups
-            .iter()
-            .filter(|g| !matches!(g, Expr::Col(..)))
-            .map(costs::qual_cost)
-            .sum();
-        if gexpr > 0.0 {
-            c.node.total_cost += c.node.rows * gexpr;
-            if let Some(pi) = &mut part_in {
-                pi.total_cost += pi.rows * gexpr;
-            }
-        }
         // cost_agg, with estimate_num_groups for the group count.
         let in_rows = c.node.rows;
-        let ngroups = self.group_num_groups(groups, &c.node.cols, in_rows);
+        // (Of the keys that group anything: processed_groupClause. None when an equality
+        // fixes them all.)
+        let kept: Vec<Expr> = if sets.is_some() {
+            groups.to_vec()
+        } else if {
+            let fixed = super::paths::constant_columns(input);
+            groups.iter().all(|g| implicit_key_col(g).is_some_and(|j| fixed.get(j).copied().unwrap_or(false)))
+        } {
+            Vec::new()
+        } else {
+            groups
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !redundant.get(*i).copied().unwrap_or(false))
+                .map(|(_, g)| g.clone())
+                .collect()
+        };
+        let ngroups = self.group_num_groups(&kept, &c.node.cols, in_rows);
         let trans = costs::CPU_OPERATOR_COST
             * aggs
                 .iter()
                 .map(|a| 1 + a.args.iter().map(costs::ops).sum::<usize>())
                 .sum::<usize>() as f64;
-        let group_ops = costs::CPU_OPERATOR_COST * groups.len() as f64;
+        let group_ops = costs::CPU_OPERATOR_COST * kept.len() as f64;
         match n.strategy {
             Some("Plain") => {
                 n.rows = 1.0;
@@ -8322,6 +8472,8 @@ impl Builder<'_, '_> {
                 n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
             }
         }
+        // (create_agg_path: the grouping target's group expressions, per group.)
+        n.total_cost += n.rows * gexpr;
         let mut cols = gcols;
         // (A single grouping key is unique in the output: examine_variable's isunique, as
         // many values as groups.)
@@ -8476,6 +8628,7 @@ impl Builder<'_, '_> {
                         + in_rows * (trans + group_ops)
                         + ngroups * costs::CPU_TUPLE_COST;
                 }
+                ga.total_cost += ngroups * gexpr;
                 ga.disabled = false;
                 ga.order = keys_ord;
                 ga.children.push(input.child("Outer"));
@@ -8503,8 +8656,13 @@ impl Builder<'_, '_> {
         }
         if sets.is_none()
             && let Some(pi) = part_in
-            && let Some(f) = self.parallel_agg(&n, *pi, groups, aggs, &gnames, &anames)
+            && let Some(mut f) = self.parallel_agg(&n, *pi, groups, aggs, &gnames, &anames)
         {
+            let mut serial = std::mem::take(&mut n);
+            serial.alt = None;
+            if !parallel::has_gather(&serial) {
+                f.safe_alt = Some(Box::new(serial));
+            }
             n = f;
         }
         // Or partition by partition.
@@ -9104,7 +9262,8 @@ impl Builder<'_, '_> {
                 let cols: Vec<ColInfo> = first.order_by.iter().map(|k| col_of(&k.expr)).collect();
                 part_rows / self.num_groups(&cols, part_rows)
             };
-            let f = &first.frame;
+            // (The clause's frame as optimize_window_clauses left it.)
+            let f = &win_frames[wi];
             let mut ret = match (&f.end, f.unit) {
                 (FrameBound::UnboundedFollowing, _) => part_rows,
                 (FrameBound::CurrentRow, FrameUnit::Rows) => 1.0,
@@ -11317,10 +11476,62 @@ impl Render<'_> {
                     if text {
                         self.w
                             .prop("Sort Method", &format!("{method}  {space}: {kb}kB"), true);
+                        // (A sort in parallel workers: each worker's own, show_sort_info's
+                        // shared_info.)
+                        if n.workers > 0 {
+                            for i in 0..n.workers {
+                                self.w.prop(
+                                    &format!("Worker {i}:  Sort Method"),
+                                    &format!("{method}  {space}: {kb}kB"),
+                                    true,
+                                );
+                            }
+                        }
                     } else {
                         self.w.prop("Sort Method", method, false);
                         self.w.prop("Sort Space Used", &kb.to_string(), true);
                         self.w.prop("Sort Space Type", space, false);
+                    }
+                }
+                Detail::IncSortInfo if executed => {
+                    // show_incremental_sort_info: the full sorts, then those of presorted
+                    // prefix groups.
+                    let st = self.stats(n.key).unwrap_or_default().incr;
+                    let width = n.width as u64;
+                    for (g, label) in [(0, "Full-sort"), (1, "Pre-sorted")] {
+                        if st.groups[g] == 0 || st.groups[0] == 0 {
+                            continue;
+                        }
+                        let methods: Vec<String> = [(1u8, "top-N heapsort"), (2, "quicksort")]
+                            .iter()
+                            .filter(|(b, _)| st.methods[g] & b != 0)
+                            .map(|(_, m)| m.to_string())
+                            .collect();
+                        let kb = |kept: u64, sorts: u64| (kept * (width + 40)).div_ceil(1024) + 25 * sorts;
+                        let peak = kb(st.kept_max[g], 1);
+                        let avg = kb(st.kept_total[g], st.groups[g]) / st.groups[g];
+                        let name = format!("{label} Groups");
+                        if text {
+                            let s = if methods.len() > 1 { "s" } else { "" };
+                            self.w.prop(
+                                &name,
+                                &format!(
+                                    "{}  Sort Method{s}: {}  Average Memory: {avg}kB  Peak Memory: {peak}kB",
+                                    st.groups[g],
+                                    methods.join(", ")
+                                ),
+                                true,
+                            );
+                        } else {
+                            self.w.open("Incremental Sort Groups", Some(&name), true);
+                            self.w.prop("Group Count", &st.groups[g].to_string(), true);
+                            self.w.list("Sort Methods Used", &methods);
+                            self.w.open("Sort Space", Some("Sort Space Memory"), true);
+                            self.w.prop("Average Sort Space Used", &avg.to_string(), true);
+                            self.w.prop("Peak Sort Space Used", &peak.to_string(), true);
+                            self.w.close("Sort Space", true);
+                            self.w.close("Incremental Sort Groups", true);
+                        }
                     }
                 }
                 Detail::MemoizeInfo if executed => {
@@ -11504,6 +11715,7 @@ impl Render<'_> {
                     self.w.close("Target Tables", false);
                 }
                 Detail::SortInfo
+                | Detail::IncSortInfo
                 | Detail::HashInfo
                 | Detail::IndexSearches(_)
                 | Detail::HeapFetches(_)

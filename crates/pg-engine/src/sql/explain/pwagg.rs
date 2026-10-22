@@ -303,6 +303,102 @@ pub(super) fn add_path_survivors(paths: Vec<ExNode>, keys: &[String]) -> Vec<ExN
 }
 
 impl Builder<'_, '_> {
+    /// The partitions' partial groupings (of `kids`, each gathered from workers on its
+    /// own, under a Finalize of its own when the partition was grouped whole) as one
+    /// Parallel Append under a Gather (Merge, sorted), finalized: the candidates, and the
+    /// partial groupings appended.
+    fn par_partial_cands(
+        &self,
+        kids: &[ExNode],
+        serial: &ExNode,
+        keys: &[String],
+        finalize: &dyn Fn(ExNode, ExNode, bool) -> ExNode,
+    ) -> (Vec<ExNode>, usize) {
+        let g = crate::sql::paths::Gucs::read(self.ctx);
+        // The partitions' partial groupings run by workers (each a Gather over its
+        // own): one Parallel Append of them under a Gather (Merge, sorted) instead.
+        // (A sub-partitioned partition's: the partial groupings of its own Parallel
+        // Append, joining this one.)
+        let par_parts: Option<Vec<Vec<ExNode>>> = kids
+            .iter()
+            .map(|k| {
+                // (A partition grouped whole: its partial groupings under its Finalize.)
+                let k = match k.partial_mode {
+                    Some("Finalize") if k.children.len() == 1 => &k.children[0],
+                    _ => k,
+                };
+                if !matches!(k.node_type, "Gather" | "Gather Merge") || k.children.len() != 1 {
+                    return None;
+                }
+                let mut x = k.children[0].clone();
+                while x.node_type == "Sort" && x.children.len() == 1 {
+                    x = x.children.pop().unwrap();
+                }
+                if x.title == "Parallel Append"
+                    && !x.children.is_empty()
+                    && x.children.iter().all(|c| c.partial_mode == Some("Partial"))
+                {
+                    return Some(x.children);
+                }
+                (x.partial_mode == Some("Partial")).then(|| vec![x])
+            })
+            .collect();
+        let mut cands: Vec<ExNode> = Vec::new();
+        let mut par_leaves = 0;
+        if let Some(subs) = par_parts
+            && self.par.is_some()
+        {
+            let mut subs: Vec<ExNode> = subs.into_iter().flatten().collect();
+            par_leaves = subs.len();
+            let cfg = self.par.clone().expect("checked");
+            let workers = subs.iter().map(|x| x.workers).max().unwrap_or(1).max(1);
+            subs.sort_by(|a, b| b.total_cost.total_cmp(&a.total_cost));
+            let div = cfg.divisor(workers);
+            let mut pa = ExNode::new("Append");
+            pa.title = "Parallel Append".into();
+            pa.parallel_aware = true;
+            pa.workers = workers;
+            pa.rows = subs.iter().map(|x| x.rows * (cfg.divisor(x.workers) / div)).sum();
+            pa.startup_cost = subs.iter().map(|x| x.startup_cost).fold(f64::INFINITY, f64::min);
+            pa.total_cost = subs.iter().map(|x| x.total_cost).sum::<f64>() + costs::CPU_TUPLE_COST * 0.5 * pa.rows;
+            pa.width = subs.iter().map(|x| x.width).max().unwrap_or(0);
+            pa.cols = subs.first().map(|x| x.cols.clone()).unwrap_or_default();
+            pa.children = subs.into_iter().map(|c| c.child("Member")).collect();
+            // (Both finalizations: a sorted one shaped from the hashed one when the
+            // serial grouping has none.)
+            let mut forms: Vec<ExNode> = std::iter::once(serial).chain(serial.alt.as_deref()).cloned().collect();
+            if !forms.iter().any(|f| f.strategy == Some("Sorted"))
+                && let Some(h) = forms.iter().find(|f| f.strategy == Some("Hashed"))
+            {
+                let mut f = h.clone();
+                f.strategy = Some("Sorted");
+                f.title = f.title.replace("HashAggregate", "GroupAggregate");
+                f.details.retain(|d| !matches!(d, Detail::HashAggInfo));
+                forms.push(f);
+            }
+            for form in &forms {
+                let mut f = form.clone();
+                f.children.clear();
+                if form.strategy == Some("Hashed") {
+                    let g = self.gather_of(&pa);
+                    cands.push(finalize(f, g, true));
+                } else {
+                    let mut sn = ExNode::new("Sort");
+                    sn.details.push(Detail::List("Sort Key", keys.to_vec()));
+                    sn.details.push(Detail::SortInfo);
+                    self.sort_costs(&mut sn, &pa);
+                    sn.order = keys.to_vec();
+                    sn.workers = pa.workers;
+                    sn.children.push(pa.clone().child("Outer"));
+                    let gm = self.gather_merge_of(&sn);
+                    cands.push(finalize(f, gm, false));
+                }
+            }
+        }
+        let _ = &g;
+        (cands, par_leaves)
+    }
+
     /// A grouping's total cost as the ORDER BY over it sees it (`ordered`: one of its
     /// keys, `keys`): with a sort when it doesn't come in that order.
     fn ordered_cost(&self, n: &ExNode, keys: &[String], ordered: bool) -> f64 {
@@ -494,6 +590,31 @@ impl Builder<'_, '_> {
         }
         self.pw_partial = saved_partial;
         let g = crate::sql::paths::Gucs::read(self.ctx);
+        let ops = costs::CPU_OPERATOR_COST * groups.len() as f64;
+        let trans = costs::CPU_OPERATOR_COST * aggs.len() as f64;
+        let finalize = |mut f: ExNode, input: ExNode, hashed: bool| -> ExNode {
+            let in_rows = input.rows;
+            if hashed {
+                f.startup_cost = input.total_cost + in_rows * (trans + ops);
+                f.total_cost = f.startup_cost + f.rows * costs::CPU_TUPLE_COST;
+            } else {
+                f.startup_cost = input.startup_cost;
+                f.total_cost = input.total_cost + in_rows * (trans + ops) + f.rows * costs::CPU_TUPLE_COST;
+                // (Its groups come out in the keys' order.)
+                f.order = keys.to_vec();
+            }
+            if !aggs.is_empty() {
+                let base = f.title.trim_start_matches("Finalize ").to_string();
+                f.title = format!("Finalize {base}");
+                f.partial_mode = Some("Finalize");
+            }
+            f.alt = None;
+            f.children = vec![input.child("Outer")];
+            f
+        };
+        // (Whether the partitions' groupings stay whole: else their partial groupings are
+        // finalized above, and the HAVING with them.)
+        let mut pw_full = full;
         let best = if full {
             // An Append of the groupings, or (for an ORDER BY of the group keys) a Merge
             // Append of their sorted forms.
@@ -516,19 +637,48 @@ impl Builder<'_, '_> {
                 .children
                 .iter()
                 .map(|k| {
-                    let mut k = k.clone();
+                    // (Of a grouping gathered from workers, its serial form.)
+                    let mut k = match &k.safe_alt {
+                        Some(s) => {
+                            let mut s = (**s).clone().child("Member");
+                            // (Its target list the grouping's.)
+                            s.width = k.width;
+                            s.cols = k.cols.clone();
+                            s.output = k.output.clone();
+                            s
+                        }
+                        None => k.clone(),
+                    };
                     k.partial = None;
                     // (A grouping a worker can run whole: over a parallel-safe tree.)
                     k.par_safe = k.subplans.is_empty() && k.children.iter().all(parallel::safe_tree);
                     k
                 })
                 .collect();
+            // (A partial path of the grouping relation: the node above gathers it, or sorts
+            // it in the workers first.)
             if let Some(pa) = self.partial_append(&plain, &members)
                 && pa.parallel_aware
             {
-                let g = self.gather_of(&pa);
+                best.partial = Some(Box::new(pa));
+            }
+            // Or the partitions' partial groupings (create_partitionwise_grouping_paths
+            // makes them too), finalized over a Parallel Append of them all.
+            let (pc, leaves) = self.par_partial_cands(&kids, serial, keys, &finalize);
+            let mut best_cost = self.ordered_cost(&best, keys, hint_full);
+            if let Some(pa) = &best.partial {
+                let g = self.gather_of(pa);
                 if parallel::parallel_wins(&g, &best) {
-                    best = g;
+                    best_cost = best_cost.min(self.ordered_cost(&g, keys, hint_full));
+                }
+            }
+            for c in pc {
+                let (dc, db) = (parallel::disabled_nodes(&c), parallel::disabled_nodes(&best));
+                if dc < db || (dc == db && self.ordered_cost(&c, keys, hint_full) < best_cost) {
+                    best_cost = self.ordered_cost(&c, keys, hint_full);
+                    best = c;
+                    pw_full = false;
+                    par_leaves = leaves;
                 }
             }
             best
@@ -542,28 +692,6 @@ impl Builder<'_, '_> {
                 }
                 k.alt = None;
                 k
-            };
-            let ops = costs::CPU_OPERATOR_COST * groups.len() as f64;
-            let trans = costs::CPU_OPERATOR_COST * aggs.len() as f64;
-            let finalize = |mut f: ExNode, input: ExNode, hashed: bool| -> ExNode {
-                let in_rows = input.rows;
-                if hashed {
-                    f.startup_cost = input.total_cost + in_rows * (trans + ops);
-                    f.total_cost = f.startup_cost + f.rows * costs::CPU_TUPLE_COST;
-                } else {
-                    f.startup_cost = input.startup_cost;
-                    f.total_cost = input.total_cost + in_rows * (trans + ops) + f.rows * costs::CPU_TUPLE_COST;
-                    // (Its groups come out in the keys' order.)
-                    f.order = keys.to_vec();
-                }
-                if !aggs.is_empty() {
-                    let base = f.title.trim_start_matches("Finalize ").to_string();
-                    f.title = format!("Finalize {base}");
-                    f.partial_mode = Some("Finalize");
-                }
-                f.alt = None;
-                f.children = vec![input.child("Outer")];
-                f
             };
             let mut cands: Vec<ExNode> = Vec::new();
             // (The serial grouping's two forms give the finalize nodes' shapes.)
@@ -594,77 +722,9 @@ impl Builder<'_, '_> {
             }
             // The partitions' partial groupings run by workers (each a Gather over its
             // own): one Parallel Append of them under a Gather (Merge, sorted) instead.
-            // (A sub-partitioned partition's: the partial groupings of its own Parallel
-            // Append, joining this one.)
-            let par_parts: Option<Vec<Vec<ExNode>>> = kids
-                .iter()
-                .map(|k| {
-                    if !matches!(k.node_type, "Gather" | "Gather Merge") || k.children.len() != 1 {
-                        return None;
-                    }
-                    let mut x = k.children[0].clone();
-                    while x.node_type == "Sort" && x.children.len() == 1 {
-                        x = x.children.pop().unwrap();
-                    }
-                    if x.title == "Parallel Append"
-                        && !x.children.is_empty()
-                        && x.children.iter().all(|c| c.partial_mode == Some("Partial"))
-                    {
-                        return Some(x.children);
-                    }
-                    (x.partial_mode == Some("Partial")).then(|| vec![x])
-                })
-                .collect();
-            if let Some(subs) = par_parts
-                && self.par.is_some()
-            {
-                let mut subs: Vec<ExNode> = subs.into_iter().flatten().collect();
-                par_leaves = subs.len();
-                let cfg = self.par.clone().expect("checked");
-                let workers = subs.iter().map(|x| x.workers).max().unwrap_or(1).max(1);
-                subs.sort_by(|a, b| b.total_cost.total_cmp(&a.total_cost));
-                let div = cfg.divisor(workers);
-                let mut pa = ExNode::new("Append");
-                pa.title = "Parallel Append".into();
-                pa.parallel_aware = true;
-                pa.workers = workers;
-                pa.rows = subs.iter().map(|x| x.rows * (cfg.divisor(x.workers) / div)).sum();
-                pa.startup_cost = subs.iter().map(|x| x.startup_cost).fold(f64::INFINITY, f64::min);
-                pa.total_cost = subs.iter().map(|x| x.total_cost).sum::<f64>() + costs::CPU_TUPLE_COST * 0.5 * pa.rows;
-                pa.width = subs.iter().map(|x| x.width).max().unwrap_or(0);
-                pa.cols = subs.first().map(|x| x.cols.clone()).unwrap_or_default();
-                pa.children = subs.into_iter().map(|c| c.child("Member")).collect();
-                // (Both finalizations: a sorted one shaped from the hashed one when the
-                // serial grouping has none.)
-                let mut forms: Vec<ExNode> = std::iter::once(serial).chain(serial.alt.as_deref()).cloned().collect();
-                if !forms.iter().any(|f| f.strategy == Some("Sorted"))
-                    && let Some(h) = forms.iter().find(|f| f.strategy == Some("Hashed"))
-                {
-                    let mut f = h.clone();
-                    f.strategy = Some("Sorted");
-                    f.title = f.title.replace("HashAggregate", "GroupAggregate");
-                    f.details.retain(|d| !matches!(d, Detail::HashAggInfo));
-                    forms.push(f);
-                }
-                for form in &forms {
-                    let mut f = form.clone();
-                    f.children.clear();
-                    if form.strategy == Some("Hashed") {
-                        let g = self.gather_of(&pa);
-                        cands.push(finalize(f, g, true));
-                    } else {
-                        let mut sn = ExNode::new("Sort");
-                        sn.details.push(Detail::List("Sort Key", keys.to_vec()));
-                        sn.details.push(Detail::SortInfo);
-                        self.sort_costs(&mut sn, &pa);
-                        sn.order = keys.to_vec();
-                        sn.workers = pa.workers;
-                        sn.children.push(pa.clone().child("Outer"));
-                        let gm = self.gather_merge_of(&sn);
-                        cands.push(finalize(f, gm, false));
-                    }
-                }
-            }
+            let (pc, leaves) = self.par_partial_cands(&kids, serial, keys, &finalize);
+            par_leaves = leaves;
+            cands.extend(pc);
             // (add_path into the grouping relation: a sorted one fuzzily as cheap as a
             // hashed one replaces it. Under an ORDER BY of the group keys, the survivors
             // with the sort they need.)
@@ -700,7 +760,15 @@ impl Builder<'_, '_> {
                     .filter(|a| parallel::disabled_nodes(a) <= ds)
                     .map_or(f64::INFINITY, |a| self.ordered_cost(a, keys, hint_full)),
             );
-        if db > ds || (db == ds && self.ordered_cost(&best, keys, hint_full) >= serial_cost) {
+        // (Its partial path gathered, when that wins.)
+        let mut best_cost = self.ordered_cost(&best, keys, hint_full);
+        if let Some(pa) = &best.partial {
+            let g = self.gather_of(pa);
+            if parallel::parallel_wins(&g, &best) {
+                best_cost = best_cost.min(self.ordered_cost(&g, keys, hint_full));
+            }
+        }
+        if db > ds || (db == ds && best_cost >= serial_cost) {
             return None;
         }
         self.pw_aggs.push(addr(app));
@@ -714,7 +782,7 @@ impl Builder<'_, '_> {
             self.pw_aggs.extend(par_flattened);
         }
         let mut best = best;
-        best.pw_full = full;
+        best.pw_full = pw_full;
         Some(best)
     }
 }

@@ -2243,6 +2243,7 @@ impl Binder<'_, '_> {
                     phv_quals: Vec::new(),
                     check_as: self.check_as,
                     rti: self.next_rti(),
+                    useful: Default::default(),
                 };
                 let mut scan = scan;
                 if self.dml_inh {
@@ -2601,6 +2602,7 @@ impl Binder<'_, '_> {
                     phv_quals: Vec::new(),
                     check_as: self.check_as,
                     rti: self.next_rti(),
+                    useful: Default::default(),
                 };
                 if inh {
                     self.expand_inheritance(scan, alias)?

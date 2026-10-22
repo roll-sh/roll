@@ -169,6 +169,8 @@ pub struct NodeStats {
     pub hash_max_group: u64,
     /// A MERGE's source (counted under its key): rows inserted, updated and deleted.
     pub merged: [u64; 3],
+    /// An Incremental Sort's sorts.
+    pub incr: pgsort::IncrStats,
 }
 
 /// Counters per plan node, keyed by the node's address (`Arc::as_ptr`; a scan's filter by its

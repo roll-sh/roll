@@ -120,6 +120,7 @@ impl Planner<'_, '_> {
                     Plan::Empty {
                         ncols: consts.len(),
                         cols: None,
+                        info: None,
                     }
                 };
             }
@@ -307,6 +308,7 @@ fn flatten_union_all(p: &mut Plan) {
                 Plan::Empty { .. } => Plan::Empty {
                     ncols: exprs.len(),
                     cols: None,
+                    info: None,
                 },
                 // (A member's own projection, composed with the outer one.)
                 Plan::Project { input, exprs: inner } if inner.iter().all(simple_target) => {

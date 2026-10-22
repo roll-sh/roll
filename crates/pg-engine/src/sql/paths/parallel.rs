@@ -253,7 +253,7 @@ fn partial_scan_safe(
     let cfg = cfg.clone();
     let rel = p.rel(s, needed)?;
     let mut best: Option<(Path, usize)> = None;
-    for (path, workers) in p.partial_paths(&rel, &cfg, member) {
+    for (path, workers) in p.partial_paths(&rel, &cfg, member, &s.useful) {
         let better = match &best {
             None => true,
             Some((b, _)) => {
@@ -281,7 +281,13 @@ fn partial_scan_safe(
 impl Planner<'_, '_> {
     /// The partial (parallel-aware) paths of a base relation: a parallel sequential scan,
     /// parallel index scans and a parallel bitmap heap scan, each with its workers.
-    pub(super) fn partial_paths(&self, rel: &Rel, cfg: &ParCfg, member: bool) -> Vec<(Path, usize)> {
+    pub(super) fn partial_paths(
+        &self,
+        rel: &Rel,
+        cfg: &ParCfg,
+        member: bool,
+        useful: &crate::sql::plan::ScanUseful,
+    ) -> Vec<(Path, usize)> {
         let mut out = Vec::new();
         let t = &rel.table;
         // create_plain_partial_paths.
@@ -301,8 +307,16 @@ impl Planner<'_, '_> {
                 w,
             ));
         }
-        // Partial index scans (btree), and the bitmap heap scan.
-        let want = Want::default();
+        // Partial index scans (btree), and the bitmap heap scan: build_index_paths makes
+        // them along with the plain ones, for the orderings found useful.
+        let want = match &useful.0 {
+            Some(u) => Want {
+                keys: u.0.clone(),
+                limit: None,
+                merge: u.1.clone(),
+            },
+            None => Want::default(),
+        };
         for (path, _) in self.paths(rel, &want).into_iter().map(|p| (p, 0)) {
             match &path.kind {
                 PathKind::Index(ip) if rel.indexes[ip.ix].am == Am::Btree => {
