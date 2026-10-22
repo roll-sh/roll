@@ -2826,6 +2826,30 @@ impl Catalog {
             .map(|(o, _, s, n)| (s, n, o != oid))
     }
 
+    /// Every oid `user_type_name` knows (types and their array types).
+    pub fn user_type_oids(&self) -> std::collections::HashSet<u32> {
+        let mut out = std::collections::HashSet::new();
+        let mut add = |o: u32, a: u32| {
+            if o != 0 {
+                out.insert(o);
+                if a != 0 {
+                    out.insert(a);
+                }
+            }
+        };
+        self.enums.values().for_each(|e| add(e.oid, e.array_oid));
+        self.composites.values().for_each(|c| add(c.oid, c.array_oid));
+        self.domains.values().for_each(|d| add(d.oid, d.array_oid));
+        self.base_types.values().for_each(|b| add(b.ty.oid, b.ty.array_oid));
+        for r in self.ranges.values() {
+            add(r.oid, r.array_oid);
+            add(r.multi_oid, r.multi_array_oid);
+        }
+        self.tables.values().for_each(|t| add(t.rowtype, t.array_type()));
+        self.views.values().for_each(|v| add(v.rowtype, v.array_type()));
+        out
+    }
+
     /// The domain a type oid names, or the domain an array type `_d` holds: (domain, array).
     pub fn domain_type(&self, oid: u32) -> Option<(&Arc<Domain>, bool)> {
         if let Some(d) = self.domains.get(&oid) {

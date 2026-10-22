@@ -98,7 +98,34 @@ fn pinned((class, oid, _): Addr) -> bool {
 /// A user type `t` stands for (`domain` when declared as one).
 fn user_type(cat: &Catalog, t: &DataType, domain: Option<u32>) -> Option<u32> {
     let oid = domain.unwrap_or_else(|| type_oid(cat, t));
-    cat.user_type_name(oid).map(|_| oid)
+    let known = USER_TYPES.with(|u| u.borrow().as_ref().map(|s| s.contains(&oid)));
+    match known {
+        Some(true) => Some(oid),
+        Some(false) => None,
+        None => cat.user_type_name(oid).map(|_| oid),
+    }
+}
+
+thread_local! {
+    /// While `derived_depends` runs: the oids `Catalog::user_type_name` knows, looked up once
+    /// (a search of every type and relation for each column made each DROP slow).
+    static USER_TYPES: std::cell::RefCell<Option<std::collections::HashSet<u32>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `USER_TYPES` for the catalog `derived_depends` reads, until dropped.
+struct UserTypes(Option<std::collections::HashSet<u32>>);
+
+impl UserTypes {
+    fn set(cat: &Catalog) -> UserTypes {
+        UserTypes(USER_TYPES.with(|u| u.replace(Some(cat.user_type_oids()))))
+    }
+}
+
+impl Drop for UserTypes {
+    fn drop(&mut self) {
+        USER_TYPES.with(|u| *u.borrow_mut() = self.0.take());
+    }
 }
 
 fn is_relation(cat: &Catalog, oid: u32) -> bool {
@@ -352,6 +379,7 @@ pub fn depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
 
 /// The dependencies the catalog's objects record.
 fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
+    let _types = UserTypes::set(cat);
     let mut out = Out { rows: Vec::new() };
     // plpgsql is an extension: its language and handlers are its members.
     for f in PLPGSQL_FUNCS {
