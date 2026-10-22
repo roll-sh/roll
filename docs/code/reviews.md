@@ -317,7 +317,11 @@ A crate with no HTTP routes of its own. code-control drives it (`src/ai/`), and 
 - **The codebase index (`code-index`)** follows the default branch.
   - It's stored in `<home>/code/index/<repo>.db`. After its first build, each landing is applied
     as a diff in the background. The first build happens on first use (a deep review, a search),
-    one file at a time, one repo at a time.
+    in the background, one repo at a time. It's streamed: it lists the paths (up to 200,000 files),
+    then reads files and commits them to the index 200 at a time, so memory doesn't grow with the
+    repo. Measured on 2026-10-22 (release build, real disk, a 2 GB memory limit, a loaded 16-core
+    host): 50,000 Rust files (about 60 MB) took 120 s (417 files/s), and peak RSS grew by 51 MB.
+    Until it's done, searches answer 503 and deep reviews go on without repository context.
   - For each file it keeps the symbol definitions (Rust, TS/JS, Python, Go, Java/Kotlin, C/C++,
     Ruby and PHP patterns), identifier references with their first few lines, and lowercased
     trigrams. Contents aren't stored: search confirms each candidate on the file.

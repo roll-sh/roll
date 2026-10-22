@@ -510,3 +510,36 @@ async fn main() -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `roll code` command (and subcommand) has a row with tests in
+    /// docs/code/test-coverage.md, like the routes and MCP tools do (code-control's
+    /// `tests/coverage_map.rs`).
+    #[test]
+    fn every_code_command_is_in_the_coverage_map() {
+        fn walk(c: &clap::Command, path: String, out: &mut Vec<String>) {
+            for s in c.get_subcommands().filter(|s| s.get_name() != "help") {
+                let p = format!("{path} {}", s.get_name());
+                // A group that needs a subcommand (`roll code change`) runs nothing itself.
+                if !s.is_subcommand_required_set() || !s.has_subcommands() {
+                    out.push(p.clone());
+                }
+                walk(s, p, out);
+            }
+        }
+        let cli = Cli::command();
+        let code = cli.find_subcommand("code").expect("roll code");
+        let mut commands = Vec::new();
+        walk(code, "roll code".into(), &mut commands);
+        assert!(commands.len() > 60, "{commands:?}");
+        let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/code/test-coverage.md")).unwrap();
+        let missing: Vec<&String> = commands
+            .iter()
+            .filter(|c| !doc.lines().any(|l| l.starts_with(&format!("| `{c}`")) && l.contains("::")))
+            .collect();
+        assert!(missing.is_empty(), "no row with tests in docs/code/test-coverage.md for: {missing:?}");
+    }
+}

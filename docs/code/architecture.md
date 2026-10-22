@@ -148,6 +148,15 @@ index and per-minute landing counts. A ref update is a compare-and-swap on one r
 writer connection and a pool of reader connections, so reads don't queue behind writes. The
 schema is plain SQL so it can move to roll Postgres for multi-node.
 
+**Durability** (`code-store/src/durable.rs`). Commits use `synchronous=NORMAL`: they append to the
+WAL without an fsync, which survives the process crashing but not the machine. So a landing (a
+lander batch, `Store::advance`, a ref update) is acknowledged and published only after the WAL is
+fsynced past its commit. That's group commit: one `fdatasync` covers every commit made before it
+started, from any writer, and it runs outside the writer's lock. Checkpoints run on a background
+thread with its own connection every 50 ms, so their fsyncs never happen inside a commit that
+holds the writer lock; the writer only checkpoints itself past 8,192 WAL pages, as a backstop.
+Blobs are as durable as the object store: S3 is, but the local directory store doesn't fsync.
+
 Paths are UTF-8. An import rejects a tree with a non-UTF-8 file name. A commit whose bytes
 don't come back from derivation (unusual header order, legacy tree modes such as `100664`) keeps
 them verbatim in the changeset (`git_raw`). Its trees are stored as imported, so serving stays
@@ -196,12 +205,18 @@ minute. `crates/code-store/tests/throughput.rs` measures it with hot-file overla
 concurrent agents, about 9% of changes needing a 3-way merge. Run it with
 `CODE_THROUGHPUT_N=40000 cargo test --release -p code-store --test throughput -- --nocapture`.
 
-Measured on 2026-10-20 on an 18-core Linux host, with local object storage:
+Measured on 2026-10-22 on a 16-core Linux host that other builds were also using (load 6–11),
+with local object storage, 40,000 changes each, the old and new store run alternately:
 
-| changes | time | merges per second |
-| ------- | ---- | ----------------- |
-| 40,000  | 24 s | ~1,650            |
-| 10,000  | —    | ~2,400            |
+| where the store lives | merges per second | before (no fsync, inline checkpoints) |
+| --------------------- | ----------------- | ------------------------------------- |
+| tmpfs                 | 883–911           | 668–806                               |
+| real disk (SATA SSD, RAID 0) | 448–496    | 314–365                               |
+
+Every one of these landings was fsynced before it was acknowledged; the "before" ones weren't.
+Moving checkpoints off the writer's lock gained more than the group-commit fsync costs. An earlier
+run on an idle 18-core host reached ~1,650 merges/s on tmpfs; this host was shared, so compare
+the columns with each other, not with that.
 
 The single SQLite writer is the limit. Agents creating changesets compete with the lander for it.
 

@@ -204,7 +204,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - 40,000 merges in release
     - 2,000 changes through the merge queue
   - Every feature gets a test. `docs/code/test-coverage.md` maps features to tests; update it
-    when you add either. Put new tests in the matching file:
+    when you add either. `code-control/tests/coverage_map.rs` and `roll-cli`'s
+    `every_code_command_is_in_the_coverage_map` fail when a route, MCP tool, event or `roll code`
+    command has no row there, or a row names a test that doesn't exist. Put new tests in the
+    matching file:
     - storage and landing: `code-store/tests/{lander,store,roundtrip,advance}.rs`
     - the merge queue, reverts and bisecting: `code-control/tests/queue.rs` (fake runner)
     - work trees: `code-store/tests/checkout.rs` and `code-control/tests/checkout.rs`
@@ -219,6 +222,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
       Docker)
     - the CLI: `roll-cli/tests/code.rs`
     - dashboard logic: `apps/dashboard/src/**/*.test.ts` (vitest, node)
+    - dashboard components: `apps/dashboard/src/**/*.test.tsx` (vitest, Testing Library, jsdom;
+      helpers in `src/test/`)
+    - HTTP statuses and the auth matrix for every route: `code-control/tests/routes.rs`
+    - event stream limits: `code-control/tests/streams.rs`
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.
   - Test Postgres with `docker run --rm postgres:18-alpine psql "postgres://...@host.docker.internal:55432/main?options=endpoint%3D<ep>"`, because there is no local psql.
