@@ -69,9 +69,12 @@ async fn configuration_limits_branches_and_deletes() {
     assert!(matches!(s.set_bucket_config("nope", kind::METRICS, "c", Some("3"), None).await, Err(StoreError::NoSuchBucket(_))));
     assert!(matches!(s.set_bucket_tags("lim", &[("aws:x".to_string(), "y".to_string())].into()).await, Err(StoreError::InvalidArgument(_))));
     s.set_bucket_tags("lim", &[("k".to_string(), "v".to_string())].into()).await.unwrap();
-    // A branch starts with its parent's configuration, then has its own.
+    s.set_bucket_config("lim", kind::POLICY, "", Some("{\"Statement\":[]}"), None).await.unwrap();
+    // A branch starts with its parent's configuration (but its policy, which names the parent),
+    // then has its own.
     s.branch_bucket("lim", "lim-branch").await.unwrap();
     assert_eq!(s.bucket_tags("lim-branch").unwrap().len(), 1);
+    assert!(s.bucket_config("lim-branch", kind::POLICY, "").unwrap().is_none());
     assert_eq!(s.list_bucket_config("lim-branch", kind::METRICS, None, 10).unwrap(), vec![("a".to_string(), "1".to_string()), ("b".to_string(), "2b".to_string())]);
     s.set_bucket_tags("lim-branch", &Default::default()).await.unwrap();
     assert_eq!(s.bucket_tags("lim").unwrap().len(), 1);

@@ -8,7 +8,7 @@
 //!
 //! One-per-bucket settings use `id = ""`; analytics, metrics, inventory and intelligent-tiering
 //! configurations are keyed by their id. Branches copy their parent's configuration when they're
-//! made, and a deleted bucket's configuration goes with it.
+//! made (all but the policy), and a deleted bucket's configuration goes with it.
 
 use crate::error::{Result, StoreError};
 use crate::rows;
@@ -150,9 +150,13 @@ pub(crate) fn drop_bucket_config(c: &Connection, bucket_id: &str) -> Result<()> 
     Ok(())
 }
 
-/// A new branch starts with its parent's configuration.
+/// A new branch starts with its parent's configuration, except the policy: its resources name
+/// the parent bucket.
 pub(crate) fn copy_bucket_config(c: &Connection, from: &str, to: &str) -> Result<()> {
-    c.execute("INSERT INTO bucket_config (bucket_id, kind, id, value) SELECT ?2, kind, id, value FROM bucket_config WHERE bucket_id = ?1", params![from, to])?;
+    c.execute(
+        "INSERT INTO bucket_config (bucket_id, kind, id, value) SELECT ?2, kind, id, value FROM bucket_config WHERE bucket_id = ?1 AND kind <> ?3",
+        params![from, to, kind::POLICY],
+    )?;
     Ok(())
 }
 

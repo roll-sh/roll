@@ -955,3 +955,47 @@ async fn bucket_settings_are_validated() {
     let br = t.ok("POST", "/v1/storage/buckets/settings/branches", Some(json!({ "name": "settings-br" }))).await;
     assert_eq!((br["public"].as_bool(), br["recover_days"].as_u64()), (Some(true), Some(2)));
 }
+
+#[tokio::test]
+async fn bucket_tags_and_website() {
+    let t = start().await;
+    let b = t.bucket("tagged").await;
+    assert_eq!((b["tags"].clone(), b["website"].clone()), (json!({}), Value::Null));
+    let u = t.ok("PATCH", "/v1/storage/buckets/tagged", Some(json!({ "tags": { "env": "prod", "team": "storage" }, "recover_days": 3 }))).await;
+    assert_eq!(u["tags"], json!({ "env": "prod", "team": "storage" }));
+    assert_eq!(u["recover_days"], 3);
+    // Omitted: unchanged. `{}`: removed. Invalid: refused, and nothing changes.
+    assert_eq!(t.ok("PATCH", "/v1/storage/buckets/tagged", Some(json!({ "public": false }))).await["tags"]["env"], "prod");
+    for bad in [json!({ "tags": { "aws:x": "y" } }), json!({ "tags": { "": "y" } }), json!({ "tags": { "k": "v".repeat(257) } }), json!({ "tags": { "k": 1 } })] {
+        assert_eq!(t.err("PATCH", "/v1/storage/buckets/tagged", Some(bad.clone())).await, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let many: serde_json::Map<String, Value> = (0..51).map(|i| (format!("k{i}"), json!("v"))).collect();
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/tagged", Some(json!({ "tags": many, "recover_days": 9 }))).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/tagged", None).await["recover_days"], 3, "a refused PATCH changes nothing");
+    // The S3 API sees the same tags, and the control plane what the S3 API sets.
+    let k = t.ok("POST", "/v1/storage/keys", Some(json!({ "name": "admin", "permission": "admin" }))).await;
+    let s3 = t.sdk(k["id"].as_str().unwrap(), k["secret_access_key"].as_str().unwrap());
+    assert_eq!(s3.get_bucket_tagging().bucket("tagged").send().await.unwrap().tag_set().len(), 2);
+    let site = aws_sdk_s3::types::WebsiteConfiguration::builder().index_document(aws_sdk_s3::types::IndexDocument::builder().suffix("index.html").build().unwrap()).build();
+    s3.put_bucket_website().bucket("tagged").website_configuration(site).send().await.unwrap();
+    let v = t.ok("GET", "/v1/storage/buckets/tagged", None).await;
+    assert_eq!(v["website"]["index_document"], "index.html");
+    assert_eq!(v["website"]["routing_rules"], json!([]));
+    assert_eq!(t.ok("PATCH", "/v1/storage/buckets/tagged", Some(json!({ "tags": {} }))).await["tags"], json!({}));
+    let e = s3.get_bucket_tagging().bucket("tagged").send().await.unwrap_err();
+    assert_eq!(aws_sdk_s3::error::ProvideErrorMetadata::code(&e), Some("NoSuchTagSet"));
+    // The deployment's ids, for policies and ACLs.
+    let info = t.ok("GET", "/v1/storage", None).await;
+    assert_eq!(info["owner_id"].as_str().map(str::len), Some(64));
+    assert_eq!(info["account_id"].as_str().map(str::len), Some(12));
+    assert_eq!(info["block_public_access"], false);
+}
+
+#[tokio::test]
+async fn blocked_public_access_refuses_public_buckets() {
+    let t = start_with(|s| s.block_public_access = true, |_| {}).await;
+    assert_eq!(t.err("POST", "/v1/storage/buckets", Some(json!({ "name": "nope", "public": true }))).await, StatusCode::BAD_REQUEST);
+    t.bucket("private").await;
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/private", Some(json!({ "public": true }))).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.ok("GET", "/v1/storage", None).await["block_public_access"], true);
+}

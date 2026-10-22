@@ -118,8 +118,24 @@ async fn show_bucket(State(c): State<AppState>, Path(name): Path<String>) -> Api
     Ok(Json(c.bucket_view(&c.store.bucket(&name)?)))
 }
 
-async fn update_bucket(State(c): State<AppState>, Path(name): Path<String>, JsonBody(u): JsonBody<BucketUpdate>) -> ApiResult<Value> {
-    let b = c.store.update_bucket(&name, u).await?;
+/// `PATCH /buckets/{name}`: the store's settings, plus the bucket's tags (replaced whole; `{}`
+/// removes them).
+#[derive(Deserialize)]
+struct BucketPatch {
+    #[serde(flatten)]
+    update: BucketUpdate,
+    tags: Option<BTreeMap<String, String>>,
+}
+
+async fn update_bucket(State(c): State<AppState>, Path(name): Path<String>, JsonBody(p): JsonBody<BucketPatch>) -> ApiResult<Value> {
+    if let Some(t) = &p.tags {
+        s3_store::config::validate_bucket_tags(t.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
+    }
+    let mut b = c.store.update_bucket(&name, p.update).await?;
+    if let Some(t) = &p.tags {
+        c.store.set_bucket_tags(&name, t).await?;
+        b = c.store.bucket(&name)?;
+    }
     Ok(Json(c.bucket_view(&b)))
 }
 

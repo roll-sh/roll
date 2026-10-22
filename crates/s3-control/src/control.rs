@@ -201,6 +201,9 @@ impl Control {
             "storage": self.store.describe(),
             "storage_class": self.cfg.storage_class.as_deref().unwrap_or("LOCAL"),
             "recover_days_default": self.store.cfg.recover_days_default,
+            "owner_id": self.store.owner_id(),
+            "account_id": self.store.account_id(),
+            "block_public_access": self.store.cfg.block_public_access,
             "pricing": self.cfg.pricing,
             "buckets": st.buckets,
             "objects": st.objects,
@@ -220,6 +223,8 @@ impl Control {
     pub fn bucket_view(&self, b: &Bucket) -> Value {
         let mut v = serde_json::to_value(b).unwrap_or_default();
         let endpoint = self.cfg.endpoint.trim_end_matches('/');
+        v["tags"] = json!(self.store.bucket_tags(&b.name).unwrap_or_default());
+        v["website"] = json!(self.store.bucket_website(&b.name).ok().flatten());
         v["endpoint"] = json!(endpoint);
         v["url"] = json!(format!("{endpoint}/{}", b.name));
         v["virtual_host_url"] = json!(self.virtual_host_url(&b.name));

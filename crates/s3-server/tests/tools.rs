@@ -131,6 +131,71 @@ async fn aws_cli() {
     assert_eq!(r.status(), 404, "{}", r.text().await.unwrap());
 }
 
+/// Bucket configuration with the AWS CLI: a public-read policy (then read anonymously, by the
+/// CLI and by plain HTTP), tags, a public access block, ACLs and a static website.
+#[tokio::test(flavor = "multi_thread")]
+async fn aws_cli_bucket_configuration() {
+    if !docker_ok() {
+        return;
+    }
+    let t = start_with(|c| c.website_domain = Some("web.localtest".into())).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("index.html"), b"<h1>home</h1>").unwrap();
+    std::fs::write(dir.path().join("error.html"), b"<h1>missing</h1>").unwrap();
+    let policy = serde_json::json!({"Version": "2012-10-17", "Statement": [{"Sid": "PublicRead", "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::awssite/*"}]});
+    std::fs::write(dir.path().join("policy.json"), policy.to_string()).unwrap();
+    let endpoint = t.endpoint.clone();
+    let path = dir.path().to_path_buf();
+    blocking(move || {
+        let env = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
+        let aws = |args: &[&str]| {
+            let mut all = vec!["--endpoint-url", endpoint.as_str()];
+            all.extend_from_slice(args);
+            run("amazon/aws-cli", &env, &path, &all)
+        };
+        aws(&["s3", "mb", "s3://awssite"]);
+        aws(&["s3", "cp", "/data/index.html", "s3://awssite/index.html"]);
+        aws(&["s3", "cp", "/data/error.html", "s3://awssite/error.html"]);
+        aws(&["s3api", "put-bucket-policy", "--bucket", "awssite", "--policy", "file:///data/policy.json"]);
+        let got = aws(&["s3api", "get-bucket-policy", "--bucket", "awssite", "--query", "Policy", "--output", "text"]);
+        assert!(got.contains("PublicRead"), "{got}");
+        let status = aws(&["s3api", "get-bucket-policy-status", "--bucket", "awssite", "--query", "PolicyStatus.IsPublic", "--output", "text"]);
+        assert_eq!(status.trim(), "True");
+        // Anonymous reads through the CLI itself.
+        aws(&["--no-sign-request", "s3", "cp", "s3://awssite/index.html", "/data/anon.html"]);
+        same(&path.join("index.html"), &path.join("anon.html"));
+        aws(&["s3api", "put-bucket-tagging", "--bucket", "awssite", "--tagging", "TagSet=[{Key=env,Value=prod}]"]);
+        let tags = aws(&["s3api", "get-bucket-tagging", "--bucket", "awssite", "--query", "TagSet[0].Value", "--output", "text"]);
+        assert_eq!(tags.trim(), "prod");
+        aws(&["s3", "website", "s3://awssite/", "--index-document", "index.html", "--error-document", "error.html"]);
+        let site = aws(&["s3api", "get-bucket-website", "--bucket", "awssite", "--query", "IndexDocument.Suffix", "--output", "text"]);
+        assert_eq!(site.trim(), "index.html");
+        let enc = aws(&["s3api", "get-bucket-encryption", "--bucket", "awssite", "--query", "ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm", "--output", "text"]);
+        assert_eq!(enc.trim(), "AES256");
+        let own = aws(&["s3api", "get-bucket-ownership-controls", "--bucket", "awssite", "--query", "OwnershipControls.Rules[0].ObjectOwnership", "--output", "text"]);
+        assert_eq!(own.trim(), "BucketOwnerEnforced");
+        aws(&["s3api", "put-bucket-ownership-controls", "--bucket", "awssite", "--ownership-controls", "Rules=[{ObjectOwnership=BucketOwnerPreferred}]"]);
+        aws(&["s3api", "put-object-acl", "--bucket", "awssite", "--key", "error.html", "--acl", "public-read"]);
+        let acl = aws(&["s3api", "get-object-acl", "--bucket", "awssite", "--key", "error.html"]);
+        assert!(acl.contains("AllUsers"), "{acl}");
+        aws(&["s3api", "put-public-access-block", "--bucket", "awssite", "--public-access-block-configuration", "RestrictPublicBuckets=true"]);
+        let pab = aws(&["s3api", "get-public-access-block", "--bucket", "awssite", "--query", "PublicAccessBlockConfiguration.RestrictPublicBuckets", "--output", "text"]);
+        assert_eq!(pab.trim(), "True");
+        aws(&["s3api", "delete-public-access-block", "--bucket", "awssite"]);
+    })
+    .await;
+    // The website, as a browser sees it.
+    let http = reqwest::Client::new();
+    let get = |path: &str| http.get(format!("{}{path}", t.endpoint)).header("host", "awssite.web.localtest").send();
+    let r = get("/").await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "<h1>home</h1>");
+    let r = get("/nope").await.unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.text().await.unwrap(), "<h1>missing</h1>");
+    assert_eq!(reqwest::get(format!("{}/awssite/index.html", t.endpoint)).await.unwrap().status(), 200, "anonymous REST read");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rclone() {
     if !docker_ok() {

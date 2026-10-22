@@ -88,6 +88,7 @@ objects (bucket_id, key TEXT, blob_id TEXT,  -- blob_id NULL = tombstone (branch
          checksum_algorithm, checksum_type /* FULL_OBJECT|COMPOSITE */, checksum,
          parts INTEGER /* 0 = single PUT */, part_sizes TEXT /* JSON, for partNumber GETs */,
          modified_at INTEGER /* ms */,
+         acl TEXT /* JSON grants; NULL = private */, website_redirect TEXT,
          PRIMARY KEY (bucket_id, key)) WITHOUT ROWID
 
 trash   (bucket_id, key, deleted_at, blob_id, <same columns as objects>,
@@ -97,7 +98,14 @@ blobs   (id TEXT PRIMARY KEY, size INTEGER, crc32c INTEGER, refs INTEGER NOT NUL
          created_at INTEGER, unreferenced_at INTEGER)   -- set when refs drops to 0
 
 uploads (id TEXT PRIMARY KEY /* customer UploadId */, bucket_id, key, blob_id,
-         backend_upload_id TEXT, <object header columns>, created_at)
+         backend_upload_id TEXT, <object header columns>, created_at, acl, website_redirect)
+
+bucket_config (bucket_id, kind TEXT, id TEXT /* '' = one per bucket */, value TEXT,
+         PRIMARY KEY (bucket_id, kind, id)) WITHOUT ROWID
+         -- kind: tagging, policy, public_access_block, ownership, acl, encryption, website,
+         -- logging, accelerate (one per bucket); analytics, metrics, inventory,
+         -- intelligent_tiering (by id). Branches copy their parent's, except the policy (its
+         -- resources name the parent); deleted buckets drop theirs.
 parts   (upload_id, part_number, size, etag, checksum, backend_etag, created_at, crc32c,
          PRIMARY KEY (upload_id, part_number))
 
@@ -113,8 +121,15 @@ usage   (bucket_id, day TEXT /* YYYY-MM-DD UTC */, class_a, class_b, bytes_in,
          PRIMARY KEY (bucket_id, day))
 
 orphans (blob_key TEXT PRIMARY KEY, size, found_at)   -- orphan-scan candidates
-state   (k TEXT PRIMARY KEY, v TEXT)                  -- scrub report, job barriers
+state   (k TEXT PRIMARY KEY, v TEXT)                  -- scrub report, job barriers, canonical owner id
 ```
+
+Object ACLs and website redirects live in the row, so every row copy carries them: branch
+push-down, the trash and restores, in-place updates (tagging), and multipart uploads from
+Create to Complete. `CopyObject` sets them from the request, as S3 does.
+
+The deployment's **canonical owner id** (64 hex chars) is random, created on the first start
+and kept in `state`, so it survives restarts, recovery and moving hosts.
 
 `refs` counts every `objects` row and every `trash` row that points at the blob.
 
@@ -280,14 +295,28 @@ Usage writes are relaxed: they ride the next group commit without waiting.
 - The credential scope's region is accepted as given (any region; R2 does the same). The
   service must be `s3`.
 - Clock skew is limited to 15 minutes.
-- Anonymous requests are allowed only for GET/HEAD of objects in `public` buckets.
+- Anonymous requests get what the bucket's policy, ACLs or `public` flag allow.
 
 **Permissions.**
-- `read`: GET, HEAD, List*
+- `read`: GET, HEAD, List*, reading bucket configuration
 - `write`: read, plus PUT, DELETE, copy and multipart
 - `admin`: write, plus create/delete bucket and bucket configuration
 
-A key with a `buckets` list only sees those buckets (ListBuckets is filtered).
+A key with a `buckets` list only sees those buckets (ListBuckets is filtered, and other buckets
+answer `AccessDenied`, existing or not), unless a bucket's policy or ACL grants it more.
+
+**Authorization** (`s3-server/src/access.rs`; every operation maps to its IAM action name):
+1. a bucket policy `Deny` that matches refuses, whoever asks;
+2. the key's own permission allows;
+3. a policy `Allow` allows (also anonymous requests, unless `RestrictPublicBuckets` and the
+   policy is public);
+4. ACL grants allow, when Object Ownership enables ACLs (`IgnorePublicAcls` drops public ones);
+5. the `public` flag allows anonymous `GetObject` (not with `RestrictPublicBuckets`).
+
+Admin keys can always manage a bucket's policy. Policies are parsed in `policy.rs`, ACLs in
+`acl.rs`; see [compatibility](compatibility.md#policies-acls-and-public-access) for principals,
+condition keys and the canonical ids. `ROLL_S3_BLOCK_PUBLIC_ACCESS` (store config
+`block_public_access`) applies all four Block Public Access settings to every bucket.
 
 **Operations.**
 - **Service:** ListBuckets.
@@ -298,13 +327,24 @@ A key with a `buckets` list only sees those buckets (ListBuckets is filtered).
     AbortIncompleteMultipartUpload, filtered by prefix)
   - GetBucketVersioning (always unversioned)
   - ListObjectsV2, ListObjects (v1), ListMultipartUploads
-  - DeleteObjects (batch, quiet mode)
+  - DeleteObjects (batch, quiet mode; each key authorized on its own)
+  - configuration (`s3-server/src/config.rs`, stored in `bucket_config`): tagging, policy and
+    policy status, public access block, ownership controls, ACL, encryption, website, logging,
+    accelerate, request payment, replication (not found), notifications (empty), and the
+    analytics, metrics, inventory and intelligent-tiering configurations with List*.
+    `config::default_encryption(ctx, &bucket) -> Option<(algorithm, kms_key_id, bucket_key_enabled)>`
+    is the bucket's configured default encryption rule (`None`: the default SSE-S3), for SSE-KMS.
+- **Website endpoint** (`website.rs`): `<bucket>.<website_domain>` (`ROLL_S3_WEBSITE_DOMAIN`)
+  serves S3 website semantics: index and error documents, routing rules, redirects.
+- **Server access logs** (`logging.rs`): lines are buffered in memory (at most 100 000) and
+  written as objects to the target bucket every `access_log_interval` (5 min) through the
+  normal put path, so they're durable once written and billed to the target. Best effort.
 - **Object:**
   - PutObject, GetObject and HeadObject: `Range`, `partNumber`, conditional headers,
     `response-*` overrides and checksum mode
   - DeleteObject
   - CopyObject: `x-amz-metadata-directive` and copy-source conditionals
-  - Get/Put/DeleteObjectTagging
+  - Get/Put/DeleteObjectTagging, Get/PutObjectAcl, RestoreObject (`InvalidObjectState`)
 - **Multipart:** CreateMultipartUpload, UploadPart, UploadPartCopy,
   CompleteMultipartUpload, AbortMultipartUpload, ListParts.
 - **Browser uploads:** POST Object (presigned POST policy).
@@ -331,12 +371,14 @@ All JSON. Errors are `{"error": "..."}` with 400/404/409/500. Times are Unix mil
 ```text
 GET    /v1/storage
   → { endpoint, region, virtual_host_domain|null, storage, storage_class, recover_days_default,
+      owner_id /* canonical owner id */, account_id /* for policy ARNs */, block_public_access,
       pricing: Pricing, buckets, objects, bytes, scrub: { last_at|null, missing, mismatched } }
 
 GET    /v1/storage/buckets                       → [Bucket]
 POST   /v1/storage/buckets  { name, public?, recover_days? }   → Bucket
 GET    /v1/storage/buckets/{name}                → Bucket
-PATCH  /v1/storage/buckets/{name}  { public?, recover_days?, cors?: [CorsRule], lifecycle?: [LifecycleRule] } → Bucket
+PATCH  /v1/storage/buckets/{name}  { public?, recover_days?, cors?: [CorsRule], lifecycle?: [LifecycleRule],
+                                     tags?: Record<string,string> /* replaces them; {} removes */ } → Bucket
 DELETE /v1/storage/buckets/{name}?force=true     → { deleted }   (force: delete all objects first)
 POST   /v1/storage/buckets/{name}/branches  { name }  → Bucket
 
@@ -366,7 +408,12 @@ DELETE /v1/storage/keys/{id}                     → { deleted }
 Bucket = { id, name, region, public, recover_days, created_at,
            parent: { id, name, at } | null, branches: [string],
            objects, bytes, trash_bytes, cors: CorsRule[], lifecycle: LifecycleRule[],
+           tags: Record<string,string>, website: Website | null,
            endpoint, url /* path-style */, virtual_host_url: string | null }
+Website = { index_document: string | null, error_document: string | null,
+            redirect_all: { host_name, protocol: "http"|"https"|null } | null,
+            routing_rules: [{ condition: { key_prefix_equals: string|null, http_error_code_returned_equals: number|null } | null,
+                              redirect: { host_name, protocol, http_redirect_code, replace_key_prefix_with, replace_key_with /* each string|number|null */ } }] }
 CorsRule = { id?: string | null /* S3's optional rule ID */, allowed_origins: string[],
              allowed_methods: string[], allowed_headers: string[], expose_headers: string[],
              max_age_s: number | null }
@@ -407,6 +454,11 @@ Details:
   the control plane can't tell where its caller is.
 - Invalid JSON bodies and query parameters are 400s with the usual `{error}` body. A closed or
   fenced store answers 503.
+- `tags` follow S3's bucket tag rules (at most 50, keys 1–128 and values up to 256 characters,
+  no `aws:` prefix); invalid tags are a 400 and nothing in the PATCH is applied. `public: true`
+  is a 400 when the bucket's public access block (or `ROLL_S3_BLOCK_PUBLIC_ACCESS`) blocks
+  public policies.
+- `website` is set through the S3 API (`PutBucketWebsite`); the control plane shows it.
 
 `ROLL_S3_ACCESS_KEY` and `ROLL_S3_SECRET_KEY`, if set, create (or update) an `admin` key with
 that id and secret at startup, the way MinIO's root user works. This is for local dev and

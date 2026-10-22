@@ -382,8 +382,17 @@ fn validate_resource(r: &str, bucket: &str) -> Result<(), S3Error> {
 }
 
 impl Policy {
-    /// Parse and validate a policy document for `bucket`.
+    /// Parse and validate a policy document for `bucket` (`PutBucketPolicy`).
     pub(crate) fn parse(doc: &[u8], bucket: &str) -> Result<Self, S3Error> {
+        Self::parse_for(doc, Some(bucket))
+    }
+
+    /// Parse a stored policy (validated when it was put; its resources aren't checked again).
+    pub(crate) fn load(doc: &[u8]) -> Result<Self, S3Error> {
+        Self::parse_for(doc, None)
+    }
+
+    fn parse_for(doc: &[u8], bucket: Option<&str>) -> Result<Self, S3Error> {
         if doc.len() > MAX_POLICY_BYTES {
             return Err(malformed("Policy exceeds the maximum allowed document size."));
         }
@@ -447,8 +456,10 @@ impl Policy {
             if resource.is_some() == not_resource.is_some() {
                 return Err(malformed("Missing required field Resource"));
             }
-            for r in resource.iter().chain(not_resource.iter()).flatten() {
-                validate_resource(r, bucket)?;
+            if let Some(bucket) = bucket {
+                for r in resource.iter().chain(not_resource.iter()).flatten() {
+                    validate_resource(r, bucket)?;
+                }
             }
             let mut conditions = Vec::new();
             if let Some(c) = m.get("Condition") {

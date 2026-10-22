@@ -48,13 +48,14 @@ impl Access {
         // A stored policy was valid when it was put; if it no longer parses, deny rather than
         // silently drop it.
         let policy = match settings.get(kind::POLICY) {
-            Some(p) => Some(Policy::parse(p.as_bytes(), &bucket.name).map_err(|e| {
+            Some(p) => Some(Policy::load(p.as_bytes()).map_err(|e| {
                 tracing::error!(bucket = bucket.name, error = %e, "a stored bucket policy doesn't parse");
                 S3Error::new(Code::AccessDenied)
             })?),
             None => None,
         };
-        let (_, block) = store.public_access_block(&bucket.id).s3()?;
+        let own: PublicAccessBlock = settings.get(kind::PUBLIC_ACCESS_BLOCK).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+        let block = if store.cfg.block_public_access { own.or(PublicAccessBlock::ALL) } else { own };
         let ownership = Ownership::from_setting(settings.get(kind::OWNERSHIP).map(String::as_str));
         let acls_enabled = ownership != Some(Ownership::BucketOwnerEnforced);
         let bucket_acl = acl::bucket_acl(settings.get(kind::ACL).map(String::as_str));
@@ -161,16 +162,18 @@ pub(crate) fn authorize(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, ac
     {
         return Ok(());
     }
-    let p = principal(ctx, who);
+    let p = OnceLock::new();
+    let p = || p.get_or_init(|| principal(ctx, who));
     let decision = match &a.policy {
         Some(policy) => {
+            let p = p();
             let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
             let resource = match key {
                 Some(k) => format!("arn:aws:s3:::{bucket}/{k}"),
                 None => format!("arn:aws:s3:::{bucket}"),
             };
             let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new() };
-            policy.evaluate(&p, &account, action, &resource, &cond)
+            policy.evaluate(p, &account, action, &resource, &cond)
         }
         None => Decision::None,
     };
@@ -189,10 +192,10 @@ pub(crate) fn authorize(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, ac
         let ignore = a.block.ignore_public_acls;
         let granted = match (on_object, key) {
             (true, Some(k)) => match ctx.store().get_object(bucket, k) {
-                Ok(m) => acl::object_acl(true, m.headers.acl.as_deref()).allows(&p, perm, ignore),
+                Ok(m) => acl::object_acl(true, m.headers.acl.as_deref()).allows(p(), perm, ignore),
                 Err(_) => false,
             },
-            _ => a.bucket_acl.allows(&p, perm, ignore),
+            _ => a.bucket_acl.allows(p(), perm, ignore),
         };
         if granted {
             return Ok(());

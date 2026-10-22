@@ -46,7 +46,7 @@ async fn anon(t: &TestServer, method: &str, path: &str) -> u16 {
 async fn sub(t: &TestServer, method: &'static str, path: &'static str, query: &'static str) -> (u16, String) {
     let mut r = Raw::new(method, path);
     r.query = query;
-    status_code(r.send(&t).await).await
+    status_code(r.send(t).await).await
 }
 
 async fn set_policy(t: &TestServer, b: &str, p: serde_json::Value) {
@@ -244,6 +244,14 @@ async fn policies_are_enforced() {
     let wc = client(&t.endpoint, &wk.id, &wk.secret);
     wc.copy_object().bucket("other").key("c").copy_source("pol/public/a").send().await.unwrap();
     assert_eq!(err(wc.copy_object().bucket("other").key("c").copy_source("pol/private/a").send().await.unwrap_err()).1, "AccessDenied");
+    // A branch doesn't inherit the policy (it names the parent), and works normally.
+    t.store.branch_bucket("pol", "pol-branch").await.unwrap();
+    assert_eq!(err(t.client.get_bucket_policy().bucket("pol-branch").send().await.unwrap_err()).1, "NoSuchBucketPolicy");
+    t.client.delete_object().bucket("pol-branch").key("keep/a").send().await.unwrap();
+    assert_eq!(anon(&t, "GET", "/pol-branch/public/a").await, 403);
+    // A policy naming another bucket can't be put.
+    let e = t.client.put_bucket_policy().bucket("pol-branch").policy(public_read("pol").to_string()).send().await.unwrap_err();
+    assert_eq!(err(e).1, "MalformedPolicy");
 }
 
 #[tokio::test(flavor = "multi_thread")]

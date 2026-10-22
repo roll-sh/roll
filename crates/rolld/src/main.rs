@@ -115,6 +115,13 @@ struct Args {
     /// `<bucket>.<domain>` addresses a bucket (virtual-host style); path style always works.
     #[arg(long, env = "ROLL_S3_DOMAIN")]
     s3_domain: Option<String>,
+    /// `<bucket>.<domain>` serves the bucket's static website (S3 website endpoint semantics).
+    #[arg(long, env = "ROLL_S3_WEBSITE_DOMAIN")]
+    s3_website_domain: Option<String>,
+    /// Block public access to every bucket (all four S3 Block Public Access settings, on top of
+    /// each bucket's own).
+    #[arg(long, env = "ROLL_S3_BLOCK_PUBLIC_ACCESS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_block_public_access: bool,
     /// Storage class of stored objects (default: INTELLIGENT_TIERING on AWS S3, STANDARD on a
     /// custom endpoint; ignored for a local directory).
     #[arg(long, env = "ROLL_S3_STORAGE_CLASS")]
@@ -319,6 +326,8 @@ struct StorageOpts {
     public_host: String,
     node: String,
     s3_domain: Option<String>,
+    s3_website_domain: Option<String>,
+    s3_block_public_access: bool,
     s3_storage_class: Option<String>,
     s3_internal_cidrs: Option<String>,
     s3_access_key: Option<String>,
@@ -332,6 +341,8 @@ impl From<&Args> for StorageOpts {
             public_host: a.public_host.clone(),
             node: a.node.clone(),
             s3_domain: a.s3_domain.clone(),
+            s3_website_domain: a.s3_website_domain.clone(),
+            s3_block_public_access: a.s3_block_public_access,
             s3_storage_class: a.s3_storage_class.clone(),
             s3_internal_cidrs: a.s3_internal_cidrs.clone(),
             s3_access_key: a.s3_access_key.clone(),
@@ -350,9 +361,15 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     // Bind first: a node that can't serve shouldn't take over the metadata log.
     let listener = tokio::net::TcpListener::bind(args.s3).await?;
     let backend = s3_store::from_config(storage, class.as_deref()).await?;
-    let mut scfg = s3_server::Config { virtual_host_domain: args.s3_domain.clone(), spool_dir: home.join("storage").join("spool"), ..Default::default() };
+    let mut scfg = s3_server::Config {
+        virtual_host_domain: args.s3_domain.clone(),
+        website_domain: args.s3_website_domain.clone(),
+        spool_dir: home.join("storage").join("spool"),
+        ..Default::default()
+    };
     let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
     cfg.node = args.node.clone();
+    cfg.block_public_access = args.s3_block_public_access;
     cfg.region = scfg.region.clone();
     let store = s3_store::Store::open(cfg, backend).await?;
     if let (Some(id), Some(secret)) = (&args.s3_access_key, &args.s3_secret_key) {
