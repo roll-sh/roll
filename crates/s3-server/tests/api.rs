@@ -688,8 +688,9 @@ async fn unsupported_features_fail_loudly() {
     assert_eq!(e.raw_response().unwrap().status().as_u16(), 501);
     let e = t.client.put_object().bucket("bkt").key("k").server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::AwsKms).body(ByteStream::from_static(b"x")).send().await.unwrap_err();
     assert_eq!(e.raw_response().unwrap().status().as_u16(), 501);
+    // ACLs are off by default (BucketOwnerEnforced), as on S3.
     let e = t.client.put_object().bucket("bkt").key("k").acl(aws_sdk_s3::types::ObjectCannedAcl::PublicRead).body(ByteStream::from_static(b"x")).send().await.unwrap_err();
-    assert_eq!(e.raw_response().unwrap().status().as_u16(), 501);
+    assert_eq!((status(&e), code(&e.into_service_error())), (400, "AccessControlListNotSupported".to_string()));
     // Accepted: private ACL, SSE-S3, storage classes.
     t.client
         .put_object()
@@ -705,7 +706,7 @@ async fn unsupported_features_fail_loudly() {
     let e = t.client.put_bucket_versioning().bucket("bkt").versioning_configuration(aws_sdk_s3::types::VersioningConfiguration::builder().status(aws_sdk_s3::types::BucketVersioningStatus::Enabled).build()).send().await.unwrap_err();
     assert_eq!(e.raw_response().unwrap().status().as_u16(), 501);
     let e = t.client.get_bucket_policy().bucket("bkt").send().await.unwrap_err();
-    assert_eq!(e.raw_response().unwrap().status().as_u16(), 501);
+    assert_eq!(code(&e.into_service_error()), "NoSuchBucketPolicy");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1004,19 +1005,16 @@ async fn everything_else_is_not_implemented() {
         r
     };
     let ni = (501, "NotImplemented".to_string());
-    for sub in ["website", "replication", "logging", "notification", "encryption", "object-lock", "ownershipControls", "publicAccessBlock", "requestPayment", "accelerate", "analytics", "inventory", "metrics", "intelligent-tiering", "versions", "policyStatus", "torrent"] {
+    for sub in ["object-lock", "versions", "torrent", "metadataTable", "session"] {
         assert_eq!(status_code(raw("GET", "/bkt", sub, vec![]).send(&t).await).await, ni, "?{sub}");
     }
-    for sub in ["retention", "legal-hold", "torrent", "restore", "select", "attributes", "renameObject"] {
+    for sub in ["retention", "legal-hold", "torrent", "select", "attributes", "renameObject"] {
         assert_eq!(status_code(raw("GET", "/bkt/k", sub, vec![]).send(&t).await).await, ni, "?{sub}");
     }
     for (h, v) in [
         ("x-amz-object-lock-mode", "GOVERNANCE"),
-        ("x-amz-grant-read", "id=x"),
-        ("x-amz-website-redirect-location", "/x"),
         ("x-amz-server-side-encryption-customer-algorithm", "AES256"),
         ("x-amz-copy-source-server-side-encryption-customer-algorithm", "AES256"),
-        ("x-amz-acl", "public-read"),
         ("x-amz-server-side-encryption", "aws:kms:dsse"),
     ] {
         let mut r = raw("PUT", "/bkt/nope", "", vec![(h, v.into())]);
@@ -1028,18 +1026,13 @@ async fn everything_else_is_not_implemented() {
     assert!(missing(&t, "bkt", "nope").await);
     let e = t.client.put_object().bucket("bkt").key("k").if_none_match(&etag).body(ByteStream::from_static(b"x")).send().await.unwrap_err();
     assert_eq!(status(&e), 501, "If-None-Match on a write is only '*'");
-    let tags = Tagging::builder().tag_set(Tag::builder().key("a").value("b").build().unwrap()).build().unwrap();
-    assert_eq!(status(&t.client.put_bucket_tagging().bucket("bkt").tagging(tags).send().await.unwrap_err()), 501);
-    assert_eq!(code(&t.client.get_bucket_tagging().bucket("bkt").send().await.unwrap_err()), "NoSuchTagSet");
-    t.client.delete_bucket_tagging().bucket("bkt").send().await.unwrap();
-    assert_eq!(status(&t.client.restore_object().bucket("bkt").key("k").send().await.unwrap_err()), 501);
     assert_eq!(status(&t.client.get_object_attributes().bucket("bkt").key("k").object_attributes(aws_sdk_s3::types::ObjectAttributes::Etag).send().await.unwrap_err()), 501);
     let e = t.client.create_bucket().bucket("locked").object_lock_enabled_for_bucket(true).send().await.unwrap_err();
     assert_eq!(status(&e), 501);
     assert_eq!(status(&t.client.head_bucket().bucket("locked").send().await.unwrap_err()), 404);
-    // ACLs: only the canned private one.
+    // ACLs are disabled by default: the canned private ACL is accepted (see tests/config.rs).
     let policy = AccessControlPolicy::builder().owner(Owner::builder().id("roll").build()).build();
-    assert_eq!(status(&t.client.put_bucket_acl().bucket("bkt").access_control_policy(policy).send().await.unwrap_err()), 501);
+    assert_eq!(status(&t.client.put_bucket_acl().bucket("bkt").access_control_policy(policy).send().await.unwrap_err()), 400);
     t.client.put_bucket_acl().bucket("bkt").acl(BucketCannedAcl::Private).send().await.unwrap();
     t.client.put_object_acl().bucket("bkt").key("k").acl(aws_sdk_s3::types::ObjectCannedAcl::Private).send().await.unwrap();
     assert_eq!(code(&t.client.put_object_acl().bucket("bkt").key("gone").acl(aws_sdk_s3::types::ObjectCannedAcl::Private).send().await.unwrap_err()), "NoSuchKey");

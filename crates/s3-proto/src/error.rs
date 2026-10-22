@@ -78,6 +78,21 @@ codes! {
     SignatureDoesNotMatch 403 "The request signature we calculated does not match the signature you provided. Check your key and signing method.",
     SlowDown 503 "Please reduce your request rate.",
     XAmzContentSHA256Mismatch 400 "The provided 'x-amz-content-sha256' header does not match what was computed.",
+    // Bucket configuration, policies, ACLs and websites.
+    AccessControlListNotSupported 400 "The bucket does not allow ACLs",
+    InvalidBucketAclWithObjectOwnership 400 "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting",
+    InvalidRedirectLocation 400 "The website redirect location must have a prefix of 'http://' or 'https://' or '/'.",
+    InvalidTargetBucketForLogging 400 "The target bucket for logging does not exist",
+    MalformedACLError 400 "The XML you provided was not well-formed or did not validate against our published schema",
+    MalformedPolicy 400 "Policies must be valid JSON and the first byte must be '{'",
+    NoSuchBucketPolicy 404 "The bucket policy does not exist",
+    NoSuchConfiguration 404 "The specified configuration does not exist.",
+    NoSuchPublicAccessBlockConfiguration 404 "The public access block configuration was not found",
+    NoSuchWebsiteConfiguration 404 "The specified bucket does not have a website configuration",
+    OwnershipControlsNotFoundError 404 "The bucket ownership controls were not found",
+    ReplicationConfigurationNotFoundError 404 "The replication configuration was not found",
+    TooManyConfigurations 400 "You are attempting to create a new configuration but have already reached the 1,000-configuration limit.",
+    UnresolvableGrantByEmailAddress 400 "The email address you provided does not match any account on record.",
 }
 
 /// An S3 error response.

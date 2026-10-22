@@ -25,19 +25,27 @@ pub async fn start() -> TestServer {
 }
 
 pub async fn start_with(tweak: impl FnOnce(&mut Config)) -> TestServer {
+    start_full(|_| {}, tweak).await.0
+}
+
+/// A server with tweaked store and server configuration; also returns the `Server`.
+pub async fn start_full(store_tweak: impl FnOnce(&mut StoreConfig), tweak: impl FnOnce(&mut Config)) -> (TestServer, Arc<Server>) {
     let dir = tempfile::tempdir().unwrap();
     let backend = s3_store::test_backend("s3-server").await;
-    let store = Store::open(StoreConfig::new(dir.path().join("meta")).manual(), backend).await.unwrap();
+    let mut scfg = StoreConfig::new(dir.path().join("meta")).manual();
+    store_tweak(&mut scfg);
+    let store = Store::open(scfg, backend).await.unwrap();
     store.ensure_key(ACCESS, SECRET, "admin").await.unwrap();
     let mut cfg = Config { spool_dir: dir.path().to_path_buf(), ..Config::default() };
     tweak(&mut cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = Server::new(store.clone(), cfg);
-    tokio::spawn(async move { s3_server::serve(listener, server).await.unwrap() });
+    let serving = server.clone();
+    tokio::spawn(async move { s3_server::serve(listener, serving).await.unwrap() });
     let endpoint = format!("http://127.0.0.1:{port}");
     let client = client(&endpoint, ACCESS, SECRET);
-    TestServer { store, endpoint, port, client, dir }
+    (TestServer { store, endpoint, port, client, dir }, server)
 }
 
 pub fn client(endpoint: &str, access: &str, secret: &str) -> Client {

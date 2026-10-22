@@ -63,7 +63,7 @@ impl Row {
 
 /// Object columns after `bucket_id` (the trash adds `deleted_at` before them).
 pub(crate) const COLS: &str = "key, blob_id, size, etag, content_type, cache_control, content_disposition, content_encoding, \
-     content_language, expires, metadata, tags, checksum_algorithm, checksum_type, checksum, parts, part_sizes, modified_at";
+     content_language, expires, metadata, tags, checksum_algorithm, checksum_type, checksum, parts, part_sizes, modified_at, acl, website_redirect";
 
 fn json_col<T: serde::de::DeserializeOwned>(r: &rusqlite::Row, i: usize) -> rusqlite::Result<T> {
     let s: String = r.get(i)?;
@@ -89,6 +89,8 @@ pub(crate) fn row_at(r: &rusqlite::Row, o: usize) -> rusqlite::Result<Row> {
             expires: r.get(o + 9)?,
             metadata: json_col(r, o + 10)?,
             tags: json_col(r, o + 11)?,
+            acl: r.get(o + 18)?,
+            website_redirect: r.get(o + 19)?,
         },
         checksum: match (algorithm, kind, value) {
             (Some(algorithm), Some(kind), Some(value)) => Some(Checksum { algorithm, kind, value }),
@@ -129,6 +131,8 @@ fn row_values(r: &Row) -> Result<Vec<rusqlite::types::Value>> {
         Integer(r.parts as i64),
         Text(serde_json::to_string(&r.part_sizes)?),
         Integer(r.modified_at),
+        opt(&r.headers.acl),
+        opt(&r.headers.website_redirect),
     ])
 }
 

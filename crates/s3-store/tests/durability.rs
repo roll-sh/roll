@@ -55,6 +55,11 @@ async fn workload(s: &Store) {
     s.update_bucket("beta", BucketUpdate { cors: Some(cors), ..Default::default() }).await.unwrap();
     s.create_key("deploy", Permission::Write, None).await.unwrap();
     s.put_tags("alpha", "dir/01", [("a".to_string(), "b".to_string())].into()).await.unwrap();
+    // Bucket configuration and object ACLs.
+    s.set_bucket_tags("alpha", &[("env".to_string(), "prod".to_string())].into()).await.unwrap();
+    s.set_bucket_config("beta", config::kind::POLICY, "", Some("{\"Statement\":[]}"), None).await.unwrap();
+    s.set_bucket_config("beta", config::kind::METRICS, "m1", Some("<MetricsConfiguration><Id>m1</Id></MetricsConfiguration>"), Some(1000)).await.unwrap();
+    s.set_object_acl("alpha", "dir/02", Some("{\"grants\":[]}".into())).await.unwrap();
 }
 
 #[tokio::test]
@@ -260,7 +265,7 @@ async fn an_idle_deposed_node_stops_serving() {
 fn dump(s: &Store) -> Vec<String> {
     let c = meta_db(s);
     let mut out = Vec::new();
-    for t in ["buckets", "objects", "trash", "blobs", "uploads", "parts", "keys", "usage", "orphans", "state"] {
+    for t in ["buckets", "objects", "trash", "blobs", "uploads", "parts", "keys", "usage", "orphans", "state", "bucket_config"] {
         let mut st = c.prepare(&format!("SELECT * FROM {t}")).unwrap();
         let n = st.column_count();
         let mut rows: Vec<String> = st

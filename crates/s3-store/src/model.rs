@@ -86,6 +86,13 @@ pub struct ObjectHeaders {
     pub expires: Option<String>,
     pub metadata: BTreeMap<String, String>,
     pub tags: BTreeMap<String, String>,
+    /// The object's ACL grants (opaque JSON owned by `s3-server`); `None` = the owner has full
+    /// control and nobody else has anything (S3's `private`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<String>,
+    /// `x-amz-website-redirect-location`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website_redirect: Option<String>,
 }
 
 /// An `x-amz-checksum-*` value: `algorithm` is `CRC32`, `CRC32C`, `CRC64NVME`, `SHA1` or

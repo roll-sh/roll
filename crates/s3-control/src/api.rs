@@ -261,6 +261,7 @@ fn upload_headers(h: &HeaderMap) -> Result<ObjectHeaders, ControlError> {
         expires: s("expires"),
         metadata,
         tags,
+        ..Default::default()
     })
 }
 

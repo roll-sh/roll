@@ -2,7 +2,7 @@
 
 use crate::ctx::Ctx;
 use s3_proto::sigv4::{self, Verified};
-use s3_proto::{Code, S3Error};
+use s3_proto::S3Error;
 use s3_store::{AccessKey, Bucket};
 
 pub(crate) struct Auth {
@@ -41,27 +41,20 @@ pub(crate) enum Need {
     Admin,
 }
 
-fn denied() -> S3Error {
-    S3Error::new(Code::AccessDenied)
-}
-
 impl Ctx {
-    /// The request's key may do `need` on `bucket`.
-    pub fn require(&self, bucket: &str, need: Need) -> Result<&AccessKey, S3Error> {
-        let Some(a) = &self.auth else { return Err(denied()) };
-        let ok = match need {
-            Need::Read => a.key.can_read(bucket),
-            Need::Write => a.key.can_write(bucket),
-            Need::Admin => a.key.is_admin() && a.key.covers(bucket),
-        };
-        if ok { Ok(&a.key) } else { Err(denied()) }
+    /// The request may do what it asks on `bucket`: its key has `need` there, or the bucket's
+    /// policy, ACLs or `public` flag allow it (see `access.rs`).
+    pub fn require(&self, bucket: &str, need: Need) -> Result<(), S3Error> {
+        crate::access::authorize(self, self.who(), bucket, self.key.as_deref(), crate::access::action_of(self), need)
     }
 
-    /// Reading an object: a key that may read the bucket, or anyone if the bucket is public.
+    /// Reading the source of a copy (`s3:GetObject` on it).
+    pub fn require_source(&self, bucket: &str, key: &str) -> Result<(), S3Error> {
+        crate::access::authorize(self, self.who(), bucket, Some(key), "s3:GetObject", Need::Read)
+    }
+
+    /// Reading an object.
     pub fn require_object_read(&self, bucket: &Bucket) -> Result<(), S3Error> {
-        if self.auth.is_none() && bucket.public {
-            return Ok(());
-        }
-        self.require(&bucket.name, Need::Read).map(|_| ())
+        self.require(&bucket.name, Need::Read)
     }
 }

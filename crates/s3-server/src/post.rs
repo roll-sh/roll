@@ -233,9 +233,12 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
     let c = &auth.credential;
     verify_post_signature(&auth, &signing_key(&access.secret, &c.date, &c.region, &c.service))?;
     let policy = check_post_policy(&auth.policy, &fields, &bucket.name, ctx.store().now())?;
-    if !access.can_write(&bucket.name) {
-        return Err(S3Error::new(Code::AccessDenied));
-    }
+    crate::access::authorize(ctx, crate::access::Who::Key(&access), &bucket.name, Some(&key), "s3:PutObject", crate::auth::Need::Write)?;
+    let acl = match field(&fields, "acl") {
+        Some(c) => crate::acl::check_write(ctx, &bucket.name, &crate::acl::Acl::canned(c, false)?)?,
+        None => None,
+    };
+    let website_redirect = field(&fields, "x-amz-website-redirect-location").map(crate::website::check_redirect).transpose()?;
     ctx.store().touch_key(&access.id);
     ctx.meter(&bucket.id, Class::A);
 
@@ -259,6 +262,8 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         expires: s("expires"),
         metadata: user_metadata(meta_fields)?,
         tags,
+        acl,
+        website_redirect,
     };
 
     // Spool the file, hashing it, then store it.

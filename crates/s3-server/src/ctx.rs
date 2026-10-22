@@ -25,6 +25,10 @@ pub(crate) struct Ctx {
     pub key: Option<String>,
     pub peer: Option<IpAddr>,
     pub auth: Option<Auth>,
+    /// Addressed to the bucket's website endpoint (`<bucket>.<website_domain>`).
+    pub website: bool,
+    pub(crate) access_cache: crate::access::AccessCache,
+    pub(crate) started: std::time::Instant,
 }
 
 impl Ctx {
@@ -91,6 +95,9 @@ fn request_id() -> String {
 /// Bucket and key from the `Host` header (virtual-host style) or the path.
 fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Option<String>, Option<String>), S3Error> {
     let path = raw_path.strip_prefix('/').unwrap_or(raw_path);
+    if let Some(b) = crate::website::host_bucket(server, headers) {
+        return Ok((Some(b), Some(percent_decode_utf8(path)?)));
+    }
     if let Some(domain) = &server.cfg.virtual_host_domain {
         // Host names are case-insensitive.
         let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
@@ -116,6 +123,7 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
     let head = parts.method == Method::HEAD;
     let request_id = request_id();
     let addressed = address(&server, &parts.headers, &raw_path);
+    let website = crate::website::host_bucket(&server, &parts.headers).is_some();
     let mut ctx = Ctx {
         server,
         method: parts.method,
@@ -127,6 +135,9 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
         key: None,
         peer,
         auth: None,
+        website,
+        access_cache: Default::default(),
+        started: std::time::Instant::now(),
     };
     let result = match addressed {
         Ok((b, k)) => {
@@ -136,9 +147,11 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
         }
         Err(e) => Err(e),
     };
+    let mut error_code = None;
     let mut resp = match result {
         Ok(r) => r,
         Err(e) => {
+            error_code = Some(e.code);
             if e.code == Code::InternalError || e.code == Code::ServiceUnavailable {
                 tracing::warn!(code = e.code.as_str(), message = e.message, method = %ctx.method, resource = ctx.resource(), "s3 request failed");
             }
@@ -152,6 +165,7 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
     if ctx.method != Method::OPTIONS {
         cors::decorate(&ctx, &mut resp);
     }
+    crate::logging::record(&ctx, &resp, &request_id, error_code);
     resp
 }
 
@@ -160,6 +174,9 @@ fn is_form_post(ctx: &Ctx) -> bool {
 }
 
 async fn run(ctx: &mut Ctx, body: Body) -> Reply {
+    if ctx.website {
+        return Ok(crate::website::serve(ctx).await);
+    }
     if ctx.method == Method::OPTIONS {
         return cors::preflight(ctx);
     }
@@ -192,23 +209,11 @@ fn reject_unsupported_headers(ctx: &Ctx) -> Result<(), S3Error> {
         if n.starts_with("x-amz-object-lock-") {
             return not_impl(n, "Object Lock is not supported.");
         }
-        if n.starts_with("x-amz-grant-") {
-            return not_impl(n, "ACL grants are not supported; use the bucket's public flag and scoped keys.");
-        }
-        if n == "x-amz-website-redirect-location" {
-            return not_impl(n, "Website hosting is not supported.");
-        }
     }
     if let Some(sse) = ctx.h("x-amz-server-side-encryption")
         && !sse.trim().eq_ignore_ascii_case("AES256")
     {
         return not_impl("x-amz-server-side-encryption", "Only AES256 (SSE-S3) server-side encryption is supported.");
-    }
-    if let Some(acl) = ctx.h("x-amz-acl")
-        && acl.trim() != "private"
-        && !(acl.trim() == "bucket-owner-full-control")
-    {
-        return not_impl("x-amz-acl", "ACLs are not supported; use the bucket's public flag and scoped keys. x-amz-acl: private is accepted.");
     }
     if let Some(rp) = ctx.h("x-amz-request-payer")
         && !rp.eq_ignore_ascii_case("requester")

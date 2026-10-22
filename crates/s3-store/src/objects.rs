@@ -35,7 +35,7 @@ fn check_condition(cur: Option<&Row>, cond: &WriteCondition, key: &str) -> Resul
 }
 
 const UPLOAD_COLS: &str = "id, bucket_id, key, blob_id, backend_upload_id, content_type, cache_control, content_disposition, content_encoding, \
-     content_language, expires, metadata, tags, checksum_algorithm, checksum_type, created_at";
+     content_language, expires, metadata, tags, checksum_algorithm, checksum_type, created_at, acl, website_redirect";
 
 fn upload_row(r: &rusqlite::Row) -> rusqlite::Result<Upload> {
     let json = |i: usize| -> rusqlite::Result<BTreeMap<String, String>> {
@@ -57,6 +57,8 @@ fn upload_row(r: &rusqlite::Row) -> rusqlite::Result<Upload> {
             expires: r.get(10)?,
             metadata: json(11)?,
             tags: json(12)?,
+            acl: r.get(16)?,
+            website_redirect: r.get(17)?,
         },
         checksum_algorithm: r.get(13)?,
         checksum_type: r.get(14)?,
@@ -364,7 +366,7 @@ impl Store {
             .write(move |c| {
                 find_bucket(c, bucket)?;
                 c.execute(
-                    &format!("INSERT INTO uploads ({UPLOAD_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"),
+                    &format!("INSERT INTO uploads ({UPLOAD_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"),
                     params![
                         u.id,
                         u.bucket_id,
@@ -381,7 +383,9 @@ impl Store {
                         rows::json(&u.headers.tags)?,
                         u.checksum_algorithm,
                         u.checksum_type,
-                        u.created_at
+                        u.created_at,
+                        u.headers.acl,
+                        u.headers.website_redirect
                     ],
                 )?;
                 Ok(())

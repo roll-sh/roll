@@ -72,6 +72,21 @@ CREATE TABLE usage (
 CREATE TABLE state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
 CREATE TABLE orphans (blob_key TEXT PRIMARY KEY, size INTEGER NOT NULL, found_at INTEGER NOT NULL);
+"#,
+// Bucket configuration (tagging, policy, ACL, website, logging, …) and per-object ACLs and
+// website redirects. `id` is '' for one-per-bucket settings, else the configuration's id
+// (analytics, metrics, inventory, intelligent-tiering). See `config.rs`.
+r#"
+CREATE TABLE bucket_config (
+  bucket_id TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL,
+  PRIMARY KEY (bucket_id, kind, id)
+) WITHOUT ROWID;
+ALTER TABLE objects ADD COLUMN acl TEXT;
+ALTER TABLE objects ADD COLUMN website_redirect TEXT;
+ALTER TABLE trash ADD COLUMN acl TEXT;
+ALTER TABLE trash ADD COLUMN website_redirect TEXT;
+ALTER TABLE uploads ADD COLUMN acl TEXT;
+ALTER TABLE uploads ADD COLUMN website_redirect TEXT;
 "#];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;

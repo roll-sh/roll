@@ -55,6 +55,9 @@ pub struct StoreConfig {
     pub orphan_interval: Option<Duration>,
     pub scrub_interval: Option<Duration>,
     pub clock: Clock,
+    /// Block public access everywhere (`ROLL_S3_BLOCK_PUBLIC_ACCESS`): all four S3 Block Public
+    /// Access settings apply to every bucket, on top of the bucket's own.
+    pub block_public_access: bool,
 }
 
 impl StoreConfig {
@@ -80,6 +83,7 @@ impl StoreConfig {
             orphan_interval: Some(Duration::from_secs(86_400)),
             scrub_interval: Some(Duration::from_secs(7 * 86_400)),
             clock: system_clock(),
+            block_public_access: false,
         }
     }
 
@@ -255,6 +259,7 @@ impl Store {
             scrub: Mutex::new(scrub),
             unexpected_orphans: Default::default(),
         });
+        store.ensure_owner().await?;
         store.start_jobs();
         Ok(store)
     }
@@ -338,6 +343,9 @@ impl Store {
         let id = ids::bucket_id();
         let region = self.cfg.region.clone();
         let public = opts.public.unwrap_or(false);
+        if public && self.cfg.block_public_access {
+            return Err(StoreError::InvalidArgument(format!("bucket {name} can't be made public: public access is blocked for this deployment")));
+        }
         self.write(|c| {
             if c.query_row("SELECT 1 FROM buckets WHERE name = ?1", [name], |_| Ok(())).optional()?.is_some() {
                 return Err(StoreError::BucketExists(name.to_string()));
@@ -380,6 +388,9 @@ impl Store {
         self.write(|c| {
             let b = find_bucket(c, name)?;
             if let Some(p) = u.public {
+                if p {
+                    crate::config::check_may_be_public(c, &b.id, name, self.cfg.block_public_access)?;
+                }
                 c.execute("UPDATE buckets SET public = ?2 WHERE id = ?1", params![b.id, p as i64])?;
             }
             if let Some(d) = u.recover_days {
@@ -413,6 +424,7 @@ impl Store {
                 &format!("INSERT INTO buckets ({BUCKET_COLS}) SELECT ?1, ?2, region, ?3, public, recover_days, cors, lifecycle, id, ?3, 0, 0, 0 FROM buckets WHERE id = ?4"),
                 params![id, name, now, p.id],
             )?;
+            crate::config::copy_bucket_config(c, &p.id, &id)?;
             Ok(())
         })
         .await?;
@@ -487,6 +499,7 @@ impl Store {
                         if uploads > 0 {
                             return Err(StoreError::Unavailable("uploads started while the bucket was being deleted; retry".into()));
                         }
+                        crate::config::drop_bucket_config(c, &b.id)?;
                         c.execute("DELETE FROM buckets WHERE id = ?1", [&b.id])?;
                         return Ok(true);
                     }

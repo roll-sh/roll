@@ -25,7 +25,7 @@ use std::task::{Context, Poll};
 pub(crate) const MAX_PUT: u64 = 5 << 30;
 
 /// Subresources S3 has that we don't implement.
-const UNSUPPORTED: [&str; 7] = ["retention", "legal-hold", "torrent", "restore", "select", "attributes", "renameObject"];
+const UNSUPPORTED: [&str; 6] = ["retention", "legal-hold", "torrent", "select", "attributes", "renameObject"];
 
 pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
     if let Some(sub) = UNSUPPORTED.iter().find(|s| ctx.has(s)) {
@@ -37,26 +37,30 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
         return Err(S3Error::msg(Code::NoSuchKey, "The specified version does not exist.").with("VersionId", v.to_string()));
     }
     validate_key(ctx.key_name())?;
-    // A key that can't see the bucket learns nothing about it.
-    if let Some(a) = &ctx.auth
-        && !a.key.covers(ctx.bucket_name())
-    {
-        return Err(S3Error::new(Code::AccessDenied));
-    }
-    let bucket = ctx.store().bucket(ctx.bucket_name()).s3()?;
+    // A key that can't see the bucket learns nothing about it (a policy may still let it in).
+    let bucket = match ctx.store().bucket(ctx.bucket_name()) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(match &ctx.auth {
+                Some(a) if !a.key.covers(ctx.bucket_name()) => S3Error::new(Code::AccessDenied),
+                _ => store_error(e),
+            });
+        }
+    };
     match ctx.method.clone() {
         Method::GET if ctx.has("uploadId") => multipart::list_parts(ctx, &bucket),
         Method::GET if ctx.has("tagging") => get_tagging(ctx, &bucket),
-        Method::GET if ctx.has("acl") => get_acl(ctx, &bucket),
+        Method::GET if ctx.has("acl") => crate::acl::get_object_acl(ctx, &bucket),
         Method::GET => get(ctx, &bucket, false).await,
         Method::HEAD => get(ctx, &bucket, true).await,
         Method::PUT if ctx.has("uploadId") || ctx.has("partNumber") => multipart::upload_part(ctx, &bucket, body).await,
         Method::PUT if ctx.has("tagging") => put_tagging(ctx, &bucket, body).await,
-        Method::PUT if ctx.has("acl") => put_acl(ctx, &bucket),
+        Method::PUT if ctx.has("acl") => crate::acl::put_object_acl(ctx, &bucket, body).await,
         Method::PUT if ctx.h("x-amz-copy-source").is_some() => copy(ctx, &bucket).await,
         Method::PUT => put(ctx, &bucket, body).await,
         Method::POST if ctx.has("uploads") => multipart::create(ctx, &bucket).await,
         Method::POST if ctx.has("uploadId") => multipart::complete(ctx, &bucket, body).await,
+        Method::POST if ctx.has("restore") => restore(ctx, &bucket),
         Method::DELETE if ctx.has("uploadId") => multipart::abort(ctx, &bucket).await,
         Method::DELETE if ctx.has("tagging") => delete_tagging(ctx, &bucket).await,
         Method::DELETE => delete(ctx, &bucket).await,
@@ -71,8 +75,14 @@ fn content_encoding(ctx: &Ctx) -> Option<String> {
     (!kept.is_empty()).then(|| kept.join(","))
 }
 
-/// The standard headers, user metadata and `x-amz-tagging` of a write.
+/// A write's ACL (`x-amz-acl`, `x-amz-grant-*`; `None` = private) and website redirect.
+pub(crate) fn write_extras(ctx: &Ctx) -> Result<(Option<String>, Option<String>), S3Error> {
+    Ok((crate::acl::for_new_object(ctx, ctx.bucket_name())?, crate::website::redirect_location(ctx)?))
+}
+
+/// The standard headers, user metadata, `x-amz-tagging`, ACL and website redirect of a write.
 pub(crate) fn object_headers(ctx: &Ctx) -> Result<ObjectHeaders, S3Error> {
+    let (acl, website_redirect) = write_extras(ctx)?;
     let pairs = ctx.header_pairs();
     let metadata = user_metadata(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
     let tags = match ctx.h("x-amz-tagging") {
@@ -89,6 +99,8 @@ pub(crate) fn object_headers(ctx: &Ctx) -> Result<ObjectHeaders, S3Error> {
         expires: s("expires"),
         metadata,
         tags,
+        acl,
+        website_redirect,
     })
 }
 
@@ -192,6 +204,9 @@ fn object_response(meta: &ObjectMeta, overrides: &Overrides, code: StatusCode, l
     if !h.tags.is_empty() {
         set(&mut r, "x-amz-tagging-count", &h.tags.len().to_string());
     }
+    if let Some(loc) = &h.website_redirect {
+        set(&mut r, "x-amz-website-redirect-location", loc);
+    }
     set(&mut r, "etag", &quote_etag(&meta.etag));
     set(&mut r, "last-modified", &http_date(meta.modified_at));
     set(&mut r, "accept-ranges", "bytes");
@@ -251,7 +266,7 @@ impl Drop for Metered {
     }
 }
 
-async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
+pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     ctx.require_object_read(bucket)?;
     let meta = ctx.store().get_object(&bucket.name, ctx.key_name()).s3()?;
     ctx.meter(&bucket.id, Class::B);
@@ -338,18 +353,26 @@ fn directive(ctx: &Ctx, name: &str) -> Result<bool, S3Error> {
 async fn copy(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
     let (src_bucket, src_key) = parse_copy_source(ctx.h("x-amz-copy-source").unwrap_or_default())?;
-    ctx.require(&src_bucket, Need::Read)?;
+    ctx.require_source(&src_bucket, &src_key)?;
     let src = ctx.store().get_object(&src_bucket, &src_key).s3()?;
     Conditions::copy_source_from_headers(|n| ctx.h(n)).check_copy_source(&src.etag, src.modified_at)?;
     let replace = directive(ctx, "x-amz-metadata-directive")?;
     let replace_tags = directive(ctx, "x-amz-tagging-directive")?;
-    if src_bucket == bucket.name && src_key == ctx.key_name() && !replace && !replace_tags {
+    if src_bucket == bucket.name && src_key == ctx.key_name() && !replace && !replace_tags && ctx.h("x-amz-website-redirect-location").is_none() {
         return Err(S3Error::msg(
             Code::InvalidRequest,
             "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes.",
         ));
     }
-    let headers = if replace { Some(object_headers(ctx)?) } else { None };
+    // As on S3, a copy never takes the source's ACL or website redirect: they come from the
+    // request (private and none by default), whatever the metadata directive.
+    let headers = if replace {
+        object_headers(ctx)?
+    } else {
+        let (acl, website_redirect) = write_extras(ctx)?;
+        ObjectHeaders { acl, website_redirect, ..src.headers.clone() }
+    };
+    let headers = Some(headers);
     let tags = if replace_tags {
         let t = ctx.h("x-amz-tagging").map(parse_tagging_header).transpose()?.unwrap_or_default();
         Some(t.into_iter().collect())
@@ -393,27 +416,11 @@ async fn delete_tagging(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     no_content()
 }
 
-/// The canned `private` ACL: the owner has full control.
-pub(crate) fn private_acl() -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<AccessControlPolicy xmlns=\"{}\"><Owner><ID>roll</ID><DisplayName>roll</DisplayName></Owner><AccessControlList><Grant><Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\"><ID>roll</ID><DisplayName>roll</DisplayName></Grantee><Permission>FULL_CONTROL</Permission></Grant></AccessControlList></AccessControlPolicy>",
-        s3_proto::XMLNS
-    )
-}
-
-fn get_acl(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
-    ctx.require(&bucket.name, Need::Read)?;
-    ctx.store().get_object(&bucket.name, ctx.key_name()).s3()?;
-    ctx.meter(&bucket.id, Class::B);
-    response::ok_xml(private_acl())
-}
-
-/// `PutObjectAcl` with the canned `private` ACL (what objects have) is accepted.
-fn put_acl(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
+/// `RestoreObject`: nothing is ever archived, so there's nothing to restore (S3's answer for an
+/// object that isn't in an archive storage class).
+fn restore(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
-    if ctx.h("x-amz-acl").is_none() {
-        return Err(S3Error::msg(Code::NotImplemented, "ACLs are not supported; use the bucket's public flag and scoped keys."));
-    }
+    ctx.meter(&bucket.id, Class::A);
     ctx.store().get_object(&bucket.name, ctx.key_name()).s3()?;
-    Ok(response::empty(StatusCode::OK))
+    Err(S3Error::msg(Code::InvalidObjectState, "Restore is not allowed for the object's current storage class").with("StorageClass", "STANDARD"))
 }

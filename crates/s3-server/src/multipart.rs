@@ -14,10 +14,6 @@ use s3_proto::{Code, S3Error, xml};
 use s3_store::{Bucket, Checksum, Class, Part, Upload, UploadsQuery};
 use std::collections::HashMap;
 
-fn owner() -> xml::Owner {
-    xml::Owner { id: "roll".into(), display_name: "roll".into() }
-}
-
 fn upload_id(ctx: &Ctx) -> Result<String, S3Error> {
     ctx.q("uploadId").map(str::to_string).filter(|s| !s.is_empty()).ok_or_else(|| S3Error::msg(Code::InvalidArgument, "uploadId is required").with("ArgumentName", "uploadId"))
 }
@@ -116,7 +112,7 @@ pub(crate) async fn upload_part(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> R
 
 async fn copy_part(ctx: &mut Ctx, up: &Upload, n: u32) -> Reply {
     let (src_bucket, src_key) = parse_copy_source(ctx.h("x-amz-copy-source").unwrap_or_default())?;
-    ctx.require(&src_bucket, Need::Read)?;
+    ctx.require_source(&src_bucket, &src_key)?;
     let src = ctx.store().get_object(&src_bucket, &src_key).s3()?;
     Conditions::copy_source_from_headers(|h| ctx.h(h)).check_copy_source(&src.etag, src.modified_at)?;
     let range = match ctx.h("x-amz-copy-source-range") {
@@ -257,7 +253,7 @@ pub(crate) fn list_parts(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         is_truncated: more,
         parts: entries,
         storage_class: "STANDARD".into(),
-        owner: owner(),
+        owner: crate::acl::owner(ctx.store()),
         checksum: ck,
     };
     response::ok_xml(xml::list_parts(&l))
@@ -290,7 +286,7 @@ pub(crate) fn list_uploads(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         url_encode,
         uploads: page.uploads.iter().map(|u| xml::UploadEntry { key: u.key.clone(), upload_id: u.id.clone(), initiated_ms: u.created_at, checksum: upload_checksum(u) }).collect(),
         common_prefixes: page.prefixes.clone(),
-        owner: owner(),
+        owner: crate::acl::owner(ctx.store()),
         storage_class: "STANDARD".into(),
     };
     response::ok_xml(xml::list_uploads(&l))

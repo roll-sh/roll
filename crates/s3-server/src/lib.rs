@@ -10,17 +10,23 @@
 //! s3_server::serve(tokio::net::TcpListener::bind("127.0.0.1:59000").await?, server).await?;
 //! ```
 
+mod access;
+mod acl;
 mod auth;
 mod body;
 mod bucket;
+mod config;
 mod cors;
 mod ctx;
 mod error;
+mod logging;
 mod multipart;
 mod object;
+mod policy;
 mod post;
 mod response;
 mod upload;
+mod website;
 
 use axum::Router;
 use axum::extract::{ConnectInfo, Request, State};
@@ -45,6 +51,11 @@ pub struct Config {
     pub region: String,
     /// Where browser form uploads (POST Object, length unknown up front) are spooled.
     pub spool_dir: PathBuf,
+    /// `<bucket>.<domain>` is the bucket's static website endpoint (S3 website semantics).
+    pub website_domain: Option<String>,
+    /// How often buffered server access logs are written to their target buckets; `None` =
+    /// only by [`Server::flush_access_logs`].
+    pub access_log_interval: Option<std::time::Duration>,
 }
 
 impl Default for Config {
@@ -54,6 +65,8 @@ impl Default for Config {
             internal_cidrs: default_internal_cidrs(),
             region: "us-east-1".into(),
             spool_dir: std::env::temp_dir(),
+            website_domain: None,
+            access_log_interval: Some(std::time::Duration::from_secs(300)),
         }
     }
 }
@@ -71,11 +84,34 @@ pub fn parse_cidrs(s: &str) -> anyhow::Result<Vec<IpNet>> {
 pub struct Server {
     pub store: Arc<Store>,
     pub cfg: Config,
+    logs: logging::Logs,
 }
 
 impl Server {
     pub fn new(store: Arc<Store>, cfg: Config) -> Arc<Self> {
-        Arc::new(Self { store, cfg })
+        let server = Arc::new(Self { store, cfg, logs: Default::default() });
+        if let (Some(every), Ok(rt)) = (server.cfg.access_log_interval, tokio::runtime::Handle::try_current()) {
+            let weak = Arc::downgrade(&server);
+            rt.spawn(async move {
+                loop {
+                    tokio::time::sleep(every).await;
+                    let Some(s) = weak.upgrade() else { return };
+                    s.flush_access_logs().await;
+                }
+            });
+        }
+        server
+    }
+
+    /// Write the buffered server access logs to their target buckets now (they're otherwise
+    /// written every `access_log_interval`). Returns how many log objects were written.
+    pub async fn flush_access_logs(&self) -> usize {
+        logging::flush(self).await
+    }
+
+    /// Access log lines dropped because the buffer was full.
+    pub fn access_logs_dropped(&self) -> u64 {
+        self.logs.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether traffic to `ip` is inside roll (free egress).

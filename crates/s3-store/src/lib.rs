@@ -19,6 +19,7 @@
 //! ```
 
 pub mod backend;
+pub mod config;
 mod db;
 mod error;
 mod ids;
@@ -32,6 +33,7 @@ mod schema;
 mod store;
 pub mod validate;
 
+pub use config::{PublicAccessBlock, RedirectAll, Redirect, RoutingCondition, RoutingRule, WebsiteConfig};
 pub use backend::{Backend, BlobAttrs, ByteStream, Listed, LocalBackend, S3Backend, Uploaded, UploadedPart, bytes_body, from_config, test_backend};
 pub use error::{Result, StoreError};
 pub use ids::{blob_key, day_of};
