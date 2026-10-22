@@ -4779,14 +4779,24 @@ fn gather(
     leaves.push((p.clone(), off));
 }
 
+/// What the binder's `=` for a type depends on: the catalog and the search path. (A `Weak`
+/// keeps the catalog's allocation, so no later catalog can take its address.)
+type EqScope = (std::sync::Weak<crate::catalog::Catalog>, Vec<String>);
+
 thread_local! {
-    /// `=` operators met in join clauses, by type (to rebuild hash keys as clauses).
-    static EQ_OPS: std::cell::RefCell<Vec<(DataType, Arc<FuncDef>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// `=` operators met in join clauses, by type (to rebuild hash keys as clauses), as the
+    /// binder resolved them in their scope: another catalog (after DDL, a rollback, in
+    /// another database) or search path may resolve another one. Every planning that
+    /// rebuilds hash keys (`gather_group`, `gather`) calls `remember_equalities` first,
+    /// which starts the list over for a new scope.
+    static EQ_OPS: std::cell::RefCell<(Option<EqScope>, Vec<(DataType, Arc<FuncDef>)>)> =
+        const { std::cell::RefCell::new((None, Vec::new())) };
 }
 
 fn equality_for(t: &DataType) -> Option<Arc<FuncDef>> {
     EQ_OPS.with(|m| {
         m.borrow()
+            .1
             .iter()
             .find(|(x, _)| x.without_typmod() == t.without_typmod())
             .map(|(_, d)| d.clone())
@@ -4794,6 +4804,14 @@ fn equality_for(t: &DataType) -> Option<Arc<FuncDef>> {
 }
 
 fn remember_equalities(p: &Plan, ctx: &ExecCtx) {
+    // (What was resolved for another catalog or search path goes.)
+    EQ_OPS.with(|m| {
+        let mut m = m.borrow_mut();
+        let cat = ctx.catalog();
+        if !m.0.as_ref().is_some_and(|(c, path)| std::ptr::eq(c.as_ptr(), Arc::as_ptr(&cat)) && *path == ctx.search_path) {
+            *m = (Some((Arc::downgrade(&cat), ctx.search_path.clone())), Vec::new());
+        }
+    });
     // The hash keys' types: an `=` for each, as the binder would resolve it.
     let mut types = Vec::new();
     // (Through every node: a filter or projection between two joins too, whose lower
@@ -4814,7 +4832,7 @@ fn remember_equalities(p: &Plan, ctx: &ExecCtx) {
         let mut b = crate::sql::binder::Binder::new(ctx, Vec::new());
         let (x, y) = (Expr::Col(0, t.clone()), Expr::Col(1, t.clone()));
         if let Ok(Expr::Call(d, ..)) = b.binop("=", x, y, -1) {
-            EQ_OPS.with(|m| m.borrow_mut().push((t, d)));
+            EQ_OPS.with(|m| m.borrow_mut().1.push((t, d)));
         }
     }
 }
@@ -4870,6 +4888,7 @@ impl Planner<'_, '_> {
         if absorb.is_empty() {
             return false;
         }
+        remember_equalities(input, self.ctx);
         let Some(g) = outerjoins::gather_group(input, &[]) else {
             return false;
         };

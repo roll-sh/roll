@@ -83,7 +83,7 @@ pub fn validate_function(ctx: &ExecCtx, f: &Function, sql: &str) -> Result<()> {
         if v.len() > 256 {
             v.clear();
         }
-        v.insert((f.schema, f.name.clone(), f.body.clone()));
+        v.insert((ctx.sess.db.instance, f.schema, f.name.clone(), f.body.clone()));
     });
     parse::parse(&f.body)
         .map(|_| ())
@@ -152,11 +152,12 @@ fn compile_checked(ctx: &ExecCtx, body: &str, spec: &compile::Spec, sql: &str) -
 }
 
 thread_local! {
-    /// Functions (oid and body) compiled for a call in this session.
-    static COMPILED: RefCell<HashSet<(u32, String)>> = RefCell::new(HashSet::new());
+    /// Functions (database, oid and body) compiled for a call in this session. (By
+    /// `Database::instance`: oids repeat in other engines' databases on the thread.)
+    static COMPILED: RefCell<HashSet<(u64, u32, String)>> = RefCell::new(HashSet::new());
     /// Functions (schema, name and body) the validator compiled in this session, kept for
     /// calls whose input collation is the validator's (none: no collatable arguments).
-    static VALIDATED: RefCell<HashSet<(u32, String, String)>> = RefCell::new(HashSet::new());
+    static VALIDATED: RefCell<HashSet<(u64, u32, String, String)>> = RefCell::new(HashSet::new());
 }
 
 /// Whether a call's input collation is none, as the validator compiles with.
@@ -174,12 +175,12 @@ fn compile_for_call(ctx: &ExecCtx, f: &Function) -> Result<()> {
     if f.args.iter().any(|a| a.1 == DataType::AnyArray) {
         return compile_spec(ctx, f, true);
     }
-    let key = (f.oid, f.body.clone());
+    let key = (ctx.sess.db.instance, f.oid, f.body.clone());
     if COMPILED.with(|c| c.borrow().contains(&key)) {
         return Ok(());
     }
     // What the validator compiled is the cached function (`cached_function_compile`).
-    let validated = (f.schema, f.name.clone(), f.body.clone());
+    let validated = (ctx.sess.db.instance, f.schema, f.name.clone(), f.body.clone());
     if no_input_collation(f) && VALIDATED.with(|v| v.borrow_mut().remove(&validated)) {
         COMPILED.with(|c| c.borrow_mut().insert(key));
         return Ok(());
@@ -498,7 +499,14 @@ fn compile_context(e: Error, name: &str) -> Error {
 }
 
 fn parsed(body: &str, name: &str) -> Result<Rc<Block>> {
-    if let Some(b) = PARSED.with(|p| p.borrow().get(body).cloned()) {
+    // A DO block is scanned anew each time, under the standard_conforming_strings it runs
+    // with: the same body run before under the other setting scanned its strings apart.
+    let key = if name == "inline_code_block" {
+        format!("DO#{}#{body}", crate::sql::scs::opts().standard_strings)
+    } else {
+        body.to_string()
+    };
+    if let Some(b) = PARSED.with(|p| p.borrow().get(&key).cloned()) {
         return Ok(b);
     }
     let b = Rc::new(parse::parse(body).map_err(|e| compile_context(e, name))?);
@@ -507,7 +515,7 @@ fn parsed(body: &str, name: &str) -> Result<Rc<Block>> {
         if p.len() > 256 {
             p.clear();
         }
-        p.insert(body.to_string(), b.clone());
+        p.insert(key, b.clone());
     });
     Ok(b)
 }
@@ -1795,11 +1803,15 @@ impl<'c, 'a> Interp<'c, 'a> {
             .collect();
         let colls: Vec<&Option<String>> = self.vars.iter().map(|v| &v.coll).collect();
         let key = format!(
-            "{}#{:?}#{}#{:p}#{}#{:?}#{:?}#{:?}#{:?}#{}#{:?}#{:?}#{:?}",
+            "{}#{:?}#{:?}#{}#{}#{}#{:?}#{:?}#{:?}#{:?}#{}#{:?}#{:?}#{:?}",
             self.body_key,
+            // (A DO block's expressions are scanned under the setting it runs with: see
+            // `lexed`.)
+            (self.fn_name == "inline_code_block").then(|| crate::sql::scs::opts().standard_strings),
             self.conflict,
             e.id,
-            Arc::as_ptr(&self.ctx.sess.db),
+            // (Not the database's address: one opened later may take it.)
+            self.ctx.sess.db.instance,
             cat.version,
             self.ctx.search_path,
             sig,
@@ -1833,8 +1845,11 @@ impl<'c, 'a> Interp<'c, 'a> {
     /// `text` (expression or statement `id` of the body) as first scanned here
     /// (`LEXED`), its scanner warnings reported then.
     fn lexed(&self, id: usize, text: &str) -> Result<Rc<str>> {
-        let key = (self.fn_name != "inline_code_block")
-            .then(|| format!("{}#{id}#{text}", self.body_key));
+        // (Per function, as Postgres compiles each: another function with the same body
+        // first ran under another setting.)
+        let key = (self.fn_name != "inline_code_block").then(|| {
+            format!("{}#{}#{}#{id}#{text}", self.ctx.sess.db.instance, self.fn_oid, self.body_key)
+        });
         if let Some(t) = key
             .as_ref()
             .and_then(|k| LEXED.with(|l| l.borrow().get(k).cloned()))

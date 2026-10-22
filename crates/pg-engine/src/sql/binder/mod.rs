@@ -687,9 +687,13 @@ impl<'b, 'a> Binder<'b, 'a> {
     }
 
     pub fn fresh_id(&mut self) -> usize {
-        self.next_id += 1;
-        // Unique per process run, so cached subquery results never collide across statements
-        // sharing an ExecCtx.
+        // Unique per process run (not per binder), so cached subquery results never collide
+        // across statements sharing an ExecCtx: a SQL function's statements, each bound by a
+        // binder of its own, run in their caller's context, whose sub-selects and CTEs are
+        // cached by id. (Wrapping well below the ids EXPLAIN and the planner hand out.)
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(2);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % (1 << 38);
+        self.next_id = id.max(2);
         self.next_id
     }
 

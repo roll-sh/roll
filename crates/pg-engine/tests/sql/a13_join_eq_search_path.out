@@ -1,0 +1,63 @@
+> CREATE TABLE tk (unique1 int, unique2 int, thousand int, twothousand int)
+-- CREATE TABLE
+
+> INSERT INTO tk SELECT (i * 7919) % 10000, i, ((i * 7919) % 10000) % 1000, ((i * 7919) % 10000) % 2000
+>   FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE INDEX tk_unique2 ON tk (unique2)
+-- CREATE INDEX
+
+> CREATE INDEX tk_thous ON tk (thousand)
+-- CREATE INDEX
+
+> VACUUM ANALYZE tk
+-- VACUUM
+
+> CREATE SCHEMA s
+-- CREATE SCHEMA
+
+> CREATE FUNCTION s.always(int, int) RETURNS bool LANGUAGE plpgsql IMMUTABLE AS $$ BEGIN RETURN true; END $$
+-- CREATE FUNCTION
+
+> CREATE OPERATOR s.= (leftarg = int, rightarg = int, function = s.always)
+-- CREATE OPERATOR
+
+> SELECT a.unique1, b.unique1, c.unique1, coalesce(b.twothousand, a.twothousand)
+>   FROM tk a LEFT JOIN tk b ON b.thousand = a.unique1
+>   LEFT JOIN tk c ON c.unique2 = coalesce(b.twothousand, a.twothousand)
+>   WHERE a.unique2 < 10 AND coalesce(b.twothousand, a.twothousand) = 44
+unique1:int4 | unique1:int4 | unique1:int4 | coalesce:int4
+-- SELECT 0
+
+> SET search_path = s, pg_catalog, public
+-- SET
+
+> SELECT a.unique1, b.unique1, c.unique1, coalesce(b.twothousand, a.twothousand)
+>   FROM tk a LEFT JOIN tk b ON b.thousand OPERATOR(pg_catalog.=) a.unique1
+>   LEFT JOIN tk c ON c.unique2 OPERATOR(pg_catalog.=) coalesce(b.twothousand, a.twothousand)
+>   WHERE a.unique2 OPERATOR(pg_catalog.<) 10
+>     AND coalesce(b.twothousand, a.twothousand) OPERATOR(pg_catalog.=) 44
+unique1:int4 | unique1:int4 | unique1:int4 | coalesce:int4
+-- SELECT 0
+
+> SELECT count(*) FROM tk a JOIN tk b ON a.unique1 OPERATOR(pg_catalog.=) b.unique2
+count:int8
+10000
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> SELECT a.unique1, b.unique1, c.unique1, coalesce(b.twothousand, a.twothousand)
+>   FROM tk a LEFT JOIN tk b ON b.thousand = a.unique1
+>   LEFT JOIN tk c ON c.unique2 = coalesce(b.twothousand, a.twothousand)
+>   WHERE a.unique2 < 10 AND coalesce(b.twothousand, a.twothousand) = 44
+unique1:int4 | unique1:int4 | unique1:int4 | coalesce:int4
+-- SELECT 0
+
+> SELECT count(*) FROM tk a JOIN tk b ON a.unique1 = b.unique2
+count:int8
+10000
+-- SELECT 1
+

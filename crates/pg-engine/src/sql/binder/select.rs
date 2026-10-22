@@ -274,7 +274,8 @@ impl Binder<'_, '_> {
         };
         let mut slots = Vec::new();
         // (Later items are planned seeing the earlier ones' estimates.)
-        let mut pushed = 0;
+        // (Popped when this returns, on an error too: a later statement must not see them.)
+        let mut pushed = crate::sql::explain::CteEstimatesPushed(0);
         let future_mark = self.future_ctes.len();
         // (The statement's references to its items: taken before their queries' own WITHs.)
         let refs = self.cte_refs.take();
@@ -392,7 +393,7 @@ impl Binder<'_, '_> {
                 work_filter: None,
             });
             if !self.deparse && self.ctes.last().and_then(|l| l.last()).is_some_and(|c| c.inline.is_none()) {
-                pushed += crate::sql::explain::push_cte_estimates(
+                pushed.0 += crate::sql::explain::push_cte_estimates(
                     &[(id, Arc::new(plan.clone()))],
                     std::slice::from_ref(&cte.ctename),
                     self.ctx,
@@ -400,7 +401,7 @@ impl Binder<'_, '_> {
             }
             slots.push((cte.ctename.clone(), id, plan));
         }
-        crate::sql::explain::pop_cte_estimates(pushed);
+        drop(pushed);
         self.future_ctes.truncate(future_mark);
         // (Kept in the order they were analyzed in, so each one's inputs open first.)
         let mut plans = Vec::new();

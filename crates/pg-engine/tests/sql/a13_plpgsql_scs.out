@@ -1,0 +1,91 @@
+> SET standard_conforming_strings = off
+-- SET
+
+> DO $$ BEGIN RAISE NOTICE 'a\\b'; END $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 26)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+NOTICE 00000: a\b
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> SET standard_conforming_strings = on
+-- SET
+
+> DO $$ BEGIN RAISE NOTICE 'a\\b'; END $$
+NOTICE 00000: a\\b
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> DO $$ BEGIN RAISE NOTICE 'c\\d %', 'e\\f'; END $$
+NOTICE 00000: c\\d e\\f
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> SET standard_conforming_strings = off
+-- SET
+
+> DO $$ BEGIN RAISE NOTICE 'c\\d %', 'e\\f'; END $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 26)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 36)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 36)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: 'e\\f' (at 1)
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+NOTICE 00000: c\d e\f
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> SET standard_conforming_strings = on
+-- SET
+
+> CREATE FUNCTION f1() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'g\\h'; RETURN 'i\\j'; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION f2() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'g\\h'; RETURN 'i\\j'; END $$
+-- CREATE FUNCTION
+
+> SELECT f1()
+NOTICE 00000: g\\h
+CONTEXT: PL/pgSQL function f1() line 1 at RAISE
+f1:text
+i\\j
+-- SELECT 1
+
+> SET standard_conforming_strings = off
+-- SET
+
+> SELECT f1()
+NOTICE 00000: g\\h
+CONTEXT: PL/pgSQL function f1() line 1 at RAISE
+f1:text
+i\\j
+-- SELECT 1
+
+> SELECT f2()
+NOTICE 00000: g\\h
+CONTEXT: PL/pgSQL function f2() line 1 at RAISE
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: 'i\\j' (at 1)
+CONTEXT: PL/pgSQL function f2() line 1 at RETURN
+f2:text
+i\j
+-- SELECT 1
+
+> SET standard_conforming_strings = on
+-- SET
+
+> SELECT f2()
+NOTICE 00000: g\\h
+CONTEXT: PL/pgSQL function f2() line 1 at RAISE
+f2:text
+i\j
+-- SELECT 1
+
+> RESET standard_conforming_strings
+-- RESET
+

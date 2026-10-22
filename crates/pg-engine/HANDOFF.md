@@ -112,6 +112,13 @@ GOLDEN_RECORD=127.0.0.1:55499 GOLDEN_PASSWORD=pw GOLDEN_FILTER=<name> cargo test
   any you create (start and end of the file).
 - Avoid raw OIDs and `pg_temp_N` names in outputs.
 - psql hides `CONTEXT` on NOTICE/WARNING by default, but goldens record it.
+- `golden` runs every file on one thread, in name order, each in a fresh store; `golden_wire`
+  runs each on a connection thread of its own. `golden_shuffled` runs a sample (60 files) in a
+  shuffled order on one thread, so a file's statements run after other files' than in
+  `golden`: a difference there means some state outlived a statement (see "Session and thread
+  state"). `GOLDEN_SHUFFLE=all` runs every file (as long as `golden`), `GOLDEN_SHUFFLE=<n>` n
+  files, `GOLDEN_SHUFFLE=off` none; `GOLDEN_SHUFFLE_SEED=<n>` another order (the failure message
+  names the seed and the files before the differing one, and says whether it matches alone).
 
 **Regression suite** (`tests/pg_regress.rs`, `#[ignore]`d):
 
@@ -185,6 +192,79 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
 - Every fix gets a golden recorded against PostgreSQL. Correctness (results, errors, data)
   before EXPLAIN text.
 - Commit only verified states: the whole `cargo test -p pg-engine` passes first.
+
+## Session and thread state
+
+A statement's rows, errors and plan may depend only on the catalog it sees, its session's
+settings and the data, never on which statements ran before it on the thread or in the
+process. The server runs each connection on a thread of its own, but the engine is a library:
+embedders (and the golden harness) run many sessions, databases and even engines on one thread,
+and `cargo test` runs several engines in one process. Oids, transaction ids, catalog versions'
+starting points and row keys repeat across engines and stores, and freed `Arc`s' addresses are
+reused at once.
+
+What outlives a statement today, and what keys or invalidates it (round 16 audit, agent 13):
+
+- **Keyed by the scope it depends on**:
+  - `Session` prepared statements' bindings (`Prepared::bound`): catalog version, search path,
+    role, row_security. The generic plan's cost: by a `Weak` to the binding.
+  - PL/pgSQL (`plpgsql/mod.rs`): `PLANS` (body, statement, `Database::instance`, catalog
+    version, search path, role, row_security, variable types, a DO block's
+    standard_conforming_strings), `LEXED` (database, function oid, body: each function is
+    scanned at its own first run), `PARSED` (body; a DO block's with
+    standard_conforming_strings), `COMPILED` / `VALIDATED` (database, oid / schema + name, body),
+    `pl_conflicts` / `pl_strict_params` (per session, by function and body).
+  - Catalog versions are unique in the process (`Catalog::bump`, also for a rebased commit), so
+    a version identifies one catalog of one database's history; rolled-back DDL's versions are
+    never reused.
+  - `EQ_OPS` (`paths/joinpath.rs`, the `=` per type to rebuild hash keys): by a `Weak` to the
+    catalog and the search path, started over by every `remember_equalities`.
+  - `SYS_ROWS` (`explain::sys_tuples`, a system catalog's row count): by the catalog's address
+    with a `Weak` holding it.
+  - `exec::sizing::METHODS` (a stored datum's compression method, process-wide): by
+    `Database::instance`, table, column and value.
+  - `func::range::user_constructors` (process-wide): by the whole range type and its
+    constructors' oids. `types::collation::get`: by the whole definition. `regex::compile`: by
+    pattern, flags and strategy. Interners (`func::intern`), the built-in registries and the
+    `include_str!` tables are pure.
+  - Subquery / CTE ids (`Binder::fresh_id`) are unique in the process: `ExecCtx`'s
+    `subq_cache`, `exists_hash`, `scalar_hash`, `ctes`, `work` are keyed by them, and a SQL
+    function's statements (bound by binders of their own) run in their caller's context.
+- **Set from the statement's catalog / settings by every `Binder::new`**: `cast::USER_CASTS`,
+  `optimize::ALIAS_FAMILIES`, `partition::PRUNING`. Readers outside a binder (run-time partition
+  pruning, PL/pgSQL assignment casts, CREATE AGGREGATE's lookup) see the last binder's on the
+  thread, normally this statement's.
+- **Scoped to a call**, put back when it returns (a guard's `Drop`, or set / restore around a
+  call that can't fail): `current::CURRENT`, `partition::COLLS`, `range::COLL`,
+  `depend::USER_TYPES`, `dml::DML_TARGETS`, PL/pgSQL `DEPTH` / `TRIGGER_DEPTH`,
+  `ddl::TOP_LEVEL`, `event_trigger::STATES`, the binder's `SECURITY_QUALS` / `QUERY_RLS` /
+  `PHV_*` / `EXISTS_SUBLINKS` / `CASE_TEST_DOMAIN`, ruleutils' `FN_ARGS` / `RTABLES` /
+  `NO_INDENT` / `STORED_TABLE`, explain's builder flags, `CTE_ESTIMATES` / `CTE_ORDERS`
+  (`CteEstimatesPushed` pops them on an error too), trigger `MOVING_ROW` / `UPDATED_COLS`.
+  The set / restore ones without a guard stay set if a panic unwinds through them (the server
+  turns a panic into an ERROR and keeps the session): an engine panic can leave the session's
+  thread with a stale flag.
+- **Per session, synced before each statement**: `scs::OPTS` (lexer settings), `SOURCE`,
+  `catalog::SESSION_TEMP_SCHEMA` (set by `execute_with`; a Parse / Describe message binding
+  before any execute on a thread another session used sees that session's `pg_temp`).
+- **Shared on purpose** (PostgreSQL's shared state): the database's locks, sequences, xids,
+  relation files model, cumulative statistics, LISTEN / NOTIFY.
+
+Rules for a new cache:
+
+1. Prefer state on the `Planner`, `Binder` or `ExecCtx` (one statement) over a `thread_local!`
+   or a `static`.
+2. Key it by everything its value depends on: the catalog (by version, or a `Weak<Catalog>`),
+   the database (`Database::instance`, never an oid alone or an address), the search path,
+   the role, the settings it reads. Never key by `Arc::as_ptr` / an address without holding a
+   `Weak` (or the `Arc`) to keep the allocation.
+3. A thread-local set for a call goes back in a guard's `Drop`, so errors (`?`) and panics
+   restore it.
+4. Add a case to `tests/session_state.rs` (the same script alone, after another store's,
+   after another database's, after the same session's) or a golden whose statements would hit
+   a stale entry.
+5. `golden_shuffled` (below) runs the goldens in another order on one thread; run it with
+   `GOLDEN_SHUFFLE=all` after adding one.
 
 ## Decisions already made (don't revisit)
 

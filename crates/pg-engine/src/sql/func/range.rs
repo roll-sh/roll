@@ -484,17 +484,12 @@ pub fn user_constructors(
 ) -> Vec<Arc<super::FuncDef>> {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    type Key = (u32, u32, Arc<str>, Arc<str>, String, String);
+    // (By the whole definition and the constructors' oids: a type's oid and names repeat
+    // in other databases of the process, of other engines or stores, as other types.)
+    type Key = (String, String, String);
     static CACHE: Mutex<Option<HashMap<Key, Registry>>> = Mutex::new(None);
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let key = (
-        rt.oid,
-        rt.schema,
-        rt.name.clone(),
-        rt.multi_name.clone(),
-        ctors.0.to_string(),
-        ctors.1.to_string(),
-    );
+    let key = (format!("{:?} {oids:?}", **rt), ctors.0.to_string(), ctors.1.to_string());
     let reg = cache
         .get_or_insert_with(HashMap::new)
         .entry(key)

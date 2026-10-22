@@ -74,6 +74,10 @@ struct SeqState {
 pub struct Database {
     pub name: String,
     pub oid: u32,
+    /// Unique among the databases this process opened (oids aren't: every engine, every
+    /// store opened apart hands them out from the same start). What per-database state kept
+    /// outside the database is keyed by.
+    pub instance: u64,
     pub store: Arc<Store>,
     catalog: RwLock<Arc<Catalog>>,
     pub locks: LockManager,
@@ -128,9 +132,11 @@ impl Database {
             |_| {},
         )));
         let version = catalog.version;
+        static INSTANCES: AtomicU64 = AtomicU64::new(1);
         Ok(Arc::new(Database {
             name: name.to_string(),
             oid,
+            instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
             store,
             catalog: RwLock::new(Arc::new(catalog)),
             locks: LockManager::default(),
@@ -744,7 +750,11 @@ impl Txn {
         {
             let cur = self.db.catalog().version;
             self.catalog_base = Some(cur);
-            c.version = cur + 1;
+            // (A new version, unique as `bump` makes them: `cur + 1` may be one another
+            // transaction's catalog already has, which caches keyed by the version take for
+            // this one.)
+            c.version = cur;
+            c.bump();
         }
         let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
         self.writes

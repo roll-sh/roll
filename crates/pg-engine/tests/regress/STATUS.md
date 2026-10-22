@@ -112,6 +112,70 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
 
+## Round 16, agent 13 (session and thread state audit)
+
+Every `thread_local!`, interior-mutable `static` and cache on the engine, session and catalog
+structs was checked for a statement whose output depends on what ran before it (the inventory
+and the rule for new caches are in HANDOFF.md, "Session and thread state"). No regress unit
+changes: the suite runs each file on a connection thread of its own, which hides most of this.
+
+Fixed (reproduced first by a golden recorded from PostgreSQL):
+
+- **Wrong results: a SQL function's sub-selects reused their earlier call's value.** Subquery /
+  CTE ids were per binder (2, 3, …), but a SQL function's statements, each bound by a binder of
+  its own, run in their caller's `ExecCtx`, whose InitPlan results (and hashed EXISTS / scalar
+  sub-selects, CTE tuplestores) are cached by id: `SELECT c(1), c(2)` with
+  `c(int) ... AS $$ CALL p($1 * 2); SELECT (SELECT count(*)::int FROM log) $$` gave `1 | 1`
+  (PostgreSQL `1 | 2`). Ids are now unique in the process (`Binder::fresh_id`). Golden:
+  a13_sqlfn_subquery_ids.
+- **A DO block reused another run's scan.** PL/pgSQL's `PARSED` (by body) and `PLANS` caches
+  handed a DO block the parse / plans of the same body run before under the other
+  standard_conforming_strings (`'a\\b'` printed `a\b` with the setting on). And `LEXED` (an
+  expression's first scan) was shared by functions with the same body, so a function first run
+  under another setting kept another function's scan. Keyed now by the setting (DO) and by the
+  function (database, oid). Golden: a13_plpgsql_scs.
+
+Fixed as hardening (not reproduced in a test; each could hand out a wrong entry):
+
+- `EQ_OPS` (the `=` per type that hash keys are rebuilt into clauses with, round 15's lost join
+  clause): kept across statements, catalogs and search paths; now started over for each catalog
+  / search path. (A rebuilt key still takes the `=` the search path finds, not the one the
+  clause named: `OPERATOR(pg_catalog.=)` under a search path whose first schema has an
+  `int = int`. Not reachable today, see below.) Golden: a13_join_eq_search_path.
+- Caches keyed by an address that a later allocation can take: `SYS_ROWS` (a system catalog's
+  rows, by catalog address), PL/pgSQL `PLANS` (by database address), a prepared statement's
+  generic plan cost (by binding address). Now a `Weak` or `Database::instance`.
+- Process-wide caches keyed by oids, which repeat across engines and stores of one process:
+  `sizing::METHODS` (compression methods; also by xid and row key), range constructors
+  (`func::range::user_constructors`), PL/pgSQL `COMPILED` / `VALIDATED`. Keyed by
+  `Database::instance` / the whole type now. Test: tests/session_state.rs.
+- `Txn::replace_catalog` (a commit rebased past shared-catalog updates) gave the catalog
+  `cur + 1`, a version another transaction's catalog could have: now `bump`ed.
+- CTE estimates pushed by `define_ctes` stayed on the thread when a later CTE failed to bind
+  (a leak, and entries a later statement's lookup by name could find): popped by a guard now.
+
+Guard: `golden_shuffled` (60 files in a shuffled order on one thread, in `cargo test`;
+`GOLDEN_SHUFFLE=all` for every file). Every file ran shuffled on the old engine (seed 0xa13) and
+on the fixed one (seeds 0xa13 and 7): no file differed by its order (on the old engine only the
+two new goldens differed, and they differ alone too). A regress subset (create_function_sql,
+triggers, subselect, plpgsql, rangefuncs, polymorphism, with) matches as before (3736/3746).
+
+Open, found on the way (not state, for the long tail):
+
+- `SET search_path = s, pg_catalog` with `CREATE OPERATOR s.= (int, int)`: `SELECT 1 = 2` errors
+  "operator is not unique: integer = integer" (PostgreSQL takes the first schema's, `t`).
+- An engine panic (turned into an ERROR, the session goes on) can leave a set / restore flag
+  without a `Drop` guard set on the thread (the binder's `SECURITY_QUALS`, `PHV_OUTPUTS`,
+  `EXISTS_SUBLINKS`, `CASE_TEST_DOMAIN`, ruleutils' `RTABLES` / `NO_INDENT`, explain's builder
+  flags, `ddl::TOP_LEVEL`): the session's later statements then plan or print differently.
+- The planner keys `lifted` / `pw_joins` by plan `Arc` addresses within a statement; a dropped
+  plan's address can come back for another during the same planning (agents 8 / 12's areas).
+- `catalog::SESSION_TEMP_SCHEMA` is set by `execute_with`: an embedder's Parse / Describe on a
+  thread that ran another session, before this one executed anything, resolves `pg_temp` to
+  that session's schema. (The server runs a thread per connection.)
+- `cast::USER_CASTS` / `ALIAS_FAMILIES` / `PRUNING` are the last `Binder::new`'s on the thread;
+  run-time partition pruning reads `PRUNING` as of the last binder, not the plan's.
+
 ## Round 15, agent 9 (full-run ALTER TABLE "stalls", harness timeouts, row locks at the level's top)
 
 A full run of the schedule (`PGREGRESS_TIMEOUT=300`, now per statement) against 308f2d1 +

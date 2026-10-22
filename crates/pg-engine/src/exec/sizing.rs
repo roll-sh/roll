@@ -200,10 +200,17 @@ fn chunk_len(bytes: usize, seq: u32) -> usize {
 /// version), so it keeps the method it got then, whatever the column's is now. Each value's
 /// entries are per stored row (`RowId`): rows of the same content stored apart keep their
 /// own methods.
+/// (By database too, `Database::instance`: table oids, transaction ids and row keys repeat
+/// across the engines and stores of a process.)
 #[allow(clippy::type_complexity)]
 static METHODS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<(u32, usize, u64), Vec<(RowId, char)>>>,
+    std::sync::Mutex<HashMap<(u64, u32, usize, u64), Vec<(RowId, char)>>>,
 > = std::sync::LazyLock::new(Default::default);
+
+/// The database of the statement running on this thread (`METHODS`'s key).
+fn methods_db() -> u64 {
+    crate::session::current::with_current(|ctx| ctx.sess.db.instance).unwrap_or(0)
+}
 
 /// Which stored row a value is in: the version's xmin and, when known, the row's key.
 type RowId = (u64, Option<Arc<[u8]>>);
@@ -297,7 +304,7 @@ fn read_from(v: &Value) -> Option<(u32, usize, RowId)> {
 /// compressed.
 fn compressed_with(v: &Value) -> Option<char> {
     let (t, i, x) = read_from(v)?;
-    method_of(METHODS.lock().ok()?.get(&(t, i, value_sig(v)))?, Some(&x))
+    method_of(METHODS.lock().ok()?.get(&(methods_db(), t, i, value_sig(v)))?, Some(&x))
 }
 
 /// The method a datum read from a relation is stored compressed with.
@@ -307,7 +314,7 @@ pub fn read_compression(v: &Value) -> Option<char> {
 
 /// The method `v`, stored in table `t`'s column `col`, was compressed with.
 fn stored_with(t: u32, col: usize, v: &Value) -> Option<char> {
-    method_of(METHODS.lock().ok()?.get(&(t, col, value_sig(v)))?, None)
+    method_of(METHODS.lock().ok()?.get(&(methods_db(), t, col, value_sig(v)))?, None)
 }
 
 /// A row about to be stored in `t`: the values it compresses get their method remembered.
@@ -320,12 +327,13 @@ pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
         .filter_map(|(i, v)| compressed_with(v).map(|m| (i, value_sig(v), m)))
         .collect();
     let at: RowId = (ctx.txn.borrow_mut().cur_xid(), key.map(Arc::from));
+    let db = ctx.sess.db.instance;
     if !copied.is_empty()
         && let Ok(mut m) = METHODS.lock()
     {
         // (The latest copy wins over a value of the same content stored before.)
         for (i, sig, method) in copied {
-            record_method(m.entry((t.oid, i, sig)).or_default(), at.clone(), method, true);
+            record_method(m.entry((db, t.oid, i, sig)).or_default(), at.clone(), method, true);
         }
     }
     let types: Vec<DataType> = t.columns[..n].iter().map(|c| c.ty.clone()).collect();
@@ -354,7 +362,7 @@ pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
                 None if lz4 => 'l',
                 None => 'p',
             };
-            record_method(m.entry((t.oid, i, value_sig(&row[i]))).or_default(), at.clone(), method, false);
+            record_method(m.entry((db, t.oid, i, value_sig(&row[i]))).or_default(), at.clone(), method, false);
         }
     }
 }

@@ -245,3 +245,105 @@ fn run_wire(addr: &str, path: &Path) -> String {
         .unwrap();
     out
 }
+
+/// Run `f` on a thread with a session's stack (as `golden` does).
+fn on_session_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            pg_engine::stack::set_limit(60 << 20);
+            f()
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+/// The goldens again, in a shuffled order on one thread that keeps running file after file
+/// (each in a fresh database), so each file runs after other files' statements than the ones
+/// sorting before it. State outliving a statement (thread-local caches, process-wide caches
+/// keyed by oids, which every fresh database hands out again) must not change any output: a
+/// file that matches in `golden` and differs here depends on what ran before it.
+///
+/// `GOLDEN_SHUFFLE`: unset runs a sample of `SHUFFLE_SAMPLE` files, `all` every file, a number
+/// that many, `off` none. `GOLDEN_SHUFFLE_SEED` picks the order and sample (default: a fixed
+/// seed, so a failure reproduces; set it to try others). `GOLDEN_FILTER` narrows the files as
+/// in `golden`. A difference is reported with the files that ran just before it, and whether
+/// the file matches when run alone on a fresh thread.
+#[test]
+fn golden_shuffled() {
+    const SHUFFLE_SAMPLE: usize = 60;
+    if std::env::var("GOLDEN_RECORD").is_ok() {
+        return;
+    }
+    let n = match std::env::var("GOLDEN_SHUFFLE").unwrap_or_default().as_str() {
+        "off" | "0" => return,
+        "all" => usize::MAX,
+        "" => SHUFFLE_SAMPLE,
+        s => s.parse().expect("GOLDEN_SHUFFLE: off, all or a number"),
+    };
+    let seed: u64 = std::env::var("GOLDEN_SHUFFLE_SEED")
+        .ok()
+        .map(|s| s.parse().expect("GOLDEN_SHUFFLE_SEED: a number"))
+        .unwrap_or(0xa13);
+    let mut files = sql_files();
+    // Fisher-Yates over splitmix64.
+    let mut state = seed;
+    let mut next = || {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    for i in (1..files.len()).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        files.swap(i, j);
+    }
+    files.truncate(n);
+    let expected = |f: &Path| std::fs::read_to_string(f.with_extension("out")).unwrap_or_default();
+    let order = files.clone();
+    let differing: Vec<(PathBuf, String)> = on_session_thread(move || {
+        let mut out = Vec::new();
+        for f in order {
+            let (want, got) = (expected(&f), run_engine(&f));
+            if got != want {
+                let d = diff(&want, &got);
+                out.push((f, d));
+            }
+        }
+        out
+    });
+    let mut failures = Vec::new();
+    for (f, d) in differing {
+        let pos = files.iter().position(|x| *x == f).unwrap();
+        let before: Vec<String> = files[pos.saturating_sub(5)..pos]
+            .iter()
+            .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let alone = {
+            let f = f.clone();
+            on_session_thread(move || run_engine(&f) == expected(&f))
+        };
+        failures.push(format!(
+            "{} (file {} of the order, after {}; {}):\n{d}",
+            f.file_name().unwrap().to_string_lossy(),
+            pos + 1,
+            before.join(", "),
+            if alone {
+                "matches alone on a fresh thread"
+            } else {
+                "differs alone too"
+            },
+        ));
+    }
+    if !failures.is_empty() {
+        panic!(
+            "GOLDEN_SHUFFLE_SEED={seed}: {} of {} golden files differ in this order:\n\n{}",
+            failures.len(),
+            files.len(),
+            failures.join("\n")
+        );
+    }
+    eprintln!("{} golden files match in a shuffled order (seed {seed})", files.len());
+}

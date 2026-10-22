@@ -115,7 +115,8 @@ struct PlanUses {
     /// The custom plans' costs, planning charged (total_custom_cost).
     custom_cost: f64,
     /// The generic plan's cost, and which binding it is of (generic_cost; None: not built).
-    generic_cost: Option<(usize, f64)>,
+    /// (A `Weak`, not an address: a later binding could take a dropped one's address.)
+    generic_cost: Option<(std::sync::Weak<BoundQuery>, f64)>,
 }
 
 impl Prepared {
@@ -1143,13 +1144,18 @@ impl Session {
             Some(c) => c,
             None => {
                 let bq = self.bound(p, stmt, params)?;
-                let id = Arc::as_ptr(&bq) as usize;
-                let known = p.plans.lock().generic_cost.filter(|(g, _)| *g == id);
+                let known = p
+                    .plans
+                    .lock()
+                    .generic_cost
+                    .as_ref()
+                    .filter(|(g, _)| std::ptr::eq(g.as_ptr(), Arc::as_ptr(&bq)))
+                    .map(|(_, c)| *c);
                 let cost = match known {
-                    Some((_, c)) => c,
+                    Some(c) => c,
                     None => {
                         let c = self.plan_cost(&bq, params, false);
-                        p.plans.lock().generic_cost = Some((id, c));
+                        p.plans.lock().generic_cost = Some((Arc::downgrade(&bq), c));
                         c
                     }
                 };

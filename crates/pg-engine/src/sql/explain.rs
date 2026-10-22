@@ -11822,11 +11822,15 @@ fn union_arms<'p>(p: &'p Arc<Plan>, all: bool, out: &mut Vec<&'p Arc<Plan>>) {
 
 /// A system catalog's rows now (its reltuples), cached for the catalog version.
 pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx) -> f64 {
+    // (By the catalog's address, with a `Weak` to it: that keeps the allocation, so a later
+    // catalog can't take the address and find this one's count.)
+    type SysRows = HashMap<(usize, u32), (std::sync::Weak<crate::catalog::Catalog>, f64)>;
     thread_local! {
-        static SYS_ROWS: std::cell::RefCell<HashMap<(usize, u32), f64>> = std::cell::RefCell::new(HashMap::new());
+        static SYS_ROWS: std::cell::RefCell<SysRows> = std::cell::RefCell::new(HashMap::new());
     }
-    let key = (Arc::as_ptr(&ctx.catalog()) as usize, table.oid());
-    if let Some(n) = SYS_ROWS.with(|m| m.borrow().get(&key).copied()) {
+    let cat = ctx.catalog();
+    let key = (Arc::as_ptr(&cat) as usize, table.oid());
+    if let Some(n) = SYS_ROWS.with(|m| m.borrow().get(&key).map(|e| e.1)) {
         return n;
     }
     let n = crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64).max(1.0);
@@ -11835,7 +11839,7 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
         if m.len() > 256 {
             m.clear();
         }
-        m.insert(key, n);
+        m.insert(key, (Arc::downgrade(&cat), n));
     });
     n
 }
@@ -11891,6 +11895,15 @@ pub(crate) fn pop_cte_estimates(n: usize) {
         let keep = m.len().saturating_sub(n);
         m.truncate(keep);
     });
+}
+
+/// CTE estimates pushed (`push_cte_estimates`), popped when dropped.
+pub(crate) struct CteEstimatesPushed(pub usize);
+
+impl Drop for CteEstimatesPushed {
+    fn drop(&mut self) {
+        pop_cte_estimates(self.0);
+    }
 }
 
 /// A CTE's estimate and output order, for the CTE Scans of the query being planned.
