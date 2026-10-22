@@ -3,7 +3,7 @@
 Every feature of phases 1–3 maps to the tests that cover it: every route and the statuses it
 answers, the auth matrix, every event, MCP tool and CLI command, every GitHub event, every merge
 queue transition, every review rule and blocker, and every mode, command, error and job state of
-roll's reviewer. `pnpm test:code` runs all of them: about 500 Rust tests across the code crates and
+roll's reviewer. `pnpm test:code` runs all of them: about 430 Rust tests across the code crates and
 `roll-cli`, and about 440 vitest tests for the dashboard (node and jsdom).
 
 `crates/code-control/tests/coverage_map.rs` keeps this map honest. It fails when a route the
