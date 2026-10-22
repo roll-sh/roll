@@ -1,0 +1,162 @@
+# Setup: item a=1, b='x', n=NULL
+> CreateTable {"TableName":"alt_cond_ex2_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_cond_ex2_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}}}
+< 200 {}
+# Value alone (implies equality): equal, different, other type, missing attribute
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"2"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"S":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"z":{"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1.0"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# Exists true/false with and without Value
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":true,"Value":{"N":"1"}}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":true,"Value":{"N":"2"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Exists!=false requires Value"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"z":{"Exists":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Exists!=false requires Value"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":false}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"z":{"Exists":false}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"n":{"Exists":false}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":false,"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Value with Exists!=true"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"z":{"Exists":false,"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Value with Exists!=true"}
+# Exists of the wrong JSON type
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":"true"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Exists!=false requires Value"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":1,"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Value with Exists!=true"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Exists!=false requires Value"}
+# Value combined with ComparisonOperator / AttributeValueList; Exists combined with ComparisonOperator
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"},"ComparisonOperator":"EQ"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Value with ComparisonOperator"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"},"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Value with ComparisonOperator"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"},"AttributeValueList":[{"N":"1"}]}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing ComparisonOperator, Value or Exists"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":true,"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Exists with ComparisonOperator"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":false,"ComparisonOperator":"NULL"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Exists with ComparisonOperator"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":true,"Value":{"N":"1"},"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Value with ComparisonOperator"}
+# Empty or malformed per-attribute conditions
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing ComparisonOperator, Value or Exists"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Bogus":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing ComparisonOperator, Value or Exists"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"":{"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"X":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"X":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"ComparisonOperator":"EQ","AttributeValueList":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"With ComparisonOperator, AttributeValueList must be given and an array"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"SS":[]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# Several attributes: AND by default, explicit AND, OR, invalid ConditionalOperator
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}},"b":{"Value":{"S":"x"}}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}},"b":{"Value":{"S":"y"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}},"b":{"Value":{"S":"y"}}},"ConditionalOperator":"AND"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}},"b":{"Value":{"S":"y"}}},"ConditionalOperator":"OR"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"2"}},"b":{"Value":{"S":"y"}}},"ConditionalOperator":"OR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionalOperator":"OR"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionalOperator":"or"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter must be AND, OR or missing. Found or."}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionalOperator":"XOR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter must be AND, OR or missing. Found XOR."}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionalOperator":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter, if given, must be a string"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}},"b":{"Exists":false},"z":{"Exists":false}},"ConditionalOperator":"OR"}
+< 200 {}
+# Expected with key attributes
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"p":{"Value":{"S":"k"}}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"p":{"Exists":false}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"p":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"k"}]}}}
+< 200 {}
+# Mixing Expected with expression parameters
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionExpression":"attribute_exists(a)"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues cannot be used without ConditionExpression"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ExpressionAttributeNames":{"#n":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames cannot be used without ConditionExpression"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{},"ConditionExpression":"attribute_exists(a)"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"2"}}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionExpression":"attribute_not_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"2"}}},"ConditionExpression":"attribute_not_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionExpression":"a = "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = ': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Exists":true}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Exists!=false requires Value"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionExpression":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must not be empty"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"ConditionalOperator":"OR","ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty Expression"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":{"a":{"Value":{"N":"1"}}},"ConditionalOperator":"OR","ConditionExpression":"attribute_exists(a)"}
+< 200 {}
+# Expected of the wrong JSON type (a non-object per-attribute entry gives a backtrace message: not captured)
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'Expected' parameter, if given, must be an object"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}},"Expected":"a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'Expected' parameter, if given, must be an object"}
+# Expected on a missing item: only absence-style conditions can succeed
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"new1"}},"Expected":{"a":{"Exists":false}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"new2"}},"Expected":{"a":{"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"new3"}},"Expected":{"a":{"ComparisonOperator":"NULL"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"new4"}},"Expected":{"a":{"ComparisonOperator":"NE","AttributeValueList":[{"N":"1"}]}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"new5"}},"Expected":{"a":{"ComparisonOperator":"NOT_CONTAINS","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_ex2_s","Item":{"p":{"S":"new6"}},"Expected":{"a":{"ComparisonOperator":"LT","AttributeValueList":[{"L":[]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"LT operator allow only the types String, Number, or Binary"}
+> GetItem {"TableName":"alt_cond_ex2_s","Key":{"p":{"S":"new1"}}}
+< 200 {"Item":{"p":{"S":"new1"}}}
+> GetItem {"TableName":"alt_cond_ex2_s","Key":{"p":{"S":"new3"}}}
+< 200 {"Item":{"p":{"S":"new3"}}}
+> GetItem {"TableName":"alt_cond_ex2_s","Key":{"p":{"S":"new4"}}}
+< 200 {"Item":{"p":{"S":"new4"}}}
+# DeleteItem with Expected: failing, then succeeding with ReturnValues
+> DeleteItem {"TableName":"alt_cond_ex2_s","Key":{"p":{"S":"k"}},"Expected":{"a":{"Value":{"N":"2"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> DeleteItem {"TableName":"alt_cond_ex2_s","Key":{"p":{"S":"k"}},"Expected":{"a":{"Value":{"N":"1"}},"b":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"x"}]}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"n":{"NULL":true}}}
+> DeleteItem {"TableName":"alt_cond_ex2_s","Key":{"p":{"S":"k"}},"Expected":{"a":{"Exists":false}},"ReturnValues":"ALL_OLD"}
+< 200 {}
+> DeleteTable {"TableName":"alt_cond_ex2_s"}
+< 200 {"TableDescription":{"TableName":"alt_cond_ex2_s","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_cond_ex2_s:scylla:table/alt_cond_ex2_s","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

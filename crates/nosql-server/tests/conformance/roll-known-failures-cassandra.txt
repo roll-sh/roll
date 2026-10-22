@@ -1,0 +1,10 @@
+# roll known failures: ScyllaDB test/cqlpy (scylla-2026.3.3) against roll, cassandra dialect.
+# Each line is a test that PASSes in reference-cassandra-cqlpy.txt but not on roll: `test_id  # tag: note`,
+# sorted by id. The list may only shrink. `scripts/nosql-conformance.sh --roll cassandra --compare ...` fails
+# on any other reference-passing test that does not pass on roll, and prints the listed tests that
+# pass now so they can be removed. Tags and root causes: docs/nosql/conformance-triage.md.
+cqlpy/cassandra_tests/validation/entities/uf_types_test.py::test_types_with_and_without_nulls  # java_udf: runs a Java UDF body; Cassandra compiles it with the JDK and runs it in its JVM sandbox, roll stores Java UDFs but runs no JVM (compatibility.md)
+cqlpy/test_permissions.py::test_uda_subfunc_permission_enforced[finalfunc]  # java_udf: runs a Java UDF body; Cassandra compiles it with the JDK and runs it in its JVM sandbox, roll stores Java UDFs but runs no JVM (compatibility.md)
+cqlpy/test_permissions.py::test_uda_subfunc_permission_enforced[sfunc]  # java_udf: runs a Java UDF body; Cassandra compiles it with the JDK and runs it in its JVM sandbox, roll stores Java UDFs but runs no JVM (compatibility.md)
+cqlpy/test_permissions.py::test_udf_permissions_with_udt  # java_udf: runs a Java UDF body; Cassandra compiles it with the JDK and runs it in its JVM sandbox, roll stores Java UDFs but runs no JVM (compatibility.md)
+cqlpy/test_udf.py::test_udf_with_udt  # java_udf: runs a Java UDF body; Cassandra compiles it with the JDK and runs it in its JVM sandbox, roll stores Java UDFs but runs no JVM (compatibility.md)

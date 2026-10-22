@@ -1,0 +1,4 @@
+/tmp/roll-cqlsh-golden/warnings.cql:13:InvalidRequest: Error from server: code=2200 [Invalid query] message="fromJson() can only be called if receiver type is known"
+/tmp/roll-cqlsh-golden/warnings.cql:16:Unauthorized: Error from server: code=2100 [Unauthorized] message="You have to be logged in and not anonymous to perform this request"
+/tmp/roll-cqlsh-golden/warnings.cql:17:Unauthorized: Error from server: code=2100 [Unauthorized] message="You are not authorized to view everyone's permissions"
+/tmp/roll-cqlsh-golden/warnings.cql:18:Unauthorized: Error from server: code=2100 [Unauthorized] message="You have to be logged in and not anonymous to perform this request"

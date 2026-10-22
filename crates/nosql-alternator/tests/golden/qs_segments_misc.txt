@@ -1,0 +1,184 @@
+# Hash-only table with 20 keys k00..k19, and an S/N table with 3 partitions
+> CreateTable {"TableName":"alt_qs_seg_h","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_qs_seg_h","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_qs_seg","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_qs_seg","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> BatchWriteItem {"RequestItems":{"alt_qs_seg_h":[{"PutRequest":{"Item":{"p":{"S":"k00"}}}},{"PutRequest":{"Item":{"p":{"S":"k01"}}}},{"PutRequest":{"Item":{"p":{"S":"k02"}}}},{"PutRequest":{"Item":{"p":{"S":"k03"}}}},{"PutRequest":{"Item":{"p":{"S":"k04"}}}},{"PutRequest":{"Item":{"p":{"S":"k05"}}}},{"PutRequest":{"Item":{"p":{"S":"k06"}}}},{"PutRequest":{"Item":{"p":{"S":"k07"}}}},{"PutRequest":{"Item":{"p":{"S":"k08"}}}},{"PutRequest":{"Item":{"p":{"S":"k09"}}}},{"PutRequest":{"Item":{"p":{"S":"k10"}}}},{"PutRequest":{"Item":{"p":{"S":"k11"}}}},{"PutRequest":{"Item":{"p":{"S":"k12"}}}},{"PutRequest":{"Item":{"p":{"S":"k13"}}}},{"PutRequest":{"Item":{"p":{"S":"k14"}}}},{"PutRequest":{"Item":{"p":{"S":"k15"}}}},{"PutRequest":{"Item":{"p":{"S":"k16"}}}},{"PutRequest":{"Item":{"p":{"S":"k17"}}}},{"PutRequest":{"Item":{"p":{"S":"k18"}}}},{"PutRequest":{"Item":{"p":{"S":"k19"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+> BatchWriteItem {"RequestItems":{"alt_qs_seg":[{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"1"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"2"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"3"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"1"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"2"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"3"}}}},{"PutRequest":{"Item":{"p":{"S":"p3"},"c":{"N":"1"}}}},{"PutRequest":{"Item":{"p":{"S":"p3"},"c":{"N":"2"}}}},{"PutRequest":{"Item":{"p":{"S":"p3"},"c":{"N":"3"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+# Full scan, for reference
+> Scan {"TableName":"alt_qs_seg_h"}
+< 200 {"Count":20,"ScannedCount":20,"Items":[{"p":{"S":"k00"}},{"p":{"S":"k12"}},{"p":{"S":"k09"}},{"p":{"S":"k14"}},{"p":{"S":"k01"}},{"p":{"S":"k15"}},{"p":{"S":"k04"}},{"p":{"S":"k16"}},{"p":{"S":"k13"}},{"p":{"S":"k17"}},{"p":{"S":"k19"}},{"p":{"S":"k10"}},{"p":{"S":"k06"}},{"p":{"S":"k07"}},{"p":{"S":"k03"}},{"p":{"S":"k11"}},{"p":{"S":"k18"}},{"p":{"S":"k08"}},{"p":{"S":"k02"}},{"p":{"S":"k05"}}]}
+# Parallel scan: TotalSegments 1, 2, 3, 4 and 17 - each segment holds a disjoint token range
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":1}
+< 200 {"Count":20,"ScannedCount":20,"Items":[{"p":{"S":"k00"}},{"p":{"S":"k12"}},{"p":{"S":"k09"}},{"p":{"S":"k14"}},{"p":{"S":"k01"}},{"p":{"S":"k15"}},{"p":{"S":"k04"}},{"p":{"S":"k16"}},{"p":{"S":"k13"}},{"p":{"S":"k17"}},{"p":{"S":"k19"}},{"p":{"S":"k10"}},{"p":{"S":"k06"}},{"p":{"S":"k07"}},{"p":{"S":"k03"}},{"p":{"S":"k11"}},{"p":{"S":"k18"}},{"p":{"S":"k08"}},{"p":{"S":"k02"}},{"p":{"S":"k05"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":2}
+< 200 {"Count":11,"ScannedCount":11,"Items":[{"p":{"S":"k00"}},{"p":{"S":"k12"}},{"p":{"S":"k09"}},{"p":{"S":"k14"}},{"p":{"S":"k01"}},{"p":{"S":"k15"}},{"p":{"S":"k04"}},{"p":{"S":"k16"}},{"p":{"S":"k13"}},{"p":{"S":"k17"}},{"p":{"S":"k19"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":1,"TotalSegments":2}
+< 200 {"Count":9,"ScannedCount":9,"Items":[{"p":{"S":"k10"}},{"p":{"S":"k06"}},{"p":{"S":"k07"}},{"p":{"S":"k03"}},{"p":{"S":"k11"}},{"p":{"S":"k18"}},{"p":{"S":"k08"}},{"p":{"S":"k02"}},{"p":{"S":"k05"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":3}
+< 200 {"Count":10,"ScannedCount":10,"Items":[{"p":{"S":"k00"}},{"p":{"S":"k12"}},{"p":{"S":"k09"}},{"p":{"S":"k14"}},{"p":{"S":"k01"}},{"p":{"S":"k15"}},{"p":{"S":"k04"}},{"p":{"S":"k16"}},{"p":{"S":"k13"}},{"p":{"S":"k17"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":1,"TotalSegments":3}
+< 200 {"Count":4,"ScannedCount":4,"Items":[{"p":{"S":"k19"}},{"p":{"S":"k10"}},{"p":{"S":"k06"}},{"p":{"S":"k07"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":2,"TotalSegments":3}
+< 200 {"Count":6,"ScannedCount":6,"Items":[{"p":{"S":"k03"}},{"p":{"S":"k11"}},{"p":{"S":"k18"}},{"p":{"S":"k08"}},{"p":{"S":"k02"}},{"p":{"S":"k05"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":4}
+< 200 {"Count":7,"ScannedCount":7,"Items":[{"p":{"S":"k00"}},{"p":{"S":"k12"}},{"p":{"S":"k09"}},{"p":{"S":"k14"}},{"p":{"S":"k01"}},{"p":{"S":"k15"}},{"p":{"S":"k04"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":1,"TotalSegments":4}
+< 200 {"Count":4,"ScannedCount":4,"Items":[{"p":{"S":"k16"}},{"p":{"S":"k13"}},{"p":{"S":"k17"}},{"p":{"S":"k19"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":2,"TotalSegments":4}
+< 200 {"Count":6,"ScannedCount":6,"Items":[{"p":{"S":"k10"}},{"p":{"S":"k06"}},{"p":{"S":"k07"}},{"p":{"S":"k03"}},{"p":{"S":"k11"}},{"p":{"S":"k18"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":3,"TotalSegments":4}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"S":"k08"}},{"p":{"S":"k02"}},{"p":{"S":"k05"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":17}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"k00"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":5,"TotalSegments":17}
+< 200 {"Count":2,"ScannedCount":2,"Items":[{"p":{"S":"k13"}},{"p":{"S":"k17"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":16,"TotalSegments":17}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+# Parallel scan with Limit and paging inside a segment
+> Scan {"TableName":"alt_qs_seg_h","Segment":1,"TotalSegments":2,"Limit":3}
+< 200 {"Count":3,"ScannedCount":3,"LastEvaluatedKey":{"p":{"S":"k07"}},"Items":[{"p":{"S":"k10"}},{"p":{"S":"k06"}},{"p":{"S":"k07"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":2,"Limit":3}
+< 200 {"Count":3,"ScannedCount":3,"LastEvaluatedKey":{"p":{"S":"k09"}},"Items":[{"p":{"S":"k00"}},{"p":{"S":"k12"}},{"p":{"S":"k09"}}]}
+# ExclusiveStartKey inside and outside the segment
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":2,"ExclusiveStartKey":{"p":{"S":"k00"}}}
+< 200 {"Count":10,"ScannedCount":10,"Items":[{"p":{"S":"k12"}},{"p":{"S":"k09"}},{"p":{"S":"k14"}},{"p":{"S":"k01"}},{"p":{"S":"k15"}},{"p":{"S":"k04"}},{"p":{"S":"k16"}},{"p":{"S":"k13"}},{"p":{"S":"k17"}},{"p":{"S":"k19"}}]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":2,"ExclusiveStartKey":{"p":{"S":"k05"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The provided starting key is invalid: Invalid ExclusiveStartKey. Please use ExclusiveStartKey with correct Segment. TotalSegments: 2 Segment: 0"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":1,"TotalSegments":2,"ExclusiveStartKey":{"p":{"S":"k00"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The provided starting key is invalid: Invalid ExclusiveStartKey. Please use ExclusiveStartKey with correct Segment. TotalSegments: 2 Segment: 1"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":1,"TotalSegments":2,"ExclusiveStartKey":{"p":{"S":"k05"}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":1000000,"ExclusiveStartKey":{"p":{"S":"k00"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The provided starting key is invalid: Invalid ExclusiveStartKey. Please use ExclusiveStartKey with correct Segment. TotalSegments: 1000000 Segment: 0"}
+# Segment / TotalSegments validation
+> Scan {"TableName":"alt_qs_seg_h","Segment":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Both Segment and TotalSegments attributes need to be present for a parallel scan"}
+> Scan {"TableName":"alt_qs_seg_h","TotalSegments":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Both Segment and TotalSegments attributes need to be present for a parallel scan"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":2,"TotalSegments":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Segment must be non-negative and less than TotalSegments"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":7,"TotalSegments":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Segment must be non-negative and less than TotalSegments"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":-1,"TotalSegments":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Segment must be non-negative and less than TotalSegments"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Segment must be non-negative and less than TotalSegments"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":-1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Segment must be non-negative and less than TotalSegments"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":1000000}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":999999,"TotalSegments":1000000}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> Scan {"TableName":"alt_qs_seg_h","Segment":0,"TotalSegments":1000001}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TotalSegments must be non-negative and less or equal to 1000000"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":1000000,"TotalSegments":1000001}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TotalSegments must be non-negative and less or equal to 1000000"}
+# Which error wins: bad Segment vs bad Limit vs bad Select vs missing table
+> Scan {"TableName":"alt_qs_seg_h","Segment":5,"TotalSegments":2,"Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Segment must be non-negative and less than TotalSegments"}
+> Scan {"TableName":"alt_qs_seg_h","Segment":5,"TotalSegments":2,"Select":"bogus"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Segment must be non-negative and less than TotalSegments"}
+> Scan {"TableName":"alt_qs_nothere","Segment":5,"TotalSegments":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_qs_nothere not found"}
+> Scan {"TableName":"alt_qs_nothere","Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_qs_nothere not found"}
+# Segment on Query is not a Query parameter (ignored?)
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"Segment":0,"TotalSegments":2}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}}]}
+# ConsistentRead on Query and Scan
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"ConsistentRead":true}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}}]}
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"ConsistentRead":false}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}}]}
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"ConsistentRead":"true"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"ConsistentRead":null}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_seg","ConsistentRead":true}
+< 200 {"Count":9,"ScannedCount":9,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}},{"p":{"S":"p3"},"c":{"N":"1"}},{"p":{"S":"p3"},"c":{"N":"2"}},{"p":{"S":"p3"},"c":{"N":"3"}},{"p":{"S":"p2"},"c":{"N":"1"}},{"p":{"S":"p2"},"c":{"N":"2"}},{"p":{"S":"p2"},"c":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_seg","ConsistentRead":false}
+< 200 {"Count":9,"ScannedCount":9,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}},{"p":{"S":"p3"},"c":{"N":"1"}},{"p":{"S":"p3"},"c":{"N":"2"}},{"p":{"S":"p3"},"c":{"N":"3"}},{"p":{"S":"p2"},"c":{"N":"1"}},{"p":{"S":"p2"},"c":{"N":"2"}},{"p":{"S":"p2"},"c":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_seg","ConsistentRead":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+# Missing table and bad table names
+> Query {"TableName":"alt_qs_nothere","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_qs_nothere not found"}
+> Scan {"TableName":"alt_qs_nothere"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_qs_nothere not found"}
+> Query {"KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> Scan {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> Scan {"TableName":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table:  not found"}
+> Scan {"TableName":"ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: ab not found"}
+> Scan {"TableName":"bad name!"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: bad name! not found"}
+> Scan {"TableName":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx not found"}
+> Scan {"TableName":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> Query {"TableName":"alt_qs_nothere","KeyConditionExpression":"p = :p OR c = :p","ExpressionAttributeValues":{":p":{"S":"p1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_qs_nothere not found"}
+> Query {"TableName":"alt_qs_nothere","KeyConditionExpression":"p = = :p"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_qs_nothere not found"}
+> Scan {"TableName":"alt_qs_nothere","FilterExpression":"a = = :p"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_qs_nothere not found"}
+# IndexName on a table with no indexes
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"IndexName":"idx"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Requested resource not found: Index 'idx' for table 'alt_qs_seg'"}
+> Scan {"TableName":"alt_qs_seg","IndexName":"idx"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Requested resource not found: Index 'idx' for table 'alt_qs_seg'"}
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"IndexName":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IndexName must be at least 3 characters long"}
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"IndexName":"bad name!"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IndexName 'bad name!' must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"IndexName":5}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string_view expects a string value, got: kNumberType)"}
+> Query {"TableName":"alt_qs_nothere","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"IndexName":"idx"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_qs_nothere not found"}
+# Unknown request parameters are ignored
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"Bogus":1}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_seg","Bogus":{"x":1},"ReturnConsumedCapacity":"NONE"}
+< 200 {"Count":9,"ScannedCount":9,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}},{"p":{"S":"p3"},"c":{"N":"1"}},{"p":{"S":"p3"},"c":{"N":"2"}},{"p":{"S":"p3"},"c":{"N":"3"}},{"p":{"S":"p2"},"c":{"N":"1"}},{"p":{"S":"p2"},"c":{"N":"2"}},{"p":{"S":"p2"},"c":{"N":"3"}}]}
+# ReturnConsumedCapacity on Query and Scan
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"ReturnConsumedCapacity":"TOTAL"}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}}]}
+> Query {"TableName":"alt_qs_seg","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"p1"}},"ReturnConsumedCapacity":"INDEXES"}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_seg","ReturnConsumedCapacity":"TOTAL"}
+< 200 {"Count":9,"ScannedCount":9,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}},{"p":{"S":"p3"},"c":{"N":"1"}},{"p":{"S":"p3"},"c":{"N":"2"}},{"p":{"S":"p3"},"c":{"N":"3"}},{"p":{"S":"p2"},"c":{"N":"1"}},{"p":{"S":"p2"},"c":{"N":"2"}},{"p":{"S":"p2"},"c":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_seg","ReturnConsumedCapacity":"BOGUS"}
+< 200 {"Count":9,"ScannedCount":9,"Items":[{"p":{"S":"p1"},"c":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"3"}},{"p":{"S":"p3"},"c":{"N":"1"}},{"p":{"S":"p3"},"c":{"N":"2"}},{"p":{"S":"p3"},"c":{"N":"3"}},{"p":{"S":"p2"},"c":{"N":"1"}},{"p":{"S":"p2"},"c":{"N":"2"}},{"p":{"S":"p2"},"c":{"N":"3"}}]}
+# Internal system tables through the .scylla.alternator. prefix (read-only; just the shape)
+> Query {"TableName":".scylla.alternator.system_schema.keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"system"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"system"},"durable_writes":{"BOOL":"true"},"replication":{"S":"({class : org.apache.cassandra.locator.LocalStrategy})"}}]}
+> Query {"TableName":".scylla.alternator.system_schema.keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"system"}},"IndexName":"x"}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"system"},"durable_writes":{"BOOL":"true"},"replication":{"S":"({class : org.apache.cassandra.locator.LocalStrategy})"}}]}
+> Query {"TableName":".scylla.alternator.system_schema.columns","KeyConditionExpression":"keyspace_name = :k AND table_name = :t","ExpressionAttributeValues":{":k":{"S":"system_schema"},":t":{"S":"keyspaces"}},"ProjectionExpression":"column_name, kind, #t","ExpressionAttributeNames":{"#t":"type"}}
+< 200 {"Count":5,"ScannedCount":5,"Items":[{"column_name":{"S":"durable_writes"},"kind":{"S":"regular"},"type":{"S":"boolean"}},{"column_name":{"S":"keyspace_name"},"kind":{"S":"partition_key"},"type":{"S":"text"}},{"column_name":{"S":"next_replication"},"kind":{"S":"regular"},"type":{"S":"frozen<map<text, text>>"}},{"column_name":{"S":"replication"},"kind":{"S":"regular"},"type":{"S":"frozen<map<text, text>>"}},{"column_name":{"S":"replication_v2"},"kind":{"S":"regular"},"type":{"S":"frozen<map<text, text>>"}}]}
+> Query {"TableName":".scylla.alternator.system_schema.keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column keyspace_name, got type \"N\""}
+> Scan {"TableName":".scylla.alternator.system.local","ProjectionExpression":"#k","ExpressionAttributeNames":{"#k":"key"}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"key":{"S":"local"}}]}
+> Scan {"TableName":".scylla.alternator.system.nothere"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Internal table: system.nothere not found"}
+> Scan {"TableName":".scylla.alternator.nothere.local"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: .scylla.alternator.nothere.local not found"}
+> Scan {"TableName":".scylla.alternator.system"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: .scylla.alternator.system not found"}
+> Scan {"TableName":".scylla.alternator."}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: .scylla.alternator. not found"}
+> Scan {"TableName":".scylla.alternator.alternator_alt_qs_seg.alt_qs_seg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: .scylla.alternator.alternator_alt_qs_seg.alt_qs_seg not found"}
+> DescribeTable {"TableName":".scylla.alternator.system.local"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: .scylla.alternator.system.local not found"}
+> DeleteTable {"TableName":"alt_qs_seg"}
+< 200 {"TableDescription":{"TableName":"alt_qs_seg","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_qs_seg:scylla:table/alt_qs_seg","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_qs_seg_h"}
+< 200 {"TableDescription":{"TableName":"alt_qs_seg_h","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_qs_seg_h:scylla:table/alt_qs_seg_h","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

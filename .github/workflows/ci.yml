@@ -16,6 +16,7 @@ jobs:
     outputs:
       postgres: ${{ steps.diff.outputs.postgres }}
       queues: ${{ steps.diff.outputs.queues }}
+      nosql: ${{ steps.diff.outputs.nosql }}
       redis: ${{ steps.diff.outputs.redis }}
       stream: ${{ steps.diff.outputs.stream }}
       tasks: ${{ steps.diff.outputs.tasks }}
@@ -33,6 +34,7 @@ jobs:
           match() { if grep -qE "$2" <<< "$files"; then echo "$1=true"; else echo "$1=false"; fi >> "$GITHUB_OUTPUT"; }
           match postgres '^(crates/(pg-proxy|pg-storage|pg-control|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-postgres\.sh$|\.github/workflows/(postgres|ci)\.yml$)'
           match queues '^(crates/(mq-[a-z0-9-]+|rolld|roll-cli)/|tests/queues/|deploy/queues/|Cargo\.(toml|lock)$|scripts/test-queues(-clients)?\.sh$|\.github/workflows/(queues|ci)\.yml$)'
+          match nosql '^(crates/(nosql-[a-z-]+|pg-storage|redis-lua|rolld|roll-cli)/|deploy/nosql/|Cargo\.(toml|lock)$|scripts/(test-nosql\.sh|nosql-conformance|nosql-bench)|\.github/workflows/(nosql|ci)\.yml$)'
           match redis '^(crates/(redis-[a-z]+|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-redis\.sh$|\.github/workflows/(redis|ci)\.yml$)'
           match stream '^(crates/(stream-log|stream-broker|pg-storage|rolld|roll-cli)/|vendor/kafka-protocol/|Cargo\.(toml|lock)$|scripts/test-stream\.sh$|\.github/workflows/(stream|ci)\.yml$)'
           match tasks '^(crates/(tasks|rolld|roll-cli)/|deploy/aws/|Cargo\.(toml|lock)$|scripts/test-tasks\.sh$|\.github/workflows/(tasks|ci)\.yml$)'
@@ -47,6 +49,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.queues == 'true'
     uses: ./.github/workflows/queues.yml
+
+  nosql:
+    needs: changes
+    if: needs.changes.outputs.nosql == 'true'
+    uses: ./.github/workflows/nosql.yml
 
   redis:
     needs: changes
@@ -69,7 +76,7 @@ jobs:
     uses: ./.github/workflows/web.yml
 
   ci:
-    needs: [changes, postgres, queues, redis, stream, tasks, web]
+    needs: [changes, nosql, postgres, queues, redis, stream, tasks, web]
     if: always()
     runs-on: ubuntu-latest
     steps:

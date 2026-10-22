@@ -1,0 +1,6 @@
+# Statements of scylla_reference.tsv whose error differs from the reference (see the crate
+# docs for why). The test fails if one starts matching: remove it from here then.
+CREATE SERVICE LEVEL IF NOT EXISTS sl WITH KEY = 10ms AND workload_type = 'batch'
+CREATE SERVICE LEVEL IF NOT EXISTS sl WITH timeout = KEY 10ms AND workload_type = 'batch'
+CREATE SERVICE LEVEL IF NOT EXISTS sl WITH timeout = int 10ms AND workload_type = 'batch'
+GRANT SELECT ON MBEAN '' TO r

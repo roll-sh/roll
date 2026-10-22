@@ -1,0 +1,9 @@
+{
+  "name": "roll-nosql-testcontainers-check",
+  "private": true,
+  "dependencies": {
+    "@testcontainers/cassandra": "12.2.1",
+    "@testcontainers/scylladb": "12.2.1",
+    "cassandra-driver": "4.10.0"
+  }
+}

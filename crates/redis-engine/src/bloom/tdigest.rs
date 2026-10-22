@@ -1,6 +1,9 @@
 //! t-digests (the `t-digest-c` histogram RedisBloom links): centroids (mean, weight) buffered
 //! unmerged and merged by compression, with quantile/CDF/rank estimates.
 
+// `q < 0.0 || q > 1.0` lets NaN through on purpose; `RangeInclusive::contains` would not.
+#![allow(clippy::manual_range_contains)]
+
 use super::sb::MAX_ALLOC;
 
 use std::f64::consts::PI;

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Testcontainers for Java (Cassandra and ScyllaDB modules) with the roll image swapped in. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>sh.roll.nosql</groupId>
+  <artifactId>testcontainers-check</artifactId>
+  <version>1</version>
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-cassandra</artifactId><version>2.0.5</version></dependency>
+    <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-scylladb</artifactId><version>2.0.5</version></dependency>
+    <dependency><groupId>org.apache.cassandra</groupId><artifactId>java-driver-core</artifactId><version>4.19.4</version></dependency>
+    <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-simple</artifactId><version>2.0.17</version></dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.8.1</version>
+        <executions>
+          <execution><id>libs</id><phase>package</phase><goals><goal>copy-dependencies</goal></goals>
+            <configuration><outputDirectory>${project.build.directory}/lib</outputDirectory></configuration></execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

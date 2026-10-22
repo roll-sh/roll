@@ -1,0 +1,17 @@
+
+PAGING [cqlsh]
+
+  Enables or disables query paging.
+
+PAGING ON
+
+  Enables query paging for all further queries.
+
+PAGING OFF
+
+  Disables paging.
+
+PAGING
+
+  PAGING with no arguments shows the current query paging status.
+

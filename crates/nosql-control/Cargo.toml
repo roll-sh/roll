@@ -1,0 +1,39 @@
+[package]
+name = "nosql-control"
+description = "Control plane for roll nosql: databases, branches, restore, imports, credentials, settings, metering and pricing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+nosql-engine.workspace = true
+nosql-proto = { workspace = true, features = ["client"] }
+nosql-server.workspace = true
+nosql-sstable-import.workspace = true
+nosql-storage.workspace = true
+nosql-types.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+url.workspace = true
+urlencoding.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+flate2.workspace = true
+nosql-alternator.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+zstd.workspace = true

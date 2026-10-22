@@ -5,8 +5,9 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
-mod redis;
+mod nosql;
 mod queues;
+mod redis;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -45,6 +46,9 @@ enum Cmd {
     /// Kafka-compatible streams.
     #[command(subcommand, alias = "kafka")]
     Stream(stream::Stream),
+    /// ScyllaDB / Cassandra-compatible databases (with a built-in cqlsh).
+    #[command(subcommand, alias = "cql")]
+    Nosql(Box<nosql::Nosql>),
     /// RabbitMQ-compatible message queues.
     #[command(alias = "q")]
     Queues(queues::Queues),
@@ -293,6 +297,15 @@ async fn main() -> anyhow::Result<()> {
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
+        Cmd::Nosql(cmd) => {
+            let r = nosql::run(&api, cli.json, *cmd).await;
+            if let Err(e) = &r
+                && let Some(nosql::Exit(code)) = e.downcast_ref::<nosql::Exit>()
+            {
+                std::process::exit(*code);
+            }
+            return r;
+        }
     };
     let out = match cmd {
         Db::List => {

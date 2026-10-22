@@ -1,0 +1,16 @@
+# The final stage of deploy/nosql/Dockerfile around binaries built elsewhere (bookworm's glibc
+# or older). deploy/nosql/build-local.sh prepares the context: rolld, roll and the scripts.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 999 --user-group --home-dir /var/lib/roll roll \
+ && mkdir -p /var/lib/roll /etc/cassandra /etc/scylla && chown roll:roll /var/lib/roll
+COPY rolld roll /usr/local/bin/
+COPY docker-entrypoint.sh cqlsh healthcheck /usr/local/bin/
+USER roll
+# / as in the reference images: Testcontainers copies init scripts to a relative path.
+WORKDIR /
+ENV ROLL_HOME=/var/lib/roll RUST_LOG=info NO_COLOR=1
+EXPOSE 9042 19042 8000 10000 9180 7070
+VOLUME /var/lib/roll
+HEALTHCHECK --interval=1s --timeout=3s --start-period=10s --retries=30 CMD ["healthcheck"]
+ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]

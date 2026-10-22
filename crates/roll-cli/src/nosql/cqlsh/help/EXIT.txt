@@ -1,0 +1,5 @@
+
+EXIT/QUIT [cqlsh only]
+
+Exits cqlsh.
+

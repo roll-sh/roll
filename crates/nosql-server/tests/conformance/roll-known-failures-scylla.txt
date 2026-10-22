@@ -1,0 +1,5 @@
+# roll known failures: ScyllaDB test/cqlpy (scylla-2026.3.3) against roll, scylla dialect.
+# Each line is a test that PASSes in reference-scylla-cqlpy.txt but not on roll: `test_id  # tag: note`,
+# sorted by id. The list may only shrink. `scripts/nosql-conformance.sh --roll scylla --compare ...` fails
+# on any other reference-passing test that does not pass on roll, and prints the listed tests that
+# pass now so they can be removed. Tags and root causes: docs/nosql/conformance-triage.md.

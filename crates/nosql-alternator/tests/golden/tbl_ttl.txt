@@ -1,0 +1,106 @@
+# errors on a missing table / bad requests
+> UpdateTimeToLive {"TableName":"alt_tbl_tt_missing","TimeToLiveSpecification":{"AttributeName":"e","Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tt_missing not found"}
+> DescribeTimeToLive {"TableName":"alt_tbl_tt_missing"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tt_missing not found"}
+> UpdateTimeToLive {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> DescribeTimeToLive {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> UpdateTimeToLive {"TableName":"ab","TimeToLiveSpecification":{"AttributeName":"e","Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> DescribeTimeToLive {"TableName":"a@b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt_missing"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tt_missing not found"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt_missing","TimeToLiveSpecification":{"AttributeName":"","Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tt_missing not found"}
+> CreateTable {"TableName":"alt_tbl_tt","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"k","Value":"v"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tt","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"k","Value":"v"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# DescribeTimeToLive without TTL
+> DescribeTimeToLive {"TableName":"alt_tbl_tt"}
+< 200 {"TimeToLiveDescription":{"TimeToLiveStatus":"DISABLED"}}
+# UpdateTimeToLive validation
+> UpdateTimeToLive {"TableName":"alt_tbl_tt"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTimeToLive missing mandatory TimeToLiveSpecification"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTimeToLive missing mandatory TimeToLiveSpecification"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTimeToLive requires boolean Enabled"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTimeToLive requires string AttributeName"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"hello"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTimeToLive requires boolean Enabled"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"","Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The length of AttributeName must be between 1 and 255"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The length of AttributeName must be between 1 and 255"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":5,"Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTimeToLive requires string AttributeName"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"e","Enabled":"true"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTimeToLive requires boolean Enabled"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"e","Enabled":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTimeToLive requires boolean Enabled"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"","Enabled":"x"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTimeToLive requires boolean Enabled"}
+# disable when not enabled
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"e","Enabled":false}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TTL is already disabled"}
+# enable (255-char attribute name is allowed), describe, enable again
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","Enabled":true}}
+< 200 {"TimeToLiveSpecification":{"AttributeName":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","Enabled":true}}
+> DescribeTimeToLive {"TableName":"alt_tbl_tt"}
+< 200 {"TimeToLiveDescription":{"TimeToLiveStatus":"ENABLED","AttributeName":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","Enabled":false}}
+< 200 {"TimeToLiveSpecification":{"AttributeName":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","Enabled":false}}
+> DescribeTimeToLive {"TableName":"alt_tbl_tt"}
+< 200 {"TimeToLiveDescription":{"TimeToLiveStatus":"DISABLED"}}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"exp","Enabled":true,"Extra":1}}
+< 200 {"TimeToLiveSpecification":{"AttributeName":"exp","Enabled":true,"Extra":1}}
+> DescribeTimeToLive {"TableName":"alt_tbl_tt"}
+< 200 {"TimeToLiveDescription":{"TimeToLiveStatus":"ENABLED","AttributeName":"exp"}}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"exp","Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TTL is already enabled"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"other","Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TTL is already enabled"}
+# disable with a different name, then the right one
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"other","Enabled":false}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Requested to disable TTL on attribute other, but a different attribute exp is enabled."}
+# TTL is not visible in DescribeTable or tags; system:ttl_attribute is reserved
+> DescribeTable {"TableName":"alt_tbl_tt"}
+< 200 {"Table":{"TableName":"alt_tbl_tt","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_tt:scylla:table/alt_tbl_tt","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tt:scylla:table/alt_tbl_tt"}
+< 200 {"Tags":[{"Key":"k","Value":"v"}]}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tt:scylla:table/alt_tbl_tt","Tags":[{"Key":"system:ttl_attribute","Value":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Tag key 'system:ttl_attribute' is reserved for internal use"}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tt:scylla:table/alt_tbl_tt","TagKeys":["system:ttl_attribute"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Tag key 'system:ttl_attribute' is reserved for internal use"}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"exp","Enabled":false}}
+< 200 {"TimeToLiveSpecification":{"AttributeName":"exp","Enabled":false}}
+> DescribeTimeToLive {"TableName":"alt_tbl_tt"}
+< 200 {"TimeToLiveDescription":{"TimeToLiveStatus":"DISABLED"}}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"exp","Enabled":false}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TTL is already disabled"}
+# TTL on a key attribute (allowed)
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"p","Enabled":true}}
+< 200 {"TimeToLiveSpecification":{"AttributeName":"p","Enabled":true}}
+> DescribeTimeToLive {"TableName":"alt_tbl_tt"}
+< 200 {"TimeToLiveDescription":{"TimeToLiveStatus":"ENABLED","AttributeName":"p"}}
+> UpdateTimeToLive {"TableName":"alt_tbl_tt","TimeToLiveSpecification":{"AttributeName":"p","Enabled":false}}
+< 200 {"TimeToLiveSpecification":{"AttributeName":"p","Enabled":false}}
+# TTL at CreateTable is not a CreateTable parameter (ignored/echoed)
+> DeleteTable {"TableName":"alt_tbl_tt"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tt","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_tt:scylla:table/alt_tbl_tt","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_tt","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"TimeToLiveSpecification":{"AttributeName":"e","Enabled":true}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tt","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"TimeToLiveSpecification":{"AttributeName":"e","Enabled":true},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTimeToLive {"TableName":"alt_tbl_tt"}
+< 200 {"TimeToLiveDescription":{"TimeToLiveStatus":"DISABLED"}}
+> DeleteTable {"TableName":"alt_tbl_tt"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tt","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_tt:scylla:table/alt_tbl_tt","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# system:ttl_attribute at CreateTable
+> CreateTable {"TableName":"alt_tbl_tt","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"system:ttl_attribute","Value":"e"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Tag key 'system:ttl_attribute' is reserved for internal use"}
+> DescribeTimeToLive {"TableName":"alt_tbl_tt"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tt not found"}
+> DeleteTable {"TableName":"alt_tbl_tt"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tt not found"}

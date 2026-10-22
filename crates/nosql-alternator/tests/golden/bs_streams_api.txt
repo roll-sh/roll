@@ -1,0 +1,289 @@
+# CreateTable StreamSpecification validation (no table is created)
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"BOGUS"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamViewType : \"BOGUS\""}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"keys_only"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamViewType : \"keys_only\""}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true,"StreamViewType":5}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamViewType : 5"}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true,"StreamViewType":null}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamViewType : null"}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":"true","StreamViewType":"KEYS_ONLY"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"StreamSpecification needs boolean StreamEnabled"}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamViewType":"KEYS_ONLY"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"StreamSpecification needs boolean StreamEnabled"}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"StreamSpecification needs boolean StreamEnabled"}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":null}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"StreamSpecification needs boolean StreamEnabled"}
+> DescribeTable {"TableName":"alt_bs_sa_ct"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_bs_sa_ct not found"}
+# StreamEnabled false: StreamViewType is not validated at all
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"BOGUS"}}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"BOGUS"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_bs_sa_ct"}
+< 200 {"Table":{"TableName":"alt_bs_sa_ct","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_ct:scylla:table/alt_bs_sa_ct","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"N"},{"AttributeName":"p","AttributeType":"S"}]}}
+> DeleteTable {"TableName":"alt_bs_sa_ct"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_ct:scylla:table/alt_bs_sa_ct","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# A StreamSpecification that is not an object is ignored (and echoed back): the table is created without a stream
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":"x"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":"x","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_bs_sa_ct"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_ct:scylla:table/alt_bs_sa_ct","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":null}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":null,"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_bs_sa_ct"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_ct:scylla:table/alt_bs_sa_ct","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":[]}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":[],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_bs_sa_ct"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_ct:scylla:table/alt_bs_sa_ct","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":5}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":5,"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_bs_sa_ct"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_ct:scylla:table/alt_bs_sa_ct","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# StreamEnabled true without StreamViewType defaults to KEYS_ONLY; the response repeats StreamSpecification (request echo, then actual)
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true}}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*"}}
+> DescribeTable {"TableName":"alt_bs_sa_ct"}
+< 200 {"Table":{"TableName":"alt_bs_sa_ct","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_ct:scylla:table/alt_bs_sa_ct","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"N"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"}}}
+> DeleteTable {"TableName":"alt_bs_sa_ct"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_ct:scylla:table/alt_bs_sa_ct","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"}}}
+# StreamEnabled false: no stream, no LatestStreamArn
+> CreateTable {"TableName":"alt_bs_sa_off","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":false}}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_off","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":false},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_bs_sa_off"}
+< 200 {"Table":{"TableName":"alt_bs_sa_off","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_off:scylla:table/alt_bs_sa_off","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"N"},{"AttributeName":"p","AttributeType":"S"}]}}
+> ListStreams {"TableName":"alt_bs_sa_off"}
+< 200 {"Streams":[]}
+# StreamEnabled false with an extra (even invalid) StreamViewType
+> CreateTable {"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_bs_sa_ct"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_ct","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_ct:scylla:table/alt_bs_sa_ct","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# UpdateTable stream changes
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":false}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Table has no stream to disable: TableName: alt_bs_sa_off"}
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"BOGUS"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamViewType : \"BOGUS\""}
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamViewType":"KEYS_ONLY"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"StreamSpecification needs boolean StreamEnabled"}
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_IMAGE"}}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_IMAGE"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_bs_sa_off"}
+< 200 {"Table":{"TableName":"alt_bs_sa_off","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_off:scylla:table/alt_bs_sa_off","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"N"},{"AttributeName":"p","AttributeType":"S"}],"StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_IMAGE"}}}
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_IMAGE"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Table already has an enabled stream: TableName: alt_bs_sa_off"}
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"OLD_IMAGE"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Table already has an enabled stream: TableName: alt_bs_sa_off"}
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Table already has an enabled stream: TableName: alt_bs_sa_off"}
+# Disable: LatestStreamArn stays, StreamSpecification shows StreamEnabled false with the old view type
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":false}}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"NEW_IMAGE"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*"}}
+> DescribeTable {"TableName":"alt_bs_sa_off"}
+< 200 {"Table":{"TableName":"alt_bs_sa_off","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_off:scylla:table/alt_bs_sa_off","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"N"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"NEW_IMAGE"}}}
+> UpdateTable {"TableName":"alt_bs_sa_off","StreamSpecification":{"StreamEnabled":false}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Table has no stream to disable: TableName: alt_bs_sa_off"}
+# Table with a stream, one tablet
+> CreateTable {"TableName":"alt_bs_sa","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa","Tags":[{"Key":"system:initial_tablets","Value":"1"}],"KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*"}}
+> DescribeTable {"TableName":"alt_bs_sa"}
+< 200 {"Table":{"TableName":"alt_bs_sa","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa:scylla:table/alt_bs_sa","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"N"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+# ListStreams with TableName (never list without it: the answer would include every table on the node)
+> ListStreams {"TableName":"alt_bs_sa"}
+< 200 {"Streams":[{"StreamArn":"*","StreamLabel":"*","TableName":"alt_bs_sa"}]}
+> ListStreams {"TableName":"alt_bs_sa","Limit":1}
+< 200 {"Streams":[{"StreamArn":"*","StreamLabel":"*","TableName":"alt_bs_sa"}],"LastEvaluatedStreamArn":"*"}
+> ListStreams {"TableName":"alt_bs_sa","Limit":100000}
+< 200 {"Streams":[{"StreamArn":"*","StreamLabel":"*","TableName":"alt_bs_sa"}]}
+> ListStreams {"TableName":"alt_bs_sa","ExclusiveStartStreamArn":"$StreamArn"}
+< 200 {"Streams":[]}
+> ListStreams {"TableName":"alt_bs_sa","ExclusiveStartStreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_zz@alt_bs_sa_zz_scylla_cdc_log/stream/2026-01-01T00:00:00.000000000"}
+< 200 {"Streams":[]}
+> ListStreams {"TableName":"alt_bs_sa","Bogus":1}
+< 200 {"Streams":[{"StreamArn":"*","StreamLabel":"*","TableName":"alt_bs_sa"}]}
+# ListStreams errors
+> ListStreams {"TableName":"alt_bs_sa_missing"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_bs_sa_missing not found"}
+> ListStreams {"TableName":"alt_bs_sa","Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be 1 or more"}
+> ListStreams {"TableName":"alt_bs_sa","Limit":-1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be 1 or more"}
+> ListStreams {"TableName":"alt_bs_sa","Limit":"1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value Limit : \"1\""}
+> ListStreams {"TableName":"alt_bs_sa","Limit":1.5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value Limit : 1.5"}
+> ListStreams {"TableName":"alt_bs_sa","ExclusiveStartStreamArn":"bogus"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ExclusiveStartStreamArn : \"bogus\""}
+> ListStreams {"TableName":"alt_bs_sa","ExclusiveStartStreamArn":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ExclusiveStartStreamArn : 5"}
+> ListStreams {"TableName":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> ListStreams {"TableName":"ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> ListStreams {"TableName":"bad name!"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> ListStreams {"TableName":"alt_bs_sa_missing","Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_bs_sa_missing not found"}
+# DescribeStream: shape (one shard, open: no EndingSequenceNumber), Limit, ExclusiveStartShardId
+> ListStreams {"TableName":"alt_bs_sa"}
+< 200 {"Streams":[{"StreamArn":"*","StreamLabel":"*","TableName":"alt_bs_sa"}]}
+> DescribeStream {"StreamArn":"$StreamArn"}
+< 200 {"StreamDescription":{"StreamStatus":"ENABLED","StreamArn":"*","StreamViewType":"NEW_AND_OLD_IMAGES","TableName":"alt_bs_sa","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"Shards":[{"ShardId":"*","SequenceNumberRange":{"StartingSequenceNumber":"*"}}]}}
+> DescribeStream {"StreamArn":"$StreamArn","Limit":1}
+< 200 {"StreamDescription":{"StreamStatus":"ENABLED","StreamArn":"*","StreamViewType":"NEW_AND_OLD_IMAGES","TableName":"alt_bs_sa","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"LastEvaluatedShardId":"*","Shards":[{"ShardId":"*","SequenceNumberRange":{"StartingSequenceNumber":"*"}}]}}
+> DescribeStream {"StreamArn":"$StreamArn","Limit":100000}
+< 200 {"StreamDescription":{"StreamStatus":"ENABLED","StreamArn":"*","StreamViewType":"NEW_AND_OLD_IMAGES","TableName":"alt_bs_sa","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"Shards":[{"ShardId":"*","SequenceNumberRange":{"StartingSequenceNumber":"*"}}]}}
+> DescribeStream {"StreamArn":"$StreamArn","ExclusiveStartShardId":"$ShardId"}
+< 200 {"StreamDescription":{"StreamStatus":"ENABLED","StreamArn":"*","StreamViewType":"NEW_AND_OLD_IMAGES","TableName":"alt_bs_sa","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"Shards":[]}}
+> DescribeStream {"StreamArn":"$StreamArn","ExclusiveStartShardId":"bogus"}
+< 200 {"StreamDescription":{"StreamStatus":"ENABLED","StreamArn":"*","StreamViewType":"NEW_AND_OLD_IMAGES","TableName":"alt_bs_sa","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"Shards":[]}}
+> DescribeStream {"StreamArn":"$StreamArn","Bogus":1}
+< 200 {"StreamDescription":{"StreamStatus":"ENABLED","StreamArn":"*","StreamViewType":"NEW_AND_OLD_IMAGES","TableName":"alt_bs_sa","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"Shards":[{"ShardId":"*","SequenceNumberRange":{"StartingSequenceNumber":"*"}}]}}
+# DescribeStream: the part after the table name is not checked
+> DescribeStream {"StreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa@alt_bs_sa_scylla_cdc_log/stream/whatever"}
+< 200 {"StreamDescription":{"StreamStatus":"ENABLED","StreamArn":"*","StreamViewType":"NEW_AND_OLD_IMAGES","TableName":"alt_bs_sa","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"Shards":[{"ShardId":"*","SequenceNumberRange":{"StartingSequenceNumber":"*"}}]}}
+> DescribeStream {"StreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa@alt_bs_sa_scylla_cdc_log"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamArn : \"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa@alt_bs_sa_scylla_cdc_log\""}
+# DescribeStream errors
+> DescribeStream {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter StreamArn not found"}
+> DescribeStream {"StreamArn":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamArn : 5"}
+> DescribeStream {"StreamArn":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamArn : null"}
+> DescribeStream {"StreamArn":"bogus"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamArn : \"bogus\""}
+> DescribeStream {"StreamArn":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamArn : \"\""}
+> DescribeStream {"StreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alt_bs_sa/stream/2026-01-01T00:00:00.000"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamArn : \"arn:aws:dynamodb:us-east-1:000000000000:table/alt_bs_sa/stream/2026-01-01T00:00:00.000\""}
+> DescribeStream {"StreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_zz@alt_bs_sa_zz_scylla_cdc_log/stream/2026-01-01T00:00:00.000000000"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"`arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_zz@alt_bs_sa_zz_scylla_cdc_log/stream/2026-01-01T00:00:00.000000000` is not a valid StreamArn - table alt_bs_sa_zz_scylla_cdc_log not found"}
+> DescribeStream {"StreamArn":"$StreamArn","Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be 1 or more"}
+> DescribeStream {"StreamArn":"$StreamArn","Limit":"1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value Limit : \"1\""}
+> DescribeStream {"StreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_zz@alt_bs_sa_zz_scylla_cdc_log/stream/2026-01-01T00:00:00.000000000","Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"`arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_zz@alt_bs_sa_zz_scylla_cdc_log/stream/2026-01-01T00:00:00.000000000` is not a valid StreamArn - table alt_bs_sa_zz_scylla_cdc_log not found"}
+# GetShardIterator: valid types; responses are iterators (masked)
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"TRIM_HORIZON"}
+< 200 {"ShardIterator":"*"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"LATEST"}
+< 200 {"ShardIterator":"*"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"AT_SEQUENCE_NUMBER","SequenceNumber":"123"}
+< 200 {"ShardIterator":"*"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"AFTER_SEQUENCE_NUMBER","SequenceNumber":"123"}
+< 200 {"ShardIterator":"*"}
+# GetShardIterator: the ShardId is only checked for format
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"H 1:00000000000000000000000000000001","ShardIteratorType":"TRIM_HORIZON"}
+< 200 {"ShardIterator":"*"}
+# GetShardIterator errors (and which is checked first)
+> GetShardIterator {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter ShardIteratorType not found"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter ShardIteratorType not found"}
+> GetShardIterator {"ShardId":"$ShardId","ShardIteratorType":"TRIM_HORIZON"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter StreamArn not found"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardIteratorType":"TRIM_HORIZON"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Invalid ShardId"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"BOGUS"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIteratorType : \"BOGUS\""}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"trim_horizon"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIteratorType : \"trim_horizon\""}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIteratorType : 5"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"AT_SEQUENCE_NUMBER"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing required parameter \"SequenceNumber\""}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"AFTER_SEQUENCE_NUMBER"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing required parameter \"SequenceNumber\""}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"AT_SEQUENCE_NUMBER","SequenceNumber":"bogus"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value SequenceNumber : \"bogus\""}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"AT_SEQUENCE_NUMBER","SequenceNumber":123}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value SequenceNumber : 123"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"AT_SEQUENCE_NUMBER","SequenceNumber":"-1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value SequenceNumber : \"-1\""}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"AT_SEQUENCE_NUMBER","SequenceNumber":"340282366920938463463374607431768211456"}
+< 200 {"ShardIterator":"*"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"TRIM_HORIZON","SequenceNumber":"123"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Iterator of this type should not have sequence number"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"LATEST","SequenceNumber":"123"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Iterator of this type should not have sequence number"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"bogus","ShardIteratorType":"TRIM_HORIZON"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Invalid ShardId"}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":5,"ShardIteratorType":"TRIM_HORIZON"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Invalid ShardId"}
+> GetShardIterator {"StreamArn":"bogus","ShardId":"$ShardId","ShardIteratorType":"TRIM_HORIZON"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamArn : \"bogus\""}
+> GetShardIterator {"StreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_zz@alt_bs_sa_zz_scylla_cdc_log/stream/2026-01-01T00:00:00.000000000","ShardId":"$ShardId","ShardIteratorType":"TRIM_HORIZON"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"`arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_zz@alt_bs_sa_zz_scylla_cdc_log/stream/2026-01-01T00:00:00.000000000` is not a valid StreamArn - table alt_bs_sa_zz_scylla_cdc_log not found"}
+> GetShardIterator {"StreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_zz@alt_bs_sa_zz_scylla_cdc_log/stream/2026-01-01T00:00:00.000000000","ShardId":"bogus","ShardIteratorType":"TRIM_HORIZON"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"`arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_zz@alt_bs_sa_zz_scylla_cdc_log/stream/2026-01-01T00:00:00.000000000` is not a valid StreamArn - table alt_bs_sa_zz_scylla_cdc_log not found"}
+> GetShardIterator {"StreamArn":"bogus","ShardId":"bogus","ShardIteratorType":"BOGUS"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIteratorType : \"BOGUS\""}
+# GetRecords on a fresh stream: no records yet, NextShardIterator stays at the start
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"TRIM_HORIZON"}
+< 200 {"ShardIterator":"*"}
+> GetRecords {"ShardIterator":"$ShardIterator"}
+< 200 {"Records":[],"NextShardIterator":"*"}
+> GetRecords {"ShardIterator":"$ShardIterator","Limit":1000}
+< 200 {"Records":[],"NextShardIterator":"*"}
+# GetRecords errors
+> GetRecords {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter ShardIterator not found"}
+> GetRecords {"ShardIterator":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : 5"}
+> GetRecords {"ShardIterator":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : null"}
+> GetRecords {"ShardIterator":"bogus"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : \"bogus\""}
+> GetRecords {"ShardIterator":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : \"\""}
+> GetRecords {"ShardIterator":"$ShardIterator","Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be 1 or more"}
+> GetRecords {"ShardIterator":"$ShardIterator","Limit":-1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value Limit : -1"}
+> GetRecords {"ShardIterator":"$ShardIterator","Limit":1001}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be less than or equal to 1000"}
+> GetRecords {"ShardIterator":"$ShardIterator","Limit":"5"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value Limit : \"5\""}
+> GetRecords {"ShardIterator":"bogus","Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : \"bogus\""}
+# Hand-made iterators: format I<uuid>:<timeuuid>:<shard id>; unknown table uuid; bad parts
+> GetRecords {"ShardIterator":"I00000000-0000-1000-8000-000000000000:00000000-0000-0000-0000-000000000000:H 1:00000000000000000000000000000001"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"00000000-0000-1000-8000-000000000000"}
+> GetRecords {"ShardIterator":"X00000000-0000-1000-8000-000000000000:00000000-0000-0000-0000-000000000000:H 1:00000000000000000000000000000001"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : \"X00000000-0000-1000-8000-000000000000:00000000-0000-0000-0000-000000000000:H 1:00000000000000000000000000000001\""}
+> GetRecords {"ShardIterator":"I00000000-0000-1000-8000-000000000000:zz:H 1:00000000000000000000000000000001"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : \"I00000000-0000-1000-8000-000000000000:zz:H 1:00000000000000000000000000000001\""}
+> GetRecords {"ShardIterator":"I00000000-0000-1000-8000-000000000000:00000000-0000-0000-0000-000000000000:bogus"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : \"I00000000-0000-1000-8000-000000000000:00000000-0000-0000-0000-000000000000:bogus\""}
+> GetRecords {"ShardIterator":"I00000000-0000-1000-8000-000000000000:00000000-0000-0000-0000-000000000000"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : \"I00000000-0000-1000-8000-000000000000:00000000-0000-0000-0000-000000000000\""}
+# Streams of the disabled table: DescribeStream shows the old stream
+> ListStreams {"TableName":"alt_bs_sa_off"}
+< 200 {"Streams":[{"StreamArn":"*","StreamLabel":"*","TableName":"alt_bs_sa_off"}]}
+> DescribeStream {"StreamArn":"$StreamArn"}
+< 200 {"StreamDescription":{"StreamStatus":"DISABLED","StreamArn":"*","StreamViewType":"NEW_IMAGE","TableName":"alt_bs_sa_off","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"Shards":[{"ShardId":"*","SequenceNumberRange":{"StartingSequenceNumber":"*","EndingSequenceNumber":"*"}}]}}
+# Cleanup
+> DeleteTable {"TableName":"alt_bs_sa"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa:scylla:table/alt_bs_sa","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+> DescribeStream {"StreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_off@alt_bs_sa_off_scylla_cdc_log/stream/x"}
+< 200 {"StreamDescription":{"StreamStatus":"DISABLED","StreamArn":"*","StreamViewType":"NEW_IMAGE","TableName":"alt_bs_sa_off","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"Shards":[{"ShardId":"*","SequenceNumberRange":{"StartingSequenceNumber":"*","EndingSequenceNumber":"*"}}]}}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"TRIM_HORIZON"}
+< 200 {"ShardIterator":"*"}
+> GetRecords {"ShardIterator":"$ShardIterator"}
+< 200 {"Records":[]}
+> GetShardIterator {"StreamArn":"$StreamArn","ShardId":"$ShardId","ShardIteratorType":"LATEST"}
+< 200 {"ShardIterator":"*"}
+> GetRecords {"ShardIterator":"$ShardIterator"}
+< 200 {"Records":[]}
+> DeleteTable {"TableName":"alt_bs_sa_off"}
+< 200 {"TableDescription":{"TableName":"alt_bs_sa_off","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_bs_sa_off:scylla:table/alt_bs_sa_off","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"NEW_IMAGE"}}}
+# After DeleteTable the stream is gone
+> DescribeStream {"StreamArn":"arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_off@alt_bs_sa_off_scylla_cdc_log/stream/x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"`arn:aws:dynamodb:us-east-1:000000000000:table/alternator_alt_bs_sa_off@alt_bs_sa_off_scylla_cdc_log/stream/x` is not a valid StreamArn - table alt_bs_sa_off_scylla_cdc_log not found"}
+> ListStreams {"TableName":"alt_bs_sa_off"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_bs_sa_off not found"}

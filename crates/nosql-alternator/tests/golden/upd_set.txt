@@ -1,0 +1,406 @@
+# Tables: hash-only S key, and hash S + range N key
+> CreateTable {"TableName":"alt_upd_set","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_set","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_upd_set_sn","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_set_sn","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# SET a top-level attribute on a missing item creates it (upsert)
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"k1"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"N":"4"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"k1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k1"},"b":{"N":"4"}}}
+# Several SET actions in one clause, same value reference used twice
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"k2"}},"UpdateExpression":"SET x = :v, y = :v","ExpressionAttributeValues":{":v":{"N":"4"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"k2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k2"},"x":{"N":"4"},"y":{"N":"4"}}}
+# SET merges into an existing item (does not replace it)
+> PutItem {"TableName":"alt_upd_set","Item":{"p":{"S":"k3"},"a":{"S":"hi"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"k3"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"hello"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"k3"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":"hey"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"k3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k3"},"a":{"S":"hey"},"b":{"S":"hello"}}}
+# SET b = a copies an attribute; copying a missing attribute fails
+> PutItem {"TableName":"alt_upd_set","Item":{"p":{"S":"c1"},"a":{"S":"hello"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"UpdateExpression":"SET b = a"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c1"},"a":{"S":"hello"},"b":{"S":"hello"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"UpdateExpression":"SET c = z"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An item can contain only one attribute definition: null"}
+# copy from a missing attribute on a missing item
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c-missing"}},"UpdateExpression":"SET c = z"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An item can contain only one attribute definition: null"}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c-missing"}},"ConsistentRead":true}
+< 200 {}
+# the RHS is read from the old item: SET x = :v, y = x fails when x did not exist
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"UpdateExpression":"SET x = :v, y = x","ExpressionAttributeValues":{":v":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An item can contain only one attribute definition: null"}
+# SET a = a is a no-op; SET z = z fails
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"UpdateExpression":"SET a = a"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"UpdateExpression":"SET z = z"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An item can contain only one attribute definition: null"}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c1"},"a":{"S":"hello"},"b":{"S":"hello"}}}
+# name references on both sides; an extra unused name is an error
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"UpdateExpression":"SET #one = #two","ExpressionAttributeNames":{"#one":"c","#two":"a"}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c1"},"a":{"S":"hello"},"b":{"S":"hello"},"c":{"S":"hello"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c1"}},"UpdateExpression":"SET #one = #two","ExpressionAttributeNames":{"#one":"c","#two":"a","#three":"z"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#three', not used in UpdateItem"}
+# copy of whole map / list values, and of a nested path on the RHS
+> PutItem {"TableName":"alt_upd_set","Item":{"p":{"S":"c2"},"a":{"M":{"b":{"N":"3"},"c":{"M":{"x":{"N":"7"},"y":{"N":"8"}}}}},"l":{"L":[{"N":"1"},{"L":[{"N":"2"},{"N":"3"}]},{"M":{"m":{"S":"n"}}}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c2"}},"UpdateExpression":"SET z = a.c.x, y = a.c, w = l[1], v = l[2].m, u = l"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c2"},"a":{"M":{"b":{"N":"3"},"c":{"M":{"x":{"N":"7"},"y":{"N":"8"}}}}},"l":{"L":[{"N":"1"},{"L":[{"N":"2"},{"N":"3"}]},{"M":{"m":{"S":"n"}}}]},"u":{"L":[{"N":"1"},{"L":[{"N":"2"},{"N":"3"}]},{"M":{"m":{"S":"n"}}}]},"v":{"S":"n"},"w":{"L":[{"N":"2"},{"N":"3"}]},"y":{"M":{"x":{"N":"7"},"y":{"N":"8"}}},"z":{"N":"7"}}}
+# RHS list index past the end / nested path through a non-container
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c2"}},"UpdateExpression":"SET z = l[7]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An item can contain only one attribute definition: null"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c2"}},"UpdateExpression":"SET z = a.b.c"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An item can contain only one attribute definition: null"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c2"}},"UpdateExpression":"SET z = a[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An item can contain only one attribute definition: null"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"c2"}},"UpdateExpression":"SET z = a.q"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An item can contain only one attribute definition: null"}
+# reading key attributes on the RHS (also arithmetic on a numeric range key)
+> UpdateItem {"TableName":"alt_upd_set_sn","Key":{"p":{"S":"kk"},"c":{"N":"7"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set_sn","Key":{"p":{"S":"kk"},"c":{"N":"7"}},"UpdateExpression":"SET #n = #p","ExpressionAttributeNames":{"#n":"n","#p":"p"}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set_sn","Key":{"p":{"S":"kk"},"c":{"N":"7"}},"UpdateExpression":"SET #nn = #c + #c","ExpressionAttributeNames":{"#nn":"nn","#c":"c"}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set_sn","Key":{"p":{"S":"kk"},"c":{"N":"7"}},"UpdateExpression":"SET q = c - :one","ExpressionAttributeValues":{":one":{"N":"1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set_sn","Key":{"p":{"S":"kk"},"c":{"N":"7"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"kk"},"c":{"N":"7"},"n":{"S":"kk"},"nn":{"N":"14"},"q":{"N":"6"}}}
+# arithmetic: :a + :b and :a - :b
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"4"},":b":{"N":"3"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"b":{"N":"7"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a - :b","ExpressionAttributeValues":{":a":{"N":"5"},":b":{"N":"2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"b":{"N":"3"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a - :b","ExpressionAttributeValues":{":a":{"N":"2"},":b":{"N":"5"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"b":{"N":"-3"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"1.5"},":b":{"N":"2.25"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"b":{"N":"3.75"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"0.1"},":b":{"N":"-0.1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"b":{"N":"0"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"1.50"},":b":{"N":"0"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"b":{"N":"1.5"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"1e3"},":b":{"N":"1E-2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"b":{"N":"1000.01"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a+:b","ExpressionAttributeValues":{":a":{"N":"-7"},":b":{"N":"+3"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"b":{"N":"-4"}}}
+# chains of three operands (a + b - c) and parentheses
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b + :c","ExpressionAttributeValues":{":a":{"N":"4"},":b":{"N":"3"},":c":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET b = :a + :b + :c': syntax error at char 16"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b - :c","ExpressionAttributeValues":{":a":{"N":"4"},":b":{"N":"3"},":c":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET b = :a + :b - :c': syntax error at char 16"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a - :b - :c","ExpressionAttributeValues":{":a":{"N":"4"},":b":{"N":"3"},":c":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET b = :a - :b - :c': syntax error at char 16"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = (:a + :b)","ExpressionAttributeValues":{":a":{"N":"4"},":b":{"N":"3"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET b = (:a + :b)': syntax error at char 8"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = (:a)","ExpressionAttributeValues":{":a":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET b = (:a)': syntax error at char 8"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a * :b","ExpressionAttributeValues":{":a":{"N":"4"},":b":{"N":"3"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET b = :a * :b': syntax error"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = -:a","ExpressionAttributeValues":{":a":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET b = -:a': syntax error at char 8"}
+# operand type errors: S, L, SS, BOOL, NULL, M, B on either side
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"S":"dog"},":b":{"N":"3"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"S\"'"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"3"},":b":{"S":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"S\"'"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"L":[{"S":"a"}]},":b":{"L":[{"S":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"L\"'"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a - :b","ExpressionAttributeValues":{":a":{"NS":["1"]},":b":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"NS\"'"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"BOOL":true},":b":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"BOOL\"'"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"NULL":true},":b":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"NULL\"'"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"M":{"x":{"N":"1"}}},":b":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"M\"'"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n1"}},"UpdateExpression":"SET b = :a - :b","ExpressionAttributeValues":{":a":{"N":"1"},":b":{"B":"AQ=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"B\"'"}
+# read-modify-write arithmetic with paths
+> PutItem {"TableName":"alt_upd_set","Item":{"p":{"S":"n2"},"a":{"N":"2"},"s":{"S":"str"},"m":{"M":{"x":{"N":"10"}}},"l":{"L":[{"N":"5"},{"N":"6"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"3"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET a = :v + a","ExpressionAttributeValues":{":v":{"N":"4"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET b = :v + a","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET a = b + a"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET c = a - a"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET m.x = m.x - l[1]"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n2"},"a":{"N":"19"},"b":{"N":"10"},"c":{"N":"0"},"l":{"L":[{"N":"5"},{"N":"6"}]},"m":{"M":{"x":{"N":"4"}}},"s":{"S":"str"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET d = s + :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"S\"'"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET d = missing + :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: invalid number object"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET d = :v - missing","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: invalid number object"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n-missing"}},"UpdateExpression":"SET d = d + :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: invalid number object"}
+# if_not_exists(path, :zero) + :v implements a counter
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET a = if_not_exists(a, :z) + :v","ExpressionAttributeValues":{":z":{"N":"0"},":v":{"N":"3"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET e = if_not_exists(e, :z) + :v","ExpressionAttributeValues":{":z":{"N":"0"},":v":{"N":"5"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"UpdateExpression":"SET f = :v - if_not_exists(f, :z)","ExpressionAttributeValues":{":z":{"N":"0"},":v":{"N":"5"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n3"}},"UpdateExpression":"SET a = if_not_exists(a, :z) + :v","ExpressionAttributeValues":{":z":{"N":"0"},":v":{"N":"7"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n2"},"a":{"N":"22"},"b":{"N":"10"},"c":{"N":"0"},"e":{"N":"5"},"f":{"N":"5"},"l":{"L":[{"N":"5"},{"N":"6"}]},"m":{"M":{"x":{"N":"4"}}},"s":{"S":"str"}}}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n3"},"a":{"N":"7"}}}
+# number precision and magnitude in + and -
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"1"},":b":{"N":"10000000000000000000000"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n4"},"b":{"N":"10000000000000000000001"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :b - :a","ExpressionAttributeValues":{":a":{"N":"1"},":b":{"N":"10000000000000000000000"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n4"},"b":{"N":"9999999999999999999999"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"9e125"},":b":{"N":"9e125"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000. Attempting to store a number with magnitude larger than supported range."}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a - :b","ExpressionAttributeValues":{":a":{"N":"9e125"},":b":{"N":"-9e125"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000. Attempting to store a number with magnitude larger than supported range."}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"9e125"},":b":{"N":"9e124"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n4"},"b":{"N":"990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a - :b","ExpressionAttributeValues":{":a":{"N":"1e50"},":b":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 99999999999999999999999999999999999999999999999999. Attempting to store a number with more significant digits than supported."}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"1e50"},":b":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 100000000000000000000000000000000000000000000000001. Attempting to store a number with more significant digits than supported."}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"1.0"},":b":{"N":"1.0e100000000"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1.0e100000000. Attempting to store a number with magnitude larger than supported range."}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"1e-130"},":b":{"N":"1e-130"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n4"},"b":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a - :b","ExpressionAttributeValues":{":a":{"N":"1e-130"},":b":{"N":"1e-130"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n4"},"b":{"N":"0"}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"12345678901234567890123456789012345678"},":b":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"UpdateExpression":"SET b = :a + :b","ExpressionAttributeValues":{":a":{"N":"99999999999999999999999999999999999999"},":b":{"N":"1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"n4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n4"},"b":{"N":"100000000000000000000000000000000000000"}}}
+# list_append with value references; function names are case-sensitive
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append(:a, :b)","ExpressionAttributeValues":{":a":{"L":[{"N":"4"},{"S":"hello"}]},":b":{"L":[{"S":"hi"},{"N":"7"}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l1"},"a":{"L":[{"N":"4"},{"S":"hello"},{"S":"hi"},{"N":"7"}]}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = LIST_APPEND(:a, :b)","ExpressionAttributeValues":{":a":{"L":[{"N":"4"}]},":b":{"L":[{"N":"5"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: unknown function 'LIST_APPEND' called."}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = List_Append(:a, :b)","ExpressionAttributeValues":{":a":{"L":[{"N":"4"}]},":b":{"L":[{"N":"5"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: unknown function 'List_Append' called."}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append( :a ,:b )","ExpressionAttributeValues":{":a":{"L":[{"S":"a"}]},":b":{"L":[{"S":"b"}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l1"},"a":{"L":[{"S":"a"},{"S":"b"}]}}}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append (:a, :b)","ExpressionAttributeValues":{":a":{"L":[{"S":"a"}]},":b":{"L":[{"S":"c"}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l1"},"a":{"L":[{"S":"a"},{"S":"c"}]}}}
+# list_append arity errors
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append(:a)","ExpressionAttributeValues":{":a":{"L":[{"S":"a"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() accepts 2 parameters, got 1"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append(:a, :b, :c)","ExpressionAttributeValues":{":a":{"L":[{"N":"4"}]},":b":{"L":[{"N":"7"}]},":c":{"L":[{"S":"a"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() accepts 2 parameters, got 3"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append()"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = list_append()': syntax error at char 20"}
+# list_append with non-list values
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append(:a, :b)","ExpressionAttributeValues":{":a":{"L":[{"N":"4"}]},":b":{"S":"hi"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append(:a, :b)","ExpressionAttributeValues":{":a":{"N":"5"},":b":{"L":[{"N":"4"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append(:a, :b)","ExpressionAttributeValues":{":a":{"SS":["x"]},":b":{"L":[{"N":"4"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append(:a, :b)","ExpressionAttributeValues":{":a":{"M":{"x":{"N":"1"}}},":b":{"L":[{"N":"4"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+# list_append with paths (RMW), including empty and nested lists
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"L":[{"S":"hi"},{"N":"2"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append(a, :v)","ExpressionAttributeValues":{":v":{"L":[{"N":"4"},{"S":"hello"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a = list_append(:v, a)","ExpressionAttributeValues":{":v":{"L":[{"S":"dog"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET b = list_append(a, :v)","ExpressionAttributeValues":{":v":{"L":[{"S":"cat"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET c = list_append(a, b)"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET #x = list_append(#y,:v)","ExpressionAttributeNames":{"#x":"a","#y":"a"},"ExpressionAttributeValues":{":v":{"L":[{"N":"8"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET e = list_append(:v, :w)","ExpressionAttributeValues":{":v":{"L":[]},":w":{"L":[]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET f = list_append(:v, :w)","ExpressionAttributeValues":{":v":{"L":[{"S":"x"},{"L":[{"S":"hi"},{"S":"hello"}]}]},":w":{"L":[{"M":{"m":{"N":"1"}}}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l1"},"a":{"L":[{"S":"dog"},{"S":"hi"},{"N":"2"},{"N":"4"},{"S":"hello"},{"N":"8"}]},"b":{"L":[{"S":"dog"},{"S":"hi"},{"N":"2"},{"N":"4"},{"S":"hello"},{"S":"cat"}]},"c":{"L":[{"S":"dog"},{"S":"hi"},{"N":"2"},{"N":"4"},{"S":"hello"},{"S":"dog"},{"S":"hi"},{"N":"2"},{"N":"4"},{"S":"hello"},{"S":"cat"}]},"e":{"L":[]},"f":{"L":[{"S":"x"},{"L":[{"S":"hi"},{"S":"hello"}]},{"M":{"m":{"N":"1"}}}]}}}
+# list_append where a path argument is missing or not a list
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l-missing"}},"UpdateExpression":"SET a = list_append(b, :v)","ExpressionAttributeValues":{":v":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l-missing"}},"UpdateExpression":"SET a = list_append(:v, b)","ExpressionAttributeValues":{":v":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> PutItem {"TableName":"alt_upd_set","Item":{"p":{"S":"l2"},"a":{"N":"2"},"n":{"N":"7"},"s":{"S":"hello"},"bb":{"B":"aGk="},"ns":{"NS":["1","2"]},"m":{"M":{"a":{"N":"3"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a = list_append(zz, :v)","ExpressionAttributeValues":{":v":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a = list_append(n, :v)","ExpressionAttributeValues":{":v":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a = list_append(s, :v)","ExpressionAttributeValues":{":v":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a = list_append(bb, :v)","ExpressionAttributeValues":{":v":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a = list_append(ns, :v)","ExpressionAttributeValues":{":v":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a = list_append(m, :v)","ExpressionAttributeValues":{":v":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a = list_append(:v, s)","ExpressionAttributeValues":{":v":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+# nesting list_append and if_not_exists
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l3"}},"UpdateExpression":"SET a = list_append(if_not_exists(a, :e), :v)","ExpressionAttributeValues":{":e":{"L":[{"S":"a"},{"S":"b"}]},":v":{"L":[{"S":"cat"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l3"}},"UpdateExpression":"SET a = list_append(if_not_exists(a, :e), :v)","ExpressionAttributeValues":{":e":{"L":[{"S":"a"},{"S":"b"}]},":v":{"L":[{"S":"dog"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l3"}},"UpdateExpression":"SET b = list_append(:v, if_not_exists(zz, :e))","ExpressionAttributeValues":{":e":{"L":[{"S":"x"}]},":v":{"L":[{"S":"y"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l3"}},"UpdateExpression":"SET c = list_append(list_append(:a, :b), :c)","ExpressionAttributeValues":{":a":{"L":[{"S":"a"}]},":b":{"L":[{"S":"1"}]},":c":{"L":[{"S":"hi"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l3"}},"UpdateExpression":"SET c = list_append(list_append(list_append(:a, :b), :c), :d)","ExpressionAttributeValues":{":a":{"L":[{"S":"a"}]},":b":{"L":[{"S":"1"}]},":c":{"L":[{"S":"hi"}]},":d":{"L":[{"S":"yo"}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"l3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l3"},"a":{"L":[{"S":"a"},{"S":"b"},{"S":"cat"},{"S":"dog"}]},"b":{"L":[{"S":"y"},{"S":"x"}]},"c":{"L":[{"S":"a"},{"S":"1"},{"S":"hi"},{"S":"yo"}]}}}
+# if_not_exists basics: attribute missing, then present; checking one attribute to set another
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = if_not_exists(a, :v)","ExpressionAttributeValues":{":v":{"N":"2"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = if_not_exists(a, :v)","ExpressionAttributeValues":{":v":{"N":"3"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET b = if_not_exists(c, :v)","ExpressionAttributeValues":{":v":{"N":"4"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET b = if_not_exists(a, :v)","ExpressionAttributeValues":{":v":{"N":"6"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"i1"},"a":{"N":"2"},"b":{"N":"2"}}}
+# if_not_exists on nested paths and list elements, and with a path as the default
+> PutItem {"TableName":"alt_upd_set","Item":{"p":{"S":"i2"},"m":{"M":{"x":{"N":"1"}}},"l":{"L":[{"N":"10"},{"N":"20"}]},"d":{"S":"dflt"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i2"}},"UpdateExpression":"SET r1 = if_not_exists(m.x, :v), r2 = if_not_exists(m.y, :v), r3 = if_not_exists(l[1], :v), r4 = if_not_exists(l[5], :v), r5 = if_not_exists(zz.y, :v), r6 = if_not_exists(zz, d)","ExpressionAttributeValues":{":v":{"N":"99"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i2"}},"UpdateExpression":"SET m.x = if_not_exists(m.x, :v), m.z = if_not_exists(m.z, :v)","ExpressionAttributeValues":{":v":{"N":"5"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i2"}},"UpdateExpression":"SET r7 = if_not_exists(m.x.y, :v)","ExpressionAttributeValues":{":v":{"N":"99"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"i2"},"d":{"S":"dflt"},"l":{"L":[{"N":"10"},{"N":"20"}]},"m":{"M":{"x":{"N":"1"},"z":{"N":"5"}}},"r1":{"N":"1"},"r2":{"N":"99"},"r3":{"N":"20"},"r4":{"N":"99"},"r5":{"N":"99"},"r6":{"S":"dflt"},"r7":{"N":"99"}}}
+# nested if_not_exists inside if_not_exists (second argument)
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET x = if_not_exists(zz, if_not_exists(yy, :v))","ExpressionAttributeValues":{":v":{"N":"3"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET y = if_not_exists(zz, if_not_exists(a, :v))","ExpressionAttributeValues":{":v":{"N":"4"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"i1"},"a":{"N":"2"},"b":{"N":"2"},"x":{"N":"3"},"y":{"N":"2"}}}
+# if_not_exists first argument must be a path
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET b = if_not_exists(if_not_exists(a, :w), :v)","ExpressionAttributeValues":{":v":{"N":"6"},":w":{"N":"3"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: if_not_exists() must include path as its first argument"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET b = if_not_exists(:w, :v)","ExpressionAttributeValues":{":v":{"N":"6"},":w":{"N":"3"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: if_not_exists() must include path as its first argument"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET b = if_not_exists(:w, :v)","ExpressionAttributeValues":{":v":{"N":"6"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':w' required by expression"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET b = if_not_exists(non@sense, :v)","ExpressionAttributeValues":{":v":{"N":"6"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET b = if_not_exists(non@sense, :v)': syntax error"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET b = if_not_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: if_not_exists() accepts 2 parameters, got 1"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET b = if_not_exists(a, :v, :v)","ExpressionAttributeValues":{":v":{"N":"6"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: if_not_exists() accepts 2 parameters, got 3"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET b = IF_NOT_EXISTS(a, :v)","ExpressionAttributeValues":{":v":{"N":"6"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: unknown function 'IF_NOT_EXISTS' called."}
+# + outside a function call works, inside an argument it is a syntax error
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET c = if_not_exists(c, :a)+:b","ExpressionAttributeValues":{":a":{"N":"2"},":b":{"N":"3"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET c = if_not_exists(c, :a+:b)","ExpressionAttributeValues":{":a":{"N":"5"},":b":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET c = if_not_exists(c, :a+:b)': syntax error at char 27"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET d = list_append(:a, :b) + :c","ExpressionAttributeValues":{":a":{"L":[{"N":"1"}]},":b":{"L":[{"N":"2"}]},":c":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"L\"'"}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"i1"},"a":{"N":"2"},"b":{"N":"2"},"c":{"N":"5"},"x":{"N":"3"},"y":{"N":"2"}}}
+# unknown functions; functions that are only valid in conditions
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = f(b,c,d)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: unknown function 'f' called."}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = f123_hi(b,c,d)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: unknown function 'f123_hi' called."}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = _f(b,c,d)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = _f(b,c,d)': syntax error"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = size(b)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: size() not allowed here"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = attribute_exists(b)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: attribute_exists() not allowed here"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = attribute_not_exists(b)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: attribute_not_exists() not allowed here"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = attribute_type(b, :v)","ExpressionAttributeValues":{":v":{"S":"S"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: attribute_type() not allowed here"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = contains(b, :v)","ExpressionAttributeValues":{":v":{"S":"S"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: contains() not allowed here"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = begins_with(b, :v)","ExpressionAttributeValues":{":v":{"S":"S"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: begins_with() not allowed here"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = size(b) + :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: size() not allowed here"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"i1"}},"UpdateExpression":"SET a = f()"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = f()': syntax error at char 10"}
+# empty sets are rejected; empty list, map, string and binary are allowed
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"e1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"SS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: empty set not allowed"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"e1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"NS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: empty set not allowed"}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"e1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"BS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: empty set not allowed"}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"e1"}},"ConsistentRead":true}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"e1"}},"UpdateExpression":"SET d = :a, e = :b, f = :c, g = :d","ExpressionAttributeValues":{":a":{"L":[]},":b":{"M":{}},":c":{"S":""},":d":{"B":""}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"e1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"e1"},"d":{"L":[]},"e":{"M":{}},"f":{"S":""},"g":{"B":""}}}
+# every attribute type round-trips through SET
+> UpdateItem {"TableName":"alt_upd_set","Key":{"p":{"S":"t1"}},"UpdateExpression":"SET s = :s, n = :n, b = :b, t = :t, nl = :nl, l = :l, m = :m, ss = :ss, ns = :ns, bs = :bs","ExpressionAttributeValues":{":s":{"S":"x"},":n":{"N":"-1.50"},":b":{"B":"AP8="},":t":{"BOOL":false},":nl":{"NULL":true},":l":{"L":[{"N":"1"},{"S":"a"},{"L":[{"NULL":true}]}]},":m":{"M":{"k":{"M":{"j":{"BOOL":true}}}}},":ss":{"SS":["b","a"]},":ns":{"NS":["3","1.0","2"]},":bs":{"BS":["eg==","YQ=="]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_set","Key":{"p":{"S":"t1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"t1"},"b":{"B":"AP8="},"bs":{"BS":["eg==","YQ=="]},"l":{"L":[{"N":"1"},{"S":"a"},{"L":[{"NULL":true}]}]},"m":{"M":{"k":{"M":{"j":{"BOOL":true}}}}},"n":{"N":"-1.5"},"nl":{"NULL":true},"ns":{"NS":["3","1.0","2"]},"s":{"S":"x"},"ss":{"SS":["b","a"]},"t":{"BOOL":false}}}
+> DeleteTable {"TableName":"alt_upd_set"}
+< 200 {"TableDescription":{"TableName":"alt_upd_set","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_set:scylla:table/alt_upd_set","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_upd_set_sn"}
+< 200 {"TableDescription":{"TableName":"alt_upd_set_sn","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_set_sn:scylla:table/alt_upd_set_sn","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

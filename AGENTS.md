@@ -103,6 +103,15 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - compaction: `tests/compaction.rs`
   - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the broker tests against S3.
   - `roll stream …` in `crates/roll-cli` and `/dashboard/streams` both use the HTTP API.
+- **NoSQL (ScyllaDB / Cassandra compatible):**
+  - The design is in `docs/nosql/`. Start with `contracts.md`.
+  - The target is 1:1 client-visible behaviour with `scylladb/scylla:2026.3.3` and `cassandra:5.0.9`. Each database has a dialect (`scylla` or `cassandra`); where the two products differ, gate on `Dialect`, never on a guess.
+  - `nosql-proto`, `nosql-cql` and `nosql-storage` don't depend on each other. `nosql-engine` joins them, and `nosql-server` / `nosql-control` sit on top.
+  - You may read Apache Cassandra's source (Apache-2.0) and port it, naming the Cassandra class in the module doc. Never read ScyllaDB's source; learn its behaviour from its docs and the image.
+  - ScyllaDB's `test/cqlpy` and `test/alternator` suites are downloaded at test time by `scripts/nosql-conformance.sh`. Never commit their content; only test ids go in the baselines.
+  - After touching anything nosql-related, run `pnpm test:nosql`. A conformance test that passes on the reference must pass on roll, and the baseline may only shrink.
+  - Put new tests in the matching file: differential scripts in `crates/nosql-server/tests/compat/*.cql`, drivers in `tests/drivers.rs`, persistence in `tests/storage.rs`, `branches.rs` and `restore.rs`.
+  - SSTable backup imports: format parsers are unit-tested in `crates/nosql-sstable-import`, imports end to end in `crates/nosql-control/tests/import_sstables.rs`. Its fixtures are made by `tests/fixtures/generate.sh` on the references (`imp_` keyspaces; `cleanup.sh` drops them and their snapshots).
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.
   - Test Postgres with `docker run --rm postgres:18-alpine psql "postgres://...@host.docker.internal:55432/main?options=endpoint%3D<ep>"`, because there is no local psql.
