@@ -34,8 +34,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50820 (**99.35%**) |
-| units differing | 330 |
+| units matching | 50825 (**99.36%**) |
+| units differing | 325 |
 | files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
@@ -44,16 +44,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 318 | 96.4% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.3% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 313 | 96.3% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.4% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 318 units
-join (87), partition_join (35), partition_prune (38), subselect (18), collate.icu.utf8 (8), incremental_sort (15), select_parallel (13), updatable_views (6), groupingsets (10), with (8), memoize (8), equivclass (8), aggregates (7), rowtypes (6), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (2), merge (2), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 313 units
+join (87), partition_join (35), partition_prune (38), subselect (18), collate.icu.utf8 (8), incremental_sort (15), select_parallel (13), updatable_views (5), groupingsets (9), with (5), memoize (8), equivclass (8), aggregates (7), rowtypes (6), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (2), merge (2), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -288,6 +288,31 @@ Still open in these files, and why:
   partitioned target: its dummy Result's names and Inner Unique); returning 103 / 105
   (rule-rewritten statements run as a CTE of the rule's actions).
 
+## Fixed in round 13, agent 2, sixth batch (DML sublinks, small target lists)
+
+Same 29-file subset (plus the files with UPDATE / DELETE: update, delete, returning, merge,
+triggers, rules, plpgsql, transactions, portals, arrays, matview, generated_stored, identity,
+insert_conflict, alter_table, foreign_key, unchanged), against the engine of commit c4e2775:
+5 units fixed, none broken.
+
+| file | fixed units |
+|---|---|
+| updatable_views | 731 |
+| with | 55, 58, 79 |
+| groupingsets | 213 |
+
+What changed:
+
+- An UPDATE's or DELETE's WHERE clause (an updatable view's conditions too) over a plain table
+  target turns its EXISTS / IN sublinks into semi / anti joins with the target
+  (pull_up_sublinks), as a SELECT's does.
+- A CTE or WorkTable Scan sorted for a merge join returns the columns used above the join, then
+  the merge keys' (CP_SMALL_TLIST in reltarget order).
+- A ProjectSet's input needs only what its consumers read of its target list (plus the calls'
+  arguments); a Values Scan under it returns exactly those (CP_EXACT_TLIST).
+
+Goldens extended: `tests/sql/a2_dml_views.sql`, `a2_cte_paths.sql`, `a2_grouping_misc.sql`.
+
 ## Fixed in round 13, agent 2, fifth batch (collated sort keys, WITH CHECK OPTION SubPlans)
 
 Same 29-file subset, against the engine of commit 6cc6e0e: 3 units fixed, none broken.
@@ -460,14 +485,14 @@ Still open in these files (after both batches), and why:
   (plan choices); 630, 647: an equivalence class of three members under a nondeterministic
   collation (Postgres derives the restriction `c = b` and one join clause); 328, 334 (hashed
   grouping of a subquery and a semi join over DISTINCT under collations: cost choices).
-- updatable_views 731 (EXISTS in an UPDATE's view qual as a join),
   817, 819, 914 (conditional rules: Postgres plans each rule action as a statement of its own,
   here a CTE), 173, 174 (an equivalence class's constant reaching the other side of a join
   through a Subquery Scan's output), 848 (a security-barrier view over an inheritance tree with
   a sub-select output: its EXISTS not pulled up, a leakproof qual not pushed down).
-- groupingsets 55, 57, 189–201, 213, 215: SubPlans in grouping expressions (numbering and
-  where they are computed), a pulled-up VALUES row's constants shown as references (199),
-  VERBOSE target lists of a ProjectSet / Values Scan under grouping sets.
+- groupingsets 55, 57, 189–201, 215: SubPlans in grouping expressions (numbering and where
+  they are computed), a pulled-up VALUES row's constants shown as references (199: constants
+  under an outer join's nullable side must stay references, PlaceHolderVars), grouping
+  expressions of grouping sets computed by the input (215).
 - with 55, 58, 79: VERBOSE target lists over recursive CTEs (the work table scan's columns in
   the order the query reads them; its width counts a column only its filter reads); 235, 238, 241, 283: row marks in VERBOSE target lists (another agent's
   item).
@@ -967,7 +992,7 @@ produces no units on Linux (skipped by the file itself).
 | typed_table | 36 | 36 | 100% | yes | yes |  |
 | vacuum | 328 | 328 | 100% | yes | yes |  |
 | drop_if_exists | 161 | 161 | 100% | yes | yes |  |
-| updatable_views | 1109 | 1102 | 99% | no | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
+| updatable_views | 1109 | 1103 | 99% | no | no | wrong EXPLAIN `EXPLAIN plan text differs` (5) |
 | roleattributes | 80 | 80 | 100% | yes | yes |  |
 | create_am | 142 | 142 | 100% | yes | yes |  |
 | hash_func | 43 | 43 | 100% | yes | yes |  |
@@ -1008,7 +1033,7 @@ produces no units on Linux (skipped by the file itself).
 | rowsecurity | 1226 | 1220 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
 | object_address | 85 | 85 | 100% | yes | yes |  |
 | tablesample | 58 | 58 | 100% | yes | yes |  |
-| groupingsets | 217 | 207 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (10) |
+| groupingsets | 217 | 208 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (9) |
 | drop_operator | 12 | 12 | 100% | yes | yes |  |
 | password | 53 | 53 | 100% | yes | yes |  |
 | identity | 288 | 288 | 100% | yes | yes |  |
@@ -1090,7 +1115,7 @@ produces no units on Linux (skipped by the file itself).
 | rowtypes | 237 | 231 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
 | returning | 145 | 143 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
-| with | 307 | 299 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
+| with | 307 | 302 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (5) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 579 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (35) |
 | partition_prune | 771 | 733 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (30) |

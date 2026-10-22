@@ -3544,7 +3544,21 @@ impl Builder<'_, '_> {
                 built
             }
             Plan::ProjectSet { input, exprs, srfs } => {
-                let c = self.node(input);
+                let mut c = self.node(input);
+                // A Values Scan under it returns exactly the columns it reads (CP_EXACT_TLIST).
+                if self.o.verbose
+                    && c.node.node_type == "Values Scan"
+                    && let Some(mask) = self.needed.get(&addr(input))
+                    && mask.iter().any(|m| !m)
+                {
+                    c.node.output = c
+                        .internal
+                        .iter()
+                        .zip(mask)
+                        .filter(|(_, m)| **m)
+                        .map(|(x, _)| self.pick(x, Cx::Output))
+                        .collect();
+                }
                 let mut n = ExNode::new("ProjectSet");
                 n.rows = c.node.rows * 10.0;
                 n.total_cost = c.node.total_cost + n.rows * 0.02;
@@ -9602,6 +9616,42 @@ impl Builder<'_, '_> {
             JoinMethod::Merge => {
                 if let Some(t) = and_text(keys_text) {
                     n.details.push(Detail::Text("Merge Cond", t));
+                }
+                // A CTE or WorkTable Scan sorted for the merge returns just the columns used
+                // above, then the merge keys' (CP_SMALL_TLIST, in reltarget order).
+                if self.o.verbose {
+                    let need = self.needed.get(&at).cloned();
+                    let lw = l.exported.len();
+                    for (side, off) in [(&mut l, 0usize), (&mut r, lw)] {
+                        if side.node.node_type != "Sort"
+                            || side.node.children.len() != 1
+                            || !matches!(side.node.children[0].node_type, "CTE Scan" | "WorkTable Scan")
+                        {
+                            continue;
+                        }
+                        let width = side.internal.len();
+                        let mut order: Vec<usize> = Vec::new();
+                        if let Some(need) = &need {
+                            for i in 0..width {
+                                if need.get(off + i).copied().unwrap_or(true) && !order.contains(&i) {
+                                    order.push(i);
+                                }
+                            }
+                        }
+                        for (a, b) in &keys {
+                            let k = if off == 0 { a } else { b };
+                            for c in k.columns() {
+                                if c < width && !order.contains(&c) {
+                                    order.push(c);
+                                }
+                            }
+                        }
+                        if order.len() < width {
+                            let out: Vec<String> = order.iter().map(|&i| self.pick(&side.internal[i], Cx::Output)).collect();
+                            side.node.output = out.clone();
+                            side.node.children[0].output = out;
+                        }
+                    }
                 }
             }
             JoinMethod::NestLoop => join_filter = keys_text,

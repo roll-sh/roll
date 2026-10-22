@@ -107,3 +107,7 @@ DROP TABLE a2_ec1, a2_ec2;
 DROP TYPE a2_int8alias CASCADE;
 DROP COLLATION a2_ci;
 DROP COLLATION a2_cs;
+
+-- (A Values Scan under a ProjectSet returns exactly the columns it reads.)
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT generate_series(1, a) AS g FROM (VALUES (1, 1), (2, 2)) AS t (a, b) GROUP BY ROLLUP (g) ORDER BY 1;

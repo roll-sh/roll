@@ -4254,7 +4254,12 @@ pub fn child_needs(p: &Plan, needed: &[bool]) -> Vec<Vec<bool>> {
         }
         Plan::ProjectSet { input, exprs, srfs } => {
             let mut n = vec![false; pw(input)];
-            exprs.iter().for_each(|e| mark(&mut n, e));
+            // (What the consumers read of its target list, and the calls' arguments.)
+            exprs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| needed.get(*i).copied().unwrap_or(true))
+                .for_each(|(_, e)| mark(&mut n, e));
             for s in srfs {
                 s.args.iter().for_each(|a| mark(&mut n, a));
             }

@@ -412,3 +412,19 @@ DETAIL: drop cascades to operator =(bigint,a2_int8alias)
 > DROP COLLATION a2_cs
 -- DROP COLLATION
 
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT generate_series(1, a) AS g FROM (VALUES (1, 1), (2, 2)) AS t (a, b) GROUP BY ROLLUP (g) ORDER BY 1
+QUERY PLAN:text
+Sort
+  Output: (generate_series(1, "*VALUES*".column1))
+  Sort Key: (generate_series(1, "*VALUES*".column1))
+  ->  MixedAggregate
+        Output: (generate_series(1, "*VALUES*".column1))
+        Hash Key: generate_series(1, "*VALUES*".column1)
+        Group Key: ()
+        ->  ProjectSet
+              Output: generate_series(1, "*VALUES*".column1)
+              ->  Values Scan on "*VALUES*"
+                    Output: "*VALUES*".column1
+-- EXPLAIN
+

@@ -133,3 +133,27 @@ INSERT INTO a2_dv_wv VALUES (5);
 INSERT INTO a2_dv_wv VALUES (15);
 EXPLAIN (COSTS OFF) INSERT INTO a2_dv_wv VALUES (5);
 DROP TABLE a2_dv_wb, a2_dv_wr CASCADE;
+
+-- (An UPDATE / DELETE's EXISTS / IN sublinks become semi / anti joins with the target.)
+CREATE TABLE a2_dv_bt (a int);
+CREATE TABLE a2_dv_rt (a int PRIMARY KEY);
+INSERT INTO a2_dv_rt SELECT * FROM generate_series(1,10);
+EXPLAIN (costs off) UPDATE a2_dv_bt b SET a = a + 5 WHERE EXISTS (SELECT 1 FROM a2_dv_rt r WHERE r.a = b.a);
+CREATE VIEW a2_dv_bv AS SELECT * FROM a2_dv_bt b WHERE EXISTS (SELECT 1 FROM a2_dv_rt r WHERE r.a = b.a);
+EXPLAIN (costs off) UPDATE a2_dv_bv SET a = a + 5;
+EXPLAIN (costs off) DELETE FROM a2_dv_bv;
+DROP TABLE a2_dv_bt, a2_dv_rt CASCADE;
+CREATE TABLE a2_dv_bt (a int, b text);
+CREATE TABLE a2_dv_rt (a int PRIMARY KEY);
+INSERT INTO a2_dv_rt SELECT * FROM generate_series(1,10);
+INSERT INTO a2_dv_bt SELECT g, 'x' || g FROM generate_series(1, 15) g;
+INSERT INTO a2_dv_bt VALUES (3, 'dup');
+UPDATE a2_dv_bt b SET b = b || '!' WHERE EXISTS (SELECT 1 FROM a2_dv_rt r WHERE r.a = b.a) AND a > 2 RETURNING *;
+DELETE FROM a2_dv_bt b WHERE NOT EXISTS (SELECT 1 FROM a2_dv_rt r WHERE r.a = b.a) RETURNING *;
+UPDATE a2_dv_bt b SET a = a + 100 WHERE a IN (SELECT a FROM a2_dv_rt WHERE a < 3) RETURNING a, b;
+SELECT * FROM a2_dv_bt ORDER BY a, b;
+BEGIN;
+DELETE FROM a2_dv_bt b WHERE EXISTS (SELECT 1 FROM a2_dv_rt r WHERE r.a = b.a);
+SELECT count(*) FROM a2_dv_bt;
+ROLLBACK;
+DROP TABLE a2_dv_bt, a2_dv_rt CASCADE;

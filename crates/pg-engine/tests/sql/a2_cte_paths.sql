@@ -60,3 +60,16 @@ search_graph(f, t, label) AS (
   SELECT g.* FROM graph g, search_graph sg WHERE g.f = sg.t
 ) CYCLE f, t SET is_cycle TO true DEFAULT false USING path
 SELECT f, t, label FROM search_graph;
+
+-- (A CTE or WorkTable Scan sorted for a merge join returns the columns used above, then
+-- the keys'.)
+CREATE TEMP TABLE a2_graph0 (f int, t int, label text);
+INSERT INTO a2_graph0 VALUES (1, 2, 'arc 1 -> 2'), (1, 3, 'arc 1 -> 3'), (2, 3, 'arc 2 -> 3'),
+  (1, 4, 'arc 1 -> 4'), (4, 5, 'arc 4 -> 5');
+EXPLAIN (VERBOSE, COSTS OFF)
+WITH RECURSIVE search_graph(f, t, label) AS (
+  SELECT * FROM a2_graph0 g
+  UNION ALL
+  SELECT g.* FROM a2_graph0 g, search_graph sg WHERE g.f = sg.t
+) SEARCH DEPTH FIRST BY f, t SET seq
+SELECT * FROM search_graph ORDER BY seq;

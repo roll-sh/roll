@@ -2263,7 +2263,7 @@ impl Binder<'_, '_> {
         // An updatable view's WHERE conditions limit the rows touched.
         let view_filter = updatable.and_then(|v| v.filter());
         if let Some(f) = &view_filter {
-            plan = super::optimize::add_filter(&self.cat, plan, f.clone());
+            plan = self.dml_where(plan, f.clone());
         }
         for item in from {
             // (FROM items can't reference the target.)
@@ -2327,9 +2327,28 @@ impl Binder<'_, '_> {
             if !own.is_empty() {
                 recheck = Some(Expr::And(own));
             }
-            plan = super::optimize::add_filter(&self.cat, plan, pred);
+            plan = self.dml_where(plan, pred);
         }
         Ok((plan, recheck))
+    }
+
+    /// An UPDATE / DELETE's WHERE clause over its target's scan: EXISTS / IN sublinks
+    /// become semi / anti joins with the target (pull_up_sublinks), the rest filters it.
+    fn dml_where(&mut self, plan: Plan, pred: Expr) -> Plan {
+        let plain_target = !self.deparse
+            && !self.unplanned
+            && match &plan {
+                Plan::Scan(s) => s.current_of.is_none() && s.table.partkey.is_none(),
+                _ => false,
+            };
+        if !plain_target {
+            return super::optimize::add_filter(&self.cat, plan, pred);
+        }
+        let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, plan, pred);
+        match rest {
+            Some(r) => super::optimize::add_filter(&self.cat, p, r),
+            None => p,
+        }
     }
 
     // ── MERGE ──
