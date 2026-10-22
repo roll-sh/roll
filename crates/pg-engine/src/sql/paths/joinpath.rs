@@ -2818,10 +2818,22 @@ fn const_equality(q: &Expr, col: usize) -> bool {
 impl Search<'_, '_, '_> {
     /// build_join_pathkeys: the outer path's order, as far as it is still useful (to the
     /// rest of the search or the query).
-    fn join_pathkeys(&self, jt: Jt, set: u32, outer_keys: &[GKey]) -> Vec<GKey> {
+    fn join_pathkeys(&self, jt: Jt, set: u32, outer_set: u32, outer_keys: &[GKey]) -> Vec<GKey> {
         if matches!(jt, Jt::Full | Jt::Right) {
             return Vec::new();
         }
+        // (An outer side sorted by an expression has the class of the column a clause
+        // equates it with; past an outer join's null-extended rows that is no order of
+        // the column's: only classes with members on the outer side go on.)
+        let outer_keys = if jt != Jt::Left {
+            outer_keys
+        } else {
+            let n = outer_keys
+                .iter()
+                .take_while(|k| (0..self.ec.len()).any(|g| self.ec[g] == k.ec && (1u32 << self.leaf_of[g]) & outer_set != 0))
+                .count();
+            &outer_keys[..n]
+        };
         // truncate_useless_pathkeys: as far as the ORDER BY or a later merge can use them.
         let q = self.query_keys();
         let ordering = outer_keys
@@ -2831,8 +2843,19 @@ impl Search<'_, '_, '_> {
             .count();
         let mut merging = 0;
         for k in outer_keys {
+            // (pathkeys_useful_for_merging: a class with members still to join, or a
+            // mergeable clause between the rel and the rest on that class, as an outer
+            // join's clause is.)
             let useful = (0..self.ec.len())
-                .any(|g| self.ec[g] == k.ec && (1u32 << self.leaf_of[g]) & set == 0);
+                .any(|g| self.ec[g] == k.ec && (1u32 << self.leaf_of[g]) & set == 0)
+                || self.clauses.iter().any(|c| {
+                    c.mergeable
+                        && c.leaves & set != 0
+                        && c.leaves & !set != 0
+                        && c.eq.as_ref().is_some_and(|(a, b, _, _)| {
+                            self.side_ec(a) == Some(k.ec) || self.side_ec(b) == Some(k.ec)
+                        })
+                });
             let right_desc = q.iter().find(|x| x.ec == k.ec).is_some_and(|x| x.desc);
             if !useful || k.desc != right_desc {
                 break;
@@ -2865,7 +2888,7 @@ impl Search<'_, '_, '_> {
             }
             let clauses = self.clauses_for_outer_keys(&okeys, merge);
             let ikeys = self.inner_keys_for(&clauses, &okeys);
-            let pk = self.join_pathkeys(ex.jt, ex.set, &okeys);
+            let pk = self.join_pathkeys(ex.jt, ex.set, op.set, &okeys);
             self.try_merge(ri, &op, &ip, pk, &clauses, Some(okeys), Some(ikeys), ex);
         }
     }
@@ -3045,7 +3068,7 @@ impl Search<'_, '_, '_> {
             }
         }
         for op in outer_paths.iter().filter(|p| p.req == 0) {
-            let pk = self.join_pathkeys(ex.jt, ex.set, &op.keys);
+            let pk = self.join_pathkeys(ex.jt, ex.set, op.set, &op.keys);
             if nest_ok {
                 for ip in &inner_params {
                     self.try_nestloop(ri, op, ip, pk.clone(), ex);
@@ -4713,7 +4736,7 @@ fn gather(
                 let eq = if ty.without_typmod() != b.ty().without_typmod() {
                     crate::sql::func::resolve_binop("=", &ty, &b.ty()).ok().map(|r| r.def)
                 } else {
-                    equality_for(&ty)
+                    equality_for(&ty).or_else(|| crate::sql::func::resolve_binop("=", &ty, &ty).ok().map(|r| r.def))
                 };
                 if let Some(eq) = eq {
                     let e = crate::sql::binder::eq_under(Expr::Call(eq, vec![a, b], DataType::Bool), coll);
@@ -4763,20 +4786,14 @@ fn equality_for(t: &DataType) -> Option<Arc<FuncDef>> {
 fn remember_equalities(p: &Plan, ctx: &ExecCtx) {
     // The hash keys' types: an `=` for each, as the binder would resolve it.
     let mut types = Vec::new();
+    // (Through every node: a filter or projection between two joins too, whose lower
+    // join's keys are rebuilt as clauses all the same.)
     fn walk_types(p: &Plan, out: &mut Vec<DataType>) {
-        if let Plan::Join {
-            hash: Some((lk, _)),
-            left,
-            right,
-            ..
-        } = p
-        {
+        if let Plan::Join { hash: Some((lk, _)), .. } = p {
             out.extend(lk.iter().map(|e| e.ty()));
-            walk_types(left, out);
-            walk_types(right, out);
-        } else if let Plan::Join { left, right, .. } = p {
-            walk_types(left, out);
-            walk_types(right, out);
+        }
+        for c in crate::sql::explain::plan_inputs(p) {
+            walk_types(c, out);
         }
     }
     walk_types(p, &mut types);
@@ -5767,7 +5784,7 @@ impl Planner<'_, '_> {
             // A pulled-up subquery's scan, planned for itself before: the join's paths are
             // chosen again (parameterized ones too), as for any base relation.
             if let Plan::Scan(sp) = &mut plan
-                && matches!(sp.access, Access::Seq | Access::Bitmap(_) | Access::Index { ordered: false, .. })
+                && matches!(sp.access, Access::Seq | Access::Bitmap(..) | Access::Index { ordered: false, .. })
                 && sp.sample.is_none()
                 && sp.current_of.is_none()
                 && sp.table.partkey.is_none()

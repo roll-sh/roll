@@ -52,7 +52,10 @@ fn rebuild_eq(a: Expr, b: Expr, bad: bool) -> Option<Expr> {
     let eq = if ty.without_typmod() != b.ty().without_typmod() {
         crate::sql::func::resolve_binop("=", &ty, &b.ty()).ok()?.def
     } else {
-        equality_for(&ty)?
+        match equality_for(&ty) {
+            Some(d) => d,
+            None => crate::sql::func::resolve_binop("=", &ty, &ty).ok()?.def,
+        }
     };
     let e = Expr::Call(eq, vec![a, b], DataType::Bool);
     Some(if bad {

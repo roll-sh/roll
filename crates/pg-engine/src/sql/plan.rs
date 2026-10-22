@@ -310,8 +310,9 @@ pub enum Access {
         /// A nested loop's parameterized inner side: the scans it is repeated for.
         loops: f64,
     },
-    /// Bitmap index scans combined, then the heap read in physical order.
-    Bitmap(Arc<BitmapQual>),
+    /// Bitmap index scans combined, then the heap read in physical order; the scans it
+    /// is repeated for (a nested loop's parameterized inner side: 1 otherwise).
+    Bitmap(Arc<BitmapQual>, f64),
     /// A TID scan: the rows at the TIDs `quals` give (alternatives, implicitly ORed:
     /// `ctid = x`, `ctid = ANY (array)`); `removed` are the restriction clauses they stand
     /// for exactly, not checked again. (Run as a scan in TID order checking the filter.)

@@ -1514,6 +1514,14 @@ impl BPath {
         }
     }
 
+    /// get_indexpath_pages: the pages of its indexes.
+    fn index_pages(&self, rel: &Rel) -> f64 {
+        match self {
+            BPath::Index(p) => rel.indexes[p.ix].pages,
+            BPath::And(l, ..) | BPath::Or(l, ..) => l.iter().map(|b| b.index_pages(rel)).sum(),
+        }
+    }
+
     /// cost_bitmap_tree_node: (cost, selectivity).
     fn cost_sel(&self) -> (f64, f64) {
         match self {
@@ -2367,6 +2375,12 @@ impl Planner<'_, '_> {
         let heap_pages = pages.min(rel.size.pages);
         // tbm_calculate_entries: 64 bytes per page entry.
         let maxentries = (self.g.work_mem * 1024.0 / 64.0).floor().max(16.0);
+        // Repeated scans (a nested loop's parameterized inner side): the pages all of them
+        // fetch, pro-rated (the bitmap still holds one scan's).
+        if rel.loop_count > 1.0 {
+            pages = self.pages_fetched(tuples * rel.loop_count, rel.size.pages, b.index_pages(rel), rel.size.pages)
+                / rel.loop_count;
+        }
         if pages >= t {
             pages = t;
         } else {
@@ -3551,7 +3565,7 @@ fn apply(rel: &Rel, s: &mut ScanPlan, p: &Path) {
         PathKind::Bitmap(b) => {
             s.index = None;
             s.reverse = false;
-            s.access = Access::Bitmap(Arc::new(to_bitmap(rel, b)));
+            s.access = Access::Bitmap(Arc::new(to_bitmap(rel, b)), rel.loop_count);
         }
         PathKind::Tid(quals, removed) => {
             s.index = None;
@@ -4097,7 +4111,9 @@ pub fn describe_with(ctx: &ExecCtx, s: &ScanPlan, par: Option<(usize, f64)>) -> 
                 tid_conds: quals.clone(),
             })
         }
-        Access::Bitmap(bq) => {
+        Access::Bitmap(bq, loops) => {
+            let mut rel = rel;
+            rel.loop_count = *loops;
             let b = p.bpath(&rel, bq)?;
             let (st, tot, _, tuples) = p.bitmap_heap(&rel, &b);
             let cpu = (CPU_TUPLE_COST + rel.qual_cost) * tuples;

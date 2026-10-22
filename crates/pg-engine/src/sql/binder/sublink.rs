@@ -447,6 +447,9 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
                     meta: meta.clone(),
                 })
             }
+            // A merge join input's sort (the subquery planned already): the pulled-up
+            // tree is planned again as one group, and an EXISTS needs no order.
+            Plan::Sort { input, .. } if pull => go(input, off, pull, out),
             // A FROM subquery's projection reading nothing of the outer query (on a side
             // the outer query's clauses can't come from).
             Plan::Project { input, exprs } if !pull && exprs.iter().all(clean) => {

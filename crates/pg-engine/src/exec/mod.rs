@@ -301,7 +301,7 @@ pub(crate) fn reads_enclosing(p: &crate::sql::plan::Plan, depth: usize) -> bool 
         if let crate::sql::plan::Access::Index { quals, .. } = &sc.access {
             es.extend(quals.iter().map(|q| &q.expr));
         }
-        if matches!(sc.access, crate::sql::plan::Access::Bitmap(_) | crate::sql::plan::Access::Tid { .. } | crate::sql::plan::Access::TidRange(_)) {
+        if matches!(sc.access, crate::sql::plan::Access::Bitmap(..) | crate::sql::plan::Access::Tid { .. } | crate::sql::plan::Access::TidRange(_)) {
             // (Conservatively: their conditions came from the filter or a join.)
             return true;
         }

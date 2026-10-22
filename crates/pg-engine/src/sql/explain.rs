@@ -7441,7 +7441,7 @@ impl Builder<'_, '_> {
                 n.target.push(("Index Name", ix_name, false));
                 n
             }
-            Access::Bitmap(_) => ExNode::new("Bitmap Heap Scan"),
+            Access::Bitmap(..) => ExNode::new("Bitmap Heap Scan"),
             Access::Tid { .. } => ExNode::new("Tid Scan"),
             Access::TidRange(_) => ExNode::new("Tid Range Scan"),
             _ => ExNode::new("Seq Scan"),
@@ -7573,7 +7573,7 @@ impl Builder<'_, '_> {
                     })
                     .collect();
             }
-            Access::Bitmap(_) => {
+            Access::Bitmap(..) => {
                 n.details.push(Detail::HeapBlocks(scan_addr(s)));
                 if let Some(b) = &d.bitmap {
                     let child = self.bitmap_node(b, names);

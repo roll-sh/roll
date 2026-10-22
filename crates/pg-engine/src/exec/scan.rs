@@ -337,7 +337,7 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
         ctx.searched(s as *const ScanPlan as usize, ranges.len());
     }
     // A bitmap heap scan: the rows the bitmap selects, in heap order.
-    if let (Access::Bitmap(q), None) = (&s.access, &s.current_of) {
+    if let (Access::Bitmap(q, _), None) = (&s.access, &s.current_of) {
         let keys = bitmap_rows(s, q, ctx)?;
         let mut plan = s.clone();
         plan.access = Access::Seq;

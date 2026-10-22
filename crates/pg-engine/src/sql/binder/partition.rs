@@ -552,9 +552,7 @@ pub fn with_known(
             eval(&Expr::Cast(Box::new(Expr::Const(v, a.clone())), a.clone(), b.clone(), false)).ok()
         };
         let x = raw(v)?;
-        if x.checked_sub(HOUR)?.checked_add(2 * HOUR).is_none() {
-            return None;
-        }
+        x.checked_sub(HOUR)?.checked_add(2 * HOUR)?;
         let out = cast(v.clone(), from, to)?;
         let y = raw(&out)?;
         for d in [-HOUR, 0, HOUR] {
