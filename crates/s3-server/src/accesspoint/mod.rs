@@ -185,26 +185,88 @@ pub(crate) fn resolve(ctx: &mut Ctx) -> Result<(), S3Error> {
             (ap, ctx.key.clone())
         }
     };
-    let region = ctx.server.cfg.region.clone();
-    let req = match found.kind {
-        AccessPointKind::Standard => {
-            let arn = ap_arn(&region, &account, &found.name);
-            let policy = load_policy(found.policy.as_deref())?;
-            ApRequest { ap: found, arn, policy, olap: None }
-        }
-        AccessPointKind::ObjectLambda => {
-            let supporting = store.access_point(&account, AccessPointKind::Standard, &found.bucket).s3()?.ok_or_else(|| no_such(&found.bucket))?;
-            let arn = ap_arn(&region, &account, &supporting.name);
-            let policy = load_policy(supporting.policy.as_deref())?;
-            let oarn = olap_arn(&region, &account, &found.name);
-            let opolicy = load_policy(found.policy.as_deref())?;
-            ApRequest { ap: supporting, arn, policy, olap: Some((found, oarn, opolicy)) }
-        }
-    };
+    let req = request_for(ctx, found)?;
     ctx.bucket = Some(req.ap.bucket.clone());
     ctx.key = key;
     ctx.access_point = Some(Arc::new(req));
     Ok(())
+}
+
+/// How a request through `found` is authorized: its ARN and policy (an Object Lambda access
+/// point's supporting access point's too).
+fn request_for(ctx: &Ctx, found: AccessPoint) -> Result<ApRequest, S3Error> {
+    let store = ctx.store();
+    let account = store.account_id();
+    let region = &ctx.server.cfg.region;
+    Ok(match found.kind {
+        AccessPointKind::Standard => {
+            let arn = ap_arn(region, &account, &found.name);
+            let policy = load_policy(found.policy.as_deref())?;
+            ApRequest { ap: found, arn, policy, olap: None }
+        }
+        AccessPointKind::ObjectLambda => {
+            let supporting = store
+                .access_point(&account, AccessPointKind::Standard, &found.bucket)
+                .s3()?
+                .ok_or_else(|| S3Error::msg(Code::NoSuchAccessPoint, format!("The specified accesspoint does not exist: {}", found.bucket)))?;
+            let arn = ap_arn(region, &account, &supporting.name);
+            let policy = load_policy(supporting.policy.as_deref())?;
+            let oarn = olap_arn(region, &account, &found.name);
+            let opolicy = load_policy(found.policy.as_deref())?;
+            ApRequest { ap: supporting, arn, policy, olap: Some((found, oarn, opolicy)) }
+        }
+    })
+}
+
+/// The source of CopyObject and UploadPartCopy (`x-amz-copy-source`), authorized for reading
+/// (`s3:GetObject`): `<bucket>/<key>`; an access point's object ARN,
+/// `arn:aws:s3:<region>:<account>:accesspoint/<name>/object/<key>` (URL-encoded or not); or an
+/// access point alias as the bucket. Through an access point it's authorized exactly as a
+/// GetObject through it is (its policy, network origin and the bucket's policy). Returns the
+/// bucket, key and version id.
+pub(crate) fn copy_source(ctx: &Ctx) -> Result<(String, String, Option<String>), S3Error> {
+    let header = ctx.h("x-amz-copy-source").unwrap_or_default();
+    let raw = header.trim();
+    let (path, query) = raw.split_once('?').unwrap_or((raw, ""));
+    let decoded = percent_decode_utf8(path)?;
+    let p = decoded.strip_prefix('/').unwrap_or(&decoded);
+    let bad = || S3Error::msg(Code::InvalidArgument, "Copy Source must mention the source bucket and key: sourcebucket/sourcekey").with("ArgumentName", "x-amz-copy-source");
+    let (found, key, vid) = if p.starts_with("arn:") {
+        let (arn, key) = p.split_once("/object/").ok_or_else(bad)?;
+        let (kind, account, name) = parse_arn(arn).ok_or_else(|| S3Error::msg(Code::InvalidArgument, "The access point ARN in x-amz-copy-source is not valid").with("ArgumentName", "x-amz-copy-source"))?;
+        if kind == AccessPointKind::ObjectLambda {
+            return Err(S3Error::msg(Code::InvalidArgument, "An Object Lambda access point can't be the source of a copy").with("ArgumentName", "x-amz-copy-source"));
+        }
+        if key.is_empty() {
+            return Err(bad());
+        }
+        let store = ctx.store();
+        if account != store.account_id() {
+            return Err(S3Error::msg(Code::AccessDenied, "The access point belongs to another account"));
+        }
+        let ap = store.access_point(&account, kind, &name).s3()?.ok_or_else(|| S3Error::msg(Code::NoSuchAccessPoint, format!("The specified accesspoint does not exist: {name}")))?;
+        // The version id is checked as for `bucket/key?versionId=…`.
+        let vid = if query.is_empty() { None } else { s3_proto::http::parse_copy_source_version(&format!("b/k?{query}"))?.2 };
+        (ap, key.to_string(), vid)
+    } else {
+        let (bucket, key, vid) = s3_proto::http::parse_copy_source_version(header)?;
+        if !s3_store::access_points::is_alias(&bucket) {
+            ctx.require_source(&bucket, &key)?;
+            return Ok((bucket, key, vid));
+        }
+        let ap = ctx.store().access_point_by_alias(&bucket).s3()?.ok_or_else(|| S3Error::new(Code::NoSuchBucket).with("BucketName", bucket.clone()))?;
+        if ap.kind == AccessPointKind::ObjectLambda {
+            return Err(S3Error::msg(Code::InvalidArgument, "An Object Lambda access point can't be the source of a copy").with("ArgumentName", "x-amz-copy-source"));
+        }
+        (ap, key, vid)
+    };
+    let r = request_for(ctx, found)?;
+    if r.ap.network_origin == "VPC" && !ctx.internal() {
+        return Err(S3Error::msg(Code::AccessDenied, "This access point only accepts requests from its VPC (inside roll's network)"));
+    }
+    let a = ctx.access(&r.ap.bucket)?;
+    authorize_with(ctx, &r, ctx.who(), &a, &r.ap.bucket, Some(&key), "s3:GetObject", Need::Read, None)?;
+    Ok((r.ap.bucket.clone(), key, vid))
 }
 
 /// What an access point allows a request to do at all (before its permissions): its network
@@ -231,10 +293,16 @@ pub(crate) fn check_request(ctx: &Ctx) -> Result<(), S3Error> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn authorize(ctx: &Ctx, who: Who, a: &Access, bucket: &str, key: Option<&str>, action: &str, need: Need, prefix: Option<&str>) -> Option<Result<(), S3Error>> {
     let r = ctx.access_point.as_ref().filter(|r| r.ap.bucket == bucket)?;
+    Some(authorize_with(ctx, r, who, a, bucket, key, action, need, prefix))
+}
+
+/// [`authorize`] through the access point `r`.
+#[allow(clippy::too_many_arguments)]
+fn authorize_with(ctx: &Ctx, r: &ApRequest, who: Who, a: &Access, bucket: &str, key: Option<&str>, action: &str, need: Need, prefix: Option<&str>) -> Result<(), S3Error> {
     let denied = || S3Error::new(Code::AccessDenied);
     let p = who.principal();
     let resource = crate::access::resource_arn(bucket, key);
-    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix };
+    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix, ap: Some(r) };
     let ap_resource = match key {
         Some(k) => format!("{}/object/{k}", r.arn),
         None => r.arn.clone(),
@@ -242,7 +310,7 @@ pub(crate) fn authorize(ctx: &Ctx, who: Who, a: &Access, bucket: &str, key: Opti
     let ap_decision = r.policy.as_ref().map_or(Decision::None, |pol| pol.evaluate(p, action, &ap_resource, &cond).decision());
     let bucket_decision = a.policy.as_ref().map_or(Decision::None, |pol| pol.evaluate(p, action, &resource, &cond).decision());
     if ap_decision == Decision::Deny || bucket_decision == Decision::Deny {
-        return Some(Err(denied()));
+        return Err(denied());
     }
     // As AWS evaluates it: in the bucket owner's account, the requester's own side (identity
     // policies, roll permission level) or both resource policies; across accounts, both; and
@@ -251,7 +319,7 @@ pub(crate) fn authorize(ctx: &Ctx, who: Who, a: &Access, bucket: &str, key: Opti
         Who::Key(k, id) => {
             let v = id.verdict(action, &resource, &cond, crate::access::key_allows(k, bucket, need));
             if v.deny {
-                return Some(Err(denied()));
+                return Err(denied());
             }
             v.allowed()
         }
@@ -260,21 +328,20 @@ pub(crate) fn authorize(ctx: &Ctx, who: Who, a: &Access, bucket: &str, key: Opti
     let both = ap_decision == Decision::Allow && bucket_decision == Decision::Allow;
     let same_account = who.account() == Some(a.owner());
     if own && same_account {
-        return Some(Ok(()));
+        return Ok(());
     }
     if both && (same_account || own || matches!(who, Who::Anonymous)) {
         let public = r.policy.as_ref().is_some_and(Policy::is_public) || a.policy_public;
         let restricted = r.ap.block.restrict_public_buckets || a.block.restrict_public_buckets;
         if !(matches!(who, Who::Anonymous) && public && restricted) {
-            return Some(Ok(()));
+            return Ok(());
         }
     }
-    Some(Err(denied()))
+    Err(denied())
 }
 
 /// The condition keys of a request through an access point.
-pub(crate) fn condition(ctx: &Ctx, key: &str) -> Option<Option<Vec<String>>> {
-    let r = ctx.access_point.as_ref();
+pub(crate) fn condition(r: Option<&ApRequest>, key: &str) -> Option<Option<Vec<String>>> {
     let v = match key {
         "s3:dataaccesspointarn" => r.map(|r| r.arn.clone()),
         "s3:dataaccesspointaccount" => r.map(|r| r.ap.account.clone()),

@@ -469,6 +469,7 @@ pub(crate) fn get_object_acl(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
 
 pub(crate) async fn put_object_acl(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
+    crate::replication::replica_sync(ctx, bucket)?;
     ctx.meter(&bucket.id, Class::A);
     let version = ctx.q("versionId").map(str::to_string);
     let meta = ctx.store().get_object_version(&bucket.name, ctx.key_name(), version.as_deref()).s3()?;

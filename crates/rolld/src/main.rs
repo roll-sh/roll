@@ -158,6 +158,11 @@ struct Args {
     /// ROLL_S3_NOTIFY_AWS_ENDPOINT).
     #[arg(long, env = "ROLL_S3_NOTIFY_AWS_ENDPOINTS")]
     s3_notify_aws_endpoints: Option<String>,
+    /// Publish storage replication metrics (S3's `ReplicationLatency`, `BytesPendingReplication`,
+    /// `OperationsPendingReplication`, `OperationsFailedReplication`) to CloudWatch every minute,
+    /// in the `roll/S3` namespace (needs ROLL_S3_NOTIFY_AWS).
+    #[arg(long, env = "ROLL_S3_REPLICATION_METRICS_CLOUDWATCH", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_replication_metrics_cloudwatch: bool,
     /// How Object Lambda functions reach the S3 API (`inputS3Url`); default
     /// `http://<public host>:<S3 port>`.
     #[arg(long, env = "ROLL_S3_PUBLIC_ENDPOINT")]
@@ -373,6 +378,7 @@ struct StorageOpts {
     s3_notify_aws: bool,
     s3_notify_aws_endpoint: Option<String>,
     s3_notify_aws_endpoints: Option<String>,
+    s3_replication_metrics_cloudwatch: bool,
     s3_public_endpoint: Option<String>,
     s3_webhook_allow_private: bool,
 }
@@ -395,6 +401,7 @@ impl From<&Args> for StorageOpts {
             s3_notify_aws: a.s3_notify_aws,
             s3_notify_aws_endpoint: a.s3_notify_aws_endpoint.clone(),
             s3_notify_aws_endpoints: a.s3_notify_aws_endpoints.clone(),
+            s3_replication_metrics_cloudwatch: a.s3_replication_metrics_cloudwatch,
             s3_public_endpoint: a.s3_public_endpoint.clone(),
             s3_webhook_allow_private: a.s3_webhook_allow_private,
         }
@@ -418,6 +425,9 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
         ..Default::default()
     };
     scfg.notify.aws = args.s3_notify_aws;
+    if args.s3_replication_metrics_cloudwatch {
+        scfg.notify.replication_metrics_interval = Some(std::time::Duration::from_secs(60));
+    }
     scfg.notify.webhook_allow_private = args.s3_webhook_allow_private;
     scfg.notify.aws_endpoint = args.s3_notify_aws_endpoint.clone().filter(|e| !e.is_empty());
     for pair in args.s3_notify_aws_endpoints.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|p| !p.is_empty()) {

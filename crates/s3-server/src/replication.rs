@@ -7,6 +7,7 @@
 //! `Destination`, else the replication target that lists the bucket, else the roll bucket.
 
 use crate::config::{Doc, malformed, node_xml, read_xml, reading, writing};
+use crate::auth::Need;
 use crate::ctx::{Ctx, no_content};
 use crate::error::StoreResult;
 use crate::response::{self, Reply, set};
@@ -87,6 +88,24 @@ fn parse_rule(r: &Node) -> Result<ReplicationRule, S3Error> {
         Some(a) if a.text_of("Owner").map(str::trim) == Some("Destination") => true,
         Some(_) => return Err(malformed()),
     };
+    // Replication Time Control and metrics: S3 takes 15 minutes only, and RTC comes with
+    // metrics.
+    let rtc = status(d, "ReplicationTime")?;
+    let metrics = status(d, "Metrics")?;
+    for (el, inner) in [("ReplicationTime", "Time"), ("Metrics", "EventThreshold")] {
+        if let Some(m) = d.child(el).and_then(|e| e.child(inner)) {
+            let minutes = m.text_of("Minutes").map(str::trim).ok_or_else(malformed)?;
+            if minutes != "15" {
+                return Err(S3Error::msg(Code::InvalidArgument, format!("{el} {inner} Minutes must be 15")).with("ArgumentName", "Minutes").with("ArgumentValue", minutes.to_string()));
+            }
+        }
+    }
+    if rtc == Some(true) && d.child("ReplicationTime").and_then(|e| e.child("Time")).is_none() {
+        return Err(malformed());
+    }
+    if rtc == Some(true) && metrics != Some(true) {
+        return Err(S3Error::msg(Code::InvalidRequest, "Replication Time Control must be used in conjunction with Metrics."));
+    }
     let extra: String = d.children.iter().filter(|c| matches!(c.name.as_str(), "EncryptionConfiguration" | "ReplicationTime" | "Metrics")).map(node_xml).collect();
     let target = d.text_of(TARGET_ELEMENT).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
     Ok(ReplicationRule {
@@ -180,7 +199,7 @@ pub(crate) async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     let n = read_xml(ctx, body, "ReplicationConfiguration").await?;
     let mut cfg = parse(&n)?;
     cfg.validate(&bucket.name).map_err(|m| S3Error::msg(Code::InvalidRequest, m))?;
-    resolve_destinations(&ctx.server.notifier, &mut cfg).await.map_err(|m| S3Error::msg(Code::InvalidRequest, m))?;
+    resolve_destinations(&ctx.server.notifier, &mut cfg, bucket.object_lock.is_some()).await.map_err(|m| S3Error::msg(Code::InvalidRequest, m))?;
     ctx.store().set_replication(&bucket.name, Some(&cfg)).await.s3()?;
     Ok(response::empty(StatusCode::OK))
 }
@@ -188,14 +207,14 @@ pub(crate) async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
 /// Where each rule's destination is: the rule's target, the target listing the bucket, or a
 /// roll bucket. A bucket outside roll must have versioning enabled, as S3 requires (asked of
 /// the target now). `Err` says what's wrong.
-pub(crate) async fn resolve_destinations(n: &crate::Notifier, cfg: &mut ReplicationConfig) -> Result<(), String> {
+pub(crate) async fn resolve_destinations(n: &crate::Notifier, cfg: &mut ReplicationConfig, object_lock: bool) -> Result<(), String> {
     let store = n.store();
     for r in &mut cfg.rules {
         if r.target.is_none() {
             r.target = store.target_for_bucket(&r.destination).map_err(|e| e.to_string())?;
         }
         match &r.target {
-            Some(t) => n.external.check_destination(t, &r.destination).await?,
+            Some(t) => n.external.check_destination(t, &r.destination, object_lock).await?,
             None => match store.bucket(&r.destination) {
                 Ok(_) => {}
                 Err(StoreError::NoSuchBucket(_)) => {
@@ -217,6 +236,87 @@ pub(crate) async fn delete(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     no_content()
 }
 
+// ---- roll's replication extension: replicas that keep their source's version id ----
+//
+// Another roll deployment replicating here (`replicate_ext.rs` on its side) writes each replica
+// with the source version's id and Last-Modified, as S3's own replication does:
+// - `x-roll-replica-version-id: <version id>` (`null` for a null version) and
+//   `x-roll-replica-last-modified: <Unix ms>` on PutObject, CompleteMultipartUpload and
+//   DeleteObject (a delete marker);
+// - `x-roll-replica-sync: true` on PutObjectTagging, DeleteObjectTagging, PutObjectRetention,
+//   PutObjectLegalHold and PutObjectAcl: the change is a replica's metadata kept in sync, not
+//   synced on again.
+//
+// They're honoured only for a signed request whose identity may replicate into the bucket:
+// `s3:ReplicateObject` (`s3:ReplicateDelete` for delete markers, `s3:ReplicateTags` for tags) as
+// AWS's replication role needs, granted by an identity or bucket policy or a roll `admin` key
+// covering the bucket (a `write` key can't rewrite a bucket's history). A plain write doesn't
+// need `s3:PutObject` then, as a replication role doesn't. Only versioning-enabled buckets take
+// them; a version id that's there with other content is refused, the same content is a
+// retry and answers as the first write did.
+
+pub(crate) const REPLICA_VERSION: &str = "x-roll-replica-version-id";
+pub(crate) const REPLICA_MODIFIED: &str = "x-roll-replica-last-modified";
+pub(crate) const REPLICA_SYNC: &str = "x-roll-replica-sync";
+
+/// The replica a write carries (roll's replication extension), authorized for `action`
+/// (`s3:ReplicateObject`, `s3:ReplicateDelete`); `None`: a plain write, authorized as one.
+pub(crate) fn replica_auth(ctx: &Ctx, bucket: &Bucket, action: &str) -> Result<Option<s3_store::ReplicaWrite>, S3Error> {
+    let Some(vid) = ctx.h(REPLICA_VERSION).map(str::trim) else {
+        if ctx.h(REPLICA_MODIFIED).is_some() {
+            return Err(S3Error::msg(Code::InvalidRequest, format!("{REPLICA_MODIFIED} needs {REPLICA_VERSION}")));
+        }
+        return Ok(None);
+    };
+    if vid != "null" && !s3_proto::versioning::valid_version_id(vid) {
+        return Err(S3Error::msg(Code::InvalidArgument, "Invalid version id specified").with("ArgumentName", REPLICA_VERSION).with("ArgumentValue", vid.to_string()));
+    }
+    let modified_at = ctx
+        .h(REPLICA_MODIFIED)
+        .and_then(|m| m.trim().parse::<i64>().ok())
+        .filter(|m| *m > 0)
+        .ok_or_else(|| S3Error::msg(Code::InvalidArgument, format!("{REPLICA_MODIFIED} must be the source version's Last-Modified in Unix milliseconds")).with("ArgumentName", REPLICA_MODIFIED))?;
+    if ctx.auth.is_none() {
+        return Err(S3Error::new(Code::AccessDenied));
+    }
+    crate::access::authorize(ctx, ctx.who(), &bucket.name, ctx.key.as_deref(), action, Need::Admin)?;
+    if action == "s3:ReplicateObject" && ctx.h("x-amz-tagging").is_some_and(|t| !t.trim().is_empty()) {
+        crate::access::authorize(ctx, ctx.who(), &bucket.name, ctx.key.as_deref(), "s3:ReplicateTags", Need::Admin)?;
+    }
+    Ok(Some(s3_store::ReplicaWrite { version_id: vid.to_string(), modified_at }))
+}
+
+/// A write that may carry a replica (PutObject, the multipart operations): authorized as a
+/// replica write when it does, as a plain write otherwise.
+pub(crate) fn require_write(ctx: &Ctx, bucket: &Bucket) -> Result<Option<s3_store::ReplicaWrite>, S3Error> {
+    match replica_auth(ctx, bucket, "s3:ReplicateObject")? {
+        Some(rw) => Ok(Some(rw)),
+        None => {
+            ctx.require(&bucket.name, Need::Write)?;
+            Ok(None)
+        }
+    }
+}
+
+/// The write makes this replica (its version id and Last-Modified are the source's).
+pub(crate) fn writing_replica(rw: s3_store::ReplicaWrite) {
+    s3_store::events::set_origin(|o| o.replica = Some(rw));
+}
+
+/// `x-roll-replica-sync` on a metadata change: replication keeping a replica in sync
+/// (`s3:ReplicateTags`), which doesn't sync on.
+pub(crate) fn replica_sync(ctx: &Ctx, bucket: &Bucket) -> Result<(), S3Error> {
+    if !ctx.h(REPLICA_SYNC).is_some_and(|v| v.trim().eq_ignore_ascii_case("true")) {
+        return Ok(());
+    }
+    if ctx.auth.is_none() {
+        return Err(S3Error::new(Code::AccessDenied));
+    }
+    crate::access::authorize(ctx, ctx.who(), &bucket.name, ctx.key.as_deref(), "s3:ReplicateTags", Need::Admin)?;
+    s3_store::events::set_origin(|o| o.replica_sync = true);
+    Ok(())
+}
+
 /// `x-amz-replication-status` on GET and HEAD.
 pub(crate) fn set_status(ctx: &Ctx, bucket: &Bucket, key: &str, version_id: &str, r: &mut Response) {
     if let Ok(Some(s)) = ctx.store().replication_status(&bucket.id, key, version_id) {
@@ -236,7 +336,8 @@ mod tests {
             <DeleteMarkerReplication><Status>Enabled</Status></DeleteMarkerReplication>
             <Destination><Bucket>arn:aws:s3:::dst</Bucket><StorageClass>STANDARD_IA</StorageClass><Account>1</Account>
               <AccessControlTranslation><Owner>Destination</Owner></AccessControlTranslation>
-              <ReplicationTime><Status>Enabled</Status><Time><Minutes>15</Minutes></Time></ReplicationTime></Destination>
+              <ReplicationTime><Status>Enabled</Status><Time><Minutes>15</Minutes></Time></ReplicationTime>
+              <Metrics><Status>Enabled</Status><EventThreshold><Minutes>15</Minutes></EventThreshold></Metrics></Destination>
             <ExistingObjectReplication><Status>Enabled</Status></ExistingObjectReplication></Rule>
           <Rule><Status>Disabled</Status><Prefix>logs/</Prefix><Destination><Bucket>arn:aws:s3:::dst</Bucket></Destination></Rule>
         </ReplicationConfiguration>"#;
@@ -251,6 +352,13 @@ mod tests {
         assert_eq!(back, cfg);
         let no_dmr = br#"<ReplicationConfiguration><Rule><Status>Enabled</Status><Filter/><Destination><Bucket>arn:aws:s3:::d</Bucket></Destination></Rule></ReplicationConfiguration>"#;
         assert_eq!(parse(&s3_proto::xml::parse(no_dmr).unwrap()).unwrap_err().code, Code::InvalidRequest);
+        assert!(r.replication_time() && r.metrics());
+        let rule = |dest: &str| format!("<ReplicationConfiguration><Rule><Status>Enabled</Status><Filter/><DeleteMarkerReplication><Status>Disabled</Status></DeleteMarkerReplication><Destination><Bucket>arn:aws:s3:::d</Bucket>{dest}</Destination></Rule></ReplicationConfiguration>");
+        let code = |dest: &str| parse(&s3_proto::xml::parse(rule(dest).as_bytes()).unwrap()).err().map(|e| e.code);
+        assert_eq!(code("<ReplicationTime><Status>Enabled</Status><Time><Minutes>15</Minutes></Time></ReplicationTime>"), Some(Code::InvalidRequest), "RTC needs metrics");
+        assert_eq!(code("<ReplicationTime><Status>Enabled</Status><Time><Minutes>30</Minutes></Time></ReplicationTime>"), Some(Code::InvalidArgument), "15 minutes only");
+        assert_eq!(code("<Metrics><Status>Enabled</Status><EventThreshold><Minutes>5</Minutes></EventThreshold></Metrics>"), Some(Code::InvalidArgument));
+        assert_eq!(code("<Metrics><Status>Enabled</Status></Metrics>"), None, "metrics alone");
         assert_eq!(arn_bucket("arn:aws:s3:::b"), Some("b"));
         assert_eq!(arn_bucket("arn:aws:s3:::b/x"), None);
     }

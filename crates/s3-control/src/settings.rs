@@ -173,9 +173,9 @@ impl Control {
     pub(crate) fn settings_view(&self, b: &Bucket, v: &mut Value, has_notifications: bool, website: bool) {
         let replication = self.store.replication(&b.name).ok().flatten();
         let backlog = self.backlog(b, has_notifications || replication.is_some());
-        // Replication Time Control's metrics, per destination.
+        // S3's replication metrics (and Replication Time Control's), per rule.
         let (pending, latency) = match &replication {
-            Some(_) => (self.store.replication_backlog(&b.id).unwrap_or_default(), self.notifier.get().map(|n| n.replication_latency(&b.id)).unwrap_or_default()),
+            Some(_) => (self.store.replication_backlog(&b.id).unwrap_or_default(), self.notifier.get().map(|n| n.replication_metrics(&b.id)).unwrap_or_default()),
             None => Default::default(),
         };
         let now = self.store.now();
@@ -188,15 +188,19 @@ impl Control {
                         let mut rv = rule_view(r);
                         let dest = r.dest_key();
                         let w = backlog.replicate.get(&dest);
-                        let p = pending.get(&dest).cloned().unwrap_or_default();
-                        let l = latency.get(&dest);
+                        let p = pending.get(&r.id).cloned().unwrap_or_default();
+                        let l = latency.get(&r.id);
                         rv["metrics"] = json!({
+                            "enabled": r.metrics(),
+                            "replication_time_control": r.replication_time(),
                             "operations_pending": p.operations,
                             "bytes_pending": p.bytes,
                             "oldest_pending_ms": p.oldest_at.map(|at| (now - at).max(0)),
                             "latency_ms": l.map(|l| l.last_ms),
                             "max_latency_ms": l.map(|l| l.max_ms),
                             "replicated": l.map_or(0, |l| l.replicated),
+                            "operations_failed": l.map_or(0, |l| l.failed),
+                            "replicated_after_threshold": l.map_or(0, |l| l.late),
                         });
                         rv["pending"] = json!(w.map_or(0, |w| w.pending));
                         rv["last_error"] = json!(w.and_then(|w| w.last_error.clone()));
@@ -350,14 +354,15 @@ impl Control {
     }
 
     /// Check the destinations of replication rules on targets outside roll (the bucket has
-    /// versioning enabled there), as PutBucketReplication does.
-    pub(crate) async fn check_replication_targets(&self, p: &mut Prepared) -> Result<()> {
+    /// versioning enabled there, and Object Lock when the source has it), as PutBucketReplication
+    /// does.
+    pub(crate) async fn check_replication_targets(&self, b: &Bucket, p: &mut Prepared) -> Result<()> {
         let Some(Some(cfg)) = &mut p.replication else { return Ok(()) };
         if cfg.rules.iter().all(|r| r.target.is_none()) {
             return Ok(());
         }
         let n = self.notifier.get().ok_or_else(|| ControlError::Unavailable("replication to buckets outside roll needs the S3 API, which isn't running".into()))?;
-        n.check_replication(cfg).await.map_err(invalid)
+        n.check_replication(cfg, b.object_lock.is_some()).await.map_err(invalid)
     }
 
     /// Apply checked settings: the public access block before the store's own update (it

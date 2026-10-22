@@ -49,7 +49,7 @@ pub use config::{PublicAccessBlock, RedirectAll, Redirect, RoutingCondition, Rou
 pub use sse::Encryption;
 pub use error::{Result, StoreError};
 pub use access_points::{AccessPoint, AccessPointKind, NewAccessPoint};
-pub use events::{EventRecord, InventoryEntry, NotificationConfig, NotificationTarget, Origin, PendingEvent, ReplicaSource, ReplicateTask, ReplicationBacklog, ReplicationConfig, ReplicationRule, Replicated, RuleFilter};
+pub use events::{EventRecord, InventoryEntry, NotificationConfig, NotificationTarget, Origin, PendingEvent, ReplicaSource, ReplicaVersion, ReplicaWrite, ReplicateTask, ReplicationBacklog, ReplicationConfig, ReplicationRule, Replicated, RuleFilter};
 pub use targets::{ReplicationTarget, Secret, TargetSpec};
 pub use ids::{blob_key, day_of, is_temporary_key_id, version_id};
 pub use log::LogStats;

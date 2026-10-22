@@ -32,9 +32,24 @@ impl Store {
     /// version has that ETag.
     pub async fn delete_object_version(&self, bucket: &str, key: &str, version_id: Option<&str>, if_match: Option<&str>, bypass: bool) -> Result<DeleteOutcome> {
         let now = self.now();
+        // A delete marker replicated by another deployment keeps its version id and time.
+        let replica = events::replica_write().filter(|_| version_id.is_none());
+        if replica.is_some() {
+            self.mark_replication_status();
+        }
         self.write(|c| {
             let b = find_bucket(c, bucket)?;
             let chain = rows::chain(c, &b.id)?;
+            if let Some(rw) = &replica {
+                let stored = match events::existing_replica(c, &chain, key, rw, None)? {
+                    Some(there) => there,
+                    None => {
+                        let marker = crate::rows::Row { delete_marker: true, ..crate::rows::Row::tombstone(key, now) };
+                        events::place_replica(c, &b, &chain, marker, rw, now)?
+                    }
+                };
+                return Ok(DeleteOutcome { existed: true, version_id: Some(stored.version_id()), delete_marker: true });
+            }
             if let Some(m) = if_match {
                 let target = match version_id {
                     None => rows::resolve(c, &chain, key)?.map(|(r, _)| r),
@@ -164,7 +179,7 @@ impl Store {
                 return Err(StoreError::InvalidRequest("Bucket is missing Object Lock Configuration".into()));
             }
             let chain = rows::chain(c, &b.id)?;
-            versioning::update_version(c, &b, &chain, key, version_id, now, |r| {
+            let r = versioning::update_version(c, &b, &chain, key, version_id, now, |r| {
                 versioning::check_retention_change(&r.lock, retention.as_ref().map(|(m, u)| (m.as_str(), *u)), now, bypass)?;
                 match &retention {
                     Some((m, u)) => {
@@ -177,8 +192,9 @@ impl Store {
                     }
                 }
                 Ok(())
-            })?
-            .meta()
+            })?;
+            events::sync_metadata(c, &b, &r, now)?;
+            r.meta()
         })
         .await
     }
@@ -192,11 +208,12 @@ impl Store {
                 return Err(StoreError::InvalidRequest("Bucket is missing Object Lock Configuration".into()));
             }
             let chain = rows::chain(c, &b.id)?;
-            versioning::update_version(c, &b, &chain, key, version_id, now, |r| {
+            let r = versioning::update_version(c, &b, &chain, key, version_id, now, |r| {
                 r.lock.legal_hold = Some(on);
                 Ok(())
-            })?
-            .meta()
+            })?;
+            events::sync_metadata(c, &b, &r, now)?;
+            r.meta()
         })
         .await
     }

@@ -82,7 +82,7 @@ async fn localstack() -> String {
                     std::fs::set_permissions(&boot, std::fs::Permissions::from_mode(0o755)).unwrap();
                     docker(&[
                         "run", "-d", "--rm", "--name", CONTAINER, "-p", &format!("127.0.0.1:{port}:4566"),
-                        "-e", "SERVICES=s3,kms,sqs,sns,lambda,events,sts,iam,logs",
+                        "-e", "SERVICES=s3,kms,sqs,sns,lambda,events,sts,iam,logs,cloudwatch",
                         "-e", "LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT=120",
                         "-v", &format!("{}:/etc/localstack/init/boot.d", boot.display()),
                         "-v", "/var/run/docker.sock:/var/run/docker.sock", IMAGE,
@@ -94,7 +94,7 @@ async fn localstack() -> String {
             for _ in 0..120 {
                 if let Ok(r) = reqwest::get(format!("{endpoint}/_localstack/health")).await
                     && let Ok(v) = r.json::<Value>().await
-                    && ["s3", "kms", "sqs", "sns", "lambda", "events"].iter().all(|s| matches!(v["services"][s].as_str(), Some("available" | "running")))
+                    && ["s3", "kms", "sqs", "sns", "lambda", "events", "cloudwatch"].iter().all(|s| matches!(v["services"][s].as_str(), Some("available" | "running")))
                 {
                     return endpoint;
                 }
@@ -656,4 +656,133 @@ def handler(event, context):
     let got = host_client(port, ACCESS, SECRET).get_object().bucket(&olap).key("note.txt").send().await.unwrap();
     assert_eq!(got.content_type(), Some("text/x-upper"));
     assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"SHOUT THIS");
+}
+
+/// Replication to AWS S3: the public S3 API can't set a version id, so the replica gets
+/// S3's own, which roll records per source version (the replica is found from its source, and
+/// later tag changes go to that version). Object Lock retention and legal hold are on the
+/// replica (the bucket there has Object Lock, as checked when the configuration is put).
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_to_s3_keeps_versions_and_locks() {
+    use aws_sdk_s3::types::{ObjectLockLegalHoldStatus, ObjectLockMode, ObjectLockRetentionMode, Tag, Tagging};
+    if !enabled() {
+        return;
+    }
+    let ls = localstack().await;
+    let l = ls_s3(&ls);
+    let plain = unique("replica-plain");
+    versioned_on(&l, &plain).await;
+    let locked = unique("replica-locked");
+    l.create_bucket().bucket(&locked).object_lock_enabled_for_bucket(true).send().await.unwrap();
+    let (t, s) = start_full(|_| {}, |c| c.notify.dispatch_interval = None).await;
+    let spec = s3_store::TargetSpec { endpoint: Some(ls.clone()), region: Some(REGION.into()), access_key_id: Some("test".into()), secret_access_key: Some(s3_store::Secret::new("test")), path_style: Some(true), buckets: vec![plain.clone(), locked.clone()] };
+    t.store.put_replication_target("localstack", &spec, true).await.unwrap();
+    let c = &t.client;
+    c.create_bucket().bucket("lock-src").object_lock_enabled_for_bucket(true).send().await.unwrap();
+    // A source with Object Lock needs a destination with Object Lock.
+    let e = c.put_bucket_replication().bucket("lock-src").replication_configuration(replication(&plain, None)).send().await.unwrap_err();
+    assert_eq!(e.as_service_error().and_then(|s| aws_sdk_s3::error::ProvideErrorMetadata::code(s)), Some("InvalidRequest"));
+    c.put_bucket_replication().bucket("lock-src").replication_configuration(replication(&locked, None)).send().await.unwrap();
+    let until = aws_sdk_s3::primitives::DateTime::from_secs(now_s() + 86_400);
+    let put = c
+        .put_object()
+        .bucket("lock-src")
+        .key("held")
+        .object_lock_mode(ObjectLockMode::Governance)
+        .object_lock_retain_until_date(until)
+        .object_lock_legal_hold_status(ObjectLockLegalHoldStatus::On)
+        .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Crc32)
+        .body(ByteStream::from_static(b"held on aws"))
+        .send()
+        .await
+        .unwrap();
+    s.dispatch_events().await.unwrap();
+    let src_vid = put.version_id().unwrap();
+    assert_eq!(c.head_object().bucket("lock-src").key("held").send().await.unwrap().replication_status().map(|s| s.as_str()), Some("COMPLETED"));
+    let src = t.store.bucket("lock-src").unwrap();
+    let found = t.store.replica_versions(&src.id, "held", src_vid).unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].bucket.as_str(), found[0].target.as_str()), (locked.as_str(), "localstack"));
+    let vid = found[0].version_id.clone().expect("the target's version id");
+    assert_ne!(vid, src_vid, "S3 assigns its own version ids");
+    let got = l.head_object().bucket(&locked).key("held").version_id(&vid).send().await.unwrap();
+    assert_eq!(got.content_length(), Some(11));
+    let r = l.get_object_retention().bucket(&locked).key("held").version_id(&vid).send().await.unwrap();
+    assert_eq!(r.retention().unwrap().mode(), Some(&ObjectLockRetentionMode::Governance));
+    assert_eq!(r.retention().unwrap().retain_until_date().map(|d| d.secs()), Some(until.secs()));
+    let h = l.get_object_legal_hold().bucket(&locked).key("held").version_id(&vid).send().await.unwrap();
+    assert_eq!(h.legal_hold().unwrap().status(), Some(&ObjectLockLegalHoldStatus::On));
+    // A tag change on the source goes to that version of the replica.
+    let tags = Tagging::builder().tag_set(Tag::builder().key("synced").value("yes").build().unwrap()).build().unwrap();
+    c.put_object_tagging().bucket("lock-src").key("held").version_id(src_vid).tagging(tags).send().await.unwrap();
+    s.dispatch_events().await.unwrap();
+    let tt = l.get_object_tagging().bucket(&locked).key("held").version_id(&vid).send().await.unwrap();
+    assert_eq!(tt.tag_set().iter().map(|t| (t.key(), t.value())).collect::<Vec<_>>(), [("synced", "yes")]);
+    assert_eq!(t.store.events_backlog().unwrap(), 0);
+}
+
+/// Replication metrics to CloudWatch (`PutMetricData` on LocalStack): S3's metric names, units
+/// and dimensions, per rule, in roll's namespace.
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_metrics_to_cloudwatch() {
+    use aws_sdk_s3::types::{Metrics, MetricsStatus, ReplicationTime, ReplicationTimeStatus, ReplicationTimeValue};
+    if !enabled() {
+        return;
+    }
+    let ls = localstack().await;
+    let dest = unique("replica-metrics");
+    versioned_on(&ls_s3(&ls), &dest).await;
+    let namespace = unique("roll/S3-test");
+    let ns = namespace.clone();
+    let (t, s) = start_full(
+        |_| {},
+        move |c| {
+            c.notify.dispatch_interval = None;
+            c.notify.aws = true;
+            c.notify.aws_endpoint = Some(ls.clone());
+            c.notify.aws_credentials = Some(s3_server::AwsCredentials { access_key_id: "test".into(), secret_access_key: "test".into(), session_token: None });
+            c.notify.replication_metrics_namespace = ns;
+        },
+    )
+    .await;
+    let ls = localstack().await;
+    let spec = s3_store::TargetSpec { endpoint: Some(ls.clone()), region: Some(REGION.into()), access_key_id: Some("test".into()), secret_access_key: Some(s3_store::Secret::new("test")), path_style: Some(true), buckets: vec![dest.clone()] };
+    t.store.put_replication_target("localstack", &spec, true).await.unwrap();
+    let c = &t.client;
+    versioned_on(c, "metrics-src").await;
+    let mut cfg = replication(&dest, None);
+    if let Some(d) = cfg.rules[0].destination.as_mut() {
+        d.replication_time = Some(ReplicationTime::builder().status(ReplicationTimeStatus::Enabled).time(ReplicationTimeValue::builder().minutes(15).build()).build().unwrap());
+        d.metrics = Some(Metrics::builder().status(MetricsStatus::Enabled).event_threshold(ReplicationTimeValue::builder().minutes(15).build()).build().unwrap());
+    }
+    c.put_bucket_replication().bucket("metrics-src").replication_configuration(cfg).send().await.unwrap();
+    c.put_object().bucket("metrics-src").key("a").body(ByteStream::from_static(b"12345")).send().await.unwrap();
+    c.put_object().bucket("metrics-src").key("b").body(ByteStream::from_static(b"678")).send().await.unwrap();
+    // Two operations (8 bytes) pending, then none.
+    assert_eq!(s.notifier.publish_replication_metrics().await.unwrap(), 4);
+    s.dispatch_events().await.unwrap();
+    assert_eq!(s.notifier.publish_replication_metrics().await.unwrap(), 4);
+    let form = |action: &str, extra: &str| format!("Action={action}&Version=2010-08-01&Namespace={}{extra}", urlencode(&namespace));
+    let (status, listed) = aws_rest(&ls, "monitoring", reqwest::Method::POST, "/", "application/x-www-form-urlencoded", form("ListMetrics", "")).await;
+    assert_eq!(status, 200, "{listed}");
+    for m in ["ReplicationLatency", "BytesPendingReplication", "OperationsPendingReplication", "OperationsFailedReplication"] {
+        assert!(listed.contains(&format!("<MetricName>{m}</MetricName>")), "{m} missing: {listed}");
+    }
+    for d in ["SourceBucket", "DestinationBucket", "RuleId"] {
+        assert!(listed.contains(&format!("<Name>{d}</Name>")), "{d} missing: {listed}");
+    }
+    assert!(listed.contains("<Value>metrics-src</Value>") && listed.contains("<Value>to-aws</Value>"), "{listed}");
+    let start = s3_proto::time::iso8601_ms((now_s() - 600) * 1000);
+    let end = s3_proto::time::iso8601_ms((now_s() + 600) * 1000);
+    let dims = format!(
+        "&Dimensions.member.1.Name=SourceBucket&Dimensions.member.1.Value=metrics-src&Dimensions.member.2.Name=DestinationBucket&Dimensions.member.2.Value={}&Dimensions.member.3.Name=RuleId&Dimensions.member.3.Value=to-aws",
+        urlencode(&dest)
+    );
+    let stats = |metric: &str| form("GetMetricStatistics", &format!("&MetricName={metric}&StartTime={}&EndTime={}&Period=60&Statistics.member.1=Maximum&Statistics.member.2=Minimum{dims}", urlencode(&start), urlencode(&end)));
+    let (status, ops) = aws_rest(&ls, "monitoring", reqwest::Method::POST, "/", "application/x-www-form-urlencoded", stats("OperationsPendingReplication")).await;
+    assert_eq!(status, 200, "{ops}");
+    assert!(ops.contains("<Maximum>2.0</Maximum>"), "two pending at first: {ops}");
+    assert!(ops.contains("<Minimum>0.0</Minimum>"), "none once replicated: {ops}");
+    let (_, bytes) = aws_rest(&ls, "monitoring", reqwest::Method::POST, "/", "application/x-www-form-urlencoded", stats("BytesPendingReplication")).await;
+    assert!(bytes.contains("<Maximum>8.0</Maximum>"), "{bytes}");
 }

@@ -410,3 +410,68 @@ async fn inventory_pages_cover_every_version() {
     let got: Vec<(&str, bool, bool)> = all.iter().map(|e| (e.key.as_str(), e.is_latest, e.delete_marker)).collect();
     assert_eq!(got, [("a", true, false), ("a", false, false), ("b", true, true), ("b", false, false)]);
 }
+
+/// A replica from another deployment's replication (roll's extension, `Origin::replica`) keeps
+/// the source's version id and Last-Modified, durably: it's there after a restart and recovery
+/// from the log, a retry with the same content is a no-op, other content under that id is
+/// refused, and an older replica arriving late takes its place behind a newer one.
+#[tokio::test]
+async fn replica_writes_keep_their_version_ids_durably() {
+    let (backend, clock, s) = env("rep-ext").await;
+    versioned(&s, "dst").await;
+    let old_at = s.now() - 120_000;
+    let older = version_id(old_at);
+    let newer = version_id(old_at + 60_000);
+    let as_replica = |vid: &str, at: i64| Origin { replica: Some(ReplicaWrite { version_id: vid.to_string(), modified_at: at }), ..Default::default() };
+    let n = events::with_origin(as_replica(&newer, old_at + 60_000), put(&s, "dst", "k", b"two")).await;
+    assert_eq!((n.version_id.as_str(), n.modified_at), (newer.as_str(), old_at + 60_000));
+    let o = events::with_origin(as_replica(&older, old_at), put(&s, "dst", "k", b"one")).await;
+    assert_eq!(o.version_id, older);
+    let blobs = s.stats().unwrap().blobs;
+    let again = events::with_origin(as_replica(&older, old_at), put(&s, "dst", "k", b"one")).await;
+    assert_eq!(again.version_id, older);
+    assert_eq!(s.stats().unwrap().blobs, blobs, "a retry keeps nothing new");
+    let other = events::with_origin(as_replica(&older, old_at), put_with(&s, "dst", "k", b"other", &WriteCondition::default())).await;
+    assert!(matches!(other, Err(StoreError::InvalidRequest(_))), "{other:?}");
+    let marker_vid = version_id(old_at + 90_000);
+    let m = events::with_origin(as_replica(&marker_vid, old_at + 90_000), s.delete_object_version("dst", "k", None, None, false)).await.unwrap();
+    assert_eq!((m.delete_marker, m.version_id.as_deref()), (true, Some(marker_vid.as_str())));
+    let dst = s.bucket("dst").unwrap();
+    assert_eq!(s.replication_status(&dst.id, "k", &older).unwrap().as_deref(), Some("REPLICA"));
+    s.snapshot_now().await.unwrap();
+    s.close().await;
+    let s2 = open(&backend, &clock).await;
+    let page = s2.list_versions("dst", &VersionsQuery { max_keys: 10, ..Default::default() }).unwrap();
+    let ids: Vec<&str> = page.versions.iter().map(|v| v.version_id.as_str()).collect();
+    assert_eq!(ids, [marker_vid.as_str(), newer.as_str(), older.as_str()], "newest first by version id");
+    assert_eq!(s2.get_object_version("dst", "k", Some(&older)).unwrap().modified_at, old_at);
+    assert_eq!(s2.replication_status(&dst.id, "k", &newer).unwrap().as_deref(), Some("REPLICA"));
+    // Not into an unversioned bucket.
+    s2.create_bucket("plain", BucketOptions::default()).await.unwrap();
+    let r = events::with_origin(as_replica(&older, old_at), put_with(&s2, "plain", "k", b"one", &WriteCondition::default())).await;
+    assert!(matches!(r, Err(StoreError::InvalidRequest(_))), "{r:?}");
+}
+
+/// A metadata change of a replicated version queues a metadata-only row behind it; one made by
+/// replication itself (`Origin::replica_sync`) doesn't.
+#[tokio::test]
+async fn metadata_changes_replicate() {
+    let (_b, _c, s) = env("rep-sync").await;
+    versioned(&s, "src").await;
+    versioned(&s, "dst").await;
+    s.set_replication("src", Some(&rule("dst", true))).await.unwrap();
+    let v = put(&s, "src", "k", b"one").await;
+    replicate_all(&s).await;
+    let tags: BTreeMap<String, String> = [("a".to_string(), "1".to_string())].into();
+    s.put_version_tags("src", "k", Some(&v.version_id), tags.clone()).await.unwrap();
+    let rows: Vec<ReplicateTask> = s.pending_events(None, 10).unwrap().iter().filter(|e| e.kind == "replicate").map(|e| serde_json::from_str(&e.body).unwrap()).collect();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].metadata);
+    assert_eq!(replicate_all(&s).await, [Replicated::Completed]);
+    assert_eq!(s.get_version_tags("dst", "k", Some(&v.version_id)).unwrap().1, tags);
+    let src = s.bucket("src").unwrap();
+    assert_eq!(s.replication_status(&src.id, "k", &v.version_id).unwrap().as_deref(), Some("COMPLETED"));
+    let synced = Origin { replica_sync: true, ..Default::default() };
+    events::with_origin(synced, s.put_version_tags("src", "k", Some(&v.version_id), BTreeMap::new())).await.unwrap();
+    assert_eq!(s.events_backlog().unwrap(), 0, "replication's own changes aren't synced on");
+}

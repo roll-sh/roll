@@ -276,6 +276,49 @@ impl ReplicationRule {
     pub fn dest_key(&self) -> String {
         dest_key(&self.destination, self.target.as_deref())
     }
+
+    /// Replication Time Control (`Destination` `ReplicationTime` `Enabled`).
+    pub fn replication_time(&self) -> bool {
+        enabled_section(self.destination_extra.as_deref(), "ReplicationTime")
+    }
+
+    /// Replication metrics (`Destination` `Metrics` `Enabled`; RTC implies them).
+    pub fn metrics(&self) -> bool {
+        self.replication_time() || enabled_section(self.destination_extra.as_deref(), "Metrics")
+    }
+
+    /// `SourceSelectionCriteria` `ReplicaModifications` `Enabled`: metadata changes made to
+    /// replicas in this bucket replicate (two-way replication).
+    pub fn replica_modifications(&self) -> bool {
+        enabled_section(self.source_selection.as_deref(), "ReplicaModifications")
+    }
+
+    /// `SourceSelectionCriteria` `SseKmsEncryptedObjects` `Enabled`: SSE-KMS versions are in
+    /// scope.
+    pub fn sse_kms_objects(&self) -> bool {
+        enabled_section(self.source_selection.as_deref(), "SseKmsEncryptedObjects")
+    }
+
+    /// The destination's `EncryptionConfiguration` `ReplicaKmsKeyID`, if any.
+    pub fn replica_kms_key(&self) -> Option<String> {
+        let enc = xml_section(self.destination_extra.as_deref()?, "EncryptionConfiguration")?;
+        xml_section(enc, "ReplicaKmsKeyID").filter(|k| !k.is_empty()).map(str::to_string)
+    }
+}
+
+/// The content of the first `<tag>…</tag>` in `xml` (stored configuration elements, which are
+/// canonical XML without attributes), trimmed.
+pub fn xml_section<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].trim())
+}
+
+/// Whether `xml` has `<tag>` with `<Status>Enabled</Status>`.
+fn enabled_section(xml: Option<&str>, tag: &str) -> bool {
+    xml.and_then(|x| xml_section(x, tag)).and_then(|s| xml_section(s, "Status")) == Some("Enabled")
 }
 
 /// See [`ReplicationRule::dest_key`].
@@ -339,6 +382,21 @@ pub struct Origin {
     pub request_id: Option<String>,
     /// How a plain write arrived: `Put` (default) or `Post`.
     pub create: Option<&'static str>,
+    /// The write is a replica from another deployment's replication (roll's authenticated
+    /// replication extension): it keeps this version id, Last-Modified and ETag.
+    pub replica: Option<ReplicaWrite>,
+    /// The change is replication keeping a replica's metadata in sync: it isn't synced on
+    /// again (no ping-pong between two-way replicas).
+    pub replica_sync: bool,
+}
+
+/// What a replica written by another deployment's replication keeps of its source version.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReplicaWrite {
+    /// The source's version id (`null` for its null version).
+    pub version_id: String,
+    /// The source's Last-Modified (Unix ms).
+    pub modified_at: i64,
 }
 
 tokio::task_local! {
@@ -358,6 +416,11 @@ pub fn set_origin(f: impl FnOnce(&mut Origin)) {
 
 fn origin() -> Origin {
     ORIGIN.try_with(|o| o.borrow().clone()).unwrap_or_default()
+}
+
+/// The replica this request writes for another deployment's replication, if any.
+pub(crate) fn replica_write() -> Option<ReplicaWrite> {
+    ORIGIN.try_with(|o| o.borrow().replica.clone()).ok().flatten()
 }
 
 // ---- Event records ----
@@ -388,6 +451,9 @@ pub struct EventRecord {
     pub reason: Option<String>,
     /// For replication events: the destination bucket.
     pub replication_destination: Option<String>,
+    /// For replication events: the rule (`replicationRuleId`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_rule: Option<String>,
 }
 
 /// What an outbox row of kind [`REPLICATE`] carries.
@@ -405,11 +471,31 @@ pub struct ReplicateTask {
     /// The version's size (none for delete markers), for `BytesPendingReplication`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// Only the version's metadata (tags, ACL, Object Lock) changed: sync it onto the replica
+    /// (`ReplicaModifications`, and metadata changes of replicated source versions).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub metadata: bool,
+    /// The rule has Replication Time Control: missing the threshold is reported.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rtc: bool,
+    /// `OperationMissedThreshold` was reported for it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub missed: bool,
 }
 
 impl ReplicateTask {
     fn new(rule: &ReplicationRule, version_id: &str, size: Option<u64>) -> Self {
-        Self { rule: rule.id.clone(), destination: rule.destination.clone(), version_id: version_id.to_string(), owner_override: rule.owner_override, target: rule.target.clone(), size }
+        Self {
+            rule: rule.id.clone(),
+            destination: rule.destination.clone(),
+            version_id: version_id.to_string(),
+            owner_override: rule.owner_override,
+            target: rule.target.clone(),
+            size,
+            metadata: false,
+            rtc: rule.replication_time(),
+            missed: false,
+        }
     }
 
     pub fn dest_key(&self) -> String {
@@ -576,6 +662,16 @@ fn complete_if_last(c: &Connection, bucket_id: &str, key: &str, version_id: &str
     Ok(())
 }
 
+/// A metadata-only row ended (however it went): its version's data has replicated to that
+/// destination (the row waited behind it), so a version still `PENDING` only for it is
+/// `COMPLETED` now. A failed metadata change doesn't make the version `FAILED`.
+fn metadata_done(c: &Connection, bucket_id: &str, key: &str, version_id: &str) -> Result<()> {
+    if status_of(c, bucket_id, key, version_id)?.as_deref() == Some("PENDING") {
+        complete_if_last(c, bucket_id, key, version_id)?;
+    }
+    Ok(())
+}
+
 /// A change to report.
 pub(crate) struct Change<'a> {
     /// Without `s3:`: `ObjectCreated:Put`, …
@@ -592,11 +688,12 @@ pub(crate) struct Change<'a> {
     pub principal: Option<&'a str>,
     pub reason: Option<&'a str>,
     pub replication_destination: Option<&'a str>,
+    pub replication_rule: Option<&'a str>,
 }
 
 impl<'a> Change<'a> {
     pub fn new(name: &'a str, key: &'a str) -> Self {
-        Self { name, key, version_id: None, size: None, etag: None, replicate: None, principal: None, reason: None, replication_destination: None }
+        Self { name, key, version_id: None, size: None, etag: None, replicate: None, principal: None, reason: None, replication_destination: None, replication_rule: None }
     }
 
     /// A new version (or a restored one): its id, size and ETag, and it replicates.
@@ -627,6 +724,7 @@ pub(crate) fn emit(c: &Connection, b: &BucketRow, ch: Change<'_>, now: i64) -> R
         request_id: o.request_id,
         reason: ch.reason.map(str::to_string),
         replication_destination: ch.replication_destination.map(str::to_string),
+        replication_rule: ch.replication_rule.map(str::to_string),
     };
     let mut notify_hits: Vec<(String, String)> = Vec::new(); // (dest, config id)
     if let Some(n) = &notify {
@@ -682,11 +780,129 @@ pub(crate) fn created() -> String {
     format!("ObjectCreated:{}", origin().create.unwrap_or("Put"))
 }
 
-/// A version's metadata changed (`ObjectTagging:*`, `ObjectAcl:Put`).
+/// A version's metadata changed (`ObjectTagging:*`, `ObjectAcl:Put`): its event, and the
+/// change replicates ([`sync_metadata`]).
 pub(crate) fn emit_update(c: &Connection, b: &BucketRow, name: &str, r: &Row, now: i64) -> Result<()> {
     let mut ch = Change::new(name, &r.key);
     ch.version_id = Some(r.version_id());
-    emit(c, b, ch, now)
+    emit(c, b, ch, now)?;
+    sync_metadata(c, b, r, now)
+}
+
+fn status_of(c: &Connection, bucket_id: &str, key: &str, version_id: &str) -> Result<Option<String>> {
+    Ok(c.prepare_cached("SELECT status FROM replication_status WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3")?.query_row(params![bucket_id, key, version_id], |r| r.get(0)).optional()?)
+}
+
+/// A version's metadata (tags, ACL, Object Lock retention and legal hold) changed: as on S3,
+/// the change replicates to the replicas of a replicated version, and a change made to a
+/// replica replicates back through a rule with `ReplicaModifications` (two-way replication).
+/// Queued as metadata-only rows behind the version's own (the outbox keeps a destination's
+/// rows of one key in order). Changes made by replication itself aren't synced on again.
+pub(crate) fn sync_metadata(c: &Connection, b: &BucketRow, r: &Row, now: i64) -> Result<()> {
+    if r.delete_marker || origin().replica_sync {
+        return Ok(());
+    }
+    let Some((_, Some(cfg))) = targets(c, &b.id)? else { return Ok(()) };
+    let vid = r.version_id();
+    let replica = match status_of(c, &b.id, &r.key, &vid)?.as_deref() {
+        Some("COMPLETED" | "PENDING") => false,
+        Some("REPLICA") => true,
+        _ => return Ok(()),
+    };
+    let mut dests: BTreeMap<String, &ReplicationRule> = BTreeMap::new();
+    for rule in cfg.rules.iter().filter(|x| x.enabled && x.matches(&r.key, &r.headers.tags) && (!replica || x.replica_modifications())) {
+        let dest = rule.dest_key();
+        if dests.get(&dest).is_none_or(|cur| rule.priority.unwrap_or(0) > cur.priority.unwrap_or(0)) {
+            dests.insert(dest, rule);
+        }
+    }
+    for (dest, rule) in dests {
+        let mut task = ReplicateTask::new(rule, &vid, None);
+        task.metadata = true;
+        let seq = take_seqs(c, 1)?;
+        insert_event(c, seq, &b.id, &r.key, &format!("replicate:{dest}"), REPLICATE, &rows::json(&task)?, now)?;
+    }
+    Ok(())
+}
+
+/// Replication Time Control's threshold: 15 minutes (the only value S3 takes).
+pub const RTC_THRESHOLD_MS: i64 = 15 * 60_000;
+
+/// What a replication event says about the version and where it was going.
+fn replication_change<'a>(name: &'a str, key: &'a str, task: &'a ReplicateTask, row: Option<&'a Row>) -> Change<'a> {
+    let mut ch = Change::new(name, key);
+    ch.version_id = Some(task.version_id.clone());
+    ch.size = row.filter(|r| r.blob_id.is_some()).map(|r| r.size).or(task.size);
+    ch.etag = row.filter(|r| r.blob_id.is_some()).map(|r| r.etag.as_str());
+    ch.replication_destination = Some(&task.destination);
+    ch.replication_rule = Some(&task.rule);
+    ch
+}
+
+/// A replication row ended at `now`: with Replication Time Control, one that took longer than
+/// the threshold reports `OperationMissedThreshold` (unless the scan did already) and
+/// `OperationReplicatedAfterThreshold` when it completed.
+fn rtc_finished(c: &Connection, src: &BucketRow, ev: &PendingEvent, task: &ReplicateTask, row: Option<&Row>, completed: bool, now: i64) -> Result<()> {
+    if !task.rtc || now - ev.created_at <= RTC_THRESHOLD_MS {
+        return Ok(());
+    }
+    if !task.missed {
+        emit(c, src, replication_change("Replication:OperationMissedThreshold", &ev.key, task, row), now)?;
+    }
+    if completed {
+        emit(c, src, replication_change("Replication:OperationReplicatedAfterThreshold", &ev.key, task, row), now)?;
+    }
+    Ok(())
+}
+
+/// Where a replica written by another deployment's replication goes, if it's there already
+/// (a retry after a lost answer): the same version id with the same content (size and CRC32C)
+/// or both delete markers. A version with that id and other content is a conflict, refused.
+/// A null version with other content is replaced (as replication between roll buckets does).
+pub(crate) fn existing_replica(c: &Connection, chain: &[String], key: &str, rw: &ReplicaWrite, content: Option<(u64, u32)>) -> Result<Option<Row>> {
+    let Some((r, _)) = versioning::find_version(c, chain, key, &rw.version_id)? else { return Ok(None) };
+    let same = match (&r.blob_id, content) {
+        (None, None) => r.delete_marker,
+        (Some(blob), Some((size, crc))) => {
+            let have: Option<(i64, i64)> = c.prepare_cached("SELECT size, crc32c FROM blobs WHERE id = ?1")?.query_row([blob], |x| Ok((x.get(0)?, x.get(1)?))).optional()?;
+            have == Some((size as i64, crc as i64))
+        }
+        _ => false,
+    };
+    match (same, rw.version_id == "null") {
+        (true, _) => Ok(Some(r)),
+        (false, true) => Ok(None),
+        (false, false) => Err(StoreError::InvalidRequest(format!("version {} of {key} already exists with other content; a replica can't replace it", rw.version_id))),
+    }
+}
+
+/// Write `row` as a replica with the source's version id and Last-Modified, at its place in
+/// the key's history by version id (versioning must be enabled). It's a `REPLICA`, and it
+/// doesn't replicate on.
+pub(crate) fn place_replica(c: &Connection, b: &BucketRow, chain: &[String], mut row: Row, rw: &ReplicaWrite, now: i64) -> Result<Row> {
+    if Mode::of(b) != Mode::Enabled {
+        return Err(StoreError::InvalidRequest("A replica can only be written to a bucket with versioning enabled".into()));
+    }
+    let valid = rw.version_id.len() == 32 && rw.version_id.bytes().all(|x| x.is_ascii_lowercase() || x.is_ascii_digit());
+    if rw.version_id != "null" && !valid {
+        return Err(StoreError::InvalidArgument(format!("Invalid replica version id {}", rw.version_id)));
+    }
+    if row.delete_marker {
+        row.lock = ObjectLock::default();
+    } else {
+        versioning::apply_lock(b, &mut row.lock, now)?;
+    }
+    row.modified_at = rw.modified_at;
+    row.is_null = rw.version_id == "null";
+    row.vid = if row.is_null { String::new() } else { rw.version_id.clone() };
+    let key = row.key.clone();
+    let stored = versioning::restore(c, b, chain, &key, row, now)?;
+    let name = if stored.delete_marker { "ObjectRemoved:DeleteMarkerCreated".to_string() } else { created() };
+    let mut ch = Change::version(&name, &stored);
+    ch.replicate = None;
+    emit(c, b, ch, now)?;
+    set_status(c, &b.id, &key, &stored.version_id(), Some("REPLICA"))?;
+    Ok(stored)
 }
 
 /// The outcome of a delete (`DeleteObject`, lifecycle) as its event: `removed` is the family
@@ -761,6 +977,11 @@ impl Store {
                 if Mode::of(&d) != Mode::Enabled {
                     return Err(StoreError::InvalidRequest(format!("Destination bucket must have versioning enabled: {}", r.destination)));
                 }
+                // As on S3: a source with Object Lock replicates retention and legal holds,
+                // so its destinations need Object Lock too.
+                if b.object_lock.is_some() && d.object_lock.is_none() {
+                    return Err(StoreError::InvalidRequest(format!("Destination bucket must have Object Lock enabled when the source bucket has it: {}", r.destination)));
+                }
             }
             c.execute(
                 "INSERT INTO bucket_config (bucket_id, kind, id, value) VALUES (?1, ?2, '', ?3) ON CONFLICT (bucket_id, kind, id) DO UPDATE SET value = excluded.value",
@@ -778,6 +999,17 @@ impl Store {
             Ok(())
         })
         .await
+    }
+
+    /// Every bucket with a replication configuration: `(bucket id, name, configuration)`.
+    pub fn replication_configs(&self) -> Result<Vec<(String, String, ReplicationConfig)>> {
+        self.read(|c| {
+            let rows = c
+                .prepare("SELECT b.id, b.name, bc.value FROM bucket_config bc JOIN buckets b ON b.id = bc.bucket_id WHERE bc.kind = 'replication' AND bc.id = '' ORDER BY b.name")?
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter().map(|(id, name, v)| Ok((id, name, serde_json::from_str(&v)?))).collect()
+        })
     }
 
     /// The bucket's webhook signing secret, created on first use (`rotate`: replaced).
@@ -885,6 +1117,12 @@ impl Store {
         })
     }
 
+    /// Some replication status was written outside the outbox (a replica from another
+    /// deployment): reads look them up from now on.
+    pub(crate) fn mark_replication_status(&self) {
+        self.events.has_status.store(true, Ordering::Relaxed);
+    }
+
     pub(crate) fn load_event_state(&self) -> Result<()> {
         let any = self.read(|c| {
             Ok(c.prepare("SELECT 1 FROM replication_status LIMIT 1")?.exists([])? || c.prepare("SELECT 1 FROM bucket_config WHERE kind = 'replication' LIMIT 1")?.exists([])?)
@@ -917,25 +1155,40 @@ impl Store {
                     return Ok(Replicated::Skipped);
                 };
                 let failed = |why: String| -> Result<Replicated> {
-                    set_status(c, &src.id, &ev.key, &task.version_id, Some("FAILED"))?;
-                    let mut ch = Change::new("Replication:OperationFailedReplication", &ev.key);
-                    ch.version_id = Some(task.version_id.clone());
-                    ch.size = row.blob_id.is_some().then_some(row.size);
-                    ch.etag = row.blob_id.is_some().then_some(row.etag.as_str());
+                    // A metadata sync that fails leaves the version's status as it was.
+                    if !task.metadata {
+                        set_status(c, &src.id, &ev.key, &task.version_id, Some("FAILED"))?;
+                    } else {
+                        metadata_done(c, &src.id, &ev.key, &task.version_id)?;
+                    }
+                    let mut ch = replication_change("Replication:OperationFailedReplication", &ev.key, &task, Some(&row));
                     ch.reason = Some(&why);
-                    ch.replication_destination = Some(&task.destination);
                     emit(c, &src, ch, now)?;
+                    rtc_finished(c, &src, ev, &task, Some(&row), false, now)?;
                     Ok(Replicated::Failed(why))
                 };
                 let dest = match find_bucket(c, &task.destination) {
                     Ok(d) => d,
-                    Err(StoreError::NoSuchBucket(_)) => return failed(format!("the destination bucket {} doesn't exist", task.destination)),
+                    Err(StoreError::NoSuchBucket(_)) => return failed(format!("DstBucketNotFound: the destination bucket {} doesn't exist", task.destination)),
                     Err(e) => return Err(e),
                 };
                 if Mode::of(&dest) != Mode::Enabled {
-                    return failed(format!("versioning isn't enabled on the destination bucket {}", task.destination));
+                    return failed(format!("DstBucketUnversioned: versioning isn't enabled on the destination bucket {}", task.destination));
                 }
                 let dchain = rows::chain(c, &dest.id)?;
+                if task.metadata {
+                    return self.sync_replica_metadata(c, &src, &dest, &dchain, ev, &task, &row, now, failed);
+                }
+                // SSE-KMS versions are only in scope with `SseKmsEncryptedObjects`, as on S3.
+                if let Some(blob) = &row.blob_id
+                    && matches!(crate::sse::load(c, blob)?, Some(crate::sse::Encryption::Kms(_)))
+                {
+                    let rule = targets(c, &src.id)?.and_then(|(_, r)| r).and_then(|r| r.rules.into_iter().find(|x| x.id == task.rule));
+                    if !rule.is_some_and(|r| r.sse_kms_objects()) {
+                        set_status(c, &src.id, &ev.key, &task.version_id, None)?;
+                        return Ok(Replicated::Skipped);
+                    }
+                }
                 if versioning::find_version(c, &dchain, &ev.key, &task.version_id)?.is_none() {
                     // Refusals first, before anything changes: a new null version replaces the
                     // destination's, which must be deletable.
@@ -964,11 +1217,96 @@ impl Store {
                 }
                 set_status(c, &dest.id, &ev.key, &task.version_id, Some("REPLICA"))?;
                 complete_if_last(c, &src.id, &ev.key, &task.version_id)?;
+                rtc_finished(c, &src, ev, &task, Some(&row), true, now)?;
                 Ok(Replicated::Completed)
             })
             .await?;
         self.events.has_status.store(true, Ordering::Relaxed);
         Ok(out)
+    }
+
+    /// A metadata-only row between roll buckets: the replica (the same version id in the
+    /// destination) takes the version's tags, ACL (unless the rule makes replicas the
+    /// destination's) and, in a bucket with Object Lock, its retention and legal hold. A
+    /// retention change that Object Lock forbids on the replica (shortening a COMPLIANCE one)
+    /// fails. The row is already removed.
+    #[allow(clippy::too_many_arguments)]
+    fn sync_replica_metadata(
+        &self,
+        c: &Connection,
+        src: &BucketRow,
+        dest: &BucketRow,
+        dchain: &[String],
+        ev: &PendingEvent,
+        task: &ReplicateTask,
+        row: &Row,
+        now: i64,
+        failed: impl FnOnce(String) -> Result<Replicated>,
+    ) -> Result<Replicated> {
+        if versioning::find_version(c, dchain, &ev.key, &task.version_id)?.is_none() {
+            return failed(format!("DstVersionNotFound: version {} of {} isn't in {}", task.version_id, ev.key, task.destination));
+        }
+        let lock = dest.object_lock.is_some();
+        let applied = versioning::update_version(c, dest, dchain, &ev.key, Some(&task.version_id), now, |d| {
+            d.headers.tags = row.headers.tags.clone();
+            if !task.owner_override {
+                d.headers.acl = row.headers.acl.clone();
+            }
+            if lock {
+                versioning::check_retention_change(&d.lock, row.lock.mode.as_deref().zip(row.lock.retain_until), now, true)?;
+                d.lock.mode = row.lock.mode.clone();
+                d.lock.retain_until = row.lock.retain_until;
+                if row.lock.legal_hold.is_some() {
+                    d.lock.legal_hold = row.lock.legal_hold;
+                }
+            }
+            Ok(())
+        });
+        match applied {
+            Ok(_) => {}
+            Err(StoreError::ObjectLocked(why)) => return failed(format!("DstPutRetentionNotPermitted: {why}")),
+            Err(e) => return Err(e),
+        }
+        metadata_done(c, &src.id, &ev.key, &task.version_id)?;
+        rtc_finished(c, src, ev, task, Some(row), true, now)?;
+        Ok(Replicated::Completed)
+    }
+
+    /// Replication Time Control: rows queued longer than the threshold ago that haven't
+    /// reported it yet report `OperationMissedThreshold` now (once: the row remembers), in one
+    /// durable write. Returns how many.
+    pub async fn replication_missed_threshold(&self) -> Result<usize> {
+        let now = self.now();
+        let due: Vec<PendingEvent> = self.read(|c| {
+            Ok(c.prepare_cached(&format!(
+                "SELECT {EVENT_COLS} FROM events WHERE kind = 'replicate' AND created_at < ?1
+                   AND json_extract(body, '$.rtc') = 1 AND json_extract(body, '$.missed') IS NULL ORDER BY seq LIMIT 500"
+            ))?
+            .query_map([now - RTC_THRESHOLD_MS], event_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+        })?;
+        if due.is_empty() {
+            return Ok(0);
+        }
+        self.write(|c| {
+            let mut n = 0;
+            for ev in &due {
+                let Ok(mut task) = serde_json::from_str::<ReplicateTask>(&ev.body) else { continue };
+                // Still there (and not reported) inside this transaction.
+                if !c.prepare_cached("SELECT 1 FROM events WHERE seq = ?1 AND json_extract(body, '$.missed') IS NULL")?.exists([ev.seq])? {
+                    continue;
+                }
+                let Some(src) = find_bucket_id(c, &ev.bucket_id)? else { continue };
+                let chain = rows::chain(c, &src.id)?;
+                let row = versioning::find_version(c, &chain, &ev.key, &task.version_id)?.map(|(r, _)| r);
+                emit(c, &src, replication_change("Replication:OperationMissedThreshold", &ev.key, &task, row.as_ref()), now)?;
+                task.missed = true;
+                c.prepare_cached("UPDATE events SET body = ?2 WHERE seq = ?1")?.execute(params![ev.seq, rows::json(&task)?])?;
+                n += 1;
+            }
+            Ok(n)
+        })
+        .await
     }
 
     /// Give up on a [`REPLICATE`] row (it kept failing past the retention window): the source
@@ -980,13 +1318,16 @@ impl Store {
             if !remove_event(c, ev.seq, now)? {
                 return Ok(());
             }
-            set_status(c, &ev.bucket_id, &ev.key, &task.version_id, Some("FAILED"))?;
+            if !task.metadata {
+                set_status(c, &ev.bucket_id, &ev.key, &task.version_id, Some("FAILED"))?;
+            } else {
+                metadata_done(c, &ev.bucket_id, &ev.key, &task.version_id)?;
+            }
             if let Some(src) = find_bucket_id(c, &ev.bucket_id)? {
-                let mut ch = Change::new("Replication:OperationFailedReplication", &ev.key);
-                ch.version_id = Some(task.version_id.clone());
+                let mut ch = replication_change("Replication:OperationFailedReplication", &ev.key, &task, None);
                 ch.reason = Some(why);
-                ch.replication_destination = Some(&task.destination);
                 emit(c, &src, ch, now)?;
+                rtc_finished(c, &src, ev, &task, None, false, now)?;
             }
             Ok(())
         })
@@ -1145,6 +1486,26 @@ pub struct ReplicaSource {
     pub encryption: Option<crate::sse::Encryption>,
     /// The bucket's replication rule the row was queued for (`None`: it's gone since).
     pub rule: Option<ReplicationRule>,
+    /// The version the target made of it earlier, if it was replicated already (metadata
+    /// rows).
+    pub target_version_id: Option<String>,
+    /// Whether the source bucket has Object Lock (the version's retention and legal hold go
+    /// with it).
+    pub object_lock: bool,
+}
+
+/// Where a version was replicated to outside roll (`replica_versions`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReplicaVersion {
+    /// The destination bucket.
+    pub bucket: String,
+    /// The replication target it's on.
+    pub target: String,
+    /// The replica's version id there (the source's own on another roll deployment; the
+    /// target's own on AWS S3 and other services). `None`: the target didn't say (an
+    /// unversioned answer).
+    pub version_id: Option<String>,
+    pub replicated_at: i64,
 }
 
 /// One destination's replication backlog (Replication Time Control's metrics).
@@ -1198,8 +1559,31 @@ impl Store {
                 row.meta()?
             };
             meta.version_id = row.version_id();
+            let target_version_id: Option<String> = c
+                .prepare_cached("SELECT target_version_id FROM replica_versions WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3 AND dest = ?4")?
+                .query_row(params![src.id, ev.key, task.version_id, task.dest_key()], |r| r.get(0))
+                .optional()?
+                .flatten();
+            let object_lock = src.object_lock.is_some();
             let bucket = crate::store::bucket_view(c, src)?;
-            Ok(Some(ReplicaSource { bucket, task: task.clone(), meta, delete_marker, crc32c, encryption, rule }))
+            Ok(Some(ReplicaSource { bucket, task: task.clone(), meta, delete_marker, crc32c, encryption, rule, target_version_id, object_lock }))
+        })
+    }
+
+    /// Where a version was replicated to outside roll, and which version it became there.
+    pub fn replica_versions(&self, bucket_id: &str, key: &str, version_id: &str) -> Result<Vec<ReplicaVersion>> {
+        self.read(|c| {
+            let rows = c
+                .prepare_cached("SELECT dest, target_version_id, replicated_at FROM replica_versions WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3 ORDER BY dest")?
+                .query_map(params![bucket_id, key, version_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows
+                .into_iter()
+                .map(|(dest, version_id, replicated_at)| {
+                    let (bucket, target) = dest.split_once('@').unwrap_or((dest.as_str(), ""));
+                    ReplicaVersion { bucket: bucket.to_string(), target: target.to_string(), version_id, replicated_at }
+                })
+                .collect())
         })
     }
 
@@ -1208,7 +1592,7 @@ impl Store {
     /// waits; `Err(why)` makes it `FAILED` with an `OperationFailedReplication` event. `None`:
     /// out of the rule's scope after all (an SSE-KMS version without `SseKmsEncryptedObjects`),
     /// no status. Returns how it ended (`Skipped` if the row was gone already).
-    pub async fn finish_external_replication(&self, ev: &PendingEvent, outcome: Option<std::result::Result<(), String>>) -> Result<Replicated> {
+    pub async fn finish_external_replication(&self, ev: &PendingEvent, outcome: Option<std::result::Result<Option<String>, String>>) -> Result<Replicated> {
         let task: ReplicateTask = serde_json::from_str(&ev.body)?;
         let now = self.now();
         let out = self
@@ -1216,24 +1600,47 @@ impl Store {
                 if !remove_event(c, ev.seq, now)? {
                     return Ok(Replicated::Skipped);
                 }
+                let src = find_bucket_id(c, &ev.bucket_id)?;
                 match outcome {
                     None => {
-                        set_status(c, &ev.bucket_id, &ev.key, &task.version_id, None)?;
+                        if !task.metadata {
+                            set_status(c, &ev.bucket_id, &ev.key, &task.version_id, None)?;
+                        } else {
+                            metadata_done(c, &ev.bucket_id, &ev.key, &task.version_id)?;
+                        }
                         Ok(Replicated::Skipped)
                     }
-                    Some(Ok(())) => {
-                        complete_if_last(c, &ev.bucket_id, &ev.key, &task.version_id)?;
+                    Some(Ok(target_vid)) => {
+                        if !task.metadata {
+                            // Which version the target made of it: how the replica is found
+                            // from its source (and kept in sync).
+                            c.prepare_cached(
+                                "INSERT INTO replica_versions (bucket_id, key, version_id, dest, target_version_id, replicated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                                 ON CONFLICT (bucket_id, key, version_id, dest) DO UPDATE SET target_version_id = excluded.target_version_id, replicated_at = excluded.replicated_at",
+                            )?
+                            .execute(params![ev.bucket_id, ev.key, task.version_id, task.dest_key(), target_vid, now])?;
+                        }
+                        if task.metadata {
+                            metadata_done(c, &ev.bucket_id, &ev.key, &task.version_id)?;
+                        } else {
+                            complete_if_last(c, &ev.bucket_id, &ev.key, &task.version_id)?;
+                        }
+                        if let Some(src) = &src {
+                            rtc_finished(c, src, ev, &task, None, true, now)?;
+                        }
                         Ok(Replicated::Completed)
                     }
                     Some(Err(why)) => {
-                        set_status(c, &ev.bucket_id, &ev.key, &task.version_id, Some("FAILED"))?;
-                        if let Some(src) = find_bucket_id(c, &ev.bucket_id)? {
-                            let mut ch = Change::new("Replication:OperationFailedReplication", &ev.key);
-                            ch.version_id = Some(task.version_id.clone());
-                            ch.size = task.size;
+                        if !task.metadata {
+                            set_status(c, &ev.bucket_id, &ev.key, &task.version_id, Some("FAILED"))?;
+                        } else {
+                            metadata_done(c, &ev.bucket_id, &ev.key, &task.version_id)?;
+                        }
+                        if let Some(src) = &src {
+                            let mut ch = replication_change("Replication:OperationFailedReplication", &ev.key, &task, None);
                             ch.reason = Some(&why);
-                            ch.replication_destination = Some(&task.destination);
-                            emit(c, &src, ch, now)?;
+                            emit(c, src, ch, now)?;
+                            rtc_finished(c, src, ev, &task, None, false, now)?;
                         }
                         Ok(Replicated::Failed(why))
                     }
@@ -1244,28 +1651,28 @@ impl Store {
         Ok(out)
     }
 
-    /// A bucket's pending replication by destination ([`ReplicationRule::dest_key`]): what
-    /// S3's Replication Time Control metrics report.
+    /// A bucket's pending replication by rule id: what S3's replication metrics report
+    /// (`OperationsPendingReplication` counts metadata operations too; `BytesPendingReplication`
+    /// the versions' sizes).
     pub fn replication_backlog(&self, bucket_id: &str) -> Result<BTreeMap<String, ReplicationBacklog>> {
         self.read(|c| {
             let rows = c
                 .prepare_cached(
-                    "SELECT dest, count(*), coalesce(sum(json_extract(body, '$.size')), 0), min(created_at) FROM events
-                     WHERE bucket_id = ?1 AND kind = 'replicate' GROUP BY dest",
+                    "SELECT coalesce(json_extract(body, '$.rule'), ''), count(*), coalesce(sum(json_extract(body, '$.size')), 0), min(created_at) FROM events
+                     WHERE bucket_id = ?1 AND kind = 'replicate' GROUP BY 1",
                 )?
                 .query_map([bucket_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows
-                .into_iter()
-                .map(|(d, n, b, at)| (d.strip_prefix("replicate:").unwrap_or(&d).to_string(), ReplicationBacklog { operations: n.max(0) as u64, bytes: b.max(0) as u64, oldest_at: at }))
-                .collect())
+            Ok(rows.into_iter().map(|(rule, n, b, at)| (rule, ReplicationBacklog { operations: n.max(0) as u64, bytes: b.max(0) as u64, oldest_at: at })).collect())
         })
     }
 }
 
-/// A deleted bucket's replication statuses go with it (its outbox rows are still delivered).
+/// A deleted bucket's replication statuses and replica mappings go with it (its outbox rows
+/// are still delivered).
 pub(crate) fn drop_bucket(c: &Connection, bucket_id: &str) -> Result<()> {
     c.execute("DELETE FROM replication_status WHERE bucket_id = ?1", [bucket_id])?;
+    c.execute("DELETE FROM replica_versions WHERE bucket_id = ?1", [bucket_id])?;
     Ok(())
 }
 
@@ -1359,5 +1766,16 @@ mod tests {
         assert!(!r.replicates_markers());
         assert!(ReplicationRule { legacy_prefix: Some(String::new()), ..Default::default() }.replicates_markers());
         assert_eq!(sequencer(255), "0000000000000000FF");
+        let r = ReplicationRule {
+            source_selection: Some("<SourceSelectionCriteria><SseKmsEncryptedObjects><Status>Enabled</Status></SseKmsEncryptedObjects><ReplicaModifications><Status>Disabled</Status></ReplicaModifications></SourceSelectionCriteria>".into()),
+            destination_extra: Some("<EncryptionConfiguration><ReplicaKmsKeyID> arn:k </ReplicaKmsKeyID></EncryptionConfiguration><Metrics><Status>Enabled</Status></Metrics>".into()),
+            ..Default::default()
+        };
+        assert!(r.sse_kms_objects() && !r.replica_modifications());
+        assert!(r.metrics() && !r.replication_time());
+        assert_eq!(r.replica_kms_key().as_deref(), Some("arn:k"));
+        assert!(!ReplicationRule::default().metrics());
+        assert_eq!(xml_section("<A><B>x</B></A>", "B"), Some("x"));
+        assert_eq!(xml_section("<A/>", "B"), None);
     }
 }

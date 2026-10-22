@@ -76,12 +76,12 @@ async fn to_another_roll() {
         let p = a.client.upload_part().bucket("src").key("big.bin").upload_id(id).part_number(n).body(ByteStream::from(chunk.to_vec())).send().await.unwrap();
         parts.push(aws_sdk_s3::types::CompletedPart::builder().part_number(n).e_tag(p.e_tag().unwrap()).build());
     }
-    a.client.complete_multipart_upload().bucket("src").key("big.bin").upload_id(id).multipart_upload(aws_sdk_s3::types::CompletedMultipartUpload::builder().set_parts(Some(parts)).build()).send().await.unwrap();
+    let big_done = a.client.complete_multipart_upload().bucket("src").key("big.bin").upload_id(id).multipart_upload(aws_sdk_s3::types::CompletedMultipartUpload::builder().set_parts(Some(parts)).build()).send().await.unwrap();
     let head = a.client.head_object().bucket("src").key("dir/small.txt").version_id(small.version_id().unwrap()).send().await.unwrap();
     assert_eq!(head.replication_status().map(|s| s.as_str()), Some("PENDING"));
     let src_bucket = a.store.bucket("src").unwrap();
     let pending = a.store.replication_backlog(&src_bucket.id).unwrap();
-    let p = &pending["dst@other-roll"];
+    let p = &pending["all"];
     assert!(p.operations >= 2 && p.bytes >= big.len() as u64, "{p:?}");
 
     a.store.flush_meter().unwrap();
@@ -105,17 +105,206 @@ async fn to_another_roll() {
     let head = a.client.head_object().bucket("src").key("dir/small.txt").send().await.unwrap();
     assert_eq!(head.replication_status().map(|s| s.as_str()), Some("COMPLETED"));
     assert!(a.store.replication_backlog(&src_bucket.id).unwrap().is_empty());
-    let latency = sa.notifier.replication_latency(&src_bucket.id);
-    assert!(latency["dst@other-roll"].replicated >= 3, "{latency:?}");
+    let metrics = sa.notifier.replication_metrics(&src_bucket.id);
+    assert!(metrics["all"].replicated >= 3, "{metrics:?}");
     assert_eq!(sa.notifier.server_side_copies(), 0, "another service: streamed");
 
-    // Delete markers replicate as deletes.
-    a.client.delete_object().bucket("src").key("dir/small.txt").send().await.unwrap();
+    // Another roll deployment keeps the source's version ids and Last-Modified (roll's
+    // replication extension), as S3's replication does, and the replicas are REPLICAs.
+    let svid = small.version_id().unwrap();
+    let replica = b.client.head_object().bucket("dst").key("dir/small.txt").send().await.unwrap();
+    assert_eq!(replica.version_id(), Some(svid));
+    assert_eq!(replica.replication_status().map(|s| s.as_str()), Some("REPLICA"));
+    let src_meta = a.store.get_object_version("src", "dir/small.txt", Some(svid)).unwrap();
+    let dst_meta = b.store.get_object_version("dst", "dir/small.txt", Some(svid)).unwrap();
+    assert_eq!(dst_meta.modified_at, src_meta.modified_at, "Last-Modified to the millisecond");
+    assert_eq!(dst_meta.etag, src_meta.etag);
+    let gb = b.client.head_object().bucket("dst").key("big.bin").send().await.unwrap();
+    assert_eq!(gb.version_id(), big_done.version_id());
+    assert_eq!(gb.e_tag(), big_done.e_tag(), "part for part: the source's multipart ETag");
+    let found = a.store.replica_versions(&src_bucket.id, "dir/small.txt", svid).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].bucket.as_str(), found[0].target.as_str(), found[0].version_id.as_deref()), ("dst", "other-roll", Some(svid)));
+
+    // Tags changed on the source go to the replica (on the same version).
+    a.client
+        .put_object_tagging()
+        .bucket("src")
+        .key("dir/small.txt")
+        .version_id(svid)
+        .tagging(aws_sdk_s3::types::Tagging::builder().tag_set(aws_sdk_s3::types::Tag::builder().key("new").value("1").build().unwrap()).build().unwrap())
+        .send()
+        .await
+        .unwrap();
+    sa.dispatch_events().await.unwrap();
+    let tags = b.client.get_object_tagging().bucket("dst").key("dir/small.txt").version_id(svid).send().await.unwrap();
+    assert_eq!(tags.tag_set().iter().map(|t| t.key()).collect::<Vec<_>>(), ["new"]);
+    assert_eq!(b.store.events_backlog().unwrap(), 0);
+
+    // Delete markers replicate as deletes, with the source marker's version id.
+    let marker = a.client.delete_object().bucket("src").key("dir/small.txt").send().await.unwrap();
     sa.dispatch_events().await.unwrap();
     let e = b.client.head_object().bucket("dst").key("dir/small.txt").send().await.unwrap_err();
     assert_eq!(e.raw_response().map(|r| r.status().as_u16()), Some(404));
     let versions = b.client.list_object_versions().bucket("dst").prefix("dir/").send().await.unwrap();
     assert_eq!(versions.delete_markers().len(), 1);
+    assert_eq!(versions.delete_markers()[0].version_id(), marker.version_id());
+}
+
+/// A PUT carrying roll's replication extension (as `a`'s replication sends it to `b`).
+async fn replica_put(c: &aws_sdk_s3::Client, bucket: &str, key: &str, vid: &str, at: i64, body: &'static [u8]) -> Result<aws_sdk_s3::operation::put_object::PutObjectOutput, (u16, String)> {
+    let (v, m) = (vid.to_string(), at.to_string());
+    c.put_object()
+        .bucket(bucket)
+        .key(key)
+        .body(ByteStream::from_static(body))
+        .customize()
+        .mutate_request(move |r| {
+            r.headers_mut().insert("x-roll-replica-version-id", v.clone());
+            r.headers_mut().insert("x-roll-replica-last-modified", m.clone());
+        })
+        .send()
+        .await
+        .map_err(|e| (e.raw_response().map_or(0, |r| r.status().as_u16()), aws_sdk_s3::error::ProvideErrorMetadata::code(&e).unwrap_or_default().to_string()))
+}
+
+/// The receiving side of roll's replication extension: only identities that may replicate,
+/// only into versioned buckets; a retry of the same replica answers as the first did, another
+/// one with the same version id is refused; version ids keep their order.
+#[tokio::test(flavor = "multi_thread")]
+async fn replica_writes_are_checked() {
+    let b = start().await;
+    versioned(&b.client, "dst").await;
+    b.client.create_bucket().bucket("plain").send().await.unwrap();
+    let older = s3_store::version_id(now_s() * 1000 - 60_000);
+    let newer = s3_store::version_id(now_s() * 1000 - 1_000);
+    let at = now_s() * 1000 - 60_000;
+    // A write key can't rewrite history.
+    let w = b.store.create_key("writer", s3_store::Permission::Write, None).await.unwrap();
+    let wc = client(&b.endpoint, &w.id, &w.secret);
+    assert_eq!(replica_put(&wc, "dst", "k", &older, at, b"one").await.unwrap_err(), (403, "AccessDenied".into()));
+    // Not into an unversioned bucket; not with a malformed version id.
+    assert_eq!(replica_put(&b.client, "plain", "k", &older, at, b"one").await.unwrap_err(), (400, "InvalidRequest".into()));
+    assert_eq!(replica_put(&b.client, "dst", "k", "nope", at, b"one").await.unwrap_err(), (400, "InvalidArgument".into()));
+    // The newer one first, then the older: they keep their order by version id.
+    let n = replica_put(&b.client, "dst", "k", &newer, at + 59_000, b"two").await.unwrap();
+    assert_eq!(n.version_id(), Some(newer.as_str()));
+    assert_eq!(b.client.head_object().bucket("dst").key("k").send().await.unwrap().replication_status().map(|s| s.as_str()), Some("REPLICA"));
+    let o = replica_put(&b.client, "dst", "k", &older, at, b"one").await.unwrap();
+    assert_eq!(o.version_id(), Some(older.as_str()));
+    let cur = b.client.get_object().bucket("dst").key("k").send().await.unwrap();
+    assert_eq!(cur.version_id(), Some(newer.as_str()), "the newer version stays current");
+    let vs = b.client.list_object_versions().bucket("dst").send().await.unwrap();
+    assert_eq!(vs.versions().iter().map(|v| v.version_id().unwrap()).collect::<Vec<_>>(), [newer.as_str(), older.as_str()]);
+    assert_eq!(b.store.get_object_version("dst", "k", Some(&older)).unwrap().modified_at, at);
+    // A retry (same content) is answered again; other content under that id is refused.
+    let again = replica_put(&b.client, "dst", "k", &older, at, b"one").await.unwrap();
+    assert_eq!(again.version_id(), Some(older.as_str()));
+    assert_eq!(b.client.list_object_versions().bucket("dst").send().await.unwrap().versions().len(), 2);
+    assert_eq!(replica_put(&b.client, "dst", "k", &older, at, b"other").await.unwrap_err(), (400, "InvalidRequest".into()));
+    // A bucket policy granting s3:ReplicateObject lets the write key replicate (as a
+    // replication role's permission does).
+    let policy = format!(r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"{}"}},"Action":["s3:ReplicateObject","s3:ReplicateDelete"],"Resource":"arn:aws:s3:::dst/*"}}]}}"#, w.id);
+    b.client.put_bucket_policy().bucket("dst").policy(policy).send().await.unwrap();
+    let third = s3_store::version_id(now_s() * 1000 - 30_000);
+    assert_eq!(replica_put(&wc, "dst", "k2", &third, at, b"three").await.unwrap().version_id(), Some(third.as_str()));
+}
+
+/// Object Lock replicates to another roll deployment: it's checked when the configuration is
+/// put (the target bucket must have Object Lock), and retention and legal hold are on the
+/// replica, then kept in sync.
+#[tokio::test(flavor = "multi_thread")]
+async fn object_lock_to_another_roll() {
+    use aws_sdk_s3::types::{ObjectLockLegalHold, ObjectLockLegalHoldStatus, ObjectLockMode, ObjectLockRetentionMode};
+    let (a, sa, b) = pair().await;
+    b.client.create_bucket().bucket("locked").object_lock_enabled_for_bucket(true).send().await.unwrap();
+    let spec = TargetSpec { endpoint: Some(b.endpoint.clone()), region: Some(REGION.into()), access_key_id: Some(ACCESS.into()), secret_access_key: Some(s3_store::Secret::new(SECRET)), path_style: Some(true), buckets: vec!["locked".into()] };
+    a.store.put_replication_target("lock-roll", &spec, true).await.unwrap();
+    a.client.create_bucket().bucket("lsrc").object_lock_enabled_for_bucket(true).send().await.unwrap();
+    let e = a.client.put_bucket_replication().bucket("lsrc").replication_configuration(ReplicationConfiguration::builder().role("r").rules(rule("l", "dst", false)).build().unwrap()).send().await.unwrap_err();
+    assert_eq!(e.as_service_error().and_then(|s| aws_sdk_s3::error::ProvideErrorMetadata::code(s)), Some("InvalidRequest"), "dst has no Object Lock");
+    a.client.put_bucket_replication().bucket("lsrc").replication_configuration(ReplicationConfiguration::builder().role("r").rules(rule("l", "locked", false)).build().unwrap()).send().await.unwrap();
+    let until = aws_sdk_s3::primitives::DateTime::from_secs(now_s() + 86_400);
+    let v = a
+        .client
+        .put_object()
+        .bucket("lsrc")
+        .key("held")
+        .object_lock_mode(ObjectLockMode::Governance)
+        .object_lock_retain_until_date(until)
+        .object_lock_legal_hold_status(ObjectLockLegalHoldStatus::On)
+        .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Crc32)
+        .body(ByteStream::from_static(b"locked"))
+        .send()
+        .await
+        .unwrap();
+    sa.dispatch_events().await.unwrap();
+    let vid = v.version_id().unwrap();
+    let r = b.client.get_object_retention().bucket("locked").key("held").version_id(vid).send().await.unwrap();
+    assert_eq!(r.retention().unwrap().mode(), Some(&ObjectLockRetentionMode::Governance));
+    assert_eq!(r.retention().unwrap().retain_until_date().map(|d| d.secs()), Some(until.secs()));
+    let h = b.client.get_object_legal_hold().bucket("locked").key("held").version_id(vid).send().await.unwrap();
+    assert_eq!(h.legal_hold().unwrap().status(), Some(&ObjectLockLegalHoldStatus::On));
+    // A locked replica can't be deleted on the target.
+    assert!(b.client.delete_object().bucket("locked").key("held").version_id(vid).send().await.is_err());
+    a.client.put_object_legal_hold().bucket("lsrc").key("held").version_id(vid).legal_hold(ObjectLockLegalHold::builder().status(ObjectLockLegalHoldStatus::Off).build()).send().await.unwrap();
+    let later = aws_sdk_s3::primitives::DateTime::from_secs(now_s() + 2 * 86_400);
+    a.client
+        .put_object_retention()
+        .bucket("lsrc")
+        .key("held")
+        .version_id(vid)
+        .retention(aws_sdk_s3::types::ObjectLockRetention::builder().mode(ObjectLockRetentionMode::Governance).retain_until_date(later).build())
+        .send()
+        .await
+        .unwrap();
+    sa.dispatch_events().await.unwrap();
+    let h = b.client.get_object_legal_hold().bucket("locked").key("held").version_id(vid).send().await.unwrap();
+    assert_eq!(h.legal_hold().unwrap().status(), Some(&ObjectLockLegalHoldStatus::Off));
+    let r = b.client.get_object_retention().bucket("locked").key("held").version_id(vid).send().await.unwrap();
+    assert_eq!(r.retention().unwrap().retain_until_date().map(|d| d.secs()), Some(later.secs()), "extended on the replica too");
+}
+
+/// Replication is prompt (S3's Replication Time Control SLA is 15 minutes; roll's dispatcher
+/// looks every 250 ms): the latency from each write to its replica on another roll deployment,
+/// measured and reported.
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_latency_is_measured() {
+    let (a, sa) = start_full(|_| {}, |_| {}).await;
+    let b = start().await;
+    versioned(&b.client, "dst").await;
+    let spec = TargetSpec { endpoint: Some(b.endpoint.clone()), region: Some(REGION.into()), access_key_id: Some(ACCESS.into()), secret_access_key: Some(s3_store::Secret::new(SECRET)), path_style: Some(true), buckets: vec!["dst".into()] };
+    a.store.put_replication_target("other-roll", &spec, true).await.unwrap();
+    versioned(&a.client, "src").await;
+    a.client.put_bucket_replication().bucket("src").replication_configuration(ReplicationConfiguration::builder().role("r").rules(rule("all", "dst", false)).build().unwrap()).send().await.unwrap();
+    let n = 20;
+    let mut latencies = Vec::new();
+    for i in 0..n {
+        let started = std::time::Instant::now();
+        let key = format!("k{i}");
+        let put = a.client.put_object().bucket("src").key(&key).body(ByteStream::from(data(4096, i as u8))).send().await.unwrap();
+        loop {
+            if let Ok(h) = b.client.head_object().bucket("dst").key(&key).send().await
+                && h.version_id() == put.version_id()
+            {
+                break;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(30), "{key} wasn't replicated within 30 s");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        latencies.push(started.elapsed().as_millis() as u64);
+    }
+    latencies.sort();
+    let (p50, max) = (latencies[n / 2], latencies[n - 1]);
+    println!("replication latency to another roll deployment over {n} writes: p50 {p50} ms, max {max} ms");
+    assert!(max < 5_000, "replication should take well under the 15-minute threshold: {latencies:?}");
+    let src = a.store.bucket("src").unwrap();
+    // The source's status lands just after the replica does.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let m = sa.notifier.replication_metrics(&src.id);
+    assert_eq!(m["all"].replicated, n as u64);
+    assert!(m["all"].max_ms < 5_000, "{m:?}");
+    println!("roll's own ReplicationLatency (write to replica): last {} ms, max {} ms", m["all"].last_ms, m["all"].max_ms);
 }
 
 #[tokio::test(flavor = "multi_thread")]

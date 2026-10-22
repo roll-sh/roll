@@ -584,12 +584,22 @@ async fn aws_cli_access_points() {
         aws(&["s3", "cp", "/data/up.txt", &format!("s3://{arn}/up.txt")]);
         aws(&["s3api", "get-object", "--bucket", &arn, "--key", "up.txt", "/data/back.txt"]);
         assert_eq!(std::fs::read(path.join("back.txt")).unwrap(), b"uploaded by arn\n");
-        created["Alias"].as_str().unwrap().to_string()
+        // A copy whose source is named by the access point's object ARN (the CLI URL-encodes
+        // the value), and by its alias.
+        let copied: serde_json::Value = serde_json::from_str(&aws(&["s3api", "copy-object", "--bucket", "apcli", "--key", "copied/one.txt", "--copy-source", &format!("{arn}/object/seen/by-arn.txt")])).unwrap();
+        assert!(copied["CopyObjectResult"]["ETag"].as_str().is_some(), "{copied}");
+        let alias = created["Alias"].as_str().unwrap().to_string();
+        aws(&["s3api", "copy-object", "--bucket", "apcli", "--key", "copied/two.txt", "--copy-source", &format!("{alias}/up.txt")]);
+        alias
     })
     .await;
     let got = t.client.get_object().bucket(&alias).key("up.txt").send().await.unwrap();
     assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"uploaded by arn\n");
     assert!(t.client.head_object().bucket("apcli").key("up.txt").send().await.is_ok());
+    let one = t.client.get_object().bucket("apcli").key("copied/one.txt").send().await.unwrap();
+    assert_eq!(one.body.collect().await.unwrap().into_bytes().as_ref(), b"through an access point\n");
+    let two = t.client.get_object().bucket("apcli").key("copied/two.txt").send().await.unwrap();
+    assert_eq!(two.body.collect().await.unwrap().into_bytes().as_ref(), b"uploaded by arn\n");
 }
 
 /// IAM with the AWS CLI (`--endpoint-url` for every service): the account root creates a user,
