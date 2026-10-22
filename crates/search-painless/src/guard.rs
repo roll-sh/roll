@@ -51,6 +51,24 @@ thread_local! {
     /// Recursion depth of [`drop_nested`].
     static DROP_DEPTH: Cell<u32> = const { Cell::new(0) };
     static DEFERRED: RefCell<Vec<Deferred>> = const { RefCell::new(Vec::new()) };
+    static PENDING_THROWN: RefCell<Option<Thrown>> = const { RefCell::new(None) };
+}
+
+/// Where Java detects a `BigInteger` range overflow (picks the JDK frames of the exception).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BigSite {
+    /// `checkRange` in a constructor.
+    Range,
+    /// `checkRange` of `shiftLeft`'s result.
+    ShiftLeft,
+    /// `checkRange` of `shiftRight(Integer.MIN_VALUE)`'s result.
+    ShiftRight,
+    /// `pow`: the power of two does not shift by an `int`.
+    PowShift,
+    /// `pow`: the size estimate.
+    Pow,
+    /// `pow` of ±2^k: its final `shiftLeft`.
+    PowShiftLeft,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -58,6 +76,10 @@ enum Pending {
     None,
     Overflow,
     OutOfMemory,
+    /// `BigInteger would overflow supported range`, from arithmetic that returns plain values.
+    BigOverflow(BigSite),
+    /// Any other exception, held in `PENDING_THROWN`.
+    Thrown,
 }
 
 /// The current stack address (approximately: the address of a local).
@@ -133,6 +155,37 @@ pub fn note_out_of_memory() {
     }
 }
 
+/// Records a `BigInteger` result outside Java's supported range (2^31 - 1 bits) inside
+/// arithmetic that cannot return an error; it surfaces as Java's `ArithmeticException` after the
+/// library call.
+#[cold]
+pub fn note_big_overflow(site: BigSite) {
+    if PENDING.get() == Pending::None {
+        PENDING.set(Pending::BigOverflow(site));
+    }
+}
+
+/// Takes a recorded `BigInteger` overflow (only that kind of pending failure).
+pub fn take_big_overflow() -> Option<BigSite> {
+    match PENDING.get() {
+        Pending::BigOverflow(site) => {
+            PENDING.set(Pending::None);
+            Some(site)
+        }
+        _ => None,
+    }
+}
+
+/// Records an exception raised inside code that cannot return one (a `toString` building text
+/// the JDK would fail to build); it surfaces after the library call.
+#[cold]
+pub fn note_thrown(t: Thrown) {
+    if PENDING.get() == Pending::None {
+        PENDING.set(Pending::Thrown);
+        PENDING_THROWN.with(|p| *p.borrow_mut() = Some(t));
+    }
+}
+
 /// For recursions over script data that cannot return an error: whether to stop here (the
 /// overflow is recorded and surfaces as a `stack_overflow_error` after the library call).
 #[inline(always)]
@@ -164,6 +217,8 @@ pub fn take_pending() -> Option<Thrown> {
             PENDING.set(Pending::None);
             Some(match p {
                 Pending::OutOfMemory => out_of_memory("Java heap space"),
+                Pending::BigOverflow(site) => crate::bignum::overflow_error(site, &[]),
+                Pending::Thrown => PENDING_THROWN.with(|p| p.borrow_mut().take()).unwrap_or_else(|| out_of_memory("Java heap space")),
                 _ => stack_overflow(),
             })
         }
@@ -240,6 +295,114 @@ pub fn check_elements(len: usize) -> Result<(), Thrown> {
         return Ok(());
     }
     check_array(len as u64, std::mem::size_of::<Value>() as u64)
+}
+
+/// The capacity of a `java.lang.StringBuilder` (JDK 27, compact strings) being filled by library
+/// code, so text the JDK builds in one can fail where and how it does: an `int` length overflow is
+/// `OutOfMemoryError: Required array length <old> + <growth> is too large`, and each buffer it
+/// would allocate is checked against [`max_object_bytes`] before the text itself is built.
+pub struct JavaSb {
+    /// `value.length` in bytes.
+    bytes: i32,
+    /// 0 Latin-1, 1 UTF-16.
+    coder: u32,
+    count: i32,
+}
+
+impl Default for JavaSb {
+    fn default() -> JavaSb {
+        JavaSb { bytes: 16, coder: 0, count: 0 }
+    }
+}
+
+const SOFT_MAX_ARRAY_LENGTH: i32 = i32::MAX - 8;
+
+/// `ArraysSupport.newLength`.
+fn new_length(old: i32, min_growth: i32, pref_growth: i32) -> Result<i32, Thrown> {
+    let pref = old.wrapping_add(min_growth.max(pref_growth));
+    if 0 < pref && pref <= SOFT_MAX_ARRAY_LENGTH {
+        return Ok(pref);
+    }
+    let min = old.wrapping_add(min_growth);
+    if min < 0 {
+        let mut t = out_of_memory(&format!("Required array length {old} + {min_growth} is too large"));
+        t.frames = vec!["java.base/jdk.internal.util.ArraysSupport.hugeLength(ArraysSupport.java:914)".into(), "java.base/jdk.internal.util.ArraysSupport.newLength(ArraysSupport.java:907)".into()];
+        return Err(t);
+    }
+    Ok(min.max(SOFT_MAX_ARRAY_LENGTH))
+}
+
+impl JavaSb {
+    /// `ensureCapacityNewCoder(…, limit, newCoder)`, with Java's `int` arithmetic.
+    fn ensure(&mut self, limit: i32, coder: u32) -> Result<(), Thrown> {
+        let needed = (limit as i64) << coder;
+        if coder == self.coder && needed <= self.bytes as i64 && needed >= 0 {
+            return Ok(());
+        }
+        let old_cap = self.bytes >> self.coder;
+        let cap = if limit.wrapping_sub(old_cap) <= 0 {
+            old_cap
+        } else {
+            let len = new_length(self.bytes, limit.wrapping_shl(coder).wrapping_sub(self.bytes), self.bytes.wrapping_add(2 << coder)).map_err(|mut t| {
+                t.frames.push("java.base/java.lang.AbstractStringBuilder.newCapacity(AbstractStringBuilder.java:344)".into());
+                t.frames.push("java.base/java.lang.AbstractStringBuilder.ensureCapacityNewCoder(AbstractStringBuilder.java:276)".into());
+                t
+            })?;
+            if len == i32::MAX {
+                return Err(out_of_memory("Required length exceeds implementation limit"));
+            }
+            len >> coder
+        };
+        let bytes = (cap as u64) << coder;
+        check_bytes(16 + bytes)?;
+        self.bytes = bytes as i32;
+        self.coder = coder;
+        Ok(())
+    }
+
+    fn coder_of(max_char: u32) -> u32 {
+        (max_char > 0xFF) as u32
+    }
+
+    /// `n` chars appended one or a few at a time (`append(char)`, short strings).
+    pub fn append(&mut self, n: usize, max_char: u32) -> Result<(), Thrown> {
+        let coder = self.coder | JavaSb::coder_of(max_char);
+        let target = self.count as i64 + n as i64;
+        if n > 0 && coder != self.coder {
+            self.ensure(self.count, coder)?;
+        }
+        while (self.count as i64) < target {
+            let room = (self.bytes >> self.coder) as i64 - self.count as i64;
+            if room >= target - self.count as i64 {
+                self.count = target as i32;
+                break;
+            }
+            self.count += room as i32;
+            self.ensure(self.count.wrapping_add(1), coder)?;
+        }
+        Ok(())
+    }
+
+    /// `repeat(char, count)`: one capacity request for all of them.
+    pub fn repeat(&mut self, count: i32, c: u32) -> Result<(), Thrown> {
+        if count < 0 {
+            return Err(crate::vm::iae(format!("count is negative: {count}")));
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        let limit = self.count.wrapping_add(count);
+        self.ensure(limit, self.coder | JavaSb::coder_of(c)).map_err(|mut t| {
+            if !t.frames.is_empty() {
+                t.frames.push("java.base/java.lang.AbstractStringBuilder.repeat(AbstractStringBuilder.java:2056)".into());
+                t.frames.push("java.base/java.lang.AbstractStringBuilder.repeat(AbstractStringBuilder.java:2100)".into());
+                t.frames.push("java.base/java.lang.StringBuilder.repeat(StringBuilder.java:456)".into());
+            }
+            t
+        })?;
+        self.count = limit;
+        Ok(())
+    }
 }
 
 /// The largest object a script may build in the current execution, in bytes.

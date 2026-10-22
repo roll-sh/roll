@@ -142,20 +142,19 @@ pub fn fast_log(mut value: f64) -> f64 {
         if value == f64::INFINITY {
             return f64::INFINITY;
         }
-        let h;
-        if value > 0.95 {
+        let h = if value > 0.95 {
             if value < 1.14 {
                 let z = (value - 1.0) / (value + 1.0);
                 let z2 = z * z;
                 return z * (2.0 + z2 * ((2.0 / 3.0) + z2 * ((2.0 / 5.0) + z2 * ((2.0 / 7.0) + z2 * ((2.0 / 9.0) + z2 * (2.0 / 11.0))))));
             }
-            h = 0.0;
+            0.0
         } else if value < f64::MIN_POSITIVE {
             value *= f64::from_bits(0x4330_0000_0000_0000);
-            h = -52.0 * strict_log(2.0);
+            -52.0 * strict_log(2.0)
         } else {
-            h = 0.0;
-        }
+            0.0
+        };
         let t = log_tables();
         let bits_hi = (value.to_bits() >> 32) as i32;
         let exp = (bits_hi >> 20) - MAX_DOUBLE_EXPONENT;

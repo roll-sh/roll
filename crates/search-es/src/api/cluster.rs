@@ -1002,6 +1002,22 @@ pub fn stats(ctx: &Ctx) -> EsResult<Reply> {
 
 fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
+    // Documents (root documents of the primaries), their bytes and vector counts of the open
+    // indices' loaded engines.
+    let mut engine_docs = (0i64, 0i64, 0i64);
+    let mut vectors = crate::engine::VectorStats::default();
+    for i in st.metadata.indices.values().filter(|i| !i.is_closed()) {
+        let Some(e) = ctx.cluster.engine.loaded(&i.uuid) else { continue };
+        let table = e.table();
+        for s in &e.shards {
+            let stats = s.shard.stats();
+            let roots = s.shard.searcher().count(&search_index::query::nested::root_filter()).unwrap_or(stats.num_docs);
+            engine_docs.0 += roots as i64;
+            engine_docs.1 += stats.deleted_docs as i64;
+            engine_docs.2 += stats.segment_bytes as i64;
+            vectors.add(&s.vector_stats(&table));
+        }
+    }
     let h = compute_health(ctx.cluster, &st, None);
     let m = super::nodes::NodeMetrics::sample(ctx.cluster);
     let n_idx = st.metadata.indices.len();
@@ -1040,8 +1056,8 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
         "indices" => obj! {
             "count" => n_idx,
             "shards" => shards,
-            "docs" => obj! { "count" => 0, "deleted" => 0, "total_size_in_bytes" => 0 },
-            "store" => obj! { "size_in_bytes" => 0, "total_data_set_size_in_bytes" => 0, "reserved_in_bytes" => 0 },
+            "docs" => obj! { "count" => engine_docs.0, "deleted" => engine_docs.1, "total_size_in_bytes" => engine_docs.2 },
+            "store" => obj! { "size_in_bytes" => engine_docs.2, "total_data_set_size_in_bytes" => engine_docs.2, "reserved_in_bytes" => 0 },
             "fielddata" => obj! { "memory_size_in_bytes" => 0, "evictions" => 0, "global_ordinals" => obj! { "build_time_in_millis" => 0 } },
             "query_cache" => pick("query_cache"),
             "completion" => obj! { "size_in_bytes" => 0 },
@@ -1052,8 +1068,8 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
                 Value::Arr(vec![obj! { "version" => crate::version::ES_VERSION, "index_count" => n_idx, "primary_shard_count" => h.active_primary_shards, "total_primary_bytes" => 0 }])
             },
             "search" => obj! { "total" => 0, "queries" => obj! {}, "rescorers" => obj! {}, "sections" => obj! {}, "retrievers" => obj! {} },
-            "dense_vector" => obj! { "value_count" => 0 },
-            "sparse_vector" => obj! { "value_count" => 0 },
+            "dense_vector" => obj! { "value_count" => vectors.dense_count as i64 },
+            "sparse_vector" => obj! { "value_count" => vectors.sparse_count as i64 },
         },
         "nodes" => obj! {
             "count" => if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {

@@ -15,6 +15,13 @@
 //! of the `content_type` option (JSON string escaping by default). The custom sections are
 //! `{{#toJson}}name{{/toJson}}`, `{{#join}}name{{/join}}` (also with `delimiter='…'`) and
 //! `{{#url}}…{{/url}}`.
+//!
+//! Compilation and rendering recurse once per nested section, and a template under
+//! `script.max_size_in_bytes` can nest some 16,000 deep (Elasticsearch's node dies of a
+//! `StackOverflowError` on those). Large sources therefore compile on a thread with
+//! [`crate::guard::COMPILE_THREAD_STACK`] of stack, `render_json` of a deeply nested template
+//! renders on one, other renders stop with a `stack_overflow_error` at the execution stack
+//! budget, and dropping a template is iterative: no template can overflow its caller's stack.
 
 use std::rc::Rc;
 
@@ -60,6 +67,55 @@ pub struct Template {
     encoder: Encoder,
     detect_missing_params: bool,
     source: String,
+    /// Deepest section nesting (rendering recurses this deep).
+    depth: usize,
+}
+
+/// Sources up to this size compile on the caller's thread: they cannot nest deeply enough to
+/// matter (a level takes at least four characters).
+const INLINE_COMPILE_BYTES: usize = 2048;
+/// Templates nested deeper than this render on a large-stack thread (`render_json`).
+const INLINE_RENDER_DEPTH: usize = 128;
+
+fn nested_codes(k: &mut Kind) -> Option<&mut Vec<Code>> {
+    match k {
+        Kind::Section { codes, .. } | Kind::Inverted { codes, .. } | Kind::Join { codes, .. } | Kind::Url { codes } => Some(codes),
+        _ => None,
+    }
+}
+
+fn nested_ref(k: &Kind) -> Option<&Vec<Code>> {
+    match k {
+        Kind::Section { codes, .. } | Kind::Inverted { codes, .. } | Kind::Join { codes, .. } | Kind::Url { codes } => Some(codes),
+        _ => None,
+    }
+}
+
+/// Deepest nesting of `codes`, without recursion.
+fn max_depth(codes: &[Code]) -> usize {
+    let mut max = 0;
+    let mut stack: Vec<(&[Code], usize)> = vec![(codes, 0)];
+    while let Some((cs, d)) = stack.pop() {
+        max = max.max(d);
+        for c in cs {
+            if let Some(inner) = nested_ref(&c.kind) {
+                stack.push((inner, d + 1));
+            }
+        }
+    }
+    max
+}
+
+impl Drop for Template {
+    fn drop(&mut self) {
+        // nested sections are dropped level by level instead of recursively
+        let mut stack = std::mem::take(&mut self.codes);
+        while let Some(mut c) = stack.pop() {
+            if let Some(inner) = nested_codes(&mut c.kind) {
+                stack.append(inner);
+            }
+        }
+    }
 }
 
 fn err(src: &str, msg: String) -> ScriptError {
@@ -377,10 +433,26 @@ impl Template {
                 _ => {}
             }
         }
-        let chars: Vec<char> = src.chars().collect();
-        let mut p = Parser { r: Reader { s: &chars, pos: 0, mark: 0 }, line: 0, sm: vec!['{', '{'], em: vec!['}', '}'], src };
-        let codes = p.compile(None, true)?;
-        Ok(Template { codes, encoder, detect_missing_params, source: src.to_string() })
+        let parse = || -> Result<Vec<Code>, ScriptError> {
+            let chars: Vec<char> = src.chars().collect();
+            let mut p = Parser { r: Reader { s: &chars, pos: 0, mark: 0 }, line: 0, sm: vec!['{', '{'], em: vec!['}', '}'], src };
+            // a failed parse drops its partial sections here, on the parsing thread
+            p.compile(None, true)
+        };
+        let codes = if src.len() <= INLINE_COMPILE_BYTES {
+            let _scope = crate::guard::OuterScope::enter();
+            parse()?
+        } else {
+            std::thread::scope(|scope| {
+                let worker = std::thread::Builder::new().name("mustache-compile".into()).stack_size(crate::guard::COMPILE_THREAD_STACK).spawn_scoped(scope, parse);
+                match worker {
+                    Ok(h) => h.join().unwrap_or_else(|panic| Err(ScriptError::internal(src, &*panic))),
+                    Err(_) => parse(),
+                }
+            })?
+        };
+        let depth = max_depth(&codes);
+        Ok(Template { codes, encoder, detect_missing_params, source: src.to_string(), depth })
     }
 
     pub fn source(&self) -> &str {
@@ -389,16 +461,32 @@ impl Template {
 
     /// Renders with JSON params (converted like Elasticsearch parses them: `HashMap`s).
     pub fn render_json(&self, params: &serde_json::Value) -> Result<String, ScriptError> {
-        let v = match params {
-            serde_json::Value::Object(_) => Value::from_json(params, cls::HASH_MAP),
-            _ => Value::Map(Rc::new(JMap::hash_map())),
+        let run = || {
+            let v = match params {
+                serde_json::Value::Object(_) => Value::from_json(params, cls::HASH_MAP),
+                _ => Value::Map(Rc::new(JMap::hash_map())),
+            };
+            self.render(&v, DEFAULT_MAX_OUTPUT)
         };
-        self.render(&v, DEFAULT_MAX_OUTPUT)
+        if self.depth <= INLINE_RENDER_DEPTH {
+            return run();
+        }
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new().name("mustache-render".into()).stack_size(crate::guard::COMPILE_THREAD_STACK).spawn_scoped(scope, || {
+                let _scope = crate::guard::StackScope::enter(crate::guard::COMPILE_STACK, crate::guard::max_object_bytes());
+                run()
+            });
+            match worker {
+                Ok(h) => h.join().unwrap_or_else(|panic| Err(ScriptError::internal(&self.source, &*panic))),
+                Err(_) => run(),
+            }
+        })
     }
 
     /// Renders with a params value (a map), failing when the output exceeds `max_output`
     /// UTF-16 units (`mustache.max_output_size_bytes`).
     pub fn render(&self, params: &Value, max_output: usize) -> Result<String, ScriptError> {
+        let _scope = crate::guard::OuterScope::enter();
         let mut r = Render { out: String::new(), units: 0, max: max_output, enc: self.encoder, detect: self.detect_missing_params, failed: None };
         let mut scopes: Vec<Value> = vec![params.clone()];
         r.codes(&self.codes, &mut scopes);
@@ -453,6 +541,10 @@ impl Render {
     }
 
     fn codes(&mut self, codes: &[Code], scopes: &mut Vec<Value>) {
+        if crate::guard::stack_exhausted() && self.failed.is_none() {
+            // Elasticsearch's mustache.java dies of a `StackOverflowError` here
+            self.failed = Some(ScriptError::plain("stack_overflow_error", String::new()));
+        }
         for c in codes {
             if self.failed.is_some() {
                 return;
@@ -925,5 +1017,35 @@ mod tests {
         assert_eq!(t.render(&p, 6).unwrap(), "abcabc");
         let e = t.render(&p, 5).unwrap_err();
         assert_eq!(e.cause_type, "parse_exception");
+    }
+
+    /// A template nested 8,100 deep (64,810 bytes, under `max_size_in_bytes`) compiles,
+    /// renders and drops on a 2 MiB thread (Rust's and tokio's default); Elasticsearch's node dies on it.
+    #[test]
+    fn deep_nesting_needs_no_caller_stack() {
+        let n = 8100;
+        let src = format!("{{{{=< >=}}}}{}x{}", "<#a>".repeat(n), "</a>".repeat(n));
+        assert!(src.len() < 65535);
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let t = Template::compile(&src, &[]).unwrap();
+                assert_eq!(t.depth, n);
+                assert_eq!(t.render_json(&serde_json::json!({"a": true})).unwrap(), "x");
+                assert_eq!(t.render_json(&serde_json::json!({})).unwrap(), "");
+                // a script-side render stops at the stack budget instead of overflowing
+                let params = Value::from_json(&serde_json::json!({"a": true}), cls::HASH_MAP);
+                match t.render(&params, DEFAULT_MAX_OUTPUT) {
+                    Ok(out) => assert_eq!(out, "x"),
+                    Err(e) => assert_eq!(e.to_json()["type"], "stack_overflow_error"),
+                }
+                drop(t);
+                // an unclosed deep section fails to compile, also without overflowing
+                let bad = format!("{{{{=< >=}}}}{}x", "<#a>".repeat(n));
+                assert!(Template::compile(&bad, &[]).is_err());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

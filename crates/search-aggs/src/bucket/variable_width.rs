@@ -130,6 +130,7 @@ pub fn create(def: &AggDef, spec: &VariableWidthSpec, ctx: &mut BindCtx<'_>) -> 
         ));
     }
     let subs = Subs::bind(def, ctx)?;
+    crate::collect::check_time_series_deferral(ctx, &def.name, &subs)?;
     // Sub-aggregations are always deferred, and nested docs' scores can't be replayed.
     if let (Some(nested), Some(scoring)) = (&ctx.nested_agg, subs.nodes.iter().find(|n| n.agg.needs_scores())) {
         return Err(AggError::new(
@@ -502,10 +503,8 @@ impl Aggregator for VwAgg {
         self.subs.needs_scores() || self.vs.script.as_ref().is_some_and(|s| s.needs_score())
     }
 
-    fn validate_sort(&self, name: &str, _key: Option<&str>, _rest: &[PathElement]) -> Result<()> {
-        Err(AggError::illegal_argument(format!(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end. [{name}] is not single-bucket."
-        )))
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
     }
 }
 
@@ -698,7 +697,7 @@ impl Internal for VariableWidthHistogram {
                 let mut o = Json::obj();
                 o.push("min", Json::Float(b.min));
                 if !raw {
-                    o.push("min_as_string", f.double_json(b.min));
+                    o.push("min_as_string", f.format_double(b.min));
                 }
                 o.push("key", Json::Float(b.centroid));
                 if !raw {
@@ -706,7 +705,7 @@ impl Internal for VariableWidthHistogram {
                 }
                 o.push("max", Json::Float(b.max));
                 if !raw {
-                    o.push("max_as_string", f.double_json(b.max));
+                    o.push("max_as_string", f.format_double(b.max));
                 }
                 o.push("doc_count", Json::from(b.doc_count));
                 b.aggs.render_into(&mut o, rc);

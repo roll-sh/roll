@@ -1,8 +1,10 @@
 //! Bucket aggregations.
 
 pub mod auto_histogram;
+pub mod categorize_text;
 pub mod composite;
 pub mod filters;
+pub mod frequent_item_sets;
 pub mod geogrid;
 pub mod histogram;
 pub mod include;

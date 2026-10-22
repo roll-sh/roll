@@ -614,6 +614,14 @@ impl PercentilesAgg {
 }
 
 impl Aggregator for PercentilesAgg {
+    fn profile_type(&self) -> &'static str {
+        match (self.spec.ranks, !matches!(self.spec.method, Method::TDigest { .. })) {
+            (false, false) => "TDigestPercentilesAggregator",
+            (false, true) => "HDRPercentilesAggregator",
+            (true, false) => "TDigestPercentileRanksAggregator",
+            (true, true) => "HDRPercentileRanksAggregator",
+        }
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         if self.vs.vs_type == VsType::ExponentialHistogram && !self.vs.unmapped {
             self.exp = Some(ExpHistogramReader::open(seg, self.vs.field.as_ref().map(|f| f.number)));
@@ -695,6 +703,14 @@ impl Aggregator for PercentilesAgg {
     }
 
     fn validate_sort(&self, name: &str, key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        // `hasMetric` parses the key as a double, so a non-numeric key fails with Java's
+        // NumberFormatException.
+        if rest.is_empty()
+            && let Some(k) = key
+            && let Err(e) = java_parse_double(k)
+        {
+            return Err(e);
+        }
         multi_value_validate_sort(name, key, rest, |k| java_parse_double(k).is_ok_and(|v| self.spec.keys.contains(&v)))
     }
 

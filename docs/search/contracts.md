@@ -13,7 +13,10 @@ update this file in the same change when a signature other crates use moves.
 
 Other `rolld` flags (`crates/rolld/src/search.rs`, `#[derive(clap::Args)] SearchArgs`):
 `--search-tls-cert/-key`, `--search-domain`, `--search-idle-unload` (300 s),
-`--search-cache-bytes`, `--search-sync-objects`, `--search-proxy-protocol`.
+`--search-cache-bytes`, `--search-sync-objects`, `--search-proxy-protocol`,
+`--search-history` (point-in-time window, 86400 s), `--search-gc-interval` (3600 s),
+`--search-test-features`, `--no-search`;
+`rolld --search-only` runs only search and its API. See [README.md](README.md).
 
 ## Version and dialect
 
@@ -57,6 +60,14 @@ in this file explaining why.
   runner needs each scalar's source text (`id: 01` is sent as `01`). It is checked against
   PyYAML on every file of the three suites (identical trees except SnakeYAML's YAML 1.1 floats). Edit the root `Cargo.toml` with targeted edits only — several
 people work in it at once.
+- `search-es` uses `reqwest` (workspace dependency, no TLS features) for reindex from remote clusters
+  (`api::remote`), only for hosts `reindex.remote.whitelist` allows.
+- `search-es` uses `libc` (only `pthread_getattr_np` / `pthread_attr_getstack` in `search_es::stack`):
+  the current thread's stack bounds, so deeply nested requests move to a fresh stack before they
+  could overflow a tokio worker's instead of aborting the node.
+- `search-server` uses `libc` (only `prctl(PR_SET_THP_DISABLE)`: transparent huge pages inflate an idle
+  node's RSS about threefold, see `search_server::process`) and `tokio-postgres-rustls` +
+  `rustls-native-certs` (TLS to the Postgres lease store, as `mq-cluster` does).
 - `search-index` uses `libm` for fdlibm-exact `sin`/`cos`/`asin`/`sqrt` (Lucene's `SloppyMath`
   tables behind geo distances and sorts must round like Java's `StrictMath`, which the platform
   libm does not guarantee) and `foldhash` (fixed-seed term hashing in the indexing buffer).
@@ -86,6 +97,11 @@ impl Analyzer {
     pub fn analyze_values(&self, values: &[&str], sink: &mut dyn FnMut(&Token)); // position/offset gap between values
     pub fn try_analyze(&self, text: &str, sink: …) -> Result<(), AnalysisError>; // analysis-time failures (condition script, delimited_payload)
     pub fn try_analyze_values(&self, values: &[&str], sink: …) -> Result<(), AnalysisError>;
+    pub fn try_analyze_field(&self, field: &str, values: &[&str], sink: …) -> Result<(), AnalysisError>;
+        // both: Lucene's IndexingChain position checks (Java int positions; a negative or huge
+        // position_increment_gap fails with "position overflowed Integer.MAX_VALUE (…) for field 'f'"
+        // or "position N is too large …" instead of emitting non-monotonic positions); the error
+        // names `field` (try_analyze_values: field '')
     pub fn terms(&self, text: &str) -> Vec<String>;
     pub fn normalize(&self, text: &str) -> String;                      // multi-term normalization chain
     pub fn explain(&self, texts: &[&str], attributes: &[String]) -> Explain;   // `_analyze` explain as data
@@ -147,7 +163,14 @@ all of them match Elasticsearch on the full Snowball test vocabularies),
 synonyms and synonym_graph (inline and `synonyms_path` is rejected the way a node without the
 file rejects it), word_delimiter(_graph), ngram/edge_ngram, shingle, stop with `_lang_` lists,
 keyword_marker, hunspell is out of scope. Java regex semantics (pattern tokenizer and filters)
-come from its own engine (`jregex.rs`). Checked against ES 9.5.5 `_analyze` output in
+come from its own engine (`jregex.rs`). No pattern can crash the process: Java patterns nested
+deeper than 1000 groups/classes fail with Java's "Stack overflow during pattern compilation"
+`pattern_syntax_exception`, Lucene (`simple_pattern*`) ones with an `illegal_argument_exception`
+past 1000 groups or past 1M automaton states plus transitions (`a{100000000}`); Elasticsearch
+itself dies on those. `mapping` rules are Java strings matched by UTF-16 units (a lone-surrogate
+key maps half a character; an unpaired surrogate in the output becomes U+FFFD). `classic` and
+`html_strip` stay linear on inputs whose scans never end (`a-a-a-…`, `<?<?…`), where Lucene is
+quadratic. Checked against ES 9.5.5 `_analyze` output in
 `tests/fixtures/*.json` (regenerate with `tests/fixtures/gen_fixtures.py`). The `thai` tokenizer
 reproduces the JDK's chunking, sentence and dictionary-based word iterators; its built-in word
 list is ICU's (Unicode License), so Thai words outside the JDK list's overlap can split
@@ -357,17 +380,28 @@ impl PostingsCursor { fn doc(&self) -> u32 /* u32::MAX before first */; fn next(
 //         raw(doc) -> Result<&[u8]>}  (doc >= max_doc: InvalidArgument; stored::decode_doc(bytes, visitor) decodes raw bytes)
 //   trait StoredVisitor { fn needs_field(&mut self, field) -> VisitStatus /* Yes|No|Stop */; fn value(&mut self, field, StoredValue<'_>) }
 // Vectors: VectorsReader::{len(), docs(), ord(doc), doc(ord), vector(ord) -> &[u8], vector_f32(ord, &mut Vec<f32>),
-//     prepare(VectorQuery::{Float(&[f32]) | Byte(&[i8]) | Bits(&[u8])}) -> Result<PreparedQuery> /* dims checked */,
+//     prepare(VectorQuery::{Float(&[f32]) | Byte(&[i8]) | Bits(&[u8])}) -> Result<PreparedQuery> /* InvalidArgument with ES's
+//         createKnnQuery texts: float input on byte/bit fields must be whole and in [-128, 127] (checked first, as
+//         `element_type [byte]`), then "The query vector has a different number of dimensions [q] than the document
+//         vectors [d]." (bits for bit fields), then float NaN/infinite values, dot_product unit length (±1e-3 on the
+//         squared norm), cosine non-zero (byte fields: cosine only); value errors end with " Preview of invalid
+//         vector: [first five, ...]" */,
 //     score(&q, ord) -> f32 /* Lucene VectorSimilarityFunction score; bit = (bits - hamming) / bits */, score_doc(&q, doc),
 //     search(&q, k, num_candidates, accept: Option<&dyn Fn(doc)->bool>, visit_limit) -> KnnResult { hits: Vec<KnnHit{doc,score}>, visited, complete },
-//     exact_search(&q, k, accept) -> KnnResult,  // complete == false: visit_limit hit, fall back to exact_search (Lucene's strategy)
+//     exact_search(&q, k, accept) -> KnnResult,
+//     // complete == false: fall back to exact_search (Lucene's AbstractKnnVectorQuery rule): visit_limit hit, or fewer
+//     // hits than k (without accept: than min(k, len())) although more may exist
 //     search_filtered(&q, k, num_candidates, accept: &dyn Fn(doc)->bool, accepted: u32 /* filter cardinality */, visit_limit) -> KnnResult}
+//     // accepted <= k: exact search; fewer than k hits (e.g. an overestimated `accepted`): complete == false
 //     // filters passing < 60% of the vectors use Lucene's filtered HNSW search (ACORN-1: only accepted vectors are scored,
 //     // rejected neighbors are bridges; 1% filter: ~50x fewer distance computations than search() with accept); else search().
 //   Graphs: concurrent builds link each node bottom-up (no quality loss vs 1 thread); every node is reachable from the entry
-//   point (Lucene's connectComponents), also with duplicate vectors.
+//   point (Lucene's connectComponents), also with duplicate vectors, and level 0 is strongly connected (every node also reaches
+//   the entry: duplicates and coarse quantization otherwise strand regions), so an unbounded beam finds every vector. The
+//   filtered search keeps walking rejected nodes while it holds fewer than num_candidates results.
 //   Quantized fields (int8 / packed int4 / bbq) steer the graph search with quantized scores and return exact float scores (the
-//   beam is rescored), so `_score` equals ES's `flat`/rescored value, not its approximate int8/int4/bbq score.
+//   beam is rescored), so `_score` equals ES's `flat`/rescored value, not its approximate int8/int4/bbq score (deliberate:
+//   ES's quantized scores depend on per-segment quantiles, so they differ with segment layout even within ES).
 //   Quantized flat fields (int8_flat, bbq_flat): search() scans the codes for max(k, num_candidates), then rescores.
 //   vectors::similarity_score(&VectorSpec, a, b); vectors::distance::{dot_f32, l2sq_f32, dot_i8, l2sq_i8, dot_u8, l2sq_u8,
 //   dot_u4, l2sq_u4, hamming, prefetch} (AVX2/FMA at runtime + portable, tested equal)
@@ -386,16 +420,21 @@ impl PostingsCursor { fn doc(&self) -> u32 /* u32::MAX before first */; fn next(
 pub trait Automaton: Send + Sync { fn start(&self) -> u32; fn is_match(&self, s: u32) -> bool; fn can_match(&self, s) -> bool;
     fn will_always_match(&self, s) -> bool; fn accept(&self, s: u32, byte: u8) -> u32; fn matches(&self, &[u8]) -> bool;
     fn next_live_byte(&self, s, from: u8) -> Option<u8> /* default: scan with accept; lets dictionaries seek past dead prefixes */ }
-AlwaysMatch; Prefix::new(bytes); Dfa::levenshtein(term, max_edits, prefix_len /* code points */, transpositions) (Lucene FuzzyQuery automaton);
+AlwaysMatch; Prefix::new(bytes); Dfa::levenshtein(term, max_edits, prefix_len /* code points */, transpositions) (Lucene FuzzyQuery automaton;
+    an empty term matches only "" whatever max_edits, as FuzzyTermsEnum drops maxEdits to 0 for it);
 Dfa::wildcard(pattern, case_insensitive, work_limit) -> Result<Dfa, TooComplex>; Dfa::prefix_case_insensitive(prefix, work_limit);
 Dfa::term_case_insensitive(term, work_limit) /* `term` query with case_insensitive */;
-    // wildcard/prefix/term case_insensitive fold ASCII letters only, and `\x` escapes match exactly (ES AutomatonQueries)
+    // wildcard/prefix/term case_insensitive fold ASCII letters only (ES AutomatonQueries); a wildcard `\x` escape is a
+    // literal that still folds (`\a` matches `A`), escaped `*`/`?` are literal
 automaton::regexp::compile(pattern, flags /* regexp::ALL = ES default */, case_insensitive, work_limit /* dfa::DEFAULT_WORK_LIMIT = 10000 */)
     -> Result<Dfa, RegexpError::{Syntax(lucene IllegalArgumentException text), TooComplex(TooComplex /* Display = Lucene's message */)}>;
     // regexp case_insensitive = Lucene 10.5 CaseFolding (simple mappings + specials: k~K, ß~ẞ, σ~ς~Σ; ranges not folded).
     // ES runs regexp::collapse_consecutive_quantifiers(pattern) (`a+*` -> `a*`) before compiling regexp queries on
     // string fields: call it first so error positions match. Lucene quirk kept: `X*` of an empty language (`#*`)
-    // matches nothing. TooComplex thresholds track Lucene's effort accounting (checked around the limit).
+    // matches nothing. TooComplex thresholds track Lucene's effort accounting (checked around the limit); like Lucene, an
+    // automaton that is already deterministic costs no effort (`a{100000}` compiles). Construction is budgeted:
+    // past regexp::MAX_STATES (400 000) code point NFA states or intersection product states, compile fails fast with
+    // TooComplex (`a{0,2147483647}`, `((a{1000}){1000}){1000}`; ES trips a memory circuit breaker instead).
 Dfa::{intersection(a, b), complement(), single_string() -> Option<Vec<u8>>, is_empty_language()}; automaton::edit_distance(a, b, transpositions)
 // Builds determinize per code point first, then compile to bytes directly: `elasticsearch`~2 ≈ 0.3 ms, `kitten`~1 ≈ 20 µs,
 // `*abc*` ≈ 8 µs, `[a-z]+ing` ≈ 4 µs.
@@ -644,14 +683,22 @@ pub struct ParseOptions<'a> { src: Option<&'a [u8]> /* body, for [line:col] */, 
 impl AggRequest {
     fn validate(&self) -> Vec<String>;   // action_request_validation_exception messages (pipelines, orders)
     // ShardOptions { budget, matches_all /* query matches every live doc: segment-statistics shortcuts;
-    //                run() sets it for a MatchAllQuery */ } — construct with ..Default::default()
+    //                run() sets it for a MatchAllQuery */, max_buckets: Option<usize> /* search.max_buckets,
+    //                None = 65536: composite's size is checked on the shard */,
+    //                profiler: Option<Arc<search_aggs::profile::Profiler>> /* profile: true — after finish(),
+    //                Profiler::to_json() is the shard's `profile.shards[].aggregations` array (type = Elasticsearch
+    //                aggregator class, description, time_in_nanos, breakdown with *_count, debug, children) */ }
+    //                — construct with ..Default::default()
     fn collector(&self, &dyn FieldLookup, &search_index::Searcher, &ShardOptions { budget }) -> Result<AggCollector>;
     fn run(&self, &dyn FieldLookup, &Searcher, query: &QueryRef, &ShardOptions) -> Result<Aggs>;  // collector + search + finish
 }
 impl search_index::Collector for AggCollector;  impl AggCollector { fn finish(self) -> Result<Aggs> /* = ShardAggs */ }
 pub fn reduce(parts: Vec<Aggs>, req: &AggRequest, opts: &ReduceOptions) -> Result<Aggs>;
 pub struct ReduceOptions { final_reduce, max_buckets /* search.max_buckets */, has_batched_result,
-                           scripts: Option<Arc<dyn ScriptHost>> /* reduce-side scripts */, budget: Option<Arc<MemoryBudget>> }
+                           scripts: Option<Arc<dyn ScriptHost>> /* reduce-side scripts */,
+                           budget: Option<Arc<MemoryBudget>> /* every reduce, partial ones included, charges 1.5× its inputs'
+                               estimated size as "<reduce_aggs>" (QueryPhaseResultConsumer) and releases it on return; buckets
+                               are capped (max_buckets) only in the final reduce, as in Elasticsearch */ }
 impl Aggs { fn to_json(&self, typed_keys: bool) -> Json; fn get(&self, name) -> Option<&Agg> }
 pub trait FieldLookup {   // per shard; every method but `field` has a default
     fn field(&self, name) -> Result<Option<AggField /* type, SourceType (dv kind), number, format, nested path */>>;
@@ -697,9 +744,27 @@ every value) and add a companion binary field with the centroid of the *original
 value's `shape_field::Geometry` (`SourceType::GeoShape { centroid: Some(field) }` / `CartesianShape { .. }`; without the
 companion the centroid is approximated from the triangles).
 
-Every aggregation of Elasticsearch 9.5 core, `aggregations` module, analytics, spatial and
-parent-join is implemented except `categorize_text` and `frequent_item_sets` (Platinum ML features; 501
-`unsupported_operation_exception`). `exponential_histogram`
+Every aggregation of Elasticsearch 9.5 core, `aggregations` module, analytics, spatial, ml
+(`categorize_text`, `frequent_item_sets`) and parent-join is implemented. `categorize_text` reads
+`_source` through `TextTerms::source_strings(seg, doc, field) -> Result<Vec<String>>` (default: error) and
+analyzes with the built-in standard categorization analyzer (`first_line_with_letters` + `ml_standard` +
+date-word stop filter + limit 100: `search_aggs::bucket::categorize_text::{standard_tokens,
+first_line_with_letters, MlStandardTokenizer}`, exported so the index's analysis can offer them too);
+`categorization_filters` / `categorization_analyzer` go to
+`FieldLookup::categorization_analyzer(&Json /* ES's analyzer definition */) -> Result<Arc<dyn
+CategorizationAnalyzer>>` (default: error). Token weights need ML's part-of-speech dictionary, installed
+process-wide with `categorize_text::set_part_of_speech_dictionary(PosDictionary::parse(text_in_ml_en_dict_format)?)`
+(without it every token weighs 1 and categories can differ from Elasticsearch's).
+`DateFormatter::try_format(millis, nanos, zone) -> Result<String, String /* DateTimeException message */>`
+(default: `Ok(format(..))`) lets `stats`/`extended_stats` fail like Elasticsearch when a stat can't be
+printed in the format (a year wider than the pattern allows: "Cannot format stat [sum] with format [...]");
+`DocValueFormat::java_string()` is Java's `toString()` of the format. The built-in date formatter (used until
+`FieldLookup::date_formatter` is overridden) prints Elasticsearch's named formats but only parses ISO dates
+and date math.
+`ParseOptions.java_regex_valid: Option<&dyn Fn(&str) -> bool>` validates `categorization_filters`
+(default: a basic syntax check). `FieldLookup::field` returns `text` fields (no fielddata) with
+`SourceType::None`; binding one as a values source raises Elasticsearch's "Fielddata is disabled on [f] in
+[index]…" error. `exponential_histogram`
 fields feed `sum`/`avg`/`min`/`max`/`value_count`/`percentiles`/`percentile_ranks`/`boxplot`/`histogram`/`range`
 (`HistogramUnionState`, `search_aggs::exp_histogram`); shapes feed `geo_bounds`/`geo_centroid`/`geotile_grid`/
 `geohash_grid`/`geohex_grid` and `cartesian_bounds`/`cartesian_centroid`. Results match Elasticsearch bit for bit, including reduce
@@ -731,8 +796,24 @@ impl Engine {
     fn compile_stored(&self, Lang, src, ctx, options) -> Result<Compiled, ScriptError>;        // stored scripts: no size check
     fn compile_lang(&self, Lang, src, ctx, options: &[(String, String)]) -> Result<Compiled, ScriptError>;
     fn compile_template(&self, src, ctx, options) -> Result<Arc<mustache::Template>, ScriptError>;
+    fn compile_expression(&self, src, ctx) -> Result<Arc<expression::Expression>, ScriptError>;  // lang: expression
     fn update_settings(&self, Settings); fn settings(&self) -> Settings; fn stats(&self) -> Stats;   // _nodes/stats script
 }
+pub enum Lang { Painless, Mustache, Expression }   // from_name("painless"|"mustache"|"expression"), name()
+pub enum Compiled { Painless(Arc<Script>), Mustache(Arc<Template>), Expression(Arc<expression::Expression>) }
+// expression (Lucene expressions, Elasticsearch's lang-expression): contexts expression::CONTEXTS (score, filter,
+//   field, number_sort, aggs, terms_set, bucket_aggregation, aggregation_selector, double_values; others fail to
+//   compile with illegal_argument_exception). Expression: Send + Sync; source(), context(), variables() (normalized,
+//   first-use order), needs_score(), evaluate(&[f64]) (double_values), instance() -> expression::Instance:
+//   set_params(&Json)/set_params_value (numeric params are constants; the bucket contexts' variables), set_var("_value"),
+//   set_document(doc) (opt-in: executions on the same doc return the first one's value, as Lucene caches it — aggs
+//   value scripts over multi-valued fields), execute(&mut dyn Host) -> Value (Double; Bool for filter /
+//   aggregation_selector), execute_f64, execute_bool, link(&mut dyn Host) (link now, as Elasticsearch does per
+//   segment before any document: fails searches over segments without matches too). Variables link through
+//   Host::doc_values (Ok(false) = "does not exist in mappings"; a HostError, e.g. text fielddata, is the cause), so
+//   compile errors come from compile_*, `link error`s from the first execute; both are script_exceptions with
+//   lang "expression", script_stack [portion, pointer] and no position (queries wrap them in query_shard_exception
+//   "failed to create query: …"). One Instance per segment; reads every field once per document.
 impl Script {   // Arc, Send + Sync, immutable
     fn instance(&self) -> Instance<'_>;      // per thread / per segment: reuse across documents (no per-doc allocation)
     fn run(&self, &mut dyn Host, params: &serde_json::Value, &mut Vars) -> Result<Value, ScriptError>;  // one-shot
@@ -774,20 +855,29 @@ pub enum DocKind { Long, Integer, Short, Byte, UnsignedLong, Double, Float, Half
 pub enum Value { Null, Bool, Byte, Short, Char, Int, Long, Float, Double, Str(Rc<JStr>), List, Map, Set, Obj }  // 16 bytes
                      // Value::from_json(&Json, map_class) / from_json_map, to_json(), to_java_string(),
                      // try_to_json() -> Result<Json, ToJsonError{kind, reason}> (1,000-level nesting limit like Jackson,
-                     // object size limit); to_json() gives null for those
+                     // object size limit, stale subList views → concurrent_modification_exception
+                     // with an empty (null) reason: Elasticsearch answers a plain 500); to_json()
+                     // gives null for those; try_to_java_string(): the `_execute` painless_test
+                     // result (String.valueOf), same stale-view failure
 // write scripts: es::write::{ctx_value(CtxKind, source, metadata: &[(&str, Value)], now) -> Result<Value, String>,
 //   ctx_of(&Value) -> Option<Rc<Ctx>>, CtxKind::{Update, Upsert, UpdateByQuery, Reindex, Ingest}}
 //   Ctx: source() (new _source), metadata(), meta_get(key), op() (index|noop|delete|create, Elasticsearch's getOp rules)
 // xcontent::{parse_source(json) (LinkedHashMap, document order), parse_source_unordered(json) (HashMap: upsert docs,
 //   ingest, update_by_query, reindex), to_xcontent(&Value) -> Result<String, XContentError> (Jackson output, XContent
-//   type rules), check_ingest_value(&Value) (IngestDocument.deepCopy rules, simulate)}
+//   type rules; iterative, 1,000-level limit), check_ingest_value(&Value) (ensureNoSelfReferences with hint
+//   "source document", then IngestDocument.deepCopy rules; iterative: cyclic or 300,000-deep values are
+//   errors, never a stack overflow), ensure_no_self_references(&Value, hint: Option<&str>) (CollectionUtils)}
 // value::zoned_date_time_millis(ms) (ingest timestamp / metadata().getNow())
 // ingest `if` conditions: es::write::conditional_ctx(&ctx) -> Value (read-only UnmodifiableIngestData view of an
 //   ingest ctx or a plain map; build it only when script.uses_var("ctx")), Context::ProcessorConditional, execute_bool
 // pipeline aggs: Context::BucketAggregation / AggregationSelector (buckets_path values in params, NaN for gaps),
 //   Context::MovingFunction (set_var("values", Value::double_array(window)))
 // grok::{PatternBank::legacy()/ecs_v1()/new/extend_with, Grok::new(&bank, expr) -> Result<Grok, GrokError{kind,message}>,
-//   Grok::captures(text) -> Result<Option<Vec<(field, GrokValue)>>, ConvertError>, warnings()}
+//   Grok::captures(text) -> Result<Option<Vec<(field, GrokValue)>>, MatchError>, matches(text) -> Result<bool, MatchError>,
+//   warnings(), with_max_execution_time(Option<Duration>) (watchdog; default DEFAULT_MAX_EXECUTION_TIME = 1s,
+//   ingest.grok.watchdog.max_execution_time / runtime_fields.grok.watchdog.max_execution_time; None or zero = off)}
+//   MatchError::{Convert(ConvertError), Interrupted{after_millis}}: kind() ("number_format_exception" |
+//   "runtime_exception") and reason() ("grok pattern matching was interrupted after [1000] ms") are Elasticsearch's
 //   and dissect::Dissect::new(pattern, append_separator)?.parse(Option<&str>) -> Option<HashMap>: reusable by the
 //   ingest grok/dissect processors (Joni dialect and Elasticsearch's error texts)
 // es::uri::{parse_uri(s), parse_url(s)} -> Option<Parts{scheme,user_info,host,port,path,query,fragment}>:
@@ -813,15 +903,21 @@ does (`update`: `illegal_argument_exception` "failed to execute script" caused b
 update-by-query: as is). Mustache (`lang: mustache`, search templates): `Template::render_json(&params)`
 / `render(&Value, max_output)`. Fixture harnesses in `crates/search-painless/tests/` show how each
 context is driven (`execute.rs`, `write.rs` (also ingest conditions and `Processors`), `search.rs`, `pipeline.rs`,
-`similarity.rs`, `heuristic.rs`, `analysis.rs`, `call_sites.rs`, `mustache.rs`). `def` operator call sites keep
+`similarity.rs`, `heuristic.rs`, `analysis.rs`, `call_sites.rs`, `mustache.rs`, `expression.rs`). `def` operator call sites keep
 what they linked across executions of a `Script` (as Painless's do), so null-operand errors read `leftObject`
 after the first execution: share one compiled `Script` per source, as Elasticsearch's script cache does.
+`mustache::Template` compiles sources over 2 KiB on its own large-stack thread, `render_json` renders templates
+nested over 128 sections deep on one, and `render(&Value)` stops with `stack_overflow_error` at the execution
+stack budget: hosts may call both from ordinary 2 MiB threads.
 `search-painless` enables serde_json's `float_roundtrip` feature: params and sources must parse doubles
 exactly, as Jackson does (the default parser can be off by one ulp).
 Straight-line per-document scripts — score, filter, sort, aggregation (`def` results, boxed), script-field and
 runtime-field (`emit` of long/double/date/boolean) scripts made of locals and assignments, `if`/`return`,
 `for (x : doc['f'])` over numeric/boolean doc values, `_score`, `params`, `doc[..].value/size()/isEmpty()/empty`,
-`Math`, decay/saturation/sigmoid — run on a fast path specialized on an instance's first document from its
+`Math`, decay/saturation/sigmoid (numeric and `decayDate*`), the vector functions over `params.x`,
+keyword `doc['f'].value ==`/`!=`/`.equals` a literal or `params.x`, `doc['f'].contains(s)`,
+`params.list.contains(doc['f'].value)`, `date` `.getMillis()`/`.millis`/`.toInstant().toEpochMilli()`
+— run on a fast path specialized on an instance's first document from its
 params and the fields' `DocKind`s: keep one `Instance` per segment and return the same `DocKind` for a field
 on every document (any other kind still works, through the interpreter); `set_params*`/`set_var` re-specialize.
 No script can take the node down: compilation runs on its own large-stack thread and fails deep sources with
@@ -851,6 +947,8 @@ impl Store {
     pub fn wal(&self) -> &Wal;
     pub async fn close(&self) -> Result<()>;                                   // commit + ship the WAL, stop it
     pub fn set_epoch(&self, cluster: &str, epoch: u64);   // the cluster's lease epoch (default 0); newer epochs fence older writers
+    pub async fn claim_cluster(&self, cluster: &str) -> Result<()>;  // ownership marker for the epoch; before reading the cluster
+    pub async fn check_owner(&self, cluster: &str) -> Result<()>;    // Fenced once a newer owner claimed (one listing)
     pub fn epoch(&self, cluster: &str) -> u64;
     // segments: write to segment_path(id) (staging, same fs as the cache), then upload; the store takes the file
     pub fn segment_path(&self, id: &SegmentId) -> PathBuf;
@@ -933,9 +1031,12 @@ the history once the tombstone is older than the window. Writes of a deleted sha
 `search/wal/<node>/<first file:016>.run` at startup: a range a crashed run left open ends where the node's next
 run starts, for garbage collection and replay alike. A range another node froze is `WalSource::exact`: a file of
 it missing at replay (lost, not skipped) fails the replay instead of leaving a hole in the shard's history.
-Fencing: search-server calls `set_epoch(cluster, lease_epoch)` before recovering a cluster's shards. A write
-(`write_manifest`, `attach_shard`, `detach_shard`, `write_cluster`, `delete_shard`) that finds a newer epoch
-fails with `Fenced`, and the node's WAL then refuses the cluster's appends: unload the cluster. `WalFull` is
+Fencing: search-server calls `set_epoch(cluster, lease_epoch)` and then `claim_cluster(cluster)` (writes
+`search/c/<cluster>/owner/<epoch:020>`, drops older markers; `Fenced` if a newer one exists) before reading the
+cluster. A write (`write_manifest`, `attach_shard`, `detach_shard`, `write_cluster`, `delete_shard`) that finds a
+newer epoch — in the versions it writes over or, with an epoch set, in the ownership markers — fails with `Fenced`,
+and the node's WAL then refuses the cluster's appends: unload the cluster. `check_owner(cluster)` (one listing;
+no-op without an epoch; counted in `StoreStats::owner_checks`) fails the same way once a newer owner has claimed. `WalFull` is
 transient (object storage is behind): answer 429 `es_rejected_execution_exception`.
 
 Object keys (never reused; a rewritten object gets a new key):
@@ -1039,35 +1140,242 @@ impl Cluster { async fn open(ClusterConfig, Arc<dyn MetaStore>) -> Result<Cluste
 //   time::{parse_date_math(..) -> Result<Instant, DateMathError /* to_es() */>, to_epoch_nanos(Instant), java_instant_string_nanos}
 // mapping::FieldMapper::{date_formatter(ctx) -> EsResult<Arc<DateFormatter>> /* compiled once */, full_name(path) -> Arc<str>};
 //   mapping::date_locale(Option<&Value>); stack::maybe_grow(f) — run recursion over untrusted nesting without overflowing
+// Document and search half (engine state lives behind an in-memory trait; persistence/idle unload plug in there):
+// Cluster { engine: engine::Engine, scripts: Arc<scripting::ScriptService>, contexts: search::contexts::Contexts /* scroll, PIT */,
+//           ingest: ingest::pipeline::Cache /* compiled pipelines per metadata version */, .. }
+// engine::ShardStorage: Send + Sync { fn open(&self, index_uuid, shard: u32, schema) -> EsResult<search_index::Shard> }
+//   engine::MemoryShards (default); Engine::with_storage(Arc<dyn ShardStorage>); Engine::index(cluster, st, idx) -> Arc<IndexEngine>
+//   (opens shards lazily, keeps the mapping→engine field table in sync, never moving it back: FieldTable.key is
+//   engine::table_key(st, idx) = (mapping_version, settings_version, synonyms_version) and metadata older in any
+//   component leaves the table alone), Engine::loaded(uuid), retain(live uuids), remove(uuid)
+// engine::IndexEngine { uuid, name, shards: Vec<Arc<ShardEngine>>, fielddata_loaded, .. } — table() -> Arc<fields::FieldTable>, shard(n),
+//   refresh_all(), doc_count(); construct with IndexEngine::assemble(uuid, name, shards, numbers, table) (crate-internal; hooks use it),
+//   load_fielddata(field, aggregation), field_stats_into(&ShardEngine, &mut Map, fielddata_fields, completion_fields) (`fielddata` /
+//   global ordinals / `completion` stats); ShardEngine::group_stats_into(&mut Map, groups) (search `stats` groups)
+// engine::ShardEngine { id, shard: search_index::Shard, counters: ShardCounters } — refresh(), before_search(interval_ms) (lazy
+//   refresh: `index.refresh_interval` elapsed or search-idle 30 s), searcher(), stats_into(&mut Map) (`_stats` blocks)
+// engine::fields::FieldTable — mapping → engine fields (stable numbers per path; dense_vector numbered per index layout),
+//   analyzers, nested paths; engine::convert::to_indexable(table, &ParsedDocument, DocMeta { id, routing, source, tsid: Option<(&[u8], &str)> })
+//   -> IndexableDoc (time series docs: `_tsid` and `_ts_routing_hash` sorted doc values, engine fields 13 and 15, instead of `_routing`)
+// engine::tsdb — time series indices like Elasticsearch 9.5: routing_hash(idx, &source) (routing_path), build_tsid(&dimensions(idx, &parsed)),
+//   create_id / create_synthetic_id (`index.mapping.synthetic_id`, default true), id_routing_hash(idx, id), encode_hash/decode_hash
+//   (`_ts_routing_hash`), invalid_id / unsupported errors; meta::routing::shard_for routes time series docs by that hash
+// write::{prepare (-> Prepared { .., id /* generated for time series */, tsdb }), apply_index, apply_delete, resolve_target,
+//   resolve_existing, check_may_auto_create, effective_routing, RefreshPolicy, copy_index /* resize */}
+//   — index/create/delete with routing, seq_no/primary_term/_version, OCC, version_type, op_type, require_alias/data_stream
+// fetch::{FetchSource, source_bytes, stored_fields, render_source}; scripting::ScriptService::compile(st, &Script, context) -> Bound
+// ingest::run_for_write(cluster, Target, &WriteArgs, id, Value, Bytes, now, clock: Option<&AtomicU64> /* Ctx.ingest_nanos,
+//   `_bulk`'s ingest_took */) -> Outcome::{Index(Target, Value, Bytes), Dropped(index)}
+//   (request/default pipeline, final pipeline, re-targeting; non-finite doubles come back as "NaN"/"Infinity" strings, as
+//   Elasticsearch re-reads its own JSON: json::write::quote_non_finite); ingest::pipeline::simulate; ingest::doc::java_hash_order(map)
+//   (Elasticsearch's HashMap key order for ingest output and hit `fields`); ingest::jregex::{JavaPattern::{compile, find_all,
+//   split(text, limit)}, JavaReplace::{new(pattern, replacement), replace_all}} — java.util.regex semantics for gsub/split/kv,
+//   run through search-analysis's engine (a one-off `pattern_replace` normalizer)
+// search::{search, msearch, count, explain, run (scroll/PIT), execute(cluster, &SearchRequest) -> SearchOutcome, render};
+//   search::query::QueryCtx::to_query(&query::Query) -> QueryRef (Query DSL → engine queries with Elasticsearch's rules);
+//   search::aggs::{Lookup /* search_aggs::FieldLookup incl. top_hits fetcher, hit sort, scripts */, reduce};
+//   search::agg_scripts::Host (search_aggs::ScriptHost over painless); search::profile (profile: true output);
+//   search::dv_terms::DocValuesMultiTermQuery::query(MultiTermQuery) (prefix/wildcard/regexp/fuzzy on doc-values-only fields);
+//   search::dv_distance::DocValuesDistanceFeatureQuery::query(field, Origin) (distance_feature without points)
+// api::by_query_request::{parse_by_query(ctx, update), parse_reindex(ctx)} -> ByScroll (Elasticsearch's parse/validate order);
+//   api::remote::{check_whitelist(node setting `reindex.remote.whitelist`, &Remote), fetch(..)} — reindex from remote (HTTP, reqwest);
+//   node settings `http.publish_host` / `http.publish_port` set the advertised HTTP address (node info, remote reindex)
+// engine::synthetic — synthetic _source built at index time: source_mode(idx) -> SourceMode::{Stored, Synthetic, Disabled},
+//   options(idx) -> Options { keep: Keep::{None, Arrays, All}, binary_fallback }, synthesize(&mapping, &ctx, &table, Options, &doc) -> Map,
+//   vectors(table, path, &mut map, exclude) / vectors_keeping(.., Option<&Globs>) (index.mapping.exclude_source_vectors);
+//   write::stored_source(idx, &table, &bytes, &value) stores the synthetic source for synthetic indices
+// fetch::SourceView { idx, table, force_synthetic }.apply(value, &FetchSource) and render_source_view(..) — what get/search/explain
+//   fetch (force_synthetic_source, vectors left out unless `exclude_vectors: false` or included); FetchSource.exclude_vectors
+// failure_store::{target(cluster, expr) -> Store::{None, Disabled, Enabled(ds)}, eligible(&err), redirect(..)} — data stream failure
+//   stores (failure documents, lazy failure index creation, `failure_store: used|not_enabled`); EsError::{with_trailing, take_trailing}
+// engine::completion::{context_defs, index_contexts, query_contexts, ContextAutomaton, key_context, CONTEXT_SEP} — completion contexts
+// engine::convert::{encode_binary_dv, decode_binary_dv} (multi-valued `binary` doc values, sorted and unique)
+// search::retriever::{apply(&mut SearchSource, url_sort), Diversify::mmr} — standard/knn/rescorer/diversify retrievers;
+//   SearchSource.diversify; SearchRequest.force_synthetic_source; search::hits::vector_of(table, searcher, doc, field)
+// ingest::simulate::simulate_ingest (POST _ingest/_simulate); ingest::pipeline::{with_substitutions, take_failure -> IngestFailure}
+// MappingCtx.{ignore_dynamic_beyond_limit, ignore_dynamic_names_beyond_limit}; FieldTable.{has_vectors, copy_sources}
+// tsds::{route(cluster, Target, create, &source, &value, now) -> Target, document_timestamp, select, past_window,
+//   value_location_path} — time series data streams route creates by @timestamp (timestamp_error), past backing indices;
+//   api::indices::BackingOf gained `past: Option<(start_ms, end_ms)>`
+// engine::tsdb::{tsid_dv, tsid_from_dv, tsid_display, tsid_parse} — `_tsid` doc values (engine field 13) hold the _tsid as
+//   lowercase hex (byte order kept); responses print base64url. search::aggs::{render_tsid_keys, mentions_tsid}
+// search::runtime::{RuntimeFields::of(&mapping, Option<&runtime_mappings>), RtField, RtType, Evaluator::new(&ScriptService, st,
+//   &table, shard, index, Arc<RtField>).leaf(seg)?.values(doc), render, Predicate, RuntimeQuery (FilterScript), agg_script,
+//   from_agg_params, check_time_series} — runtime fields; QueryCtx.runtime_mappings; mapping::RuntimeField::parse_def
+// FieldTable::keyed(path) -> Option<Arc<FieldInfo>> (keyed flattened sub-fields; FieldInfo.flattened_key);
+//   Mapping::prefix_disabled(field_path) (strict columnar prefixes)
+// write::{seq_no_disabled(idx), seq_no_unsupported(..)} — index.disable_sequence_numbers (default in the columnar modes);
+//   write::prepare(.., dynamic_templates: Option<&Map>) — bulk items' `dynamic_templates` (MappingCtx.requested_templates)
+// SearchSource.rescore_before_collapse (rescorer retrievers); search_source::Rescore.script (script rescorer)
+// ingest::pipeline::failure_of(&EsError) -> Option<(IngestFailure, created data streams)> (the failure travels in the error:
+//   EsError::{with_hidden, hidden}); IngestFailure.index (the target its failing pipeline started from)
+// search::query_phase(cluster, st, req, t, ti, shards, n, after, aggs, knn, window: Option<EsError>) — `shards` is the request's
+//   shard count (slices spread over shards), `window` the shard's result-window failure (raised after query/aggs/highlight build)
+// search::aggs::Lookup::with_parent_fields(&[FieldAndFormat]); aggs::TOP_HIT_MARKER (hidden key top_hits hits carry to the
+//   coordinator: highlight, matched_queries, explain, runtime fields); aggs::check_metric_scripts(st, &aggs) (metric script
+//   allow lists); Lookup implements FieldLookup::{text_terms (significant_text/categorize_text), global_query (alias filters),
+//   date_formatter (roll's Java-compatible date parser)}; ShardOptions.{profiler, max_buckets, matches_all} are passed
+// search::highlight::highlight_hit(.., doc: Option<u32>) (stored fields of `store: true` fields); search::inner::{render(&QueryCtx,
+//   ..), nested_identity(table, seg, local) -> Option<NestedIdentity { root, levels }>, NestedIdentity::{to_value, source_of}}
+// search::painless_execute::execute (POST _scripts/painless/_execute: painless_test, filter, score and runtime field contexts
+//   over a one-document private in-memory engine); scripting::analysis_scripts() (analysis predicate scripts)
+// api::tasks::persist_result(ctx, id) — finished stored tasks are written to the `.tasks` system index; GET _tasks/<id> falls
+//   back to it; api::shards::{segment_rows(ctx, idx, shard) -> Vec<SegmentRow>} (real `_segments` / `_cat/segments`)
+// engine::index_sort(idx, &table) -> Option<IndexSort> (index.sort.* and mode defaults go into the shard schema)
+// FieldMapper::validate_type(&ctx); MappingCtx.{array_objects_limit, dynamic_auto_text}; EsError::set_meta(key, v);
+//   units::java_base64_url_error(&str) (java.util.Base64 decoder messages); engine::source::extract_values_keeping_coordinates
+// Cluster::enable_background_tasks(self: &Arc<Self>) — owners holding the cluster in an Arc call it once: `wait_for_completion
+//   =false` by-query requests then run on a spawned task after the response (holding a strong handle while they run; their task
+//   is registered, so it pins the cluster), else they run before answering; Cluster::handle() -> Option<Arc<Cluster>>
+// TaskInfo.live: Option<Arc<api::by_query::Live>> (rate for _rethrottle, progress for GET _tasks, slices as child tasks);
+//   TaskRegistry::{set_live, adopt(id), record(&guard, outcome), wait_until(timeout, done) /* wait_for_completion */};
+//   TaskGuard::detach() -> u64; api::tasks::{by_node(ctx, tasks, detailed), node_failure(node, err)}
+// api::by_query::scan(..) -> Scanner { total, next_batch(n) } (doc ids up front, documents a batch at a time)
+// join::Joiner::{of(&Mapping), from_mapper, parent_of, is_parent, is_child, children, parent_join_field, child_join_field};
+//   FieldValue::{Join { name, parent }, Percolator(json, location)}; MappingCtx.join_routing; FieldTable has `<join>#<parent>`
+//   entries (keyword-like, sorted doc values); search::join::{has_child, has_parent, parent_id, inner_hits, JoinInner};
+//   InnerHitsDef.join; aggs::Lookup implements FieldLookup::join (children / parent aggregations)
+// search::percolate::{percolate, check_query, MemoryIndex::build(cluster, st, idx, docs), Percolated, check_indexed_documents};
+//   percolator fields keep their query in binary doc values; ShardResult.percolate
+// search::fusion::{execute, Fused}; retriever::{Fusion { kind, window, min_score, children }, FusionKind::{Rrf, Linear}, Normalizer};
+//   SearchSource.fusion; SearchRequest.{fused, rank_only}; SearchOutcome.ranked: Vec<(target, doc, score)>
+// search::knn::{knn_search (_knn_search, compatible-with=8 only), lookup_vector, resolve_lookups, decode_query_vector};
+//   knn::similarity_to_score(&VectorSpec, s); FieldInfo.vector_layouts (earlier engine fields of a dense_vector whose
+//   index_options changed; searched together); QueryCtx.{alias_filter, exact_knn, strict_unmapped, unmapped, percolate,
+//   constant_joins}; query::contains_query(&Query, name)
+// engine::{VectorStats, VectorSizes}, ShardEngine::vector_stats(&table) (dense_vector / sparse_vector stats);
+//   api::disk_usage::disk_usage (_disk_usage from segment sections); api::rank_eval::rank_eval;
+//   api::document::check_active_shards_for(ctx, idx, shard, request description)
+// api::indices::add_index_stats(cluster, idx, &mut block, shard: Option<u32>) (engine figures into a stats_block_in block;
+//   used by _stats-shaped node stats and _cat/indices: api::cat::stats::of_block(block, column));
+//   search::{max_slices_per_scroll(idx), check_slice_count(idx, max)} (sliced scrolls and every by-query slice);
+//   search::suggest::check(&XParser) (SuggestBuilder.fromXContent checks); sort::parse_after(v, key, format, now, pos, field)
 
 // search-server
 #[async_trait] pub trait Catalog { async fn lookup(&self, cluster: &str) -> Option<ClusterSpec>; }    // StaticCatalog
 #[async_trait] pub trait StoreProvider { async fn meta_store(&self, cluster) -> Result<Arc<dyn MetaStore>>;
                                          async fn branch(&self, parent, child) -> Result<()>; async fn delete(&self, cluster) -> Result<()>;
-                                         async fn release(&self, cluster) /* on unload; default no-op */ }
-// MemoryStores (in memory); ObjectStores::new(search_store::Store) (metadata as search-store cluster states: read_cluster/write_cluster,
-// branch, delete_cluster, release_cluster on unload)
-pub struct ClusterSpec { pub name, pub dialect, pub credentials: Vec<Credential { user, api_key_id, secret }>, pub idle_unload: Option<Duration>,
-                         pub max_in_flight: usize, pub max_body_bytes: Option<usize>, pub destructive_requires_name: bool }
-pub struct NodeConfig { pub node_name, pub domain: Option<String>, pub idle_unload: Option<Duration> /* 300 s */, pub max_body_bytes /* 100 MiB */,
+                                         async fn release(&self, cluster) /* on unload; default no-op */;
+                                         async fn branch_at(&self, parent, child, at_ms: Option<u64>) -> Result<()> /* default: branch() for None */;
+                                         fn data(&self) -> Option<search_store::Store> /* default None; ObjectStores: Some — shards become durable.
+                                                                                          WRAPPERS MUST FORWARD IT (search-control's GuardedStores) */ }
+// MemoryStores (in memory, shards in memory too); ObjectStores::new(search_store::Store) (metadata as search-store cluster states:
+// read_cluster/write_cluster, branch, delete_cluster, release_cluster on unload; shards through search_server::persist)
+pub struct ClusterSpec { pub name, pub dialect, pub credentials: Vec<Credential>, pub idle_unload: Option<Duration>,
+                         pub max_in_flight: usize, pub max_body_bytes: Option<usize>, pub destructive_requires_name: bool,
+                         pub max_requests_per_second: Option<f64> /* token bucket, burst max(1, rate); 429 */,
+                         pub max_in_flight_bytes: Option<usize> /* body bytes in flight, default 2 × body limit; 429 like indexing pressure */,
+                         pub max_resident_bytes: Option<u64> /* over it the node commits the cluster's shards (buffers → files) */ }
+pub struct Credential { pub user: Option<String>, pub api_key_id: Option<String>, pub secret: String, pub secret_sha256: Option<[u8; 32]> }
+// Credential::{password(s), hashed(sha256), for_user(u), for_api_key(id)}; search_server::secret_hash(s) -> [u8; 32]; compared in constant time
+pub struct NodeConfig { pub node_name, pub node_id: Option<String> /* lease identity, default node_name */, pub domain: Option<String>,
+                        pub idle_unload: Option<Duration> /* 300 s */, pub max_body_bytes /* 100 MiB */,
                         pub default_cluster: Option<String> /* dev mode: no auth */,
                         pub node_settings: Vec<(String, String)>, pub test_features: bool /* copied into ClusterConfig */,
-                        pub host_metrics: bool /* copied into ClusterConfig; search-dev sets it */ }
+                        pub host_metrics: bool /* copied into ClusterConfig; search-dev sets it */,
+                        pub max_running: usize /* node-wide running requests, granted round-robin across clusters; 0 = 2 × cores, usize::MAX = off */,
+                        pub lease_ttl: Duration /* 10 s */,
+                        pub memory_budget: Option<u64> /* resident bytes of all loaded clusters; LRU idle clusters are unloaded past it,
+                                                          and a wake makes room first */,
+                        pub unload_memory_only: bool /* false: with a StoreProvider whose data() is None, idle and budget unloads skip
+                                                        clusters holding documents (they'd lose them; warned once); explicit unload still
+                                                        unloads. true: tests / throwaway nodes */ }
 #[async_trait] pub trait LifecycleHooks { async fn loaded(&self, &Arc<Cluster>); async fn unloading(&self, &Arc<Cluster>); }
-impl Node { fn new(catalog, stores, cfg) -> Arc<Node>; fn with_hooks(..); async fn open(spec) -> Result<Arc<Loaded>>; fn idle(older_than) -> Vec<String>;
-            async fn unload(name) -> bool; async fn branch(parent, child); async fn admit(&EsRequest, sni) -> Result<Lease, Rejected>;
-            async fn handle(EsRequest) -> EsResponse; fn loaded() -> Vec<String>; fn update_spec(ClusterSpec) /* credential rotation */ }
-pub async fn serve(listener, Arc<Node>, ListenOptions { tls: Option<TlsAcceptor>, proxy_protocol }) -> Result<()>; // also spawn(addr, ..)
+impl Node { fn new(catalog, stores, cfg) -> Arc<Node>; fn with_hooks(..); fn set_leases(Arc<dyn Leases>) /* before the first request */;
+            async fn open(spec) -> Result<Arc<Loaded>> /* Err downcasts to node::OpenError { error: EsError } for refusals */;
+            fn idle(older_than) -> Vec<String> /* a spec's own idle_unload overrides older_than; the reaper also runs for clusters
+                                                   with their own idle_unload when the node has none */;
+            async fn unload(name) -> bool /* flush + detach + release lease + free memory */;
+            async fn force_unload(name) -> bool /* drop without writing (lease lost); requests still running on the instance get 503
+                                                   for writes no WAL record covers yet, and its metadata store refuses saves */;
+            async fn branch(parent, child); async fn branch_at(parent, child, at_ms: Option<u64>) /* commits a loaded parent first */;
+            async fn delete_cluster(name); async fn flush(name); async fn usage(name) -> Usage { loaded, docs, deleted_docs, store_bytes, resident_bytes, requests };
+            async fn shutdown(timeout) /* refuse loads, unload all (flush, hand leases back), close the WAL: SIGTERM */;
+            async fn admit(&EsRequest, sni) -> Result<Lease, Rejected>; async fn enter(..) /* auth + rate */; async fn handle(EsRequest) -> EsResponse;
+            fn loaded() -> Vec<String>; fn get_loaded(name) -> Option<Arc<Loaded>>;
+            fn update_spec(ClusterSpec) /* live: credentials, rate, max_in_flight (permits added, or retired as they return), byte budget;
+                                           also reaches a cluster whose load is in progress (applied as it is published); dialect and
+                                           destructive_requires_name still need a reload */;
+            async fn enforce_memory(room) -> Vec<String> /* the budget check the reaper runs every 2 s; returns the clusters unloaded */;
+            fn take_request_counts() -> Vec<(String, u64)> /* metering: requests admitted per cluster since the previous call,
+                                           unloaded instances included; each request reported once */;
+            fn background_tasks() -> usize /* 0 whenever nothing is loaded */; fn scheduler() -> Option<&Arc<FairScheduler>>; pub wakes, unloads: AtomicU64 }
+impl Loaded { pub cluster: Arc<Cluster>; pub data: Option<Arc<persist::ClusterData>>; fn spec(); fn in_flight(); fn requests() -> u64;
+              fn epoch() -> u64; fn bytes_in_flight(); pub wake_time: Duration; pub recovery: persist::RecoveryStats { shards, segments, fetching, records, orphans } }
+impl Lease { fn reserve_body(&mut self, &EsRequest, bytes) -> Result<(), Rejected>; fn reserve_more(..) /* grows the reservation (chunked frames,
+              inflated output) */; fn over_budget(&EsRequest, used, bytes) -> Rejected; async fn acquire(&mut self, &EsRequest); async fn handle(&self, EsRequest) -> EsResponse /* + durability */ }
+pub async fn serve(listener, Arc<Node>, ListenOptions { tls: Option<TlsAcceptor>, proxy_protocol, body_timeouts }) -> Result<()>; // also spawn(addr, ..)
+pub async fn serve_until(listener, node, opts, Shutdown) -> Result<()>;  // Shutdown::new()/trigger(): stop accepting, finish in-flight requests, return
+// lease::{Leases (acquire(cluster, node, ttl) -> Result<Result<epoch, Owner>>, renew, renew_many(&[(cluster, epoch)], node, ttl) -> Vec<bool>
+//   /* the renewer's one round trip per period for every held lease; default loops over renew */, release, owner),
+//   MemoryLeases, SqliteLeases::open(path), PgLeases::{connect(url), connect_with(url, ca_pem)} /* TLS per sslmode, verified */}
+// process::{tune_memory() -> Tuned { thp_disabled } /* mimalloc purge delay 0 + PR_SET_THP_DISABLE; call first in main (rolld too) */,
+//   on_thread_park /* tokio Builder::on_thread_park */}
+// limits::{RateLimiter, ByteBudget { reserve, grow(&mut Reservation, n), .. }, Reservation { bytes(), shrink(n) }, FairScheduler};
+// persist::{ClusterData { set_verify_owner, is_closed, .. }, Unloaded /* error: flush_all/state saves after unload */,
+//   segment_verifier() /* StoreConfig.verify */, resident_bytes(&Cluster), NUMBERS_KEY}; meta_guard::CheckedMeta::close()
+// http: Netty's limits — request line > 4096 B → 400 too_long_http_line_exception, header lines > 16384 B → 400
+//   too_long_http_header_exception (both close); body > max_content_length (declared, chunked or inflated) → empty
+//   "413 Request Entity Too Large" + close; truncated gzip/deflate → the inflated prefix; invalid → connection dropped
+//   unanswered; raw deflate accepted; HEAD never gzipped; inflate/gzip > 64 KiB on the blocking pool.
 // net::{tls_config, tls_acceptor, read_proxy_header}.  Binary: search-dev --listen 127.0.0.1:59200 [--cluster] [--dialect] [--data-dir dir]
 //   (--yaml-test-cluster also sets path.repo to <tmp>/roll-search-repo, so `fs` snapshot repositories can be registered)
-//   [--tls-cert --tls-key] [-E key=value]... [--test-features] [--yaml-test-cluster]
-//   (--data-dir: metadata through search-store in a local directory instead of memory; --yaml-test-cluster = the settings
-//   Elasticsearch's YAML test cluster runs with: node.attr.testattr=test, node.processors=2, test cluster features)
+//   [--tls-cert --tls-key] [-E key=value]... [--test-features] [--yaml-test-cluster] [--idle-unload s | --idle-unload-ms ms] [--sync-objects]
+//   (--data-dir: the whole cluster — metadata and documents — durable through search-store in a local directory; SIGTERM/SIGINT
+//   stop gracefully and flush; --yaml-test-cluster = the settings Elasticsearch's YAML test cluster runs with: node.attr.testattr=test,
+//   node.processors=2, test cluster features)
 ```
 
-The idle reaper task exists only while a cluster is loaded. `search-es` cluster state JSON
-(`ClusterState::to_json`) is what `MetaStore::save` receives; `ObjectStores` stores it with
+A cluster isn't idle while it holds state that lives only in memory: an open scroll or point in time (until the
+`scroll` / `keep_alive` of the last successful request naming one expires) or a running task, and its idle time starts
+when the pin ends (a long task's stored result gets a whole idle timeout to be fetched); memory-budget eviction
+takes such clusters last. Each cluster reports a node id that is stable across wakes and hosts
+(`node::stable_node_id(cluster)`, a base64url UUID derived from the name), and a cluster that never wrote its state
+saves it on its first wake so `cluster_uuid` stays the same too. Wakes keep everything durable but not what lives only
+in memory: `_stats`/`_nodes/stats` counters restart from zero, stored task results are gone, and documents indexed but not
+yet refreshed are searchable after the wake (as after an Elasticsearch restart).
+
+Every cluster state reaches the `StoreProvider`'s `MetaStore` through `meta_guard::CheckedMeta`, which parses it
+exactly as a wake would (`ClusterState::from_json_in`, indices unchanged since the last save skipped by hash) and
+refuses to save one that fails: the request gets search-es's 500 `failed to persist cluster state: the change would
+leave a cluster state that cannot be loaded again: <parse error>`, nothing is published, and the cluster keeps its
+last good state instead of becoming unwakeable. (`search-es` should still run the stricter check itself and answer
+400 like Elasticsearch; the guard is the backstop.)
+
+The idle reaper, lease renewer, async-durability syncer and background flushes exist only while a cluster that needs
+them is loaded (`Node::background_tasks()` is 0 otherwise; the store's WAL thread sleeps without a timeout). `search-es`
+cluster state JSON (`ClusterState::to_json`) is what `MetaStore::save` receives; `ObjectStores` stores it with
 `search-store`'s `write_cluster`/`read_cluster`.
+
+**Shard durability** (`search_server::persist`, used when `StoreProvider::data()` is `Some`): the engine's
+`ShardStorage` is `ClusterData`. After every non-GET request the node makes the request's writes durable before
+answering: each dirty shard's consistent cut (`search_index::Shard::flush`, which publishes nothing) is appended to the
+WAL as a *cut record* (only segments the log doesn't hold yet as bytes, deletions as deltas) and the response waits for
+`Wal::wait_ack` when `index.translog.durability` is `request` (default); `async` indices are appended by a per-cluster
+syncer every `index.translog.sync_interval`. Concurrent writers of a shard share one cut. A *full commit* (segments to
+object storage, live docs, `write_manifest`, WAL trimmed) runs for records over 8 MiB (big bulks, merged segments), past
+`index.translog.flush_threshold_size` (10 GB) or `flush_threshold_age` (1 m), on `_flush`, before branching and on
+unload. Wake: `recover_shards`, segments from the cache (an uncached segment larger than one fetch part, 8 MiB, opens
+while still downloading: `Store::fetch_segment` + `SegmentHandle::fetching` behind `persist::FetchGate`, whose blocking
+waits use `block_in_place` on tokio workers; only on a multi-thread runtime), replay of the cut records, then
+`Engine::open_seeded(.., numbers)` with the index's field numbering (persisted in manifest `user_data["roll.field_numbers"]`
+and in records; field numbers are allocated in mapping-growth order and segments depend on them). Segment files live in
+`<staging>/c-<cluster>/<uuid>-<shard>/` (`Store::staging_dir`) and are uploaded from there. Errors: `WalFull` → 429
+`es_rejected_execution_exception`; `Fenced` or a lapsed lease → 503 `cluster_block_exception` and the cluster is dropped
+without writing; others → 500 `translog_exception` (the write stays in memory and is persisted by the next cut).
+With leases (`Node::set_leases`), a wake takes the cluster's lease (refused: 503 + `X-Roll-Search-Owner: <node>`),
+`set_epoch(cluster, epoch)` fences older writers in the store, `Store::claim_cluster` writes an ownership marker
+before anything of the cluster is read, renewals run every `ttl/3`, and writes are acknowledged only before
+`sent + 0.8 × ttl` of the last successful renewal, so a partitioned owner stops acknowledging before another node can
+take over. Multi-node deployments must use `sync_objects` (acks once the WAL is in object storage); there each
+acknowledgement also waits for a `Store::check_owner` listing that started after its record was in object storage
+(concurrent writers share one), so a deposed owner whose lease store wrongly vouches for it gets 503 instead of
+acknowledging a write the new owner can't see. A request still running when its cluster is closed under it (lease
+lost, persistence failure, shutdown timeout) is acknowledged only if a WAL record already covers its writes.
+search-es hook (`crates/search-es/src/persist_hooks.rs`, declared in `engine::fields`): `Engine::{indices_snapshot(),
+open_seeded(cluster, st, idx, numbers)}`, `IndexEngine::{field_numbers(), field_numbers_allocated()}`,
+`Numbers::{snapshot(), allocated(), seeded(..)}`. search-es must not drop the `IndexEngine` of an index that still
+exists (`ShardStorage::open` refuses to reopen a shard that is still open: an empty shard would lose its data).
 
 ## roll API (`/v1/search`, served by `search-control` on the rolld API port)
 
@@ -1085,7 +1393,42 @@ The idle reaper task exists only while a cluster is loaded. `search-es` cluster 
 | POST   | `/v1/search/clusters/{id}/request`               | run one REST request (dashboard console) |
 | GET    | `/v1/search/clusters/{id}/usage`                 | metering, cost vs Elastic Cloud / Amazon OpenSearch Service |
 
-Errors follow the other control planes: `{"error": "..."}` with 400/404/409/500.
+Errors follow the other control planes: `{"error": "..."}` with 400/404/409/500, plus 413 when a
+console request exceeds what the cluster's `max_body_mb` allows (`api::console_limit`: twice the
+limit plus 1 MiB, room for JSON escapes; the cluster then enforces its exact limit). Also
+`GET /v1/search` (info, pricing) and `GET /v1/search/clusters/{id}/branches`; `{id}` is the id or
+the name. Full shapes: [README.md](README.md).
+
+`search-control` (owned by the product crate) builds the node:
+
+```rust
+pub struct SearchConfig { home, node_name, region, public_host, http_port, tls, domain, idle_unload, cache_bytes, sync_objects,
+                          history_retention /* StoreConfig::manifest_retain_ms */, gc_interval, metering_interval, stats_interval, test_features,
+                          defaults: Defaults, pricing: Pricing }      // SearchConfig::local(home)
+impl Control { async fn new(SearchConfig, pg_storage::Objects) -> Result<Arc<Control>>;   // opens search_store::Store + Node
+               pub node: Arc<search_server::Node>; pub data: search_store::Store; pub store /* SQLite */; pub meter: Arc<Meter>;
+               async fn shutdown(&self) -> Result<()>;  async fn sample(&self) /* one metering pass */; fn usage(id, days);
+               async fn update(id, ClusterOptions); async fn rotate_password(id); async fn delete(id) }
+// Changes are applied to the node also while a cluster wakes (control.rs/wake.rs: the catalog
+// stamps lookups, the node's StoreProvider is wrapped to track loads and refuse deleted clusters,
+// the load hook reconciles the new instance). Dialect, destructive_requires_name and max_in_flight
+// are fixed at load: changing them schedules a reload, done once no request runs.
+pub enum ControlError { NotFound, Invalid, Conflict, TooLarge /* 413 */, Internal }
+pub fn api::router(Arc<Control>) -> axum::Router;   // /v1/search
+pub struct SqlCatalog;   // search_server::Catalog over SQLite: ClusterSpec { name, dialect from flavor, credentials: [password],
+                         // idle_unload (0 = always loaded), max_in_flight, max_body_bytes, destructive_requires_name }
+pub struct meter::MeterHooks(Arc<Meter>);   // metering half of the node's LifecycleHooks: exact loaded time; Meter::count_request(cluster)
+pub fn meter::engine_figures(&Cluster) -> EngineFigures;   // docs (Lucene-level, nested included, = _stats docs.count),
+                                                          // deleted, segment and heap bytes over open shards; complete()
+pub fn meter::index_figures(&Cluster, uuid) -> Option<EngineFigures>;   pub fn meter::resident_bytes(&Cluster) -> i64;   // billed GiB-hours
+```
+
+A cluster's name is its key on the node and in object storage (Basic user, SNI label,
+`cluster_name`); names are DNS labels. The node does not count requests per cluster yet, so
+metered requests are only the console's until search-server exposes a counter (e.g.
+`Loaded::requests()` or a `LifecycleHooks::request` callback) for `Control::sample` to read.
+Wanted from search-server to simplify the wake coordination: `Node::update_spec` applying to a
+load in progress, and resizing `Loaded.permits` so `max_in_flight` changes need no reload.
 
 ## `search-yaml`
 

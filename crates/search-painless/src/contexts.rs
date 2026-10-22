@@ -346,6 +346,7 @@ pub fn script_language_json() -> serde_json::Value {
     serde_json::json!({
         "types_allowed": ["inline", "stored"],
         "language_contexts": [
+            {"language": "expression", "contexts": crate::expression::CONTEXTS.iter().map(|c| c.name()).collect::<std::collections::BTreeSet<_>>()},
             {"language": "mustache", "contexts": ["ingest_template", "template"]},
             {"language": "painless", "contexts": painless},
         ]
@@ -364,6 +365,7 @@ mod metadata_tests {
         ours.sort_unstable();
         assert_eq!(names, ours);
         let langs = script_language_json();
-        assert_eq!(langs["language_contexts"][1]["contexts"].as_array().unwrap().len(), Context::ALL.len());
+        assert_eq!(langs["language_contexts"][0]["contexts"], serde_json::json!(["aggregation_selector", "aggs", "bucket_aggregation", "double_values", "field", "filter", "number_sort", "score", "terms_set"]));
+        assert_eq!(langs["language_contexts"][2]["contexts"].as_array().unwrap().len(), Context::ALL.len());
     }
 }

@@ -10,8 +10,11 @@
 //! Work is bounded like Lucene's `Operations.determinize`: each DFA state processed costs the
 //! number of NFA states in it that a character leads to (Lucene's automata have no epsilon
 //! transitions, so our join and fork states do not count), and reaching `10 × limit` fails with
-//! [`TooComplex`]. Intersection and complement (regexp `&` and `~`) also run here, on code point
-//! DFAs, as in Lucene.
+//! [`TooComplex`] — but only once the automaton has shown nondeterminism (a subset holding two
+//! such states): Lucene's `determinize` returns an already deterministic automaton untouched, so
+//! a long chain like `a{100000}` costs nothing there and must not fail here either. (Memory is
+//! bounded separately, by the builders' state budgets.) Intersection and complement (regexp `&`
+//! and `~`) also run here, on code point DFAs, as in Lucene.
 
 use std::collections::HashMap;
 
@@ -50,6 +53,7 @@ impl CpDfa {
         };
         let effort_limit = work_limit as u64 * 10;
         let mut effort = 0u64;
+        let mut deterministic = true;
 
         let mut mark = vec![0u32; n];
         let mut stamp = 1u32;
@@ -69,8 +73,10 @@ impl CpDfa {
         let mut next = 0usize;
         while next < sets.len() {
             let set = std::mem::take(&mut sets[next]);
-            effort += set.iter().filter(|&&s| entered[s as usize]).count() as u64;
-            if effort >= effort_limit {
+            let real = set.iter().filter(|&&s| entered[s as usize]).count() as u64;
+            deterministic &= real <= 1;
+            effort += real;
+            if effort >= effort_limit && !deterministic {
                 return Err(too_complex());
             }
             out.accept.push(set.iter().any(|&s| nfa.states[s as usize].accept));
@@ -178,10 +184,11 @@ impl CpDfa {
         self.accept.is_empty()
     }
 
-    /// The product automaton (Lucene's `Operations.intersection`).
-    pub(crate) fn intersection(&self, other: &CpDfa) -> CpDfa {
+    /// The product automaton (Lucene's `Operations.intersection`), or `None` once it would
+    /// exceed `max_states` states (products of independent automata multiply).
+    pub(crate) fn intersection(&self, other: &CpDfa, max_states: usize) -> Option<CpDfa> {
         if self.is_empty_language() || other.is_empty_language() {
-            return CpDfa::default();
+            return Some(CpDfa::default());
         }
         let mut ids: HashMap<(u32, u32), u32, FxBuild> = HashMap::default();
         let mut pairs = vec![(0u32, 0u32)];
@@ -202,6 +209,9 @@ impl CpDfa {
                         pairs.push((a.2, b.2));
                         (pairs.len() - 1) as u32
                     });
+                    if pairs.len() > max_states {
+                        return None;
+                    }
                     row.push((lo, hi, id));
                 }
                 if a.1 < b.1 {
@@ -214,7 +224,7 @@ impl CpDfa {
             i += 1;
         }
         out.remove_dead();
-        out
+        Some(out)
     }
 
     /// Every code point string this automaton rejects (Lucene's `Operations.complement`).
@@ -379,7 +389,7 @@ mod tests {
         for _ in 0..300 {
             let (n1, n2) = (random_nfa(&mut rng), random_nfa(&mut rng));
             let (d1, d2) = (CpDfa::determinize(&n1, 1 << 20).unwrap(), CpDfa::determinize(&n2, 1 << 20).unwrap());
-            let (both, not1) = (d1.intersection(&d2), d1.complement());
+            let (both, not1) = (d1.intersection(&d2, usize::MAX).unwrap(), d1.complement());
             for w in &words {
                 let (a, b) = (n1.matches_str(w), n2.matches_str(w));
                 assert_eq!(run(&d1, w), a, "{w}");

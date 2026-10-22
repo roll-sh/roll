@@ -1622,12 +1622,68 @@ impl Regex {
 
 // ------------------------------------------------------------------------------ VM
 
-/// The regex-limit counter (`LimitedCharSequence`).
+/// The regex-limit counter (`LimitedCharSequence`), and an optional watchdog deadline.
+///
+/// The deadline (grok's `ingest.grok.watchdog`) costs nothing per character: `limit` is then a
+/// checkpoint a fixed number of reads ahead, and only crossing it reads the clock. Backtracking
+/// that reads no characters ticks `steps` instead, so every exponential search reaches the
+/// clock.
 #[derive(Clone, Debug)]
 pub struct Limit {
     pub factor: i32,
     pub limit: u64,
     pub count: u64,
+    pub deadline: Option<std::time::Instant>,
+    steps: u32,
+    /// Set when the deadline (not the character limit) stopped the match.
+    pub interrupted: bool,
+}
+
+/// Reads or backtracking steps between two looks at the clock (about 0.1 ms of matching).
+const WATCHDOG_STRIDE: u64 = 1 << 14;
+
+impl Limit {
+    /// `script.painless.regex.limit-factor`: at most `factor * len` character reads.
+    pub fn chars(factor: i32, len: usize) -> Limit {
+        Limit { factor, limit: factor as u64 * len as u64, count: 0, deadline: None, steps: 0, interrupted: false }
+    }
+
+    /// No character limit; matching stops once `deadline` has passed.
+    pub fn deadline(deadline: std::time::Instant) -> Limit {
+        Limit { factor: 0, limit: WATCHDOG_STRIDE, count: 0, deadline: Some(deadline), steps: 0, interrupted: false }
+    }
+
+    /// The character limit was crossed: a real limit fails; a watchdog checkpoint reads the clock.
+    #[cold]
+    fn crossed(&mut self) -> Result<(), LimitHit> {
+        match self.deadline {
+            None => Err(LimitHit),
+            Some(d) => {
+                self.limit = self.count + WATCHDOG_STRIDE;
+                self.check_clock(d)
+            }
+        }
+    }
+
+    fn check_clock(&mut self, d: std::time::Instant) -> Result<(), LimitHit> {
+        if std::time::Instant::now() >= d {
+            self.interrupted = true;
+            return Err(LimitHit);
+        }
+        Ok(())
+    }
+
+    /// One backtracking step.
+    #[inline]
+    fn step(&mut self) -> Result<(), LimitHit> {
+        if let Some(d) = self.deadline {
+            self.steps = self.steps.wrapping_add(1);
+            if (self.steps as u64).is_multiple_of(WATCHDOG_STRIDE) {
+                return self.check_clock(d);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Raised when the limit is hit; converted to the Elasticsearch error by the caller.
@@ -1736,7 +1792,7 @@ impl Exec<'_> {
         if let Some(l) = self.limit.as_deref_mut() {
             l.count += n;
             if l.count > l.limit {
-                return Err(LimitHit);
+                return l.crossed();
             }
         }
         Ok(())
@@ -2127,6 +2183,9 @@ impl Exec<'_> {
             // backtrack
             loop {
                 let Some(f) = self.stack.pop() else { return Ok(None) };
+                if let Some(l) = self.limit.as_deref_mut() {
+                    l.step()?;
+                }
                 match f {
                     Frame::Alt { pc: p, pos: q } => {
                         if p & 0x8000_0000 != 0 {
@@ -2314,7 +2373,7 @@ fn limit_error(re: &Regex, text: &[u16], l: &Limit, whole: bool) -> Thrown {
     let entry: &[&str] = if whole {
         &["java.base/java.util.regex.Matcher.match(Matcher.java:1792)", "java.base/java.util.regex.Matcher.matches(Matcher.java:752)"]
     } else {
-        &["java.base/java.util.regex.Matcher.search(Matcher.java:1767)", "java.base/java.util.regex.Matcher.find(Matcher.java:787)"]
+        &["java.base/java.util.regex.Matcher.search(Matcher.java:1765)", "java.base/java.util.regex.Matcher.find(Matcher.java:785)"]
     };
     let mut frames = vec!["org.elasticsearch.server@9.5.5/org.elasticsearch.common.text.ReadLimitedCharSequence.charAt(ReadLimitedCharSequence.java:57)".to_string()];
     frames.extend(entry.iter().map(|s| s.to_string()));
@@ -2326,9 +2385,22 @@ impl MatcherState {
     pub fn new(regex: Arc<Regex>, input: &str, limit_factor: i32) -> MatcherState {
         let text = utf16(input);
         let len = text.len();
-        let limit = if limit_factor > 0 { Some(Limit { factor: limit_factor, limit: limit_factor as u64 * len as u64, count: 0 }) } else { None };
+        let limit = if limit_factor > 0 { Some(Limit::chars(limit_factor, len)) } else { None };
         let groups = vec![NONE; 2 * (regex.ngroups + 1)];
         MatcherState { regex, text, from: 0, to: len, first: NONE, last: 0, groups, append_pos: 0, hit_end: false, anchoring: true, transparent: false, limit }
+    }
+
+    /// A matcher with no character limit that stops (with an error, see [`Self::interrupted`])
+    /// once `deadline` has passed: grok's watchdog.
+    pub fn with_deadline(regex: Arc<Regex>, input: &str, deadline: std::time::Instant) -> MatcherState {
+        let mut m = MatcherState::new(regex, input, 0);
+        m.limit = Some(Limit::deadline(deadline));
+        m
+    }
+
+    /// Whether the last operation failed because the deadline passed.
+    pub fn interrupted(&self) -> bool {
+        self.limit.as_ref().is_some_and(|l| l.interrupted)
     }
 
     fn run(&mut self, start: usize, mode: Mode) -> Result<bool, Thrown> {
@@ -2351,6 +2423,7 @@ impl MatcherState {
                 }
                 Ok(false)
             }
+            Err(LimitHit) if self.interrupted() => Err(Throw::new(cls::RUNTIME_EXCEPTION, Some("regular expression matching was interrupted".into()))),
             Err(LimitHit) => Err(limit_error(&self.regex, &self.text, self.limit.as_ref().unwrap(), mode != Mode::Search)),
         }
     }
@@ -2508,8 +2581,7 @@ impl MatcherState {
                 if i >= r.len() {
                     return Err(iae_at("Illegal group reference: group index is missing", 1073));
                 }
-                let g: usize;
-                if r[i] == '{' {
+                let g: usize = if r[i] == '{' {
                     i += 1;
                     let s = i;
                     while i < r.len() && r[i].is_ascii_alphanumeric() {
@@ -2526,10 +2598,10 @@ impl MatcherState {
                     if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                         return Err(iae_at(&format!("capturing group name {{{name}}} starts with digit character"), 1098));
                     }
-                    g = match self.regex.group_index(&name) {
+                    match self.regex.group_index(&name) {
                         Some(g) => g,
                         None => return Err(iae_at(&format!("No group with name {{{name}}}"), 1103)),
-                    };
+                    }
                 } else {
                     let Some(d) = r[i].to_digit(10) else {
                         return Err(iae_at("Illegal group reference", 1111));
@@ -2554,8 +2626,8 @@ impl MatcherState {
                         n = nn;
                         i += 1;
                     }
-                    g = n;
-                }
+                    n
+                };
                 let (s, e) = (self.groups[2 * g], self.groups[2 * g + 1]);
                 if s != NONE && e != NONE {
                     buf.extend_from_slice(&self.text[s..e]);
@@ -2625,17 +2697,41 @@ fn matcher_of(v: &Value) -> Result<&RefCell<MatcherState>, Thrown> {
     }
 }
 
-fn input(v: &Value) -> Result<String, Thrown> {
+/// [`crate::lookup::MethodInfo::aug`] of the augmentations whose receiver is the text a matcher
+/// reads (`CharSequence.replaceAll(Pattern, Function)`): a null receiver fails in the matcher.
+pub const REGEX_INPUT_AUG: &str = "<regex input>";
+
+/// The text a matcher reads. With the regex limit on, Elasticsearch wraps it in a
+/// `ReadLimitedCharSequence` first (which fails on null); without, `Pattern.matcher` does.
+fn input(vm: &Vm, v: &Value) -> Result<String, Thrown> {
     match v {
-        Value::Null => Err(crate::vm::npe("Cannot invoke \"java.lang.CharSequence.length()\" because \"wrap\" is null")),
+        Value::Null => Err(null_input(vm.prog.regex_limit_factor > 0, &["java.util.regex.Pattern.matcher(Pattern.java:1182)"])),
         other => crate::lib_lang::char_seq(other),
     }
+}
+
+/// The NPE of a matcher over null text; `callers` are the JDK frames above `Pattern.matcher`'s
+/// constructor call when no limit wraps the text.
+pub(crate) fn null_input(limited: bool, callers: &[&str]) -> Thrown {
+    if limited {
+        return crate::vm::npe("Cannot invoke \"java.lang.CharSequence.length()\" because \"wrapped\" is null")
+            .with_frames(&["org.elasticsearch.server@9.5.5/org.elasticsearch.common.text.ReadLimitedCharSequence.<init>(ReadLimitedCharSequence.java:26)"]);
+    }
+    let mut frames = vec![
+        "java.base/java.util.regex.Matcher.getTextLength(Matcher.java:1806)".to_string(),
+        "java.base/java.util.regex.Matcher.reset(Matcher.java:459)".to_string(),
+        "java.base/java.util.regex.Matcher.<init>(Matcher.java:255)".to_string(),
+    ];
+    frames.extend(callers.iter().map(|f| format!("java.base/{f}")));
+    let mut t = crate::vm::npe("Cannot invoke \"java.lang.CharSequence.length()\" because \"this.text\" is null");
+    t.frames = frames;
+    t
 }
 
 /// `x =~ /p/` (find) and `x ==~ /p/` (matches).
 pub fn regex_op(vm: &mut Vm, find: bool, s: &Value, p: &Value) -> Result<bool, Thrown> {
     let re = pattern_of(p)?;
-    let text = input(s)?;
+    let text = input(vm, s)?;
     let mut m = MatcherState::new(re, &text, vm.prog.regex_limit_factor);
     if find {
         m.find()
@@ -2650,7 +2746,7 @@ fn new_matcher(vm: &Vm, re: Arc<Regex>, text: &str) -> Value {
 
 fn p_matcher(vm: &mut Vm, a: &mut [Value]) -> VR {
     let re = pattern_of(&a[0])?;
-    let text = input(&a[1])?;
+    let text = input(vm, &a[1])?;
     Ok(new_matcher(vm, re, &text))
 }
 
@@ -2722,34 +2818,56 @@ fn string_array(items: Vec<String>) -> Value {
     crate::dynamic::array_from(crate::types::Ty::array(cls::STRING, 1), vals)
 }
 
+/// The regex limit failing inside `Pattern.split`: its `find` loop's frames.
+fn in_split(mut e: Thrown, one_arg: bool) -> Thrown {
+    if e.es_type == Some("circuit_breaking_exception") && e.offset.is_none() {
+        e.frames.push("java.base/java.util.regex.Pattern.split(Pattern.java:1407)".into());
+        if one_arg {
+            e.frames.push("java.base/java.util.regex.Pattern.split(Pattern.java:1483)".into());
+        }
+    }
+    e
+}
+
 fn p_split(vm: &mut Vm, a: &mut [Value]) -> VR {
     let re = pattern_of(&a[0])?;
-    let text = input(&a[1])?;
-    Ok(string_array(split_impl(vm, re, &text, 0)?))
+    let text = input(vm, &a[1])?;
+    Ok(string_array(split_impl(vm, re, &text, 0).map_err(|e| in_split(e, true))?))
 }
 
 fn p_split2(vm: &mut Vm, a: &mut [Value]) -> VR {
     let re = pattern_of(&a[0])?;
-    let text = input(&a[1])?;
+    let text = input(vm, &a[1])?;
     let limit = crate::lib_lang::int(&a[2]);
-    Ok(string_array(split_impl(vm, re, &text, limit)?))
+    Ok(string_array(split_impl(vm, re, &text, limit).map_err(|e| in_split(e, false))?))
 }
 
 fn p_split_as_stream(vm: &mut Vm, a: &mut [Value]) -> VR {
     let re = pattern_of(&a[0])?;
-    let text = input(&a[1])?;
-    // splitAsStream keeps trailing empty strings except a single trailing one (Java's
-    // MatcherIterator): emulate with limit 0 semantics for the common cases
-    let parts = split_impl(vm, re, &text, 0)?;
-    let items = if text.is_empty() { vec![Value::str("")] } else { parts.into_iter().map(Value::string).collect() };
-    Ok(crate::stream::unsized_stream_of(items))
+    let text = input(vm, &a[1])?;
+    // the matching runs when the stream is consumed (Java's lazy `MatcherIterator`)
+    Ok(crate::stream::split_stream(re, text))
+}
+
+/// The elements of `Pattern.splitAsStream`: `MatcherIterator` drops trailing empty strings
+/// (and the leading one of a zero-width match), as `split(text, 0)` does, but streams `""`
+/// for empty input.
+pub fn split_stream_parts(vm: &mut Vm, re: Arc<Regex>, text: &str) -> Result<Vec<Value>, Thrown> {
+    let parts = split_impl(vm, re, text, 0)?;
+    Ok(if text.is_empty() { vec![Value::str("")] } else { parts.into_iter().map(Value::string).collect() })
 }
 
 fn p_as_predicate(_: &mut Vm, a: &mut [Value]) -> VR {
     let re = pattern_of(&a[0])?;
     Ok(crate::func::native(Some(cls::PREDICATE), move |vm, args| {
-        let text = input(args.first().unwrap_or(&Value::Null))?;
-        let mut m = MatcherState::new(re.clone(), &text, vm.prog.regex_limit_factor);
+        // the predicate matches without the regex limit
+        let text = match args.first().unwrap_or(&Value::Null) {
+            Value::Null => return Err(null_input(false, &["java.util.regex.Pattern.matcher(Pattern.java:1182)", "java.util.regex.Pattern.lambda$asPredicate$0(Pattern.java:6021)"])),
+            v => crate::lib_lang::char_seq(v)?,
+        };
+        // `Pattern.asPredicate` matches the text itself, outside the regex limit
+        let _ = &vm;
+        let mut m = MatcherState::new(re.clone(), &text, 0);
         Ok(Value::Bool(m.find()?))
     }))
 }
@@ -2913,18 +3031,21 @@ pub fn quote_replacement(s: &str) -> String {
 }
 
 /// `CharSequence.replaceAll(Pattern, Function)` / `replaceFirst`: the function builds each
-/// replacement from the matcher (no limit factor, as in Elasticsearch).
+/// replacement from the matcher (under the regex limit, as in Elasticsearch 9).
 fn cs_replace(vm: &mut Vm, a: &mut [Value], all: bool) -> VR {
-    let text = crate::lib_lang::char_seq(&a[0])?;
     let re = pattern_of(&a[1])?;
+    let text = input(vm, &a[0])?;
     let f = a[2].clone();
-    let state = MatcherState::new(re, &text, 0);
+    let state = MatcherState::new(re, &text, vm.prog.regex_limit_factor);
     let mv = Value::obj(Obj::Matcher(RefCell::new(state)));
     let m = matcher_of(&mv)?;
     if !m.borrow_mut().find()? {
         return Ok(Value::string(text));
     }
     let mut out: Vec<u16> = Vec::with_capacity(text.len() + 16);
+    if f.is_null() {
+        return Err(crate::vm::npe("Cannot invoke \"java.util.function.Function.apply(Object)\" because \"replacementBuilder\" is null"));
+    }
     loop {
         let r = crate::func::call(vm, &f, std::slice::from_ref(&mv))?;
         let rs = match r {

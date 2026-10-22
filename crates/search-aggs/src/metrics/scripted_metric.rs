@@ -174,9 +174,12 @@ impl Aggregator for ScriptedMetricAgg {
         self.scripts.needs_score()
     }
 
-    fn validate_sort(&self, name: &str, _key: Option<&str>, _rest: &[PathElement]) -> Result<()> {
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        // `resolveSortPath` (the path goes on) names the aggregation, `bucketComparator`
+        // (it ends here) doesn't.
+        let tail = if rest.is_empty() { String::new() } else { format!(" [{name}] is not single-bucket.") };
         Err(AggError::illegal_argument(format!(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end. [{name}] is not single-bucket."
+            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.{tail}"
         )))
     }
 }

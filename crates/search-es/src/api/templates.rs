@@ -114,6 +114,29 @@ pub async fn delete_index_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 let shown = if missing.is_empty() { raw.clone() } else { missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",") };
                 return Err(EsError::index_template_missing(&shown));
             }
+            // `dataStreamsExclusivelyUsingTemplates`: data streams no remaining template matches.
+            let md = &st.metadata;
+            let mut in_use: Vec<String> = md
+                .data_streams
+                .values()
+                .filter(|ds| matched.iter().filter_map(|n| md.index_templates.get(n)).any(|t| t.index_patterns.iter().any(|p| glob_match(p, &ds.name))))
+                .filter(|ds| {
+                    let candidates: Vec<&String> =
+                        md.index_templates.iter().filter(|(_, t)| t.data_stream.is_some() && t.matches(&ds.name, ds.hidden)).map(|(n, _)| n).collect();
+                    !candidates.is_empty() && candidates.iter().all(|n| matched.contains(n))
+                })
+                .map(|ds| ds.name.clone())
+                .collect();
+            if !in_use.is_empty() {
+                in_use.sort();
+                let mut names = matched.clone();
+                names.sort();
+                return Err(EsError::illegal_argument(format!(
+                    "unable to remove composable templates [{}] as they are in use by a data streams [{}]",
+                    names.join(", "),
+                    in_use.join(", ")
+                )));
+            }
             for n in matched {
                 st.metadata.index_templates.remove(&n);
             }

@@ -208,7 +208,10 @@ fn index_fields(idx: &IndexMeta, runtime_request: &Map) -> Vec<(String, Cap)> {
                 "counted_keyword" => out.push((format!("{path}_count"), Cap::new("binary", true, true))),
                 "join" => {
                     if let Some(Value::Obj(rel)) = f.raw("relations") {
-                        for parent in rel.keys() {
+                        // `ParentJoinFieldMapper` keeps its parent id fields by name.
+                        let mut parents: Vec<&String> = rel.keys().collect();
+                        parents.sort();
+                        for parent in parents {
                             out.push((format!("{path}#{parent}"), Cap::new("parent", true, true)));
                         }
                     }
@@ -385,6 +388,44 @@ fn can_match(q: &Value, idx: &IndexMeta) -> bool {
     }
 }
 
+/// The shards' `can_match` (`SearchService.canMatch`): an index whose every shard rewrites
+/// the filter to match nothing (ranges outside a field's values, terms it doesn't hold) is
+/// left out. Indices whose engine isn't loaded, or a filter that doesn't convert, may match.
+fn shards_can_match(ctx: &Ctx, st: &crate::meta::ClusterState, filter: &Value, idx: &IndexMeta) -> bool {
+    // Metadata-only fields (`_index_mode`, `_tier`) are decided by [`can_match`].
+    let text = filter.to_json();
+    if idx.is_closed() || text.contains("\"_index_mode\"") || text.contains("\"_tier\"") {
+        return true;
+    }
+    let Ok((q, _)) = crate::query::parse_query(filter, None, &[]) else { return true };
+    let Ok(engine) = ctx.cluster.engine.index(ctx.cluster, st, idx) else { return true };
+    let table = engine.table();
+    engine.shards.iter().any(|s| {
+        let searcher = s.shard.searcher();
+        let qctx = crate::search::query::QueryCtx::new(ctx.cluster, st, idx, &table, &searcher, ctx.now_ms);
+        match qctx.to_filter(&q).and_then(|eq| searcher.rewrite(&eq).map_err(crate::engine::convert::index_error)) {
+            Ok(r) => !r.as_any().is::<search_index::query::MatchNoneQuery>(),
+            Err(_) => true,
+        }
+    })
+}
+
+/// The mapped fields some segment of the index holds data of.
+fn fields_with_values(ctx: &Ctx, st: &crate::meta::ClusterState, idx: &IndexMeta) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Ok(engine) = ctx.cluster.engine.index(ctx.cluster, st, idx) else { return out };
+    let table = engine.table();
+    let searchers: Vec<search_index::Searcher> = engine.shards.iter().map(|s| s.shard.searcher()).collect();
+    for (name, f) in table.fields.iter() {
+        let numbers = std::iter::once(f.number).chain(f.subfields.iter().map(|(_, n)| *n)).chain(f.prefix_field.map(|p| p.0)).chain(f.keyed_field);
+        let numbers: Vec<u32> = numbers.collect();
+        if searchers.iter().any(|s| s.segments().iter().any(|seg| numbers.iter().any(|n| seg.reader.field_info(*n).is_some()))) {
+            out.insert(name.clone());
+        }
+    }
+    out
+}
+
 /// `Maps.newMapWithExpectedSize(n)`: a `HashMap` whose table fits `n` entries.
 fn hash_map_for(m: Map) -> Map {
     let n = m.len();
@@ -436,16 +477,22 @@ pub fn field_caps(ctx: &Ctx) -> EsResult<Reply> {
     let indices: Vec<&IndexMeta> = names
         .iter()
         .filter_map(|n| st.metadata.indices.get(n).map(|i| i.as_ref()))
-        .filter(|i| index_filter.as_ref().is_none_or(|f| can_match(f, i)))
+        .filter(|i| index_filter.as_ref().is_none_or(|f| can_match(f, i) && shards_can_match(ctx, &st, f, i)))
         .collect();
     // field -> type -> (index, cap)
     let mut merged: BTreeMap<String, BTreeMap<String, Vec<(String, Cap)>>> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     for idx in &indices {
         let fields = select(index_fields(idx, &runtime_request), &patterns, &filters, &types);
+        let with_values = if include_empty { None } else { Some(fields_with_values(ctx, &st, idx)) };
         for (name, cap) in fields {
-            // No field has values until the engine says otherwise.
-            if !include_empty && !cap.metadata {
+            // `include_empty_fields=false`: fields no segment holds data of are left out.
+            // Metadata fields count as present only when every document has them.
+            let always = matches!(name.as_str(), "_id" | "_index" | "_index_mode" | "_seq_no" | "_source" | "_tier" | "_version");
+            if let Some(w) = &with_values
+                && !always
+                && !(if cap.parent { w.iter().any(|f| f.starts_with(&format!("{name}."))) } else { w.contains(&name) })
+            {
                 continue;
             }
             if !merged.contains_key(&name) {

@@ -1,0 +1,405 @@
+//! `roll search …`: Elasticsearch-compatible search clusters.
+
+use crate::{Api, ago, bytes, s};
+use anyhow::{Context, bail};
+use clap::Subcommand;
+use serde_json::{Value, json};
+
+#[derive(Subcommand)]
+pub enum Search {
+    /// Clusters: create, list, show, delete, branch, rotate the password, unload.
+    #[command(subcommand, alias = "cluster")]
+    Clusters(Clusters),
+    /// Run one REST request, e.g. `roll search request app GET /_cat/indices?v`.
+    Request {
+        cluster: String,
+        /// GET, POST, PUT, DELETE or HEAD.
+        method: String,
+        /// Path and query, e.g. `/products/_search?q=title:shoes`.
+        path: String,
+        /// Request body: JSON, NDJSON for `_bulk`, `@file` to read a file, or `-` for stdin.
+        body: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum Clusters {
+    /// List clusters.
+    #[command(alias = "ls")]
+    List,
+    /// Create a cluster. Its password is printed once.
+    Create {
+        name: String,
+        /// `elasticsearch` (default) or `opensearch`.
+        #[arg(long)]
+        flavor: Option<String>,
+        /// Seconds without requests before scaling to zero; 0 = always loaded.
+        #[arg(long)]
+        idle: Option<i64>,
+        /// Requests running at once.
+        #[arg(long)]
+        max_in_flight: Option<i64>,
+        /// Largest request body, in MiB (`http.max_content_length`).
+        #[arg(long)]
+        max_body_mb: Option<i64>,
+        /// Default of `action.destructive_requires_name` (Elasticsearch's default: true).
+        #[arg(long)]
+        destructive_requires_name: Option<bool>,
+    },
+    /// Show a cluster: state, URL, indices, branches.
+    Show { cluster: String },
+    /// Change settings.
+    Set {
+        cluster: String,
+        #[arg(long)]
+        flavor: Option<String>,
+        #[arg(long)]
+        idle: Option<i64>,
+        #[arg(long)]
+        max_in_flight: Option<i64>,
+        #[arg(long)]
+        max_body_mb: Option<i64>,
+        /// Default of `action.destructive_requires_name`.
+        #[arg(long)]
+        destructive_requires_name: Option<bool>,
+    },
+    /// Delete a cluster and its data (branches keep theirs).
+    Delete { cluster: String },
+    /// Branch a cluster: an instant copy, optionally of a past point in time.
+    Branch {
+        cluster: String,
+        name: String,
+        /// Unix seconds, or how long ago (30s, 15m, 2h, 1d).
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// New password (printed once); the old one stops working at once.
+    Password { cluster: String },
+    /// Scale to zero now (the next request wakes it).
+    Unload { cluster: String },
+    /// Print the URL (with credentials when given --password).
+    Url {
+        cluster: String,
+        /// Embed this password: `https://<name>:<password>@host:port`.
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// List indices: health, docs, size.
+    Indices { cluster: String },
+    /// Usage and cost, next to Elastic Cloud and Amazon OpenSearch Service.
+    Usage {
+        cluster: String,
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+    },
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// `--at`: unix seconds, or a duration ago (`90s`, `15m`, `2h`, `1d`).
+pub fn at(v: &str, now: i64) -> anyhow::Result<i64> {
+    if let Ok(t) = v.parse::<i64>() {
+        return Ok(t);
+    }
+    let (n, unit) = v.split_at(v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len()));
+    let n: i64 = n.parse().with_context(|| format!("bad time {v:?}: use unix seconds or e.g. 15m"))?;
+    let unit = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => bail!("bad time {v:?}: use unix seconds or e.g. 30s, 15m, 2h, 1d"),
+    };
+    n.checked_mul(unit).and_then(|secs| now.checked_sub(secs)).with_context(|| format!("bad time {v:?}: too long ago"))
+}
+
+fn read_body(arg: &str) -> anyhow::Result<String> {
+    if arg == "-" {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+        return Ok(s);
+    }
+    if let Some(path) = arg.strip_prefix('@') {
+        return std::fs::read_to_string(path).with_context(|| format!("can't read {path}"));
+    }
+    Ok(arg.to_string())
+}
+
+/// Adds `pretty` to a request path unless it already asks for a format.
+pub fn with_pretty(path: &str) -> String {
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    if query.split('&').any(|p| p == "pretty" || p.starts_with("pretty=") || p.starts_with("format=")) {
+        return path.to_string();
+    }
+    format!("{path}{}pretty", if path.contains('?') { "&" } else { "?" })
+}
+
+/// `http://host:port` → `http://user:password@host:port`.
+pub fn url_with_password(url: &str, user: &str, password: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => format!("{scheme}://{}:{}@{rest}", urlencoding::encode(user), urlencoding::encode(password)),
+        None => url.to_string(),
+    }
+}
+
+fn print_cluster(c: &Value) {
+    let st = &c["status"];
+    let state = s(&st["state"]);
+    let branch = match (c["parent_name"].as_str(), c["parent_id"].as_str()) {
+        (Some(p), _) => format!("  branch of {p}"),
+        (None, Some(p)) => format!("  branch of {p} (deleted)"),
+        _ => String::new(),
+    };
+    println!(
+        "{:<24} {:<18} {:<14} {:<7} {:>4} indices {:>10} docs {:>10}  {}{branch}",
+        s(&c["name"]),
+        s(&c["id"]),
+        s(&c["flavor"]),
+        state,
+        st["indices"].as_i64().or(c["indices"].as_i64()).unwrap_or(0),
+        s(&c["docs"]),
+        bytes(c["stored_bytes"].as_f64().unwrap_or(0.0)),
+        s(&c["url"]),
+    );
+}
+
+fn print_credentials(c: &Value) {
+    let (user, pw) = (s(&c["username"]), s(&c["password"]));
+    println!("\nurl       {}", s(&c["url"]));
+    println!("username  {user}");
+    println!("password  {pw}   (shown once)");
+    println!("\ncurl -u {user}:{pw} {}", s(&c["url"]));
+}
+
+async fn find(api: &Api, key: &str) -> anyhow::Result<Value> {
+    api.get(&format!("/v1/search/clusters/{}", urlencoding::encode(key))).await.with_context(|| format!("no search cluster {key}"))
+}
+
+pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
+    let out = match cmd {
+        Search::Request { cluster, method, path, body } => {
+            let c = find(api, &cluster).await?;
+            // Sent as text, byte for byte (the control plane labels it JSON, or NDJSON for
+            // `_bulk`/`_msearch`): re-encoding parsed JSON would reorder `_source` keys.
+            let body = body.as_deref().map(read_body).transpose()?;
+            let path = if path.starts_with('/') { path } else { format!("/{path}") };
+            // Elasticsearch's own pretty printing keeps its key order (and does nothing to text).
+            let path = if as_json { path } else { with_pretty(&path) };
+            let v = api.post(&format!("/v1/search/clusters/{}/request", s(&c["id"])), json!({ "method": method, "path": path, "body": body })).await?;
+            if !as_json {
+                let t = v["body"].as_str().unwrap_or_default();
+                if !t.is_empty() {
+                    print!("{t}{}", if t.ends_with('\n') { "" } else { "\n" });
+                }
+                let status = v["status"].as_u64().unwrap_or(0);
+                if !(200..300).contains(&status) {
+                    eprintln!("HTTP {status}");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            v
+        }
+        Search::Clusters(cmd) => match cmd {
+            Clusters::List => {
+                let v = api.get("/v1/search/clusters").await?;
+                if !as_json {
+                    for c in v.as_array().into_iter().flatten() {
+                        print_cluster(c);
+                    }
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::Create { name, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name } => {
+                let body = json!({
+                    "name": name, "flavor": flavor, "idle_timeout_s": idle, "max_in_flight": max_in_flight, "max_body_mb": max_body_mb,
+                    "destructive_requires_name": destructive_requires_name,
+                });
+                let v = api.post("/v1/search/clusters", body).await?;
+                if !as_json {
+                    print_cluster(&v);
+                    print_credentials(&v);
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::Show { cluster } => {
+                let v = find(api, &cluster).await?;
+                if !as_json {
+                    print_cluster(&v);
+                    println!("\nurl       {}\nusername  {}", s(&v["url"]), s(&v["username"]));
+                    let idle = v["idle_timeout_s"].as_i64().unwrap_or(0);
+                    println!("idle      {}", if idle == 0 { "always loaded".to_string() } else { format!("{idle}s") });
+                    println!("limits    {} in flight, {} MiB bodies", s(&v["max_in_flight"]), s(&v["max_body_mb"]));
+                    println!("created   {}", ago(v["created_at"].as_i64().unwrap_or(0)));
+                    for b in v["branches"].as_array().into_iter().flatten() {
+                        println!("  branch {}  {}  as of {}", s(&b["name"]), s(&b["id"]), ago(b["parent_at"].as_i64().unwrap_or(0)));
+                    }
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::Set { cluster, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name } => {
+                let c = find(api, &cluster).await?;
+                let body = json!({
+                    "flavor": flavor, "idle_timeout_s": idle, "max_in_flight": max_in_flight, "max_body_mb": max_body_mb,
+                    "destructive_requires_name": destructive_requires_name,
+                });
+                let v = api.call(reqwest::Method::PATCH, &format!("/v1/search/clusters/{}", s(&c["id"])), Some(body)).await?;
+                if !as_json {
+                    print_cluster(&v);
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::Delete { cluster } => {
+                let c = find(api, &cluster).await?;
+                api.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/{}", s(&c["id"])), None).await?;
+                println!("deleted {}", s(&c["name"]));
+                return Ok(());
+            }
+            Clusters::Branch { cluster, name, at: when } => {
+                let c = find(api, &cluster).await?;
+                let t = when.as_deref().map(|w| at(w, now())).transpose()?;
+                let v = api.post(&format!("/v1/search/clusters/{}/branches", s(&c["id"])), json!({ "name": name, "at": t })).await?;
+                if !as_json {
+                    println!("branch {} ({}) of {}", s(&v["name"]), s(&v["id"]), s(&c["name"]));
+                    print_credentials(&v);
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::Password { cluster } => {
+                let c = find(api, &cluster).await?;
+                let v = api.post(&format!("/v1/search/clusters/{}/password", s(&c["id"])), json!({})).await?;
+                if !as_json {
+                    print_credentials(&v);
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::Unload { cluster } => {
+                let c = find(api, &cluster).await?;
+                let v = api.post(&format!("/v1/search/clusters/{}/unload", s(&c["id"])), json!({})).await?;
+                if !as_json {
+                    if v["unloaded"].as_bool() == Some(true) {
+                        println!("{} is asleep", s(&c["name"]));
+                    } else {
+                        println!("{} has requests running; try again", s(&c["name"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::Url { cluster, password } => {
+                let c = find(api, &cluster).await?;
+                let url = s(&c["url"]);
+                match password {
+                    Some(p) => println!("{}", url_with_password(&url, &s(&c["username"]), &p)),
+                    None => println!("{url}"),
+                }
+                return Ok(());
+            }
+            Clusters::Indices { cluster } => {
+                let c = find(api, &cluster).await?;
+                let v = api.get(&format!("/v1/search/clusters/{}/indices", s(&c["id"]))).await?;
+                if !as_json {
+                    println!("{:<7} {:<6} {:<32} {:>4} {:>4} {:>12} {:>10}", "health", "status", "index", "pri", "rep", "docs", "size");
+                    for i in v.as_array().into_iter().flatten() {
+                        println!(
+                            "{:<7} {:<6} {:<32} {:>4} {:>4} {:>12} {:>10}",
+                            s(&i["health"]),
+                            s(&i["status"]),
+                            s(&i["index"]),
+                            s(&i["primaries"]),
+                            s(&i["replicas"]),
+                            s(&i["docs"]),
+                            bytes(i["size_bytes"].as_f64().unwrap_or(0.0)),
+                        );
+                    }
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::Usage { cluster, days } => {
+                let c = find(api, &cluster).await?;
+                let u = api.get(&format!("/v1/search/clusters/{}/usage?days={days}", s(&c["id"]))).await?;
+                if !as_json {
+                    let f = |v: &Value| v.as_f64().unwrap_or(0.0);
+                    let cost = &u["cost"];
+                    println!("{} — last {days} days", s(&c["name"]));
+                    println!("  loaded         {:>10.1} h", f(&u["loaded_seconds"]) / 3600.0);
+                    println!("  memory         {:>10.4} GiB-h   ${:.4}", f(&u["loaded_gib_hours"]), f(&cost["memory_usd"]));
+                    println!("  requests       {:>10}         ${:.4}", s(&u["requests"]), f(&cost["requests_usd"]));
+                    println!("  storage        {:>10.4} GiB-mo  ${:.4}  (now {})", f(&u["stored_gib_months"]), f(&cost["storage_usd"]), bytes(f(&u["stored_bytes"])));
+                    println!("  total                           ${:.4}", f(&cost["total_usd"]));
+                    println!("  Elastic Cloud                   ${:.2}", f(&cost["elastic_cloud_usd"]));
+                    println!("  Amazon OpenSearch Service       ${:.2}", f(&cost["opensearch_service_usd"]));
+                    println!("  OpenSearch Serverless           ${:.2}", f(&cost["opensearch_serverless_usd"]));
+                    return Ok(());
+                }
+                u
+            }
+        },
+    };
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn times() {
+        assert_eq!(at("1700000000", 0).unwrap(), 1_700_000_000);
+        assert_eq!(at("90s", 1000).unwrap(), 910);
+        assert_eq!(at("15m", 1000).unwrap(), 100);
+        assert_eq!(at("2h", 10_000).unwrap(), 2800);
+        assert_eq!(at("1d", 100_000).unwrap(), 13_600);
+        assert!(at("5w", 0).is_err());
+        assert!(at("soon", 0).is_err());
+        // Overflow is an error, not a panic (debug) or a wrapped timestamp (release).
+        let e = at("999999999999999d", 1_700_000_000).unwrap_err().to_string();
+        assert!(e.contains("bad time"), "{e}");
+        assert!(at(&format!("{}s", i64::MAX), -10).is_err());
+        assert!(at("99999999999999999999d", 0).is_err());
+    }
+
+    #[test]
+    fn pretty() {
+        assert_eq!(with_pretty("/"), "/?pretty");
+        assert_eq!(with_pretty("/_cat/indices?v"), "/_cat/indices?v&pretty");
+        assert_eq!(with_pretty("/x?pretty=false"), "/x?pretty=false");
+        assert_eq!(with_pretty("/_cat/indices?format=json"), "/_cat/indices?format=json");
+    }
+
+    #[test]
+    fn urls() {
+        assert_eq!(url_with_password("http://127.0.0.1:59200", "app", "p@ss"), "http://app:p%40ss@127.0.0.1:59200");
+        assert_eq!(url_with_password("https://web.search.example.com", "web", "x"), "https://web:x@web.search.example.com");
+    }
+
+    #[test]
+    fn commands_parse() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            s: Search,
+        }
+        let t = T::try_parse_from(["t", "clusters", "branch", "app", "app-dev", "--at", "15m"]).unwrap();
+        assert!(matches!(t.s, Search::Clusters(Clusters::Branch { ref at, .. }) if at.as_deref() == Some("15m")));
+        let t = T::try_parse_from(["t", "request", "app", "GET", "/_cat/indices?v"]).unwrap();
+        assert!(matches!(t.s, Search::Request { ref method, ref body, .. } if method == "GET" && body.is_none()));
+        let t = T::try_parse_from(["t", "request", "app", "POST", "/_bulk", "@bulk.ndjson"]).unwrap();
+        assert!(matches!(t.s, Search::Request { body: Some(ref b), .. } if b == "@bulk.ndjson"));
+        for sub in ["create", "list", "show", "delete", "branch", "password", "unload", "url", "indices", "usage"] {
+            let e = T::try_parse_from(["t", "clusters", sub, "--help"]).err().unwrap();
+            assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp, "{sub}");
+        }
+    }
+}

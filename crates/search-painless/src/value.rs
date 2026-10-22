@@ -18,6 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::rc::Rc;
 
+use indexmap::map::RawEntryApiV1;
 use indexmap::IndexMap;
 
 use crate::java;
@@ -172,6 +173,26 @@ impl JList {
     pub fn get(&self, i: usize) -> Option<Value> {
         self.v.borrow().get(i).cloned()
     }
+
+    /// Brings a `subList` view's window copy up to date with its parent (ancestors first), for
+    /// reads that bypass library calls: printing, serialization, equality, copying. The parent
+    /// may have been written to (`set`, `l[i] = x`) since the view's last library call; a stale
+    /// view (structural change) is left as is, its readers report the failure.
+    pub fn sync_view(&self) {
+        let Some(view) = &self.view else { return };
+        view.parent.sync_view();
+        if view.parent.mods.get() != view.expected.get() {
+            return;
+        }
+        let p = view.parent.v.borrow();
+        let end = (view.offset + view.len.get()).min(p.len());
+        let Some(window) = p.get(view.offset..end) else { return };
+        let fresh = window.to_vec();
+        drop(p);
+        if let Ok(mut mine) = self.v.try_borrow_mut() {
+            *mine = fresh;
+        }
+    }
 }
 
 // Containers drop their contents through `guard::drop_nested`: values nest without bound, and
@@ -250,6 +271,60 @@ pub struct JMap {
     pub comparator: Option<Value>,
     /// Elasticsearch's `params` in search contexts resolve `_source`/`doc` lazily through the host.
     pub lazy_host: bool,
+    /// A `TreeMap`/`TreeSet` range view (`headMap`, `subSet`, `descendingMap`, …).
+    pub window: Option<Box<MapWindow>>,
+}
+
+/// The link of a sorted range view to the tree it shows. The view keeps a copy of the root's
+/// entries in range (in its own order: reversed for descending views), refreshed before and
+/// written back after each library call on it (`lib_coll::window_enter`/`window_exit`) and
+/// refreshed on plain reads (`JMap::sync_window`); a `TreeMap` view never goes stale.
+pub struct MapWindow {
+    pub root: Rc<JMap>,
+    /// Lower and upper bounds in the root's order, and whether each is inclusive.
+    pub lo: Option<(Value, bool)>,
+    pub hi: Option<(Value, bool)>,
+    pub descending: bool,
+    /// A key-set view of a map (`navigableKeySet`, `descendingKeySet`): writes remove keys.
+    pub keys_only: bool,
+    /// Library calls on the view in progress: its copy is the truth until they end.
+    pub busy: Cell<u32>,
+}
+
+impl MapWindow {
+    /// Where `k` falls against the bounds: `Less` below, `Greater` above, `Equal` inside.
+    pub fn place(&self, k: &Value, cmp: &mut dyn FnMut(&Value, &Value) -> Result<std::cmp::Ordering, crate::vm::Thrown>) -> Result<std::cmp::Ordering, crate::vm::Thrown> {
+        use std::cmp::Ordering::*;
+        if let Some((lo, incl)) = &self.lo {
+            match cmp(k, lo)? {
+                Less => return Ok(Less),
+                Equal if !incl => return Ok(Less),
+                _ => {}
+            }
+        }
+        if let Some((hi, incl)) = &self.hi {
+            match cmp(k, hi)? {
+                Greater => return Ok(Greater),
+                Equal if !incl => return Ok(Greater),
+                _ => {}
+            }
+        }
+        Ok(Equal)
+    }
+
+    /// The root's entries in range, in the view's order.
+    pub fn select(&self, cmp: &mut dyn FnMut(&Value, &Value) -> Result<std::cmp::Ordering, crate::vm::Thrown>) -> Result<Vec<(Value, Value)>, crate::vm::Thrown> {
+        let mut out = Vec::new();
+        for (k, v) in self.root.entries() {
+            if self.place(&k, cmp)? == std::cmp::Ordering::Equal {
+                out.push((k, if self.keys_only { Value::Null } else { v }));
+            }
+        }
+        if self.descending {
+            out.reverse();
+        }
+        Ok(out)
+    }
 }
 
 impl Drop for JMap {
@@ -259,6 +334,34 @@ impl Drop for JMap {
             crate::guard::drop_nested(crate::guard::Deferred::Map(std::mem::take(&mut d.m)));
         }
     }
+}
+
+/// `java.util.Hashtable`'s iteration order: buckets from the last to the first, each chain
+/// newest first, replaying the insertions (in the map's insertion order) with the table's
+/// growth (`rehash` to `2n + 1` buckets when the count reaches 3/4 of them, re-linking each
+/// old chain onto the heads of the new ones).
+fn hashtable_order(d: &MapData) -> Vec<usize> {
+    let mut cap = if d.init_cap > 0 { d.init_cap as usize } else { 11 };
+    let mut chains: Vec<Vec<usize>> = vec![Vec::new(); cap];
+    let hashes: Vec<u32> = d.m.keys().map(|k| (k.0.java_hash() as u32) & 0x7FFF_FFFF).collect();
+    for (i, &h) in hashes.iter().enumerate() {
+        // `i` entries are in the table
+        let count = i;
+        let threshold = (cap as f64 * 0.75) as usize;
+        if count >= threshold {
+            let new_cap = cap * 2 + 1;
+            let mut fresh: Vec<Vec<usize>> = vec![Vec::new(); new_cap];
+            for b in (0..cap).rev() {
+                for &e in &chains[b] {
+                    fresh[hashes[e] as usize % new_cap].insert(0, e);
+                }
+            }
+            chains = fresh;
+            cap = new_cap;
+        }
+        chains[h as usize % cap].insert(0, i);
+    }
+    chains.into_iter().rev().flatten().collect()
 }
 
 /// `HashMap.tableSizeFor`.
@@ -278,6 +381,30 @@ impl JMap {
             mods: Cell::new(0),
             comparator: None,
             lazy_host: false,
+            window: None,
+        }
+    }
+
+    /// Refreshes a range view from its tree for reads outside library calls (printing,
+    /// equality, copying). Trees with a comparator refresh in library calls only (the
+    /// comparator may be a script function, which needs the VM).
+    pub fn sync_window(&self) {
+        let Some(w) = &self.window else { return };
+        if w.root.comparator.is_some() || w.busy.get() > 0 {
+            return;
+        }
+        if let Ok(fresh) = w.select(&mut |a, b| crate::func::natural_compare(a, b)) {
+            self.replace_entries(fresh);
+        }
+    }
+
+    /// Replaces the entries, keeping the table (a view's refresh).
+    pub fn replace_entries(&self, entries: Vec<(Value, Value)>) {
+        if let Ok(mut d) = self.data.try_borrow_mut() {
+            d.m.clear();
+            for (k, v) in entries {
+                d.m.insert(Key(k), v);
+            }
         }
     }
     pub fn with_capacity(class: ClassId, n: usize) -> JMap {
@@ -294,7 +421,10 @@ impl JMap {
     pub fn order(&self) -> MapOrder {
         match self.class {
             cls::HASH_MAP | cls::HASH_SET | cls::HASHTABLE | cls::IDENTITY_HASH_MAP => MapOrder::Hash,
-            cls::TREE_MAP | cls::TREE_SET => MapOrder::Sorted,
+            cls::TREE_MAP | cls::TREE_SET | cls::TREE_MAP_ASCENDING_SUB_MAP | cls::TREE_MAP_DESCENDING_SUB_MAP => MapOrder::Sorted,
+            // a key set is sorted as a range view (`navigableKeySet`); a map's plain key set view
+            // is an `Obj::MapView`
+            cls::TREE_MAP_KEY_SET => MapOrder::Sorted,
             _ => MapOrder::Insertion,
         }
     }
@@ -310,12 +440,15 @@ impl JMap {
         self.mods.set(self.mods.get().wrapping_add(1));
     }
     pub fn len(&self) -> usize {
+        self.sync_window();
         self.data.borrow().m.len()
     }
     pub fn is_empty(&self) -> bool {
+        self.sync_window();
         self.data.borrow().m.is_empty()
     }
     pub fn get(&self, k: &Value) -> Option<Value> {
+        self.sync_window();
         self.data.borrow().m.get(&Key(k.clone())).cloned()
     }
     pub fn get_str(&self, k: &str) -> Option<Value> {
@@ -323,6 +456,7 @@ impl JMap {
         self.data.borrow().m.get(&key).cloned()
     }
     pub fn contains(&self, k: &Value) -> bool {
+        self.sync_window();
         self.data.borrow().m.contains_key(&Key(k.clone()))
     }
 
@@ -339,26 +473,48 @@ impl JMap {
     /// Inserts without key-order maintenance (callers handle sorted maps). Returns the previous
     /// value.
     pub fn insert_raw(&self, k: Value, v: Value) -> Option<Value> {
+        let key = Key(k);
+        let (hash, found) = self.locate(&key);
         let mut d = self.data.borrow_mut();
-        let prev = d.m.insert(Key(k), v);
-        if prev.is_none() {
-            JMap::grow(&mut d);
-            drop(d);
-            self.bump();
+        if let Some(i) = found {
+            return Some(std::mem::replace(&mut d.m[i], v));
         }
-        prev
+        if let indexmap::map::raw_entry_v1::RawEntryMut::Vacant(e) = d.m.raw_entry_mut_v1().from_hash(hash, |_| false) {
+            e.insert_hashed_nocheck(hash, key, v);
+        }
+        JMap::grow(&mut d);
+        drop(d);
+        self.bump();
+        None
+    }
+
+    /// The table hash of `key` and its index, under a shared borrow. Hashing and comparing a key
+    /// reads it, and a key may contain this very map (`m.put(m, 1)` is legal Java: the hash is
+    /// taken before the insertion), so neither may happen inside the mutable borrow that
+    /// inserts or removes.
+    fn locate(&self, key: &Key) -> (u64, Option<usize>) {
+        use std::hash::BuildHasher;
+        let d = self.data.borrow();
+        let hash = d.m.hasher().hash_one(key);
+        let i = d.m.raw_entry_v1().index_from_hash(hash, |x| x == key);
+        (hash, i)
     }
 
     /// Inserts at a sorted position (`TreeMap`), given the index from a binary search.
     pub fn insert_at(&self, idx: usize, k: Value, v: Value) {
+        let key = Key(k);
+        let (hash, _) = self.locate(&key);
         let mut d = self.data.borrow_mut();
-        d.m.shift_insert(idx, Key(k), v);
+        if let indexmap::map::raw_entry_v1::RawEntryMut::Vacant(e) = d.m.raw_entry_mut_v1().from_hash(hash, |_| false) {
+            e.shift_insert_hashed_nocheck(idx, hash, key, v);
+        }
         drop(d);
         self.bump();
     }
 
     pub fn remove(&self, k: &Value) -> Option<Value> {
-        let r = self.data.borrow_mut().m.shift_remove(&Key(k.clone()));
+        let (_, found) = self.locate(&Key(k.clone()));
+        let r = found.and_then(|i| self.data.borrow_mut().m.shift_remove_index(i)).map(|(_, v)| v);
         if r.is_some() {
             self.bump();
         }
@@ -390,6 +546,9 @@ impl JMap {
         if self.order() != MapOrder::Hash || n <= 1 {
             return (0..n).collect();
         }
+        if self.class == cls::HASHTABLE {
+            return hashtable_order(&d);
+        }
         let mask = d.cap.max(1) - 1;
         let mut idx: Vec<(u32, usize)> = d
             .m
@@ -406,6 +565,7 @@ impl JMap {
 
     /// Snapshot of the entries in iteration order.
     pub fn entries(&self) -> Vec<(Value, Value)> {
+        self.sync_window();
         let order = self.order_indices();
         let d = self.data.borrow();
         order
@@ -418,12 +578,14 @@ impl JMap {
     }
 
     pub fn keys(&self) -> Vec<Value> {
+        self.sync_window();
         let order = self.order_indices();
         let d = self.data.borrow();
         order.into_iter().map(|i| d.m.get_index(i).unwrap().0 .0.clone()).collect()
     }
 
     pub fn values(&self) -> Vec<Value> {
+        self.sync_window();
         let order = self.order_indices();
         let d = self.data.borrow();
         order.into_iter().map(|i| d.m.get_index(i).unwrap().1.clone()).collect()
@@ -695,6 +857,8 @@ pub struct JException {
     pub origin: RefCell<Option<Box<ExceptionOrigin>>>,
     /// `ParseException.getErrorOffset()`.
     pub error_offset: Option<i32>,
+    /// `DateTimeParseException.getParsedString()` of one a script constructed.
+    pub parsed: Option<String>,
 }
 
 /// The script offset and library frames of an exception's construction.
@@ -705,7 +869,7 @@ pub struct ExceptionOrigin {
 
 impl JException {
     pub fn new(class: ClassId, message: Option<String>) -> JException {
-        JException { class, message, origin: RefCell::new(None), error_offset: None }
+        JException { class, message, origin: RefCell::new(None), error_offset: None, parsed: None }
     }
 }
 
@@ -847,6 +1011,7 @@ impl Value {
                 }
                 match other.list_snapshot() {
                     Some(bv) => {
+                        a.sync_view();
                         let av = a.v.borrow().clone();
                         av.len() == bv.len() && av.iter().zip(bv.iter()).all(|(x, y)| x.java_equals(y))
                     }
@@ -885,7 +1050,10 @@ impl Value {
     /// Elements of anything list-like (lists and list-like objects), for equality.
     pub fn list_snapshot(&self) -> Option<Vec<Value>> {
         match self {
-            Value::List(l) => Some(l.v.borrow().clone()),
+            Value::List(l) => {
+                l.sync_view();
+                Some(l.v.borrow().clone())
+            }
             Value::Obj(o) => match &**o {
                 Obj::Es(e) => e.list_values(),
                 _ => None,
@@ -935,6 +1103,7 @@ impl Value {
             Map(m) if m.class == cls::INGEST_DATA => identity_hash(&**m),
             List(_) | Map(_) | Set(_) if crate::guard::too_deep() => 0,
             List(l) => {
+                l.sync_view();
                 let v = l.v.borrow();
                 let mut h: i32 = 1;
                 for x in v.iter() {
@@ -994,6 +1163,7 @@ impl Value {
             List(_) | Map(_) | Set(_) if crate::guard::too_deep() => {}
             List(l) => {
                 out.push('[');
+                l.sync_view();
                 let items = l.v.borrow().clone();
                 for (i, x) in items.iter().enumerate() {
                     if crate::guard::too_long(out.len()) {
@@ -1108,9 +1278,62 @@ impl Value {
         self.try_to_json().unwrap_or(serde_json::Value::Null)
     }
 
+    /// [`Value::to_java_string`] as the `_execute` API renders a result (`String.valueOf`),
+    /// failing as Elasticsearch does where `toString` throws: a `subList` view whose list
+    /// changed structurally (`concurrent_modification_exception`, reason empty for `null`;
+    /// Elasticsearch answers 500).
+    pub fn try_to_java_string(&self) -> Result<String, ToJsonError> {
+        if self.has_stale_view() {
+            return Err(ToJsonError { kind: "concurrent_modification_exception", reason: String::new() });
+        }
+        Ok(self.to_java_string())
+    }
+
+    /// Whether a `subList` view reachable from this value is stale (its list was modified
+    /// structurally behind it), so iterating it throws.
+    pub fn has_stale_view(&self) -> bool {
+        fn stale(l: &JList) -> bool {
+            let mut cur = l;
+            while let Some(v) = &cur.view {
+                if v.parent.mods.get() != v.expected.get() {
+                    return true;
+                }
+                cur = &v.parent;
+            }
+            false
+        }
+        fn walk(v: &Value, depth: usize, seen: &mut std::collections::HashSet<*const ()>) -> bool {
+            if depth > MAX_JSON_DEPTH {
+                return false;
+            }
+            let p = match v {
+                Value::List(l) => Rc::as_ptr(l) as *const (),
+                Value::Map(m) | Value::Set(m) => Rc::as_ptr(m) as *const (),
+                _ => return false,
+            };
+            if !seen.insert(p) {
+                return false;
+            }
+            match v {
+                Value::List(l) => stale(l) || l.v.borrow().iter().any(|x| walk(x, depth + 1, seen)),
+                Value::Map(m) | Value::Set(m) => m.data.borrow().m.iter().any(|(k, x)| walk(&k.0, depth + 1, seen) || walk(x, depth + 1, seen)),
+                _ => false,
+            }
+        }
+        // a cheap answer for the common case: no containers at all
+        if !matches!(self, Value::List(_) | Value::Map(_) | Value::Set(_)) {
+            return false;
+        }
+        walk(self, 0, &mut std::collections::HashSet::new())
+    }
+
     /// [`Value::to_json`], failing on values nested deeper than Elasticsearch's writer allows
-    /// (`stream_constraints_exception`) or too large to build (`out_of_memory_error`).
+    /// (`stream_constraints_exception`) or too large to build (`out_of_memory_error`), and on
+    /// stale `subList` views (see [`Value::try_to_java_string`]).
     pub fn try_to_json(&self) -> Result<serde_json::Value, ToJsonError> {
+        if self.has_stale_view() {
+            return Err(ToJsonError { kind: "concurrent_modification_exception", reason: String::new() });
+        }
         let _scope = crate::guard::OuterScope::enter();
         let mut budget = crate::guard::max_object_bytes();
         match self.to_json_at(0, &mut budget) {
@@ -1143,7 +1366,11 @@ impl Value {
             Value::Float(f) => serde_json::Number::from_f64(*f as f64).map(J::Number).unwrap_or(J::String(java::fmt_float(*f))),
             Value::Double(d) => serde_json::Number::from_f64(*d).map(J::Number).unwrap_or(J::String(java::fmt_double(*d))),
             Value::Str(s) => J::String(s.as_str().to_string()),
-            Value::List(l) => J::Array(l.v.borrow().iter().map(|v| v.to_json_at(depth + 1, budget)).collect::<Option<_>>()?),
+            Value::List(l) => J::Array({
+                l.sync_view();
+                l.v.borrow()
+            }
+            .iter().map(|v| v.to_json_at(depth + 1, budget)).collect::<Option<_>>()?),
             Value::Set(s) => J::Array(s.keys().iter().map(|v| v.to_json_at(depth + 1, budget)).collect::<Option<_>>()?),
             Value::Map(m) => {
                 let mut o = serde_json::Map::new();

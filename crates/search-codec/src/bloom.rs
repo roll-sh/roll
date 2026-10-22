@@ -38,11 +38,10 @@ fn mum(a: u64, b: u64) -> u64 {
 #[inline]
 pub fn hash64(b: &[u8]) -> u64 {
     let mut h = (b.len() as u64).wrapping_mul(P0) ^ 0x2d35_8dcc_aa6c_78a5;
-    let mut chunks = b.chunks_exact(8);
-    for c in &mut chunks {
-        h = mum(h ^ u64::from_le_bytes(c.try_into().unwrap()), P1);
+    let (chunks, rem) = b.as_chunks::<8>();
+    for c in chunks {
+        h = mum(h ^ u64::from_le_bytes(*c), P1);
     }
-    let rem = chunks.remainder();
     if !rem.is_empty() {
         let mut t = [0u8; 8];
         t[..rem.len()].copy_from_slice(rem);
@@ -140,8 +139,8 @@ impl BloomFilter {
         let (b, mut bits) = probe(h, self.num_blocks);
         let block = &self.data[b * BLOCK_BYTES..(b + 1) * BLOCK_BYTES];
         let mut words = [0u64; BLOCK_WORDS];
-        for (w, c) in words.iter_mut().zip(block.chunks_exact(8)) {
-            *w = u64::from_le_bytes(c.try_into().unwrap());
+        for (w, c) in words.iter_mut().zip(block.as_chunks::<8>().0) {
+            *w = u64::from_le_bytes(*c);
         }
         let mut ok = true;
         for _ in 0..7 {

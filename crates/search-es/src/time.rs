@@ -243,7 +243,9 @@ enum Tok {
     /// `yy`: two-digit year based at 2000.
     ReducedYear,
     /// Fixed-width fraction (`SSS`) without the point.
-    Fraction { min: u8, max: u8, point: bool },
+    /// `comma`: a `,` may stand for the point (only Elasticsearch's ISO parser of
+    /// `date_optional_time` takes it; java.time's `appendFraction` wants `.`).
+    Fraction { min: u8, max: u8, point: bool, comma: bool },
     /// `MMM`+ (`standalone`: `LLL`+).
     MonthText { width: Width, standalone: bool },
     /// `EEE`+, `eee`+ (`standalone`: `ccc`+).
@@ -295,8 +297,9 @@ fn compile_pattern_in(p: &str, lenient: bool, iso: bool) -> Result<Vec<Tok>, Str
                 None => return Err("Pattern includes reserved character: '{'".into()),
             };
             let tok = match name.as_str() {
-                "F" => Tok::Fraction { min: 1, max: 9, point: true },
-                "P" => Tok::Fraction { min: 3, max: 9, point: true },
+                "F" => Tok::Fraction { min: 1, max: 9, point: true, comma: false },
+                "C" => Tok::Fraction { min: 1, max: 9, point: true, comma: true },
+                "P" => Tok::Fraction { min: 3, max: 9, point: true, comma: true },
                 "Z" => Tok::AnyZone,
                 // The ISO-8601 parser's year: four digits, optionally negative.
                 "Y" => Tok::Num { field: Field::Year, min: 4, max: 4, signed: true },
@@ -418,7 +421,7 @@ fn letter_token(c: char, n: usize, lenient: bool, iso: bool) -> Result<Tok, Stri
             1 => num(if c == 'W' { Field::LocWeekOfMonth } else { Field::AlignedWeekOfMonth }, 1, 1, false),
             _ => too_many(),
         },
-        'S' => Ok(Tok::Fraction { min: n as u8, max: n as u8, point: false }),
+        'S' => Ok(Tok::Fraction { min: n as u8, max: n as u8, point: false, comma: false }),
         'n' => num(Field::NanoOfSecond, n.max(1), 19, false),
         'N' => num(Field::NanoOfDay, n.max(1), 19, false),
         'A' => num(Field::MilliOfDay, n.max(1), 19, false),
@@ -622,7 +625,7 @@ pub struct DateFormatter {
 
 /// Named formats: (name, parser definition, printer definition, strict).
 fn named(name: &str) -> Option<(&'static str, &'static str, bool)> {
-    const DOT: &str = "yyyy[-MM[-dd['T'[HH[:mm[:ss[{F}]]]][{Z}]]]]";
+    const DOT: &str = "yyyy[-MM[-dd['T'[HH[:mm[:ss[{C}]]]][{Z}]]]]";
     const DOT_PRINT: &str = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX";
     let strip = name.strip_prefix("strict_");
     let strict = strip.is_some();
@@ -806,6 +809,8 @@ impl DateFormatter {
             // signed. The strict ISO-8601 ones go through Elasticsearch's own parser, which
             // takes exactly four year digits.
             let iso = (strict && matches!(base, "date_optional_time" | "date_optional_time_nanos" | "date_time" | "date_time_no_millis")) || base == "iso8601";
+            // The ISO parser of `strict_date_time` makes the fraction optional.
+            let p = if iso && base == "date_time" { "yyyy-MM-dd'T'HH:mm:ss[{F}]{Z}" } else { p };
             let p = p.replacen("yyyy", if iso { "{Y}" } else { "uuuu" }, 1);
             let pr = pr.replacen("yyyy", "uuuu", 1);
             let mode = if NAMED_ISO.contains(&part) {
@@ -1066,9 +1071,9 @@ fn match_toks(toks: &[Tok], s: &[u8], mut pos: usize, p: &mut Parsed, locale: Da
                 p.year = Some(2000 + v);
                 pos += 2;
             }
-            Tok::Fraction { min, max, point } => {
+            Tok::Fraction { min, max, point, comma } => {
                 if *point {
-                    if pos >= s.len() || (s[pos] != b'.' && s[pos] != b',') {
+                    if pos >= s.len() || (s[pos] != b'.' && !(*comma && s[pos] == b',')) {
                         return Err(at);
                     }
                     pos += 1;
@@ -1397,13 +1402,11 @@ fn resolve(p: &Parsed, zone: Option<&Zone>, round_up: bool, week_based: bool, re
     } else if let Some(doy) = p.day_of_year {
         year_day(year.unwrap_or(1970), doy)?
     } else {
+        // `JavaDateFormatter.ROUND_UP_BASE_FIELDS`: rounding up defaults only the time of day
+        // to its end; a missing month or day is the first.
         let y = year.unwrap_or(1970);
-        let month = p.month.unwrap_or(if round_up && p.day.is_none() { 12 } else { 1 });
-        let day = match p.day {
-            Some(d) => d,
-            None if round_up => i32::try_from(y).ok().and_then(|yi| last_day_of_month(yi, month)).unwrap_or(1),
-            None => 1,
-        };
+        let month = p.month.unwrap_or(1);
+        let day = p.day.unwrap_or(1);
         resolve_ymd(y, month, day, resolver)?
     };
     // A parsed day of week must agree with the date (`Parsed.crossCheck`), unless the date is
@@ -1618,7 +1621,7 @@ fn print_toks(toks: &[Tok], local: NaiveDateTime, off: i32, zone: &Zone, locale:
                 out.push_str(&digits);
             }
             Tok::ReducedYear => out.push_str(&format!("{:02}", local.year().rem_euclid(100))),
-            Tok::Fraction { min, max, point } => {
+            Tok::Fraction { min, max, point, .. } => {
                 let nanos = format!("{:09}", local.nanosecond());
                 let mut f = nanos[..*max as usize].to_string();
                 while f.len() > *min as usize && f.ends_with('0') {

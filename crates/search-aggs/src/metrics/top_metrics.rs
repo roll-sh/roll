@@ -19,7 +19,7 @@ use crate::request::{AggDef, PathElement};
 use crate::sort::{DocSort, SegmentSort, SortKey, SortVal};
 use crate::util::LucenePq;
 use crate::values::{BoundVs, BytesReader, NumReader, VsSpec, VsType, bind, field_format};
-use crate::xparser::{Field, Tokens, XParser};
+use crate::xparser::{Ctor, Field, Tokens, XParser};
 
 /// One gathered or heaped document: its sort key and metric values.
 type Slot = Option<(SortKey, Vec<Option<MetricVal>>)>;
@@ -41,43 +41,38 @@ fn sort_count(v: &Json) -> usize {
     }
 }
 
-/// `TopMetricsAggregationBuilder.PARSER` (a constructing parser: checks run at the end).
+/// `TopMetricsAggregationBuilder.PARSER`: a constructing parser whose constructor takes `sort`,
+/// `size` (optional) and `metrics`. Its checks run when the last of the three arrives (wrapped
+/// as a failure of that field) or at the end of the object.
 pub fn parse(p: &mut XParser<'_>) -> Result<TopMetricsSpec> {
     let fields = [Field::new("sort", Tokens::OBJECT_ARRAY_OR_STRING), Field::new("size", Tokens::INT), Field::new("metrics", Tokens::OBJECT_ARRAY)];
     let (mut sort, mut size, mut metrics): (Option<Json>, Option<i32>, Option<Vec<VsSpec>>) = (None, None, None);
-    p.object("top_metrics", &fields, |p, i| {
-        match i {
-            0 => sort = Some(p.take_value()),
-            1 => size = Some(p.int_value()?),
-            _ => {
+    p.constructing("top_metrics", &fields, &[0, 1, 2], &[0, 2], |p, ev| {
+        match ev {
+            Ctor::Field(0) => sort = Some(p.take_value()),
+            Ctor::Field(1) => size = Some(p.int_value()?),
+            Ctor::Field(_) => {
                 metrics = Some(p.array_items(|p| {
                     let f = crate::metrics::simple::parse_field_config(p, true)?;
                     Ok(f.to_vs())
                 })?)
             }
+            Ctor::Build => {
+                let size = size.unwrap_or(1);
+                if size < 1 {
+                    return Err(AggError::illegal_argument(format!("[size] must be more than 0 but was [{size}]")));
+                }
+                if sort.as_ref().is_some_and(|s| sort_count(s) != 1) {
+                    return Err(AggError::illegal_argument("[sort] must contain exactly one sort"));
+                }
+            }
         }
-        Ok(())
+        Ok(None)
     })?;
-    let mut missing = Vec::new();
-    if sort.is_none() {
-        missing.push("sort");
-    }
-    if metrics.is_none() {
-        missing.push("metrics");
-    }
-    if !missing.is_empty() {
-        return Err(AggError::illegal_argument(format!("Required [{}]", missing.join(", "))));
-    }
-    let wrap = |e: AggError| AggError::new(400, "x_content_parse_exception", "Failed to build [top_metrics] after last required field arrived").caused_by(e);
-    let size = size.unwrap_or(1);
-    if size < 1 {
-        return Err(wrap(AggError::illegal_argument(format!("[size] must be more than 0 but was [{size}]"))));
-    }
-    let sort = sort.expect("checked");
-    if sort_count(&sort) != 1 {
-        return Err(wrap(AggError::illegal_argument("[sort] must contain exactly one sort")));
-    }
-    Ok(TopMetricsSpec { sort, size: size as usize, metrics: metrics.expect("checked") })
+    let (Some(sort), Some(metrics)) = (sort, metrics) else {
+        return Err(AggError::illegal_state("top_metrics built without its required fields"));
+    };
+    Ok(TopMetricsSpec { sort, size: size.unwrap_or(1) as usize, metrics })
 }
 
 /// A metric value (`SortValue`) with its format.

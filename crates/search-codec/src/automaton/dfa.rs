@@ -335,6 +335,8 @@ impl Dfa {
         };
         let effort_limit = work_limit as u64 * 10;
         let mut effort = 0u64;
+        // As in `CpDfa::determinize`: deterministic input costs no effort (Lucene).
+        let mut deterministic = true;
 
         let mut mark = vec![0u32; states.len()];
         let mut stamp = 1u32;
@@ -352,8 +354,10 @@ impl Dfa {
         let mut targets: Vec<u32> = Vec::new();
         while next < sets.len() {
             let set = sets[next].clone();
-            effort += set.iter().filter(|&&s| states[s as usize].real).count() as u64;
-            if effort >= effort_limit {
+            let real = set.iter().filter(|&&s| states[s as usize].real).count() as u64;
+            deterministic &= real <= 1;
+            effort += real;
+            if effort >= effort_limit && !deterministic {
                 return Err(too_complex());
             }
             accept.push(set.iter().any(|&s| states[s as usize].accept));
@@ -529,8 +533,11 @@ impl Dfa {
     /// Lucene's Levenshtein automaton: accepts strings within `max_edits` edits of `term`
     /// (insertions, deletions, substitutions and, with `transpositions`, swaps of adjacent
     /// characters), counting code points, where the first `prefix_len` code points must match
-    /// exactly.
+    /// exactly. An empty `term` matches only the empty string: Lucene's `FuzzyTermsEnum` drops
+    /// `maxEdits` while `1 - maxEdits / termLength` is not above the (initially -∞) bottom boost,
+    /// and a zero length makes that -∞, so `fuzzy` on `""` is an exact query.
     pub fn levenshtein(term: &str, max_edits: u32, prefix_len: usize, transpositions: bool) -> Dfa {
+        let max_edits = if term.is_empty() { 0 } else { max_edits };
         let nfa = levenshtein_nfa(term, max_edits, prefix_len, transpositions);
         // Levenshtein DFAs are linear in the term length for the supported edit distances.
         Dfa::from_nfa(&nfa, u32::MAX / 16).unwrap_or_else(|_| Dfa::empty())
@@ -819,14 +826,14 @@ pub fn wildcard_nfa(pattern: &str, case_insensitive: bool) -> Nfa {
                 cur = n;
             }
             _ => {
-                // An escaped character matches exactly, even case-insensitively; a trailing
-                // `\` is a literal backslash (Elasticsearch's lenient parsing).
-                let (lit, escaped) = match (c, chars.peek()) {
-                    ('\\', Some(_)) => (chars.next().unwrap_or('\\'), true),
-                    _ => (c, false),
+                // An escaped character is literal but still case-folded (`\a` matches `A` too,
+                // as in Elasticsearch); a trailing `\` is a literal backslash.
+                let lit = match (c, chars.peek()) {
+                    ('\\', Some(_)) => chars.next().unwrap_or('\\'),
+                    _ => c,
                 };
                 let n = nfa.add_state();
-                if case_insensitive && !escaped {
+                if case_insensitive {
                     for v in ascii_case_variants(lit as u32) {
                         nfa.add_char(cur, v, n);
                     }
@@ -847,6 +854,32 @@ mod tests {
     use super::*;
     use rand::{Rng, SeedableRng, rngs::StdRng};
 
+    /// Elasticsearch 9.5.5 `wildcard` with `case_insensitive` on a keyword field holding
+    /// a, A, xb, XB, Xb, a*, A*, ab: escaped letters fold like plain ones, escaped `*`/`?` stay
+    /// literal.
+    #[test]
+    fn case_insensitive_wildcard_folds_escaped_letters() {
+        let docs = ["a", "A", "xb", "XB", "Xb", "a*", "A*", "ab"];
+        for (pattern, expected) in [
+            (r"\a", &["a", "A"][..]),
+            (r"\A", &["a", "A"]),
+            (r"x\b", &["xb", "XB", "Xb"]),
+            (r"\x\b", &["xb", "XB", "Xb"]),
+            (r"\a*", &["a", "A", "a*", "A*", "ab"]),
+            (r"\x?", &["xb", "XB", "Xb"]),
+            (r"\a\*", &["a*", "A*"]),
+            (r"\*", &[]),
+            ("a\\", &[]),
+        ] {
+            let d = Dfa::wildcard(pattern, true, DEFAULT_WORK_LIMIT).unwrap();
+            let got: Vec<&str> = docs.iter().copied().filter(|t| d.matches(t.as_bytes())).collect();
+            assert_eq!(got, expected, "{pattern}");
+        }
+        // Case-sensitive escapes stay exact.
+        let d = Dfa::wildcard(r"\a", false, DEFAULT_WORK_LIMIT).unwrap();
+        assert!(d.matches(b"a") && !d.matches(b"A"));
+    }
+
     #[test]
     fn case_insensitive_prefix_escapes_wildcards() {
         let d = Dfa::prefix_case_insensitive("Ab*?\\", DEFAULT_WORK_LIMIT).unwrap();
@@ -865,6 +898,24 @@ mod tests {
             .collect()
     }
 
+    /// Elasticsearch 9.5.5: `fuzzy` with value "" and fuzziness 1 or 2 on a keyword field
+    /// matches only "" (not every one-character term).
+    #[test]
+    fn levenshtein_of_empty_term_is_exact() {
+        for k in 0..=2 {
+            for prefix in [0, 1] {
+                let d = Dfa::levenshtein("", k, prefix, true);
+                assert!(d.matches(b""));
+                for t in ["a", "A", "ß", "k", "日", "ab"] {
+                    assert!(!d.matches(t.as_bytes()), "{t} k={k}");
+                }
+            }
+        }
+        // A prefix covering the whole term still allows edits after it (termLength > 0).
+        let d = Dfa::levenshtein("ab", 1, 2, true);
+        assert!(d.matches(b"ab") && d.matches(b"abc") && !d.matches(b"ac"));
+    }
+
     #[test]
     fn levenshtein_matches_brute_force() {
         let mut rng = StdRng::seed_from_u64(1);
@@ -879,6 +930,8 @@ mod tests {
             for _ in 0..100 {
                 let cand = random_word(&mut rng, &alphabet, 8);
                 let cp: String = cand.chars().take(tp.chars().count()).collect();
+                // An empty term only matches itself (Lucene's FuzzyTermsEnum).
+                let k = if term.is_empty() { 0 } else { k };
                 let want = cp == tp
                     && edit_distance(
                         &term.chars().skip(prefix).collect::<String>(),

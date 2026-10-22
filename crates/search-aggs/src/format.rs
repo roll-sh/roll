@@ -244,6 +244,11 @@ pub trait DateFormatter: Send + Sync + std::fmt::Debug {
     fn pattern(&self) -> &str;
     /// Prints an instant (`millis` since the epoch plus `nanos` within the milli) in `zone`.
     fn format(&self, millis: i64, nanos: u32, zone: &TimeZone) -> String;
+    /// [`format`](Self::format), or the message of the `DateTimeException` Java's formatter
+    /// throws (a year wider than the pattern prints).
+    fn try_format(&self, millis: i64, nanos: u32, zone: &TimeZone) -> std::result::Result<String, String> {
+        Ok(self.format(millis, nanos, zone))
+    }
     /// Parses `text` with date math into epoch millis (`round_up` for `/unit` rounding of upper
     /// bounds; `zone` for dates without an offset).
     fn parse(&self, text: &str, now_millis: i64, round_up: bool, zone: &TimeZone) -> Result<i64>;
@@ -302,6 +307,41 @@ impl PartialEq for DocValueFormat {
 impl DocValueFormat {
     pub fn is_raw(&self) -> bool {
         matches!(self, DocValueFormat::Raw)
+    }
+
+    /// Whether `format(v)` succeeds: a date format fails (as `DateFormatter.format` does) when
+    /// the value doesn't fit its pattern.
+    pub fn verify_double(&self, v: f64) -> Result<()> {
+        if let DocValueFormat::DateTime { formatter, zone, nanos } = self {
+            let l = v as i64;
+            let (ms, ns) = if *nanos { (l.div_euclid(1_000_000), l.rem_euclid(1_000_000) as u32) } else { (l, 0) };
+            if let Err(msg) = formatter.try_format(ms, ns, zone) {
+                let unit = if *nanos { "date_nanos" } else { "date" };
+                return Err(AggError::illegal_argument(format!("Failed formatting value [{l}] as {unit} with pattern [{}]", formatter.pattern()))
+                    .caused_by(AggError::new(400, "date_time_exception", msg)));
+            }
+        }
+        Ok(())
+    }
+
+    /// `toString()` of the Java format (error messages print it).
+    pub fn java_string(&self) -> String {
+        match self {
+            DocValueFormat::Raw => "RAW".into(),
+            DocValueFormat::Decimal(f) => format!("DocValueFormat.Decimal({})", f.pattern()),
+            DocValueFormat::DateTime { formatter, zone, nanos } => format!(
+                "DocValueFormat.DateTime(format[{}] locale[en], {}, {})",
+                formatter.pattern(),
+                zone.id(),
+                if *nanos { "NANOSECONDS" } else { "MILLISECONDS" }
+            ),
+            DocValueFormat::Ip => "IP".into(),
+            DocValueFormat::Boolean => "BOOLEAN".into(),
+            DocValueFormat::GeoHash => "GEOHASH".into(),
+            DocValueFormat::GeoTile => "GEOTILE".into(),
+            DocValueFormat::UnsignedLongShifted => "UNSIGNED_LONG_SHIFTED".into(),
+            DocValueFormat::Binary => "BINARY".into(),
+        }
     }
 
     /// The default date format (`strict_date_optional_time||epoch_millis`, UTC, millis).
@@ -503,10 +543,96 @@ pub fn builtin_date_formatter(pattern: &str) -> Result<Arc<dyn DateFormatter>> {
         "strict_date_hour_minute_second" | "date_hour_minute_second" => Print::Pattern(compile_pattern("yyyy-MM-dd'T'HH:mm:ss")?),
         "strict_date_hour_minute" | "date_hour_minute" => Print::Pattern(compile_pattern("yyyy-MM-dd'T'HH:mm")?),
         "strict_date_hour" | "date_hour" => Print::Pattern(compile_pattern("yyyy-MM-dd'T'HH")?),
-        p => Print::Pattern(compile_pattern(p)?),
+        p => match NAMED_FORMATS.iter().find(|(n, _)| *n == p || (p.strip_prefix("strict_") == Some(*n) && (!n.starts_with("basic_") || n.starts_with("basic_week_")))) {
+            Some((_, java)) => Print::Pattern(compile_pattern(java)?),
+            None => Print::Pattern(compile_pattern(p)?),
+        },
     };
-    Ok(Arc::new(BuiltinDateFormatter { pattern: pattern.to_string(), print }))
+    // These print the year in at most four digits (others widen it), as Elasticsearch 9.5.5's
+    // formatters do.
+    let fixed_year = FIXED_WIDTH_YEAR_FORMATS.contains(&first);
+    // These print a year past 9999 without the `+` the others add.
+    let unsigned_wide_year = matches!(
+        first,
+        "basic_date"
+            | "basic_date_time"
+            | "basic_date_time_no_millis"
+            | "year"
+            | "weekyear"
+            | "basic_week_date"
+            | "basic_week_date_time"
+            | "basic_week_date_time_no_millis"
+            | "strict_basic_week_date"
+            | "strict_basic_week_date_time"
+            | "strict_basic_week_date_time_no_millis"
+    );
+    Ok(Arc::new(BuiltinDateFormatter { pattern: pattern.to_string(), print, fixed_year, unsigned_wide_year }))
 }
+
+/// The named formats whose printer has a four-digit maximum year width.
+const FIXED_WIDTH_YEAR_FORMATS: &[&str] = &[
+    "date_hour_minute_second_fraction",
+    "date_hour_minute_second_millis",
+    "ordinal_date_time",
+    "ordinal_date_time_no_millis",
+    "year_month_day",
+    "strict_date_hour_minute_second_fraction",
+    "strict_date_hour_minute_second_millis",
+    "strict_date_time",
+    "strict_date_time_no_millis",
+    "strict_ordinal_date",
+    "strict_ordinal_date_time",
+    "strict_ordinal_date_time_no_millis",
+    "strict_year",
+    "strict_year_month",
+    "strict_year_month_day",
+];
+
+/// Elasticsearch's other named date formats (`strict_` variants exist for all but `basic_*`) (each also as `strict_<name>`) as the
+/// `DateTimeFormatter` patterns they print with.
+const NAMED_FORMATS: &[(&str, &str)] = &[
+    ("basic_date", "yyyyMMdd"),
+    ("basic_date_time", "yyyyMMdd'T'HHmmss.SSSXX"),
+    ("basic_date_time_no_millis", "yyyyMMdd'T'HHmmssXX"),
+    ("basic_ordinal_date", "yyyyDDD"),
+    ("basic_ordinal_date_time", "yyyyDDD'T'HHmmss.SSSXX"),
+    ("basic_ordinal_date_time_no_millis", "yyyyDDD'T'HHmmssXX"),
+    ("basic_time", "HHmmss.SSSXX"),
+    ("basic_time_no_millis", "HHmmssXX"),
+    ("basic_t_time", "'T'HHmmss.SSSXX"),
+    ("basic_t_time_no_millis", "'T'HHmmssXX"),
+    ("date", "yyyy-MM-dd"),
+    ("date_hour", "yyyy-MM-dd'T'HH"),
+    ("date_hour_minute", "yyyy-MM-dd'T'HH:mm"),
+    ("date_hour_minute_second", "yyyy-MM-dd'T'HH:mm:ss"),
+    ("date_hour_minute_second_fraction", "yyyy-MM-dd'T'HH:mm:ss.SSS"),
+    ("date_hour_minute_second_millis", "yyyy-MM-dd'T'HH:mm:ss.SSS"),
+    ("date_time_no_millis", "yyyy-MM-dd'T'HH:mm:ssXXX"),
+    ("hour", "HH"),
+    ("hour_minute", "HH:mm"),
+    ("hour_minute_second", "HH:mm:ss"),
+    ("hour_minute_second_fraction", "HH:mm:ss.SSS"),
+    ("hour_minute_second_millis", "HH:mm:ss.SSS"),
+    ("ordinal_date", "yyyy-DDD"),
+    ("ordinal_date_time", "yyyy-DDD'T'HH:mm:ss.SSSXXX"),
+    ("ordinal_date_time_no_millis", "yyyy-DDD'T'HH:mm:ssXXX"),
+    ("time", "HH:mm:ss.SSSXXX"),
+    ("time_no_millis", "HH:mm:ssXXX"),
+    ("t_time", "'T'HH:mm:ss.SSSXXX"),
+    ("t_time_no_millis", "'T'HH:mm:ssXXX"),
+    ("year", "yyyy"),
+    ("year_month", "yyyy-MM"),
+    ("year_month_day", "yyyy-MM-dd"),
+    ("weekyear", "YYYY"),
+    ("weekyear_week", "YYYY-'W'ww"),
+    ("weekyear_week_day", "YYYY-'W'ww-e"),
+    ("week_date", "YYYY-'W'ww-e"),
+    ("week_date_time", "YYYY-'W'ww-e'T'HH:mm:ss.SSSXXX"),
+    ("week_date_time_no_millis", "YYYY-'W'ww-e'T'HH:mm:ssXXX"),
+    ("basic_week_date", "YYYY'W'wwe"),
+    ("basic_week_date_time", "YYYY'W'wwe'T'HHmmss.SSSXX"),
+    ("basic_week_date_time_no_millis", "YYYY'W'wwe'T'HHmmssXX"),
+];
 
 #[derive(Debug)]
 enum Print {
@@ -553,7 +679,9 @@ fn compile_pattern(p: &str) -> Result<Vec<Tok>> {
             while i + n < cs.len() && cs[i + n] == c {
                 n += 1;
             }
-            if !"uyYMLdDHhmsSnaEeXxZVzGkKAN".contains(c) {
+            // `DateTimeFormatterBuilder.parsePattern`'s letters (the builtin printer only
+            // implements the common ones; search-es supplies the full formatter).
+            if !"GuyDMLdQqYwWEecFaBhKkHmsSAnNgVvzOXxZp".contains(c) {
                 return Err(AggError::illegal_argument(format!("Invalid format: [{p}]: Unknown pattern letter: {c}")));
             }
             out.push(Tok::F(c, n));
@@ -570,17 +698,15 @@ fn compile_pattern(p: &str) -> Result<Vec<Tok>> {
 struct BuiltinDateFormatter {
     pattern: String,
     print: Print,
+    fixed_year: bool,
+    unsigned_wide_year: bool,
 }
 
 const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const DAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
-impl DateFormatter for BuiltinDateFormatter {
-    fn pattern(&self) -> &str {
-        &self.pattern
-    }
-
-    fn format(&self, millis: i64, nanos: u32, zone: &TimeZone) -> String {
+impl BuiltinDateFormatter {
+    fn format_inner(&self, millis: i64, nanos: u32, zone: &TimeZone) -> String {
         match &self.print {
             Print::EpochMillis => {
                 if nanos == 0 {
@@ -613,9 +739,37 @@ impl DateFormatter for BuiltinDateFormatter {
             }
         }
     }
+}
+
+impl DateFormatter for BuiltinDateFormatter {
+    fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    fn format(&self, millis: i64, nanos: u32, zone: &TimeZone) -> String {
+        let out = self.format_inner(millis, nanos, zone);
+        match out.strip_prefix('+') {
+            Some(rest) if self.unsigned_wide_year => rest.to_string(),
+            _ => out,
+        }
+    }
+
+    fn try_format(&self, millis: i64, nanos: u32, zone: &TimeZone) -> std::result::Result<String, String> {
+        if self.fixed_year {
+            let local = millis + zone.offset_at(millis) as i64 * 1000;
+            if let Some(dt) = chrono::DateTime::from_timestamp(local.div_euclid(1000), 0) {
+                let year = dt.year();
+                if year > 9999 {
+                    return Err(format!("Field Year cannot be printed as the value {year} exceeds the maximum print width of 4"));
+                }
+            }
+        }
+        Ok(self.format(millis, nanos, zone))
+    }
 
     fn parse(&self, text: &str, now_millis: i64, round_up: bool, zone: &TimeZone) -> Result<i64> {
         parse_date_math(text, now_millis, round_up, zone, matches!(self.print, Print::EpochSecond))
+            .map_err(|e| if e.kind == "illegal_argument_exception" { e } else { date_parse_error(text, &self.pattern, "Failed to parse with all enclosed parsers") })
     }
 }
 
@@ -633,7 +787,8 @@ fn pad(out: &mut String, v: i64, n: usize) {
 fn print_field(out: &mut String, c: char, n: usize, dt: &NaiveDateTime, off: i32, zone: &TimeZone) {
     match c {
         'y' | 'u' | 'Y' => {
-            let y = dt.year() as i64;
+            // `Y`: the ISO week-based year (Elasticsearch's week formats).
+            let y = if c == 'Y' { dt.iso_week().year() as i64 } else { dt.year() as i64 };
             if n == 2 {
                 pad(out, y.rem_euclid(100), 2)
             } else {
@@ -669,7 +824,10 @@ fn print_field(out: &mut String, c: char, n: usize, dt: &NaiveDateTime, off: i32
         'n' => pad(out, dt.nanosecond() as i64, n),
         'A' => pad(out, (dt.num_seconds_from_midnight() as i64) * 1000 + (dt.nanosecond() / 1_000_000) as i64, n),
         'a' => out.push_str(if dt.hour() < 12 { "AM" } else { "PM" }),
-        'E' | 'e' => {
+        // `e`/`c` up to two letters: the day-of-week number (Monday = 1, ISO).
+        'e' | 'c' if n <= 2 => pad(out, dt.weekday().number_from_monday() as i64, n),
+        'w' => pad(out, dt.iso_week().week() as i64, n),
+        'E' | 'e' | 'c' => {
             let d = DAYS[dt.weekday().num_days_from_monday() as usize];
             if n >= 4 { out.push_str(d) } else { out.push_str(&d[..3]) }
         }
@@ -719,9 +877,55 @@ fn print_field(out: &mut String, c: char, n: usize, dt: &NaiveDateTime, off: i32
     }
 }
 
+/// `JavaDateMathParser`'s failure: an `ElasticsearchParseException` around the formatter's
+/// `IllegalArgumentException` around the `DateTimeParseException` (`cause`).
+pub fn date_parse_error(text: &str, pattern: &str, cause: &str) -> AggError {
+    let msg = format!("failed to parse date field [{text}] with format [{pattern}]");
+    AggError::new(400, "parse_exception", format!("{msg}: [{msg}]"))
+        .caused_by(AggError::illegal_argument(msg).caused_by(AggError::new(400, "date_time_parse_exception", cause)))
+}
+
+/// `Instant.MAX.getEpochSecond()` (the end of year +1000000000).
+const MAX_INSTANT_SECONDS: u64 = 31_556_889_864_403_199;
+
+/// Epoch seconds that fit an `Instant` but whose millis don't fit a long: `DateUtils.toLong`'s
+/// "date[…] is too far in the future/past …" around `Math.multiplyExact`'s "long overflow".
+fn epoch_seconds_overflow(text: &str) -> Option<AggError> {
+    let v: i64 = text.trim().parse().ok()?;
+    if v == i64::MIN || v.unsigned_abs() > MAX_INSTANT_SECONDS || v.checked_mul(1000).is_some() {
+        return None;
+    }
+    let (days, secs) = (v.div_euclid(86_400), v.rem_euclid(86_400));
+    let (y, m, d) = civil_from_days(days);
+    let year = if y > 9999 { format!("+{y}") } else if y < 0 { format!("-{:04}", -y) } else { format!("{y:04}") };
+    let instant = format!("{year}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs / 60 % 60, secs % 60);
+    let when = if v > 0 { "future" } else { "past" };
+    Some(
+        AggError::illegal_argument(format!("date[{instant}] is too far in the {when} to be represented in a long milliseconds variable"))
+            .caused_by(AggError::new(500, "arithmetic_exception", "long overflow")),
+    )
+}
+
+/// Proleptic Gregorian `(year, month, day)` of a day count from 1970-01-01, for any `i64`
+/// day count an `Instant` can hold.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
 /// Date math over ISO dates and epoch millis: `now`, `<date>||`, then `+N<unit>`, `-N<unit>`,
 /// `/<unit>`.
 pub fn parse_date_math(text: &str, now: i64, round_up: bool, zone: &TimeZone, epoch_seconds: bool) -> Result<i64> {
+    if epoch_seconds && let Some(e) = epoch_seconds_overflow(text.split_once("||").map_or(text, |(d, _)| d)) {
+        return Err(e);
+    }
     let fail = |t: &str| {
         AggError::new(400, "parse_exception", format!("failed to parse date field [{t}] with format [strict_date_optional_time||epoch_millis]"))
     };
@@ -819,7 +1023,13 @@ fn parse_date(s: &str, zone: &TimeZone, epoch_seconds: bool) -> Option<i64> {
     let s = s.trim();
     if !s.is_empty() && (s.bytes().all(|b| b.is_ascii_digit()) || (s.starts_with('-') && s.len() > 1 && s[1..].bytes().all(|b| b.is_ascii_digit()))) && (s.len() != 4 || s.starts_with('-')) {
         let v: i64 = s.parse().ok()?;
-        return Some(if epoch_seconds { v * 1000 } else { v });
+        // `EpochTime` reads the sign apart and the digits as a positive long: Long.MIN_VALUE's
+        // magnitude doesn't fit. Seconds must fit an `Instant` (and then its millis a long,
+        // checked in `parse_date_math`).
+        if v == i64::MIN || (epoch_seconds && v.unsigned_abs() > MAX_INSTANT_SECONDS) {
+            return None;
+        }
+        return Some(if epoch_seconds { v.checked_mul(1000)? } else { v });
     }
     if let Some(d) = parse_java_double(s).filter(|_| s.contains('.') && s.bytes().all(|b| b.is_ascii_digit() || b == b'.' || b == b'-')) {
         return Some(if epoch_seconds { (d * 1000.0) as i64 } else { d as i64 });

@@ -6,7 +6,7 @@
 //! earlier rule on ties, anything unmatched skipped one code point at a time. Lucene sizes the
 //! scanner buffer to `max_token_length` and disables buffer growth, so a match can never be longer
 //! than that many UTF-16 units: a longer word comes out in `max_token_length` pieces, each
-//! re-scanned from where the last stopped. The window passed to `longest_match` reproduces that.
+//! re-scanned from where the last stopped. The window of the `jflex` scanner reproduces that.
 
 use std::sync::OnceLock;
 

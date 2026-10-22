@@ -1025,8 +1025,8 @@ pub fn doc_value(triangles: &[PackedTriangle]) -> bytes::Bytes {
 }
 
 /// The packed triangles of a [`doc_value`] (bare concatenations included).
-pub fn doc_value_triangles(bytes: &[u8]) -> std::slice::ChunksExact<'_, u8> {
-    split_doc_value(bytes).1.chunks_exact(28)
+pub fn doc_value_triangles(bytes: &[u8]) -> std::slice::Iter<'_, [u8; 28]> {
+    split_doc_value(bytes).1.as_chunks::<28>().0.iter()
 }
 
 /// The bounding box of a [`doc_value`] as encoded `[minY, minX, maxY, maxX]`, if it has one.
@@ -1130,7 +1130,7 @@ fn dv_relates(v: &Visitor, rel: ShapeRelation, bytes: &[u8]) -> bool {
             _ => {}
         }
     }
-    let mut tris = body.chunks_exact(28).filter_map(decode_triangle);
+    let mut tris = body.as_chunks::<28>().0.iter().filter_map(|t| decode_triangle(t));
     match rel {
         ShapeRelation::Intersects => tris.any(|t| v.intersects(&t)),
         ShapeRelation::Disjoint => !tris.any(|t| v.intersects(&t)),

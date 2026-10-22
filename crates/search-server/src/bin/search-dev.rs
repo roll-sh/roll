@@ -11,12 +11,19 @@
 //! against (`node.attr.testattr=test`, `node.processors=2`, `path.repo` in the temp directory, test
 //! features published).
 //!
-//! Without `--data-dir` the cluster lives in memory; with it, metadata is kept through
-//! `search-store` in that directory (objects under `objects/`, the local cache under `cache/`)
-//! and survives restarts.
+//! Without `--data-dir` the cluster lives in memory; with it, the cluster (metadata and
+//! documents) is kept through `search-store` in that directory (objects under `objects/`, the
+//! WAL and the local cache under `cache/`): every acknowledged write survives a restart or a
+//! crash (`kill -9`). `--idle-unload <s>` (or `--idle-unload-ms`) unloads the cluster when idle (it wakes on the next
+//! request); `--sync-objects` acknowledges writes once they are in object storage. SIGINT and
+//! SIGTERM stop gracefully: requests in flight finish, the cluster is flushed.
 
 use clap::Parser;
 use search_es::Dialect;
+use std::time::Duration;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use search_server::{ClusterSpec, ListenOptions, MemoryStores, Node, NodeConfig, StaticCatalog};
 use std::sync::Arc;
 
@@ -51,6 +58,16 @@ struct Args {
     /// Configure the node like Elasticsearch's YAML REST test clusters.
     #[arg(long)]
     yaml_test_cluster: bool,
+    /// Unload the cluster after this many idle seconds (with `--data-dir`; 0: never).
+    #[arg(long, default_value_t = 0)]
+    idle_unload: u64,
+    /// Like `--idle-unload`, in milliseconds (stress tests: wake fidelity under constant
+    /// unloads); overrides it.
+    #[arg(long)]
+    idle_unload_ms: Option<u64>,
+    /// Acknowledge writes once the WAL is in object storage instead of on local disk.
+    #[arg(long)]
+    sync_objects: bool,
     /// PEM certificate chain for HTTPS.
     #[arg(long, requires = "tls_key")]
     tls_cert: Option<std::path::PathBuf>,
@@ -59,8 +76,14 @@ struct Args {
     tls_key: Option<std::path::PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Hand freed memory back at once, keep THP from inflating a sparse heap, and collect a
+    // worker's heap when it parks, so an unloaded cluster's memory leaves the process.
+    search_server::process::tune_memory();
+    tokio::runtime::Builder::new_multi_thread().enable_all().on_thread_park(search_server::process::on_thread_park).build()?.block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
     let args = Args::parse();
     let dialect = match args.dialect.as_str() {
@@ -80,6 +103,12 @@ async fn main() -> anyhow::Result<()> {
         node_settings.push(("node.processors".to_string(), "2".to_string()));
         // Elasticsearch's test clusters register a temporary directory as `path.repo`.
         node_settings.push(("path.repo".to_string(), std::env::temp_dir().join("roll-search-repo").to_string_lossy().into_owned()));
+        // Like Elasticsearch's test clusters: reindex from remote may target this node, which
+        // advertises its real port.
+        node_settings.push(("reindex.remote.whitelist".to_string(), "127.0.0.1:*".to_string()));
+        if let Some((_, port)) = args.listen.rsplit_once(':') {
+            node_settings.push(("http.publish_port".to_string(), port.to_string()));
+        }
     }
     for s in &args.setting {
         let Some((k, v)) = s.split_once('=') else { anyhow::bail!("setting [{s}] must be key=value") };
@@ -91,7 +120,10 @@ async fn main() -> anyhow::Result<()> {
     let cfg = NodeConfig {
         node_name: args.node_name,
         default_cluster: Some(args.cluster.clone()),
-        idle_unload: None,
+        idle_unload: Some(args.idle_unload_ms.map_or(Duration::from_secs(args.idle_unload), Duration::from_millis))
+            .filter(|d| !d.is_zero() && args.data_dir.is_some()),
+        // One tenant: no node-wide cap beyond the cluster's own.
+        max_running: usize::MAX,
         node_settings,
         test_features: args.test_features || args.yaml_test_cluster,
         // One tenant: the host's numbers are its own.
@@ -101,7 +133,9 @@ async fn main() -> anyhow::Result<()> {
     let stores: Arc<dyn search_server::StoreProvider> = match &args.data_dir {
         Some(dir) => {
             let objects = search_store::Objects::new(&search_store::StorageConfig::Local(dir.join("objects")))?;
-            let store = search_store::Store::open(objects, dir.join("cache"), search_store::StoreConfig::default()).await?;
+            let mut scfg = search_store::StoreConfig { verify: Some(search_server::persist::segment_verifier()), ..Default::default() };
+            scfg.wal.sync_objects = args.sync_objects;
+            let store = search_store::Store::open(objects, dir.join("cache"), scfg).await?;
             Arc::new(search_server::ObjectStores::new(store))
         }
         None => Arc::new(MemoryStores::new()),
@@ -112,9 +146,16 @@ async fn main() -> anyhow::Result<()> {
         opts.tls = Some(search_server::net::tls_acceptor(&std::fs::read(c)?, &std::fs::read(k)?)?);
     }
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
-    tracing::info!(addr = %listener.local_addr()?, cluster = args.cluster, "roll search (dev) listening");
+    tracing::info!(addr = %listener.local_addr()?, cluster = args.cluster, persistent = args.data_dir.is_some(), "roll search (dev) listening");
+    let shutdown = search_server::Shutdown::new();
+    let server = tokio::spawn(search_server::serve_until(listener, node.clone(), opts, shutdown.clone()));
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
-        r = search_server::serve(listener, node, opts) => r,
-        _ = tokio::signal::ctrl_c() => Ok(()),
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
     }
+    tracing::info!("shutting down");
+    shutdown.trigger();
+    let _ = tokio::time::timeout(Duration::from_secs(30), server).await;
+    node.shutdown(Duration::from_secs(30)).await
 }

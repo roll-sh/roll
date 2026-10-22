@@ -216,7 +216,10 @@ impl TextObj {
             TextObj::Decimal(f) => {
                 let f = f.borrow();
                 let name = crate::lib_util::locale_display_name(&f.sym.locale);
-                out.push_str(&format!("DecimalFormat [locale: \"{name}\", pattern: \"{}\"]\n", f.to_pattern(false)));
+                match f.to_pattern(false) {
+                    Ok(p) => out.push_str(&format!("DecimalFormat [locale: \"{name}\", pattern: \"{p}\"]\n")),
+                    Err(t) => crate::guard::note_thrown(t),
+                }
             }
             TextObj::ParsePosition { index, error } => out.push_str(&format!("java.text.ParsePosition[index={},errorIndex={}]", index.get(), error.get())),
             TextObj::FieldPosition { field, attribute, begin, end } => {
@@ -458,8 +461,8 @@ getter!(df_pos_prefix, |f| Value::str(f.positive_prefix()));
 getter!(df_pos_suffix, |f| Value::str(f.positive_suffix()));
 getter!(df_decimal_always, |f| Value::Bool(f.decimal_always));
 getter!(df_parse_big, |f| Value::Bool(f.parse_big_decimal));
-getter!(df_to_pattern, |f| Value::string(f.to_pattern(false)));
-getter!(df_to_localized, |f| Value::string(f.to_pattern(true)));
+getter!(df_to_pattern, |f| Value::string(f.to_pattern(false)?));
+getter!(df_to_localized, |f| Value::string(f.to_pattern(true)?));
 getter!(df_symbols, |f| text_value(TextObj::Symbols(Box::new(RefCell::new(f.sym.clone())))));
 getter!(nf_max_frac, |f| Value::Int(f.max_frac()));
 getter!(nf_min_frac, |f| Value::Int(f.min_frac()));

@@ -14,6 +14,14 @@
 //!
 //! Scanning is then one class lookup (a direct table for ASCII, a two-level table otherwise) and
 //! one transition load per character, with no allocation.
+//!
+//! Longest match is quadratic on adversarial input: when the DFA stays alive long after its last
+//! accepting state (`a-a-a-…` keeps the classic grammar's e-mail rule alive to the end of the
+//! text), every token rescans that tail. JFlex does the same, so Elasticsearch takes minutes on a
+//! megabyte of it. Scanners that can meet unbounded tails keep a [`DeadEnds`] memo (Reps,
+//! "Maximal-munch tokenization in linear time", 1998): once a scan's tail is known to reach no
+//! accept, each (position, state) on it is recorded, and a later scan reaching the same state at
+//! the same position stops there. The memo is only built for texts where a long tail occurs.
 
 use std::collections::HashMap;
 
@@ -318,6 +326,53 @@ fn minimize(trans: &[u32], accept: &[u16], ncls: usize, nlex: usize) -> (Vec<u32
 
 pub(crate) const DEAD: u32 = 0;
 pub(crate) const START: u32 = 1;
+
+/// Tail length (bytes past the last accept) from which a scan's dead end is recorded.
+const DEAD_END_TAIL: usize = 64;
+/// Memo entries kept between texts (4 bytes per byte of text).
+const DEAD_END_KEEP: usize = 1 << 20;
+
+/// A scan's result, and where its dead tail runs: (end, last accept, state there).
+struct Scan {
+    best: Option<(usize, usize, usize)>,
+    tail: Option<(usize, usize, u32)>,
+}
+
+/// Per-text memo of dead ends of longest-match scans: `states[pos]` is a DFA state known to reach
+/// no accepting state when entered at byte `pos` (one per position, the latest recorded).
+#[derive(Default)]
+pub(crate) struct DeadEnds {
+    states: Vec<u32>,
+    active: bool,
+}
+
+impl DeadEnds {
+    /// Forgets everything (a new text, or the DFA renumbered its states).
+    pub(crate) fn reset(&mut self) {
+        self.active = false;
+        if self.states.capacity() > DEAD_END_KEEP {
+            self.states = Vec::new();
+        }
+    }
+
+    /// Records the dead tail of a scan of `text`: from `from` in state `state` up to `to`.
+    fn record(&mut self, text: &str, from: usize, mut state: u32, to: usize, mut step: impl FnMut(u32, char) -> u32) {
+        if !self.active {
+            self.states.clear();
+            self.states.resize(text.len() + 1, DEAD);
+            self.active = true;
+        }
+        let mut pos = from;
+        for c in text[from..to].chars() {
+            self.states[pos] = state;
+            state = step(state, c);
+            pos += c.len_utf8();
+        }
+        if pos < self.states.len() && state != DEAD {
+            self.states[pos] = state;
+        }
+    }
+}
 
 struct Nfa {
     /// Per state: epsilon edges.
@@ -736,8 +791,9 @@ impl Dfa {
 
     /// Longest match starting at byte `start` of `text`, reading at most `limit` UTF-16 code units
     /// (a code point that would cross the limit is not read). Returns (rule, end byte, UTF-16
-    /// length).
-    #[inline]
+    /// length). The scanners use [`Dfa::longest_match_memo`]; this plain form is the reference
+    /// the tests check it against.
+    #[cfg(test)]
     pub(crate) fn longest_match(
         &self,
         text: &str,
@@ -748,7 +804,7 @@ impl Dfa {
     }
 
     /// [`Dfa::longest_match`] in lexical state `lex`.
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn longest_match_in(
         &self,
         lex: usize,
@@ -786,6 +842,65 @@ impl Dfa {
         best
     }
 
+    /// [`Dfa::longest_match`] without a length limit, in linear time over a whole text (see
+    /// [`DeadEnds`]; `memo` belongs to `text`).
+    #[inline]
+    pub(crate) fn longest_match_memo(
+        &self,
+        text: &str,
+        start: usize,
+        memo: &mut DeadEnds,
+    ) -> Option<(usize, usize, usize)> {
+        // Two copies of the loop, so texts without long tails pay nothing for the memo.
+        let scan = if memo.active {
+            self.scan::<true>(text, start, &memo.states)
+        } else {
+            self.scan::<false>(text, start, &[])
+        };
+        if let Some((end, acc_pos, acc_state)) = scan.tail
+            && end - acc_pos > DEAD_END_TAIL
+        {
+            memo.record(text, acc_pos, acc_state, end, |s, c| self.step(s, c));
+        }
+        scan.best
+    }
+
+    #[inline(always)]
+    fn scan<const MEMO: bool>(&self, text: &str, start: usize, dead: &[u32]) -> Scan {
+        let bytes = text.as_bytes();
+        let mut state = START;
+        let mut best = None;
+        let mut pos = start;
+        let mut units = 0usize;
+        let (mut acc_pos, mut acc_state) = (start, START);
+        while pos < bytes.len() {
+            if MEMO && dead[pos] == state {
+                return Scan { best, tail: None };
+            }
+            let b = bytes[pos];
+            let (c, len, ulen) = if b < 0x80 {
+                (b as char, 1, 1)
+            } else {
+                let c = text[pos..].chars().next().unwrap_or('\u{FFFD}');
+                (c, c.len_utf8(), c.len_utf16())
+            };
+            state = self.step(state, c);
+            if state == DEAD {
+                break;
+            }
+            pos += len;
+            units += ulen;
+            if let Some(rule) = self.accepts_in(0, state) {
+                best = Some((rule, pos, units));
+                (acc_pos, acc_state) = (pos, state);
+            }
+        }
+        Scan {
+            best,
+            tail: Some((pos, acc_pos, acc_state)),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn states(&self) -> usize {
         self.accept.len() / self.nlex
@@ -805,6 +920,8 @@ pub(crate) struct LazyDfa {
     /// `accept[state * nlex + lex]` as in [`Dfa`].
     accept: Vec<u16>,
     scratch: Vec<u32>,
+    /// Dead ends of scans of the current text (in this instance's state numbering).
+    dead_ends: DeadEnds,
 }
 
 const UNKNOWN: u32 = u32::MAX;
@@ -820,12 +937,19 @@ impl LazyDfa {
             trans: Vec::new(),
             accept: Vec::new(),
             scratch: Vec::new(),
+            dead_ends: DeadEnds::default(),
         };
         d.clear();
         d
     }
 
+    /// Call before scanning a new text.
+    pub(crate) fn new_text(&mut self) {
+        self.dead_ends.reset();
+    }
+
     fn clear(&mut self) {
+        self.dead_ends.reset();
         self.sets.clear();
         self.ids.clear();
         self.trans.clear();
@@ -892,7 +1016,14 @@ impl LazyDfa {
         let mut pos = start;
         let mut units = 0usize;
         let bytes = text.as_bytes();
+        // Dead ends are only valid without a limit (and in one lexical state).
+        let memo = limit == usize::MAX && lex == 0;
+        let check = memo && self.dead_ends.active;
+        let (mut acc_pos, mut acc_state) = (start, START);
         while pos < bytes.len() {
+            if check && self.dead_ends.states[pos] == state {
+                return best;
+            }
             let b = bytes[pos];
             let (c, len, ulen) = if b < 0x80 {
                 (b as char, 1, 1)
@@ -911,8 +1042,16 @@ impl LazyDfa {
             units += ulen;
             match self.accept[state as usize * nlex + lex] {
                 0 => {}
-                r => best = Some((r as usize - 1, pos, units)),
+                r => {
+                    best = Some((r as usize - 1, pos, units));
+                    (acc_pos, acc_state) = (pos, state);
+                }
             }
+        }
+        if memo && pos - acc_pos > DEAD_END_TAIL {
+            let mut dead_ends = std::mem::take(&mut self.dead_ends);
+            dead_ends.record(text, acc_pos, acc_state, pos, |s, c| self.step(s, c));
+            self.dead_ends = dead_ends;
         }
         best
     }

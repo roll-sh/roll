@@ -227,6 +227,7 @@ struct StoreCounters {
     gc_deleted: AtomicU64,
     gc_deleted_bytes: AtomicU64,
     fenced: AtomicU64,
+    owner_checks: AtomicU64,
 }
 
 /// Everything the store counts, for metrics and the dashboard.
@@ -247,6 +248,8 @@ pub struct StoreStats {
     pub gc_deleted_bytes: u64,
     /// Writes refused because a newer owner had written ([`Fenced`]).
     pub fenced: u64,
+    /// Ownership checks made ([`Store::check_owner`]).
+    pub owner_checks: u64,
     /// Segment files written but not yet uploaded.
     pub staging_files: u64,
     pub staging_bytes: u64,
@@ -426,6 +429,12 @@ impl Store {
         self.inner.staging.join(id.file_name())
     }
 
+    /// The staging directory (same filesystem as the cache; emptied when the store opens).
+    /// Writers may keep per-shard subdirectories of segments in it and upload from there.
+    pub fn staging_dir(&self) -> &Path {
+        &self.inner.staging
+    }
+
     /// Upload a finished segment file named `<segment id hex>.seg` and move it into the cache
     /// (the store owns the file afterwards). Large files go up as multipart uploads.
     pub async fn upload_segment(&self, seg: &Path) -> anyhow::Result<SegmentKey> {
@@ -522,6 +531,67 @@ impl Store {
             return Err(Fenced { cluster: cluster.to_string(), epoch, owner_epoch: top }.into());
         }
         Ok(epoch)
+    }
+
+    /// Claim `cluster` for this node's epoch ([`Store::set_epoch`] first): writes an ownership
+    /// marker (`search/c/<cluster>/owner/<epoch>`) that every later write and
+    /// [`Store::check_owner`] of an older owner finds, then drops older markers. Call it right
+    /// after taking the cluster's lease and before reading anything of the cluster: what an
+    /// older owner makes durable after the claim is refused to it, and what it made durable
+    /// before is visible to this node's reads. Fails with [`Fenced`] when a newer owner has
+    /// claimed the cluster already.
+    pub async fn claim_cluster(&self, cluster: &str) -> anyhow::Result<()> {
+        keys::validate_cluster(cluster)?;
+        let epoch = self.epoch(cluster);
+        anyhow::ensure!(epoch > 0, "claiming cluster [{cluster}] needs an epoch (set_epoch)");
+        self.inner.objects.put(&keys::owner_key(cluster, epoch), Bytes::new()).await?;
+        let markers = self.owner_markers(cluster).await?;
+        self.fence_check(cluster, markers.last().copied())?;
+        // Only the newest marker matters (it's the one every check compares with).
+        let old: Vec<String> = markers.into_iter().filter(|&e| e < epoch).map(|e| keys::owner_key(cluster, e)).collect();
+        for r in futures::future::join_all(old.iter().map(|k| self.inner.objects.delete(k))).await {
+            if let Err(e) = r {
+                tracing::debug!(error = %e, cluster, "deleting an old ownership marker failed");
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this node still owns `cluster`: fails with [`Fenced`] (and fences the cluster's
+    /// WAL appends) once a newer owner has claimed it ([`Store::claim_cluster`]). One listing of
+    /// the cluster's ownership markers; a no-op without an epoch.
+    pub async fn check_owner(&self, cluster: &str) -> anyhow::Result<()> {
+        if self.epoch(cluster) == 0 {
+            return Ok(());
+        }
+        let top = self.owner_markers(cluster).await?.last().copied();
+        self.inner.counters.owner_checks.fetch_add(1, Relaxed);
+        self.fence_check(cluster, top)?;
+        Ok(())
+    }
+
+    /// Epochs of the cluster's ownership markers, ascending.
+    async fn owner_markers(&self, cluster: &str) -> anyhow::Result<Vec<u64>> {
+        let prefix = keys::owner_prefix(cluster);
+        let mut v: Vec<u64> = self
+            .inner
+            .objects
+            .list(&prefix)
+            .await?
+            .into_iter()
+            .filter_map(|(k, _)| k.strip_prefix(&prefix)?.parse().ok())
+            .collect();
+        v.sort_unstable();
+        Ok(v)
+    }
+
+    /// The newest ownership marker's epoch, when this node writes under an epoch (writes then
+    /// also refuse when a newer owner has only claimed the cluster, without writing yet).
+    async fn claimed_epoch(&self, cluster: &str) -> anyhow::Result<Option<u64>> {
+        if self.epoch(cluster) == 0 {
+            return Ok(None);
+        }
+        Ok(self.owner_markers(cluster).await?.last().copied())
     }
 
     // ---- manifests ----
@@ -717,8 +787,9 @@ impl Store {
         if t.deleted {
             bail!("shard {shard} of cluster [{cluster}] was deleted");
         }
-        let mut versions = self.list_shard_versions(cluster, shard).await?;
-        m.epoch = self.fence_check(cluster, versions.last().map(|v| v.version.epoch))?;
+        let (versions, claimed) = futures::future::join(self.list_shard_versions(cluster, shard), self.claimed_epoch(cluster)).await;
+        let mut versions = versions?;
+        m.epoch = self.fence_check(cluster, versions.last().map(|v| v.version.epoch).max(claimed?))?;
         if versions.last().is_some_and(|v| v.deleted) {
             t.deleted = true;
             bail!("shard {shard} of cluster [{cluster}] was deleted");
@@ -975,9 +1046,10 @@ impl Store {
         let track = self.state_track(cluster);
         let mut written = track.lock().await;
         let prefix = keys::state_prefix(cluster);
-        let mut versions = self.list_versions(&prefix, ".json.zst").await?;
+        let (versions, claimed) = futures::future::join(self.list_versions(&prefix, ".json.zst"), self.claimed_epoch(cluster)).await;
+        let mut versions = versions?;
         let mut s = state.clone();
-        s.epoch = self.fence_check(cluster, versions.last().map(|v| v.epoch))?;
+        s.epoch = self.fence_check(cluster, versions.last().map(|v| v.epoch).max(claimed?))?;
         s.generation = next_generation(versions.iter().map(|v| v.generation))?;
         s.written_ms = now_ms();
         let data = s.encode(3)?;
@@ -1092,6 +1164,7 @@ impl Store {
             gc_deleted: c.gc_deleted.load(Relaxed),
             gc_deleted_bytes: c.gc_deleted_bytes.load(Relaxed),
             fenced: c.fenced.load(Relaxed),
+            owner_checks: c.owner_checks.load(Relaxed),
             staging_files,
             staging_bytes,
             tracked_shards: self.inner.shards.lock().len() as u64,

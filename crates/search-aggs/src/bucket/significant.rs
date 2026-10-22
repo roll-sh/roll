@@ -375,7 +375,13 @@ fn parse_object_with_heuristics(
             continue;
         }
         let value_loc = p.token_location();
-        return Err(AggError::x_content(name_loc, format!("[{parser_name}] unknown field [{name}]")).caused_by(AggError::new(
+        let mut candidates: Vec<&str> = Vec::new();
+        for f in fields {
+            candidates.push(f.name);
+            candidates.extend(f.deprecated.iter().copied());
+        }
+        let hint = crate::error::suggest(&name, &candidates);
+        return Err(AggError::x_content(name_loc, format!("[{parser_name}] unknown field [{name}]{hint}")).caused_by(AggError::new(
             400,
             "named_object_not_found_exception",
             format!("[{}:{}] unknown field [{name}]", value_loc.0, value_loc.1),
@@ -744,6 +750,15 @@ pub fn create(def: &AggDef, spec: &SignificantSpec, ctx: &mut BindCtx<'_>) -> Re
     if vs.unmapped && vs.missing.is_none() {
         return Ok(Box::new(UnmappedSig { proto: base(SigKind::Unmapped) }));
     }
+    if vs.unmapped && vs.field.is_none() && vs.script.is_none() {
+        // An unmapped field with `missing`: the background lookup reads the (absent) field
+        // context's type, an NPE in Elasticsearch 9.5 that fails the shard.
+        return Err(AggError::new(
+            500,
+            "null_pointer_exception",
+            "Cannot invoke \"org.elasticsearch.search.aggregations.support.FieldContext.fieldType()\" because the return value of \"org.elasticsearch.search.aggregations.support.ValuesSourceConfig.fieldContext()\" is null",
+        ));
+    }
     let many = !ctx.cardinality.is_one();
     let (kind, sfilter, lfilter, dense) = match vs.vs_type {
         VsType::Keyword | VsType::Ip => {
@@ -804,6 +819,10 @@ pub fn create(def: &AggDef, spec: &SignificantSpec, ctx: &mut BindCtx<'_>) -> Re
     let bg_filter = if spec.background_filter.is_some() || ctx.sampling.is_some() { Some(superset_query.clone()) } else { None };
     let scorer = Scorer::new(&spec.heuristic, ctx.lookup.scripts().as_ref())?;
     let field = vs.field.as_ref().map(|f| f.number);
+    let nested_docs = match vs.field.as_ref().and_then(|f| f.nested_path.as_deref()).map(|p| ctx.lookup.nested(p)) {
+        Some(crate::field::NestedLookup::Nested(n)) => Some(n.child_filter),
+        _ => None,
+    };
     Ok(Box::new(SigAgg {
         proto: SignificantTerms { superset_size, ..base(kind) },
         text: None,
@@ -816,6 +835,7 @@ pub fn create(def: &AggDef, spec: &SignificantSpec, ctx: &mut BindCtx<'_>) -> Re
         scorer: Some(scorer),
         field,
         bg_filter,
+        nested_docs,
         sampling: ctx.sampling,
         searcher: ctx.searcher.clone(),
         bytes: None,
@@ -855,6 +875,9 @@ struct SigAgg {
     scorer: Option<Scorer>,
     field: Option<u32>,
     bg_filter: Option<QueryRef>,
+    /// The docs of the field's nested object path: background frequencies of a nested field
+    /// count the root docs with a matching nested doc (`NestedQueryBuilder` over the term).
+    nested_docs: Option<QueryRef>,
     /// The enclosing sampler's sampling (background counts sample too).
     sampling: Option<crate::bucket::random_sampler::Sampling>,
     searcher: Searcher,
@@ -899,6 +922,14 @@ impl SigAgg {
             TermKey::Bytes(b) => Arc::new(DocValuesTermsQuery::new(field, [b.clone()])),
             TermKey::Long(l) => Arc::new(DocValuesRangeQuery { field, range: DvRange::Long { lower: *l, upper: *l } }),
             _ => return Ok(0),
+        };
+        let term: QueryRef = match &self.nested_docs {
+            Some(docs) => Arc::new(search_index::query::nested::ToParentQuery {
+                child: Arc::new(BooleanQuery::new().add(Occur::Filter, term).add(Occur::Filter, docs.clone())),
+                parent_filter: search_index::query::nested::root_filter(),
+                score_mode: search_index::query::nested::JoinScoreMode::None,
+            }),
+            None => term,
         };
         let q: QueryRef = match &self.bg_filter {
             Some(f) => Arc::new(BooleanQuery::new().add(Occur::Filter, term).add(Occur::Filter, f.clone())),
@@ -1088,10 +1119,8 @@ impl Aggregator for SigAgg {
         self.subs.needs_scores() || self.vs.as_ref().and_then(|v| v.script.as_ref()).is_some_and(|s| s.needs_score())
     }
 
-    fn validate_sort(&self, _name: &str, _key: Option<&str>, _rest: &[PathElement]) -> Result<()> {
-        Err(AggError::illegal_argument(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.",
-        ))
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
     }
 }
 
@@ -1174,6 +1203,7 @@ pub fn create_text(def: &AggDef, spec: &SigTextSpec, ctx: &mut BindCtx<'_>) -> R
         scorer: Some(scorer),
         field: None,
         bg_filter,
+        nested_docs: None,
         sampling: ctx.sampling,
         searcher: ctx.searcher.clone(),
         bytes: None,

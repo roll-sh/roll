@@ -1,5 +1,5 @@
-//! Ignored benchmarks over millions of documents: `terms`, `date_histogram` and `cardinality`
-//! collection and reduce, timed per run.
+//! Ignored benchmarks over millions of documents: `terms`, `date_histogram`, `cardinality`,
+//! `frequent_item_sets` and more, collection and reduce, timed per run.
 //!
 //! `cargo test -p search-aggs --release --test bench -- --ignored --nocapture`
 //! (`BENCH_DOCS` sets the document count, 2 000 000 by default; `BENCH_SHARDS` the shard count).
@@ -68,6 +68,8 @@ fn bench_terms_date_histogram_cardinality() {
     time(&index, &shards, "terms (keyword, size 1000)", r#"{"t":{"terms":{"field":"k","size":1000}}}"#);
     time(&index, &shards, "terms (long)", r#"{"t":{"terms":{"field":"n"}}}"#);
     time(&index, &shards, "terms + avg", r#"{"t":{"terms":{"field":"k"},"aggs":{"a":{"avg":{"field":"n"}}}}}"#);
+    time(&index, &shards, "terms (long) + avg, breadth_first (default)", r#"{"t":{"terms":{"field":"n"},"aggs":{"a":{"avg":{"field":"t"}}}}}"#);
+    time(&index, &shards, "terms (long) + avg, depth_first", r#"{"t":{"terms":{"field":"n","collect_mode":"depth_first"},"aggs":{"a":{"avg":{"field":"t"}}}}}"#);
     time(&index, &shards, "date_histogram (day)", r#"{"h":{"date_histogram":{"field":"t","calendar_interval":"day"}}}"#);
     time(&index, &shards, "date_histogram (hour) + max", r#"{"h":{"date_histogram":{"field":"t","fixed_interval":"1h"},"aggs":{"m":{"max":{"field":"n"}}}}}"#);
     time(&index, &shards, "global: collection pipeline only", r#"{"g":{"global":{}}}"#);
@@ -81,4 +83,5 @@ fn bench_terms_date_histogram_cardinality() {
     time(&index, &shards, "cardinality (keyword)", r#"{"c":{"cardinality":{"field":"k"}}}"#);
     time(&index, &shards, "cardinality (long)", r#"{"c":{"cardinality":{"field":"n"}}}"#);
     time(&index, &shards, "cardinality (long, 100)", r#"{"c":{"cardinality":{"field":"n","precision_threshold":100}}}"#);
+    time(&index, &shards, "frequent_item_sets (keyword)", r#"{"f":{"frequent_item_sets":{"fields":[{"field":"k"}],"minimum_support":0.0005}}}"#);
 }

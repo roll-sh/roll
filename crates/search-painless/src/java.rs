@@ -369,30 +369,93 @@ pub fn compare_strings(a: &str, b: &str) -> i32 {
 }
 
 /// `Character.toUpperCase(char)` / `toLowerCase` on one code unit.
+/// `Character.toUpperCase(char)`: the simple (one-to-one) mapping.
 pub fn char_upper(c: u16) -> u16 {
-    match char::from_u32(c as u32) {
-        Some(ch) => {
-            let mut up = ch.to_uppercase();
-            match (up.next(), up.next()) {
-                (Some(u), None) if (u as u32) <= 0xFFFF => u as u16,
-                _ => c,
-            }
-        }
-        None => c,
+    cp_upper(c as u32) as u16
+}
+
+/// `Character.toLowerCase(char)`: the simple mapping.
+pub fn char_lower(c: u16) -> u16 {
+    cp_lower(c as u32) as u16
+}
+
+/// `Character.toUpperCase(int)`: Unicode's simple uppercase mapping. Rust's `to_uppercase` is
+/// the full one; where that expands to several characters the simple mapping is the character
+/// itself, except for the Greek letters with ypogegrammeni, whose simple uppercase is the
+/// titlecase form with prosgegrammeni.
+pub fn cp_upper(c: u32) -> u32 {
+    let Some(ch) = char::from_u32(c) else { return c };
+    let mut up = ch.to_uppercase();
+    match (up.next(), up.next()) {
+        (Some(u), None) => u as u32,
+        _ => match c {
+            0x1F80..=0x1F87 | 0x1F90..=0x1F97 | 0x1FA0..=0x1FA7 => c + 8,
+            0x1FB3 | 0x1FC3 | 0x1FF3 => c + 9,
+            _ => c,
+        },
     }
 }
 
-pub fn char_lower(c: u16) -> u16 {
-    match char::from_u32(c as u32) {
-        Some(ch) => {
-            let mut lo = ch.to_lowercase();
-            match (lo.next(), lo.next()) {
-                (Some(u), None) if (u as u32) <= 0xFFFF => u as u16,
-                _ => c,
+/// `Character.toLowerCase(int)`: the simple lowercase mapping (`İ` lowercases to `i`; its full
+/// mapping adds a combining dot).
+pub fn cp_lower(c: u32) -> u32 {
+    if c == 0x130 {
+        return 0x69;
+    }
+    let Some(ch) = char::from_u32(c) else { return c };
+    let mut lo = ch.to_lowercase();
+    match (lo.next(), lo.next()) {
+        (Some(u), None) => u as u32,
+        _ => c,
+    }
+}
+
+/// `String.compareToIgnoreCase` / `regionMatches(true, …)` (JDK 27 `compareToCIImpl`): units
+/// compare by uppercase, then by the lowercase of that, and a surrogate pair that differs is
+/// compared as its code point.
+pub fn compare_ci(x: &[u16], y: &[u16]) -> i32 {
+    fn ci(a: u32, b: u32) -> i32 {
+        let (ua, ub) = (cp_upper(a), cp_upper(b));
+        if ua == ub {
+            return 0;
+        }
+        cp_lower(ua) as i32 - cp_lower(ub) as i32
+    }
+    // the code point containing unit `i` (negated when the unit starts a pair)
+    fn including(s: &[u16], i: usize) -> i64 {
+        let c = s[i] as u32;
+        if (0xDC00..0xE000).contains(&c) {
+            if i > 0 && (0xD800..0xDC00).contains(&(s[i - 1] as u32)) {
+                return (0x10000 + ((s[i - 1] as u32 - 0xD800) << 10) + (c - 0xDC00)) as i64;
+            }
+        } else if (0xD800..0xDC00).contains(&c) && i + 1 < s.len() && (0xDC00..0xE000).contains(&(s[i + 1] as u32)) {
+            return -((0x10000 + ((c - 0xD800) << 10) + (s[i + 1] as u32 - 0xDC00)) as i64);
+        }
+        c as i64
+    }
+    let (mut i, mut j) = (0, 0);
+    while i < x.len() && j < y.len() {
+        let (c1, c2) = (x[i] as u32, y[j] as u32);
+        if c1 != c2 && ci(c1, c2) != 0 {
+            let mut p1 = including(x, i);
+            if p1 < 0 {
+                i += 1;
+                p1 = -p1;
+            }
+            let mut p2 = including(y, j);
+            if p2 < 0 {
+                j += 1;
+                p2 = -p2;
+            }
+            let d = ci(p1 as u32, p2 as u32);
+            if d != 0 {
+                return d;
             }
         }
-        None => c,
+        i += 1;
+        j += 1;
     }
+    x.len() as i32 - y.len() as i32
 }
 
 /// `Integer.toString(i, radix)`.

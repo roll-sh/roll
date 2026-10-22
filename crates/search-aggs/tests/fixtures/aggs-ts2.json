@@ -8315,6 +8315,867 @@
    }
   },
   {
+   "name": "time_series_err_composite_parent",
+   "body": "{\"aggs\":{\"c\":{\"composite\":{\"sources\":[{\"h\":{\"terms\":{\"field\":\"host\"}}}]},\"aggs\":{\"ts\":{\"time_series\":{}}}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[composite] aggregation is incompatible with time series execution mode"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-ts2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[composite] aggregation is incompatible with time series execution mode"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[composite] aggregation is incompatible with time series execution mode",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[composite] aggregation is incompatible with time series execution mode"
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_err_composite_sibling",
+   "body": "{\"aggs\":{\"ts\":{\"time_series\":{}},\"c\":{\"composite\":{\"sources\":[{\"h\":{\"terms\":{\"field\":\"host\"}}}]}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[composite] aggregation is incompatible with time series execution mode"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-ts2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[composite] aggregation is incompatible with time series execution mode"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[composite] aggregation is incompatible with time series execution mode",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[composite] aggregation is incompatible with time series execution mode"
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_err_global",
+   "body": "{\"aggs\":{\"g\":{\"global\":{},\"aggs\":{\"ts\":{\"time_series\":{}}}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Time series aggregations cannot be used inside global aggregation."
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-ts2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "Time series aggregations cannot be used inside global aggregation."
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Time series aggregations cannot be used inside global aggregation.",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Time series aggregations cannot be used inside global aggregation."
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_err_rare_terms",
+   "body": "{\"aggs\":{\"r\":{\"rare_terms\":{\"field\":\"host\"},\"aggs\":{\"ts\":{\"time_series\":{}}}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[r] aggregation is incompatible with time series execution mode"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-ts2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[r] aggregation is incompatible with time series execution mode"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[r] aggregation is incompatible with time series execution mode",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[r] aggregation is incompatible with time series execution mode"
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_rare_terms_sibling",
+   "body": "{\"aggs\":{\"ts\":{\"time_series\":{}},\"r\":{\"rare_terms\":{\"field\":\"host\"}}}}",
+   "typed_keys": false,
+   "response": {
+    "r": {
+     "buckets": []
+    },
+    "ts": {
+     "buckets": {
+      "{host=h1, pod=p0}": {
+       "key": {
+        "host": "h1",
+        "pod": "p0"
+       },
+       "doc_count": 46
+      },
+      "{host=h2, pod=p1}": {
+       "key": {
+        "host": "h2",
+        "pod": "p1"
+       },
+       "doc_count": 34
+      },
+      "{host=h3, pod=p1}": {
+       "key": {
+        "host": "h3",
+        "pod": "p1"
+       },
+       "doc_count": 20
+      },
+      "{host=h3, pod=p3}": {
+       "key": {
+        "host": "h3",
+        "pod": "p3"
+       },
+       "doc_count": 20
+      },
+      "{host=h4, pod=p2}": {
+       "key": {
+        "host": "h4",
+        "pod": "p2"
+       },
+       "doc_count": 14
+      },
+      "{host=h5, pod=p0}": {
+       "key": {
+        "host": "h5",
+        "pod": "p0"
+       },
+       "doc_count": 10
+      },
+      "{host=h5, pod=p2}": {
+       "key": {
+        "host": "h5",
+        "pod": "p2"
+       },
+       "doc_count": 12
+      },
+      "{host=h7, pod=p0}": {
+       "key": {
+        "host": "h7",
+        "pod": "p0"
+       },
+       "doc_count": 83
+      },
+      "{host=h0, pod=p0, zone=-2}": {
+       "key": {
+        "host": "h0",
+        "pod": "p0",
+        "zone": -2
+       },
+       "doc_count": 48
+      },
+      "{host=h0, pod=p1, zone=1}": {
+       "key": {
+        "host": "h0",
+        "pod": "p1",
+        "zone": 1
+       },
+       "doc_count": 48
+      },
+      "{host=h1, pod=p2, zone=1}": {
+       "key": {
+        "host": "h1",
+        "pod": "p2",
+        "zone": 1
+       },
+       "doc_count": 44
+      },
+      "{host=h2, pod=p0, zone=2}": {
+       "key": {
+        "host": "h2",
+        "pod": "p0",
+        "zone": 2
+       },
+       "doc_count": 23
+      },
+      "{host=h2, pod=p3, zone=2}": {
+       "key": {
+        "host": "h2",
+        "pod": "p3",
+        "zone": 2
+       },
+       "doc_count": 20
+      },
+      "{host=h3, pod=p2, zone=2}": {
+       "key": {
+        "host": "h3",
+        "pod": "p2",
+        "zone": 2
+       },
+       "doc_count": 25
+      },
+      "{host=h3, pod=p4, zone=3}": {
+       "key": {
+        "host": "h3",
+        "pod": "p4",
+        "zone": 3
+       },
+       "doc_count": 12
+      },
+      "{host=h4, pod=p0, zone=3}": {
+       "key": {
+        "host": "h4",
+        "pod": "p0",
+        "zone": 3
+       },
+       "doc_count": 15
+      },
+      "{host=h4, pod=p1, zone=-2}": {
+       "key": {
+        "host": "h4",
+        "pod": "p1",
+        "zone": -2
+       },
+       "doc_count": 12
+      },
+      "{host=h5, pod=p1, zone=2}": {
+       "key": {
+        "host": "h5",
+        "pod": "p1",
+        "zone": 2
+       },
+       "doc_count": 13
+      },
+      "{host=h6, pod=p0, zone=0}": {
+       "key": {
+        "host": "h6",
+        "pod": "p0",
+        "zone": 0
+       },
+       "doc_count": 10
+      },
+      "{host=h6, pod=p1, zone=1}": {
+       "key": {
+        "host": "h6",
+        "pod": "p1",
+        "zone": 1
+       },
+       "doc_count": 10
+      },
+      "{host=h6, pod=p2, zone=1}": {
+       "key": {
+        "host": "h6",
+        "pod": "p2",
+        "zone": 1
+       },
+       "doc_count": 5
+      },
+      "{host=h1, pod=p1, up=0, zone=-3}": {
+       "key": {
+        "host": "h1",
+        "pod": "p1",
+        "up": 0,
+        "zone": -3
+       },
+       "doc_count": 43
+      },
+      "{host=h1, pod=p3, up=1, zone=2}": {
+       "key": {
+        "host": "h1",
+        "pod": "p3",
+        "up": 1,
+        "zone": 2
+       },
+       "doc_count": 35
+      },
+      "{host=h2, pod=p2, up=0, zone=-2}": {
+       "key": {
+        "host": "h2",
+        "pod": "p2",
+        "up": 0,
+        "zone": -2
+       },
+       "doc_count": 37
+      },
+      "{host=h2, pod=p4, up=1, zone=3}": {
+       "key": {
+        "host": "h2",
+        "pod": "p4",
+        "up": 1,
+        "zone": 3
+       },
+       "doc_count": 16
+      },
+      "{host=h3, pod=p0, up=1, zone=3}": {
+       "key": {
+        "host": "h3",
+        "pod": "p0",
+        "up": 1,
+        "zone": 3
+       },
+       "doc_count": 23
+      },
+      "{host=h4, pod=p3, up=1, zone=-2}": {
+       "key": {
+        "host": "h4",
+        "pod": "p3",
+        "up": 1,
+        "zone": -2
+       },
+       "doc_count": 13
+      },
+      "{host=h6, pod=p3, up=0, zone=-1}": {
+       "key": {
+        "host": "h6",
+        "pod": "p3",
+        "up": 0,
+        "zone": -1
+       },
+       "doc_count": 9
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_err_rare_terms_subs_sibling",
+   "body": "{\"aggs\":{\"ts\":{\"time_series\":{}},\"r\":{\"rare_terms\":{\"field\":\"host\"},\"aggs\":{\"m\":{\"max\":{\"field\":\"cpu\"}}}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[r] aggregation is incompatible with time series execution mode"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-ts2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[r] aggregation is incompatible with time series execution mode"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[r] aggregation is incompatible with time series execution mode",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[r] aggregation is incompatible with time series execution mode"
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_err_sampler",
+   "body": "{\"aggs\":{\"s\":{\"sampler\":{},\"aggs\":{\"ts\":{\"time_series\":{}}}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[s] aggregation is incompatible with time series execution mode"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-ts2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[s] aggregation is incompatible with time series execution mode"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[s] aggregation is incompatible with time series execution mode",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[s] aggregation is incompatible with time series execution mode"
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_err_diversified",
+   "body": "{\"aggs\":{\"s\":{\"diversified_sampler\":{\"field\":\"host\"},\"aggs\":{\"ts\":{\"time_series\":{}}}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[s] aggregation is incompatible with time series execution mode"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-ts2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[s] aggregation is incompatible with time series execution mode"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[s] aggregation is incompatible with time series execution mode",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[s] aggregation is incompatible with time series execution mode"
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_err_variable_width",
+   "body": "{\"aggs\":{\"v\":{\"variable_width_histogram\":{\"field\":\"cpu\"},\"aggs\":{\"ts\":{\"time_series\":{}}}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[v] aggregation is incompatible with time series execution mode"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-ts2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[v] aggregation is incompatible with time series execution mode"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[v] aggregation is incompatible with time series execution mode",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[v] aggregation is incompatible with time series execution mode"
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_err_auto_date",
+   "body": "{\"aggs\":{\"a\":{\"auto_date_histogram\":{\"field\":\"@timestamp\"},\"aggs\":{\"ts\":{\"time_series\":{}}}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[a] aggregation is incompatible with time series execution mode"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-ts2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[a] aggregation is incompatible with time series execution mode"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[a] aggregation is incompatible with time series execution mode",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[a] aggregation is incompatible with time series execution mode"
+     }
+    }
+   }
+  },
+  {
+   "name": "time_series_breadth_first_terms",
+   "body": "{\"aggs\":{\"t\":{\"terms\":{\"field\":\"host\",\"collect_mode\":\"breadth_first\"},\"aggs\":{\"ts\":{\"time_series\":{}}}}}}",
+   "typed_keys": false,
+   "response": {
+    "t": {
+     "doc_count_error_upper_bound": 0,
+     "sum_other_doc_count": 0,
+     "buckets": [
+      {
+       "key": "h1",
+       "doc_count": 168,
+       "ts": {
+        "buckets": {
+         "{host=h1, pod=p0}": {
+          "key": {
+           "host": "h1",
+           "pod": "p0"
+          },
+          "doc_count": 46
+         },
+         "{host=h1, pod=p2, zone=1}": {
+          "key": {
+           "host": "h1",
+           "pod": "p2",
+           "zone": 1
+          },
+          "doc_count": 44
+         },
+         "{host=h1, pod=p1, up=0, zone=-3}": {
+          "key": {
+           "host": "h1",
+           "pod": "p1",
+           "up": 0,
+           "zone": -3
+          },
+          "doc_count": 43
+         },
+         "{host=h1, pod=p3, up=1, zone=2}": {
+          "key": {
+           "host": "h1",
+           "pod": "p3",
+           "up": 1,
+           "zone": 2
+          },
+          "doc_count": 35
+         }
+        }
+       }
+      },
+      {
+       "key": "h2",
+       "doc_count": 130,
+       "ts": {
+        "buckets": {
+         "{host=h2, pod=p1}": {
+          "key": {
+           "host": "h2",
+           "pod": "p1"
+          },
+          "doc_count": 34
+         },
+         "{host=h2, pod=p0, zone=2}": {
+          "key": {
+           "host": "h2",
+           "pod": "p0",
+           "zone": 2
+          },
+          "doc_count": 23
+         },
+         "{host=h2, pod=p3, zone=2}": {
+          "key": {
+           "host": "h2",
+           "pod": "p3",
+           "zone": 2
+          },
+          "doc_count": 20
+         },
+         "{host=h2, pod=p2, up=0, zone=-2}": {
+          "key": {
+           "host": "h2",
+           "pod": "p2",
+           "up": 0,
+           "zone": -2
+          },
+          "doc_count": 37
+         },
+         "{host=h2, pod=p4, up=1, zone=3}": {
+          "key": {
+           "host": "h2",
+           "pod": "p4",
+           "up": 1,
+           "zone": 3
+          },
+          "doc_count": 16
+         }
+        }
+       }
+      },
+      {
+       "key": "h3",
+       "doc_count": 100,
+       "ts": {
+        "buckets": {
+         "{host=h3, pod=p1}": {
+          "key": {
+           "host": "h3",
+           "pod": "p1"
+          },
+          "doc_count": 20
+         },
+         "{host=h3, pod=p3}": {
+          "key": {
+           "host": "h3",
+           "pod": "p3"
+          },
+          "doc_count": 20
+         },
+         "{host=h3, pod=p2, zone=2}": {
+          "key": {
+           "host": "h3",
+           "pod": "p2",
+           "zone": 2
+          },
+          "doc_count": 25
+         },
+         "{host=h3, pod=p4, zone=3}": {
+          "key": {
+           "host": "h3",
+           "pod": "p4",
+           "zone": 3
+          },
+          "doc_count": 12
+         },
+         "{host=h3, pod=p0, up=1, zone=3}": {
+          "key": {
+           "host": "h3",
+           "pod": "p0",
+           "up": 1,
+           "zone": 3
+          },
+          "doc_count": 23
+         }
+        }
+       }
+      },
+      {
+       "key": "h0",
+       "doc_count": 96,
+       "ts": {
+        "buckets": {
+         "{host=h0, pod=p0, zone=-2}": {
+          "key": {
+           "host": "h0",
+           "pod": "p0",
+           "zone": -2
+          },
+          "doc_count": 48
+         },
+         "{host=h0, pod=p1, zone=1}": {
+          "key": {
+           "host": "h0",
+           "pod": "p1",
+           "zone": 1
+          },
+          "doc_count": 48
+         }
+        }
+       }
+      },
+      {
+       "key": "h7",
+       "doc_count": 83,
+       "ts": {
+        "buckets": {
+         "{host=h7, pod=p0}": {
+          "key": {
+           "host": "h7",
+           "pod": "p0"
+          },
+          "doc_count": 83
+         }
+        }
+       }
+      },
+      {
+       "key": "h4",
+       "doc_count": 54,
+       "ts": {
+        "buckets": {
+         "{host=h4, pod=p2}": {
+          "key": {
+           "host": "h4",
+           "pod": "p2"
+          },
+          "doc_count": 14
+         },
+         "{host=h4, pod=p0, zone=3}": {
+          "key": {
+           "host": "h4",
+           "pod": "p0",
+           "zone": 3
+          },
+          "doc_count": 15
+         },
+         "{host=h4, pod=p1, zone=-2}": {
+          "key": {
+           "host": "h4",
+           "pod": "p1",
+           "zone": -2
+          },
+          "doc_count": 12
+         },
+         "{host=h4, pod=p3, up=1, zone=-2}": {
+          "key": {
+           "host": "h4",
+           "pod": "p3",
+           "up": 1,
+           "zone": -2
+          },
+          "doc_count": 13
+         }
+        }
+       }
+      },
+      {
+       "key": "h5",
+       "doc_count": 35,
+       "ts": {
+        "buckets": {
+         "{host=h5, pod=p0}": {
+          "key": {
+           "host": "h5",
+           "pod": "p0"
+          },
+          "doc_count": 10
+         },
+         "{host=h5, pod=p2}": {
+          "key": {
+           "host": "h5",
+           "pod": "p2"
+          },
+          "doc_count": 12
+         },
+         "{host=h5, pod=p1, zone=2}": {
+          "key": {
+           "host": "h5",
+           "pod": "p1",
+           "zone": 2
+          },
+          "doc_count": 13
+         }
+        }
+       }
+      },
+      {
+       "key": "h6",
+       "doc_count": 34,
+       "ts": {
+        "buckets": {
+         "{host=h6, pod=p0, zone=0}": {
+          "key": {
+           "host": "h6",
+           "pod": "p0",
+           "zone": 0
+          },
+          "doc_count": 10
+         },
+         "{host=h6, pod=p1, zone=1}": {
+          "key": {
+           "host": "h6",
+           "pod": "p1",
+           "zone": 1
+          },
+          "doc_count": 10
+         },
+         "{host=h6, pod=p2, zone=1}": {
+          "key": {
+           "host": "h6",
+           "pod": "p2",
+           "zone": 1
+          },
+          "doc_count": 5
+         },
+         "{host=h6, pod=p3, up=0, zone=-1}": {
+          "key": {
+           "host": "h6",
+           "pod": "p3",
+           "up": 0,
+           "zone": -1
+          },
+          "doc_count": 9
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
    "name": "time_series_size",
    "body": "{\"aggs\":{\"s1\":{\"time_series\":{\"size\":1}},\"s5\":{\"time_series\":{\"size\":5,\"keyed\":false}},\"s0\":{\"time_series\":{\"size\":0}}}}",
    "typed_keys": false,
@@ -14035,7 +14896,7 @@
      {
       "shard": 0,
       "index": "aggs-fx-ts2",
-      "node": "2_QqMdFrRZa-vmSktSuNww",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
       "reason": {
        "type": "illegal_argument_exception",
        "reason": "Aggregation on a time-series field is misconfigured, likely due to lack of wrapping a metric aggregation within a `time-series` aggregation"
@@ -14071,7 +14932,7 @@
      {
       "shard": 0,
       "index": "aggs-fx-ts2",
-      "node": "2_QqMdFrRZa-vmSktSuNww",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
       "reason": {
        "type": "illegal_argument_exception",
        "reason": "Aggregation on a time-series field is misconfigured, likely due to lack of wrapping a metric aggregation within a `time-series` aggregation"
@@ -14107,7 +14968,7 @@
      {
       "shard": 0,
       "index": "aggs-fx-ts2",
-      "node": "2_QqMdFrRZa-vmSktSuNww",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
       "reason": {
        "type": "illegal_argument_exception",
        "reason": "Wrapping a time-series rate aggregation within a DeferableBucketAggregator is not supported. Consider using an alternative outer aggregation type to avoid this, e.g. date_histogram instead of auto_date_histogram."
@@ -14143,7 +15004,7 @@
      {
       "shard": 0,
       "index": "aggs-fx-ts2",
-      "node": "2_QqMdFrRZa-vmSktSuNww",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
       "reason": {
        "type": "array_index_out_of_bounds_exception",
        "reason": "Index 8 out of bounds for length 1"
@@ -14179,7 +15040,7 @@
      {
       "shard": 0,
       "index": "aggs-fx-ts2",
-      "node": "2_QqMdFrRZa-vmSktSuNww",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
       "reason": {
        "type": "illegal_argument_exception",
        "reason": "Field [bytes] of type [long][counter] is not supported for aggregation [terms]"
@@ -14215,7 +15076,7 @@
      {
       "shard": 0,
       "index": "aggs-fx-ts2",
-      "node": "2_QqMdFrRZa-vmSktSuNww",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
       "reason": {
        "type": "illegal_argument_exception",
        "reason": "Field [bytes] of type [long][counter] is not supported for aggregation [date_histogram]"
@@ -14251,7 +15112,7 @@
      {
       "shard": 0,
       "index": "aggs-fx-ts2",
-      "node": "2_QqMdFrRZa-vmSktSuNww",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
       "reason": {
        "type": "illegal_argument_exception",
        "reason": "Field [bytes] of type [long][counter] is not supported for aggregation [missing]"
@@ -14287,7 +15148,7 @@
      {
       "shard": 0,
       "index": "aggs-fx-ts2",
-      "node": "2_QqMdFrRZa-vmSktSuNww",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
       "reason": {
        "type": "illegal_argument_exception",
        "reason": "Field [bytes] of type [long][counter] is not supported for aggregation [terms]"

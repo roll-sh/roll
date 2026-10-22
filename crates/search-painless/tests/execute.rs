@@ -69,7 +69,14 @@ pub fn run_one(engine: &Engine, case: &Json) -> Result<(), String> {
             inst.set_params(&params);
             if ctx == Context::PainlessTest {
                 match inst.execute(&mut NoHost) {
-                    Ok(v) => (200, json!({ "result": v.to_java_string() })),
+                    Ok(v) => match v.try_to_java_string() {
+                        Ok(s) => (200, json!({ "result": s })),
+                        // the response fails to serialize: a plain 500 error, no script_exception
+                        Err(e) => {
+                            let reason = if e.reason.is_empty() { Json::Null } else { json!(e.reason) };
+                            (500, json!({ "error": { "root_cause": [{ "type": e.kind, "reason": reason }], "type": e.kind, "reason": reason }, "status": 500 }))
+                        }
+                    },
                     Err(e) => (e.status as u64, e.to_response()),
                 }
             } else {
@@ -371,6 +378,27 @@ fn nio_buffers() {
     check("nio.json");
 }
 
+/// Stream pipelines as the JDK runs them (late-bound list sources and their concurrent
+/// modification checks, `toArray` generators, the JDK frames of failures inside the pipeline,
+/// reuse of consumed streams), `forEach`/`removeIf`/`compute*` concurrent modification, lambda
+/// bodies that must return on every path, regex inputs, the ISO formatters' lenient offsets
+/// and structure, `TemporalQuery`/`TemporalAdjuster` lambdas, `Debug.explain` (`lang9.json`).
+#[test]
+fn language_jdk_more() {
+    check("lang9.json");
+}
+
+/// Review regressions (`review1.json`, captured from Elasticsearch 9.5.5): `BigInteger` range
+/// overflow with the JDK's frames (`shiftLeft`, `pow`, `BigDecimal.setScale`/`movePoint*`/`pow`)
+/// and large-value radix conversion; `HexFormat.parseHex`, `parseUnsigned*` and `decode` messages
+/// and frames; `equalsIgnoreCase` with simple case mappings; `DecimalFormat.toPattern` failing
+/// like the JDK's `StringBuilder`; the JDK 27 zone ID set, `SystemV/*` zones, `SHORT_IDS` and zone
+/// names in parsing; `StrictMath` bit-exact with fdlibm.
+#[test]
+fn review_regressions() {
+    check("review1.json");
+}
+
 /// Runs a fixture file named by `PAINLESS_ADHOC` (a path; relative paths resolve in
 /// `tests/fixtures`) — for probing new captures before they get their own test.
 #[test]
@@ -399,4 +427,22 @@ fn vector_element_types() {
 #[test]
 fn doc_value_loops() {
     check("docloops.json");
+}
+
+/// Everyday scripts across the library (streams, collectors, maps, strings, regexes, numbers,
+/// statements, exceptions), identity of string constants, and the positions of brace errors
+/// after a map access (`lang8.json`).
+#[test]
+fn language_everyday_more() {
+    check("lang8.json");
+}
+
+/// Score and filter scripts over doc values (dates, geo points, decay functions), indexed
+/// doc-value reads `doc['f'].get(i)` / `doc['f'][i]` with their conversions and errors, the
+/// shapes the fast path reads in place (keyword compares and `contains`, date millis, vector
+/// functions), string identity of doc values, and runtime-field emits of every type
+/// (`docs3.json`).
+#[test]
+fn documents_indexed() {
+    check("docs3.json");
 }

@@ -253,6 +253,31 @@ impl NativeMovFn {
     }
 }
 
+/// Painless's `ScriptException` for an exception a `MovingFunctions` call threw while the
+/// script ran (only `holtWinters` throws): the Java frame, the statement and a caret under the
+/// call.
+pub fn script_runtime_error(source: &str, cause: AggError) -> AggError {
+    if !cause.reason.starts_with("Holt-Winters aggregation requires") {
+        return cause;
+    }
+    let offset = source.find("MovingFunctions.holtWinters").map_or(0, |i| i + "MovingFunctions".len());
+    let end = source.encode_utf16().count();
+    let caret = format!("{}^---- HERE", " ".repeat(offset));
+    let mut e = AggError::new(400, "script_exception", "runtime error");
+    e.meta.push((
+        "script_stack".into(),
+        Json::Arr(vec![
+            Json::Str("org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holtWinters(MovingFunctions.java:233)".into()),
+            Json::Str(source.to_string()),
+            Json::Str(caret),
+        ]),
+    ));
+    e.meta.push(("script".into(), Json::Str(source.to_string())));
+    e.meta.push(("lang".into(), Json::Str("painless".into())));
+    e.meta.push(("position".into(), Json::obj().with("offset", Json::Int(offset as i64)).with("start", Json::Int(0)).with("end", Json::Int(end as i64))));
+    e.caused_by(cause)
+}
+
 fn eval(e: &Expr, values: &[f64], params: &Json) -> Result<Val> {
     Ok(match e {
         Expr::Values => Val::Values,

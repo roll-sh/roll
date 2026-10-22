@@ -218,6 +218,8 @@ impl Sdv {
                     Obj::Es(EsObj::GeoPoint(a, b)) => es_value(EsObj::GeoPoint(*a, *b)),
                     _ => self.vals[i as usize].clone(),
                 },
+                // Strings.get decodes the bytes into a new String on every call
+                Value::Str(s) if matches!(self.kind, DocKind::String | DocKind::Ip) => Value::str(s.as_str()),
                 v => v.clone(),
             });
         }
@@ -409,9 +411,34 @@ pub fn doc_fast(vm: &mut Vm, field: u32, what: DocWhat) -> VR {
                 }
                 return Err(get_error(class, dv.kind, 0, 0, &[gv]));
             }
+            if matches!(dv.kind, DocKind::String | DocKind::Ip) {
+                return Ok(reuse_str(&mut vm.st.doc_strs[i], &vm.st.doc_bufs[i].strings()[0]));
+            }
             Ok(doc_value(dv, 0))
         }
     }
+}
+
+/// `s` as a `String` value, reusing the one cached in `slot` when it is no longer referenced
+/// anywhere else: a fresh string with the same contents could not be told apart from it (it
+/// was handed out once and every holder dropped it), and keyword fields repeat values from
+/// document to document, so most reads allocate nothing and hash once.
+fn reuse_str(slot: &mut Option<Rc<crate::value::JStr>>, s: &str) -> Value {
+    if let Some(rc) = slot
+        && Rc::strong_count(rc) == 1
+        && Rc::weak_count(rc) == 0
+    {
+        if rc.as_str() != s
+            && let Some(j) = Rc::get_mut(rc)
+        {
+            *j = crate::value::JStr::new(s);
+        }
+        return Value::Str(rc.clone());
+    }
+    let rc = Rc::new(crate::value::JStr::new(s));
+    // a slot still held elsewhere stays: the new string takes its place for the next read
+    *slot = Some(rc.clone());
+    Value::Str(rc)
 }
 
 /// Element `i` of a literal `doc['field']` whose doc values [`doc_fast`] fetched, as iterating

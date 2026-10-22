@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::format::{compile_pattern_into, formatter_of, formatter_value, FField, Formatter, Item, Sign, OFFSET_PATTERNS};
+use super::format::{compile_pattern_into, formatter_of, formatter_value, FField, Formatter, Item, Sign, ZoneQuery, OFFSET_PATTERNS};
 use super::*;
 use crate::lookup::Builder;
 use crate::value::{Obj, Value};
@@ -349,7 +349,21 @@ fn b_append_offset_id(_: &mut Vm, a: &mut [Value]) -> VR {
 
 fn b_append_zone_id(_: &mut Vm, a: &mut [Value]) -> VR {
     with(a, |b| {
-        b.push(Item::ZoneId);
+        b.push(Item::ZoneId(ZoneQuery::Id));
+        Ok(())
+    })
+}
+
+fn b_append_zone_region_id(_: &mut Vm, a: &mut [Value]) -> VR {
+    with(a, |b| {
+        b.push(Item::ZoneId(ZoneQuery::Region));
+        Ok(())
+    })
+}
+
+fn b_append_zone_or_offset_id(_: &mut Vm, a: &mut [Value]) -> VR {
+    with(a, |b| {
+        b.push(Item::ZoneId(ZoneQuery::OrOffset));
         Ok(())
     })
 }
@@ -519,8 +533,8 @@ pub fn register(b: &mut Builder) {
     b.m(c, &format!("{n} appendValue(TemporalField,int,int,SignStyle)"), b_append_value4);
     b.m(c, &format!("{n} appendValueReduced(TemporalField,int,int,int)"), b_append_value_reduced);
     b.m(c, &format!("{n} appendZoneId()"), b_append_zone_id);
-    b.m(c, &format!("{n} appendZoneOrOffsetId()"), b_append_zone_id);
-    b.m(c, &format!("{n} appendZoneRegionId()"), b_append_zone_id);
+    b.m(c, &format!("{n} appendZoneOrOffsetId()"), b_append_zone_or_offset_id);
+    b.m(c, &format!("{n} appendZoneRegionId()"), b_append_zone_region_id);
     b.m(c, &format!("{n} appendZoneText(TextStyle)"), b_append_zone_text);
     b.m(c, &format!("{n} appendZoneText(TextStyle,Set)"), b_append_zone_text);
     b.s(c, "String getLocalizedDateTimePattern(FormatStyle,FormatStyle,Chronology,Locale)", b_localized_pattern);

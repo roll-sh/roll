@@ -12,6 +12,14 @@
 //! The AST compiles to a code point NFA (Thompson construction); intersections and complements
 //! determinize their operands per code point and embed the product or complement. The result is
 //! determinized under the caller's work limit, per code point and then per byte.
+//!
+//! Counted repetitions unroll (`a{1000}` is a thousand copies of `a`), so a few bytes of pattern
+//! can describe billions of states (`a{0,2147483647}`, `((a{1000}){1000}){1000}`). The work limit
+//! only applies when determinizing, too late to bound memory, and a deterministic chain costs no
+//! effort at all (Lucene). So construction itself is budgeted: an NFA (or an intersection
+//! product) past [`MAX_STATES`] fails at once with [`TooComplex`], before allocating more.
+//! Elasticsearch has no equivalent limit; it accepts `a{100000}` and trips a memory circuit
+//! breaker on `a{1000000}`, and the budget sits between the two.
 
 use super::cp::CpDfa;
 use super::dfa::{Dfa, TooComplex};
@@ -32,6 +40,12 @@ pub const INTERVAL: u32 = 0x0020;
 /// All optional syntax (Elasticsearch's default `flags: ALL`).
 pub const ALL: u32 = 0xff;
 pub const NONE: u32 = 0;
+
+/// Most code point NFA states (about two per pattern character after unrolling repetitions) a
+/// regexp may build, and most states of an intersection product; past it [`compile`] fails with
+/// [`RegexpError::TooComplex`]. `a{100000}` (Elasticsearch accepts it) needs about 200k; at the
+/// budget, building and determinizing a deterministic chain takes ~1 s and ~100 MB.
+pub const MAX_STATES: usize = 400_000;
 
 /// Why a regexp could not be compiled.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -518,12 +532,34 @@ pub fn compile(
     let node = parse(pattern, flags, case_insensitive)?;
     let mut nfa = Nfa::new();
     let (s, e) = build(&node, &mut nfa, case_insensitive, work_limit)?;
+    check_size(&nfa, work_limit)?;
     nfa.set_start(s);
     nfa.set_accept(e, true);
     Ok(Dfa::from_nfa(&nfa, work_limit)?)
 }
 
+/// Fails once `nfa` has grown past [`MAX_STATES`]. Every [`build`] call checks first, so
+/// unrolling stops within one fragment of the budget.
+fn check_size(nfa: &Nfa, limit: u32) -> Result<(), RegexpError> {
+    if nfa.len() > MAX_STATES {
+        return Err(too_large(nfa.len(), nfa.transition_count(), limit));
+    }
+    Ok(())
+}
+
+fn too_large(states: usize, transitions: usize, limit: u32) -> RegexpError {
+    RegexpError::TooComplex(TooComplex { states, transitions, limit })
+}
+
 fn build(n: &Node, nfa: &mut Nfa, ci: bool, limit: u32) -> Result<(u32, u32), RegexpError> {
+    check_size(nfa, limit)?;
+    if let Node::Concat(a, b) = n {
+        // No wrapper states: chains of concatenations (unrolled repeats) stay lean.
+        let (a1, a2) = build(a, nfa, ci, limit)?;
+        let (b1, b2) = build(b, nfa, ci, limit)?;
+        nfa.add_epsilon(a2, b1);
+        return Ok((a1, b2));
+    }
     let s = nfa.add_state();
     let e = nfa.add_state();
     match n {
@@ -562,13 +598,7 @@ fn build(n: &Node, nfa: &mut Nfa, ci: bool, limit: u32) -> Result<(u32, u32), Re
             }
             nfa.add_epsilon(cur, e);
         }
-        Node::Concat(a, b) => {
-            let (a1, a2) = build(a, nfa, ci, limit)?;
-            let (b1, b2) = build(b, nfa, ci, limit)?;
-            nfa.add_epsilon(s, a1);
-            nfa.add_epsilon(a2, b1);
-            nfa.add_epsilon(b2, e);
-        }
+        Node::Concat(..) => unreachable!("handled above"),
         Node::Union(a, b) => {
             for x in [a, b] {
                 let (x1, x2) = build(x, nfa, ci, limit)?;
@@ -615,7 +645,16 @@ fn build(n: &Node, nfa: &mut Nfa, ci: bool, limit: u32) -> Result<(u32, u32), Re
             }
         }
         Node::Intersection(a, b) => {
-            let p = sub_dfa(a, ci, limit)?.intersection(&sub_dfa(b, ci, limit)?);
+            let (x, y) = (sub_dfa(a, ci, limit)?, sub_dfa(b, ci, limit)?);
+            let budget = MAX_STATES.saturating_sub(nfa.len());
+            let Some(p) = x.intersection(&y, budget) else {
+                let transitions = |d: &CpDfa| d.trans.iter().map(Vec::len).sum::<usize>();
+                return Err(too_large(
+                    x.accept.len() * y.accept.len(),
+                    transitions(&x) + transitions(&y),
+                    limit,
+                ));
+            };
             if let Some(start) = p.embed(nfa, e) {
                 nfa.add_epsilon(s, start);
             }
@@ -695,10 +734,21 @@ fn interval(nfa: &mut Nfa, s: u32, e: u32, min: u64, max: u64, digits: usize) {
     }
 }
 
-/// Equal-length digit strings between `lo` and `hi` inclusive.
+/// Equal-length digit strings between `lo` and `hi` inclusive. Linear in the length for each
+/// boundary path (full `0..9` tails become a plain chain), so quadratic overall.
 fn fixed_range(nfa: &mut Nfa, s: u32, e: u32, lo: &[u8], hi: &[u8]) {
     if lo.is_empty() {
         nfa.add_epsilon(s, e);
+        return;
+    }
+    if lo.iter().all(|&b| b == b'0') && hi.iter().all(|&b| b == b'9') {
+        let mut cur = s;
+        for _ in 0..lo.len() {
+            let m = nfa.add_state();
+            nfa.add_range(cur, '0' as u32, '9' as u32, m);
+            cur = m;
+        }
+        nfa.add_epsilon(cur, e);
         return;
     }
     let (l, h) = (lo[0] as u32, hi[0] as u32);
@@ -877,5 +927,66 @@ mod tests {
     fn too_complex() {
         let e = compile("[ac]*a[ac]{50,200}", ALL, false, DEFAULT_WORK_LIMIT).unwrap_err();
         assert!(matches!(e, RegexpError::TooComplex(_)), "{e:?}");
+    }
+
+    /// Huge counted repetitions fail during construction, before allocating the unrolled NFA
+    /// (a{0,2147483647} used to exhaust memory and abort the process).
+    #[test]
+    fn huge_repetitions_fail_fast() {
+        for p in [
+            "a{0,2147483647}",
+            "a{2147483647}",
+            "a{2000000}",
+            "a{1000000}",
+            "((a{1000}){1000}){1000}",
+            "(a|b){1000}{1000}",
+            "[a-z]{100}{100}{100}{100}",
+            "(\"abcdefghij\"{100000})",
+            "(a{1000}){1000}&b",
+            // Independent cycles: each operand is small, the product is a billion states.
+            "(.{1009})*&(.{1013})*&(.{1019})*",
+        ] {
+            let t = std::time::Instant::now();
+            let e = compile(p, ALL, false, DEFAULT_WORK_LIMIT).unwrap_err();
+            assert!(matches!(e, RegexpError::TooComplex(_)), "{p}: {e:?}");
+            assert!(e.to_string().starts_with("Determinizing automaton with "), "{e}");
+            assert!(t.elapsed().as_secs() < 5, "{p} took {:?}", t.elapsed());
+        }
+    }
+
+    /// Long deterministic chains cost Lucene no determinization effort (`determinize` returns
+    /// deterministic automata unchanged), so Elasticsearch accepts them whatever the work limit.
+    #[test]
+    fn long_deterministic_repeats_are_not_too_complex() {
+        for (p, len) in [("a{100000}", 100_000usize), ("a{0,100000}", 1), ("(ab){50000}", 100_000)] {
+            let d = compile(p, ALL, false, DEFAULT_WORK_LIMIT).unwrap_or_else(|e| panic!("{p}: {e}"));
+            let s: String = "ab".chars().cycle().take(len).collect();
+            let s = if p.starts_with('a') { "a".repeat(len) } else { s };
+            assert!(d.matches(s.as_bytes()), "{p}");
+            assert!(!d.matches(format!("{s}a").as_bytes()) || p == "a{0,100000}", "{p}");
+        }
+        let d = compile("a{0,100000}", ALL, false, DEFAULT_WORK_LIMIT).unwrap();
+        assert!(d.matches(b"") && d.matches("a".repeat(100_000).as_bytes()));
+        assert!(!d.matches("a".repeat(100_001).as_bytes()));
+        // Nondeterminism anywhere still pays for every state (Lucene's whole-automaton check).
+        let e = compile("a{100000}|ab", ALL, false, DEFAULT_WORK_LIMIT).unwrap_err();
+        assert!(matches!(e, RegexpError::TooComplex(_)), "{e:?}");
+        // The work limit still applies to the deterministic part's neighbours below the budget.
+        assert!(compile("a{40000}|ab", ALL, false, DEFAULT_WORK_LIMIT).is_ok());
+    }
+
+    #[test]
+    fn wide_intervals_stay_small() {
+        let t = std::time::Instant::now();
+        let d = compile("<0-2147483647>", ALL, false, DEFAULT_WORK_LIMIT).unwrap();
+        for (s, m) in [("0", true), ("2147483647", true), ("002147483647", true), ("2147483648", false), ("x", false)] {
+            assert_eq!(d.matches(s.as_bytes()), m, "{s}");
+        }
+        let d = compile("<0000000001-2147483647>", ALL, false, DEFAULT_WORK_LIMIT).unwrap();
+        for (s, m) in [("0000000001", true), ("0999999999", true), ("1999999999", true), ("2147483647", true),
+                       ("0000000000", false), ("2147483648", false), ("1", false)] {
+            assert_eq!(d.matches(s.as_bytes()), m, "{s}");
+        }
+        assert!(t.elapsed().as_millis() < 2000);
     }
 }

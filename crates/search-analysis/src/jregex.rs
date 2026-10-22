@@ -18,9 +18,16 @@
 //!   ASCII `\b` next to a non-spacing mark (Java counts a mark after a letter as part of the
 //!   word); inputs where they matter go to the backtracker.
 //! - **backtracking**: a continuation-passing matcher over the AST with Java's semantics for
-//!   everything else. Single-character repetitions loop instead of recursing, so typical patterns
-//!   run in constant stack; deeply nested repetitions of groups stop at a depth limit (where Java
-//!   would overflow its stack) and count as no match.
+//!   everything else. Single-character repetitions loop instead of recursing (and give back
+//!   characters by stepping back, without remembering positions), so typical patterns run in
+//!   constant stack; deeply nested repetitions of groups stop at a depth and stack budget (where
+//!   Java would overflow its stack) and count as no match. Its buffers live in [`Captures`], so
+//!   a component that keeps one matches without allocating.
+//!
+//! The parser recurses per group or class nesting level, like Java's. Nesting beyond
+//! `MAX_NESTING` is Java's "Stack overflow during pattern compilation" error, and patterns that
+//! could be deeply nested compile on a large stack ([`crate::stack`]), so no pattern can overflow
+//! the stack of the thread building an index's analyzers.
 //!
 //! [`Matcher`] reproduces `Matcher.find()`'s iteration rule (after an empty match the next search
 //! starts one character later) and [`Replacement`] `appendReplacement`'s `$n`/`${name}`/`\`
@@ -264,6 +271,22 @@ impl std::fmt::Debug for JavaRegex {
 
 /// `Pattern.compile(pattern, flags)`.
 pub(crate) fn compile(pattern: &str, flags: u32) -> Result<JavaRegex> {
+    // Parsing and the passes over the tree recurse per nesting level.
+    let opens = if flags & LITERAL != 0 {
+        0
+    } else {
+        crate::stack::opens(pattern, b"([")
+    };
+    crate::stack::deep(opens, || compile_here(pattern, flags)).unwrap_or_else(|| {
+        Err(AnalysisError::other(
+            "illegal_state_exception",
+            500,
+            "could not start a thread to compile the pattern",
+        ))
+    })
+}
+
+fn compile_here(pattern: &str, flags: u32) -> Result<JavaRegex> {
     let mut p = Parser::new(pattern, flags);
     let root = if flags & LITERAL != 0 {
         literal_node(pattern, Flags::from(flags))
@@ -331,6 +354,7 @@ impl JavaRegex {
         Captures {
             slots: vec![None; 2 * (self.groups + 1)],
             locs: self.fast.as_ref().map(|f| f.re.capture_locations()),
+            scratch: Scratch::default(),
         }
     }
 
@@ -372,22 +396,24 @@ impl JavaRegex {
             }
             return true;
         }
-        let mut bt = Backtracker::new(text, self.groups, start);
+        let mut bt = Backtracker::new(text, self.groups, start, &mut caps.scratch);
         let mut s = start;
-        loop {
+        let found = loop {
             bt.reset();
             let found = bt.run(&self.root, s, &mut |_, p| Some(p));
             if let Some(end) = found {
                 bt.slots[0] = Some(s);
                 bt.slots[1] = Some(end);
                 caps.slots.copy_from_slice(&bt.slots);
-                return true;
+                break true;
             }
             if s >= text.len() {
-                return false;
+                break false;
             }
             s += text[s..].chars().next().map_or(1, char::len_utf8);
-        }
+        };
+        bt.finish(&mut caps.scratch);
+        found
     }
 
     /// The bounds of the first match at or after `start`, without groups (faster).
@@ -411,7 +437,7 @@ impl JavaRegex {
     }
 
     /// `Matcher.matches()`: whether the whole text matches.
-    pub fn full_match(&self, text: &str) -> bool {
+    pub fn full_match(&self, text: &str, caps: &mut Captures) -> bool {
         if let Some(f) = self.fast_for(text) {
             let full = f.full.get_or_init(|| {
                 regex::RegexBuilder::new(&format!("\\A(?:{})\\z", f.rendered))
@@ -423,17 +449,29 @@ impl JavaRegex {
                 return full.is_match(text);
             }
         }
-        let mut bt = Backtracker::new(text, self.groups, 0);
+        let mut bt = Backtracker::new(text, self.groups, 0, &mut caps.scratch);
         let len = text.len();
-        bt.run(&self.root, 0, &mut |_, p| (p == len).then_some(p))
-            .is_some()
+        let found = bt
+            .run(&self.root, 0, &mut |_, p| (p == len).then_some(p))
+            .is_some();
+        bt.finish(&mut caps.scratch);
+        found
     }
 }
 
-/// Match groups as byte ranges (Java's `start(i)`/`end(i)`), plus the fast engine's scratch.
+/// Match groups as byte ranges (Java's `start(i)`/`end(i)`), plus both engines' scratch, so
+/// a component that keeps its `Captures` matches without allocating.
 pub(crate) struct Captures {
     slots: Vec<Option<usize>>,
     locs: Option<regex::CaptureLocations>,
+    scratch: Scratch,
+}
+
+/// The backtracker's buffers, lent to it for one search.
+#[derive(Default)]
+struct Scratch {
+    slots: Vec<Option<usize>>,
+    save: Vec<Option<usize>>,
 }
 
 impl Captures {
@@ -603,21 +641,24 @@ fn parse_replacement(
                 };
                 let group = if n == '{' {
                     it.next();
+                    // `appendExpandedReplacement`: the name is collected first, so an empty one is
+                    // reported before a missing `}`.
                     let mut name = String::new();
-                    loop {
-                        match it.next() {
-                            Some('}') => break,
-                            Some(ch) if ch.is_ascii_alphanumeric() => name.push(ch),
-                            _ => {
-                                return Err(AnalysisError::illegal(
-                                    "named capturing group is missing trailing '}'",
-                                ));
-                            }
+                    while let Some(&ch) = it.peek() {
+                        if !ch.is_ascii_alphanumeric() {
+                            break;
                         }
+                        name.push(ch);
+                        it.next();
                     }
                     if name.is_empty() {
                         return Err(AnalysisError::illegal(
                             "named capturing group has 0 length name",
+                        ));
+                    }
+                    if it.next() != Some('}') {
+                        return Err(AnalysisError::illegal(
+                            "named capturing group is missing trailing '}'",
                         ));
                     }
                     if name.as_bytes()[0].is_ascii_digit() {
@@ -794,7 +835,8 @@ fn render(n: &Node, out: &mut String) {
 // ---------------------------------------------------------------------------------------------
 // The backtracking engine.
 
-/// Recursion budget of one match attempt (Java overflows its stack instead).
+/// Recursion budget of one match attempt (Java overflows its stack instead). The stack itself
+/// is also measured ([`crate::stack::Depth`]): frames are much larger in unoptimized builds.
 const MAX_DEPTH: u32 = 3000;
 /// Work budget of one search (pathological patterns).
 const MAX_STEPS: u64 = 50_000_000;
@@ -804,9 +846,13 @@ type K<'k> = &'k mut dyn FnMut(&mut Backtracker<'_>, usize) -> Option<usize>;
 struct Backtracker<'t> {
     text: &'t str,
     slots: Vec<Option<usize>>,
+    /// Saved copies of `slots` (atomic groups, lookaround, possessive loops restore them on
+    /// failure), as a stack: each construct pushes one copy and pops it before returning.
+    save: Vec<Option<usize>>,
     search_start: usize,
     depth: u32,
     steps: u64,
+    stack: crate::stack::Depth,
 }
 
 #[inline]
@@ -839,25 +885,61 @@ fn is_unicode_word(c: char) -> bool {
 }
 
 impl<'t> Backtracker<'t> {
-    fn new(text: &'t str, groups: usize, search_start: usize) -> Self {
+    fn new(text: &'t str, groups: usize, search_start: usize, scratch: &mut Scratch) -> Self {
+        let mut slots = std::mem::take(&mut scratch.slots);
+        slots.clear();
+        slots.resize(2 * (groups + 1), None);
+        let mut save = std::mem::take(&mut scratch.save);
+        save.clear();
         Backtracker {
             text,
-            slots: vec![None; 2 * (groups + 1)],
+            slots,
+            save,
             search_start,
             depth: 0,
             steps: 0,
+            stack: crate::stack::Depth::start(),
         }
+    }
+
+    /// Returns the buffers for the next search.
+    fn finish(self, scratch: &mut Scratch) {
+        scratch.slots = self.slots;
+        scratch.save = self.save;
     }
 
     fn reset(&mut self) {
         self.slots.iter_mut().for_each(|s| *s = None);
+        self.save.clear();
         self.depth = 0;
+    }
+
+    /// Pushes a copy of the groups; returns its mark for [`Self::restore`]/[`Self::release`].
+    #[inline]
+    fn save(&mut self) -> usize {
+        let m = self.save.len();
+        self.save.extend_from_slice(&self.slots);
+        m
+    }
+
+    #[inline]
+    fn restore(&mut self, m: usize) {
+        let n = self.slots.len();
+        self.slots.copy_from_slice(&self.save[m..m + n]);
+    }
+
+    #[inline]
+    fn release(&mut self, m: usize) {
+        self.save.truncate(m);
     }
 
     /// Matches `n` at `pos` and then the continuation; returns the continuation's result.
     fn run(&mut self, n: &Node, pos: usize, k: K<'_>) -> Option<usize> {
         self.steps += 1;
-        if self.steps > MAX_STEPS || self.depth > MAX_DEPTH {
+        if self.steps > MAX_STEPS
+            || self.depth > MAX_DEPTH
+            || self.stack.exceeded(crate::stack::MATCH_STACK_BUDGET)
+        {
             return None;
         }
         self.depth += 1;
@@ -932,14 +1014,15 @@ impl<'t> Backtracker<'t> {
                     Greed::Possessive => {
                         // Java's possessive `Curly`: each iteration takes the body's first
                         // match, an empty one ends the loop, and nothing is given back.
-                        let saved = self.slots.clone();
+                        let m = self.save();
                         let mut i = pos;
                         let mut count = 0u32;
                         while count < *min {
                             match self.run(node, i, &mut |_, p| Some(p)) {
                                 Some(p) => i = p,
                                 None => {
-                                    self.slots = saved;
+                                    self.restore(m);
+                                    self.release(m);
                                     return None;
                                 }
                             }
@@ -954,8 +1037,9 @@ impl<'t> Backtracker<'t> {
                         }
                         let r = k(self, i);
                         if r.is_none() {
-                            self.slots = saved;
+                            self.restore(m);
                         }
+                        self.release(m);
                         r
                     }
                 }
@@ -974,36 +1058,40 @@ impl<'t> Backtracker<'t> {
                 k(self, pos + g.len())
             }
             Node::Atomic(x) => {
-                let saved = self.slots.clone();
-                match self.run(x, pos, &mut |_, p| Some(p)) {
+                let m = self.save();
+                let r = match self.run(x, pos, &mut |_, p| Some(p)) {
                     Some(e) => {
                         let r = k(self, e);
                         if r.is_none() {
-                            self.slots = saved;
+                            self.restore(m);
                         }
                         r
                     }
                     None => None,
-                }
+                };
+                self.release(m);
+                r
             }
             Node::Around {
                 node,
                 behind: false,
                 negate,
             } => {
-                let saved = self.slots.clone();
+                let m = self.save();
                 let matched = self.run(node, pos, &mut |_, p| Some(p)).is_some();
                 if matched == *negate {
-                    self.slots = saved;
+                    self.restore(m);
+                    self.release(m);
                     return None;
                 }
                 if *negate {
-                    self.slots = saved.clone();
+                    self.restore(m);
                 }
                 let r = k(self, pos);
                 if r.is_none() {
-                    self.slots = saved;
+                    self.restore(m);
                 }
+                self.release(m);
                 r
             }
             Node::Around {
@@ -1011,7 +1099,7 @@ impl<'t> Backtracker<'t> {
                 behind: true,
                 negate,
             } => {
-                let saved = self.slots.clone();
+                let m = self.save();
                 let (min, max) = node.len16();
                 let mut matched = false;
                 // Candidate starts from the closest (shortest) to the farthest, as Java tries them.
@@ -1040,16 +1128,18 @@ impl<'t> Backtracker<'t> {
                     }
                 }
                 if matched == *negate {
-                    self.slots = saved;
+                    self.restore(m);
+                    self.release(m);
                     return None;
                 }
                 if *negate {
-                    self.slots = saved.clone();
+                    self.restore(m);
                 }
                 let r = k(self, pos);
                 if r.is_none() {
-                    self.slots = saved;
+                    self.restore(m);
                 }
+                self.release(m);
                 r
             }
             Node::Backref {
@@ -1146,16 +1236,12 @@ impl<'t> Backtracker<'t> {
             }
         }
         // Greedy and possessive: consume as many as possible.
-        let mut ends: smallvec::SmallVec<[usize; 32]> = smallvec::SmallVec::new();
-        ends.push(p);
+        let floor = p;
         while count < max {
             match step(self.text, p) {
                 Some(np) if np != p => {
                     p = np;
                     count += 1;
-                    if greed == Greed::Greedy {
-                        ends.push(p);
-                    }
                 }
                 _ => break,
             }
@@ -1163,16 +1249,25 @@ impl<'t> Backtracker<'t> {
         if greed == Greed::Possessive {
             return k(self, p);
         }
-        while let Some(e) = ends.pop() {
-            if let Some(r) = k(self, e) {
+        // Give back one iteration at a time. Every iteration consumed one character of the
+        // set or the whole string, so the earlier ends are found by stepping back, without
+        // remembering them.
+        loop {
+            if let Some(r) = k(self, p) {
                 return Some(r);
             }
+            if p <= floor {
+                return None;
+            }
+            p -= match node {
+                Node::Str(s) => s.len(),
+                _ => char_before(self.text, p).map_or(1, char::len_utf8),
+            };
             self.steps += 1;
             if self.steps > MAX_STEPS {
                 return None;
             }
         }
-        None
     }
 
     /// Java's `Prolog`/`Loop` (`LazyLoop` when `lazy`): the first iteration is tried without the
@@ -1588,7 +1683,16 @@ struct Parser {
     flags: Flags,
     groups: usize,
     names: Vec<(String, usize)>,
+    /// Current nesting of groups and character classes (the parser recurses once per level).
+    depth: usize,
 }
+
+/// Nesting of groups and classes beyond which a pattern is rejected. Java recurses per level
+/// too and reports a `StackOverflowError` as "Stack overflow during pattern compilation"; with
+/// Elasticsearch's 1 MB thread stacks that happens between about 1,300 and 3,700 levels of
+/// `(`, depending on the JIT. The bound sits below that range, and keeps every recursive pass
+/// over the tree (parsing, rendering, the backtracker, drop) well inside a 2 MB stack.
+const MAX_NESTING: usize = 1000;
 
 const ASCII_SPACE: &[(u32, u32)] = &[(0x09, 0x0D), (0x20, 0x20)];
 
@@ -1609,7 +1713,17 @@ impl Parser {
             flags: Flags::from(flags),
             groups: 0,
             names: Vec::new(),
+            depth: 0,
         }
+    }
+
+    /// Enters a nested group or class whose opening character is at char index `open`.
+    fn enter(&mut self, open: usize) -> PResult<()> {
+        if self.depth >= MAX_NESTING {
+            return err("Stack overflow during pattern compilation", self.at(open));
+        }
+        self.depth += 1;
+        Ok(())
     }
 
     fn peek(&self) -> Option<char> {
@@ -1702,7 +1816,12 @@ impl Parser {
         self.i += 1;
         Ok(Some(match c {
             '(' => return self.group(),
-            '[' => Node::Set(self.class()?.into()),
+            '[' => {
+                self.enter(start)?;
+                let set = self.class();
+                self.depth -= 1;
+                Node::Set(set?.into())
+            }
             '.' => {
                 let set = if self.flags.dotall {
                     vec![(0, 0x10FFFF)]
@@ -1810,6 +1929,13 @@ impl Parser {
     }
 
     fn group(&mut self) -> PResult<Option<Node>> {
+        self.enter(self.i - 1)?;
+        let r = self.group_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn group_inner(&mut self) -> PResult<Option<Node>> {
         let saved = self.flags;
         let node = if self.peek() == Some('?') {
             self.i += 1;
@@ -2358,9 +2484,11 @@ impl Parser {
                     cur.extend(self.flags.class_char_set(']'));
                 }
                 '[' => {
+                    self.enter(self.i)?;
                     self.i += 1;
-                    let inner = self.class()?;
-                    cur.extend(inner);
+                    let inner = self.class();
+                    self.depth -= 1;
+                    cur.extend(inner?);
                 }
                 '&' if self.peek_at(1) == Some('&') => {
                     self.i += 2;
@@ -3137,15 +3265,119 @@ mod tests {
         assert_eq!(msg("$"), "Illegal group reference: group index is missing");
         assert_eq!(msg("$x"), "Illegal group reference");
         assert_eq!(msg("${nope}"), "No group with name {nope}");
+        // Java collects the name before looking for the `}`.
+        assert_eq!(msg("${"), "named capturing group has 0 length name");
+        assert_eq!(msg("${-}"), "named capturing group has 0 length name");
+        assert_eq!(msg("${}"), "named capturing group has 0 length name");
+        assert_eq!(msg("${ab"), "named capturing group is missing trailing '}'");
+        assert_eq!(msg("${ab-}"), "named capturing group is missing trailing '}'");
+        assert_eq!(
+            msg("${1a}"),
+            "capturing group name {1a} starts with digit character"
+        );
         // `$12` is group 1 then a literal 2 when there is no group 12.
         let mut out = String::new();
         Replacement::parse("$12", &re)
             .replace(&re, "1-a", true, &mut caps, &mut out)
             .unwrap();
         assert_eq!(out, "12");
-        assert!(compile("[a-z]+ed", 0).unwrap().full_match("jumped"));
-        assert!(!compile("[a-z]+ed", 0).unwrap().full_match("jumpedx"));
-        assert!(compile("a|ab", 0).unwrap().full_match("ab"));
+        let full = |p: &str, t: &str| {
+            let re = compile(p, 0).unwrap();
+            re.full_match(t, &mut re.captures())
+        };
+        assert!(full("[a-z]+ed", "jumped"));
+        assert!(!full("[a-z]+ed", "jumpedx"));
+        assert!(full("a|ab", "ab"));
+    }
+
+    /// Runs `f` on a thread with a 2 MB stack, the size of a tokio worker's.
+    fn on_small_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn deep_patterns_fit_a_small_stack() {
+        on_small_stack(|| {
+            let nest = |open: &str, n: usize| format!("{}a{}", open.repeat(n), ")".repeat(n));
+            for open in ["(", "(?:", "(?>", "(?<n>"] {
+                let n = if open == "(?<n>" { 1 } else { MAX_NESTING };
+                let p = nest(open, n);
+                let re = compile(&p, 0).unwrap_or_else(|e| panic!("{open}: {}", e.reason));
+                let mut caps = re.captures();
+                if re.find_at("xa", 0, &mut caps) {
+                    assert_eq!(caps.get(0), Some((1, 2)));
+                }
+            }
+            // Deeper than the bound: Java's error for a stack overflow, at the `(` that is one
+            // level too deep (as Java reports where its parser was).
+            let err = compile(&nest("(", MAX_NESTING + 1), 0).unwrap_err();
+            assert_eq!(err.kind, "pattern_syntax_exception");
+            assert!(
+                err.reason.starts_with(&format!(
+                    "Stack overflow during pattern compilation near index {MAX_NESTING}\n"
+                )),
+                "{}",
+                err.reason
+            );
+            let err = compile(&nest("(?:", 100_000), 0).unwrap_err();
+            assert!(err.reason.starts_with(&format!(
+                "Stack overflow during pattern compilation near index {}\n",
+                3 * MAX_NESTING
+            )));
+            let classes = format!("{}a{}", "[".repeat(MAX_NESTING + 1), "]".repeat(MAX_NESTING + 1));
+            assert!(
+                compile(&classes, 0)
+                    .unwrap_err()
+                    .reason
+                    .starts_with("Stack overflow during pattern compilation near index 1000\n")
+            );
+            let classes = format!("{}a{}", "[".repeat(MAX_NESTING), "]".repeat(MAX_NESTING));
+            assert_eq!(all(&classes, 0, "bab"), vec!["a"]);
+            // The backtracker (lookahead) over deep nesting: it matches while its stack budget
+            // lasts and otherwise reports no match, never overflows.
+            let p = format!("(?=a){}", nest("(", 100));
+            assert_eq!(all(&p, 0, "bab"), vec!["a"]);
+            let p = format!("(?=a){}", nest("(", MAX_NESTING - 1));
+            let _ = all(&p, 0, "bab");
+            // Long flat patterns are not nested: alternatives and sequences are lists.
+            let alt = format!("{}b", "a|".repeat(50_000));
+            assert_eq!(all(&alt, 0, "cb"), vec!["b"]);
+            let seq = "a.".repeat(50_000);
+            assert!(compile(&seq, 0).is_ok());
+            let lookalt = format!("(?=x)y|{}b", "a|".repeat(50_000));
+            assert_eq!(all_slow(&lookalt, 0, "ca"), vec!["a"]);
+        });
+    }
+
+    #[test]
+    fn backtracker_reuses_its_buffers() {
+        // Greedy runs longer than any inline buffer give back one character at a time.
+        let long = "a".repeat(100);
+        assert_eq!(all("(?=a)a+a", 0, &long), vec![long.clone()]);
+        assert_eq!(all("(?=a)(?:ab)+ab", 0, "abababx"), vec!["ababab"]);
+        assert_eq!(all("(?=.)é+é", 0, "ééé"), vec!["ééé"]);
+        assert_eq!(all("(?=a)a{2,}+a", 0, "aaaa"), Vec::<String>::new());
+        // Saved groups are restored after a failed atomic group / lookaround, also when a
+        // nested construct saved its own copy in between.
+        assert_eq!(both("(?>(a)(?=(b)))c|(a)b", 0, "ab"), vec!["ab"]);
+        let re = compile("(?>(a)(?=(b))(?!(c)))b|(a)", 0).unwrap();
+        let mut caps = re.captures();
+        for _ in 0..3 {
+            assert!(re.find_at("ab", 0, &mut caps));
+            assert_eq!(caps.get(0), Some((0, 2)));
+            assert_eq!(caps.get(1), Some((0, 1)));
+            assert_eq!(caps.get(2), Some((1, 2)));
+            assert_eq!(caps.get(3), None);
+            assert!(re.find_at("ac", 0, &mut caps));
+            assert_eq!(caps.get(0), Some((0, 1)));
+            assert_eq!(caps.get(1), None);
+            assert_eq!(caps.get(4), Some((0, 1)));
+        }
     }
 
     #[test]
@@ -3243,3 +3475,4 @@ mod tests {
         assert!(compile("\\8", 0).is_ok());
     }
 }
+

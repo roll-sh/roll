@@ -43,7 +43,8 @@ const TEXT: &str = "The QUICK brown-fox jumped over the lazy dog's bone, didn't 
     Ünïcödé façade naïve straße 我是中国人 日本語のテキスト 한국어 😀 👍🏽 new york ny usa running ponies \
     ภาษาไทยง่ายนิดเดียว กรุงเทพมหานคร детьми книгами bromfietsen kinderen undersøgelserne kauppojen \
     kitaplarımızdan házainkban macchinette ordenadores fiskerne questionários dentistes orduetatik \
-    biblioteques պատմություններ cheannaigh dideliems gerações";
+    biblioteques պատմություններ cheannaigh dideliems gerações Donaudampfschiff \
+    donaudampfschiffahrt booking good looking";
 
 fn analysis() -> Analysis {
     let settings = serde_json::json!({
@@ -55,16 +56,31 @@ fn analysis() -> Analysis {
             "en": {"type": "stemmer", "language": "light_english"},
             "fold": {"type": "asciifolding", "preserve_original": true},
             "cg": {"type": "common_grams", "common_words": "_english_"},
-            "rep": {"type": "pattern_replace", "pattern": "(\\d+)", "replacement": "<$1>"}
+            "rep": {"type": "pattern_replace", "pattern": "(\\d+)", "replacement": "<$1>"},
+            "rep_bt": {"type": "pattern_replace", "pattern": "(?<=o)\\w", "replacement": "_"},
+            "cap_bt": {"type": "pattern_capture", "patterns": ["(?<=o)(\\w+)", "(\\w)\\1"]},
+            "kw_bt": {"type": "keyword_marker", "keywords_pattern": "(?=d).*(?<!s)"},
+            "decomp": {"type": "dictionary_decompounder", "word_list": ["donau", "dampf", "schiff", "fahrt"]}
+        },
+        "tokenizer": {
+            "look": {"type": "pattern", "pattern": "(?=a)b|\\s+"},
+            "backref": {"type": "pattern", "pattern": "(\\w)\\1|\\s+"},
+            "atomic": {"type": "pattern", "pattern": "(?>\\w+)(?<=g)|[^\\w]+"}
         },
         "char_filter": {
-            "map": {"type": "mapping", "mappings": ["& => and", "😀 => smile"]}
+            "map": {"type": "mapping", "mappings": ["& => and", "😀 => smile"]},
+            "map16": {"type": "mapping", "mappings": ["\\uD83D => x", "ß => ss"]}
         },
         "analyzer": {
             "graph": {"tokenizer": "standard", "filter": ["lowercase", "syn", "flatten_graph", "en"]},
             "delim": {"tokenizer": "whitespace", "filter": ["wdg", "lowercase", "fold", "unique"]},
             "grams": {"tokenizer": "standard", "filter": ["lowercase", "sh", "ng", "cg"]},
-            "chars": {"tokenizer": "standard", "char_filter": ["html_strip", "map"], "filter": ["lowercase", "rep", "porter_stem", "kstem"]}
+            "chars": {"tokenizer": "standard", "char_filter": ["html_strip", "map"], "filter": ["lowercase", "rep", "porter_stem", "kstem"]},
+            "repeat": {"tokenizer": "standard", "filter": ["lowercase", "keyword_repeat", "porter_stem", "remove_duplicates"]},
+            "look": {"tokenizer": "look"},
+            "backref": {"tokenizer": "backref", "filter": ["rep_bt"]},
+            "atomic": {"tokenizer": "atomic", "filter": ["cap_bt", "kw_bt"]},
+            "decomp": {"tokenizer": "standard", "char_filter": ["map16"], "filter": ["lowercase", "decomp"]}
         }
     });
     Analysis::from_settings(&settings, &IndexOptions::default()).unwrap()
@@ -120,6 +136,11 @@ const ANALYZERS: &[&str] = &[
     "delim",
     "grams",
     "chars",
+    "repeat",
+    "look",
+    "backref",
+    "atomic",
+    "decomp",
 ];
 
 #[test]

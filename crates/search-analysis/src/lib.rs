@@ -37,6 +37,7 @@ mod jregex;
 mod lregexp;
 mod registry;
 mod settings;
+mod stack;
 mod stem;
 mod stopwords;
 mod stream;

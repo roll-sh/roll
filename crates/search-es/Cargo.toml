@@ -19,11 +19,19 @@ libc.workspace = true
 memchr.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
+# Reindex from remote clusters (`api::remote`), behind `reindex.remote.whitelist`.
+reqwest.workspace = true
 regex.workspace = true
 regex-syntax.workspace = true
 ryu.workspace = true
+search-aggs.workspace = true
 search-analysis.workspace = true
+search-codec.workspace = true
+search-index.workspace = true
+search-painless.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 
 [build-dependencies]

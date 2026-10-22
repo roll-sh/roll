@@ -10,8 +10,42 @@ use crate::rest::{Ctx, Reply};
 
 /// `POST {index}/_cache/clear`: nothing is cached between requests yet; reports the shards.
 pub fn clear_cache(ctx: &Ctx) -> EsResult<Reply> {
+    let mut flags = Vec::new();
     for p in ["fielddata", "query", "request"] {
-        ctx.bool_param(p, false)?;
+        flags.push(ctx.bool_param(p, false)?);
+    }
+    // Field data (`fielddata=true`, or no flags) and the request cache (`request=true`, or no
+    // flags) hold state here.
+    if flags[0] || !flags.iter().any(|f| *f) {
+        let st = ctx.state();
+        if let Ok(names) = super::resolve_indices(ctx, IndicesOptions::STRICT_EXPAND_OPEN) {
+            let fields = ctx.list_param("fields");
+            for n in names {
+                if let Some(idx) = st.metadata.indices.get(&n)
+                    && let Some(e) = ctx.cluster.engine.loaded(&idx.uuid)
+                {
+                    let mut l = e.fielddata_loaded.lock();
+                    match &fields {
+                        Some(f) => l.retain(|x| !f.iter().any(|p| crate::xcontent::filter::glob_match(p, x))),
+                        None => l.clear(),
+                    }
+                }
+            }
+        }
+    }
+    if flags[2] || !flags.iter().any(|f| *f) {
+        let st = ctx.state();
+        if let Ok(names) = super::resolve_indices(ctx, IndicesOptions::STRICT_EXPAND_OPEN) {
+            for n in names {
+                if let Some(idx) = st.metadata.indices.get(&n)
+                    && let Some(e) = ctx.cluster.engine.loaded(&idx.uuid)
+                {
+                    for sh in &e.shards {
+                        sh.clear_request_cache();
+                    }
+                }
+            }
+        }
     }
     super::indices::broadcast(ctx)
 }

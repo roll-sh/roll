@@ -271,6 +271,16 @@ pub fn cluster_prefix(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/")
 }
 
+/// Ownership markers of a cluster: `<epoch:020>`, written by each new owner before it reads
+/// anything (see `Store::claim`).
+pub fn owner_prefix(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/owner/")
+}
+
+pub fn owner_key(cluster: &str, epoch: u64) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/owner/{epoch:020}")
+}
+
 pub fn state_prefix(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/state/")
 }

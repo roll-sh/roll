@@ -393,6 +393,7 @@ pub fn render(ctx: &Ctx, t: &Table, accept: Option<&MediaType>) -> EsResult<(Str
 /// zero, every size `0b` and every duration `0s`.
 pub mod stats {
     use super::Cell;
+    use crate::json::Value;
     use crate::units::TimeValue;
 
     /// The zero value of a stats column, typed by its name as Elasticsearch types it.
@@ -411,6 +412,50 @@ pub mod stats {
             return Cell::Int(-1);
         }
         Cell::Int(0)
+    }
+
+    /// A `_cat/indices` stats column (`pri.` prefixed or not) read from an index stats block,
+    /// as `RestIndicesAction` reads `IndexStats`; columns without a figure are zero.
+    pub fn of_block(block: &Value, column: &str) -> Cell {
+        let base = column.strip_prefix("pri.").unwrap_or(column);
+        let n = |section: &str, key: &str| block.get(section).and_then(|s| s.get(key)).and_then(Value::as_i64).unwrap_or(0);
+        let (section, key) = match base {
+            "store.size" => return Cell::Bytes(n("store", "size_in_bytes")),
+            "dataset.size" => return Cell::Bytes(n("store", "total_data_set_size_in_bytes")),
+            "memory.total" => {
+                // `CommonStats.getTotalMemory`.
+                let total = n("fielddata", "memory_size_in_bytes")
+                    + n("query_cache", "memory_size_in_bytes")
+                    + n("segments", "index_writer_memory_in_bytes")
+                    + n("segments", "version_map_memory_in_bytes")
+                    + n("segments", "fixed_bit_set_memory_in_bytes");
+                return Cell::Bytes(total);
+            }
+            "suggest.current" => ("search", "suggest_current"),
+            "suggest.time" => ("search", "suggest_time_in_millis"),
+            "suggest.total" => ("search", "suggest_total"),
+            "segments.memory" => ("segments", "memory_in_bytes"),
+            "segments.fixed_bitset_memory" => ("segments", "fixed_bit_set_memory_in_bytes"),
+            "refresh.time" => ("refresh", "total_time_in_millis"),
+            "refresh.external_time" => ("refresh", "external_total_time_in_millis"),
+            "get.time" => ("get", "time_in_millis"),
+            "completion.size" => ("completion", "size_in_bytes"),
+            other => match other.split_once('.') {
+                Some(p) => p,
+                None => return zero(column),
+            },
+        };
+        let zero_cell = zero(column);
+        let found = |k: &str| block.get(section).and_then(|s| s.get(k)).and_then(Value::as_i64);
+        match zero_cell {
+            Cell::Time(_) => {
+                let v = found(key).or_else(|| found(&format!("{key}_in_millis"))).unwrap_or(0);
+                Cell::Time(TimeValue::millis(v))
+            }
+            Cell::Bytes(_) => Cell::Bytes(found(key).or_else(|| found(&format!("{key}_in_bytes"))).unwrap_or(0)),
+            Cell::Int(_) => Cell::Int(found(key).unwrap_or(0)),
+            other => other,
+        }
     }
 }
 
@@ -490,6 +535,9 @@ pub fn indices(ctx: &Ctx) -> EsResult<Reply> {
             continue;
         }
         let closed = idx.is_closed();
+        // One node holds every started copy, so primaries and totals are the same figures.
+        let mut block = crate::api::indices::stats_block_in(ctx.cluster.dialect, &[], idx.number_of_shards() as u64);
+        crate::api::indices::add_index_stats(ctx.cluster, idx, &mut block, None);
         t.push_row(|c| match c {
             "health" => Cell::str(health),
             "status" => Cell::str(idx.state.as_str()),
@@ -505,8 +553,7 @@ pub fn indices(ctx: &Ctx) -> EsResult<Reply> {
                 _ => Cell::Null,
             },
             _ if closed => Cell::Null,
-            "docs.count" | "docs.deleted" => Cell::Int(0),
-            other => stats::zero(other),
+            other => stats::of_block(&block, other),
         });
     }
     finish(t)
@@ -621,8 +668,21 @@ pub fn nodes(ctx: &Ctx) -> EsResult<Reply> {
     finish(t)
 }
 
+/// A shard's documents (root documents, as searches count them) and segment bytes.
+fn shard_docs(ctx: &Ctx, st: &crate::meta::ClusterState, idx: &crate::meta::IndexMeta, shard: u32) -> (i64, i64) {
+    if idx.is_closed() {
+        return (0, 0);
+    }
+    let Ok(engine) = ctx.cluster.engine.index(ctx.cluster, st, idx) else { return (0, 0) };
+    let s = engine.shard(shard);
+    let stats = s.shard.stats();
+    let roots = s.shard.searcher().count(&search_index::query::nested::root_filter()).unwrap_or(stats.num_docs);
+    (roots as i64, stats.segment_bytes as i64)
+}
+
 pub fn shards(ctx: &Ctx) -> EsResult<Reply> {
-    let names = index_options(ctx, IndicesOptions::STRICT_EXPAND)?;
+    // `RestShardsAction` reads every index, hidden ones included (`IndicesOptions.strictExpandHidden`).
+    let names = index_options(ctx, IndicesOptions::STRICT_EXPAND_HIDDEN)?;
     let st = ctx.state();
     let node = &ctx.cluster.node;
     let mut t = table(ctx, columns!(ctx, SHARDS));
@@ -633,6 +693,7 @@ pub fn shards(ctx: &Ctx) -> EsResult<Reply> {
             continue;
         }
         for shard in 0..idx.number_of_shards() {
+            let (docs, bytes) = shard_docs(ctx, &st, idx, shard);
             for copy in 0..=idx.number_of_replicas() {
                 let primary = copy == 0;
                 let assigned = primary;
@@ -653,8 +714,8 @@ pub fn shards(ctx: &Ctx) -> EsResult<Reply> {
                     "sync_id" | "unassigned.details" => Cell::Null,
                     "unassigned.reason" | "unassigned.at" | "unassigned.for" | "recoverysource.type" => Cell::Null,
                     _ if !assigned || idx.is_closed() => Cell::Null,
-                    "docs" => Cell::Int(0),
-                    "store" | "dataset" => Cell::Bytes(0),
+                    "docs" => Cell::Int(docs),
+                    "store" | "dataset" => Cell::Bytes(bytes),
                     other => stats::zero(other),
                 });
             }
@@ -701,11 +762,19 @@ pub fn templates(ctx: &Ctx) -> EsResult<Reply> {
 }
 
 pub fn count(ctx: &Ctx) -> EsResult<Reply> {
-    // Resolving validates the index expressions; documents arrive with the engine.
-    index_options(ctx, IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?;
+    let names = index_options(ctx, IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?;
+    let st = ctx.state();
+    let mut total = 0i64;
+    for n in &names {
+        if let Some(idx) = st.metadata.indices.get(n) {
+            for shard in 0..idx.number_of_shards() {
+                total += shard_docs(ctx, &st, idx, shard).0;
+            }
+        }
+    }
     let mut t = table(ctx, columns!(ctx, COUNT));
     let now = ctx.now_ms;
-    t.push_row(|c| time_cells(now, c).unwrap_or(Cell::Int(0)));
+    t.push_row(|c| time_cells(now, c).unwrap_or(Cell::Int(total)));
     finish(t)
 }
 
@@ -762,8 +831,36 @@ pub fn pending_tasks(ctx: &Ctx) -> EsResult<Reply> {
 }
 
 pub fn segments(ctx: &Ctx) -> EsResult<Reply> {
-    index_options(ctx, IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?;
-    finish(table(ctx, columns!(ctx, SEGMENTS)))
+    let names = index_options(ctx, IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?;
+    let st = ctx.state();
+    let node = &ctx.cluster.node;
+    let mut t = table(ctx, columns!(ctx, SEGMENTS));
+    for n in names {
+        let Some(idx) = st.metadata.indices.get(&n) else { continue };
+        for shard in 0..idx.number_of_shards() {
+            for r in super::shards::segment_rows(ctx, idx, shard) {
+                t.push_row(|c| match c {
+                    "index" => Cell::str(&idx.name),
+                    "shard" => Cell::Int(shard as i64),
+                    "prirep" => Cell::str("p"),
+                    "ip" => Cell::str(&node.ip),
+                    "id" => Cell::str(&node.id),
+                    "segment" => Cell::str(&r.name),
+                    "generation" => Cell::Int(r.generation as i64),
+                    "docs.count" => Cell::Int(r.docs as i64),
+                    "docs.deleted" => Cell::Int(r.deleted as i64),
+                    "size" => Cell::Bytes(r.size as i64),
+                    "size.memory" => Cell::Int(0),
+                    "committed" => Cell::str(if r.committed { "true" } else { "false" }),
+                    "searchable" => Cell::str(if r.search { "true" } else { "false" }),
+                    "version" => Cell::str(crate::version::LUCENE_VERSION),
+                    "compound" => Cell::str("true"),
+                    _ => Cell::Null,
+                });
+            }
+        }
+    }
+    finish(t)
 }
 
 pub fn recovery(ctx: &Ctx) -> EsResult<Reply> {

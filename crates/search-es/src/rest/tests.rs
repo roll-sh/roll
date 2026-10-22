@@ -103,10 +103,15 @@ async fn cat_rendering() {
 }
 
 #[tokio::test]
-async fn placeholder_for_document_apis() {
+async fn document_apis_round_trip() {
     let c = Cluster::in_memory("t").await;
     let r = run(&c, "GET", "/idx/_search", None).await;
-    assert_eq!(r.status, 501);
+    assert_eq!(r.status, 404);
+    let r = run(&c, "PUT", "/idx/_doc/1?refresh=true", Some(r#"{"title":"hello world"}"#)).await;
+    assert_eq!(r.status, 201);
+    let r = run(&c, "GET", "/idx/_search", Some(r#"{"query":{"match":{"title":"hello"}}}"#)).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body_json().pointer(&["hits", "total", "value"]).and_then(Value::as_i64), Some(1));
 }
 
 #[test]

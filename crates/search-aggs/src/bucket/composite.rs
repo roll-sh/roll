@@ -532,22 +532,33 @@ impl Internal for Composite {
     }
     fn reduce(list: Vec<Self>, ctx: &mut ReduceCtx<'_>) -> Result<Self> {
         let first = &list[0];
-        let (size, names, formats, orders) = (first.size, first.names.clone(), first.formats.clone(), first.orders.clone());
-        let lists: Vec<Vec<CompositeBucket>> = list.into_iter().map(|c| c.buckets).collect();
+        let (size, names, orders) = (first.size, first.names.clone(), first.orders.clone());
+        // Buckets carry the formats of the shard they came from (an unmapped shard's are
+        // RAW); a reduced bucket keeps its first (prototype) bucket's, and the result takes the
+        // last bucket's.
+        let all_formats: Vec<Arc<Vec<DocValueFormat>>> = list.iter().map(|c| c.formats.clone()).collect();
+        let lists: Vec<Vec<(usize, CompositeBucket)>> =
+            list.into_iter().enumerate().map(|(i, c)| c.buckets.into_iter().map(|b| (i, b)).collect()).collect();
         let ord = orders.clone();
-        let groups = crate::util::lucene_merge_groups(lists, |a, b| compare_keys(&a.key, &b.key, &ord) == Ordering::Less);
+        let groups = crate::util::lucene_merge_groups(lists, |a, b| compare_keys(&a.1.key, &b.1.key, &ord) == Ordering::Less);
         let mut out = Vec::new();
+        let mut formats_from = 0;
         for g in groups {
             if out.len() >= size {
                 break;
             }
-            let key = g[0].key.clone();
-            let doc_count = g.iter().map(|b| b.doc_count).sum();
-            let aggs = Aggs::reduce_hashed(g.into_iter().map(|b| b.aggs).collect(), ctx)?;
+            formats_from = g[0].0;
+            let key = g[0].1.key.clone();
+            let doc_count = g.iter().map(|b| b.1.doc_count).sum();
+            let aggs = Aggs::reduce_hashed(g.into_iter().map(|b| b.1.aggs).collect(), ctx)?;
             out.push(CompositeBucket { key, doc_count, aggs });
         }
         ctx.consume_buckets(out.len())?;
         let after_key = out.last().map(|b| b.key.clone());
+        let formats = all_formats.into_iter().nth(formats_from).unwrap_or_default();
+        if let Some(k) = &after_key {
+            validate_after_key(k, &formats)?;
+        }
         Ok(Composite { size, names, formats, orders, buckets: out, after_key })
     }
     fn render(&self, out: &mut Json, rc: &RenderCtx) {
@@ -575,7 +586,30 @@ impl Internal for Composite {
     }
 }
 
+/// `InternalComposite.validateAfterKey`: every part of a reduced `after_key` must survive
+/// formatting and parsing back (a `date_histogram` source's `format` can lose information, or
+/// mix week- and month-based fields), or the next page couldn't continue from it.
+fn validate_after_key(key: &CompositeKey, formats: &[DocValueFormat]) -> Result<()> {
+    for (part, format) in key.iter().zip(formats) {
+        let (KeyPart::Long(v), DocValueFormat::DateTime { .. }) = (part, format) else { continue };
+        let Json::Str(text) = format.format_long(*v) else { continue };
+        // A text the formatter can't read back at all is left alone: the built-in formatter
+        // only parses ISO dates (search-es supplies the real ones).
+        let Ok(parsed) = format.parse_long(&text, false, 0) else { continue };
+        if parsed != *v {
+            return Err(AggError::illegal_argument(format!(
+                "Format [{}] created output it couldn't parse for value [{v}] of type [class java.lang.Long]. parsed value: [{parsed}(class java.lang.Long)]",
+                format.java_string()
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl MultiBuckets for Composite {
+    fn bucket_class(&self) -> &'static str {
+        "InternalBucket"
+    }
     fn len(&self) -> usize {
         self.buckets.len()
     }
@@ -819,6 +853,9 @@ pub fn create(def: &AggDef, spec: &CompositeSpec, ctx: &mut BindCtx<'_>) -> Resu
             factory_class(p)
         )));
     }
+    if ctx.time_series_request {
+        return Err(AggError::illegal_argument("[composite] aggregation is incompatible with time series execution mode"));
+    }
     let now = ctx.lookup.now_millis();
     let mut sources = Vec::with_capacity(spec.sources.len());
     for s in &spec.sources {
@@ -870,6 +907,10 @@ pub fn create(def: &AggDef, spec: &CompositeSpec, ctx: &mut BindCtx<'_>) -> Resu
         };
         sources.push(BoundSource { spec: s.clone(), vs, double, bytes, rounding, tile_bounds, reader: SourceReader::None, vals: Vec::new(), arena: Vec::new() });
     }
+    // `CompositeAggregator`'s constructor.
+    if spec.size as i64 > ctx.max_buckets as i64 {
+        return Err(AggError::too_many_buckets_requested(ctx.max_buckets, spec.size as i64));
+    }
     let after = match &spec.after {
         None => None,
         Some(a) => {
@@ -879,10 +920,23 @@ pub fn create(def: &AggDef, spec: &CompositeSpec, ctx: &mut BindCtx<'_>) -> Resu
             }
             let mut key = CompositeKey::new();
             for s in &sources {
-                let Some(v) = a.get(&s.spec.name) else {
+                if a.get(&s.spec.name).is_none() {
                     return Err(AggError::illegal_argument(format!("Missing value for [after.{}]", s.spec.name)));
-                };
-                key.push(s.after_part(v, now)?);
+                }
+            }
+            // `CompositeValuesCollectorQueue.setAfterKey` names the position of a value its
+            // source rejects; the aggregator wraps that in a parse exception.
+            for (i, s) in sources.iter().enumerate() {
+                let v = a.get(&s.spec.name).expect("checked");
+                match s.after_part(v, now) {
+                    Ok(part) => key.push(part),
+                    Err(e) if matches!(&*e.kind, "illegal_argument_exception" | "number_format_exception") => {
+                        let msg = format!("incompatible value in the position {i}: {}", e.reason);
+                        return Err(AggError::new(400, "parse_exception", format!("Cannot set after key in the composite aggregation [{}] - {msg}", def.name))
+                            .caused_by(AggError::illegal_argument(msg).caused_by(e)));
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             Some(key)
         }
@@ -1345,9 +1399,7 @@ impl Aggregator for CompositeAgg {
         self.subs.needs_scores() || self.sources.iter().any(|s| s.vs.script.as_ref().is_some_and(|x| x.needs_score()))
     }
 
-    fn validate_sort(&self, _name: &str, _key: Option<&str>, _rest: &[PathElement]) -> Result<()> {
-        Err(AggError::illegal_argument(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.",
-        ))
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
     }
 }

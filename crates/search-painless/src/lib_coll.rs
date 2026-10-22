@@ -6,6 +6,13 @@
 //! sets, map views, read-only doc-values lists), the way Java's virtual dispatch would; failure
 //! messages and the JDK frames above the script follow `java.util` of the JDK Elasticsearch
 //! 9.5 ships.
+//!
+//! Views are live: a `subList` and a `TreeMap`/`TreeSet` range view (`headMap`, `subSet`,
+//! `descendingMap`, `navigableKeySet`, …) keep a copy of their window that is refreshed from
+//! the backing collection before and written back after every library call on them, and
+//! refreshed on plain reads. Mutators that call scripts (`forEach`, `removeIf`, `replaceAll`,
+//! `sort`, `compute*`, `merge`) check the collection's modification count the way the JDK
+//! class does and fail with its `ConcurrentModificationException` frames.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -193,7 +200,10 @@ fn as_map(v: &Value) -> Option<&Rc<JMap>> {
 /// Elements of anything iterable, or `None` if the value is not iterable.
 pub fn elements_opt(vm: &mut Vm, v: &Value) -> Result<Option<Vec<Value>>, Thrown> {
     Ok(Some(match v {
-        Value::List(l) => l.v.borrow().clone(),
+        Value::List(l) => {
+            l.sync_view();
+            l.v.borrow().clone()
+        }
         Value::Set(s) => s.keys(),
         Value::Obj(o) => match &**o {
             Obj::MapView { map, kind } => match kind {
@@ -505,6 +515,7 @@ pub fn map_put(vm: &mut Vm, recv: &Value, k: Value, v: Value) -> VR {
             // an entry holds a key and a value
             crate::guard::check_elements(2 * (m.len() + 1))?;
             if m.order() == MapOrder::Sorted {
+                window_check(vm, m, &k, &[])?;
                 return Ok(sorted_insert(vm, m, k, v)?.unwrap_or(Value::Null));
             }
             Ok(m.insert_raw(k, v).unwrap_or(Value::Null))
@@ -546,6 +557,11 @@ fn set_add(vm: &mut Vm, s: &Rc<JMap>, x: Value) -> Result<bool, Thrown> {
         return Err(uoe());
     }
     if s.order() == MapOrder::Sorted {
+        if s.window.as_ref().is_some_and(|w| w.keys_only) {
+            // a map's key set cannot add
+            return Err(uoe_frames(&["java.util.AbstractCollection.add(AbstractCollection.java:253)"]));
+        }
+        window_check(vm, s, &x, &["java.util.TreeSet.add(TreeSet.java:261)"])?;
         return Ok(sorted_insert(vm, s, x, Value::Null)?.is_none());
     }
     if s.contains(&x) {
@@ -572,9 +588,56 @@ fn bool_v(b: bool) -> VR {
 
 fn it_for_each(vm: &mut Vm, a: &mut [Value]) -> VR {
     let f = a[1].clone();
-    // iterate live for lists so concurrent modification is detected like Java
+    match &a[0] {
+        // `ArrayList.forEach`: stops after the first structural change and then fails
+        Value::List(l) if l.class == cls::ARRAY_LIST && l.view.is_none() => {
+            let l = l.clone();
+            let (expected, n) = (l.mods.get(), l.len());
+            let mut i = 0;
+            while l.mods.get() == expected && i < n {
+                let x = l.get(i).unwrap_or(Value::Null);
+                call(vm, &f, &[x])?;
+                i += 1;
+            }
+            if l.mods.get() != expected {
+                return Err(Throw::new(cls::CONCURRENT_MODIFICATION_EXCEPTION, None).with_frames(&["java.base/java.util.ArrayList.forEach(ArrayList.java:1614)"]));
+            }
+            return Ok(Value::Null);
+        }
+        // `HashMap.KeySet/Values/EntrySet.forEach`: the whole table, then the check
+        Value::Obj(o) if matches!(&**o, Obj::MapView { map, .. } if map.class == cls::HASH_MAP) => {
+            let Obj::MapView { map, kind } = &**o else { unreachable!() };
+            let (map, kind) = (map.clone(), *kind);
+            let expected = map.mods.get();
+            let (items, frame) = match kind {
+                ViewKind::Keys => (map.keys(), "java.base/java.util.HashMap$KeySet.forEach(HashMap.java:1045)"),
+                ViewKind::Values => (map.values(), "java.base/java.util.HashMap$Values.forEach(HashMap.java:1102)"),
+                ViewKind::Entries => (entry_values(&map), "java.base/java.util.HashMap$EntrySet.forEach(HashMap.java:1163)"),
+            };
+            for x in items {
+                call(vm, &f, &[x])?;
+            }
+            if map.mods.get() != expected {
+                return Err(Throw::new(cls::CONCURRENT_MODIFICATION_EXCEPTION, None).with_frames(&[frame]));
+            }
+            return Ok(Value::Null);
+        }
+        _ => {}
+    }
+    // `Iterable.forEach`: a for-each loop over the iterator
     let mut it = crate::iter::iter_of(vm, &a[0])?;
-    while let Some(x) = it.next()? {
+    let iterated = matches!(it.source, crate::iter::Source::List(_) | crate::iter::Source::Set(_) | crate::iter::Source::Map(..));
+    loop {
+        let x = match it.next() {
+            Ok(Some(x)) => x,
+            Ok(None) => break,
+            Err(mut e) => {
+                if iterated && e.class == cls::CONCURRENT_MODIFICATION_EXCEPTION {
+                    e.frames.push("java.base/java.lang.Iterable.forEach(Iterable.java:74)".into());
+                }
+                return Err(e);
+            }
+        };
         call(vm, &f, &[x])?;
     }
     Ok(Value::Null)
@@ -834,12 +897,19 @@ fn remove_where(vm: &mut Vm, recv: &Value, op: &str, mut pred: impl FnMut(&mut V
             let items = l.v.borrow().clone();
             let mut keep = Vec::with_capacity(items.len());
             let mut changed = false;
+            let expected = l.mods.get();
             for x in items {
                 if pred(vm, &x)? {
                     changed = true;
                 } else {
                     keep.push(x);
                 }
+            }
+            if op == "removeIf" && l.class == cls::ARRAY_LIST && l.view.is_none() && l.mods.get() != expected {
+                // `ArrayList.removeIf` tests every element, then checks
+                let line = if changed { 1784 } else { 1794 };
+                return Err(Throw::new(cls::CONCURRENT_MODIFICATION_EXCEPTION, None)
+                    .with_frames(&[&format!("java.base/java.util.ArrayList.removeIf(ArrayList.java:{line})"), "java.base/java.util.ArrayList.removeIf(ArrayList.java:1759)"]));
             }
             if changed {
                 *l.v.borrow_mut() = keep;
@@ -899,8 +969,8 @@ fn coll_remove_if(vm: &mut Vm, a: &mut [Value]) -> VR {
 }
 
 fn coll_stream(vm: &mut Vm, a: &mut [Value]) -> VR {
-    let items = elements(vm, &a[0])?;
-    Ok(crate::stream::stream_of(items))
+    let recv = a[0].clone();
+    crate::stream::collection_stream(&recv, || elements(vm, &recv))
 }
 
 fn coll_to_array(vm: &mut Vm, a: &mut [Value]) -> VR {
@@ -1091,7 +1161,13 @@ fn list_replace_all(vm: &mut Vm, a: &mut [Value]) -> VR {
     let l = l.clone();
     check_mutable(&l, false, "replaceAll")?;
     let n = l.len();
+    let expected = l.mods.get();
+    let array_list = l.class == cls::ARRAY_LIST && l.view.is_none();
     for i in 0..n {
+        // `ArrayList.replaceAllRange` stops at a structural change
+        if array_list && l.mods.get() != expected {
+            break;
+        }
         let x = match l.get(i) {
             Some(x) => x,
             None => break,
@@ -1100,6 +1176,14 @@ fn list_replace_all(vm: &mut Vm, a: &mut [Value]) -> VR {
         if let Some(slot) = l.v.borrow_mut().get_mut(i) {
             *slot = r;
         }
+    }
+    if array_list {
+        if l.mods.get() != expected {
+            return Err(Throw::new(cls::CONCURRENT_MODIFICATION_EXCEPTION, None)
+                .with_frames(&["java.base/java.util.ArrayList.replaceAllRange(ArrayList.java:1813)", "java.base/java.util.ArrayList.replaceAll(ArrayList.java:1801)"]));
+        }
+        // `ArrayList.replaceAll` counts as a structural change (iterators and sub lists fail)
+        l.bump();
     }
     Ok(Value::Null)
 }
@@ -1117,7 +1201,13 @@ fn list_sort(vm: &mut Vm, a: &mut [Value]) -> VR {
     check_mutable(&l, false, "sort")?;
     let mut items = l.v.borrow().clone();
     let natural = cmp.is_null();
+    let expected = l.mods.get();
     let r = func::sort_values(vm, &mut items, &cmp);
+    if r.is_ok() && l.class == cls::ARRAY_LIST && l.view.is_none() && l.mods.get() != expected {
+        // the comparator changed the list: `sortRange` checks after sorting its array
+        return Err(Throw::new(cls::CONCURRENT_MODIFICATION_EXCEPTION, None)
+            .with_frames(&["java.base/java.util.ArrayList.sortRange(ArrayList.java:1827)", "java.base/java.util.ArrayList.sort(ArrayList.java:1818)"]));
+    }
     // the JDK sorts the list's array in place: a failed sort leaves it partially sorted
     *l.v.borrow_mut() = items;
     if let Err(mut e) = r {
@@ -1565,6 +1655,7 @@ fn list_clone(_: &mut Vm, a: &mut [Value]) -> VR {
                 mods: std::cell::Cell::new(0),
                 comparator: m.comparator.clone(),
                 lazy_host: false,
+                window: None,
             };
             Ok(if matches!(a[0], Value::Map(_)) { Value::Map(Rc::new(n)) } else { Value::Set(Rc::new(n)) })
         }
@@ -1969,6 +2060,15 @@ fn sorted_keys(v: &Value) -> Result<(Rc<JMap>, Vec<Value>), Thrown> {
 
 /// `TreeSet.first()`/`last()` and `TreeMap.firstKey()`/`lastKey()` of an empty tree.
 fn tree_empty(m: &JMap, first: bool) -> Thrown {
+    if let Some(w) = &m.window {
+        let mut f = vec!["java.util.TreeMap.key(TreeMap.java:1638)"];
+        let _ = w;
+        f.push(if first { "java.util.TreeMap$NavigableSubMap.firstKey(TreeMap.java:1915)" } else { "java.util.TreeMap$NavigableSubMap.lastKey(TreeMap.java:1919)" });
+        if m.class == cls::TREE_SET {
+            f.push(if first { "java.util.TreeSet.first(TreeSet.java:397)" } else { "java.util.TreeSet.last(TreeSet.java:404)" });
+        }
+        return nsee(&f);
+    }
     let mut f = vec!["java.util.TreeMap.key(TreeMap.java:1638)", if first { "java.util.TreeMap.firstKey(TreeMap.java:303)" } else { "java.util.TreeMap.lastKey(TreeMap.java:310)" }];
     if m.class == cls::TREE_SET {
         f.push(if first { "java.util.TreeSet.first(TreeSet.java:397)" } else { "java.util.TreeSet.last(TreeSet.java:404)" });
@@ -2041,61 +2141,221 @@ fn sset_poll_last(_: &mut Vm, a: &mut [Value]) -> VR {
         None => Ok(Value::Null),
     }
 }
-fn sorted_subset(vm: &mut Vm, recv: &Value, lo: Option<(&Value, bool)>, hi: Option<(&Value, bool)>) -> VR {
-    let (m, keys) = sorted_keys(recv)?;
-    let start = match lo {
-        Some((x, incl)) => lower_bound(vm, &m, &keys, x, !incl)?,
-        None => 0,
+// ------------------------------------------------------------------------------ range views
+
+/// Compares by a tree's order (its comparator, or natural ordering).
+fn tree_cmp(vm: &mut Vm, root: &JMap, a: &Value, b: &Value) -> Result<std::cmp::Ordering, Thrown> {
+    let cmp = root.comparator.clone().unwrap_or(Value::Null);
+    compare_with(vm, &cmp, a, b)
+}
+
+/// The tree a sorted map or set shows and the view's bounds and direction (a plain tree: no
+/// bounds, ascending).
+/// A range bound: the key and whether it is inclusive.
+type Bound = Option<(Value, bool)>;
+
+fn window_of(m: &Rc<JMap>) -> (Rc<JMap>, Bound, Bound, bool) {
+    match &m.window {
+        Some(w) => (w.root.clone(), w.lo.clone(), w.hi.clone(), w.descending),
+        None => (m.clone(), None, None, false),
+    }
+}
+
+/// A range view of `root` (`TreeMap.headMap` & co., `TreeSet.headSet` & co.).
+fn make_window(vm: &mut Vm, root: &Rc<JMap>, set: bool, lo: Bound, hi: Bound, descending: bool, keys_only: bool) -> VR {
+    // `TreeSet` range views are `TreeSet`s over a sub map; a map's key sets are `TreeMap.KeySet`
+    let class = match (set, keys_only, descending) {
+        (true, true, _) => cls::TREE_MAP_KEY_SET,
+        (true, false, _) => cls::TREE_SET,
+        (false, _, false) => cls::TREE_MAP_ASCENDING_SUB_MAP,
+        (false, _, true) => cls::TREE_MAP_DESCENDING_SUB_MAP,
     };
-    let end = match hi {
-        Some((x, incl)) => lower_bound(vm, &m, &keys, x, incl)?,
-        None => keys.len(),
+    let mut v = JMap::new(class);
+    // a descending view orders by the reversed comparator (`Collections.reverseOrder(cmp)`)
+    v.comparator = match (&root.comparator, descending) {
+        (c, false) => c.clone(),
+        (None, true) => Some(func::reverse_order_comparator()),
+        (Some(c), true) => {
+            let c = c.clone();
+            Some(func::native(Some(cls::COMPARATOR), move |vm, a| Ok(Value::Int(compare_with(vm, &c, &a[1], &a[0])? as i32))))
+        }
     };
-    let mut out = JMap::new(m.class);
-    out.comparator = m.comparator.clone();
-    let is_set = matches!(recv, Value::Set(_));
-    {
-        let d = m.data.borrow();
-        for i in start..end.max(start) {
-            let (k, v) = d.m.get_index(i).unwrap();
-            out.data.borrow_mut().m.insert(k.clone(), v.clone());
+    v.window = Some(Box::new(crate::value::MapWindow { root: root.clone(), lo, hi, descending, keys_only, busy: std::cell::Cell::new(0) }));
+    let v = Rc::new(v);
+    // filled now: reads outside library calls cannot refresh a view whose tree has a comparator
+    window_enter(vm, &v)?;
+    window_exit_quiet(&v);
+    Ok(if set { Value::Set(v) } else { Value::Map(v) })
+}
+
+/// Ends a `window_enter` that changed nothing.
+fn window_exit_quiet(m: &JMap) {
+    if let Some(w) = &m.window {
+        w.busy.set(w.busy.get().saturating_sub(1));
+    }
+}
+
+/// Before a library call on a range view: its entries from the tree.
+pub fn window_enter(vm: &mut Vm, m: &Rc<JMap>) -> Result<(), Thrown> {
+    let Some(w) = &m.window else { return Ok(()) };
+    let root = w.root.clone();
+    if w.busy.get() == 0 {
+        let fresh = w.select(&mut |a, b| tree_cmp(vm, &root, a, b))?;
+        m.replace_entries(fresh);
+    }
+    w.busy.set(w.busy.get() + 1);
+    Ok(())
+}
+
+/// After a library call on a range view: the tree's entries in range become the view's.
+pub fn window_exit(vm: &mut Vm, m: &Rc<JMap>) -> Result<(), Thrown> {
+    let Some(w) = &m.window else { return Ok(()) };
+    w.busy.set(w.busy.get().saturating_sub(1));
+    if w.busy.get() > 0 {
+        return Ok(());
+    }
+    let root = w.root.clone();
+    let mut inside: Vec<(Value, Value)> = m.data.borrow().m.iter().map(|(k, v)| (k.0.clone(), v.clone())).collect();
+    if w.descending {
+        inside.reverse();
+    }
+    let (mut below, mut old_inside, mut above) = (Vec::new(), Vec::new(), Vec::new());
+    for (k, v) in root.entries() {
+        match w.place(&k, &mut |a, b| tree_cmp(vm, &root, a, b))? {
+            std::cmp::Ordering::Less => below.push((k, v)),
+            std::cmp::Ordering::Equal => old_inside.push((k, v)),
+            std::cmp::Ordering::Greater => above.push((k, v)),
         }
     }
-    Ok(if is_set { Value::Set(Rc::new(out)) } else { Value::Map(Rc::new(out)) })
+    if w.keys_only {
+        // a key set only removes: the remaining keys keep their values
+        let keep: Vec<(Value, Value)> = old_inside.into_iter().filter(|(k, _)| inside.iter().any(|(x, _)| x.java_equals(k))).collect();
+        inside = keep;
+    } else {
+        old_inside.clear();
+    }
+    let n_before = root.len();
+    below.extend(inside);
+    below.extend(above);
+    let changed = below.len() != n_before;
+    root.replace_entries(below);
+    if changed {
+        root.bump();
+    }
+    Ok(())
+}
+
+/// A put into a range view: the key must be in range (`NavigableSubMap.put`).
+fn window_check(vm: &mut Vm, m: &Rc<JMap>, k: &Value, callers: &[&str]) -> Result<(), Thrown> {
+    let Some(w) = &m.window else { return Ok(()) };
+    let root = w.root.clone();
+    if w.place(k, &mut |a, b| tree_cmp(vm, &root, a, b))? != std::cmp::Ordering::Equal {
+        let mut f = vec!["java.util.TreeMap$NavigableSubMap.put(TreeMap.java:1834)"];
+        f.extend(callers);
+        let mut t = Throw::new(cls::ILLEGAL_ARGUMENT_EXCEPTION, Some("key out of range".into()));
+        t.frames = jframes(&f);
+        return Err(t);
+    }
+    Ok(())
+}
+
+/// `headMap`/`tailMap`/`subMap` (and the set versions) of a tree or of a view: `from`/`to` in
+/// the receiver's order (a descending view's head is its tree's tail).
+fn sorted_subset(vm: &mut Vm, recv: &Value, from: Option<(&Value, bool)>, to: Option<(&Value, bool)>, method: &str) -> VR {
+    let (m, set) = match recv {
+        Value::Map(m) => (m.clone(), false),
+        Value::Set(m) => (m.clone(), true),
+        _ => return Err(uoe()),
+    };
+    let (root, lo, hi, desc) = window_of(&m);
+    let (mut new_lo, mut new_hi) = (lo.clone(), hi.clone());
+    // in the tree's order
+    let (asc_lo, asc_hi) = if desc { (to, from) } else { (from, to) };
+    if let (Some((a, _)), Some((b, _))) = (from, to) {
+        let o = if desc { tree_cmp(vm, &root, b, a)? } else { tree_cmp(vm, &root, a, b)? };
+        if o == std::cmp::Ordering::Greater {
+            let mut t = Throw::new(cls::ILLEGAL_ARGUMENT_EXCEPTION, Some("fromKey > toKey".into()));
+            if m.window.is_none() {
+                let mut f = vec!["java.util.TreeMap$NavigableSubMap.<init>(TreeMap.java:1686)", "java.util.TreeMap$AscendingSubMap.<init>(TreeMap.java:2212)", "java.util.TreeMap.subMap(TreeMap.java:1226)"];
+                if method == "subMap2" {
+                    f.push("java.util.TreeMap.subMap(TreeMap.java:1267)");
+                }
+                t.frames = jframes(&f);
+            }
+            return Err(t);
+        }
+    }
+    let w = crate::value::MapWindow { root: root.clone(), lo, hi, descending: desc, keys_only: false, busy: std::cell::Cell::new(0) };
+    for (bound, is_lo) in [(asc_lo, true), (asc_hi, false)] {
+        let Some((k, incl)) = bound else { continue };
+        if m.window.is_some() {
+            // a view's sub-view must stay in its range (`inRange` / `inClosedRange`)
+            let place = w.place(k, &mut |a, b| tree_cmp(vm, &root, a, b))?;
+            let edge_ok = |b: &Option<(Value, bool)>, vm: &mut Vm| -> Result<bool, Thrown> {
+                // an exclusive bound accepts its own key when the new bound is exclusive too
+                match b {
+                    Some((bk, false)) if !incl => Ok(tree_cmp(vm, &root, k, bk)? == std::cmp::Ordering::Equal),
+                    _ => Ok(false),
+                }
+            };
+            let ok = place == std::cmp::Ordering::Equal || edge_ok(if place == std::cmp::Ordering::Less { &w.lo } else { &w.hi }, vm)?;
+            if !ok {
+                let which = if (is_lo && !desc) || (!is_lo && desc) { "fromKey" } else { "toKey" };
+                let mut t = Throw::new(cls::ILLEGAL_ARGUMENT_EXCEPTION, Some(format!("{which} out of range")));
+                if method == "headMap" && !desc {
+                    t.frames = jframes(&["java.util.TreeMap$AscendingSubMap.headMap(TreeMap.java:2232)", "java.util.TreeMap$NavigableSubMap.headMap(TreeMap.java:1970)"]);
+                } else if method == "subMap2" && !desc {
+                    t.frames = jframes(&["java.util.TreeMap$AscendingSubMap.subMap(TreeMap.java:2224)", "java.util.TreeMap$NavigableSubMap.subMap(TreeMap.java:1966)"]);
+                }
+                return Err(t);
+            }
+        } else {
+            // the tree checks the key's type (`compare(key, key)`)
+            tree_cmp(vm, &root, k, k)?;
+        }
+        if is_lo {
+            new_lo = Some((k.clone(), incl));
+        } else {
+            new_hi = Some((k.clone(), incl));
+        }
+    }
+    let keys_only = m.window.as_ref().is_some_and(|w| w.keys_only);
+    make_window(vm, &root, set, new_lo, new_hi, desc, keys_only)
 }
 fn sset_head(vm: &mut Vm, a: &mut [Value]) -> VR {
     let r = a[0].clone();
-    sorted_subset(vm, &r, None, Some((&a[1], false)))
+    sorted_subset(vm, &r, None, Some((&a[1], false)), "headMap")
 }
 fn sset_head2(vm: &mut Vm, a: &mut [Value]) -> VR {
     let r = a[0].clone();
-    sorted_subset(vm, &r, None, Some((&a[1], crate::lib_lang::boolean(&a[2]))))
+    sorted_subset(vm, &r, None, Some((&a[1], crate::lib_lang::boolean(&a[2]))), "headMap2")
 }
 fn sset_tail(vm: &mut Vm, a: &mut [Value]) -> VR {
     let r = a[0].clone();
-    sorted_subset(vm, &r, Some((&a[1], true)), None)
+    sorted_subset(vm, &r, Some((&a[1], true)), None, "tailMap")
 }
 fn sset_tail2(vm: &mut Vm, a: &mut [Value]) -> VR {
     let r = a[0].clone();
-    sorted_subset(vm, &r, Some((&a[1], crate::lib_lang::boolean(&a[2]))), None)
+    sorted_subset(vm, &r, Some((&a[1], crate::lib_lang::boolean(&a[2]))), None, "tailMap2")
 }
 fn sset_sub(vm: &mut Vm, a: &mut [Value]) -> VR {
     let r = a[0].clone();
-    sorted_subset(vm, &r, Some((&a[1], true)), Some((&a[2], false)))
+    sorted_subset(vm, &r, Some((&a[1], true)), Some((&a[2], false)), "subMap2")
 }
 fn sset_sub4(vm: &mut Vm, a: &mut [Value]) -> VR {
     let r = a[0].clone();
-    sorted_subset(vm, &r, Some((&a[1], crate::lib_lang::boolean(&a[2]))), Some((&a[3], crate::lib_lang::boolean(&a[4]))))
+    sorted_subset(vm, &r, Some((&a[1], crate::lib_lang::boolean(&a[2]))), Some((&a[3], crate::lib_lang::boolean(&a[4]))), "subMap4")
 }
-fn sset_descending(_: &mut Vm, a: &mut [Value]) -> VR {
-    let (m, mut keys) = sorted_keys(&a[0])?;
-    keys.reverse();
-    let out = Rc::new(JMap::new(cls::LINKED_HASH_SET));
-    for k in keys {
-        out.insert_raw(k, Value::Null);
-    }
-    let _ = m;
-    Ok(Value::Set(out))
+fn sset_descending(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let (m, set) = match &a[0] {
+        Value::Set(m) => (m.clone(), true),
+        Value::Map(m) => (m.clone(), false),
+        _ => return Err(uoe()),
+    };
+    let (root, lo, hi, desc) = window_of(&m);
+    let keys_only = !set || m.window.as_ref().is_some_and(|w| w.keys_only);
+    // `descendingKeySet` of a map is a key set of its descending view
+    make_window(vm, &root, true, lo, hi, !desc, keys_only)
 }
 fn sset_descending_iterator(_: &mut Vm, a: &mut [Value]) -> VR {
     let (_, mut keys) = sorted_keys(&a[0])?;
@@ -2137,12 +2397,22 @@ fn map_clear(vm: &mut Vm, a: &mut [Value]) -> VR {
     }
     coll_clear(vm, a)
 }
+/// `HashMap`'s compute methods fail when their function changed the map structurally.
+fn hash_map_cme(m: &JMap, before: u32, method: &str, line: u32) -> Result<(), Thrown> {
+    if matches!(m.class, cls::HASH_MAP | cls::LINKED_HASH_MAP) && m.mods.get() != before {
+        return Err(Throw::new(cls::CONCURRENT_MODIFICATION_EXCEPTION, None).with_frames(&[&format!("java.base/java.util.HashMap.{method}(HashMap.java:{line})")]));
+    }
+    Ok(())
+}
+
 fn map_compute(vm: &mut Vm, a: &mut [Value]) -> VR {
     let m = mm(a)?;
     check_map_op(&m, "compute")?;
     let (k, f) = (a[1].clone(), a[2].clone());
     let old = m.get(&k).unwrap_or(Value::Null);
+    let before = m.mods.get();
     let nv = call(vm, &f, &[k.clone(), old])?;
+    hash_map_cme(&m, before, "compute", 1351)?;
     if nv.is_null() {
         map_remove_key(vm, &m, &k)?;
     } else {
@@ -2158,7 +2428,9 @@ fn map_compute_if_absent(vm: &mut Vm, a: &mut [Value]) -> VR {
         && !v.is_null() {
             return Ok(v);
         }
+    let before = m.mods.get();
     let nv = call(vm, &f, std::slice::from_ref(&k))?;
+    hash_map_cme(&m, before, "computeIfAbsent", 1255)?;
     if !nv.is_null() {
         map_put(vm, &a[0].clone(), k, nv.clone())?;
     }
@@ -2170,7 +2442,9 @@ fn map_compute_if_present(vm: &mut Vm, a: &mut [Value]) -> VR {
     let (k, f) = (a[1].clone(), a[2].clone());
     match m.get(&k) {
         Some(old) if !old.is_null() => {
+            let before = m.mods.get();
             let nv = call(vm, &f, &[k.clone(), old])?;
+            hash_map_cme(&m, before, "computeIfPresent", 1296)?;
             if nv.is_null() {
                 map_remove_key(vm, &m, &k)?;
             } else {
@@ -2250,7 +2524,8 @@ fn map_for_each(vm: &mut Vm, a: &mut [Value]) -> VR {
     }
     if let Some((m, before)) = mods
         && m.mods.get() != before {
-            return Err(Throw::new(cls::CONCURRENT_MODIFICATION_EXCEPTION, None));
+            let t = Throw::new(cls::CONCURRENT_MODIFICATION_EXCEPTION, None);
+            return Err(if m.class == cls::HASH_MAP { t.with_frames(&["java.base/java.util.HashMap.forEach(HashMap.java:1458)"]) } else { t });
         }
     Ok(Value::Null)
 }
@@ -2259,6 +2534,16 @@ fn map_get_n(vm: &mut Vm, a: &mut [Value]) -> VR {
     map_get(vm, &r, &a[1])
 }
 fn map_get_or_default(vm: &mut Vm, a: &mut [Value]) -> VR {
+    // a hash map: one lookup (`HashMap.getOrDefault` finds the node once)
+    if let Value::Map(m) = &a[0]
+        && m.order() != MapOrder::Sorted
+        && !m.lazy_host
+    {
+        return Ok(match m.get(&a[1]) {
+            Some(v) => v,
+            None => std::mem::take(&mut a[2]),
+        });
+    }
     let r = a[0].clone();
     let has = match &r {
         Value::Map(m) => map_contains(vm, m, &a[1])?,
@@ -2286,7 +2571,12 @@ fn map_merge(vm: &mut Vm, a: &mut [Value]) -> VR {
         return Err(npe("Cannot invoke \"Object.hashCode()\" because \"value\" is null"));
     }
     let nv = match m.get(&k) {
-        Some(old) if !old.is_null() => call(vm, &f, &[old, v])?,
+        Some(old) if !old.is_null() => {
+            let before = m.mods.get();
+            let r = call(vm, &f, &[old, v])?;
+            hash_map_cme(&m, before, "merge", 1419)?;
+            r
+        }
         _ => v,
     };
     if nv.is_null() {
@@ -2386,11 +2676,20 @@ fn map_replace_all(vm: &mut Vm, a: &mut [Value]) -> VR {
     let m = mm(a)?;
     check_map_op(&m, "replaceAll")?;
     let f = a[1].clone();
+    let before = m.mods.get();
     for (k, v) in m.entries() {
         let nv = call(vm, &f, &[k.clone(), v])?;
         if let Some(slot) = m.data.borrow_mut().m.get_mut(&crate::value::Key(k)) {
             *slot = nv;
         }
+    }
+    if m.mods.get() != before {
+        let t = Throw::new(cls::CONCURRENT_MODIFICATION_EXCEPTION, None);
+        return Err(match m.class {
+            cls::HASH_MAP => t.with_frames(&["java.base/java.util.HashMap.replaceAll(HashMap.java:1475)"]),
+            cls::LINKED_HASH_MAP => t.with_frames(&["java.base/java.util.LinkedHashMap.replaceAll(LinkedHashMap.java:999)"]),
+            _ => t,
+        });
     }
     Ok(Value::Null)
 }
@@ -2555,7 +2854,10 @@ fn hashtable_new(_: &mut Vm, _: &mut [Value]) -> VR {
 fn hashtable_from(vm: &mut Vm, a: &mut [Value]) -> VR {
     let src = a[0].clone();
     let m = JMap::new(cls::HASHTABLE);
-    for (k, v) in map_entries(vm, &src)? {
+    let entries = map_entries(vm, &src)?;
+    // `Hashtable(Map)`: `max(2 * size, 11)` buckets
+    m.data.borrow_mut().init_cap = (2 * entries.len()).max(11) as u32;
+    for (k, v) in entries {
         m.insert_raw(k, v);
     }
     Ok(Value::Map(Rc::new(m)))
@@ -2646,19 +2948,16 @@ fn smap_higher_entry(vm: &mut Vm, a: &mut [Value]) -> VR {
 fn smap_lower_entry(vm: &mut Vm, a: &mut [Value]) -> VR {
     smap_nav(vm, a, "lower", true)
 }
-fn smap_descending_map(_: &mut Vm, a: &mut [Value]) -> VR {
+fn smap_descending_map(vm: &mut Vm, a: &mut [Value]) -> VR {
     let m = mm(a)?;
-    let mut entries = m.entries();
-    entries.reverse();
-    let out = Rc::new(JMap::linked());
-    for (k, v) in entries {
-        out.insert_raw(k, v);
-    }
-    Ok(Value::Map(out))
+    let (root, lo, hi, desc) = window_of(&m);
+    make_window(vm, &root, false, lo, hi, !desc, false)
 }
-fn smap_key_set_view(_: &mut Vm, a: &mut [Value]) -> VR {
+fn smap_key_set_view(vm: &mut Vm, a: &mut [Value]) -> VR {
     let m = mm(a)?;
-    Ok(Value::obj(Obj::MapView { map: m, kind: ViewKind::Keys }))
+    // `navigableKeySet`: a live sorted set of the keys
+    let (root, lo, hi, desc) = window_of(&m);
+    make_window(vm, &root, true, lo, hi, desc, true)
 }
 fn smap_descending_key_set(vm: &mut Vm, a: &mut [Value]) -> VR {
     sset_descending(vm, a)
@@ -2801,8 +3100,8 @@ fn iter_has_next(_: &mut Vm, a: &mut [Value]) -> VR {
     bool_v(with_iter(&a[0], |i| i.has_next()).unwrap_or(false))
 }
 fn iter_next(_: &mut Vm, a: &mut [Value]) -> VR {
-    match with_iter(&a[0], |i| i.next().map(|v| v.ok_or_else(|| i.exhausted()))) {
-        Some(r) => r?,
+    match with_iter(&a[0], |i| i.next_strict()) {
+        Some(r) => r,
         None => Err(nsee(&[])),
     }
 }
@@ -3137,11 +3436,312 @@ fn col_unmodifiable_map(vm: &mut Vm, a: &mut [Value]) -> VR {
     }
     Ok(Value::Map(Rc::new(m)))
 }
+/// An `Enumeration` over a snapshot of elements.
+fn enumeration(class: ClassId, items: Vec<Value>) -> Value {
+    Value::obj(Obj::Iterator(RefCell::new(JIter::of_values(class, items))))
+}
+fn col_enumeration(vm: &mut Vm, a: &mut [Value]) -> VR {
+    if a[0].is_null() {
+        return Err(npe("Cannot invoke \"java.util.Collection.iterator()\" because \"c\" is null"));
+    }
+    Ok(enumeration(cls::COLLECTIONS_ENUMERATION, elements(vm, &a[0])?))
+}
+/// `Enumeration.nextElement()`: past the end, the JDK frames of the enumeration's class.
+fn enum_next(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let class = a[0].class();
+    iter_next(vm, a).map_err(|mut e| {
+        if e.class == cls::NO_SUCH_ELEMENT_EXCEPTION && e.frames.is_empty() {
+            e.frames = jframes(if class == cls::EMPTY_ENUMERATION {
+                &["java.util.Collections$EmptyEnumeration.nextElement(Collections.java:4723)"]
+            } else {
+                &["java.util.ArrayList$Itr.next(ArrayList.java:1061)", "java.util.Collections$3.nextElement(Collections.java:5837)"]
+            });
+        }
+        e
+    })
+}
+fn col_empty_enumeration(_: &mut Vm, _: &mut [Value]) -> VR {
+    Ok(enumeration(cls::EMPTY_ENUMERATION, Vec::new()))
+}
+/// `Collections.list(e)`: the enumeration's remaining elements.
+fn col_list(_: &mut Vm, a: &mut [Value]) -> VR {
+    let mut out = Vec::new();
+    match with_iter(&a[0], |i| -> Result<(), Thrown> {
+        while let Some(x) = i.next()? {
+            out.push(x);
+        }
+        Ok(())
+    }) {
+        Some(r) => r?,
+        None if a[0].is_null() => {
+            return Err(npe("Cannot invoke \"java.util.Enumeration.hasMoreElements()\" because \"e\" is null").with_frames(&["java.base/java.util.Collections.list(Collections.java:5860)"]))
+        }
+        None => return Err(crate::vm::cce("not an Enumeration")),
+    }
+    Ok(JList::array_list(out))
+}
+/// `Collections.newSetFromMap(map)`: a set ordered like the (empty) map.
+fn col_new_set_from_map(_: &mut Vm, a: &mut [Value]) -> VR {
+    let m = mm(a)?;
+    if !m.is_empty() {
+        return Err(iae("Map is non-empty".to_string()).with_frames(&["java.base/java.util.Collections.newSetFromMap(Collections.java:6058)"]));
+    }
+    let class = match m.order() {
+        MapOrder::Sorted => cls::TREE_SET,
+        MapOrder::Insertion => cls::LINKED_HASH_SET,
+        MapOrder::Hash => cls::HASH_SET,
+    };
+    let mut set = JMap::new(class);
+    set.comparator = m.comparator.clone();
+    Ok(Value::Set(Rc::new(set)))
+}
+/// `Dictionary.elements()` / `Vector.elements()`.
+fn dict_elements(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let items = match &a[0] {
+        Value::Map(m) => m.values(),
+        v => elements(vm, v)?,
+    };
+    Ok(enumeration(cls::COLLECTIONS_ENUMERATION, items))
+}
+fn dict_keys(_: &mut Vm, a: &mut [Value]) -> VR {
+    let m = mm(a)?;
+    Ok(enumeration(cls::COLLECTIONS_ENUMERATION, m.keys()))
+}
+/// `Vector.copyInto(array)`.
+fn vector_copy_into(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let items = elements(vm, &a[0])?;
+    if a[1].is_null() {
+        return Err(npe("Cannot read the array length because \"dest\" is null"));
+    }
+    for (i, x) in items.into_iter().enumerate() {
+        crate::dynamic::array_store(&a[1], &Value::Int(i as i32), x, None)?;
+    }
+    Ok(Value::Null)
+}
+
+// ------------------------------------------------------------------------------ Spliterator
+
+const SP_ORDERED: i32 = 16;
+const SP_DISTINCT: i32 = 1;
+const SP_SIZED: i32 = 64;
+const SP_SUBSIZED: i32 = 16384;
+
+/// `Spliterator.characteristics()`: fixed by the JDK class, else carried by the spliterator.
+fn sp_characteristics(it: &JIter) -> i32 {
+    match it.class {
+        cls::ARRAY_LIST_SPLITERATOR | cls::SUB_LIST_SPLITERATOR | cls::LINKED_LIST_SPLITERATOR => SP_ORDERED | SP_SIZED | SP_SUBSIZED,
+        // `ArrayDeque`: also `NONNULL`
+        cls::ARRAY_DEQUE_SPLITERATOR => SP_ORDERED | SP_SIZED | SP_SUBSIZED | 256,
+        cls::HASH_MAP_KEY_SPLITERATOR | cls::HASH_MAP_ENTRY_SPLITERATOR => SP_SIZED | SP_DISTINCT,
+        cls::HASH_MAP_VALUE_SPLITERATOR => SP_SIZED,
+        // `SORTED`
+        cls::TREE_MAP_KEY_SPLITERATOR => SP_DISTINCT | 4 | SP_ORDERED | SP_SIZED,
+        cls::EMPTY_SPLITERATOR => SP_SIZED | SP_SUBSIZED,
+        _ => it.ch,
+    }
+}
+
+fn spliterator(class: ClassId, items: Vec<Value>, ch: i32) -> Value {
+    let mut it = JIter::of_values(class, items);
+    it.ch = ch;
+    Value::obj(Obj::Iterator(RefCell::new(it)))
+}
+
+/// `Collection.spliterator()` / `Iterable.spliterator()`: the JDK class of the collection's
+/// spliterator; an `ArrayList`'s reads the live list (its size binds late).
+fn coll_spliterator(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let v = a[0].clone();
+    let (class, ch) = match &v {
+        Value::List(l) if l.class == cls::ARRAY_LIST && l.view.is_none() => {
+            let mut it = JIter::of_values(cls::ARRAY_LIST_SPLITERATOR, Vec::new());
+            it.source = Source::List(l.clone());
+            it.ch = crate::iter::UNBOUND;
+            return Ok(Value::obj(Obj::Iterator(RefCell::new(it))));
+        }
+        Value::List(l) => match l.class {
+            cls::SUB_LIST => (cls::SUB_LIST_SPLITERATOR, 0),
+            cls::LINKED_LIST => (cls::LINKED_LIST_SPLITERATOR, 0),
+            cls::ARRAY_DEQUE => (cls::ARRAY_DEQUE_SPLITERATOR, 0),
+            _ => (cls::ITERATOR_SPLITERATOR, SP_ORDERED | SP_SIZED | SP_SUBSIZED),
+        },
+        Value::Set(m) => match m.class {
+            cls::HASH_SET => (cls::HASH_MAP_KEY_SPLITERATOR, 0),
+            cls::TREE_SET => (cls::TREE_MAP_KEY_SPLITERATOR, 0),
+            _ => (cls::ITERATOR_SPLITERATOR, SP_ORDERED | SP_DISTINCT | SP_SIZED | SP_SUBSIZED),
+        },
+        Value::Obj(o) => match &**o {
+            Obj::MapView { map, kind } if map.class == cls::HASH_MAP => match kind {
+                ViewKind::Keys => (cls::HASH_MAP_KEY_SPLITERATOR, 0),
+                ViewKind::Values => (cls::HASH_MAP_VALUE_SPLITERATOR, 0),
+                ViewKind::Entries => (cls::HASH_MAP_ENTRY_SPLITERATOR, 0),
+            },
+            _ => (cls::ITERATOR_SPLITERATOR, SP_SIZED | SP_SUBSIZED),
+        },
+        _ => (cls::ITERATOR_SPLITERATOR, SP_SIZED | SP_SUBSIZED),
+    };
+    Ok(spliterator(class, elements(vm, &v)?, ch))
+}
+
+/// `BaseStream.spliterator()`: the stream's elements, sized.
+fn stream_spliterator(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let items = crate::stream::stream_items(vm, &a[0])?;
+    Ok(spliterator(cls::ITERATOR_SPLITERATOR, items, SP_ORDERED | SP_SIZED | SP_SUBSIZED))
+}
+
+/// Elements left in a spliterator.
+fn sp_remaining(it: &JIter) -> i64 {
+    let n = match &it.source {
+        Source::List(l) => l.len(),
+        _ => it.items.len(),
+    };
+    n.saturating_sub(it.pos) as i64
+}
+
+fn sp_try_advance(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let f = a[1].clone();
+    match with_iter(&a[0], |i| i.next()).unwrap_or(Ok(None))? {
+        Some(x) => {
+            call(vm, &f, &[x])?;
+            bool_v(true)
+        }
+        None => bool_v(false),
+    }
+}
+fn sp_estimate_size(_: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(Value::Long(with_iter(&a[0], |i| if sp_characteristics(i) & SP_SIZED != 0 { sp_remaining(i) } else { i64::MAX }).unwrap_or(0)))
+}
+fn sp_exact_size(_: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(Value::Long(with_iter(&a[0], |i| if sp_characteristics(i) & SP_SIZED != 0 { sp_remaining(i) } else { -1 }).unwrap_or(-1)))
+}
+fn sp_characteristics_v(_: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(Value::Int(with_iter(&a[0], |i| sp_characteristics(i)).unwrap_or(0)))
+}
+fn sp_has_characteristics(_: &mut Vm, a: &mut [Value]) -> VR {
+    let want = int(&a[1]);
+    bool_v(with_iter(&a[0], |i| sp_characteristics(i) & want == want).unwrap_or(false))
+}
+/// `trySplit()`: list spliterators hand off their first half (`[index, mid)`); others do
+/// not split.
+fn sp_try_split(_: &mut Vm, a: &mut [Value]) -> VR {
+    let split = with_iter(&a[0], |i| {
+        if !matches!(i.class, cls::ARRAY_LIST_SPLITERATOR | cls::SUB_LIST_SPLITERATOR | cls::ARRAY_DEQUE_SPLITERATOR | cls::LINKED_LIST_SPLITERATOR) {
+            return None;
+        }
+        let all: Vec<Value> = match &i.source {
+            Source::List(l) => l.v.borrow().clone(),
+            _ => i.items.clone(),
+        };
+        let (lo, hi) = (i.pos, all.len());
+        let mid = (lo + hi) / 2;
+        if lo >= mid {
+            return None;
+        }
+        let first = all[lo..mid].to_vec();
+        i.pos = mid;
+        Some((i.class, first))
+    })
+    .flatten();
+    Ok(match split {
+        Some((class, items)) => spliterator(class, items, 0),
+        None => Value::Null,
+    })
+}
+fn sp_get_comparator(_: &mut Vm, a: &mut [Value]) -> VR {
+    let sorted = with_iter(&a[0], |i| sp_characteristics(i) & 4 != 0).unwrap_or(false);
+    if sorted {
+        return Ok(Value::Null);
+    }
+    Err(Throw::new(cls::ILLEGAL_STATE_EXCEPTION, None).with_frames(&["java.base/java.util.Spliterator.getComparator(Spliterator.java:471)"]))
+}
+/// `Spliterators.iterator(spliterator)`.
+fn sps_iterator(_: &mut Vm, a: &mut [Value]) -> VR {
+    let mut items = Vec::new();
+    with_iter(&a[0], |i| -> Result<(), Thrown> {
+        while let Some(x) = i.next()? {
+            items.push(x);
+        }
+        Ok(())
+    })
+    .unwrap_or(Ok(()))?;
+    Ok(Value::obj(Obj::Iterator(RefCell::new(JIter::of_values(cls::GENERIC_ITERATOR, items)))))
+}
+fn sps_unknown_size(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let items = elements(vm, &a[0])?;
+    Ok(spliterator(cls::ITERATOR_SPLITERATOR, items, int(&a[1]) & !(SP_SIZED | SP_SUBSIZED)))
+}
+fn sps_of_collection(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let items = elements(vm, &a[0])?;
+    Ok(spliterator(cls::ITERATOR_SPLITERATOR, items, int(&a[1]) | SP_SIZED | SP_SUBSIZED))
+}
+fn sps_of_iterator(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let items = elements(vm, &a[0])?;
+    Ok(spliterator(cls::ITERATOR_SPLITERATOR, items, int(&a[2]) | SP_SIZED | SP_SUBSIZED))
+}
+fn sps_empty(_: &mut Vm, _: &mut [Value]) -> VR {
+    Ok(spliterator(cls::EMPTY_SPLITERATOR, Vec::new(), 0))
+}
+
+fn register_spliterators(b: &mut Builder) {
+    use cls::*;
+    b.interface(SPLITERATOR, &[]);
+    b.interface(SPLITERATOR_OF_PRIMITIVE, &[SPLITERATOR]);
+    for c in [SPLITERATOR_OF_INT, SPLITERATOR_OF_LONG, SPLITERATOR_OF_DOUBLE] {
+        b.interface(c, &[SPLITERATOR_OF_PRIMITIVE]);
+    }
+    macro_rules! sp_const {
+        ($($name:literal = $v:literal),*) => {
+            $( b.sf(SPLITERATOR, concat!("int ", $name), |_, _| Ok(Value::Int($v))); )*
+        };
+    }
+    sp_const!("ORDERED" = 16, "DISTINCT" = 1, "SORTED" = 4, "SIZED" = 64, "NONNULL" = 256, "IMMUTABLE" = 1024, "CONCURRENT" = 4096, "SUBSIZED" = 16384);
+    b.m(SPLITERATOR, "int characteristics()", sp_characteristics_v);
+    b.m(SPLITERATOR, "long estimateSize()", sp_estimate_size);
+    b.m(SPLITERATOR, "void forEachRemaining(Consumer)", iter_for_each_remaining);
+    b.m(SPLITERATOR, "Comparator getComparator()", sp_get_comparator);
+    b.m(SPLITERATOR, "long getExactSizeIfKnown()", sp_exact_size);
+    b.m(SPLITERATOR, "boolean hasCharacteristics(int)", sp_has_characteristics);
+    b.m(SPLITERATOR, "boolean tryAdvance(Consumer)", sp_try_advance);
+    b.m(SPLITERATOR, "Spliterator trySplit()", sp_try_split);
+    for c in [
+        ARRAY_LIST_SPLITERATOR,
+        SUB_LIST_SPLITERATOR,
+        LINKED_LIST_SPLITERATOR,
+        ARRAY_DEQUE_SPLITERATOR,
+        HASH_MAP_KEY_SPLITERATOR,
+        HASH_MAP_VALUE_SPLITERATOR,
+        HASH_MAP_ENTRY_SPLITERATOR,
+        TREE_MAP_KEY_SPLITERATOR,
+        ITERATOR_SPLITERATOR,
+        EMPTY_SPLITERATOR,
+    ] {
+        b.supers(c, &[OBJECT, SPLITERATOR]);
+    }
+    b.supers(SPLITERATORS, &[OBJECT]);
+    b.s(SPLITERATORS, "Iterator iterator(Spliterator)", sps_iterator);
+    b.s(SPLITERATORS, "Spliterator spliteratorUnknownSize(Iterator,int)", sps_unknown_size);
+    b.s(SPLITERATORS, "Spliterator spliterator(Collection,int)", sps_of_collection);
+    b.s(SPLITERATORS, "Spliterator spliterator(Iterator,long,int)", sps_of_iterator);
+    b.s(SPLITERATORS, "Spliterator emptySpliterator()", sps_empty);
+    b.s(SPLITERATORS, "Spliterator.OfInt emptyIntSpliterator()", sps_empty);
+    b.s(SPLITERATORS, "Spliterator.OfLong emptyLongSpliterator()", sps_empty);
+    b.s(SPLITERATORS, "Spliterator.OfDouble emptyDoubleSpliterator()", sps_empty);
+    b.m(ITERABLE, "Spliterator spliterator()", coll_spliterator);
+    b.m(COLLECTION, "Spliterator spliterator()", coll_spliterator);
+    b.m(BASE_STREAM, "Spliterator spliterator()", stream_spliterator);
+}
+
 fn col_reverse_order(_: &mut Vm, _: &mut [Value]) -> VR {
-    Ok(func::native(Some(cls::COMPARATOR), |_, a| Ok(Value::Int(func::natural_compare(&a[1], &a[0])? as i32))))
+    Ok(func::reverse_order_comparator())
 }
 fn col_reverse_order_cmp(_: &mut Vm, a: &mut [Value]) -> VR {
     let c = a[0].clone();
+    let (natural, reverse) = (func::natural_order_comparator(), func::reverse_order_comparator());
+    if c.is_null() || func::same_object(&c, &natural) {
+        return Ok(reverse);
+    }
+    if func::same_object(&c, &reverse) {
+        return Ok(natural);
+    }
     Ok(func::native(Some(cls::COMPARATOR), move |vm, a| Ok(Value::Int(compare_with(vm, &c, &a[1], &a[0])? as i32))))
 }
 fn col_empty_list_field(_: &mut Vm, _: &mut [Value]) -> VR {
@@ -3311,6 +3911,21 @@ pub fn register(b: &mut Builder) {
     b.supers(LINKED_HASH_MAP, &[HASH_MAP, MAP]);
     b.supers(TREE_MAP, &[ABSTRACT_MAP, NAVIGABLE_MAP]);
     b.supers(DICTIONARY, &[OBJECT]);
+    // `Dictionary` (Hashtable's superclass) and its enumerations
+    b.m(DICTIONARY, "Enumeration elements()", dict_elements);
+    b.m(DICTIONARY, "Enumeration keys()", dict_keys);
+    b.m(DICTIONARY, "def get(def)", map_get_n);
+    b.m(DICTIONARY, "boolean isEmpty()", map_is_empty);
+    b.m(DICTIONARY, "def put(def,def)", map_put_n);
+    b.m(DICTIONARY, "def remove(def)", map_remove);
+    b.m(DICTIONARY, "int size()", map_size);
+    b.interface(ENUMERATION, &[]);
+    b.m(ENUMERATION, "boolean hasMoreElements()", iter_has_next);
+    b.m(ENUMERATION, "def nextElement()", enum_next);
+    b.supers(COLLECTIONS_ENUMERATION, &[OBJECT, ENUMERATION]);
+    b.supers(EMPTY_ENUMERATION, &[OBJECT, ENUMERATION]);
+    b.m(VECTOR, "Enumeration elements()", dict_elements);
+    b.m(VECTOR, "void copyInto(Object[])", vector_copy_into);
     b.supers(HASHTABLE, &[DICTIONARY, MAP]);
     b.supers(IDENTITY_HASH_MAP, &[ABSTRACT_MAP, MAP]);
     b.supers(HASH_SET, &[ABSTRACT_SET, SET]);
@@ -3340,6 +3955,8 @@ pub fn register(b: &mut Builder) {
     b.supers(LINKED_ENTRY_SET, &[ABSTRACT_SET]);
     b.supers(LINKED_ENTRY, &[HASH_MAP_NODE]);
     b.supers(TREE_MAP_KEY_SET, &[ABSTRACT_SET, NAVIGABLE_SET]);
+    b.supers(TREE_MAP_ASCENDING_SUB_MAP, &[ABSTRACT_MAP, NAVIGABLE_MAP]);
+    b.supers(TREE_MAP_DESCENDING_SUB_MAP, &[ABSTRACT_MAP, NAVIGABLE_MAP]);
     b.supers(TREE_MAP_VALUES, &[ABSTRACT_COLLECTION]);
     b.supers(TREE_MAP_ENTRY_SET, &[ABSTRACT_SET]);
     b.supers(TREE_MAP_ENTRY, &[OBJECT, MAP_ENTRY]);
@@ -3385,6 +4002,7 @@ pub fn register(b: &mut Builder) {
     b.m(COLLECTION, "boolean retainAll(Collection)", coll_retain_all);
     b.m(COLLECTION, "int size()", coll_size);
     b.m(COLLECTION, "Stream stream()", coll_stream);
+    register_spliterators(b);
     b.m(COLLECTION, "def[] toArray()", coll_to_array);
     b.m(COLLECTION, "def[] toArray(def[])", coll_to_array2);
     let c_inner = "java.util.Collection.iterator()";
@@ -3647,6 +4265,10 @@ pub fn register(b: &mut Builder) {
     b.s(COLLECTIONS, "boolean replaceAll(List,def,def)", col_replace_all);
     b.s(COLLECTIONS, "void reverse(List)", col_reverse);
     b.s(COLLECTIONS, "Comparator reverseOrder()", col_reverse_order);
+    b.s(COLLECTIONS, "Enumeration enumeration(Collection)", col_enumeration);
+    b.s(COLLECTIONS, "Enumeration emptyEnumeration()", col_empty_enumeration);
+    b.s(COLLECTIONS, "ArrayList list(Enumeration)", col_list);
+    b.s(COLLECTIONS, "Set newSetFromMap(Map)", col_new_set_from_map);
     b.s(COLLECTIONS, "Comparator reverseOrder(Comparator)", col_reverse_order_cmp);
     b.s(COLLECTIONS, "void rotate(List,int)", col_rotate);
     let m = b.s(COLLECTIONS, "void shuffle(List)", col_shuffle);

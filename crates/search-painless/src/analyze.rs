@@ -162,6 +162,12 @@ pub struct Analyzer<'r> {
     /// Offset of the source's first token (where a script without statements fails): the
     /// first function, or the end of input.
     src_start: u32,
+    /// A `void[]` type was looked up: Elasticsearch's lookup fails loading the array class,
+    /// which turns whatever error follows into its internal one.
+    void_array: std::cell::Cell<bool>,
+    /// The first failure of Elasticsearch's IR builder on a tree the semantic checks accepted
+    /// (`return (x++ = 2)`): reported after every semantic check, before `deferred`.
+    ir_error: Option<CompileError>,
 }
 
 fn tn(t: Ty) -> String {
@@ -186,69 +192,89 @@ pub fn analyze(src: &ast::Source, ctx: &ContextDef, reg: &Registry, settings: Se
         lambda_count: 0,
         lambda_captures: HashMap::new(),
         src_start: src.functions.first().map_or(src.end, |f| f.loc),
+        void_array: std::cell::Cell::new(false),
+        ir_error: None,
     };
-    // header phase: declare user functions
-    for f in &src.functions {
-        let key = format!("{}/{}", f.name, f.params.len());
-        if a.local_fns.iter().any(|lf| lf.name == f.name && lf.params.len() == f.params.len()) || (f.name == "execute" && f.params.is_empty()) {
-            return Err(CompileError::illegal_argument(f.loc, format!("invalid function definition: found duplicate function [{key}].")));
-        }
-        let ret = match a.resolve_type(&f.ret) {
-            Some(t) => t,
-            None => {
-                return Err(CompileError::illegal_argument(
-                    f.loc,
-                    format!("invalid function definition: return type [{}] not found for function [{key}]", f.ret),
-                ))
+    let r = a.run(src);
+    if r.is_err() && a.void_array.get() {
+        return Err(CompileError::unlocated("illegal_state_exception", "internal error").caused_by("class_not_found_exception", Some("void".into())));
+    }
+    r
+}
+
+impl Analyzer<'_> {
+    fn run(&mut self, src: &ast::Source) -> R<Analyzed> {
+        let a = self;
+        // header phase: declare user functions
+        for f in &src.functions {
+            let key = format!("{}/{}", f.name, f.params.len());
+            if a.local_fns.iter().any(|lf| lf.name == f.name && lf.params.len() == f.params.len()) || (f.name == "execute" && f.params.is_empty()) {
+                return Err(CompileError::illegal_argument(f.loc, format!("invalid function definition: found duplicate function [{key}].")));
             }
-        };
-        let mut params = Vec::new();
-        for (pt, _) in &f.params {
-            match a.resolve_type(pt) {
-                Some(t) => params.push(t),
+            let ret = match a.resolve_type(&f.ret) {
+                Some(t) => t,
                 None => {
                     return Err(CompileError::illegal_argument(
                         f.loc,
-                        format!("invalid function definition: parameter type [{pt}] not found for function [{key}]"),
+                        format!("invalid function definition: return type [{}] not found for function [{key}]", f.ret),
                     ))
                 }
+            };
+            let mut params = Vec::new();
+            for (pt, _) in &f.params {
+                match a.resolve_type(pt) {
+                    Some(t) => params.push(t),
+                    None => {
+                        return Err(CompileError::illegal_argument(
+                            f.loc,
+                            format!("invalid function definition: parameter type [{pt}] not found for function [{key}]"),
+                        ))
+                    }
+                }
             }
+            let index = a.out.len() as u32;
+            a.out.push(None);
+            a.local_fns.push(LocalFn { name: f.name.clone(), ret, params, internal: false, index });
         }
-        let index = a.out.len() as u32;
+        // execute is the last function, as in Elasticsearch's Walker
+        let exec_index = a.out.len() as u32;
         a.out.push(None);
-        a.local_fns.push(LocalFn { name: f.name.clone(), ret, params, internal: false, index });
+        for (i, f) in src.functions.iter().enumerate() {
+            a.visit_function(f, i)?;
+        }
+        a.visit_execute(&src.stmts, exec_index)?;
+        if let Some(e) = a.ir_error.take() {
+            return Err(e);
+        }
+        if let Some(e) = a.deferred.take() {
+            return Err(e);
+        }
+        let functions = std::mem::take(&mut a.out).into_iter().map(|f| f.expect("function analyzed")).collect();
+        let mut statements = std::mem::take(&mut a.statements);
+        statements.sort_unstable();
+        statements.dedup();
+        Ok(Analyzed {
+            functions,
+            execute: exec_index,
+            used_vars: std::mem::take(&mut a.used_vars),
+            patterns: std::mem::take(&mut a.patterns),
+            bindings: a.bindings,
+            statements,
+            uses_score: a.uses_score,
+            nondeterministic: a.nondeterministic,
+            lambda_captures: std::mem::take(&mut a.lambda_captures),
+        })
     }
-    // execute is the last function, as in Elasticsearch's Walker
-    let exec_index = a.out.len() as u32;
-    a.out.push(None);
-    for (i, f) in src.functions.iter().enumerate() {
-        a.visit_function(f, i)?;
-    }
-    a.visit_execute(&src.stmts, exec_index)?;
-    if let Some(e) = a.deferred {
-        return Err(e);
-    }
-    let functions = a.out.into_iter().map(|f| f.expect("function analyzed")).collect();
-    let mut statements = a.statements;
-    statements.sort_unstable();
-    statements.dedup();
-    Ok(Analyzed {
-        functions,
-        execute: exec_index,
-        used_vars: a.used_vars,
-        patterns: a.patterns,
-        bindings: a.bindings,
-        statements,
-        uses_score: a.uses_score,
-        nondeterministic: a.nondeterministic,
-        lambda_captures: a.lambda_captures,
-    })
 }
 
 impl<'r> Analyzer<'r> {
     /// A type by name, as the context's allowlist sees it: extension classes (`Processors`,
     /// `MovingFunctions`, …) exist only in the contexts Elasticsearch adds them to.
     fn resolve_type(&self, name: &str) -> Option<crate::types::Ty> {
+        if name.starts_with("void[") {
+            self.void_array.set(true);
+            return None;
+        }
         self.reg.resolve_type(name).filter(|t| crate::contexts::class_visible(self.ctx.context, t.class))
     }
 
@@ -916,7 +942,8 @@ impl<'r> Analyzer<'r> {
                 }
                 let ty = match c.target {
                     Some(t) => {
-                        if t.is_primitive() {
+                        // `void.class.isPrimitive()` holds too (`x++ = null`)
+                        if t.is_primitive() || t == Ty::VOID {
                             return Err(CompileError::illegal_argument(loc, format!("Cannot cast null to a primitive type [{}].", tn(t))));
                         }
                         t
@@ -1128,6 +1155,9 @@ impl<'r> Analyzer<'r> {
                     None => return Err(CompileError::illegal_argument(loc, format!("Not a type [{ty}]."))),
                 };
                 let (vty, iface) = self.ref_target(loc, c.target)?;
+                // Painless compiles the reference into a synthetic function whose single
+                // statement (`return new T[size]`) sits at the reference
+                self.stmt_offset(loc);
                 TExpr { loc, ty: vty, k: TK::FuncRef(Box::new(FuncRefSpec::NewArray { ty: at, iface })) }
             }
         };
@@ -1959,9 +1989,19 @@ impl<'r> Analyzer<'r> {
         let lx = self.checked(lhs, EC { read: c.read, write: true, ..EC::default() })?;
         let lt = lx.ty;
         let ploc = lx.loc;
+        // an assignment as the target (`x++ = 2`) analyzes like Elasticsearch's: its value is
+        // `void` unless read, so the right side usually fails to cast; what gets past that
+        // breaks Elasticsearch's IR builder (`None` here)
         let place = match lx.k {
-            TK::Load(p) => p,
+            TK::Load(p) => Some(p),
+            TK::Assign { .. } => None,
             _ => return Err(CompileError::illegal_state(loc, "illegal tree structure")),
+        };
+        let access_depth = || {
+            CompileError::unlocated(
+                "null_pointer_exception",
+                "Cannot invoke \"org.elasticsearch.painless.symbol.Decorations$AccessDepth.accessDepth()\" because the return value of \"org.elasticsearch.painless.symbol.ScriptScope.getDecoration(org.elasticsearch.painless.node.ANode, java.lang.Class)\" is null",
+            )
         };
         if let Some(op) = op {
             let rx = self.checked(rhs, EC::read())?;
@@ -2006,10 +2046,14 @@ impl<'r> Analyzer<'r> {
             let up = self.legal_cast(loc, lt, ct, false, false)?;
             let down = self.legal_cast(loc, ct, lt, true, false)?;
             let compound = Compound { op, ty: ct, up, down, concat };
+            let Some(place) = place else {
+                self.ir_error.get_or_insert_with(access_depth);
+                return Ok(TExpr { loc, ty: if c.read { lt } else { Ty::VOID }, k: rx.k });
+            };
             let vt = if c.read { lt } else { Ty::VOID };
             return Ok(TExpr { loc, ty: vt, k: TK::Assign { place, rhs: Box::new(rx), compound: Some(Box::new(compound)), post, read: c.read, ploc } });
         }
-        let def_optimized = matches!(*place, Place::DefDot { .. } | Place::DefIdx { .. });
+        let def_optimized = matches!(place.as_deref(), Some(Place::DefDot { .. } | Place::DefIdx { .. }));
         let (rx, vt) = if def_optimized {
             let rx = self.checked(rhs, EC::read())?;
             if rx.ty == Ty::VOID {
@@ -2022,6 +2066,10 @@ impl<'r> Analyzer<'r> {
             (self.cast_to(rx, lt, false, false)?, lt)
         };
         let ty = if c.read { vt } else { Ty::VOID };
+        let Some(place) = place else {
+            self.ir_error.get_or_insert_with(access_depth);
+            return Ok(TExpr { loc, ty, k: rx.k });
+        };
         Ok(TExpr { loc, ty, k: TK::Assign { place, rhs: Box::new(rx), compound: None, post: false, read: c.read, ploc } })
     }
 
@@ -2109,15 +2157,13 @@ impl<'r> Analyzer<'r> {
             return Err(CompileError::new(crate::error::NO_LOCATION, "null_pointer_exception", ""));
         }
         self.push_scope();
-        let (mut tbody, flags) = self.visit_block_stmts(&body.stmts, SCond { last_source: true, ..SCond::default() })?;
+        let (tbody, flags) = self.visit_block_stmts(&body.stmts, SCond { last_source: true, ..SCond::default() })?;
         self.pop_scope();
+        // every path of a lambda body must escape, whatever the interface returns (a trailing
+        // expression statement is an implicit return)
         if !flags.method_escape {
-            if ret == Ty::DEF && self.lambda_is_void(iface) {
-                tbody.push(TStmt::Return(None, loc));
-            } else {
-                self.fns.pop();
-                return Err(CompileError::illegal_argument(loc, "not all paths return a value for lambda"));
-            }
+            self.fns.pop();
+            return Err(CompileError::illegal_argument(loc, "not all paths return a value for lambda"));
         }
         let fc = self.fns.pop().unwrap();
         let captures: Vec<u32> = fc.captures.iter().map(|(_, outer, _)| outer.slot).collect();
@@ -2138,16 +2184,6 @@ impl<'r> Analyzer<'r> {
             Some(t) => t,
         };
         Ok(TExpr { loc, ty: vt, k: TK::Lambda { f: index, captures, iface } })
-    }
-
-    fn lambda_is_void(&self, iface: Option<ClassId>) -> bool {
-        match iface {
-            Some(c) => match self.reg.functional(Ty::of(c)) {
-                Some(m) => self.reg.method(m).ret == Ty::VOID,
-                None => false,
-            },
-            None => false,
-        }
     }
 
     fn visit_funcref(&mut self, loc: u32, symbol: &str, method: &str, c: EC) -> R<TExpr> {
@@ -2769,6 +2805,11 @@ fn fold_comp(op: Op, ty: Ty, l: &TExpr, r: &TExpr) -> Option<bool> {
             _ => a == b,
         }
     };
+    // folding `===` of two string constants compares the parser's two String objects, never
+    // the same reference (at run time constants are interned, so `s === 'abc'` can hold)
+    if let (Some(Const::Str(_)), Some(Const::Str(_)), Op::Eqr | Op::Ner) = (lv, rv, op) {
+        return Some(op == Op::Ner);
+    }
     match op {
         Op::Eq | Op::Eqr => Some(match (lv, rv) {
             (None, None) => true,

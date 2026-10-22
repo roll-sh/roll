@@ -117,7 +117,7 @@ pub struct AdjacencySpec {
     pub separator: String,
 }
 
-pub fn parse_adjacency(p: &mut XParser<'_>, check_query: &mut dyn FnMut(&XParser<'_>) -> Result<()>) -> Result<AdjacencySpec> {
+pub fn parse_adjacency(p: &mut XParser<'_>, name: &str, check_query: &mut dyn FnMut(&XParser<'_>) -> Result<()>) -> Result<AdjacencySpec> {
     let fields = [Field::new("separator", Tokens::STRING), Field::new("filters", Tokens::OBJECT_ARRAY)];
     let mut filters: Vec<(String, Json)> = Vec::new();
     let mut separator = "&".to_string();
@@ -127,7 +127,7 @@ pub fn parse_adjacency(p: &mut XParser<'_>, check_query: &mut dyn FnMut(&XParser
             return Ok(());
         }
         if p.token() != Token::StartObject {
-            return Err(AggError::illegal_argument("[adjacency_matrix] filters doesn't support values of type: START_ARRAY"));
+            return Err(AggError::illegal_argument("[filters] doesn't support arrays. Use a single object with multiple fields."));
         }
         loop {
             match p.next_token() {
@@ -143,6 +143,9 @@ pub fn parse_adjacency(p: &mut XParser<'_>, check_query: &mut dyn FnMut(&XParser
         }
         Ok(())
     })?;
+    if filters.is_empty() {
+        return Err(AggError::illegal_state(format!("[{name}] is missing : filters parameter")));
+    }
     filters.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
     Ok(AdjacencySpec { filters, separator })
 }
@@ -250,6 +253,9 @@ impl FiltersAgg {
 }
 
 impl Aggregator for FiltersAgg {
+    fn profile_type(&self) -> &'static str {
+        if self.separator.is_some() { "AdjacencyMatrixAggregator" } else { "FiltersAggregator.Compatible" }
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         for f in &mut self.filters {
@@ -453,6 +459,9 @@ impl Internal for Filters {
 }
 
 impl MultiBuckets for Filters {
+    fn bucket_class(&self) -> &'static str {
+        "InternalBucket"
+    }
     fn len(&self) -> usize {
         self.buckets.len()
     }
@@ -545,6 +554,9 @@ impl Internal for AdjacencyMatrix {
 }
 
 impl MultiBuckets for AdjacencyMatrix {
+    fn bucket_class(&self) -> &'static str {
+        "InternalBucket"
+    }
     fn len(&self) -> usize {
         self.buckets.len()
     }

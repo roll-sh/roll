@@ -13,7 +13,6 @@
 //! password so cluster names can't be probed.
 
 use crate::catalog::{ClusterSpec, Credential};
-use base64::Engine;
 
 /// Credentials as presented in the `Authorization` header.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,32 +34,121 @@ impl Presented {
     }
 }
 
-/// A malformed `Authorization` header.
+/// A malformed `Authorization` header, with what Elasticsearch answers for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Malformed;
+pub enum Malformed {
+    /// `Basic` with bad base64: "invalid basic authentication header encoding", caused by
+    /// Java's `Base64` error text.
+    BasicEncoding(String),
+    /// `Basic` whose decoded value has no `:`: "invalid basic authentication header value".
+    BasicValue,
+    /// `ApiKey` that doesn't decode to `<id>:<secret>`: the message of
+    /// `additional_unsuccessful_credentials` ("API key: <message>").
+    ApiKey(String),
+}
 
+fn strip_prefix_ci<'a>(h: &'a str, prefix: &str) -> Option<&'a str> {
+    (h.len() >= prefix.len() && h.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())).then(|| &h[prefix.len()..])
+}
+
+/// Java's `String.trim()`: strips chars `<= ' '`.
+fn java_trim(s: &str) -> &str {
+    s.trim_matches(|c: char| c <= ' ')
+}
+
+/// `java.util.Base64.getDecoder().decode(..)` with its error texts (Elasticsearch passes them on).
+pub fn java_base64(src: &[u8]) -> Result<Vec<u8>, String> {
+    let len = src.len();
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if len < 2 {
+        return Err("Input byte[] should at least have 2 bytes for base64 bytes".into());
+    }
+    fn val(b: u8) -> i32 {
+        match b {
+            b'A'..=b'Z' => (b - b'A') as i32,
+            b'a'..=b'z' => (b - b'a') as i32 + 26,
+            b'0'..=b'9' => (b - b'0') as i32 + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => -2,
+            _ => -1,
+        }
+    }
+    let mut out = Vec::with_capacity(len / 4 * 3 + 2);
+    let (mut bits, mut shift, mut sp) = (0i32, 18i32, 0usize);
+    while sp < len {
+        let raw = src[sp];
+        sp += 1;
+        let b = val(raw);
+        if b < 0 {
+            if b == -2 {
+                if (shift == 6 && (sp == len || {
+                    let next = src[sp];
+                    sp += 1;
+                    next != b'='
+                })) || shift == 18
+                {
+                    return Err("Input byte array has wrong 4-byte ending unit".into());
+                }
+                break;
+            }
+            // Integer.toString(byte, 16): signed, e.g. "-3d".
+            let signed = raw as i8 as i32;
+            let hex = if signed < 0 { format!("-{:x}", -signed) } else { format!("{signed:x}") };
+            return Err(format!("Illegal base64 character {hex}"));
+        }
+        bits |= b << shift;
+        shift -= 6;
+        if shift < 0 {
+            out.extend_from_slice(&[(bits >> 16) as u8, (bits >> 8) as u8, bits as u8]);
+            shift = 18;
+            bits = 0;
+        }
+    }
+    match shift {
+        6 => out.push((bits >> 16) as u8),
+        0 => out.extend_from_slice(&[(bits >> 16) as u8, (bits >> 8) as u8]),
+        12 => return Err("Last unit does not have enough valid bits".into()),
+        _ => {}
+    }
+    if sp < len {
+        return Err(format!("Input byte array has incorrect ending byte at {sp}"));
+    }
+    Ok(out)
+}
+
+/// Parses `Authorization` like Elasticsearch's realms: `Basic `, `ApiKey ` and `Bearer `
+/// (case-insensitive, one space, value trimmed); an empty value or another scheme presents
+/// nothing.
 pub fn parse_authorization(header: Option<&str>) -> Result<Presented, Malformed> {
-    let Some(h) = header.map(str::trim).filter(|h| !h.is_empty()) else { return Ok(Presented::None) };
-    let (scheme, rest) = h.split_once(' ').unwrap_or((h, ""));
-    let rest = rest.trim();
-    let decode = |s: &str| -> Result<String, Malformed> {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(s).map_err(|_| Malformed)?;
-        String::from_utf8(bytes).map_err(|_| Malformed)
-    };
-    if scheme.eq_ignore_ascii_case("basic") {
-        let text = decode(rest)?;
-        let (user, password) = text.split_once(':').ok_or(Malformed)?;
+    let Some(h) = header else { return Ok(Presented::None) };
+    if let Some(rest) = strip_prefix_ci(h, "Basic ") {
+        let rest = java_trim(rest);
+        if rest.is_empty() {
+            return Ok(Presented::None);
+        }
+        let bytes = java_base64(rest.as_bytes()).map_err(Malformed::BasicEncoding)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let (user, password) = text.split_once(':').ok_or(Malformed::BasicValue)?;
         return Ok(Presented::Basic { user: user.to_string(), password: password.to_string() });
     }
-    if scheme.eq_ignore_ascii_case("apikey") {
-        let text = decode(rest)?;
-        let (id, secret) = text.split_once(':').ok_or(Malformed)?;
+    if let Some(rest) = strip_prefix_ci(h, "ApiKey ") {
+        let rest = java_trim(rest);
+        if rest.is_empty() {
+            return Ok(Presented::None);
+        }
+        let bytes = java_base64(rest.as_bytes()).map_err(Malformed::ApiKey)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let (id, secret) = text.split_once(':').filter(|(id, _)| !id.is_empty()).ok_or_else(|| Malformed::ApiKey("invalid ApiKey value".into()))?;
         return Ok(Presented::ApiKey { id: id.to_string(), secret: secret.to_string() });
     }
-    if scheme.eq_ignore_ascii_case("bearer") {
-        return Ok(Presented::Bearer(rest.to_string()));
+    if let Some(rest) = strip_prefix_ci(h, "Bearer ") {
+        let rest = java_trim(rest);
+        return Ok(if rest.is_empty() { Presented::None } else { Presented::Bearer(rest.to_string()) });
     }
-    Err(Malformed)
+    Ok(Presented::None)
 }
 
 /// Constant-time byte comparison (the length is not secret).
@@ -125,7 +213,8 @@ pub fn verify(spec: &ClusterSpec, claim: &Claim) -> bool {
     }
     let Some(secret) = &claim.secret else { return false };
     let mut ok = false;
-    for Credential { user, api_key_id, secret: expected } in &spec.credentials {
+    let presented_hash = spec.credentials.iter().any(|c| c.secret_sha256.is_some()).then(|| crate::catalog::secret_hash(secret));
+    for Credential { user, api_key_id, secret: expected, secret_sha256 } in &spec.credentials {
         let user_ok = match (user, &claim.user) {
             (Some(u), Some(cu)) => ct_eq(u.as_bytes(), cu.as_bytes()),
             (Some(_), None) => false,
@@ -137,7 +226,11 @@ pub fn verify(spec: &ClusterSpec, claim: &Claim) -> bool {
             (None, _) => true,
         };
         // Evaluate every credential so timing doesn't reveal which one matched.
-        ok |= user_ok & key_ok & ct_eq(expected.as_bytes(), secret.as_bytes());
+        let secret_ok = match (secret_sha256, &presented_hash) {
+            (Some(h), Some(p)) => ct_eq(h, p),
+            _ => !expected.is_empty() && ct_eq(expected.as_bytes(), secret.as_bytes()),
+        };
+        ok |= user_ok & key_ok & secret_ok;
     }
     ok
 }
@@ -145,6 +238,7 @@ pub fn verify(spec: &ClusterSpec, claim: &Claim) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     fn b64(s: &str) -> String {
         base64::engine::general_purpose::STANDARD.encode(s)
@@ -157,10 +251,39 @@ mod tests {
             parse_authorization(Some(&format!("Basic {}", b64("c1:pw")))),
             Ok(Presented::Basic { user: "c1".into(), password: "pw".into() })
         );
+        assert_eq!(
+            parse_authorization(Some(&format!("basic  {}  ", b64("c1:pw")))),
+            Ok(Presented::Basic { user: "c1".into(), password: "pw".into() })
+        );
         assert_eq!(parse_authorization(Some(&format!("ApiKey {}", b64("c1:s")))), Ok(Presented::ApiKey { id: "c1".into(), secret: "s".into() }));
         assert_eq!(parse_authorization(Some("Bearer c1_abc")), Ok(Presented::Bearer("c1_abc".into())));
-        assert_eq!(parse_authorization(Some("Basic !!!")), Err(Malformed));
-        assert_eq!(parse_authorization(Some("Digest x")), Err(Malformed));
+        // Elasticsearch 9.5.5's answers (captured with security enabled).
+        let enc = |m: &str| Err(Malformed::BasicEncoding(m.into()));
+        assert_eq!(parse_authorization(Some("Basic %%%")), enc("Illegal base64 character 25"));
+        assert_eq!(parse_authorization(Some("Basic a")), enc("Input byte[] should at least have 2 bytes for base64 bytes"));
+        assert_eq!(parse_authorization(Some("Basic YWJj=")), enc("Input byte array has wrong 4-byte ending unit"));
+        assert_eq!(parse_authorization(Some("Basic \u{e9}")), enc("Illegal base64 character -3d"));
+        assert_eq!(parse_authorization(Some("Basic YQ")), Err(Malformed::BasicValue));
+        assert_eq!(parse_authorization(Some(&format!("Basic {}", b64("nocolon")))), Err(Malformed::BasicValue));
+        assert_eq!(parse_authorization(Some("ApiKey a")), Err(Malformed::ApiKey("Input byte[] should at least have 2 bytes for base64 bytes".into())));
+        assert_eq!(parse_authorization(Some(&format!("ApiKey {}", b64(":x")))), Err(Malformed::ApiKey("invalid ApiKey value".into())));
+        assert_eq!(parse_authorization(Some(&format!("ApiKey {}", b64("nocolon")))), Err(Malformed::ApiKey("invalid ApiKey value".into())));
+        for none in ["Digest x", "Basic", "Basic ", "Bearer", "Bearer  ", "ApiKey "] {
+            assert_eq!(parse_authorization(Some(none)), Ok(Presented::None), "{none}");
+        }
+    }
+
+    #[test]
+    fn java_base64_matches_the_jdk() {
+        assert_eq!(java_base64(b"YWJj").unwrap(), b"abc");
+        assert_eq!(java_base64(b"YWI=").unwrap(), b"ab");
+        assert_eq!(java_base64(b"YWI").unwrap(), b"ab");
+        assert_eq!(java_base64(b"YQ==").unwrap(), b"a");
+        assert_eq!(java_base64(b"YQ=").unwrap_err(), "Input byte array has wrong 4-byte ending unit");
+        assert_eq!(java_base64(b"Y=").unwrap_err(), "Last unit does not have enough valid bits");
+        assert_eq!(java_base64(b"YWJjZ").unwrap_err(), "Last unit does not have enough valid bits");
+        assert_eq!(java_base64(b"YQ==YQ").unwrap_err(), "Input byte array has incorrect ending byte at 4");
+        assert_eq!(java_base64(b"").unwrap(), b"");
     }
 
     #[test]
@@ -197,9 +320,17 @@ mod tests {
         assert!(!verify(&spec, &Claim { secret: None, ..ok.clone() }));
         assert!(verify(&ClusterSpec::new("open"), &Claim { secret: None, ..ok.clone() }));
         let mut bound = ClusterSpec::new("c1");
-        bound.credentials.push(Credential { user: Some("bob".into()), api_key_id: None, secret: "pw".into() });
+        bound.credentials.push(Credential::password("pw").for_user("bob"));
         assert!(!verify(&bound, &ok));
         assert!(verify(&bound, &Claim { user: Some("bob".into()), ..ok }));
         assert!(ct_eq(b"abc", b"abc") && !ct_eq(b"abc", b"abd") && !ct_eq(b"abc", b"ab"));
+        // Hashed secrets.
+        let mut hashed = ClusterSpec::new("c1");
+        hashed.credentials.push(Credential::hashed(crate::catalog::secret_hash("s3cret")));
+        let c = Claim { cluster: "c1".into(), user: None, api_key_id: None, secret: Some("s3cret".into()) };
+        assert!(verify(&hashed, &c));
+        assert!(!verify(&hashed, &Claim { secret: Some("s3cre".into()), ..c.clone() }));
+        // An empty hashed credential's clear secret never matches an empty password.
+        assert!(!verify(&hashed, &Claim { secret: Some(String::new()), ..c }));
     }
 }

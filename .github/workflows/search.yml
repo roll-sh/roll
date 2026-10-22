@@ -1,0 +1,96 @@
+name: search
+
+# Runs only when roll search code changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/search-*/**"
+      - "crates/snowball/**"
+      - "crates/pg-storage/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "docs/search/compatibility.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/test-search.sh"
+      - "scripts/search-yaml-suites.sh"
+      - ".github/workflows/search.yml"
+      - "apps/dashboard/src/lib/search-*"
+  workflow_dispatch:
+  # Pull requests and the merge queue run this through ci.yml.
+  workflow_call:
+
+concurrency:
+  group: search-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The dashboard's search helpers run under Node's TypeScript type stripping.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: scripts/test-search.sh --force --unit
+
+  yaml:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Elasticsearch's rest-resources zip is downloaded at test time into target/ (never
+      # committed: it isn't Apache-licensed); OpenSearch's suite is a sparse clone.
+      - name: YAML REST suites against search-dev
+        run: |
+          # A cached target/ may hold an old report; a run that fails early must not reuse it.
+          rm -f target/search-yaml/roll.json target/search-yaml/roll-opensearch.json
+          ROLL_JOBS=4 scripts/search-yaml-suites.sh roll --max-failures 1000000 || true
+          ROLL_JOBS=4 scripts/search-yaml-suites.sh roll-os --max-failures 1000000 || true
+      - name: Pass counts at or above docs/search/compatibility.md
+        run: |
+          check() {
+            local n min
+            n=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["totals"]["passed"])' "$2")
+            min=$(grep -oE "test-search: $1 >= [0-9]+" docs/search/compatibility.md 2>/dev/null | grep -oE '[0-9]+$' || echo 0)
+            echo "$1: $n passed (minimum $min)"
+            [ "$n" -ge "$min" ]
+          }
+          check roll target/search-yaml/roll.json
+          check roll-os target/search-yaml/roll-opensearch.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: search-yaml-reports
+          path: target/search-yaml/roll*.json
+          if-no-files-found: ignore
+
+  s3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_ACCESS_KEY_ID: roll
+      AWS_SECRET_ACCESS_KEY: roll
+      AWS_REGION: us-east-1
+      ROLL_E2E_S3_BUCKET: roll-e2e
+      ROLL_E2E_S3_ENDPOINT: http://127.0.0.1:8333
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: S3 object store (SeaweedFS)
+        run: |
+          docker run -d --name seaweed -p 8333:8333 chrislusf/seaweedfs server -s3
+          for i in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && break; sleep 1; done
+          docker exec seaweed sh -c 'echo "s3.bucket.create -name roll-e2e" | weed shell'
+      - name: Storage, server and control plane on S3
+        run: cargo test -p search-store -p search-server -p search-control

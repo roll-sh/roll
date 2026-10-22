@@ -98,7 +98,8 @@ pub enum TrackTotalHits {
     UpTo(i32),
 }
 
-/// A query rescorer.
+/// A rescorer: `query` (`QueryRescorer`) or, when `script` is set, `script`
+/// (`ScriptRescorer`: the script's value replaces the score; `query` is then unused).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rescore {
     pub window_size: Option<i32>,
@@ -106,6 +107,7 @@ pub struct Rescore {
     pub query_weight: f32,
     pub rescore_query_weight: f32,
     pub score_mode: String,
+    pub script: Option<Script>,
 }
 
 /// `collapse`.
@@ -166,10 +168,80 @@ pub struct SearchSource {
     pub suggest: Option<Map>,
     pub knn: Vec<Map>,
     pub retriever: Option<Map>,
+    /// A `diversify` retriever over the rest of the request (set by [`crate::search::retriever`]).
+    pub diversify: Option<crate::search::retriever::Diversify>,
+    /// A compound retriever (`rrf`, `linear`): the children whose rankings fuse.
+    pub fusion: Option<Box<crate::search::retriever::Fusion>>,
+    /// Set by a `rescorer` retriever: its window is rescored before `collapse` applies (a
+    /// plain search collapses first and rescores the collapsed hits).
+    pub rescore_before_collapse: bool,
     pub rank: Option<Map>,
     pub ext: Option<Map>,
     /// Deprecation warnings raised while parsing.
     pub warnings: Vec<String>,
+}
+
+/// The checks `HighlightBuilder.fromXContent` makes while parsing (positioned on the
+/// `highlight` object): empty tag lists, and `number_of_fragments` out of `[0, 10000]` (wrapped
+/// in each enclosing `ObjectParser`'s "failed to parse field").
+fn check_highlight(p: &XParser<'_>) -> EsResult<()> {
+    use crate::json::locate::Seg;
+    let Value::Obj(h) = p.value() else { return Ok(()) };
+    let empty = |k: &str| matches!(h.get(k), Some(Value::Arr(a)) if a.is_empty());
+    if empty("pre_tags") || empty("post_tags") {
+        // Raised once the whole object was read: at its end.
+        let (l, c) = crate::json::locate::value_end(p.source(), &p.path()).unwrap_or_else(|| p.token_location());
+        return Err(EsError::parsing(l, c, "pre_tags or post_tags must not be empty"));
+    }
+    // The cause of a bad `key` value, if it is one.
+    let cause = |key: &str, v: &Value| -> Option<EsError> {
+        match key {
+            "number_of_fragments" => {
+                v.as_f64().is_some_and(|n| !(0.0..=10000.0).contains(&n)).then(|| EsError::illegal_argument("[number_of_fragments] must be between [0] and [10000]"))
+            }
+            // `intValue()` with string coercion; 0 and below -1 are refused.
+            _ => {
+                let n = match v {
+                    Value::Num(n) => n.as_f64(),
+                    Value::Str(s) => match crate::units::parse_java_double(s.trim()) {
+                        Some(d) => d,
+                        None => return Some(EsError::java(400, "number_format_exception", format!("For input string: \"{s}\""))),
+                    },
+                    _ => return None,
+                };
+                let n = n.trunc();
+                (n == 0.0 || n < -1.0).then(|| EsError::illegal_argument("[max_analyzed_offset] must be a positive integer, or -1"))
+            }
+        }
+    };
+    const CHECKED: [&str; 2] = ["number_of_fragments", "max_analyzed_offset"];
+    for key in CHECKED {
+        if let Some(e) = h.get(key).and_then(|v| cause(key, v)) {
+            let (l, c) = p.location_of(&[Seg::Key(key)]);
+            return Err(EsError::x_content_parse(l, c, format!("[highlight] failed to parse field [{key}]")).caused_by(e));
+        }
+    }
+    let fields: Vec<(&str, &Value)> = match h.get("fields") {
+        Some(Value::Obj(m)) => m.iter().map(|(k, v)| (k.as_str(), v)).collect(),
+        Some(Value::Arr(a)) => a.iter().filter_map(|x| match x {
+            Value::Obj(m) => m.iter().next().map(|(k, v)| (k.as_str(), v)),
+            _ => None,
+        }).collect(),
+        _ => Vec::new(),
+    };
+    for (name, f) in fields {
+        for key in CHECKED {
+            let Some(e) = f.get(key).and_then(|v| cause(key, v)) else { continue };
+            let (l, c) = match h.get("fields") {
+                Some(Value::Obj(_)) => p.location_of(&[Seg::Key("fields"), Seg::Key(name), Seg::Key(key)]),
+                _ => p.token_location(),
+            };
+            let inner = EsError::x_content_parse(l, c, format!("[highlight_field] failed to parse field [{key}]")).caused_by(e);
+            let mid = EsError::x_content_parse(l, c, format!("[fields] failed to parse field [{name}]")).caused_by(inner);
+            return Err(EsError::x_content_parse(l, c, "[highlight] failed to parse field [fields]").caused_by(mid));
+        }
+    }
+    Ok(())
 }
 
 fn unknown_key(p: &XParser<'_>, t: Token, key: &str) -> EsError {
@@ -237,9 +309,10 @@ impl SearchSource {
                     if v < -1 {
                         return Err(EsError::illegal_argument(format!("[track_total_hits] parameter must be positive or equals to -1, got {v}")));
                     }
+                    // `TRACK_TOTAL_HITS_DISABLED` is -1; `Integer.MAX_VALUE` is accurate.
                     match v {
-                        -1 | i32::MAX => TrackTotalHits::Accurate,
-                        0 => TrackTotalHits::Disabled,
+                        -1 => TrackTotalHits::Disabled,
+                        i32::MAX => TrackTotalHits::Accurate,
                         n => TrackTotalHits::UpTo(n),
                     }
                 })
@@ -276,8 +349,14 @@ impl SearchSource {
                 }
             }
             "aggregations" | "aggs" => self.aggs = Some(p.map()?),
-            "highlight" => self.highlight = Some(p.map()?),
-            "suggest" => self.suggest = Some(p.map()?),
+            "highlight" => {
+                check_highlight(p)?;
+                self.highlight = Some(p.map()?);
+            }
+            "suggest" => {
+                crate::search::suggest::check(p)?;
+                self.suggest = Some(p.map()?);
+            }
             "sort" => self.sort = sorts(p)?,
             "rescore" => self.rescore.push(rescore(p)?),
             "ext" => self.ext = Some(p.map()?),
@@ -682,6 +761,17 @@ fn rescore(p: &mut XParser<'_>) -> EsResult<Rescore> {
                     return Err(p.parsing_error(format!("rescore doesn't support [{key}]")));
                 }
             }
+            Token::StartObject if key == "script" => {
+                const F: &[Field] = &[Field::new("script", Tokens::OBJECT_OR_STRING)];
+                let mut script = None;
+                p.object("script", F, |p, _| {
+                    script = Some(Script::parse(p)?);
+                    Ok(())
+                })?;
+                let script = script.ok_or_else(|| EsError::illegal_argument("[script] is required"))?;
+                let q = crate::query::Query::from(crate::query::compound::MatchAll::default());
+                out = Some(Rescore { window_size: None, query: q, query_weight: 1.0, rescore_query_weight: 1.0, score_mode: "total".into(), script: Some(script) });
+            }
             Token::StartObject => {
                 if key != "query" {
                     let (l, c) = p.token_location();
@@ -710,7 +800,7 @@ fn rescore(p: &mut XParser<'_>) -> EsResult<Rescore> {
                     Ok(())
                 })?;
                 let q = q.ok_or_else(|| EsError::illegal_argument("Required [rescore_query]"))?;
-                out = Some(Rescore { window_size: None, query: q, query_weight: qw, rescore_query_weight: rqw, score_mode: mode });
+                out = Some(Rescore { window_size: None, query: q, query_weight: qw, rescore_query_weight: rqw, score_mode: mode, script: None });
             }
             t => return Err(p.parsing_error(format!("unexpected token [{t}] after [{key}]"))),
         }
@@ -731,7 +821,25 @@ fn collapse(p: &mut XParser<'_>) -> EsResult<Collapse> {
     p.object("collapse", F, |p, i| {
         match i {
             0 => field = Some(p.text()?),
-            1 => inner_hits = p.array_items(|p| Ok(p.take_value()))?,
+            1 => {
+                inner_hits = p.array_items(|p| {
+                    let v = p.take_value();
+                    // `InnerHitBuilder`: a name is required, and its own `collapse` takes only a
+                    // field (no `inner_hits` or `collapse` of its own).
+                    // (`p.object` adds the `[collapse] failed to parse field [inner_hits]` layer.)
+                    let (l, c) = p.token_location();
+                    if let Some(Value::Obj(inner)) = v.get("collapse")
+                        && (inner.contains_key("inner_hits") || inner.contains_key("collapse"))
+                    {
+                        let invalid = EsError::parsing(l, c, "Invalid token in the inner collapse");
+                        return Err(EsError::x_content_parse(l, c, "[inner_hits] failed to parse field [collapse]").caused_by(invalid));
+                    }
+                    if v.get("name").is_none() {
+                        return Err(EsError::illegal_argument("inner_hits must have a [name]; set the [name] field in the inner_hits definition"));
+                    }
+                    Ok(v)
+                })?
+            }
             _ => {
                 let v = p.int_value()?;
                 if v < 1 {
@@ -784,7 +892,12 @@ fn pit(p: &mut XParser<'_>) -> EsResult<PointInTime> {
     let (mut id, mut keep_alive) = (None, None);
     p.object("pit", F, |p, i| {
         if i == 0 {
-            id = Some(p.text()?);
+            let text = p.text()?;
+            // `SearchContextId.decode` reads the id as URL-safe base64 while parsing.
+            if let Some(msg) = crate::units::java_base64_url_error(&text) {
+                return Err(EsError::illegal_argument(msg));
+            }
+            id = Some(text);
         } else {
             keep_alive = Some(TimeValue::parse(&p.text()?, "keep_alive")?);
         }

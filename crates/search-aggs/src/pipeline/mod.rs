@@ -26,7 +26,7 @@ use crate::json::Json;
 use crate::metrics::simple::{ExtendedStats, Stats};
 use crate::request::{AggDef, AggPath, GapPolicy, PathElement, PipelineDef};
 use crate::script::{Script, ScriptKind};
-use crate::xparser::{Field, Token, Tokens, XParser};
+use crate::xparser::{Ctor, Field, Token, Tokens, XParser};
 
 use self::movfn::NativeMovFn;
 use self::values::{BucketMetricValue, Derivative, ExtendedStatsBucket, PercentilesBucket, SimpleLongValue, SimpleValue, StatsBucket};
@@ -135,6 +135,12 @@ pub fn parse(p: &mut XParser<'_>, type_name: &str, name: &str, formats: DecimalF
     }
 }
 
+/// The `ArrayIndexOutOfBoundsException` of the parsers that read `bucketsPaths[0]` of an empty
+/// `buckets_path` array (Elasticsearch answers 500).
+fn empty_paths_error() -> AggError {
+    AggError::new(500, "array_index_out_of_bounds_exception", "Index 0 out of bounds for length 0")
+}
+
 fn parse_buckets_path_array(p: &mut XParser<'_>) -> Result<Vec<String>> {
     let mut out = Vec::new();
     loop {
@@ -181,6 +187,8 @@ fn parse_bucket_metrics(p: &mut XParser<'_>, type_name: &str, name: &str, format
     let Some(paths) = paths else {
         return Err(p.parsing_error(format!("Missing required field [buckets_path] for aggregation [{name}]")));
     };
+    // `buildFactory(name, bucketsPaths[0], params)`: only the first path is kept.
+    let Some(path) = paths.into_iter().next() else { return Err(empty_paths_error()) };
     let kind = match type_name {
         "avg_bucket" => BucketMetricKind::Avg,
         "sum_bucket" => BucketMetricKind::Sum,
@@ -201,8 +209,6 @@ fn parse_bucket_metrics(p: &mut XParser<'_>, type_name: &str, name: &str, format
             BucketMetricKind::Percentiles { percents, keyed }
         }
     };
-    let path = paths.first().cloned().unwrap_or_default();
-    let _ = paths;
     Ok(PipelineKind::BucketMetric { kind, path, gap: gap.unwrap_or_default(), format: format_of(format, formats)? })
 }
 
@@ -241,6 +247,9 @@ fn parse_derivative_like(p: &mut XParser<'_>, type_name: &str, name: &str, forma
     let Some(paths) = paths else {
         return Err(p.parsing_error(format!("Missing required field [buckets_path] for derivative aggregation [{name}]")));
     };
+    // `new …PipelineAggregationBuilder(name, bucketsPaths[0])`: the other paths are dropped.
+    let Some(first) = paths.into_iter().next() else { return Err(empty_paths_error()) };
+    let paths = vec![first];
     let format = format_of(format, formats)?;
     let gap = gap.unwrap_or_default();
     Ok(if serial { PipelineKind::SerialDiff { paths, gap, format, lag } } else { PipelineKind::Derivative { paths, gap, format, unit } })
@@ -259,32 +268,26 @@ fn parse_constructing(p: &mut XParser<'_>, type_name: &str, formats: DecimalFact
     let mut paths: Option<Vec<String>> = None;
     let mut format = None;
     let mut method: Option<String> = None;
-    p.object(type_name, &fields, |p, i| {
-        match i {
-            0 => {
-                paths = Some(if p.token() == Token::StartArray { parse_buckets_path_array(p)? } else { vec![p.text()?] });
-            }
-            1 => format = Some(p.text()?),
-            _ => {
-                let m = p.text()?;
-                if !matches!(m.as_str(), "rescale_0_1" | "rescale_0_100" | "mean" | "z-score" | "percent_of_sum" | "softmax") {
+    // `normalize` takes format, method and buckets_path in its constructor (the method is
+    // checked there); the cumulative ones only buckets_path.
+    let (ctor, required): (&[usize], &[usize]) = if normalize { (&[0, 1, 2], &[2, 0]) } else { (&[0], &[0]) };
+    p.constructing(type_name, &fields, ctor, required, |p, ev| {
+        match ev {
+            Ctor::Build => {
+                if let Some(m) = &method
+                    && !matches!(m.as_str(), "rescale_0_1" | "rescale_0_100" | "mean" | "z-score" | "percent_of_sum" | "softmax")
+                {
                     return Err(AggError::illegal_argument(format!("invalid method [{m}]")));
                 }
-                method = Some(m);
             }
+            Ctor::Field(0) => {
+                paths = Some(if p.token() == Token::StartArray { parse_buckets_path_array(p)? } else { vec![p.text()?] });
+            }
+            Ctor::Field(1) => format = Some(p.text()?),
+            Ctor::Field(_) => method = Some(p.text()?),
         }
-        Ok(())
+        Ok(None)
     })?;
-    let mut missing = Vec::new();
-    if paths.is_none() {
-        missing.push("buckets_path");
-    }
-    if normalize && method.is_none() {
-        missing.push("method");
-    }
-    if !missing.is_empty() {
-        return Err(AggError::illegal_argument(format!("Required [{}]", missing.join(", "))));
-    }
     let paths = paths.unwrap_or_default();
     let format = format_of(format, formats)?;
     Ok(match type_name {
@@ -309,45 +312,36 @@ fn parse_movfn(p: &mut XParser<'_>, formats: DecimalFactory<'_>) -> Result<Pipel
     let mut shift = 0;
     let mut format = None;
     let mut gap = GapPolicy::Skip;
-    p.object("moving_fn", &fields, |p, i| {
-        match i {
-            0 => path = Some(p.text()?),
-            1 => script = Some(Script::parse(p)?),
-            2 => window = Some(p.int_value()?),
-            3 => shift = p.int_value()?,
-            4 => format = Some(p.text()?),
-            _ => {
-                let t = p.text()?.to_lowercase();
-                gap = match t.as_str() {
-                    "insert_zeros" => GapPolicy::InsertZeros,
-                    "skip" => GapPolicy::Skip,
-                    "keep_values" => GapPolicy::KeepValues,
-                    _ => return Err(p.parsing_error(format!("Invalid gap policy: [{t}], accepted values: [insert_zeros, skip, keep_values]"))),
-                };
+    p.constructing("moving_fn", &fields, &[0, 1, 2], &[0, 1, 2], |p, ev| {
+        match ev {
+            Ctor::Build => {
+                if window.unwrap_or(0) <= 0 {
+                    return Err(AggError::illegal_argument("[window] must be a positive, non-zero integer."));
+                }
             }
+            Ctor::Field(0) => path = Some(p.text()?),
+            Ctor::Field(1) => script = Some(Script::parse(p)?),
+            Ctor::Field(2) => window = Some(p.int_value()?),
+            Ctor::Field(3) => shift = p.int_value()?,
+            Ctor::Field(4) => format = Some(p.text()?),
+            Ctor::Field(_) => gap = parse_gap_text(p)?,
         }
-        Ok(())
+        Ok(None)
     })?;
-    let mut missing = Vec::new();
-    if path.is_none() {
-        missing.push("buckets_path");
-    }
-    if script.is_none() {
-        missing.push("script");
-    }
-    if window.is_none() {
-        missing.push("window");
-    }
-    if !missing.is_empty() {
-        return Err(AggError::illegal_argument(format!("Required [{}]", missing.join(", "))));
-    }
-    let window = window.unwrap_or(0);
-    if window <= 0 {
-        return Err(AggError::illegal_argument("[window] must be a positive, non-zero integer."));
-    }
     let script = script.expect("script");
     let native = script.source.as_deref().and_then(NativeMovFn::parse);
-    Ok(PipelineKind::MovFn { path: path.unwrap_or_default(), script, native, window, shift, gap, format: format_of(format, formats)? })
+    Ok(PipelineKind::MovFn { path: path.unwrap_or_default(), script, native, window: window.unwrap_or(0), shift, gap, format: format_of(format, formats)? })
+}
+
+/// A `gap_policy` string (`GapPolicy.parse`).
+fn parse_gap_text(p: &XParser<'_>) -> Result<GapPolicy> {
+    let t = p.text()?.to_lowercase();
+    Ok(match t.as_str() {
+        "insert_zeros" => GapPolicy::InsertZeros,
+        "skip" => GapPolicy::Skip,
+        "keep_values" => GapPolicy::KeepValues,
+        _ => return Err(p.parsing_error(format!("Invalid gap policy: [{t}], accepted values: [insert_zeros, skip, keep_values]"))),
+    })
 }
 
 fn parse_paths_map(p: &mut XParser<'_>) -> Result<Vec<(String, String)>> {
@@ -468,37 +462,31 @@ fn parse_bucket_sort(p: &mut XParser<'_>) -> Result<PipelineKind> {
     let mut from = 0;
     let mut size = None;
     let mut gap = GapPolicy::Skip;
-    p.object("bucket_sort", &fields, |p, i| {
-        match i {
-            0 => {
+    // `sort` is the (optional) constructor argument; from and size are checked by setters.
+    p.constructing("bucket_sort", &fields, &[0], &[], |p, ev| {
+        match ev {
+            Ctor::Build => {}
+            Ctor::Field(0) => {
                 let v = p.take_value();
                 sorts = parse_sorts(&v)?;
             }
-            1 => {
+            Ctor::Field(1) => {
                 let v = p.int_value()?;
                 if v < 0 {
-                    return Err(AggError::illegal_argument(format!("[from] must be a non-negative integer: [{v}]")));
+                    return Ok(Some(AggError::illegal_argument(format!("[from] must be a non-negative integer: [{v}]"))));
                 }
                 from = v;
             }
-            2 => {
+            Ctor::Field(2) => {
                 let v = p.int_value()?;
                 if v <= 0 {
-                    return Err(AggError::illegal_argument(format!("[size] must be a positive integer: [{v}]")));
+                    return Ok(Some(AggError::illegal_argument(format!("[size] must be a positive integer: [{v}]"))));
                 }
                 size = Some(v);
             }
-            _ => {
-                let t = p.text()?.to_lowercase();
-                gap = match t.as_str() {
-                    "insert_zeros" => GapPolicy::InsertZeros,
-                    "skip" => GapPolicy::Skip,
-                    "keep_values" => GapPolicy::KeepValues,
-                    _ => return Err(p.parsing_error(format!("Invalid gap policy: [{t}], accepted values: [insert_zeros, skip, keep_values]"))),
-                };
-            }
+            Ctor::Field(_) => gap = parse_gap_text(p)?,
         }
-        Ok(())
+        Ok(None)
     })?;
     Ok(PipelineKind::BucketSort { sorts, from, size, gap })
 }
@@ -549,6 +537,9 @@ fn bucket_cardinality(def: &AggDef) -> u8 {
     match def.type_name {
         "filter" | "global" | "missing" | "nested" | "reverse_nested" | "sampler" | "diversified_sampler" | "random_sampler" | "children" | "parent" => 1,
         t if crate::parse::is_metric(t) => 0,
+        // `CompositeAggregationBuilder.bucketCardinality()` is NONE: its buckets can't feed
+        // sibling pipelines.
+        "composite" => 0,
         _ => 2,
     }
 }
@@ -569,6 +560,19 @@ fn builder_class(type_name: &str) -> String {
         "filter" => pkg("bucket.filter", "FilterAggregationBuilder"),
         "nested" => pkg("bucket.nested", "NestedAggregationBuilder"),
         "global" => pkg("bucket.global", "GlobalAggregationBuilder"),
+        "composite" => pkg("bucket.composite", "CompositeAggregationBuilder"),
+        "missing" => pkg("bucket.missing", "MissingAggregationBuilder"),
+        "reverse_nested" => pkg("bucket.nested", "ReverseNestedAggregationBuilder"),
+        "sampler" => pkg("bucket.sampler", "SamplerAggregationBuilder"),
+        "diversified_sampler" => pkg("bucket.sampler", "DiversifiedAggregationBuilder"),
+        "random_sampler" => pkg("bucket.sampler.random", "RandomSamplerAggregationBuilder"),
+        "percentile_ranks" => pkg("metrics", "PercentileRanksAggregationBuilder"),
+        "median_absolute_deviation" => pkg("metrics", "MedianAbsoluteDeviationAggregationBuilder"),
+        "geo_bounds" => pkg("metrics", "GeoBoundsAggregationBuilder"),
+        "geo_centroid" => pkg("metrics", "GeoCentroidAggregationBuilder"),
+        "top_hits" => pkg("metrics", "TopHitsAggregationBuilder"),
+        "scripted_metric" => pkg("metrics", "ScriptedMetricAggregationBuilder"),
+        "weighted_avg" => pkg("metrics", "WeightedAvgAggregationBuilder"),
         other => format!("org.elasticsearch.search.aggregations.{other}"),
     }
 }
@@ -630,6 +634,9 @@ fn validate_pipeline(p: &PipelineDef, siblings: &[Arc<AggDef>], parent: Option<&
             }
             let Ok(path) = AggPath::parse(&paths[0]) else { return };
             let els = &path.elements;
+            if els.is_empty() {
+                return;
+            }
             let mut pos = 0;
             let mut cur = &els[pos];
             pos += 1;
@@ -685,12 +692,7 @@ fn validate_pipeline(p: &PipelineDef, siblings: &[Arc<AggDef>], parent: Option<&
             }
             sequential_ordered(t, name, parent, true, errors);
         }
-        PipelineKind::Derivative { .. } => {
-            if paths.len() != 1 {
-                errors.push(format!("buckets_path must contain a single entry for aggregation [{name}]"));
-            }
-            sequential_ordered(t, name, parent, true, errors);
-        }
+        PipelineKind::Derivative { .. } => sequential_ordered(t, name, parent, true, errors),
         PipelineKind::CumulativeCardinality { .. } => {
             if paths.len() != 1 {
                 errors.push(format!("buckets_path must contain a single entry for aggregation [{name}]"));
@@ -750,7 +752,9 @@ fn visit(
     }
     temp.push(p.name.clone());
     for bp in p.kind.buckets_paths() {
-        let Ok(path) = AggPath::parse(&bp) else { continue };
+        // A malformed path fails the request's validation ("Invalid path element [.] in path
+        // [.]", "Invalid path []"), as `AggregationPath.parse` does here in Elasticsearch.
+        let path = AggPath::parse(&bp).map_err(|e| e.reason)?;
         let Some(first) = path.elements.first() else { continue };
         if bp == "_count" || bp == "_key" {
             continue;
@@ -802,7 +806,23 @@ pub fn apply_top(aggs: &mut Aggs, defs: &[Arc<AggDef>], pipelines: &[Arc<Pipelin
 
 /// `InternalAggregation.reducePipelines` for one aggregation and its definition.
 fn reduce_pipelines(agg: &mut Agg, def: &AggDef, ctx: &mut ReduceCtx<'_>) -> Result<()> {
-    if !def.subs.is_empty() {
+    // `InternalIpPrefix.createBucket(aggregations, prototype)` keeps the prototype's
+    // aggregations, so every pipeline result Elasticsearch writes into ip_prefix buckets (the
+    // pipelines below them, sibling pipelines in them, bucket_script and normalize on them) is
+    // computed, failures included, and then lost. Only bucket_selector and bucket_sort, which
+    // rebuild the bucket list instead, take effect.
+    if matches!(agg.value, AggValue::IpPrefix(_)) {
+        let mut scratch = agg.clone();
+        reduce_pipelines_inner(&mut scratch, def, ctx, true)?;
+        return reduce_pipelines_inner(agg, def, ctx, false);
+    }
+    reduce_pipelines_inner(agg, def, ctx, true)
+}
+
+/// [`reduce_pipelines`]; without `into_buckets` only the pipelines that rebuild the bucket
+/// list (bucket_selector, bucket_sort) run.
+fn reduce_pipelines_inner(agg: &mut Agg, def: &AggDef, ctx: &mut ReduceCtx<'_>, into_buckets: bool) -> Result<()> {
+    if !def.subs.is_empty() && into_buckets {
         if let Some(m) = agg.value.multi_mut() {
             for i in 0..m.len() {
                 let bucket_aggs = m.aggs_mut(i);
@@ -825,6 +845,9 @@ fn reduce_pipelines(agg: &mut Agg, def: &AggDef, ctx: &mut ReduceCtx<'_>) -> Res
     }
     let ordered = resolve_order(&def.subs, &def.pipelines).map_err(AggError::illegal_argument)?;
     for p in ordered {
+        if !into_buckets && !matches!(p.kind, PipelineKind::BucketSelector { .. } | PipelineKind::BucketSort { .. }) {
+            continue;
+        }
         if p.kind.is_sibling() {
             // SiblingPipelineAggregator.reduce: one result appended to every bucket.
             if let Some(m) = agg.value.multi_mut() {
@@ -846,6 +869,13 @@ fn reduce_pipelines(agg: &mut Agg, def: &AggDef, ctx: &mut ReduceCtx<'_>) -> Res
 /// The value a `buckets_path` resolves to in a bucket (`BucketHelpers.resolveBucketValue`);
 /// `None` when the path doesn't resolve (an invalid aggregation path).
 pub fn resolve_bucket_value<M: MultiBuckets + ?Sized>(m: &M, agg_name: &str, i: usize, path: &[String], gap: Option<GapPolicy>) -> Result<Option<f64>> {
+    // An empty path resolves to the bucket itself.
+    if path.is_empty() {
+        return Err(AggError::illegal_argument(format!(
+            "buckets_path must reference either a number value or a single value numeric metric aggregation, got: [{}] at aggregation [{agg_name}]",
+            m.bucket_class()
+        )));
+    }
     let prop = match bucket_property(agg_name, m.doc_count(i), || m.key(i), m.aggs(i), path) {
         Ok(p) => p,
         Err(e) if e.kind == "invalid_aggregation_path_exception" => return Ok(None),
@@ -872,7 +902,7 @@ fn prop_to_f64(prop: Prop<'_>, agg_name: &str, path: &[String]) -> Result<f64> {
             }
             if a.value.is_multi_value_metric() {
                 let last = path.last().cloned().unwrap_or_default();
-                return match a.value.multi_value(&last) {
+                return match a.value.multi_value(&a.name, &last) {
                     Ok(v) => Ok(v),
                     Err(e) if e.kind == "number_format_exception" => Err(AggError::illegal_argument(format!(
                         "buckets_path must reference either a number value or a single value numeric metric aggregation, but [{cur_name}] contains multiple values. Please specify which to use."
@@ -1107,8 +1137,9 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
     let histogram_like = is_histogram_like(&agg.value);
     let class = agg.value.class_name();
     let Some(m) = agg.value.multi_mut() else {
-        return Err(AggError::class_cast(format!(
-            "class org.elasticsearch.search.aggregations.{class} cannot be cast to class org.elasticsearch.search.aggregations.InternalMultiBucketAggregation"
+        return Err(AggError::illegal_argument(format!(
+            "Expected a multi bucket aggregation but got [{class}] for aggregation [{}]",
+            p.name
         )));
     };
     let needs_histogram = matches!(
@@ -1120,10 +1151,16 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
             "class org.elasticsearch.search.aggregations.bucket.{class} cannot be cast to class org.elasticsearch.search.aggregations.bucket.histogram.HistogramFactory"
         )));
     }
+    // Validation refuses empty or several paths where Elasticsearch does; this guards reduces of
+    // unvalidated requests.
     let list = |path: &str| -> Result<Vec<String>> { Ok(AggPath::parse(path)?.as_string_list()) };
+    let first = |paths: &[String]| -> Result<Vec<String>> {
+        let Some(path) = paths.first() else { return Err(empty_paths_error()) };
+        list(path)
+    };
     match &p.kind {
         PipelineKind::CumulativeSum { paths, format } => {
-            let path = list(&paths[0])?;
+            let path = first(paths)?;
             let mut sum = 0.0;
             for i in 0..m.len() {
                 let v = resolve_bucket_value(m, &agg_name, i, &path, Some(GapPolicy::InsertZeros))?;
@@ -1136,7 +1173,7 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
             }
         }
         PipelineKind::Derivative { paths, gap, format, unit } => {
-            let path = list(&paths[0])?;
+            let path = first(paths)?;
             let units = match unit {
                 Some(u) => Some(derivative_units(u)?),
                 None => None,
@@ -1157,7 +1194,7 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
             }
         }
         PipelineKind::SerialDiff { paths, gap, format, lag } => {
-            let path = list(&paths[0])?;
+            let path = first(paths)?;
             let lag = *lag as usize;
             if lag >= m.len() {
                 return Ok(());
@@ -1197,7 +1234,7 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
                 let to = clamp(index + *shift as i64);
                 let win = if from <= to { &values[from..to] } else { &values[0..0] };
                 let result = match (native, &host_script) {
-                    (Some(n), _) => n.eval(win, &script.params)?,
+                    (Some(n), _) => n.eval(win, &script.params).map_err(|e| crate::pipeline::movfn::script_runtime_error(script.source.as_deref().unwrap_or(""), e))?,
                     (None, Some(h)) => h.run(win, &script.params)?,
                     _ => f64::NAN,
                 };
@@ -1295,19 +1332,24 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
             let mut rows: Vec<(usize, Vec<Option<SV>>)> = Vec::new();
             for i in 0..n {
                 let mut vals = Vec::with_capacity(parsed.len());
+                // `ComparableBucket.skip()`: a bucket goes when no sort value was recorded; an
+                // unresolvable path records null (sorted last) unless the gap policy skips it.
+                let mut recorded = false;
                 for (path, _, is_key) in &parsed {
                     if *is_key {
                         vals.push(Some(SV::Key(m.key(i))));
+                        recorded = true;
                         continue;
                     }
                     let v = resolve_bucket_value(m, &agg_name, i, path, Some(*gap))?;
                     if gap.is_skippable() && v.is_none_or(|x| x.is_nan()) {
                         vals.push(None);
                     } else {
+                        recorded = true;
                         vals.push(v.map(SV::Num));
                     }
                 }
-                if vals.iter().all(|v| v.is_none()) {
+                if !recorded {
                     continue;
                 }
                 rows.push((i, vals));
@@ -1344,7 +1386,7 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
             m.reorder(&order);
         }
         PipelineKind::Normalize { paths, method, format } => {
-            let path = list(&paths[0])?;
+            let path = first(paths)?;
             let values: Vec<f64> = (0..m.len())
                 .map(|i| resolve_bucket_value(m, &agg_name, i, &path, Some(GapPolicy::Skip)).map(|v| v.unwrap_or(f64::NAN)))
                 .collect::<Result<_>>()?;

@@ -121,6 +121,8 @@ pub(crate) struct ClassicTokenizer {
     upos: usize,
     skipped: u32,
     exhausted: bool,
+    /// Keeps adversarial input (`a-a-a-…`) linear; see [`dfa::DeadEnds`].
+    dead_ends: dfa::DeadEnds,
 }
 
 impl ClassicTokenizer {
@@ -132,6 +134,7 @@ impl ClassicTokenizer {
             upos: 0,
             skipped: 0,
             exhausted: false,
+            dead_ends: dfa::DeadEnds::default(),
         }
     }
 }
@@ -142,12 +145,16 @@ impl Tokenizer for ClassicTokenizer {
         self.upos = 0;
         self.skipped = 0;
         self.exhausted = false;
+        self.dead_ends.reset();
     }
 
     fn next(&mut self, text: &str, t: &mut Tok) -> bool {
         let mut skipped = 0;
         while self.pos < text.len() {
-            if let Some((rule, end, ulen)) = self.dfa.longest_match(text, self.pos, usize::MAX) {
+            if let Some((rule, end, ulen)) =
+                self.dfa
+                    .longest_match_memo(text, self.pos, &mut self.dead_ends)
+            {
                 let (start_b, start_u) = (self.pos, self.upos);
                 self.pos = end;
                 self.upos += ulen;
@@ -229,5 +236,56 @@ mod tests {
         );
         // ACRONYM_DEP: alphanumerics with dots, reported as a host without its last dot.
         assert_eq!(tokens("ab1.cd."), vec![("ab1.cd".to_string(), HOST)]);
+    }
+
+    /// The same tokens with and without the dead-end memo, on inputs with long dead tails.
+    #[test]
+    fn dead_ends_keep_long_tails_linear() {
+        let plain = |text: &str| {
+            let dfa = dfa_classic();
+            let mut out = Vec::new();
+            let mut pos = 0;
+            while pos < text.len() {
+                match dfa.longest_match(text, pos, usize::MAX) {
+                    Some((rule, end, _)) => {
+                        let e = if rule == ACRONYM_DEP { end - 1 } else { end };
+                        out.push((text[pos..e].to_string(), RULE_TYPES[rule]));
+                        pos = end;
+                    }
+                    None => pos += text[pos..].chars().next().map_or(1, char::len_utf8),
+                }
+            }
+            out
+        };
+        let memo = |text: &str| {
+            let mut tk = ClassicTokenizer::new(usize::MAX);
+            tk.reset(text);
+            let mut out = Vec::new();
+            let mut t = Tok::default();
+            loop {
+                t.clear();
+                if !tk.next(text, &mut t) {
+                    break;
+                }
+                out.push((t.term.clone(), t.kind));
+            }
+            out
+        };
+        for text in [
+            "a-".repeat(200),
+            format!("{}@x.com b", "a-".repeat(100)),
+            format!("{} {}", "a-".repeat(100), "b-".repeat(100)),
+            format!("{}é{}", "a.".repeat(100), "1-2-".repeat(60)),
+            "x.y.".repeat(100),
+            format!("{}&", "ab-cd".repeat(50)),
+            format!("{}@", "a_b.".repeat(80)),
+        ] {
+            assert_eq!(plain(&text), memo(&text), "{text}");
+        }
+        // 400 KB of `a-`: Lucene (and the plain scan) take minutes.
+        let text = "a-".repeat(200_000);
+        let t = std::time::Instant::now();
+        assert_eq!(tokens(&text).len(), 200_000);
+        assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
     }
 }

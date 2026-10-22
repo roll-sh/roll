@@ -7,6 +7,9 @@
 //! segments; `delete_cluster` removes everything of the cluster). Writes are fenced by the
 //! store's ownership epochs: a node that lost a cluster's lease gets an error instead of
 //! overwriting the new owner's state, and the request fails before anything is published.
+//!
+//! [`ObjectStores::data`](StoreProvider::data) hands the node the store itself, so the
+//! cluster's shards are durable too ([`crate::persist`]).
 
 use crate::catalog::StoreProvider;
 use async_trait::async_trait;
@@ -65,5 +68,13 @@ impl StoreProvider for ObjectStores {
 
     async fn release(&self, cluster: &str) {
         self.store.release_cluster(cluster);
+    }
+
+    async fn branch_at(&self, parent: &str, child: &str, at_ms: Option<u64>) -> anyhow::Result<()> {
+        self.store.branch(parent, child, at_ms).await
+    }
+
+    fn data(&self) -> Option<Store> {
+        Some(self.store.clone())
     }
 }

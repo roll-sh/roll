@@ -221,7 +221,61 @@ pub fn shard_stores(ctx: &Ctx) -> EsResult<Reply> {
     Reply::ok(obj! { "indices" => Value::Obj(crate::json::java_hash_map(out, 16)) })
 }
 
-/// `GET [<index>]/_segments`: shards with no segments until the engine reports them.
+/// One Lucene-style segment of a shard, as `_segments` and `_cat/segments` list it.
+pub struct SegmentRow {
+    /// `_<generation in base 36>`.
+    pub name: String,
+    pub generation: u64,
+    pub docs: u64,
+    pub deleted: u64,
+    pub size: u64,
+    /// Written to the shard's files (a commit point holds it).
+    pub committed: bool,
+    /// Visible to searches (refreshed).
+    pub search: bool,
+}
+
+/// `Long.toString(v, Character.MAX_RADIX)`.
+fn base36(mut v: u64) -> String {
+    const D: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if v == 0 {
+        return "0".into();
+    }
+    let mut out = Vec::new();
+    while v > 0 {
+        out.push(D[(v % 36) as usize]);
+        v /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// The segments of shard `shard` of `idx` (none while its engine isn't loaded). Generations
+/// number the shard's current segments in creation order.
+pub fn segment_rows(ctx: &Ctx, idx: &IndexMeta, shard: u32) -> Vec<SegmentRow> {
+    let Some(engine) = ctx.cluster.engine.loaded(&idx.uuid) else { return Vec::new() };
+    if shard >= idx.number_of_shards() {
+        return Vec::new();
+    }
+    engine
+        .shard(shard)
+        .shard
+        .segments()
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| SegmentRow {
+            name: format!("_{}", base36(i as u64)),
+            generation: i as u64,
+            docs: (s.max_doc - s.del_count) as u64,
+            deleted: s.del_count as u64,
+            size: s.size_bytes,
+            committed: !s.in_memory,
+            search: s.searchable,
+        })
+        .collect()
+}
+
+/// `GET [<index>]/_segments`.
 pub fn segments(ctx: &Ctx) -> EsResult<Reply> {
     let names = super::resolve_indices(ctx, IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?;
     let st = ctx.state();
@@ -237,13 +291,31 @@ pub fn segments(ctx: &Ctx) -> EsResult<Reply> {
         ok += p;
         let mut shards = Map::new();
         for s in 0..idx.number_of_shards() {
+            let rows = segment_rows(ctx, idx, s);
+            let mut segs = Map::new();
+            for r in &rows {
+                segs.insert(
+                    r.name.clone(),
+                    obj! {
+                        "generation" => r.generation as i64,
+                        "num_docs" => r.docs as i64,
+                        "deleted_docs" => r.deleted as i64,
+                        "size_in_bytes" => r.size as i64,
+                        "committed" => r.committed,
+                        "search" => r.search,
+                        "version" => crate::version::LUCENE_VERSION,
+                        "compound" => true,
+                        "attributes" => obj! { "Lucene90StoredFieldsFormat.mode" => "BEST_SPEED" },
+                    },
+                );
+            }
             shards.insert(
                 s.to_string(),
                 Value::Arr(vec![obj! {
                     "routing" => obj! { "state" => "STARTED", "primary" => true, "node" => ctx.cluster.node.id.clone() },
-                    "num_committed_segments" => 0,
-                    "num_search_segments" => 0,
-                    "segments" => obj! {},
+                    "num_committed_segments" => rows.iter().filter(|r| r.committed).count() as i64,
+                    "num_search_segments" => rows.iter().filter(|r| r.search).count() as i64,
+                    "segments" => Value::Obj(segs),
                 }]),
             );
         }

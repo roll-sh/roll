@@ -145,6 +145,10 @@ fn visit(insn: &Insn, f: &mut dyn FnMut(Reg, Access)) {
             f(i, Read);
             f(d, Write);
         }
+        DocGet { d, i, .. } => {
+            f(i, Read);
+            f(d, MayWrite);
+        }
         Alloc { .. } => {}
         AllocArray { a, n, .. } => {
             for i in 0..n as Reg {
@@ -290,7 +294,7 @@ fn rewrite_reads(insn: &mut Insn, from: Reg, to: Reg) -> bool {
             sub(a);
             sub(b);
         }
-        JCmpK { a, .. } | DocAt { i: a, .. } => sub(a),
+        JCmpK { a, .. } | DocAt { i: a, .. } | DocGet { i: a, .. } => sub(a),
         Jf { c, .. } | Jt { c, .. } => sub(c),
         JNull { s, .. } | JNonNull { s, .. } | Ret { s } | Throw { s } => sub(s),
         Field { r, .. } | GetDot { r, .. } | ArrLen { r, .. } | MapGetK { r, .. } => sub(r),
@@ -316,7 +320,7 @@ fn rewrite_reads(insn: &mut Insn, from: Reg, to: Reg) -> bool {
 fn targets(insn: &Insn) -> Option<u32> {
     use Insn::*;
     match *insn {
-        Jmp { t } | Jf { t, .. } | Jt { t, .. } | JNull { t, .. } | JNonNull { t, .. } | JCmpFalse { t, .. } | JCmp { t, .. } | JCmpK { t, .. } | IncJCmpK { t, .. } | IterNext { t, .. } => Some(t),
+        Jmp { t } | Jf { t, .. } | Jt { t, .. } | JNull { t, .. } | JNonNull { t, .. } | JCmpFalse { t, .. } | JCmp { t, .. } | JCmpK { t, .. } | IncJCmpK { t, .. } | IterNext { t, .. } | DocGet { t, .. } => Some(t),
         _ => None,
     }
 }
@@ -324,7 +328,7 @@ fn targets(insn: &Insn) -> Option<u32> {
 fn target_mut(insn: &mut Insn) -> Option<&mut u32> {
     use Insn::*;
     match insn {
-        Jmp { t } | Jf { t, .. } | Jt { t, .. } | JNull { t, .. } | JNonNull { t, .. } | JCmpFalse { t, .. } | JCmp { t, .. } | JCmpK { t, .. } | IncJCmpK { t, .. } | IterNext { t, .. } => Some(t),
+        Jmp { t } | Jf { t, .. } | Jt { t, .. } | JNull { t, .. } | JNonNull { t, .. } | JCmpFalse { t, .. } | JCmp { t, .. } | JCmpK { t, .. } | IncJCmpK { t, .. } | IterNext { t, .. } | DocGet { t, .. } => Some(t),
         _ => None,
     }
 }

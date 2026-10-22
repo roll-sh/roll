@@ -22,10 +22,39 @@
 //!
 //! Matching uses the finished deterministic automaton directly ([`RunAutomaton`]): a binary
 //! search over the current state's sorted ranges per character.
+//!
+//! Unlike Lucene, a pattern cannot exhaust the stack or the heap: the parsed expression is a flat
+//! arena evaluated in one pass (`a|a|…` and `a???…` chains are as long as the pattern), group
+//! nesting is bounded ([`MAX_NESTING`]), and every automaton operation is bounded by
+//! [`MAX_AUTOMATON_SIZE`] before it allocates (`a{100000000}` is a 400 error, not an 8 GB
+//! allocation). Elasticsearch dies on such patterns (a `StackOverflowError` or
+//! `OutOfMemoryError`), so there is no response to match; both are `illegal_argument_exception`.
 
 use crate::error::{AnalysisError, Result};
 
 const MAX_CP: i32 = 0x10FFFF;
+
+/// Bound on the states plus transitions of any automaton built from a pattern. Lucene has none
+/// (`a{100000000}` or a long chain of `a?` exhausts the heap and takes the node down); the bound
+/// keeps one pattern's memory at a few tens of MB however large its repetition counts are.
+pub(crate) const MAX_AUTOMATON_SIZE: usize = 1_000_000;
+
+/// Bound on the nesting of `(...)` groups. The parser recurses once per level; Elasticsearch
+/// overflows its stack (and dies) somewhere under a thousand levels.
+pub(crate) const MAX_NESTING: usize = 1000;
+
+fn too_complex() -> AnalysisError {
+    illegal(format!(
+        "regular expression is too complex: its automaton would exceed {MAX_AUTOMATON_SIZE} states and transitions"
+    ))
+}
+
+fn check_size(n: usize) -> Result<()> {
+    if n > MAX_AUTOMATON_SIZE {
+        return Err(too_complex());
+    }
+    Ok(())
+}
 
 fn illegal(msg: impl Into<String>) -> AnalysisError {
     AnalysisError::illegal(msg)
@@ -72,6 +101,11 @@ impl Automaton {
 
     pub fn is_deterministic(&self) -> bool {
         self.deterministic
+    }
+
+    /// States plus transitions, the measure [`MAX_AUTOMATON_SIZE`] bounds.
+    fn size(&self) -> usize {
+        self.states.len() + self.trans.len()
     }
 
     fn create_state(&mut self) -> i32 {
@@ -214,25 +248,18 @@ impl Builder {
         self.accept[s as usize] = a;
     }
 
-    fn is_accept(&self, s: i32) -> bool {
-        self.accept.get(s as usize).copied().unwrap_or(false)
-    }
-
     fn add_transition(&mut self, src: i32, dest: i32, min: i32, max: i32) {
         self.trans.push((src, dest, min, max));
     }
 
-    /// Copies the transitions of `dest` added so far to `src`.
-    fn add_epsilon(&mut self, src: i32, dest: i32) {
-        let mut i = 0;
-        while i < self.trans.len() {
-            let (s, d, min, max) = self.trans[i];
-            if s == dest {
-                self.add_transition(src, d, min, max);
-            }
-            i += 1;
+    /// `add_epsilon(src, offset)` where `offset` is the initial state of a copy of `a` made by
+    /// [`Builder::copy`]: the same transitions, without scanning every transition added so far
+    /// (which makes `a{0,n}` quadratic in Lucene).
+    fn add_epsilon_to_copy(&mut self, src: i32, offset: i32, a: &Automaton) {
+        for &(d, min, max) in a.transitions(0) {
+            self.add_transition(src, offset + d, min, max);
         }
-        if self.is_accept(dest) {
+        if a.is_accept(0) {
             self.set_accept(src, true);
         }
     }
@@ -445,11 +472,12 @@ fn between(
 // ---------------------------------------------------------------------------------------------
 // Operations
 
-fn concatenate(list: &[Automaton]) -> Automaton {
+fn concatenate(list: &[Automaton]) -> Result<Automaton> {
     let mut result = Automaton::new();
+    check_size(list.iter().map(Automaton::size).sum())?;
     for a in list {
         if a.num_states() == 0 {
-            return make_empty();
+            return Ok(make_empty());
         }
         for _ in 0..a.num_states() {
             result.create_state();
@@ -496,6 +524,9 @@ fn concatenate(list: &[Automaton]) -> Automaton {
                         }
                     }
                 }
+                // A run of optional parts (`a?a?a?…`) gives every accept state the transitions
+                // of all the parts that follow: quadratic, so checked as it grows.
+                check_size(result.size())?;
             }
         }
         state_offset += n;
@@ -504,10 +535,11 @@ fn concatenate(list: &[Automaton]) -> Automaton {
         result.create_state();
     }
     result.finish_state();
-    remove_dead_states(result)
+    Ok(remove_dead_states(result))
 }
 
-fn union(list: &[Automaton]) -> Automaton {
+fn union(list: &[Automaton]) -> Result<Automaton> {
+    check_size(list.iter().map(Automaton::size).sum())?;
     let mut result = Automaton::new();
     result.create_state();
     for a in list {
@@ -522,7 +554,7 @@ fn union(list: &[Automaton]) -> Automaton {
         offset += a.num_states() as i32;
     }
     result.finish_state();
-    merge_accept_states_with_no_transition(remove_dead_states(result))
+    Ok(merge_accept_states_with_no_transition(remove_dead_states(result)))
 }
 
 fn optional(a: Automaton) -> Automaton {
@@ -592,19 +624,24 @@ fn repeat(a: Automaton) -> Automaton {
     remove_dead_states(b.finish())
 }
 
-fn repeat_min(a: Automaton, count: u32) -> Automaton {
+fn repeat_min(a: Automaton, count: u32) -> Result<Automaton> {
     if count == 0 {
-        return repeat(a);
+        return Ok(repeat(a));
     }
+    // Checked before cloning: the count comes from the pattern.
+    check_size(a.size().saturating_mul(count as usize + 1))?;
     let mut list: Vec<Automaton> = (0..count).map(|_| a.clone()).collect();
     list.push(repeat(a));
     concatenate(&list)
 }
 
-fn repeat_min_max(a: Automaton, min: u32, max: u32) -> Automaton {
+fn repeat_min_max(a: Automaton, min: u32, max: u32) -> Result<Automaton> {
     if min > max {
-        return make_empty();
+        return Ok(make_empty());
     }
+    // Each optional copy adds `a` plus the epsilon transitions from the previous accept states.
+    let per_copy = a.size() + a.accept_count() * a.transitions(0).len();
+    check_size(per_copy.saturating_mul(max as usize))?;
     let b = if min == 0 {
         make_empty_string()
     } else if min == 1 {
@@ -613,7 +650,7 @@ fn repeat_min_max(a: Automaton, min: u32, max: u32) -> Automaton {
         b
     } else {
         let list: Vec<Automaton> = (0..min).map(|_| a.clone()).collect();
-        concatenate(&list)
+        concatenate(&list)?
     };
     let mut prev_accept: Vec<i32> = (0..b.num_states() as i32)
         .filter(|&s| b.is_accept(s))
@@ -624,14 +661,14 @@ fn repeat_min_max(a: Automaton, min: u32, max: u32) -> Automaton {
         let n = builder.num_states();
         builder.copy(&a);
         for &s in &prev_accept {
-            builder.add_epsilon(s, n);
+            builder.add_epsilon_to_copy(s, n, &a);
         }
         prev_accept = (0..a.num_states() as i32)
             .filter(|&s| a.is_accept(s))
             .map(|s| s + n)
             .collect();
     }
-    remove_dead_states(builder.finish())
+    Ok(remove_dead_states(builder.finish()))
 }
 
 fn complement(a: Automaton, work_limit: i64) -> Result<Automaton> {
@@ -642,12 +679,12 @@ fn complement(a: Automaton, work_limit: i64) -> Result<Automaton> {
     Ok(remove_dead_states(a))
 }
 
-fn intersection(a1: Automaton, a2: Automaton) -> Automaton {
+fn intersection(a1: Automaton, a2: Automaton) -> Result<Automaton> {
     if a1.num_states() == 0 {
-        return a1;
+        return Ok(a1);
     }
     if a2.num_states() == 0 {
-        return a2;
+        return Ok(a2);
     }
     let mut c = Automaton::new();
     c.create_state();
@@ -681,9 +718,11 @@ fn intersection(a1: Automaton, a2: Automaton) -> Automaton {
                 n2 += 1;
             }
         }
+        // The product can have |a1| * |a2| states.
+        check_size(c.size())?;
     }
     c.finish_state();
-    remove_dead_states(c)
+    Ok(remove_dead_states(c))
 }
 
 /// `Operations.determinize` (subset construction; the effort is the total size of the state
@@ -759,6 +798,7 @@ fn determinize(a: Automaton, work_limit: i64) -> Result<Automaton> {
             };
             b.add_transition(r, q, lo, hi);
         }
+        check_size(b.accept.len() + b.trans.len())?;
     }
     Ok(b.finish())
 }
@@ -893,16 +933,21 @@ fn merge_accept_states_with_no_transition(a: Automaton) -> Automaton {
 // ---------------------------------------------------------------------------------------------
 // RegExp
 
+/// A node of the parsed expression. Nodes live in one arena ([`Parser::nodes`]) and refer to
+/// their operands by index, and an operand is always created before the node using it, so the
+/// arena order is a post-order of the tree: [`to_automaton`] evaluates it in one forward pass,
+/// and dropping it is flat. (A tree of boxes would recurse once per level to build, convert and
+/// drop it, and `a|a|…|a` or `a????…` chains are as deep as they are long.)
 #[derive(Debug)]
 enum Exp {
-    Union(Box<Exp>, Box<Exp>),
-    Concat(Box<Exp>, Box<Exp>),
-    Inter(Box<Exp>, Box<Exp>),
-    Optional(Box<Exp>),
-    Repeat(Box<Exp>),
-    RepeatMin(Box<Exp>, u32),
-    RepeatMinMax(Box<Exp>, u32, u32),
-    Complement(Box<Exp>),
+    Union(u32, u32),
+    Concat(u32, u32),
+    Inter(u32, u32),
+    Optional(u32),
+    Repeat(u32),
+    RepeatMin(u32, u32),
+    RepeatMinMax(u32, u32, u32),
+    Complement(u32),
     Char(i32),
     CharRange(i32, i32),
     CharClass(Vec<i32>, Vec<i32>),
@@ -912,39 +957,19 @@ enum Exp {
     AnyString,
     Named(String),
     Interval(i32, i32, i32),
+    /// Text merged into another node by [`Parser::make_concat`].
+    Merged,
 }
 
 fn is_text(e: &Exp) -> bool {
     matches!(e, Exp::Char(_) | Exp::Str(_))
 }
 
-fn text_of(e: Exp) -> Vec<i32> {
-    match e {
+fn take_text(e: &mut Exp) -> Vec<i32> {
+    match std::mem::replace(e, Exp::Merged) {
         Exp::Char(c) => vec![c],
         Exp::Str(s) => s,
         _ => Vec::new(),
-    }
-}
-
-/// `RegExp.makeConcatenation`: adjacent characters and strings become one string.
-fn make_concat(e1: Exp, e2: Exp) -> Exp {
-    if is_text(&e1) && is_text(&e2) {
-        let mut s = text_of(e1);
-        s.extend(text_of(e2));
-        return Exp::Str(s);
-    }
-    match (e1, e2) {
-        (Exp::Concat(a, b), e2) if is_text(&b) && is_text(&e2) => {
-            let mut s = text_of(*b);
-            s.extend(text_of(e2));
-            Exp::Concat(a, Box::new(Exp::Str(s)))
-        }
-        (e1, Exp::Concat(a, b)) if is_text(&e1) && is_text(&a) => {
-            let mut s = text_of(e1);
-            s.extend(text_of(*a));
-            Exp::Concat(Box::new(Exp::Str(s)), b)
-        }
-        (e1, e2) => Exp::Concat(Box::new(e1), Box::new(e2)),
     }
 }
 
@@ -962,9 +987,49 @@ struct Parser {
     /// UTF-16 offset of each character (and of the end), for error positions.
     u16: Vec<usize>,
     pos: usize,
+    nodes: Vec<Exp>,
+    /// Current `(` nesting.
+    depth: usize,
 }
 
+type Id = u32;
+
 impl Parser {
+    fn push(&mut self, e: Exp) -> Id {
+        self.nodes.push(e);
+        (self.nodes.len() - 1) as Id
+    }
+
+    /// `RegExp.makeConcatenation`: adjacent characters and strings become one string.
+    fn make_concat(&mut self, e1: Id, e2: Id) -> Id {
+        let (i1, i2) = (e1 as usize, e2 as usize);
+        if is_text(&self.nodes[i1]) && is_text(&self.nodes[i2]) {
+            let mut s = take_text(&mut self.nodes[i1]);
+            s.extend(take_text(&mut self.nodes[i2]));
+            self.nodes[i1] = Exp::Str(s);
+            return e1;
+        }
+        if let Exp::Concat(_, b) = self.nodes[i1]
+            && is_text(&self.nodes[b as usize])
+            && is_text(&self.nodes[i2])
+        {
+            let mut s = take_text(&mut self.nodes[b as usize]);
+            s.extend(take_text(&mut self.nodes[i2]));
+            self.nodes[b as usize] = Exp::Str(s);
+            return e1;
+        }
+        if let Exp::Concat(a, _) = self.nodes[i2]
+            && is_text(&self.nodes[i1])
+            && is_text(&self.nodes[a as usize])
+        {
+            let mut s = take_text(&mut self.nodes[i1]);
+            s.extend(take_text(&mut self.nodes[a as usize]));
+            self.nodes[a as usize] = Exp::Str(s);
+            return e2;
+        }
+        self.push(Exp::Concat(e1, e2))
+    }
+
     fn at(&self) -> usize {
         self.u16[self.pos]
     }
@@ -990,29 +1055,29 @@ impl Parser {
         Ok(self.s[self.pos - 1] as i32)
     }
 
-    fn union(&mut self) -> Result<Exp> {
+    fn union(&mut self) -> Result<Id> {
         let mut e = self.inter()?;
         while self.matches('|') {
             let r = self.inter()?;
-            e = Exp::Union(Box::new(e), Box::new(r));
+            e = self.push(Exp::Union(e, r));
         }
         Ok(e)
     }
 
-    fn inter(&mut self) -> Result<Exp> {
+    fn inter(&mut self) -> Result<Id> {
         let mut e = self.concat()?;
         while self.matches('&') {
             let r = self.concat()?;
-            e = Exp::Inter(Box::new(e), Box::new(r));
+            e = self.push(Exp::Inter(e, r));
         }
         Ok(e)
     }
 
-    fn concat(&mut self) -> Result<Exp> {
+    fn concat(&mut self) -> Result<Id> {
         let mut e = self.repeat()?;
         while self.more() && !self.peek(")|") && !self.peek("&") {
             let r = self.repeat()?;
-            e = make_concat(e, r);
+            e = self.make_concat(e, r);
         }
         Ok(e)
     }
@@ -1029,15 +1094,15 @@ impl Parser {
         })
     }
 
-    fn repeat(&mut self) -> Result<Exp> {
+    fn repeat(&mut self) -> Result<Id> {
         let mut e = self.char_class_exp()?;
         while self.peek("?*+{") {
             if self.matches('?') {
-                e = Exp::Optional(Box::new(e));
+                e = self.push(Exp::Optional(e));
             } else if self.matches('*') {
-                e = Exp::Repeat(Box::new(e));
+                e = self.push(Exp::Repeat(e));
             } else if self.matches('+') {
-                e = Exp::RepeatMin(Box::new(e), 1);
+                e = self.push(Exp::RepeatMin(e, 1));
             } else if self.matches('{') {
                 let start = self.pos;
                 while self.peek("0123456789") {
@@ -1073,24 +1138,26 @@ impl Parser {
                         "invalid repetition range(out of order): {n}..{m}"
                     )));
                 }
-                e = match m {
-                    None => Exp::RepeatMin(Box::new(e), n),
-                    Some(m) => Exp::RepeatMinMax(Box::new(e), n, m),
-                };
+                e = self.push(match m {
+                    None => Exp::RepeatMin(e, n),
+                    Some(m) => Exp::RepeatMinMax(e, n, m),
+                });
             }
         }
         Ok(e)
     }
 
-    fn char_class_exp(&mut self) -> Result<Exp> {
+    fn char_class_exp(&mut self) -> Result<Id> {
         if self.matches('[') {
             let negate = self.matches('^');
-            let mut e = self.char_classes()?;
+            let class = self.char_classes()?;
+            let mut e = self.push(class);
             if negate {
-                e = Exp::Inter(
-                    Box::new(Exp::AnyChar),
-                    Box::new(Exp::Complement(Box::new(e))),
-                );
+                // Lucene builds `AnyChar` first; neither side can fail, so the order of
+                // evaluation does not show.
+                let any = self.push(Exp::AnyChar);
+                let c = self.push(Exp::Complement(e));
+                e = self.push(Exp::Inter(any, c));
             }
             if !self.matches(']') {
                 return Err(illegal(format!("expected ']' at position {}", self.at())));
@@ -1170,7 +1237,32 @@ impl Parser {
         self.next()
     }
 
-    fn simple(&mut self) -> Result<Exp> {
+    /// `parseSimpleExp`.
+    fn simple(&mut self) -> Result<Id> {
+        if self.matches('(') {
+            if self.matches(')') {
+                return Ok(self.push(Exp::Str(Vec::new())));
+            }
+            if self.depth >= MAX_NESTING {
+                return Err(illegal(format!(
+                    "regular expression is nested too deeply (more than {MAX_NESTING} groups) at position {}",
+                    self.u16[self.pos - 1]
+                )));
+            }
+            self.depth += 1;
+            let e = self.union()?;
+            self.depth -= 1;
+            if !self.matches(')') {
+                return Err(illegal(format!("expected ')' at position {}", self.at())));
+            }
+            return Ok(e);
+        }
+        let e = self.simple_exp()?;
+        Ok(self.push(e))
+    }
+
+    /// The leaves of `parseSimpleExp`.
+    fn simple_exp(&mut self) -> Result<Exp> {
         if self.matches('.') {
             return Ok(Exp::AnyChar);
         }
@@ -1194,16 +1286,6 @@ impl Parser {
                     .map(|&c| c as i32)
                     .collect(),
             ));
-        }
-        if self.matches('(') {
-            if self.matches(')') {
-                return Ok(Exp::Str(Vec::new()));
-            }
-            let e = self.union()?;
-            if !self.matches(')') {
-                return Err(illegal(format!("expected ')' at position {}", self.at())));
-            }
-            return Ok(e);
         }
         if self.matches('<') {
             let start = self.pos;
@@ -1250,58 +1332,101 @@ fn interval(s: &str, pos: usize) -> Result<Exp> {
     Ok(Exp::Interval(min, max, digits))
 }
 
-fn leaves(e: Exp, union: bool, out: &mut Vec<Automaton>) -> Result<()> {
-    match e {
-        Exp::Union(a, b) if union => {
-            leaves(*a, union, out)?;
-            leaves(*b, union, out)
+/// A node's result while [`to_automaton`] runs: `RegExp.findLeaves` collects the operands of
+/// nested unions (and of nested concatenations) into one list instead of building each level,
+/// so a union or concatenation stays a list until a node of another kind uses it.
+enum Val {
+    Done,
+    Auto(Automaton),
+    Union(Vec<Automaton>),
+    Concat(Vec<Automaton>),
+}
+
+impl Val {
+    fn finish(self) -> Result<Automaton> {
+        match self {
+            Val::Auto(a) => Ok(a),
+            Val::Union(list) => union(&list),
+            Val::Concat(list) => concatenate(&list),
+            // Operands are used once, in arena order.
+            Val::Done => Err(illegal("regular expression operand used twice")),
         }
-        Exp::Concat(a, b) if !union => {
-            leaves(*a, union, out)?;
-            leaves(*b, union, out)
+    }
+
+    /// Appends this operand to a union (`union` true) or concatenation list.
+    fn leaves_into(self, union: bool, out: &mut Vec<Automaton>) -> Result<()> {
+        match (self, union) {
+            (Val::Union(list), true) | (Val::Concat(list), false) => out.extend(list),
+            (v, _) => out.push(v.finish()?),
         }
-        e => {
-            out.push(to_automaton(e)?);
-            Ok(())
-        }
+        Ok(())
     }
 }
 
-/// `RegExp.toAutomaton()`.
-fn to_automaton(e: Exp) -> Result<Automaton> {
-    Ok(match e {
-        Exp::Union(a, b) => {
-            let mut list = Vec::new();
-            leaves(*a, true, &mut list)?;
-            leaves(*b, true, &mut list)?;
-            union(&list)
-        }
-        Exp::Concat(a, b) => {
-            let mut list = Vec::new();
-            leaves(*a, false, &mut list)?;
-            leaves(*b, false, &mut list)?;
-            concatenate(&list)
-        }
-        Exp::Inter(a, b) => intersection(to_automaton(*a)?, to_automaton(*b)?),
-        Exp::Optional(a) => optional(to_automaton(*a)?),
-        Exp::Repeat(a) => repeat(to_automaton(*a)?),
-        Exp::RepeatMin(a, n) => repeat_min(to_automaton(*a)?, n),
-        Exp::RepeatMinMax(a, n, m) => repeat_min_max(to_automaton(*a)?, n, m),
-        Exp::Complement(a) => complement(to_automaton(*a)?, i32::MAX as i64)?,
-        Exp::Char(c) => make_char_range(c, c),
-        Exp::CharRange(lo, hi) => make_char_range(lo, hi),
-        Exp::CharClass(starts, ends) => make_char_class(&starts, &ends),
-        Exp::AnyChar => make_char_range(0, MAX_CP),
-        Exp::Empty => make_empty(),
-        Exp::Str(s) => make_string(&s),
-        Exp::AnyString => make_any_string(),
-        Exp::Named(name) => return Err(illegal(format!("'{name}' not found"))),
-        Exp::Interval(min, max, digits) => make_decimal_interval(min, max, digits)?,
-    })
+/// `RegExp.toAutomaton()` of the expression `root`, in one pass over the arena (operands come
+/// before their users, left before right, which is the order Lucene's recursion visits them,
+/// so the first failing node is the one Lucene reports).
+fn to_automaton(nodes: Vec<Exp>, root: Id) -> Result<Automaton> {
+    let mut vals: Vec<Val> = Vec::with_capacity(nodes.len());
+    for e in nodes {
+        let mut take = |i: Id| std::mem::replace(&mut vals[i as usize], Val::Done);
+        let v = match e {
+            Exp::Union(a, b) | Exp::Concat(a, b) => {
+                let is_union = matches!(e, Exp::Union(..));
+                // Chains are left-deep (`a|b|c` is `(a|b)|c`): extend the left operand's list
+                // in place, or long chains would copy it once per operator.
+                let mut list = match (take(a), is_union) {
+                    (Val::Union(list), true) | (Val::Concat(list), false) => list,
+                    (v, _) => vec![v.finish()?],
+                };
+                take(b).leaves_into(is_union, &mut list)?;
+                if is_union {
+                    Val::Union(list)
+                } else {
+                    Val::Concat(list)
+                }
+            }
+            Exp::Inter(a, b) => {
+                let a = take(a).finish()?;
+                let b = take(b).finish()?;
+                Val::Auto(intersection(a, b)?)
+            }
+            Exp::Optional(a) => Val::Auto(optional(take(a).finish()?)),
+            Exp::Repeat(a) => Val::Auto(repeat(take(a).finish()?)),
+            Exp::RepeatMin(a, n) => Val::Auto(repeat_min(take(a).finish()?, n)?),
+            Exp::RepeatMinMax(a, n, m) => Val::Auto(repeat_min_max(take(a).finish()?, n, m)?),
+            Exp::Complement(a) => Val::Auto(complement(take(a).finish()?, i32::MAX as i64)?),
+            Exp::Char(c) => Val::Auto(make_char_range(c, c)),
+            Exp::CharRange(lo, hi) => Val::Auto(make_char_range(lo, hi)),
+            Exp::CharClass(starts, ends) => Val::Auto(make_char_class(&starts, &ends)),
+            Exp::AnyChar => Val::Auto(make_char_range(0, MAX_CP)),
+            Exp::Empty => Val::Auto(make_empty()),
+            Exp::Str(s) => Val::Auto(make_string(&s)),
+            Exp::AnyString => Val::Auto(make_any_string()),
+            Exp::Named(name) => return Err(illegal(format!("'{name}' not found"))),
+            Exp::Interval(min, max, digits) => Val::Auto(make_decimal_interval(min, max, digits)?),
+            Exp::Merged => Val::Done,
+        };
+        vals.push(v);
+    }
+    std::mem::replace(&mut vals[root as usize], Val::Done).finish()
 }
 
 /// `new RegExp(pattern).toAutomaton()`.
 pub(crate) fn parse(pattern: &str) -> Result<Automaton> {
+    // The parser recurses per `(` level.
+    crate::stack::deep(crate::stack::opens(pattern, b"("), || parse_here(pattern)).unwrap_or_else(
+        || {
+            Err(AnalysisError::other(
+                "illegal_state_exception",
+                500,
+                "could not start a thread to compile the pattern",
+            ))
+        },
+    )
+}
+
+fn parse_here(pattern: &str) -> Result<Automaton> {
     let s: Vec<char> = pattern.chars().collect();
     let mut u16 = Vec::with_capacity(s.len() + 1);
     let mut off = 0;
@@ -1310,9 +1435,15 @@ pub(crate) fn parse(pattern: &str) -> Result<Automaton> {
         off += c.len_utf16();
     }
     u16.push(off);
-    let mut p = Parser { s, u16, pos: 0 };
-    let e = if p.s.is_empty() {
-        Exp::Str(Vec::new())
+    let mut p = Parser {
+        s,
+        u16,
+        pos: 0,
+        nodes: Vec::new(),
+        depth: 0,
+    };
+    let root = if p.s.is_empty() {
+        p.push(Exp::Str(Vec::new()))
     } else {
         let e = p.union()?;
         if p.more() {
@@ -1323,7 +1454,7 @@ pub(crate) fn parse(pattern: &str) -> Result<Automaton> {
         }
         e
     };
-    to_automaton(e)
+    to_automaton(p.nodes, root)
 }
 
 /// The automaton of `simple_pattern` (`split` false) or `simple_pattern_split`, ready to run.
@@ -1478,6 +1609,69 @@ mod tests {
         assert_eq!(lm("~", "~"), Some(1));
         assert!(compile("[a", true).is_err());
         assert!(compile("a{3,2}", true).is_err());
+    }
+
+    /// Runs `f` on a thread with a 2 MB stack, the size of a tokio worker's.
+    fn on_small_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn deep_and_long_patterns_fit_a_small_stack() {
+        on_small_stack(|| {
+            let nest = |n: usize| format!("{}a{}", "(".repeat(n), ")".repeat(n));
+            assert_eq!(lm(&nest(MAX_NESTING), "ab"), Some(1));
+            let err = compile(&nest(MAX_NESTING + 1), false).unwrap_err();
+            assert_eq!(err.kind, "illegal_argument_exception");
+            assert_eq!(
+                err.reason,
+                format!(
+                    "regular expression is nested too deeply (more than {MAX_NESTING} groups) at position {MAX_NESTING}"
+                )
+            );
+            assert!(compile(&nest(100_000), true).is_err());
+            // Chains are as long as the pattern, not nested: unions, concatenations,
+            // repetition operators.
+            let alt = format!("{}b", "a|".repeat(50_000));
+            assert_eq!(lm(&alt, "b"), Some(1));
+            assert!(compile(&alt, false).is_ok());
+            assert_eq!(lm(&format!("a{}", "?".repeat(50_000)), "aa"), Some(1));
+            assert_eq!(lm(&format!("a{}", "*".repeat(50_000)), "aa"), Some(2));
+            assert_eq!(lm(&"a.".repeat(20_000), &"ab".repeat(20_001)), Some(40_000));
+            assert_eq!(lm(&format!("{}x", "[ab]".repeat(20_000)), &"ab".repeat(10_000)), None);
+        });
+    }
+
+    #[test]
+    fn repetition_counts_are_bounded() {
+        let too_complex = |p: &str| {
+            let e = compile(p, false).unwrap_err();
+            assert_eq!(e.kind, "illegal_argument_exception", "{p}");
+            assert!(e.reason.starts_with("regular expression is too complex"), "{p}: {}", e.reason);
+        };
+        too_complex("a{100000000}");
+        too_complex("a{2000000000}");
+        too_complex("a{0,2147483647}");
+        too_complex("a{100000000,}");
+        too_complex("(a{1000}){1000}");
+        too_complex("([a-z]{999}&[a-y]{999}){600}");
+        // `a?a?…a?` concatenates into a quadratic number of transitions.
+        too_complex(&"a?".repeat(5_000));
+        // Large but bounded counts still work, in linear time.
+        let t = std::time::Instant::now();
+        assert_eq!(lm("a{0,200000}", &"a".repeat(10)), Some(10));
+        assert_eq!(lm("a{100000}", &"a".repeat(100_001)), Some(100_000));
+        assert!(t.elapsed() < std::time::Duration::from_secs(20));
+        // Not deterministic, and too much work to determinize, as in Lucene.
+        assert_eq!(
+            compile(&"a?".repeat(500), true).unwrap_err().kind,
+            "too_complex_to_determinize_exception"
+        );
     }
 
     #[test]

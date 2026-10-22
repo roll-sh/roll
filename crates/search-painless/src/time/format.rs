@@ -63,6 +63,17 @@ impl FField {
     }
 }
 
+/// The `TemporalQuery` a zone printer uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ZoneQuery {
+    /// `TemporalQueries.zoneId()`: a `ZonedDateTime`'s zone, offsets included.
+    Id,
+    /// Region ids only: a zone that is an offset does not print.
+    Region,
+    /// `TemporalQueries.zone()`: the zone, else the offset (`OffsetDateTime`).
+    OrOffset,
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum Item {
     Lit(String),
@@ -74,7 +85,9 @@ pub(super) enum Item {
     Text { f: FField, style: u8 },
     Offset { pattern: &'static str, none: String },
     LocalizedOffset { full: bool },
-    ZoneId,
+    /// `appendZoneId` / `appendZoneRegionId` / `appendZoneOrOffsetId`: which zone the printer
+    /// asks the temporal for (parsing is the same).
+    ZoneId(ZoneQuery),
     ZoneText { full: bool },
     Instant,
     Optional(Vec<Item>),
@@ -368,7 +381,7 @@ fn letter(c: char, count: usize) -> Result<Item, Thrown> {
             if count != 2 {
                 return Err(pattern_error(format!("Pattern letter count must be 2: {c}")));
             }
-            Item::ZoneId
+            Item::ZoneId(ZoneQuery::Id)
         }
         'v' => match count {
             1 | 4 => Item::ZoneText { full: count == 4 },
@@ -527,7 +540,8 @@ impl Formatter {
             }
             Item::Text { f, style } => {
                 let v = get_ffield(t, *f, WeekDef::of_locale(&self.locale))?;
-                out.push_str(&locale_text(&self.locale, *f, v, *style));
+                let (locale, style) = text_map(&self.locale, *style);
+                out.push_str(&locale_text(locale, *f, v, style));
             }
             Item::Offset { pattern, none } => {
                 let o = t.get_long(Field::OffsetSeconds)? as i32;
@@ -537,11 +551,21 @@ impl Formatter {
                 let o = t.get_long(Field::OffsetSeconds)? as i32;
                 out.push_str(&localized_offset(o, *full));
             }
-            Item::ZoneId => match t {
-                TimeVal::Zoned { zone, .. } => out.push_str(&zone.id()),
-                TimeVal::OffsetDateTime { offset, .. } | TimeVal::OffsetTime { offset, .. } => out.push_str(&offset_id(*offset)),
-                TimeVal::ZoneId(z) => out.push_str(&z.id()),
-                _ => return Err(dte(format!("Unable to extract ZoneId from temporal {}", self.print_context(t)))),
+            Item::ZoneId(q) => match (t, q) {
+                (TimeVal::Zoned { zone: Zone::Offset(_), .. }, ZoneQuery::Region) => {
+                    return Err(dte(format!("Unable to extract ZoneRegionId() from temporal {}", self.print_context(t))));
+                }
+                (TimeVal::Zoned { zone, .. }, _) => out.push_str(&zone.id()),
+                (TimeVal::OffsetDateTime { offset, .. } | TimeVal::OffsetTime { offset, .. }, ZoneQuery::OrOffset) => out.push_str(&offset_id(*offset)),
+                (TimeVal::ZoneId(z), _) => out.push_str(&z.id()),
+                (_, q) => {
+                    let what = match q {
+                        ZoneQuery::Id => "ZoneId",
+                        ZoneQuery::Region => "ZoneRegionId()",
+                        ZoneQuery::OrOffset => "Zone",
+                    };
+                    return Err(dte(format!("Unable to extract {what} from temporal {}", self.print_context(t))));
+                }
             },
             Item::ZoneText { full } => match t {
                 TimeVal::Zoned { zone, offset, .. } => out.push_str(&zone_text(zone, *offset, *full, t.instant().map_or(0, |i| i.0), &self.locale)),
@@ -609,10 +633,15 @@ impl Formatter {
 
     pub fn parse_resolved(&self, text: &str) -> Result<Parsed, Thrown> {
         let chars: Vec<char> = text.chars().collect();
-        let mut st = PState { fields: Vec::new(), offset: None, zone: None, insensitive: false, instant: None };
+        let mut st = PState::default();
         let pos = match self.parse_items(&self.items, &chars, 0, &mut st) {
             Some(p) => p,
             None => {
+                if let Some(why) = st.error.take() {
+                    // `DateTimeFormatter.createError`: the parser's exception as the cause
+                    let cause = dte(why.clone());
+                    return Err(Throw::new(cls::DATE_TIME_PARSE_EXCEPTION, Some(format!("Text '{text}' could not be parsed: {why}"))).with_cause(&cause));
+                }
                 let at = self.error_index(&chars);
                 return Err(parse_error(text, at, ""));
             }
@@ -624,16 +653,24 @@ impl Formatter {
     }
 
     fn error_index(&self, chars: &[char]) -> usize {
-        // the position of the first item that failed: replay items one by one
-        let mut st = PState { fields: Vec::new(), offset: None, zone: None, insensitive: false, instant: None };
-        let mut pos = 0;
-        for it in &self.items {
-            match self.parse_item(it, chars, pos, &mut st) {
-                Some(p) => pos = p,
-                None => return pos,
+        // the position of the innermost parser that failed: replay items one by one, into
+        // appended formatters (a failing optional section is skipped, not an error)
+        fn walk(f: &Formatter, items: &[Item], chars: &[char], mut pos: usize, st: &mut PState) -> Result<usize, usize> {
+            for it in items {
+                match it {
+                    Item::Group(inner) => pos = walk(f, inner, chars, pos, st)?,
+                    _ => match f.parse_item(it, chars, pos, st) {
+                        Some(p) => pos = p,
+                        None => return Err(pos),
+                    },
+                }
             }
+            Ok(pos)
         }
-        pos
+        let mut st = PState::default();
+        match walk(self, &self.items, chars, 0, &mut st) {
+            Ok(p) | Err(p) => p,
+        }
     }
 
     fn parse_items(&self, items: &[Item], s: &[char], mut pos: usize, st: &mut PState) -> Option<usize> {
@@ -756,7 +793,8 @@ impl Formatter {
                 Some(p)
             }
             Item::Text { f, style } => {
-                let (count, vals): (i64, Vec<(i64, String)>) = text_candidates(&self.locale, *f, *style);
+                let (locale, style) = text_map(&self.locale, *style);
+                let (count, vals): (i64, Vec<(i64, String)>) = text_candidates(locale, *f, style);
                 let _ = count;
                 let mut best: Option<(usize, i64)> = None;
                 for (v, name) in vals {
@@ -774,12 +812,15 @@ impl Formatter {
                 Some(pos + n)
             }
             Item::Offset { pattern, none } => {
-                let nlen = none.chars().count();
-                if pos + nlen <= s.len() && s[pos..pos + nlen].iter().collect::<String>() == *none {
-                    st.offset = Some(0);
-                    return Some(pos + nlen);
-                }
-                let (o, p) = parse_offset_text(s, pos, pattern)?;
+                let (o, p) = match parse_offset_id(s, pos, pattern, none, st.strict, st.insensitive) {
+                    Ok(r) => r,
+                    Err(why) => {
+                        if let Some(why) = why {
+                            st.error = Some(why);
+                        }
+                        return None;
+                    }
+                };
                 st.offset = Some(o);
                 Some(p)
             }
@@ -797,7 +838,7 @@ impl Formatter {
                 st.offset = Some(o);
                 Some(e)
             }
-            Item::ZoneId | Item::ZoneText { .. } => {
+            Item::ZoneId(_) | Item::ZoneText { .. } => {
                 let start = pos;
                 let mut p = pos;
                 while p < s.len() && (s[p].is_ascii_alphanumeric() || matches!(s[p], '/' | '_' | '+' | '-' | ':' | '~' | '.')) {
@@ -812,15 +853,28 @@ impl Formatter {
                     }
                     end -= 1;
                 }
+                if matches!(it, Item::ZoneText { .. }) {
+                    let (z, e) = zone_by_name(s, start, &self.locale)?;
+                    st.zone = Some(z);
+                    return Some(e);
+                }
                 None
             }
             Item::Instant => {
-                let rest: String = s[pos..].iter().collect();
-                // ISO_INSTANT: up to the zone designator
-                let end = rest.find(['Z', 'z']).map(|i| i + 1).unwrap_or(rest.len());
-                let (secs, nanos) = parse_instant(&rest[..end]).ok()?;
-                st.instant = Some((secs, nanos));
-                Some(pos + rest[..end].chars().count())
+                // `InstantPrinterParser.parse`: an ISO local date-time, then an offset id
+                // parsed leniently
+                let rest = &s[pos..];
+                let t = rest.iter().position(|c| *c == 'T' || *c == 't')?;
+                let mut e = t + 1;
+                while e < rest.len() && (rest[e].is_ascii_digit() || rest[e] == ':' || rest[e] == '.' || rest[e] == ',') {
+                    e += 1;
+                }
+                // (JDK 27: `parseLenient().appendOffset("+HH", "Z")`)
+                let (o, end) = parse_offset_id(rest, e, "+HH", "Z", false, true).ok()?;
+                let local: String = rest[..e].iter().collect();
+                let (secs, nanos) = parse_instant(&format!("{local}Z")).ok()?;
+                st.instant = Some((secs - o as i64, nanos));
+                Some(pos + end)
             }
             Item::Optional(inner) => {
                 let mut copy = st.clone();
@@ -846,7 +900,10 @@ impl Formatter {
                 }
                 Some(pos)
             }
-            Item::ParseMode { .. } => Some(pos),
+            Item::ParseMode { strict } => {
+                st.strict = *strict;
+                Some(pos)
+            }
             Item::Group(inner) => self.parse_items(inner, s, pos, st),
             Item::Chrono { .. } => {
                 let end = pos + 3;
@@ -1000,6 +1057,11 @@ impl Formatter {
             let _ = o;
         }
         if let Some((secs, nanos)) = st.instant {
+            if zone.is_none() && date.is_none() && time.is_none() {
+                // `INSTANT_SECONDS` and `NANO_OF_SECOND` stay fields: without a zone nothing
+                // resolves them into a date and a time (only `Instant.from` reads them)
+                return Ok(Parsed { date: None, time: None, offset: None, zone: None, fields, instant: Some((secs, nanos)) });
+            }
             let z = zone.clone().unwrap_or(Zone::Offset(0));
             let zd = zoned_of_instant(secs, nanos, z);
             if let TimeVal::Zoned { d, t, offset, zone: zz } = zd {
@@ -1022,6 +1084,16 @@ struct PState {
     zone: Option<Zone>,
     insensitive: bool,
     instant: Option<(i64, i32)>,
+    /// `parseStrict()` / `parseLenient()` (the context's setting, not scoped by sections).
+    strict: bool,
+    /// A `DateTimeException` a parser threw (the parse fails with it as the cause).
+    error: Option<String>,
+}
+
+impl Default for PState {
+    fn default() -> PState {
+        PState { fields: Vec::new(), offset: None, zone: None, insensitive: false, instant: None, strict: true, error: None }
+    }
 }
 
 impl PState {
@@ -1047,6 +1119,9 @@ pub struct Parsed {
 impl Parsed {
     /// The most specific temporal the parsed fields form.
     pub fn to_value(&self) -> TimeVal {
+        if let (None, None, None, Some((secs, nanos))) = (self.date, self.time, &self.zone, self.instant) {
+            return TimeVal::Instant { secs, nanos };
+        }
         match (self.date, self.time, self.offset, &self.zone) {
             (Some(d), Some(t), _, Some(z)) => {
                 if let Some((s, n)) = self.instant {
@@ -1100,20 +1175,34 @@ impl Parsed {
 
     /// `Parsed.toString()`: unresolved fields, chronology, and what was resolved.
     pub fn describe(&self) -> String {
-        let mut s = String::from("{");
-        for (i, (f, v)) in self.fields.iter().enumerate() {
-            if i > 0 {
-                s.push_str(", ");
-            }
-            s.push_str(&format!("{}={v}", f.name()));
+        let mut parts: Vec<String> = Vec::new();
+        if let (None, None, None, Some((secs, nanos))) = (self.date, self.time, &self.zone, self.instant) {
+            // the JDK's field map order for these four fields
+            parts.push(format!("MilliOfSecond={}", nanos / 1_000_000));
+            parts.push(format!("InstantSeconds={secs}"));
+            parts.push(format!("MicroOfSecond={}", nanos / 1_000));
+            parts.push(format!("NanoOfSecond={nanos}"));
         }
+        // a parsed offset stays a field (`OffsetSeconds`); with a date and a time
+        // `Parsed.resolveInstant` adds `InstantSeconds` (printed in the order the JDK's field
+        // map shows them)
+        if self.zone.is_none()
+            && let Some(o) = self.offset
+        {
+            if let (Some(d), Some(t)) = (self.date, self.time) {
+                parts.push(format!("InstantSeconds={}", epoch_of_local(d, t, o)));
+            }
+            parts.push(format!("OffsetSeconds={o}"));
+        }
+        let mut s = String::from("{");
+        for (f, v) in &self.fields {
+            parts.push(format!("{}={v}", f.name()));
+        }
+        s.push_str(&parts.join(", "));
         s.push_str("},ISO");
         if let Some(z) = &self.zone {
             s.push(',');
             s.push_str(&z.id());
-        } else if let Some(o) = self.offset {
-            s.push(',');
-            s.push_str(&offset_id(o));
         }
         if self.date.is_some() || self.time.is_some() {
             s.push_str(" resolved to ");
@@ -1354,6 +1443,163 @@ fn parse_offset_text(s: &[char], pos: usize, pattern: &str) -> Option<(i32, usiz
     Some((total, p))
 }
 
+/// `OffsetIdPrinterParser.parse`: the `noOffsetText`, else a sign and the pattern's hours,
+/// minutes and seconds. In lenient mode (`parseLenient()`) the pattern only decides between
+/// a padded and a variable hour and whether parts are colon-separated; minutes and seconds
+/// are optional. `Err(Some(msg))`: a `DateTimeException` (out-of-range parts).
+pub(super) fn parse_offset_id(s: &[char], pos: usize, pattern: &str, none: &str, strict: bool, insensitive: bool) -> Result<(i32, usize), Option<String>> {
+    const PATTERNS: [&str; 22] = [
+        "+HH", "+HHmm", "+HH:mm", "+HHMM", "+HH:MM", "+HHMMss", "+HH:MM:ss", "+HHMMSS", "+HH:MM:SS", "+HHmmss", "+HH:mm:ss", "+H", "+Hmm", "+H:mm", "+HMM", "+H:MM", "+HMMss",
+        "+H:MM:ss", "+HMMSS", "+H:MM:SS", "+Hmmss", "+H:mm:ss",
+    ];
+    let ty = PATTERNS.iter().position(|p| *p == pattern).unwrap_or(6);
+    let style = ty % 11;
+    let none: Vec<char> = none.chars().collect();
+    let len = s.len();
+    if none.is_empty() {
+        if pos == len {
+            return Ok((0, pos));
+        }
+    } else {
+        if pos == len {
+            return Err(None);
+        }
+        let n = none.len();
+        if pos + n <= len && s[pos..pos + n].iter().zip(&none).all(|(a, b)| if insensitive { a.eq_ignore_ascii_case(b) } else { a == b }) {
+            return Ok((0, pos + n));
+        }
+    }
+    let sign = s[pos];
+    if sign == '+' || sign == '-' {
+        let negative = if sign == '-' { -1i64 } else { 1 };
+        let mut colon = style > 0 && style % 2 == 0;
+        let padded = ty < 11;
+        // a[0]: position (negative = failed, as `~pos`), then hours, minutes, seconds
+        let mut a: [i64; 4] = [(pos + 1) as i64, 0, 0, 0];
+        let mut parse_type = ty;
+        if !strict {
+            if padded {
+                if colon || (parse_type == 0 && len > pos + 3 && s[pos + 3] == ':') {
+                    colon = true;
+                    parse_type = 10;
+                } else {
+                    parse_type = 9;
+                }
+            } else if colon || (parse_type == 11 && len > pos + 3 && (s[pos + 2] == ':' || s[pos + 3] == ':')) {
+                colon = true;
+                parse_type = 21;
+            } else {
+                parse_type = 20;
+            }
+        }
+        let digits = |a: &mut [i64; 4], colon: bool, idx: usize| -> bool {
+            if a[0] < 0 {
+                return true;
+            }
+            let mut p = a[0] as usize;
+            if colon && idx != 1 {
+                if p + 1 > len || s[p] != ':' {
+                    return false;
+                }
+                p += 1;
+            }
+            if p + 2 > len {
+                return false;
+            }
+            let (c1, c2) = (s[p], s[p + 1]);
+            if !c1.is_ascii_digit() || !c2.is_ascii_digit() {
+                return false;
+            }
+            let v = (c1 as i64 - 48) * 10 + (c2 as i64 - 48);
+            if v > 59 {
+                return false;
+            }
+            a[idx] = v;
+            a[0] = (p + 2) as i64;
+            true
+        };
+        let variable = |a: &mut [i64; 4], min: usize, max: usize| {
+            let mut p = a[0] as usize;
+            let mut ds = Vec::with_capacity(max);
+            while ds.len() < max && p < len && s[p].is_ascii_digit() {
+                ds.push(s[p] as i64 - 48);
+                p += 1;
+            }
+            if ds.len() < min {
+                a[0] = !a[0];
+                return;
+            }
+            let d = |i: usize, j: usize| ds[i] * 10 + ds[j];
+            match ds.len() {
+                1 => a[1] = ds[0],
+                2 => a[1] = d(0, 1),
+                3 => (a[1], a[2]) = (ds[0], d(1, 2)),
+                4 => (a[1], a[2]) = (d(0, 1), d(2, 3)),
+                5 => (a[1], a[2], a[3]) = (ds[0], d(1, 2), d(3, 4)),
+                _ => (a[1], a[2], a[3]) = (d(0, 1), d(2, 3), d(4, 5)),
+            }
+            a[0] = p as i64;
+        };
+        let hour = |a: &mut [i64; 4]| {
+            if padded {
+                if !digits(a, false, 1) {
+                    a[0] = !a[0];
+                }
+            } else {
+                variable(a, 1, 2);
+            }
+        };
+        let part = |a: &mut [i64; 4], colon: bool, idx: usize, mandatory: bool| {
+            if !digits(a, colon, idx) && mandatory {
+                a[0] = !a[0];
+            }
+        };
+        match parse_type {
+            0 | 11 => hour(&mut a),
+            1 | 2 | 13 => {
+                hour(&mut a);
+                part(&mut a, colon, 2, false);
+            }
+            3 | 4 | 15 => {
+                hour(&mut a);
+                part(&mut a, colon, 2, true);
+            }
+            5 | 6 | 17 => {
+                hour(&mut a);
+                part(&mut a, colon, 2, true);
+                part(&mut a, colon, 3, false);
+            }
+            7 | 8 | 19 => {
+                hour(&mut a);
+                part(&mut a, colon, 2, true);
+                part(&mut a, colon, 3, true);
+            }
+            9 | 10 | 21 => {
+                hour(&mut a);
+                if digits(&mut a, colon, 2) {
+                    digits(&mut a, colon, 3);
+                }
+            }
+            12 => variable(&mut a, 1, 4),
+            14 => variable(&mut a, 3, 4),
+            16 => variable(&mut a, 3, 6),
+            18 => variable(&mut a, 5, 6),
+            _ => variable(&mut a, 1, 6),
+        }
+        if a[0] > 0 {
+            if a[1] > 23 || a[2] > 59 || a[3] > 59 {
+                return Err(Some("Value out of range: Hour[0-23], Minute[0-59], Second[0-59]".into()));
+            }
+            let secs = negative * (a[1] * 3600 + a[2] * 60 + a[3]);
+            return Ok((secs as i32, a[0] as usize));
+        }
+    }
+    if none.is_empty() {
+        return Ok((0, pos));
+    }
+    Err(None)
+}
+
 fn localized_offset(total: i32, full: bool) -> String {
     if total == 0 {
         return "GMT".into();
@@ -1390,13 +1636,52 @@ fn in_daylight(tz: &chrono_tz::Tz, epoch_secs: i64) -> bool {
     total != std
 }
 
+/// Zones CLDR names for a metazone when parsing a display name (`EST`, `Central European Time`):
+/// the JDK resolves every zone's names to its metazone's preferred zone (`ZoneName.toZid`).
+const GOLDEN_ZONES: &[&str] = &[
+    "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Juneau", "Pacific/Honolulu",
+    "America/Halifax", "America/St_Johns", "Europe/Paris", "Europe/Bucharest", "Atlantic/Canary", "Atlantic/Reykjavik",
+    "Europe/Moscow", "Asia/Calcutta", "Asia/Shanghai", "Asia/Tokyo", "Asia/Seoul", "Australia/Sydney", "Australia/Adelaide",
+    "Australia/Perth", "Pacific/Auckland", "Africa/Maputo", "Africa/Nairobi", "Africa/Johannesburg", "Africa/Lagos",
+    "Asia/Jerusalem", "Asia/Riyadh", "Asia/Hong_Kong", "Asia/Singapore",
+];
+
+/// `ZoneTextPrinterParser.parse` of a display name: the longest standard or daylight name (long
+/// or short, in `locale`) of an available zone at `pos`; among zones sharing it, the metazone's
+/// preferred zone, else the first in ID order.
+fn zone_by_name(s: &[char], pos: usize, locale: &str) -> Option<(Zone, usize)> {
+    let rest: String = s[pos..].iter().collect();
+    let mut best: Option<(usize, &str)> = None;
+    for id in super::available_zone_ids() {
+        let Some(names) = super::locale::zone_names(locale, id) else { continue };
+        for n in names {
+            if n.is_empty() || !rest.starts_with(n) {
+                continue;
+            }
+            let len = n.chars().count();
+            let better = match best {
+                None => true,
+                Some((l, b)) => len > l || (len == l && GOLDEN_ZONES.contains(id) && !GOLDEN_ZONES.contains(&b)),
+            };
+            if better {
+                best = Some((len, id));
+            }
+        }
+    }
+    let (len, id) = best?;
+    Some((zone_of(id).ok()?, pos + len))
+}
+
 /// `ZoneTextPrinterParser`: the zone's `TimeZone` display name in `locale` (long for `zzzz`,
 /// short for `z`), standard or daylight by the instant; fixed offsets print their id.
 fn zone_text(z: &Zone, offset: i32, full: bool, epoch_secs: i64, locale: &str) -> String {
     match z {
         Zone::Offset(_) => offset_id(offset),
-        Zone::Region(id, tz, _) => {
-            let dst = tz.as_ref().is_some_and(|tz| in_daylight(tz, epoch_secs));
+        Zone::Region(id, tz, std) => {
+            let dst = match tz {
+                Some(tz) => in_daylight(tz, epoch_secs),
+                None => super::systemv_dst(id) && super::systemv_offset(*std, epoch_secs) != *std,
+            };
             match super::locale::zone_names(locale, id) {
                 Some(n) => n[if full { 0 } else { 2 } + dst as usize].to_string(),
                 None => id.to_string(),
@@ -1445,8 +1730,8 @@ fn describe_items(items: &[Item], s: &mut String) {
             }
             Item::Fraction { f, min, max, point } => s.push_str(&format!("Fraction({},{min},{max}{})", f.name(), if *point { ",DecimalPoint" } else { "" })),
             Item::Text { f, style } => {
-                let st = ["FULL", "FULL_STANDALONE", "SHORT", "SHORT_STANDALONE", "NARROW", "NARROW_STANDALONE"][*style as usize];
-                if *style == 0 {
+                let st = ["FULL", "FULL_STANDALONE", "SHORT", "SHORT_STANDALONE", "NARROW", "NARROW_STANDALONE"].get(*style as usize).copied().unwrap_or("");
+                if *style == 0 || *style == TEXT_ENGLISH_SHORT {
                     s.push_str(&format!("Text({})", f.name()));
                 } else {
                     s.push_str(&format!("Text({},{st})", f.name()));
@@ -1454,9 +1739,13 @@ fn describe_items(items: &[Item], s: &mut String) {
             }
             Item::Offset { pattern, none } => s.push_str(&format!("Offset({pattern},'{}')", none.replace('\'', "''"))),
             Item::LocalizedOffset { full } => s.push_str(&format!("LocalizedOffset({})", if *full { "FULL" } else { "SHORT" })),
-            Item::ZoneId => s.push_str("ZoneId()"),
+            Item::ZoneId(q) => s.push_str(match q {
+                ZoneQuery::Id => "ZoneId()",
+                ZoneQuery::Region => "ZoneRegionId()",
+                ZoneQuery::OrOffset => "ZoneOrOffsetId()",
+            }),
             Item::ZoneText { full } => s.push_str(&format!("ZoneText({})", if *full { "FULL" } else { "SHORT" })),
-            Item::Instant => s.push_str("ParseCaseSensitive(false)(Value(Year,4,10,EXCEEDS_PAD)'-'Value(MonthOfYear,2)'-'Value(DayOfMonth,2))'T'(Value(HourOfDay,2)':'Value(MinuteOfHour,2)[':'Value(SecondOfMinute,2)[Fraction(NanoOfSecond,0,9,DecimalPoint)]])Offset(+HH:MM:ss,'Z')"),
+            Item::Instant => s.push_str("Instant()"),
             Item::Optional(inner) => {
                 s.push('[');
                 describe_items(inner, s);
@@ -1488,6 +1777,14 @@ fn describe_items(items: &[Item], s: &mut String) {
 
 // ------------------------------------------------------------------------------ predefined
 
+/// `Item::Text` style of `appendText(field, Map)` with the fixed English short names of
+/// `RFC_1123_DATE_TIME` (whatever the formatter's locale).
+const TEXT_ENGLISH_SHORT: u8 = 255;
+
+fn text_map(locale: &str, style: u8) -> (&str, u8) {
+    if style == TEXT_ENGLISH_SHORT { ("en", 2) } else { (locale, style) }
+}
+
 fn v(f: Field, min: u8, max: u8, sign: Sign) -> Item {
     Item::Value { f: FField::Std(f), min, max, sign }
 }
@@ -1509,85 +1806,74 @@ fn iso_local_time_items() -> Vec<Item> {
     ]
 }
 
-fn iso_local_date_time_items() -> Vec<Item> {
-    let mut items = vec![Item::CaseInsensitive];
-    items.extend(iso_local_date_items());
-    items.push(Item::Lit("T".into()));
-    items.extend(iso_local_time_items());
-    items
+/// `parseLenient().appendOffsetId().parseStrict()`, as the JDK's ISO formatters end.
+fn lenient_offset_id() -> [Item; 3] {
+    [Item::ParseMode { strict: false }, Item::Offset { pattern: "+HH:MM:ss", none: "Z".into() }, Item::ParseMode { strict: true }]
 }
 
-fn offset_item() -> Item {
-    Item::Offset { pattern: "+HH:MM:ss", none: "Z".into() }
+/// `optionalStart().appendLiteral('[').parseCaseSensitive().appendZoneRegionId().appendLiteral(']')`.
+fn bracketed_region() -> Item {
+    Item::Optional(vec![Item::Lit("[".into()), Item::CaseSensitive, Item::ZoneId(ZoneQuery::Region), Item::Lit("]".into())])
 }
 
+/// The predefined constants as `DateTimeFormatter` builds them: a formatter appended with
+/// `append` is a nested group (it prints in parentheses), offsets parse leniently.
 pub fn predefined(name: &str) -> Option<Formatter> {
+    let local_date = || Item::Group(iso_local_date_items());
+    let local_time = || Item::Group(iso_local_time_items());
+    let local_date_time = || Item::Group(vec![Item::CaseInsensitive, local_date(), Item::Lit("T".into()), local_time()]);
+    let offset_date_time = || {
+        let mut i = vec![Item::CaseInsensitive, local_date_time()];
+        i.extend(lenient_offset_id());
+        Item::Group(i)
+    };
+    let with_offset = |mut i: Vec<Item>, optional: bool| {
+        if optional {
+            i.push(Item::Optional(lenient_offset_id().to_vec()));
+        } else {
+            i.extend(lenient_offset_id());
+        }
+        i
+    };
     let f = match name {
         "ISO_LOCAL_DATE" => Formatter::iso("ISO_LOCAL_DATE", iso_local_date_items()),
         "ISO_LOCAL_TIME" => Formatter::iso("ISO_LOCAL_TIME", iso_local_time_items()),
-        "ISO_LOCAL_DATE_TIME" => Formatter::iso("ISO_LOCAL_DATE_TIME", iso_local_date_time_items()),
-        "ISO_OFFSET_DATE" => {
-            let mut i = vec![Item::CaseInsensitive];
-            i.extend(iso_local_date_items());
-            i.push(offset_item());
-            Formatter::iso("ISO_OFFSET_DATE", i)
+        "ISO_LOCAL_DATE_TIME" => {
+            let Item::Group(i) = local_date_time() else { unreachable!() };
+            Formatter::iso("ISO_LOCAL_DATE_TIME", i)
         }
-        "ISO_OFFSET_TIME" => {
-            let mut i = vec![Item::CaseInsensitive];
-            i.extend(iso_local_time_items());
-            i.push(offset_item());
-            Formatter::iso("ISO_OFFSET_TIME", i)
-        }
+        "ISO_OFFSET_DATE" => Formatter::iso("ISO_OFFSET_DATE", with_offset(vec![Item::CaseInsensitive, local_date()], false)),
+        "ISO_OFFSET_TIME" => Formatter::iso("ISO_OFFSET_TIME", with_offset(vec![Item::CaseInsensitive, local_time()], false)),
         "ISO_OFFSET_DATE_TIME" => {
-            let mut i = iso_local_date_time_items();
-            i.push(offset_item());
+            let Item::Group(i) = offset_date_time() else { unreachable!() };
             Formatter::iso("ISO_OFFSET_DATE_TIME", i)
         }
-        "ISO_ZONED_DATE_TIME" => {
-            let mut i = iso_local_date_time_items();
-            i.push(offset_item());
-            i.push(Item::Optional(vec![Item::Lit("[".into()), Item::CaseSensitive, Item::ZoneId, Item::Lit("]".into())]));
-            Formatter::iso("ISO_ZONED_DATE_TIME", i)
-        }
+        "ISO_ZONED_DATE_TIME" => Formatter::iso("ISO_ZONED_DATE_TIME", vec![offset_date_time(), bracketed_region()]),
         "ISO_DATE_TIME" => {
-            let mut i = iso_local_date_time_items();
-            i.push(Item::Optional(vec![offset_item(), Item::Optional(vec![Item::Lit("[".into()), Item::CaseSensitive, Item::ZoneId, Item::Lit("]".into())])]));
-            Formatter::iso("ISO_DATE_TIME", i)
+            let mut opt = lenient_offset_id().to_vec();
+            opt.push(bracketed_region());
+            Formatter::iso("ISO_DATE_TIME", vec![local_date_time(), Item::Optional(opt)])
         }
-        "ISO_DATE" => {
-            let mut i = vec![Item::CaseInsensitive];
-            i.extend(iso_local_date_items());
-            i.push(Item::Optional(vec![offset_item()]));
-            Formatter::iso("ISO_DATE", i)
-        }
-        "ISO_TIME" => {
-            let mut i = vec![Item::CaseInsensitive];
-            i.extend(iso_local_time_items());
-            i.push(Item::Optional(vec![offset_item()]));
-            Formatter::iso("ISO_TIME", i)
-        }
+        "ISO_DATE" => Formatter::iso("ISO_DATE", with_offset(vec![Item::CaseInsensitive, local_date()], true)),
+        "ISO_TIME" => Formatter::iso("ISO_TIME", with_offset(vec![Item::CaseInsensitive, local_time()], true)),
         "ISO_INSTANT" => Formatter::iso("ISO_INSTANT", vec![Item::CaseInsensitive, Item::Instant]),
         "ISO_ORDINAL_DATE" => Formatter::iso(
             "ISO_ORDINAL_DATE",
-            vec![
-                Item::CaseInsensitive,
-                v(Field::Year, 4, 10, Sign::ExceedsPad),
-                Item::Lit("-".into()),
-                v(Field::DayOfYear, 3, 3, Sign::NotNegative),
-                Item::Optional(vec![offset_item()]),
-            ],
+            with_offset(vec![Item::CaseInsensitive, v(Field::Year, 4, 10, Sign::ExceedsPad), Item::Lit("-".into()), v(Field::DayOfYear, 3, 3, Sign::NotNegative)], true),
         ),
         "ISO_WEEK_DATE" => Formatter::iso(
             "ISO_WEEK_DATE",
-            vec![
-                Item::CaseInsensitive,
-                Item::Value { f: FField::IsoWeekBasedYear, min: 4, max: 10, sign: Sign::ExceedsPad },
-                Item::Lit("-W".into()),
-                Item::Value { f: FField::IsoWeekOfWeekBasedYear, min: 2, max: 2, sign: Sign::NotNegative },
-                Item::Lit("-".into()),
-                v(Field::DayOfWeek, 1, 1, Sign::NotNegative),
-                Item::Optional(vec![offset_item()]),
-            ],
+            with_offset(
+                vec![
+                    Item::CaseInsensitive,
+                    Item::Value { f: FField::IsoWeekBasedYear, min: 4, max: 10, sign: Sign::ExceedsPad },
+                    Item::Lit("-W".into()),
+                    Item::Value { f: FField::IsoWeekOfWeekBasedYear, min: 2, max: 2, sign: Sign::NotNegative },
+                    Item::Lit("-".into()),
+                    v(Field::DayOfWeek, 1, 1, Sign::NotNegative),
+                ],
+                true,
+            ),
         ),
         "BASIC_ISO_DATE" => Formatter::iso(
             "BASIC_ISO_DATE",
@@ -1596,17 +1882,18 @@ pub fn predefined(name: &str) -> Option<Formatter> {
                 v(Field::Year, 4, 4, Sign::NotNegative),
                 v(Field::MonthOfYear, 2, 2, Sign::NotNegative),
                 v(Field::DayOfMonth, 2, 2, Sign::NotNegative),
-                Item::Optional(vec![Item::Offset { pattern: "+HHMMss", none: "Z".into() }]),
+                Item::Optional(vec![Item::ParseMode { strict: false }, Item::Offset { pattern: "+HHMMss", none: "Z".into() }, Item::ParseMode { strict: true }]),
             ],
         ),
         "RFC_1123_DATE_TIME" => Formatter::iso(
             "RFC_1123_DATE_TIME",
             vec![
                 Item::CaseInsensitive,
-                Item::Optional(vec![Item::Text { f: FField::Std(Field::DayOfWeek), style: 2 }, Item::Lit(", ".into())]),
+                Item::ParseMode { strict: false },
+                Item::Optional(vec![Item::Text { f: FField::Std(Field::DayOfWeek), style: TEXT_ENGLISH_SHORT }, Item::Lit(", ".into())]),
                 v(Field::DayOfMonth, 1, 2, Sign::NotNegative),
                 Item::Lit(" ".into()),
-                Item::Text { f: FField::Std(Field::MonthOfYear), style: 2 },
+                Item::Text { f: FField::Std(Field::MonthOfYear), style: TEXT_ENGLISH_SHORT },
                 Item::Lit(" ".into()),
                 v(Field::Year, 4, 4, Sign::NotNegative),
                 Item::Lit(" ".into()),
@@ -1719,6 +2006,17 @@ fn f_format(_: &mut Vm, a: &mut [Value]) -> VR {
                 "format.DateTimeFormatter.format(DateTimeFormatter.java:1902)",
             ]);
             jt(e, &fr)
+        } else if e.class == cls::DATE_TIME_EXCEPTION && e.frames.is_empty() && e.message.as_deref().is_some_and(|m| m.starts_with("Unable to extract Zone")) {
+            jt(
+                e,
+                &[
+                    "format.DateTimePrintContext.getValue(DateTimePrintContext.java:353)",
+                    "format.DateTimeFormatterBuilder$ZoneIdPrinterParser.format(DateTimeFormatterBuilder.java:4632)",
+                    "format.DateTimeFormatterBuilder$CompositePrinterParser.format(DateTimeFormatterBuilder.java:2549)",
+                    "format.DateTimeFormatter.formatTo(DateTimeFormatter.java:1928)",
+                    "format.DateTimeFormatter.format(DateTimeFormatter.java:1902)",
+                ],
+            )
         } else {
             e
         }
@@ -1733,13 +2031,23 @@ fn f_format_to(vm: &mut Vm, a: &mut [Value]) -> VR {
 fn f_parse(_: &mut Vm, a: &mut [Value]) -> VR {
     let f = formatter_of(&a[0])?;
     let text = text_arg(&a[1])?;
-    let p = f.parse_resolved(&text)?;
+    // `parse(CharSequence)` reaches `parseResolved0` from its own line
+    let p = f.parse_resolved(&text).map_err(|t| {
+        let t = super::parse_frames(t);
+        let mut t = t;
+        for fr in t.frames.iter_mut() {
+            if fr.ends_with("DateTimeFormatter.parse(DateTimeFormatter.java:2033)") {
+                *fr = fr.replace("2033", "1959");
+            }
+        }
+        t
+    })?;
     Ok(time_value(TimeVal::Parsed(Rc::new(p))))
 }
 fn f_parse_query(vm: &mut Vm, a: &mut [Value]) -> VR {
     let f = formatter_of(&a[0])?;
     let text = text_arg(&a[1])?;
-    let p = f.parse_resolved(&text)?;
+    let p = f.parse_resolved(&text).map_err(super::parse_frames)?;
     let v = time_value(p.to_value());
     let q = a[2].clone();
     crate::func::call(vm, &q, &[v])

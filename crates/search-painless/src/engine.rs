@@ -91,6 +91,8 @@ impl Default for Settings {
 pub enum Lang {
     Painless,
     Mustache,
+    /// Lucene expressions (`lang-expression`, see [`crate::expression`]).
+    Expression,
 }
 
 impl Lang {
@@ -98,6 +100,7 @@ impl Lang {
         match s {
             "painless" => Some(Lang::Painless),
             "mustache" => Some(Lang::Mustache),
+            "expression" => Some(Lang::Expression),
             _ => None,
         }
     }
@@ -105,6 +108,7 @@ impl Lang {
         match self {
             Lang::Painless => "painless",
             Lang::Mustache => "mustache",
+            Lang::Expression => "expression",
         }
     }
 }
@@ -113,6 +117,7 @@ impl Lang {
 pub enum Compiled {
     Painless(Arc<Script>),
     Mustache(Arc<Template>),
+    Expression(Arc<crate::expression::Expression>),
 }
 
 impl Clone for Compiled {
@@ -120,6 +125,7 @@ impl Clone for Compiled {
         match self {
             Compiled::Painless(s) => Compiled::Painless(s.clone()),
             Compiled::Mustache(t) => Compiled::Mustache(t.clone()),
+            Compiled::Expression(e) => Compiled::Expression(e.clone()),
         }
     }
 }
@@ -135,7 +141,16 @@ struct CacheKey {
 struct CacheEntry {
     value: Compiled,
     last_used: u64,
-    inserted: StdInstant,
+    /// Last hit or insertion: `script.cache.expire` counts from here (`setExpireAfterAccess`).
+    accessed: StdInstant,
+}
+
+/// A compilation in progress. Threads that miss on the same key wait for it instead of compiling
+/// (and charging a compilation token) themselves, as Elasticsearch's `computeIfAbsent` does.
+#[derive(Default)]
+struct Flight {
+    result: Mutex<Option<Result<Compiled, ScriptError>>>,
+    done: std::sync::Condvar,
 }
 
 struct Bucket {
@@ -145,6 +160,7 @@ struct Bucket {
 
 struct Cache {
     map: HashMap<CacheKey, CacheEntry>,
+    inflight: HashMap<CacheKey, Arc<Flight>>,
     tick: u64,
     bucket: Bucket,
     compilations: u64,
@@ -179,6 +195,7 @@ impl Engine {
             settings: Mutex::new(settings),
             cache: Mutex::new(Cache {
                 map: HashMap::new(),
+                inflight: HashMap::new(),
                 tick: 0,
                 bucket: Bucket { tokens, last: StdInstant::now() },
                 compilations: 0,
@@ -223,7 +240,7 @@ impl Engine {
     pub fn compile(&self, src: &str, ctx: Context) -> Result<Arc<Script>, ScriptError> {
         match self.compile_lang(Lang::Painless, src, ctx, &[])? {
             Compiled::Painless(s) => Ok(s),
-            Compiled::Mustache(_) => unreachable!(),
+            _ => unreachable!(),
         }
     }
 
@@ -231,7 +248,16 @@ impl Engine {
     pub fn compile_template(&self, src: &str, ctx: Context, options: &[(String, String)]) -> Result<Arc<Template>, ScriptError> {
         match self.compile_lang(Lang::Mustache, src, ctx, options)? {
             Compiled::Mustache(t) => Ok(t),
-            Compiled::Painless(_) => unreachable!(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Compiles a Lucene expression (cached, size-checked and rate-limited like other inline
+    /// scripts).
+    pub fn compile_expression(&self, src: &str, ctx: Context) -> Result<Arc<crate::expression::Expression>, ScriptError> {
+        match self.compile_lang(Lang::Expression, src, ctx, &[])? {
+            Compiled::Expression(e) => Ok(e),
+            _ => unreachable!(),
         }
     }
 
@@ -256,23 +282,33 @@ impl Engine {
 
     fn compile_unchecked(&self, lang: Lang, src: &str, ctx: Context, options: &[(String, String)], settings: &Settings, limited: bool) -> Result<Compiled, ScriptError> {
         let key = CacheKey { lang, source: Arc::from(src), context: ctx, options: options.to_vec() };
-        {
+        let flight = {
             let mut c = self.cache.lock().unwrap();
             c.tick += 1;
             let tick = c.tick;
+            let now = StdInstant::now();
             let expired = match (c.map.get(&key), settings.cache_expire) {
-                (Some(e), Some(ttl)) => e.inserted.elapsed() > ttl,
+                (Some(e), Some(ttl)) => now.duration_since(e.accessed) > ttl,
                 _ => false,
             };
             if expired {
                 c.map.remove(&key);
             } else if let Some(e) = c.map.get_mut(&key) {
                 e.last_used = tick;
+                e.accessed = now;
                 return Ok(e.value.clone());
+            }
+            if let Some(f) = c.inflight.get(&key) {
+                let f = f.clone();
+                drop(c);
+                let mut r = f.result.lock().unwrap();
+                while r.is_none() {
+                    r = f.done.wait(r).unwrap();
+                }
+                return r.clone().unwrap();
             }
             if limited && ctx.compilation_rate_limited()
                 && let Some((count, per)) = settings.max_compilations_rate {
-                    let now = StdInstant::now();
                     let per_nano = count as f64 / per.as_nanos().max(1) as f64;
                     let passed = now.duration_since(c.bucket.last).as_nanos() as f64;
                     let mut t = c.bucket.tokens + passed * per_nano;
@@ -295,11 +331,37 @@ impl Engine {
                         .with_status(429));
                     }
                 }
-        }
-        let value = match lang {
-            Lang::Painless => Compiled::Painless(Arc::new(compile_painless(src, ctx, settings)?)),
-            Lang::Mustache => Compiled::Mustache(Arc::new(Template::compile(src, options)?)),
+            let f = Arc::new(Flight::default());
+            c.inflight.insert(key.clone(), f.clone());
+            f
         };
+        // the waiters are released even if compilation panics
+        struct Land<'a> {
+            engine: &'a Engine,
+            key: &'a CacheKey,
+            flight: &'a Flight,
+            result: Option<Result<Compiled, ScriptError>>,
+        }
+        impl Drop for Land<'_> {
+            fn drop(&mut self) {
+                let r = self.result.take().unwrap_or_else(|| Err(ScriptError::plain("illegal_state_exception", "script compilation failed".to_string())));
+                if let Ok(mut c) = self.engine.cache.lock() {
+                    c.inflight.remove(self.key);
+                }
+                if let Ok(mut slot) = self.flight.result.lock() {
+                    *slot = Some(r);
+                }
+                self.flight.done.notify_all();
+            }
+        }
+        let mut land = Land { engine: self, key: &key, flight: &flight, result: None };
+        let value = match lang {
+            Lang::Painless => compile_painless(src, ctx, settings).map(|s| Compiled::Painless(Arc::new(s))),
+            Lang::Mustache => Template::compile(src, options).map(|t| Compiled::Mustache(Arc::new(t))),
+            Lang::Expression => crate::expression::Expression::compile(src, ctx).map(|e| Compiled::Expression(Arc::new(e))),
+        };
+        land.result = Some(value.clone());
+        let value = value?;
         let mut c = self.cache.lock().unwrap();
         c.compilations += 1;
         if settings.cache_max_size == 0 {
@@ -312,7 +374,7 @@ impl Engine {
             c.evictions += 1;
         }
         let tick = c.tick;
-        c.map.insert(key, CacheEntry { value: value.clone(), last_used: tick, inserted: StdInstant::now() });
+        c.map.insert(key.clone(), CacheEntry { value: value.clone(), last_used: tick, accessed: StdInstant::now() });
         Ok(value)
     }
 }
@@ -885,6 +947,56 @@ mod tests {
         assert_eq!(e.stats().compilations, 2);
         e.compile("return 2", Context::PainlessTest).unwrap();
         assert_eq!(e.stats().cache_evictions, 1);
+    }
+
+    /// `script.cache.expire` counts from the last use (Elasticsearch's `setExpireAfterAccess`): a
+    /// script in constant use is never recompiled.
+    #[test]
+    fn cache_expires_after_access() {
+        let e = Engine::new(Settings { cache_expire: Some(Duration::from_millis(300)), ..Settings::default() });
+        let a = e.compile("return 1", Context::PainlessTest).unwrap();
+        for _ in 0..8 {
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(Arc::ptr_eq(&a, &e.compile("return 1", Context::PainlessTest).unwrap()));
+        }
+        assert_eq!(e.stats().compilations, 1);
+        std::thread::sleep(Duration::from_millis(450));
+        assert!(!Arc::ptr_eq(&a, &e.compile("return 1", Context::PainlessTest).unwrap()));
+        assert_eq!(e.stats().compilations, 2);
+    }
+
+    /// Threads missing on the same script wait for one compilation and charge one token.
+    #[test]
+    fn concurrent_misses_compile_once() {
+        let e = Engine::new(Settings { max_compilations_rate: Some((1, Duration::from_secs(3600))), ..Settings::default() });
+        // big enough that the threads overlap with its compilation
+        let src: String = (0..3000).map(|i| format!("int v{i} = {i};")).collect::<String>() + "return 1";
+        let results: Vec<_> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..8).map(|_| sc.spawn(|| e.compile(&src, Context::PainlessTest))).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let first = results[0].as_ref().unwrap();
+        assert!(results.iter().all(|r| Arc::ptr_eq(r.as_ref().unwrap(), first)));
+        assert_eq!(e.stats().compilations, 1);
+        assert_eq!(e.stats().compilation_limit_triggered, 0);
+        // compile errors reach every waiter too, and nothing is cached
+        let e = Engine::new(Settings { max_compilations_rate: None, ..Settings::default() });
+        let errs: Vec<_> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..4).map(|_| sc.spawn(|| e.compile_stored(Lang::Painless, "return [", Context::PainlessTest, &[]))).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(errs.iter().all(|r| matches!(r, Err(e) if e.to_response()["error"]["type"] == "script_exception")));
+    }
+
+    /// Library edge cases that used to panic (an engine bug surfacing as `illegal_state_exception`)
+    /// or loop: deleting half of a surrogate pair, stepping `substring(1)` through one.
+    #[test]
+    fn surrogate_pairs_do_not_panic_or_stall() {
+        let e = Engine::default();
+        let run = |src: &str| e.compile(src, Context::PainlessTest).unwrap().instance().execute(&mut crate::NoHost).map(|v| v.to_java_string());
+        assert_eq!(run("StringBuilder sb = new StringBuilder('\u{1F600}'); sb.deleteCharAt(0); return sb.length()").unwrap(), "0");
+        assert_eq!(run("String s = '\u{1F600}x'; int n = 0; while (s.length() > 0) { s = s.substring(1); n++ } return n").unwrap(), "2");
+        assert_eq!(run("return 'x\u{1F600}'.substring(2)").unwrap(), "");
     }
 
     #[test]

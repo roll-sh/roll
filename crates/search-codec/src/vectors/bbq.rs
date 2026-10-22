@@ -238,8 +238,8 @@ unsafe fn plane_dots_popcnt(planes: &[u64], code: &[u8], words: usize) -> u32 {
 #[inline(always)]
 fn plane_dots_portable(planes: &[u64], code: &[u8], words: usize) -> u32 {
     let mut dots = [0u32; 4];
-    for (w, c) in code.chunks_exact(8).take(words).enumerate() {
-        let b = u64::from_le_bytes(c.try_into().unwrap());
+    for (w, c) in code.as_chunks::<8>().0.iter().take(words).enumerate() {
+        let b = u64::from_le_bytes(*c);
         for (k, d) in dots.iter_mut().enumerate() {
             *d += (planes[k * words + w] & b).count_ones();
         }

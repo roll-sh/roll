@@ -58,18 +58,19 @@ impl DynamicError {
 struct Ctx<'a> {
     mapping: &'a Mapping,
     ctx: &'a MappingCtx,
-    date_formats: Vec<(String, DateFormatter)>,
+    /// Parsed on first use: most documents add no string field that needs date detection.
+    date_formats: std::cell::OnceCell<Vec<(String, DateFormatter)>>,
     update: Mapping,
+    /// Walking the values copied to an unmapped `copy_to` target.
+    copy_to_dest: bool,
+    /// Fields added so far (`DocumentParserContext.dynamicMappersSize`), for
+    /// `ignore_dynamic_beyond_limit`.
+    added: usize,
 }
 
 /// Computes the mapping update for `doc`. `None` when the mapping already covers it.
 pub fn dynamic_update(mapping: &Mapping, doc: &Map, ctx: &MappingCtx) -> Result<Option<Mapping>, DynamicError> {
-    let formats: Vec<String> = match &mapping.dynamic_date_formats {
-        Some(f) => f.clone(),
-        None => DEFAULT_DYNAMIC_DATE_FORMATS.iter().map(|s| s.to_string()).collect(),
-    };
-    let date_formats = formats.into_iter().filter_map(|f| DateFormatter::new(&f).ok().map(|d| (f, d))).collect();
-    let mut c = Ctx { mapping, ctx, date_formats, update: Mapping::empty() };
+    let mut c = Ctx { mapping, ctx, date_formats: std::cell::OnceCell::new(), update: Mapping::empty(), copy_to_dest: false, added: 0 };
     let root_dynamic = mapping.root.dynamic.unwrap_or(super::Dynamic::True);
     walk_object(&mut c, Some(&mapping.root), "", doc, root_dynamic, &mut Vec::new())?;
     if c.update.root.children.is_empty() && c.update.runtime.is_empty() {
@@ -124,7 +125,8 @@ fn check_limits(base: &Mapping, update: &Mapping, ctx: &MappingCtx) -> Result<()
 /// Walks an object of the document. `existing` is the mapped object at `path` (if any) and
 /// `trail` the chain of new object names leading here (for building the update).
 fn walk_object(c: &mut Ctx, existing: Option<&ObjectMapper>, path: &str, doc: &Map, dynamic: super::Dynamic, trail: &mut Vec<String>) -> Result<(), DynamicError> {
-    let subobjects = existing.map(|o| !o.literal_dots()).unwrap_or(true);
+    // Strict columnar mappings keep every field as a dotted name at the root.
+    let subobjects = c.ctx.columnar.is_none() && existing.map(|o| !o.literal_dots()).unwrap_or(true);
     let disable_objects = existing.is_some_and(|o| o.disable_objects == Some(true));
     for (key, value) in doc {
         if disable_objects
@@ -171,8 +173,27 @@ fn walk_object(c: &mut Ctx, existing: Option<&ObjectMapper>, path: &str, doc: &M
                 continue;
             }
         }
+        // Root metadata fields (`_doc_count`, or `_id` which the parser rejects) never map.
+        if path.is_empty() && super::METADATA_FIELDS.contains(&key.as_str()) {
+            continue;
+        }
         let full = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
         let child = existing.and_then(|o| o.children.get(key));
+        // `subobjects: false`: an unmapped object flattens into dotted leaf names, unless a
+        // dynamic template maps it as a (non-object) field.
+        if !subobjects
+            && !disable_objects
+            && child.is_none()
+            && let Value::Obj(inner) = value
+            && find_template(c, &full, key, "object")?.is_none_or(|t| t.mapping_type("object") == "object")
+        {
+            let mut flat = Map::new();
+            for (k, v) in inner {
+                flat.insert(format!("{key}.{k}"), v.clone());
+            }
+            crate::stack::maybe_grow(|| walk_object(c, existing, path, &flat, dynamic, trail))?;
+            continue;
+        }
         match child {
             Some(Mapper::Object(o)) => {
                 let child_dynamic = o.dynamic.unwrap_or(dynamic);
@@ -185,11 +206,37 @@ fn walk_object(c: &mut Ctx, existing: Option<&ObjectMapper>, path: &str, doc: &M
                     trail.pop();
                 }
             }
+            Some(Mapper::Field(f)) if !f.copy_to.is_empty() => {
+                // Values copied to an unmapped target map it dynamically, as if the document
+                // had the target field (`DocumentParserContext.createCopyToContext`).
+                for target in f.copy_to.clone() {
+                    if c.mapping.lookup(&target).is_some() || c.update.lookup(&target).is_some() {
+                        continue;
+                    }
+                    let mut single = Map::new();
+                    single.insert(target.clone(), value.clone());
+                    let root_dynamic = c.mapping.root.dynamic.unwrap_or(super::Dynamic::True);
+                    let was = std::mem::replace(&mut c.copy_to_dest, true);
+                    let r = crate::stack::maybe_grow(|| walk_object(c, Some(&c.mapping.root), "", &single, root_dynamic, &mut Vec::new()));
+                    c.copy_to_dest = was;
+                    r?;
+                }
+            }
             Some(_) => {}
             None => {
                 if c.mapping.runtime.contains_key(&full) || c.update.runtime.contains_key(&full) {
                     continue;
                 }
+                // Strict columnar mappings: the field's prefix decides (`prefix_properties`).
+                let dynamic = match full.rsplit_once('.') {
+                    Some((prefix, _)) if c.ctx.columnar.is_some() => {
+                        if c.mapping.prefix_disabled(&full) {
+                            continue;
+                        }
+                        c.mapping.dynamic_for(prefix)
+                    }
+                    _ => dynamic,
+                };
                 new_field(c, path, key, &full, value, dynamic, trail)?;
             }
         }
@@ -246,7 +293,7 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
             }
             return Ok(());
         }
-        let template = find_template(c, full, key, "object");
+        let template = find_template(c, full, key, "object")?;
         let mapper = match template {
             Some(t) => template_mapper(c, &t, key, "object")?,
             // OpenSearch: without a template, `false_allow_templates` skips the object;
@@ -258,6 +305,9 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
             Mapper::Object(o) => o.dynamic.unwrap_or(dynamic),
             _ => dynamic,
         };
+        if !admit(c, trail, &mapper) {
+            return Ok(());
+        }
         insert(c, trail, mapper.clone());
         if let Mapper::Object(o) = &mapper {
             let mut t: Vec<String> = trail.to_vec();
@@ -276,7 +326,7 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
         Value::Bool(_) => ("boolean", Builtin::Boolean),
         _ => return Ok(()),
     };
-    if let Some(t) = find_template(c, full, key, xtype) {
+    if let Some(t) = find_template(c, full, key, xtype)? {
         if t.runtime {
             let dt = match xtype {
                 "string" => "keyword",
@@ -289,7 +339,9 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
             c.update.runtime.insert(full.to_string(), rf);
         } else {
             let mapper = template_mapper(c, &t, key, xtype)?;
-            insert(c, trail, mapper);
+            if admit(c, trail, &mapper) {
+                insert(c, trail, mapper);
+            }
         }
         return Ok(());
     }
@@ -300,7 +352,7 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
     }
     if dynamic == super::Dynamic::Runtime {
         let ty = match builtin {
-            Builtin::Text => "keyword",
+            Builtin::Text | Builtin::Keyword => "keyword",
             Builtin::Long => "long",
             Builtin::Float => "double",
             Builtin::Boolean => "boolean",
@@ -313,18 +365,77 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
         c.update.runtime.insert(full.to_string(), RuntimeField { ty: ty.into(), params });
         return Ok(());
     }
+    // `DocumentParser.parseArrayDynamic`: an array of 128 to 4096 values led by a float maps as
+    // a `dense_vector` of that many dims, unless it is a `copy_to` destination.
+    if matches!(builtin, Builtin::Float)
+        && !c.copy_to_dest
+        && let Value::Arr(_) = value
+    {
+        let n = count_values(value);
+        if (MIN_DIMS_FOR_DYNAMIC_FLOAT_MAPPING..=MAX_DIMS_COUNT).contains(&n) {
+            let m = dense_vector_mapper(key, n);
+            if admit(c, trail, &m) {
+                insert(c, trail, m);
+            }
+            return Ok(());
+        }
+    }
+    // Strings under a pass-through object holding dimensions map as (dimension) keywords.
+    let builtin = match builtin {
+        // Strict columnar mappings map strings as keywords.
+        Builtin::Text if dimension_container(c, parent) || c.ctx.columnar.is_some() => Builtin::Keyword,
+        b => b,
+    };
     let mapper = builtin_mapper(key, builtin, c.ctx);
-    insert(c, trail, mapper);
+    if admit(c, trail, &mapper) {
+        insert(c, trail, mapper);
+    }
     Ok(())
+}
+
+/// `DenseVectorFieldMapper.MIN_DIMS_FOR_DYNAMIC_FLOAT_MAPPING`.
+const MIN_DIMS_FOR_DYNAMIC_FLOAT_MAPPING: usize = 128;
+/// `DenseVectorFieldMapper.MAX_DIMS_COUNT`.
+const MAX_DIMS_COUNT: usize = 4096;
+
+/// The non-null values of an array (inner arrays flattened, as the document parser reads them).
+fn count_values(v: &Value) -> usize {
+    match v {
+        Value::Arr(a) => a.iter().map(count_values).sum(),
+        Value::Null => 0,
+        _ => 1,
+    }
+}
+
+/// The dynamic `dense_vector` mapping (with the defaults Elasticsearch 9.5 writes out).
+fn dense_vector_mapper(name: &str, dims: usize) -> Mapper {
+    let def = types::lookup("dense_vector").expect("built-in type");
+    let mut f = FieldMapper::new(name, def);
+    f.set("dims", Value::from(dims as i64));
+    f.set("index", Value::Bool(true));
+    f.set("similarity", Value::from("cosine"));
+    f.set("index_options", obj! { "type" => "int8_hnsw", "m" => 16, "ef_construction" => 100 });
+    Mapper::Field(f)
 }
 
 enum Builtin {
     Text,
+    /// A string under a pass-through object holding dimensions.
+    Keyword,
     Long,
     Float,
     Boolean,
     /// A date with a non-default format.
     Date(Option<String>),
+}
+
+/// Whether the object at `path` is a pass-through object with `time_series_dimension: true`.
+fn dimension_container(c: &Ctx, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let is = |m: Option<super::MapperRef<'_>>| matches!(m, Some(super::MapperRef::Object(o)) if matches!(o.kind, super::ObjectKind::PassThrough { dimensions: Some(true), .. }));
+    is(c.mapping.lookup(path)) || is(c.update.lookup(path))
 }
 
 fn classify_string(c: &Ctx, s: &str) -> (&'static str, Builtin) {
@@ -338,7 +449,14 @@ fn classify_string(c: &Ctx, s: &str) -> (&'static str, Builtin) {
         return ("double", Builtin::Float);
     }
     if !as_long && !as_double && c.mapping.date_detection.unwrap_or(true) {
-        for (pattern, f) in &c.date_formats {
+        let formats = c.date_formats.get_or_init(|| {
+            let names: Vec<String> = match &c.mapping.dynamic_date_formats {
+                Some(f) => f.clone(),
+                None => DEFAULT_DYNAMIC_DATE_FORMATS.iter().map(|s| s.to_string()).collect(),
+            };
+            names.into_iter().filter_map(|f| DateFormatter::new(&f).ok().map(|d| (f, d))).collect()
+        });
+        for (pattern, f) in formats {
             if f.parse(s, None, false).is_ok() {
                 let fmt = if pattern == "strict_date_optional_time" || pattern == DateFormatter::DEFAULT { None } else { Some(pattern.clone()) };
                 return ("date", Builtin::Date(fmt));
@@ -351,6 +469,7 @@ fn classify_string(c: &Ctx, s: &str) -> (&'static str, Builtin) {
 fn builtin_mapper(name: &str, b: Builtin, ctx: &MappingCtx) -> Mapper {
     let def = |t: &str| types::lookup(t).expect("built-in type");
     match b {
+        Builtin::Text if !ctx.dynamic_auto_text => Mapper::Field(FieldMapper::new(name, def("keyword"))),
         Builtin::Text => {
             let mut f = FieldMapper::new(name, def("text"));
             let mut kw = FieldMapper::new("keyword", def("keyword"));
@@ -358,6 +477,7 @@ fn builtin_mapper(name: &str, b: Builtin, ctx: &MappingCtx) -> Mapper {
             f.fields.insert("keyword".into(), kw);
             Mapper::Field(f)
         }
+        Builtin::Keyword => Mapper::Field(FieldMapper::new(name, def("keyword"))),
         Builtin::Long => Mapper::Field(FieldMapper::new(name, def("long"))),
         Builtin::Float => Mapper::Field(FieldMapper::new(name, def("float"))),
         Builtin::Boolean => Mapper::Field(FieldMapper::new(name, def("boolean"))),
@@ -377,8 +497,19 @@ fn builtin_mapper(name: &str, b: Builtin, ctx: &MappingCtx) -> Mapper {
     }
 }
 
-fn find_template(c: &Ctx, full: &str, key: &str, xtype: &str) -> Option<DynamicTemplate> {
-    c.mapping.dynamic_templates.as_ref()?.iter().find(|t| t.matches(full, key, xtype)).cloned()
+/// `DocumentParserContext.findDynamicTemplate`: a template the request names for the field
+/// (by name only, failing when there is none), else the first matching one.
+fn find_template(c: &Ctx, full: &str, key: &str, xtype: &str) -> Result<Option<DynamicTemplate>, DynamicError> {
+    let templates = c.mapping.dynamic_templates.as_deref().unwrap_or(&[]);
+    if let Some(name) = c.ctx.requested_templates.as_ref().and_then(|m| m.get(full)).and_then(Value::as_str) {
+        return match templates.iter().find(|t| t.name == name) {
+            Some(t) => Ok(Some(t.clone())),
+            None => Err(DynamicError::Other(
+                EsError::document_parsing(format!("Can't find dynamic template for dynamic template name [{name}] of field [{full}]")).with_hidden("locate", Value::from(full)),
+            )),
+        };
+    }
+    Ok(templates.iter().find(|t| t.matches(full, key, xtype)).cloned())
 }
 
 fn template_mapper(c: &Ctx, t: &DynamicTemplate, key: &str, xtype: &str) -> Result<Mapper, DynamicError> {
@@ -396,6 +527,36 @@ fn template_mapper(c: &Ctx, t: &DynamicTemplate, key: &str, xtype: &str) -> Resu
             DynamicError::Other(e)
         }
     })
+}
+
+/// Whether a new dynamic mapper fits (`DocumentParserContext.addDynamicMapper`): with
+/// `ignore_dynamic_beyond_limit`, a mapper past the total fields limit (or with a name past the
+/// name length limit) is skipped, and the document keeps the value only in `_source`
+/// (recorded in `_ignored` by the document parser).
+fn admit(c: &mut Ctx, trail: &[String], mapper: &Mapper) -> bool {
+    let mut path = trail.join(".");
+    if !path.is_empty() {
+        path.push('.');
+    }
+    path.push_str(mapper.name());
+    if c.mapping.lookup(&path).is_some() || c.update.lookup(&path).is_some() {
+        return true;
+    }
+    if c.ctx.ignore_dynamic_names_beyond_limit && mapper.name().chars().count() as i64 > c.ctx.field_name_length_limit {
+        return false;
+    }
+    if !c.ctx.ignore_dynamic_beyond_limit {
+        return true;
+    }
+    let size = match mapper {
+        Mapper::Field(f) => 1 + f.fields.len(),
+        _ => 1,
+    };
+    if (c.mapping.total_fields() + c.added + size) as i64 > c.ctx.total_fields_limit {
+        return false;
+    }
+    c.added += size;
+    true
 }
 
 /// Adds a new mapper to the update under the object chain `trail`.

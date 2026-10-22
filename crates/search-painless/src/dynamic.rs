@@ -46,8 +46,12 @@ fn param_java_name(t: Ty) -> String {
 }
 
 /// NPE for a typed call on a null receiver.
-pub fn null_receiver(reg: &Registry, m: MethodId, desc: Option<&str>) -> Thrown {
+pub fn null_receiver(reg: &Registry, m: MethodId, desc: Option<&str>, regex_limited: bool) -> Thrown {
     let mi = reg.method(m);
+    if mi.aug.as_deref() == Some(crate::regex::REGEX_INPUT_AUG) {
+        // the augmentation matches over its receiver: the matcher fails on the null text
+        return crate::regex::null_input(regex_limited, &["java.util.regex.Pattern.matcher(Pattern.java:1182)"]);
+    }
     if let Some(inner) = &mi.aug {
         return npe(format!("Cannot invoke \"{inner}\" because \"receiver\" is null"));
     }

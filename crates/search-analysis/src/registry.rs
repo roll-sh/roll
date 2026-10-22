@@ -771,7 +771,7 @@ fn keyword_marker(s: &Settings) -> Result<Arc<dyn FilterFactory>> {
             ));
         }
         let re = Arc::new(jregex::compile(&pattern, 0)?);
-        keyword_aware_fn(move || Box::new(KeywordMarker::Pattern(re.clone())))
+        keyword_aware_fn(move || Box::new(KeywordMarker::Pattern(re.clone(), re.captures())))
     } else {
         let Some(list) = word_list(s, "keywords")? else {
             return Err(AnalysisError::illegal(

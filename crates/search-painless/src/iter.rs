@@ -21,6 +21,9 @@ pub enum Source {
     Set(Rc<JMap>),
 }
 
+/// [`JIter::ch`] of an `ArrayList` spliterator not traversed yet (late binding).
+pub const UNBOUND: i32 = -1;
+
 pub struct JIter {
     pub class: ClassId,
     pub items: Vec<Value>,
@@ -29,6 +32,9 @@ pub struct JIter {
     pub mods: u32,
     /// Whether `remove()` is allowed (an element was returned and not yet removed).
     pub can_remove: bool,
+    /// `Spliterator.characteristics()` of a spliterator whose class does not fix them
+    /// (`Spliterators.spliterator(…)`); for a spliterator over an unknown size, `SIZED` is unset.
+    pub ch: i32,
 }
 
 impl JIter {
@@ -37,7 +43,7 @@ impl JIter {
     }
 
     pub fn of_values(class: ClassId, items: Vec<Value>) -> JIter {
-        JIter { class, items, pos: 0, source: Source::None, mods: 0, can_remove: false }
+        JIter { class, items, pos: 0, source: Source::None, mods: 0, can_remove: false, ch: 0 }
     }
 
     fn check(&self) -> Result<(), Thrown> {
@@ -130,6 +136,19 @@ impl JIter {
         }
     }
 
+    /// An explicit `Iterator.next()`: past the end it checks for a concurrent modification
+    /// before failing with `NoSuchElementException`.
+    pub fn next_strict(&mut self) -> Result<Value, Thrown> {
+        if !self.has_next() {
+            self.check()?;
+            return Err(self.exhausted());
+        }
+        match self.next()? {
+            Some(v) => Ok(v),
+            None => Err(self.exhausted()),
+        }
+    }
+
     /// `NoSuchElementException` of `next()` past the end.
     pub fn exhausted(&self) -> Thrown {
         let mut t = Throw::new(cls::NO_SUCH_ELEMENT_EXCEPTION, None);
@@ -151,25 +170,33 @@ impl JIter {
         if frame.is_empty() { t } else { t.with_frames(&[frame]) }
     }
 
+    /// `hasNext()`: a list iterator compares its cursor with the live size (`cursor != size`),
+    /// so a loop that shrank the list to exactly the cursor ends without failing.
     pub fn has_next(&self) -> bool {
         match &self.source {
-            Source::List(l) => self.pos < l.len(),
+            Source::List(l) => self.pos != l.len(),
             _ => self.pos < self.items.len(),
         }
     }
 
+    /// `hasNext()` then `next()`, as a for-each loop runs them: `None` at the end.
     pub fn next(&mut self) -> Result<Option<Value>, Thrown> {
         match &self.source {
             Source::List(l) => {
                 let l = l.clone();
-                if self.pos >= l.len() {
-                    // a structural change still fails fast on the next call, like ArrayList.Itr
-                    if l.mods.get() != self.mods {
-                        return Err(self.cme());
-                    }
+                if self.class == cls::ARRAY_LIST_SPLITERATOR && self.ch == UNBOUND {
+                    // an `ArrayList` spliterator binds the list's size and modCount at first use
+                    self.mods = l.mods.get();
+                    self.ch = 0;
+                }
+                if self.pos == l.len() {
                     return Ok(None);
                 }
+                // `checkForComodification` comes first: a list that shrank past the cursor fails
                 self.check()?;
+                if self.pos > l.len() {
+                    return Ok(None);
+                }
                 let v = l.get(self.pos);
                 self.pos += 1;
                 self.can_remove = true;
@@ -260,8 +287,8 @@ pub fn entry_values(m: &Rc<JMap>) -> Vec<Value> {
 /// `iterable.iterator()` (and what a for-each loop iterates).
 pub fn iter_of(vm: &mut Vm, v: &Value) -> Result<JIter, Thrown> {
     Ok(match v {
-        Value::List(l) => JIter { class: cls::ARRAY_LIST_ITR, items: Vec::new(), pos: 0, mods: l.mods.get(), source: Source::List(l.clone()), can_remove: false },
-        Value::Set(s) => JIter { class: cls::HASH_MAP_ITERATOR, items: s.keys(), pos: 0, mods: s.mods.get(), source: Source::Set(s.clone()), can_remove: false },
+        Value::List(l) => JIter { class: cls::ARRAY_LIST_ITR, items: Vec::new(), pos: 0, mods: l.mods.get(), source: Source::List(l.clone()), can_remove: false, ch: 0 },
+        Value::Set(s) => JIter { class: cls::HASH_MAP_ITERATOR, items: s.keys(), pos: 0, mods: s.mods.get(), source: Source::Set(s.clone()), can_remove: false, ch: 0 },
         Value::Obj(o) => match &**o {
             Obj::MapView { map, kind } => {
                 let items = match kind {
@@ -269,7 +296,7 @@ pub fn iter_of(vm: &mut Vm, v: &Value) -> Result<JIter, Thrown> {
                     ViewKind::Values => map.values(),
                     ViewKind::Entries => entry_values(map),
                 };
-                JIter { class: cls::HASH_MAP_ITERATOR, items, pos: 0, mods: map.mods.get(), source: Source::Map(map.clone(), *kind), can_remove: false }
+                JIter { class: cls::HASH_MAP_ITERATOR, items, pos: 0, mods: map.mods.get(), source: Source::Map(map.clone(), *kind), can_remove: false, ch: 0 }
             }
             Obj::Array(a) => {
                 let mut it = JIter::of_values(cls::GENERIC_ITERATOR, a.data.borrow().to_values());

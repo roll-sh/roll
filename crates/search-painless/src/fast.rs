@@ -5,7 +5,12 @@
 //! Such a script is straight-line code — local declarations, `if`/`else`, `return` — over
 //! expressions of constants, locals, `_score`, `params.x`, `doc['f'].value`, `doc['f'].size()`,
 //! `doc['f'].empty`/`isEmpty()`, arithmetic, comparisons, conditionals, casts, `Math` functions and the
-//! score functions (no loops, no stores but declarations, no other calls). At compile time the typed tree is reduced to a [`Plan`] (or rejected). The
+//! score functions (no loops, no stores but declarations, no other calls). A few object-valued
+//! idioms are read in place rather than materialized: keyword doc values compared with or
+//! looked up in strings fixed for the instance (`doc['tag'].value == 'x'`,
+//! `params.ids.contains(doc['id'].value)`), `date` doc values as epoch milliseconds
+//! (`.getMillis()`, `decayDate*`), and vector functions over a `params` query vector. At
+//! compile time the typed tree is reduced to a [`Plan`] (or rejected). The
 //! first execution of an [`crate::Instance`] specializes the plan on what it then knows: the
 //! values of `params` (fixed for the instance) and the doc-values kind of each field (fixed by
 //! the mapping) decide every `def` operation's type, so each node becomes a closure over unboxed
@@ -83,6 +88,80 @@ enum FExpr {
     Cond(Box<FExpr>, Box<FExpr>, Box<FExpr>),
     /// A pure static method or score function: `ctx` calls set the binding slot first.
     Call { m: MethodId, args: Vec<FExpr>, binding: Option<u32>, ctx: bool },
+    /// An object argument of a vector score function, fixed for the instance: `params.x` (the
+    /// query vector) or a string constant (the field name). Only valid as a `Call` argument.
+    ParamObj(Box<str>),
+    Str(Box<str>),
+    /// `doc['f'].value == s` / `!=` / `.equals(s)` of a string-valued field against a string
+    /// literal or `params.x`: compared in place, without materializing the `String`.
+    /// `fallback`: the same comparison planned generically, for a field that turns out not
+    /// to hold strings.
+    DocStrEq { field: Box<str>, other: Box<FExpr>, ne: bool, fallback: Option<Box<FExpr>> },
+    /// `doc['f'].value.getMillis()` / `.millis` / `.toInstant().toEpochMilli()` of a `date`
+    /// field: the stored long, without building the `ZonedDateTime`.
+    DocMillis(Box<str>),
+    /// `decayDate*(origin, scale, offset, decay, doc['f'].value)`: the class binding over the
+    /// first four arguments, fed the date's epoch milliseconds.
+    DateDecay { m: MethodId, binding: u32, args: Vec<FExpr>, field: Box<str> },
+    /// `doc['f'].contains(s)` of a string-valued field, `s` a literal or `params.x`.
+    DocContains { field: Box<str>, other: Box<FExpr> },
+    /// `params.x.contains(doc['f'].value)`: membership of a keyword in a list fixed for the
+    /// instance (hashed when long).
+    ParamContains { key: Box<str>, field: Box<str> },
+    /// A UTC field of a `date` doc value (`getHour()`, `getDayOfWeek().getValue()`, …).
+    DocDatePart(Box<str>, DatePart),
+    /// `doc.containsKey('f')`.
+    DocHas(Box<str>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatePart {
+    Year,
+    Month,
+    Day,
+    DayOfYear,
+    DayOfWeek,
+    Hour,
+    Minute,
+    Second,
+}
+
+impl DatePart {
+    fn of(name: &str) -> Option<DatePart> {
+        Some(match name {
+            "getYear" => DatePart::Year,
+            "getMonthValue" => DatePart::Month,
+            "getDayOfMonth" => DatePart::Day,
+            "getDayOfYear" => DatePart::DayOfYear,
+            "getHour" => DatePart::Hour,
+            "getMinute" => DatePart::Minute,
+            "getSecond" => DatePart::Second,
+            _ => return None,
+        })
+    }
+
+    /// The field of the UTC date-time at `ms` epoch milliseconds.
+    #[inline]
+    fn at(self, ms: i64) -> i32 {
+        let secs = ms.div_euclid(1000);
+        let (day, sod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400) as i32);
+        match self {
+            DatePart::Hour => sod / 3600,
+            DatePart::Minute => sod / 60 % 60,
+            DatePart::Second => sod % 60,
+            // 1970-01-01 was a Thursday (ISO day 4)
+            DatePart::DayOfWeek => (day + 3).rem_euclid(7) as i32 + 1,
+            _ => {
+                let d = crate::time::Date::from_epoch_day(day);
+                match self {
+                    DatePart::Year => d.y,
+                    DatePart::Month => d.m as i32,
+                    DatePart::Day => d.d as i32,
+                    _ => d.day_of_year() as i32,
+                }
+            }
+        }
+    }
 }
 
 /// Static `Math` methods over primitives the fast path calls (all pure).
@@ -92,6 +171,9 @@ const MATH: &[&str] = &[
 ];
 /// Score functions with no per-document host access beyond what they read themselves.
 const SCORE_FNS: &[&str] = &["saturation", "sigmoid", "decayNumericLinear", "decayNumericExp", "decayNumericGauss"];
+/// Vector score functions: class bindings over a query vector from `params` and a field name,
+/// both fixed for the instance; the document's vector is read by the function itself.
+const VECTOR_FNS: &[&str] = &["dotProduct", "cosineSimilarity", "l1norm", "l2norm", "hamming"];
 
 /// Reduces `execute` to a plan when the script has the supported shape.
 pub fn plan(exec: &crate::ir::TFunction, def: &ContextDef) -> Option<Plan> {
@@ -258,6 +340,69 @@ fn doc_field<'e>(recv: &'e TExpr, v: &Vars) -> Option<&'e str> {
     const_str(key)
 }
 
+/// `doc['f'].value` (a `def`), the field side of a string comparison.
+fn str_eq_side<'e>(e: &'e TExpr, v: &Vars) -> Option<&'e str> {
+    let e = strip_noop(e);
+    let TK::Load(p) = &e.k else { return None };
+    match &**p {
+        Place::DefDot { recv, name, null_safe: false, result: None } if &**name == "value" => doc_field(recv, v),
+        _ => None,
+    }
+}
+
+/// The field of `doc['f'].value.getMillis()` or `doc['f'].value.toInstant().toEpochMilli()`
+/// (`recv.name()`).
+fn doc_millis<'e>(recv: &'e TExpr, name: &str, v: &Vars) -> Option<&'e str> {
+    match name {
+        "getMillis" => str_eq_side(recv, v),
+        "toEpochMilli" => match &strip_noop(recv).k {
+            TK::InvokeDyn { recv, name, args, null_safe: false, result: None } if &**name == "toInstant" && args.is_empty() => str_eq_side(recv, v),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `doc['f'].value.getHour()` and the like: the field and the part.
+fn date_part<'e>(recv: &'e TExpr, name: &str, v: &Vars) -> Option<(&'e str, DatePart)> {
+    if name == "getValue" {
+        // `getDayOfWeek().getValue()`, `getDayOfWeekEnum().getValue()`
+        return match &strip_noop(recv).k {
+            TK::InvokeDyn { recv, name, args, null_safe: false, result: None } if matches!(&**name, "getDayOfWeek" | "getDayOfWeekEnum") && args.is_empty() => {
+                Some((str_eq_side(recv, v)?, DatePart::DayOfWeek))
+            }
+            _ => None,
+        };
+    }
+    Some((str_eq_side(recv, v)?, DatePart::of(name)?))
+}
+
+/// The other side of a string comparison: a string literal or `params.x`.
+fn str_operand(e: &TExpr, v: &Vars) -> Option<FExpr> {
+    if let Some(s) = const_str(e) {
+        return Some(FExpr::Str(s.into()));
+    }
+    // a conversion of `params.x` to `String` (an argument): specialization requires a string
+    let mut e = e;
+    while let TK::Cast(x, _) = &e.k {
+        e = x;
+    }
+    match &e.k {
+        TK::Load(p) => match &**p {
+            Place::MapKey { recv, key, .. } if local(recv).is_some() && local(recv) == v.params => Some(FExpr::ParamObj(const_str(key)?.into())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn strip_noop(mut e: &TExpr) -> &TExpr {
+    while let TK::Cast(x, Cast::Noop | Cast::Transparent) = &e.k {
+        e = x;
+    }
+    e
+}
+
 fn local(e: &TExpr) -> Option<u32> {
     match &e.k {
         TK::Load(p) => match &**p {
@@ -311,6 +456,14 @@ fn expr(e: &TExpr, v: &Vars) -> Option<FExpr> {
         },
         TK::Cast(x, c) if numeric_cast(c) => FExpr::Cast(b(x)?, c.clone()),
         TK::Load(p) => match &**p {
+            Place::DefDot { recv, name, null_safe: false, result } if &**name == "millis" && str_eq_side(recv, v).is_some() => {
+                let d = FExpr::DocMillis(str_eq_side(recv, v)?.into());
+                match result {
+                    Some(c) if numeric_cast(c) => FExpr::Cast(Box::new(d), c.clone()),
+                    Some(_) => return None,
+                    None => d,
+                }
+            }
             Place::Local { slot } if Some(*slot) == v.score => FExpr::Score,
             Place::Local { slot } if *slot >= v.first_local => FExpr::Local(*slot),
             Place::MapKey { recv, key, .. } if local(recv).is_some() && local(recv) == v.params => FExpr::Param(const_str(key)?.into()),
@@ -340,6 +493,81 @@ fn expr(e: &TExpr, v: &Vars) -> Option<FExpr> {
             FExpr::Neg { x: b(x)?, operand, def: *def }
         }
         TK::Unary { op: Op::Not, x, def: None } => FExpr::Not(b(x)?),
+        TK::Comp { op: op @ (Op::Eq | Op::Ne), l, r, operand: t } if str_eq_side(l, v).is_some() || str_eq_side(r, v).is_some() => {
+            let (field, other) = match str_eq_side(l, v) {
+                Some(f) => (f, r),
+                None => (str_eq_side(r, v)?, l),
+            };
+            let fallback = (|| Some(Box::new(FExpr::Cmp { op: *op, l: b(l)?, r: b(r)?, operand: operand(*t)? })))();
+            match str_operand(other, v) {
+                Some(o) => FExpr::DocStrEq { field: field.into(), other: Box::new(o), ne: *op == Op::Ne, fallback },
+                None => *fallback?,
+            }
+        }
+        TK::InvokeDyn { recv, name, args, null_safe: false, result } if args.is_empty() && date_part(recv, name, v).is_some() => {
+            let (field, part) = date_part(recv, name, v)?;
+            let d = FExpr::DocDatePart(field.into(), part);
+            match result {
+                Some(c) if numeric_cast(c) => FExpr::Cast(Box::new(d), c.clone()),
+                Some(_) => return None,
+                None => d,
+            }
+        }
+        TK::Invoke { recv: Some(r), m, args, null_safe: false } if args.len() == 1 && local(r).is_some() && local(r) == v.doc && &*registry().method(*m).name == "containsKey" => {
+            FExpr::DocHas(const_str(&args[0])?.into())
+        }
+        TK::InvokeDyn { recv, name, args, null_safe: false, result } if args.is_empty() && doc_millis(recv, name, v).is_some() => {
+            let d = FExpr::DocMillis(doc_millis(recv, name, v)?.into());
+            match result {
+                Some(c) if numeric_cast(c) => FExpr::Cast(Box::new(d), c.clone()),
+                Some(_) => return None,
+                None => d,
+            }
+        }
+        TK::CallContext { m, args, binding: Some(binding) } if args.len() == 5 && registry().method(*m).name.starts_with("decayDate") => {
+            let mut date = &args[4];
+            while let TK::Cast(x, _) = &date.k {
+                date = x;
+            }
+            // `doc['f'].value` converted to `ZonedDateTime` (always succeeds for a `date`)
+            let TK::Load(p) = &date.k else { return None };
+            let Place::DefDot { recv, name, null_safe: false, .. } = &**p else { return None };
+            if &**name != "value" {
+                return None;
+            }
+            let field = doc_field(recv, v)?.into();
+            let mut fargs = Vec::with_capacity(4);
+            for a in &args[..3] {
+                fargs.push(str_operand(a, v)?);
+            }
+            fargs.push(expr(&args[3], v)?);
+            FExpr::DateDecay { m: *m, binding: *binding, args: fargs, field }
+        }
+        TK::InvokeDyn { recv, name, args, null_safe: false, result } if &**name == "contains" && args.len() == 1 => {
+            let d = if let Some(field) = doc_field(recv, v) {
+                FExpr::DocContains { field: field.into(), other: Box::new(str_operand(&args[0], v)?) }
+            } else {
+                let TK::Load(p) = &strip_noop(recv).k else { return None };
+                let Place::MapKey { recv: pr, key, .. } = &**p else { return None };
+                if local(pr).is_none() || local(pr) != v.params {
+                    return None;
+                }
+                FExpr::ParamContains { key: const_str(key)?.into(), field: str_eq_side(&args[0], v)?.into() }
+            };
+            match result {
+                Some(c) if numeric_cast(c) => FExpr::Cast(Box::new(d), c.clone()),
+                Some(_) => return None,
+                None => d,
+            }
+        }
+        TK::InvokeDyn { recv, name, args, null_safe: false, result } if &**name == "equals" && args.len() == 1 && str_eq_side(recv, v).is_some() => {
+            let d = FExpr::DocStrEq { field: str_eq_side(recv, v)?.into(), other: Box::new(str_operand(&args[0], v)?), ne: false, fallback: None };
+            match result {
+                Some(c) if numeric_cast(c) => FExpr::Cast(Box::new(d), c.clone()),
+                Some(_) => return None,
+                None => d,
+            }
+        }
         TK::Comp { op, l, r, operand: t } if matches!(op, Op::Lt | Op::Lte | Op::Gt | Op::Gte | Op::Eq | Op::Ne) => {
             let operand = operand(*t)?;
             // `def ==` on two numbers compares them promoted, as primitives do (DefMath.eq);
@@ -365,6 +593,18 @@ fn expr(e: &TExpr, v: &Vars) -> Option<FExpr> {
             }
             FExpr::Call { m: *m, args: args.iter().map(|a| expr(a, v)).collect::<Option<_>>()?, binding: None, ctx: false }
         }
+        TK::CallContext { m, args, binding } if binding.is_some() && args.len() == 2 && VECTOR_FNS.contains(&&*registry().method(*m).name) => {
+            operand(registry().method(*m).ret)??;
+            let query = match &strip_noop(&args[0]).k {
+                TK::Load(p) => match &**p {
+                    Place::MapKey { recv, key, .. } if local(recv).is_some() && local(recv) == v.params => FExpr::ParamObj(const_str(key)?.into()),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            let field = FExpr::Str(const_str(&args[1])?.into());
+            FExpr::Call { m: *m, args: vec![query, field], binding: *binding, ctx: true }
+        }
         TK::CallContext { m, args, binding } => {
             let mi = registry().method(*m);
             if !SCORE_FNS.contains(&&*mi.name) || operand(mi.ret)?.is_none() {
@@ -387,6 +627,12 @@ where
     F: for<'v, 'a> Fn(&'v mut Vm<'a>) -> Result<T, ()> + 'static,
 {
     Box::new(f)
+}
+
+/// A library call's argument: a specialized node, or a value fixed for the instance.
+enum Arg {
+    T(Typed),
+    V(Value),
 }
 
 /// A specialized node: a closure producing an unboxed value of one type.
@@ -682,6 +928,144 @@ impl Spec<'_> {
                 }
             }
             FExpr::Call { m, args, binding, ctx } => self.call(*m, args, *binding, *ctx, vm)?,
+            FExpr::ParamObj(_) | FExpr::Str(_) => return None,
+            FExpr::DocMillis(field) => {
+                let slot = self.date_slot(field, vm)?;
+                L(fx(move |vm| {
+                    if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                        crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
+                    }
+                    let dv = &vm.st.doc_bufs[slot];
+                    match dv.longs.first() {
+                        Some(&ms) if dv.kind == crate::host::DocKind::Date => Ok(ms),
+                        _ => Err(()),
+                    }
+                }))
+            }
+            FExpr::DateDecay { m, binding, args, field } => {
+                let slot = self.date_slot(field, vm)?;
+                let mut fixed: Vec<Value> = Vec::with_capacity(3);
+                for a in &args[..3] {
+                    fixed.push(match a {
+                        FExpr::Str(s) => Value::str(s),
+                        FExpr::ParamObj(k) => {
+                            let Value::Map(pm) = self.params? else { return None };
+                            match pm.get_str(k)? {
+                                s @ Value::Str(_) => s,
+                                _ => return None,
+                            }
+                        }
+                        _ => return None,
+                    });
+                }
+                let D(decay) = convert(self.node(&args[3], vm)?, Prim::Double)? else { return None };
+                let name: &'static str = &registry().method(*m).name;
+                let binding = *binding;
+                let [a0, a1, a2]: [Value; 3] = fixed.try_into().ok()?;
+                D(fx(move |vm| {
+                    let a = [a0.clone(), a1.clone(), a2.clone(), Value::Double(decay(vm)?)];
+                    if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                        crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
+                    }
+                    let dv = &vm.st.doc_bufs[slot];
+                    let ms = match dv.longs.first() {
+                        Some(&ms) if dv.kind == crate::host::DocKind::Date => ms,
+                        _ => return Err(()),
+                    };
+                    vm.st.cur_binding = binding;
+                    crate::es::score::date_decay_millis(vm, &a, ms, name).map_err(|_| ())
+                }))
+            }
+            FExpr::DocDatePart(field, part) => {
+                let slot = self.date_slot(field, vm)?;
+                let part = *part;
+                I(fx(move |vm| {
+                    if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                        crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
+                    }
+                    let dv = &vm.st.doc_bufs[slot];
+                    match dv.longs.first() {
+                        Some(&ms) if dv.kind == crate::host::DocKind::Date => Ok(part.at(ms)),
+                        _ => Err(()),
+                    }
+                }))
+            }
+            FExpr::DocHas(field) => {
+                let field = field.clone();
+                Z(fx(move |vm| Ok(vm.host.has_field(&field))))
+            }
+            FExpr::DocContains { field, other } => {
+                let slot = self.string_slot(field, vm)?;
+                let want = self.fixed_str(other)?;
+                let kind = vm.st.doc_bufs[slot].kind;
+                Z(fx(move |vm| {
+                    if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                        crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
+                    }
+                    let dv = &vm.st.doc_bufs[slot];
+                    if dv.kind != kind {
+                        return Err(());
+                    }
+                    Ok(dv.strings().iter().any(|s| **s == *want))
+                }))
+            }
+            FExpr::ParamContains { key, field } => {
+                let Value::Map(pm) = self.params? else { return None };
+                let Value::List(l) = pm.get_str(key)? else { return None };
+                // a list a script could change (or a view) is read by the interpreter
+                if l.view.is_some() {
+                    return None;
+                }
+                let strs: Vec<Box<str>> = l.v.borrow().iter().filter_map(|x| if let Value::Str(s) = x { Some(s.as_str().into()) } else { None }).collect();
+                let slot = self.string_slot(field, vm)?;
+                let kind = vm.st.doc_bufs[slot].kind;
+                let set: Option<std::collections::HashSet<Box<str>>> = (strs.len() > 8).then(|| strs.iter().cloned().collect());
+                Z(fx(move |vm| {
+                    if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                        crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
+                    }
+                    let dv = &vm.st.doc_bufs[slot];
+                    let Some(s) = dv.strings().first().filter(|_| dv.kind == kind) else { return Err(()) };
+                    Ok(match &set {
+                        Some(set) => set.contains(s.as_str()),
+                        None => strs.iter().any(|x| **x == **s),
+                    })
+                }))
+            }
+            FExpr::DocStrEq { field, other, ne, fallback } => {
+                let slot = self.doc_fields.iter().position(|f| **f == **field)?;
+                if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                    crate::es::doc_fetch(vm, slot as u32).ok()?;
+                }
+                use crate::host::DocKind as K;
+                let kind = vm.st.doc_bufs[slot].kind;
+                if !matches!(kind, K::String | K::Ip) {
+                    return self.node(fallback.as_deref()?, vm);
+                }
+                let want: Box<str> = match &**other {
+                    FExpr::Str(s) => s.clone(),
+                    FExpr::ParamObj(k) => {
+                        let Value::Map(m) = self.params? else { return None };
+                        match m.get_str(k)? {
+                            Value::Str(s) => s.as_str().into(),
+                            _ => return None,
+                        }
+                    }
+                    _ => return None,
+                };
+                let ne = *ne;
+                Z(fx(move |vm| {
+                    if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                        crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
+                    }
+                    let dv = &vm.st.doc_bufs[slot];
+                    // an empty field throws, another kind converts differently: the interpreter's
+                    match dv.strings().first() {
+                        Some(s) if dv.kind == kind => Ok((**s == *want) != ne),
+                        _ => Err(()),
+                    }
+                }))
+            }
         })
     }
 
@@ -718,6 +1102,41 @@ impl Spec<'_> {
         None
     }
 
+    /// The doc-values slot of a keyword-like (`keyword`, `ip`) field, as for
+    /// [`Spec::date_slot`].
+    fn string_slot(&self, field: &str, vm: &mut Vm) -> Option<usize> {
+        let slot = self.doc_fields.iter().position(|f| **f == *field)?;
+        if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+            crate::es::doc_fetch(vm, slot as u32).ok()?;
+        }
+        matches!(vm.st.doc_bufs[slot].kind, crate::host::DocKind::String | crate::host::DocKind::Ip).then_some(slot)
+    }
+
+    /// A string literal or string `params.x`, fixed for the instance.
+    fn fixed_str(&self, e: &FExpr) -> Option<Box<str>> {
+        match e {
+            FExpr::Str(s) => Some(s.clone()),
+            FExpr::ParamObj(k) => {
+                let Value::Map(m) = self.params? else { return None };
+                match m.get_str(k)? {
+                    Value::Str(s) => Some(s.as_str().into()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The doc-values slot of a `date` field (`None`: not a literal field of the program, or
+    /// not a `date` on this document).
+    fn date_slot(&self, field: &str, vm: &mut Vm) -> Option<usize> {
+        let slot = self.doc_fields.iter().position(|f| **f == *field)?;
+        if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+            crate::es::doc_fetch(vm, slot as u32).ok()?;
+        }
+        (vm.st.doc_bufs[slot].kind == crate::host::DocKind::Date).then_some(slot)
+    }
+
     /// A library call: arguments evaluated unboxed, passed to the native as values (`Math`
     /// functions over doubles are called directly).
     fn call(&self, m: MethodId, args: &[FExpr], binding: Option<u32>, ctx: bool, vm: &mut Vm) -> Option<Typed> {
@@ -726,19 +1145,33 @@ impl Spec<'_> {
         let ret = prim_of_ty(mi.ret)?;
         let mut typed = Vec::with_capacity(args.len());
         for (a, p) in args.iter().zip(&mi.params) {
-            let t = self.node(a, vm)?;
-            // arguments arrive cast to the parameter types
-            if Some(t.prim()) != prim_of_ty(*p) {
-                return None;
+            match a {
+                FExpr::ParamObj(k) => {
+                    let Value::Map(m) = self.params? else { return None };
+                    let v = m.get_str(k)?;
+                    // a lazily read `_source` value, or a missing query: the interpreter decides
+                    if (m.lazy_host && matches!(v, Value::Obj(_))) || v.is_null() {
+                        return None;
+                    }
+                    typed.push(Arg::V(v));
+                }
+                FExpr::Str(s) => typed.push(Arg::V(Value::str(s))),
+                _ => {
+                    let t = self.node(a, vm)?;
+                    // arguments arrive cast to the parameter types
+                    if Some(t.prim()) != prim_of_ty(*p) {
+                        return None;
+                    }
+                    typed.push(Arg::T(t));
+                }
             }
-            typed.push(t);
         }
-        if !ctx && ret == Prim::Double && typed.iter().all(|t| t.prim() == Prim::Double) {
+        if !ctx && ret == Prim::Double && typed.iter().all(|t| matches!(t, Arg::T(Typed::D(_)))) {
             use crate::lib_lang::MathFn;
             let mut it = typed.into_iter();
             match (crate::lib_lang::math_fn(&mi.name, mi.params.len(), mi.owner == cls::STRICT_MATH), it.next(), it.next()) {
-                (Some(MathFn::F1(f)), Some(Typed::D(a)), None) => return Some(Typed::D(fx(move |vm| Ok(f(a(vm)?))))),
-                (Some(MathFn::F2(f)), Some(Typed::D(a)), Some(Typed::D(b))) => return Some(Typed::D(fx(move |vm| Ok(f(a(vm)?, b(vm)?))))),
+                (Some(MathFn::F1(f)), Some(Arg::T(Typed::D(a))), None) => return Some(Typed::D(fx(move |vm| Ok(f(a(vm)?))))),
+                (Some(MathFn::F2(f)), Some(Arg::T(Typed::D(a))), Some(Arg::T(Typed::D(b)))) => return Some(Typed::D(fx(move |vm| Ok(f(a(vm)?, b(vm)?))))),
                 (_, a, b) => typed = a.into_iter().chain(b).chain(it).collect(),
             }
         }
@@ -756,23 +1189,24 @@ impl Spec<'_> {
                 f
             }};
         }
-        fn val(t: &Typed, vm: &mut Vm) -> Result<Value, ()> {
+        fn val(t: &Arg, vm: &mut Vm) -> Result<Value, ()> {
             Ok(match t {
-                Typed::I(f) => Value::Int(f(vm)?),
-                Typed::L(f) => Value::Long(f(vm)?),
-                Typed::F(f) => Value::Float(f(vm)?),
-                Typed::D(f) => Value::Double(f(vm)?),
-                Typed::Z(f) => Value::Bool(f(vm)?),
+                Arg::T(Typed::I(f)) => Value::Int(f(vm)?),
+                Arg::T(Typed::L(f)) => Value::Long(f(vm)?),
+                Arg::T(Typed::F(f)) => Value::Float(f(vm)?),
+                Arg::T(Typed::D(f)) => Value::Double(f(vm)?),
+                Arg::T(Typed::Z(f)) => Value::Bool(f(vm)?),
+                Arg::V(v) => v.clone(),
             })
         }
         let f: Fx<Value> = match typed.len() {
-            1 => run!(1, |t: &Vec<Typed>, vm: &mut Vm| -> Result<[Value; 1], ()> { Ok([val(&t[0], vm)?]) }),
-            2 => run!(2, |t: &Vec<Typed>, vm: &mut Vm| -> Result<[Value; 2], ()> { Ok([val(&t[0], vm)?, val(&t[1], vm)?]) }),
-            3 => run!(3, |t: &Vec<Typed>, vm: &mut Vm| -> Result<[Value; 3], ()> { Ok([val(&t[0], vm)?, val(&t[1], vm)?, val(&t[2], vm)?]) }),
-            4 => run!(4, |t: &Vec<Typed>, vm: &mut Vm| -> Result<[Value; 4], ()> {
+            1 => run!(1, |t: &Vec<Arg>, vm: &mut Vm| -> Result<[Value; 1], ()> { Ok([val(&t[0], vm)?]) }),
+            2 => run!(2, |t: &Vec<Arg>, vm: &mut Vm| -> Result<[Value; 2], ()> { Ok([val(&t[0], vm)?, val(&t[1], vm)?]) }),
+            3 => run!(3, |t: &Vec<Arg>, vm: &mut Vm| -> Result<[Value; 3], ()> { Ok([val(&t[0], vm)?, val(&t[1], vm)?, val(&t[2], vm)?]) }),
+            4 => run!(4, |t: &Vec<Arg>, vm: &mut Vm| -> Result<[Value; 4], ()> {
                 Ok([val(&t[0], vm)?, val(&t[1], vm)?, val(&t[2], vm)?, val(&t[3], vm)?])
             }),
-            5 => run!(5, |t: &Vec<Typed>, vm: &mut Vm| -> Result<[Value; 5], ()> {
+            5 => run!(5, |t: &Vec<Arg>, vm: &mut Vm| -> Result<[Value; 5], ()> {
                 Ok([val(&t[0], vm)?, val(&t[1], vm)?, val(&t[2], vm)?, val(&t[3], vm)?, val(&t[4], vm)?])
             }),
             _ => return None,
@@ -1368,4 +1802,168 @@ mod tests {
             }
         }
     }
+
+    struct StrDoc {
+        cat: &'static str,
+        vec: Vec<f32>,
+    }
+
+    impl StrDoc {
+        /// Epoch millis of the `dt` date (none for an empty `cat`), from the category.
+        fn millis(&self) -> Option<i64> {
+            (!self.cat.is_empty()).then(|| 1_577_836_800_000 + self.cat.len() as i64 * 86_400_000 * 3 - 1)
+        }
+    }
+
+    impl Host for StrDoc {
+        fn score(&mut self) -> f64 {
+            2.0
+        }
+        fn doc_values(&mut self, field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+            match field {
+                "cat" => {
+                    out.clear(DocKind::String);
+                    if !self.cat.is_empty() {
+                        out.push_str(self.cat);
+                    }
+                }
+                "n" => {
+                    out.clear(DocKind::Long);
+                    out.longs.push(self.cat.len() as i64);
+                }
+                "dt" => {
+                    out.clear(DocKind::Date);
+                    out.longs.extend(self.millis());
+                }
+                "dn" => {
+                    out.clear(DocKind::DateNanos);
+                    out.longs.extend(self.millis().map(|m| m * 1_000_000 + 7));
+                }
+                "vec" => {
+                    out.clear(DocKind::DenseVector);
+                    out.vector.extend_from_slice(&self.vec);
+                }
+                _ => return Ok(false),
+            }
+            Ok(true)
+        }
+    }
+
+    /// String comparisons of keyword doc values and vector score functions specialize, and
+    /// agree with the interpreter (empty fields, missing params and mismatched vectors bail out
+    /// to it, so their errors are the interpreter's).
+    #[test]
+    fn string_compares_and_vector_functions_agree_with_the_interpreter() {
+        let engine = Engine::new(Settings { max_compilations_rate: None, ..Settings::default() });
+        let params = serde_json::json!({ "c": "b", "num": 3, "qv": [1.0, 2.0, 3.0], "short": [1.0], "bad": "x", "now": 1_600_000_000_000i64, "origin": "2020-01-05", "decay": 0.5,
+            "cats": ["a", 1, "bb"], "many": ["q", "w", "e", "r", "t", "y", "u", "i", "o", "b"] });
+        let cases = [
+            ("doc['cat'].value == 'b' ? 2.0 : 1.0", true),
+            ("doc['cat'].value != 'b' ? 2.0 : 1.0", true),
+            ("'b' == doc['cat'].value ? 2.0 : 1.0", true),
+            ("doc['cat'].value == params.c ? 2.0 : 1.0", true),
+            ("params.c != doc['cat'].value ? 3 : 1", true),
+            ("doc['cat'].value.equals('b') ? 2.0 : 1.0", true),
+            ("doc['cat'].value.equals(params.c) ? 2.0 : 1.0", true),
+            ("doc['cat'].value == params.num ? 2.0 : 1.0", false),
+            ("doc['cat'].value == params.missing ? 2.0 : 1.0", false),
+            ("doc['n'].value == 'b' ? 2.0 : 1.0", false),
+            ("dotProduct(params.qv, 'vec')", true),
+            ("cosineSimilarity(params.qv, 'vec') + 1.0", true),
+            ("l1norm(params.qv, 'vec') * _score", true),
+            ("l2norm(params.qv, 'vec')", true),
+            ("dotProduct(params.short, 'vec')", true),
+            ("dotProduct(params.bad, 'vec')", true),
+            ("dotProduct(params.missing, 'vec')", false),
+            ("dotProduct(params.qv, 'nope')", true),
+            ("doc['dt'].value.getMillis() / 1000.0", true),
+            ("doc['dt'].value.millis * 2", true),
+            ("(params.now - doc['dt'].value.toInstant().toEpochMilli()) / 86400000.0", true),
+            ("long x = doc['dt'].value.getMillis(); return x % 1000", true),
+            ("doc['dn'].value.getMillis() / 1000.0", false),
+            ("doc['n'].value.getMillis()", false),
+            ("decayDateGauss('2020-01-01T00:00:00Z', '10d', '1d', 0.5, doc['dt'].value)", true),
+            ("decayDateLinear(params.origin, '5d', '0', params.decay, doc['dt'].value) * _score", true),
+            ("decayDateExp('2020-01-03||-1d', '2d', '12h', 0.25, doc['dt'].value)", true),
+            ("decayDateExp('not a date', '2d', '12h', 0.25, doc['dt'].value)", true),
+            ("decayDateExp('2020-01-01', '2x', '12h', 0.25, doc['dt'].value)", true),
+            ("decayDateGauss('2020-01-01', '10d', '1d', 0.5, doc['dn'].value)", false),
+            ("doc['cat'].contains('b') ? 2.0 : 1.0", true),
+            ("doc['cat'].contains(params.c) ? 2.0 : 1.0", true),
+            ("doc['cat'].contains(params.num) ? 2.0 : 1.0", false),
+            ("doc['n'].contains('b') ? 2.0 : 1.0", false),
+            ("params.cats.contains(doc['cat'].value) ? 2.0 : 1.0", true),
+            ("params.many.contains(doc['cat'].value) ? 2.0 : 1.0", true),
+            ("params.c.contains(doc['cat'].value) ? 2.0 : 1.0", false),
+            ("params.missing.contains(doc['cat'].value) ? 2.0 : 1.0", false),
+            ("doc.containsKey('cat') ? 2.0 : 1.0", true),
+            ("doc.containsKey('nope') && doc['nope'].value > 1 ? 2.0 : 1.0", false),
+            ("doc['dt'].value.getHour() + doc['dt'].value.getYear()", true),
+        ];
+        let docs = [
+            StrDoc { cat: "b", vec: vec![0.5, 1.0, -1.0] },
+            StrDoc { cat: "a", vec: vec![1.0, 1.0, 1.0] },
+            StrDoc { cat: "", vec: vec![] },
+            StrDoc { cat: "bb", vec: vec![2.0, 0.0, 0.25] },
+        ];
+        for (src, specializes) in cases {
+            let script = engine.compile(src, Context::Score).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            let (mut fast, mut slow) = (script.instance(), script.instance());
+            fast.set_params(&params);
+            slow.set_params(&params);
+            slow.disable_fast_path();
+            let mut ran_fast = false;
+            for d in &docs {
+                let mut h1 = StrDoc { cat: d.cat, vec: d.vec.clone() };
+                let mut h2 = StrDoc { cat: d.cat, vec: d.vec.clone() };
+                let (a, b) = (fast.execute(&mut h1), slow.execute(&mut h2));
+                assert!(same(&a, &b), "{src} on {}: fast {a:?} vs interpreter {b:?}", d.cat);
+                ran_fast |= fast.fast_path_active();
+            }
+            if specializes {
+                assert!(ran_fast, "{src} should take the fast path");
+            }
+        }
+    }
+
+
+    struct DateDoc(i64);
+
+    impl Host for DateDoc {
+        fn doc_values(&mut self, field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+            match field {
+                "dt" => {
+                    out.clear(DocKind::Date);
+                    out.longs.push(self.0);
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+    }
+
+    /// UTC date parts read from the stored millis agree with the interpreter's
+    /// `ZonedDateTime`, before and after the epoch, across leap years and day boundaries.
+    #[test]
+    fn date_parts_agree_with_the_interpreter() {
+        let engine = Engine::new(Settings { max_compilations_rate: None, ..Settings::default() });
+        let parts = ["getYear()", "getMonthValue()", "getDayOfMonth()", "getDayOfYear()", "getHour()", "getMinute()", "getSecond()", "getDayOfWeek().getValue()", "getDayOfWeekEnum().getValue()"];
+        let millis = [0i64, -1, 1, 86_399_999, 86_400_000, -86_400_001, 951_782_400_000, 951_868_799_999, -2_208_988_800_001, 253_402_300_799_999, -62_135_596_800_000, 1_700_000_000_123];
+        for p in parts {
+            for ctx in [Context::Score, Context::LongField] {
+                let src = if ctx == Context::Score { format!("doc['dt'].value.{p} * 1.0") } else { format!("emit(doc['dt'].value.{p})") };
+                let script = engine.compile(&src, ctx).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+                let (mut fast, mut slow) = (script.instance(), script.instance());
+                slow.disable_fast_path();
+                for &ms in &millis {
+                    let (a, b) = (fast.execute(&mut DateDoc(ms)), slow.execute(&mut DateDoc(ms)));
+                    assert!(same(&a, &b), "{src} at {ms}: fast {a:?} vs interpreter {b:?}");
+                    let (x, y) = (fast.emitted(), slow.emitted());
+                    assert!(x.len() == y.len() && x.iter().zip(y).all(|(a, b)| a.java_equals(b)), "{src} at {ms}: {x:?} vs {y:?}");
+                }
+                assert!(fast.fast_path_active(), "{src} should take the fast path");
+            }
+        }
+    }
+
 }

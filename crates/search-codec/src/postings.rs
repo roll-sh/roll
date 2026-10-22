@@ -1074,8 +1074,8 @@ impl BitsBlock {
         self.start = start;
         self.nwords = nwords;
         let mut count = 0u32;
-        for (i, c) in raw.chunks_exact(8).enumerate() {
-            let w = u64::from_le_bytes(c.try_into().unwrap());
+        for (i, c) in raw.as_chunks::<8>().0.iter().enumerate() {
+            let w = u64::from_le_bytes(*c);
             self.words[i] = w;
             self.rank[i] = count.min(255) as u8;
             count += w.count_ones();

@@ -760,10 +760,8 @@ impl Aggregator for MatrixAgg {
         false
     }
 
-    fn validate_sort(&self, name: &str, _key: Option<&str>, _rest: &[PathElement]) -> Result<()> {
-        Err(AggError::illegal_argument(format!(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end. [{name}] is not single-bucket."
-        )))
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
     }
 }
 

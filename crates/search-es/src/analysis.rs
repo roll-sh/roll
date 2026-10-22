@@ -70,6 +70,7 @@ pub fn index_options(settings: &Settings, index: Option<&str>, synonyms: Option<
         max_token_count: int_setting(settings, "index.analyze.max_token_count", 10_000).max(0) as usize,
         index_name: index.map(str::to_string),
         synonym_sets: synonyms,
+        scripts: Some(crate::scripting::analysis_scripts()),
         ..IndexOptions::default()
     }
 }

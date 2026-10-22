@@ -376,7 +376,7 @@ fn parse_named(name: &str, p: &mut XParser<'_>) -> EsResult<Query> {
         _ => {
             let (l, c) = p.token_location();
             let suggestion = crate::rest::params::suggest(name, QUERY_NAMES);
-            return Err(EsError::parsing(l, c, format!("unknown query [{name}]{suggestion}")).caused_by(EsError::new(
+            return Err(EsError::parsing(l, c, format!("unknown query [{name}]{suggestion}")).caused_by(EsError::java(
                 400,
                 "named_object_not_found_exception",
                 format!("[{l}:{c}] unknown field [{name}]"),
@@ -422,3 +422,15 @@ pub(crate) fn opt_str(m: &mut Map, key: &str, v: &Option<String>) {
 
 #[cfg(test)]
 mod tests;
+
+/// Whether a query tree has a `name` query anywhere (read off its serialized form).
+pub fn contains_query(q: &Query, name: &str) -> bool {
+    fn walk(v: &Value, name: &str) -> bool {
+        match v {
+            Value::Obj(m) => m.iter().any(|(k, x)| (k == name && matches!(x, Value::Obj(_))) || walk(x, name)),
+            Value::Arr(a) => a.iter().any(|x| walk(x, name)),
+            _ => false,
+        }
+    }
+    walk(&q.to_value(), name)
+}

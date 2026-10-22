@@ -311,9 +311,8 @@ impl Filter for FlattenGraph {
                 let (start, end) = (t.start, t.end);
                 let input_to = self.input_from + t.pos_len as i64;
                 let src_id = self.input_from as usize;
-                let out_src_id;
-                if self.inputs.get(src_id).node == -1 {
-                    out_src_id = self.recover_from_hole(src_id, start, pos_inc);
+                let out_src_id = if self.inputs.get(src_id).node == -1 {
+                    self.recover_from_hole(src_id, start, pos_inc)
                 } else {
                     let mut osid = self.inputs.get(src_id).output_node as usize;
                     if pos_inc > 1 {
@@ -335,8 +334,8 @@ impl Filter for FlattenGraph {
                             self.outputs.get(osid).end = prev_end;
                         }
                     }
-                    out_src_id = osid;
-                }
+                    osid
+                };
                 {
                     let o = self.outputs.get(out_src_id);
                     if o.start == -1 || start as i64 > o.start {

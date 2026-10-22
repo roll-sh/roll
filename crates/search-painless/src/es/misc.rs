@@ -22,10 +22,22 @@ fn debug_explain(vm: &mut Vm, a: &mut [Value]) -> VR {
         ("null".to_string(), None, None)
     } else {
         let c = v.class();
+        if let Value::Obj(o) = v
+            && let Obj::Array(arr) = &**o
+        {
+            return Err(explain_error(t, v.to_java_string(), Some(arr.descriptor()), None));
+        }
         let java = crate::lookup::java_binary_name(c).to_string();
-        let painless = if vm.reg.class(c).short.is_some() || !is_internal(c) { Some(crate::lookup::class_name(c).to_string()) } else { None };
+        // `painless_class` only for allowlisted runtime classes (Elasticsearch's
+        // `lookupPainlessClass`): the ones scripts can name
+        let name = crate::lookup::class_name(c);
+        let painless = if vm.reg.names.get(name) == Some(&c) && !is_internal(c) { Some(name.to_string()) } else { None };
         (v.to_java_string(), Some(java), painless)
     };
+    Err(explain_error(t, to_string, java, painless))
+}
+
+fn explain_error(mut t: Thrown, to_string: String, java: Option<String>, painless: Option<String>) -> Thrown {
     if let Some(p) = painless {
         t.metadata.push(("painless_class".into(), p));
     }
@@ -33,7 +45,7 @@ fn debug_explain(vm: &mut Vm, a: &mut [Value]) -> VR {
     if let Some(j) = java {
         t.metadata.push(("java_class".into(), j));
     }
-    Err(t)
+    t
 }
 
 /// Implementation classes scripts cannot name (no `painless_class` in explanations).

@@ -162,6 +162,11 @@ pub struct MergingDigest {
     max: f64,
 }
 
+/// The most one merging digest may allocate. Elasticsearch charges each array to the request
+/// breaker (a share of the heap); without a heap to share this caps a single digest, so a
+/// `compression` of `1e300` fails like Elasticsearch instead of reserving gigabytes.
+pub const MAX_DIGEST_BYTES: u64 = 1 << 30;
+
 /// `ScaleFunction.K_2` normalizer (`compression / Z(compression, n)`).
 #[inline]
 fn k2_normalizer(compression: f64, n: f64) -> f64 {
@@ -169,25 +174,50 @@ fn k2_normalizer(compression: f64, n: f64) -> f64 {
 }
 
 impl MergingDigest {
-    pub fn new(compression: f64) -> MergingDigest {
+    /// `MergingDigest(arrays, compression)` with Java's `int` arithmetic: a NaN compression
+    /// makes `size` 0 and fails on `bufferSize / size` ("/ by zero"); huge ones (`Infinity`,
+    /// `1e300`) saturate `size` to `Integer.MAX_VALUE` and trip the request breaker on the first
+    /// array, before anything is allocated.
+    pub fn new(compression: f64) -> Result<MergingDigest> {
         let compression = if compression < 10.0 { 10.0 } else { compression };
         let size_fudge = 10.0;
-        let mut size = (compression + size_fudge).max(-1.0) as i64;
-        let mut buffer_size: i64 = -1;
-        if buffer_size < 5 * size {
-            buffer_size = 5 * size;
+        // `(int) Math.max(compression + sizeFudge, size)`: Math.max propagates NaN, (int) NaN is 0.
+        let mut size = java_max(compression + size_fudge, -1.0) as i32;
+        let mut buffer_size: i32 = -1;
+        if buffer_size < size.wrapping_mul(5) {
+            buffer_size = size.wrapping_mul(5);
         }
-        // int division, as in Java.
-        let scale = ((buffer_size / size - 1) as f64).max(1.0);
+        if size == 0 {
+            return Err(AggError::new(500, "arithmetic_exception", "/ by zero"));
+        }
+        let scale = f64::from(1.max(buffer_size.wrapping_div(size).wrapping_sub(1)));
         let internal = scale.sqrt() * compression;
-        if (size as f64) < internal + size_fudge {
-            size = (internal + size_fudge).ceil() as i64;
+        if f64::from(size) < internal + size_fudge {
+            size = (internal + size_fudge).ceil() as i32;
         }
-        if buffer_size <= 2 * size {
-            buffer_size = 2 * size;
+        if buffer_size <= size.wrapping_mul(2) {
+            buffer_size = size.wrapping_mul(2);
+        }
+        // `arrays.newDoubleArray(size)` ×2, `newDoubleArray(bufferSize)` ×2, `newIntArray(bufferSize)`:
+        // each is charged to the breaker before it is allocated.
+        let mut wanted: u64 = 0;
+        for (n, width, label) in [
+            (size, 8, "tdigest-new-double-array"),
+            (size, 8, "tdigest-new-double-array"),
+            (buffer_size, 8, "tdigest-new-double-array"),
+            (buffer_size, 8, "tdigest-new-double-array"),
+            (buffer_size, 4, "tdigest-new-int-array"),
+        ] {
+            if n < 0 {
+                return Err(AggError::new(500, "negative_array_size_exception", n.to_string()));
+            }
+            wanted += 16 + n as u64 * width;
+            if wanted > MAX_DIGEST_BYTES {
+                return Err(crate::memory::breaking_error("request", label, wanted, MAX_DIGEST_BYTES));
+            }
         }
         let (size, buffer_size) = (size as usize, buffer_size as usize);
-        MergingDigest {
+        Ok(MergingDigest {
             merge_count: 0,
             public_compression: compression,
             compression: internal,
@@ -202,7 +232,7 @@ impl MergingDigest {
             order: vec![0; buffer_size],
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
-        }
+        })
     }
 
     pub fn add(&mut self, x: f64, w: u64) -> Result<()> {
@@ -693,7 +723,9 @@ impl AvlTreeDigest {
 #[derive(Clone, Debug)]
 pub struct HybridDigest {
     compression: f64,
-    max_sorting_size: u64,
+    /// `Math.round(compression) * 20` in Java `long` arithmetic: it wraps negative for huge
+    /// compressions (switching to the merging digest at once), and is 0 for NaN.
+    max_sorting_size: i64,
     sorting: Option<SortingDigest>,
     merging: Option<Box<MergingDigest>>,
 }
@@ -701,7 +733,7 @@ pub struct HybridDigest {
 impl HybridDigest {
     pub fn new(compression: f64) -> HybridDigest {
         // Math.round(double) * 20.
-        let max_sorting_size = ((compression + 0.5).floor() as i64).saturating_mul(20).max(0) as u64;
+        let max_sorting_size = crate::format::java_round(compression).wrapping_mul(20);
         HybridDigest { compression, max_sorting_size, sorting: Some(SortingDigest::new()), merging: None }
     }
 
@@ -709,9 +741,9 @@ impl HybridDigest {
         if self.merging.is_some() {
             return Ok(());
         }
-        let s = self.sorting.as_ref().map_or(0, |s| s.values.len() as u64);
-        if s + size >= self.max_sorting_size {
-            let mut m = Box::new(MergingDigest::new(self.compression));
+        let s = self.sorting.as_ref().map_or(0, |s| s.values.len() as i64);
+        if s.wrapping_add(size as i64) >= self.max_sorting_size {
+            let mut m = Box::new(MergingDigest::new(self.compression)?);
             if let Some(sorting) = self.sorting.take() {
                 for &v in &sorting.values {
                     m.add(v, 1)?;
@@ -957,8 +989,42 @@ mod tests {
     }
 
     #[test]
+    fn extreme_compressions_fail_like_elasticsearch() {
+        // NaN: `round(NaN) * 20 == 0` switches to merging at the first value, whose `int` size
+        // is 0: "/ by zero" (Elasticsearch fails the shard the same way).
+        let mut d = TDigest::new(f64::NAN, false);
+        let e = d.add(1.0).unwrap_err();
+        assert_eq!((e.kind.as_ref(), e.reason.as_str()), ("arithmetic_exception", "/ by zero"));
+        // No value, no switch: an empty digest stays valid.
+        assert!(TDigest::new(f64::NAN, false).quantile(0.5).is_nan());
+        // Huge: `Math.round(c) * 20` wraps negative, the `int` size saturates and the first
+        // array trips the breaker before anything is allocated.
+        for c in [f64::INFINITY, 1e300] {
+            let mut d = TDigest::new(c, false);
+            let e = d.add(1.0).unwrap_err();
+            assert_eq!(e.kind, "circuit_breaking_exception", "{c}");
+            assert!(e.reason.contains("[tdigest-new-double-array]"), "{}", e.reason);
+        }
+        // high_accuracy (AVL tree) has no up-front arrays: it works with any compression.
+        for c in [f64::NAN, f64::INFINITY] {
+            let mut d = TDigest::new(c, true);
+            for v in [3.0, 1.0, 2.0] {
+                d.add(v).unwrap();
+            }
+            d.compress();
+            assert_eq!(d.quantile(0.5), 2.0);
+        }
+        // 1e10 stays exact (sorted) up to 2e11 values; its merging digest would break.
+        let mut d = TDigest::new(1e10, false);
+        d.add(1.0).unwrap();
+        assert_eq!(MergingDigest::new(1e10).unwrap_err().kind, "circuit_breaking_exception");
+        // Large but sane compressions still build.
+        assert!(MergingDigest::new(100_000.0).is_ok());
+    }
+
+    #[test]
     fn merging_sizes_follow_elasticsearch() {
-        let m = MergingDigest::new(100.0);
+        let m = MergingDigest::new(100.0).unwrap();
         assert_eq!(m.compression, 200.0);
         assert_eq!(m.mean.len(), 210);
         assert_eq!(m.temp_mean.len(), 550);

@@ -469,13 +469,17 @@ pub mod direct {
         let s = start as usize;
         match bits {
             8 => data[s..s + n].iter().for_each(|&b| f(b as u64)),
-            16 => data[s * 2..(s + n) * 2].chunks_exact(2).for_each(|c| f(u16::from_le_bytes([c[0], c[1]]) as u64)),
+            16 => data[s * 2..(s + n) * 2].as_chunks::<2>().0.iter().for_each(|c| f(u16::from_le_bytes(*c) as u64)),
             32 => data[s * 4..(s + n) * 4]
-                .chunks_exact(4)
-                .for_each(|c| f(u32::from_le_bytes(c.try_into().unwrap()) as u64)),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .for_each(|c| f(u32::from_le_bytes(*c) as u64)),
             64 => data[s * 8..(s + n) * 8]
-                .chunks_exact(8)
-                .for_each(|c| f(u64::from_le_bytes(c.try_into().unwrap()))),
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .for_each(|c| f(u64::from_le_bytes(*c))),
             _ if bits <= 57 => {
                 let mask = mask64(bits);
                 let mut bit = start * bits as u64;

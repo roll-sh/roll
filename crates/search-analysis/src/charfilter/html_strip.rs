@@ -618,6 +618,9 @@ impl CharFilter for HtmlStrip {
         self.previous_restore_state = 0;
         self.input_segment.clear();
         self.entity.clear();
+        for d in &mut self.dfas {
+            d.new_text();
+        }
         let g = self.g;
         let mut pos = 0usize; // byte position of the next match
         let mut yychar = 0usize; // UTF-16 position of the next match
@@ -981,6 +984,26 @@ mod tests {
         f.filter(s, &mut out, &mut map).unwrap();
         let n = utf16_len(&out) as u32;
         (out, (0..=n).map(|o| map.correct(o)).collect())
+    }
+
+    /// Inputs whose scans stay alive long past their last match (`<?` waits for `>`) are linear:
+    /// Lucene takes minutes on a megabyte of them.
+    #[test]
+    fn long_dead_tails_are_linear() {
+        for (unit, n) in [("<?", 200_000), ("< a", 100_000), ("<a b='", 50_000), ("&#x", 100_000)] {
+            let text = format!("{}x", unit.repeat(n));
+            let t = std::time::Instant::now();
+            let (out, _) = strip(&text, &[]);
+            assert!(!out.is_empty(), "{unit}");
+            assert!(t.elapsed() < std::time::Duration::from_secs(10), "{unit}: {:?}", t.elapsed());
+        }
+        // The memo is per text: the same instance gives the same output for the next one.
+        let mut f = HtmlStrip::new(&[]);
+        for text in ["<?<?<?x".repeat(40), "<?a>b".to_string(), "<?".repeat(100) + "?>c"] {
+            let mut out = String::new();
+            f.filter(&text, &mut out, &mut OffsetMap::default()).unwrap();
+            assert_eq!(out, strip(&text, &[]).0);
+        }
     }
 
     #[test]

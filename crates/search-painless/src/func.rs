@@ -268,7 +268,7 @@ fn invoke_method(vm: &mut Vm, m: MethodId, mut args: Vec<Value>) -> VR {
     let offset = if mi.kind == MethodKind::Instance { 1 } else { 0 };
     if offset == 1
         && (args.is_empty() || args[0].is_null()) {
-            return Err(crate::dynamic::null_receiver(reg, m, None));
+            return Err(crate::dynamic::null_receiver(reg, m, None, vm.prog.regex_limit_factor > 0));
         }
     for (i, pt) in mi.params.iter().enumerate() {
         if let Some(a) = args.get_mut(i + offset) {
@@ -557,14 +557,66 @@ fn comparator(f: impl for<'a, 'b> Fn(&'b mut Vm<'a>, &Value, &Value) -> Result<s
     native(Some(cls::COMPARATOR), move |vm, args| Ok(cmp_value(f(vm, &arg_fn(args, 0), &arg_fn(args, 1))?)))
 }
 
+thread_local! {
+    /// `Comparators.NaturalOrderComparator.INSTANCE` and `Collections.ReverseComparator.REVERSE_ORDER`:
+    /// singletons, so `naturalOrder() == naturalOrder()` and `reversed()` maps one to the other.
+    static JDK_COMPARATORS: (Value, Value) = (
+        comparator(|_, a, b| natural_order_compare(a, b)),
+        comparator(|_, a, b| reverse_order_compare(a, b)),
+    );
+}
+
+/// `Comparator.naturalOrder()`.
+pub fn natural_order_comparator() -> Value {
+    JDK_COMPARATORS.with(|c| c.0.clone())
+}
+
+/// `Comparator.reverseOrder()` / `Collections.reverseOrder()`.
+pub fn reverse_order_comparator() -> Value {
+    JDK_COMPARATORS.with(|c| c.1.clone())
+}
+
+pub(crate) fn same_object(a: &Value, b: &Value) -> bool {
+    matches!((a, b), (Value::Obj(x), Value::Obj(y)) if Rc::ptr_eq(x, y))
+}
+
 fn natural_order(_: &mut Vm, _: &mut [Value]) -> VR {
-    Ok(comparator(|_, a, b| natural_compare(a, b)))
+    Ok(natural_order_comparator())
 }
 fn reverse_order(_: &mut Vm, _: &mut [Value]) -> VR {
-    Ok(comparator(|_, a, b| natural_compare(b, a)))
+    Ok(reverse_order_comparator())
+}
+
+/// `Comparators.NaturalOrderComparator.compare`: `c1.compareTo(c2)`, failures carrying its
+/// frames (the method and its bridge).
+pub fn natural_order_compare(a: &Value, b: &Value) -> Result<std::cmp::Ordering, Thrown> {
+    natural_compare(a, b).map_err(|e| jdk_comparator_error(e, "c1", "java.util.Comparators$NaturalOrderComparator.compare(Comparators.java:", 52, 47))
+}
+
+/// `Collections.ReverseComparator.compare` (`Comparator.reverseOrder()`,
+/// `Collections.reverseOrder()`): `c2.compareTo(c1)`.
+pub fn reverse_order_compare(a: &Value, b: &Value) -> Result<std::cmp::Ordering, Thrown> {
+    natural_compare(b, a).map_err(|e| jdk_comparator_error(e, "c2", "java.util.Collections$ReverseComparator.compare(Collections.java:", 5717, 5707))
+}
+
+fn jdk_comparator_error(mut e: Thrown, receiver: &str, site: &str, line: u32, bridge: u32) -> Thrown {
+    // `natural_compare` names a null receiver `k1`, as `ComparableTimSort` does
+    if e.class == cls::NULL_POINTER_EXCEPTION && e.frames.is_empty() && e.message.as_deref() == Some("Cannot invoke \"java.lang.Comparable.compareTo(Object)\" because \"k1\" is null") {
+        e.message = Some(format!("Cannot invoke \"java.lang.Comparable.compareTo(Object)\" because \"{receiver}\" is null"));
+    }
+    e.frames.push(format!("java.base/{site}{line})"));
+    e.frames.push(format!("java.base/{site}{bridge})"));
+    e
 }
 fn reversed(_: &mut Vm, a: &mut [Value]) -> VR {
     let c = arg_fn(a, 0);
+    let (natural, reverse) = (natural_order_comparator(), reverse_order_comparator());
+    if same_object(&c, &natural) {
+        return Ok(reverse);
+    }
+    if same_object(&c, &reverse) {
+        return Ok(natural);
+    }
     Ok(comparator(move |vm, x, y| compare_with(vm, &c, y, x)))
 }
 fn comparing(_: &mut Vm, a: &mut [Value]) -> VR {

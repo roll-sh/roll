@@ -162,16 +162,15 @@ fn mf_holt(_: &mut Vm, a: &mut [Value]) -> VR {
     let mut counter = 0u64;
     for x in v {
         if !x.is_nan() {
-            let b;
-            if counter == 0 {
+            let b = if counter == 0 {
                 s = x;
                 // `v - last` with `last = v`: zero, or NaN for an infinite value
                 let last = x;
-                b = x - last;
+                x - last
             } else {
                 s = alpha * x + (1.0 - alpha) * (last_s + last_b);
-                b = beta * (s - last_s) + (1.0 - beta) * last_b;
-            }
+                beta * (s - last_s) + (1.0 - beta) * last_b
+            };
             counter += 1;
             last_s = s;
             last_b = b;

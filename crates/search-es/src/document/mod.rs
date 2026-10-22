@@ -24,9 +24,9 @@ pub mod values;
 
 use crate::error::{EsError, EsResult};
 use crate::json::Value;
-use crate::mapping::{Dynamic, FieldMapper, Mapping, MappingCtx, MapperRef, MergeReason, ObjectMapper};
+use crate::mapping::{Dynamic, FieldMapper, Mapper, Mapping, MappingCtx, MapperRef, MergeReason, ObjectMapper};
 use crate::query::{Token, XParser};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 pub use values::FieldValue;
 
@@ -98,12 +98,25 @@ pub fn parse_document(mapping: &Mapping, ctx: &MappingCtx, doc: &Value, source: 
         ignored: BTreeSet::new(),
         nested: Vec::new(),
         strict_pending,
+        array_objects: 0,
+        nested_docs: 0,
+        single_seen: HashSet::new(),
+        scopes: Vec::new(),
     };
     p.p.next_token();
     let root_dynamic = effective.root.dynamic.unwrap_or(Dynamic::True);
     p.object(&effective.root, "", root_dynamic, true)?;
+    if ctx.columnar.is_some() {
+        let fields: Vec<&str> = p.out.fields.iter().map(|f| &*f.name).collect();
+        p.check_required(&effective.root, "", &fields)?;
+    }
     if let Some(e) = deferred {
-        return Err(e);
+        // Errors about a field are located at its value.
+        let at = e.hidden("locate").and_then(Value::as_str).zip(source).and_then(|(path, src)| crate::tsds::value_location_path(src, path));
+        return Err(match at {
+            Some((l, c)) => EsError::document_parsing(format!("[{l}:{c}] {}", e.reason())),
+            None => e,
+        });
     }
     let mut out = p.out;
     out.ignored = p.ignored.into_iter().collect();
@@ -157,6 +170,53 @@ struct Walker<'m, 'p> {
     /// Indexes into `out.nested` of the nested documents being filled (innermost last).
     nested: Vec<NestedDoc>,
     strict_pending: bool,
+    /// Objects met inside arrays so far (`index.mapping.array_objects.limit`).
+    array_objects: i64,
+    /// Nested documents created so far (`index.mapping.nested_objects.limit`).
+    nested_docs: i64,
+    /// Columnar `multi_value: false` fields given a value, per document scope (the scope is
+    /// the nested document's ordinal, 0 for the root).
+    single_seen: HashSet<(i64, String)>,
+    /// The document scopes being parsed (nested ordinals).
+    scopes: Vec<i64>,
+}
+
+/// A columnar field's `doc_values: {multi_value, nullability}` (`None` outside columnar modes).
+fn column_flags(f: &FieldMapper, ctx: &MappingCtx) -> Option<(bool, bool)> {
+    ctx.columnar?;
+    match f.effective("doc_values", ctx) {
+        Value::Obj(m) => Some((m.get("multi_value").and_then(Value::as_bool).unwrap_or(true), m.get("nullability").and_then(Value::as_bool).unwrap_or(true))),
+        _ => None,
+    }
+}
+
+/// Fields of `o` (not under nested objects) with `nullability: false`, by full path.
+fn required_fields(o: &ObjectMapper, path: &str, ctx: &MappingCtx, out: &mut Vec<String>) {
+    for (name, m) in &o.children {
+        let full = join(path, name);
+        match m {
+            Mapper::Field(f) => {
+                if column_flags(f, ctx).is_some_and(|(_, n)| !n) {
+                    out.push(full.clone());
+                }
+                for (sub_name, sub) in &f.fields {
+                    if column_flags(sub, ctx).is_some_and(|(_, n)| !n) {
+                        out.push(format!("{full}.{sub_name}"));
+                    }
+                }
+            }
+            Mapper::Object(child) if !child.is_nested() && child.is_enabled() => required_fields(child, &full, ctx, out),
+            _ => {}
+        }
+    }
+}
+
+fn has_content(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Arr(a) => a.iter().any(has_content),
+        _ => true,
+    }
 }
 
 fn join(path: &str, name: &str) -> String {
@@ -214,11 +274,10 @@ impl<'m, 'p> Walker<'m, 'p> {
                 Token::EndObject => break,
                 Token::FieldName => {
                     let name = self.p.current_name().unwrap_or("").to_string();
-                    let name_loc = self.p.token_location();
                     self.check_name(&name)?;
                     let value_token = self.p.next_token().unwrap_or(Token::Null);
                     if root && crate::mapping::METADATA_FIELDS.contains(&name.as_str()) {
-                        self.metadata_field(&name, name_loc)?;
+                        self.metadata_field(&name)?;
                         continue;
                     }
                     self.field(om, path, &name, value_token, dynamic)?;
@@ -230,7 +289,7 @@ impl<'m, 'p> Walker<'m, 'p> {
     }
 
     /// A metadata field inside the document: only `_doc_count` is allowed.
-    fn metadata_field(&mut self, name: &str, _name_loc: (usize, usize)) -> EsResult<()> {
+    fn metadata_field(&mut self, name: &str) -> EsResult<()> {
         if name == "_doc_count" {
             let v = match self.p.token() {
                 Token::Number => self.p.long_value()?,
@@ -239,7 +298,13 @@ impl<'m, 'p> Walker<'m, 'p> {
                 }
             };
             if v <= 0 {
-                return Err(EsError::illegal_argument(format!("Field [_doc_count] must be a positive integer. Value [{v}] is not allowed.")));
+                // `DocCountFieldMapper.parseCreateField` fails inside `FieldMapper.parse`.
+                let (l, c) = self.p.token_location();
+                return Err(EsError::document_parsing(format!(
+                    "[{l}:{c}] failed to parse field [_doc_count] of type [_doc_count] in {}. Preview of field's value: '{v}'",
+                    self.desc
+                ))
+                .caused_by(EsError::illegal_argument(format!("Field [_doc_count] must be a positive integer. Value [{v}] is not allowed."))));
             }
             self.out.doc_count = Some(v);
             return Ok(());
@@ -287,16 +352,51 @@ impl<'m, 'p> Walker<'m, 'p> {
             Some(MapperRef::Alias(_)) => Err(self.doc_error(format!("Cannot write to a field alias [{full}]."))),
             None => {
                 // Dotted names inside an object resolve against the intermediate objects.
-                if name.contains('.') && om.subobjects_enabled() {
+                // Strict columnar mappings hold every field by its dotted name at the root.
+                let subobjects = om.subobjects_enabled() && self.ctx.columnar.is_none();
+                if name.contains('.') && subobjects {
                     let (head, rest) = name.split_once('.').unwrap_or((name, ""));
                     let head_full = join(path, head);
                     if let Some(MapperRef::Object(child)) = crate::mapping::lookup_in(om, head) {
                         return self.field(child, &head_full, rest, token, child.dynamic.unwrap_or(dynamic));
                     }
                 }
+                // `subobjects: false`: an unmapped object's keys become dotted leaf names
+                // (`parseObjectOrNested` with a flat parent name).
+                if !subobjects && token == Token::StartObject {
+                    return self.flat_object(om, path, name, dynamic);
+                }
+                // Strict columnar mappings: the field's prefix decides (`prefix_properties`).
+                if self.ctx.columnar.is_some()
+                    && let Some((prefix, _)) = full.rsplit_once('.')
+                {
+                    if self.mapping.prefix_disabled(&full) {
+                        return self.unmapped(path, name, token, Dynamic::False);
+                    }
+                    let d = self.mapping.dynamic_for(prefix);
+                    return self.unmapped(prefix, &full[prefix.len() + 1..], token, d);
+                }
                 self.unmapped(path, name, token, dynamic)
             }
         }
+    }
+
+    /// The keys of the object the parser is on, as `prefix.key` fields of `om`.
+    fn flat_object(&mut self, om: &'m ObjectMapper, path: &str, prefix: &str, dynamic: Dynamic) -> EsResult<()> {
+        while let Some(t) = self.p.next_token() {
+            match t {
+                Token::EndObject => break,
+                Token::FieldName => {
+                    let name = self.p.current_name().unwrap_or("").to_string();
+                    self.check_name(&name)?;
+                    let value_token = self.p.next_token().unwrap_or(Token::Null);
+                    let flat = format!("{prefix}.{name}");
+                    crate::stack::maybe_grow(|| self.field(om, path, &flat, value_token, dynamic))?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// A field the mapping doesn't know (after the dynamic update): skipped, or `strict`.
@@ -310,6 +410,20 @@ impl<'m, 'p> Walker<'m, 'p> {
                 "strict_dynamic_mapping_exception",
                 format!("[{l}:{c}] mapping set to {}, dynamic introduction of [{leaf}] within [{within}] is not allowed", dynamic.as_str()),
             ));
+        }
+        // A dynamic field the mapping update left out was past a limit it may ignore
+        // (`ignore_dynamic_beyond_limit`): recorded in `_ignored`.
+        // An array is ignored as soon as the mapping is full, even an empty one
+        // (`parseArrayDynamic` checks the limit before reading the elements).
+        let full_mapping = (self.mapping.total_fields() as i64) >= self.ctx.total_fields_limit;
+        if dynamic == Dynamic::True
+            && (self.ctx.ignore_dynamic_beyond_limit || self.ctx.ignore_dynamic_names_beyond_limit)
+            && (has_content(self.p.value()) || (self.ctx.ignore_dynamic_beyond_limit && full_mapping && matches!(self.p.value(), Value::Arr(_))))
+        {
+            // A dotted name expands into objects first (`DotExpandingXContentParser`): the
+            // outermost object that didn't fit is what's ignored.
+            let head = if self.ctx.columnar.is_none() { name.split('.').next().unwrap_or(name) } else { name };
+            self.ignored.insert(join(path, head));
         }
         // dynamic: false (or runtime): kept in _source only.
         self.p.skip_children();
@@ -325,10 +439,23 @@ impl<'m, 'p> Walker<'m, 'p> {
                     return Ok(());
                 }
                 if child.is_nested() {
+                    self.nested_docs += 1;
+                    if self.nested_docs > self.ctx.nested_objects_limit {
+                        return Err(self.doc_error(format!(
+                            "The number of nested documents has exceeded the allowed limit of [{}]. This limit can be set by changing the [index.mapping.nested_objects.limit] index level setting.",
+                            self.ctx.nested_objects_limit
+                        )));
+                    }
                     self.nested.push(NestedDoc { path: full.to_string(), fields: Vec::new() });
+                    self.scopes.push(self.nested_docs);
                     let r = self.object(child, full, dynamic, false);
+                    self.scopes.pop();
                     let doc = self.nested.pop().unwrap_or(NestedDoc { path: full.to_string(), fields: Vec::new() });
                     r?;
+                    if self.ctx.columnar.is_some() {
+                        let fields: Vec<&str> = doc.fields.iter().map(|f| &*f.name).collect();
+                        self.check_required(child, full, &fields)?;
+                    }
                     self.nested_done(child, doc);
                     Ok(())
                 } else {
@@ -344,7 +471,12 @@ impl<'m, 'p> Walker<'m, 'p> {
                     match t {
                         Token::EndArray => break,
                         Token::Null => {}
-                        t => crate::stack::maybe_grow(|| self.object_value(child, full, name, t, dynamic))?,
+                        t => {
+                            if t == Token::StartObject {
+                                self.count_array_object()?;
+                            }
+                            crate::stack::maybe_grow(|| self.object_value(child, full, name, t, dynamic))?
+                        }
                     }
                 }
                 Ok(())
@@ -360,6 +492,43 @@ impl<'m, 'p> Walker<'m, 'p> {
                 Err(self.doc_error(format!("object mapping for [{full}] tried to parse field [{shown}] as object, but found a concrete value")))
             }
         }
+    }
+
+    /// `nullability: false` fields of a finished document scope that got no value (the parser
+    /// is on the scope's closing token).
+    fn check_required(&self, o: &ObjectMapper, path: &str, present: &[&str]) -> EsResult<()> {
+        let mut req = Vec::new();
+        required_fields(o, path, self.ctx, &mut req);
+        req.retain(|r| !present.contains(&r.as_str()));
+        if req.is_empty() {
+            return Ok(());
+        }
+        let msg = format!("Field(s) [{}] are configured with [nullability=false] but no value was provided", req.join(", "));
+        Err(self.doc_error(format!("failed to parse: {msg}")).caused_by(EsError::illegal_argument(msg)))
+    }
+
+    /// A second value of a columnar `multi_value: false` field in the same document.
+    fn check_single(&mut self, f: &FieldMapper, full: &str) -> Result<(), ValueError> {
+        if !column_flags(f, self.ctx).is_some_and(|(m, _)| !m) {
+            return Ok(());
+        }
+        let scope = self.scopes.last().copied().unwrap_or(0);
+        if !self.single_seen.insert((scope, full.to_string())) {
+            return Err(EsError::illegal_argument(format!("Field [{full}] is configured with [multi_value=false] but encountered multiple values in the same document")).into());
+        }
+        Ok(())
+    }
+
+    /// One more object inside an array (`DocumentParserContext`'s array objects counter).
+    fn count_array_object(&mut self) -> EsResult<()> {
+        self.array_objects += 1;
+        if self.array_objects > self.ctx.array_objects_limit {
+            return Err(self.doc_error(format!(
+                "The total number of objects across all arrays in the document has exceeded the allowed limit of [{}]. This limit can be set by changing the [index.mapping.array_objects.limit] index level setting.",
+                self.ctx.array_objects_limit
+            )));
+        }
+        Ok(())
     }
 
     /// A finished nested document: added, and its fields copied to the parent or root when the
@@ -390,7 +559,12 @@ impl<'m, 'p> Walker<'m, 'p> {
             while let Some(t) = self.p.next_token() {
                 match t {
                     Token::EndArray => break,
-                    t => crate::stack::maybe_grow(|| self.field_values(f, full, t))?,
+                    t => {
+                        if t == Token::StartObject {
+                            self.count_array_object()?;
+                        }
+                        crate::stack::maybe_grow(|| self.field_values(f, full, t))?
+                    }
                 }
             }
             return Ok(());
@@ -404,6 +578,22 @@ impl<'m, 'p> Walker<'m, 'p> {
         let multi = token != Token::StartObject && !f.fields.is_empty();
         // The value is kept for the multi-fields and copy_to targets only when there are some.
         let snapshot = (multi || !f.copy_to.is_empty()).then(|| self.p.value().clone());
+        // A data stream's `@timestamp` takes one value (`DataStreamTimestampFieldMapper`).
+        if full == "@timestamp"
+            && self.mapping.data_stream_timestamp == Some(true)
+            && self.nested.is_empty()
+            && token != Token::Null
+            && self.out.fields.iter().any(|x| &*x.name == "@timestamp")
+        {
+            let e = ValueError { cause: EsError::illegal_argument("data stream timestamp field [@timestamp] encountered multiple values"), wrap: Wrap::Field };
+            return Err(self.wrap(e, f, full));
+        }
+        if self.ctx.columnar.is_some()
+            && token != Token::Null
+            && let Err(e) = self.check_single(f, full)
+        {
+            return Err(self.wrap(e, f, full));
+        }
         let r = {
             let mut cx = values::Cx { p: &mut self.p, ctx: self.ctx, ignored: &mut self.ignored, desc: &self.desc };
             values::parse_value(&mut cx, f, full)
@@ -411,6 +601,31 @@ impl<'m, 'p> Walker<'m, 'p> {
         match r {
             Ok(vals) => {
                 let name = f.full_name(full);
+                // A completion object (inputs, weight, contexts) reaches its multi-fields
+                // whole when they are completions, as its inputs otherwise.
+                if f.ty == "completion" && token == Token::StartObject && !f.fields.is_empty() {
+                    for (sub_name, sub) in &f.fields {
+                        let sub_full = format!("{full}.{sub_name}");
+                        let sub_arc = sub.full_name(&sub_full);
+                        for v in &vals {
+                            let FieldValue::Completion { inputs, .. } = v else { continue };
+                            if sub.ty == "completion" {
+                                self.push(&sub_arc, v.clone());
+                                continue;
+                            }
+                            for input in inputs {
+                                let iv = Value::Str(input.clone());
+                                let parsed = {
+                                    let mut cx = values::Cx { p: &mut self.p, ctx: self.ctx, ignored: &mut self.ignored, desc: &self.desc };
+                                    values::parse_detached(&mut cx, sub, &sub_full, &iv, Token::String)?
+                                };
+                                for pv in parsed.unwrap_or_default() {
+                                    self.push(&sub_arc, pv);
+                                }
+                            }
+                        }
+                    }
+                }
                 for v in vals {
                     self.push(&name, v);
                 }
@@ -433,6 +648,11 @@ impl<'m, 'p> Walker<'m, 'p> {
                         sub.full_name(&path)
                     }
                 };
+                if self.ctx.columnar.is_some()
+                    && let Err(e) = self.check_single(sub, &name)
+                {
+                    return Err(self.wrap(e, sub, &name));
+                }
                 let vals = {
                     let mut cx = values::Cx { p: &mut self.p, ctx: self.ctx, ignored: &mut self.ignored, desc: &self.desc };
                     values::parse_detached(&mut cx, sub, &name, &snapshot, token)?
@@ -451,6 +671,20 @@ impl<'m, 'p> Walker<'m, 'p> {
             let name = tf.full_name(target);
             for v in vals.unwrap_or_default() {
                 self.push_copy(&name, v);
+            }
+            // The target's multi-fields index the copied value too.
+            if token != Token::StartObject {
+                for (sub_name, sub) in &tf.fields {
+                    let sub_full = format!("{target}.{sub_name}");
+                    let vals = {
+                        let mut cx = values::Cx { p: &mut self.p, ctx: self.ctx, ignored: &mut self.ignored, desc: &self.desc };
+                        values::parse_detached(&mut cx, sub, &sub_full, &snapshot, token)?
+                    };
+                    let sub_name = sub.full_name(&sub_full);
+                    for v in vals.unwrap_or_default() {
+                        self.push_copy(&sub_name, v);
+                    }
+                }
             }
         }
         Ok(())

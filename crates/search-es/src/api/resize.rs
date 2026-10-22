@@ -270,7 +270,13 @@ pub async fn handle(ctx: &Ctx<'_>, kind: ResizeType) -> EsResult<Reply> {
     let source = resolve_date_math(ctx.path_param("index").unwrap_or_default(), now)?;
     let target = resolve_date_math(ctx.path_param("target").unwrap_or_default(), now)?;
     let t = target.clone();
+    let src_name = source.clone();
     ctx.cluster.update(move |st| resize(st, kind, &source, &t, req, now)).await?;
+    // The target starts with the source's documents (Elasticsearch hard-links its segments).
+    let st = ctx.state();
+    if let (Some(s), Some(d)) = (st.metadata.indices.get(&src_name).cloned(), st.metadata.indices.get(&target).cloned()) {
+        crate::write::copy_index(ctx.cluster, &s, &d)?;
+    }
     Reply::ok(obj! { "acknowledged" => true, "shards_acknowledged" => true, "index" => target })
 }
 

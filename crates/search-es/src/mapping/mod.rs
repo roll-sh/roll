@@ -55,7 +55,17 @@ pub struct MappingCtx {
     pub depth_limit: i64,
     pub nested_fields_limit: i64,
     pub nested_objects_limit: i64,
+    /// `index.mapping.array_objects.limit`: objects inside arrays, across the document.
+    pub array_objects_limit: i64,
+    /// `index.mapping.dynamic_strings.auto_text`: dynamic strings map as `text` with a
+    /// `keyword` sub-field (`false`: as plain `keyword`).
+    pub dynamic_auto_text: bool,
     pub field_name_length_limit: i64,
+    /// `index.mapping.total_fields.ignore_dynamic_beyond_limit` (default in logs modes):
+    /// dynamic fields past the limit are ignored instead of failing the document.
+    pub ignore_dynamic_beyond_limit: bool,
+    /// `index.mapping.field_name_length.ignore_dynamic_beyond_limit`.
+    pub ignore_dynamic_names_beyond_limit: bool,
     /// The index mode when it is a strict columnar one (`columnar`, `logsdb_columnar`): objects
     /// flatten into dotted field names and their `dynamic`/`enabled` move to `prefix_properties`.
     pub columnar: Option<&'static str>,
@@ -66,6 +76,12 @@ pub struct MappingCtx {
     pub index_disabled_by_default: bool,
     /// `index.mode: vectordb_document`: vectors default to `bfloat16` elements.
     pub vectordb: bool,
+    /// The write request's `dynamic_templates` (field path → template name): those fields map
+    /// through the named template, whatever its match conditions.
+    pub requested_templates: Option<Arc<Map>>,
+    /// Whether the document being parsed has a `_routing` (`None`: unknown, unchecked):
+    /// child documents of a `join` field need one.
+    pub join_routing: Option<bool>,
     /// Deprecation warnings raised while parsing.
     pub warnings: RefCell<Vec<String>>,
     /// Whose mapping rules apply: OpenSearch has its own field types (`flat_object`,
@@ -97,7 +113,11 @@ impl MappingCtx {
             depth_limit: n("index.mapping.depth.limit", 20),
             nested_fields_limit: n("index.mapping.nested_fields.limit", 100),
             nested_objects_limit: n("index.mapping.nested_objects.limit", 10000),
+            array_objects_limit: n("index.mapping.array_objects.limit", 50000),
+            dynamic_auto_text: b("index.mapping.dynamic_strings.auto_text", true),
             field_name_length_limit: n("index.mapping.field_name_length.limit", i64::MAX),
+            ignore_dynamic_beyond_limit: b("index.mapping.total_fields.ignore_dynamic_beyond_limit", logs),
+            ignore_dynamic_names_beyond_limit: b("index.mapping.field_name_length.ignore_dynamic_beyond_limit", false),
             columnar: {
                 let mode = crate::meta::index_mode::IndexMode::of(s);
                 mode.is_strict_columnar().then(|| mode.name())
@@ -109,6 +129,8 @@ impl MappingCtx {
                 crate::meta::index_mode::IndexMode::of(s).is_strict_columnar(),
             ),
             vectordb: crate::meta::index_mode::IndexMode::of(s) == crate::meta::index_mode::IndexMode::VectordbDocument,
+            requested_templates: None,
+            join_routing: None,
             warnings: RefCell::new(Vec::new()),
             dialect,
         }
@@ -215,6 +237,15 @@ impl PartialEq for FieldMapper {
 }
 
 impl FieldMapper {
+    /// Runs the type's cross-parameter validation (for parameters set after parsing, such as
+    /// a `dense_vector`'s `dims` taken from the first document).
+    pub fn validate_type(&self, ctx: &MappingCtx) -> Result<(), EsError> {
+        match self.def.validate {
+            Some(v) => v(self, ctx),
+            None => Ok(()),
+        }
+    }
+
     pub fn new(name: &str, def: &'static TypeDef) -> FieldMapper {
         FieldMapper {
             name: name.to_string(),
@@ -401,6 +432,9 @@ impl FieldMapper {
                         )));
                     }
                     parse_multi_fields(&mut f, name, v, ctx)?;
+                    if def.name == "join" && !f.fields.is_empty() {
+                        ctx.warn("Adding multifields to [join] mappers has no effect and will be forbidden in future");
+                    }
                     continue;
                 }
                 "copy_to" => {
@@ -629,7 +663,11 @@ fn completion_contexts(v: &Value) -> Result<Value, EsError> {
             let precision = match m.get("precision") {
                 None => 6,
                 Some(Value::Num(n)) => n.as_f64() as i64,
-                Some(other) => other.to_es_string().trim().parse::<i64>().map_err(|_| EsError::illegal_argument(format!("failed to parse [precision] in context [{name}]")))?,
+                // A distance: the geohash level whose cells are about that size.
+                Some(other) => match crate::query::geo::parse_distance(&other.to_es_string(), 1.0) {
+                    Ok(meters) => geohash_levels_for_precision(meters),
+                    Err(_) => return Err(EsError::illegal_argument(format!("failed to parse [precision] in context [{name}]"))),
+                },
             };
             if let Value::Obj(om) = &mut o {
                 om.insert("precision".into(), Value::from(precision));
@@ -641,6 +679,21 @@ fn completion_contexts(v: &Value) -> Result<Value, EsError> {
         out.push(o);
     }
     Ok(Value::Arr(out))
+}
+
+/// `Geohash.geoHashLevelsForPrecision(meters)`.
+fn geohash_levels_for_precision(meters: f64) -> i64 {
+    const PRECISION: i64 = 12;
+    if meters <= 0.0 {
+        return PRECISION;
+    }
+    let equator = 2.0 * std::f64::consts::PI * 6_378_137.0;
+    let polar = std::f64::consts::PI * 6_356_752.314245;
+    let ratio = 1.0 + polar / equator;
+    let width = ((meters * meters) / (ratio * ratio)).sqrt();
+    let part = (equator / width).ceil().round() as i64;
+    let level = 63 - part.leading_zeros() as i64;
+    if part <= (1i64 << level) { level / 5 } else { level / 5 + 1 }
 }
 
 /// `geo_point` values in their accepted forms, normalized to `{lat, lon}`.
@@ -1750,6 +1803,11 @@ pub struct RuntimeField {
 const RUNTIME_TYPES: &[&str] = &["boolean", "composite", "date", "double", "geo_point", "geo_shape", "ip", "keyword", "long", "lookup"];
 
 impl RuntimeField {
+    /// A runtime field definition (mapping `runtime` or a request's `runtime_mappings`).
+    pub fn parse_def(name: &str, v: &Value) -> Result<RuntimeField, EsError> {
+        RuntimeField::parse(name, v)
+    }
+
     fn parse(name: &str, v: &Value) -> Result<RuntimeField, EsError> {
         let Value::Obj(m) = v else {
             return Err(EsError::mapper_parsing(format!("Expected map for runtime field [{name}] definition but got a {}", v.to_es_string())));
@@ -2724,6 +2782,15 @@ impl Mapping {
     pub fn dimension_fields(&self, ctx: &MappingCtx) -> (Vec<String>, bool) {
         let mut out: Vec<String> = Vec::new();
         let mut all = true;
+        let paths = self.field_paths();
+        // Pass-through objects holding dimensions route on everything below them.
+        for (p, m) in &paths {
+            if let MapperRef::Object(o) = m
+                && matches!(o.kind, ObjectKind::PassThrough { dimensions: Some(true), .. })
+            {
+                out.push(format!("{p}.*"));
+            }
+        }
         for t in self.dynamic_templates.iter().flatten() {
             if t.mapping.get("time_series_dimension").and_then(Value::as_bool) != Some(true) {
                 continue;
@@ -2731,7 +2798,6 @@ impl Mapping {
             all = false;
             out.extend(t.path_match.iter().cloned());
         }
-        let paths = self.field_paths();
         let fields: Vec<&String> = paths.iter().filter(|(_, m)| matches!(m, MapperRef::Field(_))).map(|(p, _)| p).collect();
         // Field mappers (metadata ones included) live in a `HashMap` sized for all of them.
         let order = crate::json::java_hash_order(&fields, (fields.len() + METADATA_FIELDS.len()) * 4 / 3 + 1);
@@ -2743,6 +2809,19 @@ impl Mapping {
             }
         }
         (out, all)
+    }
+
+    /// Strict columnar mappings: whether a dotted field path lies under a prefix with
+    /// `enabled: false` (its values are neither mapped nor indexed).
+    pub fn prefix_disabled(&self, field_path: &str) -> bool {
+        let mut path = field_path;
+        while let Some((parent, _)) = path.rsplit_once('.') {
+            if self.prefix_properties.get(parent).is_some_and(|p| p.enabled == Some(false)) {
+                return true;
+            }
+            path = parent;
+        }
+        false
     }
 
     /// The effective `dynamic` for an object path (inherited from parents, default `true`).

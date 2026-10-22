@@ -474,8 +474,10 @@ impl BeReader<'_> {
         let n = self.count(2)?;
         let b = self.take(n * 2)?;
         Some(
-            b.chunks_exact(2)
-                .map(|c| i16::from_be_bytes([c[0], c[1]]))
+            b.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| i16::from_be_bytes(*c))
                 .collect(),
         )
     }
@@ -483,8 +485,10 @@ impl BeReader<'_> {
         let n = self.count(4)?;
         let b = self.take(n * 4)?;
         Some(
-            b.chunks_exact(4)
-                .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+            b.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| i32::from_be_bytes(*c))
                 .collect(),
         )
     }

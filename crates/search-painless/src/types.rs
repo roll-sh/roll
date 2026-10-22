@@ -301,6 +301,8 @@ pub mod cls {
         LINKED_ENTRY_SET = "java.util.LinkedHashMap.LinkedEntrySet";
         LINKED_ENTRY = "java.util.LinkedHashMap.Entry";
         TREE_MAP_KEY_SET = "java.util.TreeMap.KeySet";
+        TREE_MAP_ASCENDING_SUB_MAP = "java.util.TreeMap.AscendingSubMap";
+        TREE_MAP_DESCENDING_SUB_MAP = "java.util.TreeMap.DescendingSubMap";
         TREE_MAP_VALUES = "java.util.TreeMap.Values";
         TREE_MAP_ENTRY_SET = "java.util.TreeMap.EntrySet";
         TREE_MAP_ENTRY = "java.util.TreeMap.Entry";
@@ -308,6 +310,26 @@ pub mod cls {
         LIST_ITR = "java.util.ArrayList.ListItr";
         HASH_MAP_ITERATOR = "java.util.HashMap.HashIterator";
         GENERIC_ITERATOR = "java.util.Iterator.Impl";
+        ENUMERATION = "java.util.Enumeration" as "Enumeration";
+        // `Collections.enumeration(c)`: an anonymous class
+        COLLECTIONS_ENUMERATION = "java.util.Collections.3";
+        EMPTY_ENUMERATION = "java.util.Collections.EmptyEnumeration";
+        SPLITERATOR = "java.util.Spliterator" as "Spliterator";
+        SPLITERATOR_OF_PRIMITIVE = "java.util.Spliterator.OfPrimitive" as "Spliterator.OfPrimitive";
+        SPLITERATOR_OF_INT = "java.util.Spliterator.OfInt" as "Spliterator.OfInt";
+        SPLITERATOR_OF_LONG = "java.util.Spliterator.OfLong" as "Spliterator.OfLong";
+        SPLITERATOR_OF_DOUBLE = "java.util.Spliterator.OfDouble" as "Spliterator.OfDouble";
+        SPLITERATORS = "java.util.Spliterators" as "Spliterators";
+        ARRAY_LIST_SPLITERATOR = "java.util.ArrayList.ArrayListSpliterator";
+        SUB_LIST_SPLITERATOR = "java.util.ArrayList.SubList.2";
+        LINKED_LIST_SPLITERATOR = "java.util.LinkedList.LLSpliterator";
+        ARRAY_DEQUE_SPLITERATOR = "java.util.ArrayDeque.DeqSpliterator";
+        HASH_MAP_KEY_SPLITERATOR = "java.util.HashMap.KeySpliterator";
+        HASH_MAP_VALUE_SPLITERATOR = "java.util.HashMap.ValueSpliterator";
+        HASH_MAP_ENTRY_SPLITERATOR = "java.util.HashMap.EntrySpliterator";
+        TREE_MAP_KEY_SPLITERATOR = "java.util.TreeMap.KeySpliterator";
+        ITERATOR_SPLITERATOR = "java.util.Spliterators.IteratorSpliterator";
+        EMPTY_SPLITERATOR = "java.util.Spliterators.EmptySpliterator.OfRef";
         PRIMITIVE_INT_ITERATOR = "java.util.stream.IntPipeline.Iterator";
         PRIMITIVE_LONG_ITERATOR = "java.util.stream.LongPipeline.Iterator";
         PRIMITIVE_DOUBLE_ITERATOR = "java.util.stream.DoublePipeline.Iterator";
@@ -420,6 +442,7 @@ pub mod cls {
         CLOCK = "java.time.Clock" as "Clock";
         VALUE_RANGE = "java.time.temporal.ValueRange" as "ValueRange";
         TEMPORAL_QUERY = "java.time.temporal.TemporalQuery" as "TemporalQuery";
+        TEMPORAL_QUERIES = "java.time.temporal.TemporalQueries" as "TemporalQueries";
         ISO_FIELDS = "java.time.temporal.IsoFields" as "IsoFields";
         JULIAN_FIELDS = "java.time.temporal.JulianFields" as "JulianFields";
         WEEK_FIELDS = "java.time.temporal.WeekFields" as "WeekFields";
@@ -578,6 +601,8 @@ pub mod cls {
         INGEST_LIST = "org.elasticsearch.ingest.IngestDocument.UnmodifiableIngestList";
         LOCALE_BUILDER = "java.util.Locale.Builder" as "Locale.Builder";
         LOCALE_CATEGORY = "java.util.Locale.Category" as "Locale.Category";
+        LOCALE_LANGUAGE_RANGE = "java.util.Locale.LanguageRange" as "Locale.LanguageRange";
+        LOCALE_FILTERING_MODE = "java.util.Locale.FilteringMode" as "Locale.FilteringMode";
         ZONE_RULES = "java.time.zone.ZoneRules" as "ZoneRules";
         ZONE_OFFSET_TRANSITION = "java.time.zone.ZoneOffsetTransition" as "ZoneOffsetTransition";
         CHARACTER_SUBSET = "java.lang.Character.Subset" as "Character.Subset";

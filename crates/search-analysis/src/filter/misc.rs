@@ -953,8 +953,10 @@ pub(crate) struct Decompound {
     min_word: usize,
     min_sub: usize,
     max_sub: usize,
+    /// The current token in UTF-16 units; `parts` are ranges of it, decoded when emitted (so
+    /// subwords do not allocate).
     units: Vec<u16>,
-    parts: Vec<String>,
+    parts: Vec<(usize, usize)>,
     next_part: usize,
     current: Tok,
     scratch: String,
@@ -971,7 +973,11 @@ impl Filter for Decompound {
         if self.next_part < self.parts.len() {
             t.clone_from(&self.current);
             t.term.clear();
-            t.term.push_str(&self.parts[self.next_part]);
+            let (s, e) = self.parts[self.next_part];
+            t.term.extend(
+                char::decode_utf16(self.units[s..e].iter().copied())
+                    .map(|r| r.unwrap_or('\u{FFFD}')),
+            );
             t.pos_inc = 0;
             self.next_part += 1;
             return true;
@@ -1004,10 +1010,7 @@ impl Filter for Decompound {
                     }
                 }
                 if let Some(j) = longest {
-                    let s: String = char::decode_utf16(self.units[i..i + j].iter().copied())
-                        .map(|r| r.unwrap_or('\u{FFFD}'))
-                        .collect();
-                    self.parts.push(s);
+                    self.parts.push((i, i + j));
                     i += j - 1;
                 }
                 i += 1;

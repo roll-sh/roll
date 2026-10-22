@@ -510,7 +510,7 @@ impl ScoreFunction {
             }
             _ => {
                 let (l, c) = p.token_location();
-                return Err(EsError::new(400, "named_object_not_found_exception", format!("[{l}:{c}] unknown field [{name}]")));
+                return Err(EsError::java(400, "named_object_not_found_exception", format!("[{l}:{c}] unknown field [{name}]")));
             }
         };
         Ok(ScoreFunction { weight: None, kind })

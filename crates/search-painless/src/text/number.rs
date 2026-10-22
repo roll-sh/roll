@@ -809,8 +809,10 @@ impl DecimalFmt {
         }
     }
 
-    /// `toPattern()` / `toLocalizedPattern()`.
-    pub fn to_pattern(&self, localized: bool) -> String {
+    /// `toPattern()` / `toLocalizedPattern()`. Built the JDK's way, in a `StringBuilder` whose
+    /// growth is modelled ([`crate::guard::JavaSb`]): a fraction digit count near
+    /// `Integer.MAX_VALUE` fails with Java's `OutOfMemoryError` instead of building gigabytes.
+    pub fn to_pattern(&self, localized: bool) -> Result<String, crate::vm::Thrown> {
         let s = &self.sym;
         let zero = if localized { s.zero } else { '0' };
         let digit = if localized { s.digit } else { '#' };
@@ -819,47 +821,72 @@ impl DecimalFmt {
         let exponent = if localized { s.exponent.clone() } else { "E".into() };
         let sep = if localized { s.pattern_sep } else { ';' };
         let mut out = String::new();
+        let mut sb = crate::guard::JavaSb::default();
+        // the chars appended since the last check, charged as single appends
+        let charge = |out: &str, from: usize, sb: &mut crate::guard::JavaSb| -> Result<(), crate::vm::Thrown> {
+            let added = &out[from..];
+            sb.append(crate::java::utf16_len(added), added.chars().map(|c| c as u32).max().unwrap_or(0))
+        };
+        let outer = if localized { "toLocalizedPattern(DecimalFormat.java:3264)" } else { "toPattern(DecimalFormat.java:3253)" };
+        let repeat = |out: &mut String, sb: &mut crate::guard::JavaSb, c: char, n: i32, line: u32| -> Result<(), crate::vm::Thrown> {
+            sb.repeat(n, c as u32).map_err(|mut t| {
+                if !t.frames.is_empty() {
+                    t.frames.push(format!("java.base/java.text.DecimalFormat.toPattern(DecimalFormat.java:{line})"));
+                    t.frames.push(format!("java.base/java.text.DecimalFormat.{outer}"));
+                }
+                t
+            })?;
+            out.extend(std::iter::repeat_n(c, n.max(0) as usize));
+            Ok(())
+        };
         for j in [1, 0] {
+            let mark = out.len();
             if j == 1 {
                 self.append_affix(&mut out, &self.pos_prefix_pat, &self.pos_prefix, localized);
             } else {
                 self.append_affix(&mut out, &self.neg_prefix_pat, &self.neg_prefix, localized);
             }
-            let count = if self.exp { self.max_int } else { (self.grouping_size as i32).max(self.min_int) + 1 };
+            charge(&out, mark, &mut sb)?;
+            // an `int` in Java: `max(groupingSize, MAX_VALUE) + 1` wraps and appends nothing
+            let count = if self.exp { self.max_int } else { (self.grouping_size as i32).max(self.min_int).wrapping_add(1) };
+            let groups = self.grouping_used && self.grouping_size != 0;
+            let width = |i: i32| -> u64 { i.max(0) as u64 + if groups { (i.max(1) as u64 - 1) / self.grouping_size as u64 } else { 0 } };
+            sb.append(width(count) as usize, [zero, digit, grouping].iter().map(|&c| c as u32).max().unwrap())?;
             let mut i = count;
             while i > 0 {
-                if i != count && self.grouping_used && self.grouping_size != 0 && i % self.grouping_size as i32 == 0 {
+                if i != count && groups && i % self.grouping_size as i32 == 0 {
                     out.push(grouping);
                 }
                 out.push(if i <= self.min_int { zero } else { digit });
                 i -= 1;
             }
+            let mark = out.len();
             if self.max_frac > 0 || self.decimal_always {
                 out.push(decimal);
             }
-            for _ in 0..self.min_frac {
-                out.push(zero);
-            }
-            for _ in 0..(self.max_frac - self.min_frac) {
-                out.push(digit);
-            }
+            charge(&out, mark, &mut sb)?;
+            repeat(&mut out, &mut sb, zero, self.min_frac, 3600)?;
+            repeat(&mut out, &mut sb, digit, self.max_frac.wrapping_sub(self.min_frac), 3601)?;
             if self.exp {
+                let mark = out.len();
                 out.push_str(&exponent);
-                for _ in 0..self.min_exp_digits {
-                    out.push(zero);
-                }
+                charge(&out, mark, &mut sb)?;
+                repeat(&mut out, &mut sb, zero, self.min_exp_digits as i32, 3605)?;
             }
+            let mark = out.len();
             if j == 1 {
                 self.append_affix(&mut out, &self.pos_suffix_pat, &self.pos_suffix, localized);
                 if self.pos_equals_neg() {
+                    charge(&out, mark, &mut sb)?;
                     break;
                 }
                 out.push(sep);
             } else {
                 self.append_affix(&mut out, &self.neg_suffix_pat, &self.neg_suffix, localized);
             }
+            charge(&out, mark, &mut sb)?;
         }
-        out
+        Ok(out)
     }
 
     // ------------------------------------------------------------------------------ formatting
@@ -1186,8 +1213,7 @@ impl DecimalFmt {
         let (full, int_pos, infinite) = self.subparse_number(t, position, dl, is_exponent);
         let Some(full) = full else { return Err(index) };
         position = full;
-        let new_index;
-        if !is_exponent {
+        let new_index = if !is_exponent {
             if got_positive {
                 got_positive = starts(position, &self.pos_suffix);
             }
@@ -1204,14 +1230,14 @@ impl DecimalFmt {
             if got_positive == got_negative {
                 return Err(position);
             }
-            new_index = if self.parse_integer_only && int_pos.is_some() {
+            if self.parse_integer_only && int_pos.is_some() {
                 int_pos.unwrap_or(position)
             } else {
                 position + if got_positive { len(&self.pos_suffix) } else { len(&self.neg_suffix) }
-            };
+            }
         } else {
-            new_index = position;
-        }
+            position
+        };
         if new_index == index {
             return Err(position);
         }
@@ -1407,8 +1433,8 @@ mod tests {
         assert_eq!(f.format_double(1.115).unwrap(), "1.11");
         let g = DecimalFmt::new(us(), "#,##0.###").unwrap();
         assert_eq!(g.format_double(1234567.891).unwrap(), "1,234,567.891");
-        assert_eq!(g.to_pattern(false), "#,##0.###");
-        assert_eq!(DecimalFmt::new(us(), "0.###").unwrap().to_pattern(false), "#0.###");
+        assert_eq!(g.to_pattern(false).unwrap(), "#,##0.###");
+        assert_eq!(DecimalFmt::new(us(), "0.###").unwrap().to_pattern(false).unwrap(), "#0.###");
         assert_eq!(DecimalFmt::new(us(), "##0.##E0").unwrap().format_double(12345.0).unwrap(), "12.345E3");
     }
 }

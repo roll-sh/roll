@@ -6,18 +6,25 @@
 
 pub mod aliases;
 pub mod analyze;
+pub mod bulk;
+pub mod by_query;
+pub mod by_query_request;
+pub mod remote;
 pub mod cat;
 mod cat_columns;
 mod cat_columns_os;
 pub mod cluster;
 pub mod data_streams;
 pub mod desired_nodes;
+pub mod disk_usage;
+pub mod document;
 pub mod field_caps;
 pub mod health;
 pub mod indices;
 pub mod ingest;
 pub mod misc;
 pub mod nodes;
+pub mod rank_eval;
 pub mod reroute;
 pub mod resize;
 pub mod rollover;
@@ -28,6 +35,7 @@ pub mod snapshots;
 pub mod synonyms;
 pub mod tasks;
 pub mod templates;
+pub mod update;
 
 use crate::error::{EsError, EsResult};
 use crate::meta::resolve::{self, IndicesOptions};
@@ -41,6 +49,10 @@ pub fn extra_params(api: Api) -> &'static [&'static str] {
         Api::IndicesPutSettings => &["reopen"],
         Api::IndicesGetMapping | Api::IndicesGet | Api::IndicesGetSettings => &["include_type_name"],
         Api::IngestProcessorGrok => &["s", "ecs_compatibility"],
+        // Read only to be rejected with a pointer to `dest.pipeline` (`RestReindexAction`).
+        Api::Reindex => &["pipeline"],
+        // Read only to be rejected (`RestUpdateAction`: versioning is not for updates).
+        Api::Update => &["version", "version_type"],
         Api::CatTasks => &["ts", "pri", "size", "detailed"],
         a if a.name().starts_with("cat.") => &["ts", "pri", "size"],
         _ => &[],
@@ -68,6 +80,39 @@ macro_rules! handlers {
 handlers! { ctx;
 
     Info => root::info(ctx),
+
+    Index => document::index(ctx, false).await,
+    Create => document::index(ctx, true).await,
+    Delete => document::delete(ctx).await,
+    Get => document::get(ctx, false),
+    Exists => document::get(ctx, true),
+    GetSource => document::get_source(ctx, false),
+    ExistsSource => document::get_source(ctx, true),
+    Mget => document::mget(ctx),
+    Update => update::update(ctx).await,
+    Bulk => bulk::bulk(ctx).await,
+    DeleteByQuery => by_query::delete_by_query(ctx).await,
+    UpdateByQuery => by_query::update_by_query(ctx).await,
+    Reindex => by_query::reindex(ctx).await,
+    DeleteByQueryRethrottle | UpdateByQueryRethrottle | ReindexRethrottle => by_query::rethrottle(ctx),
+    Search => crate::search::search(ctx).await,
+    IndicesDiskUsage => disk_usage::disk_usage(ctx),
+    RankEval => rank_eval::rank_eval(ctx),
+    KnnSearch => crate::search::knn::knn_search(ctx).await,
+    Count => crate::search::count(ctx),
+    Msearch => crate::search::msearch(ctx).await,
+    Explain => crate::search::explain(ctx),
+    IndicesValidateQuery => crate::search::misc::validate_query(ctx),
+    ScriptsPainlessExecute => crate::search::painless_execute::execute(ctx),
+    RenderSearchTemplate => crate::search::misc::render_template_api(ctx),
+    SearchTemplate => crate::search::misc::search_template(ctx).await,
+    MsearchTemplate => crate::search::misc::msearch_template(ctx).await,
+    Termvectors => crate::search::misc::termvectors(ctx),
+    Mtermvectors => crate::search::misc::mtermvectors(ctx),
+    Scroll => crate::search::contexts::scroll(ctx),
+    ClearScroll => crate::search::contexts::clear_scroll(ctx),
+    OpenPointInTime => crate::search::contexts::open_pit(ctx),
+    ClosePointInTime => crate::search::contexts::close_pit(ctx),
     Ping => root::ping(ctx),
     Capabilities => root::capabilities(ctx),
 
@@ -99,8 +144,8 @@ handlers! { ctx;
     IndicesSegments => shards::segments(ctx),
     NodesReloadSecureSettings => shards::reload_secure_settings(ctx),
 
-    TasksList => tasks::list(ctx),
-    TasksGet => tasks::get(ctx),
+    TasksList => tasks::list(ctx).await,
+    TasksGet => tasks::get(ctx).await,
     TasksCancel => tasks::cancel(ctx),
 
     IndicesGetAlias => aliases::get_alias(ctx),
@@ -171,6 +216,8 @@ handlers! { ctx;
     IngestGetPipeline => ingest::get(ctx),
     IngestDeletePipeline => ingest::delete(ctx).await,
     IngestProcessorGrok => ingest::grok(ctx),
+    IngestSimulate => crate::ingest::pipeline::simulate(ctx),
+    SimulateIngest => crate::ingest::simulate::simulate_ingest(ctx),
 
     SynonymsPutSynonym => synonyms::put_set(ctx).await,
     SynonymsGetSynonym => synonyms::get_set(ctx),

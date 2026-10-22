@@ -821,6 +821,21 @@ struct DateDecay {
 }
 
 fn date_decay(vm: &mut Vm, a: &[Value], d: Decay, class: &str) -> VR {
+    date_decay_at(vm, a, crate::time::epoch_millis(&a[4]), d, class).map(Value::Double)
+}
+
+/// `decayDate*` of the method named `name` (`decayDateGauss`, …) with the first four
+/// arguments in `a` and the document's date as epoch milliseconds (the fast path's form).
+pub fn date_decay_millis(vm: &mut Vm, a: &[Value], ms: i64, name: &str) -> Result<f64, crate::vm::Thrown> {
+    let (d, class) = match name {
+        "decayDateLinear" => (Decay::Linear, "DecayDateLinear"),
+        "decayDateExp" => (Decay::Exp, "DecayDateExp"),
+        _ => (Decay::Gauss, "DecayDateGauss"),
+    };
+    date_decay_at(vm, a, Some(ms), d, class)
+}
+
+fn date_decay_at(vm: &mut Vm, a: &[Value], v: Option<i64>, d: Decay, class: &str) -> Result<f64, crate::vm::Thrown> {
     let base = match d {
         Decay::Linear => 227,
         Decay::Exp => 250,
@@ -833,13 +848,12 @@ fn date_decay(vm: &mut Vm, a: &[Value], d: Decay, class: &str) -> VR {
         let offset = parse_time_value_millis(&a[2].to_java_string(), &format!("{class}.offset")).map_err(|t| outer(t, &[ctor(base + 3)]))?;
         Ok(DateDecay { origin, offset, scaling: scaling(d, scale as f64, double(&a[3])) })
     })?;
-    let v = match crate::time::epoch_millis(&a[4]) {
-        Some(ms) => ms,
-        None => return Err(crate::vm::npe("Cannot invoke \"java.time.ZonedDateTime.toInstant()\" because \"docValueDate\" is null")),
+    let Some(v) = v else {
+        return Err(crate::vm::npe("Cannot invoke \"java.time.ZonedDateTime.toInstant()\" because \"docValueDate\" is null"));
     };
     let diff = if v >= b.origin { v - b.origin } else { b.origin - v };
     let distance = 0i64.max(diff - b.offset);
-    Ok(Value::Double(decay_value(d, b.scaling, distance as f64)))
+    Ok(decay_value(d, b.scaling, distance as f64))
 }
 
 fn s_date_linear(vm: &mut Vm, a: &mut [Value]) -> VR {

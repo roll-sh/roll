@@ -296,7 +296,7 @@ impl Keep for KeepTypes {
 pub(crate) enum KeywordMarker {
     Set(Arc<WordSet>, String),
     /// Marks tokens the pattern matches entirely (`Matcher.matches()`).
-    Pattern(Arc<crate::jregex::JavaRegex>),
+    Pattern(Arc<crate::jregex::JavaRegex>, crate::jregex::Captures),
 }
 
 impl Filter for KeywordMarker {
@@ -306,7 +306,7 @@ impl Filter for KeywordMarker {
         }
         let is = match self {
             KeywordMarker::Set(words, scratch) => words.contains(&t.term, scratch),
-            KeywordMarker::Pattern(re) => re.full_match(&t.term),
+            KeywordMarker::Pattern(re, caps) => re.full_match(&t.term, caps),
         };
         if is {
             t.keyword = true;
@@ -318,29 +318,36 @@ impl Filter for KeywordMarker {
 /// `KeywordRepeatFilter`: every token twice, first marked as keyword, then unmarked at the same
 /// position.
 pub(crate) struct KeywordRepeat {
-    pending: Option<Tok>,
+    /// The copy to emit next; reused so repeating a token does not allocate.
+    pending: Tok,
+    has_pending: bool,
 }
 
 impl KeywordRepeat {
     pub fn new() -> Self {
-        KeywordRepeat { pending: None }
+        KeywordRepeat {
+            pending: Tok::default(),
+            has_pending: false,
+        }
     }
 }
 
 impl Filter for KeywordRepeat {
     fn reset(&mut self) {
-        self.pending = None;
+        self.has_pending = false;
     }
 
     fn next(&mut self, input: &mut dyn TokenStream, t: &mut Tok) -> bool {
-        if let Some(p) = self.pending.take() {
-            t.clone_from(&p);
+        if self.has_pending {
+            self.has_pending = false;
+            t.clone_from(&self.pending);
             t.pos_inc = 0;
             t.keyword = false;
             return true;
         }
         if input.next(t) {
-            self.pending = Some(t.clone());
+            self.pending.clone_from(t);
+            self.has_pending = true;
             t.keyword = true;
             return true;
         }

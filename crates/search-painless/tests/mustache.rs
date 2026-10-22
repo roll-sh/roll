@@ -11,12 +11,26 @@ use serde_json::Value as Json;
 
 #[test]
 fn render_template() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mustache.json");
+    check("mustache.json");
+}
+
+/// Whitespace in tags, negative and out-of-range indices, dotted sections, numbers as Jackson
+/// prints them, `join`/`url`/`toJson` over nested values, partials, standalone lines and
+/// delimiter changes (`mustache2.json`, cases in
+/// `mustache_cases2.json`).
+#[test]
+fn render_template_more() {
+    check("mustache2.json");
+}
+
+fn check(name: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
     let cases: Vec<Json> = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let engine = Engine::new(Settings { max_compilations_rate: None, ..Settings::default() });
     let mut failures = Vec::new();
     for c in &cases {
         let req = &c["request"];
+        // `_render/template` takes no `options`: those captures only show it refusing them
         if req.get("options").is_some() {
             continue;
         }
@@ -50,5 +64,5 @@ fn render_template() {
     for f in &failures {
         eprintln!("---- {f}");
     }
-    assert!(failures.is_empty(), "mustache.json: {} of {} cases differ from Elasticsearch", failures.len(), cases.len());
+    assert!(failures.is_empty(), "{name}: {} of {} cases differ from Elasticsearch", failures.len(), cases.len());
 }

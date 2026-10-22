@@ -817,6 +817,20 @@ impl search_aggs::field::TextTerms for TextAnalysis {
     fn term_query(&self, _field: &str, _term: &[u8]) -> search_aggs::Result<QueryRef> {
         Err(AggError::illegal_argument("no text term queries in tests"))
     }
+
+    fn source_strings(&self, seg: &search_index::SegmentContext, doc: u32, field: &str) -> search_aggs::Result<Vec<String>> {
+        let Some(id) = doc_id(seg, self.id_field, doc) else { return Ok(Vec::new()) };
+        let text = |v: &Json| match v {
+            Json::Str(s) => Some(s.clone()),
+            Json::Null => None,
+            other => Some(other.to_string()),
+        };
+        Ok(match self.sources[&id].get(field) {
+            Some(Json::Arr(a)) => a.iter().filter_map(text).collect(),
+            Some(v) => text(v).into_iter().collect(),
+            None => Vec::new(),
+        })
+    }
 }
 
 /// The test fetch phase: `_index`, `_id`, `_score`, `_source` (filtered by `_source`) and `sort`.
@@ -885,6 +899,12 @@ pub fn top_query(lookup: &Lookup<'_>, body: &Json) -> QueryRef {
 /// Runs a request body's `aggs` over shards and reduces them.
 pub fn run(index: &TestIndex, searchers: &[Searcher], body_text: &str, typed_keys: bool) -> Result<Json, AggError> {
     run_with(index, searchers, body_text, typed_keys, None, &search_aggs::ReduceOptions::default())
+}
+
+/// The lookup [`run`] binds requests with (no scripts).
+#[allow(dead_code)]
+pub fn lookup(index: &TestIndex) -> Lookup<'_> {
+    Lookup { index, now: 1_700_000_000_000, scripts: None }
 }
 
 /// [`run`] with a script engine and reduce options (`scripts` is used on both sides).

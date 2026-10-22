@@ -538,6 +538,13 @@ fn finalize_value(name: &str, v: &mut AggValue, p: f64) -> Result<()> {
             s.doc_count = scale_count(s.doc_count, p);
             finalize_aggs(&mut s.aggs, p)?;
         }
+        AggValue::FrequentItemSets(f) => f.scale(|c| scale_count(c, p)),
+        AggValue::CategorizeText(c) => {
+            for b in &mut c.buckets {
+                b.cat.num_matches = scale_count(b.cat.num_matches, p);
+                finalize_aggs(&mut b.aggs, p)?;
+            }
+        }
         // Means, extrema, sketches and hits are kept as they are.
         AggValue::Avg(_)
         | AggValue::Min(_)

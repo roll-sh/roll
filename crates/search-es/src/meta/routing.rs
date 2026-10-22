@@ -13,8 +13,7 @@ pub fn murmur3_x86_32(data: &[u8], seed: u32) -> i32 {
     const C1: u32 = 0xcc9e_2d51;
     const C2: u32 = 0x1b87_3593;
     let mut h = seed;
-    let chunks = data.chunks_exact(4);
-    let tail = chunks.remainder();
+    let (chunks, tail) = data.as_chunks::<4>();
     for c in chunks {
         let mut k = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
         k = k.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
@@ -74,6 +73,14 @@ fn partition_size(idx: &IndexMeta) -> i32 {
 
 /// The shard a document with this `_id` and optional routing goes to.
 pub fn shard_for(idx: &IndexMeta, id: &str, routing: Option<&str>) -> u32 {
+    if crate::engine::tsdb::is_time_series(idx) {
+        // Writes carry the routing hash as their routing; reads and deletes find it in the
+        // `_id` (`ExtractFromSource.idToHash`).
+        let h = routing.and_then(crate::engine::tsdb::decode_hash).or_else(|| crate::engine::tsdb::id_routing_hash(idx, id));
+        if let Some(h) = h {
+            return shard_of(idx, h);
+        }
+    }
     let partition = partition_size(idx);
     match routing {
         // Java int arithmetic: the offset addition wraps.

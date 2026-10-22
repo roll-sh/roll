@@ -284,10 +284,25 @@ fn target_of(st: &ClusterState, target: &str, new_index: Option<&str>, req: &Req
     }
 }
 
-/// Stats of the index conditions are evaluated against. Document counts and sizes come from
-/// the engine; until it reports them they are zero.
-fn stats_of(idx: &IndexMeta, now_ms: i64) -> Stats {
-    Stats { age_ms: (now_ms - idx.creation_date()).max(0), ..Stats::default() }
+/// Stats of the index conditions are evaluated against: primaries' refreshed document counts
+/// and store sizes from the engine (zero when the index's shards aren't loaded), and its age.
+fn stats_of(cluster: &crate::Cluster, idx: &IndexMeta, now_ms: i64) -> Stats {
+    let mut s = Stats { age_ms: (now_ms - idx.creation_date()).max(0), ..Stats::default() };
+    if let Some(e) = cluster.engine.loaded(&idx.uuid) {
+        for shard in &e.shards {
+            let mut b = Map::new();
+            b.insert("docs".into(), obj! { "count" => 0 });
+            b.insert("store".into(), obj! { "size_in_bytes" => 0 });
+            shard.stats_into(&mut b);
+            let docs = b.get("docs").and_then(|d| d.get("count")).and_then(Value::as_i64).unwrap_or(0);
+            let size = b.get("store").and_then(|d| d.get("size_in_bytes")).and_then(Value::as_i64).unwrap_or(0);
+            s.docs += docs;
+            s.size += size;
+            s.max_primary_shard_docs = s.max_primary_shard_docs.max(docs);
+            s.max_primary_shard_size = s.max_primary_shard_size.max(size);
+        }
+    }
+    s
 }
 
 fn rollover_response(old: &str, new: &str, rolled: bool, dry_run: bool, lazy: bool, acknowledged: bool, results: Map) -> Value {
@@ -320,7 +335,7 @@ fn apply(st: &mut ClusterState, target: &str, new_index: Option<&str>, create: C
                 Some((n, t)) if t.data_stream.is_some() => (n.clone(), t.clone()),
                 _ => return Err(EsError::illegal_argument(format!("no matching index template found for data stream [{target}]"))),
             };
-            create_backing_index(st, &name, BackingOf { data_stream: target, template: &template, settings: &ds.settings, mappings: ds.mappings.as_ref() }, now_ms)?;
+            create_backing_index(st, &name, BackingOf { data_stream: target, template: &template, settings: &ds.settings, mappings: ds.mappings.as_ref() , past: None }, now_ms)?;
             let mut d = (*ds).clone();
             d.indices.push(name.clone());
             d.generation = generation;
@@ -451,7 +466,7 @@ async fn rollover_failure_store(ctx: &Ctx<'_>, target: &str, req: &Request, dry_
             .await?;
         return Reply::ok(rollover_response(&source, &trial, false, false, true, true, Map::new()));
     }
-    let stats = st.metadata.indices.get(&source).map(|i| stats_of(i, now)).unwrap_or_default();
+    let stats = st.metadata.indices.get(&source).map(|i| stats_of(ctx.cluster, i, now)).unwrap_or_default();
     let mut results = Map::new();
     for c in &req.conditions {
         results.insert(c.label(), Value::Bool(c.evaluate(&stats)));
@@ -563,7 +578,7 @@ pub async fn rollover(ctx: &Ctx<'_>) -> EsResult<Reply> {
             .await?;
         return Reply::ok(rollover_response(&source, &trial_name, false, false, true, true, Map::new()));
     }
-    let stats = st.metadata.indices.get(&source).map(|i| stats_of(i, now)).unwrap_or_default();
+    let stats = st.metadata.indices.get(&source).map(|i| stats_of(ctx.cluster, i, now)).unwrap_or_default();
     let mut results = Map::new();
     for c in &req.conditions {
         results.insert(c.label(), Value::Bool(c.evaluate(&stats)));

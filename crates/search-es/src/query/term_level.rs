@@ -796,6 +796,23 @@ pub mod regexp_flags {
     /// `RegexpFlag.ALL`: Lucene's `ALL | DEPRECATED_COMPLEMENT`.
     pub const ALL: i32 = 0xff | 0x10000;
 
+    /// Elasticsearch's flag value (Lucene 10 numbering: `~` is `DEPRECATED_COMPLEMENT`,
+    /// 0x10000, and Lucene's 0x0002 bit means nothing) as `search_codec` syntax flags, where
+    /// 0x0002 enables `~`. Bits neither knows pass through, so the codec rejects them with
+    /// Lucene's "Illegal syntax flag".
+    pub fn to_codec(flags: i32) -> u32 {
+        let f = flags as u32;
+        let known = LUCENE_ALL as u32 | COMPLEMENT as u32;
+        if f & !known != 0 {
+            return f;
+        }
+        let mut out = f & LUCENE_ALL as u32 & !0x0002;
+        if f & COMPLEMENT as u32 != 0 {
+            out |= 0x0002;
+        }
+        out
+    }
+
     /// `RegexpFlag.resolveValue`.
     pub fn resolve(flags: Option<&str>) -> Result<i32, String> {
         let Some(flags) = flags.filter(|f| !f.is_empty()) else { return Ok(LUCENE_ALL) };

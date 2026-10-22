@@ -15,7 +15,7 @@ use serde_json::{json, Value as Json};
 
 use super::{es, server_frames, EsObj};
 use crate::dissect::Dissect;
-use crate::grok::{CaptureType, Grok, GrokValue, PatternBank};
+use crate::grok::{CaptureType, Grok, GrokValue, MatchError, PatternBank};
 use crate::lookup::Builder;
 use crate::types::cls;
 use crate::value::{JList, JMap, Value};
@@ -121,7 +121,16 @@ fn ng_extract(_: &mut Vm, a: &mut [Value]) -> VR {
                     }
                     Ok(Value::Map(std::rc::Rc::new(m)))
                 }
-                Err(e) => Err(convert_error(e.ty, &e.text)),
+                Err(MatchError::Convert(e)) => Err(convert_error(e.ty, &e.text)),
+                Err(e @ MatchError::Interrupted { .. }) => {
+                    let mut t = Throw::new(cls::RUNTIME_EXCEPTION, Some(e.reason()));
+                    t.frames.push(format!("{GROK}Grok.handleInterrupted(Grok.java:264)"));
+                    t.frames.push(format!("{GROK}Grok.match(Grok.java:243)"));
+                    t.frames.push(format!("{GROK}Grok.innerCaptures(Grok.java:219)"));
+                    t.frames.push(format!("{GROK}Grok.captures(Grok.java:200)"));
+                    t.frames.push(EXTRACT.into());
+                    Err(t)
+                }
             }
         }
         Extractor::Dissect(d) => Ok(match d.parse(text) {

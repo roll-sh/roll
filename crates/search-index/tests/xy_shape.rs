@@ -324,7 +324,7 @@ fn random_shape_queries_agree_with_triangle_scan() {
             }
             let dv = search_index::query::shape::doc_value(&tris);
             let bare: Vec<u8> = tris.concat();
-            assert_eq!(search_index::query::shape::doc_value_triangles(&dv).collect::<Vec<_>>(), bare.chunks_exact(28).collect::<Vec<_>>());
+            assert_eq!(search_index::query::shape::doc_value_triangles(&dv).collect::<Vec<_>>(), bare.as_chunks::<28>().0.iter().collect::<Vec<_>>());
             assert!(search_index::query::shape::doc_value_bbox(&dv).is_some());
             assert!(search_index::query::shape::doc_value_bbox(&bare).is_none());
             d = d.doc_value(SN, DocValue::Binary(dv));

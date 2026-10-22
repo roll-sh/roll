@@ -1534,26 +1534,79 @@ fn hex_format3(_: &mut Vm, a: &mut [Value]) -> VR {
     }
     Ok(Value::string(hex_format_bytes(&h, &b[f as usize..t as usize])))
 }
-fn hex_parse_str(h: &HexFmt, s: &str) -> Result<Vec<u8>, Thrown> {
-    let unit = h.prefix.len() + 2 + h.suffix.len();
-    let stride = unit + h.delimiter.len();
+const HEX: &str = "java.base/java.util.HexFormat.";
+
+/// Appends `HexFormat` frames (`name(HexFormat.java:line)`).
+fn hex_frames(mut t: Thrown, frames: &[(&str, u32)]) -> Thrown {
+    for (f, l) in frames {
+        t.frames.push(format!("{HEX}{f}(HexFormat.java:{l})"));
+    }
+    t
+}
+
+/// `HexFormat.parseHex(CharSequence, int, int)` (JDK 27) over UTF-16 units: the stride check,
+/// then the prefix, every `suffix + delimiter + prefix` between values and the suffix, with
+/// Java's messages and frames (up to `parseHex(…:528/534/…)`; callers add their own).
+fn hex_parse_units(h: &HexFmt, s: &[u16]) -> Result<Vec<u8>, Thrown> {
     if s.is_empty() {
         return Ok(Vec::new());
     }
-    if !(s.len() + h.delimiter.len()).is_multiple_of(stride) {
-        return Err(iae("extra or missing delimiters or values consisting of prefix, two hexadecimal digits, and suffix".to_string()));
-    }
-    let n = (s.len() + h.delimiter.len()) / stride;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let off = i * stride;
-        let digits = &s[off + h.prefix.len()..off + h.prefix.len() + 2];
-        match u8::from_str_radix(digits, 16) {
-            Ok(b) if digits.chars().all(|c| c.is_ascii_hexdigit()) => out.push(b),
-            _ => return Err(Throw::new(cls::NUMBER_FORMAT_EXCEPTION, Some(format!("not a hexadecimal digit: \"{}\" = {}", &digits[..1], digits.as_bytes()[0])))),
+    // `fromHexDigits(string, index)`: the high digit, then the low one
+    let byte_at = |i: usize| -> Result<u8, Thrown> {
+        let mut v = 0u8;
+        for (k, line) in [(0, 896), (1, 897)] {
+            let c = s[i + k];
+            match (c as u8 as char).to_digit(16) {
+                Some(d) if c < 128 => v = (v << 4) | d as u8,
+                _ => {
+                    let shown = char::from_u32(c as u32).unwrap_or('\u{FFFD}');
+                    let t = Throw::new(cls::NUMBER_FORMAT_EXCEPTION, Some(format!("not a hexadecimal digit: \"{shown}\" = {c}")));
+                    return Err(hex_frames(t, &[("fromHexDigit", 879), ("fromHexDigits", line)]));
+                }
+            }
         }
+        Ok(v)
+    };
+    if h.delimiter.is_empty() && h.prefix.is_empty() && h.suffix.is_empty() {
+        if !s.len().is_multiple_of(2) {
+            return Err(hex_frames(iae(format!("string length not even: {}", s.len())), &[("parseNoDelimiter", 819), ("parseHex", 528)]));
+        }
+        return (0..s.len() / 2).map(|i| byte_at(2 * i).map_err(|t| hex_frames(t, &[("parseNoDelimiter", 823), ("parseHex", 528)]))).collect();
     }
+    let (prefix, suffix, delimiter): (Vec<u16>, Vec<u16>, Vec<u16>) = (h.prefix.encode_utf16().collect(), h.suffix.encode_utf16().collect(), h.delimiter.encode_utf16().collect());
+    let value_chars = prefix.len() as i64 + 2 + suffix.len() as i64;
+    let stride = value_chars + delimiter.len() as i64;
+    if (s.len() as i64 - value_chars) % stride != 0 {
+        let t = iae("extra or missing delimiters or values consisting of prefix, two hexadecimal digits, and suffix".to_string());
+        return Err(hex_frames(t, &[("parseHex", 534)]));
+    }
+    let literal = |index: usize, lit: &[u16], line: u32| -> Result<(), Thrown> {
+        for (i, &c) in lit.iter().enumerate() {
+            if s[index + i] != c {
+                let found = String::from_utf16_lossy(&s[index..index + lit.len()]);
+                let msg = format!("found: \"{found}\", expected: \"{}\", index: {index} ch: {}", String::from_utf16_lossy(lit), s[index + i]);
+                return Err(hex_frames(iae(msg.replace('\n', "\\n").replace('\r', "\\r")), &[("checkLiteral", 595), ("parseHex", line)]));
+            }
+        }
+        Ok(())
+    };
+    literal(0, &prefix, 537)?;
+    literal(s.len() - suffix.len(), &suffix, 538)?;
+    let between: Vec<u16> = suffix.iter().chain(&delimiter).chain(&prefix).copied().collect();
+    let n = ((s.len() as i64 - value_chars) / stride + 1) as usize;
+    let mut out = Vec::with_capacity(n);
+    let mut offset = prefix.len();
+    for _ in 0..n - 1 {
+        out.push(byte_at(offset).map_err(|t| hex_frames(t, &[("parseHex", 544)]))?);
+        literal(offset + 2, &between, 545)?;
+        offset += 2 + between.len();
+    }
+    out.push(byte_at(offset).map_err(|t| hex_frames(t, &[("parseHex", 547)]))?);
     Ok(out)
+}
+fn hex_parse_str(h: &HexFmt, s: &str) -> Result<Vec<u8>, Thrown> {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    hex_parse_units(h, &units).map_err(|t| hex_frames(t, &[("parseHex", 496)]))
 }
 /// `HexFormat.of().parseHex(s)`.
 pub fn parse_hex(s: &str) -> Result<Vec<u8>, Thrown> {
@@ -1568,11 +1621,18 @@ fn hex_parse(_: &mut Vm, a: &mut [Value]) -> VR {
 fn hex_parse3(_: &mut Vm, a: &mut [Value]) -> VR {
     let h = hex_of(&a[0])?;
     let s = crate::lib_lang::char_seq(&a[1])?;
+    let units: Vec<u16> = s.encode_utf16().collect();
     let (f, t) = (int(&a[2]), int(&a[3]));
-    if f < 0 || t < f || t as usize > s.len() {
-        return Err(Throw::new(cls::INDEX_OUT_OF_BOUNDS_EXCEPTION, Some(format!("Range [{f}, {t}) out of bounds for length {}", s.len()))));
+    if f < 0 || t < f || t as usize > units.len() {
+        let e = Throw::new(cls::INDEX_OUT_OF_BOUNDS_EXCEPTION, Some(format!("Range [{f}, {t}) out of bounds for length {}", units.len()))).with_frames(&[
+            "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+            "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckFromToIndex(Preconditions.java:112)",
+            "java.base/jdk.internal.util.Preconditions.checkFromToIndex(Preconditions.java:349)",
+            "java.base/java.util.Objects.checkFromToIndex(Objects.java:391)",
+        ]);
+        return Err(hex_frames(e, &[("parseHex", 519)]));
     }
-    Ok(bytes_value(&hex_parse_str(&h, &s[f as usize..t as usize])?))
+    Ok(bytes_value(&hex_parse_units(&h, &units[f as usize..t as usize])?))
 }
 
 // ------------------------------------------------------------------------------ Locale
@@ -1748,6 +1808,180 @@ fn loc_category_value_of(_: &mut Vm, a: &mut [Value]) -> VR {
     }
 }
 
+// Locale.LanguageRange & matching
+
+/// A `Locale.LanguageRange` value.
+struct RangeObj(crate::locale::LangRange);
+
+impl crate::host::HostObject for RangeObj {
+    fn class(&self) -> ClassId {
+        cls::LOCALE_LANGUAGE_RANGE
+    }
+    fn call(&self, name: &str, _: &[Value]) -> VR {
+        match name {
+            "getRange" => Ok(Value::string(self.0.range.clone())),
+            "getWeight" => Ok(Value::Double(self.0.weight)),
+            "toString" => Ok(Value::string(self.0.to_java_string())),
+            "hashCode" => Ok(Value::Int(Value::string(self.0.range.clone()).java_hash().wrapping_mul(31).wrapping_add((self.0.weight.to_bits() ^ (self.0.weight.to_bits() >> 32)) as i32))),
+            _ => Err(iae(format!("dynamic method [java.util.Locale.LanguageRange, {name}] not found"))),
+        }
+    }
+    fn get(&self, name: &str) -> VR {
+        Err(iae(format!("dynamic getter [java.util.Locale.LanguageRange, {name}] not found")))
+    }
+    fn set(&self, name: &str, _: Value) -> Result<(), Thrown> {
+        Err(iae(format!("dynamic setter [java.util.Locale.LanguageRange, {name}] not found")))
+    }
+    fn to_java_string(&self) -> String {
+        self.0.to_java_string()
+    }
+    fn equals(&self, other: &Value) -> bool {
+        range_of(other).is_some_and(|r| r == self.0)
+    }
+}
+
+fn range_value(r: crate::locale::LangRange) -> Value {
+    Value::obj(Obj::Host(Box::new(RangeObj(r))))
+}
+
+fn range_of(v: &Value) -> Option<crate::locale::LangRange> {
+    let Value::Obj(o) = v else { return None };
+    let Obj::Host(h) = &**o else { return None };
+    if h.class() != cls::LOCALE_LANGUAGE_RANGE {
+        return None;
+    }
+    let range = h.call("getRange", &[]).ok()?.as_str()?.to_string();
+    let weight = match h.call("getWeight", &[]).ok()? {
+        Value::Double(w) => w,
+        _ => return None,
+    };
+    Some(crate::locale::LangRange { range, weight })
+}
+
+fn ranges_arg(vm: &mut Vm, v: &Value) -> Result<Vec<crate::locale::LangRange>, Thrown> {
+    let items = crate::lib_coll::elements(vm, v)?;
+    items.iter().map(|x| range_of(x).ok_or_else(|| crate::vm::cce("not a Locale.LanguageRange"))).collect()
+}
+
+fn lr_new(range: &Value, weight: f64, frames: &[&str]) -> VR {
+    let r = string(range, "range")?.as_str().to_string();
+    crate::locale::LangRange::new(&r, weight).map(range_value).map_err(|m| iae(m).with_frames(frames))
+}
+fn lr_new1(_: &mut Vm, a: &mut [Value]) -> VR {
+    lr_new(&a[0], 1.0, &["java.base/java.util.Locale$LanguageRange.<init>(Locale.java:3242)", "java.base/java.util.Locale$LanguageRange.<init>(Locale.java:3201)"])
+}
+fn lr_new2(_: &mut Vm, a: &mut [Value]) -> VR {
+    let w = double(&a[1]);
+    let frames: &[&str] = if (0.0..=1.0).contains(&w) { &["java.base/java.util.Locale$LanguageRange.<init>(Locale.java:3242)"] } else { &["java.base/java.util.Locale$LanguageRange.<init>(Locale.java:3222)"] };
+    lr_new(&a[0], w, frames)
+}
+fn lr_get_range(_: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(range_of(&a[0]).map(|r| Value::string(r.range)).unwrap_or(Value::Null))
+}
+fn lr_get_weight(_: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(range_of(&a[0]).map(|r| Value::Double(r.weight)).unwrap_or(Value::Null))
+}
+fn lr_parse(_: &mut Vm, a: &mut [Value]) -> VR {
+    let text = string(&a[0], "ranges")?.as_str().to_string();
+    let ranges = crate::locale::parse_ranges(&text)
+        .map_err(|m| iae(m).with_frames(&["java.base/sun.util.locale.LocaleMatcher.parse(LocaleMatcher.java:472)", "java.base/java.util.Locale$LanguageRange.parse(Locale.java:3358)"]))?;
+    Ok(crate::value::JList::array_list(ranges.into_iter().map(range_value).collect()))
+}
+fn lr_parse_map(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let parsed = lr_parse(vm, &mut a[..1])?;
+    let mut args = [parsed, a[1].clone()];
+    lr_map_equivalents(vm, &mut args)
+}
+/// `LanguageRange.mapEquivalents(ranges, map)`: each range replaced by its equivalents.
+fn lr_map_equivalents(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let ranges = ranges_arg(vm, &a[0])?;
+    let mut out = Vec::new();
+    let map = if a[1].is_null() { Vec::new() } else { crate::lib_coll::map_entries(vm, &a[1])? };
+    for r in ranges {
+        let hit = map.iter().find(|(k, _)| k.as_str().is_some_and(|k| k.eq_ignore_ascii_case(&r.range)));
+        match hit {
+            Some((_, vs)) => {
+                for v in crate::lib_coll::elements(vm, vs)? {
+                    let lr = crate::locale::LangRange { range: v.to_java_string().to_ascii_lowercase(), weight: r.weight };
+                    if !out.contains(&lr) {
+                        out.push(lr);
+                    }
+                }
+            }
+            None => out.push(r),
+        }
+    }
+    Ok(crate::value::JList::array_list(out.into_iter().map(range_value).collect()))
+}
+fn tags_arg(vm: &mut Vm, v: &Value) -> Result<Vec<String>, Thrown> {
+    Ok(crate::lib_coll::elements(vm, v)?.iter().map(|x| x.to_java_string()).collect())
+}
+fn locale_tags(vm: &mut Vm, v: &Value) -> Result<Vec<String>, Thrown> {
+    crate::lib_coll::elements(vm, v)?.iter().map(|x| Ok(loc_parts(x)?.to_tag())).collect()
+}
+fn filter_mode(v: Option<&Value>) -> u8 {
+    v.and_then(crate::time::enum_ordinal).unwrap_or(0)
+}
+fn loc_filter_tags(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let ranges = ranges_arg(vm, &a[0])?;
+    let tags = tags_arg(vm, &a[1])?;
+    let out = crate::locale::filter_tags(&ranges, &tags, filter_mode(a.get(2))).map_err(iae)?;
+    Ok(crate::value::JList::array_list(out.into_iter().map(Value::string).collect()))
+}
+fn loc_filter(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let ranges = ranges_arg(vm, &a[0])?;
+    let tags = locale_tags(vm, &a[1])?;
+    let out = crate::locale::filter_tags(&ranges, &tags, filter_mode(a.get(2))).map_err(iae)?;
+    Ok(crate::value::JList::array_list(out.iter().map(|t| loc_value(&crate::locale::Loc::from_tag(t))).collect()))
+}
+fn loc_lookup_tag(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let ranges = ranges_arg(vm, &a[0])?;
+    let tags = tags_arg(vm, &a[1])?;
+    Ok(crate::locale::lookup_tag(&ranges, &tags).map(Value::string).unwrap_or(Value::Null))
+}
+fn loc_lookup(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let ranges = ranges_arg(vm, &a[0])?;
+    let tags = locale_tags(vm, &a[1])?;
+    Ok(crate::locale::lookup_tag(&ranges, &tags).map(|t| loc_value(&crate::locale::Loc::from_tag(&t))).unwrap_or(Value::Null))
+}
+fn fm_values(_: &mut Vm, _: &mut [Value]) -> VR {
+    let items: Vec<Value> = (0..5).map(|o| crate::time::enum_value(cls::LOCALE_FILTERING_MODE, o)).collect();
+    Ok(Value::obj(Obj::Array(JArray::from_data(Ty::of(cls::LOCALE_FILTERING_MODE), ArrayData::Ref(items)))))
+}
+fn fm_value_of(_: &mut Vm, a: &mut [Value]) -> VR {
+    let s = string(&a[0], "name")?.as_str().to_string();
+    match crate::locale::FILTERING_MODES.iter().position(|m| *m == s) {
+        Some(o) => Ok(crate::time::enum_value(cls::LOCALE_FILTERING_MODE, o as u8)),
+        None => Err(iae(format!("No enum constant java.util.Locale.FilteringMode.{s}"))),
+    }
+}
+
+fn register_language_ranges(b: &mut Builder) {
+    use cls::*;
+    b.supers(LOCALE_LANGUAGE_RANGE, &[OBJECT]);
+    b.c(LOCALE_LANGUAGE_RANGE, "(String)", lr_new1);
+    b.c(LOCALE_LANGUAGE_RANGE, "(String,double)", lr_new2);
+    b.m(LOCALE_LANGUAGE_RANGE, "String getRange()", lr_get_range);
+    b.m(LOCALE_LANGUAGE_RANGE, "double getWeight()", lr_get_weight);
+    b.s(LOCALE_LANGUAGE_RANGE, "List parse(String)", lr_parse);
+    b.s(LOCALE_LANGUAGE_RANGE, "List parse(String,Map)", lr_parse_map);
+    b.s(LOCALE_LANGUAGE_RANGE, "List mapEquivalents(List,Map)", lr_map_equivalents);
+    b.sf(LOCALE_LANGUAGE_RANGE, "double MAX_WEIGHT", |_, _| Ok(Value::Double(1.0)));
+    b.sf(LOCALE_LANGUAGE_RANGE, "double MIN_WEIGHT", |_, _| Ok(Value::Double(0.0)));
+    b.supers(LOCALE_FILTERING_MODE, &[OBJECT]);
+    b.s(LOCALE_FILTERING_MODE, "Locale.FilteringMode[] values()", fm_values);
+    b.s(LOCALE_FILTERING_MODE, "Locale.FilteringMode valueOf(String)", fm_value_of);
+    b.sf(LOCALE_FILTERING_MODE, "Locale.FilteringMode AUTOSELECT_FILTERING", |_, _| Ok(crate::time::enum_value(cls::LOCALE_FILTERING_MODE, 0)));
+    b.sf(LOCALE_FILTERING_MODE, "Locale.FilteringMode EXTENDED_FILTERING", |_, _| Ok(crate::time::enum_value(cls::LOCALE_FILTERING_MODE, 1)));
+    b.sf(LOCALE_FILTERING_MODE, "Locale.FilteringMode IGNORE_EXTENDED_RANGES", |_, _| Ok(crate::time::enum_value(cls::LOCALE_FILTERING_MODE, 2)));
+    b.sf(LOCALE_FILTERING_MODE, "Locale.FilteringMode MAP_EXTENDED_RANGES", |_, _| Ok(crate::time::enum_value(cls::LOCALE_FILTERING_MODE, 3)));
+    b.sf(LOCALE_FILTERING_MODE, "Locale.FilteringMode REJECT_EXTENDED_RANGES", |_, _| Ok(crate::time::enum_value(cls::LOCALE_FILTERING_MODE, 4)));
+    b.s(LOCALE, "List filter(List,Collection)", loc_filter);
+    b.s(LOCALE, "List filterTags(List,Collection)", loc_filter_tags);
+    b.s(LOCALE, "Locale lookup(List,Collection)", loc_lookup);
+    b.s(LOCALE, "String lookupTag(List,Collection)", loc_lookup_tag);
+}
+
 // Locale.Builder
 
 fn lb(v: &Value) -> Result<&RefCell<crate::locale::Builder>, Thrown> {
@@ -1842,6 +2076,7 @@ fn register_locale(b: &mut Builder) {
     b.c(LOCALE, "(String,String,String)", loc_new3);
     b.m(LOCALE, "def clone()", loc_clone);
     b.s(LOCALE, "Locale forLanguageTag(String)", loc_for_tag);
+    register_language_ranges(b);
     b.s(LOCALE, "Locale[] getAvailableLocales()", loc_available);
     b.s(LOCALE, "Locale getDefault()", loc_default);
     b.s(LOCALE, "Locale getDefault(Locale.Category)", loc_default);

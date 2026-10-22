@@ -74,6 +74,9 @@ impl Aggs {
     }
 }
 
+/// `search.max_buckets`' default.
+pub const DEFAULT_MAX_BUCKETS: usize = 65536;
+
 /// Options of a reduce.
 #[derive(Clone)]
 pub struct ReduceOptions {
@@ -91,7 +94,7 @@ pub struct ReduceOptions {
 
 impl Default for ReduceOptions {
     fn default() -> Self {
-        ReduceOptions { final_reduce: true, max_buckets: 65536, has_batched_result: false, scripts: None, budget: None }
+        ReduceOptions { final_reduce: true, max_buckets: DEFAULT_MAX_BUCKETS, has_batched_result: false, scripts: None, budget: None }
     }
 }
 
@@ -196,6 +199,10 @@ pub trait MultiBuckets {
         let _ = i;
         None
     }
+    /// The simple name of the Java bucket class (`buckets_path` errors print it).
+    fn bucket_class(&self) -> &'static str {
+        "Bucket"
+    }
 }
 
 /// Rendering options.
@@ -230,7 +237,9 @@ macro_rules! agg_values {
                 };
                 let mut items = Vec::with_capacity(list.len());
                 let lead_kind = list[lead].clone_kind_probe();
-                for v in list {
+                // `getReducer` of a result that can't lead waits for one that can: everything
+                // before the leader is dropped, everything after goes to its reducer.
+                for v in list.into_iter().skip(lead) {
                     if !v.can_lead() && !v.same_kind(&lead_kind) {
                         continue;
                     }
@@ -264,6 +273,7 @@ macro_rules! agg_values {
                     AggValue::RareTerms(x) => Some(x.as_ref()),
                     AggValue::SignificantTerms(x) => Some(x.as_ref()),
                     AggValue::TimeSeries(x) => Some(x.as_ref()),
+                    AggValue::CategorizeText(x) => Some(x.as_ref()),
                     _ => None,
                 }
             }
@@ -284,6 +294,7 @@ macro_rules! agg_values {
                     AggValue::RareTerms(x) => Some(x.as_mut()),
                     AggValue::SignificantTerms(x) => Some(x.as_mut()),
                     AggValue::TimeSeries(x) => Some(x.as_mut()),
+                    AggValue::CategorizeText(x) => Some(x.as_mut()),
                     _ => None,
                 }
             }
@@ -311,6 +322,8 @@ agg_values! {
     MatrixStats(crate::metrics::matrix_stats::MatrixStats),
     ScriptedMetric(crate::metrics::scripted_metric::ScriptedMetric),
     TTest(crate::metrics::t_test::TTest),
+    FrequentItemSets(crate::bucket::frequent_item_sets::FrequentItemSets),
+    CategorizeText(crate::bucket::categorize_text::CategorizeText),
     CartesianBounds(crate::metrics::cartesian::CartesianBounds),
     CartesianCentroid(crate::metrics::cartesian::CartesianCentroid),
     GeoLine(crate::metrics::geo_line::GeoLine),
@@ -399,9 +412,10 @@ impl AggValue {
         )
     }
 
-    /// `MultiValue.value(name)` for multi-value metrics.
-    pub fn multi_value(&self, name: &str) -> Result<f64> {
-        match self.property("", &[name.to_string()])? {
+    /// `MultiValue.value(name)` for multi-value metrics (`agg_name`: the aggregation's own
+    /// name, which a single-percent `percentiles` accepts as its value's name).
+    pub fn multi_value(&self, agg_name: &str, name: &str) -> Result<f64> {
+        match self.property(agg_name, &[name.to_string()])? {
             Prop::Num(v) => Ok(v),
             _ => Err(AggError::illegal_argument(format!("path not supported for [{name}]"))),
         }

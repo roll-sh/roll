@@ -161,6 +161,9 @@ impl SeriesKeys {
 
 /// Binds `time_series`.
 pub fn create(def: &AggDef, spec: &TimeSeriesSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
+    if ctx.parents.contains(&"global") {
+        return Err(AggError::illegal_argument("Time series aggregations cannot be used inside global aggregation."));
+    }
     let info = ctx.lookup.time_series();
     let keys = SeriesKeys::new(info.as_ref().map(|i: &TimeSeriesInfo| i.dimensions.as_slice()).unwrap_or(&[]));
     let subs = Subs::bind(def, ctx)?;
@@ -212,6 +215,9 @@ fn write_vint(out: &mut Vec<u8>, mut v: u32) {
 }
 
 impl Aggregator for TimeSeriesAgg {
+    fn profile_type(&self) -> &'static str {
+        "TimeSeriesAggregator"
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         self.keys.set_segment(seg);
@@ -306,10 +312,8 @@ impl Aggregator for TimeSeriesAgg {
         self.subs.needs_scores()
     }
 
-    fn validate_sort(&self, _name: &str, _key: Option<&str>, _rest: &[PathElement]) -> Result<()> {
-        Err(AggError::illegal_argument(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.",
-        ))
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
     }
 }
 
@@ -454,6 +458,9 @@ impl Internal for TimeSeries {
 }
 
 impl MultiBuckets for TimeSeries {
+    fn bucket_class(&self) -> &'static str {
+        "InternalBucket"
+    }
     fn len(&self) -> usize {
         self.buckets.len()
     }

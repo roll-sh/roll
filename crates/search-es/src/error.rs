@@ -45,6 +45,11 @@ struct Ext {
     /// The `header` object (e.g. `WWW-Authenticate`), also sent as HTTP headers.
     headers: Vec<(String, Vec<String>)>,
     suppressed: Vec<EsError>,
+    /// Fields after `caused_by` (e.g. a document's `failure_store` status).
+    trailing: Vec<(Cow<'static, str>, Value)>,
+    /// Never rendered: context travelling with the error between layers (e.g. where an
+    /// ingest failure happened, for the failure store).
+    hidden: Vec<(Cow<'static, str>, Value)>,
 }
 
 pub type EsResult<T> = Result<T, EsError>;
@@ -72,8 +77,46 @@ impl EsError {
         self.ext.get_or_insert_with(Default::default)
     }
 
+    /// Removes and returns a trailing field.
+    pub fn take_trailing(&mut self, key: &str) -> Option<Value> {
+        let e = self.ext.as_mut()?;
+        let i = e.trailing.iter().position(|(k, _)| k == key)?;
+        Some(e.trailing.remove(i).1)
+    }
+
+    /// Attaches unrendered context (see [`EsError::hidden`]), replacing an earlier value.
+    pub fn with_hidden(mut self, key: impl Into<Cow<'static, str>>, v: Value) -> EsError {
+        let key = key.into();
+        let ext = self.ext_mut();
+        ext.hidden.retain(|(k, _)| *k != key);
+        ext.hidden.push((key, v));
+        self
+    }
+
+    /// Unrendered context attached with [`EsError::with_hidden`].
+    pub fn hidden(&self, key: &str) -> Option<&Value> {
+        self.ext.as_ref()?.hidden.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// A field rendered after `caused_by`.
+    pub fn with_trailing(mut self, key: impl Into<Cow<'static, str>>, v: impl Into<Value>) -> EsError {
+        self.ext_mut().trailing.push((key.into(), v.into()));
+        self
+    }
+
     pub fn with_meta(mut self, key: impl Into<Cow<'static, str>>, v: impl Into<Value>) -> EsError {
         self.ext_mut().meta.push((key.into(), v.into()));
+        self
+    }
+
+    /// Replaces the value of an extra field (appended when absent).
+    pub fn set_meta(mut self, key: &'static str, v: impl Into<Value>) -> EsError {
+        let v = v.into();
+        let meta = &mut self.ext_mut().meta;
+        match meta.iter_mut().find(|(k, _)| k == key) {
+            Some(slot) => slot.1 = v,
+            None => meta.push((key.into(), v)),
+        }
         self
     }
 
@@ -104,6 +147,14 @@ impl EsError {
 
     fn root_causes(&self) -> Option<&Vec<EsError>> {
         self.ext.as_ref().and_then(|e| e.root_causes.as_ref())
+    }
+
+    /// Drops the named `header` entries (e.g. the ingest processor identity once unwrapped).
+    pub fn without_headers(mut self, names: &[&str]) -> EsError {
+        if let Some(e) = self.ext.as_mut() {
+            e.headers.retain(|(k, _)| !names.contains(&k.as_str()));
+        }
+        self
     }
 
     pub fn with_header_values(mut self, name: impl Into<String>, values: Vec<String>) -> EsError {
@@ -197,6 +248,13 @@ impl EsError {
             c.render_into(&mut cm, true, trace, depth + 1);
             m.insert("caused_by".into(), Value::Obj(cm));
         }
+        // Java exceptions (not `ElasticsearchException`s) print trailing fields in their root
+        // cause entries too.
+        if (with_cause || !self.es) && let Some(e) = &self.ext {
+            for (k, v) in &e.trailing {
+                m.insert(k.to_string(), v.clone());
+            }
+        }
         if !self.headers().is_empty() {
             let mut h = Map::new();
             for (k, vs) in self.headers() {
@@ -228,6 +286,15 @@ impl EsError {
         let mut m = Map::new();
         self.render_into(&mut m, true, trace, 0);
         Value::Obj(m)
+    }
+
+    /// The `error` object of the full REST body (`root_cause` first), as multi-item APIs
+    /// (`_mget`, `_msearch`) embed it.
+    pub fn to_value_with_root(&self, trace: bool) -> Value {
+        match self.to_body(trace) {
+            Value::Obj(mut m) => m.shift_remove("error").unwrap_or(Value::Null),
+            other => other,
+        }
     }
 
     /// The full REST error body: `{"error":{…},"status":N}`.

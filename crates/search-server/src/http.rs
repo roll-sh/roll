@@ -3,12 +3,31 @@
 //! `GET` response's length and no body, and `http.max_content_length` enforced before the body
 //! is buffered.
 //!
-//! A request is authenticated and pins its cluster first ([`Node::enter`]), then its body is
-//! read — with [`BODY_IDLE_TIMEOUT`] between chunks and [`BODY_TIMEOUT`] overall — and only then
-//! does it take one of the cluster's concurrency permits, so stalled uploads can't exhaust them.
+//! A request is authenticated and pins its cluster first ([`Node::enter`], which also applies
+//! the cluster's request rate), reserves its `Content-Length` from the cluster's in-flight byte
+//! budget (a chunked body reserves each frame as it arrives, and a compressed body its output
+//! as it inflates), then its body is read — with [`BODY_IDLE_TIMEOUT`] between chunks and
+//! [`BODY_TIMEOUT`] overall — and only then does it take the cluster's concurrency permit and a
+//! node-wide running slot, so stalled uploads can't exhaust them.
+//!
+//! Elasticsearch's HTTP limits and failures, as Netty reports them: a request line over
+//! [`MAX_INITIAL_LINE`] bytes or headers over [`MAX_HEADER_SIZE`] get 400
+//! `too_long_http_line_exception` / `too_long_http_header_exception` and the connection closes;
+//! a body over `http.max_content_length` gets an empty `413 Request Entity Too Large` and the
+//! connection closes; a truncated compressed body is passed on as far as it inflates, and one
+//! that isn't valid gzip/deflate closes the connection without an answer. `deflate` bodies may
+//! be zlib-wrapped or raw (Netty's `ZLIB_OR_NONE`).
+//!
+//! Inflating a request body or gzipping a response larger than [`INLINE_CODEC_BYTES`] runs on
+//! the blocking pool, so a tenant's large bulk can't stall the other tenants' tasks on a worker.
+//!
+//! [`serve_until`] stops gracefully: it stops accepting, lets every request in flight finish
+//! (closing keep-alive connections after their current response) and returns once all
+//! connections are gone; the caller then shuts the node down ([`Node::shutdown`]), which
+//! flushes.
 
 use crate::net::read_proxy_header;
-use crate::node::Node;
+use crate::node::{Node, Rejected};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
@@ -16,7 +35,6 @@ use hyper::header::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use search_es::{EsError, EsRequest, EsResponse};
-use std::convert::Infallible;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,6 +47,14 @@ use tokio_rustls::TlsAcceptor;
 pub const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest time to read a whole request body.
 pub const BODY_TIMEOUT: Duration = Duration::from_secs(600);
+/// `http.max_initial_line_length` (Elasticsearch default): the request line, without its CRLF.
+pub const MAX_INITIAL_LINE: usize = 4096;
+/// `http.max_header_size` (Elasticsearch default): all header lines together, without CRLFs.
+pub const MAX_HEADER_SIZE: usize = 16 * 1024;
+/// Bodies larger than this are (de)compressed on the blocking pool, not on a worker.
+pub const INLINE_CODEC_BYTES: usize = 64 * 1024;
+/// Inflated output is reserved from the byte budget in steps of this size.
+const INFLATE_STEP: usize = 64 * 1024;
 
 #[derive(Clone, Default)]
 pub struct ListenOptions {
@@ -39,10 +65,66 @@ pub struct ListenOptions {
     pub body_timeouts: Option<(Duration, Duration)>,
 }
 
+/// Triggers a graceful stop of [`serve_until`].
+#[derive(Clone)]
+pub struct Shutdown(tokio::sync::watch::Sender<bool>);
+
+impl Default for Shutdown {
+    fn default() -> Self {
+        Shutdown(tokio::sync::watch::channel(false).0)
+    }
+}
+
+impl Shutdown {
+    pub fn new() -> Shutdown {
+        Shutdown::default()
+    }
+
+    pub fn trigger(&self) {
+        self.0.send_replace(true);
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.0.subscribe()
+    }
+}
+
 /// Accepts connections until the listener fails.
 pub async fn serve(listener: TcpListener, node: Arc<Node>, opts: ListenOptions) -> anyhow::Result<()> {
+    serve_until(listener, node, opts, Shutdown::new()).await
+}
+
+/// Counts open connections; the last one to close wakes the waiting server.
+struct Conns {
+    open: std::sync::atomic::AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+struct ConnGuard(Arc<Conns>);
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        if self.0.open.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
+/// Accepts connections until `shutdown` triggers, then waits for the open ones to finish
+/// their requests and close.
+pub async fn serve_until(listener: TcpListener, node: Arc<Node>, opts: ListenOptions, shutdown: Shutdown) -> anyhow::Result<()> {
+    let conns = Arc::new(Conns { open: Default::default(), idle: tokio::sync::Notify::new() });
+    let mut stop = shutdown.subscribe();
     loop {
-        let (mut sock, _peer) = match listener.accept().await {
+        let stopped = *stop.borrow();
+        if stopped {
+            break;
+        }
+        let accepted = tokio::select! {
+            a = listener.accept() => a,
+            _ = stop.changed() => break,
+        };
+        let (mut sock, _peer) = match accepted {
             Ok(x) => x,
             Err(e) => {
                 // Out of file descriptors and similar: back off instead of spinning.
@@ -54,7 +136,11 @@ pub async fn serve(listener: TcpListener, node: Arc<Node>, opts: ListenOptions) 
         let _ = sock.set_nodelay(true);
         let node = node.clone();
         let opts = opts.clone();
+        conns.open.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let guard = ConnGuard(conns.clone());
+        let stop = shutdown.subscribe();
         tokio::spawn(async move {
+            let _guard = guard;
             if opts.proxy_protocol {
                 match tokio::time::timeout(Duration::from_secs(5), read_proxy_header(&mut sock)).await {
                     Ok(Ok(_)) => {}
@@ -65,11 +151,19 @@ pub async fn serve(listener: TcpListener, node: Arc<Node>, opts: ListenOptions) 
                 Some(acceptor) => {
                     let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(sock)).await else { return };
                     let sni = tls.get_ref().1.server_name().map(str::to_string);
-                    serve_connection(tls, node, sni, opts.body_timeouts).await;
+                    serve_connection(tls, node, sni, opts.body_timeouts, stop).await;
                 }
-                None => serve_connection(sock, node, None, opts.body_timeouts).await,
+                None => serve_connection(sock, node, None, opts.body_timeouts, stop).await,
             }
         });
+    }
+    drop(listener);
+    loop {
+        let idle = conns.idle.notified();
+        if conns.open.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Ok(());
+        }
+        idle.await;
     }
 }
 
@@ -85,7 +179,7 @@ pub async fn spawn(addr: &str, node: Arc<Node>, opts: ListenOptions) -> anyhow::
     Ok((local, task))
 }
 
-async fn serve_connection<S>(io: S, node: Arc<Node>, sni: Option<String>, body_timeouts: Option<(Duration, Duration)>)
+async fn serve_connection<S>(io: S, node: Arc<Node>, sni: Option<String>, body_timeouts: Option<(Duration, Duration)>, mut stop: tokio::sync::watch::Receiver<bool>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -94,7 +188,7 @@ where
         let node = node.clone();
         let sni = sni.clone();
         let timeouts = body_timeouts.unwrap_or((BODY_IDLE_TIMEOUT, BODY_TIMEOUT));
-        async move { Ok::<_, Infallible>(respond(node, req, sni.as_deref(), timeouts).await) }
+        async move { respond(node, req, sni.as_deref(), timeouts).await }
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     // A client gets 30 s to send each request's headers (slowloris protection).
@@ -104,7 +198,23 @@ where
         .max_buf_size(1 << 20)
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(Duration::from_secs(30));
-    if let Err(e) = builder.serve_connection(TokioIo::new(io), svc).await {
+    let conn = builder.serve_connection(TokioIo::new(io), svc);
+    tokio::pin!(conn);
+    let stopped = *stop.borrow();
+    let r = if stopped {
+        conn.as_mut().graceful_shutdown();
+        conn.await
+    } else {
+        tokio::select! {
+            r = conn.as_mut() => r,
+            _ = stop.changed() => {
+                // Finish the request in flight, then close.
+                conn.as_mut().graceful_shutdown();
+                conn.await
+            }
+        }
+    };
+    if let Err(e) = r {
         tracing::trace!(error = %e, "connection closed");
     }
 }
@@ -141,13 +251,69 @@ enum BodyError {
     TooLong,
     TimedOut,
     Broken,
+    OverBudget(Rejected),
 }
 
-/// Reads the whole body, at most `max` bytes, within the body timeouts.
-async fn read_body(body: Incoming, max: usize, (idle, total): (Duration, Duration)) -> Result<Bytes, BodyError> {
+/// The service's error: hyper closes the connection without answering (Netty's behaviour when
+/// a request body can't be decoded).
+#[derive(Debug)]
+struct DropConnection(String);
+
+impl std::fmt::Display for DropConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DropConnection {}
+
+/// Elasticsearch's answer to a body over `http.max_content_length`: an empty
+/// `413 Request Entity Too Large` (the old reason phrase), then the connection closes.
+fn too_large() -> Response<Full<Bytes>> {
+    let mut r = Response::new(Full::new(Bytes::new()));
+    *r.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+    r.extensions_mut().insert(hyper::ext::ReasonPhrase::from_static(b"Request Entity Too Large"));
+    r.headers_mut().insert(hyper::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+    r.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+    r
+}
+
+fn closing(mut r: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
+    r.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+    r
+}
+
+/// Netty's limits on the request head (see the module docs), measured as the client sent it
+/// (header lines as `name: value`).
+fn head_too_long(req: &Request<Incoming>) -> Option<EsError> {
+    let target = match req.uri().authority() {
+        Some(_) => req.uri().to_string().len(),
+        None => req.uri().path_and_query().map_or(1, |p| p.as_str().len()),
+    };
+    let version = 8; // HTTP/1.x
+    if req.method().as_str().len() + 1 + target + 1 + version > MAX_INITIAL_LINE {
+        return Some(EsError::new(400, "too_long_http_line_exception", format!("An HTTP line is larger than {MAX_INITIAL_LINE} bytes.")));
+    }
+    let headers: usize = req.headers().iter().map(|(k, v)| k.as_str().len() + 2 + v.len()).sum();
+    if headers > MAX_HEADER_SIZE {
+        return Some(EsError::new(400, "too_long_http_header_exception", format!("HTTP header is larger than {MAX_HEADER_SIZE} bytes.")));
+    }
+    None
+}
+
+/// Reads the whole body, at most `max` bytes, within the body timeouts. Without a declared
+/// length every frame is reserved from the byte budget before it is kept (`reserve`).
+async fn read_body(
+    body: Incoming,
+    max: usize,
+    (idle, total): (Duration, Duration),
+    declared: Option<u64>,
+    reserve: &mut (dyn FnMut(usize) -> Result<(), Rejected> + Send),
+) -> Result<Bytes, BodyError> {
     let mut body = Limited::new(body, max);
     let deadline = tokio::time::Instant::now() + total;
-    let mut out = bytes::BytesMut::new();
+    // Never sized from the peer's word alone: a declared length only seeds the first step.
+    let mut out = bytes::BytesMut::with_capacity(declared.map_or(0, |n| (n as usize).min(INLINE_CODEC_BYTES)));
     loop {
         let next = tokio::time::timeout_at(deadline.min(tokio::time::Instant::now() + idle), body.frame()).await;
         match next {
@@ -155,7 +321,15 @@ async fn read_body(body: Incoming, max: usize, (idle, total): (Duration, Duratio
             Ok(None) => return Ok(out.freeze()),
             Ok(Some(Ok(frame))) => {
                 if let Ok(data) = frame.into_data() {
-                    out.extend_from_slice(&data);
+                    if declared.is_none() {
+                        reserve(data.len()).map_err(BodyError::OverBudget)?;
+                    }
+                    if out.is_empty() && declared.is_none() {
+                        // Often the whole body comes in one frame: keep it without a copy.
+                        out = bytes::BytesMut::from(data);
+                    } else {
+                        out.extend_from_slice(&data);
+                    }
                 }
             }
             Ok(Some(Err(e))) => {
@@ -165,68 +339,129 @@ async fn read_body(body: Incoming, max: usize, (idle, total): (Duration, Duratio
     }
 }
 
-async fn respond(node: Arc<Node>, req: Request<Incoming>, sni: Option<&str>, timeouts: (Duration, Duration)) -> Response<Full<Bytes>> {
+async fn respond(node: Arc<Node>, req: Request<Incoming>, sni: Option<&str>, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
     let mut es = head_of(&req);
-    let gzip_ok = accepts_gzip(es.header("accept-encoding"));
+    let gzip_ok = accepts_gzip(es.header("accept-encoding")) && es.method != "HEAD";
+    if let Some(e) = head_too_long(&req) {
+        return Ok(closing(to_hyper(search_es::rest::error_response(&e, &es, search_es::Dialect::Elasticsearch), gzip_ok).await));
+    }
     let mut lease = match node.enter(&es, sni).await {
         Ok(l) => l,
-        Err(r) => return to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok),
+        Err(r) => return Ok(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await),
     };
-    let dialect = lease.loaded.spec().dialect;
     let max = lease.max_body_bytes(&node);
-    let too_long = |len: u64| search_es::rest::error_response(&EsError::content_too_long(len, max as u64), &es, dialect);
-    if let Some(len) = es.header("content-length").and_then(|v| v.trim().parse::<u64>().ok())
-        && len > max as u64
-    {
-        return to_hyper(too_long(len), gzip_ok);
+    let declared = es.header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
+    if declared.is_some_and(|len| len > max as u64) {
+        return Ok(too_large());
     }
-    let body = match read_body(req.into_body(), max, timeouts).await {
+    if let Some(len) = declared
+        && let Err(r) = lease.reserve_body(&es, len as usize)
+    {
+        return Ok(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await);
+    }
+    let read = {
+        let es = &es;
+        let lease = &mut lease;
+        read_body(req.into_body(), max, timeouts, declared, &mut |n| lease.reserve_more(es, n)).await
+    };
+    let body = match read {
         Ok(b) => b,
-        Err(BodyError::TooLong) => return to_hyper(too_long(max as u64 + 1), gzip_ok),
+        Err(BodyError::TooLong) => return Ok(too_large()),
+        Err(BodyError::OverBudget(r)) => return Ok(closing(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await)),
         Err(BodyError::TimedOut) => {
             let e = EsError::new(408, "timeout_exception", "timed out reading the request body");
-            let mut r = to_hyper(search_es::rest::error_response(&e, &es, dialect), gzip_ok);
-            r.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
-            return r;
+            return Ok(closing(to_hyper(search_es::rest::error_response(&e, &es, lease.loaded.spec().dialect), gzip_ok).await));
         }
         // The client went away mid-body: nobody to answer.
-        Err(BodyError::Broken) => {
-            let mut r = Response::new(Full::new(Bytes::new()));
-            *r.status_mut() = StatusCode::BAD_REQUEST;
-            r.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
-            return r;
-        }
+        Err(BodyError::Broken) => return Err(DropConnection("the client went away mid-body".into())),
     };
     let body = match es.header("content-encoding").map(|v| v.trim().to_ascii_lowercase()) {
-        Some(enc) if enc == "gzip" || enc == "x-gzip" || enc == "deflate" => match inflate(&body, &enc, max) {
-            Ok(b) => b,
-            Err(Inflate::TooLong) => return to_hyper(too_long(max as u64 + 1), gzip_ok),
-            Err(Inflate::Corrupt(msg)) => {
-                return to_hyper(search_es::rest::error_response(&EsError::illegal_argument(msg), &es, dialect), gzip_ok);
+        Some(enc) if enc == "gzip" || enc == "x-gzip" || enc == "deflate" => {
+            let gz = enc != "deflate";
+            match inflate_reserved(&mut lease, body, gz, max).await {
+                Ok(b) => b,
+                Err(Inflate::TooLong) => return Ok(too_large()),
+                Err(Inflate::OverBudget { used, bytes }) => {
+                    let r = lease.over_budget(&es, used, bytes);
+                    return Ok(closing(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await));
+                }
+                Err(Inflate::Corrupt(msg)) => return Err(DropConnection(msg)),
             }
-        },
+        }
         _ => body,
     };
     es.body = body;
     if let Err(r) = lease.acquire(&es).await {
-        return to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok);
+        return Ok(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await);
     }
     let resp = lease.handle(es).await;
     drop(lease);
-    to_hyper(resp, gzip_ok)
+    Ok(to_hyper(resp, gzip_ok).await)
 }
 
+#[derive(Debug)]
 enum Inflate {
     TooLong,
+    /// The inflated body passed the byte budget (`used` in flight, `bytes` this request's).
+    OverBudget {
+        used: usize,
+        bytes: usize,
+    },
     Corrupt(String),
 }
 
-/// Decompresses a request body, refusing to expand past `max` bytes.
-fn inflate(body: &[u8], enc: &str, max: usize) -> Result<Bytes, Inflate> {
-    let mut out = Vec::with_capacity(body.len().saturating_mul(4).min(max));
-    let reader: Box<dyn Read> = if enc == "gzip" || enc == "x-gzip" { Box::new(flate2::read::GzDecoder::new(body)) } else { Box::new(flate2::read::ZlibDecoder::new(body)) };
-    let mut limited = reader.take(max as u64 + 1);
-    limited.read_to_end(&mut out).map_err(|e| Inflate::Corrupt(format!("failed to decompress request body: {e}")))?;
+/// Inflates a request body, reserving its output from the cluster's byte budget as it grows
+/// and giving the compressed bytes back afterwards; on the blocking pool when large.
+async fn inflate_reserved(lease: &mut crate::node::Lease, body: Bytes, gz: bool, max: usize) -> Result<Bytes, Inflate> {
+    let (mut res, budget) = lease.take_reservation();
+    let compressed = body.len();
+    let work = move || {
+        let mut grow = |n: usize| budget.grow(&mut res, n).map_err(|used| (used, n));
+        let r = inflate(&body, gz, max, &mut grow);
+        drop(body);
+        // The compressed copy is gone: its share of the reservation goes back.
+        res.shrink(compressed);
+        (r, res)
+    };
+    let (r, res) = if compressed > INLINE_CODEC_BYTES {
+        tokio::task::spawn_blocking(work).await.map_err(|e| Inflate::Corrupt(format!("inflating the request body failed: {e}")))?
+    } else {
+        work()
+    };
+    lease.put_reservation(res);
+    r
+}
+
+/// Decompresses a request body, refusing to expand past `max` bytes. `grow` reserves each
+/// step of output (and fails with the bytes in use). A truncated stream yields what inflated
+/// so far, as Netty's decoder passes it on; anything else that isn't valid is `Corrupt`.
+fn inflate(body: &[u8], gz: bool, max: usize, grow: &mut dyn FnMut(usize) -> Result<(), (usize, usize)>) -> Result<Bytes, Inflate> {
+    let mut reader: Box<dyn Read + '_> = if gz {
+        Box::new(flate2::read::GzDecoder::new(body))
+    } else if body.len() >= 2 && body[0] & 0x0f == 8 && (u16::from(body[0]) << 8 | u16::from(body[1])) % 31 == 0 {
+        Box::new(flate2::read::ZlibDecoder::new(body))
+    } else {
+        // Raw deflate, as Netty's ZLIB_OR_NONE accepts.
+        Box::new(flate2::read::DeflateDecoder::new(body))
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let mut reserved = 0usize;
+    loop {
+        // Reserve each step of output before inflating into it.
+        let step = INFLATE_STEP.min(max + 1 - out.len());
+        grow(step).map_err(|(used, n)| Inflate::OverBudget { used, bytes: reserved + n })?;
+        reserved += step;
+        match (&mut reader).take(step as u64).read_to_end(&mut out) {
+            Ok(n) if n < step => break,
+            Ok(_) => {}
+            // Truncated: what inflated so far (already in `out`) is the body.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(Inflate::Corrupt(format!("failed to decompress the request body: {e}"))),
+        }
+        if out.len() > max {
+            return Err(Inflate::TooLong);
+        }
+    }
     if out.len() > max {
         return Err(Inflate::TooLong);
     }
@@ -239,10 +474,18 @@ fn gzip(body: &[u8]) -> Option<Vec<u8>> {
     enc.finish().ok()
 }
 
-fn to_hyper(resp: EsResponse, accepts_gzip: bool) -> Response<Full<Bytes>> {
+/// The HTTP response; `accepts_gzip` (never for `HEAD`, whose length is the identity body's,
+/// as Elasticsearch answers) compresses the body, on the blocking pool when it is large.
+async fn to_hyper(resp: EsResponse, accepts_gzip: bool) -> Response<Full<Bytes>> {
     let EsResponse { status, headers, body, head } = resp;
-    let (body, gzipped) = if accepts_gzip && !body.is_empty() {
-        match gzip(&body) {
+    let (body, gzipped) = if accepts_gzip && !head && !body.is_empty() {
+        let z = if body.len() > INLINE_CODEC_BYTES {
+            let b = body.clone();
+            tokio::task::spawn_blocking(move || gzip(&b)).await.ok().flatten()
+        } else {
+            gzip(&body)
+        };
+        match z {
             Some(z) => (Bytes::from(z), true),
             None => (body, false),
         }
@@ -281,18 +524,80 @@ mod tests {
         assert!(!accepts_gzip(None));
     }
 
+    fn unlimited(_: usize) -> Result<(), (usize, usize)> {
+        Ok(())
+    }
+
+    fn deflate(body: &[u8], zlib: bool) -> Vec<u8> {
+        if zlib {
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(body).unwrap();
+            e.finish().unwrap()
+        } else {
+            let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(body).unwrap();
+            e.finish().unwrap()
+        }
+    }
+
     #[test]
-    fn x_gzip_bodies() {
+    fn gzip_and_deflate_bodies() {
         let z = gzip(b"{}").unwrap();
-        assert_eq!(&inflate(&z, "x-gzip", 100).ok().unwrap()[..], b"{}");
+        assert_eq!(&inflate(&z, true, 100, &mut unlimited).unwrap()[..], b"{}");
+        // `deflate` is zlib-wrapped or raw (Netty's ZLIB_OR_NONE).
+        assert_eq!(&inflate(&deflate(b"{\"a\":1}", true), false, 100, &mut unlimited).unwrap()[..], b"{\"a\":1}");
+        assert_eq!(&inflate(&deflate(b"{\"a\":1}", false), false, 100, &mut unlimited).unwrap()[..], b"{\"a\":1}");
+        // Trailing bytes after a complete gzip member are ignored, as Elasticsearch does.
+        let mut trailing = gzip(b"{}").unwrap();
+        trailing.extend_from_slice(b"garbage");
+        assert_eq!(&inflate(&trailing, true, 100, &mut unlimited).unwrap()[..], b"{}");
     }
 
     #[test]
     fn inflate_is_bounded() {
-        let big = vec![b'a'; 10_000];
+        let big = vec![b'a'; 300_000];
         let z = gzip(&big).unwrap();
-        assert_eq!(inflate(&z, "gzip", 20_000).ok().unwrap().len(), 10_000);
-        assert!(matches!(inflate(&z, "gzip", 100), Err(Inflate::TooLong)));
-        assert!(matches!(inflate(b"not gzip", "gzip", 100), Err(Inflate::Corrupt(_))));
+        assert_eq!(inflate(&z, true, 300_000, &mut unlimited).unwrap().len(), 300_000);
+        assert!(matches!(inflate(&z, true, 299_999, &mut unlimited), Err(Inflate::TooLong)));
+        assert!(matches!(inflate(&z, true, 100, &mut unlimited), Err(Inflate::TooLong)));
+        // Output is reserved step by step, never more than a step ahead of what inflated.
+        let mut steps = Vec::new();
+        let mut track = |n: usize| {
+            steps.push(n);
+            Ok(())
+        };
+        inflate(&z, true, 1 << 20, &mut track).unwrap();
+        assert_eq!(steps.iter().sum::<usize>(), 5 * INFLATE_STEP);
+        // A refusal stops inflating at once.
+        let mut budget = 100_000usize;
+        let mut limited = |n: usize| {
+            if n > budget {
+                return Err((7, n));
+            }
+            budget -= n;
+            Ok(())
+        };
+        match inflate(&z, true, 1 << 20, &mut limited) {
+            Err(Inflate::OverBudget { used: 7, bytes }) => assert_eq!(bytes, 2 * INFLATE_STEP),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn broken_compressed_bodies() {
+        let body = br#"{"query":{"match_all":{}}}"#;
+        let z = gzip(body).unwrap();
+        // Truncated: what inflated so far, as Netty passes it on (the header alone: nothing).
+        assert_eq!(&inflate(&z[..10], true, 100, &mut unlimited).unwrap()[..], b"");
+        assert_eq!(&inflate(&z[..3], true, 100, &mut unlimited).unwrap()[..], b"");
+        let part = inflate(&z[..z.len() - 8], true, 100, &mut unlimited).unwrap();
+        assert!(body.starts_with(&part), "{part:?}");
+        // Not compressed at all, or a damaged checksum: corrupt (the connection is dropped).
+        assert!(matches!(inflate(b"not gzip at all", true, 100, &mut unlimited), Err(Inflate::Corrupt(_))));
+        let mut bad = z.clone();
+        let n = bad.len();
+        bad[n - 5] ^= 0xff;
+        assert!(matches!(inflate(&bad, true, 100, &mut unlimited), Err(Inflate::Corrupt(_))));
+        assert!(matches!(inflate(b"not gzip at all", false, 100, &mut unlimited), Err(Inflate::Corrupt(_))));
     }
 }

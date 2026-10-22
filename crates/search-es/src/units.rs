@@ -444,3 +444,43 @@ mod tests {
         assert_eq!(parse_bool("yes").unwrap_err().reason(), "Failed to parse value [yes] as only [true] or [false] are allowed.");
     }
 }
+
+/// The `IllegalArgumentException` message `java.util.Base64.getUrlDecoder().decode(s)` throws
+/// for `s`, if it throws (the checks run in its order: length, characters, the last unit).
+pub fn java_base64_url_error(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    if b.is_empty() {
+        return None;
+    }
+    if b.len() < 2 {
+        return Some("Input byte[] should at least have 2 bytes for base64 bytes".into());
+    }
+    let body = s.trim_end_matches('=');
+    let padded = s.len() - body.len();
+    for &c in body.as_bytes() {
+        if !(c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+            // `Integer.toString(byte, 16)`: Latin-1 bytes past 0x7f print negative.
+            let hex = if c < 0x80 { format!("{c:x}") } else { format!("-{:x}", 256 - c as u32) };
+            return Some(format!("Illegal base64 character {hex}"));
+        }
+    }
+    match (body.len() % 4, padded) {
+        (1, _) => Some("Last unit does not have enough valid bits".into()),
+        (0, 0) | (2, 0) | (3, 0) | (2, 2) | (3, 1) => None,
+        _ => Some("Input byte array has wrong 4-byte ending unit".into()),
+    }
+}
+
+#[cfg(test)]
+mod base64_error_tests {
+    use super::java_base64_url_error;
+
+    #[test]
+    fn java_decoder_messages() {
+        assert_eq!(java_base64_url_error("x").as_deref(), Some("Input byte[] should at least have 2 bytes for base64 bytes"));
+        assert_eq!(java_base64_url_error("a-b*").as_deref(), Some("Illegal base64 character 2a"));
+        assert_eq!(java_base64_url_error("invalid_scroll_id").as_deref(), Some("Last unit does not have enough valid bits"));
+        assert_eq!(java_base64_url_error("abc"), None);
+        assert_eq!(java_base64_url_error("AXBpdAAAAAAAAAAE5FmrMn3DEyY"), None);
+    }
+}

@@ -521,6 +521,17 @@ impl SimpleAgg {
 }
 
 impl Aggregator for SimpleAgg {
+    fn profile_type(&self) -> &'static str {
+        match self.kind {
+            SimpleKind::Avg => "AvgAggregator",
+            SimpleKind::Sum => "SumAggregator",
+            SimpleKind::Min => "MinAggregator",
+            SimpleKind::Max => "MaxAggregator",
+            SimpleKind::ValueCount => "ValueCountAggregator",
+            SimpleKind::Stats => "StatsAggregator",
+            SimpleKind::ExtendedStats => "ExtendedStatsAggregator",
+        }
+    }
     fn segment_done(&self) -> bool {
         self.segment_done
     }
@@ -645,7 +656,15 @@ impl Aggregator for SimpleAgg {
     }
 
     fn build(&mut self, owning: &[u32]) -> Result<Vec<crate::internal::AggValue>> {
-        Ok(owning.iter().map(|&o| self.build_one(o)).collect())
+        let out: Vec<crate::internal::AggValue> = owning.iter().map(|&o| self.build_one(o)).collect();
+        for v in &out {
+            match v {
+                crate::internal::AggValue::Stats(s) => s.verify_formatting()?,
+                crate::internal::AggValue::ExtendedStats(e) => e.stats().verify_formatting()?,
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 
     fn build_empty(&self) -> crate::internal::AggValue {
@@ -778,6 +797,10 @@ pub struct Min {
 }
 
 impl Internal for Min {
+    /// `nonEmpty`: a value, or a field format (an unmapped field's result doesn't lead).
+    fn can_lead(&self) -> bool {
+        self.value != f64::INFINITY || !self.format.is_raw()
+    }
     fn type_name(&self) -> &'static str {
         "min"
     }
@@ -811,6 +834,10 @@ pub struct Max {
 }
 
 impl Internal for Max {
+    /// `nonEmpty`: a value, or a field format (an unmapped field's result doesn't lead).
+    fn can_lead(&self) -> bool {
+        self.value != f64::NEG_INFINITY || !self.format.is_raw()
+    }
     fn type_name(&self) -> &'static str {
         "max"
     }
@@ -871,6 +898,19 @@ pub struct Stats {
 }
 
 impl Stats {
+    /// `InternalStats.verifyFormattingStats`: with a format, every stat must be printable.
+    pub fn verify_formatting(&self) -> Result<()> {
+        if self.format.is_raw() || self.count == 0 {
+            return Ok(());
+        }
+        for (stat, v) in [("min", self.min), ("max", self.max), ("avg", self.avg()), ("sum", self.sum)] {
+            if let Err(e) = self.format.verify_double(v) {
+                return Err(AggError::illegal_argument(format!("Cannot format stat [{stat}] with format [{}]", self.format.java_string())).caused_by(e));
+            }
+        }
+        Ok(())
+    }
+
     pub fn avg(&self) -> f64 {
         self.sum / self.count as f64
     }
@@ -912,11 +952,13 @@ impl Stats {
             out.push("max", Json::Float(self.max));
             out.push("avg", Json::Float(self.avg()));
             out.push("sum", Json::Float(self.sum));
+            // `InternalStats` writes `format(v)` as the object it is (a boolean for boolean
+            // fields), not its `toString()`.
             if !self.format.is_raw() {
-                out.push("min_as_string", self.format.double_json(self.min));
-                out.push("max_as_string", self.format.double_json(self.max));
-                out.push("avg_as_string", self.format.double_json(self.avg()));
-                out.push("sum_as_string", self.format.double_json(self.sum));
+                out.push("min_as_string", self.format.format_double(self.min));
+                out.push("max_as_string", self.format.format_double(self.max));
+                out.push("avg_as_string", self.format.format_double(self.avg()));
+                out.push("sum_as_string", self.format.format_double(self.sum));
             }
         } else {
             out.push("min", Json::Null);
@@ -936,7 +978,9 @@ impl Internal for Stats {
     }
     fn reduce(list: Vec<Self>, _ctx: &mut ReduceCtx<'_>) -> Result<Self> {
         let (count, sum, min, max) = Stats::reduce_parts(list.iter().map(|s| (s.count, s.sum, s.min, s.max)));
-        Ok(Stats { count, sum, min, max, format: list[0].format.clone() })
+        let s = Stats { count, sum, min, max, format: list[0].format.clone() };
+        s.verify_formatting()?;
+        Ok(s)
     }
     fn render(&self, out: &mut Json, _rc: &RenderCtx) {
         self.render_stats(out);
@@ -1028,10 +1072,12 @@ impl ExtendedStats {
             out.push("std_deviation_bounds", bounds(&|k| Json::Float(f(k))));
             if !self.format.is_raw() {
                 let s = |k: &str| self.format.double_json(f(k));
-                out.push("sum_of_squares_as_string", self.format.double_json(self.sum_of_sqrs));
-                out.push("variance_as_string", s("variance"));
-                out.push("variance_population_as_string", s("variance_population"));
-                out.push("variance_sampling_as_string", s("variance_sampling"));
+                // Sum of squares and variances as objects, deviations as strings.
+                let o = |k: &str| self.format.format_double(f(k));
+                out.push("sum_of_squares_as_string", self.format.format_double(self.sum_of_sqrs));
+                out.push("variance_as_string", o("variance"));
+                out.push("variance_population_as_string", o("variance_population"));
+                out.push("variance_sampling_as_string", o("variance_sampling"));
                 out.push("std_deviation_as_string", s("std_deviation"));
                 out.push("std_deviation_population_as_string", s("std_deviation_population"));
                 out.push("std_deviation_sampling_as_string", s("std_deviation_sampling"));
@@ -1086,7 +1132,9 @@ impl Internal for ExtendedStats {
         }
         let sum_of_sqrs = ExtendedStats::reduce_squares(list.iter().map(|s| s.sum_of_sqrs));
         let (count, sum, min, max) = Stats::reduce_parts(list.iter().map(|s| (s.count, s.sum, s.min, s.max)));
-        Ok(ExtendedStats { count, sum, min, max, sum_of_sqrs, sigma, format: list[0].format.clone() })
+        let s = ExtendedStats { count, sum, min, max, sum_of_sqrs, sigma, format: list[0].format.clone() };
+        s.stats().verify_formatting()?;
+        Ok(s)
     }
     fn render(&self, out: &mut Json, _rc: &RenderCtx) {
         self.render_extended(out);
@@ -1144,8 +1192,9 @@ impl MvsField {
 /// A parsed `weighted_avg`.
 #[derive(Clone, Debug)]
 pub struct WeightedAvgSpec {
-    pub value: MvsField,
-    pub weight: MvsField,
+    /// Absent configs fail on the shard, as in Elasticsearch.
+    pub value: Option<MvsField>,
+    pub weight: Option<MvsField>,
     pub format: Option<String>,
 }
 
@@ -1170,8 +1219,6 @@ pub fn parse_weighted_avg(p: &mut XParser<'_>) -> Result<WeightedAvgSpec> {
         }
         Ok(())
     })?;
-    let value = value.ok_or_else(|| AggError::illegal_argument("[value] must not be null: [weighted_avg]"))?;
-    let weight = weight.ok_or_else(|| AggError::illegal_argument("[weight] must not be null: [weighted_avg]"))?;
     Ok(WeightedAvgSpec { value, weight, format })
 }
 
@@ -1203,10 +1250,22 @@ fn value_type_description(v: crate::values::ValueType) -> &'static str {
 }
 
 pub fn create_weighted_avg(def: &AggDef, spec: &WeightedAvgSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
-    let mut vspec = spec.value.to_vs();
+    // `WeightedAvgAggregatorFactory` reads the value config's type first (an NPE when absent),
+    // then `NumericMultiValuesSource` looks the weight up.
+    let Some(value) = &spec.value else {
+        return Err(AggError::new(
+            500,
+            "null_pointer_exception",
+            "Cannot invoke \"org.elasticsearch.search.aggregations.support.ValuesSourceConfig.valueSourceType()\" because the return value of \"java.util.Map.get(Object)\" is null",
+        ));
+    };
+    let mut vspec = value.to_vs();
     vspec.format = spec.format.clone();
     let value = bind(&vspec, ctx.lookup, VsType::Numeric, false)?;
-    let weight = bind(&spec.weight.to_vs(), ctx.lookup, VsType::Numeric, false)?;
+    let Some(weight) = &spec.weight else {
+        return Err(AggError::illegal_argument("Could not find field name [weight] in multiValuesSource"));
+    };
+    let weight = bind(&weight.to_vs(), ctx.lookup, VsType::Numeric, false)?;
     // `NumericMultiValuesSource`.
     for v in [&value, &weight] {
         if let Some(f) = &v.field
@@ -1241,6 +1300,9 @@ struct WeightedAvgAgg {
 }
 
 impl Aggregator for WeightedAvgAgg {
+    fn profile_type(&self) -> &'static str {
+        "WeightedAvgAggregator"
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         self.readers = Some((self.value.numeric_reader(seg)?, self.weight.numeric_reader(seg)?));
         Ok(())
@@ -1348,8 +1410,8 @@ impl Internal for WeightedAvg {
     }
     fn render(&self, out: &mut Json, _rc: &RenderCtx) {
         out.push("value", if self.weight != 0.0 { Json::Float(self.value()) } else { Json::Null });
-        if self.weight != 0.0 {
-            add_value_as_string(out, "value_as_string", &self.format, self.value());
+        if self.weight != 0.0 && !self.format.is_raw() {
+            out.push("value_as_string", self.format.format_double(self.value()));
         }
     }
     fn property(&self, name: &str, path: &[String]) -> Result<Prop<'_>> {

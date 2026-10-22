@@ -71,6 +71,9 @@ pub struct BackingOf<'a> {
     /// Data-stream-level settings and mappings overrides.
     pub settings: &'a Settings,
     pub mappings: Option<&'a Map>,
+    /// A past backing index of a time series data stream: its `[start, end)` bounds in epoch
+    /// millis (`MetadataCreateDataStreamService.createPastBackingIndex`).
+    pub past: Option<(i64, i64)>,
 }
 
 /// The `@timestamp` mapping data stream backing indices start from (lowest precedence), with
@@ -234,10 +237,21 @@ fn tsdb_backing_settings(md: &crate::meta::Metadata, data_stream: &str, settings
             let end = if start > now_ms { truncate(start + look_ahead.as_millis()) } else { truncate(now_ms + look_ahead.as_millis()) };
             (start, end)
         }
+        // The first backing index keeps bounds its template sets explicitly.
+        _ if settings.contains("index.time_series.start_time") && settings.contains("index.time_series.end_time") => (i64::MIN, i64::MIN),
         _ => (truncate(now_ms - look_back.as_millis()), truncate(now_ms + look_ahead.as_millis())),
     };
-    settings.set("index.time_series.start_time", fmt.format_millis(start));
-    settings.set("index.time_series.end_time", fmt.format_millis(end));
+    if start != i64::MIN {
+        // Bounds the template sets itself win over the computed ones (provider settings are
+        // applied below the template's) on the first backing index.
+        let first = ds.and_then(|d| d.write_index()).is_none() || migrating;
+        if !(first && settings.contains("index.time_series.start_time")) {
+            settings.set("index.time_series.start_time", fmt.format_millis(start));
+        }
+        if !(first && settings.contains("index.time_series.end_time")) {
+            settings.set("index.time_series.end_time", fmt.format_millis(end));
+        }
+    }
     if !settings.contains("index.disable_sequence_numbers") {
         settings.set("index.disable_sequence_numbers", "true");
     }
@@ -388,6 +402,13 @@ fn create_index_core(st: &mut ClusterState, provided_name: &str, name: &str, req
     crate::meta::auto_expand::apply(&mut settings);
     if let Some(b) = &backing {
         data_stream_index_settings(&st.metadata, b.data_stream, &mut settings, &composed.mappings, now_ms)?;
+        if let Some((start, end)) = b.past {
+            let fmt = crate::time::DateFormatter::new("strict_date_optional_time").map_err(EsError::illegal_argument)?;
+            settings.set("index.time_series.start_time", fmt.format_millis(start));
+            settings.set("index.time_series.end_time", fmt.format_millis(end));
+            settings.set("index.lifecycle.origination_date", end.to_string());
+            settings.set("index.lifecycle.indexing_complete", "true");
+        }
     }
     let mode = IndexMode::of(&settings);
     mode.validate_settings(&settings)?;
@@ -422,6 +443,15 @@ fn create_index_core(st: &mut ClusterState, provided_name: &str, name: &str, req
             acc = acc.merge(&m, &ctx, MergeReason::IndexTemplate)?;
         }
         acc.validate(&ctx)?;
+        // Logs modes ignore malformed values by default, but never on `@timestamp`
+        // (`DataStreamTimestampFieldMapper`): the field says so explicitly.
+        if mode.is_logs()
+            && let Some(crate::mapping::Mapper::Field(ts)) = acc.root.children.get_mut("@timestamp")
+            && matches!(ts.ty, "date" | "date_nanos")
+            && ts.raw("ignore_malformed").is_none()
+        {
+            ts.set("ignore_malformed", Value::Bool(false));
+        }
         acc
     };
     warnings.extend(ctx.warnings.borrow().iter().cloned());
@@ -700,6 +730,8 @@ pub async fn put_mapping(ctx: &Ctx<'_>) -> EsResult<Reply> {
             for idx in &indices {
                 let mctx = idx.mapping_ctx();
                 let merged = mapping::for_update(&idx.mapping, &body, &mctx)?;
+                let added: Vec<&str> = merged.runtime.keys().filter(|k| !idx.mapping.runtime.contains_key(*k)).map(String::as_str).collect();
+                crate::search::runtime::check_time_series(idx, &added, false)?;
                 let mode = IndexMode::of(&idx.settings);
                 mode.validate_source(&merged, &idx.settings)?;
                 mode.validate_mapping(&merged, &idx.settings, st.metadata.data_stream_of(&idx.name).is_some())?;
@@ -1191,6 +1223,28 @@ fn index_ops(ctx: &Ctx, idx: &IndexMeta) -> crate::cluster::OpCounts {
     sum
 }
 
+/// Adds an open index's engine figures to a stats block from [`stats_block_in`]: docs, store,
+/// indexing, get, search, segments, merges and translog per shard (`ShardEngine::stats_into`),
+/// plus its flush and refresh counts. `shard` limits it to one shard. Blocks accumulate, so a
+/// node-level block takes every index in turn.
+pub fn add_index_stats(cluster: &crate::Cluster, idx: &IndexMeta, block: &mut Value, shard: Option<u32>) {
+    if idx.is_closed() {
+        return;
+    }
+    let mut ops = crate::cluster::OpCounts { flush: 0, refresh: 0, external_refresh: 0 };
+    for s in (0..idx.number_of_shards()).filter(|s| shard.is_none_or(|x| x == *s)) {
+        let c = cluster.ops.get(&idx.uuid, s as usize);
+        ops.flush += c.flush;
+        ops.refresh += c.refresh;
+        ops.external_refresh += c.external_refresh;
+    }
+    add_ops(block, ops);
+    let (Some(e), Value::Obj(bm)) = (cluster.engine.loaded(&idx.uuid), block) else { return };
+    for s in e.shards.iter().filter(|s| shard.is_none_or(|x| x == s.id)) {
+        s.stats_into(bm);
+    }
+}
+
 /// One index's stats block with `shards` primaries (zeros until the engine reports numbers).
 pub fn stats_block(metrics: &[String], shards: u64) -> Value {
     stats_block_in(crate::cluster::Dialect::Elasticsearch, metrics, shards)
@@ -1247,6 +1301,15 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
     let (mut total_shards, mut primaries) = (0u64, 0u64);
     let mut all_ops = crate::cluster::OpCounts { flush: 0, refresh: 0, external_refresh: 0 };
     let mut per_index = Map::new();
+    // Engine figures summed over indices for `_all` (ops counts are added separately).
+    let mut engine_all: std::collections::HashMap<(String, String, String), i64> = std::collections::HashMap::new();
+    let mut all_vectors: std::collections::HashMap<String, crate::engine::VectorStats> = std::collections::HashMap::new();
+    let mut field_all: std::collections::BTreeMap<(String, String, String, String), i64> = std::collections::BTreeMap::new();
+    let groups = ctx.list_param("groups").unwrap_or_default();
+    // `fields` applies to both; `fielddata_fields` / `completion_fields` to one each.
+    let both = ctx.list_param("fields").unwrap_or_default();
+    let fd_fields: Vec<String> = ctx.list_param("fielddata_fields").unwrap_or_default().into_iter().chain(both.iter().cloned()).collect();
+    let cp_fields: Vec<String> = ctx.list_param("completion_fields").unwrap_or_default().into_iter().chain(both.iter().cloned()).collect();
     for idx in &indices {
         // Closed indices are only reported when asked for; indices without a started shard
         // have no stats.
@@ -1267,9 +1330,96 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
         all_ops.flush += ops.flush;
         all_ops.refresh += ops.refresh;
         all_ops.external_refresh += ops.external_refresh;
+        let unloaded = idx.is_closed() && ctx.bool_param("include_unloaded_segments", false).unwrap_or(false);
         for k in ["primaries", "total"] {
             let mut b = stats_block_in(d, &metrics, p);
             add_ops(&mut b, ops);
+            // A closed index's segments stay on disk; `include_unloaded_segments` counts them.
+            if unloaded
+                && let Some(e) = ctx.cluster.engine.loaded(&idx.uuid)
+                && let Value::Obj(bm) = &mut b
+                && let Some(Value::Obj(seg)) = bm.get_mut("segments")
+            {
+                let n: usize = e.shards.iter().map(|s| s.shard.segments().len()).sum();
+                seg.insert("count".into(), Value::from(n as i64));
+                *engine_all.entry((k.to_string(), "segments".into(), "count".into())).or_insert(0) += n as i64;
+            }
+            if !idx.is_closed()
+                && let Some(e) = ctx.cluster.engine.loaded(&idx.uuid)
+                && let Value::Obj(bm) = &mut b
+            {
+                let table = e.table();
+                let mut vs = crate::engine::VectorStats::default();
+                for s in &e.shards {
+                    s.stats_into(bm);
+                    e.field_stats_into(s, bm, &fd_fields, &cp_fields);
+                    s.group_stats_into(bm, &groups);
+                    if bm.contains_key("dense_vector") || bm.contains_key("sparse_vector") {
+                        vs.add(&s.vector_stats(&table));
+                    }
+                }
+                if bm.contains_key("dense_vector") {
+                    bm.insert("dense_vector".into(), vs.dense_value(true));
+                }
+                if let Some(Value::Obj(sv)) = bm.get_mut("sparse_vector") {
+                    sv.insert("value_count".into(), Value::from(vs.sparse_count as i64));
+                }
+                all_vectors.entry(k.to_string()).or_default().add(&vs);
+                for (ak, av) in bm.iter() {
+                    if matches!(ak.as_str(), "refresh" | "flush" | "shard_stats") {
+                        continue;
+                    }
+                    if let Value::Obj(sec) = av {
+                        for (sk, sv) in sec {
+                            if let Some(n) = sv.as_i64() {
+                                *engine_all.entry((k.to_string(), ak.clone(), sk.clone())).or_insert(0) += n;
+                            }
+                            if ak == "search"
+                                && sk == "groups"
+                                && let Value::Obj(fm) = sv
+                            {
+                                for (fname, fv) in fm {
+                                    if let Value::Obj(inner) = fv {
+                                        for (ik, iv) in inner {
+                                            if let Some(n) = iv.as_i64() {
+                                                *field_all.entry((k.to_string(), "search_groups".into(), fname.clone(), ik.clone())).or_insert(0) += n;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if sk == "global_ordinals"
+                                && let Value::Obj(go) = sv
+                                && let Some(Value::Obj(fm)) = go.get("fields")
+                            {
+                                for (fname, fv) in fm {
+                                    if let Value::Obj(inner) = fv {
+                                        for (ik, iv) in inner {
+                                            if let Some(n) = iv.as_i64() {
+                                                *field_all.entry((k.to_string(), "global_ordinals".into(), fname.clone(), ik.clone())).or_insert(0) += n;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Per-field figures (`fielddata.fields.x.memory_size_in_bytes`).
+                            if sk == "fields"
+                                && let Value::Obj(fm) = sv
+                            {
+                                for (fname, fv) in fm {
+                                    if let Value::Obj(inner) = fv {
+                                        for (ik, iv) in inner {
+                                            if let Some(n) = iv.as_i64() {
+                                                *field_all.entry((k.to_string(), ak.clone(), fname.clone(), ik.clone())).or_insert(0) += n;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             m.insert(k.into(), b);
         }
         if level == "shards" {
@@ -1282,7 +1432,54 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
     let mut all = Map::new();
     for k in ["primaries", "total"] {
         let mut b = stats_block_in(d, &metrics, primaries);
+        if let Value::Obj(bm) = &mut b {
+            for ((kk, sec, key), n) in &engine_all {
+                if kk != k {
+                    continue;
+                }
+                if let Some(Value::Obj(sm)) = bm.get_mut(sec)
+                    && let Some(cur) = sm.get(key).and_then(Value::as_i64)
+                    && !(sec == "shard_stats")
+                {
+                    let _ = cur;
+                    sm.insert(key.clone(), Value::from(*n));
+                }
+            }
+        }
+        if let Value::Obj(bm) = &mut b {
+            for ((kk, sec, fname, key), n) in &field_all {
+                if kk != k {
+                    continue;
+                }
+                let target = if sec == "global_ordinals" {
+                    match bm.get_mut("fielddata") {
+                        Some(Value::Obj(fd)) => fd.get_mut("global_ordinals"),
+                        _ => None,
+                    }
+                } else if sec == "search_groups" {
+                    bm.get_mut("search")
+                } else {
+                    bm.get_mut(sec)
+                };
+                let slot = if sec == "search_groups" { "groups" } else { "fields" };
+                if let Some(Value::Obj(sm)) = target {
+                    let fields = sm.entry(slot.to_string()).or_insert_with(|| Value::Obj(Map::new()));
+                    if let Value::Obj(fm) = fields {
+                        let e = fm.entry(fname.clone()).or_insert_with(|| Value::Obj(Map::new()));
+                        if let Value::Obj(em) = e {
+                            em.insert(key.clone(), Value::from(*n));
+                        }
+                    }
+                }
+            }
+        }
         add_ops(&mut b, all_ops);
+        // Vector sizes add up across indices; the per-field breakdown is per index only.
+        if let Value::Obj(bm) = &mut b
+            && bm.contains_key("dense_vector")
+        {
+            bm.insert("dense_vector".into(), all_vectors.get(k).cloned().unwrap_or_default().dense_value(false));
+        }
         all.insert(k.into(), b);
     }
     body.insert("_all".into(), Value::Obj(all));
@@ -1319,6 +1516,18 @@ fn shard_stats(ctx: &Ctx, idx: &IndexMeta, metrics: &[String]) -> Value {
         let mut block = stats_block_in(ctx.cluster.dialect, metrics, 1);
         if !idx.is_closed() {
             add_ops(&mut block, ctx.cluster.ops.get(&idx.uuid, shard as usize));
+            if let Some(e) = ctx.cluster.engine.loaded(&idx.uuid)
+                && let Value::Obj(b) = &mut block
+            {
+                e.shard(shard).stats_into(b);
+            }
+        } else if ctx.bool_param("include_unloaded_segments", false).unwrap_or(false)
+            && let Some(e) = ctx.cluster.engine.loaded(&idx.uuid)
+            && let Value::Obj(b) = &mut block
+            && let Some(Value::Obj(seg)) = b.get_mut("segments")
+        {
+            // A closed index's segments stay on disk; `include_unloaded_segments` counts them.
+            seg.insert("count".into(), Value::from(e.shard(shard).shard.segments().len() as i64));
         }
         if let Value::Obj(mut block) = block {
             // Off-heap vector sizes are only summed per index.
@@ -1479,6 +1688,13 @@ pub fn flush(ctx: &Ctx) -> EsResult<Reply> {
     // Every open shard flushes; a forced flush refreshes internally first.
     let r = broadcast(ctx)?;
     for idx in open_targets(ctx)? {
+        if let Some(e) = ctx.cluster.engine.loaded(&idx.uuid) {
+            for s in &e.shards {
+                s.refresh()?;
+                s.shard.flush().map_err(crate::engine::convert::index_error)?;
+                s.counters.flush_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         ctx.cluster.ops.record(&idx.uuid, idx.number_of_shards() as usize, |c| {
             c.flush += 1;
             if force {
@@ -1493,6 +1709,9 @@ pub fn flush(ctx: &Ctx) -> EsResult<Reply> {
 pub fn refresh(ctx: &Ctx) -> EsResult<Reply> {
     let r = broadcast(ctx)?;
     for idx in open_targets(ctx)? {
+        if let Some(e) = ctx.cluster.engine.loaded(&idx.uuid) {
+            e.refresh_all()?;
+        }
         ctx.cluster.ops.record(&idx.uuid, idx.number_of_shards() as usize, |c| {
             c.refresh += 1;
             c.external_refresh += 1;
@@ -1505,6 +1724,7 @@ pub fn refresh(ctx: &Ctx) -> EsResult<Reply> {
 fn open_targets(ctx: &Ctx) -> EsResult<Vec<Arc<IndexMeta>>> {
     let st = ctx.state();
     let names = resolve_indices(ctx, IndicesOptions::STRICT_EXPAND_OPEN)?;
+    warn_system_access(ctx, &names);
     Ok(names.iter().filter_map(|n| st.metadata.indices.get(n)).filter(|i| !i.is_closed()).cloned().collect())
 }
 
@@ -1534,14 +1754,35 @@ pub fn forcemerge(ctx: &Ctx) -> EsResult<Reply> {
             description.push_str(&format!(", primaryOnly[{primary_only}]"));
         }
         let headers = ctx.request.header("x-opaque-id").map(|v| vec![("X-Opaque-Id".to_string(), v.to_string())]).unwrap_or_default();
-        let id = ctx.cluster.tasks.run_stored("indices:admin/forcemerge", &description, headers, || broadcast_value(ctx, primary_only));
+        let id = ctx.cluster.tasks.run_stored("indices:admin/forcemerge", &description, headers, || {
+            force_merge(ctx, max_segments, expunge, flush)?;
+            broadcast_value(ctx, primary_only)
+        });
         return Reply::ok(obj! { "task" => format!("{}:{id}", ctx.cluster.node.id) });
     }
+    force_merge(ctx, max_segments, expunge, flush)?;
     Reply::ok(broadcast_value(ctx, primary_only)?)
 }
 
-/// `_refresh`, `_flush`, `_forcemerge`: nothing to do yet for metadata-only indices; reports
-/// shards like Elasticsearch.
+/// Merges the shards of the request's open indices.
+fn force_merge(ctx: &Ctx, max_segments: i64, expunge: bool, flush: bool) -> EsResult<()> {
+    for idx in open_targets(ctx)? {
+        if let Some(e) = ctx.cluster.engine.loaded(&idx.uuid) {
+            for s in &e.shards {
+                s.refresh()?;
+                let max = if max_segments > 0 { Some(max_segments as usize) } else { None };
+                s.shard.force_merge(max, expunge).map_err(crate::engine::convert::index_error)?;
+                s.shard.refresh().map_err(crate::engine::convert::index_error)?;
+                if flush {
+                    s.shard.flush().map_err(crate::engine::convert::index_error)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `_refresh`, `_flush`, `_forcemerge`: the `_shards` summary of the request's open indices.
 pub fn broadcast(ctx: &Ctx) -> EsResult<Reply> {
     Reply::ok(broadcast_value(ctx, false)?)
 }

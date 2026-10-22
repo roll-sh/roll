@@ -22,7 +22,7 @@ use crate::memory::MemTracker;
 use crate::metrics::hll_tables::{BIAS_DATA, RAW_ESTIMATE_DATA};
 use crate::request::{AggDef, PathElement};
 use crate::util::{mix64, murmur3_x64_128};
-use crate::values::{BoundVs, BytesReader, DvOrds, NumReader, VsOpts, VsSpec, VsType, bind};
+use crate::values::{BoundVs, BytesReader, DvOrds, GeoReader, NumReader, VsOpts, VsSpec, VsType, bind};
 use crate::xparser::{Field, Tokens, XParser};
 
 const P2: u32 = 25;
@@ -324,7 +324,24 @@ pub fn create(def: &AggDef, spec: &CardinalitySpec, ctx: &mut BindCtx<'_>) -> Re
         nbatch: Default::default(),
         tracker: ctx.tracker(def),
         ram: 0,
-    }))
+        global_ords: false,
+        direct: false,
+        collectors: [0; 5],
+    }
+    .with_hint(spec.execution_hint.as_deref())))
+}
+
+impl CardinalityAgg {
+    /// `CardinalityAggregatorFactory`: keyword-like fields with ordinals run as
+    /// `GlobalOrdCardinalityAggregator` unless the hint asks for `direct` or
+    /// `segment_ordinals`.
+    fn with_hint(mut self, hint: Option<&str>) -> CardinalityAgg {
+        let h = hint.map(str::to_lowercase);
+        let ords = self.vs.has_ordinals() && self.vs.missing.is_none() && !self.vs.unmapped;
+        self.global_ords = ords && !matches!(h.as_deref(), Some("direct" | "segment_ordinals"));
+        self.direct = matches!(h.as_deref(), Some("direct"));
+        self
+    }
 }
 
 enum Reader {
@@ -332,6 +349,18 @@ enum Reader {
     Ords(DvOrds),
     Num { r: NumReader, double: bool },
     Bytes(BytesReader),
+    /// `geo_point`: Elasticsearch hashes each point's `GeoPoint.toString()` ("lat, lon" in Java
+    /// doubles; `FieldData.toString(MultiGeoPointValues)`). The missing point is not quantized.
+    Geo { r: GeoReader, missing: Option<u64>, text: String },
+}
+
+/// The hash of `GeoPoint.toString()` bytes.
+fn geo_hash(lat: f64, lon: f64, text: &mut String) -> u64 {
+    text.clear();
+    text.push_str(&crate::json::java_double(lat));
+    text.push_str(", ");
+    text.push_str(&crate::json::java_double(lon));
+    hash_bytes(text.as_bytes())
 }
 
 struct CardinalityAgg {
@@ -349,6 +378,12 @@ struct CardinalityAgg {
     nbatch: crate::values::NumBatch,
     tracker: MemTracker,
     ram: usize,
+    /// `profile`: the Elasticsearch aggregator this one stands for (by execution hint) and
+    /// the collectors it would have used per segment: empty, numeric, ordinals, ordinals
+    /// with too much overhead, string hashing.
+    global_ords: bool,
+    direct: bool,
+    collectors: [u64; 5],
 }
 
 impl CardinalityAgg {
@@ -373,7 +408,36 @@ impl CardinalityAgg {
 }
 
 impl Aggregator for CardinalityAgg {
+    fn profile_type(&self) -> &'static str {
+        if self.global_ords { "GlobalOrdCardinalityAggregator" } else { "CardinalityAggregator" }
+    }
+
+    fn profile_debug(&self) -> crate::json::Json {
+        use crate::json::Json;
+        if self.global_ords {
+            return Json::obj();
+        }
+        let c = |i: usize| Json::from(self.collectors[i]);
+        Json::obj()
+            .with("empty_collectors_used", c(0))
+            .with("numeric_collectors_used", c(1))
+            .with("ordinals_collectors_used", c(2))
+            .with("ordinals_collectors_overhead_too_high", c(3))
+            .with("string_hashing_collectors_used", c(4))
+    }
+
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
+        // `CardinalityAggregator.pickCollector`, for the profile's counts.
+        let slot = if self.vs.unmapped && self.vs.missing.is_none() {
+            0
+        } else if self.vs.vs_type.is_numeric() {
+            1
+        } else if self.vs.has_ordinals() && !self.direct {
+            2
+        } else {
+            4
+        };
+        self.collectors[slot] += 1;
         self.reader = if self.vs.unmapped && self.vs.missing.is_none() {
             Reader::None
         } else if self.vs.has_ordinals() && self.vs.missing.is_none() {
@@ -387,6 +451,13 @@ impl Aggregator for CardinalityAgg {
             Reader::Ords(dv)
         } else if self.vs.vs_type.is_numeric() {
             Reader::Num { r: self.vs.numeric_reader(seg)?, double: !self.vs.is_integral() }
+        } else if self.vs.vs_type == VsType::GeoPoint && self.vs.script.is_none() {
+            let mut text = String::new();
+            let missing = match &self.vs.missing {
+                Some(crate::values::MissingValue::Geo(lat, lon)) => Some(geo_hash(*lat, *lon, &mut text)),
+                _ => None,
+            };
+            Reader::Geo { r: GeoReader::open(&self.vs, seg)?.without_missing(), missing, text }
         } else {
             Reader::Bytes(self.vs.bytes_reader(seg)?)
         };
@@ -460,6 +531,27 @@ impl Aggregator for CardinalityAgg {
                             for h in hs {
                                 self.hll(b.ords[i]).collect(h);
                             }
+                        }
+                    }
+                }
+                Reader::Geo { r, missing, text } => {
+                    for i in 0..b.len() {
+                        let points = r.points(b.docs[i]);
+                        if points.is_empty() {
+                            if let Some(h) = *missing {
+                                self.hll(b.ords[i]).collect(h);
+                            }
+                            continue;
+                        }
+                        // Consecutive equal points (multi-valued docs, sorted) hash once.
+                        let mut last: Option<((f64, f64), u64)> = None;
+                        for &p in points {
+                            let h = match last {
+                                Some((lp, lh)) if lp == p => lh,
+                                _ => geo_hash(p.0, p.1, text),
+                            };
+                            last = Some((p, h));
+                            self.hll(b.ords[i]).collect(h);
                         }
                     }
                 }

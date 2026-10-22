@@ -22,7 +22,8 @@
 //! [`rounding`] (date rounding), [`internal`] (results, reduce, properties), [`metrics`],
 //! [`bucket`], [`pipeline`], [`memory`] (the request circuit breaker), [`range_field`] (range
 //! field doc values), and the Java numerics outputs depend on: [`jmath`], [`fdlibm`]
-//! (`StrictMath`), [`commons_math`] (`t_test`), [`h3`] (`geohex_grid`).
+//! (`StrictMath`), [`commons_math`] (`t_test`), [`h3`] (`geohex_grid`), [`jchar`] (Java
+//! `Character` classes for `categorize_text`'s analysis).
 //!
 //! See `docs/search/architecture.md` and `docs/search/contracts.md`.
 
@@ -38,12 +39,14 @@ pub mod h3;
 pub mod histogram_field;
 pub mod geo;
 pub mod internal;
+pub mod jchar;
 pub mod jmath;
 pub mod json;
 pub mod memory;
 pub mod metrics;
 pub mod parse;
 pub mod pipeline;
+pub mod profile;
 pub mod range_field;
 pub mod request;
 pub mod rounding;
@@ -110,6 +113,18 @@ impl AggRequest {
 /// Merges shard (or partially reduced) results. With `final_reduce`, applies sizes, empty
 /// buckets, `search.max_buckets` and the pipeline aggregations.
 pub fn reduce(parts: Vec<Aggs>, req: &AggRequest, opts: &ReduceOptions) -> Result<Aggs> {
+    // `QueryPhaseResultConsumer`: the shard results being reduced plus half of them again for
+    // the reduce's working set are charged to the request breaker (as "<reduce_aggs>") before
+    // reducing, partial reduces included; Elasticsearch caps buckets only in the final reduce.
+    let _reservation = match &opts.budget {
+        Some(budget) => {
+            let input: usize = parts.iter().map(Aggs::ram_bytes).sum();
+            let mut tracker = memory::MemTracker::with_label(Some(budget.clone()), "<reduce_aggs>");
+            tracker.ensure(input + input / 2)?;
+            Some(tracker)
+        }
+        None => None,
+    };
     let mut ctx = internal::ReduceCtx::new(opts);
     let mut out = Aggs::reduce_lists(parts, &mut ctx)?;
     if opts.final_reduce {

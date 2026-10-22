@@ -262,6 +262,19 @@ pub fn create(def: &AggDef, spec: &TermsSpec, ctx: &mut BindCtx<'_>) -> Result<B
         }
         _ => return Err(vs.unsupported("terms")),
     };
+    let mut subs = subs;
+    if collects_breadth_first(spec, &cfg, &kind, &subs, ctx) {
+        let sorting: Vec<&str> = cfg
+            .order
+            .elements()
+            .iter()
+            .filter_map(|o| match o {
+                BucketOrder::Agg { path, .. } => path.elements.first().map(|e| e.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        subs.defer(|name| sorting.contains(&name), ctx.tracker(def));
+    }
     Ok(Box::new(TermsAgg {
         cfg,
         vs,
@@ -273,6 +286,31 @@ pub fn create(def: &AggDef, spec: &TermsSpec, ctx: &mut BindCtx<'_>) -> Result<B
         searcher: ctx.searcher.clone(),
         tracker: ctx.tracker(def),
     }))
+}
+
+/// `SubAggCollectionMode` of a terms aggregation with sub-aggregations: as requested, else
+/// `pickSubAggCollectMode` (breadth-first unless the field's global ordinals number no more
+/// than `shard_size`); depth-first anyway when sub-aggregations need the scores of nested docs
+/// or a `time_series` aggregation needs `_tsid` order. Breadth-first defers every
+/// sub-aggregation the order doesn't read until the shard's buckets are chosen, so only the
+/// kept buckets' sub-aggregations are built (`BestBucketsDeferringCollector`).
+fn collects_breadth_first(spec: &TermsSpec, cfg: &TermsConfig, mode: &Mode, subs: &Subs, ctx: &BindCtx<'_>) -> bool {
+    if subs.is_empty() || ctx.time_series_request || (subs.needs_scores() && ctx.parents.contains(&"nested")) {
+        return false;
+    }
+    match spec.collect_mode {
+        Some(m) => m == CollectMode::BreadthFirst,
+        None => {
+            if cfg.shard_size >= i32::MAX as usize {
+                return false;
+            }
+            let max_ord = match mode {
+                Mode::Ords(st) => st.gords.as_ref().map_or(-1, |g| g.value_count() as i64),
+                _ => -1,
+            };
+            max_ord == -1 || max_ord > cfg.shard_size as i64
+        }
+    }
 }
 
 /// Settings every terms result carries.
@@ -612,6 +650,45 @@ pub fn compare_discard_nan(a: f64, b: f64, asc: bool) -> Ordering {
 }
 
 impl Aggregator for TermsAgg {
+    fn profile_type(&self) -> &'static str {
+        match &self.mode {
+            Mode::Ords(_) => "GlobalOrdinalsStringTermsAggregator",
+            Mode::Bytes(_) => "MapStringTermsAggregator",
+            Mode::Num(_) => "NumericTermsAggregator",
+        }
+    }
+
+    fn profile_debug(&self) -> Json {
+        let mut o = Json::obj();
+        match &self.mode {
+            Mode::Ords(st) => {
+                let strategy = match st.assign {
+                    Assign::Direct => "dense",
+                    Assign::Dense(..) => "remap using single bucket ords",
+                    Assign::Hash(_) => "remap using many bucket ords",
+                };
+                o.push("collection_strategy", Json::Str(strategy.into()));
+                o.push("total_buckets", Json::from(self.counts.iter().filter(|&&c| c > 0).count() as u64));
+                o.push("result_strategy", Json::Str("terms".into()));
+                o.push("has_filter", Json::Bool(st.filter.is_some()));
+            }
+            Mode::Bytes(st) => {
+                o.push("total_buckets", Json::from(st.ords.len() as u64));
+                o.push("result_strategy", Json::Str("terms".into()));
+                o.push("has_filter", Json::Bool(st.filter.is_some()));
+            }
+            Mode::Num(st) => {
+                o.push("total_buckets", Json::from(st.ords.len() as u64));
+                o.push("result_strategy", Json::Str(if st.double { "double_terms" } else { "long_terms" }.into()));
+                o.push("has_filter", Json::Bool(st.filter.is_some()));
+            }
+        }
+        let deferred = self.subs.deferred_names();
+        if !deferred.is_empty() {
+            o.push("deferred_aggregators", Json::Arr(deferred.into_iter().map(Json::Str).collect()));
+        }
+        o
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         match &mut self.mode {
@@ -1166,7 +1243,7 @@ pub fn agg_sort_value(name: &str, v: &AggValue, key: Option<&str>) -> Result<Sor
         let Some(k) = key else {
             return Err(AggError::illegal_argument("Missing value key in [null] which refers to a multi-value metric aggregation"));
         };
-        return v.multi_value(k).map(SortVal::Double);
+        return v.multi_value(name, k).map(SortVal::Double);
     }
     Err(AggError::illegal_argument(format!("Can't sort a [{}] aggregation [{name}]", v.type_name())))
 }
@@ -1383,7 +1460,8 @@ impl Internal for Terms {
             Ok(TermsBucket { key, doc_count, doc_count_error: err, aggs: Aggs::reduce_lists(aggs, ctx)? })
         };
         let mut result: Vec<TermsBucket>;
-        let final_order: BucketOrder;
+        // Partial reduces keep key order (for the next merge), the final one the request's.
+        let final_order = if ctx.is_final() { cfg.order.clone() } else { BucketOrder::Key { asc: key_asc } };
         if cfg.order.is_key_order() && cfg.min_doc_count <= 1 {
             result = Vec::new();
             for g in grouped {
@@ -1394,7 +1472,6 @@ impl Internal for Terms {
                     other_doc_count += g.iter().map(|b| b.doc_count as i64).sum::<i64>();
                 }
             }
-            final_order = if ctx.is_final() { cfg.order.clone() } else { BucketOrder::Key { asc: key_asc } };
         } else if ctx.is_final() {
             let candidates: Vec<Vec<TermsBucket>> =
                 grouped.into_iter().filter(|g| g.iter().map(|b| b.doc_count).sum::<u64>() >= cfg.min_doc_count).collect();
@@ -1462,13 +1539,11 @@ impl Internal for Terms {
                     result.push(reduce_group(slots[i].take().expect("group"), ctx)?);
                 }
             }
-            final_order = cfg.order.clone();
         } else {
             result = Vec::with_capacity(grouped.len());
             for g in grouped {
                 result.push(reduce_group(g, ctx)?);
             }
-            final_order = BucketOrder::Key { asc: key_asc };
         }
         if show_error {
             for r in &mut result {

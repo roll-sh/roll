@@ -313,13 +313,25 @@ impl BoundVs {
     }
 
     /// Whether numeric values are integers (longs).
+    ///
+    /// A numeric `missing` with a fraction makes any numeric source floating point
+    /// (`MissingValues.replaceMissing`: `isFloatingPoint() || missing % 1 != 0`), and an unmapped
+    /// numeric source is integral until then (`ValuesSource.Numeric.EMPTY`), so `terms` on an
+    /// unmapped field with `missing: 3` gives long terms.
     pub fn is_integral(&self) -> bool {
+        if self.vs_type == VsType::Numeric
+            && let Some(MissingValue::Double(m)) = self.missing
+            && m % 1.0 != 0.0
+        {
+            return false;
+        }
         if self.script.is_some() && self.field.is_none() {
             return matches!(self.script_value_type, Some(ValueType::Long | ValueType::Date | ValueType::Boolean));
         }
         match self.field.as_ref().map(|f| f.source) {
             Some(SourceType::Numeric(t)) => t.is_integral() && self.script.is_none(),
             Some(SourceType::Date { .. }) | Some(SourceType::Boolean) => self.script.is_none(),
+            None if self.unmapped && self.script.is_none() => true,
             _ => self.vs_type != VsType::Numeric,
         }
     }
@@ -386,6 +398,14 @@ pub fn bind(spec: &VsSpec, lookup: &dyn FieldLookup, default_type: VsType, timez
                             )));
                         }
                         vs_type = Some(t);
+                    }
+                    (_, None) if f.type_name == "text" => {
+                        // `TextFieldMapper.TextFieldType.fielddataBuilder` without fielddata.
+                        return Err(AggError::illegal_argument(format!(
+                            "Fielddata is disabled on [{0}] in [{1}]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{0}] in order to load field data by uninverting the inverted index. Note that this can use significant memory.",
+                            f.name,
+                            lookup.index_name()
+                        )));
                     }
                     (_, None) => {
                         return Err(AggError::illegal_argument(format!("Field [{}] of type [{}] is not supported for aggregation", f.name, f.type_name)));
@@ -533,13 +553,21 @@ pub fn parse_missing(vs: &BoundVs, m: &Json, now: i64) -> Result<MissingValue> {
 /// A geo point given as `"lat,lon"`, a geohash, `[lon, lat]` or `{lat, lon}`.
 pub fn parse_geo_point_text(v: &Json) -> Result<(f64, f64)> {
     match v {
+        // `GeoPoint.resetFromString`: WKT when it mentions "point", "lat,lon" with a comma,
+        // a geohash otherwise.
         Json::Str(s) => {
-            if let Some((a, b)) = s.split_once(',') {
+            if s.to_lowercase().contains("point") {
+                parse_wkt_point(s)
+            } else if let Some((a, b)) = s.split_once(',') {
                 let lat: f64 = a.trim().parse().map_err(|_| AggError::new(400, "parse_exception", "latitude must be a number"))?;
                 let lon: f64 = b.trim().parse().map_err(|_| AggError::new(400, "parse_exception", "longitude must be a number"))?;
                 Ok((lat, lon))
             } else {
-                crate::geo::geohash_decode(s).ok_or_else(|| AggError::new(400, "parse_exception", format!("unsupported symbol [{s}] in geohash [{s}]")))
+                crate::geo::geohash_decode(s).ok_or_else(|| {
+                    let bad = s.chars().find(|c| !"0123456789bcdefghjkmnpqrstuvwxyz".contains(*c)).map(String::from).unwrap_or_default();
+                    let msg = format!("unsupported symbol [{bad}] in geohash [{s}]");
+                    AggError::new(400, "parse_exception", msg.clone()).caused_by(AggError::illegal_argument(msg))
+                })
             }
         }
         Json::Arr(a) if a.len() >= 2 => Ok((a[1].as_f64().unwrap_or(f64::NAN), a[0].as_f64().unwrap_or(f64::NAN))),
@@ -549,6 +577,30 @@ pub fn parse_geo_point_text(v: &Json) -> Result<(f64, f64)> {
             Ok((lat, lon))
         }
         _ => Err(AggError::new(400, "parse_exception", format!("unsupported geo point [{v}]"))),
+    }
+}
+
+/// A WKT `POINT (lon lat)` (`ignore_z_value` false, as for aggregation origins).
+fn parse_wkt_point(s: &str) -> Result<(f64, f64)> {
+    let invalid = |cause: Option<AggError>| {
+        let e = AggError::new(400, "parse_exception", "Invalid WKT format");
+        match cause {
+            Some(c) => e.caused_by(c),
+            None => e,
+        }
+    };
+    let t = s.trim();
+    let rest = if t.len() >= 5 && t[..5].eq_ignore_ascii_case("point") { t[5..].trim_start() } else { return Err(invalid(None)) };
+    let inner = rest.strip_prefix('(').and_then(|r| r.trim_end().strip_suffix(')')).ok_or_else(|| invalid(None))?;
+    let nums: Vec<&str> = inner.split_whitespace().collect();
+    let parse = |x: &str| x.parse::<f64>().map_err(|_| invalid(None));
+    match nums.as_slice() {
+        [lon, lat] => Ok((parse(lat)?, parse(lon)?)),
+        [_, _, z] => {
+            let z = parse(z)?;
+            Err(invalid(Some(AggError::illegal_argument(format!("found Z value [{}] but [ignore_z_value] parameter is [false]", crate::json::java_double(z))))))
+        }
+        _ => Err(invalid(None)),
     }
 }
 
@@ -595,6 +647,26 @@ impl DvNum {
             DvNum::Single(n) => n.docs().contains(doc),
             DvNum::Multi(s) => s.docs().contains(doc),
         }
+    }
+
+    /// The first doc `>= from` that has a value ([`search_codec::NO_MORE_DOCS`] if none).
+    pub fn next_valued_doc(&self, from: u32) -> u32 {
+        match self {
+            DvNum::None => search_codec::NO_MORE_DOCS,
+            DvNum::Single(n) => n.docs().next_from(from),
+            DvNum::Multi(s) => s.docs().next_from(from),
+        }
+    }
+
+    /// The smallest value of `doc`.
+    pub fn first_value(&self, doc: u32) -> Option<i64> {
+        let mut out = None;
+        self.for_each(doc, |v| {
+            if out.is_none() {
+                out = Some(v);
+            }
+        });
+        out
     }
 
     /// Whether every doc has at most one value.
@@ -1139,6 +1211,13 @@ impl GeoReader {
             _ => None,
         };
         Ok(GeoReader { dv, missing, buf: Vec::new() })
+    }
+
+    /// Drops the `missing` point: for consumers that read it unquantized (`cardinality` hashes
+    /// the parsed point's text).
+    pub fn without_missing(mut self) -> GeoReader {
+        self.missing = None;
+        self
     }
 
     /// The points of `doc` as `(lat, lon)` (decoded `LatLonDocValuesField` values).

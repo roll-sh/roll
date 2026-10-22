@@ -585,6 +585,74 @@ impl<'a> XParser<'a> {
         Ok(())
     }
 
+    /// `ConstructingObjectParser.parse` over [`object`](Self::object): `ctor_args` are the
+    /// indices (into `fields`) of the constructor arguments, `required` those of them that must
+    /// be present. `on(p, Ctor::Field(i))` parses field `i` and returns `Ok(Some(e))` when the
+    /// value parsed but its setter rejected it. The target is built (`on(p, Ctor::Build)`)
+    /// as soon as every constructor argument has arrived, or at the end of the object; until
+    /// then setter failures are queued and replayed (last first) after the build, which is where
+    /// Elasticsearch reports them. The error shapes follow `buildTarget`: a failing
+    /// constructor gives "Failed to build [x] after last required field arrived" without a
+    /// location, a failing queued setter "[l:c] failed to build [x] …" around
+    /// "[l:c] [x] failed to parse field [f]".
+    pub fn constructing(
+        &mut self,
+        parser_name: &str,
+        fields: &[Field],
+        ctor_args: &[usize],
+        required: &[usize],
+        mut on: impl FnMut(&mut XParser<'a>, Ctor) -> Result<Option<AggError>>,
+    ) -> Result<()> {
+        let mut seen = vec![false; fields.len()];
+        let mut built = false;
+        let mut queued: Vec<((usize, usize), &'static str, AggError)> = Vec::new();
+        fn build<'a>(
+            p: &mut XParser<'a>,
+            name: &str,
+            queued: &mut Vec<((usize, usize), &'static str, AggError)>,
+            on: &mut impl FnMut(&mut XParser<'a>, Ctor) -> Result<Option<AggError>>,
+        ) -> Result<()> {
+            if let Err(e) = on(p, Ctor::Build) {
+                return Err(if e.kind == "x_content_parse_exception" {
+                    let prefix = location_prefix(&e.reason).to_string();
+                    AggError::new(400, "x_content_parse_exception", format!("{prefix}failed to build [{name}] after last required field arrived")).caused_by(e)
+                } else {
+                    AggError::new(400, "x_content_parse_exception", format!("Failed to build [{name}] after last required field arrived")).caused_by(e)
+                });
+            }
+            if let Some(((l, c), field, e)) = queued.pop() {
+                let inner = AggError::x_content((l, c), format!("[{name}] failed to parse field [{field}]")).caused_by(e);
+                return Err(AggError::new(400, "x_content_parse_exception", format!("[{l}:{c}] failed to build [{name}] after last required field arrived")).caused_by(inner));
+            }
+            Ok(())
+        }
+        self.object(parser_name, fields, |p, i| {
+            let loc = p.token_location();
+            if let Some(e) = on(p, Ctor::Field(i))? {
+                if built {
+                    return Err(e);
+                }
+                queued.push((loc, fields[i].name, e));
+            }
+            if !built && ctor_args.contains(&i) {
+                seen[i] = true;
+                if ctor_args.iter().all(|&a| seen[a]) {
+                    built = true;
+                    build(p, parser_name, &mut queued, &mut on)?;
+                }
+            }
+            Ok(())
+        })?;
+        if built {
+            return Ok(());
+        }
+        let missing: Vec<&str> = required.iter().filter(|&&r| !seen[r]).map(|&r| fields[r].name).collect();
+        if !missing.is_empty() {
+            return Err(AggError::illegal_argument(format!("Required [{}]", missing.join(", "))));
+        }
+        build(self, parser_name, &mut queued, &mut on)
+    }
+
     /// `AbstractObjectParser.parseArray`: one value, or each item of an array.
     pub fn array_items<T>(&mut self, mut item: impl FnMut(&mut XParser<'a>) -> Result<T>) -> Result<Vec<T>> {
         let t = self.token();
@@ -604,6 +672,27 @@ impl<'a> XParser<'a> {
         }
         Ok(out)
     }
+}
+
+/// What [`XParser::constructing`] asks its callback for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ctor {
+    /// Parse the value of field `i`.
+    Field(usize),
+    /// Every constructor argument is in (or the object ended): build and validate.
+    Build,
+}
+
+/// The `[line:col] ` an `XContentParseException` reason starts with (or "").
+fn location_prefix(reason: &str) -> &str {
+    if let Some(rest) = reason.strip_prefix('[')
+        && let Some(end) = rest.find("] ")
+        && rest[..end].split(':').count() == 2
+        && rest[..end].bytes().all(|b| b.is_ascii_digit() || b == b':')
+    {
+        return &reason[..end + 3];
+    }
+    ""
 }
 
 /// A number's text as Jackson gives it for `text()`.

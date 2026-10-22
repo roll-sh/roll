@@ -391,7 +391,7 @@ impl<'a> Fc<'a> {
 
     fn patch(&mut self, at: usize, target: u32) {
         match &mut self.code[at] {
-            Insn::Jmp { t } | Insn::Jf { t, .. } | Insn::Jt { t, .. } | Insn::JNull { t, .. } | Insn::JNonNull { t, .. } | Insn::JCmpFalse { t, .. } | Insn::JCmp { t, .. } | Insn::IterNext { t, .. } => {
+            Insn::Jmp { t } | Insn::Jf { t, .. } | Insn::Jt { t, .. } | Insn::JNull { t, .. } | Insn::JNonNull { t, .. } | Insn::JCmpFalse { t, .. } | Insn::JCmp { t, .. } | Insn::IterNext { t, .. } | Insn::DocGet { t, .. } => {
                 *t = target
             }
             _ => panic!("patching a non-jump"),
@@ -708,6 +708,16 @@ impl<'a> Fc<'a> {
             },
             TStmt::Throw(x, _) => {
                 let r = self.expr(x);
+                // the JVM's message names where `athrow`'s operand came from
+                let mut inner = x;
+                while let TK::Cast(i, _) = &inner.k {
+                    inner = i;
+                }
+                let desc = if matches!(inner.k, TK::Null) { Some("\"null\"".to_string()) } else { self.describe(inner) };
+                if let Some(d) = desc {
+                    let pc = self.code.len() as u32;
+                    self.null_descs.push((pc, d.into()));
+                }
                 self.emit(Insn::Throw { s: r });
             }
             TStmt::Break => {
@@ -1249,36 +1259,25 @@ impl<'a> Fc<'a> {
                     self.emit(cast_insn(d, d, ci, &self.pool.casts[ci as usize]));
                 }
             }
+            TK::InvokeDyn { recv, name, args, null_safe: false, result }
+                if &**name == "get" && args.len() == 1 && self.doc_literal(recv).is_some() && local_reg(&args[0]).is_some() && doc_get_to(result.as_ref()).is_some() =>
+            {
+                // `doc['field'].get(i)`: read the doc values buffer when it can, else the call
+                let (field, _) = self.doc_literal(recv).unwrap();
+                let fi = self.pool.doc_field(&field);
+                let i = local_reg(&args[0]).unwrap();
+                let sig = if result.is_some() { e.ty } else { Ty::DEF };
+                self.doc_get(fi, i, d, result.as_ref(), |s| s.invoke_dyn(e.loc, sig, recv, name, args, false, result.as_ref(), d));
+            }
             TK::InvokeDyn { recv, name, args, null_safe, result } => {
-                let m = self.mark();
-                let a = self.alloc_n(args.len() + 1);
-                self.expr_to(recv, a);
-                let mut skip = None;
-                self.cur = e.loc;
-                if *null_safe {
-                    self.emit(Insn::Null { d });
-                    skip = Some(self.emit(Insn::JNull { s: a, t: 0 }));
+                // `doc['field'].contains(x)`: the fast path reads the field's buffer
+                if &**name == "contains"
+                    && let Some((field, _)) = self.doc_literal(recv)
+                {
+                    self.pool.doc_field(&field);
                 }
-                for (i, v) in args.iter().enumerate() {
-                    self.expr_to(v, a + 1 + i as u16);
-                }
-                let name = self.pool.name(name);
-                let site = self.pool.dyn_sites;
-                self.pool.dyn_sites += 1;
-                // the call site's static type, which `asType` converts the target method to
-                let lambda = |x: &TExpr| matches!(x.k, TK::Lambda { .. } | TK::FuncRef(_));
-                let arg_tys = args.iter().map(|x| if lambda(x) { Ty::DEF } else { x.ty }).collect();
-                self.pool.dyn_sigs.push((arg_tys, if result.is_some() { e.ty } else { Ty::DEF }));
-                let res = match result {
-                    Some(c) => self.pool.cast(c.clone()),
-                    None => u32::MAX,
-                };
-                self.emit(Insn::CallDyn { d, name, a, n: args.len() as u8 + 1, site, res });
-                if let Some(j) = skip {
-                    let h = self.here();
-                    self.patch(j, h);
-                }
-                self.release(m);
+                let sig = if result.is_some() { e.ty } else { Ty::DEF };
+                self.invoke_dyn(e.loc, sig, recv, name, args, *null_safe, result.as_ref(), d);
             }
             TK::CallFunc { f, args } => {
                 self.cur = e.loc;
@@ -1410,7 +1409,8 @@ impl<'a> Fc<'a> {
                     let r = self.expr(recv);
                     self.cur = loc;
                     // as compiling the key would: a no-op cast node moves the location
-                    if let TK::Cast(_, Cast::Noop) = &key.k {
+                    let noop_key = matches!(&key.k, TK::Cast(_, Cast::Noop));
+                    if noop_key {
                         self.cur = key.loc;
                     }
                     let k = self.pool.konst(ConstVal::Str(ks.clone()));
@@ -1418,6 +1418,12 @@ impl<'a> Fc<'a> {
                     self.pool.map_sites += 1;
                     self.null_desc(recv);
                     self.emit(Insn::MapGetK { d, r, k, m, site });
+                    // the get itself fails at the key, but code after it that records no
+                    // position of its own (`Def.normalizeIndex` of an outer brace) reports the
+                    // brace
+                    if noop_key {
+                        self.cur = loc;
+                    }
                     self.release(mk);
                     return;
                 }
@@ -1456,23 +1462,81 @@ impl<'a> Fc<'a> {
                 self.null_desc(recv);
                 self.emit(Insn::ArrLen { d, r });
             }
-            Place::DefIdx { recv, idx, result } => {
-                // index normalization runs before Elasticsearch writes the brace's line number,
-                // so its errors point at whatever wrote the last one
-                let r = self.expr(recv);
-                let i0 = self.expr(idx);
-                let i = self.alloc();
-                let t = self.index_site(idx.ty);
-                self.emit(Insn::DefNorm { d: i, r, i: i0, t });
-                self.cur = loc;
-                let res = match result {
-                    Some(c) => self.pool.cast(c.clone()),
-                    None => u32::MAX,
-                };
-                self.emit(Insn::GetIdx { d, r, i, res });
+            Place::DefIdx { recv, idx, result } if self.doc_literal(recv).is_some() && local_reg(idx).is_some() && doc_get_to(result.as_ref()).is_some() => {
+                // `doc['field'][i]`: read the doc values buffer when it can, else the brace access
+                let (field, _) = self.doc_literal(recv).unwrap();
+                let fi = self.pool.doc_field(&field);
+                let i = local_reg(idx).unwrap();
+                self.doc_get(fi, i, d, result.as_ref(), |s| s.def_idx(recv, idx, result.as_ref(), loc, d));
             }
+            Place::DefIdx { recv, idx, result } => self.def_idx(recv, idx, result.as_ref(), loc, d),
         }
         self.release(mk);
+    }
+
+    /// A `def` brace load (`x[i]`).
+    fn def_idx(&mut self, recv: &TExpr, idx: &TExpr, result: Option<&Cast>, loc: u32, d: Reg) {
+        let mk = self.mark();
+        // index normalization runs before Elasticsearch writes the brace's line number,
+        // so its errors point at whatever wrote the last one
+        let r = self.expr(recv);
+        let i0 = self.expr(idx);
+        let i = self.alloc();
+        let t = self.index_site(idx.ty);
+        self.emit(Insn::DefNorm { d: i, r, i: i0, t });
+        self.cur = loc;
+        let res = match result {
+            Some(c) => self.pool.cast(c.clone()),
+            None => u32::MAX,
+        };
+        self.emit(Insn::GetIdx { d, r, i, res });
+        self.release(mk);
+    }
+
+    /// A `def` method call; `sig` is the call site's static return type, `result` the cast of
+    /// its result.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_dyn(&mut self, loc: u32, sig: Ty, recv: &TExpr, name: &str, args: &[TExpr], null_safe: bool, result: Option<&Cast>, d: Reg) {
+        let m = self.mark();
+        let a = self.alloc_n(args.len() + 1);
+        self.expr_to(recv, a);
+        let mut skip = None;
+        self.cur = loc;
+        if null_safe {
+            self.emit(Insn::Null { d });
+            skip = Some(self.emit(Insn::JNull { s: a, t: 0 }));
+        }
+        for (i, v) in args.iter().enumerate() {
+            self.expr_to(v, a + 1 + i as u16);
+        }
+        let name = self.pool.name(name);
+        let site = self.pool.dyn_sites;
+        self.pool.dyn_sites += 1;
+        // the call site's static type, which `asType` converts the target method to
+        let lambda = |x: &TExpr| matches!(x.k, TK::Lambda { .. } | TK::FuncRef(_));
+        let arg_tys = args.iter().map(|x| if lambda(x) { Ty::DEF } else { x.ty }).collect();
+        self.pool.dyn_sigs.push((arg_tys, sig));
+        let res = match result {
+            Some(c) => self.pool.cast(c.clone()),
+            None => u32::MAX,
+        };
+        self.emit(Insn::CallDyn { d, name, a, n: args.len() as u8 + 1, site, res });
+        if let Some(j) = skip {
+            let h = self.here();
+            self.patch(j, h);
+        }
+        self.release(m);
+    }
+
+    /// `DocGet` (converting to the result's type itself) and the generic code it falls back
+    /// to, which it jumps over.
+    fn doc_get(&mut self, field: u32, i: Reg, d: Reg, result: Option<&Cast>, generic: impl FnOnce(&mut Self)) {
+        // `DocGet` never throws: the position stays what the generic code expects
+        let p = doc_get_to(result).unwrap_or(0);
+        let j = self.emit(Insn::DocGet { d, field, i, t: 0, p });
+        generic(self);
+        let h = self.here();
+        self.patch(j, h);
     }
 
     /// Recognizes `doc['literal'].value|.empty` and `doc['literal'].size()` over the context's
@@ -1858,6 +1922,31 @@ fn cmp_op(op: Op, t: Ty) -> Option<CmpOp> {
 /// The instruction for a conversion: the common widening conversions to `double`, `long` and
 /// `int` get their own opcodes (one dispatch, no look at the cast description) and fall back to
 /// the generic [`Insn::Cast`] for every other input.
+/// The conversion `DocGet` applies for a `def` result cast: 0 (none, the value as it is) or
+/// 1 + the `Prim`. Only conversions the call site's `asType` allows from every boxed value it
+/// handles qualify (`Long` → `long`/`float`/`double`, `Double` → `double`); `DocGet` checks
+/// the pair at run time and leaves the rest (`int x = …`: a `WrongMethodTypeException`) to the
+/// generic code.
+fn doc_get_to(result: Option<&Cast>) -> Option<u8> {
+    use crate::ir::Prim;
+    match result {
+        None => Some(0),
+        Some(Cast::DefTo { to: p @ (Prim::Long | Prim::Float | Prim::Double), explicit: false, boxed: false }) => Some(p.index() + 1),
+        Some(_) => None,
+    }
+}
+
+/// The register of a local read with no side effects (an index that may be read twice).
+fn local_reg(e: &TExpr) -> Option<Reg> {
+    match &strip_noop(e).k {
+        TK::Load(p) => match &**p {
+            Place::Local { slot } if e.ty == Ty::INT || e.ty == Ty::DEF => Some(*slot as Reg),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn cast_insn(d: Reg, s: Reg, c: u32, cast: &Cast) -> Insn {
     use crate::ir::Prim;
     match *cast {

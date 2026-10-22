@@ -22,7 +22,8 @@ const DAY: i64 = 86_400;
 /// Whether a zone's rules never change its offset (`ZoneRules.isFixedOffset`).
 pub fn is_fixed(z: &Zone) -> bool {
     match z {
-        Zone::Offset(_) | Zone::Region(_, None, _) => true,
+        Zone::Offset(_) => true,
+        Zone::Region(id, None, _) => !systemv_dst(id),
         Zone::Region(id, Some(_), _) => id.starts_with("Etc/"),
     }
 }
@@ -146,6 +147,7 @@ pub fn same_rules(a: &Zone, b: &Zone) -> bool {
 pub fn standard_offset(z: &Zone, epoch: i64) -> i32 {
     match z {
         Zone::Region(_, Some(tz), _) => tz_offsets(tz, epoch).1,
+        Zone::Region(_, None, std) => *std,
         _ => z.offset_at(epoch),
     }
 }

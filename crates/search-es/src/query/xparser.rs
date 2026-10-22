@@ -308,7 +308,8 @@ impl<'a> XParser<'a> {
 
     // ---- locations ----
 
-    fn source(&self) -> &[u8] {
+    /// The raw body (or the value's compact JSON when there is none).
+    pub fn source(&self) -> &[u8] {
         match self.src {
             Some(s) => s,
             None => self.owned_src.get_or_init(|| {
@@ -319,7 +320,8 @@ impl<'a> XParser<'a> {
         }
     }
 
-    fn path(&self) -> Vec<Seg<'a>> {
+    /// The current token's path in the body.
+    pub fn path(&self) -> Vec<Seg<'a>> {
         let mut path = if self.src.is_some() { self.base.clone() } else { Vec::new() };
         for f in &self.frames {
             match f {
@@ -785,24 +787,96 @@ pub fn java_parse_float(s: &str) -> EsResult<f32> {
     java_parse_double(s).map(|d| d as f32)
 }
 
-/// `AbstractXContentParser.toLong` with coercion: integers, or decimals truncated.
-fn java_to_long(s: &str) -> EsResult<i64> {
+/// `AbstractXContentParser.toLong` with coercion: integers, or decimals truncated as a
+/// `BigDecimal` is (exactly, toward zero), so no digit is lost to a double.
+pub fn java_to_long(s: &str) -> EsResult<i64> {
     if let Some(v) = crate::units::parse_java_long(s) {
         return Ok(v);
     }
-    let out_of_range = || EsError::illegal_argument(format!("Value [{s}] is out of range for a long"));
-    let Some(d) = crate::units::parse_java_double(s).filter(|_| !s.trim().is_empty() && s.trim() == s) else {
-        return Err(EsError::illegal_argument(format!("For input string: \"{s}\"")));
+    big_decimal_to_long(s).map_err(|e| match e {
+        BigDecimalError::Format => EsError::illegal_argument(format!("For input string: \"{s}\"")),
+        BigDecimalError::Range => EsError::illegal_argument(format!("Value [{s}] is out of range for a long")),
+    })
+}
+
+#[derive(Debug, PartialEq)]
+enum BigDecimalError {
+    Format,
+    Range,
+}
+
+/// `new BigDecimal(s)` (sign, digits with an optional point, optional exponent) truncated to a
+/// long as `toLong` does: a scale below -19 is out of range, one above 19 is zero.
+fn big_decimal_to_long(s: &str) -> Result<i64, BigDecimalError> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let neg = match b.first() {
+        Some(b'-') => {
+            i = 1;
+            true
+        }
+        Some(b'+') => {
+            i = 1;
+            false
+        }
+        _ => false,
     };
-    if !d.is_finite() {
-        return Err(EsError::illegal_argument(format!("For input string: \"{s}\"")));
+    let mut digits: Vec<u8> = Vec::with_capacity(b.len());
+    let mut frac = 0i64;
+    let mut point = false;
+    while i < b.len() {
+        match b[i] {
+            c @ b'0'..=b'9' => {
+                digits.push(c - b'0');
+                if point {
+                    frac += 1;
+                }
+            }
+            b'.' if !point => point = true,
+            _ => break,
+        }
+        i += 1;
     }
-    let t = d.trunc();
-    // 2^63 is exact as a double: anything at or above it (or below -2^63) doesn't fit.
-    if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&t) {
-        return Err(out_of_range());
+    if digits.is_empty() {
+        return Err(BigDecimalError::Format);
     }
-    Ok(t as i64)
+    let mut exp = 0i64;
+    if i < b.len() {
+        if !matches!(b[i], b'e' | b'E') {
+            return Err(BigDecimalError::Format);
+        }
+        let rest = &s[i + 1..];
+        let body = rest.strip_prefix(['+', '-']).unwrap_or(rest);
+        if body.is_empty() || !body.bytes().all(|c| c.is_ascii_digit()) {
+            return Err(BigDecimalError::Format);
+        }
+        // The exponent must fit an int.
+        exp = rest.parse::<i32>().map_err(|_| BigDecimalError::Format)? as i64;
+    }
+    let scale = frac - exp;
+    if scale < -19 {
+        return Err(BigDecimalError::Range);
+    }
+    if scale > 19 {
+        return Ok(0);
+    }
+    // The integer part: drop `scale` fraction digits, or append `-scale` zeros.
+    let keep = digits.len() as i64 - scale.max(0);
+    let mut int: Vec<u8> = if keep <= 0 { Vec::new() } else { digits[..keep as usize].to_vec() };
+    if scale < 0 {
+        int.extend(std::iter::repeat_n(0u8, (-scale) as usize));
+    }
+    let first = int.iter().position(|d| *d != 0).unwrap_or(int.len());
+    let int = &int[first..];
+    if int.len() > 19 {
+        return Err(BigDecimalError::Range);
+    }
+    let v = int.iter().fold(0u128, |acc, d| acc * 10 + u128::from(*d));
+    let limit = if neg { 1u128 << 63 } else { (1u128 << 63) - 1 };
+    if v > limit {
+        return Err(BigDecimalError::Range);
+    }
+    Ok(if neg { (v as i128).wrapping_neg() as i64 } else { v as i64 })
 }
 
 /// A Java `float` as Elasticsearch prints it (`Float.toString`).
@@ -826,6 +900,26 @@ pub fn is_illegal_argument(e: &EsError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decimal_strings_truncate_exactly() {
+        assert_eq!(java_to_long("9007199254740995.7").unwrap(), 9007199254740995);
+        assert_eq!(java_to_long("9223372036854775807.5").unwrap(), i64::MAX);
+        assert_eq!(java_to_long("-9223372036854775808.9").unwrap(), i64::MIN);
+        assert_eq!(java_to_long("-1.9").unwrap(), -1);
+        assert_eq!(java_to_long("1e3").unwrap(), 1000);
+        assert_eq!(java_to_long("1.5E1").unwrap(), 15);
+        assert_eq!(java_to_long("123e-2").unwrap(), 1);
+        assert_eq!(java_to_long(".5").unwrap(), 0);
+        assert_eq!(java_to_long("1e-25").unwrap(), 0);
+        assert_eq!(java_to_long("+7.").unwrap(), 7);
+        assert_eq!(java_to_long("9223372036854775808").unwrap_err().reason(), "Value [9223372036854775808] is out of range for a long");
+        assert_eq!(java_to_long("0e25").unwrap_err().reason(), "Value [0e25] is out of range for a long");
+        assert_eq!(java_to_long("1e19").unwrap_err().reason(), "Value [1e19] is out of range for a long");
+        for bad in ["abc", "1.2.3", "NaN", "Infinity", " 1", "1d", "0x10", "", "-", "1e", "1e+"] {
+            assert_eq!(java_to_long(bad).unwrap_err().reason(), format!("For input string: \"{bad}\""), "{bad}");
+        }
+    }
 
     fn tokens(src: &str) -> Vec<(Token, Option<String>, (usize, usize))> {
         let v = crate::json::parse(src.as_bytes()).unwrap().unwrap();

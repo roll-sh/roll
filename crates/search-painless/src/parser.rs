@@ -1036,8 +1036,12 @@ impl<'a> Parser<'a> {
         if self.eat(Tok::RBrace) {
             return Ok(Expr { loc, kind: ExprKind::ListInit(Vec::new()) });
         }
-        if self.kind() == Tok::Colon && self.la(1) == Tok::RBrace {
+        if self.kind() == Tok::Colon {
+            // only `[:]` starts with a colon: prediction fails at the token after it
             self.bump();
+            if self.kind() != Tok::RBrace {
+                return Err(self.no_viable());
+            }
             self.bump();
             return Ok(Expr { loc, kind: ExprKind::MapInit(Vec::new()) });
         }
@@ -1208,6 +1212,8 @@ mod tests {
         assert_eq!(err("x."), (2, "unexpected end of script.".into()));
         assert_eq!(err("if (true) { return 1 "), (21, "unexpected end of script.".into()));
         assert_eq!(err("return [1,2"), (11, "unexpected end of script.".into()));
+        assert_eq!(err("return [:"), (9, "unexpected end of script.".into()));
+        assert_eq!(err("return [:5]"), (9, "invalid sequence of tokens near ['5'].".into()));
         assert_eq!(err("foo("), (4, "unexpected end of script.".into()));
         assert_eq!(err("int x = ;"), (8, "invalid sequence of tokens near [';'].".into()));
         assert_eq!(err("return 1 +"), (10, "unexpected end of script.".into()));

@@ -69,7 +69,8 @@ pub struct PathElement {
     pub metric: Option<String>,
 }
 
-/// `AggregationPath`: `agg1>agg2[key]>agg3.metric`.
+/// `AggregationPath`: `agg1>agg2[key]>agg3.metric`. [`AggPath::parse`] never returns an empty
+/// path, so `elements[0]` always exists.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AggPath {
     pub elements: Vec<PathElement>,
@@ -146,6 +147,11 @@ impl AggPath {
                     None => out.push(PathElement { full: element.to_string(), name: element.to_string(), key: None, metric: None }),
                 }
             }
+        }
+        if out.is_empty() {
+            // `new AggregationPath(tokens)` refuses an empty path ("", ">", " > "); its
+            // `toString` joins the (no) elements, so the text is always empty.
+            return Err(AggError::illegal_argument("Invalid path []"));
         }
         Ok(AggPath { elements: out, text: path.to_string() })
     }
@@ -387,6 +393,9 @@ mod tests {
         assert_eq!(p.elements[0].key.as_deref(), Some("'x'"));
         assert_eq!(p.elements[0].metric.as_deref(), Some("avg"));
         assert!(AggPath::parse("a.").is_err());
+        for empty in ["", ">", " > ", ">>"] {
+            assert_eq!(AggPath::parse(empty).unwrap_err().reason, "Invalid path []", "{empty:?}");
+        }
         assert_eq!(AggPath::parse(".a").unwrap_err().reason, "Invalid path element [.a] in path [.a]");
         let p = AggPath::parse("the_percentiles[99.9]").unwrap();
         assert_eq!(p.elements[0].key.as_deref(), Some("99.9"));

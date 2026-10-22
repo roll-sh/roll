@@ -2,9 +2,13 @@
 //!
 //! - A [`Catalog`] answers `lookup(cluster) -> ClusterSpec`: the control plane implements it in
 //!   production; [`StaticCatalog`] is a fixed map for local use and tests.
-//! - A [`StoreProvider`] hands out each cluster's [`MetaStore`]. `search-store` will implement
-//!   it over object storage; [`MemoryStores`] keeps states in memory, so an unloaded cluster
-//!   wakes with its metadata intact for the life of the process.
+//! - A [`StoreProvider`] hands out each cluster's [`MetaStore`] and, when it keeps clusters in
+//!   `search-store` ([`crate::ObjectStores`]), the node's [`search_store::Store`] for the shards
+//!   ([`StoreProvider::data`]). [`MemoryStores`] keeps states in memory (and shards stay in
+//!   memory too), so an unloaded cluster wakes with its metadata intact for the life of the
+//!   process.
+//! - Secrets can be given as SHA-256 hashes ([`Credential::hashed`]), so a catalog never has to
+//!   hold them in the clear; either way they are compared in constant time.
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -20,13 +24,37 @@ pub struct Credential {
     pub user: Option<String>,
     /// For `Authorization: ApiKey`, the key id (`None`: the cluster name is the id).
     pub api_key_id: Option<String>,
+    /// The secret in the clear (empty when only its hash is known).
     pub secret: String,
+    /// SHA-256 of the secret; when set, presented secrets are hashed and compared with it.
+    pub secret_sha256: Option<[u8; 32]>,
 }
 
 impl Credential {
     pub fn password(secret: impl Into<String>) -> Credential {
-        Credential { user: None, api_key_id: None, secret: secret.into() }
+        Credential { user: None, api_key_id: None, secret: secret.into(), secret_sha256: None }
     }
+
+    /// A credential known only by the SHA-256 of its secret.
+    pub fn hashed(sha256: [u8; 32]) -> Credential {
+        Credential { user: None, api_key_id: None, secret: String::new(), secret_sha256: Some(sha256) }
+    }
+
+    pub fn for_user(mut self, user: impl Into<String>) -> Credential {
+        self.user = Some(user.into());
+        self
+    }
+
+    pub fn for_api_key(mut self, id: impl Into<String>) -> Credential {
+        self.api_key_id = Some(id.into());
+        self
+    }
+}
+
+/// SHA-256 of a secret (for [`Credential::hashed`]).
+pub fn secret_hash(secret: &str) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(secret.as_bytes()).into()
 }
 
 /// What a node needs to know to serve a cluster.
@@ -44,6 +72,14 @@ pub struct ClusterSpec {
     pub max_body_bytes: Option<usize>,
     /// Default of `action.destructive_requires_name` (Elasticsearch's default is `true`).
     pub destructive_requires_name: bool,
+    /// Requests per second (token bucket, burst of `max(1, rate)`); `None`: unlimited.
+    pub max_requests_per_second: Option<f64>,
+    /// Request body bytes in flight at once (indexing pressure); `None`: twice the body limit.
+    pub max_in_flight_bytes: Option<usize>,
+    /// Memory the loaded cluster may hold in indexing buffers, in-heap segments and version
+    /// maps; past it the node commits the cluster's shards (moving that memory to segment
+    /// files) at its next check. `None`: no limit of its own.
+    pub max_resident_bytes: Option<u64>,
 }
 
 impl ClusterSpec {
@@ -56,6 +92,9 @@ impl ClusterSpec {
             max_in_flight: 64,
             max_body_bytes: None,
             destructive_requires_name: true,
+            max_requests_per_second: None,
+            max_in_flight_bytes: None,
+            max_resident_bytes: None,
         }
     }
 
@@ -106,6 +145,18 @@ pub trait StoreProvider: Send + Sync + 'static {
     async fn delete(&self, cluster: &str) -> anyhow::Result<()>;
     /// The cluster was unloaded from this node: drop whatever the provider tracks for it.
     async fn release(&self, _cluster: &str) {}
+    /// Makes `child` a branch of `parent` as of `at_ms` (ms since the epoch; `None`: now).
+    async fn branch_at(&self, parent: &str, child: &str, at_ms: Option<u64>) -> anyhow::Result<()> {
+        match at_ms {
+            None => self.branch(parent, child).await,
+            Some(_) => anyhow::bail!("point-in-time branches need object storage"),
+        }
+    }
+    /// The node's search-store, when clusters live in it: their shards are then durable too
+    /// (WAL, segments, manifests). `None`: shards stay in memory. Wrappers must forward it.
+    fn data(&self) -> Option<search_store::Store> {
+        None
+    }
 }
 
 /// Metadata in memory, per cluster.

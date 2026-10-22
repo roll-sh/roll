@@ -188,7 +188,7 @@ fn cancellable_loops_poll_instead_of_counting() {
     assert_eq!(err["error"]["caused_by"]["type"], "task_cancelled_exception");
     // nested loops and loops in functions and lambdas poll too
     let nested = e
-        .compile("int f(int n) { int c = 0; for (int i = 0; i < n; ++i) { c++ } return c } long t = 0; for (int i = 0; i < 3000; ++i) { t += f(1000); [1, 2].forEach(x -> { for (int j = 0; j < 500; ++j) {} }); } return t", Context::Score)
+        .compile("int f(int n) { int c = 0; for (int i = 0; i < n; ++i) { c++ } return c } long t = 0; for (int i = 0; i < 3000; ++i) { t += f(1000); [1, 2].forEach(x -> { int s = 0; for (int j = 0; j < 500; ++j) { s++ } return s }); } return t", Context::Score)
         .unwrap();
     let mut inst = nested.instance();
     inst.set_cancellable(true);

@@ -31,12 +31,17 @@ def call(method, path, body=None, ndjson=False):
         else:
             data = (body if isinstance(body, str) else json.dumps(body)).encode()
             headers["content-type"] = "application/json"
-    req = urllib.request.Request(ES + path, data=data, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(req) as r:
-            return json.loads(r.read().decode())
-    except urllib.error.HTTPError as e:
-        return json.loads(e.read().decode())
+    for attempt in range(3):
+        req = urllib.request.Request(ES + path, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return json.loads(e.read().decode())
+        except (ConnectionError, urllib.error.URLError) as e:
+            print("retrying", method, path, e, file=sys.stderr)
+            if attempt == 2:
+                raise
 
 
 KEYWORDS = ["k%02d" % i for i in range(15)]
@@ -805,6 +810,17 @@ def ts_cases():
 
     add("time_series", {"ts": {"time_series": {}, "aggs": {"a": {"avg": {"field": "cpu"}}, "m": {"max": {"field": "mem"}}}},
                         "tk": {"time_series": {"keyed": False}}})
+    add("time_series_err_composite_parent", {"c": {"composite": {"sources": [{"h": {"terms": {"field": "host"}}}]}, "aggs": {"ts": {"time_series": {}}}}})
+    add("time_series_err_composite_sibling", {"ts": {"time_series": {}}, "c": {"composite": {"sources": [{"h": {"terms": {"field": "host"}}}]}}})
+    add("time_series_err_global", {"g": {"global": {}, "aggs": {"ts": {"time_series": {}}}}})
+    add("time_series_err_rare_terms", {"r": {"rare_terms": {"field": "host"}, "aggs": {"ts": {"time_series": {}}}}})
+    add("time_series_rare_terms_sibling", {"ts": {"time_series": {}}, "r": {"rare_terms": {"field": "host"}}})
+    add("time_series_err_rare_terms_subs_sibling", {"ts": {"time_series": {}}, "r": {"rare_terms": {"field": "host"}, "aggs": {"m": {"max": {"field": "cpu"}}}}})
+    add("time_series_err_sampler", {"s": {"sampler": {}, "aggs": {"ts": {"time_series": {}}}}})
+    add("time_series_err_diversified", {"s": {"diversified_sampler": {"field": "host"}, "aggs": {"ts": {"time_series": {}}}}})
+    add("time_series_err_variable_width", {"v": {"variable_width_histogram": {"field": "cpu"}, "aggs": {"ts": {"time_series": {}}}}})
+    add("time_series_err_auto_date", {"a": {"auto_date_histogram": {"field": "@timestamp"}, "aggs": {"ts": {"time_series": {}}}}})
+    add("time_series_breadth_first_terms", {"t": {"terms": {"field": "host", "collect_mode": "breadth_first"}, "aggs": {"ts": {"time_series": {}}}}})
     add("time_series_size", {"s1": {"time_series": {"size": 1}}, "s5": {"time_series": {"size": 5, "keyed": False}}, "s0": {"time_series": {"size": 0}}})
     add("time_series_under_terms", {"t": {"terms": {"field": "host", "size": 3}, "aggs": {"ts": {"time_series": {"keyed": False, "size": 2}, "aggs": {"s": {"sum": {"field": "cpu"}}}}}}})
     add("time_series_under_histogram", {"d": {"date_histogram": {"field": "@timestamp", "fixed_interval": "1h"}, "aggs": {"ts": {"time_series": {}}}}})
@@ -1334,6 +1350,1207 @@ def range_cases():
     return c
 
 
+LIC_MAPPING = {"properties": {
+    "k": {"type": "keyword"}, "n": {"type": "long"}, "t": {"type": "date"}, "g": {"type": "geo_point"},
+    "d": {"type": "double"},
+}}
+
+
+def lic_docs(n, seed):
+    """Tracks for the license-gated aggregations (`geo_line`, `geohex_grid`): points that wander
+    around a few centres, clustered near the poles and the antimeridian too, with ties in `t`
+    and documents missing the point or the sort value."""
+    rnd = random.Random(seed)
+    centres = [(47.5, 19.0), (-33.9, 151.2), (64.1, -21.9), (0.0, 179.95), (89.2, 10.0), (-88.5, -60.0), (35.7, 139.7)]
+    docs = []
+    for i in range(n):
+        d = {"k": KEYWORDS[min(int(rnd.expovariate(0.5)), 6)], "n": rnd.randrange(100), "d": round(rnd.uniform(-5, 5), 3)}
+        if rnd.random() < 0.93:
+            la, lo = centres[rnd.randrange(len(centres))]
+            lat = max(-90.0, min(90.0, la + rnd.gauss(0, 0.6)))
+            lon = lo + rnd.gauss(0, 0.6)
+            lon = (lon + 180.0) % 360.0 - 180.0
+            d["g"] = {"lat": round(lat, 6), "lon": round(lon, 6)}
+        if rnd.random() < 0.95:
+            d["t"] = 1600000000000 + rnd.randrange(400) * 60000
+        docs.append(d)
+    return docs
+
+
+def lic_cases():
+    c = []
+
+    def add(name, aggs, query=None):
+        body = {"aggs": aggs}
+        if query is not None:
+            body["query"] = query
+        c.append({"name": name, "body": json.dumps(body, separators=(",", ":")), "typed_keys": False})
+
+    gl = {"point": {"field": "g"}, "sort": {"field": "t"}}
+    add("geo_line", {"l": {"geo_line": gl}, "inc": {"geo_line": dict(gl, include_sort=True)},
+                     "desc": {"geo_line": dict(gl, sort_order="DESC", include_sort=True, size=20)},
+                     "small": {"geo_line": dict(gl, size=5)}, "by_n": {"geo_line": {"point": {"field": "g"}, "sort": {"field": "n"}, "size": 30, "include_sort": True}},
+                     "by_d": {"geo_line": {"point": {"field": "g"}, "sort": {"field": "d"}, "size": 15, "sort_order": "desc"}}})
+    add("geo_line_under_terms", {"t": {"terms": {"field": "k", "size": 4}, "aggs": {"l": {"geo_line": dict(gl, size=12, include_sort=True)}}}})
+    add("geo_line_under_histogram", {"h": {"histogram": {"field": "n", "interval": 20}, "aggs": {"l": {"geo_line": dict(gl, size=8)}}}})
+    add("geo_line_query", {"l": {"geo_line": dict(gl, size=50)}}, query={"term": {"k": "k01"}})
+    add("geo_line_empty", {"l": {"geo_line": gl}}, query={"term": {"k": "zzz"}})
+    add("geo_line_err_size", {"l": {"geo_line": dict(gl, size=0)}})
+    add("geo_line_err_big", {"l": {"geo_line": dict(gl, size=100001)}})
+    add("geo_line_err_no_sort", {"l": {"geo_line": {"point": {"field": "g"}}}})
+    add("geo_line_err_point_type", {"l": {"geo_line": {"point": {"field": "n"}, "sort": {"field": "t"}}}})
+    add("geo_line_err_sort_type", {"l": {"geo_line": {"point": {"field": "g"}, "sort": {"field": "k"}}}})
+    add("geo_line_err_order", {"l": {"geo_line": dict(gl, sort_order="up")}})
+    add("geo_line_unmapped_point", {"l": {"geo_line": {"point": {"field": "nope"}, "sort": {"field": "t"}}}})
+    add("geo_line_unmapped_sort", {"l": {"geo_line": {"point": {"field": "g"}, "sort": {"field": "nope"}}}})
+    add("geohex_grid", {"h0": {"geohex_grid": {"field": "g", "precision": 0}}, "h2": {"geohex_grid": {"field": "g", "precision": 2}},
+                        "h": {"geohex_grid": {"field": "g"}}, "h7": {"geohex_grid": {"field": "g", "precision": 7, "size": 15}},
+                        "h15": {"geohex_grid": {"field": "g", "precision": 15, "size": 5, "shard_size": 7}}})
+    add("geohex_grid_bounds", {"b": {"geohex_grid": {"field": "g", "precision": 3, "bounds": {"top_left": {"lat": 70, "lon": -30}, "bottom_right": {"lat": 30, "lon": 30}}}},
+                               "anti": {"geohex_grid": {"field": "g", "precision": 4, "bounds": {"top_left": "10, 170", "bottom_right": "-10, -170"}}},
+                               "pole": {"geohex_grid": {"field": "g", "precision": 1, "bounds": {"top_right": "90, 180", "bottom_left": "80, -180"}}}})
+    add("geohex_grid_subs", {"h": {"geohex_grid": {"field": "g", "precision": 1}, "aggs": {"a": {"avg": {"field": "n"}}, "t": {"terms": {"field": "k", "size": 2}}}}})
+    add("geohex_grid_under_terms", {"t": {"terms": {"field": "k"}, "aggs": {"h": {"geohex_grid": {"field": "g", "precision": 2, "size": 3}}}}})
+    add("geohex_grid_err_precision", {"h": {"geohex_grid": {"field": "g", "precision": 16}}})
+    add("geohex_grid_err_negative", {"h": {"geohex_grid": {"field": "g", "precision": -1}}})
+    add("geohex_grid_err_type", {"h": {"geohex_grid": {"field": "n"}}})
+    add("geohex_grid_unmapped", {"h": {"geohex_grid": {"field": "nope"}}})
+    add("geohex_grid_pipeline", {"h": {"geohex_grid": {"field": "g", "precision": 1}, "aggs": {"m": {"max": {"field": "n"}}}}, "mb": {"max_bucket": {"buckets_path": "h>m"}}})
+    return c
+
+
+TSG_MAPPING = {"properties": {
+    "@timestamp": {"type": "date"}, "host": {"type": "keyword", "time_series_dimension": True},
+    "loc": {"type": "geo_point"}, "bytes": {"type": "long", "time_series_metric": "counter"},
+    "seq": {"type": "long"}, "cpu": {"type": "double", "time_series_metric": "gauge"},
+}}
+TSG_SETTINGS = {"index.mode": "time_series", "index.routing_path": ["host"],
+                "index.time_series.start_time": "2020-01-01T00:00:00Z", "index.time_series.end_time": "2030-01-01T00:00:00Z"}
+
+
+def tsg_docs(n, seed):
+    """Vehicles (series) reporting positions over time; some samples lack the position or the
+    counter (a counter missing from whole series too)."""
+    rnd = random.Random(seed)
+    docs = []
+    t0 = 1609459200000
+    hosts = ["v%02d" % i for i in range(14)]
+    state = {h: [rnd.uniform(-60, 60), rnd.uniform(-170, 170), rnd.randrange(1000)] for h in hosts}
+    seen = set()
+    while len(docs) < n:
+        h = hosts[min(int(rnd.expovariate(0.2)), len(hosts) - 1)]
+        t = t0 + rnd.randrange(4 * 3600) * 1000
+        if (h, t) in seen:
+            continue
+        seen.add((h, t))
+        st = state[h]
+        st[0] = max(-89.0, min(89.0, st[0] + rnd.gauss(0, 0.05)))
+        st[1] = max(-179.0, min(179.0, st[1] + rnd.gauss(0, 0.05)))
+        d = {"host": h, "@timestamp": t, "cpu": round(rnd.uniform(0, 100), 2)}
+        if rnd.random() < 0.9:
+            d["loc"] = {"lat": round(st[0], 6), "lon": round(st[1], 6)}
+        if h not in ("v03", "v07") and rnd.random() < 0.85:
+            d["bytes"] = 0
+        docs.append(d)
+    crnd = random.Random(seed + 3)
+    for h in hosts:
+        value = crnd.randrange(1000)
+        for d in sorted((d for d in docs if d["host"] == h), key=lambda d: d["@timestamp"]):
+            if "bytes" in d:
+                value = crnd.randrange(50) if crnd.random() < 0.05 else value + crnd.randrange(500)
+                d["bytes"] = value
+    return docs
+
+
+def tsg_cases():
+    c = []
+
+    def add(name, aggs, query=None):
+        body = {"aggs": aggs}
+        if query is not None:
+            body["query"] = query
+        c.append({"name": name, "body": json.dumps(body, separators=(",", ":")), "typed_keys": False})
+
+    add("ts_geo_line", {"ts": {"time_series": {"keyed": False}, "aggs": {"l": {"geo_line": {"point": {"field": "loc"}}},
+                                                                         "s": {"geo_line": {"point": {"field": "loc"}, "size": 10}},
+                                                                         "i": {"geo_line": {"point": {"field": "loc"}, "size": 25, "include_sort": True}}}}})
+    add("ts_geo_line_keyed", {"ts": {"time_series": {}, "aggs": {"l": {"geo_line": {"point": {"field": "loc"}, "size": 4}}}}})
+    add("ts_geo_line_sort", {"ts": {"time_series": {"keyed": False, "size": 3}, "aggs": {"l": {"geo_line": {"point": {"field": "loc"}, "sort": {"field": "cpu"}, "size": 6}}}}})
+    add("ts_geo_line_under_histogram", {"d": {"date_histogram": {"field": "@timestamp", "fixed_interval": "1h"}, "aggs": {"ts": {"time_series": {"keyed": False, "size": 2}, "aggs": {"l": {"geo_line": {"point": {"field": "loc"}, "size": 5}}}}}}})
+    add("ts_geo_line_err_no_ts", {"l": {"geo_line": {"point": {"field": "loc"}}}})
+    add("ts_geo_line_top_level_sorted", {"l": {"geo_line": {"point": {"field": "loc"}, "sort": {"field": "@timestamp"}, "size": 40}}})
+    add("ts_geo_line_desc", {"ts": {"time_series": {"keyed": False, "size": 4}, "aggs": {"l": {"geo_line": {"point": {"field": "loc"}, "size": 7, "sort_order": "desc", "include_sort": True}}}}})
+    add("ts_geo_line_size1", {"ts": {"time_series": {"keyed": False}, "aggs": {"l": {"geo_line": {"point": {"field": "loc"}, "size": 1}}}}})
+    add("ts_geo_line_size2", {"ts": {"time_series": {"keyed": False}, "aggs": {"l": {"geo_line": {"point": {"field": "loc"}, "size": 2, "include_sort": True}}}}})
+    add("ts_geo_line_size3", {"ts": {"time_series": {"keyed": False}, "aggs": {"l": {"geo_line": {"point": {"field": "loc"}, "size": 3, "include_sort": True}}}}})
+    add("ts_geo_line_beside", {"ts": {"time_series": {"size": 1}}, "l": {"geo_line": {"point": {"field": "loc"}, "size": 30, "include_sort": True}}})
+    add("ts_counter_missing", {"ts": {"time_series": {"keyed": False}, "aggs": {"r": {"rate": {"field": "bytes"}}, "v": {"value_count": {"field": "bytes"}}}}})
+    add("ts_counter_missing_hourly", {"ts": {"time_series": {"keyed": False}, "aggs": {"d": {"date_histogram": {"field": "@timestamp", "fixed_interval": "1h"}, "aggs": {"r": {"rate": {"field": "bytes", "unit": "minute"}}}}}}})
+    add("ts_counter_missing_query", {"ts": {"time_series": {"keyed": False}, "aggs": {"r": {"rate": {"field": "bytes"}}}}}, query={"range": {"cpu": {"lt": 40}}})
+    return c
+
+
+FIS_MAPPING = {"properties": {
+    "k": {"type": "keyword"}, "c": {"type": "keyword"}, "n": {"type": "long"}, "ip": {"type": "ip"},
+    "b": {"type": "boolean"}, "t": {"type": "date"}, "d": {"type": "double"}, "txt": {"type": "text"},
+    "g": {"type": "keyword"},
+}}
+
+
+def fis_docs(n, seed):
+    """Shopping-basket-like transactions: products (`k`, multi-valued) bought together in
+    correlated groups, a category `c`, plus numeric, ip, boolean and date items. Item
+    probabilities differ enough that item counts rarely tie."""
+    rnd = random.Random(seed)
+    products = ["p%02d" % i for i in range(24)]
+    weights = [0.9 ** i for i in range(24)]
+    bundles = [["p00", "p03", "p07"], ["p01", "p02"], ["p04", "p05", "p06", "p09"], ["p00", "p11"]]
+    docs = []
+    for i in range(n):
+        d = {"g": "g%d" % (i % 3)}
+        ks = set()
+        for _ in range(rnd.randrange(0, 4)):
+            ks.add(rnd.choices(products, weights)[0])
+        if rnd.random() < 0.45:
+            ks.update(bundles[min(int(rnd.expovariate(0.9)), 3)])
+        if ks:
+            d["k"] = sorted(ks) if len(ks) > 1 else next(iter(ks))
+        if rnd.random() < 0.8:
+            d["c"] = rnd.choices(["food", "tools", "toys", "books", "misc"], [8, 5, 3, 2, 1])[0]
+        if rnd.random() < 0.7:
+            d["n"] = rnd.choices([1, 2, 3, 5, 8, 13], [10, 7, 5, 3, 2, 1])[0]
+        if rnd.random() < 0.6:
+            d["ip"] = rnd.choices(["10.0.0.1", "10.0.0.2", "192.168.0.7", "::1"], [6, 3, 2, 1])[0]
+        if rnd.random() < 0.75:
+            d["b"] = rnd.random() < 0.7
+        if rnd.random() < 0.5:
+            d["t"] = rnd.choices([1600000000000, 1600086400000, 1600172800000], [5, 3, 1])[0]
+        if rnd.random() < 0.5:
+            d["d"] = rnd.choices([1.25, 2.75, -3.5], [4, 2, 1])[0]
+        d["txt"] = "hello world"
+        docs.append(d)
+    return docs
+
+
+def fis_cases():
+    c = []
+
+    def add(name, aggs, query=None):
+        body = {"aggs": aggs}
+        if query is not None:
+            body["query"] = query
+        c.append({"name": name, "body": json.dumps(body, separators=(",", ":")), "typed_keys": False})
+
+    fi = "frequent_item_sets"
+    add("fis_basic", {"f": {fi: {"fields": [{"field": "k"}, {"field": "c"}]}}})
+    add("fis_support", {"f": {fi: {"fields": [{"field": "k"}, {"field": "c"}], "minimum_support": 0.05, "size": 25}},
+                        "g": {fi: {"fields": [{"field": "k"}], "minimum_support": 0.2}}})
+    add("fis_set_size", {"s2": {fi: {"fields": [{"field": "k"}, {"field": "c"}], "minimum_set_size": 2, "minimum_support": 0.03}},
+                         "s3": {fi: {"fields": [{"field": "k"}], "minimum_set_size": 3, "minimum_support": 0.02, "size": 7}}})
+    add("fis_types", {"f": {fi: {"fields": [{"field": "n"}, {"field": "ip"}, {"field": "b"}, {"field": "t"}, {"field": "d"}], "minimum_support": 0.05, "size": 30}}})
+    add("fis_mixed", {"f": {fi: {"fields": [{"field": "k"}, {"field": "n"}, {"field": "c"}, {"field": "b"}], "minimum_support": 0.04, "size": 40, "minimum_set_size": 2}}})
+    add("fis_size_small", {"f": {fi: {"fields": [{"field": "k"}, {"field": "c"}, {"field": "n"}], "size": 3, "minimum_support": 0.02}}})
+    add("fis_filter", {"f": {fi: {"fields": [{"field": "k"}, {"field": "c"}], "filter": {"term": {"b": True}}, "minimum_support": 0.05}}})
+    add("fis_include", {"f": {fi: {"fields": [{"field": "k", "include": "p0[0-5]"}, {"field": "c", "exclude": ["misc", "books"]}], "minimum_support": 0.03}},
+                        "n": {fi: {"fields": [{"field": "n", "include": [1, 2, 3]}, {"field": "k", "exclude": "p0.*"}], "minimum_support": 0.03}}})
+    add("fis_partition", {"f": {fi: {"fields": [{"field": "k", "include": {"partition": 0, "num_partitions": 2}}], "minimum_support": 0.03}}})
+    add("fis_hint", {"m": {fi: {"fields": [{"field": "k"}, {"field": "c"}], "execution_hint": "map", "minimum_support": 0.05}},
+                     "o": {fi: {"fields": [{"field": "k"}, {"field": "c"}], "execution_hint": "global_ordinals", "minimum_support": 0.05}}})
+    add("fis_missing", {"f": {fi: {"fields": [{"field": "c", "missing": "none"}, {"field": "n", "missing": 0}], "minimum_support": 0.05}}})
+    # Equal item counts order by Elasticsearch's per-JVM hash seed: supports here keep the
+    # items involved distinct.
+    add("fis_query", {"f": {fi: {"fields": [{"field": "k"}, {"field": "c"}], "minimum_support": 0.2}}}, query={"term": {"c": "food"}})
+    add("random_sampler_fis", {"s": {"random_sampler": {"probability": 0.5, "seed": 7, "shard_seed": 3}, "aggs": {"f": {fi: {"fields": [{"field": "c"}], "minimum_support": 0.1}}}}})
+    add("fis_typed", {"f": {fi: {"fields": [{"field": "c"}], "minimum_support": 0.2}}, "m": {"max": {"field": "n"}}})
+    add("fis_empty", {"f": {fi: {"fields": [{"field": "k"}]}}}, query={"term": {"c": "zzz"}})
+    add("fis_same_field_twice", {"f": {fi: {"fields": [{"field": "c"}, {"field": "c"}], "minimum_support": 0.1}}})
+    add("fis_under_terms", {"t": {"terms": {"field": "g"}, "aggs": {"f": {fi: {"fields": [{"field": "k"}, {"field": "c"}], "minimum_support": 0.1, "size": 4}}}}})
+    add("fis_under_terms_ordered", {"t": {"terms": {"field": "g", "order": {"_key": "desc"}}, "aggs": {"f": {fi: {"fields": [{"field": "c"}], "minimum_support": 0.1, "size": 3}}}}})
+    add("fis_under_filter", {"x": {"filter": {"term": {"c": "tools"}}, "aggs": {"f": {fi: {"fields": [{"field": "k"}], "minimum_support": 0.1}}}}})
+    add("fis_deprecated_name", {"f": {"frequent_items": {"fields": [{"field": "c"}], "minimum_support": 0.2}}})
+    add("fis_err_support_zero", {"f": {fi: {"fields": [{"field": "c"}], "minimum_support": 0}}})
+    add("fis_err_support_big", {"f": {fi: {"fields": [{"field": "c"}], "minimum_support": 1.5}}})
+    add("fis_err_set_size", {"f": {fi: {"fields": [{"field": "c"}], "minimum_set_size": 0}}})
+    add("fis_err_size", {"f": {fi: {"fields": [{"field": "c"}], "size": 0}}})
+    add("fis_err_hint", {"f": {fi: {"fields": [{"field": "c"}], "execution_hint": "foo"}}})
+    add("fis_err_no_fields", {"f": {fi: {"minimum_support": 0.1}}})
+    add("fis_err_unknown", {"f": {fi: {"fields": [{"field": "c"}], "foo": 1}}})
+    add("fis_err_field_unknown", {"f": {fi: {"fields": [{"field": "c", "script": "1"}]}}})
+    add("fis_err_unmapped", {"f": {fi: {"fields": [{"field": "nope"}]}}})
+    add("fis_err_unmapped_second", {"f": {fi: {"fields": [{"field": "c"}, {"field": "nope"}]}}})
+    add("fis_err_text", {"f": {fi: {"fields": [{"field": "txt"}]}}})
+    add("fis_err_subs", {"f": {fi: {"fields": [{"field": "c"}]}, "aggs": {"m": {"max": {"field": "n"}}}}})
+    add("fis_err_fields_not_array", {"f": {fi: {"fields": {"field": "c"}}}})
+    add("fis_err_pipeline", {"f": {fi: {"fields": [{"field": "c"}]}}, "m": {"max_bucket": {"buckets_path": "f>_count"}}})
+    return c
+
+
+CAT_MAPPING = {"properties": {
+    "msg": {"type": "text"}, "kmsg": {"type": "keyword"}, "g": {"type": "keyword"}, "n": {"type": "long"},
+    "other": {"type": "text"},
+}}
+
+CAT_TEMPLATES = [
+    "Node {n} stopping", "Node {n} starting", "User {u} logging on", "User {u} logging off",
+    "Failed to connect to {ip}:{port} after {n} attempts", "Connection from {ip} accepted",
+    "Disk usage at {n}% on /dev/sd{c}", "Request GET /api/v1/items/{n} completed in {n}ms",
+    "Request POST /api/v1/orders completed in {n}ms with status 201",
+    "Scheduled job {u}-{n} finished on Monday at {n}:00 UTC",
+    "error: cannot open file C:\\logs\\app{n}.log: access denied",
+    "Cache miss for key session_{hex} in region eu-west-{n}",
+    "Heartbeat received from worker {u}@host{n}.example.com",
+    "Transaction {hex} committed",
+    "Transaction {hex} rolled back due to deadlock on table {t}",
+    "Payment of {n}.{n} EUR authorised for customer {u}",
+    "Starting service {t} version {n}.{n}.{n}",
+    "Shutting down service {t} gracefully, {n} requests in flight",
+    "Out of memory: killed process {n} ({t}) score {n}",
+    "GC pause young generation {n}ms, heap {n}MB->{n}MB",
+]
+CAT_USERS = ["Foo", "alice", "bob", "carol", "dave", "eve", "mallory"]
+CAT_TABLES = ["orders", "users", "items", "payments"]
+
+
+def cat_docs(n, seed):
+    """Log messages from templates with variable parts (numbers, ips, hex ids, paths), some
+    multi-line (stack traces), some multi-valued, some without the field."""
+    rnd = random.Random(seed)
+    weights = [1.0 / (1 + i * 0.35) for i in range(len(CAT_TEMPLATES))]
+    docs = []
+    for i in range(n):
+        def msg():
+            t = rnd.choices(CAT_TEMPLATES, weights)[0]
+            return t.format(n=rnd.randrange(1, 500), u=rnd.choice(CAT_USERS), ip="10.%d.%d.%d" % (rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)),
+                            port=rnd.choice([80, 443, 5432, 9200]), c=rnd.choice("abc"), hex="%08x" % rnd.getrandbits(32), t=rnd.choice(CAT_TABLES))
+        d = {"g": "g%d" % (i % 3), "n": rnd.randrange(10)}
+        r = rnd.random()
+        if r < 0.85:
+            m = msg()
+            if rnd.random() < 0.08:
+                m = "\n  \n" + m + "\n\tat com.example.Foo.bar(Foo.java:%d)\n\tat com.example.Main" % rnd.randrange(100)
+            d["msg"] = m
+            d["kmsg"] = m
+        elif r < 0.92:
+            d["msg"] = [msg(), msg()]
+        elif r < 0.95:
+            d["msg"] = "12345 67890 ---"
+        if rnd.random() < 0.3:
+            d["other"] = msg()
+        docs.append(d)
+    return docs
+
+
+def cat_cases():
+    c = []
+
+    def add(name, aggs, query=None):
+        body = {"aggs": aggs}
+        if query is not None:
+            body["query"] = query
+        c.append({"name": name, "body": json.dumps(body, separators=(",", ":")), "typed_keys": False})
+
+    ct = "categorize_text"
+    add("cat_basic", {"c": {ct: {"field": "msg"}}})
+    add("cat_size", {"c": {ct: {"field": "msg", "size": 25}}, "s": {ct: {"field": "msg", "size": 3, "shard_size": 4}}})
+    add("cat_threshold", {"t11": {ct: {"field": "msg", "similarity_threshold": 11, "size": 20}}, "t50": {ct: {"field": "msg", "similarity_threshold": 50, "size": 20}},
+                          "t95": {ct: {"field": "msg", "similarity_threshold": 95, "size": 30}}, "t100": {ct: {"field": "msg", "similarity_threshold": 100, "size": 30}}})
+    add("cat_min_doc_count", {"c": {ct: {"field": "msg", "min_doc_count": 20, "size": 50}}, "z": {ct: {"field": "msg", "min_doc_count": 0, "size": 50}}})
+    add("cat_keyword", {"c": {ct: {"field": "kmsg", "size": 15}}})
+    add("cat_subs", {"c": {ct: {"field": "msg", "size": 6}, "aggs": {"g": {"terms": {"field": "g"}}, "a": {"avg": {"field": "n"}}}}})
+    add("cat_under_terms", {"t": {"terms": {"field": "g"}, "aggs": {"c": {ct: {"field": "msg", "size": 4}}}}})
+    add("cat_query", {"c": {ct: {"field": "msg", "size": 10}}}, query={"range": {"n": {"gte": 6}}})
+    add("cat_empty", {"c": {ct: {"field": "msg"}}}, query={"term": {"g": "zzz"}})
+    add("cat_unmapped", {"c": {ct: {"field": "nope"}}})
+    add("cat_other", {"c": {ct: {"field": "other", "size": 30}}})
+    add("cat_pipeline", {"c": {ct: {"field": "msg", "size": 5}, "aggs": {"a": {"avg": {"field": "n"}}}}, "m": {"max_bucket": {"buckets_path": "c>a"}},
+                         "b": {"avg_bucket": {"buckets_path": "c>_count"}}})
+    add("cat_deprecated_params", {"c": {ct: {"field": "msg", "max_unique_tokens": 10, "max_matched_tokens": 5, "size": 5}}})
+    add("cat_err_threshold_zero", {"c": {ct: {"field": "msg", "similarity_threshold": 0}}})
+    add("cat_err_threshold_big", {"c": {ct: {"field": "msg", "similarity_threshold": 101}}})
+    add("cat_err_size", {"c": {ct: {"field": "msg", "size": 0}}})
+    add("cat_err_shard_size", {"c": {ct: {"field": "msg", "shard_size": -1}}})
+    add("cat_err_min_doc_count", {"c": {ct: {"field": "msg", "min_doc_count": -1}}})
+    add("cat_err_shard_min_doc_count", {"c": {ct: {"field": "msg", "shard_min_doc_count": -2}}})
+    add("cat_err_filters_and_analyzer", {"c": {ct: {"field": "msg", "categorization_filters": ["foo"], "categorization_analyzer": "english"}}})
+    add("cat_err_analyzer_and_filters", {"c": {ct: {"field": "msg", "categorization_analyzer": "english", "categorization_filters": ["foo"]}}})
+    add("cat_err_filters_dup", {"c": {ct: {"field": "msg", "categorization_filters": ["a", "a"]}}})
+    add("cat_err_filters_empty", {"c": {ct: {"field": "msg", "categorization_filters": ["a", ""]}}})
+    add("cat_err_filters_regex", {"c": {ct: {"field": "msg", "categorization_filters": ["(unclosed"]}}})
+    add("cat_err_numeric", {"c": {ct: {"field": "n"}}})
+    add("cat_err_no_field", {"c": {ct: {"size": 3}}})
+    add("cat_err_unknown", {"c": {ct: {"field": "msg", "foo": 1}}})
+    return c
+
+
+CATR_MAPPING = {"properties": {"msg": {"type": "text"}, "r": {"type": "keyword"}}}
+# Dictionary words of aggs-cat-dict.txt (verbs, nouns, others) and tokens that aren't words.
+CATR_WORDS = ["failed", "connect", "completed", "cannot", "get", "killed", "received", "rolled", "starting", "attempts", "committed",
+              "cache", "connection", "customer", "disk", "error", "file", "heap", "job", "node", "service", "session", "table", "user",
+              "after", "from", "to", "with", "on", "off", "accepted", "open", "gracefully", "out"]
+CATR_OTHER = ["db01", "x", "Zq", "alpha-3", "srv_9", "k8s", "node7", "eu-1", "qq", "w", "Rx", "p9z"]
+
+
+def catr_docs(n, seed):
+    """Random near-duplicate messages: a few base token sequences mutated by substitutions,
+    insertions and deletions, so categories merge, split and lose common tokens; each doc's
+    round `r` is a separate categorization problem."""
+    rnd = random.Random(seed)
+    docs = []
+    for rid in range(12):
+        bases = [[rnd.choice(CATR_WORDS + CATR_OTHER) for _ in range(rnd.randrange(2, 9))] for _ in range(rnd.randrange(2, 6))]
+        for _ in range(rnd.randrange(20, 70)):
+            t = list(rnd.choice(bases))
+            for _ in range(rnd.randrange(0, 4)):
+                op = rnd.random()
+                if op < 0.4 and t:
+                    t[rnd.randrange(len(t))] = rnd.choice(CATR_WORDS + CATR_OTHER)
+                elif op < 0.7:
+                    t.insert(rnd.randrange(len(t) + 1), rnd.choice(CATR_WORDS + CATR_OTHER))
+                elif t:
+                    del t[rnd.randrange(len(t))]
+            if not t:
+                t = ["x"]
+            docs.append({"r": "r%02d" % rid, "msg": " ".join(t) + " " * rnd.randrange(0, 3)})
+    return docs
+
+
+def catr_cases():
+    c = []
+    for th in [20, 45, 70, 85, 100]:
+        aggs = {"t": {"terms": {"field": "r", "size": 20}, "aggs": {"c": {"categorize_text": {"field": "msg", "similarity_threshold": th, "size": 60}}}}}
+        c.append({"name": "catr_%d" % th, "body": json.dumps({"aggs": aggs}, separators=(",", ":")), "typed_keys": False})
+    return c
+
+
+
+def core_err_cases():
+    """Parse and validation errors (and edge cases next to them) of the core aggregations."""
+    c = []
+
+    def add(name, aggs, query=None, typed_keys=False, raw=None):
+        if raw is not None:
+            body = raw
+        else:
+            body = {"aggs": aggs}
+            if query is not None:
+                body["query"] = query
+            body = json.dumps(body, separators=(",", ":"))
+        c.append({"name": name, "body": body, "typed_keys": typed_keys})
+
+    # Structure.
+    add("struct_unknown_type", {"a": {"foo": {"field": "n"}}})
+    add("struct_empty", {"a": {}})
+    add("struct_two_types", {"a": {"terms": {"field": "k"}, "avg": {"field": "n"}}})
+    add("struct_metric_subs", {"a": {"avg": {"field": "n"}, "aggs": {"b": {"max": {"field": "n"}}}}})
+    add("struct_bad_name_bracket", {"a[b": {"avg": {"field": "n"}}})
+    add("struct_bad_name_gt", {"a>b": {"avg": {"field": "n"}}})
+    add("struct_bad_name_dot", {"a.b": {"avg": {"field": "n"}}})
+    add("struct_meta_not_object", {"a": {"avg": {"field": "n"}, "meta": 5}})
+    add("struct_meta", {"a": {"avg": {"field": "n"}, "meta": {"x": [1, {"y": "z"}], "n": None}}, "b": {"terms": {"field": "k", "size": 1}, "meta": {"q": 1}}})
+    add("struct_aggs_array", {"a": {"terms": {"field": "k"}, "aggs": []}})
+    add("struct_aggs_twice", {"a": {"terms": {"field": "k"}, "aggs": {"x": {"avg": {"field": "n"}}}, "aggregations": {"y": {"avg": {"field": "n"}}}}})
+    add("struct_type_not_object", {"a": {"avg": 5}})
+    add("struct_agg_not_object", {"a": 5})
+    add("struct_aggs_not_object", None, raw='{"aggs":5}')
+    add("struct_unknown_field", {"a": {"avg": {"field": "n", "foo": 1}}})
+    add("struct_unknown_terms_field", {"a": {"terms": {"field": "k", "foo": 1}}})
+    add("struct_field_array", {"a": {"avg": {"field": ["n"]}}})
+    add("struct_no_field", {"a": {"avg": {}}})
+    add("struct_no_field_terms", {"a": {"terms": {}}})
+    add("struct_null_field", {"a": {"max": {"field": None}}})
+    add("struct_global_under_terms", {"t": {"terms": {"field": "k"}, "aggs": {"g": {"global": {}}}}})
+    add("struct_global_with_body", {"g": {"global": {"x": 1}}})
+    # Metrics.
+    add("metric_stats_keyword", {"a": {"stats": {"field": "k"}}})
+    add("metric_sum_keyword", {"a": {"sum": {"field": "k"}}})
+    add("metric_avg_geo", {"a": {"avg": {"field": "g"}}})
+    add("metric_min_ip", {"a": {"min": {"field": "ip"}}})
+    add("metric_max_text", {"a": {"max": {"field": "txt"}}})
+    add("metric_missing_bad_number", {"a": {"avg": {"field": "n", "missing": "abc"}}})
+    add("metric_missing_string_number", {"a": {"avg": {"field": "n", "missing": "7"}, }, "b": {"max": {"field": "d", "missing": "1e3"}}})
+    add("metric_es_sigma_negative", {"a": {"extended_stats": {"field": "n", "sigma": -1}}})
+    add("metric_es_sigma_zero", {"a": {"extended_stats": {"field": "n", "sigma": 0}}})
+    add("metric_card_negative", {"a": {"cardinality": {"field": "k", "precision_threshold": -1}}})
+    add("metric_card_huge", {"a": {"cardinality": {"field": "tag", "precision_threshold": 1000000}}})
+    add("metric_card_zero", {"a": {"cardinality": {"field": "tag", "precision_threshold": 0}}, "b": {"cardinality": {"field": "n", "precision_threshold": 1}}})
+    add("metric_card_hint", {"a": {"cardinality": {"field": "k", "execution_hint": "direct"}}, "b": {"cardinality": {"field": "tag", "execution_hint": "save_memory_heuristic"}}})
+    add("metric_card_bad_hint", {"a": {"cardinality": {"field": "k", "execution_hint": "nope"}}})
+    add("metric_value_count_unmapped", {"a": {"value_count": {"field": "nope"}}, "b": {"value_count": {"field": "txt"}}})
+    add("metric_value_type_bad", {"a": {"avg": {"field": "nope", "value_type": "nope"}}})
+    add("metric_value_type_unmapped", {"a": {"avg": {"field": "nope", "value_type": "long", "missing": 3}}, "b": {"terms": {"field": "nope", "value_type": "date", "missing": "2020-01-01"}}})
+    add("metric_format_number", {"a": {"avg": {"field": "n", "format": "0.000E0"}}, "b": {"min": {"field": "t", "format": "yyyy"}}, "c": {"sum": {"field": "b", "format": "#"}}})
+    add("metric_format_bad", {"a": {"avg": {"field": "t", "format": "yyyy-qq-nonsense'"}}})
+    add("metric_weighted_no_weight", {"a": {"weighted_avg": {"value": {"field": "d"}}}})
+    add("metric_weighted_keyword", {"a": {"weighted_avg": {"value": {"field": "k"}, "weight": {"field": "n"}}}})
+    add("metric_weighted_multi", {"a": {"weighted_avg": {"value": {"field": "n"}, "weight": {"field": "i"}}}})
+    add("metric_geo_bounds_keyword", {"a": {"geo_bounds": {"field": "k"}}})
+    add("metric_geo_centroid_number", {"a": {"geo_centroid": {"field": "n"}}})
+    add("metric_avg_bool_date", {"a": {"avg": {"field": "b"}}, "b": {"sum": {"field": "t"}}, "c": {"stats": {"field": "b"}}})
+    # Terms.
+    add("terms_size_zero", {"t": {"terms": {"field": "k", "size": 0}}})
+    add("terms_size_negative", {"t": {"terms": {"field": "k", "size": -1}}})
+    add("terms_shard_size_zero", {"t": {"terms": {"field": "k", "shard_size": 0}}})
+    add("terms_shard_size_small", {"t": {"terms": {"field": "tag", "size": 5, "shard_size": 2, "show_term_doc_count_error": True}}})
+    add("terms_shard_size_minus_one", {"t": {"terms": {"field": "tag", "size": 3, "shard_size": -1}}})
+    add("terms_min_doc_count_negative", {"t": {"terms": {"field": "k", "min_doc_count": -1}}})
+    add("terms_shard_min_doc_count_negative", {"t": {"terms": {"field": "k", "shard_min_doc_count": -1}}})
+    add("terms_shard_min_doc_count", {"t": {"terms": {"field": "tag", "shard_min_doc_count": 3, "size": 5}}})
+    add("terms_order_unknown_agg", {"t": {"terms": {"field": "k", "order": {"nope": "asc"}}}})
+    add("terms_order_bad_direction", {"t": {"terms": {"field": "k", "order": {"_count": "up"}}}})
+    add("terms_order_term", {"t": {"terms": {"field": "k", "order": {"_term": "asc"}}}})
+    add("terms_order_multi_value_no_key", {"t": {"terms": {"field": "k", "order": {"s": "asc"}}, "aggs": {"s": {"stats": {"field": "n"}}}}})
+    add("terms_order_multi_value_bad_key", {"t": {"terms": {"field": "k", "order": {"s.nope": "asc"}}, "aggs": {"s": {"stats": {"field": "n"}}}}})
+    add("terms_order_bracket_key", {"t": {"terms": {"field": "k", "order": {"p[50.0]": "desc"}, "size": 3}, "aggs": {"p": {"percentiles": {"field": "n"}}}}})
+    add("terms_order_percentile_dot", {"t": {"terms": {"field": "k", "order": {"p.99": "desc"}, "size": 3}, "aggs": {"p": {"percentiles": {"field": "n", "percents": [99]}}}}})
+    add("terms_order_bucket_agg", {"t": {"terms": {"field": "k", "order": {"i": "asc"}}, "aggs": {"i": {"terms": {"field": "tag"}}}}})
+    add("terms_order_through_terms", {"t": {"terms": {"field": "k", "order": {"i>m": "asc"}}, "aggs": {"i": {"terms": {"field": "tag"}, "aggs": {"m": {"max": {"field": "n"}}}}}}})
+    add("terms_order_filter_count", {"t": {"terms": {"field": "k", "order": {"f._count": "desc"}, "size": 4}, "aggs": {"f": {"filter": {"term": {"b": True}}}}}})
+    add("terms_order_filter_gt_count", {"t": {"terms": {"field": "k", "order": {"f>_count": "desc"}, "size": 4}, "aggs": {"f": {"filter": {"term": {"b": True}}}}}})
+    add("terms_order_filter_direct", {"t": {"terms": {"field": "k", "order": {"f": "desc"}, "size": 4}, "aggs": {"f": {"filter": {"term": {"b": True}}}}}})
+    add("terms_order_deep_path", {"t": {"terms": {"field": "k", "order": [{"f>m>s.avg": "asc"}, {"_key": "desc"}], "size": 5},
+                                        "aggs": {"f": {"filter": {"range": {"n": {"gte": 20}}}, "aggs": {"m": {"missing": {"field": "ip"}, "aggs": {"s": {"stats": {"field": "d"}}}}, "x": {"missing": {"field": "d"}, "aggs": {"s": {"stats": {"field": "n"}}}}}}}}})
+    add("terms_order_ties", {"t": {"terms": {"field": "tag", "order": [{"mx": "desc"}, {"_count": "asc"}], "size": 8}, "aggs": {"mx": {"max": {"field": "i"}}}}})
+    add("terms_order_key_count_numeric", {"t": {"terms": {"field": "i", "order": [{"_count": "desc"}, {"_key": "asc"}], "size": 6, "show_term_doc_count_error": True}}})
+    add("terms_order_count_asc_error", {"t": {"terms": {"field": "tag", "order": {"_count": "asc"}, "size": 4, "show_term_doc_count_error": True}}})
+    add("terms_order_sub_error", {"t": {"terms": {"field": "tag", "order": {"m": "desc"}, "size": 4, "show_term_doc_count_error": True}, "aggs": {"m": {"min": {"field": "d"}}}}})
+    add("terms_order_object_array", {"t": {"terms": {"field": "k", "order": [{"_count": "desc", "_key": "asc"}]}}})
+    add("terms_order_not_object", {"t": {"terms": {"field": "k", "order": "_count"}}})
+    add("terms_regex_numeric", {"t": {"terms": {"field": "n", "include": "1.*"}}})
+    add("terms_include_partition_missing_num", {"t": {"terms": {"field": "k", "include": {"partition": 1}}}})
+    add("terms_include_partition_out_of_range", {"t": {"terms": {"field": "k", "include": {"partition": 3, "num_partitions": 3}}}})
+    add("terms_include_partition_and_exclude", {"t": {"terms": {"field": "k", "include": {"partition": 0, "num_partitions": 2}, "exclude": "k0[0-3]"}}})
+    add("terms_include_regex_bad", {"t": {"terms": {"field": "k", "include": "k0[0-"}}})
+    add("terms_include_mixed", {"t": {"terms": {"field": "k", "include": "k0.*", "exclude": ["k01", "k02"]}}})
+    add("terms_include_unknown_key", {"t": {"terms": {"field": "k", "include": {"foo": 1}}}})
+    add("terms_include_numbers_double", {"t": {"terms": {"field": "d", "include": [50.0, 41.513, 7], "size": 5}}, "u": {"terms": {"field": "b", "exclude": ["true"]}}})
+    add("terms_include_ip_date", {"t": {"terms": {"field": "ip", "include": ["10.0.0.3", "2001:db8::2"]}}, "u": {"terms": {"field": "ip", "include": "10\\.0\\.0\\.1.*", "size": 3}}})
+    add("terms_bad_hint", {"t": {"terms": {"field": "k", "execution_hint": "nope"}}})
+    add("terms_bad_collect_mode", {"t": {"terms": {"field": "k", "collect_mode": "nope"}}})
+    add("terms_collect_modes", {"t": {"terms": {"field": "k", "collect_mode": "breadth_first", "size": 3}, "aggs": {"i": {"terms": {"field": "tag", "size": 2}, "aggs": {"a": {"avg": {"field": "d"}}}}}},
+                                "u": {"terms": {"field": "n", "collect_mode": "depth_first", "size": 3, "execution_hint": "global_ordinals"}, "aggs": {"m": {"max": {"field": "t"}}}}})
+    add("terms_breadth_first_order_sub", {"t": {"terms": {"field": "k", "collect_mode": "breadth_first", "order": {"a": "desc"}, "size": 3}, "aggs": {"a": {"avg": {"field": "d"}}}}})
+    add("terms_geo", {"t": {"terms": {"field": "g"}}})
+    add("terms_missing_type_mismatch", {"t": {"terms": {"field": "n", "missing": "abc"}}})
+    add("terms_missing_bool_date_ip", {"b": {"terms": {"field": "b", "missing": False}}, "t": {"terms": {"field": "t", "missing": "2000-01-01", "order": {"_key": "asc"}, "size": 2}},
+                                       "ip": {"terms": {"field": "ip", "missing": "1.2.3.4", "order": {"_key": "asc"}, "size": 2}}})
+    add("terms_missing_ip_bad", {"ip": {"terms": {"field": "ip", "missing": "nope"}}})
+    add("terms_format", {"t": {"terms": {"field": "n", "format": "000.0", "size": 3}}, "d": {"terms": {"field": "t", "format": "yyyy-MM", "size": 2}}, "k": {"terms": {"field": "k", "format": "0.0", "size": 2}}})
+    add("terms_text", {"t": {"terms": {"field": "txt"}}})
+    add("terms_min_doc_count_zero_numeric", {"t": {"terms": {"field": "i", "min_doc_count": 0, "size": 5, "order": {"_key": "asc"}}}, "b": {"terms": {"field": "b", "min_doc_count": 0}}},
+        query={"range": {"i": {"gte": 40}}})
+    add("terms_min_doc_count_zero_subs", {"t": {"terms": {"field": "k", "min_doc_count": 0, "size": 20}, "aggs": {"a": {"avg": {"field": "n"}}, "c": {"value_count": {"field": "n"}}}}},
+        query={"term": {"k": "k05"}})
+    add("terms_size_huge", {"t": {"terms": {"field": "tag", "size": 100000}}})
+    add("terms_shard_size_less_than_size", {"t": {"terms": {"field": "tag", "size": 10, "shard_size": 3, "show_term_doc_count_error": True}}})
+    add("terms_sum_other_query", {"t": {"terms": {"field": "tag", "size": 2, "show_term_doc_count_error": True}, "aggs": {"x": {"terms": {"field": "k", "size": 2, "show_term_doc_count_error": True}}}}},
+        query={"range": {"n": {"lt": 40}}})
+    # Multi terms / rare terms / significant.
+    add("multi_terms_order_sub", {"m": {"multi_terms": {"terms": [{"field": "k"}, {"field": "b"}], "order": {"a": "desc"}, "size": 4}, "aggs": {"a": {"avg": {"field": "n"}}}}})
+    add("multi_terms_missing", {"m": {"multi_terms": {"terms": [{"field": "k", "missing": "?"}, {"field": "d", "missing": 0}], "size": 3, "show_term_doc_count_error": True}}})
+    add("multi_terms_size_zero", {"m": {"multi_terms": {"terms": [{"field": "k"}, {"field": "b"}], "size": 0}}})
+    add("multi_terms_unmapped", {"m": {"multi_terms": {"terms": [{"field": "k"}, {"field": "nope"}]}}})
+    add("rare_terms_precision", {"r": {"rare_terms": {"field": "tag", "max_doc_count": 1, "precision": 0.00001}}})
+    add("rare_terms_precision_bad", {"r": {"rare_terms": {"field": "tag", "precision": 0.000001}}})
+    add("sig_terms_size_zero", {"s": {"significant_terms": {"field": "k", "size": 0}}})
+    add("sig_terms_two_heuristics", {"s": {"significant_terms": {"field": "k", "jlh": {}, "gnd": {}}}})
+    add("sig_terms_unknown_heuristic_suggest", {"s": {"significant_terms": {"field": "k", "jlp": {}}}})
+    add("sig_terms_unknown_field", {"s": {"significant_terms": {"field": "k", "nope": {}}}})
+    add("sig_terms_unknown_value_field", {"s": {"significant_terms": {"field": "k", "min_doc_cont": 1}}})
+    add("sig_text_unknown_heuristic_suggest", {"s": {"significant_text": {"field": "txt", "chi_squar": {}}}})
+    add("sig_terms_nested_field", {"n": {"nested": {"path": "nest"}, "aggs": {"s": {"significant_terms": {"field": "nest.y", "min_doc_count": 1}}, "x": {"significant_terms": {"field": "nest.x", "min_doc_count": 1}}}}},
+        query={"term": {"b": True}})
+    add("sig_terms_nested_field_bg", {"n": {"nested": {"path": "nest"}, "aggs": {"s": {"significant_terms": {"field": "nest.y", "min_doc_count": 1, "background_filter": {"term": {"b": True}}}},
+                                                                                  "x": {"significant_terms": {"field": "nest.x", "min_doc_count": 1, "background_filter": {"range": {"n": {"lt": 50}}}, "chi_square": {}}}}}},
+        query={"term": {"b": True}})
+    add("sig_terms_nested_in_terms", {"t": {"terms": {"field": "k", "size": 3}, "aggs": {"n": {"nested": {"path": "nest"}, "aggs": {"s": {"significant_terms": {"field": "nest.y", "min_doc_count": 1, "gnd": {}}}}}}}})
+    add("sig_terms_mi_options", {"t": {"terms": {"field": "b"}, "aggs": {"s": {"significant_terms": {"field": "k", "mutual_information": {"include_negatives": True, "background_is_superset": False}, "background_filter": {"range": {"n": {"lt": 70}}}, "min_doc_count": 1}}}}})
+    add("sig_terms_chi_percentage", {"t": {"terms": {"field": "b"}, "aggs": {"s": {"significant_terms": {"field": "tag", "chi_square": {}, "min_doc_count": 2, "size": 4}},
+                                                                     "p": {"significant_terms": {"field": "k", "percentage": {}, "size": 3}}}}})
+    # Histograms.
+    add("histo_interval_zero", {"h": {"histogram": {"field": "n", "interval": 0}}})
+    add("histo_interval_negative", {"h": {"histogram": {"field": "n", "interval": -5}}})
+    add("histo_no_interval", {"h": {"histogram": {"field": "n"}}})
+    add("histo_min_doc_count_negative", {"h": {"histogram": {"field": "n", "interval": 5, "min_doc_count": -1}}})
+    add("histo_bounds_inverted", {"h": {"histogram": {"field": "n", "interval": 5, "extended_bounds": {"min": 50, "max": 10}}}})
+    add("histo_hard_bounds_inverted", {"h": {"histogram": {"field": "n", "interval": 5, "hard_bounds": {"min": 50, "max": 10}}}})
+    add("histo_bounds_outside_hard", {"h": {"histogram": {"field": "n", "interval": 5, "min_doc_count": 0, "extended_bounds": {"min": 0, "max": 200}, "hard_bounds": {"min": 10, "max": 60}}}})
+    add("histo_keyword", {"h": {"histogram": {"field": "k", "interval": 5}}})
+    add("histo_geo", {"h": {"histogram": {"field": "g", "interval": 5}}})
+    add("histo_date_field", {"h": {"histogram": {"field": "t", "interval": 86400000000}}, "b": {"histogram": {"field": "b", "interval": 1}}})
+    add("histo_unmapped_bounds", {"h": {"histogram": {"field": "nope", "interval": 5, "min_doc_count": 0, "extended_bounds": {"min": 0, "max": 20}}},
+                                  "m": {"histogram": {"field": "nope", "interval": 5, "missing": 7}}})
+    add("histo_bad_order", {"h": {"histogram": {"field": "n", "interval": 5, "order": {"_count": "sideways"}}}})
+    add("histo_order_unknown", {"h": {"histogram": {"field": "n", "interval": 5, "order": {"nope": "asc"}}}})
+    add("histo_tiny_interval", {"h": {"histogram": {"field": "f", "interval": 0.3, "offset": 0.1, "min_doc_count": 1}}})
+    add("histo_offset_large", {"h": {"histogram": {"field": "n", "interval": 10, "offset": 107}}, "o": {"histogram": {"field": "n", "interval": 10, "offset": -3.5}}})
+    add("histo_too_many", {"h": {"histogram": {"field": "n", "interval": 0.001, "min_doc_count": 0}}})
+    add("histo_too_many_bounds", {"h": {"histogram": {"field": "n", "interval": 1, "min_doc_count": 0, "extended_bounds": {"min": 0, "max": 70000}}}})
+    add("histo_just_under_limit", {"h": {"histogram": {"field": "n", "interval": 1, "min_doc_count": 0, "extended_bounds": {"min": 0, "max": 60000}}, "aggs": {"bc": {"max_bucket": {"buckets_path": "_count"}}}}})
+    add("histo_too_many_nested", {"t": {"terms": {"field": "tag", "size": 300}, "aggs": {"h": {"histogram": {"field": "n", "interval": 1, "min_doc_count": 0, "extended_bounds": {"min": 0, "max": 300}}}}}})
+    add("histo_extended_bounds_strings", {"h": {"histogram": {"field": "n", "interval": 10, "min_doc_count": 0, "extended_bounds": {"min": "-20", "max": "120"}}}})
+    add("histo_keyed_format", {"h": {"histogram": {"field": "d", "interval": 15, "keyed": True, "format": "#.#"}}})
+    # Date histograms.
+    add("dh_no_interval", {"h": {"date_histogram": {"field": "t"}}})
+    add("dh_both_intervals", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month", "fixed_interval": "30d"}}})
+    add("dh_legacy_interval", {"h": {"date_histogram": {"field": "t", "interval": "month"}}})
+    add("dh_bad_calendar", {"h": {"date_histogram": {"field": "t", "calendar_interval": "2d"}}})
+    add("dh_bad_calendar_word", {"h": {"date_histogram": {"field": "t", "calendar_interval": "fortnight"}}})
+    add("dh_fixed_month", {"h": {"date_histogram": {"field": "t", "fixed_interval": "1M"}}})
+    add("dh_fixed_bad", {"h": {"date_histogram": {"field": "t", "fixed_interval": "abc"}}})
+    add("dh_fixed_zero", {"h": {"date_histogram": {"field": "t", "fixed_interval": "0d"}}})
+    add("dh_bad_tz", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month", "time_zone": "Mars/Base"}}})
+    add("dh_bad_offset", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month", "offset": "abc"}}})
+    add("dh_bad_bounds", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month", "extended_bounds": {"min": "not a date", "max": "2021-01-01"}}}})
+    add("dh_bounds_inverted", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month", "extended_bounds": {"min": "2021-01-01", "max": "2020-01-01"}}}})
+    add("dh_keyword", {"h": {"date_histogram": {"field": "k", "calendar_interval": "month"}}})
+    add("dh_long_field", {"h": {"date_histogram": {"field": "n", "fixed_interval": "10ms"}}})
+    add("dh_calendar_units", {"m": {"date_histogram": {"field": "t", "calendar_interval": "1q", "time_zone": "Asia/Kathmandu"}},
+                              "w": {"date_histogram": {"field": "t", "calendar_interval": "1w", "time_zone": "-03:00", "min_doc_count": 5}},
+                              "y": {"date_histogram": {"field": "t", "calendar_interval": "year", "format": "epoch_second"}}})
+    add("dh_fixed_units", {"a": {"date_histogram": {"field": "t", "fixed_interval": "90m", "min_doc_count": 2}},
+                           "b": {"date_histogram": {"field": "t", "fixed_interval": "1000s", "min_doc_count": 2, "time_zone": "Australia/Lord_Howe"}},
+                           "c": {"date_histogram": {"field": "t", "fixed_interval": "7d", "offset": "-1h", "format": "date_time"}}},
+        query={"range": {"t": {"gte": 1600000000000, "lt": 1601000000000}}})
+    add("dh_tz_dst_hours", {"h": {"date_histogram": {"field": "t", "calendar_interval": "hour", "time_zone": "Europe/London", "min_doc_count": 0}}},
+        query={"range": {"t": {"gte": 1603584000000, "lt": 1603670400000}}})
+    add("dh_tz_fixed_dst", {"h": {"date_histogram": {"field": "t", "fixed_interval": "3h", "time_zone": "America/Chicago", "min_doc_count": 0}}},
+        query={"range": {"t": {"gte": 1604210400000, "lt": 1604307600000}}})
+    add("dh_extended_bounds_tz", {"h": {"date_histogram": {"field": "t", "calendar_interval": "day", "time_zone": "Pacific/Auckland", "min_doc_count": 0,
+                                                          "extended_bounds": {"min": "2020-09-20", "max": "2020-10-05"}, "format": "yyyy-MM-dd"}}},
+        query={"range": {"t": {"gte": 1600560000000, "lt": 1601856000000}}})
+    add("dh_offset_calendar", {"h": {"date_histogram": {"field": "t", "calendar_interval": "day", "offset": "+6h", "time_zone": "Europe/Paris", "min_doc_count": 0}}},
+        query={"range": {"t": {"gte": 1585180800000, "lt": 1585785600000}}})
+    add("dh_missing_bad", {"h": {"date_histogram": {"field": "t", "calendar_interval": "year", "missing": "nope"}}})
+    add("dh_too_many", {"h": {"date_histogram": {"field": "t", "fixed_interval": "1s", "min_doc_count": 0}}})
+    add("dh_keyed_order", {"h": {"date_histogram": {"field": "t", "calendar_interval": "quarter", "keyed": True, "order": [{"_count": "asc"}, {"_key": "desc"}]}}})
+    add("dh_hard_bounds_with_offset", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month", "offset": "15d", "min_doc_count": 0,
+                                                               "hard_bounds": {"min": "2020-02-10", "max": "2020-05-20"}}}})
+    add("dh_bounds_epoch_numbers", {"h": {"date_histogram": {"field": "t", "calendar_interval": "year", "min_doc_count": 0,
+                                                            "extended_bounds": {"min": 1500000000000, "max": 1700000000000}}}})
+    add("auto_dh_minimum_interval", {"a": {"auto_date_histogram": {"field": "t", "buckets": 4, "minimum_interval": "month"}},
+                                     "b": {"auto_date_histogram": {"field": "t", "buckets": 30, "time_zone": "Europe/Paris", "format": "yyyy-MM-dd"}}})
+    # Ranges.
+    add("range_no_ranges", {"r": {"range": {"field": "n"}}})
+    add("range_empty_ranges", {"r": {"range": {"field": "n", "ranges": []}}})
+    add("range_keyword", {"r": {"range": {"field": "k", "ranges": [{"to": 5}]}}})
+    add("range_string_bounds", {"r": {"range": {"field": "n", "ranges": [{"from": "10", "to": "20"}, {"from": "abc"}]}}})
+    add("range_inverted", {"r": {"range": {"field": "n", "ranges": [{"from": 50, "to": 10}, {"from": 10, "to": 50}]}}})
+    add("range_unknown_key", {"r": {"range": {"field": "n", "ranges": [{"fromm": 50}]}}})
+    add("range_format_unmapped_missing", {"r": {"range": {"field": "nope", "missing": 15, "format": "0.0", "ranges": [{"to": 10}, {"from": 10, "to": 20}]}}})
+    add("range_date_field", {"r": {"range": {"field": "t", "ranges": [{"to": 1600000000000}, {"from": 1600000000000}]}}})
+    add("date_range_bad_date", {"r": {"date_range": {"field": "t", "ranges": [{"to": "not a date"}]}}})
+    add("date_range_numeric_field", {"r": {"date_range": {"field": "n", "ranges": [{"to": 50}, {"from": "50"}]}}})
+    add("date_range_math", {"r": {"date_range": {"field": "t", "format": "yyyy-MM-dd", "ranges": [{"from": "2020-01-01||+1M/M", "to": "2020-06-01||-1d"}, {"from": "2020-06-01||/y"}]}}})
+    add("date_range_epoch", {"r": {"date_range": {"field": "t", "format": "epoch_millis", "ranges": [{"to": 1600000000000}, {"from": "1600000000000"}]}}})
+    add("ip_range_bad_mask", {"r": {"ip_range": {"field": "ip", "ranges": [{"mask": "10.0.0.0/33"}]}}})
+    add("ip_range_mask_and_from", {"r": {"ip_range": {"field": "ip", "ranges": [{"mask": "10.0.0.0/8", "from": "10.0.0.1"}]}}})
+    add("ip_range_bad_ip", {"r": {"ip_range": {"field": "ip", "ranges": [{"from": "300.0.0.1"}]}}})
+    add("ip_range_numeric_field", {"r": {"ip_range": {"field": "n", "ranges": [{"to": "10.0.0.1"}]}}})
+    add("ip_prefix_too_long", {"p": {"ip_prefix": {"field": "ip", "prefix_length": 33}}})
+    add("ip_prefix_v6_too_long", {"p": {"ip_prefix": {"field": "ip", "prefix_length": 129, "is_ipv6": True}}})
+    add("ip_prefix_negative", {"p": {"ip_prefix": {"field": "ip", "prefix_length": -1}}})
+    add("ip_prefix_keyword", {"p": {"ip_prefix": {"field": "k", "prefix_length": 8}}})
+    add("ip_prefix_no_length", {"p": {"ip_prefix": {"field": "ip"}}})
+    add("ip_prefix_min_doc_count", {"p": {"ip_prefix": {"field": "ip", "prefix_length": 30, "min_doc_count": 3}}, "z": {"ip_prefix": {"field": "ip", "prefix_length": 0}}})
+    add("geo_distance_no_origin", {"g": {"geo_distance": {"field": "g", "ranges": [{"to": 10}]}}})
+    add("geo_distance_bad_unit", {"g": {"geo_distance": {"field": "g", "origin": "0,0", "unit": "parsec", "ranges": [{"to": 10}]}}})
+    add("geo_distance_keyword", {"g": {"geo_distance": {"field": "k", "origin": "0,0", "ranges": [{"to": 10}]}}})
+    add("geo_distance_origin_forms", {"a": {"geo_distance": {"field": "g", "origin": {"lat": 10, "lon": 20}, "unit": "mi", "ranges": [{"to": 1000}, {"from": 1000}]}},
+                                      "b": {"geo_distance": {"field": "g", "origin": "s1z0", "ranges": [{"to": 5000000}, {"from": 5000000}]}},
+                                      "c": {"geo_distance": {"field": "g", "origin": "POINT (20 10)", "unit": "nmi", "ranges": [{"from": 100, "to": 3000}]}}})
+    # Filters and friends.
+    add("filters_empty", {"f": {"filters": {"filters": {}}}})
+    add("filters_empty_list", {"f": {"filters": {"filters": []}}})
+    add("filters_not_object", {"f": {"filters": {"filters": 5}}})
+    add("filters_no_filters", {"f": {"filters": {"other_bucket": True}}})
+    add("filters_other_key_only", {"f": {"filters": {"filters": {"a": {"term": {"k": "k00"}}}, "other_bucket_key": "o"}},
+                                   "g": {"filters": {"filters": {"a": {"term": {"k": "k00"}}}, "other_bucket": False, "other_bucket_key": "o"}}})
+    add("filters_keyed_false_other", {"f": {"filters": {"filters": {"b": {"term": {"k": "k00"}}, "a": {"term": {"k": "k01"}}}, "keyed": False, "other_bucket": True}}})
+    add("filters_unknown_field", {"f": {"filters": {"filters": {"a": {"match_all": {}}}, "foo": 1}}})
+    add("adjacency_separator", {"a": {"adjacency_matrix": {"separator": "+", "filters": {"x": {"term": {"k": "k00"}}, "y": {"term": {"b": True}}}}}})
+    add("adjacency_empty", {"a": {"adjacency_matrix": {"filters": {}}}})
+    add("adjacency_no_filters", {"a": {"adjacency_matrix": {}}})
+    add("adjacency_too_many", {"a": {"adjacency_matrix": {"filters": {"f%03d" % i: {"term": {"i": i - 50}} for i in range(101)}}}})
+    add("missing_no_field", {"m": {"missing": {}}})
+    add("nested_not_nested", {"n": {"nested": {"path": "k"}}})
+    add("nested_unknown_path", {"n": {"nested": {"path": "nope"}}})
+    add("nested_no_path", {"n": {"nested": {}}})
+    add("reverse_nested_top", {"r": {"reverse_nested": {}}})
+    add("reverse_nested_bad_path", {"n": {"nested": {"path": "nest"}, "aggs": {"r": {"reverse_nested": {"path": "k"}}}}})
+    add("sampler_shard_size_zero", {"s": {"sampler": {"shard_size": 0}, "aggs": {"k": {"terms": {"field": "k"}}}}})
+    add("diversified_no_field", {"s": {"diversified_sampler": {"shard_size": 10}}})
+    add("diversified_max_per_value", {"s": {"diversified_sampler": {"field": "n", "shard_size": 30, "max_docs_per_value": 2}, "aggs": {"a": {"avg": {"field": "n"}}, "c": {"cardinality": {"field": "n"}}}}},
+        query={"range": {"d": {"gte": 40}}})
+    add("geohash_precision_bad", {"g": {"geohash_grid": {"field": "g", "precision": 13}}})
+    add("geotile_precision_bad", {"g": {"geotile_grid": {"field": "g", "precision": 30}}})
+    add("geotile_bounds", {"g": {"geotile_grid": {"field": "g", "precision": 4, "bounds": {"top_left": "50, -40", "bottom_right": "-10, 60"}, "size": 5, "shard_size": 7}}})
+    add("geohash_size_zero", {"g": {"geohash_grid": {"field": "g", "size": 0}}})
+    # Pipelines.
+    add("pipe_unknown_path", {"h": {"histogram": {"field": "n", "interval": 10}}, "a": {"avg_bucket": {"buckets_path": "h>nope"}}})
+    add("pipe_unknown_top", {"a": {"avg_bucket": {"buckets_path": "nope>x"}}})
+    add("pipe_path_to_multi_bucket", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"t": {"terms": {"field": "k"}}}}, "a": {"avg_bucket": {"buckets_path": "h>t"}}})
+    add("pipe_path_to_multi_value", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"stats": {"field": "d"}}}}, "a": {"max_bucket": {"buckets_path": "h>s"}}})
+    add("pipe_path_multi_value_key", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"stats": {"field": "d"}}, "p": {"percentiles": {"field": "d"}}}},
+                                      "a": {"max_bucket": {"buckets_path": "h>s.avg"}}, "b": {"min_bucket": {"buckets_path": "h>p[99.0]"}}, "c": {"sum_bucket": {"buckets_path": "h>p.50"}}})
+    add("pipe_path_bad_value_key", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"stats": {"field": "d"}}}}, "a": {"max_bucket": {"buckets_path": "h>s.nope"}}})
+    add("pipe_sibling_of_metric", {"m": {"max": {"field": "n"}}, "a": {"avg_bucket": {"buckets_path": "m"}}})
+    add("pipe_sibling_no_gt", {"h": {"histogram": {"field": "n", "interval": 10}}, "a": {"avg_bucket": {"buckets_path": "h"}}})
+    add("pipe_sibling_count", {"h": {"histogram": {"field": "n", "interval": 10}}, "a": {"avg_bucket": {"buckets_path": "h._count"}}, "b": {"max_bucket": {"buckets_path": "h>_count"}},
+                               "c": {"sum_bucket": {"buckets_path": "h._bucket_count"}}})
+    add("pipe_bucket_count", {"t": {"terms": {"field": "k", "size": 20}, "aggs": {"h": {"histogram": {"field": "n", "interval": 30}},
+                                                                           "bs": {"bucket_selector": {"buckets_path": {"c": "h._bucket_count"}, "script": "params.c > 3"}}}}})
+    add("pipe_no_buckets_path", {"h": {"histogram": {"field": "n", "interval": 10}}, "a": {"avg_bucket": {}}})
+    add("pipe_buckets_path_array", {"h": {"histogram": {"field": "n", "interval": 10}}, "a": {"avg_bucket": {"buckets_path": ["h>_count"]}}})
+    add("pipe_buckets_path_two", {"h": {"histogram": {"field": "n", "interval": 10}}, "a": {"avg_bucket": {"buckets_path": ["h>_count", "h>_count"]}}})
+    add("pipe_buckets_path_object", {"h": {"histogram": {"field": "n", "interval": 10}}, "a": {"avg_bucket": {"buckets_path": {"x": "h>_count"}}}})
+    add("pipe_bad_gap_policy", {"h": {"histogram": {"field": "n", "interval": 10}}, "a": {"avg_bucket": {"buckets_path": "h>_count", "gap_policy": "nope"}}})
+    add("pipe_gap_policies", {"h": {"histogram": {"field": "n", "interval": 7, "min_doc_count": 0, "extended_bounds": {"min": -30, "max": 130}}, "aggs": {"a": {"avg": {"field": "d"}},
+        "d1": {"derivative": {"buckets_path": "a"}}, "d2": {"derivative": {"buckets_path": "a", "gap_policy": "insert_zeros"}}, "d3": {"derivative": {"buckets_path": "a", "gap_policy": "keep_values"}},
+        "s1": {"serial_diff": {"buckets_path": "a", "lag": 3, "gap_policy": "insert_zeros"}}, "m1": {"moving_fn": {"buckets_path": "a", "window": 3, "script": "MovingFunctions.max(values)", "gap_policy": "insert_zeros"}},
+        "m2": {"moving_fn": {"buckets_path": "a", "window": 5, "shift": 2, "script": "MovingFunctions.stdDev(values, MovingFunctions.unweightedAvg(values))"}}}},
+        "ab": {"avg_bucket": {"buckets_path": "h>a", "gap_policy": "insert_zeros"}}, "sb": {"stats_bucket": {"buckets_path": "h>a", "gap_policy": "keep_values"}}})
+    add("pipe_derivative_parent", {"t": {"terms": {"field": "k"}, "aggs": {"c": {"derivative": {"buckets_path": "_count"}}}}})
+    add("pipe_derivative_top", {"d": {"derivative": {"buckets_path": "_count"}}})
+    add("pipe_derivative_unit_histogram", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"d": {"derivative": {"buckets_path": "_count", "unit": "1d"}}}}})
+    add("pipe_derivative_bad_unit", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month"}, "aggs": {"d": {"derivative": {"buckets_path": "_count", "unit": "fortnight"}}}}})
+    add("pipe_derivative_min_doc_count", {"h": {"histogram": {"field": "n", "interval": 10, "min_doc_count": 5}, "aggs": {"d": {"derivative": {"buckets_path": "_count"}}}}})
+    add("pipe_derivative_units", {"h": {"date_histogram": {"field": "t", "calendar_interval": "quarter"}, "aggs": {"s": {"sum": {"field": "n"}},
+        "a": {"derivative": {"buckets_path": "s", "unit": "month"}}, "b": {"derivative": {"buckets_path": "s", "unit": "12h", "format": "0.00"}}, "c": {"derivative": {"buckets_path": "_count", "unit": "week"}}}}})
+    add("pipe_cumsum_gap", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"c": {"cumulative_sum": {"buckets_path": "_count", "gap_policy": "skip"}}}}})
+    add("pipe_cumsum_parent", {"t": {"terms": {"field": "k"}, "aggs": {"c": {"cumulative_sum": {"buckets_path": "_count"}}}}})
+    add("pipe_cumsum_format", {"h": {"histogram": {"field": "n", "interval": 20}, "aggs": {"m": {"max": {"field": "d"}}, "c": {"cumulative_sum": {"buckets_path": "m", "format": "0.0"}}}}})
+    add("pipe_cumcard_not_card", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"m": {"max": {"field": "d"}}, "c": {"cumulative_cardinality": {"buckets_path": "m"}}}}})
+    add("pipe_moving_fn_window_zero", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"m": {"moving_fn": {"buckets_path": "_count", "window": 0, "script": "MovingFunctions.sum(values)"}}}}})
+    add("pipe_moving_fn_no_window", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"m": {"moving_fn": {"buckets_path": "_count", "script": "MovingFunctions.sum(values)"}}}}})
+    add("pipe_moving_fn_no_script", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"m": {"moving_fn": {"buckets_path": "_count", "window": 3}}}}})
+    add("pipe_moving_fn_parent", {"t": {"terms": {"field": "k"}, "aggs": {"m": {"moving_fn": {"buckets_path": "_count", "window": 3, "script": "MovingFunctions.sum(values)"}}}}})
+    add("pipe_moving_fn_models", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month"}, "aggs": {"s": {"sum": {"field": "d"}},
+        "e": {"moving_fn": {"buckets_path": "s", "window": 6, "script": "MovingFunctions.ewma(values, 0.3)"}},
+        "h1": {"moving_fn": {"buckets_path": "s", "window": 6, "script": "MovingFunctions.holt(values, 0.3, 0.1)"}},
+        "mn": {"moving_fn": {"buckets_path": "s", "window": 4, "shift": 4, "script": "MovingFunctions.min(values)"}},
+        "sm": {"moving_fn": {"buckets_path": "_count", "window": 3, "shift": -1, "script": "MovingFunctions.sum(values)"}}}}})
+    add("pipe_moving_fn_holt_winters", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"sum": {"field": "d"}},
+        "hw": {"moving_fn": {"buckets_path": "s", "window": 8, "script": "MovingFunctions.holtWinters(values, 0.3, 0.1, 0.1, 2, false)"}}}}})
+    add("pipe_moving_fn_holt_winters_mult", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"sum": {"field": "d"}},
+        "hm": {"moving_fn": {"buckets_path": "s", "window": 6, "shift": 1, "script": "MovingFunctions.holtWinters(values, 0.5, 0.2, 0.3, 1, true)"}}}}})
+    add("pipe_moving_fn_bad_window_order", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"m": {"moving_fn": {"window": -1, "script": "MovingFunctions.sum(values)", "buckets_path": "_count"}}}}})
+    add("pipe_normalize_format_last", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"z": {"normalize": {"method": "nope", "buckets_path": "_count", "format": "0"}}}}})
+    add("pipe_normalize_missing", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"z": {"normalize": {}}}}})
+    add("pipe_bucket_sort_queue_order", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"z": {"bucket_sort": {"from": -1, "size": 0}}}}})
+    add("pipe_bucket_sort_after_sort", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"z": {"bucket_sort": {"from": -1, "sort": [], "size": 0}}}}})
+    add("histo_bounds_reversed_fields", {"h": {"histogram": {"field": "n", "interval": 10, "extended_bounds": {"max": 10, "min": 50}}}})
+    add("histo_bounds_infinite", {"h": {"histogram": {"field": "n", "interval": 10, "hard_bounds": {"min": "Infinity", "max": 5}}}})
+    add("histo_bounds_nan_only", {"h": {"histogram": {"field": "n", "interval": 10, "hard_bounds": {"max": "NaN"}}}})
+    add("terms_order_filter_doc_count", {"t": {"terms": {"field": "tag", "order": {"f.doc_count": "desc"}, "size": 3}, "aggs": {"f": {"filter": {"term": {"b": True}}}}}})
+    add("terms_order_missing_key", {"t": {"terms": {"field": "tag", "order": {"m._count": "desc"}, "size": 3}, "aggs": {"m": {"missing": {"field": "d"}}}}})
+    add("terms_order_metric_through", {"t": {"terms": {"field": "tag", "order": {"m>x": "desc"}, "size": 3}, "aggs": {"m": {"max": {"field": "n"}}}}})
+    add("terms_order_metric_bad_key", {"t": {"terms": {"field": "tag", "order": {"m.foo": "desc"}, "size": 3}, "aggs": {"m": {"max": {"field": "n"}}}}})
+    add("adjacency_array", {"a": {"adjacency_matrix": {"filters": []}}})
+    add("geo_distance_wkt_z", {"g": {"geo_distance": {"field": "g", "origin": "POINT (20 10 5)", "ranges": [{"to": 1}]}}})
+    add("geo_distance_array_z", {"g": {"geo_distance": {"field": "g", "origin": [20, 10, 5], "ranges": [{"to": 1}]}}})
+    add("geo_distance_bad_geohash", {"g": {"geo_distance": {"field": "g", "origin": "nonsense", "ranges": [{"to": 1}]}}})
+    add("metric_bool_formats", {"a": {"avg": {"field": "b"}}, "s": {"sum": {"field": "b"}}, "mi": {"min": {"field": "b"}}, "ma": {"max": {"field": "b"}}, "st": {"stats": {"field": "b"}},
+                                "es": {"extended_stats": {"field": "b"}}, "p": {"percentiles": {"field": "b", "percents": [50]}}, "pr": {"percentile_ranks": {"field": "b", "values": [1]}},
+                                "w": {"weighted_avg": {"value": {"field": "b"}, "weight": {"field": "n"}}}, "c": {"cardinality": {"field": "b"}}})
+    add("metric_bool_buckets", {"t": {"terms": {"field": "b"}, "aggs": {"m": {"max": {"field": "b"}}}}, "h": {"histogram": {"field": "b", "interval": 1}},
+                                "r": {"range": {"field": "b", "ranges": [{"to": 1}, {"from": 1}]}}, "mb": {"max_bucket": {"buckets_path": "t>m"}}, "sb": {"stats_bucket": {"buckets_path": "t>m"}}})
+    add("metric_weighted_no_value", {"w": {"weighted_avg": {"weight": {"field": "n"}}}})
+    add("sampler_no_subs_zero", {"s": {"sampler": {"shard_size": 0}}})
+    add("sampler_negative", {"s": {"sampler": {"shard_size": -1}, "aggs": {"k": {"terms": {"field": "k"}}}}})
+    add("ip_prefix_v6_no_length", {"p": {"ip_prefix": {"field": "ip", "is_ipv6": True}}})
+    add("pipe_serial_diff_lag_zero", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"serial_diff": {"buckets_path": "_count", "lag": 0}}}}})
+    add("pipe_serial_diff_lag_negative", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"serial_diff": {"buckets_path": "_count", "lag": -2}}}}})
+    add("pipe_normalize_bad_method", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"z": {"normalize": {"buckets_path": "_count", "method": "nope"}}}}})
+    add("pipe_normalize_no_method", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"z": {"normalize": {"buckets_path": "_count"}}}}})
+    add("pipe_normalize_methods", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"m": {"min": {"field": "d"}},
+        "a": {"normalize": {"buckets_path": "m", "method": "rescale_0_1"}}, "b": {"normalize": {"buckets_path": "m", "method": "rescale_0_100", "format": "0.0"}},
+        "c": {"normalize": {"buckets_path": "_count", "method": "mean"}}, "d": {"normalize": {"buckets_path": "m", "method": "softmax"}}}}})
+    add("pipe_percentiles_bucket_bad", {"h": {"histogram": {"field": "n", "interval": 10}}, "p": {"percentiles_bucket": {"buckets_path": "h>_count", "percents": [101]}}})
+    add("pipe_percentiles_bucket_path", {"h": {"histogram": {"field": "n", "interval": 10}}, "p": {"percentiles_bucket": {"buckets_path": "h>_count", "percents": [25, 50, 75]}},
+                                         "t": {"terms": {"field": "k", "order": {"_key": "asc"}}, "aggs": {"m": {"max_bucket": {"buckets_path": "p2.50"}}}}})
+    add("pipe_es_bucket_sigma_negative", {"h": {"histogram": {"field": "n", "interval": 10}}, "e": {"extended_stats_bucket": {"buckets_path": "h>_count", "sigma": -1}}})
+    add("pipe_bucket_sort_parent_metric", {"m": {"max": {"field": "n"}}, "s": {"bucket_sort": {"size": 3}}})
+    add("pipe_bucket_sort_from_negative", {"t": {"terms": {"field": "k"}, "aggs": {"s": {"bucket_sort": {"from": -1}}}}})
+    add("pipe_bucket_sort_size_zero", {"t": {"terms": {"field": "k"}, "aggs": {"s": {"bucket_sort": {"size": 0}}}}})
+    add("pipe_bucket_sort_unknown", {"t": {"terms": {"field": "k"}, "aggs": {"s": {"bucket_sort": {"sort": [{"nope": "desc"}]}}}}})
+    add("pipe_bucket_sort_only_trim", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"bucket_sort": {"from": 2, "size": 3}}}}})
+    add("pipe_bucket_sort_keys", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month"}, "aggs": {"a": {"avg": {"field": "n"}},
+        "s": {"bucket_sort": {"sort": [{"_count": {"order": "asc"}}, {"_key": "desc"}], "size": 5, "gap_policy": "insert_zeros"}}}}})
+    add("pipe_bucket_sort_missing_key_insert_zeros", {"h": {"date_histogram": {"field": "t", "calendar_interval": "quarter"}, "aggs": {"i": {"terms": {"field": "k"}},
+        "s": {"bucket_sort": {"gap_policy": "insert_zeros", "sort": [{"i['nonexistent']._count": "desc"}]}}}}})
+    add("pipe_bucket_sort_missing_key_skip", {"h": {"date_histogram": {"field": "t", "calendar_interval": "quarter"}, "aggs": {"i": {"terms": {"field": "k"}},
+        "s": {"bucket_sort": {"sort": [{"i['k01']._count": "desc"}]}}}}})
+    add("pipe_parent_under_single_bucket", {"f": {"filter": {"term": {"b": True}}, "aggs": {"b": {"sum": {"field": "n"}}, "d": {"bucket_sort": {"sort": [{"b": "asc"}]}}}}})
+    add("pipe_bucket_script_under_single_bucket", {"f": {"filter": {"term": {"b": True}}, "aggs": {"b": {"sum": {"field": "n"}}, "e": {"normalize": {"buckets_path": "b", "method": "mean"}}}}})
+    add("pipe_bucket_sort_multi", {"t": {"terms": {"field": "tag", "size": 50}, "aggs": {"st": {"stats": {"field": "d"}},
+        "s": {"bucket_sort": {"sort": ["st.max", {"st.min": "desc"}, "_key"], "size": 6}}}}})
+    add("pipe_bucket_script_no_script", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"bucket_script": {"buckets_path": {"c": "_count"}}}}}})
+    add("pipe_bucket_selector_no_script", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"bucket_selector": {"buckets_path": {"c": "_count"}}}}}})
+    add("pipe_two_pipelines_chain", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"s": {"sum": {"field": "d"}}, "d": {"derivative": {"buckets_path": "s"}}, "c": {"cumulative_sum": {"buckets_path": "d"}}}},
+                                     "m": {"max_bucket": {"buckets_path": "h>c"}}, "mm": {"stats_bucket": {"buckets_path": "h>d"}}})
+    add("pipe_sibling_of_sibling", {"t": {"terms": {"field": "k"}, "aggs": {"h": {"histogram": {"field": "n", "interval": 25}}, "m": {"max_bucket": {"buckets_path": "h>_count"}}}},
+                                    "mm": {"avg_bucket": {"buckets_path": "t>m"}}, "mk": {"max_bucket": {"buckets_path": "t>m.value"}}})
+    add("pipe_max_bucket_keys", {"t": {"terms": {"field": "k", "size": 20}}, "m": {"max_bucket": {"buckets_path": "t>_count"}}, "n": {"min_bucket": {"buckets_path": "t._count"}}})
+    add("pipe_path_through_filter", {"t": {"terms": {"field": "k", "size": 20}, "aggs": {"f": {"filter": {"term": {"b": True}}, "aggs": {"a": {"avg": {"field": "d"}}}}}},
+                                     "m": {"max_bucket": {"buckets_path": "t>f>a"}}, "c": {"avg_bucket": {"buckets_path": "t>f._count"}}})
+    add("pipe_path_through_multi_bucket", {"t": {"terms": {"field": "k", "size": 20}, "aggs": {"h": {"terms": {"field": "b"}, "aggs": {"a": {"avg": {"field": "d"}}}}}},
+                                           "m": {"max_bucket": {"buckets_path": "t>h>a"}}})
+    add("pipe_format", {"h": {"histogram": {"field": "n", "interval": 10}, "aggs": {"a": {"avg": {"field": "d"}}}},
+                        "a": {"avg_bucket": {"buckets_path": "h>a", "format": "0.00"}}, "s": {"stats_bucket": {"buckets_path": "h>a", "format": "0.0"}},
+                        "e": {"extended_stats_bucket": {"buckets_path": "h>a", "format": "0.0"}}, "p": {"percentiles_bucket": {"buckets_path": "h>a", "format": "0.0", "percents": [50]}}})
+    add("pipe_empty_parent", {"h": {"histogram": {"field": "nope", "interval": 10}, "aggs": {"a": {"avg": {"field": "d"}}}},
+                              "a": {"avg_bucket": {"buckets_path": "h>a"}}, "m": {"max_bucket": {"buckets_path": "h>a"}}, "s": {"stats_bucket": {"buckets_path": "h>a"}},
+                              "e": {"extended_stats_bucket": {"buckets_path": "h>a"}}, "p": {"percentiles_bucket": {"buckets_path": "h>a"}}, "su": {"sum_bucket": {"buckets_path": "h>a"}}})
+    add("pipe_under_metric_parent", {"t": {"terms": {"field": "k"}, "aggs": {"m": {"max": {"field": "n"}}}}, "x": {"avg_bucket": {"buckets_path": "t>m>z"}}})
+    # Composite edge cases.
+    add("composite_size_one_pages", {"c": {"composite": {"size": 1, "sources": [{"k": {"terms": {"field": "k"}}}, {"b": {"terms": {"field": "b", "order": "desc"}}}]}}})
+    add("composite_histo_missing_bucket", {"c": {"composite": {"size": 6, "sources": [{"h": {"histogram": {"field": "d", "interval": 20, "missing_bucket": True, "missing_order": "last", "order": "desc"}}}],
+                                                               "after": {"h": 60.0}}, "aggs": {"m": {"max": {"field": "n"}}}}})
+    add("composite_date_tz_offset", {"c": {"composite": {"size": 5, "sources": [{"d": {"date_histogram": {"field": "t", "calendar_interval": "month", "time_zone": "America/New_York", "offset": "+1d", "format": "yyyy-MM-dd"}}}],
+                                                         "after": {"d": "2020-03-02"}}}})
+    add("composite_after_wrong_type", {"c": {"composite": {"sources": [{"n": {"terms": {"field": "n"}}}], "after": {"n": "abc"}}}})
+    add("composite_after_extra_key", {"c": {"composite": {"sources": [{"n": {"terms": {"field": "n"}}}], "after": {"n": 1, "x": 2}}}})
+    add("metric_stats_date_format_overflow", {"s": {"stats": {"field": "t", "format": "date_hour_minute_second_millis"}}})
+    add("metric_extended_stats_date_format_overflow", {"s": {"extended_stats": {"field": "t", "format": "basic_date"}}})
+    add("metric_stats_date_iso_wide_year", {"s": {"stats": {"field": "t"}}, "e": {"stats": {"field": "t", "format": "yyyy-MM-dd"}}})
+    add("metric_stats_fixed_year_formats", {f.replace("_", "")[:20]: {"stats": {"field": "t", "format": f}} for f in [
+        "ordinal_date_time", "year_month_day", "strict_date_time", "strict_year", "strict_ordinal_date", "date_hour_minute_second", "year"]})
+    add("metric_named_date_formats", {f: {"min": {"field": "t", "format": f}} for f in [
+        "basic_date", "basic_date_time", "basic_date_time_no_millis", "basic_ordinal_date", "basic_time", "basic_t_time_no_millis", "date", "date_hour",
+        "date_hour_minute", "date_hour_minute_second", "date_hour_minute_second_fraction", "date_hour_minute_second_millis", "date_time", "date_time_no_millis",
+        "hour", "hour_minute", "hour_minute_second", "hour_minute_second_millis", "ordinal_date", "ordinal_date_time", "time", "time_no_millis",
+        "t_time", "year", "year_month", "year_month_day", "strict_date", "strict_year_month", "strict_hour_minute", "epoch_second", "epoch_millis"]})
+    add("date_range_epoch_second_numbers", {"r": {"date_range": {"field": "t", "format": "epoch_second", "ranges": [{"to": 1590000000}, {"from": 1590000000, "to": "1600000000"}, {"from": 1600000000.7}]}}})
+    add("date_range_numbers_default_format", {"r": {"date_range": {"field": "t", "ranges": [{"to": 1590000000000}, {"from": 1590000000000.9}]}}})
+    add("composite_size_over_limit", {"c": {"composite": {"size": 65537, "sources": [{"k": {"terms": {"field": "k"}}}]}}})
+    add("composite_size_at_limit", {"c": {"composite": {"size": 65536, "sources": [{"k": {"terms": {"field": "k"}}}]}}})
+    add("composite_lossy_format", {"c": {"composite": {"sources": [{"d": {"date_histogram": {"field": "t", "calendar_interval": "1d", "format": "yyyy-MM"}}}]}}})
+    add("composite_lossy_format_tz", {"c": {"composite": {"sources": [{"d": {"date_histogram": {"field": "t", "calendar_interval": "1d", "format": "yyyy-MM", "time_zone": "Europe/Paris"}}}]}}})
+    add("composite_format_ok", {"c": {"composite": {"size": 3, "sources": [{"d": {"date_histogram": {"field": "t", "calendar_interval": "1d", "format": "yyyy-MM-dd", "time_zone": "+01:00"}}}]}}})
+    add("pipe_single_percent", {"t": {"terms": {"field": "k"}, "aggs": {"p": {"percentiles": {"field": "n", "percents": [99]}}}},
+                                "m": {"max_bucket": {"buckets_path": "t>p"}}, "m2": {"min_bucket": {"buckets_path": "t>p.p"}}})
+    add("pipe_single_percent_rank_hdr", {"t": {"terms": {"field": "k"}, "aggs": {"p": {"percentile_ranks": {"field": "n", "values": [40]}}, "h": {"percentiles": {"field": "n", "percents": [50], "hdr": {}}}}},
+                                         "m": {"max_bucket": {"buckets_path": "t>p"}}, "m2": {"sum_bucket": {"buckets_path": "t>h"}}})
+    add("pipe_two_percents_no_key", {"t": {"terms": {"field": "k"}, "aggs": {"p": {"percentiles": {"field": "n", "percents": [99, 50]}}}}, "m": {"max_bucket": {"buckets_path": "t>p"}}})
+    add("terms_order_single_percent", {"t": {"terms": {"field": "k", "order": {"p": "desc"}}, "aggs": {"p": {"percentiles": {"field": "n", "percents": [99]}}}}})
+    add("terms_order_single_percent_name", {"t": {"terms": {"field": "k", "order": {"p.p": "desc"}}, "aggs": {"p": {"percentiles": {"field": "n", "percents": [99]}}}}})
+    add("composite_ip_bool", {"c": {"composite": {"size": 4, "sources": [{"ip": {"terms": {"field": "ip"}}}, {"b": {"terms": {"field": "b"}}}], "after": {"ip": "10.0.0.20", "b": False}}}})
+    return c
+
+
+
+def random_tree_cases(n, seed, wide=False):
+    """Random aggregation trees over the main mapping (bucket aggs nested up to three deep, with
+    metrics and pipelines), for differential runs against Elasticsearch. `wide` adds more
+    aggregation types and parent pipelines."""
+    rnd = random.Random(seed)
+    num_fields = ["n", "i", "d", "f", "t", "b"]
+    kw_fields = ["k", "tag", "ip", "nest.y"]
+
+    def metric(depth_fields, nested):
+        f = rnd.choice(["nest.x"] if nested else ["n", "i", "d", "f"])
+        t = rnd.choice(["avg", "sum", "min", "max", "value_count", "stats", "extended_stats", "cardinality", "percentiles", "median_absolute_deviation", "weighted_avg", "top_metrics", "boxplot", "string_stats"])
+        if nested and t == "top_metrics":
+            t = "max"  # a nested sort field needs a nested sort context
+        if t == "cardinality":
+            return {"cardinality": {"field": rnd.choice(["nest.y"] if nested else ["k", "tag", "n", "ip"]), "precision_threshold": rnd.choice([1, 10, 100, 3000])}}
+        if t == "percentiles":
+            return {"percentiles": {"field": f, "percents": [rnd.choice([1, 25, 50, 90, 99.9])], "tdigest": {"compression": rnd.choice([20, 100, 300])}}}
+        if t == "weighted_avg":
+            return {"weighted_avg": {"value": {"field": f}, "weight": {"field": "i" if not nested else "nest.x", "missing": 1}}}
+        if t == "top_metrics" and not nested:
+            # Size 1 only: a sibling top_metrics of size > 1 under terms corrupts other
+            # TDigests of the request in Elasticsearch 9.5.5 (a recycled-array bug).
+            rnd.choice([1, 2])
+            return {"top_metrics": {"metrics": {"field": f}, "sort": {"i": rnd.choice(["asc", "desc"])}, "size": 1}}
+        if t == "string_stats":
+            return {"string_stats": {"field": "nest.y" if nested else rnd.choice(["k", "tag"])}}
+        if t == "extended_stats":
+            return {"extended_stats": {"field": f, "sigma": rnd.choice([1, 2, 3.5])}}
+        return {t: {"field": f}}
+
+    def bucket(depth, nested):
+        choices = ["terms", "terms", "histogram", "date_histogram", "range", "filters", "filter", "missing", "multi_terms", "rare_terms", "significant_terms"]
+        if not nested:
+            choices += ["nested", "composite_like"]
+        if wide:
+            choices += ["ip_range", "date_range", "adjacency_matrix", "geohash_grid", "geotile_grid", "auto_date_histogram", "variable_width_histogram",
+                        "composite", "geo_distance", "ip_prefix", "sampler", "diversified_sampler", "global", "reverse_nested"]
+        t = rnd.choice(choices)
+        if t == "ip_range" and not nested:
+            return "ip_range", {"field": "ip", "ranges": [{"to": "10.0.0.10"}, {"mask": "10.0.0.0/28"}, {"from": "192.168.1.3"}], "keyed": rnd.random() < 0.3}
+        if t == "date_range" and not nested:
+            return "date_range", {"field": "t", "ranges": [{"to": "2020-04-01"}, {"from": "2020-02-01", "to": "2020-11-15"}, {"from": "2020-11-15"}],
+                                  "time_zone": rnd.choice(["UTC", "Europe/Paris"]), "format": rnd.choice(["yyyy-MM-dd", "strict_date_optional_time"])}
+        if t == "adjacency_matrix" and not nested:
+            return "adjacency_matrix", {"filters": {"x": {"term": {"b": True}}, "y": {"range": {"n": {"lt": 40}}}, "w": {"range": {"i": {"gte": 0}}}}}
+        if t in ("geohash_grid", "geotile_grid") and not nested:
+            return t, {"field": "g", "precision": rnd.choice([1, 2, 3]), "size": rnd.choice([3, 10]), "shard_size": rnd.choice([3, 20])}
+        if t == "auto_date_histogram" and not nested and depth > 0:
+            return "auto_date_histogram", {"field": "t", "buckets": rnd.choice([3, 7, 20])}
+        if t == "variable_width_histogram" and not nested and depth == 0:
+            return "variable_width_histogram", {"field": rnd.choice(["n", "d"]), "buckets": rnd.choice([3, 6])}
+        if t == "composite" and not nested and depth == 0:
+            # Not the multi-valued n: queries are ranges on n, and Elasticsearch then reads a
+            # leading numeric source from the points inside the query range only
+            # (PointsSortedDocsProducer), dropping a doc's other values.
+            src = [{"a": {"terms": {"field": rnd.choice(["k", "i", "b"]), "missing_bucket": rnd.random() < 0.3}}}]
+            if rnd.random() < 0.5:
+                src.append({"h": {"histogram": {"field": "i", "interval": 25, "order": rnd.choice(["asc", "desc"])}}})
+            return "composite", {"sources": src, "size": rnd.choice([2, 5, 20])}
+        if t == "geo_distance" and not nested:
+            return "geo_distance", {"field": "g", "origin": "10, 20", "unit": "km", "ranges": [{"to": 3000}, {"from": 3000, "to": 8000}, {"from": 8000}]}
+        if t == "ip_prefix" and not nested:
+            return "ip_prefix", {"field": "ip", "prefix_length": rnd.choice([8, 24, 30])}
+        if t == "sampler" and not nested:
+            return "sampler", {"shard_size": rnd.choice([5, 50])}
+        if t == "diversified_sampler" and not nested:
+            return "diversified_sampler", {"shard_size": rnd.choice([5, 50]), "field": rnd.choice(["tag", "i", "i", "k"])}
+        if t == "global" and depth == 0:
+            return "global", {}
+        if t == "reverse_nested" and nested:
+            return "reverse_nested", {}
+        if t == "terms":
+            f = rnd.choice(["nest.y", "nest.x"] if nested else ["k", "tag", "n", "i", "ip", "b", "t", "d"])
+            body = {"field": f, "size": rnd.choice([1, 2, 3, 5, 10])}
+            if rnd.random() < 0.4:
+                body["shard_size"] = rnd.choice([1, 2, 4, 25])
+            if rnd.random() < 0.5:
+                body["show_term_doc_count_error"] = True
+            if rnd.random() < 0.2:
+                body["min_doc_count"] = rnd.choice([0, 2, 10])
+            o = rnd.random()
+            if o < 0.2:
+                body["order"] = {"_key": rnd.choice(["asc", "desc"])}
+            elif o < 0.35:
+                body["order"] = {"_count": "asc"}
+            return "terms", body
+        if t == "histogram":
+            f = "nest.x" if nested else rnd.choice(["n", "i", "d", "f"])
+            body = {"field": f, "interval": rnd.choice([1, 2.5, 7, 10, 25])}
+            if rnd.random() < 0.3:
+                body["min_doc_count"] = rnd.choice([0, 1, 3])
+            if rnd.random() < 0.2:
+                body["order"] = {"_count": "desc"}
+            return "histogram", body
+        if t == "date_histogram" and not nested:
+            body = {"field": "t"}
+            if rnd.random() < 0.5:
+                body["calendar_interval"] = rnd.choice(["month", "quarter", "week", "year"])
+            else:
+                body["fixed_interval"] = rnd.choice(["30d", "7d", "90d"])
+            if rnd.random() < 0.4:
+                body["time_zone"] = rnd.choice(["Europe/Paris", "America/New_York", "+05:30", "Asia/Tokyo"])
+            if rnd.random() < 0.3:
+                body["min_doc_count"] = rnd.choice([0, 5])
+            return "date_histogram", body
+        if t == "range":
+            f = "nest.x" if nested else rnd.choice(["n", "d", "i"])
+            cuts = sorted(rnd.sample(range(-20, 100), 3))
+            return "range", {"field": f, "ranges": [{"to": cuts[0]}, {"from": cuts[0], "to": cuts[2]}, {"from": cuts[1]}], "keyed": rnd.random() < 0.3}
+        if t == "filters":
+            return "filters", {"filters": {"a": {"term": {"b": True}}, "z": {"range": {"n": {"lt": 30}}}}, "other_bucket": rnd.random() < 0.5}
+        if t == "filter":
+            return "filter", {"range": {("nest.x" if nested else "n"): {"gte": rnd.choice([2, 20, 50])}}}
+        if t == "missing":
+            return "missing", {"field": rnd.choice(["nest.x"] if nested else ["d", "k", "t", "g"])}
+        if t == "multi_terms" and not nested:
+            return "multi_terms", {"terms": [{"field": "k"}, {"field": rnd.choice(["b", "n"])}], "size": rnd.choice([2, 5]), "show_term_doc_count_error": rnd.random() < 0.5}
+        if t == "rare_terms":
+            return "rare_terms", {"field": "nest.y" if nested else rnd.choice(["tag", "n"]), "max_doc_count": rnd.choice([1, 2])}
+        if t == "significant_terms" and not nested and depth > 0:
+            return "significant_terms", {"field": rnd.choice(["k", "tag"]), "min_doc_count": 1, "size": 3}
+        if t == "nested":
+            return "nested", {"path": "nest"}
+        return "terms", {"field": "nest.y" if nested else "k", "size": 3}
+
+    def tree(depth, nested, parent_multi, terms_above=False):
+        aggs = {}
+        for j in range(rnd.choice([1, 1, 2, 3])):
+            if depth < 3 and rnd.random() < 0.55:
+                t, body = bucket(depth, nested)
+                sub_nested = nested or t == "nested"
+                node = {t: body}
+                # Elasticsearch's rare_terms hands its sub-aggregations the wrong buckets when
+                # it drops no term (see rare_terms.rs); which buckets it was asked for depends on
+                # how terms ancestors executed (breadth_first, filters), which isn't modelled.
+                want_subs = t not in ("rare_terms",) or rnd.random() < 0.5
+                if t == "rare_terms" and terms_above:
+                    want_subs = False
+                # Elasticsearch 9.5.5's adjacency_matrix with sub-aggregations under another
+                # bucket aggregation corrupts the parent's buckets (doc counts and keys).
+                if t == "adjacency_matrix" and depth > 0:
+                    want_subs = False
+                if want_subs:
+                    if t == "reverse_nested":
+                        sub_nested = False
+                    subs = tree(depth + 1, sub_nested, t in ("terms", "histogram", "date_histogram", "range", "filters", "multi_terms"),
+                                terms_above or t in ("terms", "multi_terms", "significant_terms", "composite"))
+                    if subs:
+                        node["aggs"] = subs
+                aggs["b%d%d" % (depth, j)] = node
+            else:
+                aggs["m%d%d" % (depth, j)] = metric(depth, nested)
+        # Pipelines over the metrics of this level.
+        metrics = [k for k, v in aggs.items() if list(v)[0] in ("avg", "sum", "min", "max", "value_count", "cardinality")]
+        if parent_multi and metrics and rnd.random() < 0.3:
+            m = rnd.choice(metrics)
+            aggs["p%d" % depth] = rnd.choice([
+                {"bucket_sort": {"sort": [{m: {"order": rnd.choice(["asc", "desc"])}}], "size": 2}},
+                {"bucket_selector": {"buckets_path": {"v": "_count"}, "script": "params.v > 5"}},
+            ])
+        histos = [k for k, v in aggs.items() if list(v)[0] in ("histogram", "date_histogram") and "aggs" in v]
+        if histos and rnd.random() < 0.5:
+            h = rnd.choice(histos)
+            inner = [k for k, v in aggs[h]["aggs"].items() if list(v)[0] in ("avg", "sum", "min", "max", "value_count")]
+            target = h + ">" + (inner[0] if inner else "_count")
+            aggs["s%d" % depth] = {rnd.choice(["avg_bucket", "max_bucket", "sum_bucket", "stats_bucket", "percentiles_bucket"]): {"buckets_path": target}}
+            if inner and rnd.random() < 0.6:
+                aggs[h]["aggs"]["dv"] = {"derivative": {"buckets_path": inner[0]}}
+                aggs[h]["aggs"]["cs"] = {"cumulative_sum": {"buckets_path": inner[0]}}
+                if wide:
+                    gp = rnd.choice(["skip", "insert_zeros", "keep_values"])
+                    aggs[h]["aggs"]["mf"] = {"moving_fn": {"buckets_path": inner[0], "window": rnd.choice([2, 5]), "shift": rnd.choice([0, 1]), "gap_policy": gp,
+                                                           "script": rnd.choice(["MovingFunctions.unweightedAvg(values)", "MovingFunctions.linearWeightedAvg(values)",
+                                                                                 "MovingFunctions.ewma(values, 0.4)", "MovingFunctions.holt(values, 0.5, 0.2)",
+                                                                                 "MovingFunctions.stdDev(values, MovingFunctions.unweightedAvg(values))",
+                                                                                 "MovingFunctions.max(values)", "MovingFunctions.min(values)", "MovingFunctions.sum(values)"])}}
+                    aggs[h]["aggs"]["sd"] = {"serial_diff": {"buckets_path": inner[0], "lag": rnd.choice([1, 3]), "gap_policy": gp}}
+                    aggs[h]["aggs"]["nz"] = {"normalize": {"buckets_path": inner[0], "method": rnd.choice(["rescale_0_1", "rescale_0_100", "percent_of_sum", "mean", "z-score", "softmax"])}}
+                    aggs[h]["aggs"]["bs"] = {"bucket_sort": {"from": rnd.choice([0, 1]), "size": rnd.choice([3, 50]), "gap_policy": gp}}
+        return aggs
+
+    c = []
+    for k in range(n):
+        body = {"aggs": tree(0, False, False)}
+        r = rnd.random()
+        if r < 0.3:
+            body["query"] = {"range": {"n": {"gte": rnd.randrange(0, 60)}}}
+        elif r < 0.4:
+            body["query"] = {"term": {"b": rnd.random() < 0.5}}
+        c.append({"name": "rnd_%03d" % k, "body": json.dumps(body, separators=(",", ":")), "typed_keys": rnd.random() < 0.3})
+    return c
+
+
+
+def review_fix_cases():
+    """Malformed aggregation paths, extreme parameters (NaN compressions, Long.MIN/MAX bounds and
+    offsets) and the other inputs a mutation fuzzer found: errors must match, nothing may panic."""
+    c = []
+
+    def add(name, aggs, query=None, typed_keys=False):
+        body = {"aggs": aggs}
+        if query is not None:
+            body["query"] = query
+        c.append({"name": name, "body": json.dumps(body, separators=(",", ":")), "typed_keys": typed_keys})
+
+    LMIN, LMAX = -9223372036854775808, 9223372036854775807
+    bad_paths = {"empty": "", "gt": ">", "gt_spaced": " > ", "gtgt": ">>", "dot": ".", "trailing_dot": "a.",
+                 "open_key": "h['x", "empty_key": "h[]>a"}
+    # Orders.
+    for pn, path in bad_paths.items():
+        add("order_terms_" + pn, {"t": {"terms": {"field": "k", "order": {path: "asc"}}, "aggs": {"a": {"avg": {"field": "n"}}}}})
+    add("order_terms_gt_top_metrics", {"t": {"terms": {"field": "k", "order": {">": "asc"}}, "aggs": {"tm": {"top_metrics": {"metrics": {"field": "d"}, "sort": {"n": "asc"}}}}}})
+    add("order_terms_gt_stats", {"t": {"terms": {"field": "k", "order": {">": "desc"}}, "aggs": {"s": {"stats": {"field": "n"}}}}})
+    add("order_terms_empty_compound", {"t": {"terms": {"field": "k", "order": [{"_count": "desc"}, {"": "asc"}]}}})
+    add("order_multi_terms_empty", {"t": {"multi_terms": {"terms": [{"field": "k"}, {"field": "tag"}], "order": {"": "asc"}}}})
+    add("order_histogram_empty", {"h": {"histogram": {"field": "n", "interval": 10, "order": {"": "asc"}}}})
+    add("order_date_histogram_gt", {"h": {"date_histogram": {"field": "t", "calendar_interval": "month", "order": {">": "asc"}}}})
+    add("order_rare_terms_like_ok", {"t": {"terms": {"field": "k", "order": {"a": "asc"}}, "aggs": {"a": {"avg": {"field": "n"}}}}})
+    # Sibling pipelines.
+    histo = {"histogram": {"field": "n", "interval": 10}, "aggs": {"a": {"avg": {"field": "d"}}}}
+    for pt in ["max_bucket", "avg_bucket", "stats_bucket", "extended_stats_bucket", "percentiles_bucket"]:
+        for pn, path in list(bad_paths.items()) + [("array_empty", []), ("array_two", ["h>a", "_count"]), ("array_two_bad", ["a", "_count"]),
+                                                   ("array_one", ["h>a"])]:
+            if pt != "max_bucket" and pn not in ("empty", "gt", "array_empty", "dot"):
+                continue
+            add("sibling_%s_%s" % (pt, pn), {"h": histo, "m": {pt: {"buckets_path": path}}})
+            if pn in ("empty", "gt", "array_empty", "dot"):
+                add("sibling_inner_%s_%s" % (pt, pn), {"h": {"histogram": {"field": "n", "interval": 10},
+                                                              "aggs": {"t": {"terms": {"field": "k"}, "aggs": {"a": {"avg": {"field": "d"}}}},
+                                                                       "m": {pt: {"buckets_path": path}}}}})
+    add("sibling_empty_array_first_error", {"m": {"max_bucket": {"buckets_path": []}}, "d": {"derivative": {"buckets_path": "x"}}})
+    add("sibling_empty_array_bad_percents", {"h": histo, "m": {"percentiles_bucket": {"buckets_path": [], "percents": [101]}}})
+    add("sibling_composite", {"c": {"composite": {"sources": [{"k": {"terms": {"field": "k"}}}]}, "aggs": {"s": {"sum": {"field": "n"}}}},
+                              "m": {"max_bucket": {"buckets_path": "c>s"}}})
+    add("sibling_composite_count", {"c": {"composite": {"sources": [{"k": {"terms": {"field": "k"}}}]}}, "m": {"avg_bucket": {"buckets_path": "c>_count"}}})
+    add("sibling_composite_under_filter", {"f": {"filter": {"exists": {"field": "n"}}, "aggs": {"c": {"composite": {"sources": [{"k": {"terms": {"field": "k"}}}]}, "aggs": {"s": {"sum": {"field": "n"}}}}}},
+                                           "m": {"max_bucket": {"buckets_path": "f>c>s"}}})
+    add("sibling_filter_no_subs", {"f": {"filter": {"exists": {"field": "n"}}}, "m": {"max_bucket": {"buckets_path": "f"}}})
+    add("sibling_filter_terms_ok", {"f": {"filter": {"exists": {"field": "n"}}, "aggs": {"t": {"terms": {"field": "k"}, "aggs": {"s": {"sum": {"field": "n"}}}}}},
+                                    "m": {"max_bucket": {"buckets_path": "f>t>s"}}})
+    # Parent pipelines.
+    for pt in ["derivative", "serial_diff", "cumulative_sum", "cumulative_cardinality", "moving_fn", "normalize"]:
+        for pn, path in [("array_empty", []), ("empty", ""), ("gt", ">"), ("dot", "."), ("array_two", ["a", "_count"]), ("array_one", ["a"])]:
+            body = {"buckets_path": path}
+            if pt == "moving_fn":
+                body.update({"window": 2, "script": "MovingFunctions.max(values)"})
+            if pt == "normalize":
+                body["method"] = "mean"
+            if pt == "serial_diff":
+                body["lag"] = 1
+            sub = {"a": {"avg": {"field": "d"}}, "p": {pt: body}}
+            if pt == "cumulative_cardinality":
+                sub["a"] = {"cardinality": {"field": "k"}}
+            add("parent_%s_%s" % (pt, pn), {"h": {"histogram": {"field": "n", "interval": 10, "min_doc_count": 0}, "aggs": sub}})
+    add("parent_serial_diff_empty_under_terms", {"t": {"terms": {"field": "k"}, "aggs": {"s1": {"serial_diff": {"buckets_path": []}}}}})
+    for pn, path in [("empty", ""), ("gt", ">"), ("dot", ".")]:
+        add("bucket_selector_" + pn, {"t": {"terms": {"field": "k"}, "aggs": {"a": {"avg": {"field": "n"}},
+                                                                            "s": {"bucket_selector": {"buckets_path": {"x": path}, "script": "params.x > 0"}}}}})
+        add("bucket_script_" + pn, {"t": {"terms": {"field": "k"}, "aggs": {"a": {"avg": {"field": "n"}},
+                                                                          "s": {"bucket_script": {"buckets_path": {"x": path}, "script": "params.x"}}}}})
+        add("bucket_sort_" + pn, {"t": {"terms": {"field": "k"}, "aggs": {"a": {"avg": {"field": "n"}},
+                                                                        "s": {"bucket_sort": {"sort": [{path: "asc"}]}}}}})
+    # TDigest compressions.
+    for comp in ["NaN", 0, 1e-300]:
+        cn = str(comp).replace(".", "_").replace("-", "m")
+        add("tdigest_percentiles_" + cn, {"p": {"percentiles": {"field": "d", "tdigest": {"compression": comp}}}})
+        add("tdigest_ranks_" + cn, {"p": {"percentile_ranks": {"field": "d", "values": [10, 50], "tdigest": {"compression": comp}}}})
+        add("tdigest_mad_" + cn, {"p": {"median_absolute_deviation": {"field": "d", "compression": comp}}})
+        add("tdigest_boxplot_" + cn, {"p": {"boxplot": {"field": "d", "compression": comp}}})
+    add("tdigest_nan_no_values", {"p": {"percentiles": {"field": "d", "tdigest": {"compression": "NaN"}}}}, query={"term": {"k": "none"}})
+    add("tdigest_nan_in_terms", {"t": {"terms": {"field": "k"}, "aggs": {"p": {"percentiles": {"field": "d", "tdigest": {"compression": "NaN"}}}}}})
+    # Cardinality on geo_point.
+    for pt in [None, 0, 1, 100, 40000]:
+        body = {"field": "g"}
+        if pt is not None:
+            body["precision_threshold"] = pt
+        add("cardinality_geo_%s" % pt, {"c": {"cardinality": body}})
+    add("cardinality_geo_missing", {"c": {"cardinality": {"field": "g", "missing": "10.5,20.25"}}, "c2": {"cardinality": {"field": "g", "missing": [20.25, 10.5]}}})
+    add("cardinality_geo_in_terms", {"t": {"terms": {"field": "k"}, "aggs": {"c": {"cardinality": {"field": "g"}}}}})
+    add("cardinality_geo_in_histogram", {"h": {"histogram": {"field": "n", "interval": 25}, "aggs": {"c": {"cardinality": {"field": "g", "precision_threshold": 0}}}}})
+    # Long overflow in date roundings, offsets and bounds.
+    dh = lambda **kw: {"h": {"date_histogram": dict({"field": "t"}, **kw)}}
+    add("overflow_offset_min", dh(fixed_interval="1d", offset="-9223372036854775807ms"))
+    add("overflow_offset_max", dh(fixed_interval="1d", offset="9223372036854775807ms"))
+    add("overflow_offset_max_hour_zone", dh(fixed_interval="3h", offset="9223372036854775807ms", time_zone="+05:30"))
+    add("overflow_ext_min_auckland", dh(calendar_interval="day", time_zone="Pacific/Auckland", min_doc_count=0, extended_bounds={"min": LMIN, "max": "2020-10-05"}, format="yyyy-MM-dd"))
+    add("overflow_ext_max_auckland", dh(calendar_interval="day", time_zone="Pacific/Auckland", min_doc_count=0, extended_bounds={"min": "2019-12-30", "max": LMAX}, format="yyyy-MM-dd"))
+    add("overflow_ext_max_day", dh(calendar_interval="day", min_doc_count=0, extended_bounds={"min": "2019-12-30", "max": LMAX}))
+    add("overflow_ext_max_fixed", dh(fixed_interval="1d", min_doc_count=0, extended_bounds={"min": "2019-12-30", "max": LMAX}))
+    add("overflow_ext_min_fixed", dh(fixed_interval="1d", min_doc_count=0, extended_bounds={"min": LMIN, "max": "2019-12-30"}))
+    add("overflow_ext_min_month", dh(calendar_interval="month", min_doc_count=0, extended_bounds={"min": LMIN, "max": "2019-12-30"}))
+    add("overflow_ext_max_year_zone", dh(calendar_interval="year", time_zone="-03:00", min_doc_count=0, extended_bounds={"min": "2019-12-30", "max": LMAX}))
+    add("overflow_ext_max_week", dh(calendar_interval="week", min_doc_count=0, extended_bounds={"min": "2019-12-30", "max": LMAX}))
+    add("overflow_missing_min_7d", dh(fixed_interval="7d", missing=LMIN))
+    add("overflow_missing_max_7d", dh(fixed_interval="7d", missing=LMAX))
+    add("overflow_missing_min_month", dh(calendar_interval="month", missing=LMIN))
+    add("overflow_missing_max_day_zone", dh(calendar_interval="day", time_zone="Europe/Paris", missing=LMAX))
+    add("overflow_far_bounds_1000000d", dh(fixed_interval="1000000d", min_doc_count=0, extended_bounds={"min": -8000000000000000000, "max": 8000000000000000000}))
+    add("overflow_offset_max_month_bounds", dh(calendar_interval="month", offset=LMAX, extended_bounds={"min": "2019-06-01", "max": "2021-09-01"}))
+    add("overflow_offset_max_month", dh(calendar_interval="month", offset=LMAX))
+    add("overflow_offset_min_month", dh(calendar_interval="month", offset=-LMAX))
+    add("overflow_hard_bounds", dh(calendar_interval="day", hard_bounds={"min": LMIN, "max": LMAX}))
+    add("overflow_hard_bounds_fixed", dh(fixed_interval="1h", hard_bounds={"min": LMIN, "max": LMAX}))
+    add("overflow_date_range_epoch_second_max", {"r": {"date_range": {"field": "t", "format": "epoch_second", "ranges": [{"to": LMAX}, {"from": 1590000000, "to": "1600000000"}]}}})
+    add("overflow_date_range_epoch_second_min", {"r": {"date_range": {"field": "t", "format": "epoch_second", "ranges": [{"from": LMIN}]}}})
+    add("overflow_date_range_epoch_second_big", {"r": {"date_range": {"field": "t", "format": "epoch_second", "ranges": [{"to": 9223372036854775}, {"from": 9223372036854776}]}}})
+    add("overflow_date_range_millis_max", {"r": {"date_range": {"field": "t", "ranges": [{"to": LMAX}, {"from": LMIN}]}}})
+    add("overflow_histogram_ext_far", {"h": {"histogram": {"field": "n", "interval": 1, "min_doc_count": 0, "extended_bounds": {"min": -1e300, "max": 5}}}})
+    add("overflow_histogram_offset_far", {"h": {"histogram": {"field": "n", "interval": 10, "offset": 9.2e18}}})
+    # (auto_date_histogram with missing Long.MAX kills Elasticsearch's JVM: not captured.)
+    add("overflow_composite_date_offset", {"c": {"composite": {"sources": [{"d": {"date_histogram": {"field": "t", "fixed_interval": "1d", "offset": "-9223372036854775807ms"}}}]}}})
+    # Unmapped terms with value_type and missing.
+    for vt, miss in [("long", 3), ("double", 3), ("long", "3"), ("date", 3), ("ip", "1.2.3.4"), ("boolean", True), ("string", 3), ("numeric", 3)]:
+        add("terms_unmapped_value_type_%s_%s" % (vt, type(miss).__name__), {"t": {"terms": {"field": "nope", "value_type": vt, "missing": miss}}}, typed_keys=True)
+    add("terms_unmapped_value_type_long_sub", {"t": {"terms": {"field": "nope", "value_type": "long", "missing": 7}, "aggs": {"x": {"terms": {"field": "nope2", "value_type": "double", "missing": 1.5}}}}}, typed_keys=True)
+    add("terms_long_missing_fraction", {"t": {"terms": {"field": "n", "missing": 1.5}}, "u": {"terms": {"field": "d", "missing": 3}}}, typed_keys=True)
+    add("terms_unmapped_missing_fraction", {"t": {"terms": {"field": "nope", "missing": 1.5, "value_type": "long"}}}, typed_keys=True)
+    add("rare_terms_long_missing_fraction", {"t": {"rare_terms": {"field": "n", "missing": 1.5}}})
+    add("sig_terms_unmapped_missing_keyword", {"t": {"significant_terms": {"field": "nope", "missing": "x"}}})
+    add("sig_terms_long_missing_fraction", {"t": {"significant_terms": {"field": "n", "missing": 1.5}}})
+    add("rare_terms_unmapped_value_type_long", {"t": {"rare_terms": {"field": "nope", "value_type": "long", "missing": 3}}}, typed_keys=True)
+    add("sig_terms_unmapped_value_type_long", {"t": {"significant_terms": {"field": "nope", "value_type": "long", "missing": 3}}}, typed_keys=True)
+    # top_metrics size.
+    add("top_metrics_size_0", {"tm": {"top_metrics": {"metrics": {"field": "d"}, "sort": {"i": "asc"}, "size": 0}}})
+    add("top_metrics_size_neg", {"tm": {"top_metrics": {"metrics": {"field": "d"}, "sort": {"i": "asc"}, "size": -1}}})
+    add("top_metrics_size_0_first", {"tm": {"top_metrics": {"size": 0, "metrics": {"field": "d"}, "sort": {"i": "asc"}}}})
+    add("top_metrics_size_0_no_sort", {"tm": {"top_metrics": {"metrics": {"field": "d"}, "size": 0}}})
+    return c
+
+
+def random_date_cases(n, seed):
+    """Random date_histogram / date_range / auto_date_histogram / composite date sources over
+    the main docs: every calendar and fixed unit, time zones with DST and odd offsets,
+    `offset`, bounds, `min_doc_count`, formats and keyed output."""
+    rnd = random.Random(seed)
+    zones = ["UTC", "Europe/Paris", "America/New_York", "Asia/Kathmandu", "Australia/Lord_Howe", "Pacific/Chatham", "-03:30", "+05:45",
+             "America/Sao_Paulo", "Europe/London", "Asia/Tehran", "America/St_Johns", "Africa/Casablanca"]
+    cal = ["minute", "hour", "day", "week", "month", "quarter", "year", "1d", "1M", "1w", "1h", "1q", "1y"]
+    fixed = ["7d", "30d", "12h", "90m", "3600s", "5d", "1000000ms", "36h"]
+    fmts = [None, None, "yyyy-MM-dd", "yyyy-MM-dd'T'HH:mm:ssXXX", "epoch_second", "date_time", "MMM yyyy", "EEE, dd MMM yyyy HH:mm", "week_date", "ordinal_date"]
+    c = []
+    for k in range(n):
+        aggs = {}
+        for j in range(rnd.choice([1, 2])):
+            body = {"field": "t"}
+            if rnd.random() < 0.5:
+                unit = rnd.choice(cal)
+                body["calendar_interval"] = unit
+            else:
+                unit = rnd.choice(fixed)
+                body["fixed_interval"] = unit
+            if rnd.random() < 0.7:
+                body["time_zone"] = rnd.choice(zones)
+            if rnd.random() < 0.3:
+                body["offset"] = rnd.choice(["+1h", "-6h", "+2d", "-30m", "+1d", "15m"])
+            f = rnd.choice(fmts)
+            if f:
+                body["format"] = f
+            if rnd.random() < 0.4:
+                body["min_doc_count"] = rnd.choice([0, 1, 3])
+            # Keyed output with a format coarser than the interval repeats keys, which a JSON
+            # object (and so this fixture) can't hold.
+            if rnd.random() < 0.2 and not f:
+                body["keyed"] = True
+            if rnd.random() < 0.2:
+                body["order"] = rnd.choice([{"_count": "desc"}, {"_key": "desc"}])
+            fine = unit in ("minute", "hour", "1h", "90m", "3600s", "1000000ms", "12h", "36h")
+            if fine:
+                lo = 1585000000000 + rnd.randrange(0, 200) * 86400000
+                query_range = (lo, lo + rnd.choice([1, 3, 7]) * 86400000)
+            else:
+                query_range = None
+            if body.get("min_doc_count") == 0 and rnd.random() < 0.6:
+                if fine:
+                    body["extended_bounds"] = {"min": query_range[0] - 7200000, "max": query_range[1] + 7200000}
+                elif f:
+                    # Bound strings parse with the aggregation's format: give numbers.
+                    body["extended_bounds"] = {"min": 1559347200000, "max": 1633046400000}
+                else:
+                    body["extended_bounds"] = {"min": "2019-06-01", "max": "2021-09-30"}
+            if rnd.random() < 0.15 and "extended_bounds" not in body:
+                if fine:
+                    body["hard_bounds"] = {"min": query_range[0] + 3600000, "max": query_range[1] - 3600000}
+                else:
+                    body["hard_bounds"] = {"min": 1581292800000, "max": 1605830400000} if f else {"min": "2020-02-10", "max": "2020-11-20"}
+            sub = {}
+            if rnd.random() < 0.4:
+                sub["m"] = {rnd.choice(["max", "min", "avg", "sum"]): {"field": rnd.choice(["n", "d", "t"])}}
+            if rnd.random() < 0.2 and (body.get("min_doc_count") == 0 or rnd.random() < 0.1):
+                sub["c"] = {"cumulative_sum": {"buckets_path": "_count"}}
+            node = {"date_histogram": body}
+            if sub:
+                node["aggs"] = sub
+            aggs["h%d" % j] = node
+        if rnd.random() < 0.3:
+            tz = rnd.choice(zones)
+            aggs["r"] = {"date_range": {"field": "t", "time_zone": tz, "format": "strict_date_optional_time",
+                                        "ranges": [{"to": "2020-03-29T02:30"}, {"from": "2020-03-01", "to": "2020-10-25T01:30"}, {"from": "2020-10-25"}]}}
+        if rnd.random() < 0.2:
+            aggs["a"] = {"auto_date_histogram": {"field": "t", "buckets": rnd.choice([3, 10, 40]), "time_zone": rnd.choice(zones)}}
+        if rnd.random() < 0.2:
+            src = {"date_histogram": {"field": "t", "calendar_interval": rnd.choice(["month", "week", "day"]), "time_zone": rnd.choice(zones)}}
+            aggs["cp"] = {"composite": {"size": 7, "sources": [{"d": src}]}}
+        body = {"aggs": aggs}
+        fine_q = [a["date_histogram"] for a in aggs.values() if "date_histogram" in a and (a["date_histogram"].get("calendar_interval") in ("minute", "hour", "1h") or a["date_histogram"].get("fixed_interval") in ("90m", "3600s", "1000000ms", "12h", "36h"))]
+        if fine_q:
+            lo = 1585000000000 + rnd.randrange(0, 200) * 86400000
+            body["query"] = {"range": {"t": {"gte": lo, "lt": lo + 3 * 86400000}}}
+        c.append({"name": "date_%03d" % k, "body": json.dumps(body, separators=(",", ":")), "typed_keys": rnd.random() < 0.2})
+    return c
+
+
 def generate(suite, mapping, docs, cases, shards, settings=None):
     index = "aggs-fx-" + suite
     call("DELETE", "/" + index)
@@ -1372,6 +2589,8 @@ def generate(suite, mapping, docs, cases, shards, settings=None):
             placement.append([int(h["_id"]) for h in r["hits"]["hits"]])
     out_cases = []
     for c in cases:
+        if os.environ.get("FIXTURE_VERBOSE"):
+            print(c["name"], file=sys.stderr, flush=True)
         q = "/_search?size=0" + ("&typed_keys=true" if c["typed_keys"] else "")
         r = call("POST", "/" + index + q, c["body"])
         entry = dict(c)
@@ -1386,9 +2605,72 @@ def generate(suite, mapping, docs, cases, shards, settings=None):
     if tsdb:
         fixture["docs"] = [dict(d, seq=i) for i, d in enumerate(docs)]
     with open(os.path.join(HERE, "aggs-" + suite + ".json"), "w") as f:
+        # The random suites are big: one case per line keeps them diffable and small.
+        if suite.startswith("rnd"):
+            head = {k: v for k, v in fixture.items() if k != "cases"}
+            f.write(json.dumps(head, separators=(",", ":"))[:-1] + ',"cases":[\n')
+            f.write(",\n".join(json.dumps(c, separators=(",", ":")) for c in fixture["cases"]))
+            f.write("\n]}\n")
+        else:
+            json.dump(fixture, f, indent=1)
+            f.write("\n")
+    print(suite, len(out_cases), "cases")
+
+
+
+def multi_index():
+    """Two one-shard indices whose mappings differ (a field mapped in one, unmapped or of
+    another type in the other), searched together: the reduce must pick its leader, formats and
+    types the way Elasticsearch does. Writes aggs-mi2.json."""
+    indices = [
+        ("aggs-mi-b", {"properties": {"d": {"type": "date"}, "ip": {"type": "ip"}, "n": {"type": "long"}, "k": {"type": "keyword"}}},
+         [{"d": 1619827200000, "ip": "192.168.0.1", "n": 5, "k": "x"}, {"d": 1577836800000, "ip": "10.0.0.1", "n": 7, "k": "y"}]),
+        ("aggs-mi-a", {"properties": {"n": {"type": "double"}, "k": {"type": "keyword"}, "other": {"type": "long"}}},
+         [{"n": 1.5, "k": "x", "other": 1}, {"n": 7, "k": "z", "other": 2}, {"other": 3}]),
+    ]
+    # Searched shards reduce in index-name order: the index without the date and ip fields
+    # (aggs-mi-a) comes first.
+    indices.sort(key=lambda x: x[0])
+    for name, mapping, docs in indices:
+        call("DELETE", "/" + name)
+        r = call("PUT", "/" + name, {"settings": {"number_of_shards": 1, "number_of_replicas": 0}, "mappings": mapping})
+        assert r.get("acknowledged"), r
+        lines = []
+        for i, d in enumerate(docs):
+            lines.append(json.dumps({"index": {"_id": str(i)}}))
+            lines.append(json.dumps(d))
+        call("POST", "/" + name + "/_bulk?refresh=true", "\n".join(lines) + "\n", ndjson=True)
+        call("POST", "/" + name + "/_forcemerge?max_num_segments=1")
+    cases = []
+
+    def add(cname, aggs, typed_keys=False):
+        cases.append({"name": cname, "body": json.dumps({"aggs": aggs}, separators=(",", ":")), "typed_keys": typed_keys})
+
+    add("max_min_date_unmapped_first", {"mx": {"max": {"field": "d"}}, "mn": {"min": {"field": "d"}}, "a": {"avg": {"field": "d"}}, "s": {"stats": {"field": "d"}}}, True)
+    add("composite_ip_unmapped", {"c": {"composite": {"sources": [{"f": {"terms": {"field": "ip"}}}]}}})
+    add("composite_ip_and_long", {"c": {"composite": {"sources": [{"f": {"terms": {"field": "ip"}}}, {"o": {"terms": {"field": "other", "missing_bucket": True}}}]}}})
+    add("terms_long_double", {"t": {"terms": {"field": "n"}}}, True)
+    add("terms_ip_unmapped", {"t": {"terms": {"field": "ip"}}, "o": {"terms": {"field": "other"}}}, True)
+    add("histogram_date_unmapped", {"h": {"date_histogram": {"field": "d", "calendar_interval": "year"}}, "r": {"range": {"field": "other", "ranges": [{"to": 2}, {"from": 2}]}}}, True)
+    add("cardinality_mixed", {"c": {"cardinality": {"field": "n"}}, "k": {"cardinality": {"field": "k"}}, "p": {"percentiles": {"field": "n", "percents": [50]}}})
+    add("rare_and_sig_unmapped", {"r": {"rare_terms": {"field": "ip"}}, "t": {"terms": {"field": "k"}, "aggs": {"m": {"max": {"field": "d"}}}}})
+    out = []
+    for c in cases:
+        q = "/aggs-mi-a,aggs-mi-b/_search?size=0" + ("&typed_keys=true" if c["typed_keys"] else "")
+        r = call("POST", q, c["body"])
+        e = dict(c)
+        if "error" in r:
+            e["error"] = r["error"]
+        else:
+            e["response"] = r.get("aggregations")
+        out.append(e)
+    for name, _, _ in indices:
+        call("DELETE", "/" + name)
+    fixture = {"indices": [{"name": n, "mapping": m, "docs": d} for n, m, d in indices], "cases": out}
+    with open(os.path.join(HERE, "aggs-mi2.json"), "w") as f:
         json.dump(fixture, f, indent=1)
         f.write("\n")
-    print(suite, len(out_cases), "cases")
+    print("mi2", len(out), "cases")
 
 
 SUITES = {
@@ -1401,6 +2683,18 @@ SUITES = {
     "shape2": lambda: generate("shape2", SHAPE_MAPPING, shape_docs(300, 17), shape_cases(), 2),
     "exp2": lambda: generate("exp2", EXP_MAPPING, exp_docs(400, 13), exp_cases(), 2),
     "ts2": lambda: generate("ts2", TS_MAPPING, ts_docs(700, 3), ts_cases(), 2, TS_SETTINGS),
+    "catr1": lambda: generate("catr1", CATR_MAPPING, catr_docs(0, 41), catr_cases(), 1),
+    "cat2": lambda: generate("cat2", CAT_MAPPING, cat_docs(600, 37), cat_cases(), 2),
+    "fis2": lambda: generate("fis2", FIS_MAPPING, fis_docs(500, 31), fis_cases(), 2),
+    "lic2": lambda: generate("lic2", LIC_MAPPING, lic_docs(600, 23), lic_cases(), 2),
+    "err3": lambda: generate("err3", MAIN_MAPPING, main_docs(400, 42), core_err_cases(), 3),
+    "rnd3": lambda: generate("rnd3", MAIN_MAPPING, main_docs(400, 42), random_tree_cases(300, 7), 3),
+    "mi2": multi_index,
+    "rndw3": lambda: generate("rndw3", MAIN_MAPPING, main_docs(400, 42), random_tree_cases(300, 11, wide=True), 3),
+    "rnddate2": lambda: generate("rnddate2", MAIN_MAPPING, main_docs(400, 42), random_date_cases(250, 5), 2),
+    "rndx2": lambda: generate("rndx2", MAIN_MAPPING, main_docs(400, 43), random_tree_cases(300, 29, wide=True), 2),
+    "fix3": lambda: generate("fix3", MAIN_MAPPING, main_docs(400, 42), review_fix_cases(), 3),
+    "tsg2": lambda: generate("tsg2", TSG_MAPPING, tsg_docs(600, 29), tsg_cases(), 2, TSG_SETTINGS),
 }
 
 if __name__ == "__main__":

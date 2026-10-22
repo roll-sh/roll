@@ -16,10 +16,20 @@
 //! `float`, `double`, `boolean`; anything else is a string). Every participating group of a
 //! name contributes a value, and a field seen more than once collects a list, as Logstash does.
 //!
+//! Matching is bounded by a watchdog, as Elasticsearch's `MatcherWatchdog` bounds Joni: a
+//! catastrophic expression (`^(\w+\s?)+$` on a long word followed by `!`) would otherwise
+//! backtrack for hours. Elasticsearch interrupts the matcher from a timer thread; here the
+//! regex VM reads the clock every few thousand steps ([`crate::regex::MatcherState::with_deadline`])
+//! and the match fails with `grok pattern matching was interrupted after [<ms>] ms`. The limit
+//! defaults to [`DEFAULT_MAX_EXECUTION_TIME`] (`ingest.grok.watchdog.max_execution_time` and
+//! `runtime_fields.grok.watchdog.max_execution_time`); hosts change it per expression with
+//! [`Grok::with_max_execution_time`].
+//!
 //! The pattern banks are the `legacy` and `ecs-v1` sets Elasticsearch bundles, which come from
 //! logstash-patterns-core (Apache License 2.0); they are embedded as data from `patterns/`.
 
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 
@@ -289,12 +299,71 @@ pub struct ConvertError {
     pub text: String,
 }
 
+/// Why matching failed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MatchError {
+    /// A capture's text does not parse as its type.
+    Convert(ConvertError),
+    /// The watchdog stopped the match (the limit, in milliseconds).
+    Interrupted { after_millis: u64 },
+}
+
+impl MatchError {
+    /// Elasticsearch's exception type.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            MatchError::Convert(_) => "number_format_exception",
+            MatchError::Interrupted { .. } => "runtime_exception",
+        }
+    }
+
+    /// Elasticsearch's reason text.
+    pub fn reason(&self) -> String {
+        match self {
+            MatchError::Convert(c) => c.reason(),
+            MatchError::Interrupted { after_millis } => format!("grok pattern matching was interrupted after [{after_millis}] ms"),
+        }
+    }
+}
+
+impl std::fmt::Display for MatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason())
+    }
+}
+
+impl std::error::Error for MatchError {}
+
+impl From<ConvertError> for MatchError {
+    fn from(e: ConvertError) -> MatchError {
+        MatchError::Convert(e)
+    }
+}
+
+impl ConvertError {
+    /// The JDK parser's message (`Integer.parseInt`, `Float.parseFloat`, …).
+    pub fn reason(&self) -> String {
+        let t = match self.ty {
+            CaptureType::Int => crate::lib_lang::parse_failure(Some(&self.text), 10, false, true),
+            CaptureType::Long => crate::lib_lang::parse_failure(Some(&self.text), 10, true, true),
+            CaptureType::Float => crate::lib_lang::float_failure(&crate::value::Value::str(&self.text), true),
+            _ => crate::lib_lang::float_failure(&crate::value::Value::str(&self.text), false),
+        };
+        t.message.clone().unwrap_or_default()
+    }
+}
+
+/// Elasticsearch's default grok watchdog limit (`ingest.grok.watchdog.max_execution_time`,
+/// `runtime_fields.grok.watchdog.max_execution_time`).
+pub const DEFAULT_MAX_EXECUTION_TIME: Duration = Duration::from_secs(1);
+
 /// A compiled grok expression. Immutable; share it across threads.
 #[derive(Debug)]
 pub struct Grok {
     regex: Arc<Regex>,
     captures: Vec<Capture>,
     expression: String,
+    max_execution: Option<Duration>,
 }
 
 /// The parts of one `%{...}` reference.
@@ -399,7 +468,36 @@ impl Grok {
                 }
             }
         }
-        Ok(Grok { regex: Arc::new(regex), captures: captures.into_iter().map(|(_, c)| c).collect(), expression: expression.to_string() })
+        Ok(Grok {
+            regex: Arc::new(regex),
+            captures: captures.into_iter().map(|(_, c)| c).collect(),
+            expression: expression.to_string(),
+            max_execution: Some(DEFAULT_MAX_EXECUTION_TIME),
+        })
+    }
+
+    /// Sets the watchdog limit of each match (`None`: unbounded, as Elasticsearch's
+    /// `max_execution_time: 0` / a disabled watchdog).
+    pub fn with_max_execution_time(mut self, max: Option<Duration>) -> Grok {
+        self.max_execution = max.filter(|d| !d.is_zero());
+        self
+    }
+
+    pub fn max_execution_time(&self) -> Option<Duration> {
+        self.max_execution
+    }
+
+    /// Runs the search under the watchdog.
+    fn search(&self, text: &str) -> Result<Option<crate::regex::MatcherState>, MatchError> {
+        let mut m = match self.max_execution {
+            Some(d) => crate::regex::MatcherState::with_deadline(self.regex.clone(), text, Instant::now() + d),
+            None => crate::regex::MatcherState::new(self.regex.clone(), text, 0),
+        };
+        match m.find() {
+            Ok(true) => Ok(Some(m)),
+            Err(_) if m.interrupted() => Err(MatchError::Interrupted { after_millis: self.max_execution.map_or(0, |d| d.as_millis() as u64) }),
+            _ => Ok(None),
+        }
     }
 
     /// Joni's warnings for the expanded expression (redundant nested repeats, unknown
@@ -418,17 +516,13 @@ impl Grok {
     }
 
     /// Whether the expression matches anywhere in `text`.
-    pub fn matches(&self, text: &str) -> bool {
-        let mut m = crate::regex::MatcherState::new(self.regex.clone(), text, 0);
-        m.find().unwrap_or(false)
+    pub fn matches(&self, text: &str) -> Result<bool, MatchError> {
+        Ok(self.search(text)?.is_some())
     }
 
     /// The named captures of the first match, in capture order (`None` when nothing matches).
-    pub fn captures(&self, text: &str) -> Result<Option<Vec<(String, GrokValue)>>, ConvertError> {
-        let mut m = crate::regex::MatcherState::new(self.regex.clone(), text, 0);
-        if !m.find().unwrap_or(false) {
-            return Ok(None);
-        }
+    pub fn captures(&self, text: &str) -> Result<Option<Vec<(String, GrokValue)>>, MatchError> {
+        let Some(m) = self.search(text)? else { return Ok(None) };
         let mut out: Vec<(String, GrokValue)> = Vec::new();
         for c in &self.captures {
             for &g in &c.groups {
@@ -569,5 +663,46 @@ mod tests {
         let mut m = IndexMap::new();
         m.insert("A".to_string(), "%{C}".to_string());
         assert_eq!(PatternBank::new(m).unwrap_err().message, "pattern [A] is referencing a non-existent pattern [C]");
+    }
+
+    /// Catastrophic backtracking stops at the watchdog limit with Elasticsearch's error, instead
+    /// of pinning the thread (Elasticsearch 9.5.5: `runtime_exception`, `grok pattern matching was
+    /// interrupted after [1000] ms` for the first expression on 'a' x 40 + '!').
+    #[test]
+    fn watchdog_interrupts_catastrophic_patterns() {
+        let cases = [("^(\\w+\\s?)+$", format!("{}!", "a".repeat(60))), ("^(a|aa)+$", format!("{}!", "a".repeat(200)))];
+        for (expr, text) in cases {
+            let g = Grok::new(PatternBank::legacy(), expr).unwrap().with_max_execution_time(Some(Duration::from_millis(50)));
+            let t0 = Instant::now();
+            let e = g.captures(&text).expect_err(expr);
+            assert!(t0.elapsed() < Duration::from_secs(5), "{expr}: {:?}", t0.elapsed());
+            assert_eq!(e, MatchError::Interrupted { after_millis: 50 });
+            assert_eq!((e.kind(), e.reason().as_str()), ("runtime_exception", "grok pattern matching was interrupted after [50] ms"));
+            assert_eq!(g.matches(&text), Err(MatchError::Interrupted { after_millis: 50 }));
+        }
+        // the default limit is Elasticsearch's
+        let g = Grok::new(PatternBank::legacy(), "^(\\w+\\s?)+$").unwrap();
+        assert_eq!(g.max_execution_time(), Some(DEFAULT_MAX_EXECUTION_TIME));
+        assert_eq!(g.captures(&format!("{}!", "a".repeat(60))).unwrap_err().reason(), "grok pattern matching was interrupted after [1000] ms");
+    }
+
+    /// The watchdog does not change results within the limit, and can be turned off.
+    #[test]
+    fn watchdog_keeps_results() {
+        let long = "word ".repeat(20_000);
+        for max in [Some(Duration::from_secs(60)), None, Some(Duration::ZERO)] {
+            let g = Grok::new(PatternBank::legacy(), "^(%{WORD}\\s?)+$").unwrap().with_max_execution_time(max);
+            assert_eq!(g.matches(&long), Ok(true));
+            assert_eq!(g.matches("a b !"), Ok(false));
+            let g = Grok::new(PatternBank::legacy(), "%{NUMBER:n:int}").unwrap().with_max_execution_time(max);
+            assert_eq!(g.captures("x 12 y"), Ok(Some(vec![("n".to_string(), GrokValue::Int(12))])));
+        }
+        assert_eq!(Grok::new(PatternBank::legacy(), "x").unwrap().with_max_execution_time(Some(Duration::ZERO)).max_execution_time(), None);
+    }
+
+    #[test]
+    fn convert_errors_carry_the_jdk_message() {
+        let e = Grok::new(PatternBank::legacy(), "%{WORD:n:int}").unwrap().captures("abc").unwrap_err();
+        assert_eq!((e.kind(), e.reason().as_str()), ("number_format_exception", "For input string: \"abc\""));
     }
 }

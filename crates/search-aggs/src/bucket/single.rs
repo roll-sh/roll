@@ -286,9 +286,9 @@ pub fn create(def: &AggDef, spec: &SingleSpec, ctx: &mut BindCtx<'_>) -> Result<
         }
         SingleSpec::Global => {
             if !ctx.parents.is_empty() {
-                return Err(AggError::execution(format!(
+                return Err(AggError::illegal_argument(format!(
                     "Aggregation [{}] cannot have a global sub-aggregation [{}]. Global aggregations can only be defined as top level aggregations",
-                    ctx.parents.last().copied().unwrap_or(""),
+                    ctx.parent_name.as_deref().unwrap_or(""),
                     def.name
                 )));
             }
@@ -353,6 +353,7 @@ pub fn create(def: &AggDef, spec: &SingleSpec, ctx: &mut BindCtx<'_>) -> Result<
         }
         SingleSpec::Sampler { shard_size } => {
             let subs = Subs::bind(def, ctx)?;
+            crate::collect::check_time_series_deferral(ctx, &def.name, &subs)?;
             return Ok(Box::new(SamplerAgg::new(*shard_size, None, 0, subs, ctx)));
         }
         SingleSpec::Diversified { vs, shard_size, max_docs_per_value, execution_hint } => {
@@ -368,6 +369,7 @@ pub fn create(def: &AggDef, spec: &SingleSpec, ctx: &mut BindCtx<'_>) -> Result<
                 return Err(b.unsupported("diversified_sampler"));
             }
             let subs = Subs::bind(def, ctx)?;
+            crate::collect::check_time_series_deferral(ctx, &def.name, &subs)?;
             return Ok(Box::new(SamplerAgg::new(*shard_size, Some(b), *max_docs_per_value, subs, ctx)));
         }
     };
@@ -399,6 +401,19 @@ impl SingleAgg {
 }
 
 impl Aggregator for SingleAgg {
+    fn profile_type(&self) -> &'static str {
+        match self.kind {
+            SingleKind::Filter => "FilterAggregator",
+            SingleKind::Global => "GlobalAggregator",
+            SingleKind::Missing => "MissingAggregator",
+            SingleKind::Nested => "NestedAggregator",
+            SingleKind::ReverseNested => "ReverseNestedAggregator",
+            SingleKind::Sampler => "SamplerAggregator",
+            SingleKind::Children => "ParentToChildrenAggregator",
+            SingleKind::Parent => "ChildrenToParentAggregator",
+            SingleKind::RandomSampler => "RandomSamplerAggregator",
+        }
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         match &mut self.mode {
@@ -464,6 +479,11 @@ impl Aggregator for SingleAgg {
     }
 
     fn validate_sort(&self, name: &str, key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        // `filter` runs as an adapted `filters` aggregator, whose `bucketComparator` falls back
+        // to the generic error for keys other than doc_count.
+        if self.kind == SingleKind::Filter && rest.is_empty() && !matches!(key, None | Some("doc_count")) {
+            return Err(crate::collect::unsortable(name, rest));
+        }
         single_bucket_validate_sort(name, &self.subs, key, rest)
     }
 
@@ -702,6 +722,9 @@ impl SamplerAgg {
 }
 
 impl Aggregator for SamplerAgg {
+    fn profile_type(&self) -> &'static str {
+        if self.diversify.is_some() { "DiversifiedSamplerAggregator" } else { "SamplerAggregator" }
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         if self.subs.is_empty() {
             return Err(AggError::illegal_argument("Sampler aggregation must be used with child aggregations."));
@@ -728,6 +751,12 @@ impl Aggregator for SamplerAgg {
             let cap = self.shard_size;
             let per = self.max_per_value;
             let diversify = self.diversify.is_some();
+            // The bucket's `TopScoreDocCollector` is created on its first doc.
+            if cap == 0 && !diversify && self.samples[ord].is_none() {
+                return Err(AggError::illegal_argument(
+                    "numHits must be > 0; please use TotalHitCountCollectorManager if you just need the total hit count",
+                ));
+            }
             let sample = self.samples[ord].get_or_insert_with(|| BucketSample { global: HitQueue::new(cap), per_key: hashbrown::HashMap::new() });
             if !diversify {
                 sample.global.insert_with_overflow(hit);

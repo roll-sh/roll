@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 mod redis;
 mod queues;
+mod search;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -48,6 +49,9 @@ enum Cmd {
     /// RabbitMQ-compatible message queues.
     #[command(alias = "q")]
     Queues(queues::Queues),
+    /// Elasticsearch-compatible search.
+    #[command(subcommand, alias = "es")]
+    Search(search::Search),
 }
 
 #[derive(Subcommand)]
@@ -168,12 +172,20 @@ impl Api {
         let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
         let text = res.text().await?;
-        let value: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text)? };
         if !status.is_success() {
+            // Errors are JSON from the control planes, but not always from what sits in front of
+            // them (a body limit, a proxy): report those as they came.
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             // Batch endpoints report per-record errors.
             let per_record = value["offsets"].as_array().and_then(|o| o.iter().find_map(|r| r["error"].as_str()));
-            bail!("{}", value["error"].as_str().or(per_record).unwrap_or(&text));
+            match value["error"].as_str().or(per_record) {
+                Some(e) => bail!("{e}"),
+                None if text.trim().is_empty() => bail!("HTTP {status}"),
+                None if value.is_null() => bail!("HTTP {status}: {}", text.trim()),
+                None => bail!("{text}"),
+            }
         }
+        let value: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text)? };
         Ok(value)
     }
     /// The cell's root (for `/_roll/…`), from a tasks URL that may name a tenant
@@ -293,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
+        Cmd::Search(cmd) => return search::run(&api, cli.json, cmd).await,
     };
     let out = match cmd {
         Db::List => {

@@ -986,6 +986,52 @@ async fn a_deposed_owner_is_fenced() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_fences_the_old_owner_before_the_new_one_writes() {
+    use search_store::{Fenced, keys};
+    let objects = test_objects("claim");
+    let a = open(&objects, &temp_dir("claim-a"), fast_config("na")).await;
+    a.set_epoch("c1", 1);
+    a.claim_cluster("c1").await.unwrap();
+    a.check_owner("c1").await.unwrap();
+    let s = shard("idxCLAIM", 0);
+    a.write_cluster("c1", &ClusterState::new("{\"v\":1}")).await.unwrap();
+    let (wa, ma, _) = recover(&a, "c1", &s).await;
+    wa.append(0, &payload("c1", 0)).unwrap();
+
+    // b claims the cluster (a read-only wake: it writes nothing else).
+    let b = open(&objects, &temp_dir("claim-b"), fast_config("nb")).await;
+    b.set_epoch("c1", 2);
+    b.claim_cluster("c1").await.unwrap();
+    // Only the newest marker is kept.
+    let markers = objects.list(&keys::owner_prefix("c1")).await.unwrap();
+    assert_eq!(markers.into_iter().map(|(k, _)| k).collect::<Vec<_>>(), vec![keys::owner_key("c1", 2)]);
+
+    // a finds out at its next ownership check, and from then on its appends are refused.
+    let err = a.check_owner("c1").await.unwrap_err();
+    assert_eq!(err.downcast_ref::<Fenced>(), Some(&Fenced { cluster: "c1".into(), epoch: 1, owner_epoch: 2 }));
+    assert!(wa.append(1, b"late").unwrap_err().downcast_ref::<Fenced>().is_some());
+    // Its commit points and cluster states are refused too, although b has written neither.
+    assert!(a.write_manifest("c1", &s, &ShardManifest { max_seq_no: 0, local_checkpoint: 0, ..ma }).await.unwrap_err().downcast_ref::<Fenced>().is_some());
+    assert!(a.write_cluster("c1", &ClusterState::new("{\"v\":9}")).await.unwrap_err().downcast_ref::<Fenced>().is_some());
+    assert_eq!(&b.read_cluster("c1").await.unwrap().unwrap().json[..], b"{\"v\":1}");
+    // A claim under an epoch older than the newest marker fails.
+    let c = open(&objects, &temp_dir("claim-c"), fast_config("nc")).await;
+    c.set_epoch("c1", 1);
+    assert!(c.claim_cluster("c1").await.unwrap_err().downcast_ref::<Fenced>().is_some());
+    b.check_owner("c1").await.unwrap();
+    assert!(b.stats().owner_checks >= 1);
+    // Without an epoch there is nothing to check (and nothing listed).
+    let plain = open(&objects, &temp_dir("claim-plain"), fast_config("np")).await;
+    plain.check_owner("c1").await.unwrap();
+    assert_eq!(plain.stats().owner_checks, 0);
+    assert!(plain.claim_cluster("c1").await.is_err(), "a claim needs an epoch");
+    drop(wa);
+    for st in [a, b, c, plain] {
+        st.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_recreated_branch_never_reuses_manifest_keys() {
     // GC caches what each manifest key references. A branch deleted and made again under the
     // same name starts its generations over; if its keys repeated the old ones, GC would go by

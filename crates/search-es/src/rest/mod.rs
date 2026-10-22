@@ -122,6 +122,9 @@ pub struct Ctx<'a> {
     warnings: Mutex<Vec<String>>,
     pub now_ms: i64,
     pub human: bool,
+    /// Time spent in ingest pipelines by this request's writes (nanoseconds + 1, so 0 means
+    /// no pipeline ran): `_bulk`'s `ingest_took`.
+    pub ingest_nanos: std::sync::atomic::AtomicU64,
 }
 
 impl<'a> Ctx<'a> {
@@ -467,6 +470,11 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest) -> EsResponse {
     };
 
     let route = match routes::route_in(cluster.dialect, method, raw_path) {
+        // `_knn_search` is only served to REST API compatibility (v8) requests.
+        Routed::Found(r) if r.api == Api::KnnSearch && neg.compat != Some(8) => {
+            let msg = format!("no handler found for uri [{}] and method [{method}]", req.uri);
+            return render_simple(400, crate::obj! { "error" => msg }, Vec::new(), head_req);
+        }
         Routed::Found(r) => r,
         Routed::MethodNotAllowed(allowed) => {
             let list: Vec<&str> = allowed.iter().map(|m| m.as_str()).collect();
@@ -522,6 +530,7 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest) -> EsResponse {
         compat: neg.compat,
         response_compat: compat_of(Some(&neg)),
         warnings: Mutex::new(Vec::new()),
+        ingest_nanos: std::sync::atomic::AtomicU64::new(0),
         now_ms: crate::time::now_millis(),
         human,
     };

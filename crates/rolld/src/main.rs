@@ -16,9 +16,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 mod queues;
+mod search;
 
-/// roll daemon: serverless Postgres, serverless Redis, Kafka-compatible streams, tasks and RabbitMQ-compatible queues on
-/// your machine (or an EC2 host).
+/// roll daemon: serverless Postgres, serverless Redis, Kafka-compatible streams, tasks, RabbitMQ-compatible queues and
+/// Elasticsearch-compatible search on your machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -111,6 +112,11 @@ struct Args {
     queues_only: bool,
     #[command(flatten)]
     queues: queues::QueuesArgs,
+    /// Run only roll search (no Postgres control plane or proxy): search nodes on AWS.
+    #[arg(long, env = "ROLL_SEARCH_ONLY", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    search_only: bool,
+    #[command(flatten)]
+    search: search::SearchArgs,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -130,11 +136,32 @@ async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info".into()),
+                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info,search_server=info,search_control=info,search_store=info".into()),
         )
         .init();
     let args = Args::parse();
     let home = std::path::absolute(&args.home)?;
+
+    // Durable storage shared by every service: S3, or a directory under --home.
+    let storage = match &args.s3_bucket {
+        Some(bucket) => StorageConfig::S3 { bucket: bucket.clone(), region: args.s3_region.clone(), endpoint: args.s3_endpoint.clone(), prefix: args.s3_prefix.clone() },
+        None => Config::local(home.clone()).storage,
+    };
+
+    if args.search_only {
+        anyhow::ensure!(!args.queues_only, "--search-only and --queues-only exclude each other");
+        anyhow::ensure!(!args.search.search_disabled, "--search-only with --no-search leaves nothing to run");
+        let s = search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node).await?;
+        let listener = tokio::net::TcpListener::bind(args.api).await?;
+        info!(addr = %args.api, "search control API listening");
+        tokio::select! {
+            r = axum::serve(listener, s.router()) => r?,
+            r = s.serve() => r?,
+            _ = shutdown_signal() => info!("shutting down"),
+        }
+        s.shutdown().await;
+        return Ok(());
+    }
 
     let queues = if args.queues.disabled { None } else { Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host).await?) };
     if args.queues_only {
@@ -169,23 +196,15 @@ async fn run() -> anyhow::Result<()> {
     stream_config.local_disk_bytes = args.stream_disk_mb << 20;
     stream_config.evict_on_unload = !args.stream_keep_local;
 
-    let mut config = Config::local(home);
+    let mut config = Config::local(home.clone());
     config.public_host = args.public_host.clone();
     config.public_port = args.proxy.port();
     config.mem_mb_per_cu = args.mem_per_cu;
     config.evict_after_s = args.evict_after;
     config.internal_url = args.internal_url.unwrap_or_else(|| format!("http://host.docker.internal:{}", args.api.port()));
-    if let Some(bucket) = args.s3_bucket {
-        config.storage = StorageConfig::S3 {
-            bucket,
-            region: args.s3_region,
-            endpoint: args.s3_endpoint,
-            prefix: args.s3_prefix,
-        };
-    }
+    config.storage = storage.clone();
     stream_config.storage = config.storage.clone();
 
-    let storage = config.storage.clone();
     let control = Control::new(config).await?;
     info!(storage = %control.objects.description, "durable storage");
     reconciler::recover(&control).await?;
@@ -196,7 +215,7 @@ async fn run() -> anyhow::Result<()> {
     );
     // Serverless Redis: same object storage, its own node.
     let mut rcfg = redis_control::RedisConfig::local(std::path::absolute(&args.home)?.join("redis"));
-    rcfg.node_name = args.node;
+    rcfg.node_name = args.node.clone();
     rcfg.public_host = args.public_host.clone();
     rcfg.resp_port = args.redis.port();
     rcfg.http_port = args.redis_http.port();
@@ -230,6 +249,17 @@ async fn run() -> anyhow::Result<()> {
     if let Some(q) = &queues {
         router = router.merge(q.router());
     }
+    // roll search: same object storage, its own node.
+    let search = if args.search.search_disabled { None } else { Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node).await?) };
+    if let Some(s) = &search {
+        router = router.merge(s.router());
+    }
+    let search_serve = async {
+        match &search {
+            Some(s) => s.serve().await,
+            None => std::future::pending().await,
+        }
+    };
     let queues_serve = async {
         match &queues {
             Some(q) => q.serve().await,
@@ -243,6 +273,7 @@ async fn run() -> anyhow::Result<()> {
         r = redis_server::net::serve(redis_listener, redis_dir.clone(), redis_opts) => r?,
         r = redis_server::http::serve_http(redis_http, redis_dir) => r?,
         r = queues_serve => r?,
+        r = search_serve => r?,
         r = stream_broker::server::serve_on(broker.clone(), kafka) => r?,
         _ = reconciler::run(control.clone()) => {}
         _ = broker.clone().run() => {}
@@ -255,6 +286,9 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(q) = &queues {
         q.shutdown().await;
+    }
+    if let Some(s) = &search {
+        s.shutdown().await;
     }
     tasks_worker.shutdown().await;
     broker.sync_all().await;
@@ -273,4 +307,15 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    /// Flattened argument groups (queues, search) must not reuse an argument id.
+    #[test]
+    fn cli_is_consistent() {
+        super::Args::command().debug_assert();
+    }
 }

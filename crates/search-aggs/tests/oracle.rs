@@ -710,3 +710,55 @@ fn shapes_match_brute_force() {
         }
     }
 }
+
+/// Breadth-first terms (the default for fields with more terms than `shard_size`) defer their
+/// sub-aggregations to the buckets the shard keeps: the response is identical to depth-first
+/// collection, in every layout, while the sub-aggregations only exist for the kept buckets — a
+/// memory budget that depth-first collection exceeds is enough.
+#[test]
+fn breadth_first_terms_match_depth_first() {
+    let all = docs(77, 3000);
+    let sub = r#""aggs":{"h":{"date_histogram":{"field":"t","fixed_interval":"1d"},"aggs":{"s":{"sum":{"field":"d"}}}},"c":{"cardinality":{"field":"n"}},"m":{"max":{"field":"d"}}}"#;
+    for (field, order) in [("k", r#"{"_count":"desc"}"#), ("n", r#"{"m":"desc"}"#), ("k", r#"[{"m":"asc"},{"_key":"desc"}]"#), ("n", r#"{"_key":"asc"}"#)] {
+        for &(shards, segments) in &LAYOUTS {
+            let req = |mode: &str| format!(r#"{{"t":{{"terms":{{"field":"{field}","size":3,"order":{order}{mode}}},{sub}}}}}"#);
+            let depth = run_layout(&all, shards, segments, &req(r#","collect_mode":"depth_first""#));
+            let breadth = run_layout(&all, shards, segments, &req(r#","collect_mode":"breadth_first""#));
+            let default = run_layout(&all, shards, segments, &req(""));
+            assert!(common::diff(&breadth, &depth, "").is_none(), "{field} {order} {shards}x{segments}: {:?}", common::diff(&breadth, &depth, ""));
+            assert!(common::diff(&default, &depth, "").is_none(), "{field} {order} {shards}x{segments}");
+        }
+    }
+    // Nested terms, deferral at both levels, with `min_doc_count: 0` buckets.
+    let nested = |mode: &str| {
+        format!(
+            r#"{{"t":{{"terms":{{"field":"n","size":4{mode}}},"aggs":{{"u":{{"terms":{{"field":"k","size":2,"min_doc_count":0{mode}}},"aggs":{{"a":{{"avg":{{"field":"d"}}}}}}}}}}}}}}"#
+        )
+    };
+    for &(shards, segments) in &LAYOUTS {
+        let depth = run_layout(&all, shards, segments, &nested(r#","collect_mode":"depth_first""#));
+        let breadth = run_layout(&all, shards, segments, &nested(r#","collect_mode":"breadth_first""#));
+        assert!(common::diff(&breadth, &depth, "").is_none(), "nested {shards}x{segments}: {:?}", common::diff(&breadth, &depth, ""));
+    }
+
+    // 20k distinct terms, each with a daily date_histogram: depth-first builds 20k histograms.
+    let index = index();
+    let docs: Vec<(String, Json)> =
+        (0..20_000).map(|i| (i.to_string(), Json::parse(&format!(r#"{{"n":[{i}],"t":{}}}"#, T0 + (i % 50) * DAY)).unwrap())).collect();
+    let shard = index.shard(&docs, 2);
+    let searcher = shard.searcher();
+    let lookup = common::Lookup { index: &index, now: 0, scripts: None };
+    let query = common::top_query(&lookup, &Json::obj());
+    let parse = |a: &str| search_aggs::parse(&Json::parse(a).unwrap(), &search_aggs::ParseOptions::default()).unwrap();
+    let budget = search_aggs::MemoryBudget::new(2 << 20);
+    let opts = search_aggs::ShardOptions { budget: Some(budget.clone()), ..Default::default() };
+    let aggs = |mode: &str| {
+        format!(r#"{{"t":{{"terms":{{"field":"n","size":5{mode}}},"aggs":{{"h":{{"date_histogram":{{"field":"t","fixed_interval":"1d"}}}},"p":{{"percentiles":{{"field":"n"}}}}}}}}}}"#)
+    };
+    let e = parse(&aggs(r#","collect_mode":"depth_first""#)).run(&lookup, &searcher, &query, &opts).unwrap_err();
+    assert_eq!(e.kind, "circuit_breaking_exception");
+    let part = parse(&aggs("")).run(&lookup, &searcher, &query, &opts).unwrap();
+    assert_eq!(budget.used(), 0, "reservations released");
+    let r = search_aggs::reduce(vec![part], &parse(&aggs("")), &search_aggs::ReduceOptions::default()).unwrap().to_json(false);
+    assert_eq!(buckets(&r, "t").len(), 5);
+}

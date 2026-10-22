@@ -28,8 +28,10 @@
 //! [`VectorsReader::search`] runs the graph search with a beam of `max(k, num_candidates)`,
 //! steering by quantized scores when the field is quantized, then rescores the beam with exact
 //! scores. An accept filter (live docs and query filters) restricts results; when the search
-//! scores more vectors than `visit_limit` it reports `complete: false` and the caller should run
-//! [`VectorsReader::exact_search`] instead, as Lucene does for restrictive filters. Callers that
+//! scores more vectors than `visit_limit`, or finds fewer than `k` hits where more may exist, it
+//! reports `complete: false` and the caller should run [`VectorsReader::exact_search`] instead,
+//! as Lucene does (`AbstractKnnVectorQuery`). Level 0 of every graph is strongly connected, so
+//! short results are rare (filters, visit limits). Callers that
 //! know the filter's cardinality use [`VectorsReader::search_filtered`]: under 60% of the
 //! vectors it switches to the filtered graph search, which scores only accepted vectors and
 //! steps over rejected ones (Lucene's ACORN-style `FilteredHnswGraphSearcher`). Fields without a
@@ -49,6 +51,104 @@ use distance::{dot_f32, dot_i8, hamming, l2sq_f32, l2sq_i8};
 use hnsw::{GraphBuilder, GraphReader, Scored, search_graph, search_graph_filtered};
 use bbq::{BinaryQuantizer, BinaryQuery};
 use quant::{ScalarQuantizer, normalized};
+
+/// Elasticsearch's NaN / infinity check of a query vector (`checkNanAndInfinite`).
+fn non_finite_error(element: &str, v: &[f32]) -> Option<String> {
+    let (i, x) = v.iter().enumerate().find(|(_, x)| !x.is_finite())?;
+    let what = if x.is_nan() { "NaN" } else { "infinite" };
+    Some(format!(
+        "element_type [{element}] vectors do not support {what} values but found [{}] at dim [{i}];",
+        java_float(*x)
+    ))
+}
+
+/// Elasticsearch's check of float input for `byte` (and `bit`) vectors: finite, whole, in
+/// `[-128, 127]`; the first offending value is reported.
+fn byte_value_error(v: &[f32]) -> Option<String> {
+    if let Some(e) = non_finite_error("byte", v) {
+        return Some(e);
+    }
+    v.iter().enumerate().find_map(|(i, &x)| {
+        if x % 1.0 != 0.0 {
+            Some(format!(
+                "element_type [byte] vectors only support non-decimal values but found decimal value [{}] at dim [{i}];",
+                java_float(x)
+            ))
+        } else if !(-128.0..=127.0).contains(&x) {
+            Some(format!(
+                "element_type [byte] vectors only support integers between [-128, 127] but found [{}] at dim [{i}];",
+                java_float(x)
+            ))
+        } else {
+            None
+        }
+    })
+}
+
+fn preview_floats(mut msg: String, v: &[f32]) -> String {
+    preview(&mut msg, v.iter().map(|&x| java_float(x)), v.len());
+    msg
+}
+
+/// Appends Elasticsearch's ` Preview of invalid vector: [a, b, c, d, e, ...]` (the first five
+/// values; `...` from five values on).
+fn preview(msg: &mut String, values: impl Iterator<Item = String>, len: usize) {
+    msg.push_str(" Preview of invalid vector: [");
+    for (i, x) in values.take(5).enumerate() {
+        if i > 0 {
+            msg.push_str(", ");
+        }
+        msg.push_str(&x);
+    }
+    if len >= 5 {
+        msg.push_str(", ...");
+    }
+    msg.push(']');
+}
+
+/// Java's `Float.toString`: the shortest decimal that round-trips (JDK 19+), as `1.5`, `200.0`
+/// or `1.0E10` (scientific outside `[1e-3, 1e7)`). Like the JDK, a one-digit result is widened
+/// to two digits when those also round-trip closer (`1.4E-45`, not `1.0E-45`).
+pub(crate) fn java_float(x: f32) -> String {
+    if x.is_nan() {
+        return "NaN".into();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "Infinity" } else { "-Infinity" }.into();
+    }
+    if x == 0.0 {
+        return if x.is_sign_negative() { "-0.0" } else { "0.0" }.into();
+    }
+    let mut sci = format!("{:e}", x.abs());
+    if !sci.contains('.') {
+        let two = format!("{:.1e}", x.abs());
+        if two.parse::<f32>() == Ok(x.abs()) {
+            sci = two;
+        }
+    }
+    let (mant, exp) = sci.split_once('e').unwrap();
+    let exp: i32 = exp.parse().unwrap();
+    let mut digits: String = mant.replace('.', "");
+    while digits.len() > 1 && digits.ends_with('0') {
+        digits.pop();
+    }
+    let sign = if x < 0.0 { "-" } else { "" };
+    let a = x.abs();
+    if (1e-3..1e7).contains(&a) {
+        let point = exp + 1; // digits before the decimal point
+        let s = if point <= 0 {
+            format!("0.{}{digits}", "0".repeat((-point) as usize))
+        } else if point as usize >= digits.len() {
+            format!("{digits}{}.0", "0".repeat(point as usize - digits.len()))
+        } else {
+            format!("{}.{}", &digits[..point as usize], &digits[point as usize..])
+        };
+        format!("{sign}{s}")
+    } else {
+        let frac = if digits.len() > 1 { &digits[1..] } else { "0" };
+        format!("{sign}{}.{frac}E{exp}", &digits[..1])
+    }
+}
 
 /// Lucene `VectorUtil.scaleMaxInnerProductScore`.
 #[inline]
@@ -182,7 +282,7 @@ pub(crate) fn write_vectors(
             normalized(vec_at(i), tmp);
         } else {
             tmp.clear();
-            tmp.extend(vec_at(i).chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())));
+            tmp.extend(vec_at(i).as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
         }
     };
     let mut tmp = Vec::with_capacity(dims);
@@ -332,7 +432,9 @@ pub struct KnnResult {
     pub hits: Vec<KnnHit>,
     /// Number of vectors scored.
     pub visited: usize,
-    /// False when the visit limit stopped the search early (fall back to exact search).
+    /// False when the caller should fall back to exact search (Lucene's rule): the visit limit
+    /// stopped the search early, or it found fewer than `k` hits although more may exist
+    /// (fewer than `min(k, vectors)` without a filter; fewer than `k` with one).
     pub complete: bool,
 }
 
@@ -510,38 +612,90 @@ impl VectorsReader {
         out.clear();
         out.extend(
             self.vector(ord)
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap())),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c)),
         );
     }
 
-    /// Validates and converts a query vector.
+    /// Validates and converts a query vector, with Elasticsearch's checks and messages
+    /// (`DenseVectorFieldType.createKnnQuery`; the text goes into an `illegal_argument_exception`):
+    ///
+    /// - float queries on `byte`/`bit` fields must hold integers in `[-128, 127]`, checked
+    ///   before the dimensions (as `element_type [byte]`, also for `bit` fields);
+    /// - the dimension count (for `bit` fields in bits);
+    /// - float fields: no NaN or infinite values; `dot_product` needs a unit-length query and
+    ///   `cosine` a non-zero one (`byte` fields: `cosine` only).
+    ///
+    /// Value errors end with a preview of the query (its first five values).
     pub fn prepare(&self, q: VectorQuery<'_>) -> Result<PreparedQuery> {
         let dims = self.spec.dims as usize;
+        let dim_err = |qdims: usize| {
+            invalid(format!(
+                "The query vector has a different number of dimensions [{qdims}] than the document vectors [{dims}]."
+            ))
+        };
+        let sim = self.spec.similarity;
         let bytes: Vec<u8> = match (self.spec.element, q) {
-            (VectorElement::Float32, VectorQuery::Float(v)) if v.len() == dims => {
-                v.iter().flat_map(|x| x.to_le_bytes()).collect()
+            (VectorElement::Float32, VectorQuery::Bits(v)) => return Err(dim_err(v.len() * 8)),
+            (VectorElement::Float32, q) => {
+                let floats: Vec<f32> = match q {
+                    VectorQuery::Float(v) => v.to_vec(),
+                    VectorQuery::Byte(v) => v.iter().map(|&x| x as f32).collect(),
+                    VectorQuery::Bits(_) => unreachable!(),
+                };
+                if floats.len() != dims {
+                    return Err(dim_err(floats.len()));
+                }
+                if let Some(e) = non_finite_error("float", &floats) {
+                    return Err(invalid(preview_floats(e, &floats)));
+                }
+                if matches!(sim, VectorSimilarity::DotProduct | VectorSimilarity::Cosine) {
+                    // Lucene's float dot product (rounding differences are far below EPS).
+                    let sq: f32 = floats.iter().map(|x| x * x).sum();
+                    let e = if !sq.is_finite() {
+                        Some("NaN or Infinite magnitude detected, this usually means the vector values are too extreme to fit within a float.")
+                    } else if sim == VectorSimilarity::DotProduct && (sq - 1.0).abs() > 1e-3 {
+                        Some("The [dot_product] similarity can only be used with unit-length vectors.")
+                    } else if sim == VectorSimilarity::Cosine && sq.sqrt() == 0.0 {
+                        Some("The [cosine] similarity does not support vectors with zero magnitude.")
+                    } else {
+                        None
+                    };
+                    if let Some(e) = e {
+                        return Err(invalid(preview_floats(e.to_string(), &floats)));
+                    }
+                }
+                floats.iter().flat_map(|x| x.to_le_bytes()).collect()
             }
-            (VectorElement::Byte, VectorQuery::Byte(v)) if v.len() == dims => {
-                v.iter().map(|&x| x as u8).collect()
-            }
-            (VectorElement::Byte, VectorQuery::Float(v)) if v.len() == dims => {
-                v.iter().map(|&x| x as i8 as u8).collect()
-            }
-            (VectorElement::Bit, VectorQuery::Bits(v)) if v.len() == self.vb => v.to_vec(),
-            (VectorElement::Bit, VectorQuery::Byte(v)) if v.len() == self.vb => {
-                v.iter().map(|&x| x as u8).collect()
-            }
-            _ => {
-                return Err(invalid(format!(
-                    "the query vector has a different number of dimensions [{}] than the field [{}]",
-                    match q {
-                        VectorQuery::Float(v) => v.len(),
-                        VectorQuery::Byte(v) => v.len(),
-                        VectorQuery::Bits(v) => v.len() * 8,
-                    },
-                    dims
-                )));
+            (element, q) => {
+                // `byte` and `bit` fields take bytes; float input must be whole bytes.
+                let raw: Vec<u8> = match q {
+                    VectorQuery::Float(v) => {
+                        if let Some(e) = byte_value_error(v) {
+                            return Err(invalid(preview_floats(e, v)));
+                        }
+                        v.iter().map(|&x| x as i8 as u8).collect()
+                    }
+                    VectorQuery::Byte(v) => v.iter().map(|&x| x as u8).collect(),
+                    VectorQuery::Bits(v) => v.to_vec(),
+                };
+                if element == VectorElement::Bit {
+                    if raw.len() != self.vb {
+                        return Err(dim_err(raw.len() * 8));
+                    }
+                } else {
+                    if raw.len() != dims {
+                        return Err(dim_err(raw.len()));
+                    }
+                    if sim == VectorSimilarity::Cosine && raw.iter().all(|&b| b == 0) {
+                        let mut e = String::from("The [cosine] similarity does not support vectors with zero magnitude.");
+                        preview(&mut e, raw.iter().map(|&b| (b as i8).to_string()), raw.len());
+                        return Err(invalid(e));
+                    }
+                }
+                raw
             }
         };
         let norm = if self.spec.element == VectorElement::Float32 {
@@ -554,7 +708,7 @@ impl VectorsReader {
             if self.spec.similarity == VectorSimilarity::Cosine {
                 normalized(&bytes, &mut tmp);
             } else {
-                tmp.extend(bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())));
+                tmp.extend(bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
             }
             match qz {
                 Quantized::Scalar { q, code_len, .. } => {
@@ -681,7 +835,8 @@ impl VectorsReader {
         self.hits(v)
     }
 
-    /// Approximate k-NN with the HNSW graph (exact when the field has no graph).
+    /// Approximate k-NN with the HNSW graph (exact when the field has no graph). See
+    /// [`KnnResult::complete`] for when to fall back to [`exact_search`](Self::exact_search).
     pub fn search(
         &self,
         q: &PreparedQuery,
@@ -721,6 +876,10 @@ impl VectorsReader {
             accept_dyn,
             visit_limit,
         );
+        // Fewer than k hits although more may exist: let the caller search exactly, as
+        // Lucene does (with a filter, the accepted count is unknown here).
+        let expected = if accept.is_some() { k } else { k.min(self.count as usize) };
+        let complete = complete && beam.len() >= expected;
         KnnResult {
             hits: self.rescore(q, &beam, k),
             visited,
@@ -733,7 +892,8 @@ impl VectorsReader {
     /// vectors use the filtered graph search, which scores only accepted vectors and steps
     /// over rejected ones to their neighbors; wider filters use [`search`](Self::search).
     /// `visit_limit` is usually `accepted`: past it, exact search over the filter is cheaper
-    /// (`complete == false`).
+    /// (`complete == false`, also when fewer than `k` hits came back). A filter accepting at
+    /// most `k` vectors is searched exactly.
     pub fn search_filtered(
         &self,
         q: &PreparedQuery,
@@ -748,6 +908,10 @@ impl VectorsReader {
         };
         if k == 0 || self.count == 0 || accepted == 0 {
             return KnnResult { hits: Vec::new(), visited: 0, complete: true };
+        }
+        if accepted as usize <= k {
+            // Lucene: when the filter cannot even fill k, exact search is the answer.
+            return self.exact_search(q, k, Some(accept));
         }
         if accepted as u64 * 100 >= self.count as u64 * FILTERED_SEARCH_THRESHOLD {
             return self.search(q, k, num_candidates, Some(accept), visit_limit);
@@ -767,6 +931,9 @@ impl VectorsReader {
             accepted as usize,
             visit_limit,
         );
+        // `accepted > k` here, so fewer than k hits means the search fell short (or the
+        // cardinality was overestimated): the caller confirms with an exact search (Lucene).
+        let complete = complete && beam.len() >= k;
         KnnResult { hits: self.rescore(q, &beam, k), visited, complete }
     }
 }
@@ -806,6 +973,16 @@ mod tests {
                 VectorQuantization::None
             },
         }
+    }
+
+    /// A float query; `dot_product` fields get it normalized (Elasticsearch requires unit length).
+    fn prep(r: &VectorsReader, qv: &[f32]) -> PreparedQuery {
+        let mut v = qv.to_vec();
+        if r.spec.similarity == VectorSimilarity::DotProduct {
+            let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            v.iter_mut().for_each(|x| *x /= n);
+        }
+        r.prepare(VectorQuery::Float(&v)).unwrap()
     }
 
     fn open(spec: &VectorSpec, docs: &[u32], data: &[u8], max_doc: u32) -> VectorsReader {
@@ -883,7 +1060,7 @@ mod tests {
             let mut total = 0usize;
             for _ in 0..30 {
                 let qv: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
-                let q = r.prepare(VectorQuery::Float(&qv)).unwrap();
+                let q = prep(&r, &qv);
                 let exact = r.exact_search(&q, 10, None);
                 let approx = r.search(&q, 10, 50, None, usize::MAX);
                 assert!(approx.complete);
@@ -915,7 +1092,7 @@ mod tests {
         let (mut hit, mut total) = (0usize, 0usize);
         for _ in 0..30 {
             let qv: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
-            let q = r.prepare(VectorQuery::Float(&qv)).unwrap();
+            let q = prep(r, &qv);
             let exact: std::collections::HashSet<u32> =
                 r.exact_search(&q, 10, None).hits.iter().map(|h| h.doc).collect();
             let approx = r.search(&q, 10, 50, None, usize::MAX);
@@ -970,7 +1147,7 @@ mod tests {
                 for _ in 0..20 {
                     let c = &centers[rng.gen_range(0..centers.len())];
                     let qv: Vec<f32> = c.iter().map(|x| x + rng.gen_range(-0.3f32..0.3)).collect();
-                    let q = r.prepare(VectorQuery::Float(&qv)).unwrap();
+                    let q = prep(&r, &qv);
                     let exact: std::collections::HashSet<u32> = r.exact_search(&q, 10, None).hits.iter().map(|h| h.doc).collect();
                     let approx = r.search(&q, 10, 100, None, usize::MAX);
                     for h in &approx.hits {
@@ -1003,7 +1180,7 @@ mod tests {
             for _ in 0..20 {
                 let c = &centers[rng.gen_range(0..centers.len())];
                 let qv: Vec<f32> = c.iter().map(|x| x + rng.gen_range(-0.3f32..0.3)).collect();
-                let q = r.prepare(VectorQuery::Float(&qv)).unwrap();
+                let q = prep(&r, &qv);
                 let exact = r.exact_search(&q, 10, None);
                 let got = r.search(&q, 10, 100, None, usize::MAX);
                 assert_eq!(got.visited, 3000);
@@ -1037,7 +1214,7 @@ mod tests {
             let mut qrng = StdRng::seed_from_u64(99);
             for _ in 0..300 {
                 let qv: Vec<f32> = (0..dims).map(|_| qrng.gen_range(-1.0..1.0)).collect();
-                let pq = r.prepare(VectorQuery::Float(&qv)).unwrap();
+                let pq = prep(&r, &qv);
                 let ex = r.exact_search(&pq, 1, None);
                 miss40 += (r.search(&pq, 1, 40, None, usize::MAX).hits != ex.hits) as usize;
                 miss200 += (r.search(&pq, 1, 200, None, usize::MAX).hits != ex.hits) as usize;
@@ -1105,7 +1282,7 @@ mod tests {
                 let (mut cost_f, mut cost_p) = (0usize, 0usize);
                 for _ in 0..20 {
                     let qv: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
-                    let q = r.prepare(VectorQuery::Float(&qv)).unwrap();
+                    let q = prep(&r, &qv);
                     let exact: std::collections::HashSet<u32> =
                         r.exact_search(&q, 10, Some(&accept)).hits.iter().map(|h| h.doc).collect();
                     let f = r.search_filtered(&q, 10, 50, &accept, accepted, usize::MAX);
@@ -1126,7 +1303,7 @@ mod tests {
                 }
                 // A visit limit below what the search needs reports incompleteness.
                 let qv: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
-                let q = r.prepare(VectorQuery::Float(&qv)).unwrap();
+                let q = prep(&r, &qv);
                 assert!(!r.search_filtered(&q, 10, 50, &accept, accepted, 5).complete);
             }
             // Nothing accepted, and a filter accepting everything (falls back to plain search).
@@ -1265,6 +1442,109 @@ mod tests {
         }
     }
 
+    /// Vectors drawn so the diversity heuristic strands regions (duplicates, or two dimensions
+    /// quantized to few distinct codes), as found by review: level 0 used to have regions no
+    /// link leaves, so searches entering them returned far fewer than k hits.
+    fn hard_graph_cases() -> Vec<(&'static str, VectorReaderParts)> {
+        let mut out = Vec::new();
+        for (name, dims, n, dup, quantization) in [
+            ("float d8 95% duplicates", 8usize, 3000usize, 0.95, VectorQuantization::None),
+            ("int8 d2", 2, 2720, 0.0, VectorQuantization::Scalar { bits: 8, confidence_interval: None }),
+            ("int4 d2", 2, 2720, 0.0, VectorQuantization::Scalar { bits: 4, confidence_interval: None }),
+        ] {
+            for seed in 1..=3u64 {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let mut vecs: Vec<Vec<f32>> = Vec::new();
+                for _ in 0..n {
+                    let v = if !vecs.is_empty() && rng.gen_bool(dup) {
+                        vecs[rng.gen_range(0..vecs.len())].clone()
+                    } else {
+                        (0..dims).map(|_| rng.gen_range(-1.0f32..1.0)).collect()
+                    };
+                    vecs.push(v);
+                }
+                let data: Vec<u8> = vecs.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+                let sp = VectorSpec {
+                    dims: dims as u32,
+                    element: VectorElement::Float32,
+                    similarity: VectorSimilarity::L2Norm,
+                    hnsw: Some(HnswParams { m: 16, ef_construction: 100 }),
+                    quantization,
+                };
+                let docs: Vec<u32> = (0..n as u32).collect();
+                out.push((name, (open(&sp, &docs, &data, n as u32), rng)));
+            }
+        }
+        out
+    }
+    type VectorReaderParts = (VectorsReader, StdRng);
+
+    #[test]
+    fn level0_is_strongly_connected() {
+        for (name, (r, mut rng)) in hard_graph_cases() {
+            let g = r.graph.as_ref().unwrap();
+            let n = r.len() as usize;
+            let entry = g.entry().unwrap();
+            let mut rev = vec![Vec::new(); n];
+            for o in 0..n as u32 {
+                g.for_each_neighbor(0, o, |nb| rev[nb as usize].push(o));
+            }
+            type Next<'a> = &'a dyn Fn(u32, &mut dyn FnMut(u32));
+            let walk = |next: Next<'_>| {
+                let mut seen = vec![false; n];
+                seen[entry as usize] = true;
+                let mut stack = vec![entry];
+                while let Some(o) = stack.pop() {
+                    next(o, &mut |x| {
+                        if !std::mem::replace(&mut seen[x as usize], true) {
+                            stack.push(x);
+                        }
+                    });
+                }
+                seen.iter().filter(|&&s| !s).count()
+            };
+            assert_eq!(walk(&|o, f| g.for_each_neighbor(0, o, f)), 0, "{name}: unreachable from the entry");
+            assert_eq!(walk(&|o, f| rev[o as usize].iter().for_each(|&x| f(x))), 0, "{name}: cannot reach the entry");
+            // So an unbounded beam finds every vector, wherever the descent lands.
+            for _ in 0..10 {
+                let qv: Vec<f32> = (0..r.spec.dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                let a = r.search(&prep(&r, &qv), n, n, None, usize::MAX);
+                assert!(a.complete && a.hits.len() == n, "{name}: {} of {n}", a.hits.len());
+            }
+        }
+    }
+
+    #[test]
+    fn knn_returns_k_hits_or_reports_incomplete() {
+        for (name, (r, mut rng)) in hard_graph_cases() {
+            let n = r.len();
+            let even = |d: u32| d.is_multiple_of(2);
+            for _ in 0..30 {
+                let qv: Vec<f32> = (0..r.spec.dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                let q = prep(&r, &qv);
+                let f = r.search_filtered(&q, 50, 100, &even, n / 2, usize::MAX);
+                assert!(f.complete && f.hits.len() == 50, "{name}: filtered {} (visited {})", f.hits.len(), f.visited);
+                assert!(f.hits.iter().all(|h| even(h.doc)));
+                let p = r.search(&q, 50, 100, Some(&even), usize::MAX);
+                assert!(p.complete && p.hits.len() == 50, "{name}: accept {}", p.hits.len());
+                let k = r.search(&q, 50, 100, None, usize::MAX);
+                assert!(k.complete && k.hits.len() == 50, "{name}: plain {}", k.hits.len());
+            }
+            let q = prep(&r, &vec![0.5; r.spec.dims as usize]);
+            // Lucene's rule: fewer than k hits (here: the filter passes only 10) is not trusted
+            // without a known cardinality; with one at most k, the search is exact.
+            let few = |d: u32| d < 10;
+            let p = r.search(&q, 50, 100, Some(&few), usize::MAX);
+            assert!(!p.complete && p.hits.len() <= 10, "{name}");
+            let f = r.search_filtered(&q, 50, 100, &few, 10, usize::MAX);
+            assert!(f.complete && f.hits.len() == 10, "{name}");
+            assert_eq!(f.hits, r.exact_search(&q, 50, Some(&few)).hits);
+            // An overestimated cardinality: the graph search cannot fill k, so it says so.
+            let f = r.search_filtered(&q, 50, 100, &few, 100, usize::MAX);
+            assert!(!f.complete && f.hits.len() <= 10, "{name}");
+        }
+    }
+
     #[test]
     fn wrong_dims_rejected() {
         let sp = spec(
@@ -1276,6 +1556,86 @@ mod tests {
         );
         let r = open(&sp, &[0], &[0u8; 16], 1);
         assert!(r.prepare(VectorQuery::Float(&[1.0, 2.0])).is_err());
+    }
+
+    /// Query vector validation texts, captured from Elasticsearch 9.5.5 (`knn` on fields
+    /// `f` float dims 3 l2_norm, `b` byte dims 3 l2_norm, `bits` bit dims 24).
+    #[test]
+    fn query_vector_errors_match_elasticsearch() {
+        let field = |element, sim, dims| {
+            let sp = spec(sim, element, dims, false, false);
+            let width = match element {
+                VectorElement::Float32 => dims as usize * 4,
+                VectorElement::Byte => dims as usize,
+                VectorElement::Bit => dims as usize / 8,
+            };
+            open(&sp, &[0], &vec![1u8; width], 1)
+        };
+        let f = field(VectorElement::Float32, VectorSimilarity::L2Norm, 3);
+        let b = field(VectorElement::Byte, VectorSimilarity::L2Norm, 3);
+        let bits = field(VectorElement::Bit, VectorSimilarity::L2Norm, 24);
+        let err = |r: &VectorsReader, q: VectorQuery<'_>| r.prepare(q).map(|_| ()).unwrap_err().to_string();
+        let ok = |r: &VectorsReader, q: VectorQuery<'_>| r.prepare(q).is_ok();
+        let dims = |q: usize, d: usize| {
+            format!("The query vector has a different number of dimensions [{q}] than the document vectors [{d}].")
+        };
+        assert!(err(&f, VectorQuery::Float(&[1.0, 2.0])).ends_with(&dims(2, 3)));
+        assert!(err(&f, VectorQuery::Float(&[1.0, 2.0, 3.0, 4.0])).ends_with(&dims(4, 3)));
+        assert!(err(&b, VectorQuery::Float(&[1.0, 2.0])).ends_with(&dims(2, 3)));
+        assert!(err(&b, VectorQuery::Byte(&[1, 2])).ends_with(&dims(2, 3)));
+        assert!(err(&bits, VectorQuery::Float(&[1.0, 2.0])).ends_with(&dims(16, 24)));
+        assert!(err(&bits, VectorQuery::Byte(&[1, 2, 3, 4])).ends_with(&dims(32, 24)));
+        assert!(err(&bits, VectorQuery::Bits(&[1, 2])).ends_with(&dims(16, 24)));
+        for (r, q, msg) in [
+            (&b, &[1.5f32, 2.0, 3.0][..], "element_type [byte] vectors only support non-decimal values but found decimal value [1.5] at dim [0]; Preview of invalid vector: [1.5, 2.0, 3.0]"),
+            (&b, &[200.0, 1.0, 2.0], "element_type [byte] vectors only support integers between [-128, 127] but found [200.0] at dim [0]; Preview of invalid vector: [200.0, 1.0, 2.0]"),
+            (&b, &[-129.0, 1.0, 2.0], "element_type [byte] vectors only support integers between [-128, 127] but found [-129.0] at dim [0]; Preview of invalid vector: [-129.0, 1.0, 2.0]"),
+            (&b, &[1.0, 2.5, 300.0], "element_type [byte] vectors only support non-decimal values but found decimal value [2.5] at dim [1]; Preview of invalid vector: [1.0, 2.5, 300.0]"),
+            // Values are checked before dimensions.
+            (&b, &[1.5, 2.0], "element_type [byte] vectors only support non-decimal values but found decimal value [1.5] at dim [0]; Preview of invalid vector: [1.5, 2.0]"),
+            (&bits, &[1.5, 2.0, 3.0], "element_type [byte] vectors only support non-decimal values but found decimal value [1.5] at dim [0]; Preview of invalid vector: [1.5, 2.0, 3.0]"),
+            (&bits, &[255.0, 1.0, 2.0], "element_type [byte] vectors only support integers between [-128, 127] but found [255.0] at dim [0]; Preview of invalid vector: [255.0, 1.0, 2.0]"),
+            (&f, &[f32::NAN, 1.0, 2.0], "element_type [float] vectors do not support NaN values but found [NaN] at dim [0]; Preview of invalid vector: [NaN, 1.0, 2.0]"),
+            (&f, &[1.0, f32::NEG_INFINITY, 2.0], "element_type [float] vectors do not support infinite values but found [-Infinity] at dim [1]; Preview of invalid vector: [1.0, -Infinity, 2.0]"),
+        ] {
+            assert_eq!(err(r, VectorQuery::Float(q)), msg);
+        }
+        assert!(ok(&b, VectorQuery::Float(&[1.0, -128.0, 127.0])));
+        assert!(ok(&bits, VectorQuery::Float(&[-1.0, 2.0, 3.0])));
+        // Whole floats on byte fields score like the bytes.
+        let (x, y) = (b.prepare(VectorQuery::Float(&[1.0, -2.0, 3.0])).unwrap(), b.prepare(VectorQuery::Byte(&[1, -2, 3])).unwrap());
+        assert_eq!(b.score(&x, 0), b.score(&y, 0));
+        // Magnitude checks (dot_product: unit length; cosine: non-zero), with the preview of
+        // the first five values.
+        let dp = field(VectorElement::Float32, VectorSimilarity::DotProduct, 6);
+        assert_eq!(
+            err(&dp, VectorQuery::Float(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            "The [dot_product] similarity can only be used with unit-length vectors. Preview of invalid vector: [1.0, 2.0, 3.0, 4.0, 5.0, ...]"
+        );
+        assert!(ok(&dp, VectorQuery::Float(&[0.6, 0.8, 0.0, 0.0, 0.0, 0.0])));
+        let cos = field(VectorElement::Float32, VectorSimilarity::Cosine, 3);
+        assert_eq!(
+            err(&cos, VectorQuery::Float(&[0.0, 0.0, 0.0])),
+            "The [cosine] similarity does not support vectors with zero magnitude. Preview of invalid vector: [0.0, 0.0, 0.0]"
+        );
+        assert!(err(&cos, VectorQuery::Float(&[1e30, 1e30, 0.0])).starts_with("NaN or Infinite magnitude detected"));
+        let bcos = field(VectorElement::Byte, VectorSimilarity::Cosine, 3);
+        assert_eq!(
+            err(&bcos, VectorQuery::Byte(&[0, 0, 0])),
+            "The [cosine] similarity does not support vectors with zero magnitude. Preview of invalid vector: [0, 0, 0]"
+        );
+        assert!(ok(&field(VectorElement::Byte, VectorSimilarity::DotProduct, 3), VectorQuery::Byte(&[0, 0, 0])));
+    }
+
+    #[test]
+    fn java_float_strings() {
+        for (x, s) in [
+            (1.5f32, "1.5"), (200.0, "200.0"), (-129.0, "-129.0"), (0.1, "0.1"), (0.001, "0.001"), (1e-4, "1.0E-4"),
+            (1e7, "1.0E7"), (9999999.0, "9999999.0"), (1.2345e10, "1.2345E10"), (f32::MIN_POSITIVE, "1.1754944E-38"),
+            (1.4e-45, "1.4E-45"), (f32::MAX, "3.4028235E38"), (-0.0, "-0.0"), (0.3, "0.3"), (100.25, "100.25"),
+        ] {
+            assert_eq!(java_float(x), s, "{x:e}");
+        }
     }
 
     #[test]
@@ -1295,3 +1655,4 @@ mod tests {
         assert!(r.exact_search(&q, 3, None).hits.is_empty());
     }
 }
+

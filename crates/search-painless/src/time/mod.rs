@@ -653,6 +653,7 @@ impl Zone {
     pub fn offset_at(&self, epoch_sec: i64) -> i32 {
         match self {
             Zone::Offset(o) => *o,
+            Zone::Region(id, None, o) if systemv_dst(id) => systemv_offset(*o, epoch_sec),
             Zone::Region(_, None, o) => *o,
             Zone::Region(_, Some(tz), _) => tz.offset_from_utc_datetime(&tz_probe_utc(epoch_sec)).fix().local_minus_utc(),
         }
@@ -662,6 +663,11 @@ impl Zone {
     pub(crate) fn valid_offsets(&self, d: Date, t: Time) -> Vec<i32> {
         match self {
             Zone::Offset(o) => vec![*o],
+            Zone::Region(id, None, o) if systemv_dst(id) => {
+                // daylight (the larger offset, earlier in an overlap) first
+                let local = epoch_of_local(d, t, 0);
+                [*o + 3600, *o].into_iter().filter(|&off| systemv_offset(*o, local - off as i64) == off).collect()
+            }
             Zone::Region(_, None, o) => vec![*o],
             Zone::Region(_, Some(tz), _) => {
                 let Some(nd) = chrono::NaiveDate::from_ymd_opt(d.y.clamp(-200_000, 200_000), d.m as u32, d.d as u32) else {
@@ -685,7 +691,11 @@ impl Zone {
         }
     }
     pub fn is_fixed(&self) -> bool {
-        matches!(self, Zone::Offset(_) | Zone::Region(_, None, _))
+        match self {
+            Zone::Offset(_) => true,
+            Zone::Region(id, None, _) => !systemv_dst(id),
+            Zone::Region(..) => false,
+        }
     }
 }
 
@@ -755,6 +765,71 @@ pub fn offset_hms(h: i32, m: i32, s: i32) -> Result<i32, Thrown> {
     Ok(h * 3600 + m * 60 + s)
 }
 
+/// `ZoneId.getAvailableZoneIds()` of the JDK Elasticsearch 9.5.5 bundles, sorted: IANA's
+/// current zones and links plus the JDK's `SystemV/*` compatibility zones, without the IDs the
+/// JDK dropped (`EST`, `MST`, `HST`, `ROC`, …) that `chrono-tz` still knows.
+pub fn available_zone_ids() -> &'static [&'static str] {
+    static IDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| include_str!("zone_ids.txt").lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect())
+}
+
+fn zone_available(id: &str) -> bool {
+    available_zone_ids().binary_search(&id).is_ok()
+}
+
+/// The JDK's `SystemV/*` zones (its `jdk11_backward` tzdata): standard offset, and whether
+/// the zone observes the `SystemV` daylight rules.
+fn systemv(id: &str) -> Option<(i32, bool)> {
+    let rest = id.strip_prefix("SystemV/")?;
+    Some(match rest {
+        "AST4" => (-4, false),
+        "AST4ADT" => (-4, true),
+        "CST6" => (-6, false),
+        "CST6CDT" => (-6, true),
+        "EST5" => (-5, false),
+        "EST5EDT" => (-5, true),
+        "HST10" => (-10, false),
+        "MST7" => (-7, false),
+        "MST7MDT" => (-7, true),
+        "PST8" => (-8, false),
+        "PST8PDT" => (-8, true),
+        "YST9" => (-9, false),
+        "YST9YDT" => (-9, true),
+        _ => return None,
+    })
+    .map(|(h, dst)| (h * 3600, dst))
+}
+
+/// Whether `id` is a `SystemV` zone with daylight time (`Zone::Region(id, None, standard)`).
+pub(crate) fn systemv_dst(id: &str) -> bool {
+    id.len() > 12 && systemv(id).is_some_and(|(_, d)| d)
+}
+
+/// Offset of a `SystemV` daylight zone: the 1970s US rules, kept forever — daylight from the
+/// last Sunday of April 02:00 to the last Sunday of October 02:00 (wall time), with 1974
+/// (January 6 to the last Sunday of November) and 1975 (February 23) as exceptions.
+pub(crate) fn systemv_offset(std: i32, epoch: i64) -> i32 {
+    let year = Date::from_epoch_day((epoch + std as i64).div_euclid(SECONDS_PER_DAY)).y;
+    let last_sunday = |m: u8| {
+        let last = Date { y: year, m, d: month_len(year as i64, m) }.epoch_day();
+        // 1970-01-01 was a Thursday: (epoch day + 4) mod 7 == 0 on Sundays
+        last - (last + 4).rem_euclid(7)
+    };
+    let day = |m: u8, d: u8| Date { y: year, m, d }.epoch_day();
+    let (start, end) = match year {
+        1974 => (day(1, 6), last_sunday(11)),
+        1975 => (day(2, 23), last_sunday(10)),
+        _ => (last_sunday(4), last_sunday(10)),
+    };
+    let start = start * SECONDS_PER_DAY + 7200 - std as i64;
+    let end = end * SECONDS_PER_DAY + 7200 - (std as i64 + 3600);
+    if (start..end).contains(&epoch) {
+        std + 3600
+    } else {
+        std
+    }
+}
+
 /// `ZoneId.of(String)`.
 pub fn zone_of(id: &str) -> Result<Zone, Thrown> {
     if id.len() <= 1 || id.starts_with('+') || id.starts_with('-') {
@@ -777,9 +852,12 @@ pub fn zone_of(id: &str) -> Result<Zone, Thrown> {
         let t = dte(format!("Invalid ID for region-based ZoneId, invalid format: {id}"));
         return Err(jt(t, &["ZoneRegion.checkName(ZoneRegion.java:152)", "ZoneRegion.ofId(ZoneRegion.java:117)"]));
     }
+    if let Some((std, _)) = systemv(id) {
+        return Ok(Zone::Region(Arc::from(id), None, std));
+    }
     match id.parse::<chrono_tz::Tz>() {
-        Ok(tz) => Ok(Zone::Region(Arc::from(id), Some(tz), 0)),
-        Err(_) => {
+        Ok(tz) if zone_available(id) => Ok(Zone::Region(Arc::from(id), Some(tz), 0)),
+        _ => {
             let t = Throw::new(cls::ZONE_RULES_EXCEPTION, Some(format!("Unknown time-zone ID: {id}")));
             Err(jt(
                 t,
@@ -1263,6 +1341,7 @@ fn enum_const_name(c: ClassId, o: u8) -> &'static str {
         cls::SIGN_STYLE => ["NORMAL", "ALWAYS", "NEVER", "NOT_NEGATIVE", "EXCEEDS_PAD"].get(o as usize).copied().unwrap_or("NORMAL"),
         cls::NORMALIZER_FORM => ["NFD", "NFC", "NFKD", "NFKC"].get(o as usize).copied().unwrap_or("NFD"),
         cls::LOCALE_CATEGORY => ["DISPLAY", "FORMAT"].get(o as usize).copied().unwrap_or("DISPLAY"),
+        cls::LOCALE_FILTERING_MODE => crate::locale::FILTERING_MODES.get(o as usize).copied().unwrap_or(""),
         cls::UNICODE_SCRIPT => crate::charblocks::data().scripts.get(o as usize).map(|s| s.0).unwrap_or(""),
         cls::ISO_CHRONOLOGY => "ISO",
         _ => "",
@@ -1727,6 +1806,9 @@ impl TimeVal {
 
     /// A description used in "Unable to obtain X from TemporalAccessor" messages.
     pub fn describe(&self) -> String {
+        if let TimeVal::Parsed(p) = self {
+            return p.describe();
+        }
         format!("{} of type {}", self.to_java_string(), crate::lookup::java_binary_name(self.class()))
     }
 
@@ -2054,30 +2136,24 @@ impl Iso<'_> {
         }
         Time::of(h, m, s, n).map_err(|e| self.resolve_error(e))
     }
+    /// The ISO formatters' `parseLenient().appendOffsetId()`: `Z`, or a sign, two-digit hours
+    /// and optional `:mm` / `:ss` (see `format::parse_offset_id`).
     fn offset(&mut self) -> Result<i32, Thrown> {
-        match self.s.get(self.i) {
-            Some(b'Z') | Some(b'z') => {
-                self.i += 1;
-                Ok(0)
+        self.offset_as("+HH:MM:ss")
+    }
+    /// An offset parsed leniently by `pattern` (`ISO_INSTANT` uses `+HH`).
+    fn offset_as(&mut self, pattern: &str) -> Result<i32, Thrown> {
+        let chars: Vec<char> = self.s.iter().map(|&b| b as char).collect();
+        match format::parse_offset_id(&chars, self.i, pattern, "Z", false, true) {
+            Ok((o, end)) => {
+                self.i = end;
+                Ok(o)
             }
-            Some(b'+') | Some(b'-') => {
-                let neg = self.s[self.i] == b'-';
-                self.i += 1;
-                let h = self.digits(2, 2)?;
-                let mut m = 0;
-                let mut s = 0;
-                if self.s.get(self.i) == Some(&b':') {
-                    self.i += 1;
-                    m = self.digits(2, 2)?;
-                    if self.s.get(self.i) == Some(&b':') {
-                        self.i += 1;
-                        s = self.digits(2, 2)?;
-                    }
-                }
-                let sign = if neg { -1 } else { 1 };
-                offset_hms(sign * h as i32, sign * m as i32, sign * s as i32).map_err(|e| self.resolve_error(e))
+            Err(Some(why)) => {
+                let cause = Throw::new(cls::DATE_TIME_EXCEPTION, Some(why.clone()));
+                Err(Throw::new(cls::DATE_TIME_PARSE_EXCEPTION, Some(format!("Text '{}' could not be parsed: {why}", self.text))).with_cause(&cause))
             }
-            _ => Err(self.fail()),
+            Err(None) => Err(self.fail()),
         }
     }
     fn zone_id(&mut self) -> Result<Option<Zone>, Thrown> {
@@ -2207,7 +2283,7 @@ pub fn parse_instant(text: &str) -> Result<(i64, i32), Thrown> {
         let f = p.digits(0, 9)?;
         n = f * 10i64.pow(9 - (p.i - start) as u32);
     }
-    let o = p.offset()?;
+    let o = p.offset_as("+HH")?;
     p.end()?;
     // leap seconds (`23:59:60`) are smoothed to `:59`
     if s == 60 {

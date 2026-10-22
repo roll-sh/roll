@@ -132,6 +132,33 @@ fn main() {
         let path = if inst.fast_path_active() { "fast" } else { "vm" };
         println!("{best:>8.1} ns/doc  {path:<4}  {:<12} {src}  ({acc:.1})", ctx.name());
     }
+    if custom.is_none() && only.as_deref().is_none_or(|o| o == "expression") {
+        let mut host = Docs { doc: 0, copy: false, vector: Vec::new() };
+        expressions(&mut host);
+    }
+}
+
+/// `lang: expression` scripts over the same documents.
+fn expressions(host: &mut Docs) {
+    let engine = Engine::new(Settings::default());
+    for src in ["doc['likes'] * 2 + _score", "ln(2 + doc['likes'].value) * factor", "doc['price'].empty ? 0 : doc['price'] / 100", "max(doc['likes'], doc['price'])"] {
+        let e = engine.compile_expression(src, Context::Score).unwrap();
+        let mut inst = e.instance();
+        inst.set_params(&serde_json::json!({ "factor": 1.2 }));
+        let n = 1_000_000;
+        let mut best = f64::MAX;
+        let mut acc = 0.0;
+        for _ in 0..7 {
+            acc = 0.0;
+            let t = cpu_ns();
+            for d in 0..n {
+                host.doc = d;
+                acc += inst.execute_f64(host).unwrap();
+            }
+            best = best.min((cpu_ns() - t) as f64 / n as f64);
+        }
+        println!("{best:>8.1} ns/doc  expr  score        {src}  ({acc:.1})");
+    }
 }
 
 /// Vector length of the vector scripts (`PAINLESS_DIMS`, 768).

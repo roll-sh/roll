@@ -220,6 +220,66 @@ impl Cursor {
     }
 }
 
+/// Lucene's `FieldInvertState` positions: Java int arithmetic, checked per token as
+/// `IndexingChain.invert` checks them.
+struct Invert {
+    position: i32,
+    last_position: i32,
+    offset: i64,
+}
+
+/// `IndexWriter.MAX_POSITION`.
+const MAX_POSITION: i32 = i32::MAX - 128;
+
+impl Invert {
+    fn new() -> Invert {
+        Invert {
+            position: -1,
+            last_position: 0,
+            offset: 0,
+        }
+    }
+
+    /// Before every value but the first.
+    fn gap(&mut self, pos_gap: i32, offset_gap: u32) {
+        self.position = self.position.wrapping_add(pos_gap);
+        self.offset += offset_gap as i64;
+    }
+
+    /// The position of the next token, or Lucene's error for it.
+    #[inline]
+    fn token(&mut self, pos_inc: u32, field: &str) -> Result<u32, AnalysisError> {
+        let inc = pos_inc as i32;
+        self.position = self.position.wrapping_add(inc);
+        if self.position < self.last_position {
+            return Err(AnalysisError::illegal(if inc == 0 {
+                format!("first position increment must be > 0 (got 0) for field '{field}'")
+            } else if inc < 0 {
+                format!("position increment must be >= 0 (got {inc}) for field '{field}'")
+            } else {
+                format!(
+                    "position overflowed Integer.MAX_VALUE (got posIncr={inc} lastPosition={} position={}) for field '{field}'",
+                    self.last_position, self.position
+                )
+            }));
+        }
+        if self.position > MAX_POSITION {
+            return Err(AnalysisError::illegal(format!(
+                "position {} is too large for field '{field}': max allowed position is {MAX_POSITION}",
+                self.position
+            )));
+        }
+        self.last_position = self.position;
+        Ok(self.position as u32)
+    }
+
+    /// After a value: the stream's final position increment and offset.
+    fn end(&mut self, end: End) {
+        self.position = self.position.wrapping_add(end.pos_inc as i32);
+        self.offset += end.final_offset as i64;
+    }
+}
+
 fn clamp(v: i64) -> u32 {
     v.clamp(0, u32::MAX as i64) as u32
 }
@@ -468,8 +528,25 @@ impl Analyzer {
     }
 
     /// [`Analyzer::analyze_values`], reporting analysis-time failures.
+    ///
+    /// Positions follow Lucene's indexing chain (`IndexingChain.invert`): they are Java ints, so
+    /// a negative `position_increment_gap` can move them backwards and a huge one can overflow,
+    /// and either fails the document with Lucene's `illegal_argument_exception` instead of
+    /// producing non-monotonic positions. The errors name field `''`; use
+    /// [`Analyzer::try_analyze_field`] to name the field.
     pub fn try_analyze_values(
         &self,
+        values: &[&str],
+        sink: &mut dyn FnMut(&Token),
+    ) -> Result<(), AnalysisError> {
+        self.try_analyze_field("", values, sink)
+    }
+
+    /// [`Analyzer::try_analyze_values`] for the values of field `field`, whose name appears in
+    /// Lucene's position errors.
+    pub fn try_analyze_field(
+        &self,
+        field: &str,
         values: &[&str],
         sink: &mut dyn FnMut(&Token),
     ) -> Result<(), AnalysisError> {
@@ -478,24 +555,36 @@ impl Analyzer {
             &inner.pool,
             || inner.new_chain(),
             |chain| {
-                let mut cur = Cursor::new();
+                let mut inv = Invert::new();
                 let n = chain.filters.len();
-                for text in values {
+                for (i, text) in values.iter().enumerate() {
+                    if i > 0 {
+                        inv.gap(inner.pos_gap, inner.offset_gap);
+                    }
+                    let mut failed: Option<AnalysisError> = None;
                     let end = chain.run(text, n, &mut |_, _| {}, &mut |t| {
-                        let (pos, start, end) = cur.token(t);
-                        sink(&Token {
-                            term: &t.term,
-                            start_offset: clamp(start),
-                            end_offset: clamp(end),
-                            position: clamp(pos),
-                            position_increment: t.pos_inc,
-                            position_length: t.pos_len,
-                            kind: t.kind,
-                            keyword: t.keyword,
-                            payload: t.payload(),
-                        })
+                        if failed.is_some() {
+                            return;
+                        }
+                        match inv.token(t.pos_inc, field) {
+                            Ok(position) => sink(&Token {
+                                term: &t.term,
+                                start_offset: clamp(inv.offset + t.start as i64),
+                                end_offset: clamp(inv.offset + t.end as i64),
+                                position,
+                                position_increment: t.pos_inc,
+                                position_length: t.pos_len,
+                                kind: t.kind,
+                                keyword: t.keyword,
+                                payload: t.payload(),
+                            }),
+                            Err(e) => failed = Some(e),
+                        }
                     })?;
-                    cur.end(end, inner.pos_gap, inner.offset_gap);
+                    if let Some(e) = failed {
+                        return Err(e);
+                    }
+                    inv.end(end);
                 }
                 Ok(())
             },
@@ -900,5 +989,138 @@ impl Explain {
             );
         }
         Value::Object(m)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Analysis, IndexOptions};
+
+    fn with_gap(gap: i64) -> super::Analyzer {
+        let settings = serde_json::json!({"analyzer": {"x": {
+            "type": "custom", "tokenizer": "standard", "position_increment_gap": gap
+        }}});
+        Analysis::from_settings(&settings, &IndexOptions::default())
+            .unwrap()
+            .analyzer("x")
+            .unwrap()
+    }
+
+    fn index(gap: i64, values: &[&str]) -> Result<Vec<(String, u32)>, String> {
+        let mut out = Vec::new();
+        with_gap(gap)
+            .try_analyze_field("f", values, &mut |t| {
+                out.push((t.term.to_string(), t.position))
+            })
+            .map_err(|e| format!("{}: {}", e.kind, e.reason))?;
+        Ok(out)
+    }
+
+    /// Elasticsearch 9.5.5 indexing `{"f": values}` with the gap (captured from the reference
+    /// cluster): Java int positions, rejected when they go backwards or overflow.
+    #[test]
+    fn position_errors_follow_the_indexing_chain() {
+        let iae = |m: &str| Err(format!("illegal_argument_exception: {m}"));
+        assert_eq!(
+            index(-5, &["a b c", "d"]),
+            iae("position overflowed Integer.MAX_VALUE (got posIncr=1 lastPosition=2 position=-2) for field 'f'")
+        );
+        assert_eq!(
+            index(-5, &["a", "b", "c"]),
+            iae("position overflowed Integer.MAX_VALUE (got posIncr=1 lastPosition=0 position=-4) for field 'f'")
+        );
+        assert_eq!(
+            index(2147483647, &["a b c", "d"]),
+            iae("position overflowed Integer.MAX_VALUE (got posIncr=1 lastPosition=2 position=-2147483646) for field 'f'")
+        );
+        assert_eq!(
+            index(2147483647, &["a", "b", "c"]),
+            iae("position overflowed Integer.MAX_VALUE (got posIncr=1 lastPosition=0 position=-2147483648) for field 'f'")
+        );
+        assert_eq!(
+            index(2147483600, &["a b c", "d"]),
+            iae("position 2147483603 is too large for field 'f': max allowed position is 2147483519")
+        );
+        assert_eq!(
+            index(2147483600, &["a", "b", "c"]),
+            iae("position 2147483601 is too large for field 'f': max allowed position is 2147483519")
+        );
+        // Gaps that keep positions monotonic are fine, including negative ones and the gap
+        // after the last value.
+        assert_eq!(
+            index(-1, &["a", "b"]),
+            Ok(vec![("a".into(), 0), ("b".into(), 0)])
+        );
+        // Equal positions are allowed, backwards ones are not.
+        assert_eq!(
+            index(-2, &["a b c", "d"]),
+            iae("position overflowed Integer.MAX_VALUE (got posIncr=1 lastPosition=2 position=1) for field 'f'")
+        );
+        assert_eq!(
+            index(100, &["a b", "", "c"]),
+            Ok(vec![("a".into(), 0), ("b".into(), 1), ("c".into(), 202)])
+        );
+        assert_eq!(
+            index(2147483000, &["a"]),
+            Ok(vec![("a".into(), 0)])
+        );
+        // Without a field name.
+        let e = with_gap(-5)
+            .try_analyze_values(&["a", "b"], &mut |_| {})
+            .unwrap_err();
+        assert!(e.reason.ends_with("for field ''"), "{}", e.reason);
+    }
+}
+
+#[cfg(test)]
+mod hostile_patterns {
+    use crate::{Analysis, AnalyzeLimits, AnalyzeRequest, IndexOptions};
+
+    /// `_analyze` with an inline tokenizer, on a 2 MB thread (a tokio worker's stack).
+    fn analyze(tokenizer: serde_json::Value) -> Result<serde_json::Value, String> {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || {
+                let req = AnalyzeRequest::from_json(
+                    &serde_json::json!({"tokenizer": tokenizer, "text": "aaa b"}),
+                )
+                .map_err(|e| e.reason.clone())?;
+                Analysis::global()
+                    .analyze(&req, None, AnalyzeLimits::default())
+                    .map_err(|e| format!("{}: {}", e.kind, e.reason))
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    /// The reviewer's reproductions: each aborted the process; now each is an error or a
+    /// result.
+    #[test]
+    fn hostile_patterns_fail_cleanly() {
+        let nest = |n: usize| format!("{}a{}", "(".repeat(n), ")".repeat(n));
+        let e = analyze(serde_json::json!({"type": "pattern", "pattern": nest(2000)})).unwrap_err();
+        assert!(e.starts_with("pattern_syntax_exception: Stack overflow during pattern compilation near index 1000"), "{e}");
+        let e = analyze(serde_json::json!({"type": "pattern", "pattern": nest(10_000)})).unwrap_err();
+        assert!(e.starts_with("pattern_syntax_exception: Stack overflow"), "{e}");
+        let e = analyze(serde_json::json!({"type": "simple_pattern", "pattern": nest(1500)})).unwrap_err();
+        assert!(e.starts_with("illegal_argument_exception: regular expression is nested too deeply"), "{e}");
+        assert!(analyze(serde_json::json!({"type": "simple_pattern", "pattern": format!("{}b", "a|".repeat(7500))})).is_ok());
+        assert!(analyze(serde_json::json!({"type": "simple_pattern_split", "pattern": format!("{}b", "a|".repeat(50_000))})).is_ok());
+        assert!(analyze(serde_json::json!({"type": "pattern", "pattern": format!("{}b", "a|".repeat(50_000))})).is_ok());
+        for p in ["a{100000000}", "a{2000000000}"] {
+            let e = analyze(serde_json::json!({"type": "simple_pattern", "pattern": p})).unwrap_err();
+            assert!(e.starts_with("illegal_argument_exception: regular expression is too complex"), "{e}");
+        }
+        // And at index creation.
+        let settings = serde_json::json!({"tokenizer": {"t": {"type": "pattern", "pattern": nest(5000)}},
+            "analyzer": {"a": {"tokenizer": "t"}}});
+        let e = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || Analysis::from_settings(&settings, &IndexOptions::default()).err().map(|e| e.kind))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(e, Some("pattern_syntax_exception"));
     }
 }

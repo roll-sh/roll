@@ -1226,13 +1226,14 @@ fn odt_of_instant(_: &mut Vm, a: &mut [Value]) -> VR {
     r(TimeVal::OffsetDateTime { d, t, offset: o })
 }
 fn odt_parse(_: &mut Vm, a: &mut [Value]) -> VR {
-    let (d, t, o) = parse_offset_date_time(&text_arg(&a[0])?)?;
+    let (d, t, o) = parse_offset_date_time(&text_arg(&a[0])?)
+        .map_err(|t| jt(parse_frames(t), &["OffsetDateTime.parse(OffsetDateTime.java:407)", "OffsetDateTime.parse(OffsetDateTime.java:392)"]))?;
     r(TimeVal::OffsetDateTime { d, t, offset: o })
 }
 fn odt_parse_fmt(_: &mut Vm, a: &mut [Value]) -> VR {
     let text = text_arg(&a[0])?;
     let f = format::formatter_of(&a[1])?;
-    r(f.parse_to(&text, cls::OFFSET_DATE_TIME)?)
+    r(f.parse_to(&text, cls::OFFSET_DATE_TIME).map_err(|t| jt(parse_frames(t), &["OffsetDateTime.parse(OffsetDateTime.java:407)"]))?)
 }
 fn odt_at_zone_same_instant(_: &mut Vm, a: &mut [Value]) -> VR {
     let (s, n) = tv(&a[0])?.instant().ok_or_else(|| crate::vm::cce("not an OffsetDateTime"))?;
@@ -1288,16 +1289,20 @@ fn ot_of_instant(_: &mut Vm, a: &mut [Value]) -> VR {
 }
 fn ot_parse(_: &mut Vm, a: &mut [Value]) -> VR {
     let text = text_arg(&a[0])?;
-    let mut p = iso(&text);
-    let t = p.time()?;
-    let o = p.offset()?;
-    p.end()?;
+    let parsed = (|| {
+        let mut p = iso(&text);
+        let t = p.time()?;
+        let o = p.offset()?;
+        p.end()?;
+        Ok::<_, Thrown>((t, o))
+    })();
+    let (t, o) = parsed.map_err(|t| jt(parse_frames(t), &["OffsetTime.parse(OffsetTime.java:331)", "OffsetTime.parse(OffsetTime.java:316)"]))?;
     r(TimeVal::OffsetTime { t, offset: o })
 }
 fn ot_parse_fmt(_: &mut Vm, a: &mut [Value]) -> VR {
     let text = text_arg(&a[0])?;
     let f = format::formatter_of(&a[1])?;
-    r(f.parse_to(&text, cls::OFFSET_TIME)?)
+    r(f.parse_to(&text, cls::OFFSET_TIME).map_err(|t| jt(parse_frames(t), &["OffsetTime.parse(OffsetTime.java:331)"]))?)
 }
 fn odt_min(_: &mut Vm, _: &mut [Value]) -> VR {
     r(TimeVal::OffsetDateTime { d: Date { y: MIN_YEAR as i32, m: 1, d: 1 }, t: Time(0), offset: 18 * 3600 })
@@ -1370,8 +1375,8 @@ fn zid_system_default(_: &mut Vm, _: &mut [Value]) -> VR {
 }
 fn zid_available(_: &mut Vm, _: &mut [Value]) -> VR {
     let m = JMap::new(cls::HASH_SET);
-    for tz in chrono_tz::TZ_VARIANTS.iter() {
-        m.insert_raw(Value::str(tz.name()), Value::Null);
+    for id in super::available_zone_ids() {
+        m.insert_raw(Value::str(id), Value::Null);
     }
     Ok(Value::Set(Rc::new(m)))
 }
@@ -1402,9 +1407,9 @@ fn zid_short_ids(_: &mut Vm, _: &mut [Value]) -> VR {
         ("PST", "America/Los_Angeles"),
         ("SST", "Pacific/Guadalcanal"),
         ("VST", "Asia/Ho_Chi_Minh"),
-        ("EST", "-05:00"),
-        ("MST", "-07:00"),
-        ("HST", "-10:00"),
+        ("EST", "America/Panama"),
+        ("MST", "America/Phoenix"),
+        ("HST", "Pacific/Honolulu"),
     ];
     let m = JMap::new(cls::UNMODIFIABLE_MAP);
     let tmp = JMap::hash_map();
@@ -2112,6 +2117,62 @@ fn ta_of_date_adjuster(_: &mut Vm, a: &mut [Value]) -> VR {
         Ok(time_value(replace_date(&t, nd)?))
     }))
 }
+/// `TemporalQuery.queryFrom(temporal)`: a script function or one of `TemporalQueries`.
+fn query_from(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let q = a[0].clone();
+    crate::func::call(vm, &q, &[a[1].clone()])
+}
+
+/// The `TemporalQueries` query named `what` (its `toString`), answering as the JDK's
+/// temporals do: `null` when the temporal does not have the answer.
+fn temporal_query(what: &'static str) -> Value {
+    crate::func::native(Some(cls::TEMPORAL_QUERY), move |_, args| {
+        let t = tv(args.first().unwrap_or(&Value::Null))?.clone();
+        let local_date = |t: &TimeVal| match t {
+            TimeVal::LocalDate(d) | TimeVal::LocalDateTime(d, _) | TimeVal::Zoned { d, .. } | TimeVal::OffsetDateTime { d, .. } => Some(*d),
+            _ => None,
+        };
+        let local_time = |t: &TimeVal| match t {
+            TimeVal::LocalTime(x) | TimeVal::LocalDateTime(_, x) | TimeVal::Zoned { t: x, .. } | TimeVal::OffsetDateTime { t: x, .. } | TimeVal::OffsetTime { t: x, .. } => Some(*x),
+            _ => None,
+        };
+        let v = match what {
+            "LocalDate" => local_date(&t).map(TimeVal::LocalDate),
+            "LocalTime" => local_time(&t).map(TimeVal::LocalTime),
+            "ZoneId" => match &t {
+                TimeVal::Zoned { zone, .. } => Some(TimeVal::ZoneId(zone.clone())),
+                _ => None,
+            },
+            "Zone" => match &t {
+                TimeVal::Zoned { zone, .. } => Some(TimeVal::ZoneId(zone.clone())),
+                TimeVal::OffsetDateTime { offset, .. } | TimeVal::OffsetTime { offset, .. } => Some(TimeVal::ZoneId(Zone::Offset(*offset))),
+                _ => None,
+            },
+            "Offset" => match &t {
+                TimeVal::Zoned { offset, .. } | TimeVal::OffsetDateTime { offset, .. } | TimeVal::OffsetTime { offset, .. } => Some(TimeVal::ZoneId(Zone::Offset(*offset))),
+                _ => None,
+            },
+            "Chronology" => match &t {
+                TimeVal::LocalDate(_) | TimeVal::LocalDateTime(..) | TimeVal::Zoned { .. } | TimeVal::OffsetDateTime { .. } | TimeVal::Year(_) | TimeVal::YearMonth(..) | TimeVal::MonthDay(..) => {
+                    Some(TimeVal::Enum(cls::ISO_CHRONOLOGY, 0))
+                }
+                _ => None,
+            },
+            "Precision" => match &t {
+                TimeVal::LocalDate(_) => Some(TimeVal::TUnit(Unit::Days)),
+                TimeVal::LocalTime(_) | TimeVal::LocalDateTime(..) | TimeVal::Zoned { .. } | TimeVal::OffsetDateTime { .. } | TimeVal::OffsetTime { .. } | TimeVal::Instant { .. } => {
+                    Some(TimeVal::TUnit(Unit::Nanos))
+                }
+                TimeVal::Year(_) => Some(TimeVal::TUnit(Unit::Years)),
+                TimeVal::YearMonth(..) => Some(TimeVal::TUnit(Unit::Months)),
+                _ => None,
+            },
+            _ => None,
+        };
+        Ok(v.map(time_value).unwrap_or(Value::Null))
+    })
+}
+
 fn adjust_into(vm: &mut Vm, a: &mut [Value]) -> VR {
     let target = arg_tv(&a[1], "temporal")?.clone();
     let me = a[0].clone();
@@ -2441,7 +2502,17 @@ pub fn register(b: &mut Builder) {
     b.m(TEMPORAL, "long until(Temporal,TemporalUnit)", t_until);
     b.m(TEMPORAL, "Temporal with(TemporalAdjuster)", t_with_adjuster);
     b.m(TEMPORAL, "Temporal with(TemporalField,long)", t_with_field);
-    b.m(TEMPORAL_ADJUSTER, "Temporal adjustInto(Temporal)", adjust_into);
+    // functional interfaces: lambdas and method references convert to them
+    b.functional(TEMPORAL_ADJUSTER, "Temporal adjustInto(Temporal)", adjust_into);
+    b.functional(TEMPORAL_QUERY, "def queryFrom(TemporalAccessor)", query_from);
+    b.supers(TEMPORAL_QUERIES, &[OBJECT]);
+    b.s(TEMPORAL_QUERIES, "TemporalQuery chronology()", |_, _| Ok(temporal_query("Chronology")));
+    b.s(TEMPORAL_QUERIES, "TemporalQuery localDate()", |_, _| Ok(temporal_query("LocalDate")));
+    b.s(TEMPORAL_QUERIES, "TemporalQuery localTime()", |_, _| Ok(temporal_query("LocalTime")));
+    b.s(TEMPORAL_QUERIES, "TemporalQuery offset()", |_, _| Ok(temporal_query("Offset")));
+    b.s(TEMPORAL_QUERIES, "TemporalQuery precision()", |_, _| Ok(temporal_query("Precision")));
+    b.s(TEMPORAL_QUERIES, "TemporalQuery zone()", |_, _| Ok(temporal_query("Zone")));
+    b.s(TEMPORAL_QUERIES, "TemporalQuery zoneId()", |_, _| Ok(temporal_query("ZoneId")));
     b.m(TEMPORAL_AMOUNT, "Temporal addTo(Temporal)", amount_add_to);
     b.m(TEMPORAL_AMOUNT, "long get(TemporalUnit)", amount_get);
     b.m(TEMPORAL_AMOUNT, "List getUnits()", amount_units);

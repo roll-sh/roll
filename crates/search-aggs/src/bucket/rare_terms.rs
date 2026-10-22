@@ -272,6 +272,7 @@ pub fn create(def: &AggDef, spec: &RareTermsSpec, ctx: &mut BindCtx<'_>) -> Resu
         return Err(vs.unsupported("rare_terms"));
     }
     let subs = Subs::bind(def, ctx)?;
+    crate::collect::check_time_series_deferral(ctx, &def.name, &subs)?;
     if vs.unmapped && vs.missing.is_none() {
         return Ok(Box::new(RareAgg::new(RareKind::Unmapped, spec, vs, None, None, subs, ctx, def)));
     }
@@ -418,12 +419,14 @@ impl Aggregator for RareAgg {
                     keys.push(TermKey::Bytes(v.to_vec()));
                 }
             } else if let Some(r) = self.nums.as_mut() {
-                let mut prev: Option<i64> = None;
-                for &v in r.longs(doc, score)? {
-                    if prev == Some(v) {
+                // `LongRareTermsAggregator` means to skip repeated values but only tests
+                // `i == 0 && previous == val` with previous starting at Long.MAX_VALUE: every
+                // repeat counts (and is collected again), and a first value of
+                // Long.MAX_VALUE is skipped.
+                for (i, &v) in r.longs(doc, score)?.iter().enumerate() {
+                    if i == 0 && v == i64::MAX {
                         continue;
                     }
-                    prev = Some(v);
                     if self.lfilter.as_ref().is_some_and(|f| !f.accept(v)) {
                         continue;
                     }
@@ -457,7 +460,16 @@ impl Aggregator for RareAgg {
                 frequent[i].insert(identity(key));
             }
         }
-        let all: Vec<u32> = kept.iter().flatten().copied().collect();
+        let mut all: Vec<u32> = kept.iter().flatten().copied().collect();
+        // Elasticsearch renumbers the kept buckets owning bucket by owning bucket but only
+        // rewrites the collected sub-aggregation ordinals when it dropped one. When every
+        // collected term is rare its buckets read the sub-aggregations of the ordinal they
+        // were renumbered to, which under several owning buckets is another term's. Reproduce
+        // that (it can only differ from the true result when terms of several owning buckets
+        // interleave).
+        if !all.is_empty() && all.len() == self.keys.len() {
+            all = (0..all.len() as u32).collect();
+        }
         let mut aggs = self.subs.build(&all)?.into_iter();
         let mut out = Vec::with_capacity(owning.len());
         for (list, freq) in kept.into_iter().zip(frequent) {
@@ -484,9 +496,7 @@ impl Aggregator for RareAgg {
         self.subs.needs_scores() || self.vs.script.as_ref().is_some_and(|s| s.needs_score())
     }
 
-    fn validate_sort(&self, _name: &str, _key: Option<&str>, _rest: &[PathElement]) -> Result<()> {
-        Err(AggError::illegal_argument(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.",
-        ))
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
     }
 }

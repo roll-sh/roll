@@ -197,14 +197,12 @@ unsafe fn hamming_popcnt(a: &[u8], b: &[u8]) -> u32 {
 #[inline(always)]
 pub fn hamming_portable(a: &[u8], b: &[u8]) -> u32 {
     let mut n = 0u32;
-    let mut ca = a.chunks_exact(8);
-    let mut cb = b.chunks_exact(8);
-    for (x, y) in (&mut ca).zip(&mut cb) {
-        let x = u64::from_le_bytes(x.try_into().unwrap());
-        let y = u64::from_le_bytes(y.try_into().unwrap());
-        n += (x ^ y).count_ones();
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
+        n += (u64::from_le_bytes(*x) ^ u64::from_le_bytes(*y)).count_ones();
     }
-    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+    for (x, y) in ra.iter().zip(rb) {
         n += (x ^ y).count_ones();
     }
     n
@@ -230,12 +228,9 @@ pub fn l2sq_f32_portable(a: &[u8], b: &[u8]) -> f32 {
 #[inline(always)]
 fn portable_f32(a: &[u8], b: &[u8], op: impl Fn(f32, f32) -> f32) -> f32 {
     let mut acc = [0f32; 8];
-    let ca = a.chunks_exact(32);
-    let cb = b.chunks_exact(32);
-    let (ra, rb) = (ca.remainder(), cb.remainder());
-    for (x, y) in ca.zip(cb) {
-        let x: &[u8; 32] = x.try_into().unwrap();
-        let y: &[u8; 32] = y.try_into().unwrap();
+    let (ca, ra) = a.as_chunks::<32>();
+    let (cb, rb) = b.as_chunks::<32>();
+    for (x, y) in ca.iter().zip(cb) {
         for (l, s) in acc.iter_mut().enumerate() {
             let xv = f32::from_le_bytes([x[4 * l], x[4 * l + 1], x[4 * l + 2], x[4 * l + 3]]);
             let yv = f32::from_le_bytes([y[4 * l], y[4 * l + 1], y[4 * l + 2], y[4 * l + 3]]);

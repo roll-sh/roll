@@ -255,6 +255,12 @@ pub enum Insn {
     /// Value `i` of `doc[field]` (fetched already) as a for-each loop over it sees it: boxed
     /// (`p` = 0) or converted to a primitive variable (1 + its `Prim`, see `IterNext`).
     DocAt { d: Reg, field: u32, i: Reg, p: u8 },
+    /// `doc[field].get(i)` / `doc[field][i]` of a numeric or boolean field with `i` in range:
+    /// writes the value to `d` and jumps to `t`. Anything else (an unmapped field, another
+    /// kind, an index out of range or not an `int`) falls through to the generic code that
+    /// follows, which produces the result or the exact error.
+    /// `p`: 0, or 1 + the `Prim` the call site converts the result to (`double x = …`).
+    DocGet { d: Reg, field: u32, i: Reg, t: u32, p: u8 },
     /// Loads a context variable (`params`, `ctx`, `_score`, …) into a register.
     LoadVar { d: Reg, var: u32 },
     /// `Map.get` with a constant string key (`params.x`, `m['k']`): method `m` called on `r`,
@@ -443,6 +449,9 @@ pub struct State {
     pub depth: u32,
     /// Document generation each literal doc-values buffer was filled for.
     pub doc_buf_gen: Vec<u64>,
+    /// The last `String` handed out for `doc['f'].value` of each literal string field, reused
+    /// when nothing else holds it any more (see `es::doc::doc_fast`).
+    pub doc_strs: Vec<Option<std::rc::Rc<crate::value::JStr>>>,
     /// Whether the context has a `doc` variable (`params.doc` then resolves to it).
     pub has_doc: bool,
     /// Index of the `ctx` variable of write contexts (`metadata()`, `field()`).
@@ -491,6 +500,7 @@ impl State {
             cur_binding: u32::MAX,
             depth: 0,
             doc_buf_gen: vec![0; prog.doc_fields.len()],
+            doc_strs: vec![None; prog.doc_fields.len()],
             has_doc: false,
             ctx_var: None,
             field_name: std::rc::Rc::from(""),
@@ -794,20 +804,37 @@ impl<'a> Vm<'a> {
     }
 
     /// Runs a library method. A `subList` view receiver (or first argument) is brought up to
-    /// date with its parent before and written back after.
+    /// date with its parent before and written back after, as is a sorted range view.
     #[inline(always)]
     pub fn call_native(&mut self, imp: crate::lookup::Native, m: crate::lookup::MethodId, args: &mut [Value]) -> VR {
-        if let Some(Value::List(l)) = args.first()
-            && l.view.is_some()
-        {
-            let l = l.clone();
-            let mi = self.reg.method(m);
-            crate::lib_coll::view_enter(&l, &crate::lib_coll::ViewCall { owner: mi.owner, name: &mi.name, arity: mi.params.len() })?;
-            let r = imp(self, args);
-            crate::lib_coll::view_exit(&l);
-            return overflowed(r);
+        match args.first() {
+            Some(Value::List(l)) if l.view.is_some() => {
+                let l = l.clone();
+                let mi = self.reg.method(m);
+                crate::lib_coll::view_enter(&l, &crate::lib_coll::ViewCall { owner: mi.owner, name: &mi.name, arity: mi.params.len() })?;
+                let r = imp(self, args);
+                crate::lib_coll::view_exit(&l);
+                overflowed(r)
+            }
+            // a sorted range view: the tree's entries in, the view's entries back out
+            Some(Value::Map(w) | Value::Set(w)) if w.window.is_some() => {
+                let w = w.clone();
+                crate::lib_coll::window_enter(self, &w)?;
+                let r = imp(self, args);
+                crate::lib_coll::window_exit(self, &w)?;
+                overflowed(r)
+            }
+            // a key, value or entry view of one
+            Some(Value::Obj(o)) if matches!(&**o, Obj::MapView { map, .. } if map.window.is_some()) => {
+                let Obj::MapView { map, .. } = &**o else { unreachable!() };
+                let w = map.clone();
+                crate::lib_coll::window_enter(self, &w)?;
+                let r = imp(self, args);
+                crate::lib_coll::window_exit(self, &w)?;
+                overflowed(r)
+            }
+            _ => overflowed(imp(self, args)),
         }
-        overflowed(imp(self, args))
     }
 
     #[inline(always)]
@@ -1159,6 +1186,51 @@ impl<'a> Vm<'a> {
                         }
                     }
                 }
+                DocGet { d, field, i, t, p } => {
+                    let fi = field as usize;
+                    if self.st.doc_buf_gen[fi] == self.st.doc_gen || crate::es::doc_fetch(self, field).is_ok() {
+                        let dv = &self.st.doc_bufs[fi];
+                        if let Value::Int(k) = *r!(i)
+                            && k >= 0
+                        {
+                            use crate::host::DocKind as K;
+                            let k = k as usize;
+                            use crate::ir::Prim;
+                            const NONE: u8 = 0;
+                            const LONG: u8 = Prim::Long as u8 + 1;
+                            const FLOAT: u8 = Prim::Float as u8 + 1;
+                            const DOUBLE: u8 = Prim::Double as u8 + 1;
+                            let longs = matches!(dv.kind, K::Long | K::Integer | K::Short | K::Byte) && k < dv.longs.len();
+                            let doubles = matches!(dv.kind, K::Double | K::Float | K::HalfFloat | K::ScaledFloat) && k < dv.doubles.len();
+                            let hit = match p {
+                                NONE | LONG if longs => {
+                                    long_op!(d, dv.longs[k]);
+                                    true
+                                }
+                                FLOAT if longs => {
+                                    float_op!(d, dv.longs[k] as f32);
+                                    true
+                                }
+                                DOUBLE if longs => {
+                                    double_op!(d, dv.longs[k] as f64);
+                                    true
+                                }
+                                NONE | DOUBLE if doubles => {
+                                    double_op!(d, dv.doubles[k]);
+                                    true
+                                }
+                                NONE if dv.kind == K::Boolean && k < dv.longs.len() => {
+                                    bool_op!(d, dv.longs[k] != 0);
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if hit {
+                                ip = unsafe { code.add(t as usize) };
+                            }
+                        }
+                    }
+                }
                 LoadVar { d, var } => {
                     let v = &self.st.vars[var as usize];
                     if !v.is_heap() {
@@ -1314,6 +1386,10 @@ impl<'a> Vm<'a> {
             }
             Throw { s } => {
                 let v = self.r(base, s).clone();
+                if v.is_null() {
+                    let why = func.null_desc(*pc - 1).map(|d| format!(" because {d} is null")).unwrap_or_default();
+                    return Err(npe(format!("Cannot throw exception{why}")));
+                }
                 return Err(throw_value(v));
             }
             Call { d, m, a, n } => {
@@ -1332,7 +1408,7 @@ impl<'a> Vm<'a> {
             }
             CallRecv { d, m, a, n } => {
                 if self.r(base, a).is_null() {
-                    return Err(crate::dynamic::null_receiver(reg, m, func.null_desc(*pc - 1)));
+                    return Err(crate::dynamic::null_receiver(reg, m, func.null_desc(*pc - 1), self.prog.regex_limit_factor > 0));
                 }
                 let mut args = self.take_args(base, a, n);
                 let imp = self.virtual_imp(m, &args);
@@ -1529,7 +1605,7 @@ impl<'a> Vm<'a> {
             }
             MapGetK { d, r, k, m, .. } => {
                 if self.r(base, r).is_null() {
-                    return Err(crate::dynamic::null_receiver(reg, m, func.null_desc(*pc - 1)));
+                    return Err(crate::dynamic::null_receiver(reg, m, func.null_desc(*pc - 1), self.prog.regex_limit_factor > 0));
                 }
                 let mut args = crate::vm::smallvec_args::Args::new();
                 args.push(self.r(base, r).clone());
@@ -1912,7 +1988,7 @@ fn exception_value(t: Throw) -> Value {
             return v.0;
         }
     let origin = t.offset.map(|offset| Box::new(crate::value::ExceptionOrigin { offset, frames: t.frames }));
-    Value::obj(Obj::Exception(JException { class: t.class, message: t.message, origin: std::cell::RefCell::new(origin), error_offset: t.error_offset }))
+    Value::obj(Obj::Exception(JException { class: t.class, message: t.message, origin: std::cell::RefCell::new(origin), error_offset: t.error_offset, parsed: None }))
 }
 
 /// A thrown script value carried inside a [`Throw`].

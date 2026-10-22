@@ -153,7 +153,7 @@ pub fn distance_unit(s: &str) -> Result<f64> {
     })
 }
 
-pub fn parse_range(p: &mut XParser<'_>, type_name: &str) -> Result<RangeSpec> {
+pub fn parse_range(p: &mut XParser<'_>, type_name: &str, name: &str) -> Result<RangeSpec> {
     let geo = type_name == "geo_distance";
     let date = type_name == "date_range";
     let opts = VsOpts::new(true, !geo, date);
@@ -202,7 +202,7 @@ pub fn parse_range(p: &mut XParser<'_>, type_name: &str) -> Result<RangeSpec> {
     })?;
     vs.check_required(opts)?;
     let kind = if geo {
-        let origin = origin.ok_or_else(|| AggError::illegal_argument(format!("[origin] must not be null: [{type_name}]")))?;
+        let origin = origin.ok_or_else(|| AggError::illegal_argument(format!("Aggregation [{name}] must define an [origin].")))?;
         RangeKind::GeoDistance { origin, unit_meters: unit, plane }
     } else if date {
         RangeKind::DateRange
@@ -305,15 +305,19 @@ pub fn create_range(def: &AggDef, spec: &RangeSpec, ctx: &mut BindCtx<'_>) -> Re
     let now = ctx.lookup.now_millis();
     let format = if geo { DocValueFormat::Raw } else { vs.format.clone() };
     let mut ranges = Vec::with_capacity(spec.ranges.len());
+    // `date_range` passes numeric bounds through the format too (`Long.toString((long) v)`), so
+    // they follow it (`epoch_second` multiplies them by 1000).
+    let date = spec.kind == RangeKind::DateRange;
+    let bound = |s: &Option<String>, n: Option<f64>, open: f64| -> Result<f64> {
+        match (s, n) {
+            (Some(s), _) => format.parse_double(s, false, now),
+            (None, Some(v)) if date && v.is_finite() => format.parse_double(&(v as i64).to_string(), false, now),
+            (None, n) => Ok(n.unwrap_or(open)),
+        }
+    };
     for r in &spec.ranges {
-        let from = match &r.from_str {
-            Some(s) => format.parse_double(s, false, now)?,
-            None => r.from.unwrap_or(f64::NEG_INFINITY),
-        };
-        let to = match &r.to_str {
-            Some(s) => format.parse_double(s, false, now)?,
-            None => r.to.unwrap_or(f64::INFINITY),
-        };
+        let from = bound(&r.from_str, r.from, f64::NEG_INFINITY)?;
+        let to = bound(&r.to_str, r.to, f64::INFINITY)?;
         ranges.push(NumRange { key: r.key.clone(), from: fix_precision(&vs, from), to: fix_precision(&vs, to), orig_from: from, orig_to: to });
     }
     if ranges.is_empty() {
@@ -854,7 +858,7 @@ fn cidr_range(mask: &str) -> Result<(Option<String>, Option<String>)> {
     let bytes = parse_ip(ip)?;
     let total = if v4 { 32 } else { 128 };
     if len > total {
-        return Err(AggError::illegal_argument(format!("Illegal prefix length [{len}] in [{mask}]. Must be 0-{total} for IPv{}", if v4 { 4 } else { 6 })));
+        return Err(AggError::illegal_argument(format!("Illegal prefix length [{len}] in [{mask}]. Must be 0-32 for IPv4 ranges, 0-128 for IPv6 ranges")));
     }
     let mut lower = bytes;
     let mut upper = bytes;
@@ -1158,9 +1162,6 @@ pub fn parse_ip_prefix(p: &mut XParser<'_>) -> Result<IpPrefixSpec> {
         Ok(())
     })?;
     s.vs.check_required(opts)?;
-    if s.prefix_length.is_none() {
-        return Err(AggError::illegal_argument("Required [prefix_length]"));
-    }
     Ok(s)
 }
 
@@ -1187,7 +1188,8 @@ pub fn create_ip_prefix(def: &AggDef, spec: &IpPrefixSpec, ctx: &mut BindCtx<'_>
     if !vs.unmapped && vs.vs_type != VsType::Ip {
         return Err(vs.unsupported("ip_prefix"));
     }
-    let pl = spec.prefix_length.unwrap_or(0);
+    // An absent prefix_length stays at the builder's -1 and fails the shard's range check.
+    let pl = spec.prefix_length.unwrap_or(-1);
     let max = if spec.is_ipv6 { 128 } else { 32 };
     if pl < 0 || pl > max {
         return Err(AggError::illegal_argument(format!("[prefix_length] must be in range [0, {max}] while value is [{pl}]")));
@@ -1286,9 +1288,13 @@ impl Aggregator for IpPrefixAgg {
     }
 
     fn build(&mut self, owning: &[u32]) -> Result<Vec<AggValue>> {
-        let mut per: Vec<Vec<u32>> = Vec::new();
-        for &o in owning {
-            let mut ords: Vec<u32> = (0..self.ords.len() as u32).filter(|&x| self.ords.owning(x) == o).collect();
+        let mut by_owning: hashbrown::HashMap<u32, Vec<u32>> = hashbrown::HashMap::new();
+        for x in 0..self.ords.len() as u32 {
+            by_owning.entry(self.ords.owning(x)).or_default().push(x);
+        }
+        let mut per: Vec<Vec<u32>> = Vec::with_capacity(owning.len());
+        for o in owning {
+            let mut ords = by_owning.remove(o).unwrap_or_default();
             ords.sort_by(|&a, &b| self.ords.get_bytes(a).cmp(self.ords.get_bytes(b)));
             per.push(ords);
         }
@@ -1349,29 +1355,20 @@ impl Internal for IpPrefix {
     }
     fn reduce(list: Vec<Self>, ctx: &mut ReduceCtx<'_>) -> Result<Self> {
         let cfg = list[0].cfg.clone();
-        let mut all: Vec<IpPrefixBucket> = list.into_iter().flat_map(|l| l.buckets).collect();
-        all.sort_by(|a, b| a.key.cmp(&b.key));
+        // `reduceBuckets`: a priority queue over the shards' key-sorted lists; the buckets of
+        // one key are reduced in the order the queue yields them (floating-point sums in
+        // sub-aggregations depend on it).
+        let lists: Vec<Vec<IpPrefixBucket>> = list.into_iter().map(|l| l.buckets).collect();
+        let groups = crate::util::lucene_merge_groups(lists, |a: &IpPrefixBucket, b: &IpPrefixBucket| a.key < b.key);
         let mut out: Vec<IpPrefixBucket> = Vec::new();
-        let mut group: Vec<IpPrefixBucket> = Vec::new();
-        let flush = |group: &mut Vec<IpPrefixBucket>, out: &mut Vec<IpPrefixBucket>, ctx: &mut ReduceCtx<'_>| -> Result<()> {
-            if group.is_empty() {
-                return Ok(());
-            }
+        for group in groups {
             let key = group[0].key.clone();
             let doc_count = group.iter().map(|b| b.doc_count).sum();
-            let aggs = Aggs::reduce_hashed(group.drain(..).map(|b| b.aggs).collect(), ctx)?;
+            let aggs = Aggs::reduce_hashed(group.into_iter().map(|b| b.aggs).collect(), ctx)?;
             if !ctx.is_final() || doc_count >= cfg.min_doc_count {
                 out.push(IpPrefixBucket { key, doc_count, aggs });
             }
-            Ok(())
-        };
-        for b in all {
-            if group.first().is_some_and(|g| g.key != b.key) {
-                flush(&mut group, &mut out, ctx)?;
-            }
-            group.push(b);
         }
-        flush(&mut group, &mut out, ctx)?;
         ctx.consume_buckets(out.len())?;
         Ok(IpPrefix { cfg, buckets: out })
     }

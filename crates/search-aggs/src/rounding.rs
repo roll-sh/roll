@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use chrono::{Datelike, NaiveDate, Offset, TimeZone as _};
+use chrono::{Offset, TimeZone as _};
 
 use crate::error::{AggError, Result};
 use crate::format::TimeZone;
@@ -92,6 +92,17 @@ impl DateUnit {
         }
     }
 
+    /// `DateTimeUnit.extraLocalOffsetLookup()`: how far before a value offsets are looked up.
+    fn extra_local_offset_lookup(self) -> i64 {
+        match self {
+            DateUnit::Week => 7 * DAY,
+            DateUnit::Year => 366 * DAY,
+            DateUnit::Quarter => 92 * DAY,
+            DateUnit::Month => 31 * DAY,
+            u => u.ratio(),
+        }
+    }
+
     /// Length of the unit's base field in millis (hours/minutes/seconds).
     fn unit_millis(self) -> i64 {
         match self {
@@ -108,7 +119,7 @@ impl DateUnit {
     pub fn floor_local(self, local: i64) -> i64 {
         match self {
             DateUnit::Second | DateUnit::Minute | DateUnit::Hour | DateUnit::Day => round_floor(local, self.ratio()),
-            DateUnit::Week => round_floor(local + 3 * DAY, 7 * DAY) - 3 * DAY,
+            DateUnit::Week => round_floor(local.wrapping_add(3 * DAY), 7 * DAY).wrapping_sub(3 * DAY),
             DateUnit::Month | DateUnit::Quarter | DateUnit::Year => {
                 let (y, m, _) = ymd(local);
                 let m = match self {
@@ -124,8 +135,8 @@ impl DateUnit {
     /// The next local midnight after a local midnight rounded to this unit.
     fn next_local(self, local_mid: i64) -> i64 {
         match self {
-            DateUnit::Day => local_mid + DAY,
-            DateUnit::Week => local_mid + 7 * DAY,
+            DateUnit::Day => local_mid.wrapping_add(DAY),
+            DateUnit::Week => local_mid.wrapping_add(7 * DAY),
             DateUnit::Month | DateUnit::Quarter | DateUnit::Year => {
                 let (y, m, _) = ymd(local_mid);
                 let add = match self {
@@ -133,10 +144,10 @@ impl DateUnit {
                     DateUnit::Quarter => 3,
                     _ => 12,
                 };
-                let total = y as i64 * 12 + (m as i64 - 1) + add;
-                millis_of(total.div_euclid(12) as i32, (total.rem_euclid(12) + 1) as u32, 1)
+                let total = y * 12 + (m as i64 - 1) + add;
+                millis_of(total.div_euclid(12), (total.rem_euclid(12) + 1) as u32, 1)
             }
-            _ => local_mid + self.ratio(),
+            _ => local_mid.wrapping_add(self.ratio()),
         }
     }
 }
@@ -144,7 +155,8 @@ impl DateUnit {
 /// `DateUtils.roundFloor`.
 #[inline]
 pub fn round_floor(v: i64, unit: i64) -> i64 {
-    v - v.rem_euclid(unit)
+    // Java's `long` arithmetic wraps (Long.MIN_VALUE rounds to a large positive value).
+    v.wrapping_sub(v.rem_euclid(unit))
 }
 
 /// `TimeIntervalRounding.roundKey`.
@@ -153,17 +165,35 @@ fn round_key(v: i64, interval: i64) -> i64 {
     v.div_euclid(interval)
 }
 
-fn ymd(local: i64) -> (i32, u32, u32) {
-    let days = local.div_euclid(DAY);
-    let d = NaiveDate::from_num_days_from_ce_opt((days + 719_163) as i32).unwrap_or(NaiveDate::MIN);
-    (d.year(), d.month(), d.day())
+/// The proleptic Gregorian date of local millis. Plain integer arithmetic (not chrono, which
+/// stops at year ±262143) so values near `Long.MIN_VALUE`/`MAX_VALUE` (wrapped offsets,
+/// extreme `missing` values) round like `java.time` does.
+fn ymd(local: i64) -> (i64, u32, u32) {
+    let z = local.div_euclid(DAY) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
-fn millis_of(y: i32, m: u32, d: u32) -> i64 {
-    match NaiveDate::from_ymd_opt(y, m, d) {
-        Some(nd) => (nd.num_days_from_ce() as i64 - 719_163) * DAY,
-        None => 0,
-    }
+/// Local millis of a date's midnight (the inverse of [`ymd`]), wrapping like Java's `long`.
+fn millis_of(y: i64, m: u32, d: u32) -> i64 {
+    days_of(y, m, d).wrapping_mul(DAY)
+}
+
+/// Days from 1970-01-01 to a proleptic Gregorian date.
+fn days_of(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// `TimeValue.parseTimeValue(value, settingName)` in millis.
@@ -265,9 +295,79 @@ impl Rounding {
         self.round_inner(utc.wrapping_sub(self.offset)).wrapping_add(self.offset)
     }
 
+    /// `Rounding.round(v)`, which is `prepare(v, v).round(v)`: how `extended_bounds` and
+    /// `hard_bounds` are rounded. Preparing looks up the zone's offsets over a window around
+    /// `v` computed in wrapping `long` arithmetic, and `LocalTimeOffset.lookup` refuses a
+    /// window whose ends crossed ("[min] must be <= [max]", e.g. for `Long.MIN_VALUE`); units
+    /// that round to midnight then step to the next rounding value through `java.time`, whose
+    /// exact arithmetic fails past `Long.MAX_VALUE` ("long overflow").
+    pub fn round_bound(&self, v: i64) -> Result<i64> {
+        let v = v.wrapping_sub(self.offset);
+        let (min_lookup, max_lookup) = match self.kind {
+            RoundingKind::Unit(u) => {
+                let max = if u.to_midnight() { v } else { v.wrapping_add(2 * u.unit_millis()) };
+                (v.wrapping_sub(2 * u.extra_local_offset_lookup()), max)
+            }
+            RoundingKind::Interval(i) => (v.wrapping_sub(i), v.wrapping_add(i)),
+        };
+        if min_lookup > max_lookup {
+            return Err(AggError::illegal_argument(format!("[{min_lookup}] must be <= [{max_lookup}]")));
+        }
+        let rounded = self.round_inner(v);
+        if let RoundingKind::Unit(u) = self.kind
+            && u.to_midnight()
+            && self.next_overflows(u, rounded, v)
+        {
+            return Err(AggError::new(500, "arithmetic_exception", "long overflow"));
+        }
+        Ok(rounded.wrapping_add(self.offset))
+    }
+
+    /// `maybeUseArray(v, v)` of a prepared to-midnight rounding: from `round(v)`, step with
+    /// `java.time`'s `nextRoundingValue` (true calendar truncation, then one unit) while the
+    /// step stays `<= v`; whether a step leaves the range of epoch millis.
+    fn next_overflows(&self, u: DateUnit, rounded: i64, v: i64) -> bool {
+        let mut r = rounded as i128;
+        for _ in 0..128 {
+            let Ok(ri) = i64::try_from(r) else { return true };
+            let off = match self.fixed_offset_ms() {
+                Some(o) => o,
+                None => self.rules.as_ref().map_or(0, |z| z.offset_at(ri) as i64 * 1000),
+            } as i128;
+            let local = r + off;
+            let next_local = match u {
+                DateUnit::Day => local.div_euclid(DAY as i128) * DAY as i128 + DAY as i128,
+                DateUnit::Week => {
+                    let (d3, w) = (3 * DAY as i128, 7 * DAY as i128);
+                    (local + d3).div_euclid(w) * w - d3 + w
+                }
+                _ => {
+                    let Ok(l) = i64::try_from(local) else { return true };
+                    let (y, m, _) = ymd(l);
+                    let add = match u {
+                        DateUnit::Month => 1,
+                        DateUnit::Quarter => 3 - (m as i64 - 1) % 3,
+                        _ => 13 - m as i64,
+                    };
+                    let total = y * 12 + (m as i64 - 1) + add;
+                    days_of(total.div_euclid(12), (total.rem_euclid(12) + 1) as u32, 1) as i128 * DAY as i128
+                }
+            };
+            let next = next_local - off;
+            if next > i64::MAX as i128 || next < i64::MIN as i128 {
+                return true;
+            }
+            if next > v as i128 || next <= r {
+                return false;
+            }
+            r = next;
+        }
+        false
+    }
+
     /// The next rounded value after the bucket containing `utc` (`nextRoundingValue`).
     pub fn next_rounding_value(&self, utc: i64) -> i64 {
-        self.next_inner(utc - self.offset) + self.offset
+        self.next_inner(utc.wrapping_sub(self.offset)).wrapping_add(self.offset)
     }
 
     fn fixed_offset_ms(&self) -> Option<i64> {
@@ -280,16 +380,16 @@ impl Rounding {
     #[inline]
     fn round_inner(&self, utc: i64) -> i64 {
         if let Some(off) = self.fixed_offset_ms() {
-            let local = utc + off;
+            let local = utc.wrapping_add(off);
             return match self.kind {
-                RoundingKind::Unit(u) => u.floor_local(local) - off,
-                RoundingKind::Interval(i) => round_key(local, i) * i - off,
+                RoundingKind::Unit(u) => u.floor_local(local).wrapping_sub(off),
+                RoundingKind::Interval(i) => round_key(local, i).wrapping_mul(i).wrapping_sub(off),
             };
         }
         let rules = self.rules.as_ref().expect("named zone rules");
         match self.kind {
             RoundingKind::Unit(u) if u.to_midnight() => {
-                let local = utc + rules.offset_at(utc) as i64 * 1000;
+                let local = utc.wrapping_add(rules.offset_at(utc) as i64 * 1000);
                 rules.first_time_on_day(u.floor_local(local))
             }
             RoundingKind::Unit(u) => self.round_not_to_midnight(rules, u, utc),
@@ -310,7 +410,7 @@ impl Rounding {
                     {
                         return t;
                     }
-                    instant = p - 1;
+                    instant = p.wrapping_sub(1);
                 }
             }
         }
@@ -321,25 +421,25 @@ impl Rounding {
         let mut utc = original;
         let mut attempts = 0;
         'attempt: while attempts < 5000 {
-            let local = utc + rules.offset_at(utc) as i64 * 1000;
-            let rounded_local = round_key(local, interval) * interval;
+            let local = utc.wrapping_add(rules.offset_at(utc) as i64 * 1000);
+            let rounded_local = round_key(local, interval).wrapping_mul(interval);
             let offsets = rules.valid_offsets(rounded_local);
             if !offsets.is_empty() {
-                let prev = rules.previous_transition(utc + 1);
+                let prev = rules.previous_transition(utc.wrapping_add(1));
                 for &o in offsets.iter().rev() {
-                    let inst = rounded_local - o as i64 * 1000;
+                    let inst = rounded_local.wrapping_sub(o as i64 * 1000);
                     if let Some(p) = prev
                         && inst < p
                     {
                         attempts += 1;
-                        utc = p - 1;
+                        utc = p.wrapping_sub(1);
                         continue 'attempt;
                     }
                     if utc >= inst {
                         return inst;
                     }
                 }
-                return rounded_local - offsets[0] as i64 * 1000;
+                return rounded_local.wrapping_sub(offsets[0] as i64 * 1000);
             } else {
                 return rules.gap_transition(rounded_local);
             }
@@ -350,28 +450,28 @@ impl Rounding {
     fn next_inner(&self, utc: i64) -> i64 {
         match self.kind {
             RoundingKind::Unit(u) if u.to_midnight() => match self.fixed_offset_ms() {
-                Some(off) => u.next_local(u.floor_local(utc + off)) - off,
+                Some(off) => u.next_local(u.floor_local(utc.wrapping_add(off))).wrapping_sub(off),
                 None => {
                     let rules = self.rules.as_ref().expect("rules");
-                    let local = utc + rules.offset_at(utc) as i64 * 1000;
+                    let local = utc.wrapping_add(rules.offset_at(utc) as i64 * 1000);
                     rules.first_time_on_day(u.next_local(u.floor_local(local)))
                 }
             },
             RoundingKind::Unit(u) => {
                 let um = u.unit_millis();
-                let r1 = self.round_inner(utc + um);
-                if utc < r1 { r1 } else { self.round_inner(utc + 2 * um) }
+                let r1 = self.round_inner(utc.wrapping_add(um));
+                if utc < r1 { r1 } else { self.round_inner(utc.wrapping_add(2 * um)) }
             }
             RoundingKind::Interval(i) => {
                 if let Some(off) = self.fixed_offset_ms() {
-                    return (round_key(utc + off, i) + 1) * i - off;
+                    return round_key(utc.wrapping_add(off), i).wrapping_add(1).wrapping_mul(i).wrapping_sub(off);
                 }
                 // Elasticsearch's search for exactly the next rounding value.
                 let prev_round = self.round_inner(utc);
                 let mut increment = i;
                 let mut from = prev_round;
                 for _ in 0..100 {
-                    from += increment;
+                    from = from.wrapping_add(increment);
                     let rounded = self.round_inner(from);
                     if rounded <= prev_round {
                         if increment < 0 {
@@ -379,7 +479,7 @@ impl Rounding {
                         }
                         continue;
                     }
-                    let rr = self.round_inner(rounded - 1);
+                    let rr = self.round_inner(rounded.wrapping_sub(1));
                     if rr > prev_round {
                         if increment > 0 {
                             increment = -increment / 2;
@@ -443,11 +543,11 @@ impl Rounding {
 
 /// `truncateAsLocalTime` of `JavaTimeNotToMidnightRounding`.
 fn truncate_as_local_time(rules: &ZoneRules, u: DateUnit, instant: i64) -> Option<i64> {
-    let local = instant + rules.offset_at(instant) as i64 * 1000;
+    let local = instant.wrapping_add(rules.offset_at(instant) as i64 * 1000);
     let t = u.floor_local(local);
     let offsets = rules.valid_offsets(t);
     for &o in offsets.iter().rev() {
-        let r = t - o as i64 * 1000;
+        let r = t.wrapping_sub(o as i64 * 1000);
         if r <= instant {
             return Some(r);
         }
@@ -543,14 +643,14 @@ impl ZoneRules {
         let mut out: smallvec::SmallVec<[i32; 2]> = smallvec::SmallVec::new();
         // Candidate offsets: those in effect around the local time.
         let mut cands: smallvec::SmallVec<[i32; 4]> = smallvec::SmallVec::new();
-        for probe in [local - 2 * DAY, local - DAY, local, local + DAY, local + 2 * DAY] {
+        for probe in [local.wrapping_sub(2 * DAY), local.wrapping_sub(DAY), local, local.wrapping_add(DAY), local.wrapping_add(2 * DAY)] {
             let o = self.offset_at(probe);
             if !cands.contains(&o) {
                 cands.push(o);
             }
         }
         for &o in &cands {
-            let inst = local - o as i64 * 1000;
+            let inst = local.wrapping_sub(o as i64 * 1000);
             if self.offset_at(inst) == o && !out.contains(&o) {
                 out.push(o);
             }
@@ -570,14 +670,14 @@ impl ZoneRules {
             }
         }
         // Outside the cached range: the local time minus the offset after.
-        local - self.offset_at(local) as i64 * 1000
+        local.wrapping_sub(self.offset_at(local) as i64 * 1000)
     }
 
     /// `ZoneRules.previousTransition(instant)`: the latest transition strictly before the
     /// instant rounded up to a whole second.
     pub fn previous_transition(&self, utc: i64) -> Option<i64> {
         let secs = utc.div_euclid(1000) + if utc.rem_euclid(1000) > 0 { 1 } else { 0 };
-        let ms = secs * 1000;
+        let ms = secs.saturating_mul(1000);
         let i = self.transitions.partition_point(|t| t.at < ms);
         if i == 0 { None } else { Some(self.transitions[i - 1].at) }
     }
@@ -587,7 +687,7 @@ impl ZoneRules {
     pub fn first_time_on_day(&self, local_mid: i64) -> i64 {
         let offs = self.valid_offsets(local_mid);
         match offs.first() {
-            Some(&o) => local_mid - o as i64 * 1000,
+            Some(&o) => local_mid.wrapping_sub(o as i64 * 1000),
             None => self.gap_transition(local_mid),
         }
     }

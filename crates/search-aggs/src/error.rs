@@ -91,6 +91,19 @@ impl AggError {
         .with_meta("max_buckets", Json::from(limit as u64))
     }
 
+    /// The `TooManyBucketsException` of a request that asks for more buckets than allowed
+    /// up front (`composite`'s `size`).
+    pub fn too_many_buckets_requested(limit: usize, requested: i64) -> AggError {
+        AggError::new(
+            400,
+            "too_many_buckets_exception",
+            format!(
+                "Trying to create too many buckets. Must be less than or equal to: [{limit}] but was [{requested}]. This limit can be set by changing the [search.max_buckets] cluster level setting."
+            ),
+        )
+        .with_meta("max_buckets", Json::from(limit as u64))
+    }
+
     /// `NumberFormatException` with Java's text.
     pub fn number_format(s: &str) -> AggError {
         AggError::new(400, "number_format_exception", format!("For input string: \"{s}\""))

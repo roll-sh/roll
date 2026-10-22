@@ -274,7 +274,10 @@ pub fn analyze(ctx: &Ctx) -> EsResult<Reply> {
     let out = match index {
         None => {
             req.validate(false).map_err(es_error)?;
-            Analysis::global().analyze(&req, None, AnalyzeLimits::default()).map_err(es_error)?
+            // Inline `condition` / `predicate_token_filter` definitions compile their scripts.
+            static GLOBAL: std::sync::OnceLock<Analysis> = std::sync::OnceLock::new();
+            let global = GLOBAL.get_or_init(|| Analysis::global_with(search_analysis::IndexOptions { scripts: Some(crate::scripting::analysis_scripts()), ..Default::default() }));
+            global.analyze(&req, None, AnalyzeLimits::default()).map_err(es_error)?
         }
         Some(expr) => {
             req.validate(true).map_err(es_error)?;

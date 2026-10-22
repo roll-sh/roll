@@ -402,8 +402,12 @@ pub fn normalize_vector_index_options(field: &str, opts: &crate::json::Map, ctx:
     let quantized = !matches!(ty.as_str(), "hnsw" | "flat");
     let mut out = crate::json::Map::new();
     out.insert("type".into(), Value::from(ty.clone()));
-    let m = take("m").map(|v| node_int(&v)).transpose()?.unwrap_or(16);
-    let ef = take("ef_construction").map(|v| node_int(&v)).transpose()?.unwrap_or(100);
+    // Graph parameters only exist for the hnsw types: elsewhere they are unsupported.
+    let (m, ef) = if graph {
+        (take("m").map(|v| node_int(&v)).transpose()?.unwrap_or(16), take("ef_construction").map(|v| node_int(&v)).transpose()?.unwrap_or(100))
+    } else {
+        (16, 100)
+    };
     let confidence = if matches!(ty.as_str(), "int8_hnsw" | "int4_hnsw" | "int8_flat" | "int4_flat") {
         take("confidence_interval").map(|v| node_double(&v).map(|d| d as f32)).transpose()?
     } else {

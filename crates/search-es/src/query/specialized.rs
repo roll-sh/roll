@@ -724,11 +724,13 @@ impl Pinned {
     }
 }
 
-/// A `knn` query vector: floats, or bytes given as a hex string.
+/// A `knn` query vector: floats, bytes, or a hex / base64 string resolved against the field
+/// (`VectorData.decodeQueryVector`) when the query is built.
 #[derive(Clone, Debug, PartialEq)]
 pub enum VectorData {
     Floats(Vec<f32>),
     Bytes(Vec<i8>),
+    Encoded(String),
 }
 
 impl VectorData {
@@ -745,14 +747,7 @@ impl VectorData {
                 }
                 Ok(VectorData::Floats(out))
             }
-            Token::String => {
-                let s = p.text()?;
-                if s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    return Err(EsError::parse(format!("Failed to parse object: invalid hex string [{s}]")));
-                }
-                let bytes = (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0) as i8).collect();
-                Ok(VectorData::Bytes(bytes))
-            }
+            Token::String => Ok(VectorData::Encoded(p.text()?)),
             Token::Number => Ok(VectorData::Floats(vec![p.float_value()?])),
             t => Err(EsError::parse(format!("Unknown type [{t}] for parsing vector"))),
         }
@@ -762,6 +757,7 @@ impl VectorData {
         match self {
             VectorData::Floats(f) => Value::Arr(f.iter().map(|x| float_value(*x)).collect()),
             VectorData::Bytes(b) => Value::Arr(b.iter().map(|x| Value::Num(Number::Int(*x as i64))).collect()),
+            VectorData::Encoded(e) => Value::Str(e.clone()),
         }
     }
 }

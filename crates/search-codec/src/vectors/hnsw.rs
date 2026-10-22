@@ -79,6 +79,10 @@ impl Visited {
         }
         self.touched.clear();
     }
+    #[inline]
+    pub(crate) fn contains(&self, i: u32) -> bool {
+        self.words[(i >> 6) as usize] >> (i & 63) & 1 != 0
+    }
     /// Marks `i`; returns whether it was unvisited.
     #[inline]
     pub(crate) fn insert(&mut self, i: u32) -> bool {
@@ -355,10 +359,17 @@ impl GraphBuilder {
     }
 
     /// Inserts every node not seeded, on up to `threads` threads, then makes every node
-    /// reachable from the entry point.
+    /// reachable from the entry point, and on level 0 also able to reach it back.
     pub(crate) fn build<F: Fn(u32, u32) -> f32 + Sync>(&mut self, sim: &F, threads: usize) {
         self.insert_all(sim, threads);
-        self.connect_components(sim);
+        // Each pass may evict a link the other relied on (only when a list is full): repeat
+        // while they do, a few times at most.
+        for _ in 0..4 {
+            let forced = self.connect_components(sim);
+            if !self.connect_back(sim) && !forced {
+                break;
+            }
+        }
     }
 
     fn insert_all<F: Fn(u32, u32) -> f32 + Sync>(&mut self, sim: &F, threads: usize) {
@@ -507,9 +518,11 @@ impl GraphBuilder {
     /// and everything reachable from it is marked in turn. If every candidate is full, the
     /// nearest one gives up its worst link, and the level is checked again, since that link may
     /// have been the only way to some other node. Costs `O(n · m)` per level plus one small
-    /// search per orphan, negligible next to construction.
-    fn connect_components<F: Fn(u32, u32) -> f32>(&self, sim: &F) {
-        let Some(entry) = self.entry else { return };
+    /// search per orphan, negligible next to construction. Returns whether a link was evicted
+    /// in the last round.
+    fn connect_components<F: Fn(u32, u32) -> f32>(&self, sim: &F) -> bool {
+        let Some(entry) = self.entry else { return false };
+        let mut forced_any = false;
         let n = self.level0.len();
         let mut ctx = BuildCtx::default();
         let mut visited = Visited::new(n);
@@ -574,11 +587,143 @@ impl GraphBuilder {
                     }
                     mark(u, &mut reached, &mut stack);
                 }
+                forced_any = forced;
                 if !forced {
                     break;
                 }
             }
         }
+        forced_any
+    }
+
+    /// Makes every level-0 node able to reach the entry point, so that (with
+    /// [`connect_components`](Self::connect_components)) level 0 is strongly connected and a
+    /// search reaches every node from wherever the descent through the upper levels lands.
+    ///
+    /// Reachability from the entry is not enough: links are directed, and duplicate or
+    /// coarsely quantized vectors (many equal scores, which the diversity heuristic treats as
+    /// redundant) leave regions whose links all point inwards. A search entering one strands
+    /// there and returns fewer than `k` hits however wide its beam. One Tarjan pass finds the
+    /// strongly connected components (sinks first) and which of them reach the entry; each
+    /// sink that does not gets one link from a member (one with room, if any) to its nearest
+    /// node that does. Every other stranded component leads to some sink, so that suffices.
+    /// Costs `O(n · m)` plus one small search per stranded sink. Returns whether a full list
+    /// had to give up a link.
+    fn connect_back<F: Fn(u32, u32) -> f32>(&self, sim: &F) -> bool {
+        let Some(entry) = self.entry else { return false };
+        let n = self.level0.len();
+        const NONE: u32 = u32::MAX;
+        let mut index = vec![NONE; n];
+        let mut low = vec![0u32; n];
+        let mut comp = vec![NONE; n];
+        let mut on_stack = vec![false; n];
+        let mut stack: Vec<u32> = Vec::new();
+        // Frames of the iterative DFS: (node, next edge, end of its edges in `edges`).
+        let mut frames: Vec<(u32, usize, usize)> = Vec::new();
+        let mut edges: Vec<u32> = Vec::new();
+        // Per component: whether it reaches the entry.
+        let mut reaches: Vec<bool> = Vec::new();
+        // Members of the stranded sinks.
+        let mut sinks: Vec<Vec<u32>> = Vec::new();
+        let mut members: Vec<u32> = Vec::new();
+        let mut counter = 0u32;
+        for root in 0..n as u32 {
+            if index[root as usize] != NONE {
+                continue;
+            }
+            macro_rules! enter {
+                ($v:expr) => {{
+                    let v: u32 = $v;
+                    index[v as usize] = counter;
+                    low[v as usize] = counter;
+                    counter += 1;
+                    stack.push(v);
+                    on_stack[v as usize] = true;
+                    let start = edges.len();
+                    edges.extend(lock(&self.level0[v as usize]).items.iter().map(|s| s.ord));
+                    frames.push((v, start, edges.len()));
+                }};
+            }
+            enter!(root);
+            while let Some(&mut (v, ref mut pos, end)) = frames.last_mut() {
+                if *pos < end {
+                    let w = edges[*pos];
+                    *pos += 1;
+                    if index[w as usize] == NONE {
+                        enter!(w);
+                    } else if on_stack[w as usize] {
+                        low[v as usize] = low[v as usize].min(index[w as usize]);
+                    }
+                    continue;
+                }
+                // This frame's edges were pushed last, right after its parent's (whose earlier
+                // children already dropped theirs): drop them.
+                frames.pop();
+                edges.truncate(frames.last().map_or(0, |f| f.2));
+                if let Some(&(p, _, _)) = frames.last() {
+                    low[p as usize] = low[p as usize].min(low[v as usize]);
+                }
+                if low[v as usize] != index[v as usize] {
+                    continue;
+                }
+                // `v` roots a component: its members are on the stack above it. Every
+                // component its links leave to was completed earlier.
+                let id = reaches.len() as u32;
+                members.clear();
+                loop {
+                    let w = stack.pop().unwrap();
+                    on_stack[w as usize] = false;
+                    comp[w as usize] = id;
+                    members.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                let mut reach = members.contains(&entry);
+                let mut leaves = false;
+                for &w in &members {
+                    for s in &lock(&self.level0[w as usize]).items {
+                        let c = comp[s.ord as usize];
+                        if c != id {
+                            leaves = true;
+                            reach |= reaches[c as usize];
+                        }
+                    }
+                }
+                reaches.push(reach);
+                if !reach && !leaves {
+                    members.sort_unstable();
+                    sinks.push(members.clone());
+                }
+            }
+        }
+        if sinks.is_empty() {
+            return false;
+        }
+        let max = self.max_conn(0);
+        let mut ctx = BuildCtx::default();
+        let mut visited = Visited::new(n);
+        let reaches_entry = |o: u32| reaches[comp[o as usize] as usize];
+        let mut forced = false;
+        for sink in &sinks {
+            let u = sink
+                .iter()
+                .copied()
+                .find(|&o| lock(&self.level0[o as usize]).items.len() < max)
+                .unwrap_or(sink[0]);
+            let Some(v) = self.nearest_where(&mut ctx, &mut visited, 0, u, &reaches_entry, sim) else { continue };
+            let mut list = lock(&self.level0[u as usize]);
+            if list.items.len() >= max {
+                let worst = (0..list.items.len()).min_by(|&a, &b| list.items[a].cmp(&list.items[b])).unwrap_or(0);
+                list.items.remove(worst);
+                if worst < list.sorted {
+                    list.sorted -= 1;
+                }
+                forced = true;
+            }
+            list.items.push(Scored { score: v.score, ord: v.ord });
+        }
+        forced
     }
 
     /// The node nearest to `u` among those `reached` on `level`, preferring nodes whose
@@ -594,6 +739,24 @@ impl GraphBuilder {
         max: usize,
         sim: &F,
     ) -> Option<Scored> {
+        let is_reached = |o: u32| reached[o as usize >> 6] >> (o & 63) & 1 != 0;
+        let has_room = |o: u32| is_reached(o) && lock(self.list(level, o)).items.len() < max;
+        self.nearest_where(ctx, visited, level, u, &has_room, sim)
+            // Every reachable node near `u` is full: take the nearest reachable one.
+            .or_else(|| self.nearest_where(ctx, visited, level, u, &is_reached, sim))
+    }
+
+    /// The node nearest to `u` (other than `u`) on `level` that `ok` accepts, by a beam search
+    /// from the entry point, which `ok` must accept.
+    fn nearest_where<F: Fn(u32, u32) -> f32>(
+        &self,
+        ctx: &mut BuildCtx,
+        visited: &mut Visited,
+        level: usize,
+        u: u32,
+        ok: &dyn Fn(u32) -> bool,
+        sim: &F,
+    ) -> Option<Scored> {
         let entry = self.entry?;
         let mut score = |o: u32| sim(u, o);
         ctx.ep.clear();
@@ -606,22 +769,15 @@ impl GraphBuilder {
                 std::mem::swap(&mut ctx.ep, &mut ctx.cands);
             }
         }
-        // The descent may end in a part of this level the entry cannot reach: seed the beam
-        // with the entry as well, which is reached by definition.
+        // The descent may end in a part of this level `ok` excludes and cannot leave: seed
+        // the beam with the entry as well.
         if ctx.ep.iter().all(|s| s.ord != entry) {
             ctx.ep.push(Scored { score: score(entry), ord: entry });
         }
-        let is_reached = |o: u32| o != u && reached[o as usize >> 6] >> (o & 63) & 1 != 0;
-        let has_room = |o: u32| is_reached(o) && lock(self.list(level, o)).items.len() < max;
+        let accept = |o: u32| o != u && ok(o);
         let ef = self.ef_construction.clamp(2, 32);
         visited.reset();
-        search_layer(self, &mut score, &|_| {}, &ctx.ep, ef, level, visited, Some(&has_room), &mut budget, &mut ctx.scratch, &mut ctx.cands);
-        visited.reset();
-        if let Some(&best) = ctx.cands.first() {
-            return Some(best);
-        }
-        // Every reachable node near `u` is full: take the nearest reachable one.
-        search_layer(self, &mut score, &|_| {}, &ctx.ep, ef, level, visited, Some(&is_reached), &mut budget, &mut ctx.scratch, &mut ctx.cands);
+        search_layer(self, &mut score, &|_| {}, &ctx.ep, ef, level, visited, Some(&accept), &mut budget, &mut ctx.scratch, &mut ctx.cands);
         visited.reset();
         ctx.cands.first().copied()
     }
@@ -848,7 +1004,7 @@ impl GraphReader {
     /// Nodes present on upper level `level` (>= 1).
     pub(crate) fn level_nodes(&self, level: usize) -> impl Iterator<Item = u32> + '_ {
         let nodes: &[u8] = self.upper.get(level - 1).map_or(&[], |u| &u.0[..]);
-        nodes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        nodes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c))
     }
 }
 
@@ -963,6 +1119,15 @@ pub(crate) fn search_graph_filtered<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u3
 /// `EXPANDED_EXPLORATION_LAMBDA`).
 const EXPANDED_EXPLORATION_LAMBDA: f32 = 0.10;
 
+/// Level 0 of [`search_graph_filtered`].
+///
+/// Differences from Lucene's searcher, for completeness: a rejected node is marked visited
+/// only when it is actually expanded as a bridge, so one passed over (the per-candidate
+/// exploration budget ran out) can still be reached from a later candidate; and while the
+/// results hold fewer than `ef` nodes, rejected nodes passed over are remembered, and if the
+/// candidates run out first the search keeps expanding them (a walk over rejected nodes to
+/// accepted ones further away). Level 0 is strongly connected (`GraphBuilder::connect_back`),
+/// so the search returns `min(ef, accepted)` nodes unless the visit budget ends it.
 #[allow(clippy::too_many_arguments)]
 fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
     g: &G,
@@ -988,6 +1153,8 @@ fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
     let mut nbrs: Vec<u32> = Vec::new();
     let mut to_score: Vec<u32> = Vec::with_capacity(cap);
     let mut to_explore: std::collections::VecDeque<u32> = std::collections::VecDeque::with_capacity(cap);
+    // Rejected nodes passed over while the results were not full yet.
+    let mut deferred: Vec<u32> = Vec::new();
     for &e in entry {
         if visited.insert(e.ord) {
             candidates.push(e);
@@ -1002,75 +1169,139 @@ fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
     let min_competitive = |results: &BinaryHeap<std::cmp::Reverse<Scored>>| {
         if results.len() < ef { f32::NEG_INFINITY } else { results.peek().unwrap().0.score }
     };
-    let mut complete = true;
-    'search: while let Some(c) = candidates.pop() {
-        if c.score < min_competitive(&results) {
-            break;
-        }
-        nbrs.clear();
-        g.for_each_neighbor(0, c.ord, |nb| nbrs.push(nb));
-        let neighbor_count = nbrs.len().max(1);
-        to_score.clear();
-        to_explore.clear();
-        for &nb in &nbrs {
-            if to_score.len() == cap {
-                break;
-            }
-            if !visited.insert(nb) {
-                continue;
-            }
-            if accept(nb) {
-                to_score.push(nb);
-            } else if to_explore.len() < cap {
-                to_explore.push_back(nb);
-            }
-        }
-        let filtered = to_explore.len() as f32 / neighbor_count as f32;
-        let max_to_score = (neighbor_count as f32 * (multiplier as f32).min(1.0 / (1.0 - filtered))) as usize;
-        let max_explore = cap - 1;
-        let mut explored = to_score.len() + to_explore.len();
-        if to_score.len() < max_to_score && filtered > EXPANDED_EXPLORATION_LAMBDA {
-            while explored < max_explore && to_score.len() < max_to_score {
-                let Some(bridge) = to_explore.pop_front() else { break };
-                nbrs.clear();
-                g.for_each_neighbor(0, bridge, |nb| nbrs.push(nb));
-                for &nb in &nbrs {
-                    if to_score.len() >= max_to_score.min(cap) {
-                        break;
-                    }
-                    if !visited.insert(nb) {
-                        continue;
-                    }
-                    explored += 1;
-                    if accept(nb) {
-                        to_score.push(nb);
-                    } else if explored < max_explore && to_score.len() < min_to_score && to_explore.len() < cap {
-                        to_explore.push_back(nb);
-                    }
-                }
-            }
-        }
-        for &nb in &to_score {
-            prefetch(nb);
-        }
-        for &nb in &to_score {
-            if *budget == 0 {
-                complete = false;
+    'search: loop {
+        while let Some(c) = candidates.pop() {
+            if c.score < min_competitive(&results) {
                 break 'search;
             }
-            *budget -= 1;
-            let s = score(nb);
-            if s >= min_competitive(&results) {
-                candidates.push(Scored { score: s, ord: nb });
-                results.push(std::cmp::Reverse(Scored { score: s, ord: nb }));
-                if results.len() > ef {
-                    results.pop();
+            let starving = results.len() < ef;
+            nbrs.clear();
+            g.for_each_neighbor(0, c.ord, |nb| nbrs.push(nb));
+            let neighbor_count = nbrs.len().max(1);
+            to_score.clear();
+            to_explore.clear();
+            for &nb in &nbrs {
+                if to_score.len() == cap {
+                    break;
                 }
+                if visited.contains(nb) {
+                    continue;
+                }
+                if accept(nb) {
+                    visited.insert(nb);
+                    to_score.push(nb);
+                } else if to_explore.len() < cap {
+                    to_explore.push_back(nb);
+                }
+            }
+            let filtered = to_explore.len() as f32 / neighbor_count as f32;
+            let max_to_score = (neighbor_count as f32 * (multiplier as f32).min(1.0 / (1.0 - filtered))) as usize;
+            let max_explore = cap - 1;
+            let mut explored = to_score.len() + to_explore.len();
+            if to_score.len() < max_to_score && filtered > EXPANDED_EXPLORATION_LAMBDA {
+                while explored < max_explore && to_score.len() < max_to_score {
+                    let Some(bridge) = to_explore.pop_front() else { break };
+                    if !visited.insert(bridge) {
+                        continue;
+                    }
+                    nbrs.clear();
+                    g.for_each_neighbor(0, bridge, |nb| nbrs.push(nb));
+                    for (i, &nb) in nbrs.iter().enumerate() {
+                        if to_score.len() >= max_to_score.min(cap) {
+                            if starving {
+                                // The bridge is expanded only once: keep the rest reachable.
+                                deferred.extend(nbrs[i..].iter().filter(|&&x| !visited.contains(x)));
+                            }
+                            break;
+                        }
+                        if visited.contains(nb) {
+                            continue;
+                        }
+                        explored += 1;
+                        if accept(nb) {
+                            visited.insert(nb);
+                            to_score.push(nb);
+                        } else if explored < max_explore && to_score.len() < min_to_score && to_explore.len() < cap {
+                            to_explore.push_back(nb);
+                        } else if starving {
+                            deferred.push(nb);
+                        }
+                    }
+                }
+            }
+            if starving {
+                deferred.extend(to_explore.drain(..));
+            }
+            if !score_batch(&to_score, score, prefetch, budget, ef, &mut candidates, &mut results) {
+                return finish(results, out, false);
+            }
+        }
+        // The candidates ran out before the results filled: expand passed-over rejected
+        // nodes until some accepted node turns up.
+        if results.len() >= ef {
+            break;
+        }
+        to_score.clear();
+        while to_score.is_empty() {
+            let Some(x) = deferred.pop() else { break 'search };
+            if !visited.insert(x) {
+                continue;
+            }
+            nbrs.clear();
+            g.for_each_neighbor(0, x, |nb| nbrs.push(nb));
+            for &nb in &nbrs {
+                if visited.contains(nb) {
+                    continue;
+                }
+                if accept(nb) {
+                    visited.insert(nb);
+                    to_score.push(nb);
+                } else {
+                    deferred.push(nb);
+                }
+            }
+        }
+        if !score_batch(&to_score, score, prefetch, budget, ef, &mut candidates, &mut results) {
+            return finish(results, out, false);
+        }
+    }
+    finish(results, out, true)
+}
+
+/// Scores accepted nodes into the candidates and results of [`filtered_level0`]; false when
+/// the visit budget ran out.
+fn score_batch<S: FnMut(u32) -> f32, P: Fn(u32)>(
+    to_score: &[u32],
+    score: &mut S,
+    prefetch: &P,
+    budget: &mut usize,
+    ef: usize,
+    candidates: &mut BinaryHeap<Scored>,
+    results: &mut BinaryHeap<std::cmp::Reverse<Scored>>,
+) -> bool {
+    for &nb in to_score {
+        prefetch(nb);
+    }
+    for &nb in to_score {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let s = score(nb);
+        if results.len() < ef || s >= results.peek().unwrap().0.score {
+            candidates.push(Scored { score: s, ord: nb });
+            results.push(std::cmp::Reverse(Scored { score: s, ord: nb }));
+            if results.len() > ef {
+                results.pop();
             }
         }
     }
+    true
+}
+
+fn finish(results: BinaryHeap<std::cmp::Reverse<Scored>>, out: &mut Vec<Scored>, complete: bool) -> bool {
     out.clear();
-    out.extend(results.drain().map(|r| r.0));
+    out.extend(results.into_iter().map(|r| r.0));
     out.sort_unstable_by(|a, b| b.cmp(a));
     complete
 }

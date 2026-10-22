@@ -57,79 +57,11 @@
  ],
  "lang7.json": [
   {
-   "source": "TreeMap m = new TreeMap(); m.put('b', 2); m.put('a', 1); m.put('d', 4); return [m.firstKey(), m.lastKey(), m.floorKey('c'), m.ceilingKey('c'), m.headMap('c'), m.tailMap('b', false), m.descendingMap(), m.firstEntry(), m.pollFirstEntry(), m]",
-   "why": "TreeMap's headMap/tailMap/descendingMap are copies here, not live views of the map"
-  },
-  {
-   "source": "throw null",
-   "why": "throwing the null literal: the JVM's helpful message names \"null\" and the frame has no script position"
-  },
-  {
    "source": "Exception e = new Exception('x'); return e.toString() + e.getLocalizedMessage() + e.getStackTrace().length",
    "why": "getStackTrace() is empty here: the Java stack of the script's own frames is not reproduced"
-  },
-  {
-   "source": "TreeMap m = new TreeMap(); m.put('b', 2); m.put('a', 1); Map h = m.headMap('b'); m.put('0', 0); return h",
-   "why": "TreeMap's headMap is a copy here, not a live view"
-  },
-  {
-   "source": "TreeMap m = new TreeMap(); m.put('b', 2); m.put('a', 1); return m.headMap('a').firstKey()",
-   "why": "sub-map views are plain TreeMaps here, so the failure lacks TreeMap$NavigableSubMap's frame"
-  },
-  {
-   "source": "TreeMap m = new TreeMap(); m.put('b', 2); return m.subMap('c', 'a')",
-   "why": "sub-map views do not check their key range (fromKey > toKey)"
-  },
-  {
-   "source": "List l = [1, 2, 3]; l.stream().forEach(x -> l.add(4)); return l",
-   "why": "streams iterate a snapshot of their source list, so modifying the list during forEach is not detected"
-  },
-  {
-   "source": "return [3, 'a'].stream().sorted().collect(Collectors.toList())",
-   "why": "the JDK frames of the stream pipeline around a failing sort are not reproduced"
-  },
-  {
-   "source": "return [3, 'a'].stream().max(Comparator.naturalOrder())",
-   "why": "the JDK frames of the stream pipeline around a failing comparison are not reproduced"
-  },
-  {
-   "source": "def s = [1,2].stream(); s.count(); return s.filter(x -> true)",
-   "why": "the frames of reusing a stream in an intermediate operation (AbstractPipeline.<init>) are not reproduced"
-  },
-  {
-   "source": "return [1, null].stream().findFirst().get() + [null].stream().findFirst()",
-   "why": "the JDK frames of findFirst on a null element (FindOps) are not reproduced"
-  },
-  {
-   "source": "return [null].stream().collect(Collectors.toMap(x -> 'k', x -> x))",
-   "why": "the JDK frames of Collectors.toMap's null check are not reproduced"
-  },
-  {
-   "source": "return [1].stream().collect(Collectors.groupingBy(x -> null))",
-   "why": "the JDK frames of Collectors.groupingBy's null key check are not reproduced"
-  },
-  {
-   "source": "int x = 1; x++ = 2; return x",
-   "why": "Elasticsearch analyzes an assignment to a post-increment with a different (cast) error"
-  },
-  {
-   "source": "return new void[1]",
-   "why": "Elasticsearch fails with an internal class_not_found_exception for void arrays"
-  },
-  {
-   "source": "def s = [1].stream().mapToInt(x -> x); s.sum(); return s.sum()",
-   "why": "the reuse frames of primitive streams (IntPipeline) are not reproduced"
   }
  ],
  "time3.json": [
-  {
-   "source": "return [1].spliterator()",
-   "why": "Spliterator is not implemented"
-  },
-  {
-   "source": "return Collections.list(Collections.enumeration([1, 2]))",
-   "why": "Enumeration and Collections.list/enumeration are not implemented"
-  },
   {
    "source": "return Collator.getInstance(Locale.ROOT).compare('a', 'B')",
    "why": "java.text.Collator is not implemented"
@@ -155,16 +87,8 @@
    "why": "localized field display names are not bundled (English names are returned)"
   },
   {
-   "source": "return DateTimeFormatter.ofPattern('d MMM uuuu', new Locale('es')).parse('3 feb. 2021')",
-   "why": "parse failure frames (parseResolved0) are not reproduced"
-  },
-  {
    "source": "return DateTimeFormatter.ofPattern('EEE d MMM uuuu', Locale.US).parse('Fri 3 Feb 2021')",
    "why": "parse failure frames (createError) are not reproduced"
-  },
-  {
-   "source": "return DateTimeFormatter.ofPattern('h:mm a', Locale.US).parse('3:04 pm')",
-   "why": "parse failure frames (parseResolved0) are not reproduced"
   },
   {
    "source": "return LocalTime.parse('3 in the afternoon', DateTimeFormatter.ofPattern('h B', Locale.US))",
@@ -179,14 +103,6 @@
   {
    "source": "return [new Locale('en', 'US').getDisplayName(), new Locale('fr', 'CA').getDisplayName(Locale.FRENCH), new Locale('xx', 'YY').getDisplayName(), new Locale('haw').getDisplayLanguage(), new Locale('en').getISO3Language(), new Locale('en', 'GB').getISO3Country(), Locale.US.getDisplayCountry(Locale.GERMAN)]",
    "why": "display names in other display locales are not bundled (English names are returned)"
-  },
-  {
-   "source": "return Locale.lookupTag([new Locale.LanguageRange('fr-CA')], ['fr', 'fr-CA', 'en'])",
-   "why": "Locale.LanguageRange, lookup and filter are not implemented"
-  },
-  {
-   "source": "return Locale.filter(Locale.LanguageRange.parse('fr-*,en;q=0.5'), [Locale.FRANCE, Locale.CANADA_FRENCH, Locale.US, Locale.GERMANY])",
-   "why": "Locale.LanguageRange, lookup and filter are not implemented"
   },
   {
    "source": "return Locale.FRANCE.getDisplayLanguage(Locale.FRANCE) + Locale.GERMANY.getDisplayCountry(Locale.GERMANY)",
@@ -213,22 +129,54 @@
    "why": "zone names are bundled in English only (plus the UTC/GMT names of other locales)"
   }
  ],
- "views.json": [
+ "lang9.json": [
   {
-   "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.subList(0, 1)",
-   "why": "the stale view only fails when Elasticsearch serializes the result (HTTP 500); results are rendered without that check here"
+   "source": "return [1, 2].stream().map(ArrayList::new)",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
   },
   {
-   "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return [s]",
-   "why": "the stale view only fails when Elasticsearch serializes the result (HTTP 500); results are rendered without that check here"
+   "source": "def x = [1, 2].stream().filter(x -> true); return x",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
   },
   {
-   "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.spliterator()",
-   "why": "Spliterator is not implemented"
+   "source": "return [[1, 2].stream().map(x -> x), [1].stream().filter(x -> true), [1].stream().sorted(), [1].stream().distinct(), [1].stream().limit(1), [1].stream().skip(1), [1].stream().peek(x -> x), [1].stream().flatMap(x -> [x].stream()), [1].stream().mapToInt(x -> x), [1].stream().mapToLong(x -> x), [1].stream().mapToDouble(x -> x), [1].stream()].stream().map(x -> x.getClass().getName()).collect(Collectors.toList())",
+   "why": "the JDK frames of a collector failure inside a flatMap'ed inner pipeline (Head.forEach, $7$1FlatMap.accept) are not reproduced"
   },
   {
-   "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.remove(0); return s",
-   "why": "the stale view only fails when Elasticsearch serializes the result (HTTP 500); results are rendered without that check here"
+   "source": "Debug.explain([1].stream())",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "Debug.explain(Comparator.naturalOrder())",
+   "why": "Comparator.naturalOrder() is a function value here: Debug.explain reports java.util.Comparator, not Comparators$NaturalOrderComparator"
+  },
+  {
+   "source": "return [1, null, 3].stream().flatMap(x -> [x].stream()).collect(Collectors.toMap(x -> 'k' + x, x -> x))",
+   "why": "the JDK frames of a collector failure inside a flatMap'ed inner pipeline (Head.forEach, $7$1FlatMap.accept) are not reproduced"
+  },
+  {
+   "source": "return [Comparator.naturalOrder().toString(), Comparator.reverseOrder().toString(), Collections.reverseOrder().toString()]",
+   "why": "the JDK comparators print as function values here (NaturalOrderComparator's enum name INSTANCE, ReverseComparator's identity string)"
+  },
+  {
+   "source": "def s = [1, 2].stream(); s.count(); return s.skip(0)",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "def s = [1,2].stream(); s.count(); return s.unordered()",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "def s = [1,2].stream(); s.count(); return s.sequential()",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "def s = [1,2].stream(); s.count(); return s.onClose(() -> 1)",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "return [TemporalQueries.zoneId(), TemporalQueries.precision().toString()]",
+   "why": "TemporalQueries' queries are function values here: their toString is not the JDK query's name (ZoneId, Precision, …)"
   }
  ]
 }

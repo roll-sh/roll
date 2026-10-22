@@ -1645,6 +1645,60 @@ def regressions():
     return [{'name': n, 'request': r} for n, r in cases]
 
 
+@group('review_fixes')
+def review_fixes():
+    """Behaviour around the fixes for a review: long dead tails in longest-match scanners,
+    `mapping` rules that are lone surrogates, replacement-string errors, allocation-free paths
+    of keyword_repeat / dictionary_decompounder / the regex backtracker, and long or nested
+    patterns at sizes Elasticsearch still handles."""
+    cases = []
+    ws = lambda cf, text: {'tokenizer': 'whitespace', 'char_filter': [cf], 'text': text}
+    for i, text in enumerate([
+        '<?' * 300 + 'x', '<!--' + 'a-' * 200 + 'b', '< a' * 200, "<a b='" * 100 + '>c', '&#x' * 200 + '1;',
+        '<script>' + '<' * 300 + '</script>x', '<a ' + 'b=c ' * 200, '<![CDATA[' + ']' * 300, 'x<' + 'p' * 400 + ' y',
+        '<?' * 2000 + ' tail <b>bold</b>',
+    ]):
+        cases.append((f'html_tail/{i}', ws('html_strip', text)))
+    for i, text in enumerate([
+        'a-' * 500, 'a-' * 100 + '@x.com b', ('a-' * 100) + ' ' + ('b-' * 100), 'a.' * 100 + 'é' + '1-2-' * 60,
+        'x.y.' * 100, 'ab-cd' * 50 + '&', 'a_b.' * 80 + '@', 'a-' * 3000 + 'b@c.de f',
+    ]):
+        cases.append((f'classic_tail/{i}', {'tokenizer': 'classic', 'text': text}))
+    ngram1 = {'type': 'ngram', 'min_gram': 1, 'max_gram': 1}
+    for i, (rules, text) in enumerate([
+        (['\\uD83D=>x', '\\uDE00=>y'], 'a😀b'), (['a=>\\uD83D', 'b=>\\uDE00'], 'abc'),
+        (['\\uD83D=>x'], '\ufffd'), (['\\uFFFD=>x'], '\ufffd😀'), (['😀=>smile', 'a😀=>z'], 'a😀😀'),
+        (['\\uD83D=>x', '\\uFFFD=>y'], 'a'),
+    ]):
+        cases.append((f'mapping_units/{i}', {'tokenizer': ngram1, 'char_filter': [{'type': 'mapping', 'mappings': rules}],
+                                            'text': text}))
+    for i, rep in enumerate(['${', '${-}', '${}', '${ab', '${ab-}', '${1a}', '${a}x']):
+        cases.append((f'replacement/filter/{i}', {'tokenizer': 'keyword', 'text': 'abc',
+                                                  'filter': [{'type': 'pattern_replace', 'pattern': '(a)', 'replacement': rep}]}))
+        cases.append((f'replacement/char_filter/{i}', {'tokenizer': 'keyword', 'text': 'abc',
+                                                       'char_filter': [{'type': 'pattern_replace', 'pattern': '(?<a>a)',
+                                                                        'replacement': rep}]}))
+    text = TEXTS['english'] + ' Donaudampfschiff donaudampfschiffahrt booking good looking'
+    for i, (tok, filters) in enumerate([
+        ('standard', ['lowercase', 'keyword_repeat', 'porter_stem', 'remove_duplicates']),
+        ('standard', [{'type': 'dictionary_decompounder', 'word_list': ['donau', 'dampf', 'schiff', 'fahrt']}]),
+        ({'type': 'pattern', 'pattern': '(?=a)b|\\s+'}, []),
+        ({'type': 'pattern', 'pattern': '(\\w)\\1|\\s+'}, [{'type': 'pattern_replace', 'pattern': '(?<=o)\\w', 'replacement': '_'}]),
+        ({'type': 'pattern', 'pattern': '(?>\\w+)(?<=g)|[^\\w]+'},
+         [{'type': 'pattern_capture', 'patterns': ['(?<=o)(\\w+)', '(\\w)\\1']},
+          {'type': 'keyword_marker', 'keywords_pattern': '(?=d).*(?<!s)'}, 'porter_stem']),
+        ({'type': 'pattern', 'pattern': '(' * 200 + 'o' + ')' * 200, 'group': 0}, []),
+        ({'type': 'pattern', 'pattern': '(?:' * 200 + '(?=o)\\w' + ')' * 200, 'group': 0}, []),
+        ({'type': 'pattern', 'pattern': 'a|' * 5000 + 'o', 'group': 0}, []),
+        ({'type': 'simple_pattern', 'pattern': '(' * 300 + '[a-z]+' + ')' * 300}, []),
+        ({'type': 'simple_pattern_split', 'pattern': 'a|' * 2000 + ' '}, []),
+        ({'type': 'simple_pattern', 'pattern': 'o{0,2000}k'}, []),
+        ({'type': 'simple_pattern', 'pattern': '[a-z]{3}' * 300}, []),
+    ]):
+        cases.append((f'chains/{i}', {'tokenizer': tok, 'filter': filters, 'text': text}))
+    return [{'name': n, 'request': r} for n, r in cases]
+
+
 @group('index_fuzz')
 def index_fuzz():
     """Seeded random index analysis settings: custom components with random (sometimes

@@ -140,6 +140,7 @@ pub fn create(def: &AggDef, spec: &AutoDateHistogramSpec, ctx: &mut BindCtx<'_>)
     }
     let many = !ctx.cardinality.is_one();
     let subs = Subs::bind(def, ctx)?;
+    crate::collect::check_time_series_deferral(ctx, &def.name, &subs)?;
     let n = roundings.len();
     let format = vs.format.clone();
     let has_values = !vs.unmapped || vs.missing.is_some();
@@ -424,6 +425,9 @@ impl AutoAgg {
 }
 
 impl Aggregator for AutoAgg {
+    fn profile_type(&self) -> &'static str {
+        "AutoDateHistogramAggregator.FromSingle"
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         self.reader = if self.has_values { Some(self.vs.numeric_reader(seg)?) } else { None };
@@ -543,10 +547,8 @@ impl Aggregator for AutoAgg {
         self.subs.needs_scores() || self.vs.script.as_ref().is_some_and(|s| s.needs_score())
     }
 
-    fn validate_sort(&self, name: &str, _key: Option<&str>, _rest: &[PathElement]) -> Result<()> {
-        Err(AggError::illegal_argument(format!(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end. [{name}] is not single-bucket."
-        )))
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
     }
 }
 
@@ -655,14 +657,25 @@ impl AutoDateHistogram {
         let rounding = &self.roundings[idx].rounding;
         let list = merge_buckets(list, rounding, ctx)?;
         let empty = Aggs::reduce_lists(vec![self.empty_aggs.clone()], ctx)?;
+        // Elasticsearch fills every gap before merging back down, so keys spanning millions of
+        // years (a `missing` of Long.MAX_VALUE) exhaust its heap. Past what any merge could
+        // bring back under the bucket limit, fail like the limit instead.
+        let limit = (self.target as usize).saturating_mul(self.roundings[idx].max_inner() as usize).max(ctx.opts.max_buckets).saturating_mul(2);
         let mut out = Vec::with_capacity(list.len());
         let mut last: Option<i64> = None;
         for b in list {
             if let Some(l) = last {
                 let mut key = rounding.next_rounding_value(l);
                 while key < b.key {
+                    if out.len() >= limit {
+                        return Err(AggError::too_many_buckets(ctx.opts.max_buckets));
+                    }
                     out.push(AutoBucket { key, doc_count: 0, aggs: empty.clone() });
-                    key = rounding.next_rounding_value(key);
+                    let next = rounding.next_rounding_value(key);
+                    if next <= key {
+                        break;
+                    }
+                    key = next;
                 }
             }
             last = Some(b.key);

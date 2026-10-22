@@ -18,6 +18,13 @@
 //! After collection, [`Aggregator::build`] turns ordinals into results: bucket aggregations
 //! select their buckets per owning ordinal, then build all selected sub-bucket ordinals of a
 //! sub-aggregation in one call (`buildSubAggsForAllBuckets`).
+//!
+//! Breadth-first collection ([`Subs::defer`], `terms` with `collect_mode: breadth_first`, the
+//! default for fields with more terms than `shard_size`): the deferred sub-aggregations see no
+//! docs while the parent collects; the `(doc, bucket)` pairs are recorded per segment (8 bytes
+//! each, 12 with scores, charged to the memory budget) and replayed for the kept buckets only,
+//! renumbered by their position in the kept list, when the parent builds — so the
+//! sub-aggregations of the buckets the shard drops are never built.
 
 use std::sync::Arc;
 
@@ -26,6 +33,7 @@ use search_index::{Collector, LeafCollector, Scorable, ScoreMode, Searcher, Segm
 use crate::error::{AggError, Result};
 use crate::field::FieldLookup;
 use crate::internal::{Agg, AggValue, Aggs};
+use crate::json::Json;
 use crate::memory::MemoryBudget;
 use crate::request::{AggDef, AggRequest, PathElement};
 use crate::values::DocCounter;
@@ -88,10 +96,8 @@ pub trait Aggregator: Send {
     /// Checks that `key` (the metric name or `[key]` of the last path element) and the rest of
     /// a sort path can order parent buckets (`resolveSortPath` + `bucketComparator`).
     fn validate_sort(&self, name: &str, key: Option<&str>, rest: &[PathElement]) -> Result<()> {
-        let _ = (key, rest);
-        Err(AggError::illegal_argument(format!(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end. [{name}] is not single-bucket."
-        )))
+        let _ = key;
+        Err(unsortable(name, rest))
     }
     /// The sort value of owning ordinal `ord` for a validated path. Single-bucket aggregations
     /// return doc counts, metrics their value (NaN for none).
@@ -104,6 +110,14 @@ pub trait Aggregator: Send {
         let _ = (key, rest);
         false
     }
+    /// The Elasticsearch aggregator class `profile` prints (`MaxAggregator`, …).
+    fn profile_type(&self) -> &'static str {
+        ""
+    }
+    /// The `debug` map of `profile` (`collectDebugInfo`).
+    fn profile_debug(&self) -> Json {
+        Json::obj()
+    }
 }
 
 /// What binding an aggregation to a shard needs.
@@ -113,6 +127,8 @@ pub struct BindCtx<'a> {
     pub budget: Option<Arc<MemoryBudget>>,
     /// Types of the enclosing aggregations, outermost first.
     pub parents: Vec<&'static str>,
+    /// Name of the closest enclosing aggregation.
+    pub parent_name: Option<String>,
     /// The nested path the docs being collected belong to (`nested` / `reverse_nested`).
     pub nested_path: Option<String>,
     pub doc_count_field: Option<u32>,
@@ -129,6 +145,11 @@ pub struct BindCtx<'a> {
     pub time_series_request: bool,
     /// The query matches every live doc ([`ShardOptions::matches_all`]).
     pub matches_all: bool,
+    /// `search.max_buckets`.
+    pub max_buckets: usize,
+    /// `profile: true`: the profile tree and the node of the aggregation being bound.
+    pub profiler: Option<Arc<crate::profile::Profiler>>,
+    pub profile_parent: Option<usize>,
 }
 
 /// Elasticsearch's `CardinalityUpperBound`: an upper bound on the owning bucket ordinals an
@@ -261,6 +282,45 @@ pub struct Subs {
     ords: Vec<u32>,
     scores: Vec<f32>,
     needs_scores: bool,
+    /// Breadth-first collection: the deferred nodes and what they will be replayed.
+    deferred: Option<Box<Deferred>>,
+    deferred_names: Vec<String>,
+}
+
+/// `BestBucketsDeferringCollector`: the `(doc, bucket)` pairs of every segment, kept until the
+/// parent knows which buckets it keeps; then only those are replayed into the deferred
+/// sub-aggregations, renumbered by their position in the kept list.
+struct Deferred {
+    /// `mask[i]`: node `i` is deferred.
+    mask: Vec<bool>,
+    needs_scores: bool,
+    segments: Vec<DeferredSegment>,
+    bytes: usize,
+    tracker: crate::memory::MemTracker,
+}
+
+struct DeferredSegment {
+    seg: SegmentContext,
+    docs: Vec<u32>,
+    ords: Vec<u32>,
+    scores: Vec<f32>,
+}
+
+impl Deferred {
+    #[inline]
+    fn record(&mut self, doc: u32, ord: u32, score: f32) -> Result<()> {
+        let Some(s) = self.segments.last_mut() else { return Ok(()) };
+        if s.docs.len() == s.docs.capacity() {
+            self.bytes += s.docs.capacity().max(64) * if self.needs_scores { 12 } else { 8 };
+            self.tracker.ensure(self.bytes)?;
+        }
+        s.docs.push(doc);
+        s.ords.push(ord);
+        if self.needs_scores {
+            s.scores.push(score);
+        }
+        Ok(())
+    }
 }
 
 impl Subs {
@@ -268,6 +328,7 @@ impl Subs {
     pub fn bind(def: &AggDef, ctx: &mut BindCtx<'_>) -> Result<Subs> {
         let mut nodes = Vec::with_capacity(def.subs.len());
         ctx.parents.push(def.type_name);
+        let outer_name = ctx.parent_name.replace(def.name.clone());
         let outer = ctx.cardinality;
         ctx.cardinality = outer.for_subs_of(def);
         let mut out = Ok(());
@@ -282,12 +343,129 @@ impl Subs {
         }
         ctx.cardinality = outer;
         ctx.parents.pop();
+        ctx.parent_name = outer_name;
         out.map(|()| Subs::from_nodes(nodes))
     }
 
     pub fn from_nodes(nodes: Vec<Node>) -> Subs {
         let needs_scores = nodes.iter().any(|n| n.agg.needs_scores());
-        Subs { nodes, docs: Vec::with_capacity(BATCH), ords: Vec::with_capacity(BATCH), scores: Vec::new(), needs_scores }
+        Subs { nodes, docs: Vec::with_capacity(BATCH), ords: Vec::with_capacity(BATCH), scores: Vec::new(), needs_scores, deferred: None, deferred_names: Vec::new() }
+    }
+
+    /// Switches to breadth-first collection: the nodes `keep_live` rejects are collected only
+    /// for the buckets [`build`](Self::build) is eventually asked for.
+    pub fn defer(&mut self, keep_live: impl Fn(&str) -> bool, tracker: crate::memory::MemTracker) {
+        let mask: Vec<bool> = self.nodes.iter().map(|n| !keep_live(&n.def.name)).collect();
+        if !mask.iter().any(|&m| m) {
+            return;
+        }
+        let needs_scores = self.nodes.iter().zip(&mask).any(|(n, &m)| m && n.agg.needs_scores());
+        self.deferred_names = self.nodes.iter().zip(&mask).filter(|(_, m)| **m).map(|(n, _)| n.def.name.clone()).collect();
+        self.needs_scores = self.nodes.iter().zip(&mask).any(|(n, &m)| !m && n.agg.needs_scores());
+        self.deferred = Some(Box::new(Deferred { mask, needs_scores, segments: Vec::new(), bytes: 0, tracker }));
+    }
+
+    /// Whether any node is collected breadth-first.
+    pub fn is_deferred(&self) -> bool {
+        self.deferred.is_some()
+    }
+
+    /// The names of the breadth-first (deferred) sub-aggregations, for `profile`'s
+    /// `deferred_aggregators` (still known after the replay).
+    pub fn deferred_names(&self) -> Vec<String> {
+        self.deferred_names.clone()
+    }
+
+    #[inline]
+    fn live(&self, i: usize) -> bool {
+        self.deferred.as_ref().is_none_or(|d| !d.mask[i])
+    }
+
+    /// Replays the recorded pairs of the kept buckets `ords` into the deferred nodes; returns
+    /// each position's renumbered bucket (its first position in `ords`).
+    fn replay(&mut self, d: Deferred, ords: &[u32]) -> Result<Vec<u32>> {
+        let max = ords.iter().copied().max().unwrap_or(0) as usize;
+        let dense = max < (ords.len() * 4).max(1 << 16);
+        let mut dense_map: Vec<u32> = if dense { vec![u32::MAX; max + 1] } else { Vec::new() };
+        let mut sparse_map: hashbrown::HashMap<u32, u32> = hashbrown::HashMap::new();
+        let mut rebased = Vec::with_capacity(ords.len());
+        for (i, &o) in ords.iter().enumerate() {
+            let slot = if dense {
+                let e = &mut dense_map[o as usize];
+                if *e == u32::MAX {
+                    *e = i as u32;
+                }
+                *e
+            } else {
+                *sparse_map.entry(o).or_insert(i as u32)
+            };
+            rebased.push(slot);
+        }
+        // Most recorded pairs belong to dropped buckets: a bitset rejects them before the map.
+        let bits: Vec<u64> = if !dense && max < (1 << 26) {
+            let mut b = vec![0u64; max / 64 + 1];
+            for &o in ords {
+                b[o as usize / 64] |= 1 << (o % 64);
+            }
+            b
+        } else {
+            Vec::new()
+        };
+        let lookup = |o: u32| -> Option<u32> {
+            if dense {
+                return dense_map.get(o as usize).copied().filter(|&e| e != u32::MAX);
+            }
+            if !bits.is_empty() && bits.get(o as usize / 64).is_none_or(|w| w & (1 << (o % 64)) == 0) {
+                return None;
+            }
+            sparse_map.get(&o).copied()
+        };
+        let (mut docs, mut bords, mut scores) = (Vec::with_capacity(BATCH), Vec::with_capacity(BATCH), Vec::new());
+        let deliver = |nodes: &mut [Node], mask: &[bool], docs: &mut Vec<u32>, bords: &mut Vec<u32>, scores: &mut Vec<f32>| -> Result<()> {
+            if docs.is_empty() {
+                return Ok(());
+            }
+            let b = Batch { docs, ords: bords, scores };
+            for (n, &m) in nodes.iter_mut().zip(mask) {
+                if m {
+                    n.agg.collect(b)?;
+                }
+            }
+            docs.clear();
+            bords.clear();
+            scores.clear();
+            Ok(())
+        };
+        for seg in &d.segments {
+            for (n, &m) in self.nodes.iter_mut().zip(&d.mask) {
+                if m {
+                    n.agg.set_segment(&seg.seg)?;
+                }
+            }
+            for j in 0..seg.docs.len() {
+                let Some(r) = lookup(seg.ords[j]) else { continue };
+                docs.push(seg.docs[j]);
+                bords.push(r);
+                if d.needs_scores {
+                    scores.push(seg.scores[j]);
+                }
+                if docs.len() >= BATCH {
+                    deliver(&mut self.nodes, &d.mask, &mut docs, &mut bords, &mut scores)?;
+                }
+            }
+            deliver(&mut self.nodes, &d.mask, &mut docs, &mut bords, &mut scores)?;
+            for (n, &m) in self.nodes.iter_mut().zip(&d.mask) {
+                if m {
+                    n.agg.finish_segment()?;
+                }
+            }
+        }
+        for (n, &m) in self.nodes.iter_mut().zip(&d.mask) {
+            if m {
+                n.agg.post_collection()?;
+            }
+        }
+        Ok(rebased)
     }
 
     pub fn empty() -> Subs {
@@ -300,12 +478,20 @@ impl Subs {
     }
 
     pub fn needs_scores(&self) -> bool {
-        self.needs_scores
+        self.needs_scores || self.deferred.as_ref().is_some_and(|d| d.needs_scores)
     }
 
     pub fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
-        for n in &mut self.nodes {
-            n.agg.set_segment(seg)?;
+        if let Some(d) = self.deferred.as_mut() {
+            if d.segments.last().is_some_and(|s| s.docs.is_empty()) {
+                d.segments.pop();
+            }
+            d.segments.push(DeferredSegment { seg: seg.clone(), docs: Vec::new(), ords: Vec::new(), scores: Vec::new() });
+        }
+        for i in 0..self.nodes.len() {
+            if self.live(i) {
+                self.nodes[i].agg.set_segment(seg)?;
+            }
         }
         Ok(())
     }
@@ -313,6 +499,9 @@ impl Subs {
     /// Queues `(doc, ord)` for the sub-aggregations.
     #[inline]
     pub fn push(&mut self, doc: u32, ord: u32, score: f32) -> Result<()> {
+        if let Some(d) = self.deferred.as_mut() {
+            d.record(doc, ord, score)?;
+        }
         self.docs.push(doc);
         self.ords.push(ord);
         if self.needs_scores {
@@ -330,8 +519,11 @@ impl Subs {
             return Ok(());
         }
         let b = Batch { docs: &self.docs, ords: &self.ords, scores: &self.scores };
-        for n in &mut self.nodes {
-            n.agg.collect(b)?;
+        let mask = self.deferred.as_ref().map(|d| d.mask.as_slice());
+        for (i, n) in self.nodes.iter_mut().enumerate() {
+            if mask.is_none_or(|m| !m[i]) {
+                n.agg.collect(b)?;
+            }
         }
         self.docs.clear();
         self.ords.clear();
@@ -343,23 +535,35 @@ impl Subs {
     /// bucket ordinal is the owning ordinal).
     pub fn collect_direct(&mut self, b: Batch<'_>) -> Result<()> {
         self.flush()?;
-        for n in &mut self.nodes {
-            n.agg.collect(b)?;
+        if let Some(d) = self.deferred.as_mut() {
+            for i in 0..b.len() {
+                d.record(b.docs[i], b.ords[i], b.score(i))?;
+            }
+        }
+        let mask = self.deferred.as_ref().map(|d| d.mask.as_slice());
+        for (i, n) in self.nodes.iter_mut().enumerate() {
+            if mask.is_none_or(|m| !m[i]) {
+                n.agg.collect(b)?;
+            }
         }
         Ok(())
     }
 
     pub fn finish_segment(&mut self) -> Result<()> {
         self.flush()?;
-        for n in &mut self.nodes {
-            n.agg.finish_segment()?;
+        for i in 0..self.nodes.len() {
+            if self.live(i) {
+                self.nodes[i].agg.finish_segment()?;
+            }
         }
         Ok(())
     }
 
     pub fn post_collection(&mut self) -> Result<()> {
-        for n in &mut self.nodes {
-            n.agg.post_collection()?;
+        for i in 0..self.nodes.len() {
+            if self.live(i) {
+                self.nodes[i].agg.post_collection()?;
+            }
         }
         Ok(())
     }
@@ -367,11 +571,21 @@ impl Subs {
     /// The sub-aggregations of each bucket ordinal (`buildSubAggsForAllBuckets`).
     pub fn build(&mut self, ords: &[u32]) -> Result<Vec<Aggs>> {
         let mut out: Vec<Aggs> = (0..ords.len()).map(|_| Aggs { list: Vec::with_capacity(self.nodes.len()) }).collect();
+        let deferred = self.deferred.take();
+        let mask = deferred.as_ref().map(|d| d.mask.clone());
+        let rebased = match deferred {
+            Some(d) => Some(self.replay(*d, ords)?),
+            None => None,
+        };
         if ords.is_empty() {
             return Ok(out);
         }
-        for n in &mut self.nodes {
-            let values = n.agg.build(ords)?;
+        for (i, n) in self.nodes.iter_mut().enumerate() {
+            let deferred_node = mask.as_ref().is_some_and(|m| m[i]);
+            let values = match (&rebased, deferred_node) {
+                (Some(r), true) => n.agg.build(r)?,
+                _ => n.agg.build(ords)?,
+            };
             debug_assert_eq!(values.len(), ords.len());
             for (i, v) in values.into_iter().enumerate() {
                 let a = Agg { name: n.def.name.clone(), meta: n.def.meta.clone(), value: v };
@@ -419,6 +633,15 @@ impl Subs {
             None => false,
         }
     }
+}
+
+/// `DeferableBucketAggregator.doPreCollection`: an aggregator that defers its sub-aggregations
+/// can't keep the `_tsid` order a request with a `time_series` aggregation runs in.
+pub fn check_time_series_deferral(ctx: &BindCtx<'_>, name: &str, subs: &Subs) -> Result<()> {
+    if ctx.time_series_request && !subs.is_empty() {
+        return Err(AggError::illegal_argument(format!("[{name}] aggregation is incompatible with time series execution mode")));
+    }
+    Ok(())
 }
 
 /// `SingleBucketAggregator` sort semantics: ordering by a single-bucket aggregation orders by
@@ -470,6 +693,19 @@ fn not_single_bucket(name: &str) -> AggError {
     ))
 }
 
+/// The error for a sort path through or onto an aggregation that can't order buckets: a path
+/// that continues past it fails in `Aggregator.resolveSortPath` (naming it), one that ends on it
+/// in the default `bucketComparator`.
+pub fn unsortable(name: &str, rest: &[PathElement]) -> AggError {
+    if rest.is_empty() {
+        AggError::illegal_argument(
+            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.",
+        )
+    } else {
+        not_single_bucket(name)
+    }
+}
+
 /// Options of one shard's aggregation run.
 #[derive(Clone, Default)]
 pub struct ShardOptions {
@@ -479,6 +715,12 @@ pub struct ShardOptions {
     /// may then read segment statistics instead of docs. [`AggRequest::run`](crate::AggRequest::run)
     /// sets it for a `MatchAllQuery`.
     pub matches_all: bool,
+    /// `search.max_buckets` (None: the default 65536); `composite` checks its `size` against it
+    /// on the shard.
+    pub max_buckets: Option<usize>,
+    /// `profile: true`: aggregators record their phases here; render with
+    /// [`Profiler::to_json`](crate::profile::Profiler::to_json) after `finish`.
+    pub profiler: Option<Arc<crate::profile::Profiler>>,
 }
 
 /// Collects one shard's aggregations; plug it into a search (alone or in a
@@ -511,6 +753,7 @@ impl AggCollector {
             searcher,
             budget: opts.budget.clone(),
             parents: Vec::new(),
+            parent_name: None,
             nested_path: None,
             doc_count_field: lookup.doc_count_field(),
             sized: None,
@@ -519,6 +762,9 @@ impl AggCollector {
             nested_agg: None,
             time_series_request: has_type(&req.aggs, "time_series"),
             matches_all: opts.matches_all,
+            max_buckets: opts.max_buckets.unwrap_or(crate::internal::DEFAULT_MAX_BUCKETS),
+            profiler: opts.profiler.clone(),
+            profile_parent: None,
         };
         let mut nodes = Vec::new();
         let mut globals = Vec::new();

@@ -844,3 +844,203 @@ mod tests {
         assert_eq!(Builder::default().set_language("1"), Err(Illformed { message: "Ill-formed language: 1".into(), index: 0 }));
     }
 }
+
+// ------------------------------------------------------------------------------ language ranges
+
+/// `Locale.FilteringMode` constants, by ordinal.
+pub const FILTERING_MODES: [&str; 5] = ["AUTOSELECT_FILTERING", "EXTENDED_FILTERING", "IGNORE_EXTENDED_RANGES", "MAP_EXTENDED_RANGES", "REJECT_EXTENDED_RANGES"];
+
+/// A `Locale.LanguageRange` (RFC 4647): a lower-cased range and its weight.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LangRange {
+    pub range: String,
+    pub weight: f64,
+}
+
+impl LangRange {
+    /// The constructor's checks: a weight in [0, 1] and a well-formed range.
+    pub fn new(range: &str, weight: f64) -> Result<LangRange, String> {
+        if !(0.0..=1.0).contains(&weight) {
+            return Err(format!("weight={}", crate::java::fmt_double(weight)));
+        }
+        let lower = range.to_ascii_lowercase();
+        if !range_well_formed(&lower) {
+            return Err(format!("range={range}"));
+        }
+        Ok(LangRange { range: lower, weight })
+    }
+
+    /// `toString`: the range, with `;q=` and the weight below 1.
+    pub fn to_java_string(&self) -> String {
+        if self.weight == 1.0 { self.range.clone() } else { format!("{};q={}", self.range, crate::java::fmt_double(self.weight)) }
+    }
+}
+
+/// `LanguageRange`'s syntax: `*` or 1–8 letters, then `-` and `*` or 1–8 alphanumerics.
+fn range_well_formed(r: &str) -> bool {
+    let mut parts = r.split('-');
+    let first = parts.next().unwrap_or("");
+    let ok = first == "*" || (!first.is_empty() && first.len() <= 8 && first.bytes().all(|b| b.is_ascii_alphabetic()));
+    ok && parts.all(|p| p == "*" || (!p.is_empty() && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric())))
+}
+
+/// `LanguageRange.parse(ranges)`: comma-separated ranges with optional `;q=` weights, in
+/// descending weight order (stable), duplicates dropped.
+pub fn parse_ranges(text: &str) -> Result<Vec<LangRange>, String> {
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    let text = text.strip_prefix("accept-language:").unwrap_or(&text).to_string();
+    let mut out: Vec<LangRange> = Vec::new();
+    for item in text.split(',') {
+        if item.is_empty() {
+            continue;
+        }
+        let (range, weight) = match item.find(";q=") {
+            None => (item.to_string(), 1.0),
+            Some(i) => {
+                let (r, w) = (&item[..i], &item[i + 3..]);
+                let weight: f64 = w.parse().map_err(|_| format!("weight=\"{w}\" for language range \"{r}\""))?;
+                if !(0.0..=1.0).contains(&weight) {
+                    return Err(format!("weight={} for language range \"{r}\". It must be between 0.0 and 1.0.", crate::java::fmt_double(weight)));
+                }
+                (r.to_string(), weight)
+            }
+        };
+        if !range_well_formed(&range) {
+            return Err(format!("range=\"{range}\""));
+        }
+        let lr = LangRange { range, weight };
+        if out.iter().any(|x| x.range == lr.range) {
+            continue;
+        }
+        let at = out.iter().position(|x| x.weight < lr.weight).unwrap_or(out.len());
+        out.insert(at, lr);
+    }
+    Ok(out)
+}
+
+/// The ranges with a weight before the first zero weight, and the zero-weight ones after.
+fn split_zero(ranges: &[LangRange]) -> (&[LangRange], &[LangRange]) {
+    let i = ranges.iter().position(|r| r.weight == 0.0).unwrap_or(ranges.len());
+    ranges.split_at(i)
+}
+
+fn basic_match(range: &str, tag: &str) -> bool {
+    range == "*" || (tag.starts_with(range) && (tag.len() == range.len() || tag.as_bytes()[range.len()] == b'-'))
+}
+
+fn extended_match(range: &str, tag: &str) -> bool {
+    let rs: Vec<&str> = range.split('-').collect();
+    let ts: Vec<&str> = tag.split('-').collect();
+    if rs[0] != "*" && rs[0] != ts[0] {
+        return false;
+    }
+    let (mut ri, mut ti) = (1, 1);
+    while ri < rs.len() && ti < ts.len() {
+        if rs[ri] == "*" {
+            ri += 1;
+        } else if rs[ri] == ts[ti] {
+            ri += 1;
+            ti += 1;
+        } else if ts[ti].len() == 1 && ts[ti] != "*" {
+            break;
+        } else {
+            ti += 1;
+        }
+    }
+    ri == rs.len()
+}
+
+/// `Locale.filterTags(ranges, tags, mode)` (`mode`: a `FILTERING_MODES` ordinal).
+pub fn filter_tags(ranges: &[LangRange], tags: &[String], mode: u8) -> Result<Vec<String>, String> {
+    if ranges.is_empty() || tags.is_empty() {
+        return Ok(Vec::new());
+    }
+    let extended_range = |r: &str| r.starts_with("*-") || r.contains("-*");
+    let extended = match mode {
+        1 => true,
+        0 => ranges.iter().any(|r| extended_range(&r.range)),
+        4 if ranges.iter().any(|r| extended_range(&r.range)) => {
+            let r = ranges.iter().find(|r| extended_range(&r.range)).unwrap();
+            return Err(format!("An extended range \"{}\" found in REJECT_EXTENDED_RANGES mode.", r.range));
+        }
+        _ => false,
+    };
+    let mapped: Vec<LangRange>;
+    let ranges: &[LangRange] = if !extended && mode == 3 {
+        // MAP_EXTENDED_RANGES: a leading `*-` makes the whole range `*`; inner `-*` subtags go
+        mapped = ranges
+            .iter()
+            .map(|r| {
+                let range = if r.range.starts_with("*-") { "*".to_string() } else { r.range.replace("-*", "") };
+                LangRange { range, weight: r.weight }
+            })
+            .collect();
+        &mapped
+    } else if !extended {
+        mapped = ranges.iter().filter(|r| !extended_range(&r.range)).cloned().collect();
+        &mapped
+    } else {
+        ranges
+    };
+    let matches = |range: &str, tag: &str| if extended { extended_match(range, tag) } else { basic_match(range, tag) };
+    let (nonzero, zero) = split_zero(ranges);
+    let ignored = |tag: &str| zero.iter().any(|z| z.range != "*" && matches(&z.range, tag));
+    let mut out: Vec<String> = Vec::new();
+    for r in nonzero {
+        if r.range == "*" {
+            for t in tags {
+                let lt = t.to_ascii_lowercase();
+                if !ignored(&lt) && !out.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                    out.push(t.clone());
+                }
+            }
+            return Ok(out);
+        }
+        for t in tags {
+            let lt = t.to_ascii_lowercase();
+            if matches(&r.range, &lt) && !out.iter().any(|x| x.eq_ignore_ascii_case(t)) && !ignored(&lt) {
+                out.push(t.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `Locale.lookupTag(ranges, tags)`: the first tag matching a range, truncating each range
+/// from the end (`*` subtags match any alphanumerics).
+pub fn lookup_tag(ranges: &[LangRange], tags: &[String]) -> Option<String> {
+    let (nonzero, zero) = split_zero(ranges);
+    let glob = |pattern: &str, tag: &str| -> bool {
+        let ps: Vec<&str> = pattern.split('-').collect();
+        let ts: Vec<&str> = tag.split('-').collect();
+        ps.len() == ts.len() && ps.iter().zip(&ts).all(|(p, t)| *p == "*" || p == t)
+    };
+    let ignored = |tag: &str| zero.iter().any(|z| z.range != "*" && glob(&z.range, tag));
+    for r in nonzero {
+        if r.range == "*" {
+            continue;
+        }
+        let mut range = r.range.clone();
+        while !range.is_empty() {
+            for t in tags {
+                let lt = t.to_ascii_lowercase();
+                if glob(&range, &lt) && !ignored(&lt) {
+                    return Some(t.clone());
+                }
+            }
+            // drop the last subtag (and a single-letter extension key before it)
+            match range.rfind('-') {
+                Some(i) => {
+                    range.truncate(i);
+                    if let Some(j) = range.rfind('-')
+                        && j + 2 == range.len()
+                    {
+                        range.truncate(j);
+                    }
+                }
+                None => range.clear(),
+            }
+        }
+    }
+    None
+}

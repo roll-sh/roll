@@ -430,9 +430,7 @@ impl Aggregator for GeoMetricAgg {
         }
     }
 
-    fn validate_sort(&self, _name: &str, _key: Option<&str>, _rest: &[crate::request::PathElement]) -> Result<()> {
-        Err(AggError::illegal_argument(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.",
-        ))
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[crate::request::PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
     }
 }

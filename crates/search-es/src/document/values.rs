@@ -44,9 +44,14 @@ pub enum FieldValue {
     /// `flattened`: each leaf as `key` (dotted) and value text.
     Flattened(Vec<(String, String)>),
     /// `completion`: inputs and weight.
-    Completion { inputs: Vec<String>, weight: Option<i64> },
+    Completion { inputs: Vec<String>, weight: Option<i64>, contexts: Option<crate::json::Map> },
     /// `token_count`: the text whose tokens are counted at indexing.
     TokenCount(String),
+    /// `join`: the relation name and, for a child, its parent's id.
+    Join { name: String, parent: Option<String> },
+    /// `percolator`: the stored query, as JSON, and where its value ends in the document
+    /// (errors checking it against the mapping point there).
+    Percolator(String, (usize, usize)),
 }
 
 /// What a value parser works with: the parser on the value, the index's mapping context, the
@@ -100,6 +105,9 @@ fn number_text(p: &XParser<'_>) -> String {
 pub(crate) fn parse_value(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str) -> Result<Vec<FieldValue>, ValueError> {
     let ctx = w.ctx;
     let token = w.p.token();
+    if f.ty == "join" {
+        return parse_join(w, f, full).map(|v| vec![v]);
+    }
     // `null` (and for numbers, the empty string) takes the field's `null_value`.
     let null_value = f.raw("null_value").filter(|v| !v.is_null()).cloned();
     let is_null = token == Token::Null || (token == Token::String && is_numeric(f.ty) && matches!(w.p.value(), Value::Str(s) if s.is_empty()));
@@ -144,6 +152,22 @@ fn parse_detached_value(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, v: &Val
     let mut tmp = XParser::started(v, None, Vec::new());
     let mut cx = Cx { p: &mut tmp, ctx: w.ctx, ignored: w.ignored, desc: w.desc };
     parse_value(&mut cx, f, full).map(Some)
+}
+
+/// Parses one value of `f` outside a document walk (synthetic `_source`): `null_value`,
+/// coercion and `ignore_malformed` apply; names of ignored values land in `ignored`. `None`
+/// when the value doesn't parse at all.
+pub(crate) fn parse_standalone(f: &FieldMapper, full: &str, v: &Value, ctx: &MappingCtx, ignored: &mut BTreeSet<String>) -> Option<Vec<FieldValue>> {
+    let mut tmp = XParser::started(v, None, Vec::new());
+    let mut cx = Cx { p: &mut tmp, ctx, ignored, desc: "" };
+    parse_value(&mut cx, f, full).ok()
+}
+
+/// A geo point in any of Elasticsearch's forms (`GeoUtils.parseGeoPoint`), or `None`.
+pub fn geo_point_of(v: &Value) -> Option<GeoPoint> {
+    let mut p = XParser::from_value(v);
+    p.next_token();
+    crate::query::geo::parse_point(&mut p).ok()
 }
 
 pub(crate) fn half_float(v: f32) -> f32 {
@@ -463,19 +487,12 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             vec![FieldValue::Binary(bytes)]
         }
         "geo_point" => {
-            let pt = crate::query::geo::parse_point(w.p).map_err(ValueError::typed)?;
-            let im = ignore_malformed(f, ctx);
-            if !im {
-                if !(-90.0..=90.0).contains(&pt.lat) {
-                    let msg = format!("illegal latitude value [{}] for {full}", crate::json::write::java_double(pt.lat));
-                    return Err(if token == Token::StartArray { ValueError::plain(EsError::illegal_argument(msg)) } else { ValueError::typed(EsError::illegal_argument(msg)) });
-                }
-                if !(-180.0..=180.0).contains(&pt.lon) {
-                    let msg = format!("illegal longitude value [{}] for {full}", crate::json::write::java_double(pt.lon));
-                    return Err(if token == Token::StartArray { ValueError::plain(EsError::illegal_argument(msg)) } else { ValueError::typed(EsError::illegal_argument(msg)) });
-                }
+            let mut pts = if token == Token::StartArray { geo_point_array(w, f, full, ctx)? } else { vec![crate::query::geo::parse_point(w.p).map_err(ValueError::typed)?] };
+            let mut out = Vec::with_capacity(pts.len());
+            for pt in &mut pts {
+                out.push(check_geo_point(w, f, full, ctx, token, pt)?);
             }
-            vec![FieldValue::GeoPoint(pt)]
+            out
         }
         "point" => {
             let pt = crate::query::geo::parse_point(w.p).map_err(ValueError::typed)?;
@@ -531,7 +548,13 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
         }
         "completion" => vec![parse_completion(w)?],
         "alias" => return Err(ValueError::none(w.doc_error(format!("Cannot write to a field alias [{full}].")))),
-        "percolator" | "semantic_text" | "aggregate_metric_double" | "histogram" | "join" | "counted_keyword" => {
+        "percolator" => {
+            // `PercolatorFieldMapper`: the value is a query, parsed (and later checked against
+            // the mapping) when the document is indexed.
+            let q = crate::query::parse_inner(w.p).map_err(ValueError::plain)?;
+            vec![FieldValue::Percolator(q.to_value().to_json(), w.p.token_location())]
+        }
+        "semantic_text" | "aggregate_metric_double" | "histogram" | "counted_keyword" => {
             // Kept in _source; indexing these types comes with their engines.
             w.p.skip_children();
             Vec::new()
@@ -541,6 +564,55 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             Vec::new()
         }
     })
+}
+
+/// `ParentJoinFieldMapper.parse`: a relation name, or `{"name": …, "parent": …}`.
+fn parse_join(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str) -> Result<FieldValue, ValueError> {
+    let (mut name, mut parent) = (None, None);
+    match w.p.token() {
+        Token::StartObject => {
+            let mut key = String::new();
+            while let Some(t) = w.p.next_token() {
+                match t {
+                    Token::EndObject => break,
+                    Token::FieldName => key = w.p.current_name().unwrap_or("").to_string(),
+                    Token::String if key == "name" => name = Some(w.p.text()?),
+                    Token::String if key == "parent" => parent = Some(w.p.text()?),
+                    Token::Number if key == "parent" => parent = Some(w.p.raw_text()),
+                    Token::String | Token::Number => {
+                        return Err(ValueError::plain(EsError::illegal_argument(format!("unknown field name [{key}] in join field [{full}]"))));
+                    }
+                    Token::StartObject | Token::StartArray => w.p.skip_children(),
+                    _ => {}
+                }
+            }
+        }
+        Token::String => name = Some(w.p.text()?),
+        t => {
+            return Err(ValueError::plain(EsError::illegal_state(format!(
+                "[{full}] expected START_OBJECT or VALUE_STRING but was: {}",
+                t.name()
+            ))));
+        }
+    }
+    let Some(name) = name else {
+        return Err(ValueError::plain(EsError::illegal_argument(format!("null join name in field [{full}]"))));
+    };
+    let joiner = crate::join::Joiner::from_mapper(f);
+    if !joiner.known(&name) {
+        return Err(ValueError::plain(EsError::illegal_argument(format!("unknown join name [{name}] for field [{full}]"))));
+    }
+    if joiner.is_child(&name) {
+        if parent.is_none() {
+            return Err(ValueError::plain(EsError::illegal_argument(format!("[parent] is missing for join field [{full}]"))));
+        }
+        if w.ctx.join_routing == Some(false) {
+            return Err(ValueError::plain(EsError::illegal_argument(format!("[routing] is missing for join field [{full}]"))));
+        }
+    } else {
+        parent = None;
+    }
+    Ok(FieldValue::Join { name, parent })
 }
 
 fn check_feature(v: f32, feature: &str, field: &str) -> Result<(), EsError> {
@@ -573,10 +645,11 @@ fn flatten(v: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
 
 fn parse_completion(w: &mut Cx<'_, '_>) -> Result<FieldValue, ValueError> {
     match w.p.token() {
-        Token::String | Token::Number | Token::Boolean => Ok(FieldValue::Completion { inputs: vec![w.p.text()?], weight: None }),
+        Token::String | Token::Number | Token::Boolean => Ok(FieldValue::Completion { inputs: vec![w.p.text()?], weight: None, contexts: None }),
         Token::StartObject => {
             let mut inputs = Vec::new();
             let mut weight = None;
+            let mut contexts = None;
             let mut key = String::new();
             while let Some(t) = w.p.next_token() {
                 match t {
@@ -597,6 +670,7 @@ fn parse_completion(w: &mut Cx<'_, '_>) -> Result<FieldValue, ValueError> {
                             inputs.push(w.p.text()?);
                         }
                     }
+                    Token::StartObject if key == "contexts" => contexts = Some(w.p.map()?),
                     Token::StartObject | Token::StartArray => w.p.skip_children(),
                     _ => match key.as_str() {
                         "input" => inputs.push(w.p.text()?),
@@ -618,7 +692,7 @@ fn parse_completion(w: &mut Cx<'_, '_>) -> Result<FieldValue, ValueError> {
                     },
                 }
             }
-            Ok(FieldValue::Completion { inputs, weight })
+            Ok(FieldValue::Completion { inputs, weight, contexts })
         }
         t => Err(EsError::illegal_argument(format!("failed to parse [{t}]: expected text or object, but got {t}")).into()),
     }
@@ -645,7 +719,7 @@ fn parse_range(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx
             Token::EndObject => break,
             Token::FieldName => key = w.p.current_name().unwrap_or("").to_string(),
             _ => {
-                let v = range_bound(w, f, ctx)?;
+                let v = range_bound(w, f, ctx, matches!(key.as_str(), "gt" | "lte"))?;
                 match key.as_str() {
                     "gte" => {
                         from = v;
@@ -681,7 +755,9 @@ fn parse_range(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx
 }
 
 /// One bound of a range value, parsed with the range's element type.
-fn range_bound(w: &mut Cx<'_, '_>, f: &FieldMapper, ctx: &MappingCtx) -> Result<Value, ValueError> {
+/// Dates round up for `gt` and `lte` (`RangeType.DATE.parseFrom/parseTo`), so date math such
+/// as `||/M` covers whole units.
+fn range_bound(w: &mut Cx<'_, '_>, f: &FieldMapper, ctx: &MappingCtx, round_up: bool) -> Result<Value, ValueError> {
     let p = &w.p;
     if p.token() == Token::Null {
         return Ok(Value::Null);
@@ -699,7 +775,7 @@ fn range_bound(w: &mut Cx<'_, '_>, f: &FieldMapper, ctx: &MappingCtx) -> Result<
                     .into());
             }
             let fmt = f.date_formatter(ctx)?;
-            let ms = fmt.parse_millis(&text).map_err(|e| EsError::parse(e.clone()).caused_by(EsError::illegal_argument(e)))?;
+            let ms = crate::time::parse_date_math(&text, 0, round_up, None, &fmt).map_err(|e| e.to_es())?.millis();
             Value::from(ms)
         }
         "ip_range" => {
@@ -725,7 +801,8 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
     match w.p.token() {
         Token::StartArray => {
             let mut floats: Vec<f64> = Vec::new();
-            let byte = element == "byte";
+            let bit = element == "bit";
+            let byte = element == "byte" || bit;
             while let Some(t) = w.p.next_token() {
                 match t {
                     Token::EndArray => break,
@@ -734,14 +811,21 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
                         let i = floats.len();
                         if byte && v.fract() != 0.0 {
                             return Err(ValueError::plain(EsError::illegal_argument(format!(
-                                "element_type [byte] vectors only support non-decimal values but found decimal value [{}] at dim [{i}];",
+                                "element_type [{element}] vectors only support non-decimal values but found decimal value [{}] at dim [{i}];",
                                 crate::json::write::java_double(v)
                             ))));
                         }
                         if byte && !(-128.0..=127.0).contains(&v) {
                             return Err(ValueError::plain(EsError::illegal_argument(format!(
-                                "element_type [byte] vectors only support integers between [-128, 127] but found [{}] at dim [{i}];",
+                                "element_type [{element}] vectors only support integers between [-128, 127] but found [{}] at dim [{i}];",
                                 v as i64
+                            ))));
+                        }
+                        if let Some(d) = dims
+                            && ((floats.len() + 1) * if bit { 8 } else { 1 }) as i64 > d
+                        {
+                            return Err(ValueError::plain(EsError::illegal_argument(format!(
+                                "The [dense_vector] field [{full}] in doc [{desc}] has more dimensions than defined in the mapping [{d}]"
                             ))));
                         }
                         floats.push(v);
@@ -749,10 +833,12 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
                     t => return Err(parsing(format!("expecting token of type [VALUE_NUMBER] but found [{t}]"))),
                 }
             }
+            // A bit vector's dims count bits: each array element holds eight.
+            let n = if bit { floats.len() * 8 } else { floats.len() };
             if let Some(d) = dims
-                && floats.len() as i64 != d
+                && n as i64 != d
             {
-                return Err(dims_err(floats.len(), d));
+                return Err(dims_err(n, d));
             }
             if byte {
                 Ok(vec![FieldValue::ByteVector(floats.into_iter().map(|v| v as i8).collect())])
@@ -762,10 +848,32 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
         }
         Token::String => {
             let s = w.p.text()?;
-            let d = dims.unwrap_or(0) as usize;
-            if element == "byte" && s.len() == d * 2 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
-                let bytes = (0..d).map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap_or(0) as i8).collect();
+            let bit = element == "bit";
+            let byte = element == "byte" || bit;
+            // Hex strings (byte and bit vectors): two digits per byte; without `dims` the
+            // length decides (dynamic dims).
+            let hex = s.len() % 2 == 0 && !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+            if byte && hex && dims.is_none_or(|d| s.len() as i64 / 2 * if bit { 8 } else { 1 } == d) {
+                let n = s.len() / 2;
+                let bytes = (0..n).map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap_or(0) as i8).collect();
                 return Ok(vec![FieldValue::ByteVector(bytes)]);
+            }
+            let d = dims.unwrap_or(0) as usize;
+            if byte {
+                use base64::Engine as _;
+                let lenient = base64::engine::GeneralPurpose::new(
+                    &base64::alphabet::STANDARD,
+                    base64::engine::GeneralPurposeConfig::new().with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+                );
+                let decoded = lenient.decode(s.as_bytes()).unwrap_or_default();
+                let want = if bit { d / 8 } else { d };
+                if dims.is_some() && decoded.len() != want {
+                    if hex {
+                        return Err(dims_err(s.len() / 2 * if bit { 8 } else { 1 }, d as i64));
+                    }
+                    return Err(parsing(format!("Base64 decoded vector byte length [{}] does not match the expected length of [{want}] for dimension count [{d}]", decoded.len())));
+                }
+                return Ok(vec![FieldValue::ByteVector(decoded.into_iter().map(|b| b as i8).collect())]);
             }
             use base64::Engine as _;
             let lenient = base64::engine::GeneralPurpose::new(
@@ -773,6 +881,7 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
                 base64::engine::GeneralPurposeConfig::new().with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
             );
             let decoded = lenient.decode(s.as_bytes()).unwrap_or_default();
+            let d = if dims.is_none() { decoded.len() / 4 } else { d };
             if decoded.len() != d * 4 && decoded.len() != d * 2 {
                 return Err(parsing(format!(
                     "Base64 decoded vector byte length [{}] does not match the expected length of [{}] or [{}] for dimension count [{d}]",
@@ -781,9 +890,149 @@ fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &Ma
                     d * 2
                 )));
             }
-            let floats = decoded.chunks_exact(4).map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect();
+            // Two bytes per dimension: big-endian bfloat16 (the high half of a float32).
+            let floats = if decoded.len() == d * 2 && d * 2 != d * 4 {
+                decoded.as_chunks::<2>().0.iter().map(|c| f32::from_bits((u16::from_be_bytes(*c) as u32) << 16)).collect()
+            } else {
+                decoded.as_chunks::<4>().0.iter().map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect()
+            };
             Ok(vec![FieldValue::DenseVector(floats)])
         }
         t => Err(parsing(format!("expecting token of type [START_ARRAY] but found [{t}]"))),
+    }
+}
+
+/// `GeoUtils.centeredModulus`.
+fn centered_modulus(dividend: f64, divisor: f64) -> f64 {
+    let mut r = dividend % divisor;
+    if r <= 0.0 {
+        r += divisor;
+    }
+    if r > divisor / 2.0 {
+        r -= divisor;
+    }
+    r
+}
+
+/// `GeoUtils.normalizePoint(point, true, true)`: latitude folded over the poles (shifting
+/// the longitude half a turn), then longitude wrapped into (-180, 180].
+pub fn normalize_point(lat: f64, lon: f64) -> (f64, f64) {
+    let mut lat = centered_modulus(lat, 360.0);
+    let mut lon = lon;
+    let mut shift = true;
+    if lat < -90.0 {
+        lat = -180.0 - lat;
+    } else if lat > 90.0 {
+        lat = 180.0 - lat;
+    } else {
+        shift = false;
+    }
+    if shift {
+        lon += 180.0;
+    }
+    (lat, centered_modulus(lon, 360.0))
+}
+
+
+/// A `geo_point` given as a coordinate array (`AbstractPointGeometryFieldMapper.PointParser`):
+/// `[lon, lat]` or `[lon, lat, z]` read with Jackson's numeric accessors (strings coerce; other
+/// tokens fail as Jackson does), then any further elements as more points. Accessor and
+/// dimension failures happen outside the mapper's `ignore_malformed` guard.
+fn geo_point_array(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx) -> Result<Vec<crate::query::geo::GeoPoint>, ValueError> {
+    use crate::query::geo::GeoPoint;
+    // Jackson's and XContent's exceptions aren't Elasticsearch exceptions: the document
+    // parsing exception is the root cause.
+    fn plain_java(e: &EsError) -> EsError {
+        let out = EsError::java(e.status, e.kind.to_string(), e.reason().to_string());
+        match &e.caused_by {
+            Some(c) => out.caused_by(plain_java(c)),
+            None => out,
+        }
+    }
+    let fatal = |w: &mut Cx<'_, '_>, e: EsError| {
+        let msg = e.reason().to_string();
+        let e = if matches!(&*e.kind, "x_content_parse_exception" | "json_parse_exception") { plain_java(&e) } else { e };
+        ValueError::none(w.doc_error(format!("failed to parse: {msg}")).caused_by(e))
+    };
+    w.p.next_token();
+    let lon = match w.p.double_value() {
+        Ok(v) => v,
+        Err(e) => return Err(fatal(w, e)),
+    };
+    w.p.next_token();
+    let lat = match w.p.double_value() {
+        Ok(v) => v,
+        Err(e) => return Err(fatal(w, e)),
+    };
+    let mut out = vec![GeoPoint { lat, lon }];
+    match w.p.next_token() {
+        Some(Token::EndArray) => return Ok(out),
+        Some(Token::Number) => {
+            let z = w.p.double_value().map_err(ValueError::typed)?;
+            if f.effective("ignore_z_value", ctx).as_bool() == Some(false) {
+                return Err(ValueError::typed(EsError::parse(format!(
+                    "Exception parsing coordinates: found Z value [{}] but [ignore_z_value] parameter is [false]",
+                    crate::json::write::java_double(z)
+                ))));
+            }
+        }
+        _ => return Err(fatal(w, EsError::parse("field type does not accept > 3 dimensions"))),
+    }
+    while let Some(t) = w.p.next_token() {
+        if t == Token::EndArray {
+            break;
+        }
+        match crate::query::geo::parse_point(w.p) {
+            Ok(pt) => out.push(pt),
+            // Points before the malformed one were already indexed.
+            Err(_) if ignore_malformed(f, ctx) => {
+                w.p.skip_children();
+                while let Some(t) = w.p.next_token() {
+                    match t {
+                        Token::EndArray => break,
+                        Token::StartObject | Token::StartArray => w.p.skip_children(),
+                        _ => {}
+                    }
+                }
+                w.ignore(full);
+                return Ok(out);
+            }
+            Err(e) => return Err(ValueError::typed(e)),
+        }
+    }
+    Ok(out)
+}
+
+/// Range checks of a parsed point; `ignore_malformed` wraps out-of-range points instead of
+/// rejecting them (`GeoUtils.normalizePoint`).
+fn check_geo_point(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx, token: Token, pt: &mut crate::query::geo::GeoPoint) -> Result<FieldValue, ValueError> {
+    let _ = w;
+    if ignore_malformed(f, ctx) {
+        if !(-90.0..=90.0).contains(&pt.lat) || !(-180.0..=180.0).contains(&pt.lon) {
+            (pt.lat, pt.lon) = normalize_point(pt.lat, pt.lon);
+        }
+    } else {
+        let wrap = |msg: String| if token == Token::StartArray { ValueError::plain(EsError::illegal_argument(msg)) } else { ValueError::typed(EsError::illegal_argument(msg)) };
+        if !(-90.0..=90.0).contains(&pt.lat) {
+            return Err(wrap(format!("illegal latitude value [{}] for {full}", crate::json::write::java_double(pt.lat))));
+        }
+        if !(-180.0..=180.0).contains(&pt.lon) {
+            return Err(wrap(format!("illegal longitude value [{}] for {full}", crate::json::write::java_double(pt.lon))));
+        }
+    }
+    Ok(FieldValue::GeoPoint(*pt))
+}
+
+#[cfg(test)]
+mod geo_normalize_tests {
+    use super::normalize_point;
+
+    #[test]
+    fn wraps_like_geo_utils() {
+        assert_eq!(normalize_point(20.12, 182.22), (20.12, 182.22 - 360.0));
+        assert_eq!(normalize_point(95.0, 10.0), (85.0, -170.0));
+        assert_eq!(normalize_point(-95.0, 10.0), (-85.0, -170.0));
+        assert_eq!(normalize_point(0.0, -190.0), (0.0, 170.0));
+        assert_eq!(normalize_point(450.0, 0.0), (90.0, 0.0));
     }
 }

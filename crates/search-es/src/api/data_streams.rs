@@ -111,7 +111,7 @@ pub fn create_data_stream(st: &mut ClusterState, name: &str, now_ms: i64) -> EsR
         return Err(EsError::status(400, format!("data stream could not be created because backing index [{index}] already exists")));
     }
     let empty = Settings::new();
-    let warnings = create_backing_index(st, &index, BackingOf { data_stream: name, template: &template, settings: &empty, mappings: None }, now_ms)?;
+    let warnings = create_backing_index(st, &index, BackingOf { data_stream: name, template: &template, settings: &empty, mappings: None , past: None }, now_ms)?;
     let index_mode = st.metadata.indices.get(&index).and_then(|i| i.settings.get("index.mode")).map(str::to_string);
     let ds = DataStream {
         name: name.to_string(),
@@ -162,7 +162,7 @@ fn dsl_enabled(ds: &DataStream) -> bool {
 
 /// Whether the failure store of `ds` is effectively enabled: its options, else the
 /// `data_streams.failure_store.enabled` cluster setting's name patterns.
-fn failure_store_enabled(st: &ClusterState, ds: &DataStream) -> bool {
+pub(crate) fn failure_store_enabled(st: &ClusterState, ds: &DataStream) -> bool {
     if let Some(e) = ds.failure_store_enabled() {
         return e;
     }
@@ -178,7 +178,7 @@ fn time_setting(st: &ClusterState, key: &str) -> Option<TimeValue> {
 
 /// `DataStreamLifecycle.getEffectiveDataRetentionWithSource`: the retention in effect and what
 /// determined it.
-fn effective_retention(st: &ClusterState, ds: &DataStream, lifecycle: &Value) -> Option<(TimeValue, &'static str)> {
+pub(crate) fn effective_retention(st: &ClusterState, ds: &DataStream, lifecycle: &Value) -> Option<(TimeValue, &'static str)> {
     let configured = lifecycle.get("data_retention").and_then(Value::as_str).and_then(|v| TimeValue::parse(v, "data_retention").ok());
     let internal = ds.system || ds.name.starts_with('.');
     if internal {
@@ -358,6 +358,9 @@ fn data_stream_value(ctx: &Ctx, st: &ClusterState, ds: &DataStream, include_defa
     let view = DataStreamView { ds, template: template.map(|(n, _)| n.clone()), ilm_policy, prefer_ilm, failure_store_enabled: fs_enabled, verbose, index_mode };
     let mut v = view.to_value(st);
     if let Value::Obj(m) = &mut v {
+        if let Some(t) = m.get_mut("maximum_timestamp") {
+            *t = Value::from(maximum_timestamp(ctx.cluster, st, ds));
+        }
         if let Some(l) = &ds.lifecycle {
             m.insert("lifecycle".into(), lifecycle_with_effective(st, ds, l, include_defaults));
         }
@@ -437,6 +440,23 @@ fn broadcast_shards<'a>(indices: impl Iterator<Item = &'a IndexMeta>) -> Value {
     obj! { "total" => total, "successful" => ok, "failed" => 0 }
 }
 
+/// The largest `@timestamp` indexed in a data stream's backing indices (searchable values,
+/// read from the points' maximum as `DataStreamsStatsTransportAction` does; 0 when empty).
+fn maximum_timestamp(cluster: &crate::cluster::Cluster, st: &ClusterState, ds: &DataStream) -> i64 {
+    let mut max = 0i64;
+    for name in &ds.indices {
+        let Some(idx) = st.metadata.indices.get(name) else { continue };
+        if idx.is_closed() {
+            continue;
+        }
+        let Ok(engine) = cluster.engine.index(cluster, st, idx) else { continue };
+        if let Some(v) = engine.max_long_point("@timestamp") {
+            max = max.max(v);
+        }
+    }
+    max
+}
+
 pub fn stats(ctx: &Ctx) -> EsResult<Reply> {
     let opts = ctx.indices_options(IndicesOptions::STRICT_EXPAND_OPEN)?;
     let st = ctx.state();
@@ -461,7 +481,7 @@ pub fn stats(ctx: &Ctx) -> EsResult<Reply> {
             m.insert("data_stream".into(), Value::from(d.name.clone()));
             m.insert("backing_indices".into(), Value::from(d.indices.len()));
             size(0, "store_size", &mut m);
-            m.insert("maximum_timestamp".into(), Value::from(0));
+            m.insert("maximum_timestamp".into(), Value::from(maximum_timestamp(ctx.cluster, &st, d)));
             Value::Obj(m)
         })
         .collect();

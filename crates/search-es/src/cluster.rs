@@ -145,6 +145,17 @@ pub struct Cluster {
     pub tasks: TaskRegistry,
     /// Shard operation counters for `_stats` (`_flush`, `_refresh`).
     pub ops: ShardOps,
+    /// The indices' shards and field tables.
+    pub engine: crate::engine::Engine,
+    /// Compiled scripts (Painless, Mustache).
+    pub scripts: Arc<crate::scripting::ScriptService>,
+    /// Open scrolls and points in time.
+    pub contexts: crate::search::contexts::Contexts,
+    /// Compiled ingest pipelines.
+    pub ingest: crate::ingest::pipeline::Cache,
+    /// The cluster's own handle, once its owner allowed background work
+    /// ([`Cluster::enable_background_tasks`]).
+    background: std::sync::OnceLock<std::sync::Weak<Cluster>>,
 }
 
 /// Why an index's primaries are unassigned.
@@ -217,6 +228,8 @@ pub struct TaskInfo {
     /// Request headers tasks carry (`X-Opaque-Id`, `traceparent`).
     pub headers: Vec<(String, String)>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// A running by-query task's rate and progress (`BulkByScrollTask`).
+    pub live: Option<Arc<crate::api::by_query::Live>>,
 }
 
 /// The tasks running on the node for this cluster. Ids increase from 1 like Elasticsearch's;
@@ -228,6 +241,8 @@ pub struct TaskRegistry {
     next: std::sync::atomic::AtomicU64,
     running: parking_lot::Mutex<std::collections::BTreeMap<u64, TaskInfo>>,
     results: parking_lot::Mutex<std::collections::BTreeMap<u64, StoredTask>>,
+    /// Woken whenever a task ends (`wait_for_completion` on the task APIs).
+    ended: tokio::sync::Notify,
 }
 
 /// A finished task's record: the task as it ran and its response or failure.
@@ -250,6 +265,17 @@ pub struct TaskGuard<'a> {
 impl Drop for TaskGuard<'_> {
     fn drop(&mut self) {
         self.registry.running.lock().remove(&self.id);
+        self.registry.ended.notify_waiters();
+    }
+}
+
+impl TaskGuard<'_> {
+    /// Leaves the task registered without a guard (it is handed to a background run, which
+    /// takes it back with [`TaskRegistry::adopt`]).
+    pub fn detach(self) -> u64 {
+        let id = self.id;
+        std::mem::forget(self);
+        id
     }
 }
 
@@ -266,9 +292,39 @@ impl TaskRegistry {
             parent,
             headers,
             cancelled: Default::default(),
+            live: None,
         };
         self.running.lock().insert(id, info);
         TaskGuard { registry: self, id }
+    }
+
+    /// Attaches a by-query task's live state.
+    pub fn set_live(&self, id: u64, live: Arc<crate::api::by_query::Live>) {
+        if let Some(t) = self.running.lock().get_mut(&id) {
+            t.live = Some(live);
+        }
+    }
+
+    /// The guard of a task [`TaskGuard::detach`]ed earlier.
+    pub fn adopt(&self, id: u64) -> TaskGuard<'_> {
+        TaskGuard { registry: self, id }
+    }
+
+    /// Waits until `done()` holds, re-checking whenever a task ends, at most `timeout`.
+    /// Returns whether it held.
+    pub async fn wait_until(&self, timeout: std::time::Duration, mut done: impl FnMut() -> bool) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let ended = self.ended.notified();
+            tokio::pin!(ended);
+            ended.as_mut().enable();
+            if done() {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, ended).await.is_err() {
+                return done();
+            }
+        }
     }
 
     /// A snapshot of the running tasks, by id.
@@ -296,12 +352,19 @@ impl TaskRegistry {
         guard
     }
 
+    /// Keeps a task's outcome and ends it (the result is visible before the task stops
+    /// running, so a waiter never misses both).
     pub fn finish(&self, guard: TaskGuard<'_>, outcome: Result<Value, crate::error::EsError>) -> u64 {
         let id = guard.id;
-        let info = self.get(id).expect("registered");
+        self.record(&guard, outcome);
         drop(guard);
-        self.store_result(StoredTask { running_nanos: info.started.elapsed().as_nanos() as i64, info, outcome });
         id
+    }
+
+    /// Keeps a running task's outcome; the task ends when its guard drops.
+    pub fn record(&self, guard: &TaskGuard<'_>, outcome: Result<Value, crate::error::EsError>) {
+        let Some(info) = self.get(guard.id) else { return };
+        self.store_result(StoredTask { running_nanos: info.started.elapsed().as_nanos() as i64, info, outcome });
     }
 
     pub fn store_result(&self, t: StoredTask) {
@@ -340,7 +403,16 @@ impl Cluster {
             changes,
             name: config.name.clone(),
             dialect: config.dialect,
-            node: NodeInfo::new(&config.node_name),
+            node: {
+                let mut n = NodeInfo::new(&config.node_name);
+                // `http.publish_host` / `http.publish_port`: the address node info advertises
+                // (reindex from remote and clients connect to it).
+                if let Some(port) = config.node_setting("http.publish_port") {
+                    let host = config.node_setting("http.publish_host").unwrap_or("127.0.0.1");
+                    n.http_address = format!("{host}:{port}");
+                }
+                n
+            },
             config,
             state: RwLock::new(Arc::new(state)),
             write: tokio::sync::Mutex::new(()),
@@ -349,7 +421,24 @@ impl Cluster {
             analysis: Default::default(),
             ops: Default::default(),
             tasks: Default::default(),
+            engine: Default::default(),
+            scripts: Default::default(),
+            contexts: Default::default(),
+            ingest: Default::default(),
+            background: Default::default(),
         })
+    }
+
+    /// Lets requests run on after their response (`wait_for_completion=false` by-query
+    /// tasks): they hold a strong handle while they run. Without it, such tasks run to their
+    /// end before the response is sent.
+    pub fn enable_background_tasks(self: &Arc<Self>) {
+        let _ = self.background.set(Arc::downgrade(self));
+    }
+
+    /// A strong handle for background work, when enabled.
+    pub fn handle(&self) -> Option<Arc<Cluster>> {
+        self.background.get()?.upgrade()
     }
 
     /// A cluster with an in-memory store (tests, the dev server).

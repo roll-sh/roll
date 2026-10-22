@@ -28,7 +28,7 @@ use crate::util::OrdMap;
 use crate::metrics::simple::{java_max, java_min};
 use crate::range_field::{self, RangeType};
 use crate::values::{BoundVs, DocCounter, NumReader, VsOpts, VsSpec, VsType, bind};
-use crate::xparser::{Field, Token, Tokens, XParser};
+use crate::xparser::{Ctor, Field, Token, Tokens, XParser};
 
 /// `DoubleBounds`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -38,38 +38,46 @@ pub struct DoubleBounds {
 }
 
 impl DoubleBounds {
+    /// `DoubleBounds.PARSER`: a `ConstructingObjectParser` whose constructor (called by
+    /// reflection, hence the wrapping) checks the bounds.
     fn parse(p: &mut XParser<'_>) -> Result<DoubleBounds> {
         let fields = [Field::new("min", Tokens::DOUBLE_OR_NULL), Field::new("max", Tokens::DOUBLE_OR_NULL)];
         let mut min = None;
         let mut max = None;
-        p.object("double_bounds", &fields, |p, i| {
-            let v = if p.token() == Token::Null { None } else { Some(p.double_value()?) };
-            if i == 0 {
-                min = v;
-            } else {
-                max = v;
+        p.constructing("double_bounds", &fields, &[0, 1], &[], |p, ev| {
+            let check = |msg: String| -> AggError {
+                AggError::illegal_argument("Cannot instantiate an object of org.elasticsearch.search.aggregations.bucket.histogram.DoubleBounds")
+                    .caused_by(AggError::new(400, "invocation_target_exception", "").caused_by(AggError::illegal_argument(msg)))
+            };
+            match ev {
+                Ctor::Build => {
+                    if let Some(m) = min
+                        && !f64::is_finite(m)
+                    {
+                        return Err(check(format!("min bound must be finite, got: {}", java_double(m))));
+                    }
+                    if let Some(m) = max
+                        && !f64::is_finite(m)
+                    {
+                        return Err(check(format!("max bound must be finite, got: {}", java_double(m))));
+                    }
+                    if let (Some(a), Some(b)) = (min, max)
+                        && b < a
+                    {
+                        return Err(check(format!("max bound [{}] must be greater than min bound [{}]", java_double(b), java_double(a))));
+                    }
+                }
+                Ctor::Field(i) => {
+                    let v = if p.token() == Token::Null { None } else { Some(p.double_value()?) };
+                    if i == 0 {
+                        min = v;
+                    } else {
+                        max = v;
+                    }
+                }
             }
-            Ok(())
+            Ok(None)
         })?;
-        if let Some(m) = min
-            && !m.is_finite()
-        {
-            return Err(AggError::illegal_argument(format!("min bound must be finite, got: {}", java_double(m))));
-        }
-        if let Some(m) = max
-            && !m.is_finite()
-        {
-            return Err(AggError::illegal_argument(format!("max bound must be finite, got: {}", java_double(m))));
-        }
-        if let (Some(a), Some(b)) = (min, max)
-            && b < a
-        {
-            return Err(AggError::illegal_argument(format!(
-                "max bound [{}] must be greater than min bound [{}]",
-                java_double(b),
-                java_double(a)
-            )));
-        }
         Ok(DoubleBounds { min, max })
     }
 
@@ -135,7 +143,7 @@ impl LongBoundsSpec {
             )));
         }
         let r = rounding.without_offset();
-        Ok((min.map(|v| r.round(v)), max.map(|v| r.round(v))))
+        Ok((min.map(|v| r.round_bound(v)).transpose()?, max.map(|v| r.round_bound(v)).transpose()?))
     }
 
     fn to_string_java(&self) -> String {
@@ -752,6 +760,13 @@ impl HistoAgg {
 }
 
 impl Aggregator for HistoAgg {
+    fn profile_type(&self) -> &'static str {
+        match (&self.out, self.range.is_some()) {
+            (Out::Numeric { .. }, false) => "NumericHistogramAggregator",
+            (Out::Numeric { .. }, true) => "RangeHistogramAggregator",
+            (Out::Date { .. }, _) => "DateHistogramAggregator",
+        }
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         if let Some(src) = &mut self.range {
@@ -854,32 +869,40 @@ impl Aggregator for HistoAgg {
         for (o, k) in self.ords.keys().iter().enumerate() {
             by_owning.entry(k.0).or_default().push(o as u32);
         }
-        let mut per: Vec<Vec<u32>> = Vec::with_capacity(owning.len());
-        for &own in owning {
-            let mut ords = by_owning.get(&own).cloned().unwrap_or_default();
-            match &self.out {
-                Out::Numeric { .. } => ords.sort_by(|&a, &b| java_double_compare(f64::from_bits(self.ords.key(a).1), f64::from_bits(self.ords.key(b).1))),
-                Out::Date { .. } => ords.sort_by_key(|&a| self.ords.key(a).1 as i64),
+        // `buildAggregationsForVariableBuckets` builds the sub-aggregations in bucket ordinal
+        // order (which `rare_terms` below can observe), then sorts each histogram by key. A
+        // date_histogram whose shard range has few enough rounding points runs as a `range`
+        // (`FromDateRange`), whose buckets are in key order; that is assumed here.
+        let mut per: Vec<Vec<u32>> = owning.iter().map(|own| by_owning.get(own).cloned().unwrap_or_default()).collect();
+        if let Out::Date { .. } = &self.out {
+            for ords in &mut per {
+                ords.sort_by_key(|&a| self.ords.key(a).1 as i64);
             }
-            per.push(ords);
         }
         let all: Vec<u32> = per.iter().flatten().copied().collect();
         if let Some(starts) = &self.starts {
             SizedAncestor::publish(starts, all.iter().map(|&o| (o, Some(self.ords.key(o).1 as i64))));
         }
-        let mut aggs = self.subs.build(&all)?.into_iter();
+        let mut built = self.subs.build(&all)?.into_iter();
+        let per: Vec<Vec<(u32, Aggs)>> = per
+            .into_iter()
+            .map(|ords| {
+                let mut v: Vec<(u32, Aggs)> = ords.into_iter().map(|o| (o, built.next().unwrap_or_default())).collect();
+                match &self.out {
+                    Out::Numeric { .. } => v.sort_by(|a, b| java_double_compare(f64::from_bits(self.ords.key(a.0).1), f64::from_bits(self.ords.key(b.0).1))),
+                    Out::Date { .. } => v.sort_by_key(|a| self.ords.key(a.0).1 as i64),
+                }
+                v
+            })
+            .collect();
         let mut out = Vec::with_capacity(owning.len());
         for ords in per {
             match &self.out {
                 Out::Numeric { cfg, empty } => {
                     let KeyFn::Numeric { interval, offset, .. } = &self.key_fn else { unreachable!() };
                     let buckets = ords
-                        .iter()
-                        .map(|&o| HistoBucket {
-                            key: f64::from_bits(self.ords.key(o).1) * interval + offset,
-                            doc_count: self.counts[o as usize],
-                            aggs: aggs.next().unwrap_or_default(),
-                        })
+                        .into_iter()
+                        .map(|(o, aggs)| HistoBucket { key: f64::from_bits(self.ords.key(o).1) * interval + offset, doc_count: self.counts[o as usize], aggs })
                         .collect();
                     out.push(AggValue::Histogram(Box::new(Histogram {
                         buckets,
@@ -890,8 +913,8 @@ impl Aggregator for HistoAgg {
                 }
                 Out::Date { cfg, empty, offset, .. } => {
                     let buckets = ords
-                        .iter()
-                        .map(|&o| DateBucket { key: self.ords.key(o).1 as i64, doc_count: self.counts[o as usize], aggs: aggs.next().unwrap_or_default() })
+                        .into_iter()
+                        .map(|(o, aggs)| DateBucket { key: self.ords.key(o).1 as i64, doc_count: self.counts[o as usize], aggs })
                         .collect();
                     out.push(AggValue::DateHistogram(Box::new(DateHistogram {
                         buckets,
@@ -1209,50 +1232,51 @@ pub struct DateHistogram {
 
 impl DateHistogram {
     fn next_key(&self, e: &DateEmptyInfo, key: i64) -> i64 {
-        e.rounding.next_rounding_value(key - self.offset) + self.offset
+        e.rounding.next_rounding_value(key.wrapping_sub(self.offset)).wrapping_add(self.offset)
     }
 
+    /// Calls `on` with every empty key, in order. Keys use Java's wrapping `long` arithmetic;
+    /// a step that wraps (does not move forward) ends a run instead of looping.
     fn iterate_empty(&self, list: &[DateBucket], mut on: impl FnMut(i64) -> Result<()>) -> Result<()> {
         let Some(e) = &self.empty else { return Ok(()) };
         let off = self.offset;
+        let run = |mut key: i64, end: i64, inclusive: bool, on: &mut dyn FnMut(i64) -> Result<()>| -> Result<()> {
+            while key < end || (inclusive && key == end) {
+                on(key)?;
+                let next = self.next_key(e, key);
+                if next <= key {
+                    break;
+                }
+                key = next;
+            }
+            Ok(())
+        };
         if let Some((bmin, bmax)) = e.bounds {
             match list.first() {
                 None => {
                     if let (Some(mn), Some(mx)) = (bmin, bmax) {
-                        let mut key = mn + off;
-                        let max = mx + off;
-                        while key <= max {
-                            on(key)?;
-                            key = self.next_key(e, key);
-                        }
+                        run(mn.wrapping_add(off), mx.wrapping_add(off), true, &mut on)?;
                     }
                 }
                 Some(first) => {
                     if let Some(mn) = bmin {
-                        let mut key = mn + off;
-                        while key < first.key {
-                            on(key)?;
-                            key = self.next_key(e, key);
-                        }
+                        run(mn.wrapping_add(off), first.key, false, &mut on)?;
                     }
                 }
             }
         }
         for w in list.windows(2) {
-            let mut key = self.next_key(e, w[0].key);
-            while key < w[1].key {
-                on(key)?;
-                key = self.next_key(e, key);
+            let next = self.next_key(e, w[0].key);
+            if next > w[0].key {
+                run(next, w[1].key, false, &mut on)?;
             }
         }
         if let (Some((_, Some(mx))), Some(last)) = (e.bounds, list.last())
-            && mx + off > last.key
+            && mx.wrapping_add(off) > last.key
         {
-            let mut key = self.next_key(e, last.key);
-            let max = mx + off;
-            while key <= max {
-                on(key)?;
-                key = self.next_key(e, key);
+            let next = self.next_key(e, last.key);
+            if next > last.key {
+                run(next, mx.wrapping_add(off), true, &mut on)?;
             }
         }
         Ok(())

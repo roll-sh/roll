@@ -2236,13 +2236,13 @@
  {
   "request": {
    "script": {
-    "source": "Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); return [c.getDisplayNames(Calendar.YEAR, Calendar.ALL_STYLES, Locale.US), c.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.NARROW_STANDALONE, Locale.US), c.getDisplayName(Calendar.MONTH, Calendar.SHORT_STANDALONE, Locale.forLanguageTag('ru')), c.getDisplayName(Calendar.MONTH, Calendar.LONG_FORMAT, Locale.forLanguageTag('ru'))]",
+    "source": "Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1700000000000L); return [c.getDisplayNames(Calendar.YEAR, Calendar.ALL_STYLES, Locale.US), c.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.NARROW_STANDALONE, Locale.US), c.getDisplayName(Calendar.MONTH, Calendar.SHORT_STANDALONE, Locale.forLanguageTag('ru')), c.getDisplayName(Calendar.MONTH, Calendar.LONG_FORMAT, Locale.forLanguageTag('ru'))]",
     "lang": "painless"
    }
   },
   "status": 200,
   "response": {
-   "result": "[null, W, окт., октября]"
+   "result": "[null, T, нояб., ноября]"
   }
  },
  {

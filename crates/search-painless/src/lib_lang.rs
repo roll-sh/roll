@@ -1,8 +1,9 @@
 //! `java.lang`: `Object`, `String`, the boxes, `Math`, `StringBuilder`, exceptions.
 //!
 //! Strings index by UTF-16 code unit like Java's; numbers print and parse with Java's rules
-//! (see [`crate::java`]); `Math` uses fdlibm (the `libm` crate), which is what `StrictMath`
-//! specifies, so results are the same on every platform.
+//! (see [`crate::java`]). `StrictMath` is fdlibm 5.3 bit for bit: [`crate::fdlibm`] where the
+//! `libm` crate (musl) rounds differently, `libm` elsewhere; `Math` shares those except for the
+//! functions HotSpot intrinsifies, which use the platform's libm.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -293,8 +294,14 @@ fn substring_range(st: &JStr, begin: i64, end: i64, extra: &[&str]) -> VR {
     if begin < 0 || end > len as i64 || begin > end {
         return Err(sioobe_range(begin, end, len, extra));
     }
-    let (b, e) = (st.byte_index(begin as usize).unwrap(), st.byte_index(end as usize).unwrap());
-    Ok(Value::str(&st.as_str()[b..e]))
+    let (mut b, e) = (st.byte_index(begin as usize).unwrap(), st.byte_index(end as usize).unwrap());
+    // Strings hold no lone surrogates: a begin index inside a surrogate pair skips the whole
+    // character (an end index inside one drops it), so stepping `substring(1)` still makes
+    // progress where Java would leave the low surrogate
+    if !st.is_ascii() && (java::byte_to_utf16(st.as_str(), b) as i64) < begin {
+        b += st.as_str()[b..].chars().next().map_or(0, char::len_utf8);
+    }
+    Ok(Value::str(&st.as_str()[b.min(e)..e]))
 }
 
 fn str_substring1(_: &mut Vm, a: &mut [Value]) -> VR {
@@ -316,9 +323,6 @@ fn str_compare_to(_: &mut Vm, a: &mut [Value]) -> VR {
     Ok(Value::Int(java::compare_strings(s(&a[0]), o.as_str())))
 }
 
-fn fold_case(c: u16) -> u16 {
-    java::char_lower(java::char_upper(c))
-}
 
 /// `StringBuilder.compareTo(StringBuilder)` (and `StringBuffer`'s): the `String.compareTo`
 /// order over the current contents; the argument must be a builder of the receiver's class.
@@ -358,19 +362,7 @@ fn str_compare_ignore_case(_: &mut Vm, a: &mut [Value]) -> VR {
     }
     let o = string(&a[1], "compareToIgnoreCase")?.clone();
     let (x, y): (Vec<u16>, Vec<u16>) = (s(&a[0]).encode_utf16().collect(), o.as_str().encode_utf16().collect());
-    for i in 0..x.len().min(y.len()) {
-        let (c1, c2) = (x[i], y[i]);
-        if c1 != c2 {
-            let (u1, u2) = (java::char_upper(c1), java::char_upper(c2));
-            if u1 != u2 {
-                let (l1, l2) = (java::char_lower(u1), java::char_lower(u2));
-                if l1 != l2 {
-                    return Ok(Value::Int(l1 as i32 - l2 as i32));
-                }
-            }
-        }
-    }
-    Ok(Value::Int(x.len() as i32 - y.len() as i32))
+    Ok(Value::Int(java::compare_ci(&x, &y)))
 }
 
 fn str_concat(_: &mut Vm, a: &mut [Value]) -> VR {
@@ -433,10 +425,7 @@ fn str_starts_with2(_: &mut Vm, a: &mut [Value]) -> VR {
 fn str_equals_ignore_case(_: &mut Vm, a: &mut [Value]) -> VR {
     let Value::Str(o) = &a[1] else { return Ok(Value::Bool(false)) };
     let (x, y): (Vec<u16>, Vec<u16>) = (s(&a[0]).encode_utf16().collect(), o.as_str().encode_utf16().collect());
-    if x.len() != y.len() {
-        return Ok(Value::Bool(false));
-    }
-    Ok(Value::Bool(x.iter().zip(y.iter()).all(|(c1, c2)| c1 == c2 || fold_case(*c1) == fold_case(*c2))))
+    Ok(Value::Bool(x.len() == y.len() && java::compare_ci(&x, &y) == 0))
 }
 
 fn index_of_impl(hay: &JStr, needle: &str, from: i64) -> i32 {
@@ -771,17 +760,9 @@ fn region(_: &mut Vm, a: &mut [Value], ic: bool) -> VR {
     if to < 0 || oo < 0 || to > x.len() as i64 - len || oo > y.len() as i64 - len {
         return Ok(Value::Bool(false));
     }
-    for k in 0..len.max(0) as usize {
-        let (c1, c2) = (x[to as usize + k], y[oo as usize + k]);
-        if c1 == c2 {
-            continue;
-        }
-        if ic && (java::char_upper(c1) == java::char_upper(c2) || fold_case(c1) == fold_case(c2)) {
-            continue;
-        }
-        return Ok(Value::Bool(false));
-    }
-    Ok(Value::Bool(true))
+    let len = len.max(0) as usize;
+    let (xr, yr) = (&x[to as usize..to as usize + len], &y[oo as usize..oo as usize + len]);
+    Ok(Value::Bool(if ic { java::compare_ci(xr, yr) == 0 } else { xr == yr }))
 }
 
 fn str_copy_value_of(_: &mut Vm, a: &mut [Value]) -> VR {
@@ -1180,10 +1161,18 @@ fn bool_parse(_: &mut Vm, a: &mut [Value]) -> VR {
     Ok(Value::Bool(matches!(&a[0], Value::Str(s) if s.as_str().eq_ignore_ascii_case("true"))))
 }
 
-fn decode_number(st: &str) -> Option<i64> {
-    let (neg, rest) = match st.as_bytes().first() {
-        Some(b'-') => (true, &st[1..]),
-        Some(b'+') => (false, &st[1..]),
+/// `Integer.decode` / `Long.decode` (JDK 27): sign, radix prefix, then `parseInt` of the rest,
+/// retried with the sign glued back on (the `MIN_VALUE` case) so a genuine failure names the
+/// digits after the prefix.
+fn decode_number(st: &str, long: bool) -> Result<i64, Thrown> {
+    let (class, file, empty_line, sign_line, parse_line) = if long { ("Long", "Long.java", 1016, 1040, 1051) } else { ("Integer", "Integer.java", 1323, 1347, 1358) };
+    let frame = |line: u32| format!("java.lang.{class}.decode({file}:{line})");
+    if st.is_empty() {
+        return Err(nfe("Zero length string".into(), &[&frame(empty_line)]));
+    }
+    let (neg, rest) = match st.as_bytes()[0] {
+        b'-' => (true, &st[1..]),
+        b'+' => (false, &st[1..]),
         _ => (false, st),
     };
     let (radix, digits) = if let Some(r) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")).or_else(|| rest.strip_prefix('#')) {
@@ -1194,39 +1183,40 @@ fn decode_number(st: &str) -> Option<i64> {
         (10, rest)
     };
     if digits.starts_with(['-', '+']) {
-        return None;
+        return Err(nfe("Sign character in wrong position".into(), &[&frame(sign_line)]));
     }
-    let s = if neg { format!("-{digits}") } else { digits.to_string() };
-    java::parse_long(&s, radix)
+    let constant = if neg { format!("-{digits}") } else { digits.to_string() };
+    let parsed = java::parse_long(&constant, radix).filter(|&v| long || i32::try_from(v).is_ok());
+    parsed.ok_or_else(|| {
+        let mut t = parse_failure(Some(&constant), radix, long, false);
+        t.frames.push(format!("java.base/{}", frame(parse_line)));
+        t
+    })
 }
 
 fn int_decode(_: &mut Vm, a: &mut [Value]) -> VR {
-    let st = s(&a[0]).to_string();
-    match decode_number(&st).and_then(|v| i32::try_from(v).ok()) {
-        Some(v) => Ok(Value::Int(v)),
-        None => Err(nfe(format!("For input string: \"{st}\""), &[])),
-    }
+    Ok(Value::Int(decode_number(s(&a[0]), false)? as i32))
 }
 fn long_decode(_: &mut Vm, a: &mut [Value]) -> VR {
-    let st = s(&a[0]).to_string();
-    match decode_number(&st) {
-        Some(v) => Ok(Value::Long(v)),
-        None => Err(nfe(format!("For input string: \"{st}\""), &[])),
+    Ok(Value::Long(decode_number(s(&a[0]), true)?))
+}
+/// `Short.decode` / `Byte.decode`: `Integer.decode`, then the range check.
+fn small_decode(st: &str, class: &str, line: u32, min: i64, max: i64) -> Result<i64, Thrown> {
+    let wrap = |mut t: Thrown| {
+        t.frames.push(format!("java.base/java.lang.{class}.decode({class}.java:{})", line));
+        t
+    };
+    let v = decode_number(st, false).map_err(wrap)?;
+    if v < min || v > max {
+        return Err(nfe(format!("Value {v} out of range from input {st}"), &[&format!("java.lang.{class}.decode({class}.java:{})", line + 2)]));
     }
+    Ok(v)
 }
 fn short_decode(_: &mut Vm, a: &mut [Value]) -> VR {
-    let st = s(&a[0]).to_string();
-    match decode_number(&st).and_then(|v| i16::try_from(v).ok()) {
-        Some(v) => Ok(Value::Short(v)),
-        None => Err(nfe(format!("For input string: \"{st}\""), &[])),
-    }
+    Ok(Value::Short(small_decode(s(&a[0]), "Short", 328, i16::MIN as i64, i16::MAX as i64)? as i16))
 }
 fn byte_decode(_: &mut Vm, a: &mut [Value]) -> VR {
-    let st = s(&a[0]).to_string();
-    match decode_number(&st).and_then(|v| i8::try_from(v).ok()) {
-        Some(v) => Ok(Value::Byte(v)),
-        None => Err(nfe(format!("For input string: \"{st}\""), &[])),
-    }
+    Ok(Value::Byte(small_decode(s(&a[0]), "Byte", 322, i8::MIN as i64, i8::MAX as i64)? as i8))
 }
 
 fn int_value_of_radix(vm: &mut Vm, a: &mut [Value]) -> VR {
@@ -1332,7 +1322,7 @@ fn int_remainder_unsigned(_: &mut Vm, a: &mut [Value]) -> VR {
 }
 int_fn!(int_hash, |x| x);
 int_fn!(int_highest_one_bit, |x| if x == 0 { 0 } else { (1u32 << (31 - (x as u32).leading_zeros())) as i32 });
-int_fn!(int_lowest_one_bit, |x| x & x.wrapping_neg());
+int_fn!(int_lowest_one_bit, |x| x.isolate_lowest_one());
 int2_fn!(int_max, |x, y| x.max(y));
 int2_fn!(int_min, |x, y| x.min(y));
 int_fn!(int_nlz, |x| x.leading_zeros() as i32);
@@ -1343,26 +1333,77 @@ int2_fn!(int_rotate_left, |x, y| x.rotate_left((y & 31) as u32));
 int2_fn!(int_rotate_right, |x, y| x.rotate_right((y & 31) as u32));
 int_fn!(int_signum, |x| x.signum());
 fn int_parse_unsigned(_: &mut Vm, a: &mut [Value]) -> VR {
-    parse_unsigned(&a[0], 10, false)
+    parse_unsigned(&a[0], 10, false, true)
 }
 fn int_parse_unsigned_radix(_: &mut Vm, a: &mut [Value]) -> VR {
-    parse_unsigned(&a[0], int(&a[1]) as u32, false)
+    parse_unsigned(&a[0], int(&a[1]), false, false)
 }
 fn long_parse_unsigned(_: &mut Vm, a: &mut [Value]) -> VR {
-    parse_unsigned(&a[0], 10, true)
+    parse_unsigned(&a[0], 10, true, true)
 }
 fn long_parse_unsigned_radix(_: &mut Vm, a: &mut [Value]) -> VR {
-    parse_unsigned(&a[0], int(&a[1]) as u32, true)
+    parse_unsigned(&a[0], int(&a[1]), true, false)
 }
-fn parse_unsigned(v: &Value, radix: u32, wide: bool) -> VR {
-    let st = s(v).to_string();
-    let digits = st.strip_prefix('+').unwrap_or(&st);
-    let parsed = if digits.is_empty() || digits.starts_with('-') { None } else { u64::from_str_radix(digits, radix).ok() };
-    match parsed {
-        Some(v) if wide => Ok(Value::Long(v as i64)),
-        Some(v) if v <= u32::MAX as u64 => Ok(Value::Int(v as u32 as i32)),
-        _ => Err(nfe(java::number_format_message(&st, radix), &[])),
+/// `Integer.parseUnsignedInt` / `Long.parseUnsignedLong` (JDK 27): radix checks first, then
+/// `Character.digit` per UTF-16 unit, stopping at the first digit that would leave the range.
+/// `wrapper`: the one-argument overload (its frame).
+fn parse_unsigned(v: &Value, radix: i32, wide: bool, wrapper: bool) -> VR {
+    // lines of: null, MIN_RADIX, MAX_RADIX, empty, minus, bad digit, out of range, the overload
+    let (method, file, l) = if wide { ("Long.parseUnsignedLong", "Long.java", [709, 713, 718, 724, 729, 750, 752, 855]) } else { ("Integer.parseUnsignedInt", "Integer.java", [675, 679, 684, 690, 695, 716, 718, 821]) };
+    let fail = |msg: String, line: u32, input: bool| {
+        let mut fr: Vec<String> = Vec::new();
+        if input {
+            fr.push("java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)".into());
+        }
+        fr.push(format!("java.lang.{method}({file}:{line})"));
+        if wrapper {
+            fr.push(format!("java.lang.{method}({file}:{})", l[7]));
+        }
+        let refs: Vec<&str> = fr.iter().map(String::as_str).collect();
+        nfe(msg, &refs)
+    };
+    let Value::Str(js) = v else {
+        return Err(fail("Cannot parse null string".into(), l[0], false));
+    };
+    if radix < 2 {
+        return Err(fail(format!("radix {radix} less than Character.MIN_RADIX"), l[1], false));
     }
+    if radix > 36 {
+        return Err(fail(format!("radix {radix} greater than Character.MAX_RADIX"), l[2], false));
+    }
+    let st = js.as_str();
+    let mut units = st.encode_utf16();
+    let Some(first) = units.next() else { return Err(fail(java::number_format_message(st, radix as u32), l[3], true)) };
+    if first == b'-' as u16 {
+        return Err(fail(format!("Illegal leading minus sign on unsigned string {st}."), l[4], false));
+    }
+    let bad = || fail(java::number_format_message(st, radix as u32), l[5], true);
+    let max: u64 = if wide { u64::MAX } else { u32::MAX as u64 };
+    let mut result: u64 = 0;
+    let mut any = false;
+    if first != b'+' as u16 {
+        let d = crate::unicode::digit(first as i32, radix);
+        if d < 0 {
+            return Err(bad());
+        }
+        result = d as u64;
+        any = true;
+    }
+    for u in units {
+        let d = crate::unicode::digit(u as i32, radix);
+        if d < 0 {
+            return Err(bad());
+        }
+        match result.checked_mul(radix as u64).and_then(|r| r.checked_add(d as u64)).filter(|&r| r <= max) {
+            Some(r) => result = r,
+            None => return Err(fail(format!("String value {st} exceeds range of unsigned {}.", if wide { "long" } else { "int" }), l[6], false)),
+        }
+        any = true;
+    }
+    if !any {
+        return Err(bad());
+    }
+    Ok(if wide { Value::Long(result as i64) } else { Value::Int(result as u32 as i32) })
 }
 
 long_fn!(long_bit_count, Int, |x| x.count_ones() as i32);
@@ -1384,7 +1425,7 @@ fn long_remainder_unsigned(_: &mut Vm, a: &mut [Value]) -> VR {
 }
 long_fn!(long_hash, Int, |x| java::long_hash(x));
 long_fn!(long_highest_one_bit, Long, |x| if x == 0 { 0 } else { (1u64 << (63 - (x as u64).leading_zeros())) as i64 });
-long_fn!(long_lowest_one_bit, Long, |x| x & x.wrapping_neg());
+long_fn!(long_lowest_one_bit, Long, |x| x.isolate_lowest_one());
 long2_fn!(long_max, Long, |x, y| x.max(y));
 long2_fn!(long_min, Long, |x, y| x.min(y));
 long_fn!(long_nlz, Int, |x| x.leading_zeros() as i32);
@@ -1812,18 +1853,18 @@ math1!(math_acos, |x| libm::acos(x));
 math1!(math_asin, |x| libm::asin(x));
 math1!(math_atan, |x| libm::atan(x));
 math2!(math_atan2, |x, y| libm::atan2(x, y));
-math1!(math_cbrt, |x| libm::cbrt(x));
+math1!(math_cbrt, |x| crate::fdlibm::cbrt(x));
 math1!(math_ceil, |x| x.ceil());
 math2!(math_copy_sign, |x, y| x.copysign(y));
-math1!(math_cos, |x| libm::cos(x));
-math1!(math_cosh, |x| libm::cosh(x));
-math1!(math_exp, |x| libm::exp(x));
-math1!(math_expm1, |x| libm::expm1(x));
+math1!(math_cos, |x| crate::fdlibm::cos(x));
+math1!(math_cosh, |x| crate::fdlibm::cosh(x));
+math1!(math_exp, |x| crate::fdlibm::exp(x));
+math1!(math_expm1, |x| crate::fdlibm::expm1(x));
 math1!(math_floor, |x| x.floor());
-math2!(math_hypot, |x, y| libm::hypot(x, y));
+math2!(math_hypot, |x, y| crate::fdlibm::hypot(x, y));
 math2!(math_ieee_rem, |x, y| java::ieee_remainder(x, y));
-math1!(math_log, |x| libm::log(x));
-math1!(math_log10, |x| libm::log10(x));
+math1!(math_log, |x| crate::fdlibm::log(x));
+math1!(math_log10, |x| crate::fdlibm::log10(x));
 math1!(math_log1p, |x| libm::log1p(x));
 math2!(math_max, |x, y| java_max(x, y));
 math2!(math_min, |x, y| java_min(x, y));
@@ -1833,11 +1874,11 @@ math1!(math_next_up, |x| java::next_up(x));
 math2!(math_pow, |x, y| java_pow(x, y));
 math1!(math_rint, |x| java::math_rint(x));
 math1!(math_signum, |x| java::math_signum(x));
-math1!(math_sin, |x| libm::sin(x));
-math1!(math_sinh, |x| libm::sinh(x));
+math1!(math_sin, |x| crate::fdlibm::sin(x));
+math1!(math_sinh, |x| crate::fdlibm::sinh(x));
 math1!(math_sqrt, |x| x.sqrt());
 math1!(math_tan, |x| libm::tan(x));
-math1!(math_tanh, |x| libm::tanh(x));
+math1!(math_tanh, |x| crate::fdlibm::tanh(x));
 math1!(math_to_degrees, |x| x * 57.29577951308232);
 math1!(math_to_radians, |x| x * 0.017453292519943295);
 math1!(math_ulp, |x| java::ulp(x));
@@ -1852,7 +1893,7 @@ math1!(math_tan_i, |x| x.tan());
 math2!(math_pow_i, |x, y| java_pow_with(x, y, f64::powf));
 
 /// `Math.pow` special cases differ from C's for `pow(1, NaN)` and `pow(-1, ±Inf)`.
-fn java_pow(x: f64, y: f64) -> f64 {
+pub(crate) fn java_pow(x: f64, y: f64) -> f64 {
     java_pow_with(x, y, libm::pow)
 }
 
@@ -2001,7 +2042,9 @@ fn sb_delete_char_at(_: &mut Vm, a: &mut [Value]) -> VR {
         }
         let b = java::utf16_to_byte(s, i as usize).unwrap();
         let e = java::utf16_to_byte(s, i as usize + 1).unwrap_or(s.len());
-        s.replace_range(b..e.max(b + 1).min(s.len()), "");
+        // half of a surrogate pair cannot be kept on its own here: the whole character goes
+        let e = if e > b { e } else { b + s[b..].chars().next().map_or(0, char::len_utf8) };
+        s.replace_range(b..e, "");
         Ok(())
     })?;
     Ok(a[0].clone())
@@ -2212,6 +2255,31 @@ fn ex_get_message(_: &mut Vm, a: &mut [Value]) -> VR {
     })
 }
 
+/// `DateTimeParseException.getErrorIndex()` / `getParsedString()`, from the canonical message
+/// (`Text '…' could not be parsed at index N`), or the constructor's arguments.
+fn dtpe_parts(a: &[Value]) -> (Option<String>, i32) {
+    let Value::Obj(o) = &a[0] else { return (None, 0) };
+    let Obj::Exception(e) = &**o else { return (None, 0) };
+    let msg = e.message.clone().unwrap_or_default();
+    let text = e.parsed.clone().or_else(|| msg.strip_prefix("Text '").and_then(|r| r.rfind("' could not be parsed").map(|i| r[..i].to_string())));
+    let index = e.error_offset.unwrap_or_else(|| msg.rsplit("at index ").next().filter(|_| msg.contains("at index ")).and_then(|n| n.trim().parse().ok()).unwrap_or(0));
+    (text, index)
+}
+fn dtpe_error_index(_: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(Value::Int(dtpe_parts(a).1))
+}
+fn dtpe_parsed_string(_: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(dtpe_parts(a).0.map(Value::string).unwrap_or(Value::Null))
+}
+/// `new DateTimeParseException(message, parsedData, errorIndex)`.
+fn dtpe_new(_: &mut Vm, a: &mut [Value]) -> VR {
+    let message = if a[0].is_null() { None } else { Some(a[0].to_java_string()) };
+    let mut e = JException::new(cls::DATE_TIME_PARSE_EXCEPTION, message);
+    e.error_offset = Some(int(&a[2]));
+    e.parsed = if a[1].is_null() { None } else { Some(a[1].to_java_string()) };
+    Ok(Value::obj(Obj::Exception(e)))
+}
+
 fn ex_get_stack_trace(_: &mut Vm, _: &mut [Value]) -> VR {
     Ok(Value::obj(Obj::Array(JArray::new(Ty::of(cls::STACK_TRACE_ELEMENT), 0))))
 }
@@ -2300,6 +2368,9 @@ pub fn register(b: &mut Builder) {
     b.supers(CLONE_NOT_SUPPORTED_EXCEPTION, &[EXCEPTION]);
     b.supers(INTERRUPTED_EXCEPTION, &[EXCEPTION]);
     b.supers(DATE_TIME_PARSE_EXCEPTION, &[DATE_TIME_EXCEPTION]);
+    b.m(DATE_TIME_PARSE_EXCEPTION, "int getErrorIndex()", dtpe_error_index);
+    b.m(DATE_TIME_PARSE_EXCEPTION, "String getParsedString()", dtpe_parsed_string);
+    b.c(DATE_TIME_PARSE_EXCEPTION, "(String,CharSequence,int)", dtpe_new);
     b.supers(UNSUPPORTED_TEMPORAL_TYPE_EXCEPTION, &[DATE_TIME_EXCEPTION]);
     b.supers(ZONE_RULES_EXCEPTION, &[DATE_TIME_EXCEPTION]);
     for c in [ENUM_CONSTANT_NOT_PRESENT_EXCEPTION, TYPE_NOT_PRESENT_EXCEPTION, FORMATTER_CLOSED_EXCEPTION, ILLFORMED_LOCALE_EXCEPTION, MISSING_RESOURCE_EXCEPTION] {
@@ -2339,9 +2410,9 @@ pub fn register(b: &mut Builder) {
     b.m(CHAR_SEQUENCE, "CharSequence subSequence(int,int)", cs_sub_sequence);
     b.m(CHAR_SEQUENCE, "String toString()", cs_to_string);
     let m = b.m(CHAR_SEQUENCE, "String replaceAll(Pattern,Function)", crate::regex::cs_replace_all);
-    b.aug(m, "java.util.regex.Pattern.matcher(java.lang.CharSequence)");
+    b.aug(m, crate::regex::REGEX_INPUT_AUG);
     let m = b.m(CHAR_SEQUENCE, "String replaceFirst(Pattern,Function)", crate::regex::cs_replace_first);
-    b.aug(m, "java.util.regex.Pattern.matcher(java.lang.CharSequence)");
+    b.aug(m, crate::regex::REGEX_INPUT_AUG);
     b.m(COMPARABLE, "int compareTo(def)", compare_values);
 
     // String

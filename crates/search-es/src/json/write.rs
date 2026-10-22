@@ -119,7 +119,26 @@ pub(crate) fn write_number(out: &mut Vec<u8>, n: &Number) {
         Number::Int(i) => out.extend_from_slice(itoa::Buffer::new().format(*i).as_bytes()),
         Number::UInt(u) => out.extend_from_slice(itoa::Buffer::new().format(*u).as_bytes()),
         Number::Big(s) => out.extend_from_slice(s.as_bytes()),
+        // Jackson quotes non-finite doubles (`QUOTE_NON_NUMERIC_NUMBERS`), so the output stays
+        // valid JSON that any parser (including ours) reads back as a string.
+        Number::Float(f) if !f.is_finite() => {
+            out.push(b'"');
+            out.extend_from_slice(java_double(*f).as_bytes());
+            out.push(b'"');
+        }
         Number::Float(f) => out.extend_from_slice(java_double(*f).as_bytes()),
+    }
+}
+
+/// Replaces non-finite doubles with the strings Jackson writes for them, so a value matches what
+/// Elasticsearch reads back from the bytes it serialized (an ingest document's `NaN` is indexed
+/// as the string `"NaN"`).
+pub fn quote_non_finite(v: &mut Value) {
+    match v {
+        Value::Num(Number::Float(f)) if !f.is_finite() => *v = Value::Str(java_double(*f)),
+        Value::Obj(m) => m.values_mut().for_each(quote_non_finite),
+        Value::Arr(a) => a.iter_mut().for_each(quote_non_finite),
+        _ => {}
     }
 }
 
@@ -264,6 +283,18 @@ mod tests {
         assert_eq!(java_float(0.1f32), "0.1");
         assert_eq!(java_float(1e10f32), "1.0E10");
         assert_eq!(java_float(3.4028235e38f32), "3.4028235E38");
+    }
+
+    #[test]
+    fn non_finite_doubles_are_quoted() {
+        let v = obj! { "a" => Value::Num(Number::Float(f64::NAN)), "b" => arr![Value::Num(Number::Float(f64::INFINITY)), Value::Num(Number::Float(f64::NEG_INFINITY))] };
+        let json = v.to_json();
+        assert_eq!(json, r#"{"a":"NaN","b":["Infinity","-Infinity"]}"#);
+        assert!(crate::json::parse(json.as_bytes()).is_ok());
+        assert_eq!(v.to_pretty_json(), "{\n  \"a\" : \"NaN\",\n  \"b\" : [\n    \"Infinity\",\n    \"-Infinity\"\n  ]\n}");
+        let mut q = v.clone();
+        quote_non_finite(&mut q);
+        assert_eq!(q, obj! { "a" => "NaN", "b" => arr!["Infinity", "-Infinity"] });
     }
 
     #[test]

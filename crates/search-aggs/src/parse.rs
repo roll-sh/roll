@@ -79,6 +79,7 @@ pub const ALL_TYPES: &[&str] = &[
     "multi_terms",
     "categorize_text",
     "frequent_item_sets",
+    "frequent_items",
     "geo_line",
     "geohex_grid",
     "cartesian_bounds",
@@ -138,6 +139,8 @@ pub enum AggKind {
     Composite(bucket::composite::CompositeSpec),
     GeoGrid(bucket::geogrid::GridSpec),
     MultiTerms(bucket::multi_terms::MultiTermsSpec),
+    FrequentItemSets(bucket::frequent_item_sets::FrequentItemSetsSpec),
+    CategorizeText(bucket::categorize_text::CategorizeTextSpec),
     RareTerms(bucket::rare_terms::RareTermsSpec),
     Significant(bucket::significant::SignificantSpec),
     SignificantText(bucket::significant::SigTextSpec),
@@ -174,6 +177,9 @@ pub struct ParseOptions<'a> {
     pub check_query: Option<QueryCheck<'a>>,
     /// Builds a `java.text.DecimalFormat` for pipeline `format`s.
     pub decimal_format: Option<DecimalFormatFactory<'a>>,
+    /// Whether a string compiles as a `java.util.regex.Pattern` (`categorize_text`'s
+    /// `categorization_filters`); without it a basic syntax check runs.
+    pub java_regex_valid: Option<&'a dyn Fn(&str) -> bool>,
 }
 
 /// Parses an `aggs` object.
@@ -181,7 +187,15 @@ pub fn parse_aggs(aggs: &Json, opts: &ParseOptions<'_>) -> Result<AggRequest> {
     let mut p = XParser::new(aggs, opts.src, opts.base.clone());
     match p.next_token() {
         Some(Token::StartObject) => {}
-        Some(t) => return Err(p.parsing_error(format!("Unexpected token {t} in [aggs]: aggregations definitions must start with the name of the aggregation."))),
+        // `SearchSourceBuilder.parseXContent` rejects a non-object `aggs` before the
+        // aggregations parser sees it.
+        Some(t) => {
+            let field = match opts.base.last() {
+                Some(Seg::Key(k)) => k.as_str(),
+                _ => "aggs",
+            };
+            return Err(p.parsing_error(format!("Unknown key for a {} in [{field}].", t.name())));
+        }
         None => return Ok(AggRequest::default()),
     }
     let (aggs, pipelines) = parse_level(&mut p, 0, opts)?;
@@ -285,7 +299,7 @@ fn parse_level(p: &mut XParser<'_>, level: usize, opts: &ParseOptions<'_>) -> Re
                 if type_name == "scripted_metric" {
                     subs = subs.map(|(_, pipes)| (Vec::new(), pipes));
                 }
-                if subs.is_some() && type_name != "scripted_metric" && (is_metric(type_name) || type_name == "significant_text") {
+                if subs.is_some() && type_name != "scripted_metric" && (is_metric(type_name) || matches!(type_name, "significant_text" | "frequent_item_sets" | "frequent_items")) {
                     return Err(AggError::illegal_argument(format!("Aggregator [{name}] of type [{type_name}] cannot accept sub-aggregations")));
                 }
                 if aggs.iter().any(|a| a.name == name) {
@@ -355,6 +369,19 @@ fn parse_type(p: &mut XParser<'_>, ty: &'static str, name: &str, opts: &ParseOpt
         "cartesian_centroid" => AggKind::Cartesian(metrics::cartesian::parse(p, metrics::cartesian::CartesianKind::Centroid)?),
         "composite" => AggKind::Composite(bucket::composite::parse(p)?),
         "multi_terms" => AggKind::MultiTerms(bucket::multi_terms::parse(p, name)?),
+        "categorize_text" => {
+            let check = |re: &str| match opts.java_regex_valid {
+                Some(f) => f(re),
+                None => bucket::categorize_text::basic_regex_ok(re),
+            };
+            AggKind::CategorizeText(bucket::categorize_text::parse(p, name, &check)?)
+        }
+        "frequent_item_sets" | "frequent_items" => {
+            if ty == "frequent_items" {
+                p.warnings.push("Deprecated field [frequent_items] used, expected [frequent_item_sets] instead".to_string());
+            }
+            AggKind::FrequentItemSets(bucket::frequent_item_sets::parse(p, name, &mut check)?)
+        }
         "rare_terms" => AggKind::RareTerms(bucket::rare_terms::parse(p, name)?),
         "significant_terms" => AggKind::Significant(bucket::significant::parse(p, name, &mut check)?),
         "significant_text" => AggKind::SignificantText(bucket::significant::parse_text(p, name, &mut check)?),
@@ -371,7 +398,7 @@ fn parse_type(p: &mut XParser<'_>, ty: &'static str, name: &str, opts: &ParseOpt
         "children" => AggKind::Join(bucket::join::parse(p, name, false)?),
         "parent" => AggKind::Join(bucket::join::parse(p, name, true)?),
         "random_sampler" => AggKind::RandomSampler(bucket::random_sampler::parse(p)?),
-        "range" | "date_range" | "geo_distance" => AggKind::Range(bucket::range::parse_range(p, ty)?),
+        "range" | "date_range" | "geo_distance" => AggKind::Range(bucket::range::parse_range(p, ty, name)?),
         "ip_range" => AggKind::IpRange(bucket::range::parse_ip_range(p)?),
         "ip_prefix" => AggKind::IpPrefix(bucket::range::parse_ip_prefix(p)?),
         "filter" => {
@@ -401,7 +428,7 @@ fn parse_type(p: &mut XParser<'_>, ty: &'static str, name: &str, opts: &ParseOpt
         "sampler" => AggKind::Single(bucket::single::parse_sampler(p, name)?),
         "diversified_sampler" => AggKind::Single(bucket::single::parse_diversified(p, name)?),
         "filters" => AggKind::Filters(bucket::filters::parse_filters(p, name, &mut check)?),
-        "adjacency_matrix" => AggKind::Adjacency(bucket::filters::parse_adjacency(p, &mut check)?),
+        "adjacency_matrix" => AggKind::Adjacency(bucket::filters::parse_adjacency(p, name, &mut check)?),
         other => return Err(unsupported(other)),
     };
     Ok(Parsed::Agg(kind))
@@ -409,6 +436,18 @@ fn parse_type(p: &mut XParser<'_>, ty: &'static str, name: &str, opts: &ParseOpt
 
 /// Binds a definition to a shard.
 pub fn create(def: &Arc<AggDef>, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
+    let Some(profiler) = ctx.profiler.clone() else { return create_inner(def, ctx) };
+    let started = std::time::Instant::now();
+    let id = profiler.register(&def.name, ctx.profile_parent);
+    let outer = ctx.profile_parent.replace(id);
+    let inner = create_inner(def, ctx);
+    ctx.profile_parent = outer;
+    let inner = inner?;
+    profiler.record_initialize(id, started, inner.as_ref());
+    Ok(Box::new(crate::profile::Profiled { inner, id, profiler }))
+}
+
+fn create_inner(def: &Arc<AggDef>, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
     match &def.kind {
         AggKind::Simple(s) => metrics::simple::create(def, s, ctx),
         AggKind::WeightedAvg(s) => metrics::simple::create_weighted_avg(def, s, ctx),
@@ -428,6 +467,8 @@ pub fn create(def: &Arc<AggDef>, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggreg
         AggKind::Composite(s) => bucket::composite::create(def, s, ctx),
         AggKind::GeoGrid(s) => bucket::geogrid::create(def, s, ctx),
         AggKind::MultiTerms(s) => bucket::multi_terms::create(def, s, ctx),
+        AggKind::FrequentItemSets(s) => bucket::frequent_item_sets::create(def, s, ctx),
+        AggKind::CategorizeText(s) => bucket::categorize_text::create(def, s, ctx),
         AggKind::RareTerms(s) => bucket::rare_terms::create(def, s, ctx),
         AggKind::Significant(s) => bucket::significant::create(def, s, ctx),
         AggKind::SignificantText(s) => bucket::significant::create_text(def, s, ctx),

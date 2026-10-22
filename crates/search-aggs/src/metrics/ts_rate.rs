@@ -41,8 +41,9 @@ pub fn unit_seconds(unit: Option<DateUnit>) -> i64 {
 }
 
 /// Parent aggregations Elasticsearch implements as `DeferableBucketAggregator`s.
-const DEFERABLE: [&str; 9] = [
+const DEFERABLE: [&str; 10] = [
     "terms",
+    "categorize_text",
     "multi_terms",
     "rare_terms",
     "significant_terms",
@@ -65,18 +66,110 @@ pub fn create(def: &AggDef, vs: BoundVs, unit: Option<DateUnit>, ctx: &mut BindC
         vs,
         unit_seconds: unit_seconds(unit),
         ordered: ctx.time_series_request,
-        tsid_field: info.as_ref().and_then(|i| i.tsid_field),
-        timestamp_field: info.as_ref().and_then(|i| i.timestamp_field),
         reader: None,
-        tsid: DvOrds::None,
-        keys: crate::bucket::time_series::SeriesKeys::new(info.as_ref().map(|i| i.dimensions.as_slice()).unwrap_or(&[])),
-        timestamps: DvNum::None,
-        series: hashbrown::HashMap::new(),
-        series_keys: Vec::new(),
+        order: SeriesOrder::new(info.as_ref()),
         samples: Vec::new(),
+        scan_from: 0,
+        last_valued: None,
         state: None,
         tracker: ctx.tracker(def),
     }))
+}
+
+/// Where Elasticsearch's time-series search visits a document: its series (in `_tsid` order)
+/// and its `@timestamp` (newest first within a series). Aggregators that depend on that order
+/// (counter `rate`, time-series `geo_line`) record `(series, time)` per collected doc and
+/// replay in [`SeriesOrder::replay_order`].
+pub(crate) struct SeriesOrder {
+    tsid_field: Option<u32>,
+    timestamp_field: Option<u32>,
+    tsid: DvOrds,
+    /// Series identity from the dimensions when there is no `_tsid` field.
+    keys: crate::bucket::time_series::SeriesKeys,
+    timestamps: DvNum,
+    /// `_tsid` bytes → series id.
+    series: hashbrown::HashMap<Vec<u8>, u32>,
+    series_keys: Vec<Vec<u8>>,
+    key: Vec<u8>,
+}
+
+impl SeriesOrder {
+    pub(crate) fn new(info: Option<&crate::field::TimeSeriesInfo>) -> SeriesOrder {
+        SeriesOrder {
+            tsid_field: info.and_then(|i| i.tsid_field),
+            timestamp_field: info.and_then(|i| i.timestamp_field),
+            tsid: DvOrds::None,
+            keys: crate::bucket::time_series::SeriesKeys::new(info.map(|i| i.dimensions.as_slice()).unwrap_or(&[])),
+            timestamps: DvNum::None,
+            series: hashbrown::HashMap::new(),
+            series_keys: Vec::new(),
+            key: Vec::new(),
+        }
+    }
+
+    pub(crate) fn set_segment(&mut self, seg: &SegmentContext) {
+        self.tsid = match self.tsid_field {
+            Some(f) => DvOrds::open(seg, f),
+            None => DvOrds::None,
+        };
+        self.keys.set_segment(seg);
+        self.timestamps = match self.timestamp_field {
+            Some(f) => DvNum::open(seg, f),
+            None => DvNum::None,
+        };
+    }
+
+    /// The series id and `@timestamp` of the segment's `doc`.
+    pub(crate) fn series_of(&mut self, doc: u32) -> Result<(u32, i64)> {
+        let mut time = None;
+        self.timestamps.for_each(doc, |t| {
+            if time.is_none() {
+                time = Some(t);
+            }
+        });
+        let mut tsid_ord = None;
+        self.tsid.for_each(doc, |o| {
+            if tsid_ord.is_none() {
+                tsid_ord = Some(o);
+            }
+        });
+        self.key.clear();
+        if let Some(o) = tsid_ord {
+            self.tsid.lookup(o, &mut self.key);
+        } else if self.tsid_field.is_none() {
+            let k = self.keys.build(doc)?;
+            self.key.extend_from_slice(k);
+        }
+        let series = match self.series.get(&self.key) {
+            Some(&s) => s,
+            None => {
+                let s = self.series_keys.len() as u32;
+                self.series.insert(self.key.clone(), s);
+                self.series_keys.push(self.key.clone());
+                s
+            }
+        };
+        Ok((series, time.unwrap_or(0)))
+    }
+
+    /// Indices `0..n` of recorded docs in Elasticsearch's visiting order (`_tsid` ascending,
+    /// newest first, then collection order). Without a `_tsid` field docs stay in collection
+    /// order (the index is then expected to be in that order already).
+    pub(crate) fn replay_order(&self, n: usize, at: impl Fn(usize) -> (u32, i64)) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..n).collect();
+        if self.tsid_field.is_some() {
+            let keys = &self.series_keys;
+            order.sort_by(|&a, &b| {
+                let ((sa, ta), (sb, tb)) = (at(a), at(b));
+                keys[sa as usize].cmp(&keys[sb as usize]).then(tb.cmp(&ta)).then(a.cmp(&b))
+            });
+        }
+        order
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.series_keys.len() * 64
+    }
 }
 
 /// One collected sample.
@@ -103,17 +196,13 @@ struct TsRateAgg {
     unit_seconds: i64,
     /// The request runs in `_tsid` order (it has a `time_series` aggregation).
     ordered: bool,
-    tsid_field: Option<u32>,
-    timestamp_field: Option<u32>,
     reader: Option<NumReader>,
-    tsid: DvOrds,
-    /// Series identity from the dimensions when there is no `_tsid` field.
-    keys: crate::bucket::time_series::SeriesKeys,
-    timestamps: DvNum,
-    /// `_tsid` bytes → series id.
-    series: hashbrown::HashMap<Vec<u8>, u32>,
-    series_keys: Vec<Vec<u8>>,
+    order: SeriesOrder,
     samples: Vec<Sample>,
+    /// Where the search for the preceding valued doc resumes in this segment, and the last
+    /// valued doc found before it.
+    scan_from: u32,
+    last_valued: Option<u32>,
     state: Option<State>,
     tracker: MemTracker,
 }
@@ -122,14 +211,8 @@ impl TsRateAgg {
     /// Replays the samples in Elasticsearch's order (`TimeSeriesRateAggregator.collect`).
     fn replay(&mut self) -> &State {
         if self.state.is_none() {
-            let mut order: Vec<usize> = (0..self.samples.len()).collect();
-            if self.tsid_field.is_some() {
-                let (keys, samples) = (&self.series_keys, &self.samples);
-                order.sort_by(|&a, &b| {
-                    let (x, y) = (&samples[a], &samples[b]);
-                    keys[x.series as usize].cmp(&keys[y.series as usize]).then(y.time.cmp(&x.time)).then(a.cmp(&b))
-                });
-            }
+            let samples = &self.samples;
+            let order = self.order.replay_order(samples.len(), |i| (samples[i].series, samples[i].time));
             let mut st = State { size: BigArraySize::new(), start_values: Vec::new(), end_values: Vec::new(), start_times: Vec::new(), end_times: Vec::new(), resets: Vec::new() };
             let mut cur_bucket: Option<u32> = None;
             let mut cur_series: Option<u32> = None;
@@ -212,15 +295,9 @@ impl TsRateAgg {
 impl Aggregator for TsRateAgg {
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         self.reader = Some(self.vs.numeric_reader(seg)?);
-        self.tsid = match self.tsid_field {
-            Some(f) => DvOrds::open(seg, f),
-            None => DvOrds::None,
-        };
-        self.keys.set_segment(seg);
-        self.timestamps = match self.timestamp_field {
-            Some(f) => DvNum::open(seg, f),
-            None => DvNum::None,
-        };
+        self.scan_from = 0;
+        self.last_valued = None;
+        self.order.set_segment(seg);
         Ok(())
     }
 
@@ -235,42 +312,34 @@ impl Aggregator for TsRateAgg {
             ));
         }
         let Some(mut reader) = self.reader.take() else { return Ok(()) };
-        let mut key = Vec::new();
         let res = (|| {
             for i in 0..b.len() {
                 let doc = b.docs[i];
-                // `MultiValueMode.MAX`; docs without a value are skipped.
-                let Some(&value) = reader.doubles(doc, b.score(i))?.last() else { continue };
-                let mut time = None;
-                self.timestamps.for_each(doc, |t| {
-                    if time.is_none() {
-                        time = Some(t);
-                    }
-                });
-                let mut tsid_ord = None;
-                self.tsid.for_each(doc, |o| {
-                    if tsid_ord.is_none() {
-                        tsid_ord = Some(o);
-                    }
-                });
-                key.clear();
-                if let Some(o) = tsid_ord {
-                    self.tsid.lookup(o, &mut key);
-                } else if self.tsid_field.is_none() {
-                    key.extend_from_slice(self.keys.build(doc)?);
-                }
-                let series = match self.series.get(&key) {
-                    Some(&s) => s,
-                    None => {
-                        let s = self.series_keys.len() as u32;
-                        self.series.insert(key.clone(), s);
-                        self.series_keys.push(key.clone());
-                        s
-                    }
+                // `MultiValueMode.MAX`. Elasticsearch doesn't check `advanceExact` ("TODO handle
+                // missing values"): on a time-series index's doc values a doc without a value
+                // reads the value of the closest preceding doc (in doc id order, collected or
+                // not) that has one, 0 before any.
+                let value = match reader.doubles(doc, b.score(i))?.last() {
+                    Some(&v) => v,
+                    None => match reader.raw() {
+                        Some((dv, decode)) => {
+                            loop {
+                                let next = dv.next_valued_doc(self.scan_from);
+                                if next >= doc {
+                                    break;
+                                }
+                                self.last_valued = Some(next);
+                                self.scan_from = next + 1;
+                            }
+                            self.last_valued.and_then(|d| dv.first_value(d)).map(|v| decode.to_f64(v)).unwrap_or(0.0)
+                        }
+                        None => 0.0,
+                    },
                 };
-                self.samples.push(Sample { ord: b.ords[i], series, time: time.unwrap_or(0), value });
+                let (series, time) = self.order.series_of(doc)?;
+                self.samples.push(Sample { ord: b.ords[i], series, time, value });
             }
-            self.tracker.ensure(self.samples.len() * 32 + self.series_keys.len() * 64)
+            self.tracker.ensure(self.samples.len() * 32 + self.order.bytes())
         })();
         self.reader = Some(reader);
         res

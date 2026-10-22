@@ -33,6 +33,7 @@ use crate::memory::MemTracker;
 use crate::metrics::simple::{MvsField, parse_value_type_hint};
 use crate::request::{AggDef, PathElement, java_double_compare};
 use crate::util::{BigArraySize, IntroSortable, intro_sort};
+use crate::metrics::ts_rate::SeriesOrder;
 use crate::values::{BoundVs, DvNum, MissingValue, NumReader, VsType, bind};
 use crate::xparser::{Field, Tokens, XParser};
 
@@ -119,6 +120,13 @@ fn unsupported_source(vs: &BoundVs) -> AggError {
     AggError::illegal_argument(format!("ValuesSource type {desc}is not supported for multi-valued aggregation"))
 }
 
+/// `CoreValuesSourceType.NUMERIC.getField`'s refusal of a bytes-valued field (keyword, ip).
+fn expected_numeric(vs: &BoundVs) -> Option<AggError> {
+    let f = vs.field.as_ref()?;
+    matches!(vs.vs_type, VsType::Keyword | VsType::Ip)
+        .then(|| AggError::illegal_argument(format!("Expected numeric type on field [{}], but got [{}]", f.name, f.type_name)))
+}
+
 /// Binds `geo_line` (`GeoLineAggregationBuilder.innerBuild` + `GeoLineAggregatorFactory`).
 pub fn create(def: &AggDef, spec: &GeoLineSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
     let sort = match &spec.sort {
@@ -129,10 +137,30 @@ pub fn create(def: &AggDef, spec: &GeoLineSpec, ctx: &mut BindCtx<'_>) -> Result
         Some(p) => Some(bind(&p.to_vs(), ctx.lookup, VsType::Numeric, false)?),
         None => None,
     };
-    let Some(sort) = sort else {
-        return Err(AggError::illegal_argument("missing field [sort] configured for geo_line aggregations"));
+    // Configs resolve first ("sort" before "point", the `HashMap`'s order), then
+    // `validateTimeSeriesConfigs`, then the factory's source checks.
+    for vs in sort.iter().chain(point.iter()) {
+        if let Some(e) = expected_numeric(vs) {
+            return Err(e);
+        }
+    }
+    let time_series = ctx.time_series_request;
+    let sort = match sort {
+        Some(s) if time_series => {
+            let name = s.field.as_ref().map(|f| f.name.as_str()).unwrap_or("");
+            if name != TIMESTAMP {
+                return Err(AggError::illegal_argument(format!("invalid field [sort]='{name}' configured for time-series aggregations")));
+            }
+            s
+        }
+        Some(s) => s,
+        None if time_series => {
+            let ts = MvsField { field: Some(TIMESTAMP.to_string()), ..Default::default() };
+            bind(&ts.to_vs(), ctx.lookup, VsType::Numeric, false)?
+        }
+        None => return Err(AggError::illegal_argument("missing field [sort] configured for geo_line aggregations")),
     };
-    for vs in point.iter().chain(std::iter::once(&sort)) {
+    for vs in std::iter::once(&sort).chain(point.iter()) {
         if !vs.unmapped && !vs.vs_type.is_numeric() && vs.vs_type != VsType::GeoPoint {
             return Err(unsupported_source(vs));
         }
@@ -151,6 +179,22 @@ pub fn create(def: &AggDef, spec: &GeoLineSpec, ctx: &mut BindCtx<'_>) -> Result
             PointSource::Geo { field: p.field.as_ref().map(|f| f.number), missing }
         }
     };
+    if time_series {
+        let info = ctx.lookup.time_series();
+        return Ok(Box::new(TsGeoLineAgg {
+            size: spec.size as usize,
+            desc: spec.desc,
+            include_sort: spec.include_sort,
+            sort,
+            point,
+            sort_reader: None,
+            points: DvNum::None,
+            order: SeriesOrder::new(info.as_ref()),
+            docs: Vec::new(),
+            lines: None,
+            tracker: ctx.tracker(def),
+        }));
+    }
     Ok(Box::new(GeoLineAgg {
         size: spec.size as usize,
         desc: spec.desc,
@@ -165,6 +209,9 @@ pub fn create(def: &AggDef, spec: &GeoLineSpec, ctx: &mut BindCtx<'_>) -> Result
         tracker: ctx.tracker(def),
     }))
 }
+
+/// `DataStream.TIMESTAMP_FIELD_NAME`.
+const TIMESTAMP: &str = "@timestamp";
 
 #[inline]
 fn lon_lat(lat: i32, lon: i32) -> i64 {
@@ -352,10 +399,8 @@ impl Aggregator for GeoLineAgg {
         self.sort.script.as_ref().is_some_and(|s| s.needs_score())
     }
 
-    fn validate_sort(&self, name: &str, _key: Option<&str>, _rest: &[PathElement]) -> Result<()> {
-        Err(AggError::illegal_argument(format!(
-            "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end. [{name}] is not single-bucket."
-        )))
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
     }
 }
 
@@ -387,6 +432,7 @@ impl GeoLineAgg {
             desc: self.desc,
             size: self.size,
             non_overlapping: false,
+            simplified: false,
         }))
     }
 }
@@ -422,13 +468,16 @@ pub struct GeoLine {
     pub include_sort: bool,
     pub desc: bool,
     pub size: usize,
-    /// Built by an aggregator that saw no bucket (`buildEmptyAggregation`).
+    /// Lines of different partial results never overlap in sort order (empty results and
+    /// time-series lines), so the reduce concatenates them.
     pub non_overlapping: bool,
+    /// Built by line simplification (time-series mode), so the reduce simplifies too.
+    pub simplified: bool,
 }
 
 impl GeoLine {
     fn empty(include_sort: bool, desc: bool, size: usize) -> GeoLine {
-        GeoLine { line: Vec::new(), sort_vals: Vec::new(), complete: true, include_sort, desc, size, non_overlapping: true }
+        GeoLine { line: Vec::new(), sort_vals: Vec::new(), complete: true, include_sort, desc, size, non_overlapping: true, simplified: false }
     }
 }
 
@@ -485,9 +534,9 @@ fn merge_overlapping(lines: &[GeoLine], final_len: usize, desc: bool) -> (Vec<i6
     (points, vals)
 }
 
-/// `MergedGeoLines.NonOverlapping.mergeAndTruncate`: whole lines by their first sort value
-/// (lines with equal first values collapse, as in a `TreeSet`).
-fn merge_non_overlapping(lines: &[GeoLine], final_len: usize, desc: bool) -> (Vec<i64>, Vec<f64>) {
+/// `MergedGeoLines.NonOverlapping`'s `TreeSet`: non-empty lines by first sort value, lines
+/// with an equal first value dropped.
+fn sorted_by_first(lines: &[GeoLine], desc: bool) -> Vec<&GeoLine> {
     let mut sorted: Vec<&GeoLine> = Vec::new();
     for l in lines.iter().filter(|l| !l.line.is_empty()) {
         let key = l.sort_vals[0];
@@ -499,6 +548,30 @@ fn merge_non_overlapping(lines: &[GeoLine], final_len: usize, desc: bool) -> (Ve
         let c = java_double_compare(a.sort_vals[0], b.sort_vals[0]);
         if desc { c.reverse() } else { c }
     });
+    sorted
+}
+
+/// `MergedGeoLines.NonOverlapping.mergeAndSimplify`: the concatenated lines streamed through a
+/// simplifier of the final length.
+fn merge_and_simplify(lines: &[GeoLine], final_len: usize, desc: bool) -> Result<(Vec<i64>, Vec<f64>)> {
+    let mut simplifier = Simplifier::new(final_len);
+    let mut index = 0;
+    for l in sorted_by_first(lines, desc) {
+        for (&p, &v) in l.line.iter().zip(&l.sort_vals) {
+            let x = encode::decode_longitude((p >> 32) as i32);
+            let y = encode::decode_latitude(p as i32);
+            let id = simplifier.new_point(index, x, y, v);
+            simplifier.consume(id)?;
+            index += 1;
+        }
+    }
+    Ok(simplifier.produce())
+}
+
+/// `MergedGeoLines.NonOverlapping.mergeAndTruncate`: whole lines by their first sort value
+/// (lines with equal first values collapse, as in a `TreeSet`).
+fn merge_non_overlapping(lines: &[GeoLine], final_len: usize, desc: bool) -> (Vec<i64>, Vec<f64>) {
+    let sorted = sorted_by_first(lines, desc);
     let (mut points, mut vals) = (Vec::with_capacity(final_len), Vec::with_capacity(final_len));
     for l in sorted {
         for (p, v) in l.line.iter().zip(&l.sort_vals) {
@@ -536,10 +609,26 @@ impl Internal for GeoLine {
         let complete = list.iter().all(|l| l.complete) && merged <= leader.size;
         let include_sort = list.iter().all(|l| l.include_sort);
         let non_overlapping = list.iter().all(|l| l.non_overlapping);
+        let simplify = list.iter().any(|l| l.simplified);
         let final_len = merged.min(leader.size);
-        let (line, sort_vals) =
-            if non_overlapping { merge_non_overlapping(&list, final_len, leader.desc) } else { merge_overlapping(&list, final_len, leader.desc) };
-        Ok(GeoLine { line, sort_vals, complete, include_sort, desc: leader.desc, size: leader.size, non_overlapping: leader.non_overlapping })
+        let (line, sort_vals) = match (non_overlapping, simplify) {
+            (true, false) => merge_non_overlapping(&list, final_len, leader.desc),
+            (true, true) => merge_and_simplify(&list, final_len, leader.desc)?,
+            (false, false) => merge_overlapping(&list, final_len, leader.desc),
+            (false, true) => {
+                return Err(AggError::illegal_argument("Unsupported option - simplification of overlapping geo_lines during reduce phase"));
+            }
+        };
+        Ok(GeoLine {
+            line,
+            sort_vals,
+            complete,
+            include_sort,
+            desc: leader.desc,
+            size: leader.size,
+            non_overlapping: leader.non_overlapping,
+            simplified: leader.simplified,
+        })
     }
 
     fn render(&self, out: &mut Json, _rc: &RenderCtx) {
@@ -579,6 +668,384 @@ impl Internal for GeoLine {
     }
 }
 
+
+/// One document seen by the time-series `geo_line`: where it goes, where Elasticsearch's
+/// time-series search visits it, and what it reads.
+#[derive(Clone, Copy)]
+struct TsDoc {
+    ord: u32,
+    series: u32,
+    time: i64,
+    /// The sort value (`@timestamp`), `None` without one.
+    sort: Option<f64>,
+    /// `(lon, lat)` of the doc's point, decoded from doc values.
+    point: Option<(f64, f64)>,
+}
+
+/// `geo_line` in a time-series search (`GeoLineAggregator.TimeSeries` +
+/// `TimeSeriesGeoLineBuckets`): Elasticsearch streams each bucket's points, newest first,
+/// through a `StreamingGeometrySimplifier` of `size` points and keeps the simplified line
+/// instead of the `size` best sort values. Collection here is per segment, so docs are
+/// recorded and replayed in `_tsid`/`@timestamp` order at the end.
+struct TsGeoLineAgg {
+    size: usize,
+    desc: bool,
+    include_sort: bool,
+    sort: BoundVs,
+    point: PointSource,
+    sort_reader: Option<NumReader>,
+    points: DvNum,
+    order: SeriesOrder,
+    docs: Vec<TsDoc>,
+    lines: Option<hashbrown::HashMap<u32, GeoLine>>,
+    tracker: MemTracker,
+}
+
+impl TsGeoLineAgg {
+    /// `TimeSeriesGeoLineBuckets.buildInternalGeoLine`.
+    fn line_of(&self, simplifier: &Simplifier) -> GeoLine {
+        let (mut line, mut sort_vals) = simplifier.produce();
+        let complete = simplifier.length < self.size;
+        if !self.desc {
+            // Natively newest first.
+            line.reverse();
+            sort_vals.reverse();
+        }
+        GeoLine { line, sort_vals, complete, include_sort: self.include_sort, desc: self.desc, size: self.size, non_overlapping: true, simplified: true }
+    }
+
+    /// Replays the recorded docs (`Leaf.collect` + `flushBucket`).
+    fn replay(&mut self) -> Result<()> {
+        if self.lines.is_some() {
+            return Ok(());
+        }
+        let docs = &self.docs;
+        let order = self.order.replay_order(docs.len(), |i| (docs[i].series, docs[i].time));
+        let mut lines = hashbrown::HashMap::new();
+        let mut simplifier = Simplifier::new(self.size);
+        let mut current: Option<u32> = None;
+        for i in order {
+            let d = self.docs[i];
+            if current != Some(d.ord) {
+                if let Some(c) = current {
+                    if lines.contains_key(&c) {
+                        return Err(AggError::new(500, "illegal_state_exception", format!("Geoline already exists for bucket {c}")));
+                    }
+                    lines.insert(c, self.line_of(&simplifier));
+                    simplifier.reset();
+                }
+                current = Some(d.ord);
+            }
+            simplifier.current_sort = i64::MIN as f64;
+            if let Some(v) = d.sort {
+                simplifier.current_sort = v;
+                if let Some((x, y)) = d.point {
+                    simplifier.consume_xy(x, y)?;
+                }
+            }
+        }
+        if let Some(c) = current {
+            if lines.contains_key(&c) {
+                return Err(AggError::new(500, "illegal_state_exception", format!("Geoline already exists for bucket {c}")));
+            }
+            lines.insert(c, self.line_of(&simplifier));
+        }
+        self.lines = Some(lines);
+        Ok(())
+    }
+}
+
+impl Aggregator for TsGeoLineAgg {
+    fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
+        self.sort_reader = if self.sort.has_values() { Some(self.sort.numeric_reader(seg)?) } else { None };
+        self.points = match &self.point {
+            PointSource::Geo { field: Some(f), .. } => DvNum::open(seg, *f),
+            _ => DvNum::None,
+        };
+        self.order.set_segment(seg);
+        Ok(())
+    }
+
+    fn collect(&mut self, b: Batch<'_>) -> Result<()> {
+        let mut reader = self.sort_reader.take();
+        let mut buf = Vec::new();
+        let res = (|| {
+            for i in 0..b.len() {
+                let doc = b.docs[i];
+                let sort = match reader.as_mut() {
+                    Some(r) => {
+                        let vals = r.doubles(doc, b.score(i))?;
+                        if vals.len() > 1 {
+                            return Err(multi_value());
+                        }
+                        vals.first().copied()
+                    }
+                    None => None,
+                };
+                let mut point = None;
+                if sort.is_some() {
+                    // `getGeoPointField` fails for a source that isn't a geo point.
+                    let missing = match &self.point {
+                        PointSource::Geo { missing, .. } => *missing,
+                        PointSource::Absent => return Err(AggError::illegal_argument("Could not find field name [point] in multiValuesSource")),
+                        PointSource::NotGeo => return Err(AggError::illegal_argument("field [point] is not a geo_point type")),
+                    };
+                    buf.clear();
+                    self.points.for_each(doc, |v| buf.push(v));
+                    if buf.len() > 1 {
+                        return Err(multi_value());
+                    }
+                    let encoded = match buf.first() {
+                        Some(&v) => Some(lon_lat((v >> 32) as i32, v as i32)),
+                        None => missing,
+                    };
+                    point = encoded.map(|e| (encode::decode_longitude((e >> 32) as i32), encode::decode_latitude(e as i32)));
+                }
+                let (series, time) = self.order.series_of(doc)?;
+                self.docs.push(TsDoc { ord: b.ords[i], series, time, sort, point });
+            }
+            self.tracker.ensure(self.docs.len() * std::mem::size_of::<TsDoc>() + self.order.bytes())
+        })();
+        self.sort_reader = reader;
+        res
+    }
+
+    fn post_collection(&mut self) -> Result<()> {
+        self.replay()
+    }
+
+    fn build(&mut self, owning: &[u32]) -> Result<Vec<AggValue>> {
+        self.replay()?;
+        let lines = self.lines.as_ref().expect("replayed");
+        Ok(owning.iter().map(|o| AggValue::GeoLine(Box::new(lines.get(o).cloned().unwrap_or_else(|| GeoLine::empty(self.include_sort, self.desc, self.size))))).collect())
+    }
+
+    fn build_empty(&self) -> AggValue {
+        AggValue::GeoLine(Box::new(GeoLine::empty(self.include_sort, self.desc, self.size)))
+    }
+
+    fn needs_scores(&self) -> bool {
+        false
+    }
+
+    fn validate_sort(&self, name: &str, _key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        Err(crate::collect::unsortable(name, rest))
+    }
+}
+
+/// A point of the simplifier (`TimeSeriesGeoLineBuckets.SimplifiablePoint`).
+#[derive(Clone, Copy)]
+struct SPoint {
+    index: usize,
+    x: f64,
+    y: f64,
+    sort: f64,
+    encoded: i64,
+    error: f64,
+}
+
+/// No object in that slot yet.
+const NONE: u32 = u32::MAX;
+
+/// Elasticsearch's `StreamingGeometrySimplifier` with the `TRIANGLE_AREA` error: keeps at most
+/// `max` points; once full, each new point evicts the point whose removal changes the line's
+/// area least. Which point goes on equal errors depends on `java.util.PriorityQueue`'s heap
+/// layout and on which point objects are reused, so both are modelled exactly: points live in
+/// an arena (ids are Java object identities), `queue` is the binary heap.
+struct Simplifier {
+    max: usize,
+    arena: Vec<SPoint>,
+    /// `points[]`: arena ids; slots past `length` keep their objects for reuse.
+    points: Vec<u32>,
+    length: usize,
+    last_removed: u32,
+    queue: Vec<u32>,
+    current_sort: f64,
+}
+
+impl Simplifier {
+    fn new(max: usize) -> Simplifier {
+        Simplifier { max, arena: Vec::new(), points: vec![NONE; max], length: 0, last_removed: NONE, queue: Vec::new(), current_sort: 0.0 }
+    }
+
+    fn reset(&mut self) {
+        self.length = 0;
+        self.queue.clear();
+    }
+
+    fn new_point(&mut self, index: usize, x: f64, y: f64, sort: f64) -> u32 {
+        self.arena.push(SPoint { index, x, y, sort, encoded: lon_lat(encode::encode_latitude(y), encode::encode_longitude(x)), error: 0.0 });
+        (self.arena.len() - 1) as u32
+    }
+
+    fn reset_point(&mut self, id: u32, index: usize, x: f64, y: f64) -> u32 {
+        let sort = self.current_sort;
+        let p = &mut self.arena[id as usize];
+        // `reset` keeps the error.
+        p.index = index;
+        p.x = x;
+        p.y = y;
+        p.sort = sort;
+        p.encoded = lon_lat(encode::encode_latitude(y), encode::encode_longitude(x));
+        id
+    }
+
+    /// `makePointErrorFor` + `consume`.
+    fn consume_xy(&mut self, x: f64, y: f64) -> Result<()> {
+        let index = self.length;
+        let id = if index == self.max {
+            if self.last_removed == NONE { self.new_point(index, x, y, self.current_sort) } else { self.reset_point(self.last_removed, index, x, y) }
+        } else if self.points[index] == NONE {
+            self.new_point(index, x, y, self.current_sort)
+        } else {
+            let id = self.reset_point(self.points[index], index, x, y);
+            self.points[index] = id;
+            id
+        };
+        self.consume(id)
+    }
+
+    fn consume(&mut self, id: u32) -> Result<()> {
+        if self.length > 1 {
+            let (l, m) = (self.points[self.length - 2], self.points[self.length - 1]);
+            self.arena[m as usize].error = self.error(l, m, id);
+            self.offer(m);
+        }
+        if self.length == self.max {
+            let Some(remove) = self.poll() else {
+                return Err(AggError::new(500, "no_such_element_exception", String::new()));
+            };
+            let at = self.arena[remove as usize].index;
+            self.remove_and_add(at, id);
+        } else {
+            self.points[self.length] = id;
+            self.length += 1;
+        }
+        Ok(())
+    }
+
+    fn remove_and_add(&mut self, to_remove: usize, id: u32) {
+        self.last_removed = self.points[to_remove];
+        let max = self.max;
+        self.points.copy_within(to_remove + 1..max, to_remove);
+        self.points[self.length - 1] = id;
+        for i in to_remove..self.length {
+            self.arena[self.points[i] as usize].index = i;
+        }
+        self.update_error_at(to_remove - 1);
+        self.update_error_at(to_remove);
+        if to_remove < max - 1 {
+            self.update_error_at(max - 2);
+        }
+    }
+
+    fn update_error_at(&mut self, index: usize) {
+        if index > 0 && index + 1 < self.length {
+            let (l, m, r) = (self.points[index - 1], self.points[index], self.points[index + 1]);
+            let error = self.error(l, m, r);
+            let p = &mut self.arena[m as usize];
+            let delta = (error - p.error).abs();
+            p.error = error;
+            if delta > 1e-10 && self.remove(m) {
+                self.offer(m);
+            }
+        }
+    }
+
+    /// `TriangleAreaCalculator`: Heron's formula over haversine side lengths.
+    fn error(&self, left: u32, middle: u32, right: u32) -> f64 {
+        let (l, m, r) = (&self.arena[left as usize], &self.arena[middle as usize], &self.arena[right as usize]);
+        let dist = |a: &SPoint, b: &SPoint| search_index::util::geo::haversin_meters(a.y, a.x, b.y, b.x);
+        let a = dist(l, r);
+        let b = dist(r, m);
+        let c = dist(m, l);
+        let s = 0.5 * (a + b + c);
+        let (da, db, dc) = (s - a, s - b, s - c);
+        if da >= 0.0 && db >= 0.0 && dc >= 0.0 { (s * da * db * dc).sqrt() } else { 0.0 }
+    }
+
+    /// `PointError.compareTo`: `(int) Math.signum(this.error - o.error)`.
+    #[inline]
+    fn cmp(&self, a: u32, b: u32) -> i32 {
+        let d = self.arena[a as usize].error - self.arena[b as usize].error;
+        if d > 0.0 {
+            1
+        } else if d < 0.0 {
+            -1
+        } else {
+            0
+        }
+    }
+
+    fn sift_up(&mut self, mut k: usize, x: u32) {
+        while k > 0 {
+            let parent = (k - 1) >> 1;
+            let e = self.queue[parent];
+            if self.cmp(x, e) >= 0 {
+                break;
+            }
+            self.queue[k] = e;
+            k = parent;
+        }
+        self.queue[k] = x;
+    }
+
+    fn sift_down(&mut self, mut k: usize, x: u32) {
+        let n = self.queue.len();
+        let half = n >> 1;
+        while k < half {
+            let mut child = 2 * k + 1;
+            let mut c = self.queue[child];
+            let right = child + 1;
+            if right < n && self.cmp(c, self.queue[right]) > 0 {
+                child = right;
+                c = self.queue[child];
+            }
+            if self.cmp(x, c) <= 0 {
+                break;
+            }
+            self.queue[k] = c;
+            k = child;
+        }
+        self.queue[k] = x;
+    }
+
+    fn offer(&mut self, id: u32) {
+        self.queue.push(id);
+        let k = self.queue.len() - 1;
+        self.sift_up(k, id);
+    }
+
+    fn poll(&mut self) -> Option<u32> {
+        let result = *self.queue.first()?;
+        let x = self.queue.pop().expect("non-empty");
+        if !self.queue.is_empty() {
+            self.sift_down(0, x);
+        }
+        Some(result)
+    }
+
+    /// `PriorityQueue.remove(Object)` (identity) + `removeAt`.
+    fn remove(&mut self, id: u32) -> bool {
+        let Some(i) = self.queue.iter().position(|&q| q == id) else { return false };
+        let s = self.queue.len() - 1;
+        let moved = self.queue.pop().expect("non-empty");
+        if s != i {
+            self.sift_down(i, moved);
+            if self.queue[i] == moved {
+                self.sift_up(i, moved);
+            }
+        }
+        true
+    }
+
+    /// The kept points, in stream order: encoded points and sort values.
+    fn produce(&self) -> (Vec<i64>, Vec<f64>) {
+        let ids = &self.points[..self.length];
+        (ids.iter().map(|&i| self.arena[i as usize].encoded).collect(), ids.iter().map(|&i| self.arena[i as usize].sort).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,6 +1059,7 @@ mod tests {
             desc: false,
             size: 4,
             non_overlapping: false,
+            simplified: false,
         }
     }
 

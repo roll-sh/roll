@@ -4,6 +4,14 @@
 //! the two's-complement view like Java's. [`BigDec`] is an unscaled `BigInt` with a scale, with
 //! Java's preferred-scale rules for arithmetic, its rounding modes, and its `toString`,
 //! `toPlainString` and `toEngineeringString` layouts.
+//!
+//! Java bounds a `BigInteger` to 2^31 - 1 bits of magnitude and fails anything larger with
+//! `ArithmeticException: BigInteger would overflow supported range`. The operations that can
+//! grow a value cheaply from a small input (`shiftLeft`, `pow`, the powers of ten behind
+//! `setScale`/`movePoint*`, `multiply`) check that bound before allocating, as Java's do, and the
+//! plain-value arithmetic reports it through [`crate::guard::note_big_overflow`]. Multiplication
+//! is Karatsuba above [`KARATSUBA_LIMBS`] and radix conversion divides and conquers over
+//! squared powers of the radix, so large values stay sub-quadratic where Java's are.
 
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -64,23 +72,226 @@ fn mul_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
         return Vec::new();
     }
     let mut out = vec![0u32; a.len() + b.len()];
-    for (i, &x) in a.iter().enumerate() {
-        let mut carry = 0u64;
-        for (j, &y) in b.iter().enumerate() {
-            let t = x as u64 * y as u64 + out[i + j] as u64 + carry;
-            out[i + j] = t as u32;
-            carry = t >> 32;
-        }
-        let mut k = i + b.len();
-        while carry > 0 {
-            let t = out[k] as u64 + carry;
-            out[k] = t as u32;
-            carry = t >> 32;
-            k += 1;
-        }
-    }
+    mul_into(a, b, &mut out);
     trim(&mut out);
     out
+}
+
+/// Operand length (limbs) from which multiplication splits (Java's Karatsuba threshold is 80
+/// ints; ours is lower because the schoolbook loop here is not intrinsified).
+pub const KARATSUBA_LIMBS: usize = 40;
+
+/// `out += a * b` (`out` holds at least `a.len() + b.len()` limbs; the sum must fit).
+fn mul_into(a: &[u32], b: &[u32], out: &mut [u32]) {
+    let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    if b.is_empty() {
+        return;
+    }
+    if b.len() < KARATSUBA_LIMBS {
+        for (j, &y) in b.iter().enumerate() {
+            let mut carry = 0u64;
+            let row = &mut out[j..];
+            for (o, &x) in row.iter_mut().zip(a) {
+                let t = x as u64 * y as u64 + *o as u64 + carry;
+                *o = t as u32;
+                carry = t >> 32;
+            }
+            add_carry(&mut row[a.len()..], carry as u32);
+        }
+        return;
+    }
+    let h = a.len().div_ceil(2);
+    if b.len() <= h {
+        // unbalanced: multiply `b` by `a` in slices of its own length
+        for (i, chunk) in a.chunks(b.len()).enumerate() {
+            mul_into(chunk, b, &mut out[i * b.len()..]);
+        }
+        return;
+    }
+    // a = a1·B^h + a0, b = b1·B^h + b0;
+    // a·b = z2·B^2h + ((a0 + a1)(b0 + b1) - z0 - z2)·B^h + z0
+    let (a0, a1) = a.split_at(h);
+    let (b0, b1) = b.split_at(h);
+    let mut z0 = vec![0u32; 2 * h];
+    mul_into(a0, b0, &mut z0);
+    let mut z2 = vec![0u32; a1.len() + b1.len()];
+    mul_into(a1, b1, &mut z2);
+    let sa = add_mag(a0, a1);
+    let sb = add_mag(b0, b1);
+    let mut z1 = vec![0u32; sa.len() + sb.len()];
+    mul_into(&sa, &sb, &mut z1);
+    sub_in_place(&mut z1, &z0);
+    sub_in_place(&mut z1, &z2);
+    add_in_place(out, &z0);
+    add_in_place(&mut out[h..], &z1);
+    add_in_place(&mut out[2 * h..], &z2);
+}
+
+/// Adds `c` at `dst[0]` and propagates the carry.
+#[inline]
+fn add_carry(dst: &mut [u32], mut c: u32) {
+    for d in dst {
+        if c == 0 {
+            return;
+        }
+        let (v, o) = d.overflowing_add(c);
+        *d = v;
+        c = o as u32;
+    }
+}
+
+/// `dst += src` (the sum must fit in `dst`; `src` may have high zero limbs past `dst`).
+fn add_in_place(dst: &mut [u32], src: &[u32]) {
+    let n = src.len().min(dst.len());
+    let mut carry = 0u64;
+    for (d, &x) in dst[..n].iter_mut().zip(&src[..n]) {
+        let t = *d as u64 + x as u64 + carry;
+        *d = t as u32;
+        carry = t >> 32;
+    }
+    add_carry(&mut dst[n..], carry as u32);
+}
+
+/// `dst -= src` for `dst >= src`.
+fn sub_in_place(dst: &mut [u32], src: &[u32]) {
+    let n = src.len().min(dst.len());
+    let mut borrow = 0u64;
+    for (d, &x) in dst[..n].iter_mut().zip(&src[..n]) {
+        let t = (*d as u64).wrapping_sub(x as u64).wrapping_sub(borrow);
+        *d = t as u32;
+        borrow = (t >> 63) & 1;
+    }
+    for d in &mut dst[n..] {
+        if borrow == 0 {
+            break;
+        }
+        let (v, o) = d.overflowing_sub(1);
+        *d = v;
+        borrow = o as u64;
+    }
+}
+
+/// Java's bound on a magnitude: 2^31 - 1 bits.
+const MAX_MAG_BITS: u64 = i32::MAX as u64;
+
+fn mag_bits(m: &[u32]) -> u64 {
+    match m.last() {
+        Some(top) => (m.len() as u64 - 1) * 32 + (32 - top.leading_zeros() as u64),
+        None => 0,
+    }
+}
+
+/// A result outside Java's range: recorded (see [`crate::guard::note_big_overflow`]) with zero
+/// as the placeholder.
+#[cold]
+fn big_overflow(site: crate::guard::BigSite) -> BigInt {
+    crate::guard::note_big_overflow(site);
+    BigInt::zero()
+}
+
+/// Java's `ArithmeticException: BigInteger would overflow supported range` with the frames of
+/// where it is detected, then `outer` (`java.math` frames as [`jm`] takes them).
+pub(crate) fn overflow_error(site: crate::guard::BigSite, outer: &[&str]) -> Thrown {
+    use crate::guard::BigSite::*;
+    let mut f: Vec<&str> = vec!["BigInteger.reportOverflow(BigInteger.java:1220)"];
+    let range = ["BigInteger.checkRange(BigInteger.java:1215)", "BigInteger.<init>(BigInteger.java:1190)"];
+    match site {
+        Range => f.extend(range),
+        ShiftLeft => f.extend(range.iter().copied().chain(["BigInteger.shiftLeft(BigInteger.java:3578)"])),
+        ShiftRight => f.extend(range.iter().copied().chain(["BigInteger.shiftRight(BigInteger.java:3655)"])),
+        PowShift => f.push("BigInteger.pow(BigInteger.java:2616)"),
+        Pow => f.push("BigInteger.pow(BigInteger.java:2644)"),
+        PowShiftLeft => f.extend(range.iter().copied().chain(["BigInteger.shiftLeft(BigInteger.java:3578)", "BigInteger.pow(BigInteger.java:2623)"])),
+    }
+    f.extend_from_slice(outer);
+    jm(arith("BigInteger would overflow supported range"), &f)
+}
+
+/// `v`, or the range overflow recorded while computing it, with `outer` frames.
+fn in_range<T>(v: T, outer: &[&str]) -> Result<T, Thrown> {
+    match crate::guard::take_big_overflow() {
+        Some(site) => Err(overflow_error(site, outer)),
+        None => Ok(v),
+    }
+}
+
+/// Digits per limb-sized chunk of a radix and the chunk's value (`radix^digits`), the largest
+/// power that fits in a `u32`.
+fn radix_chunk(radix: u32) -> (usize, u32) {
+    let (mut d, mut v) = (0usize, 1u64);
+    while v * radix as u64 <= u32::MAX as u64 {
+        v *= radix as u64;
+        d += 1;
+    }
+    (d, v as u32)
+}
+
+/// Magnitudes up to this many limbs convert chunk by chunk; longer ones split.
+const RADIX_SPLIT_LIMBS: usize = 48;
+
+/// The digits of a non-zero magnitude in `radix` (lowercase, no sign).
+fn mag_to_radix(mag: &[u32], radix: u32) -> String {
+    let (chunk_digits, chunk) = radix_chunk(radix);
+    // pows[k] = chunk^(2^k), squared until it covers half the value
+    let mut pows: Vec<Vec<u32>> = vec![vec![chunk]];
+    while pows.last().unwrap().len() * 2 <= mag.len() + 1 && mag.len() > RADIX_SPLIT_LIMBS {
+        let p = pows.last().unwrap();
+        let sq = mul_mag(p, p);
+        pows.push(sq);
+    }
+    let mut out = Vec::with_capacity(mag.len() * 32 / (radix.ilog2() as usize).max(1) + 1);
+    radix_rec(mag, 0, radix, chunk_digits, chunk, &pows, &mut out);
+    // the digits are ASCII
+    String::from_utf8(out).unwrap()
+}
+
+/// Appends `x` in `radix`, left-padded with zeros to `pad` digits.
+fn radix_rec(x: &[u32], pad: usize, radix: u32, chunk_digits: usize, chunk: u32, pows: &[Vec<u32>], out: &mut Vec<u8>) {
+    let mut x = x;
+    while x.last() == Some(&0) {
+        x = &x[..x.len() - 1];
+    }
+    if x.len() <= RADIX_SPLIT_LIMBS {
+        let start = out.len();
+        let mut mag = x.to_vec();
+        // chunks least significant first, digits reversed at the end
+        while !mag.is_empty() {
+            let mut rem = 0u64;
+            for limb in mag.iter_mut().rev() {
+                let v = (rem << 32) | *limb as u64;
+                *limb = (v / chunk as u64) as u32;
+                rem = v % chunk as u64;
+            }
+            trim(&mut mag);
+            let mut r = rem as u32;
+            for i in 0..chunk_digits {
+                if mag.is_empty() && r == 0 && i > 0 {
+                    break;
+                }
+                out.push(std::char::from_digit(r % radix, radix).unwrap() as u8);
+                r /= radix;
+            }
+        }
+        // a zero chunk still printed one digit
+        while out.len() > start + 1 && out.last() == Some(&b'0') {
+            out.pop();
+        }
+        if x.is_empty() {
+            out.truncate(start);
+        }
+        let n = out.len() - start;
+        for _ in n..pad {
+            out.push(b'0');
+        }
+        out[start..].reverse();
+        return;
+    }
+    // the largest power whose square still covers the value: balanced halves
+    let k = pows.iter().rposition(|p| p.len() * 2 <= x.len() + 1).unwrap_or(0);
+    let (q, r) = divmod_mag(x, &pows[k]);
+    let digits = chunk_digits << k;
+    radix_rec(&q, pad.saturating_sub(digits), radix, chunk_digits, chunk, pows, out);
+    radix_rec(&r, digits, radix, chunk_digits, chunk, pows, out);
 }
 
 fn divmod_small(a: &[u32], d: u32) -> (Vec<u32>, u32) {
@@ -243,6 +454,10 @@ impl BigInt {
 
     fn from_parts(neg: bool, mut mag: Vec<u32>) -> BigInt {
         trim(&mut mag);
+        // Java's `checkRange` (2^26 limbs is where the bound can be crossed)
+        if mag.len() >= 1 << 26 && mag_bits(&mag) > MAX_MAG_BITS {
+            return big_overflow(crate::guard::BigSite::Range);
+        }
         let neg = neg && !mag.is_empty();
         BigInt { neg, mag }
     }
@@ -325,6 +540,10 @@ impl BigInt {
     }
 
     pub fn mul(&self, o: &BigInt) -> BigInt {
+        // the product has at least `bits(a) + bits(b) - 1` bits
+        if !self.mag.is_empty() && !o.mag.is_empty() && mag_bits(&self.mag) + mag_bits(&o.mag) - 1 > MAX_MAG_BITS {
+            return big_overflow(crate::guard::BigSite::Range);
+        }
         BigInt::from_parts(self.neg != o.neg, mul_mag(&self.mag, &o.mag))
     }
 
@@ -341,31 +560,61 @@ impl BigInt {
         Ok((BigInt::from_parts(self.neg != o.neg, q), BigInt::from_parts(self.neg, r)))
     }
 
+    /// `10^n`, as Java's `bigTenToThe` (`BigInteger.TEN.pow(n)` past its cache): out of range
+    /// for `n >= 715,827,883`.
     pub fn pow10(n: u32) -> BigInt {
-        let mut r = BigInt::from_i64(1);
-        let mut left = n;
-        while left > 0 {
-            let k = left.min(9);
-            r = r.mul_small(10u32.pow(k));
-            left -= k;
+        if n <= 64 {
+            let mut r = BigInt::from_i64(1);
+            let mut left = n;
+            while left > 0 {
+                let k = left.min(9);
+                r = r.mul_small(10u32.pow(k));
+                left -= k;
+            }
+            return r;
         }
-        r
+        BigInt::from_i64(10).pow(n)
     }
 
+    /// `pow` with JDK 27's range checks, made before any work: the factor of two must shift by
+    /// an `int`, and `(bits(odd part) - 1) * e + shift` must stay below `Integer.MAX_VALUE`.
     pub fn pow(&self, e: u32) -> BigInt {
-        let mut result = BigInt::from_i64(1);
-        let mut base = self.clone();
+        if e == 0 || (!self.neg && self.mag == [1]) {
+            return BigInt::from_i64(1);
+        }
+        if self.mag.is_empty() || e == 1 {
+            return self.clone();
+        }
+        let neg = self.neg && e & 1 == 1;
+        let twos = self.lowest_set_bit() as u64;
+        let shift = twos * e as u64;
+        if shift > MAX_MAG_BITS {
+            return big_overflow(crate::guard::BigSite::PowShift);
+        }
+        let odd = shr_mag(&self.mag, twos as usize);
+        let rem_bits = mag_bits(&odd);
+        if rem_bits == 1 {
+            if 1 + shift > MAX_MAG_BITS {
+                return big_overflow(crate::guard::BigSite::PowShiftLeft);
+            }
+            return BigInt::from_parts(neg, vec![1]).shift_left(shift as i32);
+        }
+        if rem_bits * e as u64 > 64 && rem_bits * e as u64 + shift - e as u64 >= MAX_MAG_BITS {
+            return big_overflow(crate::guard::BigSite::Pow);
+        }
+        let mut result = vec![1u32];
+        let mut base = odd;
         let mut e = e;
         while e > 0 {
             if e & 1 == 1 {
-                result = result.mul(&base);
+                result = mul_mag(&result, &base);
             }
             e >>= 1;
             if e > 0 {
-                base = base.mul(&base);
+                base = mul_mag(&base, &base);
             }
         }
-        result
+        BigInt::from_parts(neg, result).shift_left(shift as i32)
     }
 
     pub fn gcd(&self, o: &BigInt) -> BigInt {
@@ -497,14 +746,31 @@ impl BigInt {
     }
 
     pub fn shift_left(&self, n: i32) -> BigInt {
+        if self.mag.is_empty() {
+            return BigInt::zero();
+        }
+        if n == i32::MIN {
+            // `shiftRightImpl(-n)` with `-n` still negative: every bit is shifted out
+            return if self.neg { BigInt::from_i64(-1) } else { BigInt::zero() };
+        }
         if n < 0 {
             return self.shift_right(-n);
+        }
+        if mag_bits(&self.mag) + n as u64 > MAX_MAG_BITS {
+            return big_overflow(crate::guard::BigSite::ShiftLeft);
         }
         BigInt::from_parts(self.neg, shl_mag(&self.mag, n as usize))
     }
 
     /// Arithmetic shift (floor for negatives).
     pub fn shift_right(&self, n: i32) -> BigInt {
+        if self.mag.is_empty() {
+            return BigInt::zero();
+        }
+        if n == i32::MIN {
+            // a left shift by 2^31
+            return big_overflow(crate::guard::BigSite::ShiftRight);
+        }
         if n < 0 {
             return self.shift_left(-n);
         }
@@ -568,17 +834,7 @@ impl BigInt {
         if self.mag.is_empty() {
             return "0".into();
         }
-        if radix == 10 {
-            return self.abs().to_string();
-        }
-        let mut mag = self.mag.clone();
-        let mut out = Vec::new();
-        while !mag.is_empty() {
-            let (q, r) = divmod_small(&mag, radix);
-            out.push(std::char::from_digit(r, radix).unwrap());
-            mag = q;
-        }
-        out.iter().rev().collect()
+        mag_to_radix(&self.mag, radix)
     }
 
     pub fn to_string_radix(&self, radix: u32) -> String {
@@ -634,22 +890,10 @@ impl std::fmt::Display for BigInt {
         if self.mag.is_empty() {
             return f.write_str("0");
         }
-        let mut mag = self.mag.clone();
-        let mut chunks = Vec::new();
-        while !mag.is_empty() {
-            let (q, r) = divmod_small(&mag, 1_000_000_000);
-            chunks.push(r);
-            mag = q;
-        }
-        let mut s = String::new();
         if self.neg {
-            s.push('-');
+            f.write_str("-")?;
         }
-        s.push_str(&chunks.last().unwrap().to_string());
-        for c in chunks.iter().rev().skip(1) {
-            s.push_str(&format!("{c:09}"));
-        }
-        f.write_str(&s)
+        f.write_str(&mag_to_radix(&self.mag, 10))
     }
 }
 
@@ -1396,7 +1640,7 @@ fn i_pow(_: &mut Vm, a: &mut [Value]) -> VR {
     if e < 0 {
         return Err(jm(arith("Negative exponent"), &["BigInteger.pow(BigInteger.java:2597)"]));
     }
-    Ok(bi(big_of(&a[0])?.pow(e as u32)))
+    Ok(bi(in_range(big_of(&a[0])?.pow(e as u32), &[])?))
 }
 fn i_abs(_: &mut Vm, a: &mut [Value]) -> VR {
     Ok(bi(big_of(&a[0])?.abs()))
@@ -1443,10 +1687,10 @@ fn i_flip_bit(_: &mut Vm, a: &mut [Value]) -> VR {
     Ok(bi(big_of(&a[0])?.with_bit(n, |x, m| x ^ m)))
 }
 fn i_shl(_: &mut Vm, a: &mut [Value]) -> VR {
-    Ok(bi(big_of(&a[0])?.shift_left(int(&a[1]))))
+    Ok(bi(in_range(big_of(&a[0])?.shift_left(int(&a[1])), &[])?))
 }
 fn i_shr(_: &mut Vm, a: &mut [Value]) -> VR {
-    Ok(bi(big_of(&a[0])?.shift_right(int(&a[1]))))
+    Ok(bi(in_range(big_of(&a[0])?.shift_right(int(&a[1])), &[])?))
 }
 fn i_to_bytes(_: &mut Vm, a: &mut [Value]) -> VR {
     let b = big_of(&a[0])?.to_byte_array();
@@ -1615,7 +1859,8 @@ fn d_plus_mc(_: &mut Vm, a: &mut [Value]) -> VR {
     Ok(bd(dec_of(&a[0])?.round(mc_of(&a[1])?)?))
 }
 fn d_pow(_: &mut Vm, a: &mut [Value]) -> VR {
-    Ok(bd(dec_of(&a[0])?.pow(int(&a[1])).map_err(|t| jm(t, &["BigDecimal.pow(BigDecimal.java:2523)"]))?))
+    let r = in_range(dec_of(&a[0])?.pow(int(&a[1])), &["BigDecimal.pow(BigDecimal.java:2527)"])?;
+    Ok(bd(r.map_err(|t| jm(t, &["BigDecimal.pow(BigDecimal.java:2523)"]))?))
 }
 fn d_pow_mc(_: &mut Vm, a: &mut [Value]) -> VR {
     let mc = mc_of(&a[2])?;
@@ -1646,20 +1891,38 @@ fn d_round(_: &mut Vm, a: &mut [Value]) -> VR {
     })?))
 }
 fn d_set_scale(_: &mut Vm, a: &mut [Value]) -> VR {
-    Ok(bd(dec_of(&a[0])?.set_scale(int(&a[1]), Rounding::Unnecessary).map_err(|t| rounding_frames(t, &["BigDecimal.setScale(BigDecimal.java:3041)"]))?))
+    let d = dec_of(&a[0])?;
+    let r = in_range(d.set_scale(int(&a[1]), Rounding::Unnecessary), &scale_frames(&d, int(&a[1]), "BigDecimal.setScale(BigDecimal.java:3041)"))?;
+    Ok(bd(r.map_err(|t| rounding_frames(t, &["BigDecimal.setScale(BigDecimal.java:3041)"]))?))
 }
 fn d_set_scale_mode(_: &mut Vm, a: &mut [Value]) -> VR {
     let m = rm_of(&a[2])?;
-    Ok(bd(dec_of(&a[0])?.set_scale(int(&a[1]), m).map_err(|t| rounding_frames(t, &[]))?))
+    let d = dec_of(&a[0])?;
+    let r = in_range(d.set_scale(int(&a[1]), m), &scale_frames(&d, int(&a[1]), "BigDecimal.setScale(BigDecimal.java:2914)"))?;
+    Ok(bd(r.map_err(|t| rounding_frames(t, &[]))?))
 }
 fn d_strip(_: &mut Vm, a: &mut [Value]) -> VR {
     Ok(bd(dec_of(&a[0])?.strip_trailing_zeros()))
 }
 fn d_move_left(_: &mut Vm, a: &mut [Value]) -> VR {
-    Ok(bd(dec_of(&a[0])?.move_point(int(&a[1]) as i64)?))
+    Ok(bd(in_range(dec_of(&a[0])?.move_point(int(&a[1]) as i64), &[TEN_TO_THE, MULTIPLY_POWER_TEN, SET_SCALE_UP, "BigDecimal.movePointLeft(BigDecimal.java:3067)"])??))
 }
 fn d_move_right(_: &mut Vm, a: &mut [Value]) -> VR {
-    Ok(bd(dec_of(&a[0])?.move_point(-(int(&a[1]) as i64))?))
+    Ok(bd(in_range(dec_of(&a[0])?.move_point(-(int(&a[1]) as i64)), &[TEN_TO_THE, MULTIPLY_POWER_TEN, SET_SCALE_UP, "BigDecimal.movePointRight(BigDecimal.java:3091)"])??))
+}
+
+const TEN_TO_THE: &str = "BigDecimal.bigTenToThe(BigDecimal.java:4332)";
+const MULTIPLY_POWER_TEN: &str = "BigDecimal.bigMultiplyPowerTen(BigDecimal.java:4469)";
+const SET_SCALE_UP: &str = "BigDecimal.setScale(BigDecimal.java:2974)";
+
+/// The frames between `BigInteger.pow` and `setScale(…)` (`entry`): raising the scale multiplies
+/// by a power of ten, lowering it divides.
+fn scale_frames(d: &BigDec, new_scale: i32, entry: &'static str) -> Vec<&'static str> {
+    if new_scale >= d.scale() {
+        vec![TEN_TO_THE, MULTIPLY_POWER_TEN, SET_SCALE_UP, entry]
+    } else {
+        vec![TEN_TO_THE, "BigDecimal.setScale(BigDecimal.java:2983)", entry]
+    }
 }
 fn d_scale_by_pow10(_: &mut Vm, a: &mut [Value]) -> VR {
     let x = dec_of(&a[0])?;

@@ -44,41 +44,162 @@ fn parse_json(json: &str, map_class: crate::types::ClassId) -> Result<Value, XCo
 }
 
 /// Writes `v` as compact JSON.
+///
+/// The walk keeps its own stack of open containers instead of recursing, so the nesting limit
+/// (1,000, as Jackson's `StreamWriteConstraints`) costs no native stack: hosts call this on
+/// ordinary 2 MiB threads.
 pub fn to_xcontent(v: &Value) -> Result<String, XContentError> {
-    let mut out = String::new();
-    let mut path = Vec::new();
-    write(v, &mut out, &mut path)?;
-    Ok(out)
+    let mut w = Writer { out: String::new(), path: Vec::new(), open: Vec::new() };
+    w.value(v)?;
+    while let Some(top) = w.open.last_mut() {
+        match top {
+            Open::Array { items, next } => {
+                if *next == items.len() {
+                    w.out.push(']');
+                    w.close();
+                    continue;
+                }
+                let x = std::mem::take(&mut items[*next]);
+                *next += 1;
+                too_large(&w.out)?;
+                if *next > 1 {
+                    w.out.push(',');
+                }
+                w.value(&x)?;
+            }
+            Open::Object { entries, next } => {
+                if *next == entries.len() {
+                    w.out.push('}');
+                    w.close();
+                    continue;
+                }
+                let (k, x) = std::mem::take(&mut entries[*next]);
+                *next += 1;
+                too_large(&w.out)?;
+                if *next > 1 {
+                    w.out.push(',');
+                }
+                field_name(&k, &mut w.out)?;
+                w.out.push(':');
+                w.value(&x)?;
+            }
+        }
+    }
+    Ok(w.out)
 }
 
-/// Checks that a value survives `IngestDocument.deepCopy`, which the simulate pipeline API runs
-/// over the document after every processor: maps, lists, sets, `byte[]`, `double[]`, strings,
-/// `Integer`, `Long`, `Float`, `Double`, `Boolean`, `ZonedDateTime` and `Date`. Anything else
-/// fails with `unexpected value type [class …]`.
+/// Checks that an ingest script's `_source` is one Elasticsearch accepts: first
+/// `CollectionUtils.ensureNoSelfReferences` (see [`ensure_no_self_references`], hint
+/// `source document`, as both the simulate API and real ingest report it), then
+/// `IngestDocument.deepCopy`, which the simulate pipeline API runs over the document after every
+/// processor: maps, lists, sets, `byte[]`, `double[]`, strings, `Integer`, `Long`, `Float`,
+/// `Double`, `Boolean`, `ZonedDateTime` and `Date`. Anything else fails with
+/// `unexpected value type [class …]`.
+///
+/// Both walks use an explicit stack: a script can build a cyclic or arbitrarily deep value, and
+/// neither may recurse on the caller's stack.
 pub fn check_ingest_value(v: &Value) -> Result<(), XContentError> {
+    ensure_no_self_references(v, Some("source document"))?;
     let fail = |class: &str| Err(XContentError { kind: "illegal_argument_exception", reason: format!("unexpected value type [class {class}]") });
-    match v {
-        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Double(_) | Value::Str(_) => Ok(()),
-        Value::Byte(_) => fail("java.lang.Byte"),
-        Value::Short(_) => fail("java.lang.Short"),
-        Value::Char(_) => fail("java.lang.Character"),
-        Value::List(l) => l.v.borrow().iter().try_for_each(check_ingest_value),
-        Value::Set(s) => s.keys().iter().try_for_each(check_ingest_value),
-        // keys are copied by reference
-        Value::Map(m) => m.entries().iter().try_for_each(|(_, x)| check_ingest_value(x)),
-        Value::Obj(o) => match &**o {
-            Obj::Array(a) => match &*a.data.borrow() {
-                ArrayData::Byte(_) | ArrayData::Double(_) => Ok(()),
-                // `double[][]`
-                ArrayData::Ref(x) if a.elem.dims == 1 && a.elem.class == crate::types::cls::DOUBLE => x.iter().try_for_each(check_ingest_value),
-                _ => fail(&a.descriptor()),
+    // depth first, children in document order, like the recursive `deepCopy`
+    let mut stack: Vec<Value> = vec![v.clone()];
+    let push_rev = |stack: &mut Vec<Value>, items: Vec<Value>| stack.extend(items.into_iter().rev());
+    while let Some(v) = stack.pop() {
+        match &v {
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Double(_) | Value::Str(_) => {}
+            Value::Byte(_) => return fail("java.lang.Byte"),
+            Value::Short(_) => return fail("java.lang.Short"),
+            Value::Char(_) => return fail("java.lang.Character"),
+            Value::List(l) => {
+                l.sync_view();
+                let items = l.v.borrow().clone();
+                push_rev(&mut stack, items);
+            }
+            Value::Set(s) => push_rev(&mut stack, s.keys()),
+            // keys are copied by reference
+            Value::Map(m) => push_rev(&mut stack, m.values()),
+            Value::Obj(o) => match &**o {
+                Obj::Array(a) => match &*a.data.borrow() {
+                    ArrayData::Byte(_) | ArrayData::Double(_) => {}
+                    // `double[][]`
+                    ArrayData::Ref(x) if a.elem.dims == 1 && a.elem.class == crate::types::cls::DOUBLE => stack.extend(x.iter().rev().cloned()),
+                    _ => return fail(&a.descriptor()),
+                },
+                Obj::Time(TimeVal::Zoned { .. } | TimeVal::UtilDate(_)) => {}
+                Obj::MapView { map, kind: ViewKind::Keys } => push_rev(&mut stack, map.keys()),
+                // an entry set is a `Set` too; its entries are not copyable
+                Obj::MapView { map, kind: ViewKind::Entries } if !map.is_empty() => return fail(entry_class(map.order())),
+                Obj::MapView { kind: ViewKind::Entries, .. } => {}
+                Obj::Es(crate::es::EsObj::Ctx(c)) => push_rev(&mut stack, c.entries().into_iter().map(|(_, x)| x).collect()),
+                _ => return fail(java_binary_name(v.class())),
             },
-            Obj::Time(TimeVal::Zoned { .. } | TimeVal::UtilDate(_)) => Ok(()),
-            Obj::MapView { map, kind: ViewKind::Keys } => map.keys().iter().try_for_each(check_ingest_value),
-            Obj::Es(crate::es::EsObj::Ctx(c)) => c.entries().iter().try_for_each(|(_, x)| check_ingest_value(x)),
-            _ => fail(java_binary_name(v.class())),
-        },
+        }
     }
+    Ok(())
+}
+
+/// Elasticsearch's `CollectionUtils.ensureNoSelfReferences`: fails with `Iterable object is
+/// self-referencing itself` (plus ` (<hint>)`) when a non-empty map, an iterable or an object
+/// array contains itself (its keys and values, at any depth). Values reached twice along
+/// different paths are fine; only ancestors count. Iterative, so a deep value cannot overflow the
+/// stack (Elasticsearch's recursion dies with a `StackOverflowError` there).
+pub fn ensure_no_self_references(v: &Value, hint: Option<&str>) -> Result<(), XContentError> {
+    enum Step {
+        Enter(Value),
+        Leave(usize),
+    }
+    // the common case, a flat document of scalars, allocates nothing beyond the root's children
+    let mut ancestors: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut stack = vec![Step::Enter(v.clone())];
+    while let Some(step) = stack.pop() {
+        let v = match step {
+            Step::Leave(id) => {
+                ancestors.remove(&id);
+                continue;
+            }
+            Step::Enter(v) => v,
+        };
+        let children: Vec<Value> = match &v {
+            Value::List(l) => {
+                l.sync_view();
+                l.v.borrow().clone()
+            }
+            Value::Set(s) => s.keys(),
+            Value::Map(m) if m.is_empty() => continue,
+            Value::Map(m) => m.entries().into_iter().flat_map(|(k, x)| [k, x]).collect(),
+            Value::Obj(o) => match &**o {
+                Obj::Array(a) => match &*a.data.borrow() {
+                    ArrayData::Ref(x) => x.clone(),
+                    _ => continue,
+                },
+                Obj::MapView { map, kind: ViewKind::Keys } => map.keys(),
+                Obj::MapView { map, kind: ViewKind::Values } => map.values(),
+                // the entries themselves are neither maps nor iterables
+                Obj::MapView { kind: ViewKind::Entries, .. } => Vec::new(),
+                Obj::Es(crate::es::EsObj::Ctx(c)) => {
+                    let e = c.entries();
+                    if e.is_empty() {
+                        continue;
+                    }
+                    e.into_iter().flat_map(|(k, x)| [k, x]).collect()
+                }
+                Obj::Es(crate::es::EsObj::Values(sdv)) => sdv.vals.to_vec(),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let Some(id) = identity(&v) else { continue };
+        if !ancestors.insert(id) {
+            let reason = match hint {
+                Some(h) if !h.is_empty() => format!("Iterable object is self-referencing itself ({h})"),
+                _ => "Iterable object is self-referencing itself".to_string(),
+            };
+            return Err(XContentError { kind: "illegal_argument_exception", reason });
+        }
+        stack.push(Step::Leave(id));
+        stack.extend(children.into_iter().rev().filter(|c| matches!(c, Value::List(_) | Value::Map(_) | Value::Set(_) | Value::Obj(_))).map(Step::Enter));
+    }
+    Ok(())
 }
 
 /// Jackson's string escaping: quotes, backslashes and control characters (short forms for
@@ -142,142 +263,143 @@ fn too_large(out: &str) -> Result<(), XContentError> {
     Ok(())
 }
 
-fn array<'a>(items: impl Iterator<Item = &'a Value>, out: &mut String, path: &mut Vec<usize>) -> Result<(), XContentError> {
-    out.push('[');
-    for (i, x) in items.enumerate() {
-        too_large(out)?;
-        if i > 0 {
-            out.push(',');
-        }
-        write(x, out, path)?;
-    }
-    out.push(']');
-    Ok(())
+/// A container being written: its remaining children (taken one by one).
+enum Open {
+    Array { items: Vec<Value>, next: usize },
+    Object { entries: Vec<(Value, Value)>, next: usize },
 }
 
-fn object(entries: &[(Value, Value)], out: &mut String, path: &mut Vec<usize>) -> Result<(), XContentError> {
-    out.push('{');
-    for (i, (k, x)) in entries.iter().enumerate() {
-        too_large(out)?;
-        if i > 0 {
-            out.push(',');
-        }
-        match k {
-            Value::Str(s) => escape_into(s.as_str(), out),
-            Value::Null => return Err(XContentError { kind: "null_pointer_exception", reason: "Field name cannot be null".into() }),
-            other => {
-                let c = java_binary_name(other.class());
-                return Err(XContentError {
-                    kind: "class_cast_exception",
-                    reason: format!("class {c} cannot be cast to class java.lang.String ({c} and java.lang.String are in module java.base of loader 'bootstrap')"),
-                });
-            }
-        }
-        out.push(':');
-        write(x, out, path)?;
-    }
-    out.push('}');
-    Ok(())
+struct Writer {
+    out: String,
+    /// Identities of the open containers, for the self-reference check (one per `open` frame).
+    path: Vec<usize>,
+    open: Vec<Open>,
 }
 
-fn write(v: &Value, out: &mut String, path: &mut Vec<usize>) -> Result<(), XContentError> {
-    // maps and iterables that contain themselves would recurse forever
-    let id = identity(v);
-    if let Some(id) = id {
-        if path.len() >= crate::value::MAX_JSON_DEPTH && matches!(v, Value::List(_) | Value::Map(_) | Value::Set(_) | Value::Obj(_)) {
-            return Err(XContentError { kind: "stream_constraints_exception", reason: crate::value::nesting_depth_message(path.len() + 1) });
+impl Writer {
+    /// Opens a container: Jackson's nesting limit, then the self-reference check.
+    fn enter(&mut self, v: &Value, frame: Open) -> Result<(), XContentError> {
+        if self.path.len() >= crate::value::MAX_JSON_DEPTH {
+            return Err(XContentError { kind: "stream_constraints_exception", reason: crate::value::nesting_depth_message(self.path.len() + 1) });
         }
-        if path.contains(&id) {
+        // a value's identity; primitive arrays converted on the fly have none to repeat
+        let id = identity(v).unwrap_or(0);
+        if id != 0 && self.path.contains(&id) {
             return Err(XContentError { kind: "illegal_argument_exception", reason: "Iterable object is self-referencing itself".into() });
         }
-        path.push(id);
+        self.out.push(if matches!(frame, Open::Array { .. }) { '[' } else { '{' });
+        self.path.push(id);
+        self.open.push(frame);
+        Ok(())
     }
-    let r = write_inner(v, out, path);
-    if id.is_some() {
-        path.pop();
+
+    fn close(&mut self) {
+        self.path.pop();
+        self.open.pop();
     }
-    r
-}
 
-fn prims<T: Copy>(x: &[T], f: impl Fn(T) -> Value, out: &mut String, path: &mut Vec<usize>) -> Result<(), XContentError> {
-    let vals: Vec<Value> = x.iter().map(|&b| f(b)).collect();
-    array(vals.iter(), out, path)
-}
+    fn array(&mut self, v: &Value, items: Vec<Value>) -> Result<(), XContentError> {
+        self.enter(v, Open::Array { items, next: 0 })
+    }
 
-fn write_inner(v: &Value, out: &mut String, path: &mut Vec<usize>) -> Result<(), XContentError> {
-    match v {
-        Value::Null => out.push_str("null"),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Byte(x) => out.push_str(&x.to_string()),
-        Value::Short(x) => out.push_str(&x.to_string()),
-        Value::Int(x) => out.push_str(&x.to_string()),
-        Value::Long(x) => out.push_str(&x.to_string()),
-        Value::Float(f) => float(*f, out),
-        Value::Double(d) => double(*d, out),
-        Value::Char(_) => return Err(unknown("java.lang.Character")),
-        Value::Str(s) => escape_into(s.as_str(), out),
-        Value::List(l) => {
-            let items = l.v.borrow();
-            array(items.iter(), out, path)?;
-        }
-        Value::Set(s) => array(s.keys().iter(), out, path)?,
-        Value::Map(m) => object(&m.entries(), out, path)?,
-        Value::Obj(o) => match &**o {
-            Obj::Array(a) => match &*a.data.borrow() {
-                ArrayData::Bool(x) => prims(x, Value::Bool, out, path)?,
-                // `byte[]` is binary: Jackson writes it base64-encoded
-                ArrayData::Byte(x) => {
-                    use base64::Engine;
-                    let bytes: Vec<u8> = x.iter().map(|&b| b as u8).collect();
-                    escape_into(&base64::engine::general_purpose::STANDARD.encode(bytes), out);
+    /// Writes a scalar, or opens a container whose children the caller's loop writes.
+    fn value(&mut self, v: &Value) -> Result<(), XContentError> {
+        let out = &mut self.out;
+        match v {
+            Value::Null => out.push_str("null"),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Byte(x) => out.push_str(&x.to_string()),
+            Value::Short(x) => out.push_str(&x.to_string()),
+            Value::Int(x) => out.push_str(&x.to_string()),
+            Value::Long(x) => out.push_str(&x.to_string()),
+            Value::Float(f) => float(*f, out),
+            Value::Double(d) => double(*d, out),
+            Value::Char(_) => return Err(unknown("java.lang.Character")),
+            Value::Str(s) => escape_into(s.as_str(), out),
+            Value::List(l) => {
+                l.sync_view();
+                let items = l.v.borrow().clone();
+                self.array(v, items)?;
+            }
+            Value::Set(s) => self.array(v, s.keys())?,
+            Value::Map(m) => self.enter(v, Open::Object { entries: m.entries(), next: 0 })?,
+            Value::Obj(o) => match &**o {
+                Obj::Array(a) => {
+                    let items: Vec<Value> = match &*a.data.borrow() {
+                        ArrayData::Bool(x) => x.iter().map(|&b| Value::Bool(b)).collect(),
+                        // `byte[]` is binary: Jackson writes it base64-encoded
+                        ArrayData::Byte(x) => {
+                            use base64::Engine;
+                            let bytes: Vec<u8> = x.iter().map(|&b| b as u8).collect();
+                            escape_into(&base64::engine::general_purpose::STANDARD.encode(bytes), out);
+                            return Ok(());
+                        }
+                        ArrayData::Short(x) => x.iter().map(|&b| Value::Short(b)).collect(),
+                        ArrayData::Char(_) => return Err(unknown("[C")),
+                        ArrayData::Int(x) => x.iter().map(|&b| Value::Int(b)).collect(),
+                        ArrayData::Long(x) => x.iter().map(|&b| Value::Long(b)).collect(),
+                        ArrayData::Float(x) => x.iter().map(|&b| Value::Float(b)).collect(),
+                        ArrayData::Double(x) => x.iter().map(|&b| Value::Double(b)).collect(),
+                        ArrayData::Ref(x) => x.clone(),
+                    };
+                    self.array(v, items)?;
                 }
-                ArrayData::Short(x) => prims(x, Value::Short, out, path)?,
-                ArrayData::Char(_) => return Err(unknown("[C")),
-                ArrayData::Int(x) => prims(x, Value::Int, out, path)?,
-                ArrayData::Long(x) => prims(x, Value::Long, out, path)?,
-                ArrayData::Float(x) => prims(x, Value::Float, out, path)?,
-                ArrayData::Double(x) => prims(x, Value::Double, out, path)?,
-                ArrayData::Ref(x) => array(x.iter(), out, path)?,
-            },
-            Obj::MapView { map, kind } => match kind {
-                ViewKind::Keys => array(map.keys().iter(), out, path)?,
-                ViewKind::Values => array(map.values().iter(), out, path)?,
-                // an entry set is iterable, but its entries are not writable
-                ViewKind::Entries => {
-                    if !map.is_empty() {
-                        return Err(unknown(entry_class(map.order())));
+                Obj::MapView { map, kind } => match kind {
+                    ViewKind::Keys => self.array(v, map.keys())?,
+                    ViewKind::Values => self.array(v, map.values())?,
+                    // an entry set is iterable, but its entries are not writable
+                    ViewKind::Entries => {
+                        if !map.is_empty() {
+                            return Err(unknown(entry_class(map.order())));
+                        }
+                        self.array(v, Vec::new())?;
                     }
-                    out.push_str("[]");
+                },
+                Obj::BigInt(b) => out.push_str(&b.to_string()),
+                Obj::BigDec(d) => out.push_str(&d.to_java_string()),
+                Obj::Time(t) => time(t, out)?,
+                Obj::Es(crate::es::EsObj::Ctx(c)) => self.enter(v, Open::Object { entries: c.entries(), next: 0 })?,
+                // `ScriptDocValues` are lists
+                Obj::Es(crate::es::EsObj::Values(sdv)) => self.array(v, sdv.vals.to_vec())?,
+                // `GeoPoint` is a `ToXContentFragment` writing `latlon`
+                Obj::Es(crate::es::EsObj::GeoPoint(lat, lon)) => {
+                    out.push_str("{\"lat\":");
+                    double(*lat, out);
+                    out.push_str(",\"lon\":");
+                    double(*lon, out);
+                    out.push('}');
                 }
+                // `GeoBoundingBox` writes its corners
+                Obj::Es(crate::es::EsObj::BoundingBox(tl, br)) => {
+                    out.push_str("{\"top_left\":{\"lat\":");
+                    double(tl.0, out);
+                    out.push_str(",\"lon\":");
+                    double(tl.1, out);
+                    out.push_str("},\"bottom_right\":{\"lat\":");
+                    double(br.0, out);
+                    out.push_str(",\"lon\":");
+                    double(br.1, out);
+                    out.push_str("}}");
+                }
+                _ => return Err(unknown(java_binary_name(v.class()))),
             },
-            Obj::BigInt(b) => out.push_str(&b.to_string()),
-            Obj::BigDec(d) => out.push_str(&d.to_java_string()),
-            Obj::Time(t) => time(t, out)?,
-            Obj::Es(crate::es::EsObj::Ctx(c)) => object(&c.entries(), out, path)?,
-            // `ScriptDocValues` are lists
-            Obj::Es(crate::es::EsObj::Values(sdv)) => array(sdv.vals.iter(), out, path)?,
-            // `GeoPoint` is a `ToXContentFragment` writing `latlon`
-            Obj::Es(crate::es::EsObj::GeoPoint(lat, lon)) => {
-                out.push_str("{\"lat\":");
-                double(*lat, out);
-                out.push_str(",\"lon\":");
-                double(*lon, out);
-                out.push('}');
-            }
-            // `GeoBoundingBox` writes its corners
-            Obj::Es(crate::es::EsObj::BoundingBox(tl, br)) => {
-                out.push_str("{\"top_left\":{\"lat\":");
-                double(tl.0, out);
-                out.push_str(",\"lon\":");
-                double(tl.1, out);
-                out.push_str("},\"bottom_right\":{\"lat\":");
-                double(br.0, out);
-                out.push_str(",\"lon\":");
-                double(br.1, out);
-                out.push_str("}}");
-            }
-            _ => return Err(unknown(java_binary_name(v.class()))),
-        },
+        }
+        Ok(())
+    }
+}
+
+/// A map key: Elasticsearch casts it to `String`.
+fn field_name(k: &Value, out: &mut String) -> Result<(), XContentError> {
+    match k {
+        Value::Str(s) => escape_into(s.as_str(), out),
+        Value::Null => return Err(XContentError { kind: "null_pointer_exception", reason: "Field name cannot be null".into() }),
+        other => {
+            let c = java_binary_name(other.class());
+            return Err(XContentError {
+                kind: "class_cast_exception",
+                reason: format!("class {c} cannot be cast to class java.lang.String ({c} and java.lang.String are in module java.base of loader 'bootstrap')"),
+            });
+        }
     }
     Ok(())
 }
@@ -339,5 +461,56 @@ mod tests {
         if let Value::List(inner) = &l {
             inner.v.borrow_mut().clear();
         }
+    }
+
+    fn nested(depth: usize) -> Value {
+        let mut v = crate::value::JList::array_list(vec![Value::Int(1)]);
+        for _ in 1..depth {
+            v = crate::value::JList::array_list(vec![v]);
+        }
+        v
+    }
+
+    /// Neither walk recurses on the caller's stack: deep values are fine on a small thread.
+    #[test]
+    fn deep_values_use_no_native_stack() {
+        std::thread::Builder::new()
+            // room for the (bounded) recursive drop of nested values, not for the walks
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let ok = to_xcontent(&nested(1000)).unwrap();
+                assert_eq!(ok.len(), 2 * 1000 + 1);
+                let e = to_xcontent(&nested(1001)).unwrap_err();
+                assert_eq!((e.kind, e.reason.as_str()), ("stream_constraints_exception", crate::value::nesting_depth_message(1001).as_str()));
+                let deep = nested(300_000);
+                assert_eq!(check_ingest_value(&deep), Ok(()));
+                assert_eq!(to_xcontent(&deep).unwrap_err().kind, "stream_constraints_exception");
+                // a cycle at the bottom of a deep value
+                let mut v = crate::value::JList::array_list(vec![]);
+                let bottom = v.clone();
+                for _ in 0..100_000 {
+                    v = crate::value::JList::array_list(vec![v]);
+                }
+                if let Value::List(b) = &bottom {
+                    b.v.borrow_mut().push(v.clone());
+                }
+                let e = check_ingest_value(&v).unwrap_err();
+                assert_eq!(e.reason, "Iterable object is self-referencing itself (source document)");
+                if let Value::List(b) = &bottom {
+                    b.v.borrow_mut().clear();
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Only ancestors count: a container reached twice along different paths is no cycle.
+    #[test]
+    fn shared_children_are_not_self_references() {
+        let shared = crate::value::JList::array_list(vec![Value::Int(1)]);
+        let v = crate::value::JList::array_list(vec![shared.clone(), shared.clone(), crate::value::JList::array_list(vec![shared])]);
+        assert_eq!(ensure_no_self_references(&v, None), Ok(()));
+        assert_eq!(to_xcontent(&v).unwrap(), "[[1],[1],[[1]]]");
     }
 }

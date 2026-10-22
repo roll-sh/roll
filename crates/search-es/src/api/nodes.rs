@@ -750,6 +750,36 @@ fn node_indices_stats(ctx: &Ctx) -> EsResult<Value> {
     let os = d == crate::cluster::Dialect::OpenSearch;
     let mut idx = crate::api::indices::stats_block_in(d, &wanted, shards);
     let all = wanted.is_empty() || wanted.iter().any(|w| w == "_all");
+    // Vector statistics per index (`DenseVectorStats`, `SparseVectorStats`).
+    let mut per_index_vectors: Vec<(String, crate::engine::VectorStats)> = Vec::new();
+    let mut node_vectors = crate::engine::VectorStats::default();
+    if idx.get("dense_vector").is_some() || idx.get("sparse_vector").is_some() {
+        for i in &open {
+            let mut vs = crate::engine::VectorStats::default();
+            if let Some(e) = ctx.cluster.engine.loaded(&i.uuid) {
+                let table = e.table();
+                for s in &e.shards {
+                    vs.add(&s.vector_stats(&table));
+                }
+            }
+            node_vectors.add(&vs);
+            per_index_vectors.push((i.name.clone(), vs));
+        }
+    }
+    let put_vectors = |b: &mut Value, vs: &crate::engine::VectorStats| {
+        if let Some(o) = b.as_object_mut() {
+            if o.contains_key("dense_vector") {
+                o.insert("dense_vector".into(), vs.dense_value(false));
+            }
+            if let Some(Value::Obj(sv)) = o.get_mut("sparse_vector") {
+                sv.insert("value_count".into(), Value::from(vs.sparse_count as i64));
+            }
+        }
+    };
+    put_vectors(&mut idx, &node_vectors);
+    for i in &open {
+        crate::api::indices::add_index_stats(ctx.cluster, i, &mut idx, None);
+    }
     if let Some(o) = idx.as_object_mut() {
         if os {
             // OpenSearch's per-status request counters, whatever metrics were asked for.
@@ -767,6 +797,10 @@ fn node_indices_stats(ctx: &Ctx) -> EsResult<Value> {
                 let mut per = Map::new();
                 for i in &open {
                     let mut b = crate::api::indices::stats_block_in(d, &wanted, i.number_of_shards() as u64);
+                    crate::api::indices::add_index_stats(ctx.cluster, i, &mut b, None);
+                    if let Some((_, vs)) = per_index_vectors.iter().find(|(n, _)| *n == i.name) {
+                        put_vectors(&mut b, vs);
+                    }
                     if let Some(bo) = b.as_object_mut() {
                         bo.shift_remove("shard_stats");
                     }
@@ -780,6 +814,7 @@ fn node_indices_stats(ctx: &Ctx) -> EsResult<Value> {
                     let list: Vec<Value> = (0..i.number_of_shards())
                         .map(|s| {
                             let mut b = crate::api::indices::stats_block_in(d, &wanted, 1);
+                            crate::api::indices::add_index_stats(ctx.cluster, i, &mut b, Some(s));
                             if let Some(bo) = b.as_object_mut() {
                                 bo.shift_remove("shard_stats");
                             }

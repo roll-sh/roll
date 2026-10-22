@@ -114,6 +114,12 @@ impl ScriptError {
         if self.plain {
             m.insert("type".into(), json!(self.cause_type));
             m.insert("reason".into(), json!(self.cause_reason));
+            // a plain exception's own extra fields (its `caused_by`), not in `root_cause`
+            if with_cause {
+                for (k, v) in &self.cause_fields {
+                    m.insert(k.clone(), v.clone());
+                }
+            }
             return m;
         }
         m.insert("type".into(), json!("script_exception"));

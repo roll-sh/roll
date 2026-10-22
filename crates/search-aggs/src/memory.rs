@@ -66,18 +66,16 @@ pub fn breaking_error(name: &str, label: &str, wanted: u64, limit: u64) -> AggEr
     .with_meta("durability", Json::str("TRANSIENT"))
 }
 
-/// `ByteSizeValue.toString()` (`1.5gb`, `512b`).
+/// `ByteSizeValue.toString()` (`1.5gb`, `512b`): `Strings.format1Decimals`, which keeps the
+/// first decimal of Java's `Double.toString` (truncating: 2^34 - 8 bytes is `15.9gb`).
 pub fn byte_size(bytes: u64) -> String {
     const UNITS: [(&str, u64); 5] = [("pb", 1 << 50), ("tb", 1 << 40), ("gb", 1 << 30), ("mb", 1 << 20), ("kb", 1 << 10)];
-    for (u, size) in UNITS {
-        if bytes >= size {
-            let v = bytes as f64 / size as f64;
-            let s = format!("{:.1}", v);
-            let s = s.strip_suffix(".0").unwrap_or(&s).to_string();
-            return format!("{s}{u}");
-        }
-    }
-    format!("{bytes}b")
+    let (value, suffix) = UNITS.iter().find(|(_, size)| bytes >= *size).map_or((bytes as f64, "b"), |&(u, size)| (bytes as f64 / size as f64, u));
+    let p = crate::json::java_double(value);
+    let Some(dot) = p.find('.') else { return format!("{p}{suffix}") };
+    let exp = p.find('E').map_or("", |e| &p[e..]);
+    let fraction = p.as_bytes().get(dot + 1).copied().unwrap_or(b'0');
+    if fraction == b'0' { format!("{}{exp}{suffix}", &p[..dot]) } else { format!("{}{}{exp}{suffix}", &p[..=dot], fraction as char) }
 }
 
 /// One aggregator's reservation in a budget (released on drop).
@@ -91,6 +89,11 @@ pub struct MemTracker {
 impl MemTracker {
     pub fn new(budget: Option<Arc<MemoryBudget>>, agg_name: &str) -> MemTracker {
         MemTracker { budget, reserved: 0, label: format!("<agg [{agg_name}]>") }
+    }
+
+    /// A tracker reporting `label` verbatim in breaker messages.
+    pub fn with_label(budget: Option<Arc<MemoryBudget>>, label: &str) -> MemTracker {
+        MemTracker { budget, reserved: 0, label: label.to_string() }
     }
 
     /// Grows the reservation to at least `total` bytes.
@@ -141,5 +144,8 @@ mod tests {
         assert_eq!(b.used(), 0);
         assert_eq!(byte_size(1536), "1.5kb");
         assert_eq!(byte_size(100), "100b");
+        assert_eq!(byte_size(17_179_869_176), "15.9gb");
+        assert_eq!(byte_size(1 << 30), "1gb");
+        assert_eq!(byte_size(2047), "1.9kb");
     }
 }

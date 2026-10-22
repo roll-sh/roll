@@ -217,8 +217,10 @@ pub enum HitSort {
 /// Index-level hooks of one shard's aggregation run. Every method but [`field`](Self::field)
 /// has a default that fails or answers "none", so tests and simple embedders implement little.
 pub trait FieldLookup: Send + Sync {
-    /// The field `name` resolved for aggregations; `Ok(None)` when unmapped. Errors are
-    /// Elasticsearch's (e.g. "Fielddata is disabled on [x] in [index]…").
+    /// The field `name` resolved for aggregations; `Ok(None)` when unmapped. Fields without
+    /// usable doc values (`text` without fielddata, `binary`, …) come back with
+    /// [`SourceType::None`]: binding them as a values source fails with Elasticsearch's error
+    /// (for `text`, "Fielddata is disabled on [x] in [index]…", naming [`index_name`](Self::index_name)).
     fn field(&self, name: &str) -> Result<Option<AggField>>;
 
     /// The index name (for messages such as the fielddata error).
@@ -319,6 +321,16 @@ pub trait FieldLookup: Send + Sync {
 
     /// The index's time series layout when it is a `time_series`-mode index (`index.mode`);
     /// `None` otherwise (the `time_series` aggregation then collects nothing).
+    /// The analyzer of a `categorize_text` `categorization_analyzer` (a global analyzer name or a
+    /// custom definition, also how `categorization_filters` arrive: the standard
+    /// categorization analyzer with `pattern_replace` char filters). It may use the
+    /// `first_line_with_letters` char filter and `ml_standard` tokenizer
+    /// ([`crate::bucket::categorize_text`]). Errors are Elasticsearch's analysis errors.
+    fn categorization_analyzer(&self, config: &Json) -> Result<Arc<dyn crate::bucket::categorize_text::CategorizationAnalyzer>> {
+        let _ = config;
+        Err(AggError::illegal_argument("[categorization_analyzer] needs the index's text analysis"))
+    }
+
     fn time_series(&self) -> Option<TimeSeriesInfo> {
         None
     }
@@ -352,6 +364,12 @@ pub trait TextTerms: Send + Sync {
     /// A query for documents whose `field` holds `term` (background frequencies under a
     /// `background_filter`).
     fn term_query(&self, field: &str, term: &[u8]) -> Result<QueryRef>;
+    /// The raw `_source` values of `field` of the segment's doc `doc`, as strings
+    /// (`XContentMapValues.extractRawValues` + `toString()`; `categorize_text`).
+    fn source_strings(&self, seg: &SegmentContext, doc: u32, field: &str) -> Result<Vec<String>> {
+        let _ = (seg, doc, field);
+        Err(AggError::illegal_argument("[categorize_text] needs the index's _source"))
+    }
 }
 
 /// A lookup over a fixed list of fields (tests, simple embedders).

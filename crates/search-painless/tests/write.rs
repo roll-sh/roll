@@ -206,7 +206,11 @@ fn run_ingest(engine: &Engine, case: &Json, condition: bool) -> Result<Json, Str
             out.insert(k, json!(v.to_java_string()));
         }
     }
-    let src_json = to_xcontent(&source).map_err(|e| format!("{e:?}"))?;
+    let src_json = match to_xcontent(&source) {
+        Ok(j) => j,
+        // Elasticsearch fails writing the whole simulate response
+        Err(e) => return Ok(json!({ "top": { "type": e.kind, "reason": e.reason } })),
+    };
     out.insert("_source".into(), serde_json::from_str(&src_json).unwrap());
     Ok(json!({ "doc": out }))
 }
@@ -385,4 +389,61 @@ fn update_by_query() {
 #[test]
 fn reindex() {
     check_bulk_write("reindex.json", Context::Reindex);
+}
+
+/// Everyday ingest scripts: parsing log lines, dates and numbers, string clean-up, streams,
+/// `Json`, `Processors`, hashing, metadata and their failures (`ingest2.json`).
+#[test]
+fn ingest_everyday() {
+    check_ingest("ingest2.json", false);
+}
+
+/// Runs an ingest fixture named by `PAINLESS_ADHOC_INGEST` (a path; relative paths resolve in
+/// `tests/fixtures`) — for probing new captures before they get their own test.
+#[test]
+fn ingest_adhoc() {
+    if let Ok(p) = std::env::var("PAINLESS_ADHOC_INGEST") {
+        check_ingest(&p, false);
+    }
+}
+
+/// Cyclic and very deep `_source`s built by ingest scripts are reported, never recursed into on
+/// the stack (outcomes captured from Elasticsearch 9.5.5's `_ingest/pipeline/_simulate`; the
+/// 300,000-deep list takes Elasticsearch itself down with a `StackOverflowError`).
+#[test]
+fn ingest_self_references() {
+    let engine = Engine::new(Settings { max_compilations_rate: None, ..Settings::default() });
+    const SELF: &str = "Iterable object is self-referencing itself (source document)";
+    let depth = "Document nesting depth (1001) exceeds the maximum allowed (1000, from `StreamWriteConstraints.getMaxNestingDepth()`)";
+    let cases: &[(&str, Json)] = &[
+        ("ctx.self = ctx;", json!({ "error": { "type": "illegal_argument_exception", "reason": SELF } })),
+        ("ctx.l = []; ctx.l.add(ctx.l);", json!({ "error": { "type": "illegal_argument_exception", "reason": SELF } })),
+        ("def m = [:]; m.m = m; ctx.m = m;", json!({ "error": { "type": "illegal_argument_exception", "reason": SELF } })),
+        ("ctx.e = (char) 1; ctx.self = ctx;", json!({ "error": { "type": "illegal_argument_exception", "reason": SELF } })),
+        ("ctx.self = ctx; ctx.e = (char) 1;", json!({ "error": { "type": "illegal_argument_exception", "reason": SELF } })),
+        ("def m = [:]; m.x = 1; m.v = m.values(); ctx.m = m;", json!({ "error": { "type": "illegal_argument_exception", "reason": SELF } })),
+        ("def l = new Object[1]; l[0] = l; ctx.l = l;", json!({ "error": { "type": "illegal_argument_exception", "reason": SELF } })),
+        ("def m = [:]; def o = new Object[] {m}; m.o = o; ctx.m = m;", json!({ "error": { "type": "illegal_argument_exception", "reason": SELF } })),
+        ("def m = new HashMap(); m.put(m, 1); ctx.m = m;", json!({ "error": { "type": "illegal_argument_exception", "reason": SELF } })),
+        ("def m = [:]; m.x = 1; m.v = m.entrySet(); ctx.m = m;", json!({ "error": { "type": "illegal_argument_exception", "reason": "unexpected value type [class java.util.HashMap$Node]" } })),
+        ("def x = [(char)1]; for (int i = 0; i < 1500; i++) { x = [x]; } ctx.d = x;", json!({ "error": { "type": "illegal_argument_exception", "reason": "unexpected value type [class java.lang.Character]" } })),
+        ("def x = []; for (int i = 0; i < 1500; i++) { x = [x]; } ctx.d = x;", json!({ "top": { "type": "stream_constraints_exception", "reason": depth } })),
+        ("def x = []; for (int i = 0; i < 300000; i++) { x = [x]; } ctx.d = x;", json!({ "top": { "type": "stream_constraints_exception", "reason": depth } })),
+        ("def x = [:]; for (int i = 0; i < 300000; i++) { x = ['k': x]; } ctx.d = x;", json!({ "top": { "type": "stream_constraints_exception", "reason": depth } })),
+        ("ctx.v = [1:2].values();", json!({ "error": { "type": "illegal_argument_exception", "reason": "unexpected value type [class java.util.HashMap$Values]" } })),
+        ("ctx.v = new LinkedHashMap([1:2]).entrySet();", json!({ "error": { "type": "illegal_argument_exception", "reason": "unexpected value type [class java.util.LinkedHashMap$Entry]" } })),
+        ("ctx.v = [:].entrySet();", json!({ "doc": { "_source": { "a": 1, "v": [] } } })),
+        // shared, not cyclic
+        ("def l = []; ctx.a = [l, l]; ctx.b = l;", json!({ "doc": { "_source": { "a": [[], []], "b": [] } } })),
+        ("def m = [:]; m.x = 1; m.k = m.keySet(); ctx.m = m;", json!({ "doc": { "_source": { "a": 1, "m": { "x": 1, "k": ["x", "k"] } } } })),
+    ];
+    for (src, want) in cases {
+        let case = json!({ "request": { "script": { "source": src }, "doc": {}, "source_raw": "{\"a\":1}" } });
+        let have = run_ingest(&engine, &case, false).unwrap();
+        let have = match have.get("doc") {
+            Some(d) => json!({ "doc": { "_source": d["_source"].clone() } }),
+            None => have,
+        };
+        assert_eq!(&have, want, "{src}");
+    }
 }
