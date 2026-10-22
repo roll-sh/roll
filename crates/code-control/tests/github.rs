@@ -1040,3 +1040,162 @@ async fn roll_commands_from_github_comments() {
     let th = ts.as_array().unwrap().iter().find(|t| t["comments"][0]["body"] == "@roll review").unwrap();
     assert_eq!(th["comments"].as_array().unwrap().len(), 1);
 }
+
+/// Every review event and action GitHub sends, against the rules: what counts, what's stale,
+/// what's ignored (docs/code/reviews.md, "External reviewers").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_events_every_action_against_the_rules() {
+    let g = github_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let w = seed(home, &format!("{}/git/acme/app.git", g.base));
+    let main_sha = git(home, &w, &["rev-parse", "main"]).trim().to_string();
+    let feature_sha = git(home, &w, &["rev-parse", "feature"]).trim().to_string();
+    g.mock.pulls.lock().insert(3, pr_json(&g.mock, 3, "feature", &feature_sha, &main_sha));
+    let a = app(None);
+    enable(&a, &g, fast_mirror());
+    a.ok("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" }))).await;
+    a.ok("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "app", "source": { "github": { "installation_id": INSTALLATION, "owner": "acme", "repo": "app" } } }))).await;
+    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().iter().find(|c| c["github_pr"] == 3).unwrap().clone();
+    let id = c3["id"].as_str().unwrap().to_string();
+    let (repo, inst, pr) = (repo_json(&g.mock), json!({ "id": INSTALLATION }), pr_json(&g.mock, 3, "feature", &feature_sha, &main_sha));
+    let user = |login: &str| json!({ "login": login, "id": 11, "type": "User" });
+    let bot = |login: &str| json!({ "login": login, "id": 42, "type": "Bot" });
+    let review = |action: &str, rid: u64, who: Value, state: &str, assoc: Option<&str>, commit: &str| {
+        let mut v = json!({ "action": action, "review": { "id": rid, "user": who, "body": format!("review {rid}"), "state": state, "commit_id": commit }, "pull_request": pr, "repository": repo, "installation": inst, "sender": who });
+        if let Some(x) = assoc {
+            v["review"]["author_association"] = json!(x);
+        }
+        v
+    };
+    let comment = |action: &str, cid: u64, extra: Value| {
+        let mut c = json!({ "id": cid, "path": "feature.txt", "line": 1, "side": "RIGHT", "commit_id": feature_sha, "body": format!("comment {cid}"), "user": user("octo") });
+        for (k, v) in extra.as_object().unwrap() {
+            c[k] = v.clone();
+        }
+        json!({ "action": action, "comment": c, "pull_request": pr, "repository": repo, "installation": inst, "sender": user("octo") })
+    };
+    let thread = |action: &str, root: u64, sender: Value| {
+        json!({ "action": action, "thread": { "node_id": format!("PRRT_{root}"), "comments": [{ "id": root, "path": "feature.txt", "body": "x" }] }, "pull_request": pr, "repository": repo, "installation": inst, "sender": sender })
+    };
+    let kinds = || {
+        let (a, id) = (&a, id.clone());
+        async move {
+            let c = a.ok("GET", &format!("/v1/code/changes/{id}"), None).await;
+            c["blockers"].as_array().unwrap().iter().map(|b| b["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        }
+    };
+    let reviews = || {
+        let (a, id) = (&a, id.clone());
+        async move { a.ok("GET", &format!("/v1/code/changes/{id}/reviews"), None).await.as_array().unwrap().clone() }
+    };
+    let by_ext = |rs: &[Value], rid: u64| rs.iter().find(|r| r["url"].is_null() && r["body"] == format!("review {rid}")).cloned();
+    let mut n = 0;
+    let mut send = |event: &'static str, body: Value| {
+        n += 1;
+        let (a, delivery) = (&a, format!("e-{n}"));
+        async move { assert_eq!(hook(a, event, &delivery, &body, SECRET).await, StatusCode::OK, "{event}: {body}") }
+    };
+    a.ok("PATCH", "/v1/code/repos/acme/app/review-settings", Some(json!({ "required_approvals": 1 }))).await;
+    a.ok("POST", &format!("/v1/code/changes/{id}/review-requests"), Some(json!({ "reviewer": "@lead", "required": true }))).await;
+    assert_eq!(kinds().await, vec!["needs_approval", "review_pending"]);
+
+    // The pull request's author (octo) approving it doesn't count, owner or not.
+    send("pull_request_review", review("submitted", 800, user("octo"), "approved", Some("OWNER"), &feature_sha)).await;
+    assert_eq!(by_ext(&reviews().await, 800).unwrap()["verdict"], "approve");
+    assert_eq!(kinds().await, vec!["needs_approval", "review_pending"]);
+    // pull_request_review.submitted from the repo's owner (any case) on the head: counts, and
+    // settles the review requested from them.
+    send("pull_request_review", review("submitted", 801, user("lead"), "approved", Some("owner"), &feature_sha)).await;
+    let rs = reviews().await;
+    let v = by_ext(&rs, 801).unwrap();
+    assert_eq!((v["verdict"].as_str(), v["reviewer"]["kind"].as_str(), v["stale"].as_bool()), (Some("approve"), Some("user"), Some(false)));
+    assert_eq!(kinds().await, Vec::<String>::new());
+    // .dismissed: no longer counts, dismissed by the sender; a redelivery changes nothing.
+    send("pull_request_review", review("dismissed", 801, user("lead"), "dismissed", Some("OWNER"), &feature_sha)).await;
+    send("pull_request_review", review("dismissed", 801, user("lead"), "dismissed", Some("OWNER"), &feature_sha)).await;
+    let v = by_ext(&reviews().await, 801).unwrap();
+    assert_eq!((v["dismissed"].as_bool(), v["dismissed_by"].as_str(), v["dismiss_reason"].as_str()), (Some(true), Some("@lead"), Some("dismissed on GitHub")));
+    assert_eq!(kinds().await, vec!["needs_approval"]);
+    // .dismissed for a review roll never saw: nothing.
+    send("pull_request_review", review("dismissed", 802, user("octo"), "dismissed", Some("OWNER"), &feature_sha)).await;
+    assert!(by_ext(&reviews().await, 802).is_none());
+    // .edited for a review roll never saw (submitted while it wasn't listening): recorded.
+    send("pull_request_review", review("edited", 803, user("late"), "approved", Some("MEMBER"), &feature_sha)).await;
+    assert_eq!(by_ext(&reviews().await, 803).unwrap()["verdict"], "approve");
+    assert!(kinds().await.is_empty());
+    send("pull_request_review", review("dismissed", 803, user("late"), "dismissed", Some("MEMBER"), &feature_sha)).await;
+
+    // A bot's approval is kept as one whatever its association, and counts only with
+    // count_ai_approval; a bot's change request blocks.
+    send("pull_request_review", review("submitted", 804, bot("greptile-apps[bot]"), "approved", Some("NONE"), &feature_sha)).await;
+    assert_eq!(by_ext(&reviews().await, 804).unwrap()["verdict"], "approve");
+    assert_eq!(kinds().await, vec!["needs_approval"]);
+    a.ok("PATCH", "/v1/code/repos/acme/app/review-settings", Some(json!({ "count_ai_approval": true }))).await;
+    assert!(kinds().await.is_empty());
+    a.ok("PATCH", "/v1/code/repos/acme/app/review-settings", Some(json!({ "count_ai_approval": false }))).await;
+    send("pull_request_review", review("submitted", 805, bot("coderabbitai[bot]"), "changes_requested", None, &feature_sha)).await;
+    assert_eq!(kinds().await, vec!["needs_approval", "changes_requested"]);
+    send("pull_request_review", review("dismissed", 805, bot("coderabbitai[bot]"), "dismissed", None, &feature_sha)).await;
+
+    // Reviews of a commit that isn't the change's head are stale; dismiss_stale decides.
+    let unknown = "ab".repeat(20);
+    send("pull_request_review", review("submitted", 806, user("maint"), "approved", Some("COLLABORATOR"), &main_sha)).await;
+    send("pull_request_review", review("submitted", 807, user("maint2"), "approved", Some("COLLABORATOR"), &unknown)).await;
+    let rs = reviews().await;
+    for rid in [806, 807] {
+        let v = by_ext(&rs, rid).unwrap();
+        assert_eq!((v["revision"].as_u64(), v["stale"].as_bool()), (Some(0), Some(true)), "{v}");
+    }
+    assert_eq!(kinds().await, vec!["needs_approval"]);
+    a.ok("PATCH", "/v1/code/repos/acme/app/review-settings", Some(json!({ "dismiss_stale": false }))).await;
+    assert!(kinds().await.is_empty());
+    a.ok("PATCH", "/v1/code/repos/acme/app/review-settings", Some(json!({ "dismiss_stale": true, "required_approvals": 0 }))).await;
+
+    // A review on a pull request roll has no change for: ignored.
+    let before = reviews().await.len();
+    let mut other = review("submitted", 808, user("lead"), "approved", Some("OWNER"), &feature_sha);
+    other["pull_request"] = pr_json(&g.mock, 99, "nope", &feature_sha, &main_sha);
+    send("pull_request_review", other).await;
+    assert_eq!(reviews().await.len(), before);
+
+    // pull_request_review_comment.created: on the base side (LEFT) → old; without a line (already
+    // outdated on GitHub) → outdated; .edited and .deleted of comments roll never saw do nothing.
+    send("pull_request_review_comment", comment("created", 900, json!({ "side": "LEFT", "path": "README.md" }))).await;
+    send("pull_request_review_comment", comment("created", 901, json!({ "line": null, "original_line": 1 }))).await;
+    send("pull_request_review_comment", comment("edited", 999, json!({}))).await;
+    send("pull_request_review_comment", comment("deleted", 998, json!({}))).await;
+    let ts = a.ok("GET", &format!("/v1/code/changes/{id}/threads"), None).await;
+    let ts = ts.as_array().unwrap();
+    assert_eq!(ts.len(), 2, "{ts:?}");
+    let t900 = ts.iter().find(|t| t["comments"][0]["body"] == "comment 900").unwrap();
+    let t901 = ts.iter().find(|t| t["comments"][0]["body"] == "comment 901").unwrap();
+    assert_eq!((t900["side"].as_str(), t900["path"].as_str(), t900["outdated"].as_bool()), (Some("old"), Some("README.md"), Some(false)));
+    assert_eq!((t901["outdated"].as_bool(), t901["line"].as_u64(), t901["review"].clone()), (Some(true), Some(1), Value::Null));
+    let thread_of = |tid: Value| {
+        let a = &a;
+        async move { a.ok("GET", &format!("/v1/code/threads/{}", tid.as_str().unwrap()), None).await }
+    };
+
+    // pull_request_review_thread: resolved and unresolved on GitHub follow in roll, and decide
+    // require_resolved_threads; roll's own events and unknown threads are ignored.
+    a.ok("PATCH", "/v1/code/repos/acme/app/review-settings", Some(json!({ "require_resolved_threads": true }))).await;
+    assert_eq!(kinds().await, vec!["unresolved_threads"]);
+    send("pull_request_review_thread", thread("resolved", 900, user("octo"))).await;
+    send("pull_request_review_thread", thread("resolved", 901, bot("roll-test[bot]"))).await;
+    send("pull_request_review_thread", thread("resolved", 12_345, user("octo"))).await;
+    assert_eq!(thread_of(t900["id"].clone()).await["resolved"], true);
+    assert_eq!(thread_of(t901["id"].clone()).await["resolved"], false, "roll's own resolution events are ignored");
+    assert_eq!(kinds().await, vec!["unresolved_threads"]);
+    send("pull_request_review_thread", thread("resolved", 901, user("octo"))).await;
+    assert!(kinds().await.is_empty());
+    send("pull_request_review_thread", thread("unresolved", 900, user("octo"))).await;
+    let t = thread_of(t900["id"].clone()).await;
+    assert_eq!((t["resolved"].as_bool(), t["resolved_by"].clone()), (Some(false), Value::Null));
+    assert_eq!(kinds().await, vec!["unresolved_threads"]);
+    send("pull_request_review_thread", thread("unresolved", 12_345, user("octo"))).await;
+    // Resolution GitHub reported isn't sent back to it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!g.mock.calls.lock().iter().any(|(m, p, _)| m == "GRAPHQL" && p != "reviewThreads"), "nothing echoed to GitHub");
+}

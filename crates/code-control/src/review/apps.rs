@@ -176,7 +176,7 @@ impl Code {
         Ok(Some(Caller::App { id: a.id, owner_id: a.owner_id, name: a.name, repos: Arc::new(a.repos) }))
     }
 
-    /// Active apps installed on `r`.
+    /// Apps installed on `r`, active or not (callers check `active`).
     pub(crate) fn apps_for_repo(&self, r: &RepoRow) -> Result<Vec<AppRow>> {
         Ok(self.db.apps(Some(&r.owner_id))?.into_iter().filter(|a| a.repos.is_empty() || a.repos.contains(&r.id)).collect())
     }

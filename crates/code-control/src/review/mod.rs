@@ -343,7 +343,9 @@ impl Code {
     /// Can `caller` approve or request changes on `r`'s changes?
     pub fn may_decide(caller: &Caller, r: &RepoRow) -> bool {
         match caller {
-            Caller::App { .. } => Self::can_read(caller, r),
+            // Only on repos it's installed on: every app can read public repos, but an app of
+            // another owner approving (or blocking) them must not count.
+            Caller::App { owner_id, repos, .. } => *owner_id == r.owner_id && (repos.is_empty() || repos.contains(&r.id)),
             _ => Self::owns(caller, &r.owner_id),
         }
     }

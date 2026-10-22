@@ -245,7 +245,7 @@ POST  /v1/code/changes/{id}/review-requests {reviewer: "@name" | "agent:name" | 
       writers; a required request adds a review_pending blocker until that reviewer reviews the current head
 GET   /v1/code/repos/{owner}/{repo}/review-settings → {settings: Rules /* stored */,
       file: null /* no .roll/review.yaml */ | {path: ".roll/review.yaml",
-            rules: null | RulesPatch /* the rule keys the file sets, each null when it doesn't set it:
+            rules: null | RulesPatch /* the rule keys the file sets; keys it doesn't set are left out:
                    {required_approvals, require_codeowners, count_ai_approval, block_on_request_changes, dismiss_stale,
                     require_resolved_threads, allow_self_approval, auto_approve} */,
             reviewer: null | object /* the file's `reviewer:` section as written; see GET …/reviewer for what it means */,
