@@ -1,0 +1,257 @@
+> SET enable_partitionwise_join = on
+-- SET
+
+> SET max_parallel_workers_per_gather = 0
+-- SET
+
+> CREATE TABLE a5_fract (id bigint, PRIMARY KEY (id)) PARTITION BY RANGE (id)
+-- CREATE TABLE
+
+> CREATE TABLE a5_fract0 PARTITION OF a5_fract FOR VALUES FROM ('0') TO ('1000')
+-- CREATE TABLE
+
+> CREATE TABLE a5_fract1 PARTITION OF a5_fract FOR VALUES FROM ('1000') TO ('2000')
+-- CREATE TABLE
+
+> INSERT INTO a5_fract (id) SELECT generate_series(0, 1999)
+-- INSERT 0 2000
+
+> ANALYZE a5_fract
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT x.id, y.id FROM a5_fract x LEFT JOIN a5_fract y USING (id) ORDER BY x.id ASC LIMIT 10
+QUERY PLAN:text
+Limit
+  ->  Merge Append
+        Sort Key: x.id
+        ->  Merge Left Join
+              Merge Cond: (x_1.id = y_1.id)
+              ->  Index Only Scan using a5_fract0_pkey on a5_fract0 x_1
+              ->  Index Only Scan using a5_fract0_pkey on a5_fract0 y_1
+        ->  Merge Left Join
+              Merge Cond: (x_2.id = y_2.id)
+              ->  Index Only Scan using a5_fract1_pkey on a5_fract1 x_2
+              ->  Index Only Scan using a5_fract1_pkey on a5_fract1 y_2
+-- EXPLAIN
+
+> SELECT x.id, y.id FROM a5_fract x LEFT JOIN a5_fract y USING (id) ORDER BY x.id ASC LIMIT 10
+id:int8 | id:int8
+0 | 0
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+9 | 9
+-- SELECT 10
+
+> EXPLAIN (COSTS OFF)
+> SELECT x.id, y.id FROM a5_fract x LEFT JOIN a5_fract y USING (id) ORDER BY x.id DESC LIMIT 10
+QUERY PLAN:text
+Limit
+  ->  Merge Append
+        Sort Key: x.id DESC
+        ->  Nested Loop Left Join
+              ->  Index Only Scan Backward using a5_fract0_pkey on a5_fract0 x_1
+              ->  Index Only Scan using a5_fract0_pkey on a5_fract0 y_1
+                    Index Cond: (id = x_1.id)
+        ->  Nested Loop Left Join
+              ->  Index Only Scan Backward using a5_fract1_pkey on a5_fract1 x_2
+              ->  Index Only Scan using a5_fract1_pkey on a5_fract1 y_2
+                    Index Cond: (id = x_2.id)
+-- EXPLAIN
+
+> SELECT x.id, y.id FROM a5_fract x LEFT JOIN a5_fract y USING (id) ORDER BY x.id DESC LIMIT 10
+id:int8 | id:int8
+1999 | 1999
+1998 | 1998
+1997 | 1997
+1996 | 1996
+1995 | 1995
+1994 | 1994
+1993 | 1993
+1992 | 1992
+1991 | 1991
+1990 | 1990
+-- SELECT 10
+
+> EXPLAIN (COSTS OFF)
+> SELECT x.id, y.id FROM a5_fract x LEFT JOIN a5_fract y USING (id) ORDER BY x.id DESC LIMIT 2
+QUERY PLAN:text
+Limit
+  ->  Merge Append
+        Sort Key: x.id DESC
+        ->  Nested Loop Left Join
+              ->  Index Only Scan Backward using a5_fract0_pkey on a5_fract0 x_1
+              ->  Index Only Scan using a5_fract0_pkey on a5_fract0 y_1
+                    Index Cond: (id = x_1.id)
+        ->  Nested Loop Left Join
+              ->  Index Only Scan Backward using a5_fract1_pkey on a5_fract1 x_2
+              ->  Index Only Scan using a5_fract1_pkey on a5_fract1 y_2
+                    Index Cond: (id = x_2.id)
+-- EXPLAIN
+
+> CREATE TABLE a5_plt1 (a int, b int, c text) PARTITION BY LIST (c)
+-- CREATE TABLE
+
+> CREATE TABLE a5_plt1_p1 PARTITION OF a5_plt1 FOR VALUES IN ('0000', '0003', '0004', '0010')
+-- CREATE TABLE
+
+> CREATE TABLE a5_plt1_p2 PARTITION OF a5_plt1 FOR VALUES IN ('0001', '0005', '0002', '0009')
+-- CREATE TABLE
+
+> CREATE TABLE a5_plt1_p3 PARTITION OF a5_plt1 FOR VALUES IN ('0006', '0007', '0008', '0011')
+-- CREATE TABLE
+
+> INSERT INTO a5_plt1 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 2) i
+-- INSERT 0 300
+
+> ANALYZE a5_plt1
+-- ANALYZE
+
+> CREATE TABLE a5_plt2 (a int, b int, c text) PARTITION BY LIST (c)
+-- CREATE TABLE
+
+> CREATE TABLE a5_plt2_p1 PARTITION OF a5_plt2 FOR VALUES IN ('0000', '0003', '0004', '0010')
+-- CREATE TABLE
+
+> CREATE TABLE a5_plt2_p2 PARTITION OF a5_plt2 FOR VALUES IN ('0001', '0005', '0002', '0009')
+-- CREATE TABLE
+
+> CREATE TABLE a5_plt2_p3 PARTITION OF a5_plt2 FOR VALUES IN ('0006', '0007', '0008', '0011')
+-- CREATE TABLE
+
+> INSERT INTO a5_plt2 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 3) i
+-- INSERT 0 200
+
+> ANALYZE a5_plt2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT avg(t1.a), avg(t2.b), t1.c, t2.c FROM a5_plt1 t1 RIGHT JOIN a5_plt2 t2 ON t1.c = t2.c
+>   WHERE t1.a % 25 = 0 GROUP BY t1.c, t2.c ORDER BY t1.c, t2.c
+QUERY PLAN:text
+Sort
+  Sort Key: t1.c
+  ->  HashAggregate
+        Group Key: t1.c
+        ->  Append
+              ->  Hash Join
+                    Hash Cond: (t2_1.c = t1_1.c)
+                    ->  Seq Scan on a5_plt2_p1 t2_1
+                    ->  Hash
+                          ->  Seq Scan on a5_plt1_p1 t1_1
+                                Filter: ((a % 25) = 0)
+              ->  Hash Join
+                    Hash Cond: (t2_2.c = t1_2.c)
+                    ->  Seq Scan on a5_plt2_p2 t2_2
+                    ->  Hash
+                          ->  Seq Scan on a5_plt1_p2 t1_2
+                                Filter: ((a % 25) = 0)
+              ->  Hash Join
+                    Hash Cond: (t2_3.c = t1_3.c)
+                    ->  Seq Scan on a5_plt2_p3 t2_3
+                    ->  Hash
+                          ->  Seq Scan on a5_plt1_p3 t1_3
+                                Filter: ((a % 25) = 0)
+-- EXPLAIN
+
+> SELECT avg(t1.a), avg(t2.b), t1.c, t2.c FROM a5_plt1 t1 RIGHT JOIN a5_plt2 t2 ON t1.c = t2.c
+>   WHERE t1.a % 25 = 0 GROUP BY t1.c, t2.c ORDER BY t1.c, t2.c
+avg:numeric | avg:numeric | c:text | c:text
+0.00000000000000000000 | 24.0000000000000000 | 0000 | 0000
+50.0000000000000000 | 75.0000000000000000 | 0001 | 0001
+100.0000000000000000 | 124.5000000000000000 | 0002 | 0002
+150.0000000000000000 | 174.0000000000000000 | 0003 | 0003
+200.0000000000000000 | 225.0000000000000000 | 0004 | 0004
+250.0000000000000000 | 274.5000000000000000 | 0005 | 0005
+300.0000000000000000 | 324.0000000000000000 | 0006 | 0006
+350.0000000000000000 | 375.0000000000000000 | 0007 | 0007
+400.0000000000000000 | 424.5000000000000000 | 0008 | 0008
+450.0000000000000000 | 474.0000000000000000 | 0009 | 0009
+500.0000000000000000 | 525.0000000000000000 | 0010 | 0010
+550.0000000000000000 | 574.5000000000000000 | 0011 | 0011
+-- SELECT 12
+
+> RESET enable_partitionwise_join
+-- RESET
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> CREATE TABLE a5_x1 (a int, b int, c int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE a5_x1_1 PARTITION OF a5_x1 FOR VALUES FROM (1) TO (11)
+-- CREATE TABLE
+
+> CREATE TABLE a5_x1_2 PARTITION OF a5_x1 FOR VALUES FROM (11) TO (21)
+-- CREATE TABLE
+
+> CREATE TABLE a5_x2 (a int, b int, c int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE a5_x2_1 PARTITION OF a5_x2 FOR VALUES FROM (1) TO (11)
+-- CREATE TABLE
+
+> CREATE TABLE a5_x2_2 PARTITION OF a5_x2 FOR VALUES FROM (11) TO (21)
+-- CREATE TABLE
+
+> CREATE INDEX ON a5_x2 (b)
+-- CREATE INDEX
+
+> CREATE INDEX ON a5_x2 (c)
+-- CREATE INDEX
+
+> INSERT INTO a5_x1 SELECT 1 + mod(i, 20), i, i FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> INSERT INTO a5_x2 SELECT 1 + mod(i, 20), i, i FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> ANALYZE a5_x1
+-- ANALYZE
+
+> ANALYZE a5_x2
+-- ANALYZE
+
+> SET enable_partitionwise_join = on
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a5_x1 WHERE NOT EXISTS (SELECT 1 FROM a5_x2
+>   WHERE a5_x2.a = a5_x1.a AND (a5_x2.b = a5_x1.b + 1 OR a5_x2.c = 99)) AND a < 20 AND c = 91
+QUERY PLAN:text
+Append
+  ->  Hash Right Anti Join
+        Hash Cond: (a5_x2_1.a = a5_x1_1.a)
+        Join Filter: ((a5_x2_1.b = (a5_x1_1.b + 1)) OR (a5_x2_1.c = 99))
+        ->  Seq Scan on a5_x2_1
+        ->  Hash
+              ->  Seq Scan on a5_x1_1
+                    Filter: ((a < 20) AND (c = 91))
+  ->  Hash Right Anti Join
+        Hash Cond: (a5_x2_2.a = a5_x1_2.a)
+        Join Filter: ((a5_x2_2.b = (a5_x1_2.b + 1)) OR (a5_x2_2.c = 99))
+        ->  Seq Scan on a5_x2_2
+        ->  Hash
+              ->  Seq Scan on a5_x1_2
+                    Filter: ((a < 20) AND (c = 91))
+-- EXPLAIN
+
+> SELECT * FROM a5_x1 WHERE NOT EXISTS (SELECT 1 FROM a5_x2
+>   WHERE a5_x2.a = a5_x1.a AND (a5_x2.b = a5_x1.b + 1 OR a5_x2.c = 99)) AND a < 20 AND c = 91
+a:int4 | b:int4 | c:int4
+12 | 91 | 91
+-- SELECT 1
+
+> RESET enable_partitionwise_join
+-- RESET
+
+> DROP TABLE a5_fract, a5_plt1, a5_plt2, a5_x1, a5_x2
+-- DROP TABLE
+

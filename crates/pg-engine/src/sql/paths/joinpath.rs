@@ -436,6 +436,7 @@ fn enforced_of(p: &JP) -> Vec<usize> {
 }
 
 /// An ORDER BY over a join group.
+#[derive(Clone)]
 pub(super) struct Order {
     /// (group column, descending, nulls first) per key, while they are plain columns.
     pub keys: Vec<(usize, bool, bool)>,
@@ -4544,6 +4545,7 @@ impl Search<'_, '_, '_> {
                         key_flipped: if kind == JoinKind::Inner { key_flipped } else { Vec::new() },
                         written_kind: None,
                         phv_eval: false,
+                        presorted: false,
                     }),
                 };
                 let layout = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
@@ -4691,7 +4693,7 @@ fn gather(
                 // (An outer join's clause as written; an inner or semi join's comes from
                 // its equivalence class, outer side first: as a planned one had it.)
                 let (a, b) = if !inner_only
-                    && matches!(kind, JoinKind::Left | JoinKind::Right | JoinKind::Full)
+                    && matches!(kind, JoinKind::Left | JoinKind::Right | JoinKind::Full | JoinKind::Anti)
                     && meta.hash_swapped.get(i) == Some(&true)
                     || inner_only && meta.key_flipped.get(i) == Some(&true)
                 {
@@ -5946,12 +5948,71 @@ impl Planner<'_, '_> {
             _ => None,
         });
         let saved_lim = self.pw_limit.replace(lim);
+        let ord = s.order.as_ref().filter(|o| !o.keys.is_empty() && o.complete && !o.hint).cloned();
+        let saved_ord = self.pw_order.replace(ord.clone());
         let pwj = if alias.iter().enumerate().all(|(i, &g)| i == g) {
             self.partitionwise(p, &s, &needed[..width.min(needed.len())])
         } else {
             None
         };
         self.pw_limit.set(saved_lim);
+        self.pw_order.replace(saved_ord);
+        // (A Merge Append of child joins in the ORDER BY's order, when it reads the rows
+        // the query wants cheaper than the group's best path: generate_orderedappend_paths.)
+        if let Some((_, _, _, pw_join, Some(ordered))) = &pwj
+            && let Some(o) = &ord
+            && ordered.len() > 1
+        {
+            let ests: Vec<_> = ordered.iter().map(|c| crate::sql::explain::estimate(&Arc::new(c.clone()), self.ctx)).collect();
+            let n = ests.len() as f64;
+            let cmp = 2.0 * CPU_OPERATOR_COST;
+            let logn = n.log2();
+            let rows: f64 = ests.iter().map(|e| e.rows).sum();
+            let st = ests.iter().map(|e| e.startup).sum::<f64>() + cmp * n * logn;
+            let tot = st + ests.iter().map(|e| e.total - e.startup).sum::<f64>() + rows * cmp * logn + CPU_TUPLE_COST * 0.5 * rows;
+            let frac = |st: f64, tot: f64, rows: f64| match o.limit {
+                Some((c, off)) if c > 0.0 && off >= 0.0 => {
+                    let k = (c + off).min(rows.max(1.0));
+                    st + (tot - st) * k / rows.max(1.0)
+                }
+                _ => tot,
+            };
+            if frac(st, tot, rows) < frac(best.startup, best.total, best.rows) {
+                let mut inputs = Vec::new();
+                for c in ordered.iter() {
+                    let mut c = c.clone();
+                    let mut x = &mut c;
+                    loop {
+                        match x {
+                            Plan::Project { input, .. } | Plan::Filter { input, .. } => x = Arc::make_mut(input),
+                            Plan::Join { meta, .. } => {
+                                meta.presorted = true;
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                    inputs.push(Arc::new(c));
+                }
+                let keys = o
+                    .keys
+                    .iter()
+                    .map(|&(g, desc, nulls_first)| SortKey {
+                        expr: Expr::Col(g, s.col_type(g)),
+                        desc,
+                        nulls_first,
+                        using: None,
+                    })
+                    .collect();
+                self.pw_joins.borrow_mut().push((Arc::as_ptr(&inputs[0]) as usize, pw_join.clone()));
+                *p = Plan::Sort {
+                    input: Arc::new(Plan::Append { inputs, inh: None }),
+                    keys,
+                };
+                return Some(true);
+            }
+        }
+        let pwj = pwj.map(|(a, b, c, d, _)| (a, b, c, d));
         if let Some((children, pw_total, pw_rows, pw_join)) = pwj {
             let pw = match &s.order {
                 Some(o) if sorted => {

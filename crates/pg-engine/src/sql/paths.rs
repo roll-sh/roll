@@ -1764,6 +1764,9 @@ struct Planner<'c, 'a> {
     /// Planning a partitionwise join's child joins under a LIMIT (no ORDER BY): its count
     /// and offset, each child's cheapest path for that fraction (get_cheapest_fractional_path).
     pw_limit: std::cell::Cell<Option<(f64, f64)>>,
+    /// Planning a partitionwise join's child joins under an ORDER BY: the order, each child
+    /// planned for it too (a Merge Append of them, generate_orderedappend_paths).
+    pw_order: std::cell::RefCell<Option<joinpath::Order>>,
 }
 
 impl<'c, 'a> Planner<'c, 'a> {
@@ -1785,6 +1788,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             lifted: Default::default(),
             pw_loop_rows: Default::default(),
             pw_limit: Default::default(),
+            pw_order: Default::default(),
         }
     }
 

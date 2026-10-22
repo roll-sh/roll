@@ -219,6 +219,9 @@ pub struct JoinMeta {
     /// A semi / anti join run the other way round (Hash Right Semi Join, Hash / Merge
     /// Right Anti Join): the right input is the outer one.
     pub swapped: bool,
+    /// A partitionwise child join planned in the order a Merge Append above it merges by:
+    /// its rows come out in that order.
+    pub presorted: bool,
     /// The outer / inner input is a semi join's right side unique-ified
     /// (create_unique_path).
     pub unique_outer: bool,

@@ -4278,6 +4278,7 @@ impl Builder<'_, '_> {
                 }
                 // The input's other path, when it comes in this order and costs less than
                 // sorting this one.
+                let mut unsorted_alt = None;
                 if let Some(alt) = c.node.alt.take() {
                     let sorted = alt.order.len() >= list.len() && alt.order[..list.len()] == list[..];
                     if sorted {
@@ -4288,9 +4289,11 @@ impl Builder<'_, '_> {
                         {
                             c.node = *alt;
                         }
+                    } else {
+                        unsorted_alt = Some(alt);
                     }
                 }
-                let common = list
+                let mut common = list
                     .iter()
                     .zip(&c.node.order)
                     .enumerate()
@@ -4298,9 +4301,23 @@ impl Builder<'_, '_> {
                         a == b || c.node.order_eq.get(*oi).is_some_and(|e| e.contains(a))
                     })
                     .count();
-                // Already in that order: no sort; partly: an incremental one.
+                // Already in that order: no sort (unless the input's other path sorted costs
+                // less: a hashed grouping of few groups); partly: an incremental one.
                 if common == list.len() && !list.is_empty() {
-                    return c;
+                    let swap = unsorted_alt.as_ref().filter(|a| a.node_type == "Aggregate" && c.node.node_type == "Aggregate").is_some_and(|alt| {
+                        let mut sn = ExNode::new("Sort");
+                        self.sort_costs(&mut sn, alt);
+                        sn.disabled = !crate::sql::paths::Gucs::read(self.ctx).sort;
+                        let d_alt = parallel::disabled_nodes(alt) + sn.disabled as usize;
+                        let d_cur = parallel::disabled_nodes(&c.node);
+                        d_alt < d_cur || (d_alt == d_cur && sn.total_cost * 1.01 < c.node.total_cost)
+                    });
+                    if !swap {
+                        return c;
+                    }
+                    let alt = unsorted_alt.take().unwrap();
+                    c.node = *alt;
+                    common = 0;
                 }
                 if common > 0 && !member_sort && crate::sql::paths::Gucs::read(self.ctx).incremental_sort {
                     let mut n = ExNode::new("Incremental Sort");
@@ -6820,6 +6837,9 @@ impl Builder<'_, '_> {
 
     fn append_of(&mut self, arms: &[&Arc<Plan>], inh: bool) -> Built {
         let mut n = ExNode::new("Append");
+        // (A partitionwise join's child joins: each one's column statistics, for the
+        // partitioned tables' columns above.)
+        let mut arm_vars: Vec<Vec<Option<costs::VarRef>>> = Vec::new();
         let mut names = None;
         let mut members = Vec::new();
         let mut member_tuples: Vec<f64> = Vec::new();
@@ -6839,6 +6859,9 @@ impl Builder<'_, '_> {
             if i == 0 {
                 n.startup_cost = c.node.startup_cost;
                 n.cols = c.node.cols.iter().map(|x| ColInfo { var: None, ..x.clone() }).collect();
+            }
+            if !inh {
+                arm_vars.push(c.node.cols.iter().map(|x| x.var.clone()).collect());
             }
             n.rows += c.node.rows;
             n.width = n.width.max(c.node.width);
@@ -6919,6 +6942,52 @@ impl Builder<'_, '_> {
                     tuples,
                     expr: None,
                     rows: n.rows,
+                    inh: true,
+                });
+            }
+        }
+        // A partitionwise join's columns: its partitioned tables' (their inherited
+        // statistics), over all the child joins' partitions.
+        // (Inner child joins only: a column an outer join nulls isn't its table's as such.)
+        let child_join = |a: &Arc<Plan>| {
+            let mut x: &Plan = a;
+            while let Plan::Project { input, .. } | Plan::Filter { input, .. } = x {
+                x = input;
+            }
+            matches!(x, Plan::Join { kind: JoinKind::Inner, .. })
+        };
+        if !inh && arms.len() > 1 && arms.iter().all(|a| child_join(a)) && arm_vars.len() == arms.len() {
+            let cat = self.ctx.catalog();
+            for (k, c) in n.cols.iter_mut().enumerate() {
+                let Some(Some(v)) = arm_vars[0].get(k) else { continue };
+                if v.expr.is_some() {
+                    continue;
+                }
+                let Some(pcol) = v.table.columns.get(v.col) else { continue };
+                // (The root of the partition tree the column's table is in.)
+                let mut root = v.table.clone();
+                while let Some(&po) = root.inherits.first()
+                    && let Some(pt) = cat.table(po)
+                    && pt.partkey.is_some()
+                {
+                    root = pt.clone();
+                }
+                if Arc::ptr_eq(&root, &v.table) {
+                    continue;
+                }
+                let Some(rk) = root.columns.iter().position(|rc| !rc.dropped && rc.name == pcol.name) else {
+                    continue;
+                };
+                let tuples: f64 = arm_vars
+                    .iter()
+                    .map(|vs| vs.get(k).and_then(|x| x.as_ref()).map_or(0.0, |x| x.tuples))
+                    .sum();
+                c.var = Some(costs::VarRef {
+                    table: root,
+                    col: rk,
+                    tuples,
+                    expr: None,
+                    rows: 0.0,
                     inh: true,
                 });
             }
@@ -11155,6 +11224,11 @@ fn merge_appended(p: &Plan) -> bool {
                 true
             }
             Plan::Scan(s) if matches!(s.access, super::plan::Access::Index { ordered: true, .. }) => {
+                *leaves += 1;
+                true
+            }
+            // (A partitionwise child join planned in the merge's order.)
+            Plan::Join { meta, .. } if meta.presorted => {
                 *leaves += 1;
                 true
             }

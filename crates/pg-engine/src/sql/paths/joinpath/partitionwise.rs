@@ -386,7 +386,7 @@ impl Planner<'_, '_> {
         p: &Plan,
         s: &Search,
         needed: &[bool],
-    ) -> Option<(Vec<Plan>, f64, f64, PwJoin)> {
+    ) -> Option<(Vec<Plan>, f64, f64, PwJoin, Option<Vec<Plan>>)> {
         {
             let st = self.ctx.sess.settings.borrow();
             if !st
@@ -424,6 +424,7 @@ impl Planner<'_, '_> {
         if parted.iter().any(|p| p.bounds != first.bounds) {
             return self.partitionwise_merged(p, s, needed, &parted);
         }
+        let mut ordered: Option<Vec<Plan>> = self.pw_order.borrow().as_ref().map(|_| Vec::new());
         let mut wholes: Vec<Option<Plan>> = Vec::new();
         let mut children = Vec::new();
         let mut idx = Vec::new();
@@ -489,6 +490,7 @@ impl Planner<'_, '_> {
             // (Under a LIMIT: each child's cheapest total path too, the Append of those
             // the other candidate.)
             let mut whole = lim.is_some().then(|| child.clone());
+            let before_order = child.clone();
             self.absorbed.replace(s.extra.clone());
             self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
             let planned = self.plan_joins_with(&mut child, needed, lim.as_ref(), &[]);
@@ -502,6 +504,24 @@ impl Planner<'_, '_> {
                 self.pw_loop_rows.take();
                 self.absorbed.take();
                 planned?;
+            }
+            // (Under an ORDER BY: the child planned in that order too, a Merge Append's
+            // member when every one comes out sorted.)
+            let ord = self.pw_order.borrow().clone();
+            if let Some(o) = ord
+                && let Some(list) = ordered.as_mut()
+            {
+                let mut oc = before_order.clone();
+                self.absorbed.replace(s.extra.clone());
+                self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
+                let r = self.plan_joins_with(&mut oc, needed, Some(&o), &[]);
+                self.pw_loop_rows.take();
+                self.absorbed.take();
+                if r == Some(true) {
+                    list.push(oc);
+                } else {
+                    ordered = None;
+                }
             }
             children.push(child);
             wholes.push(whole);
@@ -576,7 +596,7 @@ impl Planner<'_, '_> {
             rowtypes: parted.iter().flat_map(|p| p.rowtypes.iter().copied()).collect(),
             colls: first.colls.clone(),
         };
-        Some((children, total, rows, pw))
+        Some((children, total, rows, pw, ordered))
     }
 }
 
@@ -652,7 +672,7 @@ impl Planner<'_, '_> {
         s: &Search,
         needed: &[bool],
         parted: &[Parted],
-    ) -> Option<(Vec<Plan>, f64, f64, PwJoin)> {
+    ) -> Option<(Vec<Plan>, f64, f64, PwJoin, Option<Vec<Plan>>)> {
         let n = parted.len();
         let first = &parted[0];
         let live = |pt: &Parted| -> Vec<bool> {
@@ -848,6 +868,6 @@ impl Planner<'_, '_> {
             rowtypes: parted.iter().flat_map(|p| p.rowtypes.iter().copied()).collect(),
             colls: first.colls.clone(),
         };
-        Some((children, total, rows, pw))
+        Some((children, total, rows, pw, None))
     }
 }
