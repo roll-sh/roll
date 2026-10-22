@@ -1,0 +1,20 @@
+[package]
+name = "search-aggs"
+description = "Elasticsearch-compatible aggregations over roll search doc values"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+foldhash.workspace = true
+hashbrown.workspace = true
+search-codec.workspace = true
+search-index.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+smallvec.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

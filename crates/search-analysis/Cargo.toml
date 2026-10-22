@@ -1,0 +1,15 @@
+[package]
+name = "search-analysis"
+description = "Elasticsearch-compatible text analysis: char filters, tokenizers, token filters, analyzers and normalizers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+foldhash.workspace = true
+regex.workspace = true
+regex-syntax.workspace = true
+smallvec.workspace = true
+unicode-segmentation.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,22 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+setup:
+  - do:
+      indices.create:
+        index: 'test_sl_cat_indices'
+
+---
+teardown:
+  - do:
+      indices.delete:
+        index: 'test_sl_cat_indices'
+---
+"cat.indices":
+  - do:
+      cat.indices:
+        index: 'test_sl_cat_indices'
+        format: 'json'
+  - match: { 0.index: 'test_sl_cat_indices' }

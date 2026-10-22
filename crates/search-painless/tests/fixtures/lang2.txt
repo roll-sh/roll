@@ -1,0 +1,537 @@
+def m = ['s': 'a']; int i = m.s; return i
+----
+def m = ['s': 1]; int i = m.s; return i
+----
+def m = ['s': true]; int i = m.s; return i
+----
+def m = ['s': [1]]; int i = m.s; return i
+----
+def m = ['s': 1.5]; int i = m.s; return i
+----
+def m = ['s': null]; int i = m.s; return i
+----
+def m = ['s': 2L]; int i = m.s; return i
+----
+def m = ['s': ['k': 1]]; int i = m.s; return i
+----
+def m = ['s': (char) 'c']; int i = m.s; return i
+----
+def m = ['s': (byte) 3]; int i = m.s; return i
+----
+def m = ['s': 1.5f]; int i = m.s; return i
+----
+def m = ['s': new HashSet()]; int i = m.s; return i
+----
+def m = ['s': 'a']; long i = m.s; return i
+----
+def m = ['s': 1]; long i = m.s; return i
+----
+def m = ['s': true]; long i = m.s; return i
+----
+def m = ['s': [1]]; long i = m.s; return i
+----
+def m = ['s': 1.5]; long i = m.s; return i
+----
+def m = ['s': null]; long i = m.s; return i
+----
+def m = ['s': 2L]; long i = m.s; return i
+----
+def m = ['s': ['k': 1]]; long i = m.s; return i
+----
+def m = ['s': (char) 'c']; long i = m.s; return i
+----
+def m = ['s': (byte) 3]; long i = m.s; return i
+----
+def m = ['s': 1.5f]; long i = m.s; return i
+----
+def m = ['s': new HashSet()]; long i = m.s; return i
+----
+def m = ['s': 'a']; double i = m.s; return i
+----
+def m = ['s': 1]; double i = m.s; return i
+----
+def m = ['s': true]; double i = m.s; return i
+----
+def m = ['s': [1]]; double i = m.s; return i
+----
+def m = ['s': 1.5]; double i = m.s; return i
+----
+def m = ['s': null]; double i = m.s; return i
+----
+def m = ['s': 2L]; double i = m.s; return i
+----
+def m = ['s': ['k': 1]]; double i = m.s; return i
+----
+def m = ['s': (char) 'c']; double i = m.s; return i
+----
+def m = ['s': (byte) 3]; double i = m.s; return i
+----
+def m = ['s': 1.5f]; double i = m.s; return i
+----
+def m = ['s': new HashSet()]; double i = m.s; return i
+----
+def m = ['s': 'a']; float i = m.s; return i
+----
+def m = ['s': 1]; float i = m.s; return i
+----
+def m = ['s': true]; float i = m.s; return i
+----
+def m = ['s': [1]]; float i = m.s; return i
+----
+def m = ['s': 1.5]; float i = m.s; return i
+----
+def m = ['s': null]; float i = m.s; return i
+----
+def m = ['s': 2L]; float i = m.s; return i
+----
+def m = ['s': ['k': 1]]; float i = m.s; return i
+----
+def m = ['s': (char) 'c']; float i = m.s; return i
+----
+def m = ['s': (byte) 3]; float i = m.s; return i
+----
+def m = ['s': 1.5f]; float i = m.s; return i
+----
+def m = ['s': new HashSet()]; float i = m.s; return i
+----
+def m = ['s': 'a']; short i = m.s; return i
+----
+def m = ['s': 1]; short i = m.s; return i
+----
+def m = ['s': true]; short i = m.s; return i
+----
+def m = ['s': [1]]; short i = m.s; return i
+----
+def m = ['s': 1.5]; short i = m.s; return i
+----
+def m = ['s': null]; short i = m.s; return i
+----
+def m = ['s': 2L]; short i = m.s; return i
+----
+def m = ['s': ['k': 1]]; short i = m.s; return i
+----
+def m = ['s': (char) 'c']; short i = m.s; return i
+----
+def m = ['s': (byte) 3]; short i = m.s; return i
+----
+def m = ['s': 1.5f]; short i = m.s; return i
+----
+def m = ['s': new HashSet()]; short i = m.s; return i
+----
+def m = ['s': 'a']; byte i = m.s; return i
+----
+def m = ['s': 1]; byte i = m.s; return i
+----
+def m = ['s': true]; byte i = m.s; return i
+----
+def m = ['s': [1]]; byte i = m.s; return i
+----
+def m = ['s': 1.5]; byte i = m.s; return i
+----
+def m = ['s': null]; byte i = m.s; return i
+----
+def m = ['s': 2L]; byte i = m.s; return i
+----
+def m = ['s': ['k': 1]]; byte i = m.s; return i
+----
+def m = ['s': (char) 'c']; byte i = m.s; return i
+----
+def m = ['s': (byte) 3]; byte i = m.s; return i
+----
+def m = ['s': 1.5f]; byte i = m.s; return i
+----
+def m = ['s': new HashSet()]; byte i = m.s; return i
+----
+def m = ['s': 'a']; char i = m.s; return i
+----
+def m = ['s': 1]; char i = m.s; return i
+----
+def m = ['s': true]; char i = m.s; return i
+----
+def m = ['s': [1]]; char i = m.s; return i
+----
+def m = ['s': 1.5]; char i = m.s; return i
+----
+def m = ['s': null]; char i = m.s; return i
+----
+def m = ['s': 2L]; char i = m.s; return i
+----
+def m = ['s': ['k': 1]]; char i = m.s; return i
+----
+def m = ['s': (char) 'c']; char i = m.s; return i
+----
+def m = ['s': (byte) 3]; char i = m.s; return i
+----
+def m = ['s': 1.5f]; char i = m.s; return i
+----
+def m = ['s': new HashSet()]; char i = m.s; return i
+----
+def m = ['s': 'a']; boolean i = m.s; return i
+----
+def m = ['s': 1]; boolean i = m.s; return i
+----
+def m = ['s': true]; boolean i = m.s; return i
+----
+def m = ['s': [1]]; boolean i = m.s; return i
+----
+def m = ['s': 1.5]; boolean i = m.s; return i
+----
+def m = ['s': null]; boolean i = m.s; return i
+----
+def m = ['s': 2L]; boolean i = m.s; return i
+----
+def m = ['s': ['k': 1]]; boolean i = m.s; return i
+----
+def m = ['s': (char) 'c']; boolean i = m.s; return i
+----
+def m = ['s': (byte) 3]; boolean i = m.s; return i
+----
+def m = ['s': 1.5f]; boolean i = m.s; return i
+----
+def m = ['s': new HashSet()]; boolean i = m.s; return i
+----
+def m = ['s': 'a']; String i = m.s; return i
+----
+def m = ['s': 1]; String i = m.s; return i
+----
+def m = ['s': true]; String i = m.s; return i
+----
+def m = ['s': [1]]; String i = m.s; return i
+----
+def m = ['s': 1.5]; String i = m.s; return i
+----
+def m = ['s': null]; String i = m.s; return i
+----
+def m = ['s': 2L]; String i = m.s; return i
+----
+def m = ['s': ['k': 1]]; String i = m.s; return i
+----
+def m = ['s': (char) 'c']; String i = m.s; return i
+----
+def m = ['s': (byte) 3]; String i = m.s; return i
+----
+def m = ['s': 1.5f]; String i = m.s; return i
+----
+def m = ['s': new HashSet()]; String i = m.s; return i
+----
+def m = ['s': 'a']; List i = m.s; return i
+----
+def m = ['s': 1]; List i = m.s; return i
+----
+def m = ['s': true]; List i = m.s; return i
+----
+def m = ['s': [1]]; List i = m.s; return i
+----
+def m = ['s': 1.5]; List i = m.s; return i
+----
+def m = ['s': null]; List i = m.s; return i
+----
+def m = ['s': 2L]; List i = m.s; return i
+----
+def m = ['s': ['k': 1]]; List i = m.s; return i
+----
+def m = ['s': (char) 'c']; List i = m.s; return i
+----
+def m = ['s': (byte) 3]; List i = m.s; return i
+----
+def m = ['s': 1.5f]; List i = m.s; return i
+----
+def m = ['s': new HashSet()]; List i = m.s; return i
+----
+def m = ['s': 'a']; Integer i = m.s; return i
+----
+def m = ['s': 1]; Integer i = m.s; return i
+----
+def m = ['s': true]; Integer i = m.s; return i
+----
+def m = ['s': [1]]; Integer i = m.s; return i
+----
+def m = ['s': 1.5]; Integer i = m.s; return i
+----
+def m = ['s': null]; Integer i = m.s; return i
+----
+def m = ['s': 2L]; Integer i = m.s; return i
+----
+def m = ['s': ['k': 1]]; Integer i = m.s; return i
+----
+def m = ['s': (char) 'c']; Integer i = m.s; return i
+----
+def m = ['s': (byte) 3]; Integer i = m.s; return i
+----
+def m = ['s': 1.5f]; Integer i = m.s; return i
+----
+def m = ['s': new HashSet()]; Integer i = m.s; return i
+----
+def m = ['s': 'a']; Double i = m.s; return i
+----
+def m = ['s': 1]; Double i = m.s; return i
+----
+def m = ['s': true]; Double i = m.s; return i
+----
+def m = ['s': [1]]; Double i = m.s; return i
+----
+def m = ['s': 1.5]; Double i = m.s; return i
+----
+def m = ['s': null]; Double i = m.s; return i
+----
+def m = ['s': 2L]; Double i = m.s; return i
+----
+def m = ['s': ['k': 1]]; Double i = m.s; return i
+----
+def m = ['s': (char) 'c']; Double i = m.s; return i
+----
+def m = ['s': (byte) 3]; Double i = m.s; return i
+----
+def m = ['s': 1.5f]; Double i = m.s; return i
+----
+def m = ['s': new HashSet()]; Double i = m.s; return i
+----
+def m = ['s': 'a']; Long i = m.s; return i
+----
+def m = ['s': 1]; Long i = m.s; return i
+----
+def m = ['s': true]; Long i = m.s; return i
+----
+def m = ['s': [1]]; Long i = m.s; return i
+----
+def m = ['s': 1.5]; Long i = m.s; return i
+----
+def m = ['s': null]; Long i = m.s; return i
+----
+def m = ['s': 2L]; Long i = m.s; return i
+----
+def m = ['s': ['k': 1]]; Long i = m.s; return i
+----
+def m = ['s': (char) 'c']; Long i = m.s; return i
+----
+def m = ['s': (byte) 3]; Long i = m.s; return i
+----
+def m = ['s': 1.5f]; Long i = m.s; return i
+----
+def m = ['s': new HashSet()]; Long i = m.s; return i
+----
+def m = ['s': 'a']; Map i = m.s; return i
+----
+def m = ['s': 1]; Map i = m.s; return i
+----
+def m = ['s': true]; Map i = m.s; return i
+----
+def m = ['s': [1]]; Map i = m.s; return i
+----
+def m = ['s': 1.5]; Map i = m.s; return i
+----
+def m = ['s': null]; Map i = m.s; return i
+----
+def m = ['s': 2L]; Map i = m.s; return i
+----
+def m = ['s': ['k': 1]]; Map i = m.s; return i
+----
+def m = ['s': (char) 'c']; Map i = m.s; return i
+----
+def m = ['s': (byte) 3]; Map i = m.s; return i
+----
+def m = ['s': 1.5f]; Map i = m.s; return i
+----
+def m = ['s': new HashSet()]; Map i = m.s; return i
+----
+def m = ['s': 'a']; Object i = m.s; return i
+----
+def m = ['s': 1]; Object i = m.s; return i
+----
+def m = ['s': true]; Object i = m.s; return i
+----
+def m = ['s': [1]]; Object i = m.s; return i
+----
+def m = ['s': 1.5]; Object i = m.s; return i
+----
+def m = ['s': null]; Object i = m.s; return i
+----
+def m = ['s': 2L]; Object i = m.s; return i
+----
+def m = ['s': ['k': 1]]; Object i = m.s; return i
+----
+def m = ['s': (char) 'c']; Object i = m.s; return i
+----
+def m = ['s': (byte) 3]; Object i = m.s; return i
+----
+def m = ['s': 1.5f]; Object i = m.s; return i
+----
+def m = ['s': new HashSet()]; Object i = m.s; return i
+----
+def m = ['s': 'a']; def i = m.s; return i
+----
+def m = ['s': 1]; def i = m.s; return i
+----
+def m = ['s': true]; def i = m.s; return i
+----
+def m = ['s': [1]]; def i = m.s; return i
+----
+def m = ['s': 1.5]; def i = m.s; return i
+----
+def m = ['s': null]; def i = m.s; return i
+----
+def m = ['s': 2L]; def i = m.s; return i
+----
+def m = ['s': ['k': 1]]; def i = m.s; return i
+----
+def m = ['s': (char) 'c']; def i = m.s; return i
+----
+def m = ['s': (byte) 3]; def i = m.s; return i
+----
+def m = ['s': 1.5f]; def i = m.s; return i
+----
+def m = ['s': new HashSet()]; def i = m.s; return i
+----
+def m = ['s': 'a']; Number i = m.s; return i
+----
+def m = ['s': 1]; Number i = m.s; return i
+----
+def m = ['s': true]; Number i = m.s; return i
+----
+def m = ['s': [1]]; Number i = m.s; return i
+----
+def m = ['s': 1.5]; Number i = m.s; return i
+----
+def m = ['s': null]; Number i = m.s; return i
+----
+def m = ['s': 2L]; Number i = m.s; return i
+----
+def m = ['s': ['k': 1]]; Number i = m.s; return i
+----
+def m = ['s': (char) 'c']; Number i = m.s; return i
+----
+def m = ['s': (byte) 3]; Number i = m.s; return i
+----
+def m = ['s': 1.5f]; Number i = m.s; return i
+----
+def m = ['s': new HashSet()]; Number i = m.s; return i
+----
+def m = ['s': 'a']; CharSequence i = m.s; return i
+----
+def m = ['s': 1]; CharSequence i = m.s; return i
+----
+def m = ['s': true]; CharSequence i = m.s; return i
+----
+def m = ['s': [1]]; CharSequence i = m.s; return i
+----
+def m = ['s': 1.5]; CharSequence i = m.s; return i
+----
+def m = ['s': null]; CharSequence i = m.s; return i
+----
+def m = ['s': 2L]; CharSequence i = m.s; return i
+----
+def m = ['s': ['k': 1]]; CharSequence i = m.s; return i
+----
+def m = ['s': (char) 'c']; CharSequence i = m.s; return i
+----
+def m = ['s': (byte) 3]; CharSequence i = m.s; return i
+----
+def m = ['s': 1.5f]; CharSequence i = m.s; return i
+----
+def m = ['s': new HashSet()]; CharSequence i = m.s; return i
+----
+def m = ['s': 'a']; Comparable i = m.s; return i
+----
+def m = ['s': 1]; Comparable i = m.s; return i
+----
+def m = ['s': true]; Comparable i = m.s; return i
+----
+def m = ['s': [1]]; Comparable i = m.s; return i
+----
+def m = ['s': 1.5]; Comparable i = m.s; return i
+----
+def m = ['s': null]; Comparable i = m.s; return i
+----
+def m = ['s': 2L]; Comparable i = m.s; return i
+----
+def m = ['s': ['k': 1]]; Comparable i = m.s; return i
+----
+def m = ['s': (char) 'c']; Comparable i = m.s; return i
+----
+def m = ['s': (byte) 3]; Comparable i = m.s; return i
+----
+def m = ['s': 1.5f]; Comparable i = m.s; return i
+----
+def m = ['s': new HashSet()]; Comparable i = m.s; return i
+----
+def m = ['s': 'a']; Collection i = m.s; return i
+----
+def m = ['s': 1]; Collection i = m.s; return i
+----
+def m = ['s': true]; Collection i = m.s; return i
+----
+def m = ['s': [1]]; Collection i = m.s; return i
+----
+def m = ['s': 1.5]; Collection i = m.s; return i
+----
+def m = ['s': null]; Collection i = m.s; return i
+----
+def m = ['s': 2L]; Collection i = m.s; return i
+----
+def m = ['s': ['k': 1]]; Collection i = m.s; return i
+----
+def m = ['s': (char) 'c']; Collection i = m.s; return i
+----
+def m = ['s': (byte) 3]; Collection i = m.s; return i
+----
+def m = ['s': 1.5f]; Collection i = m.s; return i
+----
+def m = ['s': new HashSet()]; Collection i = m.s; return i
+----
+Map m = Collections.unmodifiableMap([:]); m.a = 'x'; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = 1; return null
+----
+Map m = Collections.unmodifiableMap([:]); String s = 'x'; m.a = s; return null
+----
+Map m = Collections.unmodifiableMap([:]); def s = 'x'; m.a = s; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = (Object) 'x'; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = [1]; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = 1.5f; return null
+----
+Map m = Collections.unmodifiableMap([:]); m['a'] = 'x'; return null
+----
+Map m = Collections.unmodifiableMap([:]); m['a'] = 1; return null
+----
+Map m = Collections.unmodifiableMap([:]); String k = 'a'; m[k] = 1; return null
+----
+Map m = Collections.unmodifiableMap([:]); m[1] = 'x'; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a += 'x'; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = m.b = 'x'; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.put('a', 1); return null
+----
+Map m = Collections.unmodifiableMap([:]); m.put(1, 2); return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = 'o' + 'x'; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = 'x'.toString(); return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = (String) null; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = new ArrayList(); return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = [:]; return null
+----
+Map m = Collections.unmodifiableMap([:]); m.a = 'x'
+----
+Map m = Collections.unmodifiableMap([:]); m.a = 1
+----
+List l = Collections.unmodifiableList([1]); l[0] = 'x'; return null
+----
+List l = Collections.unmodifiableList([1]); l[0] = 5; return null
+----
+Object[] a = new Object[1]; a[1] = 'x'; return null
+----
+Object[] a = new Object[1]; a[1] = 5; return null
+----
+String[] a = new String[1]; a[1] = 'x'; return null
+----
+int[] a = new int[1]; a[1] = 5; return null
+----
+List l = Collections.unmodifiableList([1]); l[0] = 'x'

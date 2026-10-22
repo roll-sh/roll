@@ -1,0 +1,43 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+teardown:
+  - do:
+      indices.delete:
+        index: connectors-test
+        ignore: 404
+---
+"Connector":
+  - do:
+      connector.put:
+        connector_id: test-connector-1
+        body:
+          index_name: connectors-test
+  - match: { result: 'created' }
+
+  - do:
+      connector.check_in:
+        connector_id: test-connector-1
+  - match: { result: updated }
+
+  - do:
+      connector.list: {}
+  - gte: { count: 1 }
+
+  - do:
+      connector.post: { }
+  - set:  { id: id }
+  - match: { id: $id }
+
+  - do:
+      connector.get:
+        connector_id: $id
+  - match: { id: $id }
+
+  - do:
+      connector.delete:
+        connector_id: test-connector-1
+        hard: true
+  - match: { acknowledged: true }

@@ -1,0 +1,439 @@
+Calendar c = Calendar.getInstance(); return [c.getClass().getName(), c.getTimeZone().getID(), c.getFirstDayOfWeek(), c.getMinimalDaysInFirstWeek(), c.getCalendarType()]
+----
+Calendar c = Calendar.getInstance(); return [c.getTimeZone().getID(), c.getFirstDayOfWeek(), c.getMinimalDaysInFirstWeek(), c.getCalendarType(), c.isLenient()]
+----
+return [Locale.getDefault(), TimeZone.getDefault().getID()]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); return [c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH), c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE), c.get(Calendar.SECOND), c.get(Calendar.MILLISECOND), c.get(Calendar.DAY_OF_WEEK), c.get(Calendar.DAY_OF_YEAR), c.get(Calendar.WEEK_OF_YEAR), c.get(Calendar.WEEK_OF_MONTH), c.get(Calendar.DAY_OF_WEEK_IN_MONTH), c.get(Calendar.AM_PM), c.get(Calendar.HOUR), c.get(Calendar.ERA), c.get(Calendar.ZONE_OFFSET), c.get(Calendar.DST_OFFSET)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('America/New_York')); c.setTimeInMillis(1600000000000L); return [c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.ZONE_OFFSET), c.get(Calendar.DST_OFFSET), c.getTime(), c.getTimeInMillis(), c.toInstant()]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(0); c.add(Calendar.MONTH, 13); c.add(Calendar.DAY_OF_MONTH, -1); return c.getTimeInMillis()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2020, 1, 31); return [c.getTimeInMillis(), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2020, 0, 31); c.add(Calendar.MONTH, 1); return [c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2020, 0, 31); c.roll(Calendar.MONTH, 1); return [c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2020, 11, 31); c.roll(Calendar.DAY_OF_MONTH, 1); return [c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2020, 1, 1); return [c.getActualMaximum(Calendar.DAY_OF_MONTH), c.getActualMaximum(Calendar.DAY_OF_YEAR), c.getMaximum(Calendar.DAY_OF_MONTH), c.getLeastMaximum(Calendar.DAY_OF_MONTH), c.getActualMinimum(Calendar.DAY_OF_MONTH), c.getGreatestMinimum(Calendar.DAY_OF_MONTH), c.getActualMaximum(Calendar.WEEK_OF_YEAR)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2020, 1, 1, 13, 30, 15); return [c.getTimeInMillis(), c.isSet(Calendar.MILLISECOND), c.isSet(Calendar.YEAR)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(Calendar.YEAR, 2021); c.set(Calendar.WEEK_OF_YEAR, 10); c.set(Calendar.DAY_OF_WEEK, Calendar.MONDAY); return c.getTimeInMillis()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); return c.getTimeInMillis()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2021, 1, 30); return c.getTimeInMillis()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(1582, 9, 10); return [c.getTimeInMillis(), c.get(Calendar.DAY_OF_MONTH), c.get(Calendar.MONTH)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(-13000000000000L); return [c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH), c.get(Calendar.DAY_OF_WEEK)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(-70000000000000L); return [c.get(Calendar.ERA), c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); return c.toString()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); return [c.getDisplayName(Calendar.MONTH, Calendar.LONG, Locale.ENGLISH), c.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.SHORT, Locale.FRENCH), c.getDisplayName(Calendar.AM_PM, Calendar.SHORT, Locale.US), c.getDisplayName(Calendar.ERA, Calendar.LONG, Locale.US), c.getDisplayName(Calendar.YEAR, Calendar.LONG, Locale.US)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); return c.getDisplayNames(Calendar.MONTH, Calendar.SHORT, Locale.US)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); Calendar d = c.clone(); c.setTimeInMillis(5); d.setTimeInMillis(7); return [c.before(d), c.after(d), c.compareTo(d), c.equals(d), c.getWeekYear(), c.getWeeksInWeekYear(), c.isWeekDateSupported()]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0); return c.getTimeInMillis()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); c.set(Calendar.DAY_OF_WEEK, Calendar.SUNDAY); return c.getTimeInMillis()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC'), Locale.FRANCE); c.setTimeInMillis(1600000000000L); return [c.getFirstDayOfWeek(), c.getMinimalDaysInFirstWeek(), c.get(Calendar.WEEK_OF_YEAR)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.get(99)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.set(Calendar.MONTH, 15); return c.get(Calendar.MONTH)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.setTimeInMillis(0); c.set(Calendar.MONTH, 15); return c.get(Calendar.MONTH)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(0); c.add(Calendar.HOUR, 30); c.add(Calendar.YEAR, -1); c.add(Calendar.WEEK_OF_YEAR, 2); return c.getTime().getTime()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('Europe/Berlin')); c.clear(); c.set(2021, 2, 28, 2, 30); return [c.getTimeInMillis(), c.get(Calendar.HOUR_OF_DAY)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('Europe/Berlin')); c.clear(); c.set(2021, 9, 31, 2, 30); return [c.getTimeInMillis(), c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.DST_OFFSET)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTime(new Date(86400000L)); return [c.get(Calendar.DAY_OF_MONTH), c.getTime()]
+----
+Calendar.Builder b = new Calendar.Builder(); b.setDate(2020, 1, 3); b.setTimeZone(TimeZone.getTimeZone('UTC')); return b.build().getTimeInMillis()
+----
+GregorianCalendar g = new GregorianCalendar(2020, 1, 29); return [g.isLeapYear(2020), g.isLeapYear(1900), g.isLeapYear(1500), g.getGregorianChange(), g.get(Calendar.DAY_OF_MONTH)]
+----
+GregorianCalendar g = new GregorianCalendar(TimeZone.getTimeZone('UTC')); g.setTimeInMillis(1600000000000L); return [g.toZonedDateTime(), GregorianCalendar.from(ZonedDateTime.parse('2020-01-01T00:00Z')).getTimeInMillis()]
+----
+TimeZone z = TimeZone.getTimeZone('America/New_York'); return [z.getID(), z.getRawOffset(), z.getDSTSavings(), z.useDaylightTime(), z.observesDaylightTime(), z.getOffset(1600000000000L), z.inDaylightTime(new Date(1600000000000L)), z.toZoneId(), z.getDisplayName(), z.getDisplayName(true, TimeZone.SHORT), z.getDisplayName(false, TimeZone.LONG, Locale.FRENCH)]
+----
+TimeZone z = TimeZone.getTimeZone('Nope'); return [z.getID(), z.getRawOffset()]
+----
+TimeZone z = TimeZone.getTimeZone('GMT+05:30'); return [z.getID(), z.getRawOffset(), z.toZoneId(), TimeZone.getTimeZone('GMT+5').getID(), TimeZone.getTimeZone('UTC+5').getID(), TimeZone.getTimeZone('EST').getID(), TimeZone.getTimeZone('EST').getRawOffset()]
+----
+TimeZone z = TimeZone.getTimeZone(ZoneId.of('+02:00')); return [z.getID(), z.getRawOffset(), TimeZone.getTimeZone(ZoneId.of('Z')).getID(), TimeZone.getTimeZone(ZoneId.of('UTC')).getID()]
+----
+return [TimeZone.getAvailableIDs().length, TimeZone.getAvailableIDs(3600000).length, TimeZone.getAvailableIDs(3600000)[0]]
+----
+TimeZone z = TimeZone.getTimeZone('UTC'); return [z, z.hasSameRules(TimeZone.getTimeZone('GMT')), z.equals(TimeZone.getTimeZone('UTC')), z.clone()]
+----
+return TimeZone.getTimeZone('America/New_York').toString()
+----
+SimpleTimeZone z = new SimpleTimeZone(3600000, 'X'); return [z.getID(), z.getRawOffset(), z.useDaylightTime(), z]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm:ss'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return f.format(new Date(1600000000000L))
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm:ss'); return f.format(new Date(1600000000000L))
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return f.parse('2020-01-02').getTime()
+----
+SimpleDateFormat f = new SimpleDateFormat("EEE, d MMM yyyy HH:mm:ss Z", Locale.US); f.setTimeZone(TimeZone.getTimeZone('America/New_York')); return [f.format(new Date(1600000000000L)), f.toPattern(), f.parse('Sun, 13 Sep 2020 08:26:40 -0400').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat("G yy YYYY u w W D F E EEEE a h K k z zzzz X XX XXX S SSS", Locale.US); f.setTimeZone(TimeZone.getTimeZone('Europe/Paris')); return f.format(new Date(1600000000000L))
+----
+SimpleDateFormat f = new SimpleDateFormat("MMM MMMM LLL L M MM d dd ''o'' 'lit'", Locale.GERMAN); f.setTimeZone(TimeZone.getTimeZone('UTC')); return f.format(new Date(1600000000000L))
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.parse('nope')
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.setLenient(false); f.setTimeZone(TimeZone.getTimeZone('UTC')); f.parse('2021-02-30')
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return f.parse('2021-02-30').getTime()
+----
+new SimpleDateFormat('yyyy-MM-dd q')
+----
+DateFormat f = DateFormat.getDateInstance(DateFormat.LONG, Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(1600000000000L)), f.toPattern()]
+----
+DateFormat f = DateFormat.getDateTimeInstance(DateFormat.FULL, DateFormat.SHORT, Locale.FRANCE); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(1600000000000L)), f.toPattern()]
+----
+DateFormat f = DateFormat.getInstance(); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(1600000000000L)), f.toPattern(), f.getClass()]
+----
+DateFormat f = DateFormat.getTimeInstance(DateFormat.MEDIUM, Locale.JAPAN); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(1600000000000L)), f.toPattern()]
+----
+DateFormatSymbols s = DateFormatSymbols.getInstance(Locale.US); return [s.getMonths(), s.getShortWeekdays(), s.getAmPmStrings(), s.getEras(), s.getLocalPatternChars()]
+----
+SimpleDateFormat f = new SimpleDateFormat('dd/MM/yyyy'); f.setTimeZone(TimeZone.getTimeZone('UTC')); ParsePosition p = new ParsePosition(3); Date d = f.parse('xx 02/03/2020 rest', p); return [d.getTime(), p.getIndex(), p.getErrorIndex()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy.MM.dd G \'at\' HH:mm:ss z', Locale.US); f.setTimeZone(TimeZone.getTimeZone('PST')); return f.format(new Date(1600000000000L))
+----
+SimpleDateFormat f = new SimpleDateFormat(); return f.toPattern()
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); return [f.equals(new SimpleDateFormat('yyyy')), f.hashCode(), f.isLenient(), f.getTimeZone().getID(), f.getCalendar().getClass().getName()]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); return c.getTime()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); c.add(Calendar.DAY_OF_MONTH, 1)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); return c.toInstant()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); return c.getActualMaximum(Calendar.DAY_OF_MONTH)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); return c.compareTo(c)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); c.roll(Calendar.DAY_OF_MONTH, 1)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); return c.getWeekYear()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); return c.getDisplayName(Calendar.MONTH, Calendar.LONG, Locale.US)
+----
+GregorianCalendar c = new GregorianCalendar(TimeZone.getTimeZone('UTC')); c.setLenient(false); c.clear(); c.set(2021, 1, 30); return c.toZonedDateTime()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.set(99, 1)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(99)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.isSet(-1)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.add(17, 1)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.add(Calendar.ZONE_OFFSET, 1)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.roll(Calendar.DST_OFFSET, 1)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.getActualMaximum(17)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.getMaximum(17)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.getDisplayName(Calendar.MONTH, 3, Locale.US)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.getDisplayNames(Calendar.MONTH, 3, Locale.US)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); return [c.getDisplayName(Calendar.ERA, Calendar.LONG, Locale.FRANCE), c.getDisplayName(Calendar.ERA, Calendar.NARROW_FORMAT, Locale.US), c.getDisplayName(Calendar.ERA, Calendar.SHORT, Locale.GERMANY), c.getDisplayNames(Calendar.ERA, Calendar.ALL_STYLES, Locale.US), c.getDisplayNames(Calendar.AM_PM, Calendar.ALL_STYLES, Locale.US), c.getDisplayNames(Calendar.DAY_OF_WEEK, Calendar.SHORT_STANDALONE, Locale.US), c.getDisplayName(Calendar.HOUR, Calendar.LONG, Locale.US)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); return c.getDisplayNames(Calendar.MONTH, Calendar.ALL_STYLES, Locale.US).size()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); return [c.getDisplayNames(Calendar.YEAR, Calendar.ALL_STYLES, Locale.US), c.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.NARROW_STANDALONE, Locale.US), c.getDisplayName(Calendar.MONTH, Calendar.SHORT_STANDALONE, Locale.forLanguageTag('ru')), c.getDisplayName(Calendar.MONTH, Calendar.LONG_FORMAT, Locale.forLanguageTag('ru'))]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); c.setFirstDayOfWeek(Calendar.MONDAY); c.setMinimalDaysInFirstWeek(4); return [c.get(Calendar.WEEK_OF_YEAR), c.get(Calendar.WEEK_OF_MONTH), c.getWeekYear(), c.getWeeksInWeekYear()]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1609459200000L); return [c.get(Calendar.WEEK_OF_YEAR), c.getWeekYear(), c.getWeeksInWeekYear(), c.get(Calendar.DAY_OF_WEEK)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setFirstDayOfWeek(2); c.setMinimalDaysInFirstWeek(4); c.setTimeInMillis(1609459200000L); return [c.get(Calendar.WEEK_OF_YEAR), c.getWeekYear(), c.getWeeksInWeekYear()]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setWeekDate(2020, 1, 9)
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); for (int f : [3, 4, 5, 6, 7, 8, 1, 2, 9]) { c.roll(f, 3); } return c.getTimeInMillis()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); List r = []; for (int f : [3, 4, 5, 6, 7, 8, 2, 9, 10, 11, 12]) { Calendar d = c.clone(); d.roll(f, -40); r.add(d.getTimeInMillis()); } return r
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); List r = []; for (int f : [3, 4, 5, 6, 7, 8, 2, 9, 10, 11, 12, 0, 1]) { Calendar d = c.clone(); d.add(f, -40); r.add(d.getTimeInMillis()); } return r
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('America/New_York')); c.setTimeInMillis(1604210400000L); List r = []; for (int f : [5, 10, 11, 9, 7]) { Calendar d = c.clone(); d.add(f, 1); r.add(d.getTimeInMillis()); Calendar e = c.clone(); e.roll(f, 1); r.add(e.getTimeInMillis()); } return r
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(1600000000000L); List r = []; for (int f = 0; f < 15; f++) { r.add(c.getActualMinimum(f) + '/' + c.getActualMaximum(f)); } return r
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(1582, 9, 20); List r = []; for (int f = 0; f < 15; f++) { r.add(c.getActualMinimum(f) + '/' + c.getActualMaximum(f)); } r.add(c.get(Calendar.DAY_OF_YEAR)); r.add(c.get(Calendar.WEEK_OF_YEAR)); r.add(c.get(Calendar.DAY_OF_WEEK_IN_MONTH)); return r
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(Calendar.YEAR, 2020); c.set(Calendar.DAY_OF_YEAR, 100); c.set(Calendar.HOUR, 5); c.set(Calendar.AM_PM, Calendar.PM); return [c.getTimeInMillis(), c.isSet(Calendar.MONTH), c.isSet(Calendar.DAY_OF_YEAR)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(Calendar.YEAR, 2020); c.set(Calendar.MONTH, 3); c.set(Calendar.DAY_OF_WEEK_IN_MONTH, -1); c.set(Calendar.DAY_OF_WEEK, Calendar.FRIDAY); return c.getTime()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(Calendar.YEAR, 2020); c.set(Calendar.MONTH, 3); c.set(Calendar.WEEK_OF_MONTH, 2); c.set(Calendar.DAY_OF_WEEK, Calendar.FRIDAY); return c.getTime()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(Calendar.ERA, 0); c.set(Calendar.YEAR, 44); c.set(Calendar.MONTH, 2); c.set(Calendar.DATE, 15); return [c.getTimeInMillis(), c.get(Calendar.DAY_OF_WEEK)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(Calendar.YEAR, -5); return [c.get(Calendar.ERA), c.get(Calendar.YEAR)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(Calendar.ERA, 2); c.getTimeInMillis()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(Long.MAX_VALUE); return [c.get(Calendar.YEAR), c.getActualMaximum(Calendar.YEAR), c.toString()]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(Long.MIN_VALUE); return [c.get(Calendar.ERA), c.get(Calendar.YEAR), c.getActualMaximum(Calendar.YEAR)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(Calendar.ZONE_OFFSET, 3600000); c.set(2020, 0, 1); return [c.getTimeInMillis(), c.get(Calendar.ZONE_OFFSET), c.get(Calendar.DST_OFFSET)]
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); return [c.toString(), c.getTimeInMillis(), c.toString()]
+----
+Calendar.Builder b = new Calendar.Builder(); return [b.setInstant(5).build().getTimeInMillis(), new Calendar.Builder().setDate(2020, 0, 1).setTimeOfDay(1, 2, 3).build().getTimeInMillis(), new Calendar.Builder().setCalendarType('iso8601').setWeekDate(2021, 1, 1).build().getTimeInMillis(), new Calendar.Builder().setFields(new int[] {1, 2020, 6, 60}).build().getTimeInMillis()]
+----
+new Calendar.Builder().setInstant(5).setDate(2020, 0, 1)
+----
+new Calendar.Builder().setDate(2020, 0, 1).setInstant(5)
+----
+new Calendar.Builder().setCalendarType('foo')
+----
+new Calendar.Builder().set(99, 1)
+----
+new Calendar.Builder().setFields(new int[] {1})
+----
+Calendar.Builder b = new Calendar.Builder().setLocale(Locale.FRANCE).setDate(2020, 0, 1); Calendar c = b.build(); return [c.getFirstDayOfWeek(), c.getMinimalDaysInFirstWeek(), c.getTimeZone().getID(), c.isLenient()]
+----
+SimpleTimeZone z = new SimpleTimeZone(-18000000, 'MyEST', Calendar.MARCH, 8, -Calendar.SUNDAY, 7200000, Calendar.NOVEMBER, 1, -Calendar.SUNDAY, 7200000); return [z, z.getOffset(1600000000000L), z.getOffset(1610000000000L), z.inDaylightTime(new Date(1600000000000L)), z.getDSTSavings(), z.useDaylightTime(), z.observesDaylightTime(), z.getDisplayName(), z.toZoneId()]
+----
+SimpleTimeZone z = new SimpleTimeZone(3600000, 'X', 13, 1, 0, 0, 1, 1, 0, 0)
+----
+SimpleTimeZone z = new SimpleTimeZone(3600000, 'X', 2, -1, Calendar.SUNDAY, 3600000, SimpleTimeZone.UTC_TIME, 9, -1, Calendar.SUNDAY, 3600000, SimpleTimeZone.UTC_TIME, 3600000); Calendar c = Calendar.getInstance(z); c.setTimeInMillis(1600000000000L); return [z, c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.DST_OFFSET)]
+----
+SimpleTimeZone z = new SimpleTimeZone(3600000, 'X'); z.setStartRule(2, 1, 0); z.setEndRule(9, 1, 0); z.setStartYear(2000); z.setDSTSavings(1800000); return [z, z.getOffset(1600000000000L)]
+----
+TimeZone z = TimeZone.getTimeZone('Europe/London'); return [z.getDisplayName(Locale.US), z.getDisplayName(true, TimeZone.LONG, Locale.UK), z.getOffset(1, 2020, 6, 1, 4, 0), z.getOffset(1, 2020, 0, 1, 4, 0)]
+----
+TimeZone z = TimeZone.getTimeZone('America/New_York'); z.setRawOffset(0); return [z.getRawOffset(), z.getOffset(1600000000000L), z, z.getID()]
+----
+return [TimeZone.getTimeZone('GMT-0').getID(), TimeZone.getTimeZone('GMT+0').getID(), TimeZone.getTimeZone('GMT-00:00').getRawOffset(), TimeZone.getTimeZone('GMT+1234').getID(), TimeZone.getTimeZone('GMT+12:3').getID(), TimeZone.getTimeZone('GMT+123').getID(), TimeZone.getTimeZone('gmt+1').getID(), TimeZone.getTimeZone('GMT+01').getDisplayName()]
+----
+return [TimeZone.getTimeZone('Asia/Kolkata').getDisplayName(), TimeZone.getTimeZone('IST').getDisplayName(), TimeZone.getTimeZone('UTC').getDisplayName(false, TimeZone.SHORT), TimeZone.getTimeZone('Etc/GMT+5').getDisplayName(), TimeZone.getTimeZone('SystemV/EST5').getDisplayName(), TimeZone.getTimeZone('Asia/Kolkata').toZoneId(), TimeZone.getTimeZone('GMT+01:30').toZoneId()]
+----
+TimeZone z = TimeZone.getTimeZone('UTC'); z.getDisplayName(false, 2)
+----
+TimeZone z = TimeZone.getTimeZone('UTC'); return z.getOffset(1, 2020, 12, 1, 1, 0)
+----
+return [TimeZone.getTimeZone('America/New_York').hasSameRules(TimeZone.getTimeZone('US/Eastern')), TimeZone.getTimeZone('America/New_York').equals(TimeZone.getTimeZone('US/Eastern')), TimeZone.getTimeZone('UTC').hasSameRules(null)]
+----
+GregorianCalendar g = new GregorianCalendar(TimeZone.getTimeZone('UTC')); g.setGregorianChange(new Date(Long.MIN_VALUE)); g.clear(); g.set(1000, 0, 1); return [g.getTimeInMillis(), g.isLeapYear(1000), g.getGregorianChange()]
+----
+GregorianCalendar g = new GregorianCalendar(TimeZone.getTimeZone('UTC')); g.setGregorianChange(new Date(Long.MAX_VALUE)); g.clear(); g.set(2000, 0, 1); return [g.getTimeInMillis(), g.isLeapYear(1900)]
+----
+GregorianCalendar g = new GregorianCalendar(2020, 1, 29, 13, 5, 6); return [g.getTimeInMillis(), g.get(Calendar.HOUR), g.get(Calendar.AM_PM), g.toString()]
+----
+GregorianCalendar g = new GregorianCalendar(2020, 1, 29, 13, 5); return g.toString()
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyyMMddHHmmss'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('20200102030405').getTime(), f.format(new Date(0))]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('2020-1-2').getTime(), f.parse(' 2020- 1- 2').getTime(), f.parse('2020-01-02T10:00').getTime(), f.parse('2020-13-45').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.parse('2020/01/02')
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.parse('')
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.parse(null)
+----
+SimpleDateFormat f = new SimpleDateFormat('dd MMM yyyy', Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('02 jan 2020').getTime(), f.parse('2 JANUARY 2020').getTime(), f.parse('2 Janu 2020').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat('dd MMM yyyy', Locale.US); f.parse('2 Jxn 2020')
+----
+SimpleDateFormat f = new SimpleDateFormat('EEE, d MMM yyyy HH:mm:ss Z', Locale.US); return [f.parse('Wed, 4 Jul 2001 12:08:56 -0700').getTime(), f.parse('wednesday, 4 Jul 2001 12:08:56 +0000').getTime(), f.parse('Thu, 4 Jul 2001 12:08:56 GMT').getTime(), f.parse('Thu, 4 Jul 2001 12:08:56 GMT+02:00').getTime(), f.parse('Thu, 4 Jul 2001 12:08:56 PDT').getTime(), f.parse('Thu, 4 Jul 2001 12:08:56 Pacific Daylight Time').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm:ss z', Locale.US); Date d = f.parse('2020-06-01 10:00:00 EST'); return [d.getTime(), f.getTimeZone().getID(), f.format(d)]
+----
+SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX"); return [f.parse('2020-06-01T10:00:00.123+05:30').getTime(), f.parse('2020-06-01T10:00:00.123Z').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSX"); return [f.parse('2020-06-01T10:00:00.123+05').getTime(), f.parse('2020-06-01T10:00:00.5+05').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSX"); f.parse('2020-06-01T10:00:00.123+0530')
+----
+SimpleDateFormat f = new SimpleDateFormat("hh:mm a", Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('12:30 AM').getTime(), f.parse('12:30 pm').getTime(), f.parse('01:30 PM').getTime(), f.parse('13:30 PM').getTime(), f.format(new Date(0)), f.format(new Date(43200000))]
+----
+SimpleDateFormat f = new SimpleDateFormat("hh:mm a", Locale.US); f.setLenient(false); f.parse('13:30 PM')
+----
+SimpleDateFormat f = new SimpleDateFormat("kk:mm"); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('24:00').getTime(), f.parse('00:00').getTime(), f.format(new Date(0)), f.format(new Date(3600000))]
+----
+SimpleDateFormat f = new SimpleDateFormat("KK:mm a", Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(0)), f.format(new Date(43200000)), f.parse('11:00 PM').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat("D F w W u", Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(1600000000000L)), f.parse('100 1 1 1 1').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat("YYYY-'W'ww-u", Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(1609459200000L)), f.parse('2020-W53-5').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat("y yy yyy yyyy yyyyy", Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(1600000000000L)), f.format(new Date(-70000000000000L))]
+----
+SimpleDateFormat f = new SimpleDateFormat("G yyyy", Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('BC 0044').getTime(), f.parse('ad 2020').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat("S SS SSS SSSS", Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(7)), f.format(new Date(1234))]
+----
+SimpleDateFormat f = new SimpleDateFormat("M MM MMM MMMM MMMMM L LL LLL LLLL", Locale.FRANCE); f.setTimeZone(TimeZone.getTimeZone('UTC')); return f.format(new Date(1600000000000L))
+----
+SimpleDateFormat f = new SimpleDateFormat("d MMMM yyyy", new Locale('ru')); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(1600000000000L)), f.parse('13 сентября 2020').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat("d MMMM yyyy", new Locale('ar', 'EG')); f.setTimeZone(TimeZone.getTimeZone('UTC')); return f.format(new Date(1600000000000L))
+----
+SimpleDateFormat f = new SimpleDateFormat("EEEE d MMMM yyyy HH:mm z zzzz", Locale.GERMANY); f.setTimeZone(TimeZone.getTimeZone('Europe/Berlin')); return f.format(new Date(1600000000000L))
+----
+SimpleDateFormat f = new SimpleDateFormat("z zzzz Z X XX XXX", Locale.US); f.setTimeZone(TimeZone.getTimeZone('Asia/Kolkata')); return [f.format(new Date(1600000000000L)), new SimpleDateFormat('Z X').format(new Date(0))]
+----
+SimpleDateFormat f = new SimpleDateFormat("z", Locale.US); f.setTimeZone(TimeZone.getTimeZone('GMT+05:30')); return [f.format(new Date(0)), new SimpleDateFormat('zzzz').format(new Date(0))]
+----
+SimpleDateFormat f = new SimpleDateFormat("'It''s' h 'o''clock'", Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(0)), f.toPattern(), f.toLocalizedPattern()]
+----
+new SimpleDateFormat("'unterminated")
+----
+new SimpleDateFormat("XXXX")
+----
+new SimpleDateFormat(null)
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.applyPattern('MM-dd'); return [f.toPattern(), f.format(new Date(0))]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.applyPattern('Q')
+----
+DateFormat f = DateFormat.getDateTimeInstance(DateFormat.LONG, DateFormat.LONG, Locale.US); f.setTimeZone(TimeZone.getTimeZone('America/New_York')); return [f.format(new Date(1600000000000L)), f.parse('September 13, 2020 at 8:26:40 AM EDT').getTime()]
+----
+DateFormat f = DateFormat.getDateInstance(DateFormat.SHORT, Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(1600000000000L)), f.parse('9/13/20').getTime(), f.parse('9/13/2020').getTime(), f.isLenient()]
+----
+DateFormat.getDateInstance(5)
+----
+DateFormat.getTimeInstance(-1)
+----
+DateFormat f = DateFormat.getDateInstance(); Calendar c = f.getCalendar(); c.setTimeZone(TimeZone.getTimeZone('Asia/Tokyo')); return [f.getTimeZone().getID(), f.format(new Date(1600000000000L))]
+----
+DateFormat f = DateFormat.getDateTimeInstance(); return [f.format(new Date(1600000000000L)), f.format(1600000000000L)]
+----
+DateFormat f = DateFormat.getDateTimeInstance(); f.format('x')
+----
+DateFormat f = DateFormat.getDateTimeInstance(); f.format(null)
+----
+DateFormat f = DateFormat.getDateTimeInstance(); f.format(1.5)
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parseObject('2020-01-02'), f.parseObject('2020-01-02x', new ParsePosition(0))]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.parseObject('x')
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd', Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); StringBuffer sb = new StringBuffer('>'); FieldPosition p = new FieldPosition(DateFormat.MONTH_FIELD); f.format(new Date(0), sb, p); FieldPosition q = new FieldPosition(DateFormat.Field.YEAR); f.format(new Date(0), sb, q); return [sb.toString(), p.getBeginIndex(), p.getEndIndex(), q.getBeginIndex(), q.getEndIndex()]
+----
+return [DateFormat.Field.MONTH, DateFormat.Field.HOUR_OF_DAY1.getCalendarField(), DateFormat.Field.ofCalendarField(Calendar.HOUR), DateFormat.Field.ofCalendarField(Calendar.DAY_OF_MONTH)]
+----
+DateFormat.Field.ofCalendarField(99)
+----
+DateFormatSymbols s = DateFormatSymbols.getInstance(Locale.FRANCE); return [s.getMonths().length, s.getMonths()[0], s.getMonths()[12], s.getShortMonths()[4], s.getWeekdays()[0], s.getWeekdays()[1], s.getShortWeekdays()[2], s.getAmPmStrings()[1], s.getEras()[0], s.getEras()[1], s.getLocalPatternChars()]
+----
+DateFormatSymbols s = new DateFormatSymbols(Locale.US); s.setMonths(['A','B','C','D','E','F','G','H','I','J','K','L', ''] as String[]); return s.getMonths()[0]
+----
+DateFormatSymbols s = new DateFormatSymbols(Locale.US); String[] m = new String[] {'Uno','Due','Tre','Quattro','Cinque','Sei','Sette','Otto','Nove','Dieci','Undici','Dodici',''}; s.setMonths(m); SimpleDateFormat f = new SimpleDateFormat('MMMM d', s); f.setTimeZone(TimeZone.getTimeZone('UTC')); return f.format(new Date(0))
+----
+DateFormatSymbols s = new DateFormatSymbols(Locale.US); String[] m = new String[] {'Uno','Due','Tre','Quattro','Cinque','Sei','Sette','Otto','Nove','Dieci','Undici','Dodici',''}; s.setMonths(m); SimpleDateFormat f = new SimpleDateFormat('MMMM d', Locale.US); f.setDateFormatSymbols(s); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.format(new Date(0)), f.parse('due 3').getTime(), f.getDateFormatSymbols().getMonths()[1]]
+----
+DateFormatSymbols s = new DateFormatSymbols(Locale.US); String[][] z = s.getZoneStrings(); return [z.length > 400, z[0].length, s.equals(new DateFormatSymbols(Locale.US)), s.equals(new DateFormatSymbols(Locale.FRANCE))]
+----
+DateFormatSymbols s = new DateFormatSymbols(Locale.US); String[][] z = s.getZoneStrings(); for (String[] r : z) { if (r[0] == 'America/New_York') { return r } } return null
+----
+SimpleDateFormat a = new SimpleDateFormat('yyyy'); SimpleDateFormat b = a.clone(); b.setTimeZone(TimeZone.getTimeZone('UTC')); return [a.getTimeZone().getID(), b.getTimeZone().getID(), a.equals(b), a.hashCode() == b.hashCode(), a.toString(), a.getNumberFormat()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm'); f.setLenient(false); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('2020-02-29 23:59').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm'); f.setLenient(false); f.parse('2020-02-29 24:00')
+----
+SimpleDateFormat f = new SimpleDateFormat('MM/dd/yy'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('01/02/03').getTime(), f.parse('01/02/2003').getTime(), f.parse('01/02/003').getTime(), f.parse('01/02/-3').getTime(), f.parse('01/02/45').getTime(), f.parse('01/02/47').getTime(), f.parse('01/02/146').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat('MMddyy'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('010203').getTime(), f.parse('0102034').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy.MM.dd'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return f.parse('2020.1.2.3').getTime()
+----
+SimpleDateFormat f = new SimpleDateFormat('HH:mm:ss.SSS'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('10:00:00.5').getTime(), f.parse('10:00:00.0005').getTime(), f.parse('10:61:61.999').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat('dd.MM.yyyy'); f.setTimeZone(TimeZone.getTimeZone('UTC')); ParsePosition p = new ParsePosition(0); Date d = f.parse('31.02', p); return [d, p.getIndex(), p.getErrorIndex()]
+----
+SimpleDateFormat f = new SimpleDateFormat('dd.MM.yyyy'); f.setTimeZone(TimeZone.getTimeZone('UTC')); ParsePosition p = new ParsePosition(0); Date d = f.parse('31.xx.2020', p); return [d, p.getIndex(), p.getErrorIndex()]
+----
+SimpleDateFormat f = new SimpleDateFormat('dd.MM.yyyy HH:mm'); f.setTimeZone(TimeZone.getTimeZone('UTC')); f.setLenient(false); ParsePosition p = new ParsePosition(0); Date d = f.parse('31.02.2020 10:00', p); return [d, p.getIndex(), p.getErrorIndex()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.setTimeZone(TimeZone.getTimeZone('UTC')); Date d = f.parse('2020-03-04'); d.setTime(0); return [d, d.getTime()]
+----
+Date d = new Date(5); Date e = d; e.setTime(10); return [d.getTime(), d.equals(new Date(10)), d.hashCode(), d.clone() == d, d.clone().equals(d)]
+----
+DateFormat.getDateInstance(9, Locale.US)
+----
+DateFormat.getTimeInstance(9, Locale.US)
+----
+DateFormat.getDateTimeInstance(9, 1)
+----
+DateFormat.getDateTimeInstance(1, 9)
+----
+DateFormat.getDateTimeInstance(9, 1, Locale.US)
+----
+DateFormat.getDateTimeInstance(1, 9, Locale.US)
+----
+DateFormat.getDateTimeInstance(9, 9, Locale.US)
+----
+DateFormat.getDateInstance(1, null)
+----
+new SimpleDateFormat('yyyy', null)
+----
+new SimpleDateFormat(null, Locale.US)
+----
+new SimpleDateFormat("'x", Locale.US)
+----
+new SimpleDateFormat("q", Locale.US)
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.applyLocalizedPattern('Q')
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.applyPattern(null)
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.setTimeZone(null)
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.format(new Date(0), null, new FieldPosition(0))
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.parse('2020', null)
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.parse(null, new ParsePosition(0))
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.setDateFormatSymbols(null)
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.set2DigitYearStart(null)
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); f.setCalendar(null); f.format(new Date(0))
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy'); return [f.getNumberFormat().isGroupingUsed(), f.getNumberFormat().isParseIntegerOnly(), f.getNumberFormat().getMaximumFractionDigits()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd z', Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); Date d = f.parse('2020-06-01 pacific time'); return [d.getTime(), f.getTimeZone().getID()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm z', Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); Date d = f.parse('2020-06-01 10:00 pdt'); Date e = f.parse('2020-01-01 10:00 PDT'); return [d.getTime(), e.getTime(), f.getTimeZone().getID()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm z', Locale.US); f.setTimeZone(TimeZone.getTimeZone('UTC')); return [f.parse('2020-06-01 10:00 UTC').getTime(), f.parse('2020-06-01 10:00 Coordinated Universal Time').getTime(), f.parse('2020-06-01 10:00 GMT').getTime(), f.parse('2020-06-01 10:00 IST').getTime(), f.getTimeZone().getID()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm z', Locale.US); f.parse('2020-06-01 10:00 XYZ')
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm Z', Locale.US); return [f.parse('2020-06-01 10:00 -05').getTime()]
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm Z', Locale.US); f.parse('2020-06-01 10:00 +5')
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd HH:mm Z', Locale.US); return [f.parse('2020-06-01 10:00 GMT-5').getTime(), f.parse('2020-06-01 10:00 GMT-05:30').getTime(), f.parse('2020-06-01 10:00 gmt').getTime()]

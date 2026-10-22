@@ -1,0 +1,277 @@
+String s = 'Hello, World'; return s.toLowerCase().replace('o', '0').substring(2, 8)
+----
+String s = 'a,b;c d'; return s.splitOnToken(',')
+----
+return 'abc'.repeat(3) + 'x'.repeat(0)
+----
+return ' padded '.strip() + '|' + ' padded '.stripLeading() + '|' + ' padded '.stripTrailing() + '|'
+----
+return ['b', 'a', 'c'].stream().sorted().collect(Collectors.joining(', ', '[', ']'))
+----
+return 'The quick brown fox'.split(' ').length
+----
+String s = 'abcdef'; return [s.indexOf('c'), s.indexOf('z'), s.lastIndexOf('f'), s.indexOf('c', 3), s.contains('cd'), s.startsWith('ab'), s.endsWith('ef')]
+----
+return 'Mississippi'.replaceAll(/ss/, 'SS')
+----
+return /(\d+)-(\d+)/.matcher('10-20').replaceAll('$2-$1')
+----
+def m = /(?<year>\d{4})-(?<month>\d{2})/.matcher('2024-05'); if (m.matches()) { return m.group('year') + '/' + m.group('month') } return null
+----
+return 'aaa'.replaceFirst(/a/, 'b')
+----
+return 'a1b22c333'.findAll(/\d+/)
+----
+return /x/.matcher('axbxc').results().count()
+----
+List l = [5, 1, 4, 2, 3]; l.removeIf(x -> x % 2 == 0); return l
+----
+List l = [1, 2, 3, 4, 5]; return l.subList(1, 4)
+----
+List l = [1, 2, 3]; List m = new ArrayList(l); m.add(4); return [l, m, l.equals(m), l.containsAll([1, 3])]
+----
+List l = [3, 1, 2]; l.sort(Comparator.reverseOrder()); return l
+----
+List l = ['bb', 'a', 'ccc']; l.sort((a, b) -> a.length() - b.length()); return l
+----
+List l = ['bb', 'a', 'ccc']; return l.stream().sorted(Comparator.comparing(String::length).reversed()).collect(Collectors.toList())
+----
+Map m = ['a': 1, 'b': 2]; m.merge('a', 5, (x, y) -> x + y); m.computeIfAbsent('c', k -> 3); m.computeIfPresent('b', (k, v) -> v * 10); return m
+----
+Map m = new TreeMap(['b': 2, 'a': 1, 'c': 3]); return [m.firstKey(), m.lastEntry().getValue(), m.headMap('b'), m.tailMap('b'), m.descendingMap()]
+----
+Map m = ['x': 1, 'y': 2]; int sum = 0; for (e in m.entrySet()) { sum += e.getValue() } return sum
+----
+Map m = ['x': 1, 'y': 2]; return m.entrySet().stream().map(e -> e.getKey() + '=' + e.getValue()).collect(Collectors.toList())
+----
+return [1, 2, 3, 4].stream().mapToInt(x -> x).summaryStatistics()
+----
+return [1, 2, 3, 4].stream().reduce(0, (a, b) -> a + b)
+----
+return [1, 2, 3, 4].stream().filter(x -> x > 10).findFirst().isPresent()
+----
+return IntStream.range(0, 5).map(i -> i * i).boxed().collect(Collectors.toList())
+----
+return IntStream.rangeClosed(1, 5).sum()
+----
+return ['a', 'b', 'a'].stream().collect(Collectors.groupingBy(x -> x, Collectors.counting()))
+----
+return ['apple', 'banana', 'cherry'].stream().collect(Collectors.toMap(x -> x.charAt(0), x -> x.length()))
+----
+return ['a', 'b'].stream().collect(Collectors.toMap(x -> 'k', x -> x))
+----
+return [[1, 2], [3], []].stream().flatMap(l -> l.stream()).collect(Collectors.toList())
+----
+return [1, 2, 3].stream().anyMatch(x -> x == 2) && [1, 2, 3].stream().allMatch(x -> x > 0) && [1, 2, 3].stream().noneMatch(x -> x > 3)
+----
+return Arrays.asList(3, 1, 2)
+----
+int[] a = new int[] {3, 1, 2}; Arrays.sort(a); return Arrays.toString(a)
+----
+int[][] grid = new int[3][2]; grid[1][1] = 5; return grid[1][1] + grid.length + grid[0].length
+----
+String[] parts = 'x-y-z'.split('-'); return String.join('+', parts)
+----
+def x = 5; x += 2.5; return x
+----
+def x = 'a'; x += 1; return x
+----
+def x = [1]; x += 2; return x
+----
+def a = 10; def b = 3; return [a / b, a % b, a * 1.0 / b, -a / b, a >> 1, a << 2, a & 6, a | 1, a ^ 3, ~a]
+----
+long big = Long.MAX_VALUE; return big + 1
+----
+return Integer.MAX_VALUE * 2
+----
+return (int) 3.7 + (int) -3.7 + Math.round(2.5) + Math.round(-2.5) + Math.round(2.4f)
+----
+return [Math.floorDiv(-7, 2), Math.floorMod(-7, 2), -7 / 2, -7 % 2]
+----
+return [Math.ceil(1.1), Math.floor(-1.1), Math.rint(2.5), Math.rint(3.5), Math.signum(-3.0), Math.hypot(3, 4), Math.cbrt(27), Math.toDegrees(Math.PI)]
+----
+return [Double.compare(0.0, -0.0), 0.0 == -0.0, Double.valueOf(0.0).equals(-0.0), Double.NaN == Double.NaN]
+----
+return [1.0 / 3, 2.0 / 3, 0.1 + 0.2, 1e21, 1e-5, 123456789012.0, 1.0E7, 9999999.0]
+----
+return [(float) (1.0 / 3), 0.1f + 0.2f, 1e10f, 3.0f]
+----
+return [Integer.toHexString(255), Integer.toBinaryString(5), Long.toString(255, 16), Integer.parseInt('ff', 16), Integer.valueOf('42')]
+----
+return [Integer.MAX_VALUE, Integer.MIN_VALUE, Long.MIN_VALUE, Double.MAX_VALUE, Double.MIN_VALUE, Float.MAX_VALUE]
+----
+return [Character.isDigit('5' as char), Character.isLetter('x' as char), Character.toUpperCase('a' as char), Character.getNumericValue('7' as char)]
+----
+char c = 'a'; c += 1; return c
+----
+char c = 'a'; int i = c + 1; return i
+----
+return 'abc'.chars().map(c -> c + 1).mapToObj(c -> String.valueOf((char) c)).collect(Collectors.joining())
+----
+StringBuilder sb = new StringBuilder(); for (int i = 0; i < 5; i++) { sb.append(i).append(',') } sb.setLength(sb.length() - 1); return sb.toString()
+----
+StringBuilder sb = new StringBuilder('abc'); sb.insert(1, 'XY'); sb.replace(0, 1, 'Q'); return [sb.toString(), sb.indexOf('Y'), sb.charAt(2)]
+----
+def obj = ['name': 'x', 'tags': ['a', 'b'], 'meta': ['count': 3]]; return obj.meta.count + obj.tags.size() + obj.name.length()
+----
+def obj = ['a': null]; return obj.a?.b?.c
+----
+def obj = ['a': ['b': 1]]; return obj?.a?.b
+----
+def v = null; return v ?: 'default'
+----
+def v = ''; return v ?: 'default'
+----
+def v = 0; return v ?: 'default'
+----
+def v = []; return v ?: 'default'
+----
+int x = 5; String r = x > 3 ? 'big' : 'small'; return r
+----
+int count = 0; outer: for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) { count++ } } return count
+----
+int i = 0; do { i += 2 } while (i < 7); return i
+----
+int s = 0; for (int i = 0, j = 10; i < j; i++, j--) { s += j - i } return s
+----
+List out = []; for (int i = 0; i < 5; ++i) { if (i == 1) continue; if (i == 4) break; out.add(i) } return out
+----
+int f(int n) { if (n <= 1) return 1; return n * f(n - 1) } return f(10)
+----
+boolean isEven(int n) { return n % 2 == 0 } return [isEven(2), isEven(3)]
+----
+def apply(def f, def x) { return f.apply(x) } return apply(x -> x * 3, 7)
+----
+Function f = x -> x + 1; Function g = x -> x * 2; return f.compose(g).apply(3) + f.andThen(g).apply(3)
+----
+BiFunction f = (a, b) -> a + b; return f.apply(1, 2)
+----
+Supplier s = () -> 'supplied'; return s.get()
+----
+Predicate p = x -> x > 5; return [p.test(6), p.negate().test(6), p.and(x -> x < 10).test(7), p.or(x -> x == 0).test(0)]
+----
+int base = 10; Function f = x -> x + base; return f.apply(5)
+----
+List l = [1, 2, 3]; int total = 0; l.forEach(x -> { total += x }); return total
+----
+def lst = [1, 2, 3]; return lst.collect(x -> x * 2)
+----
+def lst = [1, 2, 3, 4]; return [lst.find(x -> x > 2), lst.findAll(x -> x > 2), lst.sum(), lst.any(x -> x > 3), lst.every(x -> x > 0)]
+----
+return ['a': 1, 'b': 2].findAll((k, v) -> v > 1)
+----
+return ['x', 'y'].withIndex()
+----
+try { List l = []; l.get(0) } catch (IndexOutOfBoundsException e) { return 'oob: ' + e.getMessage() }
+----
+try { Integer.parseInt('x') } catch (NumberFormatException e) { return e.getMessage() }
+----
+try { throw new IllegalArgumentException('custom') } catch (Exception e) { return e.getClass() == IllegalArgumentException }
+----
+try { def x = null; x.foo() } catch (NullPointerException e) { return 'npe' }
+----
+try { return 1 / 0 } catch (ArithmeticException e) { return 'div' } finally { }
+----
+Instant i = Instant.ofEpochMilli(1577836800000L); return i.atZone(ZoneId.of('America/New_York')).toString()
+----
+ZonedDateTime z = ZonedDateTime.of(2020, 3, 8, 1, 30, 0, 0, ZoneId.of('America/New_York')); return z.plusHours(1).toString()
+----
+LocalDate d = LocalDate.of(2020, 1, 31); return [d.plusMonths(1), d.minusDays(31), d.withDayOfMonth(15), d.lengthOfMonth(), d.isLeapYear(), d.getDayOfWeek()]
+----
+return ChronoUnit.DAYS.between(LocalDate.of(2020, 1, 1), LocalDate.of(2021, 1, 1))
+----
+return Duration.between(Instant.ofEpochSecond(0), Instant.ofEpochSecond(3725)).toString()
+----
+return Period.between(LocalDate.of(2020, 1, 15), LocalDate.of(2021, 3, 10)).toString()
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('dd/MM/yyyy HH:mm'); return LocalDateTime.of(2020, 5, 6, 7, 8).format(f)
+----
+return ZonedDateTime.parse('2020-05-06T07:08:09.123+02:00').withZoneSameInstant(ZoneOffset.UTC).toString()
+----
+return LocalDate.parse('2020-02-30')
+----
+return DateTimeFormatter.ISO_LOCAL_DATE.format(ZonedDateTime.parse('2020-05-06T07:08:09Z'))
+----
+return ZonedDateTime.parse('2020-05-06T07:08:09Z').truncatedTo(ChronoUnit.HOURS).toEpochSecond()
+----
+return [LocalDate.of(2020,1,1).atStartOfDay(ZoneId.of('Europe/Paris')), LocalTime.MIDNIGHT, LocalTime.parse('10:15:30').plusMinutes(50)]
+----
+return Instant.parse('2020-01-01T00:00:00Z').plus(Duration.ofDays(1)).toEpochMilli()
+----
+def m = new HashMap(); m.put('k', new ArrayList()); m.k.add(1); m['k'].add(2); return m
+----
+Map counts = new HashMap(); for (String w : 'a b a c b a'.split(' ')) { counts.put(w, counts.getOrDefault(w, 0) + 1) } return counts
+----
+Set s = new HashSet(); s.add(3); s.add(1); s.add(3); return [s.size(), s.contains(1), s]
+----
+Set a = new HashSet([1, 2, 3]); Set b = new HashSet([2, 3, 4]); a.retainAll(b); return a
+----
+List l = new LinkedList(); l.add(1); l.add(0, 2); return [l, l.getFirst(), l.peekLast()]
+----
+Deque d = new ArrayDeque(); d.push(1); d.push(2); d.offerLast(3); return [d.pop(), d.pollLast(), d]
+----
+PriorityQueue q = new PriorityQueue(); q.add(5); q.add(1); q.add(3); return [q.poll(), q.poll(), q.size()]
+----
+return Collections.max([3, 9, 2]) + Collections.min([3, 9, 2]) + Collections.frequency([1, 1, 2], 1)
+----
+List l = [1, 2, 3, 4]; Collections.reverse(l); Collections.swap(l, 0, 3); return l
+----
+return Collections.nCopies(3, 'x')
+----
+return Objects.equals(null, null) && !Objects.equals(1, null) && Objects.hash(1, 2) == 994 && Objects.toString(null, 'n') == 'n'
+----
+return Optional.ofNullable(null).map(x -> x + 1).orElseGet(() -> 0)
+----
+return String.valueOf(null)
+----
+return String.format('%05.1f|%-5s|%x|%,d', 3.14159, 'ab', 255, 1234567)
+----
+return 'abc'.compareTo('abd') + 'b'.compareTo('a') + 'abc'.compareToIgnoreCase('ABC')
+----
+return 'ß'.toUpperCase() + 'İ'.toLowerCase().length()
+----
+return '😀a'.length() + '😀a'.codePointCount(0, 3)
+----
+return 'text'.hashCode() + ''.hashCode()
+----
+return new String('abc'.toCharArray(), 1, 2)
+----
+return 'a-b'.toCharArray()
+----
+return 'résumé'.getBytes('UTF-8')
+----
+return Base64.getEncoder().encodeToString('hello'.getBytes()) + ' ' + new String(Base64.getDecoder().decode('aGVsbG8='))
+----
+return UUID.fromString('123e4567-e89b-12d3-a456-426614174000').toString().toUpperCase()
+----
+return Math.random() < 1.0
+----
+def x = 3; return x instanceof Integer && !(x instanceof Long) && x instanceof Number
+----
+Object o = 'str'; if (o instanceof String) { String s = (String) o; return s.length() } return -1
+----
+return (5 > 3) == true ? 1 : 0
+----
+int a = 5; a++; ++a; a--; return a++ + ++a
+----
+def a = 5; a++; return [a, a++, ++a, a--]
+----
+List l = [1, 2, 3]; int i = 0; l[i++] = 10; return [l, i]
+----
+Map m = [:]; m.x = m.y = 5; return m
+----
+return 0x1F + 017 + 0b101
+----
+return 1_000_000
+----
+return 5 / 2 * 2.0
+----
+return 'a' + 1 + 2 + 'b' + (1 + 2)
+----
+return 1 + 2 + 'a'
+----
+return null + 'x'
+----
+return [1, 2] + [3]
+----
+return '' + [1, 2] + ['a': 1]

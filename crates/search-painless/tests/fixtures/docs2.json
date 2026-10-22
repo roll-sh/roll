@@ -1,0 +1,3263 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "return [params.i.getClass().getSimpleName(), params.l.getClass().getSimpleName(), params.d.getClass().getSimpleName(), params.big.getClass().getSimpleName(), params.e, params.n, params.a.getClass().getSimpleName(), params.o.getClass().getSimpleName()]",
+    "lang": "painless",
+    "params": {
+     "i": 1,
+     "l": 3000000000,
+     "d": 1.5,
+     "s": "x",
+     "b": true,
+     "n": null,
+     "a": [
+      1,
+      2.5,
+      "z"
+     ],
+     "o": {
+      "k": [
+       1
+      ]
+     },
+     "big": 18446744073709551616,
+     "e": 1e+300,
+     "neg": -5
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return [params.i.getClass().getSimpleName(), params.l.getClass().getSimpleName(), params.d.getClass().getSimpleName(), params.big.getClass().getSimpleName(), params.e, params.n, params.a.getClass().getSimpleName(), params.o.getClass().getSimpleName()]",
+       "                ^---- HERE"
+      ],
+      "script": "return [params.i.getClass().getSimpleName(), params.l.getClass().getSimpleName(), params.d.getClass().getSimpleName(), params.big.getClass().getSimpleName(), params.e, params.n, params.a.getClass().getSimpleName(), params.o.getClass().getSimpleName()]",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 251
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return [params.i.getClass().getSimpleName(), params.l.getClass().getSimpleName(), params.d.getClass().getSimpleName(), params.big.getClass().getSimpleName(), params.e, params.n, params.a.getClass().getSimpleName(), params.o.getClass().getSimpleName()]",
+     "                ^---- HERE"
+    ],
+    "script": "return [params.i.getClass().getSimpleName(), params.l.getClass().getSimpleName(), params.d.getClass().getSimpleName(), params.big.getClass().getSimpleName(), params.e, params.n, params.a.getClass().getSimpleName(), params.o.getClass().getSimpleName()]",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 251
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "dynamic method [java.lang.Integer, getClass/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x = params.i; long y = params.l; double z = params.d; return x + y + z",
+    "lang": "painless",
+    "params": {
+     "i": 1,
+     "l": 3000000000,
+     "d": 1.5
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.0000000025E9"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x = params.l; return x",
+    "lang": "painless",
+    "params": {
+     "l": 3000000000
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "x = params.l; ",
+       "          ^---- HERE"
+      ],
+      "script": "int x = params.l; return x",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 4,
+       "end": 18
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "x = params.l; ",
+     "          ^---- HERE"
+    ],
+    "script": "int x = params.l; return x",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 4,
+     "end": 18
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot implicitly cast def [long] to int"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x = params.d; return x",
+    "lang": "painless",
+    "params": {
+     "d": 1.5
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "x = params.d; ",
+       "          ^---- HERE"
+      ],
+      "script": "int x = params.d; return x",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 4,
+       "end": 18
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "x = params.d; ",
+     "          ^---- HERE"
+    ],
+    "script": "int x = params.d; return x",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 4,
+     "end": 18
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot implicitly cast def [double] to int"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "float x = params.d; return x",
+    "lang": "painless",
+    "params": {
+     "d": 1.5
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "x = params.d; ",
+       "          ^---- HERE"
+      ],
+      "script": "float x = params.d; return x",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 6,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "x = params.d; ",
+     "          ^---- HERE"
+    ],
+    "script": "float x = params.d; return x",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 6,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot implicitly cast def [double] to float"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.s.length() + params['s'].toUpperCase() + params.get('s')",
+    "lang": "painless",
+    "params": {
+     "s": "abc"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3ABCabc"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "params.a.add(4); Collections.sort(params.a); return params.a",
+    "lang": "painless",
+    "params": {
+     "a": [
+      3,
+      1,
+      2
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 2, 3, 4]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.m + params.m.keySet()",
+    "lang": "painless",
+    "params": {
+     "m": {
+      "b": 1,
+      "a": 2
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return params.m + params.m.keySet()",
+       "                          ^---- HERE"
+      ],
+      "script": "return params.m + params.m.keySet()",
+      "lang": "painless",
+      "position": {
+       "offset": 26,
+       "start": 0,
+       "end": 35
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return params.m + params.m.keySet()",
+     "                          ^---- HERE"
+    ],
+    "script": "return params.m + params.m.keySet()",
+    "lang": "painless",
+    "position": {
+     "offset": 26,
+     "start": 0,
+     "end": 35
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot apply [+] operation to types [java.util.HashMap] and [java.util.HashMap.KeySet]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "params.y = 2; params.remove('x'); return params",
+    "lang": "painless",
+    "params": {
+     "x": 1
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Collections$UnmodifiableMap.put(Collections.java:1666)",
+       "params.y = 2; ",
+       "      ^---- HERE"
+      ],
+      "script": "params.y = 2; params.remove('x'); return params",
+      "lang": "painless",
+      "position": {
+       "offset": 6,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Collections$UnmodifiableMap.put(Collections.java:1666)",
+     "params.y = 2; ",
+     "      ^---- HERE"
+    ],
+    "script": "params.y = 2; params.remove('x'); return params",
+    "lang": "painless",
+    "position": {
+     "offset": 6,
+     "start": 0,
+     "end": 14
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.containsKey('x') + ':' + params.size() + ':' + params.isEmpty()",
+    "lang": "painless",
+    "params": {
+     "x": 1
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true:1:false"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.size()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params",
+    "lang": "painless",
+    "params": {
+     "_source": {
+      "a": 1
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "{_source={a=1}}"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.f * 3",
+    "lang": "painless",
+    "params": {
+     "f": 0.1
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.30000000000000004"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.f",
+    "lang": "painless",
+    "params": {
+     "f": 100000000000000000000000
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "100000000000000000000000"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.f",
+    "lang": "painless",
+    "params": {
+     "f": 1.0
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.f",
+    "lang": "painless",
+    "params": {
+     "f": 100.0
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "100.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.f",
+    "lang": "painless",
+    "params": {
+     "f": -0.0
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-0.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params.s.length() + ':' + params.s",
+    "lang": "painless",
+    "params": {
+     "s": "é😀"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3:é😀"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['l'].value + doc['l'].get(1) + doc['l'].size() + doc['d'].value",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "d": 1.5,
+     "dt": "2020-01-02T03:04:05.678Z",
+     "k": [
+      "b",
+      "a"
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 11.5
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['l'][5]",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfBeyondLength(ScriptDocValues.java:101)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:118)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:105)",
+       "return doc['l'][5]",
+       "               ^---- HERE"
+      ],
+      "script": "return doc['l'][5]",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfBeyondLength(ScriptDocValues.java:101)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:118)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:105)",
+     "return doc['l'][5]",
+     "               ^---- HERE"
+    ],
+    "script": "return doc['l'][5]",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 0,
+     "end": 18
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": "A document doesn't have a value for a field at position [5]!"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['d'].value",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.get(ScriptDocValues.java:213)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.getValue(ScriptDocValues.java:208)",
+       "return doc['d'].value",
+       "               ^---- HERE"
+      ],
+      "script": "return doc['d'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 0,
+       "end": 21
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.get(ScriptDocValues.java:213)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.getValue(ScriptDocValues.java:208)",
+     "return doc['d'].value",
+     "               ^---- HERE"
+    ],
+    "script": "return doc['d'].value",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 0,
+     "end": 21
+    },
+    "caused_by": {
+     "type": "illegal_state_exception",
+     "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['nope'].value",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "return doc['nope'].value",
+       "           ^---- HERE"
+      ],
+      "script": "return doc['nope'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 24
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "return doc['nope'].value",
+     "           ^---- HERE"
+    ],
+    "script": "return doc['nope'].value",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 24
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No field found for [nope] in mapping"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['t'].value",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.TextFieldMapper$TextFieldType.fielddataBuilder(TextFieldMapper.java:1550)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "return doc['t'].value",
+       "           ^---- HERE"
+      ],
+      "script": "return doc['t'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 21
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.TextFieldMapper$TextFieldType.fielddataBuilder(TextFieldMapper.java:1550)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "return doc['t'].value",
+     "           ^---- HERE"
+    ],
+    "script": "return doc['t'].value",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 21
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Fielddata is disabled on [t] in [painless-docs]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [t] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc.containsKey('l') ? 1 : 0",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc.containsKey('nope') ? 1 : 0",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 0.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['l'].min + doc['l'].max + doc['l'].sum + doc['l'].average",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return doc['l'].min + doc['l'].max + doc['l'].sum + doc['l'].average",
+       "               ^---- HERE"
+      ],
+      "script": "return doc['l'].min + doc['l'].max + doc['l'].sum + doc['l'].average",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 0,
+       "end": 68
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return doc['l'].min + doc['l'].max + doc['l'].sum + doc['l'].average",
+     "               ^---- HERE"
+    ],
+    "script": "return doc['l'].min + doc['l'].max + doc['l'].sum + doc['l'].average",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 0,
+     "end": 68
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Illegal list shortcut value [min]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['l'].stream().mapToLong(x -> x).sum()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 8.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "doc['l'].add(1); return 1",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.add(ScriptDocValues.java:68)",
+       "java.base/java.util.AbstractList.add(AbstractList.java:113)",
+       "doc['l'].add(1); ",
+       "        ^---- HERE"
+      ],
+      "script": "doc['l'].add(1); return 1",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 17
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.add(ScriptDocValues.java:68)",
+     "java.base/java.util.AbstractList.add(AbstractList.java:113)",
+     "doc['l'].add(1); ",
+     "        ^---- HERE"
+    ],
+    "script": "doc['l'].add(1); return 1",
+    "lang": "painless",
+    "position": {
+     "offset": 8,
+     "start": 0,
+     "end": 17
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "doc values are unmodifiable"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc.l.value",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 3.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['dt'].value.getMillis() + doc['dt'].value.toInstant().toEpochMilli() / 1000.0",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "dt": "2020-01-02T03:04:05.678Z"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1579512179923.678
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['dt'].value.year * 1.0 + doc['dt'].value.getMonthValue() + doc['dt'].value.dayOfMonth",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "dt": "2020-01-02T03:04:05.678Z"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2023.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return params._source.l[0]",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 5.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return _score + 1",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 'x'",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 'x'",
+       "       ^---- HERE"
+      ],
+      "script": "return 'x'",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 10
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 'x'",
+     "       ^---- HERE"
+    ],
+    "script": "return 'x'",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 10
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [double]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return null",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return null",
+       "       ^---- HERE"
+      ],
+      "script": "return null",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 11
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return null",
+     "       ^---- HERE"
+    ],
+    "script": "return null",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 11
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot cast null to a primitive type [double]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return true",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return true",
+       "       ^---- HERE"
+      ],
+      "script": "return true",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 11
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return true",
+     "       ^---- HERE"
+    ],
+    "script": "return true",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 11
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [boolean] to [double]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['l']",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return doc['l']",
+       "          ^---- HERE"
+      ],
+      "script": "return doc['l']",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return doc['l']",
+     "          ^---- HERE"
+    ],
+    "script": "return doc['l']",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 15
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot implicitly cast def [org.elasticsearch.index.fielddata.ScriptDocValues.Longs] to double"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return -1",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": -1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Double.NaN",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x = 2",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 0.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "doc['l'].value > 4",
+    "lang": "painless"
+   },
+   "context": "filter",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": false
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1",
+    "lang": "painless"
+   },
+   "context": "filter",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 1",
+       "       ^---- HERE"
+      ],
+      "script": "return 1",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 8
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 1",
+     "       ^---- HERE"
+    ],
+    "script": "return 1",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 8
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [boolean]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return null",
+    "lang": "painless"
+   },
+   "context": "filter",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return null",
+       "       ^---- HERE"
+      ],
+      "script": "return null",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 11
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return null",
+     "       ^---- HERE"
+    ],
+    "script": "return null",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 11
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot cast null to a primitive type [boolean]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def x = 'a'; return x",
+    "lang": "painless"
+   },
+   "context": "filter",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return x",
+       "       ^---- HERE"
+      ],
+      "script": "def x = 'a'; return x",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 13,
+       "end": 21
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return x",
+     "       ^---- HERE"
+    ],
+    "script": "def x = 'a'; return x",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 13,
+     "end": 21
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [java.lang.String] to boolean"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return _score > 0",
+    "lang": "painless"
+   },
+   "context": "filter",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return _score > 0",
+       "       ^---- HERE"
+      ],
+      "script": "return _score > 0",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 17
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return _score > 0",
+     "       ^---- HERE"
+    ],
+    "script": "return _score > 0",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 17
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "cannot resolve symbol [_score]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (long v : doc['l']) emit(v * 2)",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    6,
+    10
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(1.5)",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(1.5)",
+       "     ^---- HERE"
+      ],
+      "script": "emit(1.5)",
+      "lang": "painless",
+      "position": {
+       "offset": 5,
+       "start": 0,
+       "end": 9
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(1.5)",
+     "     ^---- HERE"
+    ],
+    "script": "emit(1.5)",
+    "lang": "painless",
+    "position": {
+     "offset": 5,
+     "start": 0,
+     "end": 9
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [double] to [long]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit('x')",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit('x')",
+       "     ^---- HERE"
+      ],
+      "script": "emit('x')",
+      "lang": "painless",
+      "position": {
+       "offset": 5,
+       "start": 0,
+       "end": 9
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit('x')",
+     "     ^---- HERE"
+    ],
+    "script": "emit('x')",
+    "lang": "painless",
+    "position": {
+     "offset": 5,
+     "start": 0,
+     "end": 9
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [long]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def x = 1.5; emit(x)",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "emit(x)",
+       "     ^---- HERE"
+      ],
+      "script": "def x = 1.5; emit(x)",
+      "lang": "painless",
+      "position": {
+       "offset": 18,
+       "start": 13,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "emit(x)",
+     "     ^---- HERE"
+    ],
+    "script": "def x = 1.5; emit(x)",
+    "lang": "painless",
+    "position": {
+     "offset": 18,
+     "start": 13,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot implicitly cast def [double] to long"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def x = 'x'; emit(x)",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "emit(x)",
+       "     ^---- HERE"
+      ],
+      "script": "def x = 'x'; emit(x)",
+      "lang": "painless",
+      "position": {
+       "offset": 18,
+       "start": 13,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "emit(x)",
+     "     ^---- HERE"
+    ],
+    "script": "def x = 'x'; emit(x)",
+    "lang": "painless",
+    "position": {
+     "offset": 18,
+     "start": 13,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot implicitly cast def [java.lang.String] to long"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(params._source.l[0])",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    5
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (int i = 0; i < 101; i++) emit(i)",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.AbstractFieldScript.checkMaxSize(AbstractFieldScript.java:150)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.LongFieldScript$Emit.emit(LongFieldScript.java:103)",
+       "emit(i)",
+       "     ^---- HERE"
+      ],
+      "script": "for (int i = 0; i < 101; i++) emit(i)",
+      "lang": "painless",
+      "position": {
+       "offset": 35,
+       "start": 30,
+       "end": 37
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.AbstractFieldScript.checkMaxSize(AbstractFieldScript.java:150)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.LongFieldScript$Emit.emit(LongFieldScript.java:103)",
+     "emit(i)",
+     "     ^---- HERE"
+    ],
+    "script": "for (int i = 0; i < 101; i++) emit(i)",
+    "lang": "painless",
+    "position": {
+     "offset": 35,
+     "start": 30,
+     "end": 37
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Runtime field [long_field] is emitting [101] values while the maximum number of values allowed is [100]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 1",
+       "       ^---- HERE"
+      ],
+      "script": "return 1",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 8
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 1",
+     "       ^---- HERE"
+    ],
+    "script": "return 1",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 8
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [void]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(1); emit(2L); emit(0.5f)",
+    "lang": "painless"
+   },
+   "context": "double_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    1.0,
+    2.0,
+    0.5
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(Double.NaN)",
+    "lang": "painless"
+   },
+   "context": "double_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "NaN"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(null)",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.StringFieldScript.checkMaxChars(StringFieldScript.java:136)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.StringFieldScript$Emit.emit(StringFieldScript.java:159)",
+       "emit(null)",
+       "^---- HERE"
+      ],
+      "script": "emit(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 0,
+       "start": 0,
+       "end": 10
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.StringFieldScript.checkMaxChars(StringFieldScript.java:136)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.StringFieldScript$Emit.emit(StringFieldScript.java:159)",
+     "emit(null)",
+     "^---- HERE"
+    ],
+    "script": "emit(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 0,
+     "start": 0,
+     "end": 10
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot invoke \"String.length()\" because \"v\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit('b'); emit('a'); emit('b')",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "b",
+    "a",
+    "b"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(1)",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(1)",
+       "     ^---- HERE"
+      ],
+      "script": "emit(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 5,
+       "start": 0,
+       "end": 7
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(1)",
+     "     ^---- HERE"
+    ],
+    "script": "emit(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 5,
+     "start": 0,
+     "end": 7
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(doc['l'].value))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "3"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(true); emit(false); emit(true)",
+    "lang": "painless"
+   },
+   "context": "boolean_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    false,
+    true,
+    true
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(0L); emit(1700000000000L)",
+    "lang": "painless"
+   },
+   "context": "date_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "1970-01-01T00:00:00.000Z",
+    "2023-11-14T22:13:20.000Z"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(parse('2020-01-01'))",
+    "lang": "painless"
+   },
+   "context": "date_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "2020-01-01T00:00:00.000Z"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(parse('not a date'))",
+    "lang": "painless"
+   },
+   "context": "date_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.common.time.JavaDateFormatter.parse(JavaDateFormatter.java:230)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.common.time.DateFormatter.parseMillis(DateFormatter.java:49)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.DateFieldScript$Parse.parse(DateFieldScript.java:137)",
+       "emit(parse('not a date'))",
+       "           ^---- HERE"
+      ],
+      "script": "emit(parse('not a date'))",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.common.time.JavaDateFormatter.parse(JavaDateFormatter.java:230)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.common.time.DateFormatter.parseMillis(DateFormatter.java:49)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.DateFieldScript$Parse.parse(DateFieldScript.java:137)",
+     "emit(parse('not a date'))",
+     "           ^---- HERE"
+    ],
+    "script": "emit(parse('not a date'))",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "failed to parse date field [not a date] with format [strict_date_optional_time||epoch_millis]",
+     "caused_by": {
+      "type": "date_time_parse_exception",
+      "reason": "Failed to parse with all enclosed parsers"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['dt'].value.toInstant().toEpochMilli() + 1)",
+    "lang": "painless"
+   },
+   "context": "date_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "dt": "2020-01-02T03:04:05.678Z"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "2020-01-02T03:04:05.679Z"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit('10.0.0.1'); emit('::1')",
+    "lang": "painless"
+   },
+   "context": "ip_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "10.0.0.1",
+    "::1"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit('not-ip')",
+    "lang": "painless"
+   },
+   "context": "ip_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.common.network.InetAddresses.forString(InetAddresses.java:452)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.common.network.InetAddresses.forString(InetAddresses.java:431)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.IpFieldScript.emit(IpFieldScript.java:158)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.IpFieldScript$Emit.emit(IpFieldScript.java:183)",
+       "emit('not-ip')",
+       "^---- HERE"
+      ],
+      "script": "emit('not-ip')",
+      "lang": "painless",
+      "position": {
+       "offset": 0,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.common.network.InetAddresses.forString(InetAddresses.java:452)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.common.network.InetAddresses.forString(InetAddresses.java:431)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.IpFieldScript.emit(IpFieldScript.java:158)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.IpFieldScript$Emit.emit(IpFieldScript.java:183)",
+     "emit('not-ip')",
+     "^---- HERE"
+    ],
+    "script": "emit('not-ip')",
+    "lang": "painless",
+    "position": {
+     "offset": 0,
+     "start": 0,
+     "end": 14
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "'not-ip' is not an IP string literal."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(41.5, -71.25)",
+    "lang": "painless"
+   },
+   "context": "geo_point_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    {
+     "coordinates": [
+      -71.25,
+      41.5
+     ],
+     "type": "Point"
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(91.0, 0.0)",
+    "lang": "painless"
+   },
+   "context": "geo_point_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    {
+     "coordinates": [
+      0.0,
+      91.0
+     ],
+     "type": "Point"
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit('a', 1); emit('b', 'x'); emit(['c': 2, 'd': [1, 2]])",
+    "lang": "painless"
+   },
+   "context": "composite_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": {
+    "composite_field.d": [
+     [
+      1,
+      2
+     ]
+    ],
+    "composite_field.c": [
+     2
+    ],
+    "composite_field.b": [
+     "x"
+    ],
+    "composite_field.a": [
+     1
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(['c': ['x': 1]])",
+    "lang": "painless"
+   },
+   "context": "composite_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": {
+    "composite_field.c": [
+     {
+      "x": 1
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(params['_source']['t'])",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "t": "hello world"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "hello world"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(field('t').get('dflt'))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "t": "hello world"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "hello world"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(field('k').get('dflt') + $('k', 'z') + field('k').get(1, 'q') + field('nope').get('n'))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "k": [
+      "b",
+      "a"
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "aabn"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (def v : field('k')) emit(v)",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "k": [
+      "b",
+      "a"
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "a",
+    "b"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(field('k').isEmpty()) + field('k').size() + field('k').getName())",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "k": [
+      "b",
+      "a"
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "false2k"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(field('l').get(0L)))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "3"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(field('l').get(0)))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "3"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(field('dt').get(null)))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "dt": "2020-01-02T03:04:05.678Z"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "2020-01-02T03:04:05.678Z"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['g'].value.toString() + doc['g'].lat + ':' + doc['g'].lon + ':' + doc['g'].arcDistance(41, -71) + ':' + doc['g'].getGeohash())",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "g": "41.12,-71.34"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "emit(doc['g'].value.toString() + doc['g'].lat + ':' + doc['g'].lon + ':' + doc['g'].arcDistance(41, -71) + ':' + doc['g'].getGeohash())",
+       "                                                                                                                         ^---- HERE"
+      ],
+      "script": "emit(doc['g'].value.toString() + doc['g'].lat + ':' + doc['g'].lon + ':' + doc['g'].arcDistance(41, -71) + ':' + doc['g'].getGeohash())",
+      "lang": "painless",
+      "position": {
+       "offset": 121,
+       "start": 0,
+       "end": 135
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "emit(doc['g'].value.toString() + doc['g'].lat + ':' + doc['g'].lon + ':' + doc['g'].arcDistance(41, -71) + ':' + doc['g'].getGeohash())",
+     "                                                                                                                         ^---- HERE"
+    ],
+    "script": "emit(doc['g'].value.toString() + doc['g'].lat + ':' + doc['g'].lon + ':' + doc['g'].arcDistance(41, -71) + ':' + doc['g'].getGeohash())",
+    "lang": "painless",
+    "position": {
+     "offset": 121,
+     "start": 0,
+     "end": 135
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "dynamic method [org.elasticsearch.index.fielddata.ScriptDocValues.GeoPoints, getGeohash/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['ip'].value)",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "ip": "10.0.0.1"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "10.0.0.1"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['b'].toString())",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "b": [
+      true,
+      false
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "[false, true]"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc.toString())",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "org.elasticsearch.search.lookup.LeafDocLookup@33546fd7"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['l'].toString() + doc['k'].toString())",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "[3, 5][]"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['k'].value)",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.get(ScriptDocValues.java:483)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.getValue(ScriptDocValues.java:478)",
+       "emit(doc['k'].value)",
+       "             ^---- HERE"
+      ],
+      "script": "emit(doc['k'].value)",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.get(ScriptDocValues.java:483)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.getValue(ScriptDocValues.java:478)",
+     "emit(doc['k'].value)",
+     "             ^---- HERE"
+    ],
+    "script": "emit(doc['k'].value)",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "illegal_state_exception",
+     "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['k'].size() + '')",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "0"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['obj.x'].value + '' + doc['obj'].size())",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "obj": {
+      "x": 9
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "emit(doc['obj.x'].value + '' + doc['obj'].size())",
+       "                                   ^---- HERE"
+      ],
+      "script": "emit(doc['obj.x'].value + '' + doc['obj'].size())",
+      "lang": "painless",
+      "position": {
+       "offset": 35,
+       "start": 0,
+       "end": 49
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "emit(doc['obj.x'].value + '' + doc['obj'].size())",
+     "                                   ^---- HERE"
+    ],
+    "script": "emit(doc['obj.x'].value + '' + doc['obj'].size())",
+    "lang": "painless",
+    "position": {
+     "offset": 35,
+     "start": 0,
+     "end": 49
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No field found for [obj] in mapping"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['sf'].value + ':' + doc['hf'].value + ':' + doc['f'].value)",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "sf": 1.234,
+     "hf": 0.1,
+     "f": 0.1
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "1.23:0.0999755859375:0.10000000149011612"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['ver'].value + ':' + doc['bin'].value + ':' + doc['ul'].value)",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "ver": "1.2.3",
+     "bin": "aGVsbG8=",
+     "ul": 18446744073709551615
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "emit(doc['ver'].value + ':' + doc['bin'].value + ':' + doc['ul'].value)",
+       "               ^---- HERE"
+      ],
+      "script": "emit(doc['ver'].value + ':' + doc['bin'].value + ':' + doc['ul'].value)",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 0,
+       "end": 71
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "emit(doc['ver'].value + ':' + doc['bin'].value + ':' + doc['ul'].value)",
+     "               ^---- HERE"
+    ],
+    "script": "emit(doc['ver'].value + ':' + doc['bin'].value + ':' + doc['ul'].value)",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 0,
+     "end": 71
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Illegal list shortcut value [value]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['dn'].value + ':' + doc['dn'].value.getNano())",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "dn": "2020-01-02T03:04:05.123456789Z"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "2020-01-02T03:04:05.123456789Z:123456789"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(doc['v'].vectorValue + ':' + doc['v'].magnitude + ':' + doc['v'].size())",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "v": [
+      1,
+      2,
+      3
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "[F@45cabdd6:3.7416575:1"
+   ]
+  }
+ }
+]

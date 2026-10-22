@@ -1,0 +1,35 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+setup:
+  - do:
+      index:
+        index: 'test_cat_transforms'
+        body: { 'foo': 'bar' }
+  - do:
+      transform.put_transform:
+        transform_id: transform_id
+        body: {
+          source: {index: test_cat_transforms },
+          dest: { index: transformed_index },
+          pivot: {
+            group_by: { pop: { terms: { field: 'pop' } } },
+            aggregations: { max_pop: { max: { field: 'pop' } } }
+          }
+        }
+---
+teardown:
+  - do:
+      indices.delete:
+        index: 'test_cat_transforms'
+  - do:
+      transform.delete_transform:
+        transform_id: 'transform_id'
+---
+"cat.transforms":
+  - do:
+      cat.transforms:
+        format: 'json'
+  - match: { 0.id: 'transform_id' }

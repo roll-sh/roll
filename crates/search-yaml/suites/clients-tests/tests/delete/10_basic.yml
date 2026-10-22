@@ -1,0 +1,26 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+"Basic":
+  - do:
+      index:
+        index:  test_serverless_delete_10
+        id:     "1"
+        body:   { foo: bar }
+
+  - match:   { _version: 1 }
+
+  - do:
+      delete:
+        index:  test_serverless_delete_10
+        id:     "1"
+
+  - match: { result: deleted }
+
+---
+teardown:
+  - do:
+      indices.delete:
+        index: test_serverless_delete_10

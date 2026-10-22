@@ -1,0 +1,406 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "return [Locale.forLanguageTag('en_US'), Locale.forLanguageTag('EN-us'), Locale.forLanguageTag('zh-hant-tw'), Locale.forLanguageTag('de-1996'), Locale.forLanguageTag('de-DE-1996-x-foo'), Locale.forLanguageTag('en-US-u-ca-buddhist-nu-thai'), Locale.forLanguageTag('i-klingon'), Locale.forLanguageTag('zh-yue-HK'), Locale.forLanguageTag('ja-JP-x-lvariant-JP'), Locale.forLanguageTag('und-US'), Locale.forLanguageTag('')]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[, en_US, zh_TW_#Hant, de__1996, de_DE_1996_#x-foo, en_US_#u-ca-buddhist-nu-thai, tlh, yue_HK, ja_JP_JP_#u-ca-japanese, _US, ]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Locale.forLanguageTag('en-US-u-ca-buddhist-nu-thai').toLanguageTag(), Locale.forLanguageTag('de-1996').toLanguageTag(), new Locale('iw').toLanguageTag(), new Locale('IW', 'il'), new Locale('no', 'NO', 'NY').toLanguageTag(), new Locale('en', 'US', 'WIN_x'), new Locale('en', 'US', 'WIN_x').toLanguageTag(), new Locale('', 'US').toLanguageTag(), new Locale('', '', 'X').toLanguageTag()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[en-US-u-ca-buddhist-nu-thai, de-1996, he, he_IL, nn-NO, en_US_WIN_x, en-US-x-lvariant-WIN-x, und-US, x-lvariant-X]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [new Locale('ja', 'JP', 'JP'), new Locale('th', 'TH', 'TH'), new Locale('ja', 'JP', 'JP').getUnicodeLocaleType('ca'), new Locale('ja', 'JP', 'JP').getExtensionKeys(), new Locale('ja', 'JP', 'JP').getExtension((char) 117)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[ja_JP_JP_#u-ca-japanese, th_TH_TH_#u-nu-thai, japanese, [u], ca-japanese]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Locale l = Locale.forLanguageTag('sr-Latn-RS-u-nu-latn-x-priv'); return [l, l.getLanguage(), l.getScript(), l.getCountry(), l.getVariant(), l.getDisplayName(), l.getDisplayScript(), l.hasExtensions(), l.stripExtensions(), l.getUnicodeLocaleKeys(), l.getExtension((char) 120), l.toLanguageTag()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[sr_RS_#Latn_u-nu-latn-x-priv, sr, Latn, RS, , Serbian (Latin, Serbia, Western Digits), Latin, true, sr_RS_#Latn, [nu], priv, sr-Latn-RS-u-nu-latn-x-priv]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Locale l = Locale.forLanguageTag('sr-Latn-RS-u-nu-latn-x-priv'); return [l, l.getLanguage(), l.getScript(), l.getCountry(), l.getVariant(), l.getDisplayName(), l.getDisplayScript(), l.hasExtensions(), l.stripExtensions(), l.getUnicodeLocaleKeys(), l.getExtension((char) 120), l.toLanguageTag()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[sr_RS_#Latn_u-nu-latn-x-priv, sr, Latn, RS, , Serbian (Latin, Serbia, Western Digits), Latin, true, sr_RS_#Latn, [nu], priv, sr-Latn-RS-u-nu-latn-x-priv]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [new Locale('en', 'US').getDisplayName(), new Locale('fr', 'CA').getDisplayName(Locale.FRENCH), new Locale('xx', 'YY').getDisplayName(), new Locale('haw').getDisplayLanguage(), new Locale('en').getISO3Language(), new Locale('en', 'GB').getISO3Country(), Locale.US.getDisplayCountry(Locale.GERMAN)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[English (United States), français (Canada), xx (YY), Hawaiian, eng, GBR, Vereinigte Staaten]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Locale('xx').getISO3Language()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Locale.getISO3Language(Locale.java:1916)",
+       "return new Locale('xx').getISO3Language()",
+       "                       ^---- HERE"
+      ],
+      "script": "return new Locale('xx').getISO3Language()",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Locale.getISO3Language(Locale.java:1916)",
+     "return new Locale('xx').getISO3Language()",
+     "                       ^---- HERE"
+    ],
+    "script": "return new Locale('xx').getISO3Language()",
+    "lang": "painless",
+    "position": {
+     "offset": 23,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "missing_resource_exception",
+     "reason": "Couldn't find 3-letter language code for xx"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Locale('en', 'XX').getISO3Country()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Locale.getISO3Country(Locale.java:1938)",
+       "return new Locale('en', 'XX').getISO3Country()",
+       "                             ^---- HERE"
+      ],
+      "script": "return new Locale('en', 'XX').getISO3Country()",
+      "lang": "painless",
+      "position": {
+       "offset": 29,
+       "start": 0,
+       "end": 46
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Locale.getISO3Country(Locale.java:1938)",
+     "return new Locale('en', 'XX').getISO3Country()",
+     "                             ^---- HERE"
+    ],
+    "script": "return new Locale('en', 'XX').getISO3Country()",
+    "lang": "painless",
+    "position": {
+     "offset": 29,
+     "start": 0,
+     "end": 46
+    },
+    "caused_by": {
+     "type": "missing_resource_exception",
+     "reason": "Couldn't find 3-letter country code for XX"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Locale.getISOCountries().length, Locale.getISOLanguages().length, Locale.getAvailableLocales().length, Locale.getDefault(), Locale.getDefault(Locale.Category.FORMAT), Locale.getDefault(Locale.Category.DISPLAY)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[249, 188, 1189, en_US, en_US, en_US]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Locale.Builder().setLanguage('sr').setScript('Latn').setRegion('RS').setVariant('ekavsk').setExtension((char) 117, 'nu-latn').build()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "sr_RS_ekavsk_#Latn_u-nu-latn"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Locale.Builder().setLanguage('sr').setScript('Latn').setRegion('RS').setUnicodeLocaleKeyword('nu', 'latn').addUnicodeLocaleAttribute('foo').build().toLanguageTag()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "sr-Latn-RS-u-foo-nu-latn"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Locale.Builder().setLanguage('1').build()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Locale$Builder.setLanguage(Locale.java:2765)",
+       "return new Locale.Builder().setLanguage('1').build()",
+       "                           ^---- HERE"
+      ],
+      "script": "return new Locale.Builder().setLanguage('1').build()",
+      "lang": "painless",
+      "position": {
+       "offset": 27,
+       "start": 0,
+       "end": 52
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Locale$Builder.setLanguage(Locale.java:2765)",
+     "return new Locale.Builder().setLanguage('1').build()",
+     "                           ^---- HERE"
+    ],
+    "script": "return new Locale.Builder().setLanguage('1').build()",
+    "lang": "painless",
+    "position": {
+     "offset": 27,
+     "start": 0,
+     "end": 52
+    },
+    "caused_by": {
+     "type": "illformed_locale_exception",
+     "reason": "Ill-formed language: 1 [at index 0]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Locale.Builder().setLanguageTag('en-US').setRegion('GB').build()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "en_GB"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Locale.Builder().setLocale(Locale.FRANCE).clear().build()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": ""
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Locale.Builder().setRegion('USA').build()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Locale$Builder.setRegion(Locale.java:2811)",
+       "return new Locale.Builder().setRegion('USA').build()",
+       "                           ^---- HERE"
+      ],
+      "script": "return new Locale.Builder().setRegion('USA').build()",
+      "lang": "painless",
+      "position": {
+       "offset": 27,
+       "start": 0,
+       "end": 52
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Locale$Builder.setRegion(Locale.java:2811)",
+     "return new Locale.Builder().setRegion('USA').build()",
+     "                           ^---- HERE"
+    ],
+    "script": "return new Locale.Builder().setRegion('USA').build()",
+    "lang": "painless",
+    "position": {
+     "offset": 27,
+     "start": 0,
+     "end": 52
+    },
+    "caused_by": {
+     "type": "illformed_locale_exception",
+     "reason": "Ill-formed region: USA [at index 0]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Locale.US == Locale.US, Locale.US.equals(new Locale('en', 'US')), Locale.US.hashCode(), new Locale('EN', 'us').equals(Locale.US)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, 3118343, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Locale.forLanguageTag('en-US').toString() + Locale.forLanguageTag('en-Latn').toString() + Locale.forLanguageTag('x-whatever').toString() + '|' + Locale.forLanguageTag('x-whatever').toLanguageTag()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "en_USen__#Latn|x-whatever"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [new Locale('en', 'US', 'POSIX').getDisplayName(), new Locale('ca', 'ES', 'VALENCIA').getDisplayVariant(), Locale.forLanguageTag('zh-Hant-TW').getDisplayName(), Locale.ROOT.getDisplayName(), Locale.ROOT.toLanguageTag()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[English (United States, Computer), Valencian, Chinese (Traditional, Taiwan), , und]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Locale.lookupTag([new Locale.LanguageRange('fr-CA')], ['fr', 'fr-CA', 'en'])",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "fr-CA"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Locale.filter(Locale.LanguageRange.parse('fr-*,en;q=0.5'), [Locale.FRANCE, Locale.CANADA_FRENCH, Locale.US, Locale.GERMANY])",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[fr_FR, fr_CA, en_US]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Locale.FRANCE.getDisplayLanguage(Locale.FRANCE) + Locale.GERMANY.getDisplayCountry(Locale.GERMANY)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "françaisDeutschland"
+  }
+ }
+]

@@ -29,6 +29,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "amq-protocol"
 version = "10.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2168,6 +2174,8 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash",
 ]
 
@@ -3032,6 +3040,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "mimalloc"
@@ -4205,6 +4222,8 @@ version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
+ "libc",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "serde",
 ]
@@ -4215,7 +4234,7 @@ version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
- "rand_chacha",
+ "rand_chacha 0.9.0",
  "rand_core 0.9.5",
 ]
 
@@ -4228,6 +4247,16 @@ dependencies = [
  "chacha20",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -4881,6 +4910,191 @@ checksum = "da046153aa2352493d6cb7da4b6e5c0c057d8a1d0a9aa8560baffdd945acd414"
 dependencies = [
  "ring",
  "untrusted",
+]
+
+[[package]]
+name = "search-aggs"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "foldhash",
+ "hashbrown 0.16.1",
+ "rand 0.8.8",
+ "search-codec",
+ "search-index",
+ "serde_json",
+ "smallvec",
+]
+
+[[package]]
+name = "search-analysis"
+version = "0.1.0"
+dependencies = [
+ "foldhash",
+ "regex",
+ "regex-syntax",
+ "serde_json",
+ "smallvec",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "search-codec"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32c",
+ "memmap2",
+ "rand 0.8.8",
+ "regex-syntax",
+ "serde_json",
+ "thiserror",
+ "zstd 0.14.3",
+]
+
+[[package]]
+name = "search-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "rusqlite",
+ "search-server",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tower-http 0.7.1",
+ "tracing",
+]
+
+[[package]]
+name = "search-es"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "indexmap",
+ "itoa",
+ "libc",
+ "memchr",
+ "parking_lot",
+ "rand 0.8.8",
+ "regex",
+ "regex-syntax",
+ "reqwest",
+ "ryu",
+ "search-analysis",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "search-index"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "foldhash",
+ "hashbrown 0.16.1",
+ "libm",
+ "parking_lot",
+ "rand 0.8.8",
+ "search-analysis",
+ "search-codec",
+ "serde_json",
+ "smallvec",
+ "thiserror",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "search-painless"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "indexmap",
+ "libm",
+ "regex-syntax",
+ "ryu",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "search-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "flate2",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "parking_lot",
+ "rcgen",
+ "search-es",
+ "search-store",
+ "tokio",
+ "tokio-rustls 0.26.6",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "search-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crc32c",
+ "futures",
+ "getrandom 0.4.3",
+ "hashbrown 0.16.1",
+ "memmap2",
+ "parking_lot",
+ "pg-storage",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "zstd 0.14.3",
+]
+
+[[package]]
+name = "search-yaml"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "indexmap",
+ "libc",
+ "rcgen",
+ "regex",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.6",
 ]
 
 [[package]]

@@ -1,0 +1,23 @@
+[package]
+name = "search-painless"
+description = "The Painless scripting language (and Mustache templates) for roll search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# float_roundtrip: doubles in params, sources and fixtures parse exactly, as Jackson does
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+indexmap.workspace = true
+ryu.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+base64.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+libm.workspace = true
+regex-syntax.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]

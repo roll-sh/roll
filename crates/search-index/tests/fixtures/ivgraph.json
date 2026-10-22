@@ -1,0 +1,235 @@
+{
+"analysis": {
+"filter": {
+"syn": {
+"type": "synonym_graph",
+"synonyms": [
+"ny, new york",
+"wifi, wi fi, wireless network",
+"nyc => new york city",
+"tv, television, telly set"
+]
+}
+},
+"analyzer": {
+"sg": {
+"tokenizer": "standard",
+"filter": [
+"lowercase",
+"syn"
+]
+}
+}
+},
+"docs": [
+"I love new york pizza",
+"ny pizza is great",
+"free wi fi in new york city",
+"wireless network pizza",
+"the wifi in ny is free",
+"new pizza in york",
+"a telly set and a tv in nyc",
+"television in new york city at night",
+"free pizza with wireless and network",
+"new york new york",
+"wi and fi and new and york"
+],
+"cases": [
+{
+"text": "ny pizza",
+"max_gaps": -1,
+"ordered": false,
+"lucene": "t:UNORDERED(or(BLOCK(new,york),ny),pizza)",
+"hits": [
+{
+"id": "1",
+"score": 0.5
+},
+{
+"id": "0",
+"score": 0.3333333
+}
+]
+},
+{
+"text": "ny pizza",
+"max_gaps": 0,
+"ordered": true,
+"lucene": "t:or(BLOCK(new,york,pizza),BLOCK(ny,pizza))",
+"hits": [
+{
+"id": "1",
+"score": 0.5
+},
+{
+"id": "0",
+"score": 0.3333333
+}
+]
+},
+{
+"text": "ny pizza",
+"max_gaps": 2,
+"ordered": true,
+"lucene": "t:or(MAXGAPS/2(ORDERED(BLOCK(new,york),pizza)),MAXGAPS/2(ORDERED(ny,pizza)))",
+"hits": [
+{
+"id": "1",
+"score": 0.5
+},
+{
+"id": "0",
+"score": 0.3333333
+}
+]
+},
+{
+"text": "free wifi in ny",
+"max_gaps": 2,
+"ordered": false,
+"lucene": "t:or(MAXGAPS/2(UNORDERED(free,BLOCK(wi,fi),in,BLOCK(new,york))),MAXGAPS/2(UNORDERED(free,BLOCK(wi,fi),in,ny)),MAXGAPS/2(UNORDERED(free,BLOCK(wireless,network),in,BLOCK(new,york))),MAXGAPS/2(UNORDERED(free,BLOCK(wireless,network),in,ny)),MAXGAPS/2(UNORDERED(free,wifi,in,BLOCK(new,york))),MAXGAPS/2(UNORDERED(free,wifi,in,ny)))",
+"hits": [
+{
+"id": "4",
+"score": 0.3333333
+},
+{
+"id": "2",
+"score": 0.25
+}
+]
+},
+{
+"text": "free wifi in ny",
+"max_gaps": -1,
+"ordered": true,
+"lucene": "t:ORDERED(free,or(BLOCK(wi,fi),BLOCK(wireless,network),wifi),in,or(BLOCK(new,york),ny))",
+"hits": [
+{
+"id": "2",
+"score": 0.25
+}
+]
+},
+{
+"text": "nyc",
+"max_gaps": -1,
+"ordered": false,
+"lucene": "t:UNORDERED(new,york,city)",
+"hits": [
+{
+"id": "2",
+"score": 0.5
+},
+{
+"id": "7",
+"score": 0.5
+}
+]
+},
+{
+"text": "tv in nyc",
+"max_gaps": 3,
+"ordered": false,
+"lucene": "t:or(MAXGAPS/3(UNORDERED(BLOCK(telly,set),in,new,york,city)),MAXGAPS/3(UNORDERED(or(television,tv),in,new,york,city)))",
+"hits": [
+{
+"id": "7",
+"score": 0.5
+}
+]
+},
+{
+"text": "wifi",
+"max_gaps": -1,
+"ordered": false,
+"lucene": "t:or(BLOCK(wi,fi),BLOCK(wireless,network),wifi)",
+"hits": [
+{
+"id": "4",
+"score": 0.5
+},
+{
+"id": "2",
+"score": 0.3333333
+},
+{
+"id": "3",
+"score": 0.3333333
+}
+]
+},
+{
+"text": "new york",
+"max_gaps": 0,
+"ordered": true,
+"lucene": "t:or(BLOCK(new,york),ny)",
+"hits": [
+{
+"id": "1",
+"score": 0.5
+},
+{
+"id": "4",
+"score": 0.5
+},
+{
+"id": "9",
+"score": 0.5
+},
+{
+"id": "0",
+"score": 0.3333333
+},
+{
+"id": "2",
+"score": 0.3333333
+},
+{
+"id": "7",
+"score": 0.3333333
+}
+]
+},
+{
+"text": "telly set",
+"max_gaps": -1,
+"ordered": true,
+"lucene": "t:or(BLOCK(telly,set),television,tv)",
+"hits": [
+{
+"id": "6",
+"score": 0.6
+},
+{
+"id": "7",
+"score": 0.5
+}
+]
+},
+{
+"text": "television ny",
+"max_gaps": 4,
+"ordered": true,
+"lucene": "t:or(MAXGAPS/4(ORDERED(BLOCK(telly,set),BLOCK(new,york))),MAXGAPS/4(ORDERED(BLOCK(telly,set),ny)),MAXGAPS/4(ORDERED(or(television,tv),BLOCK(new,york))),MAXGAPS/4(ORDERED(or(television,tv),ny)))",
+"hits": [
+{
+"id": "7",
+"score": 0.25
+}
+]
+},
+{
+"text": "pizza wifi",
+"max_gaps": -1,
+"ordered": false,
+"lucene": "t:UNORDERED(pizza,or(BLOCK(wi,fi),BLOCK(wireless,network),wifi))",
+"hits": [
+{
+"id": "3",
+"score": 0.3333333
+}
+]
+}
+]
+}

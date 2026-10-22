@@ -1,0 +1,233 @@
+#defaults: {"doc": {"a": 1, "s": "x", "tags": ["t1", "t2"], "o": {"k": 2, "l": [1, 2]}, "n": null, "d": 1.5}}
+ctx._source.a += 1
+----
+ctx._source.a = ctx._source.a + 1; ctx._source.b = 'new'
+----
+ctx._source.tags.add('t3')
+----
+ctx._source.tags.remove(0)
+----
+ctx._source.o.k *= 10; ctx._source.o.l.add(3)
+----
+ctx._source.remove('a')
+----
+ctx._source.n = 5
+----
+ctx._source.n.foo = 5
+----
+ctx._source.missing.x = 1
+----
+ctx._source.x = ctx._source.missing?.x
+----
+ctx._source = ['only': true]
+----
+ctx._source = 'x'
+----
+ctx._source = null
+----
+ctx.op = 'noop'
+----
+ctx.op = 'none'
+----
+ctx.op = 'delete'
+----
+ctx.op = 'foo'
+----
+ctx.op = null
+----
+ctx._source.a = 1
+----
+ctx._source.str = ctx.toString().replaceAll(/_now=[0-9]+/, m -> '_now=N')
+----
+ctx._source.keys = new ArrayList(ctx.keySet())
+----
+ctx._source.v = ctx._version; ctx._source.vt = ctx._version instanceof Long
+----
+ctx._source.i = ctx._index; ctx._source.id = ctx._id; ctx._source.r = ctx._routing; ctx._source.t = ctx._type
+----
+ctx._source.nowType = ctx._now instanceof Long; ctx._source.nowPositive = ctx._now > 0
+----
+ctx.foo = 2
+----
+ctx._version = 5
+----
+ctx._index = 'other'
+----
+ctx._id = 'z'
+----
+ctx._routing = 'r'
+----
+ctx._now = 1
+----
+ctx.remove('_index')
+----
+ctx.remove('op')
+----
+ctx.remove('_source')
+----
+ctx.remove('foo')
+----
+ctx.clear()
+----
+ctx._source.c = ctx.containsKey('_source') + ',' + ctx.containsKey('foo') + ',' + ctx.containsKey('op') + ',' + ctx.size() + ',' + ctx.isEmpty()
+----
+ctx._source.g = ctx.get('_source').a + ctx['_source']['a']
+----
+ctx['_source']['w'] = 'via brackets'
+----
+for (def e : ctx.entrySet()) { if (e.getKey() == 'op') { e.setValue('noop') } }
+----
+ctx._source.e = []; for (def k : ctx.keySet()) { ctx._source.e.add(k) }
+----
+ctx._source.vals = ctx.values().size()
+----
+ctx._source.m = metadata().getIndex() + '/' + metadata().getId() + '/' + metadata().getVersion() + '/' + metadata().getOp() + '/' + metadata().getRouting()
+----
+metadata().setOp('delete')
+----
+metadata().setOp('bogus')
+----
+metadata().setOp('none')
+----
+ctx._source.nowm = metadata().getNow() == ctx._now
+----
+ctx._source.zt = metadata().getNow() instanceof ZonedDateTime; ctx._source.zz = metadata().getNow().getZone().toString()
+----
+ctx._source.x = params.x * 2
+----
+#params: {"x": 21}
+ctx._source.x = params.x * 2
+----
+#params: {"tag": "p"}
+if (!ctx._source.tags.contains(params.tag)) { ctx._source.tags.add(params.tag) } else { ctx.op = 'noop' }
+----
+#params: {"tag": "t1"}
+if (!ctx._source.tags.contains(params.tag)) { ctx._source.tags.add(params.tag) } else { ctx.op = 'noop' }
+----
+params.x = 1
+----
+ctx._source.list = [1, 2.5, 'a', true, null, [1], ['k': 'v']]
+----
+ctx._source.big = 9007199254740993L; ctx._source.f = 1.1f; ctx._source.b = (byte) 3; ctx._source.sh = (short) 4
+----
+ctx._source.c = (char) 'c'
+----
+ctx._source.bi = new BigInteger('123456789012345678901234567890'); ctx._source.bd = new BigDecimal('1.50')
+----
+ctx._source.ld = LocalDate.of(2020, 1, 2); ctx._source.i = Instant.ofEpochMilli(0)
+----
+ctx._source.set = new HashSet([1, 2])
+----
+ctx._source.nan = Double.NaN
+----
+ctx._source.inf = Float.POSITIVE_INFINITY
+----
+ctx._source.ba = 'ab'.getBytes()
+----
+ctx._source.sa = new String[] {'a', null}
+----
+ctx._source.oa = new def[] {1, 'x', [2]}
+----
+ctx._source.dt = ZonedDateTime.parse('2020-01-01T10:00:00+02:00[Europe/Paris]')
+----
+ctx._source.pat = /a/
+----
+ctx._source.sb = new StringBuilder('sb')
+----
+ctx._source.opt = Optional.of(1)
+----
+ctx._source.ks = ctx._source.o.keySet(); ctx._source.vs = ctx._source.o.values()
+----
+ctx._source.en = ctx._source.o.entrySet().iterator().next()
+----
+ctx._source.ex = new RuntimeException('x')
+----
+ctx._source.nums = [1e300, -0.0, 0.1, 100.0, 1.0E-7, 123456789.0, 1.5f, 3.4028235E38f, 2147483648L]
+----
+ctx._source.bd2 = [new BigDecimal('1.50'), new BigDecimal('1E+3'), new BigDecimal('-0.000001')]
+----
+ctx._source.uni = 'héllo ☃ "q" \\ / </script>  ' + (char) 10 + (char) 9 + (char) 1 + (char) 0x7f + 'x'
+----
+ctx._source.empty = [:]; ctx._source.el = []
+----
+ctx._source.ldt = LocalDateTime.of(2020, 1, 2, 3, 4, 5); ctx._source.lt = LocalTime.of(1, 2); ctx._source.dur = Duration.ofSeconds(90)
+----
+ctx._source.odt = OffsetDateTime.of(2020, 1, 2, 3, 4, 5, 6000000, ZoneOffset.ofHours(2))
+----
+ctx._source.zdtn = ZonedDateTime.of(2020, 1, 2, 3, 4, 5, 123456789, ZoneId.of('UTC'))
+----
+ctx._source.date = ZonedDateTime.parse('2020-01-01T00:00:00Z')
+----
+ctx._source.arr = new int[] {1, 2}
+----
+throw new IllegalArgumentException('nope')
+----
+ctx._source.a = ctx._source.s.foo()
+----
+int x = ctx._source.s
+----
+ctx._source.a = ctx._source.n.length()
+----
+return 1
+----
+ctx._source.a = field('a').get(0)
+----
+field('o.k').set(99)
+----
+field('o.newfield').set('nf')
+----
+ctx._source.ex = field('o.k').exists() + ',' + field('zz').exists() + ',' + field('tags').size()
+----
+field('tags').append('t9')
+----
+field('o').remove('k')
+----
+ctx._source.dot = $('o.k', -1) + $('nope', -1)
+----
+ctx._source.ctxType = (ctx instanceof Map) + ' ' + (ctx instanceof HashMap)
+----
+ctx._source.srcType = (ctx._source instanceof LinkedHashMap) + ' ' + (ctx._source instanceof HashMap)
+----
+ctx._source.oType = (ctx._source.o instanceof LinkedHashMap) + ' ' + (ctx._source.tags instanceof ArrayList) + ' ' + (ctx._source.a instanceof Integer) + ' ' + (ctx._source.d instanceof Double)
+----
+#doc: {"big": 12345678901234, "i": 5, "f": 2.5, "neg": -1, "e": 1e300}
+ctx._source.t = (ctx._source.big instanceof Long) + ' ' + (ctx._source.i instanceof Integer) + ' ' + (ctx._source.f instanceof Double) + ' ' + (ctx._source.e instanceof Double)
+----
+#doc: {}
+ctx._source.created = true
+----
+#doc: {"count": 0}
+for (int i = 0; i < 10; i++) { ctx._source.count++ }
+----
+#upsert: {"z": 1}
+ctx._source.s = ctx.toString().replaceAll(/_now=[0-9]+/, m -> '_now=N'); ctx._source.k = new ArrayList(ctx.keySet())
+----
+#upsert: {"z": 1}
+ctx._source.z += 5
+----
+#upsert: {"z": 1}
+ctx.op = 'noop'
+----
+#upsert: {"z": 1}
+ctx.op = 'index'
+----
+#upsert: {"z": 1}
+ctx.op = 'delete'
+----
+#upsert: {"z": 1}
+ctx._version = 3
+----
+#upsert: {"z": 1}
+ctx._source.v = ctx._version
+----
+#upsert: {"z": 1}
+ctx._source.m = metadata().getOp() + '/' + metadata().getIndex()
+----
+#upsert: {"z": 1}
+ctx._source.v = metadata().getVersion()
+----
+#upsert: {"z": 1}
+ctx._source.r = metadata().getRouting()
+----
+#upsert: {}
+ctx._source.counter = 1

@@ -1,0 +1,1493 @@
+{
+ "description": "synonyms API: sets and rules, paging, validation, parse errors, reload and in-use checks, synonyms_set analysis",
+ "steps": [
+  {
+   "req": "PUT /_synonyms/esm-syn1",
+   "body": {
+    "synonyms_set": [
+     {
+      "synonyms": "hello, hi"
+     },
+     {
+      "id": "b",
+      "synonyms": "bye => goodbye"
+     },
+     {
+      "id": "a",
+      "synonyms": "x, y"
+     }
+    ]
+   },
+   "mask": [
+    "_shards",
+    "reloaded_node_ids"
+   ],
+   "status": 201,
+   "response": {
+    "result": "created",
+    "reload_analyzers_details": {
+     "_shards": {
+      "total": 2,
+      "successful": 1,
+      "failed": 0
+     },
+     "reload_details": []
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1",
+   "mask": [
+    "synonyms_set"
+   ],
+   "status": 200,
+   "response": {
+    "count": 3,
+    "synonyms_set": [
+     {
+      "id": "V3vXWqEB_3htJNTDa1D2",
+      "synonyms": "hello, hi"
+     },
+     {
+      "id": "a",
+      "synonyms": "x, y"
+     },
+     {
+      "id": "b",
+      "synonyms": "bye => goodbye"
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn1",
+   "body": {
+    "synonyms_set": [
+     {
+      "id": "b",
+      "synonyms": "bye => goodbye"
+     }
+    ]
+   },
+   "mask": [
+    "_shards",
+    "reloaded_node_ids"
+   ],
+   "status": 200,
+   "response": {
+    "result": "updated",
+    "reload_analyzers_details": {
+     "_shards": {
+      "total": 2,
+      "successful": 1,
+      "failed": 0
+     },
+     "reload_details": []
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn1?refresh=false",
+   "body": {
+    "synonyms_set": [
+     {
+      "id": "b",
+      "synonyms": "bye => goodbye"
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "result": "updated"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1/b",
+   "status": 200,
+   "response": {
+    "id": "b",
+    "synonyms": "bye => goodbye"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1/zz",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "resource_not_found_exception",
+       "reason": "synonym rule [zz] not found"
+      }
+     ],
+     "type": "resource_not_found_exception",
+     "reason": "synonym rule [zz] not found"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-nope/zz",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "resource_not_found_exception",
+       "reason": "synonyms set [esm-nope] not found"
+      }
+     ],
+     "type": "resource_not_found_exception",
+     "reason": "synonyms set [esm-nope] not found"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn1/c",
+   "body": {
+    "synonyms": "q, r"
+   },
+   "mask": [
+    "_shards",
+    "reloaded_node_ids"
+   ],
+   "status": 201,
+   "response": {
+    "result": "created",
+    "reload_analyzers_details": {
+     "_shards": {
+      "total": 2,
+      "successful": 1,
+      "failed": 0
+     },
+     "reload_details": []
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn1/c",
+   "body": {
+    "synonyms": "q, r, s"
+   },
+   "mask": [
+    "_shards",
+    "reloaded_node_ids"
+   ],
+   "status": 200,
+   "response": {
+    "result": "updated",
+    "reload_analyzers_details": {
+     "_shards": {
+      "total": 2,
+      "successful": 1,
+      "failed": 0
+     },
+     "reload_details": []
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-nope/c",
+   "body": {
+    "synonyms": "q, r, s"
+   },
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "resource_not_found_exception",
+       "reason": "synonyms set [esm-nope] not found"
+      }
+     ],
+     "type": "resource_not_found_exception",
+     "reason": "synonyms set [esm-nope] not found"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1",
+   "status": 200,
+   "response": {
+    "count": 2,
+    "synonyms_set": [
+     {
+      "id": "b",
+      "synonyms": "bye => goodbye"
+     },
+     {
+      "id": "c",
+      "synonyms": "q, r, s"
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1?size=1",
+   "status": 200,
+   "response": {
+    "count": 2,
+    "synonyms_set": [
+     {
+      "id": "b",
+      "synonyms": "bye => goodbye"
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1?from=1",
+   "status": 200,
+   "response": {
+    "count": 2,
+    "synonyms_set": [
+     {
+      "id": "c",
+      "synonyms": "q, r, s"
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1?search_after=b",
+   "status": 200,
+   "response": {
+    "count": 2,
+    "synonyms_set": [
+     {
+      "id": "c",
+      "synonyms": "q, r, s"
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1?search_after=b&from=0",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "[from] and [search_after] cannot be used together"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "[from] and [search_after] cannot be used together"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_synonyms/esm-syn1/c",
+   "mask": [
+    "_shards",
+    "reloaded_node_ids"
+   ],
+   "status": 200,
+   "response": {
+    "result": "deleted",
+    "reload_analyzers_details": {
+     "_shards": {
+      "total": 2,
+      "successful": 1,
+      "failed": 0
+     },
+     "reload_details": []
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_synonyms/esm-syn1/c",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "resource_not_found_exception",
+       "reason": "synonym rule [c] not found on synonyms set [esm-syn1]"
+      }
+     ],
+     "type": "resource_not_found_exception",
+     "reason": "synonym rule [c] not found on synonyms set [esm-syn1]"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1?size=-1",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: [size] must be a positive integer;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: [size] must be a positive integer;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1?from=-1",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: [from] must be a positive integer;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: [from] must be a positive integer;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1?size=100001",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: [size] must be less than or equal to 10000;2: Too many results to retrieve. [from] + [size] must be less than or equal to 10000;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: [size] must be less than or equal to 10000;2: Too many results to retrieve. [from] + [size] must be less than or equal to 10000;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn1?from=10001",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: [from] must be less than or equal to 10000;2: Too many results to retrieve. [from] + [size] must be less than or equal to 10000;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: [from] must be less than or equal to 10000;2: Too many results to retrieve. [from] + [size] must be less than or equal to 10000;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "synonyms": ""
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: [synonyms] field can't be empty;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: [synonyms] field can't be empty;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "synonyms": "bye => => goodbye"
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: More than one explicit mapping specified in the same synonyms rule: [bye => => goodbye];"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: More than one explicit mapping specified in the same synonyms rule: [bye => => goodbye];"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "synonyms": " => goodbye"
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: Incorrect syntax for [synonyms]: [ => goodbye];"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: Incorrect syntax for [synonyms]: [ => goodbye];"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "synonyms": "bye => "
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: Incorrect syntax for [synonyms]: [bye => ];"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: Incorrect syntax for [synonyms]: [bye => ];"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "synonyms": "bye, goodbye,  "
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: Incorrect syntax for [synonyms]: [bye, goodbye,  ];"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: Incorrect syntax for [synonyms]: [bye, goodbye,  ];"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "foo": 1
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"foo\":1}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"foo\":1}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:2] [synonyms_set] unknown field [foo]"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {},
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {}",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Required [synonyms_set]"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [],
+    "foo": 1
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms_set\":[],\"foo\":1}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms_set\":[],\"foo\":1}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:20] [synonyms_set] unknown field [foo]"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "foo": 1
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms_set\":[{\"foo\":1}]}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms_set\":[{\"foo\":1}]}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:25] [synonyms_set] failed to parse field [synonyms_set]",
+      "caused_by": {
+       "type": "x_content_parse_exception",
+       "reason": "[1:19] [synonym_rule] unknown field [foo]"
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "synonyms": "a",
+      "fooo": 1
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms_set\":[{\"synonyms\":\"a\",\"fooo\":1}]}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms_set\":[{\"synonyms\":\"a\",\"fooo\":1}]}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:41] [synonyms_set] failed to parse field [synonyms_set]",
+      "caused_by": {
+       "type": "x_content_parse_exception",
+       "reason": "[1:34] [synonym_rule] unknown field [fooo]"
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": 5
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms_set\":5}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms_set\":5}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:17] [synonyms_set] synonyms_set doesn't support values of type: VALUE_NUMBER"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     5
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms_set\":[5]}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms_set\":[5]}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:19] [synonyms_set] failed to parse field [synonyms_set]",
+      "caused_by": {
+       "type": "x_content_parse_exception",
+       "reason": "[1:19] [synonym_rule] Expected START_OBJECT but was: END_ARRAY"
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "synonyms": 5
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms_set\":[{\"synonyms\":5}]}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms_set\":[{\"synonyms\":5}]}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:30] [synonyms_set] failed to parse field [synonyms_set]",
+      "caused_by": {
+       "type": "x_content_parse_exception",
+       "reason": "[1:30] [synonym_rule] synonyms doesn't support values of type: VALUE_NUMBER"
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "id": 5,
+      "synonyms": "a"
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms_set\":[{\"id\":5,\"synonyms\":\"a\"}]}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms_set\":[{\"id\":5,\"synonyms\":\"a\"}]}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:24] [synonyms_set] failed to parse field [synonyms_set]",
+      "caused_by": {
+       "type": "x_content_parse_exception",
+       "reason": "[1:24] [synonym_rule] id doesn't support values of type: VALUE_NUMBER"
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "id": "x"
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms_set\":[{\"id\":\"x\"}]}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms_set\":[{\"id\":\"x\"}]}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:27] [synonyms_set] failed to parse field [synonyms_set]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "Required [synonyms]"
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": [
+    1
+   ],
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: [1]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: [1]",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:1] [synonyms_set] Expected START_OBJECT but was: START_ARRAY"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": {
+     "synonyms": "a, b"
+    }
+   },
+   "mask": [
+    "_shards",
+    "reloaded_node_ids"
+   ],
+   "status": 201,
+   "response": {
+    "result": "created",
+    "reload_analyzers_details": {
+     "_shards": {
+      "total": 2,
+      "successful": 1,
+      "failed": 0
+     },
+     "reload_details": []
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2",
+   "body": {
+    "synonyms_set": [
+     {
+      "synonyms": "a,b",
+      "id": "x"
+     },
+     {
+      "synonyms": "c,d",
+      "id": "x"
+     }
+    ]
+   },
+   "mask": [
+    "_shards",
+    "reloaded_node_ids"
+   ],
+   "status": 200,
+   "response": {
+    "result": "updated",
+    "reload_analyzers_details": {
+     "_shards": {
+      "total": 2,
+      "successful": 1,
+      "failed": 0
+     },
+     "reload_details": []
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_synonyms/esm-syn2",
+   "status": 200,
+   "response": {
+    "count": 1,
+    "synonyms_set": [
+     {
+      "id": "x",
+      "synonyms": "c,d"
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2/r1",
+   "body": {
+    "foo": 1
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"foo\":1}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"foo\":1}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:2] [synonyms] unknown field [foo]"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2/r1",
+   "body": {},
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {}",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Required [synonyms]"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2/r1",
+   "body": {
+    "synonyms": 5
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms\":5}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms\":5}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:13] [synonyms] synonyms doesn't support values of type: VALUE_NUMBER"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2/r1",
+   "body": {
+    "synonyms": ""
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: [synonyms] field can't be empty;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: [synonyms] field can't be empty;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2/r1",
+   "body": {
+    "synonyms": "a,b",
+    "id": "zz"
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: {\"synonyms\":\"a,b\",\"id\":\"zz\"}"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: {\"synonyms\":\"a,b\",\"id\":\"zz\"}",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:19] [synonyms] unknown field [id]"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2/r1",
+   "body": [
+    1
+   ],
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Failed to parse: [1]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse: [1]",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:1] [synonyms] Expected START_OBJECT but was: START_ARRAY"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-sy1",
+   "body": {
+    "settings": {
+     "analysis": {
+      "filter": {
+       "f": {
+        "type": "synonym_graph",
+        "synonyms_set": "esm-syn2",
+        "updateable": true
+       }
+      },
+      "analyzer": {
+       "a": {
+        "tokenizer": "standard",
+        "filter": [
+         "lowercase",
+         "f"
+        ]
+       }
+      }
+     }
+    },
+    "mappings": {
+     "properties": {
+      "t": {
+       "type": "text",
+       "search_analyzer": "a"
+      }
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-sy1"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-sy1/_analyze",
+   "body": {
+    "analyzer": "a",
+    "text": "C foo"
+   },
+   "status": 200,
+   "response": {
+    "tokens": [
+     {
+      "token": "d",
+      "start_offset": 0,
+      "end_offset": 1,
+      "type": "SYNONYM",
+      "position": 0
+     },
+     {
+      "token": "c",
+      "start_offset": 0,
+      "end_offset": 1,
+      "type": "<ALPHANUM>",
+      "position": 0
+     },
+     {
+      "token": "foo",
+      "start_offset": 2,
+      "end_offset": 5,
+      "type": "<ALPHANUM>",
+      "position": 1
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_synonyms/esm-syn2/r2",
+   "body": {
+    "synonyms": "foo => bar"
+   },
+   "mask": [
+    "_shards",
+    "reloaded_node_ids"
+   ],
+   "status": 201,
+   "response": {
+    "result": "created",
+    "reload_analyzers_details": {
+     "_shards": {
+      "total": 4,
+      "successful": 2,
+      "failed": 0
+     },
+     "reload_details": [
+      {
+       "index": "esm-sy1",
+       "reloaded_analyzers": [
+        "a"
+       ],
+       "reloaded_node_ids": [
+        "2AU6uEV5S82s9FCi0WUJKg"
+       ]
+      }
+     ]
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-sy1/_analyze",
+   "body": {
+    "analyzer": "a",
+    "text": "C foo"
+   },
+   "status": 200,
+   "response": {
+    "tokens": [
+     {
+      "token": "d",
+      "start_offset": 0,
+      "end_offset": 1,
+      "type": "SYNONYM",
+      "position": 0
+     },
+     {
+      "token": "c",
+      "start_offset": 0,
+      "end_offset": 1,
+      "type": "<ALPHANUM>",
+      "position": 0
+     },
+     {
+      "token": "bar",
+      "start_offset": 2,
+      "end_offset": 5,
+      "type": "SYNONYM",
+      "position": 1
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_synonyms/esm-syn2",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "synonyms set [esm-syn2] cannot be deleted as it is used in the following indices: esm-sy1"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "synonyms set [esm-syn2] cannot be deleted as it is used in the following indices: esm-sy1"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-sy2",
+   "body": {
+    "settings": {
+     "analysis": {
+      "filter": {
+       "f": {
+        "type": "synonym_graph",
+        "synonyms_set": "esm-nope",
+        "updateable": true
+       }
+      },
+      "analyzer": {
+       "a": {
+        "tokenizer": "standard",
+        "filter": [
+         "f"
+        ]
+       }
+      }
+     }
+    },
+    "mappings": {
+     "properties": {
+      "t": {
+       "type": "text",
+       "search_analyzer": "a"
+      }
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-sy2"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-sy2/_analyze",
+   "body": {
+    "analyzer": "a",
+    "text": "foo bar"
+   },
+   "status": 200,
+   "response": {
+    "tokens": [
+     {
+      "token": "foo",
+      "start_offset": 0,
+      "end_offset": 3,
+      "type": "<ALPHANUM>",
+      "position": 0
+     },
+     {
+      "token": "bar",
+      "start_offset": 4,
+      "end_offset": 7,
+      "type": "<ALPHANUM>",
+      "position": 1
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-sy3",
+   "body": {
+    "settings": {
+     "analysis": {
+      "filter": {
+       "f": {
+        "type": "synonym_graph",
+        "synonyms_set": "esm-syn2"
+       }
+      },
+      "analyzer": {
+       "a": {
+        "tokenizer": "standard",
+        "filter": [
+         "f"
+        ]
+       }
+      }
+     }
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Can't apply [synonyms_set]! Loading synonyms from index is supported only for search time synonyms!"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Can't apply [synonyms_set]! Loading synonyms from index is supported only for search time synonyms!"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /esm-sy1",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_synonyms/esm-syn2",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_synonyms/esm-syn2",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "resource_not_found_exception",
+       "reason": "synonyms set [esm-syn2] not found"
+      }
+     ],
+     "type": "resource_not_found_exception",
+     "reason": "synonyms set [esm-syn2] not found"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_synonyms/esm-syn1",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  }
+ ]
+}

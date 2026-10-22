@@ -1,0 +1,576 @@
+{
+ "terms": [
+  "0042",
+  "042",
+  "100",
+  "1000",
+  "123",
+  "99",
+  "a",
+  "a*c",
+  "a.c",
+  "ab",
+  "abc",
+  "abcabc",
+  "abcd",
+  "acb",
+  "ba",
+  "bac",
+  "bar",
+  "barbaz",
+  "baz",
+  "foo123",
+  "foo45",
+  "foo7",
+  "kitchen",
+  "kitten",
+  "mitten",
+  "sitting",
+  "smitten",
+  "xabc",
+  "日本",
+  "日本語",
+  "本日"
+ ],
+ "fuzzy": [
+  {
+   "value": "kitten",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "kitten",
+    "mitten"
+   ]
+  },
+  {
+   "value": "kitten",
+   "edits": 2,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "kitchen",
+    "kitten",
+    "mitten",
+    "smitten"
+   ]
+  },
+  {
+   "value": "kitten",
+   "edits": 2,
+   "prefix": 1,
+   "transpositions": true,
+   "matches": [
+    "kitchen",
+    "kitten"
+   ]
+  },
+  {
+   "value": "abc",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "a*c",
+    "a.c",
+    "ab",
+    "abc",
+    "abcd",
+    "acb",
+    "bac",
+    "xabc"
+   ]
+  },
+  {
+   "value": "abc",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": false,
+   "matches": [
+    "a*c",
+    "a.c",
+    "ab",
+    "abc",
+    "abcd",
+    "xabc"
+   ]
+  },
+  {
+   "value": "acb",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "ab",
+    "abc",
+    "acb"
+   ]
+  },
+  {
+   "value": "bca",
+   "edits": 2,
+   "prefix": 0,
+   "transpositions": false,
+   "matches": [
+    "a",
+    "abc",
+    "abcd",
+    "acb",
+    "ba",
+    "bac",
+    "bar",
+    "baz"
+   ]
+  },
+  {
+   "value": "bca",
+   "edits": 2,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "a",
+    "abc",
+    "abcd",
+    "acb",
+    "ba",
+    "bac",
+    "bar",
+    "baz"
+   ]
+  },
+  {
+   "value": "日本",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "日本",
+    "日本語",
+    "本日"
+   ]
+  },
+  {
+   "value": "ba",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "a",
+    "ab",
+    "ba",
+    "bac",
+    "bar",
+    "baz"
+   ]
+  },
+  {
+   "value": "ba",
+   "edits": 2,
+   "prefix": 1,
+   "transpositions": false,
+   "matches": [
+    "ba",
+    "bac",
+    "bar",
+    "baz"
+   ]
+  },
+  {
+   "value": "foo4",
+   "edits": 2,
+   "prefix": 3,
+   "transpositions": true,
+   "matches": [
+    "foo45",
+    "foo7"
+   ]
+  },
+  {
+   "value": "x",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "a"
+   ]
+  },
+  {
+   "value": "0042",
+   "edits": 2,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "0042",
+    "042"
+   ]
+  },
+  {
+   "value": "smiten",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "smitten"
+   ]
+  },
+  {
+   "value": "mtiten",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": true,
+   "matches": [
+    "mitten"
+   ]
+  },
+  {
+   "value": "mtiten",
+   "edits": 1,
+   "prefix": 0,
+   "transpositions": false,
+   "matches": []
+  }
+ ],
+ "regexp": [
+  {
+   "pattern": "a.c",
+   "matches": [
+    "a*c",
+    "a.c",
+    "abc"
+   ]
+  },
+  {
+   "pattern": "ab.*",
+   "matches": [
+    "ab",
+    "abc",
+    "abcabc",
+    "abcd"
+   ]
+  },
+  {
+   "pattern": "[ab]+c?",
+   "matches": [
+    "a",
+    "ab",
+    "abc",
+    "ba",
+    "bac"
+   ]
+  },
+  {
+   "pattern": "foo[0-9]{2,}",
+   "matches": [
+    "foo123",
+    "foo45"
+   ]
+  },
+  {
+   "pattern": ".*本.*",
+   "matches": [
+    "日本",
+    "日本語",
+    "本日"
+   ]
+  },
+  {
+   "pattern": "<10-999>",
+   "matches": [
+    "0042",
+    "042",
+    "100",
+    "123",
+    "99"
+   ]
+  },
+  {
+   "pattern": "<042-100>",
+   "matches": [
+    "042",
+    "100"
+   ]
+  },
+  {
+   "pattern": "@&~(abc)",
+   "matches": [
+    "0042",
+    "042",
+    "100",
+    "1000",
+    "123",
+    "99",
+    "a",
+    "a*c",
+    "a.c",
+    "ab",
+    "abcabc",
+    "abcd",
+    "acb",
+    "ba",
+    "bac",
+    "bar",
+    "barbaz",
+    "baz",
+    "foo123",
+    "foo45",
+    "foo7",
+    "kitchen",
+    "kitten",
+    "mitten",
+    "sitting",
+    "smitten",
+    "xabc",
+    "日本",
+    "日本語",
+    "本日"
+   ]
+  },
+  {
+   "pattern": "(ab|ba)z?",
+   "matches": [
+    "ab",
+    "ba",
+    "baz"
+   ]
+  },
+  {
+   "pattern": "a\\.c",
+   "matches": [
+    "a.c"
+   ]
+  },
+  {
+   "pattern": "[^a]..",
+   "matches": [
+    "042",
+    "100",
+    "123",
+    "bac",
+    "bar",
+    "baz",
+    "日本語"
+   ]
+  },
+  {
+   "pattern": "#|bar",
+   "matches": [
+    "bar"
+   ]
+  },
+  {
+   "pattern": "ba(r|z)",
+   "matches": [
+    "bar",
+    "baz"
+   ]
+  },
+  {
+   "pattern": ".{3}&.*c",
+   "matches": [
+    "a*c",
+    "a.c",
+    "abc",
+    "bac"
+   ]
+  },
+  {
+   "pattern": "\"a*c\"",
+   "matches": [
+    "a*c"
+   ]
+  },
+  {
+   "pattern": "a{0}bc",
+   "matches": []
+  },
+  {
+   "pattern": "[a-c]{3}",
+   "matches": [
+    "abc",
+    "acb",
+    "bac"
+   ]
+  },
+  {
+   "pattern": "~a",
+   "matches": [
+    "0042",
+    "042",
+    "100",
+    "1000",
+    "123",
+    "99",
+    "a*c",
+    "a.c",
+    "ab",
+    "abc",
+    "abcabc",
+    "abcd",
+    "acb",
+    "ba",
+    "bac",
+    "bar",
+    "barbaz",
+    "baz",
+    "foo123",
+    "foo45",
+    "foo7",
+    "kitchen",
+    "kitten",
+    "mitten",
+    "sitting",
+    "smitten",
+    "xabc",
+    "日本",
+    "日本語",
+    "本日"
+   ]
+  },
+  {
+   "pattern": "ab~(c)",
+   "matches": [
+    "ab",
+    "abcabc",
+    "abcd"
+   ]
+  },
+  {
+   "pattern": "~(a|b).*",
+   "matches": [
+    "0042",
+    "042",
+    "100",
+    "1000",
+    "123",
+    "99",
+    "a",
+    "a*c",
+    "a.c",
+    "ab",
+    "abc",
+    "abcabc",
+    "abcd",
+    "acb",
+    "ba",
+    "bac",
+    "bar",
+    "barbaz",
+    "baz",
+    "foo123",
+    "foo45",
+    "foo7",
+    "kitchen",
+    "kitten",
+    "mitten",
+    "sitting",
+    "smitten",
+    "xabc",
+    "日本",
+    "日本語",
+    "本日"
+   ]
+  },
+  {
+   "pattern": "[\\d]+",
+   "matches": [
+    "0042",
+    "042",
+    "100",
+    "1000",
+    "123",
+    "99"
+   ]
+  },
+  {
+   "pattern": "\\w\\w",
+   "matches": [
+    "99",
+    "ab",
+    "ba"
+   ]
+  },
+  {
+   "pattern": "\\D{3}",
+   "matches": [
+    "a*c",
+    "a.c",
+    "abc",
+    "acb",
+    "bac",
+    "bar",
+    "baz",
+    "日本語"
+   ]
+  },
+  {
+   "pattern": "(a",
+   "error_type": "illegal_argument_exception",
+   "error": "expected ')' at position 2"
+  },
+  {
+   "pattern": "a)",
+   "error_type": "illegal_argument_exception",
+   "error": "end-of-string expected at position 1"
+  },
+  {
+   "pattern": "[ab",
+   "error_type": "illegal_argument_exception",
+   "error": "expected ']' at position 3"
+  },
+  {
+   "pattern": "a{",
+   "error_type": "illegal_argument_exception",
+   "error": "integer expected at position 2"
+  },
+  {
+   "pattern": "a{2",
+   "error_type": "illegal_argument_exception",
+   "error": "expected '}' at position 3"
+  },
+  {
+   "pattern": "a{3,2}",
+   "error_type": "illegal_argument_exception",
+   "error": "invalid repetition range(out of order): 3..2"
+  },
+  {
+   "pattern": "[z-a]",
+   "error_type": "illegal_argument_exception",
+   "error": "invalid range: from (122) cannot be > to (97)"
+  },
+  {
+   "pattern": "\\p",
+   "error_type": "illegal_argument_exception",
+   "error": "invalid character class \\112"
+  },
+  {
+   "pattern": "\\",
+   "error_type": "illegal_argument_exception",
+   "error": "unexpected end-of-string"
+  },
+  {
+   "pattern": "<foo>",
+   "error_type": "illegal_argument_exception",
+   "error": "'foo' not found"
+  },
+  {
+   "pattern": "<1-x>",
+   "error_type": "illegal_argument_exception",
+   "error": "interval syntax error at position 4"
+  },
+  {
+   "pattern": "\"ab",
+   "error_type": "illegal_argument_exception",
+   "error": "expected '\"' at position 3"
+  },
+  {
+   "pattern": "a|",
+   "error_type": "illegal_argument_exception",
+   "error": "unexpected end-of-string"
+  },
+  {
+   "pattern": "[ac]*a[ac]{50,200}",
+   "error_type": "too_complex_to_determinize_exception",
+   "error": "Determinizing automaton with 202 states and 403 transitions would require more than 10000 effort."
+  }
+ ]
+}

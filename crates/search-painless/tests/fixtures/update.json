@@ -1,0 +1,6651 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.a += 1",
+    "lang": "painless"
+   },
+   "id": "c0",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 2,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":2,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c0",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 1,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.a = ctx._source.a + 1; ctx._source.b = 'new'",
+    "lang": "painless"
+   },
+   "id": "c1",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 2,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "b": "new"
+  },
+  "after_raw": "{\"a\":2,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"b\":\"new\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c1",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 3,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.tags.add('t3')",
+    "lang": "painless"
+   },
+   "id": "c2",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2",
+    "t3"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\",\"t3\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c2",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 5,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.tags.remove(0)",
+    "lang": "painless"
+   },
+   "id": "c3",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c3",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 7,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.o.k *= 10; ctx._source.o.l.add(3)",
+    "lang": "painless"
+   },
+   "id": "c4",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 20,
+    "l": [
+     1,
+     2,
+     3
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":20,\"l\":[1,2,3]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c4",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 9,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.remove('a')",
+    "lang": "painless"
+   },
+   "id": "c5",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c5",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 11,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.n = 5",
+    "lang": "painless"
+   },
+   "id": "c6",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": 5,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":5,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c6",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 13,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.n.foo = 5",
+    "lang": "painless"
+   },
+   "id": "c7",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "ctx._source.n.foo = 5",
+      "             ^---- HERE"
+     ],
+     "script": "ctx._source.n.foo = 5",
+     "lang": "painless",
+     "position": {
+      "offset": 13,
+      "start": 0,
+      "end": 21
+     },
+     "caused_by": {
+      "type": "null_pointer_exception",
+      "reason": "cannot access method/field [foo] from a null def reference"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.missing.x = 1",
+    "lang": "painless"
+   },
+   "id": "c8",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "ctx._source.missing.x = 1",
+      "                   ^---- HERE"
+     ],
+     "script": "ctx._source.missing.x = 1",
+     "lang": "painless",
+     "position": {
+      "offset": 19,
+      "start": 0,
+      "end": 25
+     },
+     "caused_by": {
+      "type": "null_pointer_exception",
+      "reason": "cannot access method/field [x] from a null def reference"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.x = ctx._source.missing?.x",
+    "lang": "painless"
+   },
+   "id": "c9",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "x": null
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"x\":null}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c9",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 17,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source = ['only': true]",
+    "lang": "painless"
+   },
+   "id": "c10",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "only": true
+  },
+  "after_raw": "{\"only\":true}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c10",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 19,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source = 'x'",
+    "lang": "painless"
+   },
+   "id": "c11",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.replaceSource(CtxMap.java:114)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:101)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+      "ctx._source = 'x'",
+      "              ^---- HERE"
+     ],
+     "script": "ctx._source = 'x'",
+     "lang": "painless",
+     "position": {
+      "offset": 14,
+      "start": 0,
+      "end": 17
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Expected [_source] to be a Map, not [x] with type [java.lang.String]"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source = null",
+    "lang": "painless"
+   },
+   "id": "c12",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.replaceSource(CtxMap.java:114)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:101)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+      "ctx._source = null",
+      "   ^---- HERE"
+     ],
+     "script": "ctx._source = null",
+     "lang": "painless",
+     "position": {
+      "offset": 3,
+      "start": 0,
+      "end": 18
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Expected [_source] to be a Map, not [null]"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'noop'",
+    "lang": "painless"
+   },
+   "id": "c13",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c13",
+   "_version": 1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": 22,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'none'",
+    "lang": "painless"
+   },
+   "id": "c14",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c14",
+   "_version": 1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": 23,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'delete'",
+    "lang": "painless"
+   },
+   "id": "c15",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": null,
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c15",
+   "_version": 2,
+   "result": "deleted",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 25,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'foo'",
+    "lang": "painless"
+   },
+   "id": "c16",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c16",
+   "_version": 1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": 26,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = null",
+    "lang": "painless"
+   },
+   "id": "c17",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c17",
+   "_version": 1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": 27,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.a = 1",
+    "lang": "painless"
+   },
+   "id": "c18",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c18",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 29,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.str = ctx.toString().replaceAll(/_now=[0-9]+/, m -> '_now=N')",
+    "lang": "painless"
+   },
+   "id": "c19",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "str": "{_source={a=1, s=x, tags=[t1, t2], o={k=2, l=[1, 2]}, n=null, d=1.5}, _routing=null, op=index, _index=painless-write, _type=_doc, _id=c19, _now=N, _version=1}"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"str\":\"{_source={a=1, s=x, tags=[t1, t2], o={k=2, l=[1, 2]}, n=null, d=1.5}, _routing=null, op=index, _index=painless-write, _type=_doc, _id=c19, _now=N, _version=1}\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c19",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 31,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.keys = new ArrayList(ctx.keySet())",
+    "lang": "painless"
+   },
+   "id": "c20",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "keys": [
+    "_source",
+    "_routing",
+    "op",
+    "_index",
+    "_type",
+    "_id",
+    "_now",
+    "_version"
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"keys\":[\"_source\",\"_routing\",\"op\",\"_index\",\"_type\",\"_id\",\"_now\",\"_version\"]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c20",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 33,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.v = ctx._version; ctx._source.vt = ctx._version instanceof Long",
+    "lang": "painless"
+   },
+   "id": "c21",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "v": 1,
+   "vt": true
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"v\":1,\"vt\":true}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c21",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 35,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.i = ctx._index; ctx._source.id = ctx._id; ctx._source.r = ctx._routing; ctx._source.t = ctx._type",
+    "lang": "painless"
+   },
+   "id": "c22",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "i": "painless-write",
+   "id": "c22",
+   "r": null,
+   "t": "_doc"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"i\":\"painless-write\",\"id\":\"c22\",\"r\":null,\"t\":\"_doc\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c22",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 37,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.nowType = ctx._now instanceof Long; ctx._source.nowPositive = ctx._now > 0",
+    "lang": "painless"
+   },
+   "id": "c23",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "nowType": true,
+   "nowPositive": true
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"nowType\":true,\"nowPositive\":true}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c23",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 39,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.foo = 2",
+    "lang": "painless"
+   },
+   "id": "c24",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:103)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+      "ctx.foo = 2",
+      "   ^---- HERE"
+     ],
+     "script": "ctx.foo = 2",
+     "lang": "painless",
+     "position": {
+      "offset": 3,
+      "start": 0,
+      "end": 11
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Cannot put key [foo] with value [2] into ctx"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._version = 5",
+    "lang": "painless"
+   },
+   "id": "c25",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+      "ctx._version = 5",
+      "   ^---- HERE"
+     ],
+     "script": "ctx._version = 5",
+     "lang": "painless",
+     "position": {
+      "offset": 3,
+      "start": 0,
+      "end": 16
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "_version cannot be updated"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._index = 'other'",
+    "lang": "painless"
+   },
+   "id": "c26",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+      "ctx._index = 'other'",
+      "             ^---- HERE"
+     ],
+     "script": "ctx._index = 'other'",
+     "lang": "painless",
+     "position": {
+      "offset": 13,
+      "start": 0,
+      "end": 20
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "_index cannot be updated"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._id = 'z'",
+    "lang": "painless"
+   },
+   "id": "c27",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+      "ctx._id = 'z'",
+      "          ^---- HERE"
+     ],
+     "script": "ctx._id = 'z'",
+     "lang": "painless",
+     "position": {
+      "offset": 10,
+      "start": 0,
+      "end": 13
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "_id cannot be updated"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._routing = 'r'",
+    "lang": "painless"
+   },
+   "id": "c28",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+      "ctx._routing = 'r'",
+      "               ^---- HERE"
+     ],
+     "script": "ctx._routing = 'r'",
+     "lang": "painless",
+     "position": {
+      "offset": 15,
+      "start": 0,
+      "end": 18
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "_routing cannot be updated"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._now = 1",
+    "lang": "painless"
+   },
+   "id": "c29",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+      "ctx._now = 1",
+      "   ^---- HERE"
+     ],
+     "script": "ctx._now = 1",
+     "lang": "painless",
+     "position": {
+      "offset": 3,
+      "start": 0,
+      "end": 12
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "_now cannot be updated"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('_index')",
+    "lang": "painless"
+   },
+   "id": "c30",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.remove(CtxMap.java:137)",
+      "ctx.remove('_index')",
+      "           ^---- HERE"
+     ],
+     "script": "ctx.remove('_index')",
+     "lang": "painless",
+     "position": {
+      "offset": 11,
+      "start": 0,
+      "end": 20
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "_index cannot be removed"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('op')",
+    "lang": "painless"
+   },
+   "id": "c31",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c31",
+   "_version": 1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": 47,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('_source')",
+    "lang": "painless"
+   },
+   "id": "c32",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.remove(CtxMap.java:143)",
+      "ctx.remove('_source')",
+      "           ^---- HERE"
+     ],
+     "script": "ctx.remove('_source')",
+     "lang": "painless",
+     "position": {
+      "offset": 11,
+      "start": 0,
+      "end": 21
+     },
+     "caused_by": {
+      "type": "unsupported_operation_exception",
+      "reason": "Cannot remove key _source from ctx"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('foo')",
+    "lang": "painless"
+   },
+   "id": "c33",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.remove(CtxMap.java:143)",
+      "ctx.remove('foo')",
+      "           ^---- HERE"
+     ],
+     "script": "ctx.remove('foo')",
+     "lang": "painless",
+     "position": {
+      "offset": 11,
+      "start": 0,
+      "end": 17
+     },
+     "caused_by": {
+      "type": "unsupported_operation_exception",
+      "reason": "Cannot remove key foo from ctx"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.clear()",
+    "lang": "painless"
+   },
+   "id": "c34",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.clear(CtxMap.java:155)",
+      "ctx.clear()",
+      "   ^---- HERE"
+     ],
+     "script": "ctx.clear()",
+     "lang": "painless",
+     "position": {
+      "offset": 3,
+      "start": 0,
+      "end": 11
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "_routing cannot be removed"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.c = ctx.containsKey('_source') + ',' + ctx.containsKey('foo') + ',' + ctx.containsKey('op') + ',' + ctx.size() + ',' + ctx.isEmpty()",
+    "lang": "painless"
+   },
+   "id": "c35",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "c": "true,false,true,8,false"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"c\":\"true,false,true,8,false\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c35",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 52,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.g = ctx.get('_source').a + ctx['_source']['a']",
+    "lang": "painless"
+   },
+   "id": "c36",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "g": 2
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"g\":2}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c36",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 54,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx['_source']['w'] = 'via brackets'",
+    "lang": "painless"
+   },
+   "id": "c37",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "w": "via brackets"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"w\":\"via brackets\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c37",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 56,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (def e : ctx.entrySet()) { if (e.getKey() == 'op') { e.setValue('noop') } }",
+    "lang": "painless"
+   },
+   "id": "c38",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c38",
+   "_version": 1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": 57,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.e = []; for (def k : ctx.keySet()) { ctx._source.e.add(k) }",
+    "lang": "painless"
+   },
+   "id": "c39",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "e": [
+    "_source",
+    "_routing",
+    "op",
+    "_index",
+    "_type",
+    "_id",
+    "_now",
+    "_version"
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"e\":[\"_source\",\"_routing\",\"op\",\"_index\",\"_type\",\"_id\",\"_now\",\"_version\"]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c39",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 59,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.vals = ctx.values().size()",
+    "lang": "painless"
+   },
+   "id": "c40",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "vals": 8
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"vals\":8}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c40",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 61,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.m = metadata().getIndex() + '/' + metadata().getId() + '/' + metadata().getVersion() + '/' + metadata().getOp() + '/' + metadata().getRouting()",
+    "lang": "painless"
+   },
+   "id": "c41",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "m": "painless-write/c41/1/index/null"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"m\":\"painless-write/c41/1/index/null\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c41",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 63,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setOp('delete')",
+    "lang": "painless"
+   },
+   "id": "c42",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": null,
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c42",
+   "_version": 2,
+   "result": "deleted",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 65,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setOp('bogus')",
+    "lang": "painless"
+   },
+   "id": "c43",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.UpdateMetadata.setOp(UpdateMetadata.java:93)",
+      "metadata().setOp('bogus')",
+      "          ^---- HERE"
+     ],
+     "script": "metadata().setOp('bogus')",
+     "lang": "painless",
+     "position": {
+      "offset": 10,
+      "start": 0,
+      "end": 25
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "op must be one of [delete, index, noop], not [bogus]"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setOp('none')",
+    "lang": "painless"
+   },
+   "id": "c44",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.UpdateMetadata.setOp(UpdateMetadata.java:90)",
+      "metadata().setOp('none')",
+      "          ^---- HERE"
+     ],
+     "script": "metadata().setOp('none')",
+     "lang": "painless",
+     "position": {
+      "offset": 10,
+      "start": 0,
+      "end": 24
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "'none' is not allowed, use 'noop' instead"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.nowm = metadata().getNow() == ctx._now",
+    "lang": "painless"
+   },
+   "id": "c45",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "nowm": false
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"nowm\":false}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c45",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 69,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.zt = metadata().getNow() instanceof ZonedDateTime; ctx._source.zz = metadata().getNow().getZone().toString()",
+    "lang": "painless"
+   },
+   "id": "c46",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "zt": true,
+   "zz": "Z"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"zt\":true,\"zz\":\"Z\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c46",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 71,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.x = params.x * 2",
+    "lang": "painless"
+   },
+   "id": "c47",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "ctx._source.x = params.x * 2",
+      "                      ^---- HERE"
+     ],
+     "script": "ctx._source.x = params.x * 2",
+     "lang": "painless",
+     "position": {
+      "offset": 22,
+      "start": 0,
+      "end": 28
+     },
+     "caused_by": {
+      "type": "null_pointer_exception",
+      "reason": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.x = params.x * 2",
+    "lang": "painless",
+    "params": {
+     "x": 21
+    }
+   },
+   "id": "c48",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "x": 42
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"x\":42}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c48",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 74,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "if (!ctx._source.tags.contains(params.tag)) { ctx._source.tags.add(params.tag) } else { ctx.op = 'noop' }",
+    "lang": "painless",
+    "params": {
+     "tag": "p"
+    }
+   },
+   "id": "c49",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2",
+    "p"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\",\"p\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c49",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 76,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "if (!ctx._source.tags.contains(params.tag)) { ctx._source.tags.add(params.tag) } else { ctx.op = 'noop' }",
+    "lang": "painless",
+    "params": {
+     "tag": "t1"
+    }
+   },
+   "id": "c50",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c50",
+   "_version": 1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": 77,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "params.x = 1",
+    "lang": "painless"
+   },
+   "id": "c51",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "java.base/java.util.Collections$UnmodifiableMap.put(Collections.java:1666)",
+      "params.x = 1",
+      "      ^---- HERE"
+     ],
+     "script": "params.x = 1",
+     "lang": "painless",
+     "position": {
+      "offset": 6,
+      "start": 0,
+      "end": 12
+     },
+     "caused_by": {
+      "type": "unsupported_operation_exception",
+      "reason": null
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.list = [1, 2.5, 'a', true, null, [1], ['k': 'v']]",
+    "lang": "painless"
+   },
+   "id": "c52",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "list": [
+    1,
+    2.5,
+    "a",
+    true,
+    null,
+    [
+     1
+    ],
+    {
+     "k": "v"
+    }
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"list\":[1,2.5,\"a\",true,null,[1],{\"k\":\"v\"}]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c52",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 80,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.big = 9007199254740993L; ctx._source.f = 1.1f; ctx._source.b = (byte) 3; ctx._source.sh = (short) 4",
+    "lang": "painless"
+   },
+   "id": "c53",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "big": 9007199254740993,
+   "f": 1.1,
+   "b": 3,
+   "sh": 4
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"big\":9007199254740993,\"f\":1.1,\"b\":3,\"sh\":4}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c53",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 82,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.c = (char) 'c'",
+    "lang": "painless"
+   },
+   "id": "c54",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "cannot write xcontent for unknown value of type class java.lang.Character"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "cannot write xcontent for unknown value of type class java.lang.Character"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.bi = new BigInteger('123456789012345678901234567890'); ctx._source.bd = new BigDecimal('1.50')",
+    "lang": "painless"
+   },
+   "id": "c55",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "bi": 123456789012345678901234567890,
+   "bd": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"bi\":123456789012345678901234567890,\"bd\":1.50}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c55",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 85,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.ld = LocalDate.of(2020, 1, 2); ctx._source.i = Instant.ofEpochMilli(0)",
+    "lang": "painless"
+   },
+   "id": "c56",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "ld": "2020-01-02",
+   "i": "1970-01-01T00:00:00.000Z"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"ld\":\"2020-01-02\",\"i\":\"1970-01-01T00:00:00.000Z\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c56",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 87,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.set = new HashSet([1, 2])",
+    "lang": "painless"
+   },
+   "id": "c57",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "set": [
+    1,
+    2
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"set\":[1,2]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c57",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 89,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.nan = Double.NaN",
+    "lang": "painless"
+   },
+   "id": "c58",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "nan": "NaN"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"nan\":\"NaN\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c58",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 91,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.inf = Float.POSITIVE_INFINITY",
+    "lang": "painless"
+   },
+   "id": "c59",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "inf": "Infinity"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"inf\":\"Infinity\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c59",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 93,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.ba = 'ab'.getBytes()",
+    "lang": "painless"
+   },
+   "id": "c60",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "compile error",
+     "script_stack": [
+      "ctx._source.ba = 'ab'.getBytes()",
+      "                     ^---- HERE"
+     ],
+     "script": "ctx._source.ba = 'ab'.getBytes()",
+     "lang": "painless",
+     "position": {
+      "offset": 21,
+      "start": 0,
+      "end": 32
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "member method [java.lang.String, getBytes/0] not found"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.sa = new String[] {'a', null}",
+    "lang": "painless"
+   },
+   "id": "c61",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "sa": [
+    "a",
+    null
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"sa\":[\"a\",null]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c61",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 96,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.oa = new def[] {1, 'x', [2]}",
+    "lang": "painless"
+   },
+   "id": "c62",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "oa": [
+    1,
+    "x",
+    [
+     2
+    ]
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"oa\":[1,\"x\",[2]]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c62",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 98,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.dt = ZonedDateTime.parse('2020-01-01T10:00:00+02:00[Europe/Paris]')",
+    "lang": "painless"
+   },
+   "id": "c63",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "dt": "2020-01-01T09:00:00.000+01:00"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"dt\":\"2020-01-01T09:00:00.000+01:00\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c63",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 100,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.pat = /a/",
+    "lang": "painless"
+   },
+   "id": "c64",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "cannot write xcontent for unknown value of type class java.util.regex.Pattern"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "cannot write xcontent for unknown value of type class java.util.regex.Pattern"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.sb = new StringBuilder('sb')",
+    "lang": "painless"
+   },
+   "id": "c65",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "cannot write xcontent for unknown value of type class java.lang.StringBuilder"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "cannot write xcontent for unknown value of type class java.lang.StringBuilder"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.opt = Optional.of(1)",
+    "lang": "painless"
+   },
+   "id": "c66",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "cannot write xcontent for unknown value of type class java.util.Optional"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "cannot write xcontent for unknown value of type class java.util.Optional"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.ks = ctx._source.o.keySet(); ctx._source.vs = ctx._source.o.values()",
+    "lang": "painless"
+   },
+   "id": "c67",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "ks": [
+    "k",
+    "l"
+   ],
+   "vs": [
+    2,
+    [
+     1,
+     2
+    ]
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"ks\":[\"k\",\"l\"],\"vs\":[2,[1,2]]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c67",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 105,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.en = ctx._source.o.entrySet().iterator().next()",
+    "lang": "painless"
+   },
+   "id": "c68",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "cannot write xcontent for unknown value of type class java.util.LinkedHashMap$Entry"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "cannot write xcontent for unknown value of type class java.util.LinkedHashMap$Entry"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.ex = new RuntimeException('x')",
+    "lang": "painless"
+   },
+   "id": "c69",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "cannot write xcontent for unknown value of type class java.lang.RuntimeException"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "cannot write xcontent for unknown value of type class java.lang.RuntimeException"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.nums = [1e300, -0.0, 0.1, 100.0, 1.0E-7, 123456789.0, 1.5f, 3.4028235E38f, 2147483648L]",
+    "lang": "painless"
+   },
+   "id": "c70",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "nums": [
+    1e+300,
+    -0.0,
+    0.1,
+    100.0,
+    1e-07,
+    123456789.0,
+    1.5,
+    3.4028235e+38,
+    2147483648
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"nums\":[1.0E300,-0.0,0.1,100.0,1.0E-7,1.23456789E8,1.5,3.4028235E38,2147483648]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c70",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 109,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.bd2 = [new BigDecimal('1.50'), new BigDecimal('1E+3'), new BigDecimal('-0.000001')]",
+    "lang": "painless"
+   },
+   "id": "c71",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "bd2": [
+    1.5,
+    1000.0,
+    -1e-06
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"bd2\":[1.50,1E+3,-0.000001]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c71",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 111,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.uni = 'héllo ☃ \"q\" \\\\ / </script>  ' + (char) 10 + (char) 9 + (char) 1 + (char) 0x7f + 'x'",
+    "lang": "painless"
+   },
+   "id": "c72",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "uni": "héllo ☃ \"q\" \\ / </script>  \n\t\u0001x"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"uni\":\"héllo ☃ \\\"q\\\" \\\\ / </script>  \\n\\t\\u0001x\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c72",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 113,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.empty = [:]; ctx._source.el = []",
+    "lang": "painless"
+   },
+   "id": "c73",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "empty": {},
+   "el": []
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"empty\":{},\"el\":[]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c73",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 115,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.ldt = LocalDateTime.of(2020, 1, 2, 3, 4, 5); ctx._source.lt = LocalTime.of(1, 2); ctx._source.dur = Duration.ofSeconds(90)",
+    "lang": "painless"
+   },
+   "id": "c74",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "ldt": "2020-01-02T03:04:05.000Z",
+   "lt": "01:02:00.000",
+   "dur": "PT1M30S"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"ldt\":\"2020-01-02T03:04:05.000Z\",\"lt\":\"01:02:00.000\",\"dur\":\"PT1M30S\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c74",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 117,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.odt = OffsetDateTime.of(2020, 1, 2, 3, 4, 5, 6000000, ZoneOffset.ofHours(2))",
+    "lang": "painless"
+   },
+   "id": "c75",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "odt": "2020-01-02T03:04:05.006+02:00"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"odt\":\"2020-01-02T03:04:05.006+02:00\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c75",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 119,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.zdtn = ZonedDateTime.of(2020, 1, 2, 3, 4, 5, 123456789, ZoneId.of('UTC'))",
+    "lang": "painless"
+   },
+   "id": "c76",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "zdtn": "2020-01-02T03:04:05.123456789Z"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"zdtn\":\"2020-01-02T03:04:05.123456789Z\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c76",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 121,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.date = ZonedDateTime.parse('2020-01-01T00:00:00Z')",
+    "lang": "painless"
+   },
+   "id": "c77",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "date": "2020-01-01T00:00:00.000Z"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"date\":\"2020-01-01T00:00:00.000Z\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c77",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 123,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.arr = new int[] {1, 2}",
+    "lang": "painless"
+   },
+   "id": "c78",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "arr": [
+    1,
+    2
+   ]
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"arr\":[1,2]}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c78",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 125,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "throw new IllegalArgumentException('nope')",
+    "lang": "painless"
+   },
+   "id": "c79",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "throw new IllegalArgumentException('nope')",
+      "      ^---- HERE"
+     ],
+     "script": "throw new IllegalArgumentException('nope')",
+     "lang": "painless",
+     "position": {
+      "offset": 6,
+      "start": 0,
+      "end": 42
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "nope"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.a = ctx._source.s.foo()",
+    "lang": "painless"
+   },
+   "id": "c80",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "ctx._source.a = ctx._source.s.foo()",
+      "                             ^---- HERE"
+     ],
+     "script": "ctx._source.a = ctx._source.s.foo()",
+     "lang": "painless",
+     "position": {
+      "offset": 29,
+      "start": 0,
+      "end": 35
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "dynamic method [java.lang.String, foo/0] not found"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x = ctx._source.s",
+    "lang": "painless"
+   },
+   "id": "c81",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "x = ctx._source.s",
+      "               ^---- HERE"
+     ],
+     "script": "int x = ctx._source.s",
+     "lang": "painless",
+     "position": {
+      "offset": 19,
+      "start": 4,
+      "end": 21
+     },
+     "caused_by": {
+      "type": "class_cast_exception",
+      "reason": "class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.a = ctx._source.n.length()",
+    "lang": "painless"
+   },
+   "id": "c82",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "ctx._source.a = ctx._source.n.length()",
+      "                             ^---- HERE"
+     ],
+     "script": "ctx._source.a = ctx._source.n.length()",
+     "lang": "painless",
+     "position": {
+      "offset": 29,
+      "start": 0,
+      "end": 38
+     },
+     "caused_by": {
+      "type": "null_pointer_exception",
+      "reason": "cannot access method/field [length] from a null def reference"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1",
+    "lang": "painless"
+   },
+   "id": "c83",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "compile error",
+     "script_stack": [
+      "return 1",
+      "       ^---- HERE"
+     ],
+     "script": "return 1",
+     "lang": "painless",
+     "position": {
+      "offset": 7,
+      "start": 0,
+      "end": 8
+     },
+     "caused_by": {
+      "type": "class_cast_exception",
+      "reason": "Cannot cast from [int] to [void]."
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.a = field('a').get(0)",
+    "lang": "painless"
+   },
+   "id": "c84",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c84",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 132,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('o.k').set(99)",
+    "lang": "painless"
+   },
+   "id": "c85",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 99,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":99,\"l\":[1,2]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c85",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 134,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('o.newfield').set('nf')",
+    "lang": "painless"
+   },
+   "id": "c86",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ],
+    "newfield": "nf"
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2],\"newfield\":\"nf\"},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c86",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 136,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.ex = field('o.k').exists() + ',' + field('zz').exists() + ',' + field('tags').size()",
+    "lang": "painless"
+   },
+   "id": "c87",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "ex": "true,false,2"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"ex\":\"true,false,2\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c87",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 138,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('tags').append('t9')",
+    "lang": "painless"
+   },
+   "id": "c88",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2",
+    "t9"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\",\"t9\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c88",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 140,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('o').remove('k')",
+    "lang": "painless"
+   },
+   "id": "c89",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5
+  },
+  "after_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "compile error",
+     "script_stack": [
+      "field('o').remove('k')",
+      "          ^---- HERE"
+     ],
+     "script": "field('o').remove('k')",
+     "lang": "painless",
+     "position": {
+      "offset": 10,
+      "start": 0,
+      "end": 22
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "member method [org.elasticsearch.script.field.WriteField, remove/1] not found"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.dot = $('o.k', -1) + $('nope', -1)",
+    "lang": "painless"
+   },
+   "id": "c90",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "dot": 1
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"dot\":1}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c90",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 143,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.ctxType = (ctx instanceof Map) + ' ' + (ctx instanceof HashMap)",
+    "lang": "painless"
+   },
+   "id": "c91",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "ctxType": "true false"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"ctxType\":\"true false\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c91",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 145,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.srcType = (ctx._source instanceof LinkedHashMap) + ' ' + (ctx._source instanceof HashMap)",
+    "lang": "painless"
+   },
+   "id": "c92",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "srcType": "true true"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"srcType\":\"true true\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c92",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 147,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.oType = (ctx._source.o instanceof LinkedHashMap) + ' ' + (ctx._source.tags instanceof ArrayList) + ' ' + (ctx._source.a instanceof Integer) + ' ' + (ctx._source.d instanceof Double)",
+    "lang": "painless"
+   },
+   "id": "c93",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1",
+     "t2"
+    ],
+    "o": {
+     "k": 2,
+     "l": [
+      1,
+      2
+     ]
+    },
+    "n": null,
+    "d": 1.5
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "after": {
+   "a": 1,
+   "s": "x",
+   "tags": [
+    "t1",
+    "t2"
+   ],
+   "o": {
+    "k": 2,
+    "l": [
+     1,
+     2
+    ]
+   },
+   "n": null,
+   "d": 1.5,
+   "oType": "true true true true"
+  },
+  "after_raw": "{\"a\":1,\"s\":\"x\",\"tags\":[\"t1\",\"t2\"],\"o\":{\"k\":2,\"l\":[1,2]},\"n\":null,\"d\":1.5,\"oType\":\"true true true true\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c93",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 149,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.t = (ctx._source.big instanceof Long) + ' ' + (ctx._source.i instanceof Integer) + ' ' + (ctx._source.f instanceof Double) + ' ' + (ctx._source.e instanceof Double)",
+    "lang": "painless"
+   },
+   "id": "c94",
+   "doc": {
+    "big": 12345678901234,
+    "i": 5,
+    "f": 2.5,
+    "neg": -1,
+    "e": 1e+300
+   },
+   "doc_raw": "{\"big\": 12345678901234, \"i\": 5, \"f\": 2.5, \"neg\": -1, \"e\": 1e+300}"
+  },
+  "after": {
+   "big": 12345678901234,
+   "i": 5,
+   "f": 2.5,
+   "neg": -1,
+   "e": 1e+300,
+   "t": "true true true true"
+  },
+  "after_raw": "{\"big\":12345678901234,\"i\":5,\"f\":2.5,\"neg\":-1,\"e\":1.0E300,\"t\":\"true true true true\"}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c94",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 151,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.created = true",
+    "lang": "painless"
+   },
+   "id": "c95",
+   "doc": {},
+   "doc_raw": "{}"
+  },
+  "after": {
+   "created": true
+  },
+  "after_raw": "{\"created\":true}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c95",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 153,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (int i = 0; i < 10; i++) { ctx._source.count++ }",
+    "lang": "painless"
+   },
+   "id": "c96",
+   "doc": {
+    "count": 0
+   },
+   "doc_raw": "{\"count\": 0}"
+  },
+  "after": {
+   "count": 10
+  },
+  "after_raw": "{\"count\":10}",
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c96",
+   "_version": 2,
+   "result": "updated",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 155,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.s = ctx.toString().replaceAll(/_now=[0-9]+/, m -> '_now=N'); ctx._source.k = new ArrayList(ctx.keySet())",
+    "lang": "painless"
+   },
+   "id": "c97",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": {
+   "s": "{_source={z=1}, op=create, _index=painless-write, _id=c97, _now=N}",
+   "z": 1,
+   "k": [
+    "_source",
+    "op",
+    "_index",
+    "_id",
+    "_now"
+   ]
+  },
+  "after_raw": "{\"s\":\"{_source={z=1}, op=create, _index=painless-write, _id=c97, _now=N}\",\"z\":1,\"k\":[\"_source\",\"op\",\"_index\",\"_id\",\"_now\"]}",
+  "status": 201,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c97",
+   "_version": 1,
+   "result": "created",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 156,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.z += 5",
+    "lang": "painless"
+   },
+   "id": "c98",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": {
+   "z": 6
+  },
+  "after_raw": "{\"z\":6}",
+  "status": 201,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c98",
+   "_version": 1,
+   "result": "created",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 157,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'noop'",
+    "lang": "painless"
+   },
+   "id": "c99",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": null,
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c99",
+   "_version": -1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": -2,
+   "_primary_term": 0,
+   "get": {
+    "found": false
+   }
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'index'",
+    "lang": "painless"
+   },
+   "id": "c100",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": null,
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c100",
+   "_version": -1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": -2,
+   "_primary_term": 0,
+   "get": {
+    "found": false
+   }
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'delete'",
+    "lang": "painless"
+   },
+   "id": "c101",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": null,
+  "status": 200,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c101",
+   "_version": -1,
+   "result": "noop",
+   "_shards": {
+    "total": 0,
+    "successful": 0,
+    "failed": 0
+   },
+   "_seq_no": -2,
+   "_primary_term": 0,
+   "get": {
+    "found": false
+   }
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._version = 3",
+    "lang": "painless"
+   },
+   "id": "c102",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": null,
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:103)",
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+      "ctx._version = 3",
+      "   ^---- HERE"
+     ],
+     "script": "ctx._version = 3",
+     "lang": "painless",
+     "position": {
+      "offset": 3,
+      "start": 0,
+      "end": 16
+     },
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Cannot put key [_version] with value [3] into ctx"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.v = ctx._version",
+    "lang": "painless"
+   },
+   "id": "c103",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": {
+   "v": null,
+   "z": 1
+  },
+  "after_raw": "{\"v\":null,\"z\":1}",
+  "status": 201,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c103",
+   "_version": 1,
+   "result": "created",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 158,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.m = metadata().getOp() + '/' + metadata().getIndex()",
+    "lang": "painless"
+   },
+   "id": "c104",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": {
+   "z": 1,
+   "m": "create/painless-write"
+  },
+  "after_raw": "{\"z\":1,\"m\":\"create/painless-write\"}",
+  "status": 201,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c104",
+   "_version": 1,
+   "result": "created",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 159,
+   "_primary_term": 1
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.v = metadata().getVersion()",
+    "lang": "painless"
+   },
+   "id": "c105",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": null,
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.UpsertMetadata.getVersion(UpsertMetadata.java:49)",
+      "ctx._source.v = metadata().getVersion()",
+      "                          ^---- HERE"
+     ],
+     "script": "ctx._source.v = metadata().getVersion()",
+     "lang": "painless",
+     "position": {
+      "offset": 26,
+      "start": 0,
+      "end": 39
+     },
+     "caused_by": {
+      "type": "unsupported_operation_exception",
+      "reason": "version is unavailable for insert"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.r = metadata().getRouting()",
+    "lang": "painless"
+   },
+   "id": "c106",
+   "upsert": {
+    "z": 1
+   },
+   "upsert_raw": "{\"z\": 1}"
+  },
+  "after": null,
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "failed to execute script"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "failed to execute script",
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "runtime error",
+     "script_stack": [
+      "org.elasticsearch.server@9.5.5/org.elasticsearch.script.UpsertMetadata.getRouting(UpsertMetadata.java:44)",
+      "ctx._source.r = metadata().getRouting()",
+      "                          ^---- HERE"
+     ],
+     "script": "ctx._source.r = metadata().getRouting()",
+     "lang": "painless",
+     "position": {
+      "offset": 26,
+      "start": 0,
+      "end": 39
+     },
+     "caused_by": {
+      "type": "unsupported_operation_exception",
+      "reason": "routing is unavailable for insert"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.counter = 1",
+    "lang": "painless"
+   },
+   "id": "c107",
+   "upsert": {},
+   "upsert_raw": "{}"
+  },
+  "after": {
+   "counter": 1
+  },
+  "after_raw": "{\"counter\":1}",
+  "status": 201,
+  "response": {
+   "_index": "painless-write",
+   "_id": "c107",
+   "_version": 1,
+   "result": "created",
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "failed": 0
+   },
+   "_seq_no": 160,
+   "_primary_term": 1
+  }
+ }
+]

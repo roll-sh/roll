@@ -1,0 +1,4021 @@
+{
+  "description" : "Strict columnar index modes: prefix_properties, flattening, field restrictions, doc_values column configurations, index_disabled_by_default",
+  "steps" : [
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "dynamic" : "true",
+          "properties" : {
+            "attributes" : {
+              "dynamic" : "false",
+              "properties" : {
+                "host" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "resource" : {
+              "dynamic" : "strict",
+              "properties" : {
+                "service" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "a" : {
+              "properties" : {
+                "b" : {
+                  "dynamic" : "strict",
+                  "properties" : {
+                    "c" : {
+                      "type" : "keyword"
+                    }
+                  }
+                }
+              }
+            },
+            "plain" : {
+              "properties" : {
+                "x" : {
+                  "type" : "long"
+                }
+              }
+            },
+            "e" : {
+              "enabled" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "dynamic" : "true",
+            "prefix_properties" : {
+              "a.b" : {
+                "dynamic" : "strict"
+              },
+              "attributes" : {
+                "dynamic" : "false"
+              },
+              "e" : {
+                "enabled" : false
+              },
+              "resource" : {
+                "dynamic" : "strict"
+              }
+            },
+            "properties" : {
+              "a.b.c" : {
+                "type" : "keyword"
+              },
+              "attributes.host" : {
+                "type" : "keyword"
+              },
+              "plain.x" : {
+                "type" : "long"
+              },
+              "resource.service" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "enabled" : false
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "[enabled] cannot be set to [false] on the root object in strict columnar index modes; this would prevent all fields from being indexed"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "[enabled] cannot be set to [false] on the root object in strict columnar index modes; this would prevent all fields from being indexed"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "attributes" : {
+              "dynamic" : "runtime",
+              "properties" : {
+                "host" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "dynamic [runtime] is not supported in strict columnar mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: dynamic [runtime] is not supported in strict columnar mode",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "dynamic [runtime] is not supported in strict columnar mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "prefix_properties" : {
+            "attributes" : {
+              "dynamic" : "runtime"
+            }
+          },
+          "properties" : {
+            "attributes.host" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "[prefix_properties.attributes.dynamic] does not support [runtime]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [prefix_properties.attributes.dynamic] does not support [runtime]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "[prefix_properties.attributes.dynamic] does not support [runtime]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "prefix_properties" : {
+            "attributes" : {
+              "dynamic" : "false"
+            },
+            "r" : {
+              "enabled" : false
+            }
+          },
+          "properties" : {
+            "attributes.host" : {
+              "type" : "keyword"
+            },
+            "r.x" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "prefix_properties" : {
+              "attributes" : {
+                "dynamic" : "false"
+              },
+              "r" : {
+                "enabled" : false
+              }
+            },
+            "properties" : {
+              "attributes.host" : {
+                "type" : "keyword"
+              },
+              "r.x" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "n" : {
+              "type" : "nested"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "properties" : {
+              "n" : {
+                "type" : "nested"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "subobjects" : true
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "subobjects [true] is not supported in columnar mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: subobjects [true] is not supported in columnar mode",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "subobjects [true] is not supported in columnar mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "mappings" : {
+          "prefix_properties" : {
+            "a" : {
+              "dynamic" : "false"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "prefix_properties" : {
+              "a" : {
+                "dynamic" : "false"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword",
+              "doc_values" : false
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "field [k] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "field [k] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword",
+              "store" : true
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: [store] cannot be enabled on field [k] in [columnar] index mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [store] cannot be enabled on field [k] in [columnar] index mode",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[store] cannot be enabled on field [k] in [columnar] index mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "binary"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "completion"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "token_count",
+              "analyzer" : "standard"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "rank_feature"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "percolator"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "field [f] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "join",
+              "relations" : {
+                "a" : "b"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "field [f#a] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "field [f#a] cannot reconstruct _source from doc values; every field must be reconstructable from doc values in index using [columnar] index mode"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "text",
+              "fields" : {
+                "raw" : {
+                  "type" : "keyword",
+                  "doc_values" : false
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "properties" : {
+              "f" : {
+                "type" : "text",
+                "fields" : {
+                  "raw" : {
+                    "type" : "keyword",
+                    "doc_values" : false
+                  }
+                }
+              },
+              "x" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "keyword",
+              "copy_to" : "x"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: [copy_to] is not allowed on field [f] in [columnar] index mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [copy_to] is not allowed on field [f] in [columnar] index mode",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[copy_to] is not allowed on field [f] in [columnar] index mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "match_only_text"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "properties" : {
+              "f" : {
+                "type" : "match_only_text"
+              },
+              "x" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "text"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "properties" : {
+              "f" : {
+                "type" : "text"
+              },
+              "x" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "x" : {
+              "type" : "keyword"
+            },
+            "f" : {
+              "type" : "dense_vector",
+              "dims" : 3
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "properties" : {
+              "f" : {
+                "type" : "dense_vector",
+                "dims" : 3,
+                "index" : false
+              },
+              "x" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "prefix_properties" : {
+            "a" : {
+              "bogus" : 1
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "prefix_properties" : {
+              "a" : { }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "prefix_properties" : {
+            "a" : {
+              "dynamic" : "x"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "unknown value [x] for [prefix_properties.a.dynamic]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: unknown value [x] for [prefix_properties.a.dynamic]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "unknown value [x] for [prefix_properties.a.dynamic]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "prefix_properties" : {
+            "a" : {
+              "enabled" : "x"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: Could not convert [prefix_properties.a.enabled] to boolean"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Could not convert [prefix_properties.a.enabled] to boolean",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Could not convert [prefix_properties.a.enabled] to boolean",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [x] as only [true] or [false] are allowed."
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "prefix_properties" : {
+            "a" : 1
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "[prefix_properties.a] must be an object"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [prefix_properties.a] must be an object",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "[prefix_properties.a] must be an object"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "prefix_properties" : [ ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "[prefix_properties] must be an object"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [prefix_properties] must be an object",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "[prefix_properties] must be an object"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "prefix_properties" : {
+            "a" : {
+              "dynamic" : false,
+              "enabled" : true
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "[prefix_properties.a.dynamic] must be a string value"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [prefix_properties.a.dynamic] must be a string value",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "[prefix_properties.a.dynamic] must be a string value"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "dynamic" : false,
+              "properties" : {
+                "x" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          },
+          "prefix_properties" : {
+            "a" : {
+              "dynamic" : "strict"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "prefix_properties" : {
+              "a" : {
+                "dynamic" : "strict"
+              }
+            },
+            "properties" : {
+              "a.x" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "subobjects" : false
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : { }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "object",
+              "subobjects" : false,
+              "properties" : {
+                "x" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "properties" : {
+              "a.x" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "dynamic" : "runtime"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "dynamic [runtime] is not supported in strict columnar mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: dynamic [runtime] is not supported in strict columnar mode",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "dynamic [runtime] is not supported in strict columnar mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "nested",
+              "properties" : {
+                "b" : {
+                  "dynamic" : "false",
+                  "properties" : {
+                    "c" : {
+                      "type" : "keyword"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Object mapper [a.b] was found in a context where subobjects is set to false. Auto-flattening [a.b] failed because the value of [dynamic] (FALSE) is not compatible with the value from its parent context (TRUE)"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Object mapper [a.b] was found in a context where subobjects is set to false. Auto-flattening [a.b] failed because the value of [dynamic] (FALSE) is not compatible with the value from its parent context (TRUE)",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "Object mapper [a.b] was found in a context where subobjects is set to false. Auto-flattening [a.b] failed because the value of [dynamic] (FALSE) is not compatible with the value from its parent context (TRUE)"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "logsdb_columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "dynamic" : "false",
+              "properties" : {
+                "c" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "prefix_properties" : {
+              "a" : {
+                "dynamic" : "false"
+              }
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date",
+                "ignore_malformed" : false
+              },
+              "a.c" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "runtime" : {
+            "r" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "mapping-level runtime fields are not allowed in index using [columnar] index mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "mapping-level runtime fields are not allowed in index using [columnar] index mode"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-col]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-col",
+              "index_uuid" : "_na_",
+              "index" : "esm-col"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-col]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-col",
+          "index_uuid" : "_na_",
+          "index" : "esm-col"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-col?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "dynamic" : "true",
+          "properties" : {
+            "attributes" : {
+              "dynamic" : "false",
+              "properties" : {
+                "host" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col/_mapping",
+      "body" : {
+        "properties" : {
+          "resource" : {
+            "dynamic" : "strict",
+            "properties" : {
+              "service" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col/_mapping",
+      "body" : {
+        "properties" : {
+          "attributes" : {
+            "enabled" : false
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col/_mapping",
+      "body" : {
+        "runtime" : {
+          "r" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "mapping-level runtime fields are not allowed in index using [columnar] index mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "mapping-level runtime fields are not allowed in index using [columnar] index mode"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "dynamic" : "true",
+            "prefix_properties" : {
+              "attributes" : {
+                "dynamic" : "false",
+                "enabled" : false
+              },
+              "resource" : {
+                "dynamic" : "strict"
+              }
+            },
+            "properties" : {
+              "attributes.host" : {
+                "type" : "keyword"
+              },
+              "resource.service" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_mapping/field/attributes.host",
+      "status" : 200,
+      "response" : {
+        "esm-col" : {
+          "mappings" : {
+            "attributes.host" : {
+              "full_name" : "attributes.host",
+              "mapping" : {
+                "attributes.host" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text",
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "text",
+                "doc_values" : true
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : true,
+                  "doc_values" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text",
+              "doc_values" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "text",
+                "doc_values" : false
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : true,
+                  "doc_values" : false
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "match_only_text",
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "match_only_text",
+                "doc_values" : true
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "doc_values" : true,
+                  "index" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text",
+              "doc_values" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "text",
+                "doc_values" : false
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : true,
+                  "doc_values" : false
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword",
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : false,
+                  "doc_values" : {
+                    "multi_value" : true,
+                    "nullability" : true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "boolean",
+              "doc_values" : {
+                "multi_value" : false
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "boolean",
+                "doc_values" : {
+                  "multi_value" : false,
+                  "nullability" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "doc_values" : {
+                    "multi_value" : false,
+                    "nullability" : true
+                  },
+                  "index" : false
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "geo_point",
+              "doc_values" : {
+                "multi_value" : false
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: Failed to parse value [{multi_value=false}] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Failed to parse value [{multi_value=false}] as only [true] or [false] are allowed.",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse value [{multi_value=false}] as only [true] or [false] are allowed."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-x]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-x",
+              "index_uuid" : "_na_",
+              "index" : "esm-x"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-x]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-x",
+          "index_uuid" : "_na_",
+          "index" : "esm-x"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-x]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-x",
+              "index_uuid" : "_na_",
+              "index" : "esm-x"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-x]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-x",
+          "index_uuid" : "_na_",
+          "index" : "esm-x"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword",
+              "doc_values" : {
+                "multi_value" : false
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "keyword",
+                "doc_values" : {
+                  "multi_value" : false,
+                  "nullability" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : false,
+                  "doc_values" : {
+                    "multi_value" : false,
+                    "nullability" : true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword",
+              "doc_values" : {
+                "nullability" : false,
+                "multi_value" : true
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "keyword",
+                "doc_values" : {
+                  "multi_value" : true,
+                  "nullability" : false
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : false,
+                  "doc_values" : {
+                    "multi_value" : true,
+                    "nullability" : false
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword",
+              "doc_values" : {
+                "bogus" : 1
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : false,
+                  "doc_values" : {
+                    "multi_value" : true,
+                    "nullability" : true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword",
+              "doc_values" : {
+                "multi_value" : "x"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: Failed to parse value [x] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Failed to parse value [x] as only [true] or [false] are allowed.",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse value [x] as only [true] or [false] are allowed."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-x]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-x",
+              "index_uuid" : "_na_",
+              "index" : "esm-x"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-x]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-x",
+          "index_uuid" : "_na_",
+          "index" : "esm-x"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-x]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-x",
+              "index_uuid" : "_na_",
+              "index" : "esm-x"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-x]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-x",
+          "index_uuid" : "_na_",
+          "index" : "esm-x"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar",
+          "index.mapping.doc_values.multi_value" : false
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : false,
+                  "doc_values" : {
+                    "multi_value" : false,
+                    "nullability" : true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mapping.doc_values.multi_value" : false
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : true,
+                  "doc_values" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword",
+              "doc_values" : {
+                "multi_value" : false
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "unsupported doc_values configuration for field [t] in non-columnar index; supported values: [true, false]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: unsupported doc_values configuration for field [t] in non-columnar index; supported values: [true, false]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "unsupported doc_values configuration for field [t] in non-columnar index; supported values: [true, false]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-x]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-x",
+              "index_uuid" : "_na_",
+              "index" : "esm-x"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-x]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-x",
+          "index_uuid" : "_na_",
+          "index" : "esm-x"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-x]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-x",
+              "index_uuid" : "_na_",
+              "index" : "esm-x"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-x]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-x",
+          "index_uuid" : "_na_",
+          "index" : "esm-x"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "geo_point",
+              "doc_values" : {
+                "multi_value" : false
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: Failed to parse value [{multi_value=false}] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Failed to parse value [{multi_value=false}] as only [true] or [false] are allowed.",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse value [{multi_value=false}] as only [true] or [false] are allowed."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-x]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-x",
+              "index_uuid" : "_na_",
+              "index" : "esm-x"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-x]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-x",
+          "index_uuid" : "_na_",
+          "index" : "esm-x"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-x]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-x",
+              "index_uuid" : "_na_",
+              "index" : "esm-x"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-x]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-x",
+          "index_uuid" : "_na_",
+          "index" : "esm-x"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword"
+            },
+            "l" : {
+              "type" : "long",
+              "index" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "l" : {
+                "type" : "long",
+                "index" : true
+              },
+              "t" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : false,
+                  "doc_values" : {
+                    "multi_value" : true,
+                    "nullability" : true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar",
+          "index.mapping.index_disabled_by_default" : false
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : true,
+                  "doc_values" : {
+                    "multi_value" : true,
+                    "nullability" : true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-x",
+      "body" : {
+        "settings" : {
+          "index.mapping.index_disabled_by_default" : true
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-x"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "properties" : {
+              "t" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-x/_mapping/field/t?include_defaults&filter_path=**.doc_values,**.index",
+      "status" : 200,
+      "response" : {
+        "esm-x" : {
+          "mappings" : {
+            "t" : {
+              "mapping" : {
+                "t" : {
+                  "index" : false,
+                  "doc_values" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-x?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,1442 @@
+{
+  "description" : "Index settings: get with filters, update scopes and validation.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "number_of_replicas" : 0,
+          "analysis" : {
+            "analyzer" : {
+              "my" : {
+                "type" : "standard",
+                "stopwords" : [
+                  "a",
+                  "b"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s1/_settings",
+      "status" : 200,
+      "response" : {
+        "esm-s1" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "number_of_shards" : "1",
+              "provided_name" : "esm-s1",
+              "creation_date" : "1792523123294",
+              "analysis" : {
+                "analyzer" : {
+                  "my" : {
+                    "type" : "standard",
+                    "stopwords" : [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              },
+              "number_of_replicas" : "0",
+              "uuid" : "PJUxTqspSY2AZKzJwSeKcg",
+              "version" : {
+                "created" : "9111000"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s1/_settings/index.number_*",
+      "status" : 200,
+      "response" : {
+        "esm-s1" : {
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "1",
+              "number_of_replicas" : "0"
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s1,esm-s2/_settings/index.analysis*?flat_settings=true",
+      "status" : 200,
+      "response" : {
+        "esm-s1" : {
+          "settings" : {
+            "index.analysis.analyzer.my.stopwords" : [
+              "a",
+              "b"
+            ],
+            "index.analysis.analyzer.my.type" : "standard"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s1/_settings/index.number_of_shards?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "esm-s1" : {
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "1"
+            }
+          },
+          "defaults" : { }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index" : {
+          "number_of_replicas" : 2,
+          "refresh_interval" : "10s"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s1/_settings?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-s1" : {
+          "settings" : {
+            "index.analysis.analyzer.my.stopwords" : [
+              "a",
+              "b"
+            ],
+            "index.analysis.analyzer.my.type" : "standard",
+            "index.creation_date" : "1792523123294",
+            "index.number_of_replicas" : "2",
+            "index.number_of_shards" : "1",
+            "index.provided_name" : "esm-s1",
+            "index.refresh_interval" : "10s",
+            "index.routing.allocation.include._tier_preference" : "data_content",
+            "index.uuid" : "PJUxTqspSY2AZKzJwSeKcg",
+            "index.version.created" : "9111000"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "settings" : {
+          "index.refresh_interval" : null
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s1/_settings?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-s1" : {
+          "settings" : {
+            "index.analysis.analyzer.my.stopwords" : [
+              "a",
+              "b"
+            ],
+            "index.analysis.analyzer.my.type" : "standard",
+            "index.creation_date" : "1792523123294",
+            "index.number_of_replicas" : "2",
+            "index.number_of_shards" : "1",
+            "index.provided_name" : "esm-s1",
+            "index.routing.allocation.include._tier_preference" : "data_content",
+            "index.uuid" : "PJUxTqspSY2AZKzJwSeKcg",
+            "index.version.created" : "9111000"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.number_of_shards" : 2
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't update non dynamic setting(s) [[index.number_of_shards]] for open indices [[esm-s1/PJUxTqspSY2AZKzJwSeKcg]]. The setting(s) [[index.number_of_shards]] cannot be modified on an index once it is created. You will need to create a new index with the desired setting(s) and reindex your data. See https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-reindex"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't update non dynamic setting(s) [[index.number_of_shards]] for open indices [[esm-s1/PJUxTqspSY2AZKzJwSeKcg]]. The setting(s) [[index.number_of_shards]] cannot be modified on an index once it is created. You will need to create a new index with the desired setting(s) and reindex your data. See https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-reindex"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.codec" : "best_compression"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't update non dynamic setting(s) [[index.codec]] for open indices [[esm-s1/PJUxTqspSY2AZKzJwSeKcg]]. You can either resubmit the update with `?reopen=true`, or create a new index with the desired setting(s) and reindex your data. See https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-reindex"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't update non dynamic setting(s) [[index.codec]] for open indices [[esm-s1/PJUxTqspSY2AZKzJwSeKcg]]. You can either resubmit the update with `?reopen=true`, or create a new index with the desired setting(s) and reindex your data. See https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-reindex"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.bogus" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown setting [index.bogus] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unknown setting [index.bogus] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.version.created" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "can not update private setting [index.version.created]; this setting is managed by Elasticsearch"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "can not update private setting [index.version.created]; this setting is managed by Elasticsearch"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.number_of_replicas" : -1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [-1] for setting [index.number_of_replicas] must be >= 0"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [-1] for setting [index.number_of_replicas] must be >= 0"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: no settings to update;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: no settings to update;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings?preserve_existing=true",
+      "body" : {
+        "index.number_of_replicas" : 5,
+        "index.max_result_window" : 500
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s1/_settings?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-s1" : {
+          "settings" : {
+            "index.analysis.analyzer.my.stopwords" : [
+              "a",
+              "b"
+            ],
+            "index.analysis.analyzer.my.type" : "standard",
+            "index.creation_date" : "1792523123294",
+            "index.max_result_window" : "500",
+            "index.number_of_replicas" : "2",
+            "index.number_of_shards" : "1",
+            "index.provided_name" : "esm-s1",
+            "index.routing.allocation.include._tier_preference" : "data_content",
+            "index.uuid" : "PJUxTqspSY2AZKzJwSeKcg",
+            "index.version.created" : "9111000"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.blocks.read_only" : true
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.number_of_replicas" : 1
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "cluster_block_exception",
+              "reason" : "index [esm-s1] blocked by: [FORBIDDEN/5/index read-only (api)];"
+            }
+          ],
+          "type" : "cluster_block_exception",
+          "reason" : "index [esm-s1] blocked by: [FORBIDDEN/5/index read-only (api)];"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s1/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-s1" : {
+          "mappings" : { }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.blocks.read_only" : false
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.number_of_replicas" : 1
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1/_settings",
+      "body" : {
+        "index.mapping.total_fields.limit" : 0
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s*/_settings",
+      "body" : {
+        "index.max_result_window" : 1000
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_all/_settings/index.max_result_window?filter_path=esm*",
+      "status" : 200,
+      "response" : {
+        "esm-s1" : {
+          "settings" : {
+            "index" : {
+              "max_result_window" : "1000"
+            }
+          }
+        },
+        "esm-s2" : {
+          "settings" : {
+            "index" : {
+              "max_result_window" : "1000"
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-nope/_settings",
+      "body" : {
+        "index.max_result_window" : 1000
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-s2/_close",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : {
+          "esm-s2" : {
+            "closed" : true
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s2/_settings",
+      "body" : {
+        "index.codec" : "best_compression"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s2/_settings?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-s2" : {
+          "settings" : {
+            "index.codec" : "best_compression",
+            "index.creation_date" : "1792523124728",
+            "index.max_result_window" : "1000",
+            "index.number_of_replicas" : "1",
+            "index.number_of_shards" : "1",
+            "index.provided_name" : "esm-s2",
+            "index.routing.allocation.include._tier_preference" : "data_content",
+            "index.uuid" : "Shc7sKUFQ0mH4Y_rj-jbuQ",
+            "index.verified_before_close" : "true",
+            "index.version.created" : "9111000"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-s2/_open",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s2/_settings?reopen=true",
+      "body" : {
+        "index.codec" : "default"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s2/_settings/index.codec?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-s2" : {
+          "settings" : {
+            "index.codec" : "default"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s2/_settings?include_defaults=true&flat_settings=true",
+      "mask" : [
+        "index.merge.scheduler.max_thread_count",
+        "index.merge.scheduler.max_merge_count"
+      ],
+      "status" : 200,
+      "response" : {
+        "esm-s2" : {
+          "settings" : {
+            "index.codec" : "default",
+            "index.creation_date" : "1792523124728",
+            "index.max_result_window" : "1000",
+            "index.number_of_replicas" : "1",
+            "index.number_of_shards" : "1",
+            "index.provided_name" : "esm-s2",
+            "index.routing.allocation.include._tier_preference" : "data_content",
+            "index.uuid" : "Shc7sKUFQ0mH4Y_rj-jbuQ",
+            "index.version.created" : "9111000"
+          },
+          "defaults" : {
+            "index.allocation.existing_shards_allocator" : "gateway_allocator",
+            "index.allocation.max_retries" : "5",
+            "index.analyze.max_char_count" : "1000000",
+            "index.analyze.max_token_count" : "10000",
+            "index.auto_expand_replicas" : "false",
+            "index.blocks.metadata" : "false",
+            "index.blocks.read" : "false",
+            "index.blocks.read_only" : "false",
+            "index.blocks.read_only_allow_delete" : "false",
+            "index.blocks.write" : "false",
+            "index.bloom_filter_for_id_field.enabled" : "true",
+            "index.compound_format" : "1gb",
+            "index.data_path" : "",
+            "index.default_pipeline" : "_none",
+            "index.dense_vector.experimental_features" : "false",
+            "index.dense_vector.hnsw_enable_early_termination" : "true",
+            "index.dense_vector.hnsw_filter_heuristic" : "ACORN",
+            "index.dense_vector.post_filter_selectivity_threshold" : "1.0",
+            "index.dimensions" : [ ],
+            "index.dimensions_tsid_strategy_enabled" : "true",
+            "index.disable_sequence_numbers" : "false",
+            "index.dlm.frozen.created" : "false",
+            "index.downsample.interval" : "",
+            "index.downsample.origin.name" : "",
+            "index.downsample.origin.uuid" : "",
+            "index.downsample.sampling_method" : "",
+            "index.downsample.source.name" : "",
+            "index.downsample.source.uuid" : "",
+            "index.downsample.status" : "unknown",
+            "index.esql.stored_fields_sequential_proportion" : "0.2",
+            "index.failure_store.version" : "0",
+            "index.fast_refresh" : "false",
+            "index.fielddata.cache" : "node",
+            "index.final_pipeline" : "_none",
+            "index.flush_after_merge" : "512mb",
+            "index.force_memory_term_dictionary" : "false",
+            "index.format" : "0",
+            "index.gc_deletes" : "60s",
+            "index.hidden" : "false",
+            "index.highlight.max_analyzed_offset" : "1000000",
+            "index.highlight.weight_matches_mode.enabled" : "true",
+            "index.indexing.slowlog.include.user" : "false",
+            "index.indexing.slowlog.level" : "",
+            "index.indexing.slowlog.reformat" : "true",
+            "index.indexing.slowlog.source" : "1000",
+            "index.indexing.slowlog.threshold.index.debug" : "-1",
+            "index.indexing.slowlog.threshold.index.info" : "-1",
+            "index.indexing.slowlog.threshold.index.trace" : "-1",
+            "index.indexing.slowlog.threshold.index.warn" : "-1",
+            "index.lifecycle.indexing_complete" : "false",
+            "index.lifecycle.name" : "",
+            "index.lifecycle.origination_date" : "-1",
+            "index.lifecycle.parse_origination_date" : "false",
+            "index.lifecycle.prefer_ilm" : "true",
+            "index.lifecycle.rollover_alias" : "",
+            "index.lifecycle.skip" : "false",
+            "index.lifecycle.step.wait_time_threshold" : "12h",
+            "index.load_fixed_bitset_filters_eagerly" : "true",
+            "index.logsdb.add_host_name_field" : "false",
+            "index.logsdb.default_sort_on_message_template" : "false",
+            "index.logsdb.route_on_sort_fields" : "false",
+            "index.logsdb.sort_on_host_name" : "false",
+            "index.logsdb.sort_on_message_template" : "false",
+            "index.look_ahead_time" : "9m",
+            "index.look_back_time" : "2h",
+            "index.mapper.dynamic" : "true",
+            "index.mapping.array_objects.limit" : "50000",
+            "index.mapping.coerce" : "false",
+            "index.mapping.depth.limit" : "20",
+            "index.mapping.dimension_fields.limit" : "32768",
+            "index.mapping.doc_values.multi_value" : "true",
+            "index.mapping.doc_values.nullability" : "true",
+            "index.mapping.dynamic_strings.auto_text" : "true",
+            "index.mapping.exclude_source_vectors" : "true",
+            "index.mapping.field_name_length.ignore_dynamic_beyond_limit" : "false",
+            "index.mapping.field_name_length.limit" : "9223372036854775807",
+            "index.mapping.flattened.store_root_doc_values" : "false",
+            "index.mapping.ignore_above" : "2147483647",
+            "index.mapping.ignore_malformed" : "false",
+            "index.mapping.index_disabled_by_default" : "false",
+            "index.mapping.nested_fields.limit" : "100",
+            "index.mapping.nested_objects.limit" : "10000",
+            "index.mapping.nested_parents.limit" : "50",
+            "index.mapping.pattern_text.disable_templating" : "false",
+            "index.mapping.semantic_text.use_legacy_format" : "false",
+            "index.mapping.source.mode" : "STORED",
+            "index.mapping.synthetic_id" : "false",
+            "index.mapping.synthetic_source.skip_ignored_source_read" : "false",
+            "index.mapping.synthetic_source.skip_ignored_source_write" : "false",
+            "index.mapping.synthetic_source_keep" : "none",
+            "index.mapping.total_fields.ignore_dynamic_beyond_limit" : "false",
+            "index.mapping.total_fields.limit" : "1000",
+            "index.mapping.use_columnar_id_mode_by_default" : "false",
+            "index.mapping.use_doc_values_skipper" : "false",
+            "index.max_adjacency_matrix_filters" : "100",
+            "index.max_docvalue_fields_search" : "100",
+            "index.max_inner_result_window" : "100",
+            "index.max_ngram_diff" : "1",
+            "index.max_refresh_listeners" : "1000",
+            "index.max_regex_length" : "1000",
+            "index.max_rescore_window" : "1000",
+            "index.max_script_fields" : "32",
+            "index.max_shingle_diff" : "3",
+            "index.max_slices_per_scroll" : "1024",
+            "index.max_terms_count" : "65536",
+            "index.merge.intra_merge_parallelism_enabled" : "false",
+            "index.merge.policy.deletes_pct_allowed" : "20.0",
+            "index.merge.policy.expunge_deletes_allowed" : "10.0",
+            "index.merge.policy.floor_segment" : "16mb",
+            "index.merge.policy.max_merge_at_once" : "16",
+            "index.merge.policy.max_merge_at_once_explicit" : "30",
+            "index.merge.policy.max_merged_segment" : "0b",
+            "index.merge.policy.merge_factor" : "32",
+            "index.merge.policy.segments_per_tier" : "8.0",
+            "index.merge.policy.type" : "UNSET",
+            "index.merge.scheduler.auto_throttle" : "true",
+            "index.merge.scheduler.max_merge_count" : "14",
+            "index.merge.scheduler.max_thread_count" : "9",
+            "index.mode" : "standard",
+            "index.number_of_routing_shards" : "1",
+            "index.optimize_auto_generated_id" : "true",
+            "index.override_write_load_forecast" : "0.0",
+            "index.percolator.map_unmapped_fields_as_text" : "false",
+            "index.priority" : "1",
+            "index.queries.cache.enabled" : "true",
+            "index.query.default_field" : [
+              "*"
+            ],
+            "index.query.parse.allow_unmapped_fields" : "true",
+            "index.query_string.lenient" : "false",
+            "index.recovery.type" : "",
+            "index.recovery.use_synthetic_source" : "false",
+            "index.refresh_interval" : "1s",
+            "index.requests.cache.enable" : "true",
+            "index.rollup.source.name" : "",
+            "index.rollup.source.uuid" : "",
+            "index.routing.allocation.disk.watermark.ignore" : "false",
+            "index.routing.allocation.enable" : "all",
+            "index.routing.allocation.total_shards_per_node" : "-1",
+            "index.routing.rebalance.enable" : "all",
+            "index.routing_partition_size" : "1",
+            "index.routing_path" : [ ],
+            "index.search.idle.after" : "30s",
+            "index.search.slowlog.include.user" : "false",
+            "index.search.slowlog.level" : "",
+            "index.search.slowlog.threshold.fetch.debug" : "-1",
+            "index.search.slowlog.threshold.fetch.info" : "-1",
+            "index.search.slowlog.threshold.fetch.trace" : "-1",
+            "index.search.slowlog.threshold.fetch.warn" : "-1",
+            "index.search.slowlog.threshold.query.debug" : "-1",
+            "index.search.slowlog.threshold.query.info" : "-1",
+            "index.search.slowlog.threshold.query.trace" : "-1",
+            "index.search.slowlog.threshold.query.warn" : "-1",
+            "index.semantic_text.default_inference_id" : "",
+            "index.seq_no.index_options" : "POINTS_AND_DOC_VALUES",
+            "index.shard.check_on_startup" : "false",
+            "index.shard_limit.group" : "normal",
+            "index.slice.enabled" : "false",
+            "index.soft_deletes.enabled" : "true",
+            "index.soft_deletes.retention.operations" : "0",
+            "index.soft_deletes.retention_lease.period" : "12h",
+            "index.sort.field" : [ ],
+            "index.sort.missing" : [ ],
+            "index.sort.mode" : [ ],
+            "index.sort.order" : [ ],
+            "index.source_only" : "false",
+            "index.store.fs.directio_async_prefetch_limit" : "64",
+            "index.store.fs.fs_lock" : "native",
+            "index.store.preload" : [ ],
+            "index.store.snapshot.blob_cache.metadata_files.max_length" : "64kb",
+            "index.store.snapshot.cache.enabled" : "true",
+            "index.store.snapshot.cache.excluded_file_types" : [ ],
+            "index.store.snapshot.cache.prewarm.enabled" : "true",
+            "index.store.snapshot.delete_searchable_snapshot" : "false",
+            "index.store.snapshot.index_name" : "",
+            "index.store.snapshot.index_uuid" : "",
+            "index.store.snapshot.partial" : "false",
+            "index.store.snapshot.repository_name" : "",
+            "index.store.snapshot.repository_uuid" : "",
+            "index.store.snapshot.snapshot_name" : "",
+            "index.store.snapshot.snapshot_uuid" : "",
+            "index.store.snapshot.uncached_chunk_size" : "-1b",
+            "index.store.stats_refresh_interval" : "10s",
+            "index.store.type" : "",
+            "index.synthetic_id.bloom_filter.high_bits_per_doc" : "128.0",
+            "index.synthetic_id.bloom_filter.large_segment_min_docs" : "320000",
+            "index.synthetic_id.bloom_filter.low_bits_per_doc" : "24.0",
+            "index.synthetic_id.bloom_filter.max_size" : "8mb",
+            "index.synthetic_id.bloom_filter.num_hash_functions" : "4",
+            "index.synthetic_id.bloom_filter.optimized_merge" : "true",
+            "index.synthetic_id.bloom_filter.small_segment_max_docs" : "160000",
+            "index.time_series.end_time" : "9999-12-31T23:59:59.999Z",
+            "index.time_series.es87tsdb_codec.enabled" : "true",
+            "index.time_series.es95_codec.enabled" : "false",
+            "index.time_series.start_time" : "-9999-01-01T00:00:00Z",
+            "index.time_series.temporality_field" : "",
+            "index.top_metrics_max_size" : "10",
+            "index.translog.durability" : "REQUEST",
+            "index.translog.flush_threshold_age" : "1m",
+            "index.translog.flush_threshold_size" : "10gb",
+            "index.translog.generation_threshold_size" : "64mb",
+            "index.translog.retention.age" : "-1",
+            "index.translog.retention.size" : "-1",
+            "index.translog.sync_interval" : "5s",
+            "index.unassigned.node_left.delayed_timeout" : "1m",
+            "index.use_legacy_postings_format" : "false",
+            "index.use_time_series_doc_values_format" : "false",
+            "index.use_time_series_doc_values_format_large_binary_block_size" : "true",
+            "index.use_time_series_doc_values_format_large_block_size" : "false",
+            "index.verified_before_close" : "false",
+            "index.verified_read_only" : "false",
+            "index.version.compatibility" : "9111000",
+            "index.warmer.enabled" : "true",
+            "index.write.wait_for_active_shards" : "1",
+            "index.xpack.ccr.following_index" : "false",
+            "index.xpack.version" : "",
+            "index.xpack.watcher.template.version" : ""
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s2/_settings?include_defaults=true",
+      "mask" : [
+        "max_thread_count",
+        "max_merge_count"
+      ],
+      "status" : 200,
+      "response" : {
+        "esm-s2" : {
+          "settings" : {
+            "index" : {
+              "codec" : "default",
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "number_of_shards" : "1",
+              "provided_name" : "esm-s2",
+              "max_result_window" : "1000",
+              "creation_date" : "1792523124728",
+              "number_of_replicas" : "1",
+              "uuid" : "Shc7sKUFQ0mH4Y_rj-jbuQ",
+              "version" : {
+                "created" : "9111000"
+              }
+            }
+          },
+          "defaults" : {
+            "index" : {
+              "flush_after_merge" : "512mb",
+              "time_series" : {
+                "end_time" : "9999-12-31T23:59:59.999Z",
+                "temporality_field" : "",
+                "es95_codec" : {
+                  "enabled" : "false"
+                },
+                "start_time" : "-9999-01-01T00:00:00Z",
+                "es87tsdb_codec" : {
+                  "enabled" : "true"
+                }
+              },
+              "final_pipeline" : "_none",
+              "max_inner_result_window" : "100",
+              "unassigned" : {
+                "node_left" : {
+                  "delayed_timeout" : "1m"
+                }
+              },
+              "dimensions_tsid_strategy_enabled" : "true",
+              "max_terms_count" : "65536",
+              "rollup" : {
+                "source" : {
+                  "name" : "",
+                  "uuid" : ""
+                }
+              },
+              "lifecycle" : {
+                "prefer_ilm" : "true",
+                "rollover_alias" : "",
+                "origination_date" : "-1",
+                "name" : "",
+                "parse_origination_date" : "false",
+                "skip" : "false",
+                "step" : {
+                  "wait_time_threshold" : "12h"
+                },
+                "indexing_complete" : "false"
+              },
+              "mode" : "standard",
+              "routing_partition_size" : "1",
+              "slice" : {
+                "enabled" : "false"
+              },
+              "force_memory_term_dictionary" : "false",
+              "max_docvalue_fields_search" : "100",
+              "merge" : {
+                "scheduler" : {
+                  "max_thread_count" : "9",
+                  "auto_throttle" : "true",
+                  "max_merge_count" : "14"
+                },
+                "intra_merge_parallelism_enabled" : "false",
+                "policy" : {
+                  "merge_factor" : "32",
+                  "floor_segment" : "16mb",
+                  "max_merge_at_once_explicit" : "30",
+                  "max_merge_at_once" : "16",
+                  "max_merged_segment" : "0b",
+                  "expunge_deletes_allowed" : "10.0",
+                  "segments_per_tier" : "8.0",
+                  "type" : "UNSET",
+                  "deletes_pct_allowed" : "20.0"
+                }
+              },
+              "disable_sequence_numbers" : "false",
+              "max_refresh_listeners" : "1000",
+              "max_regex_length" : "1000",
+              "load_fixed_bitset_filters_eagerly" : "true",
+              "number_of_routing_shards" : "1",
+              "write" : {
+                "wait_for_active_shards" : "1"
+              },
+              "seq_no" : {
+                "index_options" : "POINTS_AND_DOC_VALUES"
+              },
+              "verified_before_close" : "false",
+              "mapping" : {
+                "coerce" : "false",
+                "dynamic_strings" : {
+                  "auto_text" : "true"
+                },
+                "flattened" : {
+                  "store_root_doc_values" : "false"
+                },
+                "use_columnar_id_mode_by_default" : "false",
+                "semantic_text" : {
+                  "use_legacy_format" : "false"
+                },
+                "field_name_length" : {
+                  "limit" : "9223372036854775807",
+                  "ignore_dynamic_beyond_limit" : "false"
+                },
+                "array_objects" : {
+                  "limit" : "50000"
+                },
+                "nested_parents" : {
+                  "limit" : "50"
+                },
+                "total_fields" : {
+                  "limit" : "1000",
+                  "ignore_dynamic_beyond_limit" : "false"
+                },
+                "ignore_above" : "2147483647",
+                "nested_objects" : {
+                  "limit" : "10000"
+                },
+                "ignore_malformed" : "false",
+                "source" : {
+                  "mode" : "STORED"
+                },
+                "doc_values" : {
+                  "multi_value" : "true",
+                  "nullability" : "true"
+                },
+                "exclude_source_vectors" : "true",
+                "synthetic_source" : {
+                  "skip_ignored_source_read" : "false",
+                  "skip_ignored_source_write" : "false"
+                },
+                "nested_fields" : {
+                  "limit" : "100"
+                },
+                "pattern_text" : {
+                  "disable_templating" : "false"
+                },
+                "synthetic_source_keep" : "none",
+                "depth" : {
+                  "limit" : "20"
+                },
+                "index_disabled_by_default" : "false",
+                "synthetic_id" : "false",
+                "dimension_fields" : {
+                  "limit" : "32768"
+                },
+                "use_doc_values_skipper" : "false"
+              },
+              "source_only" : "false",
+              "soft_deletes" : {
+                "enabled" : "true",
+                "retention" : {
+                  "operations" : "0"
+                },
+                "retention_lease" : {
+                  "period" : "12h"
+                }
+              },
+              "max_script_fields" : "32",
+              "query" : {
+                "default_field" : [
+                  "*"
+                ],
+                "parse" : {
+                  "allow_unmapped_fields" : "true"
+                }
+              },
+              "format" : "0",
+              "use_time_series_doc_values_format_large_binary_block_size" : "true",
+              "sort" : {
+                "missing" : [ ],
+                "mode" : [ ],
+                "field" : [ ],
+                "order" : [ ]
+              },
+              "priority" : "1",
+              "routing_path" : [ ],
+              "version" : {
+                "compatibility" : "9111000"
+              },
+              "dense_vector" : {
+                "hnsw_filter_heuristic" : "ACORN",
+                "experimental_features" : "false",
+                "hnsw_enable_early_termination" : "true",
+                "post_filter_selectivity_threshold" : "1.0"
+              },
+              "max_rescore_window" : "1000",
+              "bloom_filter_for_id_field" : {
+                "enabled" : "true"
+              },
+              "max_adjacency_matrix_filters" : "100",
+              "analyze" : {
+                "max_char_count" : "1000000",
+                "max_token_count" : "10000"
+              },
+              "gc_deletes" : "60s",
+              "top_metrics_max_size" : "10",
+              "failure_store" : {
+                "version" : "0"
+              },
+              "optimize_auto_generated_id" : "true",
+              "max_ngram_diff" : "1",
+              "use_time_series_doc_values_format" : "false",
+              "hidden" : "false",
+              "translog" : {
+                "flush_threshold_age" : "1m",
+                "generation_threshold_size" : "64mb",
+                "flush_threshold_size" : "10gb",
+                "sync_interval" : "5s",
+                "retention" : {
+                  "size" : "-1",
+                  "age" : "-1"
+                },
+                "durability" : "REQUEST"
+              },
+              "auto_expand_replicas" : "false",
+              "fast_refresh" : "false",
+              "mapper" : {
+                "dynamic" : "true"
+              },
+              "recovery" : {
+                "type" : "",
+                "use_synthetic_source" : "false"
+              },
+              "requests" : {
+                "cache" : {
+                  "enable" : "true"
+                }
+              },
+              "data_path" : "",
+              "highlight" : {
+                "max_analyzed_offset" : "1000000",
+                "weight_matches_mode" : {
+                  "enabled" : "true"
+                }
+              },
+              "look_back_time" : "2h",
+              "routing" : {
+                "rebalance" : {
+                  "enable" : "all"
+                },
+                "allocation" : {
+                  "disk" : {
+                    "watermark" : {
+                      "ignore" : "false"
+                    }
+                  },
+                  "enable" : "all",
+                  "total_shards_per_node" : "-1"
+                }
+              },
+              "search" : {
+                "slowlog" : {
+                  "include" : {
+                    "user" : "false"
+                  },
+                  "level" : "",
+                  "threshold" : {
+                    "fetch" : {
+                      "warn" : "-1",
+                      "trace" : "-1",
+                      "debug" : "-1",
+                      "info" : "-1"
+                    },
+                    "query" : {
+                      "warn" : "-1",
+                      "trace" : "-1",
+                      "debug" : "-1",
+                      "info" : "-1"
+                    }
+                  }
+                },
+                "idle" : {
+                  "after" : "30s"
+                }
+              },
+              "fielddata" : {
+                "cache" : "node"
+              },
+              "use_time_series_doc_values_format_large_block_size" : "false",
+              "look_ahead_time" : "9m",
+              "default_pipeline" : "_none",
+              "max_slices_per_scroll" : "1024",
+              "shard" : {
+                "check_on_startup" : "false"
+              },
+              "xpack" : {
+                "watcher" : {
+                  "template" : {
+                    "version" : ""
+                  }
+                },
+                "version" : "",
+                "ccr" : {
+                  "following_index" : "false"
+                }
+              },
+              "percolator" : {
+                "map_unmapped_fields_as_text" : "false"
+              },
+              "verified_read_only" : "false",
+              "allocation" : {
+                "max_retries" : "5",
+                "existing_shards_allocator" : "gateway_allocator"
+              },
+              "refresh_interval" : "1s",
+              "semantic_text" : {
+                "default_inference_id" : ""
+              },
+              "dlm" : {
+                "frozen" : {
+                  "created" : "false"
+                }
+              },
+              "indexing" : {
+                "slowlog" : {
+                  "include" : {
+                    "user" : "false"
+                  },
+                  "reformat" : "true",
+                  "threshold" : {
+                    "index" : {
+                      "warn" : "-1",
+                      "trace" : "-1",
+                      "debug" : "-1",
+                      "info" : "-1"
+                    }
+                  },
+                  "source" : "1000",
+                  "level" : ""
+                }
+              },
+              "compound_format" : "1gb",
+              "blocks" : {
+                "metadata" : "false",
+                "read" : "false",
+                "read_only_allow_delete" : "false",
+                "read_only" : "false",
+                "write" : "false"
+              },
+              "esql" : {
+                "stored_fields_sequential_proportion" : "0.2"
+              },
+              "use_legacy_postings_format" : "false",
+              "store" : {
+                "stats_refresh_interval" : "10s",
+                "type" : "",
+                "fs" : {
+                  "directio_async_prefetch_limit" : "64",
+                  "fs_lock" : "native"
+                },
+                "preload" : [ ],
+                "snapshot" : {
+                  "snapshot_name" : "",
+                  "index_uuid" : "",
+                  "cache" : {
+                    "prewarm" : {
+                      "enabled" : "true"
+                    },
+                    "enabled" : "true",
+                    "excluded_file_types" : [ ]
+                  },
+                  "repository_uuid" : "",
+                  "uncached_chunk_size" : "-1b",
+                  "delete_searchable_snapshot" : "false",
+                  "index_name" : "",
+                  "partial" : "false",
+                  "blob_cache" : {
+                    "metadata_files" : {
+                      "max_length" : "64kb"
+                    }
+                  },
+                  "repository_name" : "",
+                  "snapshot_uuid" : ""
+                }
+              },
+              "queries" : {
+                "cache" : {
+                  "enabled" : "true"
+                }
+              },
+              "shard_limit" : {
+                "group" : "normal"
+              },
+              "warmer" : {
+                "enabled" : "true"
+              },
+              "downsample" : {
+                "interval" : "",
+                "source" : {
+                  "name" : "",
+                  "uuid" : ""
+                },
+                "sampling_method" : "",
+                "origin" : {
+                  "name" : "",
+                  "uuid" : ""
+                },
+                "status" : "unknown"
+              },
+              "logsdb" : {
+                "sort_on_host_name" : "false",
+                "add_host_name_field" : "false",
+                "default_sort_on_message_template" : "false",
+                "route_on_sort_fields" : "false",
+                "sort_on_message_template" : "false"
+              },
+              "override_write_load_forecast" : "0.0",
+              "max_shingle_diff" : "3",
+              "synthetic_id" : {
+                "bloom_filter" : {
+                  "large_segment_min_docs" : "320000",
+                  "optimized_merge" : "true",
+                  "low_bits_per_doc" : "24.0",
+                  "small_segment_max_docs" : "160000",
+                  "high_bits_per_doc" : "128.0",
+                  "num_hash_functions" : "4",
+                  "max_size" : "8mb"
+                }
+              },
+              "query_string" : {
+                "lenient" : "false"
+              },
+              "dimensions" : [ ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s3",
+      "body" : {
+        "settings" : {
+          "index.translog.retention.size" : "128mb"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Translog retention settings [index.translog.retention.age] and [index.translog.retention.size] are no longer supported. Please do not specify values for these settings"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Translog retention settings [index.translog.retention.age] and [index.translog.retention.size] are no longer supported. Please do not specify values for these settings"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s3",
+      "body" : {
+        "settings" : {
+          "index.soft_deletes.enabled" : false
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Creating indices with soft-deletes disabled is no longer supported. Please do not specify a value for setting [index.soft_deletes.enabled]."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Creating indices with soft-deletes disabled is no longer supported. Please do not specify a value for setting [index.soft_deletes.enabled]."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s3",
+      "body" : {
+        "settings" : {
+          "index.logsdb.sort_on_host_name" : true,
+          "index.mapping.array_objects.limit" : 10
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "validation_exception",
+              "reason" : "Validation Failed: 1: private index setting [index.logsdb.sort_on_host_name] can not be set explicitly;"
+            }
+          ],
+          "type" : "validation_exception",
+          "reason" : "Validation Failed: 1: private index setting [index.logsdb.sort_on_host_name] can not be set explicitly;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s3/_settings?flat_settings&human",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s3]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s3",
+              "index_uuid" : "_na_",
+              "index" : "esm-s3"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s3]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s3",
+          "index_uuid" : "_na_",
+          "index" : "esm-s3"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

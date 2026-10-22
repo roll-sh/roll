@@ -1,0 +1,30 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+"Index without ID":
+
+  - do:
+      index:
+        index: test_serverless_index_20
+        body:  { "foo": "bar" }
+
+  - is_true: _id
+  - match: { _index: test_serverless_index_20 }
+  - set:   { _id:    id }
+
+  - do:
+      get:
+        index: test_serverless_index_20
+        id:    '$id'
+
+  - match: { _index:   test_serverless_index_20 }
+  - match: { _id:      $id }
+  - match: { _source: { "foo": "bar" } }
+
+---
+teardown:
+  - do:
+      indices.delete:
+        index: test_serverless_index_20

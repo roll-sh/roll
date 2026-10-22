@@ -1,0 +1,854 @@
+return 1 + 2
+----
+1 + 2 * 3 - 4 / 2
+----
+return 7 / 2 + 7 % 3 + -7 / 2 + -7 % 3
+----
+return 7.0 / 2 + 1.5f
+----
+return 1 / 0
+----
+int x = 0; return 1 / x
+----
+long x = 0; return 5L % x
+----
+return 1.0 / 0
+----
+return 0.0 / 0.0
+----
+return -0.0
+----
+return 2147483647 + 1
+----
+return 9223372036854775807L + 1
+----
+return 2147483648
+----
+return 2147483648L
+----
+return 0x7fffffff + 0xff + 010
+----
+return 0xFFFFFFFF
+----
+return 1e10
+----
+return 1e300 * 1e10
+----
+return 3.14f * 2
+----
+return (float) 0.1
+----
+return (int) 3.99 + (int) -3.99
+----
+return (long) 1e30
+----
+return (int) Double.NaN
+----
+return (byte) 200
+----
+return (short) 70000
+----
+return (char) 65
+----
+return (int) 'a'
+----
+char c = 'a'; return c + 1
+----
+char c = 'a'; c++; return c
+----
+return 'abc' + 1 + 2
+----
+return 1 + 2 + 'abc'
+----
+return 'a' + null
+----
+return "x" + 1.0 + 1.0f + 1L + true + 'c'
+----
+String s = null; return s + 'x'
+----
+return 1 << 33
+----
+return 1L << 33
+----
+return -16 >> 2
+----
+return -16 >>> 28
+----
+return -16L >>> 60
+----
+return 5 & 3 | 8 ^ 2
+----
+return ~5
+----
+return true ^ false
+----
+return !true || false && true
+----
+int x = 5; x += 3; x -= 1; x *= 2; x /= 3; x %= 3; return x
+----
+int x = 5; x <<= 2; x >>= 1; x >>>= 1; x &= 7; x |= 8; x ^= 1; return x
+----
+int i = 0; return i++ + ++i + i-- + --i
+----
+int x = 1; x += 1.7; return x
+----
+byte b = 10; b += 300; return b
+----
+short s = 1; s *= 1000; s *= 1000; return s
+----
+String s = 'a'; s += 1; s += null; return s
+----
+def x = 5; x += 2.5; return x
+----
+def x = 'a'; x += 1; return x
+----
+def x = 1; x++; return x
+----
+def x = 1L; x <<= 2; return x
+----
+def a = 5; def b = 2; return [a / b, a % b, a * b, a - b, a + b, a << b, a >> b, a & b, a | b, a ^ b]
+----
+def a = 5.0; def b = 2; return [a / b, a % b, a * b, a - b, a + b]
+----
+def a = 5; def b = 2L; return [a / b, a + b]
+----
+def a = 'x'; def b = 2; return a + b
+----
+def a = true; def b = false; return [a & b, a | b, a ^ b]
+----
+def a = 1; def b = 'x'; return a - b
+----
+def a = null; return a + 1
+----
+def a = 1; return -a
+----
+def a = 1.5; return -a
+----
+def a = 5; return ~a
+----
+def a = true; return !a
+----
+def a = 2.5; return ~a
+----
+return 1 == 1.0
+----
+return 1 < 2 && 2.0 >= 2 && 3L != 4
+----
+return 'a' == 'a'
+----
+String a = 'ab'; String b = 'a' + 'b'; return a == b
+----
+String a = 'ab'; String b = 'a'; b += 'b'; return [a == b, a === b, a != b, a !== b]
+----
+def a = 1; def b = 1L; return [a == b, a < b, a >= b]
+----
+def a = 'a'; def b = 'b'; return a < b
+----
+def a = [1]; def b = [1]; return [a == b, a === b]
+----
+Integer a = 1000; Integer b = 1000; return [a == b, a === b]
+----
+Integer a = 100; Integer b = 100; return a === b
+----
+return null == null
+----
+def x = null; return x == null
+----
+int x = 5; return x > 3 ? 'big' : 'small'
+----
+return true ? 1 : 2.0
+----
+return false ? 1 : 'x'
+----
+def x = null; return x ?: 'default'
+----
+def x = 'v'; return x ?: 'default'
+----
+Map m = null; return m?.size()
+----
+Map m = ['a': 1]; return m?.size()
+----
+def m = null; return m?.a?.b
+----
+def m = ['a': ['b': 3]]; return m?.a?.b
+----
+List l = null; return l?.get(0)
+----
+int x; return x
+----
+String s; return s
+----
+def d; return d
+----
+boolean b; return b
+----
+double d; return d
+----
+int[] a = new int[3]; a[1] = 5; return a[1] + a.length
+----
+int[] a = new int[] {1, 2, 3}; return a[-1]
+----
+int[] a = new int[2]; return a[2]
+----
+int[] a = new int[2]; return a[-3]
+----
+int[][] a = new int[2][3]; a[1][2] = 7; return a[1][2] + a.length + a[0].length
+----
+String[] a = new String[2]; return a[0]
+----
+def a = new double[] {1.5, 2.5}; return a[0] + a[1]
+----
+int[] a = new int[-1]; return a
+----
+int[] a = null; return a.length
+----
+int[] a = null; return a[0]
+----
+def a = new int[3]; a[0] = 1.5; return a
+----
+def a = new int[] {1,2}; return a.length
+----
+return new int[] {1,2}
+----
+Object[] a = new Object[] {1, 'a', null}; return a.length
+----
+List l = [1, 2, 3]; return l
+----
+List l = []; l.add(1); l.add('x'); return l
+----
+Map m = [:]; m.a = 1; m['b'] = 2; m.put('c', 3); return m
+----
+Map m = ['x': 1, 'y': [1, 2], 'z': ['k': 'v']]; return m
+----
+def m = [:]; m.x = 1; return m.x + m['x']
+----
+def l = [1, 2, 3]; return l[0] + l[-1] + l.1
+----
+List l = [1, 2, 3]; return l[3]
+----
+List l = [1, 2, 3]; return l[-4]
+----
+def l = [1, 2, 3]; l[1] = 10; return l
+----
+def l = [1, 2]; return l.x
+----
+def m = ['a': 1]; return m.b
+----
+List l = [3, 1, 2]; l.sort((a, b) -> a - b); return l
+----
+List l = [3, 1, 2]; Collections.sort(l); return l
+----
+List l = ['b', 'a', 'c']; l.sort(null); return l
+----
+List l = [3, 1, 2]; l.sort(Comparator.reverseOrder()); return l
+----
+List l = [1, 2, 3, 4]; return l.stream().filter(x -> x % 2 == 0).map(x -> x * 10).collect(Collectors.toList())
+----
+List l = [1, 2, 3]; int sum = 0; for (int x : l) { sum += x } return sum
+----
+def sum = 0; for (x in [1, 2, 3]) { sum += x } return sum
+----
+int sum = 0; for (int i = 0; i < 10; i++) { if (i == 5) continue; if (i == 8) break; sum += i; } return sum
+----
+int i = 0; while (i < 5) { i++; } return i
+----
+int i = 0; do { i += 2; } while (i < 5); return i
+----
+int[] a = new int[] {1, 2, 3}; int s = 0; for (int x : a) s += x; return s
+----
+Map m = ['a': 1, 'b': 2]; int s = 0; for (def e : m.entrySet()) { s += e.getValue() } return s
+----
+Map m = ['a': 1, 'b': 2]; List keys = []; for (String k : m.keySet()) { keys.add(k) } return keys
+----
+int count = 0; while (true) { count++ } return count
+----
+for (;;) {}
+----
+int f(int x) { return x * 2 } return f(21)
+----
+def f(def x) { x + 1 } return f(1)
+----
+int fib(int n) { n <= 1 ? n : fib(n - 1) + fib(n - 2) } return fib(20)
+----
+void g(List l) { l.add(1) } List l = []; g(l); return l
+----
+int f() { return 1 } int f(int x) { return x } return f() + f(5)
+----
+int f(int x) { if (x > 0) { return 1 } } return f(1)
+----
+int f(int x) { return x } int f(int y) { return y } return 1
+----
+def f(def x) { return x } return f()
+----
+return foo(1)
+----
+int recurse(int x) { return recurse(x + 1) } return recurse(0)
+----
+def x = 1; def f = y -> y + x; return f
+----
+List l = [1, 2, 3]; int k = 10; return l.stream().map(x -> x + k).collect(Collectors.toList())
+----
+List l = [1, 2, 3]; l.removeIf(x -> x == 2); return l
+----
+List l = ['a', 'bb', 'ccc']; return l.stream().map(String::length).collect(Collectors.toList())
+----
+List l = ['1', '2']; return l.stream().mapToInt(Integer::parseInt).sum()
+----
+int twice(int x) { x * 2 } List l = [1, 2]; return l.stream().map(this::twice).collect(Collectors.toList())
+----
+String s = 'abc'; Function f = s::concat; return f.apply('d')
+----
+Supplier s = ArrayList::new; List l = s.get(); l.add(1); return l
+----
+Function f = int[]::new; int[] a = f.apply(3); return a.length
+----
+Function f = x -> x * 2; Function g = f.andThen(x -> x + 1); return g.apply(5)
+----
+Predicate p = x -> x > 2; return [p.test(3), p.negate().test(3)]
+----
+BiFunction f = (a, b) -> a + b; return f.apply(1, 2)
+----
+Comparator c = Comparator.comparing(x -> x.length()); List l = ['ccc', 'a', 'bb']; l.sort(c); return l
+----
+List l = [[n: 'b', a: 2], [n: 'a', a: 1]]; l.sort(Comparator.comparing(x -> x.n)); return l
+----
+try { throw new IllegalArgumentException('boom') } catch (IllegalArgumentException e) { return e.getMessage() }
+----
+try { int x = 1 / 0 } catch (ArithmeticException e) { return 'caught ' + e.getMessage() }
+----
+try { List l = []; l.get(5) } catch (IndexOutOfBoundsException e) { return e.getMessage() }
+----
+try { def x = null; x.foo() } catch (NullPointerException e) { return 'npe' }
+----
+try { throw new RuntimeException('a') } catch (IllegalStateException e) { return 1 } catch (RuntimeException e) { return 2 }
+----
+throw new IllegalArgumentException('my message')
+----
+throw new IllegalStateException()
+----
+throw new UnsupportedOperationException('nope')
+----
+throw new Exception('plain')
+----
+try { throw new RuntimeException('a') } catch (Exception e) { return e instanceof RuntimeException }
+----
+return 1 instanceof Integer
+----
+def x = 'a'; return [x instanceof String, x instanceof CharSequence, x instanceof Object, x instanceof Integer, x instanceof def]
+----
+List l = []; return [l instanceof List, l instanceof ArrayList, l instanceof Collection, l instanceof Map]
+----
+def x = null; return x instanceof Object
+----
+Object o = 'abc'; String s = (String) o; return s.length()
+----
+Object o = 1; String s = (String) o; return s
+----
+def o = 1; String s = o; return s
+----
+def o = 'a'; int i = o; return i
+----
+def o = 1L; int i = o; return i
+----
+def o = 1L; int i = (int) o; return i
+----
+def o = 1; long l = o; return l
+----
+def o = 1.5; float f = o; return f
+----
+def o = 1.5; float f = (float) o; return f
+----
+def o = 'a'; char c = (char) o; return c
+----
+def o = 'ab'; char c = (char) o; return c
+----
+String s = 'a'; char c = (char) s; return c
+----
+def o = null; int i = o; return i
+----
+Integer i = null; int x = i; return x
+----
+Integer i = null; return i + 1
+----
+int x = (int) 'a'; return x
+----
+return (String) 'x'
+----
+return (char) 'x'
+----
+long l = 5; int i = l; return i
+----
+int i = 5; long l = i; double d = l; return d
+----
+float f = 1.5; return f
+----
+double d = 1; return d
+----
+Long l = 5; return l
+----
+Integer i = 5L; return i
+----
+Number n = 5; return n
+----
+Object o = true; return o
+----
+List l = new ArrayList(); Map m = (Map) l; return m
+----
+def l = new ArrayList(); Map m = l; return m
+----
+String s = 'Hello World'; return [s.length(), s.toUpperCase(), s.toLowerCase(), s.substring(6), s.substring(0, 5), s.indexOf('o'), s.lastIndexOf('o'), s.charAt(1), s.contains('World'), s.startsWith('He'), s.endsWith('ld'), s.replace('l', 'L'), s.trim(), s.isEmpty()]
+----
+String s = '  a,b,,c  '; return [s.trim(), s.split(','), s.splitOnToken(','), s.strip()]
+----
+return 'a,b,,c,,'.split(',').length
+----
+return 'a1b22c333'.split('\\d+')
+----
+return String.join('-', ['a', 'b', 'c'])
+----
+return 'abc'.substring(2, 1)
+----
+return 'abc'.substring(5)
+----
+return 'abc'.charAt(5)
+----
+String s = null; return s.length()
+----
+return 'abc'.compareTo('abd') + 'b'.compareTo('a')
+----
+return 'Hello'.equalsIgnoreCase('hello')
+----
+return 'aXbXc'.replaceAll('X', '-')
+----
+return 'a-b'.matches('a.b')
+----
+return 'abc'.toCharArray().length
+----
+return String.valueOf(5) + String.valueOf(true) + String.valueOf(2.5) + String.valueOf('c' as char)
+----
+return 'x'.repeat(3)
+----
+return 'ab'.chars().sum()
+----
+return 'hello'.encodeBase64()
+----
+return 'aGVsbG8='.decodeBase64()
+----
+return '%s has %d items costing %.2f'.format('cart', 3, 9.5)
+----
+return String.format('%5d|%-5s|%05.1f|%x|%o|%e|%b|%c|%%|%n', 42, 'ab', 3.14159, 255, 8, 12345.678, true, 'z' as char)
+----
+return Integer.parseInt('42') + Long.parseLong('100') + Double.parseDouble('1.5')
+----
+return Integer.parseInt('abc')
+----
+return Integer.parseInt('')
+----
+return Double.parseDouble('x1')
+----
+return Integer.valueOf(5).equals(5)
+----
+return [Integer.MAX_VALUE, Integer.MIN_VALUE, Long.MAX_VALUE, Double.MAX_VALUE, Double.MIN_VALUE, Float.MAX_VALUE, Byte.MAX_VALUE, Short.MIN_VALUE, Character.MAX_VALUE as int]
+----
+return [Integer.toHexString(255), Integer.toBinaryString(5), Integer.toString(255, 16), Long.toHexString(-1L), Integer.bitCount(7), Integer.reverse(1), Integer.highestOneBit(100), Integer.numberOfTrailingZeros(8)]
+----
+return [Math.abs(-5), Math.max(1, 2), Math.min(1.5, 2), Math.pow(2, 10), Math.sqrt(16), Math.floor(1.7), Math.ceil(1.2), Math.round(1.5), Math.round(-1.5), Math.round(2.5f)]
+----
+return [Math.log(Math.E), Math.log10(1000), Math.exp(1), Math.sin(0), Math.cos(0), Math.tan(0), Math.atan2(1, 1), Math.hypot(3, 4), Math.cbrt(27), Math.signum(-2.5)]
+----
+return [Math.floorDiv(-7, 2), Math.floorMod(-7, 2), Math.toRadians(180), Math.toDegrees(Math.PI), Math.rint(2.5), Math.ulp(1.0)]
+----
+return Math.addExact(2147483647, 1)
+----
+return Math.toIntExact(9999999999L)
+----
+StringBuilder sb = new StringBuilder(); sb.append('a').append(1).append(2.5).append(true).append('c' as char); sb.insert(0, 'X'); return sb.toString() + sb.length()
+----
+StringBuilder sb = new StringBuilder('hello'); sb.reverse(); sb.setCharAt(0, 'O' as char); sb.deleteCharAt(1); return sb
+----
+return Character.isDigit('5' as char) && Character.isLetter('a' as char) && Character.isWhitespace(' ' as char) && Character.isUpperCase('A' as char)
+----
+return [Character.toUpperCase('a' as char), Character.getNumericValue('7' as char), Character.isLetterOrDigit('_' as char)]
+----
+return Boolean.parseBoolean('TRUE') && !Boolean.parseBoolean('yes')
+----
+Map m = new HashMap(); m.put('a', 1); m.put('b', 2); return [m.get('a'), m.containsKey('b'), m.containsValue(3), m.size(), m.getOrDefault('z', 0), m.remove('a'), m.keySet(), m.values(), m.isEmpty()]
+----
+Map m = ['a': 1]; m.putIfAbsent('a', 5); m.putIfAbsent('b', 6); m.computeIfAbsent('c', k -> k + '!'); m.merge('a', 10, (x, y) -> x + y); m.compute('b', (k, v) -> v * 2); return m
+----
+Map m = new TreeMap(); m.put('z', 1); m.put('a', 2); m.put('m', 3); return [m, m.firstKey(), m.lastKey()]
+----
+Map m = new LinkedHashMap(); m.put('z', 1); m.put('a', 2); return m
+----
+Map m = ['one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5]; return m
+----
+Map m = [:]; for (int i = 0; i < 20; i++) { m.put('key' + i, i) } return m.keySet()
+----
+Map m = [:]; for (int i = 0; i < 20; i++) { m.put(i * 37, i) } return m.keySet()
+----
+Set s = new HashSet(); s.add(3); s.add(1); s.add(2); s.add(1); return [s, s.size(), s.contains(2)]
+----
+Set s = new TreeSet(['b', 'c', 'a']); return s
+----
+List l = [1, 2, 3, 4, 5]; return [l.subList(1, 3), l.indexOf(3), l.contains(4), l.size(), l.isEmpty(), l.get(0), l.lastIndexOf(5)]
+----
+List l = [1, 2, 3]; l.remove(0); l.remove((Integer) 3); return l
+----
+List l = [1, 2, 3]; l.add(1, 9); l.set(0, 7); l.addAll([4, 5]); return l
+----
+List l = [3, 1, 2]; Collections.reverse(l); return [l, Collections.max(l), Collections.min(l), Collections.frequency(l, 1)]
+----
+List l = Arrays.asList(1, 2, 3); l.add(4); return l
+----
+List l = Collections.unmodifiableList([1]); l.add(2); return l
+----
+List l = List.of(1, 2); return l
+----
+List l = [1, 2, 3]; Iterator it = l.iterator(); int s = 0; while (it.hasNext()) { s += it.next() } return s
+----
+List l = [1, 2, 3]; for (def x : l) { l.add(4) } return l
+----
+List l = [1, 2, 3]; return l.collect(x -> x * 2)
+----
+List l = [1, 2, 3, 4]; return [l.findAll(x -> x > 2), l.find(x -> x > 2), l.any(x -> x > 3), l.every(x -> x > 0), l.sum(), l.sum(x -> x * 2)]
+----
+List l = ['a', 'bb', 'cc']; return l.groupBy(x -> x.length())
+----
+List l = [1, 2, 3]; return l.join(', ')
+----
+Map m = ['a': ['b': ['c': 5]]]; return m.getByPath('a.b.c')
+----
+Map m = ['a': 1, 'b': 2]; return m.collect((k, v) -> k + v)
+----
+Map m = ['a': 1, 'b': 2, 'c': 3]; return m.findAll((k, v) -> v > 1)
+----
+List l = [5, 3, 8]; return l.stream().sorted().collect(Collectors.toList())
+----
+List l = [5, 3, 8, 3]; return [l.stream().distinct().count(), l.stream().max(Integer::compare).get(), l.stream().mapToInt(x -> x).average().getAsDouble()]
+----
+return IntStream.range(0, 5).boxed().collect(Collectors.toList())
+----
+return Stream.of('a', 'b', 'c').collect(Collectors.joining(',', '[', ']'))
+----
+List l = ['apple', 'avocado', 'banana']; return l.stream().collect(Collectors.groupingBy(x -> x.charAt(0)))
+----
+List l = [1, 2, 3, 4]; return l.stream().reduce(0, (a, b) -> a + b)
+----
+List l = [1, 2, 3, 4]; return l.stream().anyMatch(x -> x > 3)
+----
+Optional o = Optional.of(5); return [o.isPresent(), o.get(), o.orElse(1), Optional.empty().orElse(2), o.map(x -> x + 1).get()]
+----
+Optional o = Optional.empty(); return o.get()
+----
+Random r = new Random(42); return [r.nextInt(100), r.nextInt(100), r.nextDouble(), r.nextLong(), r.nextBoolean()]
+----
+return Pattern.compile('a+').matcher('caaab').find()
+----
+Matcher m = /(\d+)-(\d+)/.matcher('tel 123-456'); if (m.find()) { return m.group(1) + ':' + m.group(2) + ':' + m.start() + ':' + m.end() } return null
+----
+return 'foobar' =~ /oba/
+----
+return 'foobar' ==~ /oba/
+----
+return 'foobar' ==~ /f.*r/
+----
+return /a(b)?c/.matcher('ac').matches()
+----
+return 'a1b2c3'.replaceAll(/\d/, m -> '<' + m.group() + '>')
+----
+return /x/i.matcher('aXb').find()
+----
+Matcher m = /(?<year>\d{4})-(?<mon>\d\d)/.matcher('2020-05'); m.matches(); return m.group('year') + m.group('mon')
+----
+return /a/.split('bacad')
+----
+return /[/
+----
+return /a/q
+----
+return 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab' ==~ /(a+)+c/
+----
+return Pattern.compile('(').matcher('x')
+----
+return [Objects.equals(null, null), Objects.isNull(null), Objects.hash(1, 2), Objects.toString(null, 'd'), Objects.requireNonNullElse(null, 'e')]
+----
+return Objects.requireNonNull(null, 'it was null')
+----
+return UUID.fromString('123e4567-e89b-12d3-a456-426614174000').toString()
+----
+return [Base64.getEncoder().encodeToString('hi'.getBytes()), new String(Base64.getDecoder().decode('aGk='))]
+----
+StringJoiner j = new StringJoiner(', ', '{', '}'); j.add('a'); j.add('b'); return j.toString()
+----
+int x = 1; { int y = 2; x += y } return x
+----
+int x = 1; int x = 2; return x
+----
+return y
+----
+x = 5
+----
+int x = 'abc'
+----
+String s = 5
+----
+List l = 5
+----
+int x = 1; x.foo()
+----
+'abc'.foo()
+----
+String.foo()
+----
+new Foo()
+----
+Foo f = null
+----
+new ArrayList(1, 2, 3)
+----
+return 1;;
+----
+if (true) { return 1 }
+----
+if (1) { return 2 }
+----
+return 1; return 2
+----
+while (false) {}
+----
+1
+----
+'x'
+----
+x
+----
+def x = 1; x
+----
+int[] a = new int[2]; a.length = 3
+----
+break
+----
+continue
+----
+for (int i = 0; i < 2; i++) { continue }
+----
+return null.foo()
+----
+def x = null; return x.foo()
+----
+def x = null; return x.foo
+----
+def x = null; x.foo = 1
+----
+def x = null; return x[0]
+----
+Map m = null; return m.get('a')
+----
+Map m = null; return m.a
+----
+List l = null; return l[0]
+----
+String s = null; return s.length()
+----
+String s = null; return s.substring(1)
+----
+def s = 'abc'; return s.foo()
+----
+def s = 'abc'; return s.foo
+----
+def s = 5; return s[0]
+----
+def m = ['a': 1]; return m.a.b
+----
+int[] a = new int[2]; return a.foo
+----
+return (List) 'x'
+----
+return (int) 'ab'
+----
+return (boolean) 1
+----
+return (Integer) 1L
+----
+Object o = new ArrayList(); return (String) o
+----
+def x = 1; String s = (String) x; return s
+----
+return 'abc' - 1
+----
+return true + 1
+----
+return [1] + 1
+----
+return [:] * 2
+----
+int x = 1; return x ? 1 : 2
+----
+return null ? 1 : 2
+----
+return -'a'
+----
+return !1
+----
+return ~1.5
+----
+List l = []; l.add()
+----
+List l = []; return l.get('x')
+----
+Map m = [:]; m.put(1)
+----
+return Math.max(1)
+----
+return Math.foo(1)
+----
+return Integer.MAX
+----
+return 1 +
+----
+return (1 + 2
+----
+return [1, 2
+----
+int x = 1 int y = 2
+----
+def f = (x, y) -> x + y; return f
+----
+return [1, 2, 3].stream().map(x -> { x + 1 }).collect(Collectors.toList())
+----
+List l = [1]; l.forEach(x -> { return x })
+----
+return params.a + params.b
+----
+#params: {"a": 1, "b": 2.5, "s": "str", "l": [1, 2], "m": {"x": "y"}, "n": null, "big": 12345678901, "t": true}
+return [params.a, params.b, params.s, params.l, params.m, params.n, params.big, params.t, params.missing]
+----
+#params: {"l": [3, 1, 2]}
+List l = params.l; l.sort(null); return l
+----
+#params: {"x": 5}
+int x = params.x; return x * 2
+----
+#params: {"x": 5}
+return params.x * 2
+----
+#params: {"x": 5}
+return params['x'] / 2
+----
+#params: {"x": "5"}
+int x = params.x; return x
+----
+#params: {"m": {"b": 1, "a": 2, "c": 3}}
+return params.m
+----
+return params
+----
+#params: {"a": 1}
+params.b = 2; return params
+----
+return Debug.explain(5)
+----
+return Debug.explain([1, 2])
+----
+return Debug.explain(null)
+----
+return Debug.explain('abc')
+----
+Map m = ['a': 1]; Debug.explain(m)
+----
+def x = 5; def y = x; return x === y
+----
+return 10000000000000000000000
+----
+return 1.0e400
+----
+return 0b101
+----
+return 'unterminated
+----
+return "double \" quoted \\ string"
+----
+return 'single \' quoted'
+----
+return "a\nb"
+----
+return 'A'
+----
+// a comment
+return 1 /* inline */ + 2
+----
+return 1 // trailing
+----
+/* only a comment */
+----
+return
+----
+return;
+----
+void
+----
+int[] a = new int[3]; return a
+----
+return new ArrayList()
+----
+return [1, [2, [3, [4]]]]
+----
+return ['a': null]
+----
+return [null]
+----
+Map m = [1: 'one', 2.5: 'x', true: 'b', null: 'n']; return m
+----
+return [1, 1L, 1.0, 1.0f, (byte) 1, (short) 1, 'c' as char]
+----
+return 1.0f / 3
+----
+return 100.0f
+----
+return 1.0E7
+----
+return 0.001
+----
+return 1.0E-4
+----
+return 123456789.0f
+----
+return (double) 0.1f
+----
+return 1e-10f
+----
+return Float.MIN_VALUE
+----
+return [Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NaN]
+----
+return Double.isNaN(0.0 / 0) && Double.isInfinite(1 / 0.0)
+----
+return Long.MAX_VALUE + 1
+----
+return Long.MIN_VALUE / -1
+----
+return Integer.MIN_VALUE / -1
+----
+return Integer.MIN_VALUE % -1
+----
+return Math.abs(Integer.MIN_VALUE)
+----
+return (int) 1e10
+----
+return (long) Double.NaN
+----
+return (int) -1e10
+----
+return (char) -1
+----
+return (byte) -129
+----
+return 07 + 017
+----
+return 08
+----
+return 1L + 1f
+----
+return 1 + 1d
+----
+return 5 / 2.0f

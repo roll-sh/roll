@@ -1,0 +1,20 @@
+//! Bucket aggregations.
+
+pub mod auto_histogram;
+pub mod composite;
+pub mod filters;
+pub mod geogrid;
+pub mod histogram;
+pub mod include;
+pub mod join;
+pub mod multi_terms;
+pub mod random_sampler;
+pub mod range;
+pub mod rare_terms;
+pub mod significant;
+pub mod shape_grid;
+pub mod shape_hex;
+pub mod single;
+pub mod terms;
+pub mod time_series;
+pub mod variable_width;

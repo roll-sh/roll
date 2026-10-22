@@ -1,0 +1,40 @@
+---
+requires:
+  serverless: false
+  stack: true
+---
+setup:
+  - do:
+      indices.create:
+        index: task_test
+---
+teardown:
+  - do:
+      indices.delete:
+        index: task_test
+        ignore: 404
+---
+"tasks":
+  - do:
+      update_by_query:
+        index: task_test
+        wait_for_completion: false
+        body: {}
+  - set: { task: task }
+
+  - do:
+      tasks.get: { task_id: $task }
+  - is_true: task
+
+  - do:
+      tasks.get: { task_id: 'node_id:123456' }
+      catch: resource_not_found_exception
+
+  - do:
+      tasks.list: {}
+  - is_true: nodes
+
+  - do:
+      tasks.cancel:
+        actions: "unknown_action"
+  - length: { nodes: 0 }

@@ -1,0 +1,4699 @@
+{
+ "source": "Elasticsearch 9.5.5 (_search on an index; printed form from an alias filter in _search_shards)",
+ "cases": [
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":true}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:49] Current token (VALUE_TRUE) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":true}}}}\"; line: 1, column: 49]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Current token (VALUE_TRUE) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":true}}}}\"; line: 1, column: 49]"
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":\"abc\"}}}",
+   "error": {
+    "type": "number_format_exception",
+    "reason": "For input string: \"abc\""
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":\"2\"}}}",
+   "expect": {
+    "term": {
+     "kw": {
+      "value": "x",
+      "boost": 2.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":{}}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:46] Current token (START_OBJECT) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":{}}}}}\"; line: 1, column: 46]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Current token (START_OBJECT) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":{}}}}}\"; line: 1, column: 46]"
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":[1]}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:46] Current token (START_ARRAY) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":[1]}}}}\"; line: 1, column: 46]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Current token (START_ARRAY) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":[1]}}}}\"; line: 1, column: 46]"
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":null}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:49] Current token (VALUE_NULL) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":null}}}}\"; line: 1, column: 49]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Current token (VALUE_NULL) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":null}}}}\"; line: 1, column: 49]"
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"case_insensitive\":\"yes\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Failed to parse value [yes] as only [true] or [false] are allowed."
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"case_insensitive\":\"true\"}}}",
+   "expect": {
+    "term": {
+     "kw": {
+      "value": "x",
+      "case_insensitive": true
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"case_insensitive\":1}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:57] Current token (VALUE_NUMBER_INT) not of boolean type\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"case_insensitive\":1}}}}\"; line: 1, column: 57]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Current token (VALUE_NUMBER_INT) not of boolean type\n at [Source: (byte[])\"{\"query\":{\"term\":{\"kw\":{\"value\":\"x\",\"case_insensitive\":1}}}}\"; line: 1, column: 57]"
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"_name\":5}}}",
+   "expect": {
+    "term": {
+     "kw": {
+      "value": "x",
+      "_name": "5"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"_name\":{}}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Expected text at 1:45 but found START_OBJECT"
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"_name\":null}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Expected text at 1:45 but found VALUE_NULL"
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"foo\":1}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] query does not support [foo]",
+    "line": 1,
+    "col": 43
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":[\"x\"]}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] query does not support arrays for value - use a bool query with multiple term clauses in the should section or use a Terms query if scoring is not required",
+    "line": 1,
+    "col": 33
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":[\"x\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] query does not support array of values",
+    "line": 1,
+    "col": 24
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":\"x\",\"kw2\":\"y\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] query doesn't support multiple fields, found [kw] and [kw2]",
+    "line": 1,
+    "col": 34
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\"},\"kw2\":{\"value\":\"y\"}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] query doesn't support multiple fields, found [kw] and [kw2]",
+    "line": 1,
+    "col": 44
+   }
+  },
+  {
+   "query": "{\"term\":{}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "field name is null or empty"
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":null}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "field name is null or empty"
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":null}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "value cannot be null"
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "value cannot be null"
+   }
+  },
+  {
+   "query": "{\"term\":{\"\":\"x\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "field name is null or empty"
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":{\"a\":1}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] query does not support [a]",
+    "line": 1,
+    "col": 38
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":1.5,\"boost\":2,\"_name\":\"n\",\"case_insensitive\":true}}}",
+   "expect": {
+    "term": {
+     "kw": {
+      "value": 1.5,
+      "case_insensitive": true,
+      "boost": 2.0,
+      "_name": "n"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"num\":12345678901234}}",
+   "expect": {
+    "term": {
+     "num": {
+      "value": 12345678901234
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"num\":1e2}}",
+   "expect": {
+    "term": {
+     "num": {
+      "value": 100.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"bool\":true}}",
+   "expect": {
+    "term": {
+     "bool": {
+      "value": true
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"term\":\"x\"}}}",
+   "expect": {
+    "term": {
+     "kw": {
+      "value": "x"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":\"x\"},\"match\":{}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] malformed query, expected [END_OBJECT] but found [FIELD_NAME]",
+    "line": 1,
+    "col": 29
+   }
+  },
+  {
+   "query": "{\"term\":\"x\"}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] query malformed, no start_object after query name",
+    "line": 1,
+    "col": 18
+   }
+  },
+  {
+   "query": "{\"term\":[]}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] query malformed, no start_object after query name",
+    "line": 1,
+    "col": 18
+   }
+  },
+  {
+   "query": "{}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "query malformed, empty clause found at [1:11]"
+   }
+  },
+  {
+   "query": "[]",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown key for a START_ARRAY in [query].",
+    "line": 1,
+    "col": 10
+   }
+  },
+  {
+   "query": "\"x\"",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown key for a VALUE_STRING in [query].",
+    "line": 1,
+    "col": 10
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":\"x\"},\"boost\":2}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[term] malformed query, expected [END_OBJECT] but found [FIELD_NAME]",
+    "line": 1,
+    "col": 29
+   }
+  },
+  {
+   "query": "{\"bool\":{\"must\":[{\"term\":{\"kw\":\"x\"}},{}]}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:48] [bool] failed to parse field [must]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "query malformed, empty clause found at [1:48]"
+    }
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":1e40}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":-1}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "negative [boost] are not allowed in [{\n  \"term\" : {\n    \"kw\" : {\n      \"value\" : \"x\"\n    }\n  }\n}], use a value between 0 and 1 to deboost"
+   }
+  },
+  {
+   "query": "{\"term\":{\"kw\":{\"value\":\"x\",\"boost\":1.1}}}",
+   "expect": {
+    "term": {
+     "kw": {
+      "value": "x",
+      "boost": 1.1
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"foo\":1}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:19] [bool] unknown field [foo]"
+   }
+  },
+  {
+   "query": "{\"bool\":{\"musst\":[]}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:19] [bool] unknown field [musst] did you mean any of [must, mustNot]?"
+   }
+  },
+  {
+   "query": "{\"bool\":{\"must\":{\"term\":{\"kw\":\"x\"}},\"boost\":\"x\"}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:54] [bool] failed to parse field [boost]",
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"x\""
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"must\":\"x\"}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:26] [bool] must doesn't support values of type: VALUE_STRING"
+   }
+  },
+  {
+   "query": "{\"bool\":{\"must\":[1]}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:28] [bool] failed to parse field [must]",
+    "caused_by": {
+     "type": "parsing_exception",
+     "reason": "[_na] query malformed, must start with start_object",
+     "line": 1,
+     "col": 28
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"must\":[{\"term\":{\"kw\":\"x\"}}],\"filter\":{\"term\":{\"kw\":\"x\"}},\"should\":[],\"must_not\":[],\"minimum_should_match\":1,\"adjust_pure_negative\":false,\"boost\":2,\"_name\":\"b\"}}",
+   "expect": {
+    "bool": {
+     "must": [
+      {
+       "term": {
+        "kw": {
+         "value": "x"
+        }
+       }
+      }
+     ],
+     "filter": [
+      {
+       "term": {
+        "kw": {
+         "value": "x"
+        }
+       }
+      }
+     ],
+     "adjust_pure_negative": false,
+     "minimum_should_match": "1",
+     "boost": 2.0,
+     "_name": "b"
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{}}",
+   "expect": {
+    "bool": {
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"minimum_should_match\":\"50%\"}}",
+   "expect": {
+    "bool": {
+     "minimum_should_match": "50%",
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"must\":[]}}",
+   "expect": {
+    "bool": {
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"should\":[{\"match_all\":{}}],\"minimum_should_match\":\"-1\"}}",
+   "expect": {
+    "bool": {
+     "should": [
+      {
+       "match_all": {
+        "boost": 1.0
+       }
+      }
+     ],
+     "minimum_should_match": "-1",
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"match_all\":{}}",
+   "expect": {
+    "match_all": {
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"match_all\":{\"boost\":2,\"_name\":\"x\"}}",
+   "expect": {
+    "match_all": {
+     "boost": 2.0,
+     "_name": "x"
+    }
+   }
+  },
+  {
+   "query": "{\"match_all\":{\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[1:24] [match_all] unknown field [foo]",
+    "line": 1,
+    "col": 30,
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:24] [match_all] unknown field [foo]"
+    }
+   }
+  },
+  {
+   "query": "{\"match_all\":{\"boost\":-1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[1:32] [match_all] failed to parse field [boost]",
+    "line": 1,
+    "col": 32,
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:32] [match_all] failed to parse field [boost]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "negative [boost] are not allowed in [{\n  \"match_all\" : {\n    \"boost\" : 1.0\n  }\n}], use a value between 0 and 1 to deboost"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match_none\":{}}",
+   "expect": {
+    "match_none": {
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"match_none\":{\"boost\":3}}",
+   "expect": {
+    "match_none": {
+     "boost": 3.0
+    }
+   }
+  },
+  {
+   "query": "{\"exists\":{\"field\":\"kw\"}}",
+   "expect": {
+    "exists": {
+     "field": "kw",
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"exists\":{}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[exists] must be provided with a [field]",
+    "line": 1,
+    "col": 21
+   }
+  },
+  {
+   "query": "{\"exists\":{\"field\":\"kw\",\"boost\":2,\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[exists] query does not support [foo]",
+    "line": 1,
+    "col": 50
+   }
+  },
+  {
+   "query": "{\"ids\":{\"values\":[\"1\",\"2\"]}}",
+   "expect": {
+    "ids": {
+     "values": [
+      "1",
+      "2"
+     ],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"ids\":{\"values\":\"1\"}}",
+   "expect": {
+    "ids": {
+     "values": [
+      "1"
+     ],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"ids\":{\"values\":[1,2]}}",
+   "expect": {
+    "ids": {
+     "values": [
+      "1",
+      "2"
+     ],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"ids\":{}}",
+   "expect": {
+    "ids": {
+     "values": [],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"ids\":{\"type\":\"x\",\"values\":[\"1\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[1:18] [ids] unknown field [type]",
+    "line": 1,
+    "col": 25,
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:18] [ids] unknown field [type]"
+    }
+   }
+  },
+  {
+   "query": "{\"constant_score\":{\"filter\":{\"term\":{\"kw\":\"x\"}}}}",
+   "expect": {
+    "constant_score": {
+     "filter": {
+      "term": {
+       "kw": {
+        "value": "x"
+       }
+      }
+     },
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"constant_score\":{\"filter\":{\"term\":{\"kw\":\"x\"}},\"boost\":2}}",
+   "expect": {
+    "constant_score": {
+     "filter": {
+      "term": {
+       "kw": {
+        "value": "x"
+       }
+      }
+     },
+     "boost": 2.0
+    }
+   }
+  },
+  {
+   "query": "{\"constant_score\":{}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[constant_score] requires a 'filter' element",
+    "line": 1,
+    "col": 29
+   }
+  },
+  {
+   "query": "{\"constant_score\":{\"query\":{\"term\":{\"kw\":\"x\"}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[constant_score] query does not support [query]",
+    "line": 1,
+    "col": 37
+   }
+  },
+  {
+   "query": "{\"constant_score\":{\"filter\":[{\"term\":{\"kw\":\"x\"}}]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "unexpected token [START_ARRAY]",
+    "line": 1,
+    "col": 38
+   }
+  },
+  {
+   "query": "{\"dis_max\":{\"queries\":[{\"term\":{\"kw\":\"x\"}},{\"term\":{\"kw\":\"y\"}}],\"tie_breaker\":0.5}}",
+   "expect": {
+    "dis_max": {
+     "tie_breaker": 0.5,
+     "queries": [
+      {
+       "term": {
+        "kw": {
+         "value": "x"
+        }
+       }
+      },
+      {
+       "term": {
+        "kw": {
+         "value": "y"
+        }
+       }
+      }
+     ],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"dis_max\":{\"queries\":[]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[_na] query malformed, must start with start_object",
+    "line": 1,
+    "col": 33
+   }
+  },
+  {
+   "query": "{\"dis_max\":{}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[dis_max] requires 'queries' field with at least one clause",
+    "line": 1,
+    "col": 22
+   }
+  },
+  {
+   "query": "{\"dis_max\":{\"queries\":{\"term\":{\"kw\":\"x\"}}}}",
+   "expect": {
+    "dis_max": {
+     "tie_breaker": 0.0,
+     "queries": [
+      {
+       "term": {
+        "kw": {
+         "value": "x"
+        }
+       }
+      }
+     ],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"boosting\":{\"positive\":{\"term\":{\"kw\":\"x\"}},\"negative\":{\"term\":{\"kw\":\"y\"}},\"negative_boost\":0.2}}",
+   "expect": {
+    "boosting": {
+     "positive": {
+      "term": {
+       "kw": {
+        "value": "x"
+       }
+      }
+     },
+     "negative": {
+      "term": {
+       "kw": {
+        "value": "y"
+       }
+      }
+     },
+     "negative_boost": 0.2,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"boosting\":{\"positive\":{\"term\":{\"kw\":\"x\"}},\"negative\":{\"term\":{\"kw\":\"y\"}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[boosting] query requires 'negative_boost' to be set to be a positive value'",
+    "line": 1,
+    "col": 84
+   }
+  },
+  {
+   "query": "{\"boosting\":{\"positive\":{\"term\":{\"kw\":\"x\"}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[boosting] query requires 'negative' query to be set'",
+    "line": 1,
+    "col": 53
+   }
+  },
+  {
+   "query": "{\"boosting\":{\"positive\":{\"term\":{\"kw\":\"x\"}},\"negative\":{\"term\":{\"kw\":\"y\"}},\"negative_boost\":-1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[boosting] query requires 'negative_boost' to be set to be a positive value'",
+    "line": 1,
+    "col": 104
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":\"hello\"}}",
+   "expect": {
+    "match": {
+     "t": {
+      "query": "hello"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"hello\",\"operator\":\"and\",\"analyzer\":\"standard\",\"fuzziness\":\"AUTO\",\"prefix_length\":1,\"max_expansions\":10,\"minimum_should_match\":\"2\",\"fuzzy_rewrite\":\"top_terms_5\",\"fuzzy_transpositions\":false,\"lenient\":true,\"zero_terms_query\":\"all\",\"auto_generate_synonyms_phrase_query\":false,\"boost\":2,\"_name\":\"m\"}}}",
+   "expect": {
+    "match": {
+     "t": {
+      "query": "hello",
+      "operator": "AND",
+      "analyzer": "standard",
+      "fuzziness": "AUTO",
+      "prefix_length": 1,
+      "max_expansions": 10,
+      "minimum_should_match": "2",
+      "fuzzy_rewrite": "top_terms_5",
+      "fuzzy_transpositions": false,
+      "lenient": true,
+      "zero_terms_query": "ALL",
+      "auto_generate_synonyms_phrase_query": false,
+      "boost": 2.0,
+      "_name": "m"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"fuzziness\":2}}}",
+   "expect": {
+    "match": {
+     "t": {
+      "query": "x",
+      "fuzziness": "2"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"fuzziness\":\"auto:2,5\"}}}",
+   "expect": {
+    "match": {
+     "t": {
+      "query": "x",
+      "fuzziness": "AUTO:2,5"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"fuzziness\":\"1.0\"}}}",
+   "expect": {
+    "match": {
+     "t": {
+      "query": "x",
+      "fuzziness": "1"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"fuzziness\":\"1.5\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "fuzziness needs to be one of 0.0, 1.0 or 2.0 but was 1.5"
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"fuzziness\":3}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Valid edit distances are [0, 1, 2] but was [3]"
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"fuzziness\":\"abc\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "fuzziness cannot be [abc].",
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"ABC\""
+    }
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"fuzziness\":\"AUTO:5,1\"}}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "fuzziness wrongly configured [AUTO:5,1]. Must be 0 < lower value <= higher value."
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"fuzziness\":\"AUTO:5\"}}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "failed to find low and high distance values"
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"fuzziness\":true}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Can't parse fuzziness on token: [VALUE_BOOLEAN]"
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"operator\":\"xor\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "No enum constant org.elasticsearch.index.query.Operator.XOR"
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"zero_terms_query\":\"some\"}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unsupported zero_terms_query value [some]",
+    "line": 1,
+    "col": 56
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"foo\":1}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[match] query does not support [foo]",
+    "line": 1,
+    "col": 43
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"analyzer\":{}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[match] unknown token [START_OBJECT] after [analyzer]",
+    "line": 1,
+    "col": 48
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"analyzer\":\"standard\"}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "No text specified for text query",
+    "line": 1,
+    "col": 47
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":null}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[match] unknown token [VALUE_NULL] after [query]",
+    "line": 1,
+    "col": 33
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":null}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "No text specified for text query",
+    "line": 1,
+    "col": 28
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":[\"a\",\"b\"]}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Expected text at 1:24 but found START_ARRAY"
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":123}}",
+   "expect": {
+    "match": {
+     "t": {
+      "query": 123
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":true}}",
+   "expect": {
+    "match": {
+     "t": {
+      "query": true
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"prefix_length\":-1}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[match] requires prefix length to be non-negative."
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"max_expansions\":0}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[match] requires maxExpansions to be positive."
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"type\":\"phrase\"}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[match] query does not support [type]",
+    "line": 1,
+    "col": 44
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"slop\":2}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[match] query does not support [slop]",
+    "line": 1,
+    "col": 44
+   }
+  },
+  {
+   "query": "{\"match\":{\"t\":{\"query\":\"x\",\"cutoff_frequency\":0.1}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[match] query does not support [cutoff_frequency]",
+    "line": 1,
+    "col": 56
+   }
+  },
+  {
+   "query": "{\"match\":{}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "No text specified for text query",
+    "line": 1,
+    "col": 20
+   }
+  },
+  {
+   "query": "{\"match_phrase\":{\"t\":\"hello world\"}}",
+   "expect": {
+    "match_phrase": {
+     "t": {
+      "query": "hello world"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match_phrase\":{\"t\":{\"query\":\"hello world\",\"slop\":2,\"analyzer\":\"standard\",\"zero_terms_query\":\"ALL\",\"boost\":3,\"_name\":\"p\"}}}",
+   "expect": {
+    "match_phrase": {
+     "t": {
+      "query": "hello world",
+      "analyzer": "standard",
+      "slop": 2,
+      "zero_terms_query": "ALL",
+      "boost": 3.0,
+      "_name": "p"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match_phrase\":{\"t\":{\"query\":\"x\",\"slop\":-1}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "No negative slop allowed."
+   }
+  },
+  {
+   "query": "{\"match_phrase_prefix\":{\"t\":{\"query\":\"hello wor\",\"max_expansions\":5,\"slop\":1,\"zero_terms_query\":\"all\"}}}",
+   "expect": {
+    "match_phrase_prefix": {
+     "t": {
+      "query": "hello wor",
+      "slop": 1,
+      "max_expansions": 5,
+      "zero_terms_query": "ALL"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match_phrase_prefix\":{\"t\":\"hel\"}}",
+   "expect": {
+    "match_phrase_prefix": {
+     "t": {
+      "query": "hel"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match_bool_prefix\":{\"t\":\"quick bro\"}}",
+   "expect": {
+    "match_bool_prefix": {
+     "t": {
+      "query": "quick bro"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"match_bool_prefix\":{\"t\":{\"query\":\"quick bro\",\"operator\":\"AND\",\"minimum_should_match\":\"1\",\"fuzziness\":\"auto\",\"prefix_length\":2,\"max_expansions\":3,\"fuzzy_transpositions\":false,\"fuzzy_rewrite\":\"constant_score\",\"analyzer\":\"simple\",\"boost\":2}}}",
+   "expect": {
+    "match_bool_prefix": {
+     "t": {
+      "query": "quick bro",
+      "analyzer": "simple",
+      "operator": "AND",
+      "minimum_should_match": "1",
+      "fuzziness": "AUTO",
+      "prefix_length": 2,
+      "max_expansions": 3,
+      "fuzzy_transpositions": false,
+      "fuzzy_rewrite": "constant_score",
+      "boost": 2.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\",\"t2^2\"]}}",
+   "expect": {
+    "multi_match": {
+     "query": "x",
+     "fields": [
+      "t^1.0",
+      "t2^2.0"
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\"}}",
+   "expect": {
+    "multi_match": {
+     "query": "x",
+     "fields": []
+    }
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":\"t\",\"type\":\"phrase\",\"slop\":2,\"tie_breaker\":0.3,\"operator\":\"and\",\"minimum_should_match\":\"1\",\"analyzer\":\"standard\",\"fuzziness\":\"AUTO\",\"prefix_length\":1,\"max_expansions\":4,\"lenient\":true,\"zero_terms_query\":\"all\",\"auto_generate_synonyms_phrase_query\":false,\"fuzzy_transpositions\":false,\"boost\":2,\"_name\":\"mm\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Fuzziness not allowed for type [phrase]",
+    "line": 1,
+    "col": 351
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"type\":\"cross_fields\"}}",
+   "expect": {
+    "multi_match": {
+     "query": "x",
+     "fields": [
+      "t^1.0"
+     ],
+     "type": "cross_fields"
+    }
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"type\":\"bool_prefix\"}}",
+   "expect": {
+    "multi_match": {
+     "query": "x",
+     "fields": [
+      "t^1.0"
+     ],
+     "type": "bool_prefix"
+    }
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"type\":\"most_fields\"}}",
+   "expect": {
+    "multi_match": {
+     "query": "x",
+     "fields": [
+      "t^1.0"
+     ],
+     "type": "most_fields"
+    }
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"type\":\"phrase_prefix\"}}",
+   "expect": {
+    "multi_match": {
+     "query": "x",
+     "fields": [
+      "t^1.0"
+     ],
+     "type": "phrase_prefix"
+    }
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"type\":\"foo\"}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "failed to parse [multi_match] query type [foo]. unknown type."
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"fields\":[\"t\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "No text specified for multi_match query",
+    "line": 1,
+    "col": 40
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"type\":\"bool_prefix\",\"slop\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[slop] not allowed for type [bool_prefix]",
+    "line": 1,
+    "col": 82
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"type\":\"phrase\",\"fuzziness\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Fuzziness not allowed for type [phrase]",
+    "line": 1,
+    "col": 82
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t^x\"]}}",
+   "error": {
+    "type": "number_format_exception",
+    "reason": "For input string: \"x\""
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\",\"t^3\",\"t2\"]}}",
+   "expect": {
+    "multi_match": {
+     "query": "x",
+     "fields": [
+      "t^3.0",
+      "t2^1.0"
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"*\"]}}",
+   "expect": {
+    "multi_match": {
+     "query": "x",
+     "fields": [
+      "*^1.0"
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"cutoff_frequency\":0.1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[multi_match] query does not support [cutoff_frequency]",
+    "line": 1,
+    "col": 72
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"use_dis_max\":true}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[multi_match] query does not support [use_dis_max]",
+    "line": 1,
+    "col": 67
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":\"x\",\"fields\":[\"t\"],\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[multi_match] query does not support [foo]",
+    "line": 1,
+    "col": 59
+   }
+  },
+  {
+   "query": "{\"multi_match\":{\"query\":[\"x\"],\"fields\":[\"t\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[multi_match] unknown token [START_ARRAY] after [query]",
+    "line": 1,
+    "col": 34
+   }
+  },
+  {
+   "query": "{\"combined_fields\":{\"query\":\"x\",\"fields\":[\"t\",\"t2^2\"]}}",
+   "expect": {
+    "combined_fields": {
+     "query": "x",
+     "fields": [
+      "t^1.0",
+      "t2^2.0"
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"combined_fields\":{\"query\":\"x\",\"fields\":[\"t\"],\"operator\":\"and\",\"minimum_should_match\":\"1\",\"zero_terms_query\":\"all\",\"auto_generate_synonyms_phrase_query\":false,\"boost\":2,\"_name\":\"c\"}}",
+   "expect": {
+    "combined_fields": {
+     "query": "x",
+     "fields": [
+      "t^1.0"
+     ],
+     "operator": "AND",
+     "minimum_should_match": "1",
+     "zero_terms_query": "ALL",
+     "auto_generate_synonyms_phrase_query": false,
+     "boost": 2.0,
+     "_name": "c"
+    }
+   }
+  },
+  {
+   "query": "{\"combined_fields\":{\"query\":\"x\"}}",
+   "parses": true
+  },
+  {
+   "query": "{\"combined_fields\":{\"fields\":[\"t\"]}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Required [query]"
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":\"a.*\"}}",
+   "expect": {
+    "regexp": {
+     "kw": {
+      "value": "a.*",
+      "flags_value": 65791,
+      "max_determinized_states": 10000,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":{\"value\":\"a.*\",\"flags\":\"ALL\"}}}",
+   "expect": {
+    "regexp": {
+     "kw": {
+      "value": "a.*",
+      "flags_value": 65791,
+      "max_determinized_states": 10000,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":{\"value\":\"a.*\",\"flags\":\"\"}}}",
+   "expect": {
+    "regexp": {
+     "kw": {
+      "value": "a.*",
+      "flags_value": 255,
+      "max_determinized_states": 10000,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":{\"value\":\"a.*\",\"flags\":\"INTERSECTION|EMPTY\"}}}",
+   "expect": {
+    "regexp": {
+     "kw": {
+      "value": "a.*",
+      "flags_value": 5,
+      "max_determinized_states": 10000,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":{\"value\":\"a.*\",\"flags\":\"NONE\"}}}",
+   "expect": {
+    "regexp": {
+     "kw": {
+      "value": "a.*",
+      "flags_value": 0,
+      "max_determinized_states": 10000,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":{\"value\":\"a.*\",\"flags\":\"COMPLEMENT\"}}}",
+   "expect": {
+    "regexp": {
+     "kw": {
+      "value": "a.*",
+      "flags_value": 65536,
+      "max_determinized_states": 10000,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":{\"value\":\"a.*\",\"flags\":\"foo\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Unknown regexp flag [foo]"
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":{\"value\":\"a.*\",\"flags_value\":3,\"max_determinized_states\":5,\"rewrite\":\"constant_score\",\"case_insensitive\":true,\"boost\":2,\"_name\":\"r\"}}}",
+   "expect": {
+    "regexp": {
+     "kw": {
+      "value": "a.*",
+      "flags_value": 3,
+      "case_insensitive": true,
+      "max_determinized_states": 5,
+      "rewrite": "constant_score",
+      "boost": 2.0,
+      "_name": "r"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":{\"value\":\"a.*\",\"flags_value\":-1}}}",
+   "expect": {
+    "regexp": {
+     "kw": {
+      "value": "a.*",
+      "flags_value": -1,
+      "max_determinized_states": 10000,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"regexp\":{\"kw\":{\"flags\":\"ALL\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "value cannot be null"
+   }
+  },
+  {
+   "query": "{\"prefix\":{\"kw\":\"ab\"}}",
+   "expect": {
+    "prefix": {
+     "kw": {
+      "value": "ab",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"prefix\":{\"kw\":{\"value\":\"ab\",\"rewrite\":\"top_terms_3\",\"case_insensitive\":true,\"boost\":2,\"_name\":\"p\"}}}",
+   "expect": {
+    "prefix": {
+     "kw": {
+      "value": "ab",
+      "rewrite": "top_terms_3",
+      "case_insensitive": true,
+      "boost": 2.0,
+      "_name": "p"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"prefix\":{\"kw\":{\"prefix\":\"ab\"}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[prefix] query does not support [prefix]",
+    "line": 1,
+    "col": 36
+   }
+  },
+  {
+   "query": "{\"prefix\":{\"kw\":{\"value\":null}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "value cannot be null"
+   }
+  },
+  {
+   "query": "{\"wildcard\":{\"kw\":\"a*\"}}",
+   "expect": {
+    "wildcard": {
+     "kw": {
+      "wildcard": "a*",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"wildcard\":{\"kw\":{\"wildcard\":\"a*\",\"rewrite\":\"scoring_boolean\",\"case_insensitive\":false,\"boost\":2}}}",
+   "expect": {
+    "wildcard": {
+     "kw": {
+      "wildcard": "a*",
+      "rewrite": "scoring_boolean",
+      "boost": 2.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"wildcard\":{\"kw\":{\"value\":\"a*\",\"foo\":1}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[wildcard] query does not support [foo]",
+    "line": 1,
+    "col": 48
+   }
+  },
+  {
+   "query": "{\"fuzzy\":{\"kw\":\"ab\"}}",
+   "expect": {
+    "fuzzy": {
+     "kw": {
+      "value": "ab",
+      "fuzziness": "AUTO",
+      "prefix_length": 0,
+      "max_expansions": 50,
+      "transpositions": true,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"fuzzy\":{\"kw\":{\"value\":\"ab\",\"fuzziness\":1,\"prefix_length\":1,\"max_expansions\":3,\"transpositions\":false,\"rewrite\":\"constant_score\",\"boost\":2,\"_name\":\"f\"}}}",
+   "expect": {
+    "fuzzy": {
+     "kw": {
+      "value": "ab",
+      "fuzziness": "1",
+      "prefix_length": 1,
+      "max_expansions": 3,
+      "transpositions": false,
+      "rewrite": "constant_score",
+      "boost": 2.0,
+      "_name": "f"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"fuzzy\":{\"kw\":{\"value\":\"ab\",\"foo\":[1]}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[fuzzy] unexpected token [START_ARRAY] after [foo]",
+    "line": 1,
+    "col": 45
+   }
+  },
+  {
+   "query": "{\"fuzzy\":{\"kw\":{\"value\":\"ab\",\"prefix_length\":-1}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"fuzzy\":{\"num\":5}}",
+   "parses": true
+  },
+  {
+   "query": "{\"terms\":{\"kw\":[\"a\",\"b\"]}}",
+   "expect": {
+    "terms": {
+     "kw": [
+      "a",
+      "b"
+     ],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":[\"a\",1,true,1.5]}}",
+   "expect": {
+    "terms": {
+     "kw": [
+      "a",
+      1,
+      true,
+      1.5
+     ],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":[\"a\",null]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "No value specified for terms query",
+    "line": 1,
+    "col": 30
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":[]}}",
+   "expect": {
+    "terms": {
+     "kw": [],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":[\"a\"],\"boost\":2,\"_name\":\"t\"}}",
+   "expect": {
+    "terms": {
+     "kw": [
+      "a"
+     ],
+     "boost": 2.0,
+     "_name": "t"
+    }
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":{\"index\":\"esm-q\",\"id\":\"1\",\"path\":\"kw\"}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"terms\":{\"kw\":{\"index\":\"esm-q\",\"id\":\"1\",\"path\":\"kw\",\"routing\":\"r\"}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"terms\":{\"kw\":{\"index\":\"esm-q\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Required [id, path]"
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":{\"index\":\"esm-q\",\"id\":\"1\",\"path\":\"kw\",\"foo\":1}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:63] [terms_lookup] unknown field [foo]"
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":\"a\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[terms] query does not support [kw]",
+    "line": 1,
+    "col": 25
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":[\"a\"],\"kw2\":[\"b\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[terms] query does not support multiple fields",
+    "line": 1,
+    "col": 37
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":[\"a\"],\"kw2\":{\"index\":\"x\",\"id\":\"1\",\"path\":\"p\"}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[terms] query does not support more than one field. Already got: [kw] but also found [kw2]",
+    "line": 1,
+    "col": 37
+   }
+  },
+  {
+   "query": "{\"terms\":{}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[terms] query requires a field name, followed by array of terms or a document lookup specification",
+    "line": 1,
+    "col": 20
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":[[\"a\"]]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[terms] unknown token [END_ARRAY] after [kw]",
+    "line": 1,
+    "col": 31
+   }
+  },
+  {
+   "query": "{\"terms\":{\"kw\":[{\"a\":1}]}}",
+   "expect": {
+    "terms": {
+     "kw": [
+      "{",
+      "a",
+      1,
+      "}"
+     ],
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"terms_set\":{\"kw\":{\"terms\":[\"a\",\"b\"],\"minimum_should_match_field\":\"num\"}}}",
+   "expect": {
+    "terms_set": {
+     "kw": {
+      "terms": [
+       "a",
+       "b"
+      ],
+      "minimum_should_match_field": "num",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"terms_set\":{\"kw\":{\"terms\":[\"a\",\"b\"],\"minimum_should_match_script\":{\"source\":\"2\"}}}}",
+   "expect": {
+    "terms_set": {
+     "kw": {
+      "terms": [
+       "a",
+       "b"
+      ],
+      "minimum_should_match_script": {
+       "source": "2",
+       "lang": "painless"
+      },
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"terms_set\":{\"kw\":{\"terms\":[\"a\",\"b\"],\"minimum_should_match\":\"1\"}}}",
+   "expect": {
+    "terms_set": {
+     "kw": {
+      "terms": [
+       "a",
+       "b"
+      ],
+      "minimum_should_match": "1",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"terms_set\":{\"kw\":{\"terms\":[\"a\"],\"minimum_should_match_field\":\"num\",\"minimum_should_match\":\"1\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "A field or script has already been specified. Cannot specify both a value and a script or field"
+   }
+  },
+  {
+   "query": "{\"terms_set\":{\"kw\":{\"terms\":[\"a\"]}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"terms_set\":{\"kw\":{\"terms\":[\"a\"],\"foo\":1}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[terms_set] query does not support [foo]",
+    "line": 1,
+    "col": 50
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":1,\"lt\":5}}}",
+   "expect": {
+    "range": {
+     "num": {
+      "gte": 1,
+      "lt": 5,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gt\":1,\"lte\":5,\"boost\":2,\"_name\":\"r\"}}}",
+   "expect": {
+    "range": {
+     "num": {
+      "gt": 1,
+      "lte": 5,
+      "boost": 2.0,
+      "_name": "r"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"date\":{\"gte\":\"now-1d/d\",\"lt\":\"now\",\"time_zone\":\"+01:00\",\"format\":\"strict_date_optional_time\",\"relation\":\"within\"}}}",
+   "expect": {
+    "range": {
+     "date": {
+      "gte": "now-1d/d",
+      "lt": "now",
+      "time_zone": "+01:00",
+      "format": "strict_date_optional_time",
+      "relation": "within",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"date\":{\"gte\":\"2020\",\"time_zone\":\"GMT+1\"}}}",
+   "expect": {
+    "range": {
+     "date": {
+      "gte": "2020",
+      "time_zone": "GMT+01:00",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"date\":{\"gte\":\"2020\",\"time_zone\":\"+0000\"}}}",
+   "expect": {
+    "range": {
+     "date": {
+      "gte": "2020",
+      "time_zone": "Z",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"date\":{\"gte\":\"2020\",\"format\":\"yyyy-MM-dd||epoch_millis\"}}}",
+   "expect": {
+    "range": {
+     "date": {
+      "gte": "2020",
+      "format": "yyyy-MM-dd||epoch_millis",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"date\":{\"gte\":\"2020\",\"format\":\"foo bar\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Invalid format: [foo bar]: Unknown pattern letter: f",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unknown pattern letter: f"
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"date\":{\"gte\":\"2020\",\"format\":\"\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "No date pattern provided"
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":1,\"relation\":\"disjoint\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[range] query does not support relation [disjoint]"
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":1,\"relation\":\"foo\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "foo is not a valid relation"
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":1,\"relation\":\"CONTAINS\"}}}",
+   "expect": {
+    "range": {
+     "num": {
+      "gte": 1,
+      "relation": "contains",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"from\":1,\"to\":5}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[range] query does not support [from]",
+    "line": 1,
+    "col": 34
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":1,\"include_lower\":false}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[range] query does not support [include_lower]",
+    "line": 1,
+    "col": 51
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":null,\"lte\":null}}}",
+   "expect": {
+    "range": {
+     "num": {
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{}}}",
+   "expect": {
+    "range": {
+     "num": {
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[range] query does not support [num]",
+    "line": 1,
+    "col": 26
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":1},\"int\":{\"gte\":1}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[range] query doesn't support multiple fields, found [num] and [int]",
+    "line": 1,
+    "col": 42
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":{\"a\":1}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[range] query does not support [a]",
+    "line": 1,
+    "col": 38
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":[1]}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"range\":{\"ip\":{\"gte\":\"10.0.0.0\",\"lte\":\"10.0.0.255\"}}}",
+   "expect": {
+    "range": {
+     "ip": {
+      "gte": "10.0.0.0",
+      "lte": "10.0.0.255",
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"range\":{\"num\":{\"gte\":1,\"gt\":2}}}",
+   "expect": {
+    "range": {
+     "num": {
+      "gt": 2,
+      "boost": 1.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"exists\":{\"field\":\"kw\",\"_name\":\"e\"}}",
+   "expect": {
+    "exists": {
+     "field": "kw",
+     "boost": 1.0,
+     "_name": "e"
+    }
+   }
+  },
+  {
+   "query": "{\"exists\":{\"field\":[\"kw\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[exists] unknown token [START_ARRAY] after [field]",
+    "line": 1,
+    "col": 29
+   }
+  },
+  {
+   "query": "{\"exists\":{\"field\":\"\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "field name is null or empty"
+   }
+  },
+  {
+   "query": "{\"ids\":{\"values\":[\"1\"],\"boost\":2,\"_name\":\"i\"}}",
+   "expect": {
+    "ids": {
+     "values": [
+      "1"
+     ],
+     "boost": 2.0,
+     "_name": "i"
+    }
+   }
+  },
+  {
+   "query": "{\"ids\":{\"values\":[null]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[1:28] [ids] failed to parse field [values]",
+    "line": 1,
+    "col": 28,
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:28] [ids] failed to parse field [values]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Expected text at 1:28 but found VALUE_NULL"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"ids\":{\"values\":[{\"a\":1}]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[1:28] [ids] failed to parse field [values]",
+    "line": 1,
+    "col": 28,
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:28] [ids] failed to parse field [values]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Expected text at 1:28 but found START_OBJECT"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"ids\":{\"values\":{\"a\":1}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[1:27] [ids] values doesn't support values of type: START_OBJECT",
+    "line": 1,
+    "col": 27,
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:27] [ids] values doesn't support values of type: START_OBJECT"
+    }
+   }
+  },
+  {
+   "query": "{\"script\":{\"script\":\"doc['num'].value > 1\"}}",
+   "expect": {
+    "script": {
+     "script": {
+      "source": "doc['num'].value > 1",
+      "lang": "painless"
+     },
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"source\":\"doc['num'].value > params.x\",\"params\":{\"x\":1},\"lang\":\"painless\"}}}",
+   "expect": {
+    "script": {
+     "script": {
+      "source": "doc['num'].value > params.x",
+      "lang": "painless",
+      "params": {
+       "x": 1
+      }
+     },
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"inline\":\"1 == 1\"}}}",
+   "expect": {
+    "script": {
+     "script": {
+      "source": "1 == 1",
+      "lang": "painless"
+     },
+     "boost": 1.0
+    }
+   },
+   "warnings": [
+    "[script][1:40] Deprecated field [inline] used, expected [source] instead"
+   ]
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"id\":\"foo\"}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"id\":\"foo\",\"source\":\"x\"}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:51] [script] failed to parse field [source]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "must only use one of [source, id] when specifying a script"
+    }
+   }
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"source\":\"1==1\",\"options\":{\"a\":\"b\"}}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "illegal compiler options [{a=b}] specified"
+   }
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"lang\":\"painless\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "must specify either [source] for an inline script or [id] for a stored script"
+   }
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"source\":{\"query\":{\"match\":{\"x\":\"{{y}}\"}}},\"lang\":\"mustache\"}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"source\":\"1==1\",\"foo\":1}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:47] [script] unknown field [foo]"
+   }
+  },
+  {
+   "query": "{\"script\":{\"script\":\"1==1\",\"boost\":2,\"_name\":\"s\"}}",
+   "expect": {
+    "script": {
+     "script": {
+      "source": "1==1",
+      "lang": "painless"
+     },
+     "boost": 2.0,
+     "_name": "s"
+    }
+   }
+  },
+  {
+   "query": "{\"script\":{}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "script must be provided with a [script] filter",
+    "line": 1,
+    "col": 21
+   }
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"id\":\"x\",\"lang\":\"painless\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "illegally specified <lang> for a stored script"
+   }
+  },
+  {
+   "query": "{\"script\":{\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[script] query does not support [foo]",
+    "line": 1,
+    "col": 27
+   }
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\",\"query\":{\"term\":{\"nest.k\":\"x\"}}}}",
+   "expect": {
+    "nested": {
+     "query": {
+      "term": {
+       "nest.k": {
+        "value": "x"
+       }
+      }
+     },
+     "path": "nest",
+     "ignore_unmapped": false,
+     "score_mode": "avg",
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\",\"query\":{\"term\":{\"nest.k\":\"x\"}},\"score_mode\":\"max\",\"ignore_unmapped\":true,\"boost\":2,\"_name\":\"n\"}}",
+   "expect": {
+    "nested": {
+     "query": {
+      "term": {
+       "nest.k": {
+        "value": "x"
+       }
+      }
+     },
+     "path": "nest",
+     "ignore_unmapped": true,
+     "score_mode": "max",
+     "boost": 2.0,
+     "_name": "n"
+    }
+   }
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\",\"query\":{\"term\":{\"nest.k\":\"x\"}},\"inner_hits\":{}}}",
+   "expect": {
+    "nested": {
+     "query": {
+      "term": {
+       "nest.k": {
+        "value": "x"
+       }
+      }
+     },
+     "path": "nest",
+     "ignore_unmapped": false,
+     "score_mode": "avg",
+     "boost": 1.0,
+     "inner_hits": {}
+    }
+   }
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\",\"query\":{\"term\":{\"nest.k\":\"x\"}},\"inner_hits\":{\"name\":\"ih\",\"size\":2,\"from\":1,\"sort\":[{\"nest.n\":\"desc\"}],\"_source\":false,\"explain\":true,\"version\":true,\"seq_no_primary_term\":true,\"track_scores\":true,\"stored_fields\":[\"a\"],\"docvalue_fields\":[\"nest.k\"],\"highlight\":{\"fields\":{\"nest.k\":{}}},\"fields\":[\"nest.k\"],\"script_fields\":{\"s\":{\"script\":\"1\"}}}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\",\"query\":{\"term\":{\"nest.k\":\"x\"}},\"score_mode\":\"foo\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "No score mode for child query [foo] found"
+   }
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[nested] requires 'query' field"
+   }
+  },
+  {
+   "query": "{\"nested\":{\"query\":{\"match_all\":{}}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[nested] requires 'path' field"
+   }
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\",\"query\":{\"match_all\":{}},\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[nested] query does not support [foo]",
+    "line": 1,
+    "col": 66
+   }
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\",\"query\":{\"match_all\":{}},\"inner_hits\":{\"foo\":1}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:74] [inner_hits] unknown field [foo]"
+   }
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\",\"query\":{\"match_all\":{}},\"score_mode\":\"none\"}}",
+   "expect": {
+    "nested": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "path": "nest",
+     "ignore_unmapped": false,
+     "score_mode": "none",
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"nested\":{\"path\":\"nest\",\"query\":{\"match_all\":{}},\"score_mode\":\"total\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "No score mode for child query [total] found"
+   }
+  },
+  {
+   "query": "{\"has_child\":{\"type\":\"answer\",\"query\":{\"match_all\":{}}}}",
+   "expect": {
+    "has_child": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "type": "answer"
+    }
+   }
+  },
+  {
+   "query": "{\"has_child\":{\"type\":\"answer\",\"query\":{\"match_all\":{}},\"score_mode\":\"sum\",\"min_children\":1,\"max_children\":5,\"ignore_unmapped\":true,\"inner_hits\":{},\"boost\":2,\"_name\":\"hc\"}}",
+   "expect": {
+    "has_child": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "type": "answer",
+     "score_mode": "sum",
+     "max_children": 5,
+     "ignore_unmapped": true,
+     "boost": 2.0,
+     "_name": "hc",
+     "inner_hits": {
+      "ignore_unmapped": true
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"has_child\":{\"type\":\"answer\",\"query\":{\"match_all\":{}},\"min_children\":5,\"max_children\":1}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[has_child] 'max_children' is less than 'min_children'"
+   }
+  },
+  {
+   "query": "{\"has_child\":{\"query\":{\"match_all\":{}}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[has_child] requires 'type' field"
+   }
+  },
+  {
+   "query": "{\"has_child\":{\"type\":\"answer\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[has_child] requires 'query' field"
+   }
+  },
+  {
+   "query": "{\"has_child\":{\"child_type\":\"answer\",\"query\":{\"match_all\":{}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[has_child] query does not support [child_type]",
+    "line": 1,
+    "col": 37
+   }
+  },
+  {
+   "query": "{\"has_parent\":{\"parent_type\":\"question\",\"query\":{\"match_all\":{}}}}",
+   "expect": {
+    "has_parent": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "parent_type": "question"
+    }
+   }
+  },
+  {
+   "query": "{\"has_parent\":{\"parent_type\":\"question\",\"query\":{\"match_all\":{}},\"score\":true,\"ignore_unmapped\":true,\"inner_hits\":{\"size\":1},\"boost\":2,\"_name\":\"hp\"}}",
+   "expect": {
+    "has_parent": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "parent_type": "question",
+     "score": true,
+     "ignore_unmapped": true,
+     "boost": 2.0,
+     "_name": "hp",
+     "inner_hits": {
+      "ignore_unmapped": true,
+      "size": 1
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"has_parent\":{\"type\":\"question\",\"query\":{\"match_all\":{}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[has_parent] query does not support [type]",
+    "line": 1,
+    "col": 32
+   }
+  },
+  {
+   "query": "{\"has_parent\":{\"parent_type\":\"question\",\"query\":{\"match_all\":{}},\"score_mode\":\"score\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[has_parent] query does not support [score_mode]",
+    "line": 1,
+    "col": 88
+   }
+  },
+  {
+   "query": "{\"parent_id\":{\"type\":\"answer\",\"id\":\"1\"}}",
+   "expect": {
+    "parent_id": {
+     "type": "answer",
+     "id": "1"
+    }
+   }
+  },
+  {
+   "query": "{\"parent_id\":{\"type\":\"answer\",\"id\":\"1\",\"ignore_unmapped\":true,\"boost\":2,\"_name\":\"p\"}}",
+   "expect": {
+    "parent_id": {
+     "type": "answer",
+     "id": "1",
+     "ignore_unmapped": true,
+     "boost": 2.0,
+     "_name": "p"
+    }
+   }
+  },
+  {
+   "query": "{\"parent_id\":{\"type\":\"answer\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[parent_id] requires 'id' field"
+   }
+  },
+  {
+   "query": "{\"parent_id\":{\"type\":\"answer\",\"id\":1}}",
+   "expect": {
+    "parent_id": {
+     "type": "answer",
+     "id": "1"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":{\"lat\":40,\"lon\":-70}}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      -70.0,
+      40.0
+     ],
+     "distance": 12000.0,
+     "distance_type": "arc",
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":[-70,40]}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      -70.0,
+      40.0
+     ],
+     "distance": 12000.0,
+     "distance_type": "arc",
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":\"40,-70\"}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      -70.0,
+      40.0
+     ],
+     "distance": 12000.0,
+     "distance_type": "arc",
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":\"drm3btev3e86\"}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      -71.34000029414892,
+      41.119999922811985
+     ],
+     "distance": 12000.0,
+     "distance_type": "arc",
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":\"POINT(-70 40)\"}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      -70.0,
+      40.0
+     ],
+     "distance": 12000.0,
+     "distance_type": "arc",
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":12,\"geo\":[-70,40],\"distance_type\":\"plane\",\"validation_method\":\"coerce\",\"ignore_unmapped\":true,\"boost\":2,\"_name\":\"g\"}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      -70.0,
+      40.0
+     ],
+     "distance": 12.0,
+     "distance_type": "plane",
+     "validation_method": "COERCE",
+     "ignore_unmapped": true,
+     "boost": 2.0,
+     "_name": "g"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"1mi\",\"geo\":[-70,40]}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      -70.0,
+      40.0
+     ],
+     "distance": 1609.344,
+     "distance_type": "arc",
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"geo\":[-70,40]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "geo_distance requires 'distance' to be specified",
+    "line": 1,
+    "col": 41
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":[-70,140]}}",
+   "parses": true
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":[-70,40],\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [geo_distance] query. unexpected field [foo]",
+    "line": 1,
+    "col": 66
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo.lat\":40,\"geo.lon\":-70}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      -70.0,
+      40.0
+     ],
+     "distance": 12000.0,
+     "distance_type": "arc",
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":[-70,40],\"distance_type\":\"foo\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "No geo distance for [foo]"
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"-1km\",\"geo\":[-70,40]}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "distance must be greater than zero"
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"abc\",\"geo\":[-70,40]}}",
+   "error": {
+    "type": "number_format_exception",
+    "reason": "For input string: \"abc\""
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":{\"lat\":41,\"lon\":-74},\"bottom_right\":{\"lat\":40,\"lon\":-71}}}}",
+   "expect": {
+    "geo_bounding_box": {
+     "geo": {
+      "top_left": [
+       -74.0,
+       41.0
+      ],
+      "bottom_right": [
+       -71.0,
+       40.0
+      ]
+     },
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":[-74,41],\"bottom_right\":[-71,40]},\"validation_method\":\"ignore_malformed\",\"ignore_unmapped\":true,\"boost\":2,\"_name\":\"b\"}}",
+   "expect": {
+    "geo_bounding_box": {
+     "geo": {
+      "top_left": [
+       -74.0,
+       41.0
+      ],
+      "bottom_right": [
+       -71.0,
+       40.0
+      ]
+     },
+     "validation_method": "IGNORE_MALFORMED",
+     "ignore_unmapped": true,
+     "boost": 2.0,
+     "_name": "b"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top\":41,\"left\":-74,\"bottom\":40,\"right\":-71}}}",
+   "expect": {
+    "geo_bounding_box": {
+     "geo": {
+      "top_left": [
+       -74.0,
+       41.0
+      ],
+      "bottom_right": [
+       -71.0,
+       40.0
+      ]
+     },
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"wkt\":\"BBOX (-74.1, -71.12, 40.73, 40.01)\"}}}",
+   "expect": {
+    "geo_bounding_box": {
+     "geo": {
+      "top_left": [
+       -74.1,
+       40.73
+      ],
+      "bottom_right": [
+       -71.12,
+       40.01
+      ]
+     },
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_right\":\"41,-71\",\"bottom_left\":\"40,-74\"}}}",
+   "expect": {
+    "geo_bounding_box": {
+     "geo": {
+      "top_left": [
+       -74.0,
+       41.0
+      ],
+      "bottom_right": [
+       -71.0,
+       40.0
+      ]
+     },
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":\"dr5r9ydj2y73\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "bottom latitude is invalid: NaN"
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":[-74,40],\"bottom_right\":[-71,41]}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "top is below bottom corner: 40.0 vs. 41.0"
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":[-74,41],\"bottom_right\":[-71,40]},\"type\":\"indexed\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [geo_bounding_box] query. unexpected field [type]",
+    "line": 1,
+    "col": 90
+   }
+  },
+  {
+   "query": "{\"geo_polygon\":{\"geo\":{\"points\":[[-70,40],[-80,30],[-90,20]]}}}",
+   "expect": {
+    "geo_polygon": {
+     "geo": {
+      "points": [
+       [
+        -70.0,
+        40.0
+       ],
+       [
+        -80.0,
+        30.0
+       ],
+       [
+        -90.0,
+        20.0
+       ],
+       [
+        -70.0,
+        40.0
+       ]
+      ]
+     },
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   },
+   "warnings": [
+    "Deprecated field [geo_polygon] used, replaced by [[geo_shape] query where polygons are defined in geojson or wkt]"
+   ]
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"envelope\",\"coordinates\":[[13,53],[14,52]]},\"relation\":\"within\"}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Envelope",
+       "coordinates": [
+        [
+         13.0,
+         53.0
+        ],
+        [
+         14.0,
+         52.0
+        ]
+       ]
+      },
+      "relation": "within"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[13,53]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Point",
+       "coordinates": [
+        13.0,
+        53.0
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":\"POINT (13 53)\"}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Point",
+       "coordinates": [
+        13.0,
+        53.0
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"indexed_shape\":{\"index\":\"esm-q\",\"id\":\"1\",\"path\":\"gs\"}}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"polygon\",\"coordinates\":[[[0,0],[1,0],[1,1],[0,0]]]}}},\"ignore_unmapped\":true,\"boost\":2,\"_name\":\"s\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[geo_shape] malformed query, expected [END_OBJECT] but found [FIELD_NAME]",
+    "line": 1,
+    "col": 101
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[13,53]}},\"geo\":{\"shape\":{\"type\":\"point\",\"coordinates\":[13,53]}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "point specified twice. [geo]",
+    "line": 1,
+    "col": 84
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"relation\":\"within\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "either shape or indexedShapeId is required"
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[13,53]},\"strategy\":\"recursive\"}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Point",
+       "coordinates": [
+        13.0,
+        53.0
+       ]
+      },
+      "relation": "intersects",
+      "strategy": "recursive"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"shape\":{\"sh\":{\"shape\":{\"type\":\"point\",\"coordinates\":[1,1]}}}}",
+   "expect": {
+    "shape": {
+     "sh": {
+      "shape": {
+       "type": "Point",
+       "coordinates": [
+        1.0,
+        1.0
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"shape\":{\"sh\":{\"shape\":\"POINT (1 1)\",\"relation\":\"disjoint\"}}}",
+   "expect": {
+    "shape": {
+     "sh": {
+      "shape": {
+       "type": "Point",
+       "coordinates": [
+        1.0,
+        1.0
+       ]
+      },
+      "relation": "disjoint"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_grid\":{\"geo\":{\"geohash\":\"u0\"}}}",
+   "expect": {
+    "geo_grid": {
+     "geo": {
+      "geohash": "u0"
+     },
+     "ignore_unmapped": false
+    }
+   }
+  },
+  {
+   "query": "{\"geo_grid\":{\"geo\":{\"geotile\":\"6/32/22\"}}}",
+   "expect": {
+    "geo_grid": {
+     "geo": {
+      "geotile": "6/32/22"
+     },
+     "ignore_unmapped": false
+    }
+   }
+  },
+  {
+   "query": "{\"geo_grid\":{\"geo\":{\"geohex\":\"811fbffffffffff\"}}}",
+   "expect": {
+    "geo_grid": {
+     "geo": {
+      "geohex": "811fbffffffffff"
+     },
+     "ignore_unmapped": false
+    }
+   }
+  },
+  {
+   "query": "{\"geo_grid\":{\"geo\":{\"geohash\":\"u0\"},\"boost\":2,\"_name\":\"x\"}}",
+   "expect": {
+    "geo_grid": {
+     "geo": {
+      "geohash": "u0"
+     },
+     "ignore_unmapped": false,
+     "boost": 2.0,
+     "_name": "x"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"linestring\",\"coordinates\":[[0,0],[1,1]]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "LineString",
+       "coordinates": [
+        [
+         0.0,
+         0.0
+        ],
+        [
+         1.0,
+         1.0
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"multipoint\",\"coordinates\":[[0,0],[1,1]]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "MultiPoint",
+       "coordinates": [
+        [
+         0.0,
+         0.0
+        ],
+        [
+         1.0,
+         1.0
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"MultiLineString\",\"coordinates\":[[[0,0],[1,1]],[[2,2],[3,3]]]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "MultiLineString",
+       "coordinates": [
+        [
+         [
+          0.0,
+          0.0
+         ],
+         [
+          1.0,
+          1.0
+         ]
+        ],
+        [
+         [
+          2.0,
+          2.0
+         ],
+         [
+          3.0,
+          3.0
+         ]
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"multipolygon\",\"coordinates\":[[[[0,0],[1,0],[1,1],[0,0]]],[[[2,2],[3,2],[3,3],[2,2]]]]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "MultiPolygon",
+       "coordinates": [
+        [
+         [
+          [
+           0.0,
+           0.0
+          ],
+          [
+           1.0,
+           0.0
+          ],
+          [
+           1.0,
+           1.0
+          ],
+          [
+           0.0,
+           0.0
+          ]
+         ]
+        ],
+        [
+         [
+          [
+           2.0,
+           2.0
+          ],
+          [
+           3.0,
+           2.0
+          ],
+          [
+           3.0,
+           3.0
+          ],
+          [
+           2.0,
+           2.0
+          ]
+         ]
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"polygon\",\"coordinates\":[[[0,0],[10,0],[10,10],[0,0]],[[1,1],[2,1],[2,2],[1,1]]]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Polygon",
+       "coordinates": [
+        [
+         [
+          0.0,
+          0.0
+         ],
+         [
+          10.0,
+          0.0
+         ],
+         [
+          10.0,
+          10.0
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        [
+         [
+          1.0,
+          1.0
+         ],
+         [
+          2.0,
+          1.0
+         ],
+         [
+          2.0,
+          2.0
+         ],
+         [
+          1.0,
+          1.0
+         ]
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"geometrycollection\",\"geometries\":[{\"type\":\"point\",\"coordinates\":[1,1]},{\"type\":\"linestring\",\"coordinates\":[[0,0],[1,1]]}]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "GeometryCollection",
+       "geometries": [
+        {
+         "type": "Point",
+         "coordinates": [
+          1.0,
+          1.0
+         ]
+        },
+        {
+         "type": "LineString",
+         "coordinates": [
+          [
+           0.0,
+           0.0
+          ],
+          [
+           1.0,
+           1.0
+          ]
+         ]
+        }
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"circle\",\"coordinates\":[1,1],\"radius\":\"100m\"}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Circle",
+       "radius": "100.0m",
+       "coordinates": [
+        1.0,
+        1.0
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[1,1,5]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Point",
+       "coordinates": [
+        1.0,
+        1.0,
+        5.0
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":\"LINESTRING (0 0, 1 1)\"}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "LineString",
+       "coordinates": [
+        [
+         0.0,
+         0.0
+        ],
+        [
+         1.0,
+         1.0
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":\"BBOX (0, 1, 1, 0)\"}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Envelope",
+       "coordinates": [
+        [
+         0.0,
+         1.0
+        ],
+        [
+         1.0,
+         0.0
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":\"MULTIPOINT ((0 0), (1 1))\"}}}",
+   "error": {
+    "type": "i_o_exception",
+    "reason": "java.text.ParseException: expected number but found: '('",
+    "caused_by": {
+     "type": "parse_exception",
+     "reason": "expected number but found: '('"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":\"MULTIPOINT (0 0, 1 1)\"}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "MultiPoint",
+       "coordinates": [
+        [
+         0.0,
+         0.0
+        ],
+        [
+         1.0,
+         1.0
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":\"POLYGON ((0 0, 1 0, 1 1, 0 0))\"}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Polygon",
+       "coordinates": [
+        [
+         [
+          0.0,
+          0.0
+         ],
+         [
+          1.0,
+          0.0
+         ],
+         [
+          1.0,
+          1.0
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":\"GEOMETRYCOLLECTION (POINT (1 1), LINESTRING (0 0, 1 1))\"}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "GeometryCollection",
+       "geometries": [
+        {
+         "type": "Point",
+         "coordinates": [
+          1.0,
+          1.0
+         ]
+        },
+        {
+         "type": "LineString",
+         "coordinates": [
+          [
+           0.0,
+           0.0
+          ],
+          [
+           1.0,
+           1.0
+          ]
+         ]
+        }
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":\"POINT EMPTY\"}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Point",
+       "coordinates": [
+        0.0,
+        0.0
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\"}}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "Failed to build [geojson] after last required field arrived",
+    "caused_by": {
+     "type": "parse_exception",
+     "reason": "coordinates not included"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"foo\",\"coordinates\":[1,1]}}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "Failed to build [geojson] after last required field arrived",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No enum constant org.elasticsearch.geometry.ShapeType.FOO"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"coordinates\":[1,1]}}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Required [type]"
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"polygon\",\"coordinates\":[[[0,0],[1,0],[1,1]]]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Polygon",
+       "coordinates": [
+        [
+         [
+          0.0,
+          0.0
+         ],
+         [
+          1.0,
+          0.0
+         ],
+         [
+          1.0,
+          1.0
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ]
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[1,1]},\"relation\":\"foo\"}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown shape operation [foo ]",
+    "line": 1,
+    "col": 86
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":\"FOO (1 1)\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Unknown geometry type: foo"
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[1,1]},\"foo\":1}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "query does not support [foo]",
+    "line": 1,
+    "col": 81
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[1,1]}},\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "query does not support [foo]",
+    "line": 1,
+    "col": 82
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[1,1],\"foo\":2}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Point",
+       "coordinates": [
+        1.0,
+        1.0
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"envelope\",\"coordinates\":[[1,0],[0,1]]}}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "Failed to build [geojson] after last required field arrived",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "max y cannot be less than min y"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[1.5e2,95]}}}}",
+   "expect": {
+    "geo_shape": {
+     "gs": {
+      "shape": {
+       "type": "Point",
+       "coordinates": [
+        150.0,
+        95.0
+       ]
+      },
+      "relation": "intersects"
+     },
+     "ignore_unmapped": false,
+     "boost": 0.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"linestring\",\"coordinates\":[[0,0]]}}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "Failed to build [geojson] after last required field arrived",
+    "caused_by": {
+     "type": "exception",
+     "reason": "not enough points to build a line"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_shape\":{\"gs\":{\"shape\":{\"type\":\"point\",\"coordinates\":[\"1\",\"2\"]}}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:69] [geojson] failed to parse field [coordinates]",
+    "caused_by": {
+     "type": "parse_exception",
+     "reason": "geo coordinates must be numbers"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":{\"lat\":40}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":{\"lat\":\"x\",\"lon\":1}}}",
+   "error": {
+    "type": "number_format_exception",
+    "reason": "For input string: \"x\""
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":\"abc\"}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "unsupported symbol [a] in geohash [abc]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unsupported symbol [a] in geohash [abc]"
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":\"1,2,3\"}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":[1]}}",
+   "parses": true
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":[1,2,3]}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":[1,2,3,4]}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":[\"a\",2]}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "numeric value expected"
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"geo\":{\"lat\":1,\"lon\":2,\"z\":3}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[geo_distance] query does not support [geo]",
+    "line": 1,
+    "col": 72
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12km\",\"unit\":\"mi\",\"geo\":[1,2]}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      1.0,
+      2.0
+     ],
+     "distance": 12000.0,
+     "distance_type": "arc",
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12nmi\",\"geo\":[1,2]}}",
+   "expect": {
+    "geo_distance": {
+     "geo": [
+      1.0,
+      2.0
+     ],
+     "distance": 22224.0,
+     "distance_type": "arc",
+     "validation_method": "STRICT",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"geo_distance\":{\"distance\":\"12xx\",\"geo\":[1,2]}}",
+   "error": {
+    "type": "number_format_exception",
+    "reason": "For input string: \"12xx\""
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":[-74,41]}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "bottom latitude is invalid: NaN"
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":[-74,41],\"bottom_right\":[-71,40],\"foo\":1}}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "failed to parse [geo_bounding_box] query. [failed to parse bounding box. unexpected field [foo]]"
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":[-74,41],\"bottom_right\":[-71,40]},\"validation_method\":\"foo\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "operator needs to be either [COERCE, IGNORE_MALFORMED, STRICT], but not [foo]"
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":[-74,41],\"bottom_right\":[-71,40]},\"geo2\":{}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "top latitude is invalid: NaN"
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"wkt\":\"POINT (1 1)\"}}}",
+   "error": {
+    "type": "parse_exception",
+    "reason": "failed to parse [geo_bounding_box] query. [failed to parse WKT bounding box. [POINT] found. expected [ENVELOPE]]"
+   }
+  },
+  {
+   "query": "{\"geo_bounding_box\":{\"geo\":{\"top_left\":\"41,-74\",\"bottom_right\":\"40,-71\",\"top\":3}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "top is below bottom corner: 3.0 vs. 40.0"
+   }
+  },
+  {
+   "query": "{\"geo_polygon\":{\"geo\":{\"points\":[[-70,40],[-80,30]]}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "too few points defined for geo_polygon query"
+   },
+   "warnings": [
+    "Deprecated field [geo_polygon] used, replaced by [[geo_shape] query where polygons are defined in geojson or wkt]"
+   ]
+  },
+  {
+   "query": "{\"geo_polygon\":{\"geo\":{\"points\":[\"40,-70\",\"30,-80\",\"20,-90\"]},\"validation_method\":\"COERCE\"}}",
+   "expect": {
+    "geo_polygon": {
+     "geo": {
+      "points": [
+       [
+        -70.0,
+        40.0
+       ],
+       [
+        -80.0,
+        30.0
+       ],
+       [
+        -90.0,
+        20.0
+       ],
+       [
+        -70.0,
+        40.0
+       ]
+      ]
+     },
+     "validation_method": "COERCE",
+     "ignore_unmapped": false,
+     "boost": 1.0
+    }
+   },
+   "warnings": [
+    "Deprecated field [geo_polygon] used, replaced by [[geo_shape] query where polygons are defined in geojson or wkt]"
+   ]
+  },
+  {
+   "query": "{\"span_term\":{\"t\":\"x\"}}",
+   "expect": {
+    "span_term": {
+     "t": {
+      "value": "x"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"span_term\":{\"t\":{\"value\":\"x\",\"boost\":2,\"_name\":\"s\"}}}",
+   "expect": {
+    "span_term": {
+     "t": {
+      "value": "x",
+      "boost": 2.0,
+      "_name": "s"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"span_term\":{\"t\":{\"term\":\"x\"}}}",
+   "expect": {
+    "span_term": {
+     "t": {
+      "value": "x"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"span_multi\":{\"match\":{\"prefix\":{\"t\":\"x\"}}}}",
+   "expect": {
+    "span_multi": {
+     "match": {
+      "prefix": {
+       "t": {
+        "value": "x",
+        "boost": 1.0
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"span_multi\":{\"match\":{\"term\":{\"t\":\"x\"}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[span_multi] [match] must be of type multi term query",
+    "line": 1,
+    "col": 50
+   }
+  },
+  {
+   "query": "{\"span_multi\":{\"match\":{\"wildcard\":{\"t\":\"x*\"}},\"boost\":2}}",
+   "expect": {
+    "span_multi": {
+     "match": {
+      "wildcard": {
+       "t": {
+        "wildcard": "x*",
+        "boost": 1.0
+       }
+      }
+     },
+     "boost": 2.0
+    }
+   }
+  },
+  {
+   "query": "{\"span_first\":{\"match\":{\"span_term\":{\"t\":\"x\"}},\"end\":3}}",
+   "expect": {
+    "span_first": {
+     "match": {
+      "span_term": {
+       "t": {
+        "value": "x"
+       }
+      }
+     },
+     "end": 3
+    }
+   }
+  },
+  {
+   "query": "{\"span_first\":{\"match\":{\"span_term\":{\"t\":\"x\"}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "span_first must have [end] set for it",
+    "line": 1,
+    "col": 56
+   }
+  },
+  {
+   "query": "{\"span_near\":{\"clauses\":[{\"span_term\":{\"t\":\"x\"}},{\"span_term\":{\"t\":\"y\"}}],\"slop\":1,\"in_order\":false}}",
+   "expect": {
+    "span_near": {
+     "clauses": [
+      {
+       "span_term": {
+        "t": {
+         "value": "x"
+        }
+       }
+      },
+      {
+       "span_term": {
+        "t": {
+         "value": "y"
+        }
+       }
+      }
+     ],
+     "slop": 1,
+     "in_order": false
+    }
+   }
+  },
+  {
+   "query": "{\"span_near\":{\"clauses\":[{\"span_term\":{\"t\":\"x\"}}]}}",
+   "expect": {
+    "span_near": {
+     "clauses": [
+      {
+       "span_term": {
+        "t": {
+         "value": "x"
+        }
+       }
+      }
+     ],
+     "slop": 0,
+     "in_order": true
+    }
+   }
+  },
+  {
+   "query": "{\"span_near\":{\"clauses\":[{\"span_term\":{\"t\":\"x\"}}],\"collect_payloads\":false}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[span_near] query does not support [collect_payloads]",
+    "line": 1,
+    "col": 79
+   }
+  },
+  {
+   "query": "{\"span_near\":{\"clauses\":[{\"span_term\":{\"t\":\"x\"}},{\"span_term\":{\"t2\":\"y\"}}],\"slop\":0}}",
+   "parses": true
+  },
+  {
+   "query": "{\"span_or\":{\"clauses\":[{\"span_term\":{\"t\":\"x\"}},{\"span_term\":{\"t\":\"y\"}}]}}",
+   "expect": {
+    "span_or": {
+     "clauses": [
+      {
+       "span_term": {
+        "t": {
+         "value": "x"
+        }
+       }
+      },
+      {
+       "span_term": {
+        "t": {
+         "value": "y"
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"span_or\":{\"clauses\":[]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "span_or must include [clauses]",
+    "line": 1,
+    "col": 34
+   }
+  },
+  {
+   "query": "{\"span_not\":{\"include\":{\"span_term\":{\"t\":\"x\"}},\"exclude\":{\"span_term\":{\"t\":\"y\"}}}}",
+   "expect": {
+    "span_not": {
+     "include": {
+      "span_term": {
+       "t": {
+        "value": "x"
+       }
+      }
+     },
+     "exclude": {
+      "span_term": {
+       "t": {
+        "value": "y"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"span_not\":{\"include\":{\"span_term\":{\"t\":\"x\"}},\"exclude\":{\"span_term\":{\"t\":\"y\"}},\"pre\":1,\"post\":2}}",
+   "expect": {
+    "span_not": {
+     "include": {
+      "span_term": {
+       "t": {
+        "value": "x"
+       }
+      }
+     },
+     "exclude": {
+      "span_term": {
+       "t": {
+        "value": "y"
+       }
+      }
+     },
+     "pre": 1,
+     "post": 2
+    }
+   }
+  },
+  {
+   "query": "{\"span_not\":{\"include\":{\"span_term\":{\"t\":\"x\"}},\"exclude\":{\"span_term\":{\"t\":\"y\"}},\"dist\":1}}",
+   "expect": {
+    "span_not": {
+     "include": {
+      "span_term": {
+       "t": {
+        "value": "x"
+       }
+      }
+     },
+     "exclude": {
+      "span_term": {
+       "t": {
+        "value": "y"
+       }
+      }
+     },
+     "pre": 1,
+     "post": 1
+    }
+   }
+  },
+  {
+   "query": "{\"span_not\":{\"include\":{\"span_term\":{\"t\":\"x\"}},\"exclude\":{\"span_term\":{\"t\":\"y\"}},\"dist\":1,\"pre\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "span_not can either use [dist] or [pre] & [post] (or none)",
+    "line": 1,
+    "col": 107
+   }
+  },
+  {
+   "query": "{\"span_containing\":{\"big\":{\"span_term\":{\"t\":\"x\"}},\"little\":{\"span_term\":{\"t\":\"y\"}}}}",
+   "expect": {
+    "span_containing": {
+     "big": {
+      "span_term": {
+       "t": {
+        "value": "x"
+       }
+      }
+     },
+     "little": {
+      "span_term": {
+       "t": {
+        "value": "y"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"span_within\":{\"big\":{\"span_term\":{\"t\":\"x\"}},\"little\":{\"span_term\":{\"t\":\"y\"}}}}",
+   "expect": {
+    "span_within": {
+     "big": {
+      "span_term": {
+       "t": {
+        "value": "x"
+       }
+      }
+     },
+     "little": {
+      "span_term": {
+       "t": {
+        "value": "y"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"span_field_masking\":{\"query\":{\"span_term\":{\"t\":\"x\"}},\"field\":\"t2\"}}",
+   "expect": {
+    "span_field_masking": {
+     "query": {
+      "span_term": {
+       "t": {
+        "value": "x"
+       }
+      }
+     },
+     "field": "t2"
+    }
+   }
+  },
+  {
+   "query": "{\"field_masking_span\":{\"query\":{\"span_term\":{\"t\":\"x\"}},\"field\":\"t2\"}}",
+   "expect": {
+    "span_field_masking": {
+     "query": {
+      "span_term": {
+       "t": {
+        "value": "x"
+       }
+      }
+     },
+     "field": "t2"
+    }
+   },
+   "warnings": [
+    "Deprecated field [field_masking_span] used, expected [span_field_masking] instead"
+   ]
+  },
+  {
+   "query": "{\"span_near\":{\"clauses\":[{\"term\":{\"t\":\"x\"}}]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "span_near [clauses] must be of type span query",
+    "line": 1,
+    "col": 52
+   }
+  },
+  {
+   "query": "{\"span_first\":{\"match\":{\"term\":{\"t\":\"x\"}},\"end\":3}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "span_first [match] must be of type span query",
+    "line": 1,
+    "col": 50
+   }
+  },
+  {
+   "query": "{\"span_term\":{\"t\":[\"x\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[span_term] query doesn't support multiple fields, found [t] and [null]",
+    "line": 1,
+    "col": 29
+   }
+  },
+  {
+   "query": "{\"more_like_this\":{\"fields\":[\"t\"],\"like\":\"some text\"}}",
+   "expect": {
+    "more_like_this": {
+     "fields": [
+      "t"
+     ],
+     "like": [
+      "some text"
+     ],
+     "max_query_terms": 25,
+     "min_term_freq": 2,
+     "min_doc_freq": 5,
+     "max_doc_freq": 2147483647,
+     "min_word_length": 0,
+     "max_word_length": 0,
+     "minimum_should_match": "30%",
+     "boost_terms": 0.0,
+     "include": false,
+     "fail_on_unsupported_field": true,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"more_like_this\":{\"like\":[\"text\",{\"_index\":\"esm-q\",\"_id\":\"1\"}],\"unlike\":\"x\",\"min_term_freq\":1,\"max_query_terms\":12,\"min_doc_freq\":2,\"max_doc_freq\":100,\"min_word_length\":1,\"max_word_length\":10,\"stop_words\":[\"a\"],\"analyzer\":\"standard\",\"minimum_should_match\":\"30%\",\"boost_terms\":1.5,\"include\":true,\"fail_on_unsupported_field\":false,\"boost\":2,\"_name\":\"m\"}}",
+   "parses": true
+  },
+  {
+   "query": "{\"more_like_this\":{\"like\":[{\"doc\":{\"t\":\"x\"}}]}}",
+   "expect": {
+    "more_like_this": {
+     "like": [
+      {
+       "doc": {
+        "t": "x"
+       }
+      }
+     ],
+     "max_query_terms": 25,
+     "min_term_freq": 2,
+     "min_doc_freq": 5,
+     "max_doc_freq": 2147483647,
+     "min_word_length": 0,
+     "max_word_length": 0,
+     "minimum_should_match": "30%",
+     "boost_terms": 0.0,
+     "include": false,
+     "fail_on_unsupported_field": true,
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"more_like_this\":{\"fields\":[\"t\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "more_like_this requires 'like' to be specified",
+    "line": 1,
+    "col": 43
+   }
+  },
+  {
+   "query": "{\"more_like_this\":{\"like\":\"x\",\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[mlt] query does not support [foo]",
+    "line": 1,
+    "col": 46
+   }
+  },
+  {
+   "query": "{\"more_like_this\":{\"like\":\"x\",\"ids\":[\"1\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[mlt] query does not support [ids]",
+    "line": 1,
+    "col": 46
+   }
+  },
+  {
+   "query": "{\"wrapper\":{\"query\":\"eyJ0ZXJtIjp7Imt3IjoieCJ9fQ==\"}}",
+   "expect": {
+    "wrapper": {
+     "query": "eyJ0ZXJtIjp7Imt3IjoieCJ9fQ=="
+    }
+   }
+  },
+  {
+   "query": "{\"wrapper\":{\"query\":\"notbase64!\"}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:41] Failed to decode VALUE_STRING as base64 (MIME-NO-LINEFEEDS): Illegal character '!' (code 0x21) in base64 content\n at [Source: (byte[])\"{\"query\":{\"wrapper\":{\"query\":\"notbase64!\"}}}\"; line: 1, column: 41]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Failed to decode VALUE_STRING as base64 (MIME-NO-LINEFEEDS): Illegal character '!' (code 0x21) in base64 content\n at [Source: (byte[])\"{\"query\":{\"wrapper\":{\"query\":\"notbase64!\"}}}\"; line: 1, column: 41]"
+    }
+   }
+  },
+  {
+   "query": "{\"wrapper\":{}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[wrapper] query malformed",
+    "line": 1,
+    "col": 22
+   }
+  },
+  {
+   "query": "{\"distance_feature\":{\"field\":\"date\",\"origin\":\"now\",\"pivot\":\"7d\"}}",
+   "expect": {
+    "distance_feature": {
+     "field": "date",
+     "origin": "now",
+     "pivot": "7d",
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"distance_feature\":{\"field\":\"geo\",\"origin\":[1,2],\"pivot\":\"1km\",\"boost\":2,\"_name\":\"d\"}}",
+   "expect": {
+    "distance_feature": {
+     "field": "geo",
+     "origin": {
+      "lat": 2.0,
+      "lon": 1.0
+     },
+     "pivot": "1km",
+     "boost": 2.0,
+     "_name": "d"
+    }
+   }
+  },
+  {
+   "query": "{\"distance_feature\":{\"field\":\"date\",\"origin\":\"now\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Required [pivot]"
+   }
+  },
+  {
+   "query": "{\"rank_feature\":{\"field\":\"feat\"}}",
+   "expect": {
+    "rank_feature": {
+     "field": "feat"
+    }
+   }
+  },
+  {
+   "query": "{\"rank_feature\":{\"field\":\"feat\",\"saturation\":{\"pivot\":2}}}",
+   "expect": {
+    "rank_feature": {
+     "field": "feat",
+     "saturation": {
+      "pivot": 2.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"rank_feature\":{\"field\":\"feat\",\"log\":{\"scaling_factor\":2}}}",
+   "expect": {
+    "rank_feature": {
+     "field": "feat",
+     "log": {
+      "scaling_factor": 2.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"rank_feature\":{\"field\":\"feat\",\"sigmoid\":{\"pivot\":2,\"exponent\":0.5}}}",
+   "expect": {
+    "rank_feature": {
+     "field": "feat",
+     "sigmoid": {
+      "pivot": 2.0,
+      "exponent": 0.5
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"rank_feature\":{\"field\":\"feat\",\"linear\":{}}}",
+   "expect": {
+    "rank_feature": {
+     "field": "feat",
+     "linear": {}
+    }
+   }
+  },
+  {
+   "query": "{\"rank_feature\":{\"field\":\"feat\",\"saturation\":{}}}",
+   "expect": {
+    "rank_feature": {
+     "field": "feat"
+    }
+   }
+  },
+  {
+   "query": "{\"rank_feature\":{\"field\":\"feat\",\"log\":{\"scaling_factor\":2},\"linear\":{}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "Failed to build [feature] after last required field arrived",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Can only specify one of [log], [saturation], [sigmoid] and [linear]"
+    }
+   }
+  },
+  {
+   "query": "{\"pinned\":{\"ids\":[\"1\",\"2\"],\"organic\":{\"match_all\":{}}}}",
+   "expect": {
+    "pinned": {
+     "organic": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "ids": [
+      "1",
+      "2"
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"pinned\":{\"docs\":[{\"_index\":\"esm-q\",\"_id\":\"1\"}],\"organic\":{\"match_all\":{}}}}",
+   "expect": {
+    "pinned": {
+     "organic": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "docs": [
+      {
+       "_index": "esm-q",
+       "_id": "1"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"pinned\":{\"ids\":[\"1\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Required [organic]",
+    "line": 1,
+    "col": 32,
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Required [organic]"
+    }
+   }
+  },
+  {
+   "query": "{\"pinned\":{\"ids\":[\"1\"],\"docs\":[{\"_id\":\"1\"}],\"organic\":{\"match_all\":{}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[1:79] [pinned] failed to parse field [organic]",
+    "line": 1,
+    "col": 79,
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:79] [pinned] failed to parse field [organic]",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "Failed to build [pinned] after last required field arrived",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "[pinned] ids and docs cannot both be used"
+      }
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector\":[1,2,3]}}",
+   "parses": true
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector\":[1,2,3],\"num_candidates\":10,\"k\":5,\"similarity\":0.5,\"filter\":{\"term\":{\"kw\":\"x\"}},\"boost\":2,\"_name\":\"k\"}}",
+   "expect": {
+    "knn": {
+     "field": "vec",
+     "query_vector": [
+      1.0,
+      2.0,
+      3.0
+     ],
+     "k": 5,
+     "num_candidates": 10,
+     "similarity": 0.5,
+     "filter": [
+      {
+       "term": {
+        "kw": {
+         "value": "x"
+        }
+       }
+      }
+     ],
+     "boost": 2.0,
+     "_name": "k"
+    }
+   }
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector_builder\":{\"text_embedding\":{\"model_id\":\"x\",\"model_text\":\"y\"}}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\"}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "Failed to build [knn] after last required field arrived",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "either [query_vector] or [query_vector_builder] must be provided"
+    }
+   }
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector\":[1,2,3],\"num_candidates\":1,\"k\":5}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "Failed to build [knn] after last required field arrived",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[num_candidates] cannot be less than [k]"
+    }
+   }
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector\":\"aabbcc\"}}",
+   "parses": true
+  },
+  {
+   "query": "{\"percolate\":{\"field\":\"perc\",\"document\":{\"t\":\"x\"}}}",
+   "expect": {
+    "percolate": {
+     "field": "perc",
+     "documents": [
+      {
+       "t": "x"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"percolate\":{\"field\":\"perc\",\"documents\":[{\"t\":\"x\"}],\"name\":\"p\"}}",
+   "expect": {
+    "percolate": {
+     "field": "perc",
+     "name": "p",
+     "documents": [
+      {
+       "t": "x"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"percolate\":{\"field\":\"perc\",\"index\":\"esm-q\",\"id\":\"1\"}}",
+   "parses": true
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector\":[1,2,3],\"k\":2}}",
+   "expect": {
+    "knn": {
+     "field": "vec",
+     "query_vector": [
+      1.0,
+      2.0,
+      3.0
+     ],
+     "k": 2
+    }
+   }
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector\":[1.5,2,3],\"k\":2,\"rescore_vector\":{\"oversample\":2}}}",
+   "expect": {
+    "knn": {
+     "field": "vec",
+     "query_vector": [
+      1.5,
+      2.0,
+      3.0
+     ],
+     "k": 2,
+     "rescore_vector": {
+      "oversample": 2.0
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector\":[1,2,3],\"k\":2,\"filter\":[{\"term\":{\"kw\":\"x\"}},{\"term\":{\"kw\":\"y\"}}]}}",
+   "expect": {
+    "knn": {
+     "field": "vec",
+     "query_vector": [
+      1.0,
+      2.0,
+      3.0
+     ],
+     "k": 2,
+     "filter": [
+      {
+       "term": {
+        "kw": {
+         "value": "x"
+        }
+       }
+      },
+      {
+       "term": {
+        "kw": {
+         "value": "y"
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector\":[1,2,3],\"k\":2,\"foo\":1}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:61] [knn] unknown field [foo]"
+   }
+  },
+  {
+   "query": "{\"knn\":{\"field\":\"vec\",\"query_vector\":[1,2,3],\"k\":20000}}",
+   "expect": {
+    "knn": {
+     "field": "vec",
+     "query_vector": [
+      1.0,
+      2.0,
+      3.0
+     ],
+     "k": 20000
+    }
+   }
+  },
+  {
+   "query": "{\"sparse_vector\":{\"field\":\"sv\",\"query_vector\":{\"a\":1,\"b\":2.5}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"sparse_vector\":{\"field\":\"sv\",\"query_vector\":{\"a\":1},\"prune\":true,\"pruning_config\":{\"tokens_freq_ratio_threshold\":5,\"tokens_weight_threshold\":0.4,\"only_score_pruned_tokens\":false},\"boost\":2,\"_name\":\"s\"}}",
+   "parses": true
+  },
+  {
+   "query": "{\"sparse_vector\":{\"field\":\"sv\",\"inference_id\":\"x\",\"query\":\"hello\"}}",
+   "parses": true
+  },
+  {
+   "query": "{\"sparse_vector\":{\"field\":\"sv\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Failed to build [sparse_vector] after last required field arrived",
+    "line": 1,
+    "col": 40,
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "Failed to build [sparse_vector] after last required field arrived",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[sparse_vector] requires one of [query_vector] or [inference_id] for sparse_vector fields"
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"weighted_tokens\":{\"sv\":{\"tokens\":{\"a\":1,\"b\":2}}}}",
+   "expect": {
+    "weighted_tokens": {
+     "sv": {
+      "tokens": {
+       "a": 1.0,
+       "b": 2.0
+      }
+     }
+    }
+   },
+   "warnings": [
+    "weighted_tokens is deprecated and will be removed. Use sparse_vector instead."
+   ]
+  },
+  {
+   "query": "{\"weighted_tokens\":{\"sv\":{\"tokens\":{\"a\":1},\"pruning_config\":{\"tokens_freq_ratio_threshold\":5}}}}",
+   "parses": true,
+   "warnings": [
+    "weighted_tokens is deprecated and will be removed. Use sparse_vector instead."
+   ]
+  },
+  {
+   "query": "{\"text_expansion\":{\"sv\":{\"model_id\":\"x\",\"model_text\":\"y\"}}}",
+   "parses": true,
+   "warnings": [
+    "text_expansion is deprecated. Use sparse_vector instead."
+   ]
+  },
+  {
+   "query": "{\"semantic\":{\"field\":\"t\",\"query\":\"x\"}}",
+   "parses": true
+  },
+  {
+   "query": "{\"semantic\":{\"field\":\"t\",\"query\":\"x\",\"boost\":2,\"_name\":\"n\"}}",
+   "parses": true
+  },
+  {
+   "query": "{\"rule\":{\"organic\":{\"match_all\":{}},\"ruleset_ids\":[\"x\"],\"match_criteria\":{\"q\":\"x\"}}}",
+   "parses": true
+  },
+  {
+   "query": "{\"script\":{\"script\":{\"source\":\"1\",\"params\":{\"a\":[1,2]}},\"boost\":2}}",
+   "parses": true
+  }
+ ]
+}

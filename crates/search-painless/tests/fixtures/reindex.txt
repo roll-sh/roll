@@ -1,0 +1,52 @@
+#defaults: {"doc": {"a": 1, "s": "x", "tags": ["t1"], "o": {"k": 2}}}
+ctx._source.a += 1
+----
+ctx._source.str = ctx.toString().replaceAll(/_now=[0-9]+/, m -> '_now=N').replaceAll(/painless-write-dest|painless-write/, m -> 'IDX'); ctx._source.keys = new ArrayList(ctx.keySet())
+----
+ctx._source.v = ctx._version; ctx._source.i = ctx._index; ctx._source.id = ctx._id; ctx._source.r = ctx._routing
+----
+ctx.op = 'noop'
+----
+ctx.op = 'delete'
+----
+ctx.op = 'bogus'
+----
+ctx._id = ctx._id + '-new'
+----
+ctx._id = null
+----
+ctx._id = 5
+----
+ctx._routing = 'r'
+----
+ctx._version = 7
+----
+ctx._version = null
+----
+ctx._version = 1.5
+----
+ctx._now = 1
+----
+ctx.foo = 1
+----
+ctx.remove('_version')
+----
+ctx.remove('_id')
+----
+ctx.remove('_routing')
+----
+ctx.remove('op')
+----
+ctx._source.m = metadata().getIndex() + '/' + metadata().getId() + '/' + metadata().getRouting() + '/' + metadata().getVersion() + '/' + metadata().getOp() + '/' + metadata().isVersionInternal()
+----
+metadata().setVersion(3); ctx._source.vi = metadata().isVersionInternal()
+----
+metadata().setVersionToInternal(); ctx._source.vi = metadata().isVersionInternal(); ctx._source.v = metadata().getVersion()
+----
+metadata().setId('mid')
+----
+metadata().setRouting('mr')
+----
+ctx._source.n = metadata().getNow()
+----
+ctx._source.c = (char) 'c'

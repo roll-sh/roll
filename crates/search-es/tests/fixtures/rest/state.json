@@ -1,0 +1,538 @@
+{
+  "description" : "Cluster state metadata with templates, scripts and indices; formats.",
+  "steps" : [
+    {
+      "req" : "PUT /_component_template/esm-sct",
+      "body" : {
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 2
+          },
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        },
+        "_meta" : {
+          "x" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-sit",
+      "body" : {
+        "index_patterns" : [
+          "esm-st-*"
+        ],
+        "composed_of" : [
+          "esm-sct"
+        ],
+        "priority" : 5,
+        "data_stream" : { },
+        "allow_auto_create" : true
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-slt",
+      "body" : {
+        "index_patterns" : [
+          "esm-sl-*"
+        ],
+        "order" : 3,
+        "settings" : {
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "b" : {
+              "type" : "long"
+            }
+          }
+        },
+        "aliases" : {
+          "esm-sla" : {
+            "filter" : {
+              "term" : {
+                "b" : 1
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-ss",
+      "body" : {
+        "script" : {
+          "lang" : "painless",
+          "source" : "params.x"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-sx",
+      "body" : {
+        "settings" : {
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "keyword"
+            }
+          }
+        },
+        "aliases" : {
+          "esm-sxa" : {
+            "is_write_index" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-sx"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/state/metadata/esm-sx?filter_path=metadata.templates.esm*,metadata.index_template.index_template.esm*,metadata.component_template.component_template.esm*,metadata.stored_scripts.esm*,metadata.indices",
+      "mask" : [
+        "created_date_millis",
+        "modified_date_millis",
+        "version",
+        "in_sync_allocations",
+        "transport_version",
+        "mappings_updated_version"
+      ],
+      "status" : 200,
+      "response" : {
+        "metadata" : {
+          "indices" : {
+            "esm-sx" : {
+              "version" : 4,
+              "transport_version" : "9458013",
+              "mapping_version" : 1,
+              "settings_version" : 1,
+              "aliases_version" : 1,
+              "routing_num_shards" : 1024,
+              "state" : "open",
+              "settings" : {
+                "index" : {
+                  "routing" : {
+                    "allocation" : {
+                      "include" : {
+                        "_tier_preference" : "data_content"
+                      }
+                    }
+                  },
+                  "number_of_shards" : "1",
+                  "provided_name" : "esm-sx",
+                  "creation_date" : "1792523441856",
+                  "number_of_replicas" : "0",
+                  "uuid" : "_eY_LcH1SvqQK9qMVnSWOw",
+                  "version" : {
+                    "created" : "9111000"
+                  }
+                }
+              },
+              "mappings" : {
+                "_doc" : {
+                  "properties" : {
+                    "f" : {
+                      "type" : "keyword"
+                    }
+                  }
+                }
+              },
+              "aliases" : [
+                "esm-sxa"
+              ],
+              "primary_terms" : {
+                "0" : 1
+              },
+              "in_sync_allocations" : {
+                "0" : [
+                  "9Zd7Qa6aQQqgt-obj9p_Yg"
+                ]
+              },
+              "rollover_info" : { },
+              "mappings_updated_version" : 9111000,
+              "system" : false,
+              "timestamp_range" : {
+                "unknown" : true
+              },
+              "event_ingested_range" : {
+                "unknown" : true
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_index_template/esm-sit",
+      "status" : 200,
+      "response" : {
+        "index_templates" : [
+          {
+            "name" : "esm-sit",
+            "index_template" : {
+              "index_patterns" : [
+                "esm-st-*"
+              ],
+              "composed_of" : [
+                "esm-sct"
+              ],
+              "priority" : 5,
+              "data_stream" : {
+                "hidden" : false,
+                "allow_custom_routing" : false
+              },
+              "allow_auto_create" : true,
+              "created_date_millis" : 1792523441798,
+              "modified_date_millis" : 1792523441798
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_component_template/esm-sct?flat_settings=true",
+      "status" : 200,
+      "response" : {
+        "component_templates" : [
+          {
+            "name" : "esm-sct",
+            "component_template" : {
+              "template" : {
+                "settings" : {
+                  "index.number_of_shards" : "2"
+                },
+                "mappings" : {
+                  "properties" : {
+                    "a" : {
+                      "type" : "keyword"
+                    }
+                  }
+                }
+              },
+              "_meta" : {
+                "x" : 1
+              },
+              "created_date_millis" : 1792523441781,
+              "modified_date_millis" : 1792523441781
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_template/esm-slt?flat_settings=true",
+      "status" : 200,
+      "response" : {
+        "esm-slt" : {
+          "order" : 3,
+          "index_patterns" : [
+            "esm-sl-*"
+          ],
+          "settings" : {
+            "index.number_of_replicas" : "0"
+          },
+          "mappings" : {
+            "properties" : {
+              "b" : {
+                "type" : "long"
+              }
+            }
+          },
+          "aliases" : {
+            "esm-sla" : {
+              "filter" : {
+                "term" : {
+                  "b" : 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-sx?format=yaml",
+      "status" : 200,
+      "text" : "---\nesm-sx:\n  aliases:\n    esm-sxa:\n      is_write_index: true\n  mappings:\n    properties:\n      f:\n        type: \"keyword\"\n  settings:\n    index:\n      routing:\n        allocation:\n          include:\n            _tier_preference: \"data_content\"\n      number_of_shards: \"1\"\n      provided_name: \"esm-sx\"\n      creation_date: \"1792523441856\"\n      number_of_replicas: \"0\"\n      uuid: \"_eY_LcH1SvqQK9qMVnSWOw\"\n      version:\n        created: \"9111000\"\n",
+      "response_headers" : {
+        "content-type" : "application/yaml"
+      }
+    },
+    {
+      "req" : "GET /esm-sx/_settings?format=json&pretty&filter_path=*.settings.index.number_*",
+      "status" : 200,
+      "response" : {
+        "esm-sx" : {
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "1",
+              "number_of_replicas" : "0"
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cat/indices/esm-sx?format=yaml&h=index,pri,rep",
+      "status" : 200,
+      "text" : "---\n- index: \"esm-sx\"\n  pri: \"1\"\n  rep: \"0\"\n",
+      "response_headers" : {
+        "content-type" : "application/yaml"
+      }
+    },
+    {
+      "req" : "GET /_cat/indices/esm-sx?h=index,pri,rep",
+      "headers" : {
+        "Accept" : "application/json"
+      },
+      "status" : 200,
+      "response" : [
+        {
+          "index" : "esm-sx",
+          "pri" : "1",
+          "rep" : "0"
+        }
+      ],
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cat/indices/esm-sx?h=index,pri,rep&format=txt",
+      "status" : 200,
+      "text" : "esm-sx 1 0\n",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_cat/aliases/esm-sxa?h=alias,index,is_write_index&format=json",
+      "status" : 200,
+      "response" : [
+        {
+          "alias" : "esm-sxa",
+          "index" : "esm-sx",
+          "is_write_index" : "true"
+        }
+      ],
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cat/templates/esm-s*?h=name,index_patterns,order,composed_of&s=name&format=json",
+      "status" : 200,
+      "response" : [
+        {
+          "name" : "esm-sit",
+          "index_patterns" : "[esm-st-*]",
+          "order" : "5",
+          "composed_of" : "[esm-sct]"
+        },
+        {
+          "name" : "esm-slt",
+          "index_patterns" : "[esm-sl-*]",
+          "order" : "3",
+          "composed_of" : ""
+        }
+      ],
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cat/component_templates/esm-s*?format=json",
+      "status" : 200,
+      "response" : [
+        {
+          "name" : "esm-sct",
+          "version" : null,
+          "alias_count" : "0",
+          "mapping_count" : "1",
+          "settings_count" : "1",
+          "metadata_count" : "1",
+          "included_in" : "[esm-sit]"
+        }
+      ],
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-sl-1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-sl-1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-sl-1/_alias",
+      "status" : 200,
+      "response" : {
+        "esm-sl-1" : {
+          "aliases" : {
+            "esm-sla" : {
+              "filter" : {
+                "term" : {
+                  "b" : 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-sl-1/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-sl-1" : {
+          "mappings" : {
+            "properties" : {
+              "b" : {
+                "type" : "long"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-st-1",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "cannot create index with name [esm-st-1], because it matches with template [esm-sit] that creates data streams only, use create data stream api instead"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "cannot create index with name [esm-st-1], because it matches with template [esm-sit] that creates data streams only, use create data stream api instead"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_resolve/index/esm-s*",
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          {
+            "name" : "esm-sl-1",
+            "aliases" : [
+              "esm-sla"
+            ],
+            "attributes" : [
+              "open"
+            ],
+            "mode" : "standard"
+          },
+          {
+            "name" : "esm-sx",
+            "aliases" : [
+              "esm-sxa"
+            ],
+            "attributes" : [
+              "open"
+            ],
+            "mode" : "standard"
+          }
+        ],
+        "aliases" : [
+          {
+            "name" : "esm-sla",
+            "indices" : [
+              "esm-sl-1"
+            ]
+          },
+          {
+            "name" : "esm-sxa",
+            "indices" : [
+              "esm-sx"
+            ]
+          }
+        ],
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

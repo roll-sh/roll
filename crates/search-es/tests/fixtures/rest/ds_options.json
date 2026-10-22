@@ -1,0 +1,626 @@
+{
+  "description" : "Data stream options: API, failures lifecycle, template composition with resets",
+  "steps" : [
+    {
+      "req" : "PUT /_index_template/esm-tr",
+      "body" : {
+        "index_patterns" : [
+          "esm-tr*"
+        ],
+        "template" : {
+          "lifecycle" : {
+            "data_retention" : "1d"
+          },
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true,
+              "lifecycle" : {
+                "data_retention" : "12h"
+              }
+            }
+          }
+        },
+        "data_stream" : { }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-tr2",
+      "body" : {
+        "index_patterns" : [
+          "esm-ur*"
+        ],
+        "template" : {
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true
+            }
+          }
+        },
+        "data_stream" : { }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-tr1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-ur1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-tr1,esm-ur1?include_defaults=true&filter_path=**.lifecycle",
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "lifecycle" : {
+              "enabled" : true,
+              "data_retention" : "1d",
+              "effective_retention" : "1d",
+              "retention_determined_by" : "data_stream_configuration",
+              "rollover" : {
+                "min_docs" : 1,
+                "max_primary_shard_docs" : 200000000,
+                "max_primary_shard_size" : "50gb",
+                "max_age" : "1h [automatic]"
+              }
+            },
+            "failure_store" : {
+              "lifecycle" : {
+                "enabled" : true,
+                "data_retention" : "12h",
+                "effective_retention" : "12h",
+                "retention_determined_by" : "data_stream_configuration",
+                "rollover" : {
+                  "min_docs" : 1,
+                  "max_primary_shard_docs" : 200000000,
+                  "max_primary_shard_size" : "50gb",
+                  "max_age" : "1h [automatic]"
+                }
+              }
+            }
+          },
+          {
+            "failure_store" : {
+              "lifecycle" : {
+                "enabled" : true,
+                "effective_retention" : "30d",
+                "retention_determined_by" : "default_failures_retention",
+                "rollover" : {
+                  "min_docs" : 1,
+                  "max_primary_shard_docs" : 200000000,
+                  "max_primary_shard_size" : "50gb",
+                  "max_age" : "7d [automatic]"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-tr1,esm-ur1?filter_path=**.lifecycle,**.failure_store.enabled",
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "lifecycle" : {
+              "enabled" : true,
+              "data_retention" : "1d",
+              "effective_retention" : "1d",
+              "retention_determined_by" : "data_stream_configuration"
+            },
+            "failure_store" : {
+              "enabled" : true,
+              "lifecycle" : {
+                "enabled" : true,
+                "data_retention" : "12h",
+                "effective_retention" : "12h",
+                "retention_determined_by" : "data_stream_configuration"
+              }
+            }
+          },
+          {
+            "failure_store" : {
+              "enabled" : true,
+              "lifecycle" : {
+                "enabled" : true,
+                "effective_retention" : "30d",
+                "retention_determined_by" : "default_failures_retention"
+              }
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-tr1/_options",
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "esm-tr1",
+            "options" : {
+              "failure_store" : {
+                "enabled" : true,
+                "lifecycle" : {
+                  "enabled" : true,
+                  "data_retention" : "12h"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-tr1/_options",
+      "body" : {
+        "failure_store" : {
+          "enabled" : false,
+          "lifecycle" : {
+            "data_retention" : "30d"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-tr1/_options",
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "esm-tr1",
+            "options" : {
+              "failure_store" : {
+                "enabled" : false,
+                "lifecycle" : {
+                  "enabled" : true,
+                  "data_retention" : "30d"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-tr1/_options",
+      "body" : {
+        "failure_store" : {
+          "lifecycle" : {
+            "frozen_after" : "30d"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: Failure store lifecycle does not support freezing, please remove the frozen_after configuration.;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: Failure store lifecycle does not support freezing, please remove the frozen_after configuration.;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-tr1/_options",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-tr1/_options",
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "esm-tr1"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-tr1,esm-ur1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-tr,esm-tr2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-c1",
+      "body" : {
+        "template" : {
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true,
+              "lifecycle" : {
+                "data_retention" : "10d"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-c2",
+      "body" : {
+        "template" : {
+          "data_stream_options" : {
+            "failure_store" : {
+              "lifecycle" : null
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-c3",
+      "body" : {
+        "template" : {
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : null
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_component_template/esm-c2",
+      "status" : 200,
+      "response" : {
+        "component_templates" : [
+          {
+            "name" : "esm-c2",
+            "component_template" : {
+              "template" : {
+                "data_stream_options" : {
+                  "failure_store" : {
+                    "lifecycle" : null
+                  }
+                }
+              },
+              "created_date_millis" : 1792574898010,
+              "modified_date_millis" : 1792574898010
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-bad",
+      "body" : {
+        "index_patterns" : [
+          "esm-nds"
+        ],
+        "composed_of" : [
+          "esm-c1"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index template [esm-bad] specifies data stream options that can only be used in combination with a data stream"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index template [esm-bad] specifies data stream options that can only be used in combination with a data stream"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-good",
+      "body" : {
+        "index_patterns" : [
+          "esm-nds"
+        ],
+        "composed_of" : [
+          "esm-c1"
+        ],
+        "template" : {
+          "data_stream_options" : null
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_index_template/esm-good",
+      "status" : 200,
+      "response" : {
+        "index_templates" : [
+          {
+            "name" : "esm-good",
+            "index_template" : {
+              "index_patterns" : [
+                "esm-nds"
+              ],
+              "template" : {
+                "data_stream_options" : null
+              },
+              "composed_of" : [
+                "esm-c1"
+              ],
+              "created_date_millis" : 1792574898059,
+              "modified_date_millis" : 1792574898059
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-sim",
+      "body" : {
+        "index_patterns" : [
+          "esm-sim"
+        ],
+        "composed_of" : [
+          "esm-c1",
+          "esm-c2",
+          "esm-c3"
+        ],
+        "data_stream" : { }
+      },
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_hot"
+                  }
+                }
+              }
+            }
+          },
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              }
+            }
+          },
+          "aliases" : { },
+          "data_stream_options" : { }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-sim",
+      "body" : {
+        "index_patterns" : [
+          "esm-sim"
+        ],
+        "composed_of" : [
+          "esm-c1",
+          "esm-c2"
+        ],
+        "data_stream" : { }
+      },
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_hot"
+                  }
+                }
+              }
+            }
+          },
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              }
+            }
+          },
+          "aliases" : { },
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true
+            }
+          }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-sim",
+      "body" : {
+        "index_patterns" : [
+          "esm-sim"
+        ],
+        "composed_of" : [
+          "esm-c1"
+        ],
+        "template" : {
+          "data_stream_options" : null
+        },
+        "data_stream" : { }
+      },
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_hot"
+                  }
+                }
+              }
+            }
+          },
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              }
+            }
+          },
+          "aliases" : { }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-good",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_component_template/esm-c1,esm-c2,esm-c3",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

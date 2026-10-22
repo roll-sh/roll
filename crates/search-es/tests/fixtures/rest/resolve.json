@@ -1,0 +1,581 @@
+{
+  "description" : "Index expressions: wildcards, hidden, closed, exclusions, date math, resolve API.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-v1",
+      "body" : {
+        "aliases" : {
+          "esm-val" : { }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v2",
+      "body" : {
+        "settings" : {
+          "index.hidden" : true
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v3",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v3"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /.esm-v4",
+      "body" : {
+        "settings" : {
+          "index.hidden" : true
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : ".esm-v4"
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Index [.esm-v4] name begins with a dot (.), which is deprecated, and will not be allowed in a future Elasticsearch version.\""
+        ]
+      }
+    },
+    {
+      "req" : "POST /esm-v3/_close",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : {
+          "esm-v3" : {
+            "closed" : true
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v*/_settings/index.number_of_shards?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-v1" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v*/_settings/index.number_of_shards?flat_settings&expand_wildcards=all",
+      "status" : 200,
+      "response" : {
+        "esm-v1" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        },
+        "esm-v2" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        },
+        "esm-v3" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v*/_settings/index.number_of_shards?flat_settings&expand_wildcards=open,hidden",
+      "status" : 200,
+      "response" : {
+        "esm-v1" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        },
+        "esm-v2" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v*/_settings/index.number_of_shards?flat_settings&expand_wildcards=closed",
+      "status" : 200,
+      "response" : {
+        "esm-v3" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v*/_settings/index.number_of_shards?flat_settings&expand_wildcards=none",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v*]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v*",
+              "index_uuid" : "_na_",
+              "index" : "esm-v*"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v*]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v*",
+          "index_uuid" : "_na_",
+          "index" : "esm-v*"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v*/_settings/index.number_of_shards?flat_settings&expand_wildcards=bogus",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No valid expand wildcard value [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No valid expand wildcard value [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v*,-esm-v1/_settings/index.number_of_shards?flat_settings&expand_wildcards=all",
+      "status" : 200,
+      "response" : {
+        "esm-v2" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        },
+        "esm-v3" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v2/_settings/index.number_of_shards?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-v2" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v3/_settings/index.number_of_shards?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-v3" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-val/_settings/index.number_of_shards?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-v1" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /remote:esm-v1/_settings",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cross-cluster calls are not supported in this context but remote indices were requested: [remote:esm-v1]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cross-cluster calls are not supported in this context but remote indices were requested: [remote:esm-v1]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /.esm-v*/_settings/index.hidden?flat_settings",
+      "status" : 200,
+      "response" : {
+        ".esm-v4" : {
+          "settings" : {
+            "index.hidden" : "true"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_resolve/index/esm-v*",
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          {
+            "name" : "esm-v1",
+            "aliases" : [
+              "esm-val"
+            ],
+            "attributes" : [
+              "open"
+            ],
+            "mode" : "standard"
+          }
+        ],
+        "aliases" : [
+          {
+            "name" : "esm-val",
+            "indices" : [
+              "esm-v1"
+            ]
+          }
+        ],
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_resolve/index/esm-v*?expand_wildcards=all",
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          {
+            "name" : "esm-v1",
+            "aliases" : [
+              "esm-val"
+            ],
+            "attributes" : [
+              "open"
+            ],
+            "mode" : "standard"
+          },
+          {
+            "name" : "esm-v2",
+            "attributes" : [
+              "hidden",
+              "open"
+            ],
+            "mode" : "standard"
+          },
+          {
+            "name" : "esm-v3",
+            "attributes" : [
+              "closed"
+            ],
+            "mode" : "standard"
+          }
+        ],
+        "aliases" : [
+          {
+            "name" : "esm-val",
+            "indices" : [
+              "esm-v1"
+            ]
+          }
+        ],
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_resolve/index/esm-val",
+      "status" : 200,
+      "response" : {
+        "indices" : [ ],
+        "aliases" : [
+          {
+            "name" : "esm-val",
+            "indices" : [
+              "esm-v1"
+            ]
+          }
+        ],
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_resolve/index/esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_resolve/index/esm-nope*",
+      "status" : 200,
+      "response" : {
+        "indices" : [ ],
+        "aliases" : [ ],
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v1,esm-nope/_settings",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v1,esm-nope/_settings/index.number_of_shards?ignore_unavailable=true&flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-v1" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /%3Cesm-v1%3E/_settings/index.number_of_shards?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-v1" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /%3Cesm-v-%7Bnow%2Fd%7D%3E/_settings",
+      "mask" : [
+        "index",
+        "resource.id",
+        "reason"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v-2026.10.20]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v-2026.10.20",
+              "index_uuid" : "_na_",
+              "index" : "esm-v-2026.10.20"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v-2026.10.20]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v-2026.10.20",
+          "index_uuid" : "_na_",
+          "index" : "esm-v-2026.10.20"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /%3Cesm-v-%7Bnow%2Fd%7Byyyy%7D%7D%3E/_settings",
+      "mask" : [
+        "index",
+        "resource.id",
+        "reason"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v-2026]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v-2026",
+              "index_uuid" : "_na_",
+              "index" : "esm-v-2026"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v-2026]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v-2026",
+          "index_uuid" : "_na_",
+          "index" : "esm-v-2026"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v1/_settings?allow_no_indices=bogus",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Could not convert [allow_no_indices] to boolean"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Could not convert [allow_no_indices] to boolean",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse value [bogus] as only [true] or [false] are allowed."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

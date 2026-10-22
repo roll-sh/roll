@@ -1,0 +1,4 @@
+# Fixture cases known to differ from Elasticsearch, one per line: <group>/<case> <reason>.
+# They are reported but do not fail the test; a listed case that starts matching is reported too.
+regex_props/other/named \N{name} needs the Unicode character name table, which is not included; such patterns are rejected
+chains_fuzz/chain/598 a min_hash term can end in a lone surrogate, which Java keeps (word_delimiter_graph then treats it as a letter) while Rust strings hold U+FFFD (a symbol, so a delimiter)

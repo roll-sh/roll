@@ -1,0 +1,1713 @@
+[
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "text"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "mapper [f] cannot be changed from type [keyword] to [text]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "mapper [f] cannot be changed from type [keyword] to [text]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "index": false
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [index] from [true] to [false]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [index] from [true] to [false]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "index": false,
+     "doc_values": false,
+     "store": true
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [index] from [true] to [false]\n\tCannot update parameter [doc_values] from [Values[enabled=true, cardinality=low, multiValue=true, nullability=true]] to [Values[enabled=false, cardinality=low, multiValue=true, nullability=true]]\n\tCannot update parameter [store] from [false] to [true]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [index] from [true] to [false]\n\tCannot update parameter [doc_values] from [Values[enabled=true, cardinality=low, multiValue=true, nullability=true]] to [Values[enabled=false, cardinality=low, multiValue=true, nullability=true]]\n\tCannot update parameter [store] from [false] to [true]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "ignore_above": 10
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword",
+       "ignore_above": 10
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "fields": {
+      "raw": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword",
+       "fields": {
+        "raw": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "fields": {
+      "raw": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword",
+       "fields": {
+        "raw": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "fields": {
+      "raw": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "fields": {
+      "raw": {
+       "type": "text"
+      }
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "mapper [f.raw] cannot be changed from type [keyword] to [text]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "mapper [f.raw] cannot be changed from type [keyword] to [text]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword",
+       "fields": {
+        "raw": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "norms": true
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "norms": false
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "text",
+       "norms": false
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "norms": false
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "norms": true
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [norms] from [false] to [true]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [norms] from [false] to [true]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "text",
+       "norms": false
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "text"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "analyzer": "simple"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [analyzer] from [default] to [simple]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [analyzer] from [default] to [simple]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "text"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "text"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "search_analyzer": "simple"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "text",
+       "analyzer": "default",
+       "search_analyzer": "simple"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "properties": {
+      "a": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "can't merge a non object mapping [f] with an object mapping"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "can't merge a non object mapping [f] with an object mapping"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "properties": {
+      "a": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "can't merge a non object mapping [f] with an object mapping"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "can't merge a non object mapping [f] with an object mapping"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "properties": {
+        "a": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "object"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "nested"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "can't merge a non-nested mapping [f] with a nested mapping"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "can't merge a non-nested mapping [f] with a nested mapping"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "object"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "nested"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "object"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "can't merge a non-nested mapping [f] with a nested mapping"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "can't merge a non-nested mapping [f] with a nested mapping"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "nested"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "nested"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "nested",
+     "include_in_parent": true
+    }
+   }
+  },
+  "status": 500,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_exception",
+      "reason": "the [include_in_parent] parameter can't be updated on a nested object mapping"
+     }
+    ],
+    "type": "mapper_exception",
+    "reason": "the [include_in_parent] parameter can't be updated on a nested object mapping"
+   },
+   "status": 500
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "nested"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "object",
+     "enabled": false
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "object",
+     "enabled": true
+    }
+   }
+  },
+  "status": 500,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_exception",
+      "reason": "the [enabled] parameter can't be updated for the object mapping [f]"
+     }
+    ],
+    "type": "mapper_exception",
+    "reason": "the [enabled] parameter can't be updated for the object mapping [f]"
+   },
+   "status": 500
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "object",
+       "enabled": false
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "object"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "object",
+     "dynamic": "strict"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "object",
+       "dynamic": "strict"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "dynamic": "strict"
+  },
+  "update": {
+   "dynamic": false
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "dynamic": "false"
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "_source": {
+    "enabled": false
+   }
+  },
+  "update": {
+   "_source": {
+    "enabled": true
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [_source] conflicts with existing mapper:\n\tCannot update parameter [enabled] from [false] to [true]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [_source] conflicts with existing mapper:\n\tCannot update parameter [enabled] from [false] to [true]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "_source": {
+      "enabled": false
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "_routing": {
+    "required": true
+   }
+  },
+  "update": {
+   "_routing": {
+    "required": false
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [required] from [true] to [false]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [required] from [true] to [false]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "_routing": {
+      "required": true
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "_meta": {
+    "a": 1
+   }
+  },
+  "update": {
+   "_meta": {
+    "b": 2
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "_meta": {
+      "b": 2
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "dynamic_templates": [
+    {
+     "a": {
+      "match": "a",
+      "mapping": {
+       "type": "keyword"
+      }
+     }
+    }
+   ]
+  },
+  "update": {
+   "dynamic_templates": [
+    {
+     "b": {
+      "match": "b",
+      "mapping": {
+       "type": "keyword"
+      }
+     }
+    }
+   ]
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "dynamic_templates": [
+      {
+       "b": {
+        "match": "b",
+        "mapping": {
+         "type": "keyword"
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "long"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "long",
+     "coerce": false,
+     "ignore_malformed": true
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "long",
+       "ignore_malformed": true,
+       "coerce": false
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "long"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "long",
+     "null_value": 1
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [null_value] from [null] to [1]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [null_value] from [null] to [1]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "long"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "date"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "date",
+     "format": "yyyy"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [format] from [strict_date_optional_time||epoch_millis] to [yyyy]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [format] from [strict_date_optional_time||epoch_millis] to [yyyy]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "date"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "meta": {
+      "a": "b"
+     }
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "meta": {
+      "c": "d"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword",
+       "meta": {
+        "c": "d"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "copy_to": "a"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "copy_to": "b"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword",
+       "copy_to": [
+        "b"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {},
+  "update": {
+   "properties": {
+    "a": {
+     "type": "keyword"
+    },
+    "b": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Limit of total fields [1] has been exceeded"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Limit of total fields [1] has been exceeded"
+   },
+   "status": 400
+  },
+  "settings": {
+   "index.mapping.total_fields.limit": 1
+  },
+  "get": {
+   "mm": {
+    "mappings": {}
+   }
+  }
+ },
+ {
+  "base": {},
+  "update": {
+   "properties": {
+    "a": {
+     "properties": {
+      "b": {
+       "properties": {
+        "c": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Limit of mapping depth [2] has been exceeded due to object field [a.b]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Limit of mapping depth [2] has been exceeded due to object field [a.b]"
+   },
+   "status": 400
+  },
+  "settings": {
+   "index.mapping.depth.limit": 2
+  },
+  "get": {
+   "mm": {
+    "mappings": {}
+   }
+  }
+ },
+ {
+  "base": {},
+  "update": {
+   "properties": {
+    "a": {
+     "type": "nested"
+    },
+    "b": {
+     "type": "nested"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Limit of nested fields [1] has been exceeded"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Limit of nested fields [1] has been exceeded"
+   },
+   "status": 400
+  },
+  "settings": {
+   "index.mapping.nested_fields.limit": 1
+  },
+  "get": {
+   "mm": {
+    "mappings": {}
+   }
+  }
+ },
+ {
+  "base": {},
+  "update": {
+   "properties": {
+    "abcdef": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Field name [_routing] is longer than the limit of [3] characters"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Field name [_routing] is longer than the limit of [3] characters"
+   },
+   "status": 400
+  },
+  "settings": {
+   "index.mapping.field_name_length.limit": 3
+  },
+  "get": {
+   "mm": {
+    "mappings": {}
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "index": false
+    },
+    "g": {
+     "type": "long",
+     "index": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: Failed to parse value [x] as only [true] or [false] are allowed."
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Failed to parse value [x] as only [true] or [false] are allowed.",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse value [x] as only [true] or [false] are allowed."
+    }
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {},
+  "update": {
+   "foo": 1
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Root mapping definition has unsupported parameters:  [foo : 1]"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Root mapping definition has unsupported parameters:  [foo : 1]",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "Root mapping definition has unsupported parameters:  [foo : 1]"
+    }
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {}
+   }
+  }
+ },
+ {
+  "base": {},
+  "update": {
+   "_doc": {
+    "properties": {
+     "a": {
+      "type": "keyword"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "a": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "dense_vector",
+     "dims": 3
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "dense_vector",
+     "dims": 4
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [dims] from [3] to [4]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [dims] from [3] to [4]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "dense_vector",
+       "dims": 3,
+       "index": true,
+       "similarity": "cosine",
+       "index_options": {
+        "type": "int8_hnsw",
+        "m": 16,
+        "ef_construction": 100
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "ignore_above": 5,
+     "index": false,
+     "store": true
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [index] from [true] to [false]\n\tCannot update parameter [store] from [false] to [true]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Mapper for [f] conflicts with existing mapper:\n\tCannot update parameter [index] from [true] to [false]\n\tCannot update parameter [store] from [false] to [true]"
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "runtime": {
+    "r": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "runtime": {
+    "r": null
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {}
+   }
+  }
+ },
+ {
+  "base": {
+   "runtime": {
+    "r": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "runtime": {
+    "r": {
+     "type": "long"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "runtime": {
+      "r": {
+       "type": "long"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "r": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "runtime": {
+    "r": {
+     "type": "long"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "runtime": {
+      "r": {
+       "type": "long"
+      }
+     },
+     "properties": {
+      "r": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "g": {
+     "type": "alias",
+     "path": "f"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword"
+      },
+      "g": {
+       "type": "alias",
+       "path": "f"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "keyword"
+    },
+    "g": {
+     "type": "alias",
+     "path": "f"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "g": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Cannot merge a field alias mapping [g] with a mapping that is not for a field alias."
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Cannot merge a field alias mapping [g] with a mapping that is not for a field alias."
+   },
+   "status": 400
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword"
+      },
+      "g": {
+       "type": "alias",
+       "path": "f"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "f": {
+     "type": "text"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "copy_to": "f"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "text",
+       "copy_to": [
+        "f"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "base": {
+   "properties": {
+    "n": {
+     "type": "nested",
+     "properties": {
+      "a": {
+       "type": "keyword"
+      }
+     }
+    },
+    "b": {
+     "type": "keyword"
+    }
+   }
+  },
+  "update": {
+   "properties": {
+    "n": {
+     "type": "nested",
+     "properties": {
+      "a": {
+       "type": "keyword",
+       "copy_to": "b"
+      }
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true
+  },
+  "get": {
+   "mm": {
+    "mappings": {
+     "properties": {
+      "b": {
+       "type": "keyword"
+      },
+      "n": {
+       "type": "nested",
+       "properties": {
+        "a": {
+         "type": "keyword",
+         "copy_to": [
+          "b"
+         ]
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+]

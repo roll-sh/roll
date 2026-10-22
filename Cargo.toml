@@ -122,6 +122,27 @@ redis-engine = { path = "crates/redis-engine" }
 redis-server = { path = "crates/redis-server" }
 redis-control = { path = "crates/redis-control" }
 
+# roll search (Elasticsearch-compatible).
+fst = "0.4"
+memmap2 = "0.9"
+hashbrown = "0.16"
+unicode-segmentation = "1"
+unicode-normalization = "0.1"
+regex-syntax = "0.8"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
+http-body-util = "0.1"
+search-analysis = { path = "crates/search-analysis" }
+search-codec = { path = "crates/search-codec" }
+search-index = { path = "crates/search-index" }
+search-aggs = { path = "crates/search-aggs" }
+search-painless = { path = "crates/search-painless" }
+search-store = { path = "crates/search-store" }
+search-es = { path = "crates/search-es" }
+search-server = { path = "crates/search-server" }
+search-control = { path = "crates/search-control" }
+search-yaml = { path = "crates/search-yaml" }
+
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]
 kafka-protocol = { path = "vendor/kafka-protocol" }

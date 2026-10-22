@@ -1,0 +1,1528 @@
+{
+ "source": "Elasticsearch 9.5.5 (PUT <index>/_doc/<id>, then GET for _ignored)",
+ "mapping": {
+  "dynamic": "strict",
+  "properties": {
+   "al": {
+    "type": "alias",
+    "path": "kw"
+   },
+   "b": {
+    "type": "byte"
+   },
+   "bin": {
+    "type": "binary"
+   },
+   "bnv": {
+    "type": "boolean",
+    "null_value": true
+   },
+   "bool": {
+    "type": "boolean"
+   },
+   "bvec": {
+    "type": "dense_vector",
+    "element_type": "byte",
+    "dims": 3,
+    "index": true,
+    "similarity": "cosine"
+   },
+   "ck": {
+    "type": "constant_keyword",
+    "value": "c"
+   },
+   "comp": {
+    "type": "completion",
+    "analyzer": "simple",
+    "preserve_separators": true,
+    "preserve_position_increments": true,
+    "max_input_length": 50
+   },
+   "d": {
+    "type": "double"
+   },
+   "date": {
+    "type": "date"
+   },
+   "depoch": {
+    "type": "date",
+    "format": "epoch_second"
+   },
+   "dfmt": {
+    "type": "date",
+    "format": "yyyy-MM-dd"
+   },
+   "dim": {
+    "type": "date",
+    "ignore_malformed": true
+   },
+   "dis": {
+    "type": "object",
+    "enabled": false
+   },
+   "dn": {
+    "type": "date_nanos"
+   },
+   "dr": {
+    "type": "date_range"
+   },
+   "dyn": {
+    "dynamic": "true",
+    "properties": {
+     "x": {
+      "type": "long"
+     }
+    }
+   },
+   "f": {
+    "type": "float"
+   },
+   "flat": {
+    "type": "flattened"
+   },
+   "fnc": {
+    "type": "float",
+    "coerce": false
+   },
+   "geo": {
+    "type": "geo_point"
+   },
+   "geoim": {
+    "type": "geo_point",
+    "ignore_malformed": true
+   },
+   "gs": {
+    "type": "geo_shape"
+   },
+   "hf": {
+    "type": "half_float"
+   },
+   "i": {
+    "type": "integer"
+   },
+   "inc": {
+    "type": "integer",
+    "coerce": false
+   },
+   "ip": {
+    "type": "ip"
+   },
+   "ipim": {
+    "type": "ip",
+    "ignore_malformed": true
+   },
+   "ipr": {
+    "type": "ip_range"
+   },
+   "ir": {
+    "type": "integer_range"
+   },
+   "knv": {
+    "type": "keyword",
+    "null_value": "NULL"
+   },
+   "kw": {
+    "type": "keyword",
+    "ignore_above": 5
+   },
+   "l": {
+    "type": "long"
+   },
+   "lim": {
+    "type": "long",
+    "ignore_malformed": true
+   },
+   "lnc": {
+    "type": "long",
+    "coerce": false
+   },
+   "lnv": {
+    "type": "long",
+    "null_value": 7
+   },
+   "mot": {
+    "type": "match_only_text"
+   },
+   "nest": {
+    "type": "nested",
+    "properties": {
+     "k": {
+      "type": "keyword"
+     }
+    }
+   },
+   "obj": {
+    "properties": {
+     "a": {
+      "type": "keyword"
+     }
+    }
+   },
+   "pt": {
+    "type": "point"
+   },
+   "rf": {
+    "type": "rank_feature"
+   },
+   "rfs": {
+    "type": "rank_features"
+   },
+   "s": {
+    "type": "short"
+   },
+   "sayt": {
+    "type": "search_as_you_type",
+    "doc_values": false,
+    "max_shingle_size": 3
+   },
+   "sf": {
+    "type": "scaled_float",
+    "scaling_factor": 100.0
+   },
+   "sh": {
+    "type": "shape"
+   },
+   "sv": {
+    "type": "sparse_vector"
+   },
+   "t": {
+    "type": "text"
+   },
+   "tc": {
+    "type": "token_count",
+    "analyzer": "standard"
+   },
+   "ul": {
+    "type": "unsigned_long"
+   },
+   "vec": {
+    "type": "dense_vector",
+    "dims": 3,
+    "index": true,
+    "similarity": "cosine",
+    "index_options": {
+     "type": "int8_hnsw",
+     "m": 16,
+     "ef_construction": 100
+    }
+   },
+   "ver": {
+    "type": "version"
+   },
+   "wild": {
+    "type": "wildcard"
+   }
+  }
+ },
+ "cases": [
+  {
+   "doc": "{\"l\":1}",
+   "id": "1",
+   "ignored": []
+  },
+  {
+   "doc": "{\"l\":\"12\"}",
+   "id": "2",
+   "ignored": []
+  },
+  {
+   "doc": "{\"l\":\"1.7\"}",
+   "id": "3",
+   "ignored": []
+  },
+  {
+   "doc": "{\"l\":1.7}",
+   "id": "4",
+   "ignored": []
+  },
+  {
+   "doc": "{\"l\":\"abc\"}",
+   "id": "5",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [l] of type [long] in document with id '5'. Preview of field's value: 'abc'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \"abc\""
+    }
+   }
+  },
+  {
+   "doc": "{\"l\":true}",
+   "id": "6",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [l] of type [long] in document with id '6'. Preview of field's value: 'true'",
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:10] Current token (VALUE_TRUE) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"l\":true}\"; line: 1, column: 10]",
+     "caused_by": {
+      "type": "json_parse_exception",
+      "reason": "Current token (VALUE_TRUE) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"l\":true}\"; line: 1, column: 10]"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"l\":{\"a\":1}}",
+   "id": "7",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:12] failed to parse field [l] of type [long] in document with id '7'. Preview of field's value: '{a=1}'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot parse object as number"
+    }
+   }
+  },
+  {
+   "doc": "{\"l\":[1,2,\"3\"]}",
+   "id": "8",
+   "ignored": []
+  },
+  {
+   "doc": "{\"l\":null}",
+   "id": "9",
+   "ignored": []
+  },
+  {
+   "doc": "{\"l\":\"\"}",
+   "id": "10",
+   "ignored": []
+  },
+  {
+   "doc": "{\"l\":\" 12 \"}",
+   "id": "11",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [l] of type [long] in document with id '11'. Preview of field's value: ' 12 '",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \" 12 \""
+    }
+   }
+  },
+  {
+   "doc": "{\"l\":\"1e3\"}",
+   "id": "12",
+   "ignored": []
+  },
+  {
+   "doc": "{\"l\":1e19}",
+   "id": "13",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [l] of type [long] in document with id '13'. Preview of field's value: '1.0E19'",
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:10] Numeric value (1e19) out of range of long (-9223372036854775808 - 9223372036854775807)\n at [Source: (byte[])\"{\"l\":1e19}\"; line: 1, column: 10]",
+     "caused_by": {
+      "type": "input_coercion_exception",
+      "reason": "Numeric value (1e19) out of range of long (-9223372036854775808 - 9223372036854775807)\n at [Source: (byte[])\"{\"l\":1e19}\"; line: 1, column: 10]"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"l\":\"9223372036854775808\"}",
+   "id": "14",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [l] of type [long] in document with id '14'. Preview of field's value: '9223372036854775808'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Value [9223372036854775808] is out of range for a long"
+    }
+   }
+  },
+  {
+   "doc": "{\"l\":9223372036854775808}",
+   "id": "15",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [l] of type [long] in document with id '15'. Preview of field's value: '9223372036854775808'",
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:25] Numeric value (9223372036854775808) out of range of long (-9223372036854775808 - 9223372036854775807)\n at [Source: (byte[])\"{\"l\":9223372036854775808}\"; line: 1, column: 25]",
+     "caused_by": {
+      "type": "input_coercion_exception",
+      "reason": "Numeric value (9223372036854775808) out of range of long (-9223372036854775808 - 9223372036854775807)\n at [Source: (byte[])\"{\"l\":9223372036854775808}\"; line: 1, column: 25]"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"lnc\":\"12\"}",
+   "id": "16",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:8] failed to parse field [lnc] of type [long] in document with id '16'. Preview of field's value: '12'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Long value passed as String"
+    }
+   }
+  },
+  {
+   "doc": "{\"lnc\":1.5}",
+   "id": "17",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:8] failed to parse field [lnc] of type [long] in document with id '17'. Preview of field's value: '1.5'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "1.5 cannot be converted to Long without data loss"
+    }
+   }
+  },
+  {
+   "doc": "{\"lnc\":1.0}",
+   "id": "18",
+   "ignored": []
+  },
+  {
+   "doc": "{\"lim\":\"abc\"}",
+   "id": "19",
+   "ignored": [
+    "lim"
+   ]
+  },
+  {
+   "doc": "{\"lim\":{\"a\":1}}",
+   "id": "20",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:14] failed to parse field [lim] of type [long] in document with id '20'. Preview of field's value: '{a=1}'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot parse object as number"
+    }
+   }
+  },
+  {
+   "doc": "{\"lnv\":null}",
+   "id": "21",
+   "ignored": []
+  },
+  {
+   "doc": "{\"i\":3000000000}",
+   "id": "22",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [i] of type [integer] in document with id '22'. Preview of field's value: '3000000000'",
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:16] Numeric value (3000000000) out of range of int (-2147483648 - 2147483647)\n at [Source: (byte[])\"{\"i\":3000000000}\"; line: 1, column: 16]",
+     "caused_by": {
+      "type": "input_coercion_exception",
+      "reason": "Numeric value (3000000000) out of range of int (-2147483648 - 2147483647)\n at [Source: (byte[])\"{\"i\":3000000000}\"; line: 1, column: 16]"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"i\":\"3000000000\"}",
+   "id": "23",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [i] of type [integer] in document with id '23'. Preview of field's value: '3000000000'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Value [3000000000] is out of range for an integer"
+    }
+   }
+  },
+  {
+   "doc": "{\"s\":40000}",
+   "id": "24",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [s] of type [short] in document with id '24'. Preview of field's value: '40000'",
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:11] Numeric value (40000) out of range of Java short\n at [Source: (byte[])\"{\"s\":40000}\"; line: 1, column: 11]",
+     "caused_by": {
+      "type": "input_coercion_exception",
+      "reason": "Numeric value (40000) out of range of Java short\n at [Source: (byte[])\"{\"s\":40000}\"; line: 1, column: 11]"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"b\":200}",
+   "id": "25",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [b] of type [byte] in document with id '25'. Preview of field's value: '200'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Value [200] is out of range for a byte"
+    }
+   }
+  },
+  {
+   "doc": "{\"b\":-129}",
+   "id": "26",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [b] of type [byte] in document with id '26'. Preview of field's value: '-129'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Value [-129] is out of range for a byte"
+    }
+   }
+  },
+  {
+   "doc": "{\"inc\":\"1\"}",
+   "id": "27",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:8] failed to parse field [inc] of type [integer] in document with id '27'. Preview of field's value: '1'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Integer value passed as String"
+    }
+   }
+  },
+  {
+   "doc": "{\"d\":\"1.5\"}",
+   "id": "28",
+   "ignored": []
+  },
+  {
+   "doc": "{\"d\":\"NaN\"}",
+   "id": "29",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [d] of type [double] in document with id '29'. Preview of field's value: 'NaN'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[double] supports only finite values, but got [NaN]"
+    }
+   }
+  },
+  {
+   "doc": "{\"d\":\"Infinity\"}",
+   "id": "30",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [d] of type [double] in document with id '30'. Preview of field's value: 'Infinity'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[double] supports only finite values, but got [Infinity]"
+    }
+   }
+  },
+  {
+   "doc": "{\"d\":1e400}",
+   "id": "31",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [d] of type [double] in document with id '31'. Preview of field's value: 'Infinity'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[double] supports only finite values, but got [Infinity]"
+    }
+   }
+  },
+  {
+   "doc": "{\"f\":\"abc\"}",
+   "id": "32",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [f] of type [float] in document with id '32'. Preview of field's value: 'abc'",
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"abc\""
+    }
+   }
+  },
+  {
+   "doc": "{\"f\":3.5e38}",
+   "id": "33",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:6] failed to parse field [f] of type [float] in document with id '33'. Preview of field's value: 'Infinity'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[float] supports only finite values, but got [Infinity]"
+    }
+   }
+  },
+  {
+   "doc": "{\"fnc\":\"1.5\"}",
+   "id": "34",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:8] failed to parse field [fnc] of type [float] in document with id '34'. Preview of field's value: '1.5'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Float value passed as String"
+    }
+   }
+  },
+  {
+   "doc": "{\"hf\":70000}",
+   "id": "35",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [hf] of type [half_float] in document with id '35'. Preview of field's value: '70000'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[half_float] supports only finite values, but got [70000.0]"
+    }
+   }
+  },
+  {
+   "doc": "{\"sf\":1.234}",
+   "id": "36",
+   "ignored": []
+  },
+  {
+   "doc": "{\"sf\":\"abc\"}",
+   "id": "37",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [sf] of type [scaled_float] in document with id '37'. Preview of field's value: 'abc'",
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"abc\""
+    }
+   }
+  },
+  {
+   "doc": "{\"ul\":-1}",
+   "id": "38",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [ul] of type [unsigned_long] in document with id '38'. Preview of field's value: '-1'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Value [-1] is out of range for unsigned long."
+    }
+   }
+  },
+  {
+   "doc": "{\"ul\":18446744073709551615}",
+   "id": "39",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ul\":18446744073709551616}",
+   "id": "40",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [ul] of type [unsigned_long] in document with id '40'. Preview of field's value: '18446744073709551616'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Value [18446744073709551616] is out of range for unsigned long"
+    }
+   }
+  },
+  {
+   "doc": "{\"ul\":\"1.5\"}",
+   "id": "41",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [ul] of type [unsigned_long] in document with id '41'. Preview of field's value: '1.5'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Value \"1.5\" has a decimal part"
+    }
+   }
+  },
+  {
+   "doc": "{\"ul\":1.5}",
+   "id": "42",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [ul] of type [unsigned_long] in document with id '42'. Preview of field's value: '1.5'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Value \"1.5\" has a decimal part"
+    }
+   }
+  },
+  {
+   "doc": "{\"bool\":\"yes\"}",
+   "id": "43",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] failed to parse field [bool] of type [boolean] in document with id '43'. Preview of field's value: 'yes'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse value [yes] as only [true] or [false] are allowed."
+    }
+   }
+  },
+  {
+   "doc": "{\"bool\":\"true\"}",
+   "id": "44",
+   "ignored": []
+  },
+  {
+   "doc": "{\"bool\":1}",
+   "id": "45",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] failed to parse field [bool] of type [boolean] in document with id '45'. Preview of field's value: '1'",
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:10] Current token (VALUE_NUMBER_INT) not of boolean type\n at [Source: (byte[])\"{\"bool\":1}\"; line: 1, column: 10]",
+     "caused_by": {
+      "type": "json_parse_exception",
+      "reason": "Current token (VALUE_NUMBER_INT) not of boolean type\n at [Source: (byte[])\"{\"bool\":1}\"; line: 1, column: 10]"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"bool\":\"\"}",
+   "id": "46",
+   "ignored": []
+  },
+  {
+   "doc": "{\"bool\":\"off\"}",
+   "id": "47",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] failed to parse field [bool] of type [boolean] in document with id '47'. Preview of field's value: 'off'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse value [off] as only [true] or [false] are allowed."
+    }
+   }
+  },
+  {
+   "doc": "{\"bnv\":null}",
+   "id": "48",
+   "ignored": []
+  },
+  {
+   "doc": "{\"date\":\"2020-01-01\"}",
+   "id": "49",
+   "ignored": []
+  },
+  {
+   "doc": "{\"date\":\"2020-13-01\"}",
+   "id": "50",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] failed to parse field [date] of type [date] in document with id '50'. Preview of field's value: '2020-13-01'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "failed to parse date field [2020-13-01] with format [strict_date_optional_time||epoch_millis]",
+     "caused_by": {
+      "type": "date_time_parse_exception",
+      "reason": "Failed to parse with all enclosed parsers"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"date\":1577836800000}",
+   "id": "51",
+   "ignored": []
+  },
+  {
+   "doc": "{\"date\":\"1577836800000\"}",
+   "id": "52",
+   "ignored": []
+  },
+  {
+   "doc": "{\"date\":\"abc\"}",
+   "id": "53",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] failed to parse field [date] of type [date] in document with id '53'. Preview of field's value: 'abc'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "failed to parse date field [abc] with format [strict_date_optional_time||epoch_millis]",
+     "caused_by": {
+      "type": "date_time_parse_exception",
+      "reason": "Failed to parse with all enclosed parsers"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"date\":1.5e12}",
+   "id": "54",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] failed to parse field [date] of type [date] in document with id '54'. Preview of field's value: '1.5E12'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "failed to parse date field [1.5e12] with format [strict_date_optional_time||epoch_millis]",
+     "caused_by": {
+      "type": "date_time_parse_exception",
+      "reason": "Failed to parse with all enclosed parsers"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"date\":true}",
+   "id": "55",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] failed to parse field [date] of type [date] in document with id '55'. Preview of field's value: 'true'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "failed to parse date field [true] with format [strict_date_optional_time||epoch_millis]",
+     "caused_by": {
+      "type": "date_time_parse_exception",
+      "reason": "Failed to parse with all enclosed parsers"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"dfmt\":\"2020-01-01T00:00:00\"}",
+   "id": "56",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] failed to parse field [dfmt] of type [date] in document with id '56'. Preview of field's value: '2020-01-01T00:00:00'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "failed to parse date field [2020-01-01T00:00:00] with format [yyyy-MM-dd]",
+     "caused_by": {
+      "type": "date_time_parse_exception",
+      "reason": "Text '2020-01-01T00:00:00' could not be parsed, unparsed text found at index 10"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"dim\":\"abc\"}",
+   "id": "57",
+   "ignored": [
+    "dim"
+   ]
+  },
+  {
+   "doc": "{\"dn\":\"2020-01-01T00:00:00.123456789Z\"}",
+   "id": "58",
+   "ignored": []
+  },
+  {
+   "doc": "{\"dn\":\"1969-01-01\"}",
+   "id": "59",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [dn] of type [date_nanos] in document with id '59'. Preview of field's value: '1969-01-01'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "date[1969-01-01T00:00:00Z] is before the epoch in 1970 and cannot be stored in nanosecond resolution"
+    }
+   }
+  },
+  {
+   "doc": "{\"dn\":\"2300-01-01\"}",
+   "id": "60",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [dn] of type [date_nanos] in document with id '60'. Preview of field's value: '2300-01-01'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "date[2300-01-01T00:00:00Z] is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution"
+    }
+   }
+  },
+  {
+   "doc": "{\"depoch\":1577836800}",
+   "id": "61",
+   "ignored": []
+  },
+  {
+   "doc": "{\"depoch\":\"1577836800.5\"}",
+   "id": "62",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ip\":\"1.2.3.4\"}",
+   "id": "63",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ip\":\"::1\"}",
+   "id": "64",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ip\":\"1.2.3\"}",
+   "id": "65",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [ip] of type [ip] in document with id '65'. Preview of field's value: '1.2.3'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "'1.2.3' is not an IP string literal."
+    }
+   }
+  },
+  {
+   "doc": "{\"ip\":\"abc\"}",
+   "id": "66",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [ip] of type [ip] in document with id '66'. Preview of field's value: 'abc'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "'abc' is not an IP string literal."
+    }
+   }
+  },
+  {
+   "doc": "{\"ip\":123}",
+   "id": "67",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [ip] of type [ip] in document with id '67'. Preview of field's value: '123'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "'123' is not an IP string literal."
+    }
+   }
+  },
+  {
+   "doc": "{\"ipim\":\"abc\"}",
+   "id": "68",
+   "ignored": [
+    "ipim"
+   ]
+  },
+  {
+   "doc": "{\"kw\":\"abcdefg\"}",
+   "id": "69",
+   "ignored": [
+    "kw"
+   ]
+  },
+  {
+   "doc": "{\"kw\":[\"a\",\"abcdefg\"]}",
+   "id": "70",
+   "ignored": [
+    "kw"
+   ]
+  },
+  {
+   "doc": "{\"kw\":123}",
+   "id": "71",
+   "ignored": []
+  },
+  {
+   "doc": "{\"kw\":true}",
+   "id": "72",
+   "ignored": []
+  },
+  {
+   "doc": "{\"kw\":{\"a\":1}}",
+   "id": "73",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:13] failed to parse field [kw] of type [keyword] in document with id '73'. Preview of field's value: '{a=1}'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Expected text at 1:7 but found START_OBJECT"
+    }
+   }
+  },
+  {
+   "doc": "{\"knv\":null}",
+   "id": "74",
+   "ignored": []
+  },
+  {
+   "doc": "{\"t\":123}",
+   "id": "75",
+   "ignored": []
+  },
+  {
+   "doc": "{\"t\":{\"a\":1}}",
+   "id": "76",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:12] failed to parse field [t] of type [text] in document with id '76'. Preview of field's value: '{a=1}'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Expected text at 1:6 but found START_OBJECT"
+    }
+   }
+  },
+  {
+   "doc": "{\"bin\":\"aGVsbG8=\"}",
+   "id": "77",
+   "ignored": []
+  },
+  {
+   "doc": "{\"bin\":\"not base64!\"}",
+   "id": "78",
+   "ignored": []
+  },
+  {
+   "doc": "{\"bin\":123}",
+   "id": "79",
+   "ignored": []
+  },
+  {
+   "doc": "{\"geo\":[1,2]}",
+   "id": "80",
+   "ignored": []
+  },
+  {
+   "doc": "{\"geo\":\"1,2\"}",
+   "id": "81",
+   "ignored": []
+  },
+  {
+   "doc": "{\"geo\":\"abc\"}",
+   "id": "82",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:8] failed to parse field [geo] of type [geo_point]",
+    "caused_by": {
+     "type": "parse_exception",
+     "reason": "unsupported symbol [a] in geohash [abc]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "unsupported symbol [a] in geohash [abc]"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"geo\":[1,200]}",
+   "id": "83",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:14] failed to parse: illegal latitude value [200.0] for geo",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "illegal latitude value [200.0] for geo"
+    }
+   }
+  },
+  {
+   "doc": "{\"geo\":{\"lat\":100,\"lon\":0}}",
+   "id": "84",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:26] failed to parse field [geo] of type [geo_point]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "illegal latitude value [100.0] for geo"
+    }
+   }
+  },
+  {
+   "doc": "{\"geo\":{\"lat\":1}}",
+   "id": "85",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:16] failed to parse field [geo] of type [geo_point]",
+    "caused_by": {
+     "type": "parse_exception",
+     "reason": "Required [lon]"
+    }
+   }
+  },
+  {
+   "doc": "{\"geo\":[[1,2],[3,4]]}",
+   "id": "86",
+   "ignored": []
+  },
+  {
+   "doc": "{\"geoim\":\"abc\"}",
+   "id": "87",
+   "ignored": [
+    "geoim"
+   ]
+  },
+  {
+   "doc": "{\"geo\":\"POINT (1 2)\"}",
+   "id": "88",
+   "ignored": []
+  },
+  {
+   "doc": "{\"obj\":{\"a\":\"x\"}}",
+   "id": "89",
+   "ignored": []
+  },
+  {
+   "doc": "{\"obj\":\"x\"}",
+   "id": "90",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:8] object mapping for [obj] tried to parse field [obj] as object, but found a concrete value"
+   }
+  },
+  {
+   "doc": "{\"obj\":{\"b\":1}}",
+   "id": "91",
+   "error": {
+    "type": "strict_dynamic_mapping_exception",
+    "reason": "[1:13] mapping set to strict, dynamic introduction of [b] within [obj] is not allowed"
+   }
+  },
+  {
+   "doc": "{\"obj.a\":\"x\"}",
+   "id": "92",
+   "ignored": []
+  },
+  {
+   "doc": "{\"nest\":[{\"k\":\"a\"},{\"k\":\"b\"}]}",
+   "id": "93",
+   "ignored": []
+  },
+  {
+   "doc": "{\"nest\":\"x\"}",
+   "id": "94",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] object mapping for [nest] tried to parse field [nest] as object, but found a concrete value"
+   }
+  },
+  {
+   "doc": "{\"dis\":{\"anything\":[1,2,{\"x\":1}]}}",
+   "id": "95",
+   "ignored": []
+  },
+  {
+   "doc": "{\"dis\":\"x\"}",
+   "id": "96",
+   "ignored": []
+  },
+  {
+   "doc": "{\"flat\":{\"a\":{\"b\":\"c\"},\"d\":[1,true,null]}}",
+   "id": "97",
+   "ignored": []
+  },
+  {
+   "doc": "{\"flat\":\"x\"}",
+   "id": "98",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:9] failed to parse field [flat] of type [flattened] in document with id '98'. Preview of field's value: 'x'",
+    "caused_by": {
+     "type": "parsing_exception",
+     "reason": "Failed to parse object: expecting token of type [START_OBJECT] but found [VALUE_STRING]"
+    }
+   }
+  },
+  {
+   "doc": "{\"ir\":{\"gte\":1,\"lt\":5}}",
+   "id": "99",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ir\":{\"gte\":5,\"lte\":1}}",
+   "id": "100",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:23] failed to parse field [ir] of type [integer_range] in document with id '100'. Preview of field's value: 'null'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "min value (5) is greater than max value (1)"
+    }
+   }
+  },
+  {
+   "doc": "{\"ir\":{\"gte\":\"a\"}}",
+   "id": "101",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:14] failed to parse field [ir] of type [integer_range] in document with id '101'. Preview of field's value: 'a'",
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"a\""
+    }
+   }
+  },
+  {
+   "doc": "{\"ir\":{\"foo\":1}}",
+   "id": "102",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:14] failed to parse field [ir] of type [integer_range] in document with id '102'. Preview of field's value: '1'",
+    "caused_by": {
+     "type": "document_parsing_exception",
+     "reason": "[1:14] error parsing field [ir], with unknown parameter [foo]"
+    }
+   }
+  },
+  {
+   "doc": "{\"ir\":5}",
+   "id": "103",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [ir] of type [integer_range] in document with id '103'. Preview of field's value: '5'",
+    "caused_by": {
+     "type": "document_parsing_exception",
+     "reason": "[1:7] error parsing field [ir], expected an object but got ir"
+    }
+   }
+  },
+  {
+   "doc": "{\"dr\":{\"gte\":\"2020-01-01\",\"lte\":\"now\"}}",
+   "id": "104",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:33] failed to parse field [dr] of type [date_range] in document with id '104'. Preview of field's value: 'now'",
+    "caused_by": {
+     "type": "parse_exception",
+     "reason": "could not read the current timestamp",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "now is not used at indexing time"
+     }
+    }
+   }
+  },
+  {
+   "doc": "{\"ipr\":\"10.0.0.0/8\"}",
+   "id": "105",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ipr\":{\"gte\":\"10.0.0.1\",\"lte\":\"10.0.0.5\"}}",
+   "id": "106",
+   "ignored": []
+  },
+  {
+   "doc": "{\"vec\":[1,2,3]}",
+   "id": "107",
+   "ignored": []
+  },
+  {
+   "doc": "{\"vec\":[1,2]}",
+   "id": "108",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:12] failed to parse: The [dense_vector] field [vec] in doc [document with id '108'] has a different number of dimensions [2] than defined in the mapping [3]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "The [dense_vector] field [vec] in doc [document with id '108'] has a different number of dimensions [2] than defined in the mapping [3]"
+    }
+   }
+  },
+  {
+   "doc": "{\"vec\":[1,\"a\",3]}",
+   "id": "109",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:11] failed to parse: Failed to parse object: expecting token of type [VALUE_NUMBER] but found [VALUE_STRING]",
+    "caused_by": {
+     "type": "parsing_exception",
+     "reason": "Failed to parse object: expecting token of type [VALUE_NUMBER] but found [VALUE_STRING]"
+    }
+   }
+  },
+  {
+   "doc": "{\"vec\":\"abc\"}",
+   "id": "110",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:8] failed to parse: Failed to parse object: Base64 decoded vector byte length [2] does not match the expected length of [12] or [6] for dimension count [3]",
+    "caused_by": {
+     "type": "parsing_exception",
+     "reason": "Failed to parse object: Base64 decoded vector byte length [2] does not match the expected length of [12] or [6] for dimension count [3]"
+    }
+   }
+  },
+  {
+   "doc": "{\"bvec\":[1,2,300]}",
+   "id": "111",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:14] failed to parse: element_type [byte] vectors only support integers between [-128, 127] but found [300] at dim [2];",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "element_type [byte] vectors only support integers between [-128, 127] but found [300] at dim [2];"
+    }
+   }
+  },
+  {
+   "doc": "{\"bvec\":[1.5,2,3]}",
+   "id": "112",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:10] failed to parse: element_type [byte] vectors only support non-decimal values but found decimal value [1.5] at dim [0];",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "element_type [byte] vectors only support non-decimal values but found decimal value [1.5] at dim [0];"
+    }
+   }
+  },
+  {
+   "doc": "{\"bvec\":\"0a0b0c\"}",
+   "id": "113",
+   "ignored": []
+  },
+  {
+   "doc": "{\"rf\":1.5}",
+   "id": "114",
+   "ignored": []
+  },
+  {
+   "doc": "{\"rf\":-1}",
+   "id": "115",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [rf] of type [rank_feature] in document with id '115'. Preview of field's value: '-1'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "featureValue must be a positive normal float, got: -1.0 for feature rf on field _feature which is less than the minimum positive normal float: 1.1754944E-38"
+    }
+   }
+  },
+  {
+   "doc": "{\"rf\":0}",
+   "id": "116",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [rf] of type [rank_feature] in document with id '116'. Preview of field's value: '0'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "featureValue must be a positive normal float, got: 0.0 for feature rf on field _feature which is less than the minimum positive normal float: 1.1754944E-38"
+    }
+   }
+  },
+  {
+   "doc": "{\"rf\":\"abc\"}",
+   "id": "117",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [rf] of type [rank_feature] in document with id '117'. Preview of field's value: 'abc'",
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"abc\""
+    }
+   }
+  },
+  {
+   "doc": "{\"rfs\":{\"a\":1,\"b\":2}}",
+   "id": "118",
+   "ignored": []
+  },
+  {
+   "doc": "{\"rfs\":{\"a\":-1}}",
+   "id": "119",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:13] failed to parse: featureValue must be a positive normal float, got: -1.0 for feature a on field rfs which is less than the minimum positive normal float: 1.1754944E-38",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "featureValue must be a positive normal float, got: -1.0 for feature a on field rfs which is less than the minimum positive normal float: 1.1754944E-38"
+    }
+   }
+  },
+  {
+   "doc": "{\"sv\":{\"a\":1}}",
+   "id": "120",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ver\":\"1.2.3\"}",
+   "id": "121",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ver\":\"abc\"}",
+   "id": "122",
+   "ignored": []
+  },
+  {
+   "doc": "{\"wild\":\"abc\"}",
+   "id": "123",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ck\":\"c\"}",
+   "id": "124",
+   "ignored": []
+  },
+  {
+   "doc": "{\"ck\":\"d\"}",
+   "id": "125",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [ck] of type [constant_keyword] in document with id '125'. Preview of field's value: 'd'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[constant_keyword] field [ck] only accepts values that are equal to the value defined in the mappings [c], but got [d]"
+    }
+   }
+  },
+  {
+   "doc": "{\"tc\":\"hello world\"}",
+   "id": "126",
+   "ignored": []
+  },
+  {
+   "doc": "{\"tc\":123}",
+   "id": "127",
+   "ignored": []
+  },
+  {
+   "doc": "{\"sayt\":\"hello world\"}",
+   "id": "128",
+   "ignored": []
+  },
+  {
+   "doc": "{\"comp\":\"hello\"}",
+   "id": "129",
+   "ignored": []
+  },
+  {
+   "doc": "{\"comp\":{\"input\":[\"a\",\"b\"],\"weight\":3}}",
+   "id": "130",
+   "ignored": []
+  },
+  {
+   "doc": "{\"comp\":{\"input\":\"a\",\"weight\":-1}}",
+   "id": "131",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:31] failed to parse: weight must be in the interval [0..2147483647], but was [-1]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "weight must be in the interval [0..2147483647], but was [-1]"
+    }
+   }
+  },
+  {
+   "doc": "{\"comp\":{\"foo\":1}}",
+   "id": "132",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:10] failed to parse: unknown field name [foo], must be one of [input, weight, contexts]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unknown field name [foo], must be one of [input, weight, contexts]"
+    }
+   }
+  },
+  {
+   "doc": "{\"al\":\"x\"}",
+   "id": "133",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] Cannot write to a field alias [al]."
+   }
+  },
+  {
+   "doc": "{\"gs\":{\"type\":\"point\",\"coordinates\":[1,2]}}",
+   "id": "134",
+   "ignored": []
+  },
+  {
+   "doc": "{\"gs\":\"POINT (1 2)\"}",
+   "id": "135",
+   "ignored": []
+  },
+  {
+   "doc": "{\"gs\":\"abc\"}",
+   "id": "136",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] failed to parse field [gs] of type [geo_shape]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unknown geometry type: abc"
+    }
+   }
+  },
+  {
+   "doc": "{\"pt\":[1,2]}",
+   "id": "137",
+   "ignored": []
+  },
+  {
+   "doc": "{\"sh\":\"POINT (1 2)\"}",
+   "id": "138",
+   "ignored": []
+  },
+  {
+   "doc": "{\"unknown\":1}",
+   "id": "139",
+   "error": {
+    "type": "strict_dynamic_mapping_exception",
+    "reason": "[1:12] mapping set to strict, dynamic introduction of [unknown] within [_doc] is not allowed"
+   }
+  },
+  {
+   "doc": "{\"dyn\":{\"x\":1}}",
+   "id": "140",
+   "ignored": []
+  },
+  {
+   "doc": "{\"_id\":\"x\"}",
+   "id": "141",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:8] failed to parse field [_id] of type [_id] in document with id '141'. Preview of field's value: 'x'",
+    "caused_by": {
+     "type": "document_parsing_exception",
+     "reason": "[1:8] Field [_id] is a metadata field and cannot be added inside a document. Use the index API request parameters."
+    }
+   }
+  },
+  {
+   "doc": "{\"_source\":{}}",
+   "id": "142",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:13] failed to parse field [_source] of type [_source] in document with id '142'. Preview of field's value: '{}'",
+    "caused_by": {
+     "type": "document_parsing_exception",
+     "reason": "[1:12] Field [_source] is a metadata field and cannot be added inside a document. Use the index API request parameters."
+    }
+   }
+  },
+  {
+   "doc": "{\"_ignored\":1}",
+   "id": "143",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:13] failed to parse field [_ignored] of type [_ignored] in document with id '143'. Preview of field's value: '1'",
+    "caused_by": {
+     "type": "document_parsing_exception",
+     "reason": "[1:13] Field [_ignored] is a metadata field and cannot be added inside a document. Use the index API request parameters."
+    }
+   }
+  },
+  {
+   "doc": "{\"\":1}",
+   "id": "144",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:2] failed to parse: field name cannot be an empty string",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "field name cannot be an empty string"
+    }
+   }
+  },
+  {
+   "doc": "{\"a..b\":1}",
+   "id": "145",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:2] failed to parse: field name cannot contain only whitespace: ['a..b']",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "field name cannot contain only whitespace: ['a..b']"
+    }
+   }
+  },
+  {
+   "doc": "{\" \":1}",
+   "id": "146",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:2] Field name cannot contain only whitespace: [ ]"
+   }
+  }
+ ]
+}

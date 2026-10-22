@@ -1,0 +1,341 @@
+#params: {"i": 1, "l": 3000000000, "d": 1.5, "s": "x", "b": true, "n": null, "a": [1, 2.5, "z"], "o": {"k": [1]}, "big": 18446744073709551616, "e": 1e300, "neg": -5}
+return [params.i.getClass().getSimpleName(), params.l.getClass().getSimpleName(), params.d.getClass().getSimpleName(), params.big.getClass().getSimpleName(), params.e, params.n, params.a.getClass().getSimpleName(), params.o.getClass().getSimpleName()]
+----
+#params: {"i": 1, "l": 3000000000, "d": 1.5}
+int x = params.i; long y = params.l; double z = params.d; return x + y + z
+----
+#params: {"l": 3000000000}
+int x = params.l; return x
+----
+#params: {"d": 1.5}
+int x = params.d; return x
+----
+#params: {"d": 1.5}
+float x = params.d; return x
+----
+#params: {"s": "abc"}
+return params.s.length() + params['s'].toUpperCase() + params.get('s')
+----
+#params: {"a": [3, 1, 2]}
+params.a.add(4); Collections.sort(params.a); return params.a
+----
+#params: {"m": {"b": 1, "a": 2}}
+return params.m + params.m.keySet()
+----
+#params: {"x": 1}
+params.y = 2; params.remove('x'); return params
+----
+#params: {"x": 1}
+return params.containsKey('x') + ':' + params.size() + ':' + params.isEmpty()
+----
+return params.size()
+----
+#params: {"_source": {"a": 1}}
+return params
+----
+#params: {"f": 0.1}
+return params.f * 3
+----
+#params: {"f": 100000000000000000000000}
+return params.f
+----
+#params: {"f": 1.0}
+return params.f
+----
+#params: {"f": 1E2}
+return params.f
+----
+#params: {"f": -0.0}
+return params.f
+----
+#params: {"s": "é😀"}
+return params.s.length() + ':' + params.s
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3], "d": 1.5, "dt": "2020-01-02T03:04:05.678Z", "k": ["b", "a"]}}
+return doc['l'].value + doc['l'].get(1) + doc['l'].size() + doc['d'].value
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc['l'][5]
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc['d'].value
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc['nope'].value
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc['t'].value
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc.containsKey('l') ? 1 : 0
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc.containsKey('nope') ? 1 : 0
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc['l'].min + doc['l'].max + doc['l'].sum + doc['l'].average
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc['l'].stream().mapToLong(x -> x).sum()
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+doc['l'].add(1); return 1
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc.l.value
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"dt": "2020-01-02T03:04:05.678Z"}}
+return doc['dt'].value.getMillis() + doc['dt'].value.toInstant().toEpochMilli() / 1000.0
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"dt": "2020-01-02T03:04:05.678Z"}}
+return doc['dt'].value.year * 1.0 + doc['dt'].value.getMonthValue() + doc['dt'].value.dayOfMonth
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return params._source.l[0]
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return _score + 1
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return 'x'
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return null
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return true
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return doc['l']
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return -1
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return Double.NaN
+----
+#context: score
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+int x = 2
+----
+#context: filter
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+doc['l'].value > 4
+----
+#context: filter
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return 1
+----
+#context: filter
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return null
+----
+#context: filter
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+def x = 'a'; return x
+----
+#context: filter
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return _score > 0
+----
+#context: long_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+for (long v : doc['l']) emit(v * 2)
+----
+#context: long_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(1.5)
+----
+#context: long_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit('x')
+----
+#context: long_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+def x = 1.5; emit(x)
+----
+#context: long_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+def x = 'x'; emit(x)
+----
+#context: long_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(params._source.l[0])
+----
+#context: long_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+for (int i = 0; i < 101; i++) emit(i)
+----
+#context: long_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+return 1
+----
+#context: double_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(1); emit(2L); emit(0.5f)
+----
+#context: double_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(Double.NaN)
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(null)
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit('b'); emit('a'); emit('b')
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(1)
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(String.valueOf(doc['l'].value))
+----
+#context: boolean_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(true); emit(false); emit(true)
+----
+#context: date_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(0L); emit(1700000000000L)
+----
+#context: date_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(parse('2020-01-01'))
+----
+#context: date_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(parse('not a date'))
+----
+#context: date_field
+#setup: {"index": "painless-docs", "document": {"dt": "2020-01-02T03:04:05.678Z"}}
+emit(doc['dt'].value.toInstant().toEpochMilli() + 1)
+----
+#context: ip_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit('10.0.0.1'); emit('::1')
+----
+#context: ip_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit('not-ip')
+----
+#context: geo_point_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(41.5, -71.25)
+----
+#context: geo_point_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(91.0, 0.0)
+----
+#context: composite_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit('a', 1); emit('b', 'x'); emit(['c': 2, 'd': [1, 2]])
+----
+#context: composite_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(['c': ['x': 1]])
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"t": "hello world"}}
+emit(params['_source']['t'])
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"t": "hello world"}}
+emit(field('t').get('dflt'))
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"k": ["b", "a"]}}
+emit(field('k').get('dflt') + $('k', 'z') + field('k').get(1, 'q') + field('nope').get('n'))
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"k": ["b", "a"]}}
+for (def v : field('k')) emit(v)
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"k": ["b", "a"]}}
+emit(String.valueOf(field('k').isEmpty()) + field('k').size() + field('k').getName())
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(String.valueOf(field('l').get(0L)))
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(String.valueOf(field('l').get(0)))
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"dt": "2020-01-02T03:04:05.678Z"}}
+emit(String.valueOf(field('dt').get(null)))
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"g": "41.12,-71.34"}}
+emit(doc['g'].value.toString() + doc['g'].lat + ':' + doc['g'].lon + ':' + doc['g'].arcDistance(41, -71) + ':' + doc['g'].getGeohash())
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"ip": "10.0.0.1"}}
+emit(doc['ip'].value)
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"b": [true, false]}}
+emit(doc['b'].toString())
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(doc.toString())
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(doc['l'].toString() + doc['k'].toString())
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(doc['k'].value)
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"l": [5, 3]}}
+emit(doc['k'].size() + '')
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"obj": {"x": 9}}}
+emit(doc['obj.x'].value + '' + doc['obj'].size())
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"sf": 1.234, "hf": 0.1, "f": 0.1}}
+emit(doc['sf'].value + ':' + doc['hf'].value + ':' + doc['f'].value)
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"ver": "1.2.3", "bin": "aGVsbG8=", "ul": 18446744073709551615}}
+emit(doc['ver'].value + ':' + doc['bin'].value + ':' + doc['ul'].value)
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"dn": "2020-01-02T03:04:05.123456789Z"}}
+emit(doc['dn'].value + ':' + doc['dn'].value.getNano())
+----
+#context: keyword_field
+#setup: {"index": "painless-docs", "document": {"v": [1, 2, 3]}}
+emit(doc['v'].vectorValue + ':' + doc['v'].magnitude + ':' + doc['v'].size())
+----

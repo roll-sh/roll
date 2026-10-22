@@ -1,0 +1,36 @@
+# Environment skips for running the suites against a real single-node Elasticsearch 9.5.5 in
+# Docker (scripts/search-yaml-suites.sh es-baseline). Every test listed here fails there for a
+# reason outside the runner; everything else that doesn't pass is skipped by its own
+# prerequisites. Format: `<glob over test ids>  # reason`.
+#
+# Applies to roll too where the reason does (roll is one node per cluster).
+
+# One node: these wait for green on indices with a replica, or need shards to move.
+free:data_stream/10_basic/Create data stream  # needs two nodes (waits for green with one replica)
+free:data_stream/10_basic/Create data stream with failure store  # needs two nodes (waits for green with one replica)
+free:data_stream/10_basic/Create data stream with match all template  # needs two nodes (waits for green with one replica)
+free:data_stream/10_basic/Create hidden data stream with match all template  # needs two nodes (waits for green with one replica)
+free:data_stream/10_basic/Get data stream api check existence of allow_custom_routing field  # needs two nodes (waits for green with one replica)
+free:data_stream/10_basic/Get data stream api check existence of replicated field  # needs two nodes (waits for green with one replica)
+free:data_stream/120_data_streams_stats/Multiple data stream  # needs two nodes (waits for green with one replica)
+free:data_stream/150_tsdb/created the data stream  # needs two nodes (waits for green with one replica)
+free:data_stream/240_data_stream_settings/Test null out settings component templates only  # needs two nodes (waits for green with one replica)
+free:data_stream/250_data_stream_mappings/Test mappings component templates only  # needs two nodes (waits for green with one replica)
+
+# Fixtures of the module's own test cluster.
+free:ingest_geoip/*  # needs the ingest-geoip test fixture (custom databases in the config dir, a download service)
+
+# elasticsearch-clients-tests (run with security and HTTPS on, a 1.5 GB container).
+clients:machine_learning/data_frame_analytics/*  # ML native processes need more memory than the 1.5 GB container
+clients:machine_learning/jobs_crud/*  # ML native processes need more memory than the 1.5 GB container
+clients:machine_learning/post_data/*  # ML native processes need more memory than the 1.5 GB container
+clients:machine_learning/set_upgrade_mode/*  # ML native processes need more memory than the 1.5 GB container
+clients:inference/10_basic/*  # deploys the ELSER model (download + ML memory)
+clients:license/10_stack/*  # installs a license signed with Elastic's test key, invalid on release builds
+
+# These assume a cluster that earlier tests left state in: the clients' runners never wipe the
+# cluster or reset feature states between tests, so shards and the .security index exist there.
+clients:cat/allocation/*  # expects shards on the node before the test creates any
+clients:cat/shards/*  # expects shards on the node before the test creates any
+clients:indices/stats/Index - blank  # expects shards in the cluster before the test creates any
+clients:security/120_get_settings/*  # needs the .security index to exist before the test starts

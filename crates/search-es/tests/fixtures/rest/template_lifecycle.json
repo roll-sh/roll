@@ -1,0 +1,551 @@
+{
+  "description" : "Template lifecycles: include_defaults rollover, simulate of data stream templates, failure store frozen_after",
+  "steps" : [
+    {
+      "req" : "PUT /_component_template/esm-lc",
+      "body" : {
+        "template" : {
+          "lifecycle" : {
+            "data_retention" : "10d"
+          }
+        },
+        "version" : 1
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_component_template/esm-lc?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "component_templates" : [
+          {
+            "name" : "esm-lc",
+            "component_template" : {
+              "template" : {
+                "lifecycle" : {
+                  "enabled" : true,
+                  "data_retention" : "10d",
+                  "rollover" : {
+                    "min_docs" : 1,
+                    "max_primary_shard_docs" : 200000000,
+                    "max_primary_shard_size" : "50gb",
+                    "max_age" : "1d [automatic]"
+                  }
+                }
+              },
+              "version" : 1,
+              "created_date_millis" : 1792573065339,
+              "modified_date_millis" : 1792573065339
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_component_template/esm-lc",
+      "status" : 200,
+      "response" : {
+        "component_templates" : [
+          {
+            "name" : "esm-lc",
+            "component_template" : {
+              "template" : {
+                "lifecycle" : {
+                  "enabled" : true,
+                  "data_retention" : "10d"
+                }
+              },
+              "version" : 1,
+              "created_date_millis" : 1792573065339,
+              "modified_date_millis" : 1792573065339
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-lc3",
+      "body" : {
+        "template" : {
+          "lifecycle" : {
+            "frozen_after" : "30d"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_component_template/esm-lc3?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "component_templates" : [
+          {
+            "name" : "esm-lc3",
+            "component_template" : {
+              "template" : {
+                "lifecycle" : {
+                  "enabled" : true,
+                  "frozen_after" : "30d",
+                  "rollover" : {
+                    "min_docs" : 1,
+                    "max_primary_shard_docs" : 200000000,
+                    "max_primary_shard_size" : "50gb",
+                    "max_age" : "30d [automatic]"
+                  }
+                }
+              },
+              "created_date_millis" : 1792573065361,
+              "modified_date_millis" : 1792573065361
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-lc2",
+      "body" : {
+        "template" : {
+          "data_stream_options" : {
+            "failure_store" : {
+              "lifecycle" : {
+                "frozen_after" : "30d"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: Failure store lifecycle does not support freezing, please remove the frozen_after configuration.;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: Failure store lifecycle does not support freezing, please remove the frozen_after configuration.;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it2",
+      "body" : {
+        "index_patterns" : [
+          "esm-y*"
+        ],
+        "template" : {
+          "data_stream_options" : {
+            "failure_store" : {
+              "lifecycle" : {
+                "frozen_after" : "30d"
+              }
+            }
+          }
+        },
+        "data_stream" : { }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: Failure store lifecycle does not support freezing, please remove the frozen_after configuration.;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: Failure store lifecycle does not support freezing, please remove the frozen_after configuration.;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it",
+      "body" : {
+        "index_patterns" : [
+          "esm-x*"
+        ],
+        "composed_of" : [
+          "esm-lc"
+        ],
+        "template" : {
+          "lifecycle" : {
+            "data_retention" : "100d",
+            "downsampling" : [
+              {
+                "after" : "1d",
+                "fixed_interval" : "1h"
+              }
+            ]
+          },
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true
+            }
+          }
+        },
+        "data_stream" : {
+          "allow_custom_routing" : true
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_index_template/esm-it?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "index_templates" : [
+          {
+            "name" : "esm-it",
+            "index_template" : {
+              "index_patterns" : [
+                "esm-x*"
+              ],
+              "template" : {
+                "lifecycle" : {
+                  "enabled" : true,
+                  "data_retention" : "100d",
+                  "downsampling" : [
+                    {
+                      "after" : "1d",
+                      "fixed_interval" : "1h"
+                    }
+                  ],
+                  "rollover" : {
+                    "min_docs" : 1,
+                    "max_primary_shard_docs" : 200000000,
+                    "max_primary_shard_size" : "50gb",
+                    "max_age" : "30d [automatic]"
+                  }
+                },
+                "data_stream_options" : {
+                  "failure_store" : {
+                    "enabled" : true
+                  }
+                }
+              },
+              "composed_of" : [
+                "esm-lc"
+              ],
+              "data_stream" : {
+                "hidden" : false,
+                "allow_custom_routing" : true
+              },
+              "created_date_millis" : 1792573065380,
+              "modified_date_millis" : 1792573065380
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate/esm-it",
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_hot"
+                  }
+                }
+              }
+            }
+          },
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "_routing" : {
+              "required" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              }
+            }
+          },
+          "aliases" : { },
+          "lifecycle" : {
+            "enabled" : true,
+            "data_retention" : "100d",
+            "downsampling" : [
+              {
+                "after" : "1d",
+                "fixed_interval" : "1h"
+              }
+            ]
+          },
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true
+            }
+          }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate/esm-it?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_hot"
+                  }
+                }
+              }
+            }
+          },
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "_routing" : {
+              "required" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              }
+            }
+          },
+          "aliases" : { },
+          "lifecycle" : {
+            "enabled" : true,
+            "data_retention" : "100d",
+            "downsampling" : [
+              {
+                "after" : "1d",
+                "fixed_interval" : "1h"
+              }
+            ],
+            "rollover" : {
+              "min_docs" : 1,
+              "max_primary_shard_docs" : 200000000,
+              "max_primary_shard_size" : "50gb",
+              "max_age" : "30d [automatic]"
+            }
+          },
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true
+            }
+          }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-x1?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_hot"
+                  }
+                }
+              }
+            }
+          },
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "_routing" : {
+              "required" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              }
+            }
+          },
+          "aliases" : { },
+          "lifecycle" : {
+            "enabled" : true,
+            "data_retention" : "100d",
+            "downsampling" : [
+              {
+                "after" : "1d",
+                "fixed_interval" : "1h"
+              }
+            ],
+            "rollover" : {
+              "min_docs" : 1,
+              "max_primary_shard_docs" : 200000000,
+              "max_primary_shard_size" : "50gb",
+              "max_age" : "30d [automatic]"
+            }
+          },
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true
+            }
+          }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate",
+      "body" : {
+        "index_patterns" : [
+          "esm-z*"
+        ],
+        "template" : {
+          "lifecycle" : {
+            "data_retention" : "1d"
+          },
+          "settings" : {
+            "number_of_shards" : 2
+          }
+        },
+        "data_stream" : { },
+        "priority" : 5
+      },
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "2",
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_hot"
+                  }
+                }
+              }
+            }
+          },
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              }
+            }
+          },
+          "aliases" : { },
+          "lifecycle" : {
+            "enabled" : true,
+            "data_retention" : "1d"
+          }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate?include_defaults=true",
+      "body" : {
+        "index_patterns" : [
+          "esm-z*"
+        ],
+        "template" : {
+          "lifecycle" : { }
+        },
+        "priority" : 5
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index template [simulate_template_zhv251pjstyl6j1ajz4xbq] specifies lifecycle configuration that can only be used in combination with a data stream"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index template [simulate_template_zhv251pjstyl6j1ajz4xbq] specifies lifecycle configuration that can only be used in combination with a data stream"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-it",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_component_template/esm-lc,esm-lc3",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

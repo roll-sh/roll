@@ -1,0 +1,291 @@
+{
+"batches": [
+[
+[
+"1",
+[
+"Nirvana",
+"Nevermind"
+],
+34
+],
+[
+"2",
+[
+"Nirvana"
+],
+10
+],
+[
+"3",
+[
+"Nine Inch Nails"
+],
+20
+],
+[
+"4",
+[
+"The Smiths"
+],
+15
+]
+],
+[
+[
+"5",
+[
+"Nirvana"
+],
+50
+],
+[
+"6",
+[
+"Nickelback"
+],
+5
+],
+[
+"7",
+[
+"The Strokes",
+"Strokes"
+],
+15
+],
+[
+"8",
+[
+"Nirvana"
+],
+34
+]
+],
+[
+[
+"9",
+[
+"Nirvana Unplugged"
+],
+34
+],
+[
+"10",
+[
+"Nina Simone"
+],
+3
+],
+[
+"11",
+[
+"The Stone Roses"
+],
+15
+],
+[
+"12",
+[
+"Nevermind"
+],
+99
+]
+]
+],
+"delete": [
+"12"
+],
+"segments": 4,
+"cases": [
+{
+"q": {
+"prefix": "n",
+"size": 5
+},
+"options": [
+{
+"text": "Nirvana",
+"id": "5",
+"score": 50.0
+},
+{
+"text": "Nevermind",
+"id": "1",
+"score": 34.0
+},
+{
+"text": "Nirvana",
+"id": "8",
+"score": 34.0
+},
+{
+"text": "Nirvana Unplugged",
+"id": "9",
+"score": 34.0
+},
+{
+"text": "Nine Inch Nails",
+"id": "3",
+"score": 20.0
+}
+]
+},
+{
+"q": {
+"prefix": "nir",
+"size": 3
+},
+"options": [
+{
+"text": "Nirvana",
+"id": "5",
+"score": 50.0
+},
+{
+"text": "Nirvana",
+"id": "1",
+"score": 34.0
+},
+{
+"text": "Nirvana",
+"id": "8",
+"score": 34.0
+}
+]
+},
+{
+"q": {
+"prefix": "nir",
+"size": 5,
+"skip_duplicates": true
+},
+"options": [
+{
+"text": "Nirvana",
+"id": "5",
+"score": 50.0
+},
+{
+"text": "Nirvana Unplugged",
+"id": "9",
+"score": 34.0
+}
+]
+},
+{
+"q": {
+"prefix": "n",
+"size": 4,
+"skip_duplicates": true
+},
+"options": [
+{
+"text": "Nirvana",
+"id": "5",
+"score": 50.0
+},
+{
+"text": "Nevermind",
+"id": "1",
+"score": 34.0
+},
+{
+"text": "Nirvana Unplugged",
+"id": "9",
+"score": 34.0
+},
+{
+"text": "Nine Inch Nails",
+"id": "3",
+"score": 20.0
+}
+]
+},
+{
+"q": {
+"prefix": "nirv",
+"size": 6,
+"fuzzy": 1
+},
+"options": [
+{
+"text": "Nirvana",
+"id": "5",
+"score": 150.0
+},
+{
+"text": "Nirvana",
+"id": "1",
+"score": 102.0
+},
+{
+"text": "Nirvana",
+"id": "8",
+"score": 102.0
+},
+{
+"text": "Nirvana Unplugged",
+"id": "9",
+"score": 102.0
+},
+{
+"text": "Nirvana",
+"id": "2",
+"score": 30.0
+}
+]
+},
+{
+"q": {
+"prefix": "nevr",
+"size": 5,
+"fuzzy": 1
+},
+"options": [
+{
+"text": "Nevermind",
+"id": "1",
+"score": 102.0
+}
+]
+},
+{
+"q": {
+"prefix": "the s",
+"size": 5
+},
+"options": [
+{
+"text": "The Smiths",
+"id": "4",
+"score": 15.0
+},
+{
+"text": "The Stone Roses",
+"id": "11",
+"score": 15.0
+},
+{
+"text": "The Strokes",
+"id": "7",
+"score": 15.0
+}
+]
+},
+{
+"q": {
+"prefix": "thes",
+"size": 5
+},
+"options": []
+},
+{
+"q": {
+"prefix": "zzz",
+"size": 5
+},
+"options": []
+}
+]
+}

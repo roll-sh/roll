@@ -1,0 +1,1952 @@
+{
+ "description": "Index stats at shard level",
+ "steps": [
+  {
+   "req": "PUT /esm-st",
+   "body": {
+    "settings": {
+     "number_of_shards": 2
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-st"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-st2",
+   "body": {
+    "settings": {
+     "number_of_replicas": 0
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-st2"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-st/_stats?level=shards",
+   "mask": [
+    "id",
+    "node",
+    "translog_uuid",
+    "history_uuid",
+    "state_path",
+    "data_path",
+    "size_in_bytes",
+    "total_data_set_size_in_bytes",
+    "total_auto_throttle_in_bytes",
+    "search_idle_time",
+    "refresh.total",
+    "refresh.external_total",
+    "warmer.total",
+    "uncommitted_size_in_bytes",
+    "earliest_last_modified_age"
+   ],
+   "status": 200,
+   "response": {
+    "_shards": {
+     "total": 4,
+     "successful": 2,
+     "failed": 0
+    },
+    "_all": {
+     "primaries": {
+      "docs": {
+       "count": 0,
+       "deleted": 0,
+       "total_size_in_bytes": 0
+      },
+      "shard_stats": {
+       "total_count": 2
+      },
+      "store": {
+       "size_in_bytes": 227,
+       "total_data_set_size_in_bytes": 227,
+       "reserved_in_bytes": 0
+      },
+      "indexing": {
+       "index_total": 0,
+       "index_time_in_millis": 0,
+       "index_current": 0,
+       "index_failed": 0,
+       "index_failed_due_to_version_conflict": 0,
+       "delete_total": 0,
+       "delete_time_in_millis": 0,
+       "delete_current": 0,
+       "noop_update_total": 0,
+       "is_throttled": false,
+       "throttle_time_in_millis": 0,
+       "write_load": 0.0,
+       "recent_write_load": 0.0,
+       "peak_write_load": 0.0
+      },
+      "get": {
+       "total": 0,
+       "time_in_millis": 0,
+       "exists_total": 0,
+       "exists_time_in_millis": 0,
+       "missing_total": 0,
+       "missing_time_in_millis": 0,
+       "current": 0
+      },
+      "search": {
+       "open_contexts": 0,
+       "query_total": 0,
+       "query_time_in_millis": 0,
+       "query_current": 0,
+       "query_failure": 0,
+       "fetch_total": 0,
+       "fetch_time_in_millis": 0,
+       "fetch_current": 0,
+       "fetch_failure": 0,
+       "scroll_total": 0,
+       "scroll_time_in_millis": 0,
+       "scroll_current": 0,
+       "suggest_total": 0,
+       "suggest_time_in_millis": 0,
+       "suggest_current": 0,
+       "recent_search_load": 0.0
+      },
+      "merges": {
+       "current": 0,
+       "current_docs": 0,
+       "current_size_in_bytes": 0,
+       "total": 0,
+       "total_time_in_millis": 0,
+       "total_docs": 0,
+       "total_size_in_bytes": 0,
+       "total_stopped_time_in_millis": 0,
+       "total_throttled_time_in_millis": 0,
+       "total_auto_throttle_in_bytes": 16249600
+      },
+      "refresh": {
+       "total": 4,
+       "total_time_in_millis": 0,
+       "external_total": 4,
+       "external_total_time_in_millis": 0,
+       "listeners": 0
+      },
+      "flush": {
+       "total": 0,
+       "periodic": 0,
+       "total_time_in_millis": 0,
+       "total_time_excluding_waiting_on_lock_in_millis": 0
+      },
+      "warmer": {
+       "current": 0,
+       "total": 2,
+       "total_time_in_millis": 0
+      },
+      "query_cache": {
+       "memory_size_in_bytes": 0,
+       "total_count": 0,
+       "hit_count": 0,
+       "miss_count": 0,
+       "cache_size": 0,
+       "cache_count": 0,
+       "evictions": 0
+      },
+      "fielddata": {
+       "memory_size_in_bytes": 0,
+       "evictions": 0,
+       "global_ordinals": {
+        "build_time_in_millis": 0
+       }
+      },
+      "completion": {
+       "size_in_bytes": 0
+      },
+      "segments": {
+       "count": 0,
+       "memory_in_bytes": 0,
+       "terms_memory_in_bytes": 0,
+       "stored_fields_memory_in_bytes": 0,
+       "term_vectors_memory_in_bytes": 0,
+       "norms_memory_in_bytes": 0,
+       "points_memory_in_bytes": 0,
+       "doc_values_memory_in_bytes": 0,
+       "index_writer_memory_in_bytes": 0,
+       "version_map_memory_in_bytes": 0,
+       "fixed_bit_set_memory_in_bytes": 0,
+       "max_unsafe_auto_id_timestamp": -1,
+       "file_sizes": {}
+      },
+      "translog": {
+       "operations": 0,
+       "size_in_bytes": 110,
+       "uncommitted_operations": 0,
+       "uncommitted_size_in_bytes": 110,
+       "earliest_last_modified_age": 94
+      },
+      "request_cache": {
+       "memory_size_in_bytes": 0,
+       "evictions": 0,
+       "hit_count": 0,
+       "miss_count": 0
+      },
+      "recovery": {
+       "current_as_source": 0,
+       "current_as_source_queued": 0,
+       "current_as_target": 0,
+       "current_as_target_queued": 0,
+       "current_from_store": 0,
+       "current_from_store_queued": 0,
+       "throttle_time_in_millis": 0
+      },
+      "bulk": {
+       "total_operations": 0,
+       "total_time_in_millis": 0,
+       "total_size_in_bytes": 0,
+       "avg_time_in_millis": 0,
+       "avg_size_in_bytes": 0
+      },
+      "dense_vector": {
+       "value_count": 0,
+       "off_heap": {
+        "total_size_bytes": 0,
+        "total_veb_size_bytes": 0,
+        "total_vec_size_bytes": 0,
+        "total_veq_size_bytes": 0,
+        "total_vex_size_bytes": 0,
+        "total_cenivf_size_bytes": 0,
+        "total_clivf_size_bytes": 0
+       }
+      },
+      "sparse_vector": {
+       "value_count": 0
+      }
+     },
+     "total": {
+      "docs": {
+       "count": 0,
+       "deleted": 0,
+       "total_size_in_bytes": 0
+      },
+      "shard_stats": {
+       "total_count": 2
+      },
+      "store": {
+       "size_in_bytes": 227,
+       "total_data_set_size_in_bytes": 227,
+       "reserved_in_bytes": 0
+      },
+      "indexing": {
+       "index_total": 0,
+       "index_time_in_millis": 0,
+       "index_current": 0,
+       "index_failed": 0,
+       "index_failed_due_to_version_conflict": 0,
+       "delete_total": 0,
+       "delete_time_in_millis": 0,
+       "delete_current": 0,
+       "noop_update_total": 0,
+       "is_throttled": false,
+       "throttle_time_in_millis": 0,
+       "write_load": 0.0,
+       "recent_write_load": 0.0,
+       "peak_write_load": 0.0
+      },
+      "get": {
+       "total": 0,
+       "time_in_millis": 0,
+       "exists_total": 0,
+       "exists_time_in_millis": 0,
+       "missing_total": 0,
+       "missing_time_in_millis": 0,
+       "current": 0
+      },
+      "search": {
+       "open_contexts": 0,
+       "query_total": 0,
+       "query_time_in_millis": 0,
+       "query_current": 0,
+       "query_failure": 0,
+       "fetch_total": 0,
+       "fetch_time_in_millis": 0,
+       "fetch_current": 0,
+       "fetch_failure": 0,
+       "scroll_total": 0,
+       "scroll_time_in_millis": 0,
+       "scroll_current": 0,
+       "suggest_total": 0,
+       "suggest_time_in_millis": 0,
+       "suggest_current": 0,
+       "recent_search_load": 0.0
+      },
+      "merges": {
+       "current": 0,
+       "current_docs": 0,
+       "current_size_in_bytes": 0,
+       "total": 0,
+       "total_time_in_millis": 0,
+       "total_docs": 0,
+       "total_size_in_bytes": 0,
+       "total_stopped_time_in_millis": 0,
+       "total_throttled_time_in_millis": 0,
+       "total_auto_throttle_in_bytes": 16249600
+      },
+      "refresh": {
+       "total": 4,
+       "total_time_in_millis": 0,
+       "external_total": 4,
+       "external_total_time_in_millis": 0,
+       "listeners": 0
+      },
+      "flush": {
+       "total": 0,
+       "periodic": 0,
+       "total_time_in_millis": 0,
+       "total_time_excluding_waiting_on_lock_in_millis": 0
+      },
+      "warmer": {
+       "current": 0,
+       "total": 2,
+       "total_time_in_millis": 0
+      },
+      "query_cache": {
+       "memory_size_in_bytes": 0,
+       "total_count": 0,
+       "hit_count": 0,
+       "miss_count": 0,
+       "cache_size": 0,
+       "cache_count": 0,
+       "evictions": 0
+      },
+      "fielddata": {
+       "memory_size_in_bytes": 0,
+       "evictions": 0,
+       "global_ordinals": {
+        "build_time_in_millis": 0
+       }
+      },
+      "completion": {
+       "size_in_bytes": 0
+      },
+      "segments": {
+       "count": 0,
+       "memory_in_bytes": 0,
+       "terms_memory_in_bytes": 0,
+       "stored_fields_memory_in_bytes": 0,
+       "term_vectors_memory_in_bytes": 0,
+       "norms_memory_in_bytes": 0,
+       "points_memory_in_bytes": 0,
+       "doc_values_memory_in_bytes": 0,
+       "index_writer_memory_in_bytes": 0,
+       "version_map_memory_in_bytes": 0,
+       "fixed_bit_set_memory_in_bytes": 0,
+       "max_unsafe_auto_id_timestamp": -1,
+       "file_sizes": {}
+      },
+      "translog": {
+       "operations": 0,
+       "size_in_bytes": 110,
+       "uncommitted_operations": 0,
+       "uncommitted_size_in_bytes": 110,
+       "earliest_last_modified_age": 94
+      },
+      "request_cache": {
+       "memory_size_in_bytes": 0,
+       "evictions": 0,
+       "hit_count": 0,
+       "miss_count": 0
+      },
+      "recovery": {
+       "current_as_source": 0,
+       "current_as_source_queued": 0,
+       "current_as_target": 0,
+       "current_as_target_queued": 0,
+       "current_from_store": 0,
+       "current_from_store_queued": 0,
+       "throttle_time_in_millis": 0
+      },
+      "bulk": {
+       "total_operations": 0,
+       "total_time_in_millis": 0,
+       "total_size_in_bytes": 0,
+       "avg_time_in_millis": 0,
+       "avg_size_in_bytes": 0
+      },
+      "dense_vector": {
+       "value_count": 0,
+       "off_heap": {
+        "total_size_bytes": 0,
+        "total_veb_size_bytes": 0,
+        "total_vec_size_bytes": 0,
+        "total_veq_size_bytes": 0,
+        "total_vex_size_bytes": 0,
+        "total_cenivf_size_bytes": 0,
+        "total_clivf_size_bytes": 0
+       }
+      },
+      "sparse_vector": {
+       "value_count": 0
+      }
+     }
+    },
+    "indices": {
+     "esm-st": {
+      "uuid": "AAmSnz56Q_mR1Rp3a8bK4A",
+      "health": "yellow",
+      "status": "open",
+      "primaries": {
+       "docs": {
+        "count": 0,
+        "deleted": 0,
+        "total_size_in_bytes": 0
+       },
+       "shard_stats": {
+        "total_count": 2
+       },
+       "store": {
+        "size_in_bytes": 227,
+        "total_data_set_size_in_bytes": 227,
+        "reserved_in_bytes": 0
+       },
+       "indexing": {
+        "index_total": 0,
+        "index_time_in_millis": 0,
+        "index_current": 0,
+        "index_failed": 0,
+        "index_failed_due_to_version_conflict": 0,
+        "delete_total": 0,
+        "delete_time_in_millis": 0,
+        "delete_current": 0,
+        "noop_update_total": 0,
+        "is_throttled": false,
+        "throttle_time_in_millis": 0,
+        "write_load": 0.0,
+        "recent_write_load": 0.0,
+        "peak_write_load": 0.0
+       },
+       "get": {
+        "total": 0,
+        "time_in_millis": 0,
+        "exists_total": 0,
+        "exists_time_in_millis": 0,
+        "missing_total": 0,
+        "missing_time_in_millis": 0,
+        "current": 0
+       },
+       "search": {
+        "open_contexts": 0,
+        "query_total": 0,
+        "query_time_in_millis": 0,
+        "query_current": 0,
+        "query_failure": 0,
+        "fetch_total": 0,
+        "fetch_time_in_millis": 0,
+        "fetch_current": 0,
+        "fetch_failure": 0,
+        "scroll_total": 0,
+        "scroll_time_in_millis": 0,
+        "scroll_current": 0,
+        "suggest_total": 0,
+        "suggest_time_in_millis": 0,
+        "suggest_current": 0,
+        "recent_search_load": 0.0
+       },
+       "merges": {
+        "current": 0,
+        "current_docs": 0,
+        "current_size_in_bytes": 0,
+        "total": 0,
+        "total_time_in_millis": 0,
+        "total_docs": 0,
+        "total_size_in_bytes": 0,
+        "total_stopped_time_in_millis": 0,
+        "total_throttled_time_in_millis": 0,
+        "total_auto_throttle_in_bytes": 16249600
+       },
+       "refresh": {
+        "total": 4,
+        "total_time_in_millis": 0,
+        "external_total": 4,
+        "external_total_time_in_millis": 0,
+        "listeners": 0
+       },
+       "flush": {
+        "total": 0,
+        "periodic": 0,
+        "total_time_in_millis": 0,
+        "total_time_excluding_waiting_on_lock_in_millis": 0
+       },
+       "warmer": {
+        "current": 0,
+        "total": 2,
+        "total_time_in_millis": 0
+       },
+       "query_cache": {
+        "memory_size_in_bytes": 0,
+        "total_count": 0,
+        "hit_count": 0,
+        "miss_count": 0,
+        "cache_size": 0,
+        "cache_count": 0,
+        "evictions": 0
+       },
+       "fielddata": {
+        "memory_size_in_bytes": 0,
+        "evictions": 0,
+        "global_ordinals": {
+         "build_time_in_millis": 0
+        }
+       },
+       "completion": {
+        "size_in_bytes": 0
+       },
+       "segments": {
+        "count": 0,
+        "memory_in_bytes": 0,
+        "terms_memory_in_bytes": 0,
+        "stored_fields_memory_in_bytes": 0,
+        "term_vectors_memory_in_bytes": 0,
+        "norms_memory_in_bytes": 0,
+        "points_memory_in_bytes": 0,
+        "doc_values_memory_in_bytes": 0,
+        "index_writer_memory_in_bytes": 0,
+        "version_map_memory_in_bytes": 0,
+        "fixed_bit_set_memory_in_bytes": 0,
+        "max_unsafe_auto_id_timestamp": -1,
+        "file_sizes": {}
+       },
+       "translog": {
+        "operations": 0,
+        "size_in_bytes": 110,
+        "uncommitted_operations": 0,
+        "uncommitted_size_in_bytes": 110,
+        "earliest_last_modified_age": 94
+       },
+       "request_cache": {
+        "memory_size_in_bytes": 0,
+        "evictions": 0,
+        "hit_count": 0,
+        "miss_count": 0
+       },
+       "recovery": {
+        "current_as_source": 0,
+        "current_as_source_queued": 0,
+        "current_as_target": 0,
+        "current_as_target_queued": 0,
+        "current_from_store": 0,
+        "current_from_store_queued": 0,
+        "throttle_time_in_millis": 0
+       },
+       "bulk": {
+        "total_operations": 0,
+        "total_time_in_millis": 0,
+        "total_size_in_bytes": 0,
+        "avg_time_in_millis": 0,
+        "avg_size_in_bytes": 0
+       },
+       "dense_vector": {
+        "value_count": 0,
+        "off_heap": {
+         "total_size_bytes": 0,
+         "total_veb_size_bytes": 0,
+         "total_vec_size_bytes": 0,
+         "total_veq_size_bytes": 0,
+         "total_vex_size_bytes": 0,
+         "total_cenivf_size_bytes": 0,
+         "total_clivf_size_bytes": 0
+        }
+       },
+       "sparse_vector": {
+        "value_count": 0
+       }
+      },
+      "total": {
+       "docs": {
+        "count": 0,
+        "deleted": 0,
+        "total_size_in_bytes": 0
+       },
+       "shard_stats": {
+        "total_count": 2
+       },
+       "store": {
+        "size_in_bytes": 227,
+        "total_data_set_size_in_bytes": 227,
+        "reserved_in_bytes": 0
+       },
+       "indexing": {
+        "index_total": 0,
+        "index_time_in_millis": 0,
+        "index_current": 0,
+        "index_failed": 0,
+        "index_failed_due_to_version_conflict": 0,
+        "delete_total": 0,
+        "delete_time_in_millis": 0,
+        "delete_current": 0,
+        "noop_update_total": 0,
+        "is_throttled": false,
+        "throttle_time_in_millis": 0,
+        "write_load": 0.0,
+        "recent_write_load": 0.0,
+        "peak_write_load": 0.0
+       },
+       "get": {
+        "total": 0,
+        "time_in_millis": 0,
+        "exists_total": 0,
+        "exists_time_in_millis": 0,
+        "missing_total": 0,
+        "missing_time_in_millis": 0,
+        "current": 0
+       },
+       "search": {
+        "open_contexts": 0,
+        "query_total": 0,
+        "query_time_in_millis": 0,
+        "query_current": 0,
+        "query_failure": 0,
+        "fetch_total": 0,
+        "fetch_time_in_millis": 0,
+        "fetch_current": 0,
+        "fetch_failure": 0,
+        "scroll_total": 0,
+        "scroll_time_in_millis": 0,
+        "scroll_current": 0,
+        "suggest_total": 0,
+        "suggest_time_in_millis": 0,
+        "suggest_current": 0,
+        "recent_search_load": 0.0
+       },
+       "merges": {
+        "current": 0,
+        "current_docs": 0,
+        "current_size_in_bytes": 0,
+        "total": 0,
+        "total_time_in_millis": 0,
+        "total_docs": 0,
+        "total_size_in_bytes": 0,
+        "total_stopped_time_in_millis": 0,
+        "total_throttled_time_in_millis": 0,
+        "total_auto_throttle_in_bytes": 16249600
+       },
+       "refresh": {
+        "total": 4,
+        "total_time_in_millis": 0,
+        "external_total": 4,
+        "external_total_time_in_millis": 0,
+        "listeners": 0
+       },
+       "flush": {
+        "total": 0,
+        "periodic": 0,
+        "total_time_in_millis": 0,
+        "total_time_excluding_waiting_on_lock_in_millis": 0
+       },
+       "warmer": {
+        "current": 0,
+        "total": 2,
+        "total_time_in_millis": 0
+       },
+       "query_cache": {
+        "memory_size_in_bytes": 0,
+        "total_count": 0,
+        "hit_count": 0,
+        "miss_count": 0,
+        "cache_size": 0,
+        "cache_count": 0,
+        "evictions": 0
+       },
+       "fielddata": {
+        "memory_size_in_bytes": 0,
+        "evictions": 0,
+        "global_ordinals": {
+         "build_time_in_millis": 0
+        }
+       },
+       "completion": {
+        "size_in_bytes": 0
+       },
+       "segments": {
+        "count": 0,
+        "memory_in_bytes": 0,
+        "terms_memory_in_bytes": 0,
+        "stored_fields_memory_in_bytes": 0,
+        "term_vectors_memory_in_bytes": 0,
+        "norms_memory_in_bytes": 0,
+        "points_memory_in_bytes": 0,
+        "doc_values_memory_in_bytes": 0,
+        "index_writer_memory_in_bytes": 0,
+        "version_map_memory_in_bytes": 0,
+        "fixed_bit_set_memory_in_bytes": 0,
+        "max_unsafe_auto_id_timestamp": -1,
+        "file_sizes": {}
+       },
+       "translog": {
+        "operations": 0,
+        "size_in_bytes": 110,
+        "uncommitted_operations": 0,
+        "uncommitted_size_in_bytes": 110,
+        "earliest_last_modified_age": 94
+       },
+       "request_cache": {
+        "memory_size_in_bytes": 0,
+        "evictions": 0,
+        "hit_count": 0,
+        "miss_count": 0
+       },
+       "recovery": {
+        "current_as_source": 0,
+        "current_as_source_queued": 0,
+        "current_as_target": 0,
+        "current_as_target_queued": 0,
+        "current_from_store": 0,
+        "current_from_store_queued": 0,
+        "throttle_time_in_millis": 0
+       },
+       "bulk": {
+        "total_operations": 0,
+        "total_time_in_millis": 0,
+        "total_size_in_bytes": 0,
+        "avg_time_in_millis": 0,
+        "avg_size_in_bytes": 0
+       },
+       "dense_vector": {
+        "value_count": 0,
+        "off_heap": {
+         "total_size_bytes": 0,
+         "total_veb_size_bytes": 0,
+         "total_vec_size_bytes": 0,
+         "total_veq_size_bytes": 0,
+         "total_vex_size_bytes": 0,
+         "total_cenivf_size_bytes": 0,
+         "total_clivf_size_bytes": 0
+        }
+       },
+       "sparse_vector": {
+        "value_count": 0
+       }
+      },
+      "shards": {
+       "0": [
+        {
+         "routing": {
+          "state": "STARTED",
+          "primary": true,
+          "node": "2AU6uEV5S82s9FCi0WUJKg",
+          "relocating_node": null
+         },
+         "docs": {
+          "count": 0,
+          "deleted": 0,
+          "total_size_in_bytes": 0
+         },
+         "shard_stats": {
+          "total_count": 1
+         },
+         "store": {
+          "size_in_bytes": 0,
+          "total_data_set_size_in_bytes": 0,
+          "reserved_in_bytes": 0
+         },
+         "indexing": {
+          "index_total": 0,
+          "index_time_in_millis": 0,
+          "index_current": 0,
+          "index_failed": 0,
+          "index_failed_due_to_version_conflict": 0,
+          "delete_total": 0,
+          "delete_time_in_millis": 0,
+          "delete_current": 0,
+          "noop_update_total": 0,
+          "is_throttled": false,
+          "throttle_time_in_millis": 0,
+          "write_load": 0.0,
+          "recent_write_load": 0.0,
+          "peak_write_load": 0.0
+         },
+         "get": {
+          "total": 0,
+          "time_in_millis": 0,
+          "exists_total": 0,
+          "exists_time_in_millis": 0,
+          "missing_total": 0,
+          "missing_time_in_millis": 0,
+          "current": 0
+         },
+         "search": {
+          "open_contexts": 0,
+          "query_total": 0,
+          "query_time_in_millis": 0,
+          "query_current": 0,
+          "query_failure": 0,
+          "fetch_total": 0,
+          "fetch_time_in_millis": 0,
+          "fetch_current": 0,
+          "fetch_failure": 0,
+          "scroll_total": 0,
+          "scroll_time_in_millis": 0,
+          "scroll_current": 0,
+          "suggest_total": 0,
+          "suggest_time_in_millis": 0,
+          "suggest_current": 0,
+          "recent_search_load": 0.0
+         },
+         "merges": {
+          "current": 0,
+          "current_docs": 0,
+          "current_size_in_bytes": 0,
+          "total": 0,
+          "total_time_in_millis": 0,
+          "total_docs": 0,
+          "total_size_in_bytes": 0,
+          "total_stopped_time_in_millis": 0,
+          "total_throttled_time_in_millis": 0,
+          "total_auto_throttle_in_bytes": 8124800
+         },
+         "refresh": {
+          "total": 2,
+          "total_time_in_millis": 0,
+          "external_total": 2,
+          "external_total_time_in_millis": 0,
+          "listeners": 0
+         },
+         "flush": {
+          "total": 0,
+          "periodic": 0,
+          "total_time_in_millis": 0,
+          "total_time_excluding_waiting_on_lock_in_millis": 0
+         },
+         "warmer": {
+          "current": 0,
+          "total": 1,
+          "total_time_in_millis": 0
+         },
+         "query_cache": {
+          "memory_size_in_bytes": 0,
+          "total_count": 0,
+          "hit_count": 0,
+          "miss_count": 0,
+          "cache_size": 0,
+          "cache_count": 0,
+          "evictions": 0
+         },
+         "fielddata": {
+          "memory_size_in_bytes": 0,
+          "evictions": 0,
+          "global_ordinals": {
+           "build_time_in_millis": 0
+          }
+         },
+         "completion": {
+          "size_in_bytes": 0
+         },
+         "segments": {
+          "count": 0,
+          "memory_in_bytes": 0,
+          "terms_memory_in_bytes": 0,
+          "stored_fields_memory_in_bytes": 0,
+          "term_vectors_memory_in_bytes": 0,
+          "norms_memory_in_bytes": 0,
+          "points_memory_in_bytes": 0,
+          "doc_values_memory_in_bytes": 0,
+          "index_writer_memory_in_bytes": 0,
+          "version_map_memory_in_bytes": 0,
+          "fixed_bit_set_memory_in_bytes": 0,
+          "max_unsafe_auto_id_timestamp": -1,
+          "file_sizes": {}
+         },
+         "translog": {
+          "operations": 0,
+          "size_in_bytes": 55,
+          "uncommitted_operations": 0,
+          "uncommitted_size_in_bytes": 55,
+          "earliest_last_modified_age": 100
+         },
+         "request_cache": {
+          "memory_size_in_bytes": 0,
+          "evictions": 0,
+          "hit_count": 0,
+          "miss_count": 0
+         },
+         "recovery": {
+          "current_as_source": 0,
+          "current_as_source_queued": 0,
+          "current_as_target": 0,
+          "current_as_target_queued": 0,
+          "current_from_store": 0,
+          "current_from_store_queued": 0,
+          "throttle_time_in_millis": 0
+         },
+         "bulk": {
+          "total_operations": 0,
+          "total_time_in_millis": 0,
+          "total_size_in_bytes": 0,
+          "avg_time_in_millis": 0,
+          "avg_size_in_bytes": 0
+         },
+         "dense_vector": {
+          "value_count": 0
+         },
+         "sparse_vector": {
+          "value_count": 0
+         },
+         "commit": {
+          "id": "zZpETHf4mmENDKlt1FsNRQ==",
+          "generation": 2,
+          "user_data": {
+           "translog_uuid": "F3jJyOWsQr2horw7_dHsKA",
+           "es_version": "9111000",
+           "local_checkpoint": "-1",
+           "max_seq_no": "-1",
+           "max_unsafe_auto_id_timestamp": "-1",
+           "history_uuid": "OBk4Rrs-ReC-nVBjJDp4-w"
+          },
+          "num_docs": 0
+         },
+         "seq_no": {
+          "max_seq_no": -1,
+          "local_checkpoint": -1,
+          "global_checkpoint": -1
+         },
+         "retention_leases": {
+          "primary_term": 1,
+          "version": 1,
+          "leases": [
+           {
+            "id": "peer_recovery/2AU6uEV5S82s9FCi0WUJKg",
+            "retaining_seq_no": 0,
+            "timestamp": 1792573281183,
+            "source": "peer recovery"
+           }
+          ]
+         },
+         "shard_path": {
+          "state_path": "/usr/share/elasticsearch/data",
+          "data_path": "/usr/share/elasticsearch/data",
+          "is_custom_data_path": false
+         },
+         "search_idle": false,
+         "search_idle_time": 200
+        }
+       ],
+       "1": [
+        {
+         "routing": {
+          "state": "STARTED",
+          "primary": true,
+          "node": "2AU6uEV5S82s9FCi0WUJKg",
+          "relocating_node": null
+         },
+         "docs": {
+          "count": 0,
+          "deleted": 0,
+          "total_size_in_bytes": 0
+         },
+         "shard_stats": {
+          "total_count": 1
+         },
+         "store": {
+          "size_in_bytes": 227,
+          "total_data_set_size_in_bytes": 227,
+          "reserved_in_bytes": 0
+         },
+         "indexing": {
+          "index_total": 0,
+          "index_time_in_millis": 0,
+          "index_current": 0,
+          "index_failed": 0,
+          "index_failed_due_to_version_conflict": 0,
+          "delete_total": 0,
+          "delete_time_in_millis": 0,
+          "delete_current": 0,
+          "noop_update_total": 0,
+          "is_throttled": false,
+          "throttle_time_in_millis": 0,
+          "write_load": 0.0,
+          "recent_write_load": 0.0,
+          "peak_write_load": 0.0
+         },
+         "get": {
+          "total": 0,
+          "time_in_millis": 0,
+          "exists_total": 0,
+          "exists_time_in_millis": 0,
+          "missing_total": 0,
+          "missing_time_in_millis": 0,
+          "current": 0
+         },
+         "search": {
+          "open_contexts": 0,
+          "query_total": 0,
+          "query_time_in_millis": 0,
+          "query_current": 0,
+          "query_failure": 0,
+          "fetch_total": 0,
+          "fetch_time_in_millis": 0,
+          "fetch_current": 0,
+          "fetch_failure": 0,
+          "scroll_total": 0,
+          "scroll_time_in_millis": 0,
+          "scroll_current": 0,
+          "suggest_total": 0,
+          "suggest_time_in_millis": 0,
+          "suggest_current": 0,
+          "recent_search_load": 0.0
+         },
+         "merges": {
+          "current": 0,
+          "current_docs": 0,
+          "current_size_in_bytes": 0,
+          "total": 0,
+          "total_time_in_millis": 0,
+          "total_docs": 0,
+          "total_size_in_bytes": 0,
+          "total_stopped_time_in_millis": 0,
+          "total_throttled_time_in_millis": 0,
+          "total_auto_throttle_in_bytes": 8124800
+         },
+         "refresh": {
+          "total": 2,
+          "total_time_in_millis": 0,
+          "external_total": 2,
+          "external_total_time_in_millis": 0,
+          "listeners": 0
+         },
+         "flush": {
+          "total": 0,
+          "periodic": 0,
+          "total_time_in_millis": 0,
+          "total_time_excluding_waiting_on_lock_in_millis": 0
+         },
+         "warmer": {
+          "current": 0,
+          "total": 1,
+          "total_time_in_millis": 0
+         },
+         "query_cache": {
+          "memory_size_in_bytes": 0,
+          "total_count": 0,
+          "hit_count": 0,
+          "miss_count": 0,
+          "cache_size": 0,
+          "cache_count": 0,
+          "evictions": 0
+         },
+         "fielddata": {
+          "memory_size_in_bytes": 0,
+          "evictions": 0,
+          "global_ordinals": {
+           "build_time_in_millis": 0
+          }
+         },
+         "completion": {
+          "size_in_bytes": 0
+         },
+         "segments": {
+          "count": 0,
+          "memory_in_bytes": 0,
+          "terms_memory_in_bytes": 0,
+          "stored_fields_memory_in_bytes": 0,
+          "term_vectors_memory_in_bytes": 0,
+          "norms_memory_in_bytes": 0,
+          "points_memory_in_bytes": 0,
+          "doc_values_memory_in_bytes": 0,
+          "index_writer_memory_in_bytes": 0,
+          "version_map_memory_in_bytes": 0,
+          "fixed_bit_set_memory_in_bytes": 0,
+          "max_unsafe_auto_id_timestamp": -1,
+          "file_sizes": {}
+         },
+         "translog": {
+          "operations": 0,
+          "size_in_bytes": 55,
+          "uncommitted_operations": 0,
+          "uncommitted_size_in_bytes": 55,
+          "earliest_last_modified_age": 94
+         },
+         "request_cache": {
+          "memory_size_in_bytes": 0,
+          "evictions": 0,
+          "hit_count": 0,
+          "miss_count": 0
+         },
+         "recovery": {
+          "current_as_source": 0,
+          "current_as_source_queued": 0,
+          "current_as_target": 0,
+          "current_as_target_queued": 0,
+          "current_from_store": 0,
+          "current_from_store_queued": 0,
+          "throttle_time_in_millis": 0
+         },
+         "bulk": {
+          "total_operations": 0,
+          "total_time_in_millis": 0,
+          "total_size_in_bytes": 0,
+          "avg_time_in_millis": 0,
+          "avg_size_in_bytes": 0
+         },
+         "dense_vector": {
+          "value_count": 0
+         },
+         "sparse_vector": {
+          "value_count": 0
+         },
+         "commit": {
+          "id": "zZpETHf4mmENDKlt1FsNRg==",
+          "generation": 2,
+          "user_data": {
+           "translog_uuid": "Zie7Sr3QQCidh81vsvKwzw",
+           "es_version": "9111000",
+           "local_checkpoint": "-1",
+           "max_seq_no": "-1",
+           "max_unsafe_auto_id_timestamp": "-1",
+           "history_uuid": "WLu6EjAxRe-7eqNQNGv4Ng"
+          },
+          "num_docs": 0
+         },
+         "seq_no": {
+          "max_seq_no": -1,
+          "local_checkpoint": -1,
+          "global_checkpoint": -1
+         },
+         "retention_leases": {
+          "primary_term": 1,
+          "version": 1,
+          "leases": [
+           {
+            "id": "peer_recovery/2AU6uEV5S82s9FCi0WUJKg",
+            "retaining_seq_no": 0,
+            "timestamp": 1792573281183,
+            "source": "peer recovery"
+           }
+          ]
+         },
+         "shard_path": {
+          "state_path": "/usr/share/elasticsearch/data",
+          "data_path": "/usr/share/elasticsearch/data",
+          "is_custom_data_path": false
+         },
+         "search_idle": false,
+         "search_idle_time": 200
+        }
+       ]
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-st/_stats/docs,flush?level=shards",
+   "mask": [
+    "id",
+    "node",
+    "translog_uuid",
+    "history_uuid",
+    "state_path",
+    "data_path",
+    "size_in_bytes",
+    "total_data_set_size_in_bytes",
+    "total_auto_throttle_in_bytes",
+    "search_idle_time",
+    "refresh.total",
+    "refresh.external_total",
+    "warmer.total",
+    "uncommitted_size_in_bytes",
+    "earliest_last_modified_age"
+   ],
+   "status": 200,
+   "response": {
+    "_shards": {
+     "total": 4,
+     "successful": 2,
+     "failed": 0
+    },
+    "_all": {
+     "primaries": {
+      "docs": {
+       "count": 0,
+       "deleted": 0,
+       "total_size_in_bytes": 0
+      },
+      "flush": {
+       "total": 0,
+       "periodic": 0,
+       "total_time_in_millis": 0,
+       "total_time_excluding_waiting_on_lock_in_millis": 0
+      }
+     },
+     "total": {
+      "docs": {
+       "count": 0,
+       "deleted": 0,
+       "total_size_in_bytes": 0
+      },
+      "flush": {
+       "total": 0,
+       "periodic": 0,
+       "total_time_in_millis": 0,
+       "total_time_excluding_waiting_on_lock_in_millis": 0
+      }
+     }
+    },
+    "indices": {
+     "esm-st": {
+      "uuid": "AAmSnz56Q_mR1Rp3a8bK4A",
+      "health": "yellow",
+      "status": "open",
+      "primaries": {
+       "docs": {
+        "count": 0,
+        "deleted": 0,
+        "total_size_in_bytes": 0
+       },
+       "flush": {
+        "total": 0,
+        "periodic": 0,
+        "total_time_in_millis": 0,
+        "total_time_excluding_waiting_on_lock_in_millis": 0
+       }
+      },
+      "total": {
+       "docs": {
+        "count": 0,
+        "deleted": 0,
+        "total_size_in_bytes": 0
+       },
+       "flush": {
+        "total": 0,
+        "periodic": 0,
+        "total_time_in_millis": 0,
+        "total_time_excluding_waiting_on_lock_in_millis": 0
+       }
+      },
+      "shards": {
+       "0": [
+        {
+         "routing": {
+          "state": "STARTED",
+          "primary": true,
+          "node": "2AU6uEV5S82s9FCi0WUJKg",
+          "relocating_node": null
+         },
+         "docs": {
+          "count": 0,
+          "deleted": 0,
+          "total_size_in_bytes": 0
+         },
+         "flush": {
+          "total": 0,
+          "periodic": 0,
+          "total_time_in_millis": 0,
+          "total_time_excluding_waiting_on_lock_in_millis": 0
+         },
+         "commit": {
+          "id": "zZpETHf4mmENDKlt1FsNRQ==",
+          "generation": 2,
+          "user_data": {
+           "translog_uuid": "F3jJyOWsQr2horw7_dHsKA",
+           "es_version": "9111000",
+           "local_checkpoint": "-1",
+           "max_seq_no": "-1",
+           "max_unsafe_auto_id_timestamp": "-1",
+           "history_uuid": "OBk4Rrs-ReC-nVBjJDp4-w"
+          },
+          "num_docs": 0
+         },
+         "seq_no": {
+          "max_seq_no": -1,
+          "local_checkpoint": -1,
+          "global_checkpoint": -1
+         },
+         "retention_leases": {
+          "primary_term": 1,
+          "version": 1,
+          "leases": [
+           {
+            "id": "peer_recovery/2AU6uEV5S82s9FCi0WUJKg",
+            "retaining_seq_no": 0,
+            "timestamp": 1792573281183,
+            "source": "peer recovery"
+           }
+          ]
+         },
+         "shard_path": {
+          "state_path": "/usr/share/elasticsearch/data",
+          "data_path": "/usr/share/elasticsearch/data",
+          "is_custom_data_path": false
+         },
+         "search_idle": false,
+         "search_idle_time": 200
+        }
+       ],
+       "1": [
+        {
+         "routing": {
+          "state": "STARTED",
+          "primary": true,
+          "node": "2AU6uEV5S82s9FCi0WUJKg",
+          "relocating_node": null
+         },
+         "docs": {
+          "count": 0,
+          "deleted": 0,
+          "total_size_in_bytes": 0
+         },
+         "flush": {
+          "total": 0,
+          "periodic": 0,
+          "total_time_in_millis": 0,
+          "total_time_excluding_waiting_on_lock_in_millis": 0
+         },
+         "commit": {
+          "id": "zZpETHf4mmENDKlt1FsNRg==",
+          "generation": 2,
+          "user_data": {
+           "translog_uuid": "Zie7Sr3QQCidh81vsvKwzw",
+           "es_version": "9111000",
+           "local_checkpoint": "-1",
+           "max_seq_no": "-1",
+           "max_unsafe_auto_id_timestamp": "-1",
+           "history_uuid": "WLu6EjAxRe-7eqNQNGv4Ng"
+          },
+          "num_docs": 0
+         },
+         "seq_no": {
+          "max_seq_no": -1,
+          "local_checkpoint": -1,
+          "global_checkpoint": -1
+         },
+         "retention_leases": {
+          "primary_term": 1,
+          "version": 1,
+          "leases": [
+           {
+            "id": "peer_recovery/2AU6uEV5S82s9FCi0WUJKg",
+            "retaining_seq_no": 0,
+            "timestamp": 1792573281183,
+            "source": "peer recovery"
+           }
+          ]
+         },
+         "shard_path": {
+          "state_path": "/usr/share/elasticsearch/data",
+          "data_path": "/usr/share/elasticsearch/data",
+          "is_custom_data_path": false
+         },
+         "search_idle": false,
+         "search_idle_time": 200
+        }
+       ]
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-st*/_stats/indexing?level=shards",
+   "mask": [
+    "id",
+    "node",
+    "translog_uuid",
+    "history_uuid",
+    "state_path",
+    "data_path",
+    "size_in_bytes",
+    "total_data_set_size_in_bytes",
+    "total_auto_throttle_in_bytes",
+    "search_idle_time",
+    "refresh.total",
+    "refresh.external_total",
+    "warmer.total",
+    "uncommitted_size_in_bytes",
+    "earliest_last_modified_age"
+   ],
+   "status": 200,
+   "response": {
+    "_shards": {
+     "total": 5,
+     "successful": 3,
+     "failed": 0
+    },
+    "_all": {
+     "primaries": {
+      "indexing": {
+       "index_total": 0,
+       "index_time_in_millis": 0,
+       "index_current": 0,
+       "index_failed": 0,
+       "index_failed_due_to_version_conflict": 0,
+       "delete_total": 0,
+       "delete_time_in_millis": 0,
+       "delete_current": 0,
+       "noop_update_total": 0,
+       "is_throttled": false,
+       "throttle_time_in_millis": 0,
+       "write_load": 0.0,
+       "recent_write_load": 0.0,
+       "peak_write_load": 0.0
+      }
+     },
+     "total": {
+      "indexing": {
+       "index_total": 0,
+       "index_time_in_millis": 0,
+       "index_current": 0,
+       "index_failed": 0,
+       "index_failed_due_to_version_conflict": 0,
+       "delete_total": 0,
+       "delete_time_in_millis": 0,
+       "delete_current": 0,
+       "noop_update_total": 0,
+       "is_throttled": false,
+       "throttle_time_in_millis": 0,
+       "write_load": 0.0,
+       "recent_write_load": 0.0,
+       "peak_write_load": 0.0
+      }
+     }
+    },
+    "indices": {
+     "esm-st2": {
+      "uuid": "1IiDU88DT56VgDN5ErWSQg",
+      "health": "green",
+      "status": "open",
+      "primaries": {
+       "indexing": {
+        "index_total": 0,
+        "index_time_in_millis": 0,
+        "index_current": 0,
+        "index_failed": 0,
+        "index_failed_due_to_version_conflict": 0,
+        "delete_total": 0,
+        "delete_time_in_millis": 0,
+        "delete_current": 0,
+        "noop_update_total": 0,
+        "is_throttled": false,
+        "throttle_time_in_millis": 0,
+        "write_load": 0.0,
+        "recent_write_load": 0.0,
+        "peak_write_load": 0.0
+       }
+      },
+      "total": {
+       "indexing": {
+        "index_total": 0,
+        "index_time_in_millis": 0,
+        "index_current": 0,
+        "index_failed": 0,
+        "index_failed_due_to_version_conflict": 0,
+        "delete_total": 0,
+        "delete_time_in_millis": 0,
+        "delete_current": 0,
+        "noop_update_total": 0,
+        "is_throttled": false,
+        "throttle_time_in_millis": 0,
+        "write_load": 0.0,
+        "recent_write_load": 0.0,
+        "peak_write_load": 0.0
+       }
+      },
+      "shards": {
+       "0": [
+        {
+         "routing": {
+          "state": "STARTED",
+          "primary": true,
+          "node": "2AU6uEV5S82s9FCi0WUJKg",
+          "relocating_node": null
+         },
+         "indexing": {
+          "index_total": 0,
+          "index_time_in_millis": 0,
+          "index_current": 0,
+          "index_failed": 0,
+          "index_failed_due_to_version_conflict": 0,
+          "delete_total": 0,
+          "delete_time_in_millis": 0,
+          "delete_current": 0,
+          "noop_update_total": 0,
+          "is_throttled": false,
+          "throttle_time_in_millis": 0,
+          "write_load": 0.0,
+          "recent_write_load": 0.0,
+          "peak_write_load": 0.0
+         },
+         "commit": {
+          "id": "zZpETHf4mmENDKlt1FsNWA==",
+          "generation": 2,
+          "user_data": {
+           "translog_uuid": "HCJ1NmlVTnq1vHrgIn4TYQ",
+           "es_version": "9111000",
+           "local_checkpoint": "-1",
+           "max_seq_no": "-1",
+           "max_unsafe_auto_id_timestamp": "-1",
+           "history_uuid": "1Kknrrs5T3uIlizMa70j0w"
+          },
+          "num_docs": 0
+         },
+         "seq_no": {
+          "max_seq_no": -1,
+          "local_checkpoint": -1,
+          "global_checkpoint": -1
+         },
+         "retention_leases": {
+          "primary_term": 1,
+          "version": 1,
+          "leases": [
+           {
+            "id": "peer_recovery/2AU6uEV5S82s9FCi0WUJKg",
+            "retaining_seq_no": 0,
+            "timestamp": 1792573281383,
+            "source": "peer recovery"
+           }
+          ]
+         },
+         "shard_path": {
+          "state_path": "/usr/share/elasticsearch/data",
+          "data_path": "/usr/share/elasticsearch/data",
+          "is_custom_data_path": false
+         },
+         "search_idle": false,
+         "search_idle_time": 0
+        }
+       ]
+      }
+     },
+     "esm-st": {
+      "uuid": "AAmSnz56Q_mR1Rp3a8bK4A",
+      "health": "yellow",
+      "status": "open",
+      "primaries": {
+       "indexing": {
+        "index_total": 0,
+        "index_time_in_millis": 0,
+        "index_current": 0,
+        "index_failed": 0,
+        "index_failed_due_to_version_conflict": 0,
+        "delete_total": 0,
+        "delete_time_in_millis": 0,
+        "delete_current": 0,
+        "noop_update_total": 0,
+        "is_throttled": false,
+        "throttle_time_in_millis": 0,
+        "write_load": 0.0,
+        "recent_write_load": 0.0,
+        "peak_write_load": 0.0
+       }
+      },
+      "total": {
+       "indexing": {
+        "index_total": 0,
+        "index_time_in_millis": 0,
+        "index_current": 0,
+        "index_failed": 0,
+        "index_failed_due_to_version_conflict": 0,
+        "delete_total": 0,
+        "delete_time_in_millis": 0,
+        "delete_current": 0,
+        "noop_update_total": 0,
+        "is_throttled": false,
+        "throttle_time_in_millis": 0,
+        "write_load": 0.0,
+        "recent_write_load": 0.0,
+        "peak_write_load": 0.0
+       }
+      },
+      "shards": {
+       "0": [
+        {
+         "routing": {
+          "state": "STARTED",
+          "primary": true,
+          "node": "2AU6uEV5S82s9FCi0WUJKg",
+          "relocating_node": null
+         },
+         "indexing": {
+          "index_total": 0,
+          "index_time_in_millis": 0,
+          "index_current": 0,
+          "index_failed": 0,
+          "index_failed_due_to_version_conflict": 0,
+          "delete_total": 0,
+          "delete_time_in_millis": 0,
+          "delete_current": 0,
+          "noop_update_total": 0,
+          "is_throttled": false,
+          "throttle_time_in_millis": 0,
+          "write_load": 0.0,
+          "recent_write_load": 0.0,
+          "peak_write_load": 0.0
+         },
+         "commit": {
+          "id": "zZpETHf4mmENDKlt1FsNRQ==",
+          "generation": 2,
+          "user_data": {
+           "translog_uuid": "F3jJyOWsQr2horw7_dHsKA",
+           "es_version": "9111000",
+           "local_checkpoint": "-1",
+           "max_seq_no": "-1",
+           "max_unsafe_auto_id_timestamp": "-1",
+           "history_uuid": "OBk4Rrs-ReC-nVBjJDp4-w"
+          },
+          "num_docs": 0
+         },
+         "seq_no": {
+          "max_seq_no": -1,
+          "local_checkpoint": -1,
+          "global_checkpoint": -1
+         },
+         "retention_leases": {
+          "primary_term": 1,
+          "version": 1,
+          "leases": [
+           {
+            "id": "peer_recovery/2AU6uEV5S82s9FCi0WUJKg",
+            "retaining_seq_no": 0,
+            "timestamp": 1792573281183,
+            "source": "peer recovery"
+           }
+          ]
+         },
+         "shard_path": {
+          "state_path": "/usr/share/elasticsearch/data",
+          "data_path": "/usr/share/elasticsearch/data",
+          "is_custom_data_path": false
+         },
+         "search_idle": false,
+         "search_idle_time": 200
+        }
+       ],
+       "1": [
+        {
+         "routing": {
+          "state": "STARTED",
+          "primary": true,
+          "node": "2AU6uEV5S82s9FCi0WUJKg",
+          "relocating_node": null
+         },
+         "indexing": {
+          "index_total": 0,
+          "index_time_in_millis": 0,
+          "index_current": 0,
+          "index_failed": 0,
+          "index_failed_due_to_version_conflict": 0,
+          "delete_total": 0,
+          "delete_time_in_millis": 0,
+          "delete_current": 0,
+          "noop_update_total": 0,
+          "is_throttled": false,
+          "throttle_time_in_millis": 0,
+          "write_load": 0.0,
+          "recent_write_load": 0.0,
+          "peak_write_load": 0.0
+         },
+         "commit": {
+          "id": "zZpETHf4mmENDKlt1FsNRg==",
+          "generation": 2,
+          "user_data": {
+           "translog_uuid": "Zie7Sr3QQCidh81vsvKwzw",
+           "es_version": "9111000",
+           "local_checkpoint": "-1",
+           "max_seq_no": "-1",
+           "max_unsafe_auto_id_timestamp": "-1",
+           "history_uuid": "WLu6EjAxRe-7eqNQNGv4Ng"
+          },
+          "num_docs": 0
+         },
+         "seq_no": {
+          "max_seq_no": -1,
+          "local_checkpoint": -1,
+          "global_checkpoint": -1
+         },
+         "retention_leases": {
+          "primary_term": 1,
+          "version": 1,
+          "leases": [
+           {
+            "id": "peer_recovery/2AU6uEV5S82s9FCi0WUJKg",
+            "retaining_seq_no": 0,
+            "timestamp": 1792573281183,
+            "source": "peer recovery"
+           }
+          ]
+         },
+         "shard_path": {
+          "state_path": "/usr/share/elasticsearch/data",
+          "data_path": "/usr/share/elasticsearch/data",
+          "is_custom_data_path": false
+         },
+         "search_idle": false,
+         "search_idle_time": 200
+        }
+       ]
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-st*/_stats/store?level=cluster",
+   "mask": [
+    "id",
+    "node",
+    "translog_uuid",
+    "history_uuid",
+    "state_path",
+    "data_path",
+    "size_in_bytes",
+    "total_data_set_size_in_bytes",
+    "total_auto_throttle_in_bytes",
+    "search_idle_time",
+    "refresh.total",
+    "refresh.external_total",
+    "warmer.total",
+    "uncommitted_size_in_bytes",
+    "earliest_last_modified_age"
+   ],
+   "status": 200,
+   "response": {
+    "_shards": {
+     "total": 5,
+     "successful": 3,
+     "failed": 0
+    },
+    "_all": {
+     "primaries": {
+      "store": {
+       "size_in_bytes": 454,
+       "total_data_set_size_in_bytes": 454,
+       "reserved_in_bytes": 0
+      }
+     },
+     "total": {
+      "store": {
+       "size_in_bytes": 454,
+       "total_data_set_size_in_bytes": 454,
+       "reserved_in_bytes": 0
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-st2/_close",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "indices": {
+     "esm-st2": {
+      "closed": true
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-st*/_stats/docs?level=shards&forbid_closed_indices=false",
+   "mask": [
+    "id",
+    "node",
+    "translog_uuid",
+    "history_uuid",
+    "state_path",
+    "data_path",
+    "size_in_bytes",
+    "total_data_set_size_in_bytes",
+    "total_auto_throttle_in_bytes",
+    "search_idle_time",
+    "refresh.total",
+    "refresh.external_total",
+    "warmer.total",
+    "uncommitted_size_in_bytes",
+    "earliest_last_modified_age"
+   ],
+   "status": 200,
+   "response": {
+    "_shards": {
+     "total": 4,
+     "successful": 2,
+     "failed": 0
+    },
+    "_all": {
+     "primaries": {
+      "docs": {
+       "count": 0,
+       "deleted": 0,
+       "total_size_in_bytes": 0
+      }
+     },
+     "total": {
+      "docs": {
+       "count": 0,
+       "deleted": 0,
+       "total_size_in_bytes": 0
+      }
+     }
+    },
+    "indices": {
+     "esm-st": {
+      "uuid": "AAmSnz56Q_mR1Rp3a8bK4A",
+      "health": "yellow",
+      "status": "open",
+      "primaries": {
+       "docs": {
+        "count": 0,
+        "deleted": 0,
+        "total_size_in_bytes": 0
+       }
+      },
+      "total": {
+       "docs": {
+        "count": 0,
+        "deleted": 0,
+        "total_size_in_bytes": 0
+       }
+      },
+      "shards": {
+       "0": [
+        {
+         "routing": {
+          "state": "STARTED",
+          "primary": true,
+          "node": "2AU6uEV5S82s9FCi0WUJKg",
+          "relocating_node": null
+         },
+         "docs": {
+          "count": 0,
+          "deleted": 0,
+          "total_size_in_bytes": 0
+         },
+         "commit": {
+          "id": "zZpETHf4mmENDKlt1FsNRQ==",
+          "generation": 2,
+          "user_data": {
+           "translog_uuid": "F3jJyOWsQr2horw7_dHsKA",
+           "es_version": "9111000",
+           "local_checkpoint": "-1",
+           "max_seq_no": "-1",
+           "max_unsafe_auto_id_timestamp": "-1",
+           "history_uuid": "OBk4Rrs-ReC-nVBjJDp4-w"
+          },
+          "num_docs": 0
+         },
+         "seq_no": {
+          "max_seq_no": -1,
+          "local_checkpoint": -1,
+          "global_checkpoint": -1
+         },
+         "retention_leases": {
+          "primary_term": 1,
+          "version": 1,
+          "leases": [
+           {
+            "id": "peer_recovery/2AU6uEV5S82s9FCi0WUJKg",
+            "retaining_seq_no": 0,
+            "timestamp": 1792573281183,
+            "source": "peer recovery"
+           }
+          ]
+         },
+         "shard_path": {
+          "state_path": "/usr/share/elasticsearch/data",
+          "data_path": "/usr/share/elasticsearch/data",
+          "is_custom_data_path": false
+         },
+         "search_idle": false,
+         "search_idle_time": 200
+        }
+       ],
+       "1": [
+        {
+         "routing": {
+          "state": "STARTED",
+          "primary": true,
+          "node": "2AU6uEV5S82s9FCi0WUJKg",
+          "relocating_node": null
+         },
+         "docs": {
+          "count": 0,
+          "deleted": 0,
+          "total_size_in_bytes": 0
+         },
+         "commit": {
+          "id": "zZpETHf4mmENDKlt1FsNRg==",
+          "generation": 2,
+          "user_data": {
+           "translog_uuid": "Zie7Sr3QQCidh81vsvKwzw",
+           "es_version": "9111000",
+           "local_checkpoint": "-1",
+           "max_seq_no": "-1",
+           "max_unsafe_auto_id_timestamp": "-1",
+           "history_uuid": "WLu6EjAxRe-7eqNQNGv4Ng"
+          },
+          "num_docs": 0
+         },
+         "seq_no": {
+          "max_seq_no": -1,
+          "local_checkpoint": -1,
+          "global_checkpoint": -1
+         },
+         "retention_leases": {
+          "primary_term": 1,
+          "version": 1,
+          "leases": [
+           {
+            "id": "peer_recovery/2AU6uEV5S82s9FCi0WUJKg",
+            "retaining_seq_no": 0,
+            "timestamp": 1792573281183,
+            "source": "peer recovery"
+           }
+          ]
+         },
+         "shard_path": {
+          "state_path": "/usr/share/elasticsearch/data",
+          "data_path": "/usr/share/elasticsearch/data",
+          "is_custom_data_path": false
+         },
+         "search_idle": false,
+         "search_idle_time": 200
+        }
+       ]
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /esm-st,esm-st2",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  }
+ ]
+}

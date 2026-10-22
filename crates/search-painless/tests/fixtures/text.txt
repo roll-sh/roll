@@ -1,0 +1,401 @@
+DecimalFormat f = new DecimalFormat('#,##0.00'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('0.###'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('#'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('00.00'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('#,##0.###'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('0.00E0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('##0.#####E0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('#%'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('0.0%'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('#,##0.00;(#,##0.00)'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('\'$\'#,##0.00'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('\u2030 0.0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('#,##,###'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('0000'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('0.0##'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('#.##'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('##0.0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('0.000E00'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('#,###'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('#0.0#;-#0.0#'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('\'#\'#'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('#,##0.0 \'units\''); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('00.###E0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+DecimalFormat f = new DecimalFormat('0.#E0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())
+----
+return new DecimalFormat('#,##0.00').toPattern()
+----
+return new DecimalFormat('#,##0.00').toPattern()
+----
+return new DecimalFormat('0.###').toPattern()
+----
+return new DecimalFormat('#').toPattern()
+----
+return new DecimalFormat('0').toPattern()
+----
+return new DecimalFormat('00.00').toPattern()
+----
+return new DecimalFormat('#,##0.###').toPattern()
+----
+return new DecimalFormat('0.00E0').toPattern()
+----
+return new DecimalFormat('##0.#####E0').toPattern()
+----
+return new DecimalFormat('#%').toPattern()
+----
+return new DecimalFormat('0.0%').toPattern()
+----
+return new DecimalFormat('#,##0.00;(#,##0.00)').toPattern()
+----
+return new DecimalFormat('\'$\'#,##0.00').toPattern()
+----
+return new DecimalFormat('\u2030 0.0').toPattern()
+----
+return new DecimalFormat('#,##,###').toPattern()
+----
+return new DecimalFormat('0000').toPattern()
+----
+return new DecimalFormat('0.0##').toPattern()
+----
+return new DecimalFormat('#.##').toPattern()
+----
+return new DecimalFormat('##0.0').toPattern()
+----
+return new DecimalFormat('0.000E00').toPattern()
+----
+return new DecimalFormat('#,###').toPattern()
+----
+return new DecimalFormat('#0.0#;-#0.0#').toPattern()
+----
+return new DecimalFormat('\'#\'#').toPattern()
+----
+return new DecimalFormat('#,##0.0 \'units\'').toPattern()
+----
+return new DecimalFormat('00.###E0').toPattern()
+----
+return new DecimalFormat('0.#E0').toPattern()
+----
+return new DecimalFormat('#.#.#').toPattern()
+----
+return new DecimalFormat('0#').toPattern()
+----
+return new DecimalFormat('#,').toPattern()
+----
+return new DecimalFormat(',#').toPattern()
+----
+return new DecimalFormat('0.0.0').toPattern()
+----
+return new DecimalFormat('#E').toPattern()
+----
+return new DecimalFormat('0E0E0').toPattern()
+----
+return new DecimalFormat('#;#;#').toPattern()
+----
+return new DecimalFormat('\'\'').toPattern()
+----
+return new DecimalFormat('#,##0.0#0').toPattern()
+----
+return new DecimalFormat('%%').toPattern()
+----
+return new DecimalFormat('0.0%%').toPattern()
+----
+return new DecimalFormat('').toPattern()
+----
+return new DecimalFormat('0.0E0.0').toPattern()
+----
+return new DecimalFormat('#\u00a4').toPattern()
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMaximumFractionDigits(1); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMinimumFractionDigits(4); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.HALF_UP); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.HALF_DOWN); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.FLOOR); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.CEILING); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.DOWN); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.UP); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setGroupingUsed(false); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setGroupingSize(4); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMinimumIntegerDigits(5); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMaximumIntegerDigits(2); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setDecimalSeparatorAlwaysShown(true); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMultiplier(1000); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setPositivePrefix('+'); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setNegativePrefix('neg '); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setNegativeSuffix(' !'); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setPositiveSuffix(' pos'); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMaximumFractionDigits(400); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMinimumIntegerDigits(0); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMultiplier(-1); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.UNNECESSARY); return f.format(1.5)
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.UNNECESSARY); return f.format(1.555)
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMultiplier(0); return f.format(1)
+----
+DecimalFormat f = new DecimalFormat('0.00'); return [f.getMaximumFractionDigits(), f.getMinimumFractionDigits(), f.getMaximumIntegerDigits(), f.getMinimumIntegerDigits(), f.getGroupingSize(), f.isGroupingUsed(), f.getMultiplier(), f.getPositivePrefix(), f.getNegativePrefix(), f.getPositiveSuffix(), f.getNegativeSuffix(), f.isDecimalSeparatorAlwaysShown(), f.getRoundingMode()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.0#%;(#)'); return [f.getMaximumFractionDigits(), f.getMinimumFractionDigits(), f.getMaximumIntegerDigits(), f.getMinimumIntegerDigits(), f.getGroupingSize(), f.isGroupingUsed(), f.getMultiplier(), f.getPositivePrefix(), f.getNegativePrefix(), f.getPositiveSuffix(), f.getNegativeSuffix(), f.toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getNumberInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getIntegerInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getPercentInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getCurrencyInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(Locale.ROOT); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(Locale.GERMANY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(Locale.FRANCE); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(Locale.US); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(Locale.UK); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(Locale.JAPAN); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(Locale.ITALY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(new Locale('es', 'ES')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(new Locale('pt', 'BR')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(new Locale('ru', 'RU')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(new Locale('de', 'CH')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(new Locale('hi', 'IN')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getPercentInstance(Locale.GERMANY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getPercentInstance(Locale.FRANCE); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getCurrencyInstance(Locale.GERMANY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getCurrencyInstance(Locale.UK); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getCurrencyInstance(Locale.JAPAN); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getCurrencyInstance(Locale.ROOT); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getCurrencyInstance(Locale.FRANCE); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getIntegerInstance(Locale.GERMANY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getNumberInstance(new Locale('ar', 'EG')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(new Locale('th', 'TH', 'TH')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]
+----
+try { def n = NumberFormat.getInstance().parse('1,234.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('abc'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('12abc'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('1e3'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('1E3'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('-0'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('0'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('-0.0'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('9223372036854775807'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('9223372036854775808'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('1.0'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('1.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse(' 12'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('+12'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('∞'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('NaN'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('1,2,3'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('1.2.3'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('-'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse(''); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('(5)'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('5%'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('12,34.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('0.000000001'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getInstance().parse('123456789012345678901234567890'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getPercentInstance().parse('5%'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getPercentInstance().parse('5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getPercentInstance().parse('12.5%'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = NumberFormat.getPercentInstance().parse('abc%'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = new DecimalFormat('#,##0.0;(#)').parse('(1,234.5)'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = new DecimalFormat('#,##0.0;(#)').parse('-1,234.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+try { def n = new DecimalFormat('#,##0.0;(#)').parse('1,234.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }
+----
+NumberFormat f = NumberFormat.getInstance(); f.setParseIntegerOnly(true); return [f.parse('12.75'), f.parse('-3.9')]
+----
+DecimalFormat f = new DecimalFormat('#.#'); f.setParseBigDecimal(true); def n = f.parse('12.345'); return [n, n instanceof BigDecimal, f.isParseBigDecimal()]
+----
+ParsePosition pp = new ParsePosition(0); def n = NumberFormat.getInstance().parse('12 apples', pp); return [n, pp.getIndex(), pp.getErrorIndex()]
+----
+ParsePosition pp = new ParsePosition(0); def n = NumberFormat.getInstance().parse('apples', pp); return [n, pp.getIndex(), pp.getErrorIndex()]
+----
+return NumberFormat.getInstance().format(new BigDecimal('12345.678901234567890123'))
+----
+return NumberFormat.getInstance().format(new BigInteger('123456789012345678901234567890'))
+----
+return new DecimalFormat('#,##0.000').format(new BigDecimal('1.0005'))
+----
+return new DecimalFormat('0.00').format(Integer.valueOf(7))
+----
+return new DecimalFormat('0.00').format('x')
+----
+return new DecimalFormat('0.00').format(null)
+----
+return NumberFormat.getInstance().format(1.0f / 3)
+----
+return NumberFormat.getInstance().getMaximumFractionDigits()
+----
+return [NumberFormat.getIntegerInstance().getRoundingMode(), NumberFormat.getIntegerInstance().format(2.5), NumberFormat.getIntegerInstance().format(3.5), NumberFormat.getIntegerInstance().isParseIntegerOnly()]
+----
+DecimalFormatSymbols s = DecimalFormatSymbols.getInstance(); return [s.getDecimalSeparator(), s.getGroupingSeparator(), s.getMinusSign(), s.getPercent(), s.getPerMill(), s.getZeroDigit(), s.getDigit(), s.getPatternSeparator(), s.getInfinity(), s.getNaN(), s.getExponentSeparator(), s.getCurrencySymbol(), s.getInternationalCurrencySymbol(), s.getMonetaryDecimalSeparator()]
+----
+DecimalFormatSymbols s = DecimalFormatSymbols.getInstance(Locale.GERMANY); return [s.getDecimalSeparator(), s.getGroupingSeparator(), s.getMinusSign(), s.getPercent(), s.getPerMill(), s.getCurrencySymbol(), s.getInternationalCurrencySymbol()]
+----
+DecimalFormatSymbols s = new DecimalFormatSymbols(Locale.FRANCE); return [s.getDecimalSeparator(), (int) s.getGroupingSeparator(), s.getCurrencySymbol()]
+----
+DecimalFormatSymbols s = new DecimalFormatSymbols(); s.setDecimalSeparator((char) ','); s.setGroupingSeparator((char) '.'); return new DecimalFormat('#,##0.00', s).format(1234567.891)
+----
+DecimalFormat f = new DecimalFormat('#,##0.00'); DecimalFormatSymbols s = f.getDecimalFormatSymbols(); s.setNaN('nan'); f.setDecimalFormatSymbols(s); return f.format(Double.NaN)
+----
+return new DecimalFormat('#,##0.00', DecimalFormatSymbols.getInstance(Locale.GERMANY)).toLocalizedPattern()
+----
+DecimalFormat f = new DecimalFormat(); f.applyPattern('0.0'); return [f.format(3.14159), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat(); return [f.format(3.14159), f.toPattern()]
+----
+DecimalFormat f = new DecimalFormat('#,##0.00', DecimalFormatSymbols.getInstance(Locale.GERMANY)); f.applyLocalizedPattern('#.##0,0'); return [f.format(1234.56), f.toPattern()]
+----
+NumberFormat f = NumberFormat.getInstance(); return [f.equals(NumberFormat.getInstance()), f.hashCode() == NumberFormat.getInstance().hashCode(), f.clone().format(1.5)]
+----
+return NumberFormat.getAvailableLocales().length > 10
+----
+return NumberFormat.getInstance().getCurrency().getCurrencyCode()
+----
+return [NumberFormat.Field.INTEGER.toString(), NumberFormat.INTEGER_FIELD, NumberFormat.FRACTION_FIELD]
+----
+return new DecimalFormat('0.00').format(1.0E-300)
+----
+return new DecimalFormat('#,##0.##########').format(0.1 + 0.2)
+----
+return new DecimalFormat('0.##########E0').format(123456789)
+----
+return new DecimalFormat('##0.##E0').format(12345)
+----
+return new DecimalFormat('##0.##E0').format(0.00012345)
+----
+return new DecimalFormat('0.###E0').format(-0.0)
+----
+return [new DecimalFormat('0').format(0.5), new DecimalFormat('0').format(1.5), new DecimalFormat('0').format(-0.5), new DecimalFormat('0').format(-1.5)]
+----
+return new DecimalFormat('#,##0').format(-0.4)
+----
+return new DecimalFormat('0.0').format(0.05)
+----
+return new DecimalFormat('0.0').format(0.15)
+----
+return new DecimalFormat('0.0').format(0.25)
+----
+return new DecimalFormat('0.0').format(0.35)
+----
+return new DecimalFormat('0.0').format(0.45)
+----
+return new DecimalFormat('0.00').format(1.115)
+----
+return new DecimalFormat('0.00').format(1.125)
+----
+return new DecimalFormat('0.00').format(1.135)
+----
+return new DecimalFormat('0.00').format(2.675)
+----
+return new DecimalFormat('0.000').format(1.0005)
+----
+return new DecimalFormat('0.0').format(9.95)
+----
+return new DecimalFormat('0.0').format(1e15 + 0.25)
+----
+return new DecimalFormat('#').format(1e300)
+----
+return new DecimalFormat('#,##0.00').format(123456789.125)
+----
+return String.format('%,.2f', 1234567.891)
+----
+return NumberFormat.getCompactNumberInstance().format(12345)

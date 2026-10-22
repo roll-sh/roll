@@ -1,0 +1,1416 @@
+{
+  "description" : "POST _cluster/reroute: command parsing errors (with locations) and explanations on one node",
+  "steps" : [
+    {
+      "req" : "PUT /esm-rr",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rr"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-r1",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 2,
+          "number_of_replicas" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-r1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":9,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "cancel",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 9,
+              "node" : "_local",
+              "allow_primary" : false
+            },
+            "decisions" : [
+              {
+                "decider" : "cancel_allocation_command",
+                "decision" : "NO",
+                "explanation" : "can't cancel [esm-rr][9], failed to find it on node {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18}"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "cancel",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 0,
+              "node" : "_local",
+              "allow_primary" : false
+            },
+            "decisions" : [
+              {
+                "decider" : "cancel_allocation_command",
+                "decision" : "NO",
+                "explanation" : "can't cancel [esm-rr][0] on node {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18}, shard is primary and started"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\",\"allow_primary\":true}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "cancel",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 0,
+              "node" : "_local",
+              "allow_primary" : true
+            },
+            "decisions" : [
+              {
+                "decider" : "cancel_allocation_command",
+                "decision" : "YES",
+                "explanation" : "shard [esm-rr][0] on node {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18} can be cancelled"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"move\":{\"index\":\"esm-rr\",\"shard\":0,\"from_node\":\"_local\",\"to_node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "move",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 0,
+              "from_node" : "_local",
+              "to_node" : "_local"
+            },
+            "decisions" : [
+              {
+                "decider" : "max_retry",
+                "decision" : "YES",
+                "explanation" : "shard has no previous failures"
+              },
+              {
+                "decider" : "replica_after_primary_active",
+                "decision" : "YES",
+                "explanation" : "shard is primary and can be allocated"
+              },
+              {
+                "decider" : "enable",
+                "decision" : "YES",
+                "explanation" : "explicitly ignoring any disabling of allocation due to manual allocation commands via the reroute API"
+              },
+              {
+                "decider" : "index_version",
+                "decision" : "YES",
+                "explanation" : "can relocate primary shard from a node with index version [9.5.2-9.5.5] to a node with equal-or-newer index version [9.5.2-9.5.5]"
+              },
+              {
+                "decider" : "node_version",
+                "decision" : "YES",
+                "explanation" : "can relocate primary shard from a node with version [9.5.5] to a node with equal-or-newer version [9.5.5]"
+              },
+              {
+                "decider" : "snapshot_in_progress",
+                "decision" : "YES",
+                "explanation" : "no snapshots are currently running"
+              },
+              {
+                "decider" : "restore_in_progress",
+                "decision" : "YES",
+                "explanation" : "ignored as shard is not being recovered from a snapshot"
+              },
+              {
+                "decider" : "node_shutdown",
+                "decision" : "YES",
+                "explanation" : "no nodes are shutting down"
+              },
+              {
+                "decider" : "write_load",
+                "decision" : "YES",
+                "explanation" : "Decider is disabled"
+              },
+              {
+                "decider" : "node_replacement",
+                "decision" : "YES",
+                "explanation" : "there are no ongoing node replacements"
+              },
+              {
+                "decider" : "filter",
+                "decision" : "YES",
+                "explanation" : "node passes include/exclude/require filters"
+              },
+              {
+                "decider" : "same_shard",
+                "decision" : "NO",
+                "explanation" : "this shard is already allocated to this node [[esm-rr][0], node[2AU6uEV5S82s9FCi0WUJKg], [P], s[STARTED], a[id=6EbFpACyTq6FxRFUOGHcEg], failed_attempts[0]]"
+              },
+              {
+                "decider" : "disk_threshold",
+                "decision" : "YES",
+                "explanation" : "enough disk for shard on node, free: [346.4gb], used: [52.5%], shard size: [227b], free after allocating shard: [346.4gb]"
+              },
+              {
+                "decider" : "throttling",
+                "decision" : "YES",
+                "explanation" : "below shard recovery limit of outgoing: [0 < 2] incoming: [0 < 2]"
+              },
+              {
+                "decider" : "shards_limit",
+                "decision" : "YES",
+                "explanation" : "total shard limits are disabled: [index: -1, cluster: -1] <= 0"
+              },
+              {
+                "decider" : "awareness",
+                "decision" : "YES",
+                "explanation" : "allocation awareness is not enabled, set cluster setting [cluster.routing.allocation.awareness.attributes] to enable it"
+              },
+              {
+                "decider" : "index_balance",
+                "decision" : "YES",
+                "explanation" : "Decider is disabled."
+              },
+              {
+                "decider" : "data_tier",
+                "decision" : "YES",
+                "explanation" : "index has a preference for tiers [data_content] and node has tier [data]"
+              },
+              {
+                "decider" : "ccr_primary_follower",
+                "decision" : "YES",
+                "explanation" : "shard is not a follower and is not under the purview of this decider"
+              },
+              {
+                "decider" : "searchable_snapshots",
+                "decision" : "YES",
+                "explanation" : "decider only applicable for indices backed by searchable snapshots"
+              },
+              {
+                "decider" : "searchable_snapshot_repository_exists",
+                "decision" : "YES",
+                "explanation" : "this decider only applies to indices backed by searchable snapshots"
+              },
+              {
+                "decider" : "searchable_snapshots_enable",
+                "decision" : "YES",
+                "explanation" : "decider only applicable for indices backed by searchable snapshots"
+              },
+              {
+                "decider" : "dedicated_frozen_node",
+                "decision" : "YES",
+                "explanation" : "this node's data roles are not exactly [data_frozen] so it is not a dedicated frozen node"
+              },
+              {
+                "decider" : "archive",
+                "decision" : "YES",
+                "explanation" : "decider only applicable for indices backed by archive functionality"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"move\":{\"index\":\"esm-rr\",\"shard\":0,\"from_node\":\"nope\",\"to_node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to resolve [nope], no matching nodes"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to resolve [nope], no matching nodes"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"move\":{\"index\":\"esm-rr\",\"shard\":3,\"from_node\":\"_local\",\"to_node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "move",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 3,
+              "from_node" : "_local",
+              "to_node" : "_local"
+            },
+            "decisions" : [
+              {
+                "decider" : "move_allocation_command",
+                "decision" : "NO",
+                "explanation" : "shard [esm-rr][3] not found"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_replica\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "allocate_replica",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 0,
+              "node" : "_local"
+            },
+            "decisions" : [
+              {
+                "decider" : "allocate_replica (allocation command)",
+                "decision" : "NO",
+                "explanation" : "all copies of [esm-rr][0] are already assigned. Use the move allocation command instead"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_replica\":{\"index\":\"esm-r1\",\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "allocate_replica",
+            "parameters" : {
+              "index" : "esm-r1",
+              "shard" : 0,
+              "node" : "_local"
+            },
+            "decisions" : [
+              {
+                "decider" : "max_retry",
+                "decision" : "YES",
+                "explanation" : "shard has no previous failures"
+              },
+              {
+                "decider" : "replica_after_primary_active",
+                "decision" : "YES",
+                "explanation" : "primary shard for this replica is already active"
+              },
+              {
+                "decider" : "enable",
+                "decision" : "YES",
+                "explanation" : "explicitly ignoring any disabling of allocation due to manual allocation commands via the reroute API"
+              },
+              {
+                "decider" : "index_version",
+                "decision" : "YES",
+                "explanation" : "can allocate replica shard to a node with index version [9.5.2-9.5.5] since this is equal-or-newer than the primary index version [9.5.2-9.5.5]"
+              },
+              {
+                "decider" : "node_version",
+                "decision" : "YES",
+                "explanation" : "can allocate replica shard to a node with version [9.5.5] since this is equal-or-newer than the primary version [9.5.5]"
+              },
+              {
+                "decider" : "snapshot_in_progress",
+                "decision" : "YES",
+                "explanation" : "the shard is not being snapshotted"
+              },
+              {
+                "decider" : "restore_in_progress",
+                "decision" : "YES",
+                "explanation" : "ignored as shard is not being recovered from a snapshot"
+              },
+              {
+                "decider" : "node_shutdown",
+                "decision" : "YES",
+                "explanation" : "no nodes are shutting down"
+              },
+              {
+                "decider" : "write_load",
+                "decision" : "YES",
+                "explanation" : "Decider is disabled"
+              },
+              {
+                "decider" : "node_replacement",
+                "decision" : "YES",
+                "explanation" : "there are no ongoing node replacements"
+              },
+              {
+                "decider" : "filter",
+                "decision" : "YES",
+                "explanation" : "node passes include/exclude/require filters"
+              },
+              {
+                "decider" : "same_shard",
+                "decision" : "NO",
+                "explanation" : "a copy of this shard is already allocated to this node [[esm-r1][0], node[2AU6uEV5S82s9FCi0WUJKg], [P], s[STARTED], a[id=VMy_abXMRxuU37wXNkf84w], failed_attempts[0]]"
+              },
+              {
+                "decider" : "disk_threshold",
+                "decision" : "YES",
+                "explanation" : "enough disk for shard on node, free: [346.4gb], used: [52.5%], shard size: [0b], free after allocating shard: [346.4gb]"
+              },
+              {
+                "decider" : "throttling",
+                "decision" : "YES",
+                "explanation" : "below shard recovery limit of outgoing: [0 < 2] incoming: [0 < 2]"
+              },
+              {
+                "decider" : "shards_limit",
+                "decision" : "YES",
+                "explanation" : "total shard limits are disabled: [index: -1, cluster: -1] <= 0"
+              },
+              {
+                "decider" : "awareness",
+                "decision" : "YES",
+                "explanation" : "allocation awareness is not enabled, set cluster setting [cluster.routing.allocation.awareness.attributes] to enable it"
+              },
+              {
+                "decider" : "index_balance",
+                "decision" : "YES",
+                "explanation" : "Decider is disabled."
+              },
+              {
+                "decider" : "data_tier",
+                "decision" : "YES",
+                "explanation" : "index has a preference for tiers [data_content] and node has tier [data]"
+              },
+              {
+                "decider" : "ccr_primary_follower",
+                "decision" : "YES",
+                "explanation" : "shard is not a follower and is not under the purview of this decider"
+              },
+              {
+                "decider" : "searchable_snapshots",
+                "decision" : "YES",
+                "explanation" : "decider only applicable for indices backed by searchable snapshots"
+              },
+              {
+                "decider" : "searchable_snapshot_repository_exists",
+                "decision" : "YES",
+                "explanation" : "this decider only applies to indices backed by searchable snapshots"
+              },
+              {
+                "decider" : "searchable_snapshots_enable",
+                "decision" : "YES",
+                "explanation" : "decider only applicable for indices backed by searchable snapshots"
+              },
+              {
+                "decider" : "dedicated_frozen_node",
+                "decision" : "YES",
+                "explanation" : "this node's data roles are not exactly [data_frozen] so it is not a dedicated frozen node"
+              },
+              {
+                "decider" : "archive",
+                "decision" : "YES",
+                "explanation" : "decider only applicable for indices backed by archive functionality"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_replica\":{\"index\":\"esm-nope\",\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "allocate_replica",
+            "parameters" : {
+              "index" : "esm-nope",
+              "shard" : 0,
+              "node" : "_local"
+            },
+            "decisions" : [
+              {
+                "decider" : "allocate_replica (allocation command)",
+                "decision" : "NO",
+                "explanation" : "no such index [esm-nope]"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_replica\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"zzz\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "allocate_replica",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 0,
+              "node" : "zzz"
+            },
+            "decisions" : [
+              {
+                "decider" : "allocate_replica (allocation command)",
+                "decision" : "NO",
+                "explanation" : "failed to resolve [zzz], no matching nodes"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_empty_primary\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\",\"accept_data_loss\":true}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "allocate_empty_primary",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 0,
+              "node" : "_local",
+              "accept_data_loss" : true
+            },
+            "decisions" : [
+              {
+                "decider" : "allocate_empty_primary (allocation command)",
+                "decision" : "NO",
+                "explanation" : "primary [esm-rr][0] is already assigned"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_stale_primary\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\",\"accept_data_loss\":true}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "allocate_stale_primary",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 0,
+              "node" : "_local",
+              "accept_data_loss" : true
+            },
+            "decisions" : [
+              {
+                "decider" : "allocate_stale_primary (allocation command)",
+                "decision" : "NO",
+                "explanation" : "primary [esm-rr][0] is already assigned"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_empty_primary\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [
+          {
+            "command" : "allocate_empty_primary",
+            "parameters" : {
+              "index" : "esm-rr",
+              "shard" : 0,
+              "node" : "_local",
+              "accept_data_loss" : false
+            },
+            "decisions" : [
+              {
+                "decider" : "allocate_empty_primary (allocation command)",
+                "decision" : "NO",
+                "explanation" : "primary [esm-rr][0] is already assigned"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-nope\",\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"zzz\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to resolve [zzz], no matching nodes"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to resolve [zzz], no matching nodes"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"bogus\":{}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "named_object_not_found_exception",
+              "reason" : "[1:23] unknown field [bogus]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:23] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "named_object_not_found_exception",
+            "reason" : "[1:23] unknown field [bogus]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\",\"x\":1}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[cancel] command does not support field [x]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:72] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[cancel] command does not support field [x]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[cancel] command missing the index parameter"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:50] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[cancel] command missing the index parameter"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[cancel] command missing the shard parameter"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:57] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[cancel] command missing the shard parameter"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":0}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[cancel] command missing the node parameter"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:51] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[cancel] command missing the node parameter"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":\"abc\",\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:50] [cluster_reroute] failed to parse field [commands]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:50] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"abc\""
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\",\"allow_primary\":\"x\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:84] [cluster_reroute] failed to parse field [commands]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:84] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse value [x] as only [true] or [false] are allowed."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":[]}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[cancel] command does not support complex json tokens [END_ARRAY]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:25] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[cancel] command does not support complex json tokens [END_ARRAY]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\"},\"move\":{}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "allocation command is malformed, done parsing a command, but didn't get END_OBJECT, got [START_OBJECT] instead"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:69] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "allocation command is malformed, done parsing a command, but didn't get END_OBJECT, got [START_OBJECT] instead"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[1]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "allocation command is malformed, got [VALUE_NUMBER] instead"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:14] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "allocation command is malformed, got [VALUE_NUMBER] instead"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_replica\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\",\"x\":1}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:78] [allocate_replica] unknown field [x]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:82] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:78] [allocate_replica] unknown field [x]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_replica\":{\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:60] [cluster_reroute] failed to parse field [commands]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:60] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Argument [index] must be defined"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_replica\":{\"index\":\"esm-rr\",\"node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:67] [cluster_reroute] failed to parse field [commands]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:67] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Argument [shard] must be defined and non-negative"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_replica\":{\"index\":\"esm-rr\",\"shard\":0}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:61] [cluster_reroute] failed to parse field [commands]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:61] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Argument [node] must be defined"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_empty_primary\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\",\"accept_data_loss\":\"x\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:103] [allocate_empty_primary] failed to parse field [accept_data_loss]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:103] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:103] [allocate_empty_primary] failed to parse field [accept_data_loss]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [x] as only [true] or [false] are allowed."
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"move\":{\"index\":\"esm-rr\",\"shard\":0,\"from_node\":\"_local\"}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[move] command missing the to_node parameter"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:70] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[move] command missing the to_node parameter"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true&dry_run=true",
+      "raw" : "{\"commands\":[{\"move\":{\"index\":\"esm-rr\",\"shard\":0,\"to_node\":\"_local\",\"y\":2}}]}",
+      "mask" : [
+        "explanation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[move] command does not support field [y]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:73] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[move] command does not support field [y]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?dry_run=true",
+      "raw" : "{\"commands\":[{\"cancel\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "reason"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[cancel_allocation] can't cancel [esm-rr][0] on node {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18}, shard is primary and started"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[cancel_allocation] can't cancel [esm-rr][0] on node {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18}, shard is primary and started"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?dry_run=true",
+      "raw" : "{\"commands\":[{\"move\":{\"index\":\"esm-rr\",\"shard\":0,\"from_node\":\"_local\",\"to_node\":\"_local\"}}]}",
+      "mask" : [
+        "reason"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[move_allocation] can't move [esm-rr][0], from {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18}, to {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18}, since its not allowed, reason: [YES(shard has no previous failures)][YES(shard is primary and can be allocated)][YES(explicitly ignoring any disabling of allocation due to manual allocation commands via the reroute API)][YES(can relocate primary shard from a node with index version [9.5.2-9.5.5] to a node with equal-or-newer index version [9.5.2-9.5.5])][YES(can relocate primary shard from a node with version [9.5.5] to a node with equal-or-newer version [9.5.5])][YES(no snapshots are currently running)][YES(ignored as shard is not being recovered from a snapshot)][YES(no nodes are shutting down)][YES(Decider is disabled)][YES(there are no ongoing node replacements)][YES(node passes include/exclude/require filters)][NO(this shard is already allocated to this node [[esm-rr][0], node[2AU6uEV5S82s9FCi0WUJKg], [P], s[STARTED], a[id=6EbFpACyTq6FxRFUOGHcEg], failed_attempts[0]])][YES(enough disk for shard on node, free: [346.4gb], used: [52.5%], shard size: [227b], free after allocating shard: [346.4gb])][YES(below shard recovery limit of outgoing: [0 < 2] incoming: [0 < 2])][YES(total shard limits are disabled: [index: -1, cluster: -1] <= 0)][YES(allocation awareness is not enabled, set cluster setting [cluster.routing.allocation.awareness.attributes] to enable it)][YES(Decider is disabled.)][YES(index has a preference for tiers [data_content] and node has tier [data])][YES(shard is not a follower and is not under the purview of this decider)][YES(decider only applicable for indices backed by searchable snapshots)][YES(this decider only applies to indices backed by searchable snapshots)][YES(decider only applicable for indices backed by searchable snapshots)][YES(this node's data roles are not exactly [data_frozen] so it is not a dedicated frozen node)][YES(decider only applicable for indices backed by archive functionality)]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[move_allocation] can't move [esm-rr][0], from {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18}, to {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18}, since its not allowed, reason: [YES(shard has no previous failures)][YES(shard is primary and can be allocated)][YES(explicitly ignoring any disabling of allocation due to manual allocation commands via the reroute API)][YES(can relocate primary shard from a node with index version [9.5.2-9.5.5] to a node with equal-or-newer index version [9.5.2-9.5.5])][YES(can relocate primary shard from a node with version [9.5.5] to a node with equal-or-newer version [9.5.5])][YES(no snapshots are currently running)][YES(ignored as shard is not being recovered from a snapshot)][YES(no nodes are shutting down)][YES(Decider is disabled)][YES(there are no ongoing node replacements)][YES(node passes include/exclude/require filters)][NO(this shard is already allocated to this node [[esm-rr][0], node[2AU6uEV5S82s9FCi0WUJKg], [P], s[STARTED], a[id=6EbFpACyTq6FxRFUOGHcEg], failed_attempts[0]])][YES(enough disk for shard on node, free: [346.4gb], used: [52.5%], shard size: [227b], free after allocating shard: [346.4gb])][YES(below shard recovery limit of outgoing: [0 < 2] incoming: [0 < 2])][YES(total shard limits are disabled: [index: -1, cluster: -1] <= 0)][YES(allocation awareness is not enabled, set cluster setting [cluster.routing.allocation.awareness.attributes] to enable it)][YES(Decider is disabled.)][YES(index has a preference for tiers [data_content] and node has tier [data])][YES(shard is not a follower and is not under the purview of this decider)][YES(decider only applicable for indices backed by searchable snapshots)][YES(this decider only applies to indices backed by searchable snapshots)][YES(decider only applicable for indices backed by searchable snapshots)][YES(this node's data roles are not exactly [data_frozen] so it is not a dedicated frozen node)][YES(decider only applicable for indices backed by archive functionality)]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_replica\":{\"index\":\"esm-r1\",\"shard\":1,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "reason"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[allocate_replica] allocation of [esm-r1][1] on node {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18} is not allowed, reason: [YES(shard has no previous failures)][YES(primary shard for this replica is already active)][YES(explicitly ignoring any disabling of allocation due to manual allocation commands via the reroute API)][YES(can allocate replica shard to a node with index version [9.5.2-9.5.5] since this is equal-or-newer than the primary index version [9.5.2-9.5.5])][YES(can allocate replica shard to a node with version [9.5.5] since this is equal-or-newer than the primary version [9.5.5])][YES(the shard is not being snapshotted)][YES(ignored as shard is not being recovered from a snapshot)][YES(no nodes are shutting down)][YES(Decider is disabled)][YES(there are no ongoing node replacements)][YES(node passes include/exclude/require filters)][NO(a copy of this shard is already allocated to this node [[esm-r1][1], node[2AU6uEV5S82s9FCi0WUJKg], [P], s[STARTED], a[id=ZzFFPttcRFmQIDS1xeSY5g], failed_attempts[0]])][YES(enough disk for shard on node, free: [346.4gb], used: [52.5%], shard size: [0b], free after allocating shard: [346.4gb])][YES(below shard recovery limit of outgoing: [0 < 2] incoming: [0 < 2])][YES(total shard limits are disabled: [index: -1, cluster: -1] <= 0)][YES(allocation awareness is not enabled, set cluster setting [cluster.routing.allocation.awareness.attributes] to enable it)][YES(Decider is disabled.)][YES(index has a preference for tiers [data_content] and node has tier [data])][YES(shard is not a follower and is not under the purview of this decider)][YES(decider only applicable for indices backed by searchable snapshots)][YES(this decider only applies to indices backed by searchable snapshots)][YES(decider only applicable for indices backed by searchable snapshots)][YES(this node's data roles are not exactly [data_frozen] so it is not a dedicated frozen node)][YES(decider only applicable for indices backed by archive functionality)]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[allocate_replica] allocation of [esm-r1][1] on node {9a12ac153b52}{2AU6uEV5S82s9FCi0WUJKg}{trhqpT96Rqakd7S3FCY4DQ}{9a12ac153b52}{172.17.0.2}{172.17.0.2:9300}{cdfhilmrstw}{9.5.5}{8000099-9111000}{ml.allocated_processors_double=18.0, ml.max_jvm_size=805306368, ml.config_version=12.0.0, xpack.installed=true, transform.config_version=10.0.0, ml.machine_memory=1610612736, ml.allocated_processors=18} is not allowed, reason: [YES(shard has no previous failures)][YES(primary shard for this replica is already active)][YES(explicitly ignoring any disabling of allocation due to manual allocation commands via the reroute API)][YES(can allocate replica shard to a node with index version [9.5.2-9.5.5] since this is equal-or-newer than the primary index version [9.5.2-9.5.5])][YES(can allocate replica shard to a node with version [9.5.5] since this is equal-or-newer than the primary version [9.5.5])][YES(the shard is not being snapshotted)][YES(ignored as shard is not being recovered from a snapshot)][YES(no nodes are shutting down)][YES(Decider is disabled)][YES(there are no ongoing node replacements)][YES(node passes include/exclude/require filters)][NO(a copy of this shard is already allocated to this node [[esm-r1][1], node[2AU6uEV5S82s9FCi0WUJKg], [P], s[STARTED], a[id=ZzFFPttcRFmQIDS1xeSY5g], failed_attempts[0]])][YES(enough disk for shard on node, free: [346.4gb], used: [52.5%], shard size: [0b], free after allocating shard: [346.4gb])][YES(below shard recovery limit of outgoing: [0 < 2] incoming: [0 < 2])][YES(total shard limits are disabled: [index: -1, cluster: -1] <= 0)][YES(allocation awareness is not enabled, set cluster setting [cluster.routing.allocation.awareness.attributes] to enable it)][YES(Decider is disabled.)][YES(index has a preference for tiers [data_content] and node has tier [data])][YES(shard is not a follower and is not under the purview of this decider)][YES(decider only applicable for indices backed by searchable snapshots)][YES(this decider only applies to indices backed by searchable snapshots)][YES(decider only applicable for indices backed by searchable snapshots)][YES(this node's data roles are not exactly [data_frozen] so it is not a dedicated frozen node)][YES(decider only applicable for indices backed by archive functionality)]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?dry_run=true",
+      "raw" : "{\"commands\":[{\"allocate_empty_primary\":{\"index\":\"esm-rr\",\"shard\":0,\"node\":\"_local\"}}]}",
+      "mask" : [
+        "reason"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[allocate_empty_primary] primary [esm-rr][0] is already assigned"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[allocate_empty_primary] primary [esm-rr][0] is already assigned"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?dry_run=true",
+      "raw" : "{\"commands\":{}}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "expected either field name [commands], or start array, got [START_OBJECT] instead"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:13] [cluster_reroute] failed to parse field [commands]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "expected either field name [commands], or start array, got [START_OBJECT] instead"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?dry_run=true",
+      "raw" : "{\"commands\":1}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:13] [cluster_reroute] commands doesn't support values of type: VALUE_NUMBER"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:13] [cluster_reroute] commands doesn't support values of type: VALUE_NUMBER"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?dry_run=true",
+      "raw" : "{\"x\":1}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:2] [cluster_reroute] unknown field [x]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:2] [cluster_reroute] unknown field [x]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?dry_run=true",
+      "raw" : "{\"commands\":[]}",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?dry_run=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?metric=none",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"the [?metric] query parameter to the [POST /_cluster/reroute] API has no effect; its use will be forbidden in a future version\""
+        ]
+      }
+    },
+    {
+      "req" : "POST /_cluster/reroute?explain=true",
+      "raw" : "{\"commands\":[]}",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "explanations" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

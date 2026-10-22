@@ -1,0 +1,327 @@
+{
+ "terms": [
+  "0042",
+  "042",
+  "100",
+  "1000",
+  "123",
+  "99",
+  "a",
+  "a*c",
+  "a.c",
+  "ab",
+  "abc",
+  "abcabc",
+  "abcd",
+  "acb",
+  "ba",
+  "bac",
+  "bar",
+  "barbaz",
+  "baz",
+  "foo123",
+  "foo45",
+  "foo7",
+  "kitchen",
+  "kitten",
+  "mitten",
+  "sitting",
+  "smitten",
+  "xabc",
+  "日本",
+  "日本語",
+  "本日",
+  "ABC",
+  "Abc",
+  "aBc",
+  "a?c",
+  "a\\c",
+  "",
+  "aaa",
+  "ẞ",
+  "ß",
+  "ss",
+  "İstanbul",
+  "istanbul"
+ ],
+ "wildcard": [
+  {
+   "pattern": "a*c",
+   "case_insensitive": false,
+   "matches": [
+    "a*c",
+    "a.c",
+    "a?c",
+    "aBc",
+    "a\\c",
+    "abc",
+    "abcabc"
+   ]
+  },
+  {
+   "pattern": "a?c",
+   "case_insensitive": false,
+   "matches": [
+    "a*c",
+    "a.c",
+    "a?c",
+    "aBc",
+    "a\\c",
+    "abc"
+   ]
+  },
+  {
+   "pattern": "*",
+   "case_insensitive": false,
+   "matches": [
+    "",
+    "0042",
+    "042",
+    "100",
+    "1000",
+    "123",
+    "99",
+    "ABC",
+    "Abc",
+    "a",
+    "a*c",
+    "a.c",
+    "a?c",
+    "aBc",
+    "a\\c",
+    "aaa",
+    "ab",
+    "abc",
+    "abcabc",
+    "abcd",
+    "acb",
+    "ba",
+    "bac",
+    "bar",
+    "barbaz",
+    "baz",
+    "foo123",
+    "foo45",
+    "foo7",
+    "istanbul",
+    "kitchen",
+    "kitten",
+    "mitten",
+    "sitting",
+    "smitten",
+    "ss",
+    "xabc",
+    "ß",
+    "İstanbul",
+    "ẞ",
+    "日本",
+    "日本語",
+    "本日"
+   ]
+  },
+  {
+   "pattern": "?",
+   "case_insensitive": false,
+   "matches": [
+    "a",
+    "ß",
+    "ẞ"
+   ]
+  },
+  {
+   "pattern": "??",
+   "case_insensitive": false,
+   "matches": [
+    "99",
+    "ab",
+    "ba",
+    "ss",
+    "日本",
+    "本日"
+   ]
+  },
+  {
+   "pattern": "*abc*",
+   "case_insensitive": false,
+   "matches": [
+    "abc",
+    "abcabc",
+    "abcd",
+    "xabc"
+   ]
+  },
+  {
+   "pattern": "a\\*c",
+   "case_insensitive": false,
+   "matches": [
+    "a*c"
+   ]
+  },
+  {
+   "pattern": "a\\?c",
+   "case_insensitive": false,
+   "matches": [
+    "a?c"
+   ]
+  },
+  {
+   "pattern": "a\\\\c",
+   "case_insensitive": false,
+   "matches": [
+    "a\\c"
+   ]
+  },
+  {
+   "pattern": "*本*",
+   "case_insensitive": false,
+   "matches": [
+    "日本",
+    "日本語",
+    "本日"
+   ]
+  },
+  {
+   "pattern": "日?",
+   "case_insensitive": false,
+   "matches": [
+    "日本"
+   ]
+  },
+  {
+   "pattern": "abc",
+   "case_insensitive": true,
+   "matches": [
+    "ABC",
+    "Abc",
+    "aBc",
+    "abc"
+   ]
+  },
+  {
+   "pattern": "a*",
+   "case_insensitive": true,
+   "matches": [
+    "ABC",
+    "Abc",
+    "a",
+    "a*c",
+    "a.c",
+    "a?c",
+    "aBc",
+    "a\\c",
+    "aaa",
+    "ab",
+    "abc",
+    "abcabc",
+    "abcd",
+    "acb"
+   ]
+  },
+  {
+   "pattern": "ss",
+   "case_insensitive": true,
+   "matches": [
+    "ss"
+   ]
+  },
+  {
+   "pattern": "ß",
+   "case_insensitive": true,
+   "matches": [
+    "ß"
+   ]
+  },
+  {
+   "pattern": "*TEN",
+   "case_insensitive": true,
+   "matches": [
+    "kitten",
+    "mitten",
+    "smitten"
+   ]
+  },
+  {
+   "pattern": "i*",
+   "case_insensitive": true,
+   "matches": [
+    "istanbul"
+   ]
+  },
+  {
+   "pattern": "İ*",
+   "case_insensitive": true,
+   "matches": [
+    "İstanbul"
+   ]
+  },
+  {
+   "pattern": "",
+   "case_insensitive": false,
+   "matches": []
+  },
+  {
+   "pattern": "\\",
+   "case_insensitive": false,
+   "matches": []
+  },
+  {
+   "pattern": "a**c",
+   "case_insensitive": false,
+   "matches": [
+    "a*c",
+    "a.c",
+    "a?c",
+    "aBc",
+    "a\\c",
+    "abc",
+    "abcabc"
+   ]
+  },
+  {
+   "pattern": "*?*?*",
+   "case_insensitive": false,
+   "matches": [
+    "0042",
+    "042",
+    "100",
+    "1000",
+    "123",
+    "99",
+    "ABC",
+    "Abc",
+    "a*c",
+    "a.c",
+    "a?c",
+    "aBc",
+    "a\\c",
+    "aaa",
+    "ab",
+    "abc",
+    "abcabc",
+    "abcd",
+    "acb",
+    "ba",
+    "bac",
+    "bar",
+    "barbaz",
+    "baz",
+    "foo123",
+    "foo45",
+    "foo7",
+    "istanbul",
+    "kitchen",
+    "kitten",
+    "mitten",
+    "sitting",
+    "smitten",
+    "ss",
+    "xabc",
+    "İstanbul",
+    "日本",
+    "日本語",
+    "本日"
+   ]
+  }
+ ],
+ "description": "keyword field `t` holding `terms`; for each `wildcard` query (value, case_insensitive) the matching terms from Elasticsearch 9.5.5. An empty pattern matches nothing at the query level (not an automaton property)."
+}

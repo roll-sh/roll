@@ -1,0 +1,9 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+'security.authenticate':
+  - do:
+      security.authenticate: {}
+  - is_true: 'enabled'

@@ -1,0 +1,1856 @@
+{
+  "description" : "Desired nodes (parsing errors with locations, versioning, dry runs), repository registration errors on a node without path.repo, health report and node removal prevalidation errors.",
+  "steps" : [
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{},\"processors\":8.0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [desired_node] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:76] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "Failed to build [desired_node] after last required field arrived",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "[node.name] or [node.external_id] is missing or empty"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.external_id\":\"  \"},\"processors\":8.0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [desired_node] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:99] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "Failed to build [desired_node] after last required field arrived",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "[node.name] or [node.external_id] is missing or empty"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.external_id\":\"a\"},\"processors\":8.0,\"memory\":\"64gb\",\"storage\":\"128gb\"},{\"settings\":{\"node.external_id\":\"a\"},\"processors\":16.0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Some nodes contain the same setting value [a] for [node.external_id]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Some nodes contain the same setting value [a] for [node.external_id]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/asa",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.external_id\":\"a\"},\"processors\":8.0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse long parameter [version] with value [asa]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse long parameter [version] with value [asa]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"asa\""
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/-1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.external_id\":\"a\"},\"processors\":8.0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: version must be positive;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: version must be positive;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/%20%20/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.external_id\":\"a\"},\"processors\":8.0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: historyID should not be empty;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: historyID should not be empty;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: nodes must contain at least one master node;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: nodes must contain at least one master node;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.external_id\":\"a\",\"node.roles\":\"data_hot\"},\"processors\":8.0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: nodes must contain at least one master node;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: nodes must contain at least one master node;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"processors\":64.0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:63] [update_desired_nodes_request] failed to parse field [nodes]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:63] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Required [settings]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":null,\"processors\":64.0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:23] [desired_node] settings doesn't support values of type: VALUE_NULL"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:23] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:23] [desired_node] settings doesn't support values of type: VALUE_NULL"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [desired_node] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:59] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "Failed to build [desired_node] after last required field arrived",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "processors or processors_range should be specified and none was specified"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{},\"processors\":8.0,\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:60] [update_desired_nodes_request] failed to parse field [nodes]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:60] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Required [memory]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{},\"processors\":8.0,\"memory\":null,\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:52] [desired_node] memory doesn't support values of type: VALUE_NULL"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:52] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:52] [desired_node] memory doesn't support values of type: VALUE_NULL"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{},\"processors\":8.0,\"memory\":\"64gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:58] [update_desired_nodes_request] failed to parse field [nodes]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:58] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Required [storage]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{},\"processors\":8,\"memory\":\"64gb\",\"storage\":null}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:67] [desired_node] storage doesn't support values of type: VALUE_NULL"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:67] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:67] [desired_node] storage doesn't support values of type: VALUE_NULL"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors_range\":{},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:61] [desired_node] failed to parse field [processors_range]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:61] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:61] [desired_node] failed to parse field [processors_range]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [min]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors_range\":{\"max\":8.0},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:70] [desired_node] failed to parse field [processors_range]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:70] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:70] [desired_node] failed to parse field [processors_range]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [min]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors_range\":{\"min\":8.0,\"max\":1.0},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [processors_range] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:77] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:77] [desired_node] failed to parse field [processors_range]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:77] [processors_range] failed to parse field [max]",
+              "caused_by" : {
+                "type" : "x_content_parse_exception",
+                "reason" : "Failed to build [processors_range] after last required field arrived",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "min processors must be less than or equal to max processors and it was: min: 8.0 max: 1.0"
+                }
+              }
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":\"NaN\",\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:54] [desired_node] failed to parse field [processors]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:54] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:54] [desired_node] failed to parse field [processors]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Only a positive number of [processors] are allowed and [NaN] was provided"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":\"Infinity\",\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:54] [desired_node] failed to parse field [processors]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:54] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:54] [desired_node] failed to parse field [processors]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Only a positive number of [processors] are allowed and [Infinity] was provided"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":\"-Infinity\",\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:54] [desired_node] failed to parse field [processors]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:54] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:54] [desired_node] failed to parse field [processors]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Only a positive number of [processors] are allowed and [-Infinity] was provided"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors_range\":{\"min\":\"NaN\",\"max\":1.0},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:67] [processors_range] failed to parse field [min]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:67] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:67] [desired_node] failed to parse field [processors_range]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:67] [processors_range] failed to parse field [min]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Only a positive number of [min] are allowed and [NaN] was provided"
+              }
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors_range\":{\"min\":0.0,\"max\":1.0},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:67] [processors_range] failed to parse field [min]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:67] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:67] [desired_node] failed to parse field [processors_range]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:67] [processors_range] failed to parse field [min]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Only a positive number of [min] are allowed and [0.000000] was provided"
+              }
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors_range\":{\"min\":1.0,\"max\":\"Infinity\"},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:77] [processors_range] failed to parse field [max]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:77] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:77] [desired_node] failed to parse field [processors_range]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:77] [processors_range] failed to parse field [max]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Only a positive number of [max] are allowed and [Infinity] was provided"
+              }
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors_range\":{\"min\":1.0,\"max\":0.0},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:77] [processors_range] failed to parse field [max]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:77] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:77] [desired_node] failed to parse field [processors_range]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:77] [processors_range] failed to parse field [max]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Only a positive number of [max] are allowed and [0.000000] was provided"
+              }
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":1.0,\"processors_range\":{\"min\":1.0,\"max\":2.0},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [desired_node] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:125] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:125] [desired_node] failed to parse field [storage]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [desired_node] after last required field arrived",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "processors and processors_range were specified, but only one should be specified"
+              }
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\",\"node.roles\":\"unknown,other\"},\"processors\":8.5,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [desired_node] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:120] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "Failed to build [desired_node] after last required field arrived",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown role [unknown]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":0,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:54] [desired_node] failed to parse field [processors]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:54] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:54] [desired_node] failed to parse field [processors]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Only a positive number of [processors] are allowed and [0.000000] was provided"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":-1,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:54] [desired_node] failed to parse field [processors]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:54] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:54] [desired_node] failed to parse field [processors]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Only a positive number of [processors] are allowed and [-1.000000] was provided"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":8,\"memory\":\"abc\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "failed to parse setting [memory] with value [abc] as a size in bytes: unit is missing or unrecognized"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:65] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:65] [desired_node] failed to parse field [memory]",
+            "caused_by" : {
+              "type" : "parse_exception",
+              "reason" : "failed to parse setting [memory] with value [abc] as a size in bytes: unit is missing or unrecognized"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":8,\"memory\":\"64gb\",\"storage\":\"128gb\",\"x\":1}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:90] [desired_node] unknown field [x]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:94] [update_desired_nodes_request] failed to parse field [nodes]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:90] [desired_node] unknown field [x]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":8,\"memory\":\"64gb\",\"storage\":\"128gb\"}],\"x\":1}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:92] [update_desired_nodes_request] unknown field [x]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:92] [update_desired_nodes_request] unknown field [x]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [nodes]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Required [nodes]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "request body is required"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "request body is required"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1?dry_run=xx",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":8,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [xx] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [xx] as only [true] or [false] are allowed."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1?dryrun=true",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\"},\"processors\":8,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_internal/desired_nodes/esm/1] contains unrecognized parameter: [dryrun] -> did you mean [dry_run]?"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_internal/desired_nodes/esm/1] contains unrecognized parameter: [dryrun] -> did you mean [dry_run]?"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\",\"node.roles\":[\"master\",\"data\"],\"node.attr.x\":\"y\",\"http.tcp.keep_idle\":100,\"bogus.setting\":1},\"processors\":8.123456789,\"memory\":\"1073741824b\",\"storage\":\"1.5tb\"}]}",
+      "status" : 200,
+      "response" : {
+        "replaced_existing_history_id" : false,
+        "dry_run" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_internal/desired_nodes/_latest",
+      "status" : 200,
+      "response" : {
+        "history_id" : "esm",
+        "version" : 1,
+        "nodes" : [
+          {
+            "settings" : {
+              "bogus" : {
+                "setting" : "1"
+              },
+              "http" : {
+                "tcp" : {
+                  "keep_idle" : "100"
+                }
+              },
+              "node" : {
+                "attr" : {
+                  "x" : "y"
+                },
+                "name" : "i",
+                "roles" : [
+                  "master",
+                  "data"
+                ]
+              }
+            },
+            "processors" : 8.12346,
+            "memory" : "1gb",
+            "storage" : "1.5tb"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i\",\"node.roles\":[\"master\",\"data\"],\"node.attr.x\":\"y\",\"http.tcp.keep_idle\":100,\"bogus.setting\":1},\"processors\":8.123456789,\"memory\":\"1073741824b\",\"storage\":\"1.5tb\"}]}",
+      "status" : 200,
+      "response" : {
+        "replaced_existing_history_id" : false,
+        "dry_run" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_internal/desired_nodes/_latest",
+      "status" : 200,
+      "response" : {
+        "history_id" : "esm",
+        "version" : 1,
+        "nodes" : [
+          {
+            "settings" : {
+              "bogus" : {
+                "setting" : "1"
+              },
+              "http" : {
+                "tcp" : {
+                  "keep_idle" : "100"
+                }
+              },
+              "node" : {
+                "attr" : {
+                  "x" : "y"
+                },
+                "name" : "i",
+                "roles" : [
+                  "master",
+                  "data"
+                ]
+              }
+            },
+            "processors" : 8.12346,
+            "memory" : "1gb",
+            "storage" : "1.5tb"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i2\"},\"processors\":8,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Desired nodes with history [esm] and version [1] already exists with a different definition"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Desired nodes with history [esm] and version [1] already exists with a different definition"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/0",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i2\"},\"processors\":8,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_exception",
+              "reason" : "version [0] has been superseded by version [1] for history [esm]"
+            }
+          ],
+          "type" : "version_conflict_exception",
+          "reason" : "version [0] has been superseded by version [1] for history [esm]"
+        },
+        "status" : 409
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/2",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i2\"},\"processors_range\":{\"min\":1.5},\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 200,
+      "response" : {
+        "replaced_existing_history_id" : false,
+        "dry_run" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_internal/desired_nodes/_latest",
+      "status" : 200,
+      "response" : {
+        "history_id" : "esm",
+        "version" : 2,
+        "nodes" : [
+          {
+            "settings" : {
+              "node" : {
+                "name" : "i2"
+              }
+            },
+            "processors_range" : {
+              "min" : 1.5
+            },
+            "memory" : "64gb",
+            "storage" : "128gb"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm/3?dry_run=true",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i3\"},\"processors\":2,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 200,
+      "response" : {
+        "replaced_existing_history_id" : false,
+        "dry_run" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_internal/desired_nodes/esm2/1",
+      "raw" : "{\"nodes\":[{\"settings\":{\"node.name\":\"i3\"},\"processors\":2,\"memory\":\"64gb\",\"storage\":\"128gb\"}]}",
+      "status" : 200,
+      "response" : {
+        "replaced_existing_history_id" : true,
+        "dry_run" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_internal/desired_nodes/_latest",
+      "status" : 200,
+      "response" : {
+        "history_id" : "esm2",
+        "version" : 1,
+        "nodes" : [
+          {
+            "settings" : {
+              "node" : {
+                "name" : "i3"
+              }
+            },
+            "processors" : 2.0,
+            "memory" : "64gb",
+            "storage" : "128gb"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_internal/desired_nodes/_latest",
+      "status" : 200,
+      "response" : {
+        "history_id" : "esm2",
+        "version" : 1,
+        "nodes" : [
+          {
+            "settings" : {
+              "node" : {
+                "name" : "i3"
+              }
+            },
+            "processors" : 2.0,
+            "memory" : "64gb",
+            "storage" : "128gb"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/state/metadata?filter_path=metadata.desired_nodes",
+      "status" : 200,
+      "response" : {
+        "metadata" : {
+          "desired_nodes" : {
+            "latest" : {
+              "history_id" : "esm2",
+              "version" : 1,
+              "nodes" : [
+                {
+                  "settings" : {
+                    "node" : {
+                      "name" : "i3"
+                    }
+                  },
+                  "processors" : 2.0,
+                  "memory" : "64gb",
+                  "storage" : "128gb",
+                  "status" : 0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_internal/desired_nodes",
+      "status" : 200,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_internal/desired_nodes",
+      "status" : 200,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_internal/desired_nodes/_latest",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "Desired nodes not found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "Desired nodes not found"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_snapshot/esm-repo",
+      "body" : {
+        "type" : "fs",
+        "settings" : {
+          "location" : "x"
+        }
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_exception",
+              "reason" : "[esm-repo] location [x] doesn't match any of the locations specified by path.repo because this setting is empty"
+            }
+          ],
+          "type" : "repository_exception",
+          "reason" : "[esm-repo] failed to create repository",
+          "caused_by" : {
+            "type" : "repository_exception",
+            "reason" : "[esm-repo] location [x] doesn't match any of the locations specified by path.repo because this setting is empty"
+          }
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_snapshot/esm-repo",
+      "body" : {
+        "type" : "fs",
+        "settings" : { }
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_exception",
+              "reason" : "[esm-repo] missing location"
+            }
+          ],
+          "type" : "repository_exception",
+          "reason" : "[esm-repo] failed to create repository",
+          "caused_by" : {
+            "type" : "repository_exception",
+            "reason" : "[esm-repo] missing location"
+          }
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_snapshot/esm-repo",
+      "body" : {
+        "type" : "weird",
+        "settings" : { }
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_exception",
+              "reason" : "[esm-repo] repository type [weird] does not exist for project [default]"
+            }
+          ],
+          "type" : "repository_exception",
+          "reason" : "[esm-repo] repository type [weird] does not exist for project [default]"
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_snapshot/esm-repo",
+      "body" : {
+        "type" : "source",
+        "settings" : {
+          "delegate_type" : "fs",
+          "location" : "x"
+        }
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_exception",
+              "reason" : "[esm-repo] location [x] doesn't match any of the locations specified by path.repo because this setting is empty"
+            }
+          ],
+          "type" : "repository_exception",
+          "reason" : "[esm-repo] failed to create repository",
+          "caused_by" : {
+            "type" : "repository_exception",
+            "reason" : "[esm-repo] location [x] doesn't match any of the locations specified by path.repo because this setting is empty"
+          }
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_snapshot/esm-repo",
+      "body" : {
+        "settings" : {
+          "location" : "x"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: type is missing;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: type is missing;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_snapshot/esm%23repo",
+      "body" : {
+        "type" : "fs",
+        "settings" : {
+          "location" : "x"
+        }
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_exception",
+              "reason" : "[esm#repo] must not contain '#'"
+            }
+          ],
+          "type" : "repository_exception",
+          "reason" : "[esm#repo] must not contain '#'"
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_snapshot/esm-repo",
+      "body" : {
+        "type" : "url",
+        "settings" : {
+          "url" : "http://example.com/x"
+        }
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_exception",
+              "reason" : "[esm-repo] file url [http://example.com/x] doesn't match any of the locations specified by path.repo or repositories.url.allowed_urls"
+            }
+          ],
+          "type" : "repository_verification_exception",
+          "reason" : "[esm-repo] path  is not accessible on master node",
+          "caused_by" : {
+            "type" : "repository_exception",
+            "reason" : "[esm-repo] file url [http://example.com/x] doesn't match any of the locations specified by path.repo or repositories.url.allowed_urls"
+          }
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_snapshot/esm-repo",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_missing_exception",
+              "reason" : "[esm-repo] missing"
+            }
+          ],
+          "type" : "repository_missing_exception",
+          "reason" : "[esm-repo] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_snapshot/esm-repo/snap",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_missing_exception",
+              "reason" : "[esm-repo] missing"
+            }
+          ],
+          "type" : "repository_missing_exception",
+          "reason" : "[esm-repo] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_snapshot/esm-repo",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_missing_exception",
+              "reason" : "[esm-repo] missing"
+            }
+          ],
+          "type" : "repository_missing_exception",
+          "reason" : "[esm-repo] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_snapshot",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_snapshot/_all",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_snapshot/esm*",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cat/repositories?v",
+      "status" : 200,
+      "text" : "id type\n",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "transient" : {
+          "repositories.default_repository" : "esm-nope"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "illegal value can't update [repositories.default_repository] from [] to [esm-nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "illegal value can't update [repositories.default_repository] from [] to [esm-nope]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Repository [esm-nope] is not registered. Cannot set as default repository. Please register the repository prior to setting as default using PUT /_snapshot/esm-nope"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_snapshot/esm-repo/_verify",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_missing_exception",
+              "reason" : "[esm-repo] missing"
+            }
+          ],
+          "type" : "repository_missing_exception",
+          "reason" : "[esm-repo] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_snapshot/esm-repo/_cleanup",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_missing_exception",
+              "reason" : "[esm-repo] missing"
+            }
+          ],
+          "type" : "repository_missing_exception",
+          "reason" : "[esm-repo] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_snapshot/esm-repo/snap/_status",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_missing_exception",
+              "reason" : "[esm-repo] missing"
+            }
+          ],
+          "type" : "repository_missing_exception",
+          "reason" : "[esm-repo] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_snapshot/_status",
+      "status" : 200,
+      "response" : {
+        "snapshots" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_health_report/nonexistent",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "Did not find indicator nonexistent"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "Did not find indicator nonexistent"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_health_report?size=-1",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: The size parameter must be a positive integer;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: The size parameter must be a positive integer;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_health_report?size=abc",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse int parameter [size] with value [abc]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse int parameter [size] with value [abc]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"abc\""
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_health_report?verbose=x",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [x] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [x] as only [true] or [false] are allowed."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_health_report/master_is_stable?verbose=false",
+      "mask" : [
+        "node_id",
+        "name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "indicators" : {
+          "master_is_stable" : {
+            "status" : "green",
+            "symptom" : "The cluster has a stable master node"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_internal/prevalidate_node_removal",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: request must contain one of the parameters 'names', 'ids', or 'external_ids';"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: request must contain one of the parameters 'names', 'ids', or 'external_ids';"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_internal/prevalidate_node_removal?names=a&ids=b",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: request must contain only one of the parameters 'names', 'ids', or 'external_ids';"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: request must contain only one of the parameters 'names', 'ids', or 'external_ids';"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_internal/prevalidate_node_removal?names=esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "could not resolve node names [esm-nope]"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "could not resolve node names [esm-nope]"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_internal/prevalidate_node_removal?external_ids=esm-nope,esm-nope2",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "could not resolve node external IDs [esm-nope2, esm-nope]"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "could not resolve node external IDs [esm-nope2, esm-nope]"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_internal/desired_balance",
+      "status" : 200,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    }
+  ]
+}

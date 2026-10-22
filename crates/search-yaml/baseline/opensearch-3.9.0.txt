@@ -1,0 +1,1459 @@
+# Tests of OpenSearch's YAML suite (rest-api-spec, Apache-2.0) that pass on a real single-node
+# OpenSearch 3.9.0 in Docker (security plugin off): roll search's target for the opensearch
+# dialect. Written by scripts/search-yaml-suites.sh os-baseline; environment skips, with
+# reasons, are in opensearch-3.9.0.skips.txt.
+os:bulk/100_error_traces/Returns a detailed error stack trace when requested
+os:bulk/100_error_traces/Skips a detailed error stack trace when requested
+os:bulk/10_basic/Array of objects
+os:bulk/10_basic/empty action
+os:bulk/10_basic/Empty _id
+os:bulk/10_basic/Empty _id with op_type create
+os:bulk/10_basic/Return item-level error when no write index defined for an alias
+os:bulk/10_basic/When setting require_alias flag
+os:bulk/10_basic/When setting require_alias flag per request
+os:bulk/110_bulk_adaptive_shard_select/Test basic use
+os:bulk/20_list_of_strings/List of strings
+os:bulk/30_big_string/One big string
+os:bulk/40_source/Source filtering
+os:bulk/50_refresh/refresh=empty string immediately makes changes are visible in search
+os:bulk/50_refresh/refresh=true immediately makes changes are visible in search
+os:bulk/50_refresh/refresh=wait_for waits until changes are visible in search
+os:bulk/80_cas/Compare And Swap Sequence Numbers
+os:bulk/90_pipeline/One request has pipeline and another not
+os:cat.aliases/10_basic/Alias against closed index
+os:cat.aliases/10_basic/Alias name
+os:cat.aliases/10_basic/Alias sorting
+os:cat.aliases/10_basic/Column headers
+os:cat.aliases/10_basic/Complex alias
+os:cat.aliases/10_basic/Empty cluster
+os:cat.aliases/10_basic/Help
+os:cat.aliases/10_basic/Multiple alias names
+os:cat.aliases/10_basic/Select columns
+os:cat.aliases/10_basic/Simple alias
+os:cat.aliases/20_headers/Simple alias with yaml body through Accept header
+os:cat.aliases/30_json/Simple alias with json body through format argument
+os:cat.aliases/40_hidden/Test cat aliases output with a hidden index with a hidden alias
+os:cat.aliases/40_hidden/Test cat aliases output with a hidden index with a visible alias
+os:cat.aliases/40_hidden/Test cat aliases output with a visible index with a hidden alias
+os:cat.allocation/10_basic/All Nodes
+os:cat.allocation/10_basic/Bytes
+os:cat.allocation/10_basic/Column headers
+os:cat.allocation/10_basic/Empty cluster
+os:cat.allocation/10_basic/Help
+os:cat.allocation/10_basic/Node ID
+os:cat.allocation/10_basic/One index
+os:cat.allocation/10_basic/Select columns
+os:cat.cluster_manager/10_basic/Help
+os:cat.cluster_manager/10_basic/Test cat cluster_manager output
+os:cat.count/10_basic/Test cat count help
+os:cat.count/10_basic/Test cat count output
+os:cat.fielddata/10_basic/Help
+os:cat.fielddata/10_basic/Test cat fielddata output
+os:cat.health/10_basic/Help
+os:cat.indices/10_basic/Test cat indices output
+os:cat.indices/10_basic/Test cat indices output for closed index
+os:cat.indices/10_basic/Test cat indices output (no indices)
+os:cat.indices/10_basic/Test cat indices sort
+os:cat.indices/10_basic/Test cat indices using health status
+os:cat.indices/10_basic/Test cat indices using wildcards
+os:cat.indices/10_basic/Test cat indices with invalid health parameter
+os:cat.indices/20_hidden/Test cat indices output for dot-hidden index and dot-prefixed pattern
+os:cat.indices/20_hidden/Test cat indices output for hidden index
+os:cat.indices/20_hidden/Test cat indices output with a hidden index, dot-hidden alias and dot pattern
+os:cat.indices/20_hidden/Test cat indices output with a hidden index with a hidden alias
+os:cat.indices/20_hidden/Test cat indices output with a hidden index with a visible alias
+os:cat.indices/30_system/Filter cat indices by system metadata
+os:cat.nodeattrs/10_basic/Help
+os:cat.nodeattrs/10_basic/Test cat nodes attrs output
+os:cat.nodes/10_basic/Additional disk information
+os:cat.nodes/10_basic/Test cat nodes output
+os:cat.nodes/10_basic/Test cat nodes output with full_id set
+os:cat.plugins/10_basic/Help
+os:cat.recovery/10_basic/Test cat recovery output
+os:cat.recovery/10_basic/Test cat recovery output for closed index
+os:cat.repositories/10_basic/Help
+os:cat.repositories/10_basic/Test cat repositories output
+os:cat.repositories/10_basic/Test cat repositories sort
+os:cat.segments/10_basic/Help
+os:cat.segments/10_basic/Test cat segments on closed index behaviour
+os:cat.segments/10_basic/Test cat segments output
+os:cat.segments/10_basic/Test cat segments using wildcards
+os:cat.shards/10_basic/Help
+os:cat.shards/10_basic/Test cat shards output
+os:cat.shards/10_basic/Test cat shards sort
+os:cat.shards/10_basic/Test cat shards using wildcards
+os:cat.snapshots/10_basic/Help
+os:cat.snapshots/10_basic/Test cat snapshots output
+os:cat.tasks/10_basic/Test cat tasks output
+os:cat.tasks/10_basic/Test cat tasks output with X-Opaque-Id
+os:cat.templates/10_basic/Column headers
+os:cat.templates/10_basic/Filtered templates
+os:cat.templates/10_basic/Help
+os:cat.templates/10_basic/Mixture of legacy and composable templates
+os:cat.templates/10_basic/Multiple template
+os:cat.templates/10_basic/Normal templates
+os:cat.templates/10_basic/No templates
+os:cat.templates/10_basic/Select columns
+os:cat.templates/10_basic/Sort templates
+os:cat.thread_pool/10_basic/Test cat thread_pool output
+os:cat.thread_pool/10_basic/Test cat thread_pool total_wait_time output
+os:cat.thread_pool/10_basic/Test cat thread_pool total_wait_time output with concurrent search thread_pool
+os:cluster.allocation_explain/10_basic/bad cluster shard allocation explanation request
+os:cluster.allocation_explain/10_basic/cluster shard allocation explanation test
+os:cluster.allocation_explain/10_basic/Cluster shard allocation explanation test with a closed index
+os:cluster.allocation_explain/10_basic/cluster shard allocation explanation test with empty request
+os:cluster.component_template/10_basic/Basic CRUD
+os:cluster.health/10_basic/cluster health basic test
+os:cluster.health/10_basic/cluster health basic test, one index
+os:cluster.health/10_basic/cluster health basic test, one index with wait for active shards
+os:cluster.health/10_basic/cluster health basic test, one index with wait for all active shards
+os:cluster.health/10_basic/cluster health basic test, one index with wait for no initializing shards
+os:cluster.health/10_basic/cluster health levels
+os:cluster.health/10_basic/cluster health with closed index
+os:cluster.health/10_basic/Get cluster health has same value for discovered_master and discovered_cluster_manager
+os:cluster.health/20_request_timeout/cluster health request timeout on waiting for nodes
+os:cluster.health/20_request_timeout/cluster health request timeout waiting for active shards
+os:cluster.health/30_indices_options/cluster health with expand_wildcards
+os:cluster.pending_tasks/10_basic/Test pending tasks
+os:cluster.pending_tasks/10_basic/Test pending tasks with local flag
+os:cluster.put_settings/10_basic/Test get a default settings
+os:cluster.put_settings/10_basic/Test put and reset persistent settings
+os:cluster.put_settings/10_basic/Test put and reset transient settings
+os:cluster.remote_info/10_info/Get an empty remote info
+os:cluster.reroute/10_basic/Basic sanity check
+os:cluster.reroute/10_basic/Cluster reroute returns cluster_manager_node
+os:cluster.reroute/11_explain/Explain API for non-existent node & shard
+os:cluster.reroute/11_explain/Explain API with empty command list
+os:cluster.reroute/20_response_filtering/Do not return metadata by default
+os:cluster.reroute/20_response_filtering/Filter the cluster reroute by cluster_manager_node only should work
+os:cluster.reroute/20_response_filtering/return metadata if requested
+os:cluster.state/10_basic/get cluster state
+os:cluster.state/10_basic/Get cluster state returns cluster_manager_node
+os:cluster.state/10_basic/get cluster state returns cluster_uuid at the top level
+os:cluster.state/20_filtering/Filtering the cluster state by blocks should return the blocks
+os:cluster.state/20_filtering/Filtering the cluster state by blocks should return the blocks field even if the response is empty
+os:cluster.state/20_filtering/Filtering the cluster state by indices should work in routing table and metadata
+os:cluster.state/20_filtering/Filtering the cluster state by indices using wildcards should work in routing table and metadata
+os:cluster.state/20_filtering/Filtering the cluster state by metadata only should work
+os:cluster.state/20_filtering/Filtering the cluster state by nodes only should work
+os:cluster.state/20_filtering/Filtering the cluster state by routing nodes only should work
+os:cluster.state/20_filtering/Filtering the cluster state by routing table only should work
+os:cluster.state/20_filtering/Filtering the cluster state returns cluster_uuid at the top level regardless of metric filters
+os:cluster.state/20_filtering/Filtering the cluster state using _all for indices and metrics should work
+os:cluster.state/20_filtering/Filter the cluster state by cluster_manager_node only should work
+os:cluster.state/30_expand_wildcards/Test allow_no_indices parameter
+os:cluster.state/30_expand_wildcards/Test expand_wildcards parameter on closed, open indices and both
+os:cluster.state/30_expand_wildcards/Test ignore_unavailable parameter
+os:cluster.stats/10_basic/get cluster stats nodes count with both master and cluster_manager
+os:cluster.stats/10_basic/get cluster stats returns discovery types
+os:cluster.stats/10_basic/get cluster stats returns packaging types
+os:cluster.voting_config_exclusions/10_basic/Add voting config exclusion by unknown node Id
+os:cluster.voting_config_exclusions/10_basic/Add voting config exclusion by unknown node Ids
+os:cluster.voting_config_exclusions/10_basic/Add voting config exclusion by unknown node name
+os:cluster.voting_config_exclusions/10_basic/Add voting config exclusion by unknown node names
+os:cluster.voting_config_exclusions/10_basic/Get cluster state without voting config exclusions
+os:cluster.voting_config_exclusions/10_basic/Throw exception when adding voting config exclusion and specifying both node_ids and node_names
+os:cluster.voting_config_exclusions/10_basic/Throw exception when adding voting config exclusion without specifying nodes
+os:count/10_basic/count body without query element
+os:count/10_basic/count with body
+os:count/10_basic/count with empty body
+os:count/20_query_string/count with query_string parameters
+os:create/10_with_id/Create with ID
+os:create/15_without_id/Create without ID
+os:create/35_external_version/External version
+os:create/40_routing/Routing
+os:create/60_refresh/Refresh
+os:create/60_refresh/refresh=wait_for waits until changes are visible in search
+os:create/60_refresh/When refresh url parameter is an empty string that means "refresh immediately"
+os:create/70_nested/Indexing a doc with No. nested objects less or equal to index.mapping.nested_objects.limit should succeed
+os:create/70_nested/Indexing a doc with No. nested objects more than index.mapping.nested_objects.limit should fail
+os:delete/10_basic/Basic
+os:delete/11_shard_header/Delete check shard header
+os:delete/12_result/Delete result field
+os:delete/20_cas/Internal version
+os:delete/25_external_version/External version
+os:delete/26_external_gte_version/External GTE version
+os:delete/30_routing/Routing
+os:delete/50_refresh/Refresh
+os:delete/50_refresh/refresh=wait_for waits until changes are visible in search
+os:delete/50_refresh/When refresh url parameter is an empty string that means "refresh immediately"
+os:delete/60_missing/Missing document with catch
+os:delete/60_missing/Missing document with ignore
+os:exists/10_basic/Basic
+os:exists/40_routing/Routing
+os:exists/60_realtime_refresh/Realtime Refresh
+os:exists/70_defaults/Client-side default type
+os:explain/10_basic/Basic explain
+os:explain/10_basic/Basic explain with alias
+os:explain/10_basic/Explain body without query element
+os:explain/20_source_filtering/Source filtering
+os:explain/30_query_string/explain with query_string parameters
+os:field_caps/10_basic/Field caps with include_unmapped
+os:field_caps/10_basic/Get date_nanos field caps
+os:field_caps/10_basic/Get leaves field caps
+os:field_caps/10_basic/Get object and nested field caps
+os:field_caps/10_basic/Get prefix field caps
+os:field_caps/10_basic/Get simple field caps
+os:field_caps/10_basic/Mix in non-existing field field caps
+os:field_caps/20_meta/Merge metadata across multiple indices
+os:field_caps/30_filter/Field caps with index filter
+os:field_caps/40_disable_objects/Field caps with disable_objects does not corrupt field names after second document indexed
+os:field_caps/40_disable_objects/Field caps with disable_objects returns leaf fields
+os:field_caps/40_disable_objects/Field caps with normal nested object returns intermediate paths
+os:get/10_basic/Basic
+os:get/15_default_values/Default values
+os:get/20_stored_fields/Stored fields
+os:get/40_routing/Routing
+os:get/50_with_headers/REST test with headers
+os:get/60_realtime_refresh/Realtime Refresh
+os:get/70_source_filtering/Source filtering
+os:get/80_missing/Missing document with catch
+os:get/80_missing/Missing document with ignore
+os:get/90_versions/Versions
+os:get_source/10_basic/Basic
+os:get_source/15_default_values/Default values
+os:get_source/40_routing/Routing
+os:get_source/60_realtime_refresh/Realtime
+os:get_source/70_source_filtering/Source filtering
+os:get_source/80_missing/Missing document with catch
+os:get_source/80_missing/Missing document with ignore
+os:get_source/85_source_missing/Missing document source with catch
+os:get_source/85_source_missing/Missing document source with ignore
+os:index/100_partial_flat_object/Exists query for sub field
+os:index/100_partial_flat_object/Mappings
+os:index/100_partial_flat_object/Supported queries
+os:index/105_partial_flat_object_nested/Exists query for sub field
+os:index/105_partial_flat_object_nested/Mappings
+os:index/105_partial_flat_object_nested/Supported queries
+os:index/10_with_id/Index with ID
+os:index/110_strict_allow_templates/Index documents with setting dynamic parameter to strict_allow_templates in the mapping of the index
+os:index/111_false_allow_templates/Index documents with setting dynamic parameter to false_allow_templates in the mapping of the index
+os:index/115_constant_keyword/Mappings and Indexing
+os:index/115_constant_keyword/Queries
+os:index/120_field_name/Index documents with field name containing only dot fail with an IllegalArgumentException
+os:index/12_result/Index result field
+os:index/15_without_id/Index without ID
+os:index/20_optype/Optype
+os:index/30_cas/Compare And Swap Sequence Numbers
+os:index/35_external_version/External version
+os:index/36_external_gte_version/External GTE version
+os:index/40_routing/Routing
+os:index/60_refresh/Refresh
+os:index/60_refresh/refresh=wait_for waits until changes are visible in search
+os:index/60_refresh/When refresh url parameter is an empty string that means "refresh immediately"
+os:index/70_require_alias/Set require_alias flag
+os:index/80_geo_point/Multi points test
+os:index/80_geo_point/Single point test
+os:index/90_flat_object/Exist query in root field
+os:index/90_flat_object/Invalid docs
+os:index/90_flat_object/Mappings
+os:index/90_flat_object/Supported queries
+os:index/90_flat_object/Unsupported
+os:index/90_unsigned_long/Stored unsigned long with decimal part test
+os:index/90_unsigned_long/Unsigned long with decimal part test
+os:index/91_flat_object_null_value/Mappings
+os:index/91_flat_object_null_value/Supported queries
+os:index/92_flat_object_support_doc_values/Supported queries
+os:indices.analyze/10_analyze/Array text
+os:indices.analyze/10_analyze/Basic test
+os:indices.analyze/10_analyze/Custom filter in request
+os:indices.analyze/10_analyze/Detail response with Analyzer
+os:indices.analyze/10_analyze/Index and field
+os:indices.analyze/20_analyze_limit/_analyze with explain with No. generated tokens more than index.analyze.max_token_count should fail
+os:indices.analyze/20_analyze_limit/_analyze with No. generated tokens less than or equal to index.analyze.max_token_count should succeed
+os:indices.analyze/20_analyze_limit/_analyze with No. generated tokens more than index.analyze.max_token_count should fail
+os:indices.blocks/10_basic/Basic test for index blocks
+os:indices.clear_cache/10_basic/clear_cache test
+os:indices.clear_cache/10_basic/clear_cache with fielddata set to true
+os:indices.clear_cache/10_basic/clear_cache with request set to false
+os:indices.clone/10_basic/Clone index via API
+os:indices.clone/10_basic/Create illegal clone indices
+os:indices.clone/10_basic/Returns error if target index's metadata write is blocked
+os:indices.clone/20_source_mapping/Clone index ignores target template mapping
+os:indices.clone/30_copy_settings/Copy settings during clone index
+os:indices.clone/40_wait_for_completion/Clone index with wait_for_completion
+os:indices.create/10_basic/Create index
+os:indices.create/10_basic/Create index with aliases
+os:indices.create/10_basic/Create index with invalid mappings
+os:indices.create/10_basic/Create index with mappings
+os:indices.create/10_basic/Create index with setting index.number_of_routing_shards to null
+os:indices.create/10_basic/Create index with settings
+os:indices.create/10_basic/Create index with wait_for_active_shards set to all
+os:indices.create/10_basic/Create index with write aliases
+os:indices.delete/10_basic/Delete index against alias
+os:indices.delete/10_basic/Delete index against alias - ignore unavailable
+os:indices.delete/10_basic/Delete index against alias -  ignore unavailable - multiple indices
+os:indices.delete/10_basic/Delete index against alias -  multiple indices
+os:indices.delete/10_basic/Delete index against wildcard matching alias
+os:indices.delete/10_basic/Delete index against wildcard matching alias - disallow no indices
+os:indices.delete/10_basic/Delete index against wildcard matching alias - disallow no indices - multiple indices
+os:indices.delete/10_basic/Delete index against wildcard matching alias - multiple indices
+os:indices.delete_alias/10_basic/Basic test for delete alias
+os:indices.delete_alias/all_path_options/check 404 on no matching alias
+os:indices.delete_alias/all_path_options/check delete with _all index
+os:indices.delete_alias/all_path_options/check delete with blank index and blank alias
+os:indices.delete_alias/all_path_options/check delete with * index
+os:indices.delete_alias/all_path_options/check delete with index list
+os:indices.delete_alias/all_path_options/check delete with index list and * aliases
+os:indices.delete_alias/all_path_options/check delete with index list and _all aliases
+os:indices.delete_alias/all_path_options/check delete with index list and wildcard aliases
+os:indices.delete_alias/all_path_options/check delete with prefix* index
+os:indices.delete_alias/all_path_options/check setup
+os:indices.delete_index_template/10_basic/Delete index template which is not used by data stream but index pattern matches
+os:indices.delete_index_template/10_basic/Delete not using index template for data stream but index pattern matches
+os:indices.exists/10_basic/Test indices.exists
+os:indices.exists/10_basic/Test indices.exists with local flag
+os:indices.exists/20_read_only_index/Test indices.exists on a read only index
+os:indices.exists_alias/10_basic/Test indices.exists_alias
+os:indices.exists_alias/10_basic/Test indices.exists_alias with local flag
+os:indices.exists_template/10_basic/Test indices.exists_template
+os:indices.exists_template/10_basic/Test indices.exists_template with local flag
+os:indices.flush/10_basic/Flush parameters validation
+os:indices.flush/10_basic/Flush stats
+os:indices.forcemerge/10_basic/Check deprecation warning when incompatible only_expunge_deletes and max_num_segments values are both set
+os:indices.forcemerge/10_basic/Force merge index tests
+os:indices.forcemerge/10_basic/Test primary_only parameter
+os:indices.forcemerge/20_wait_for_completion/Force merge index with wait_for_completion after task description changed
+os:indices.get/10_basic/Get index infos
+os:indices.get/10_basic/Get index infos by default shouldn't return index creation date and version in readable format
+os:indices.get/10_basic/Get index infos should work for wildcards
+os:indices.get/10_basic/Get index infos with human settings should return index creation date and version in readable format
+os:indices.get/10_basic/Missing index should return empty object if ignore_unavailable
+os:indices.get/10_basic/Missing index should throw an Error
+os:indices.get/10_basic/Should return an exception when querying invalid indices
+os:indices.get/10_basic/Should return empty object if allow_no_indices
+os:indices.get/10_basic/Should return test_index_2 and test_index_3 if expand_wildcards=open,closed
+os:indices.get/10_basic/Should return test_index_2 if expand_wildcards=open
+os:indices.get/10_basic/Should return test_index_3 if expand_wildcards=closed
+os:indices.get/10_basic/Should throw error if allow_no_indices=false
+os:indices.get_alias/10_basic/Existent and non-existent aliases returns 404 and the existing alias
+os:indices.get_alias/10_basic/Existent and non-existent alias returns 404 and the existing alias
+os:indices.get_alias/10_basic/Get alias against closed indices
+os:indices.get_alias/10_basic/Get aliases via /*/_alias/
+os:indices.get_alias/10_basic/Get aliases via /_alias/*
+os:indices.get_alias/10_basic/Get aliases via /_alias/_all
+os:indices.get_alias/10_basic/Get aliases via /*/_alias/{name}
+os:indices.get_alias/10_basic/Get aliases via /_alias/{name}
+os:indices.get_alias/10_basic/Get aliases via /_all/_alias/
+os:indices.get_alias/10_basic/Get aliases via /_all/_alias/{name}
+os:indices.get_alias/10_basic/Get aliases via /{index}/_alias/*
+os:indices.get_alias/10_basic/Get aliases via /{index}/_alias/_all
+os:indices.get_alias/10_basic/Get aliases via /{index}/_alias/name,name
+os:indices.get_alias/10_basic/Get aliases via /{index}/_alias/prefix*
+os:indices.get_alias/10_basic/Get aliases via /name,name/_alias/{name}
+os:indices.get_alias/10_basic/Get aliases via /*suf/_alias/{name}
+os:indices.get_alias/10_basic/Get alias with local flag
+os:indices.get_alias/10_basic/Get all aliases via /_alias
+os:indices.get_alias/10_basic/Get all aliases via /{index}/_alias/
+os:indices.get_alias/10_basic/Get and index with no aliases via /{index}/_alias/
+os:indices.get_alias/10_basic/Get specific alias via /{index}/_alias/{name}
+os:indices.get_alias/10_basic/Getting alias on an non-existent index should return 404
+os:indices.get_alias/10_basic/Non-existent alias on an existing index returns 404
+os:indices.get_alias/20_empty/Check empty aliases when getting all aliases via /_alias
+os:indices.get_alias/30_wildcards/Exclusion of non wildcarded aliases
+os:indices.get_alias/30_wildcards/Get aliases and wildcard exclusion
+os:indices.get_alias/30_wildcards/Get aliases wildcard and inclusion
+os:indices.get_alias/30_wildcards/Get aliases wildcard and simple exclusion
+os:indices.get_alias/30_wildcards/Missing exclusions does not fire 404
+os:indices.get_alias/30_wildcards/Non-existent exclusion alias before wildcard returns 404
+os:indices.get_alias/30_wildcards/Wildcard exclusions does not trigger 404
+os:indices.get_field_mapping/10_basic/Get field mapping by field, with another field that doesn't exist
+os:indices.get_field_mapping/10_basic/Get field mapping by index only
+os:indices.get_field_mapping/10_basic/Get field mapping with include_defaults
+os:indices.get_field_mapping/10_basic/Get field mapping with no index
+os:indices.get_field_mapping/20_missing_field/Return empty object if field doesn't exist, but index does
+os:indices.get_field_mapping/40_missing_index/Raise 404 when index doesn't exist
+os:indices.get_field_mapping/50_field_wildcards/Get field mapping should work using '_all' for index
+os:indices.get_field_mapping/50_field_wildcards/Get field mapping should work using comma_separated values for indices
+os:indices.get_field_mapping/50_field_wildcards/Get field mapping should work using '*' for index
+os:indices.get_field_mapping/50_field_wildcards/Get field mapping with * for fields
+os:indices.get_field_mapping/50_field_wildcards/Get field mapping with *t1 for fields
+os:indices.get_field_mapping/50_field_wildcards/Get field mapping with t* for fields
+os:indices.get_field_mapping/50_field_wildcards/Get field mapping with wildcarded relative names
+os:indices.get_index_template/10_basic/Get all index templates
+os:indices.get_index_template/10_basic/Get index template
+os:indices.get_index_template/10_basic/Get index template with local flag
+os:indices.get_index_template/20_get_missing/Get missing template
+os:indices.get_mapping/10_basic/Get /_all/_mapping
+os:indices.get_mapping/10_basic/Get /index,index/_mapping
+os:indices.get_mapping/10_basic/Get /{index}/_mapping
+os:indices.get_mapping/10_basic/Get /index*/_mapping/
+os:indices.get_mapping/10_basic/Get /{index}/_mapping with empty mappings
+os:indices.get_mapping/10_basic/Get /*/_mapping
+os:indices.get_mapping/10_basic/Get /_mapping
+os:indices.get_mapping/30_missing_index/Index missing, ignore_unavailable=true
+os:indices.get_mapping/30_missing_index/Index missing, ignore_unavailable=true, allow_no_indices=false
+os:indices.get_mapping/30_missing_index/Index missing, no indexes
+os:indices.get_mapping/30_missing_index/Raise 404 when index doesn't exist
+os:indices.get_mapping/40_aliases/Getting mapping for aliases should return the real index as key
+os:indices.get_mapping/50_wildcard_expansion/Get test-* with defaults
+os:indices.get_mapping/50_wildcard_expansion/Get test-* with wildcard_expansion=all
+os:indices.get_mapping/50_wildcard_expansion/Get test-* with wildcard_expansion=closed
+os:indices.get_mapping/50_wildcard_expansion/Get test-* with wildcard_expansion=none
+os:indices.get_mapping/50_wildcard_expansion/Get test-* with wildcard_expansion=none allow_no_indices=false
+os:indices.get_mapping/50_wildcard_expansion/Get test-* with wildcard_expansion=open
+os:indices.get_mapping/50_wildcard_expansion/Get test-* with wildcard_expansion=open,closed
+os:indices.get_mapping/60_empty/Check empty mapping when getting all mappings via /_mapping
+os:indices.get_settings/10_basic/Get /_all/_settings/{name}
+os:indices.get_settings/10_basic/Get /index,index/_settings/{name}
+os:indices.get_settings/10_basic/Get /{index}/_settings
+os:indices.get_settings/10_basic/Get /{index}/_settings/*
+os:indices.get_settings/10_basic/Get /{index}/_settings/_all
+os:indices.get_settings/10_basic/Get /{index}/_settings/{name*}
+os:indices.get_settings/10_basic/Get /{index}/_settings/{name}
+os:indices.get_settings/10_basic/Get /index*/_settings/{name}
+os:indices.get_settings/10_basic/Get /{index}/_settings/{name,name}
+os:indices.get_settings/10_basic/Get /_settings
+os:indices.get_settings/10_basic/Get /*/_settings/{name}
+os:indices.get_settings/10_basic/Get /_settings/{name}
+os:indices.get_settings/10_basic/Get /_settings with local flag
+os:indices.get_settings/20_aliases/Getting settings for aliases should return the real index as key
+os:indices.get_settings/30_defaults/Test retrieval of default settings
+os:indices.get_settings/40_number_of_routing_shards/Test retrieval of number_routing_shards settings
+os:indices.get_template/10_basic/Get all templates
+os:indices.get_template/10_basic/Get template
+os:indices.get_template/10_basic/Get template with flat settings and master timeout
+os:indices.get_template/10_basic/Get template with local flag
+os:indices.get_template/10_basic/Get template with no mappings
+os:indices.get_template/20_get_missing/Get missing template
+os:indices.open/10_basic/Basic test for index open/close
+os:indices.open/10_basic/Close index response with result per index
+os:indices.open/10_basic/Close index with wait_for_active_shards set to all
+os:indices.open/10_basic/Open index with wait_for_active_shards set to all
+os:indices.open/20_multiple_indices/All indices
+os:indices.open/20_multiple_indices/Only wildcard
+os:indices.open/20_multiple_indices/Trailing wildcard
+os:indices.open/30_wait_for_completion/Open index with wait_for_completion
+os:indices.put_alias/10_basic/Basic test for put alias
+os:indices.put_alias/10_basic/Can create filtered alias with a date_nanos range query
+os:indices.put_alias/10_basic/Can set index_routing
+os:indices.put_alias/10_basic/Can set is_hidden
+os:indices.put_alias/10_basic/Can set is_write_index
+os:indices.put_alias/10_basic/Can set routing
+os:indices.put_alias/10_basic/Can set search_routing
+os:indices.put_alias/10_basic/Can't create alias with invalid characters
+os:indices.put_alias/10_basic/Can't create alias with the same name as an index
+os:indices.put_alias/10_basic/Index and alias in request body can override path parameters
+os:indices.put_alias/10_basic/Index parameter supports multiple values
+os:indices.put_alias/10_basic/Throws exception with invalid parameters
+os:indices.put_alias/all_path_options/put alias in _all index
+os:indices.put_alias/all_path_options/put alias in * index
+os:indices.put_alias/all_path_options/put alias in list of indices
+os:indices.put_alias/all_path_options/put alias per index
+os:indices.put_alias/all_path_options/put alias prefix* index
+os:indices.put_alias/all_path_options/put alias with blank index
+os:indices.put_alias/all_path_options/put alias with missing name
+os:indices.put_index_template/10_basic/Put distinguishable multi-wildcard templates at the same priority
+os:indices.put_index_template/10_basic/Put index template
+os:indices.put_index_template/10_basic/Put index template with 'create' flag
+os:indices.put_index_template/10_basic/Put index template without index_patterns
+os:indices.put_index_template/10_basic/Put multiple index templates
+os:indices.put_index_template/15_composition/Component and index template composition
+os:indices.put_index_template/15_composition/Component template only composition
+os:indices.put_index_template/15_composition/Index template mapping merging
+os:indices.put_index_template/15_composition/Index template priority
+os:indices.put_index_template/15_composition/Index template without component templates
+os:indices.put_mapping/10_basic/Create index with invalid mappings
+os:indices.put_mapping/10_basic/Put mappings with explicit _doc type
+os:indices.put_mapping/10_basic/Test Create and update mapping
+os:indices.put_mapping/10_basic/Update per-field metadata
+os:indices.put_mapping/all_path_options/post a mapping with default analyzer twice
+os:indices.put_mapping/all_path_options/post a mapping with setting dynamic to false_allow_templates
+os:indices.put_mapping/all_path_options/post a mapping with setting dynamic to strict_allow_templates
+os:indices.put_mapping/all_path_options/put mapping in _all index
+os:indices.put_mapping/all_path_options/put mapping in * index
+os:indices.put_mapping/all_path_options/put mapping in list of indices
+os:indices.put_mapping/all_path_options/put mapping in prefix* index
+os:indices.put_mapping/all_path_options/put one mapping per index
+os:indices.put_settings/10_basic/Test indices settings
+os:indices.put_settings/10_basic/Test indices settings allow_no_indices
+os:indices.put_settings/10_basic/Test indices settings ignore_unavailable
+os:indices.put_settings/10_basic/Test preserve_existing settings
+os:indices.put_settings/11_reset/Test reset index settings
+os:indices.put_settings/all_path_options/put settings in _all index
+os:indices.put_settings/all_path_options/put settings in blank index
+os:indices.put_settings/all_path_options/put settings in * index
+os:indices.put_settings/all_path_options/put settings in prefix* index
+os:indices.put_settings/all_path_options/put settings per index
+os:indices.put_template/10_basic/Put index template without index_patterns
+os:indices.put_template/10_basic/Put multiple template
+os:indices.put_template/10_basic/Put template
+os:indices.put_template/10_basic/Put template create
+os:indices.put_template/10_basic/Put template with aliases
+os:indices.put_template/10_basic/Put template with empty mappings
+os:indices.put_template/10_basic/Test Put Versioned Template
+os:indices.recovery/10_basic/Indices recovery test
+os:indices.recovery/10_basic/Indices recovery test for closed index
+os:indices.recovery/10_basic/Indices recovery test index name not matching
+os:indices.recovery/10_basic/Indices recovery test, wildcard not matching any index
+os:indices.recovery/10_basic/Indices recovery test with detailed parameter
+os:indices.refresh/10_basic/Indices refresh test _all
+os:indices.refresh/10_basic/Indices refresh test empty array
+os:indices.refresh/10_basic/Indices refresh test no-match wildcard
+os:indices.resolve_index/10_basic_resolve_index/Resolve index with hidden and closed indices
+os:indices.resolve_index/10_basic_resolve_index/Resolve index with indices and aliases
+os:indices.rollover/10_basic/Rollover index via API
+os:indices.rollover/10_basic/Rollover no condition matched
+os:indices.rollover/10_basic/Rollover with dry-run but target index exists
+os:indices.rollover/30_max_size_condition/Rollover with max_size condition
+os:indices.rollover/40_mapping/Typeless mapping
+os:indices.segments/10_basic/basic segments test
+os:indices.segments/10_basic/closed segments test
+os:indices.segments/10_basic/no segments test
+os:indices.shard_stores/10_basic/basic index test
+os:indices.shard_stores/10_basic/multiple indices test
+os:indices.shard_stores/10_basic/no indices test
+os:indices.shrink/10_basic/Returns error if target index's metadata write is blocked
+os:indices.shrink/10_basic/Shrink index via API
+os:indices.shrink/20_source_mapping/Shrink index ignores target template mapping
+os:indices.shrink/30_copy_settings/Copy settings during shrink index
+os:indices.shrink/40_max_shard_size/Shrink index with max_shard_size
+os:indices.shrink/50_wait_for_completion/Shrink index with wait_for_completion
+os:indices.simulate_index_template/10_basic/Simulate index matches overlapping legacy and composable templates
+os:indices.simulate_index_template/10_basic/Simulate index template specifying a new template
+os:indices.simulate_index_template/10_basic/Simulate index template with index not matching any template
+os:indices.simulate_index_template/10_basic/Simulate index template without new template in the body
+os:indices.simulate_template/10_basic/Simulate index template specifying a new template
+os:indices.simulate_template/10_basic/Simulate template matches overlapping legacy and composable templates
+os:indices.simulate_template/10_basic/Simulate template without a template in the body
+os:indices.sort/10_basic/Index Sort
+os:indices.sort/10_basic/Index Sort half float
+os:indices.sort/10_basic/Index sort with nested field as sort field validation
+os:indices.sort/10_basic/Index sort with nested fields
+os:indices.split/10_basic/Create illegal split indices
+os:indices.split/10_basic/Returns error if target index's metadata write is blocked
+os:indices.split/10_basic/Split from 1 to N
+os:indices.split/10_basic/Split index via API
+os:indices.split/20_source_mapping/Split index ignores target template mapping
+os:indices.split/30_copy_settings/Copy settings during split index
+os:indices.split/40_wait_for_completion/Split index with wait_for_completion
+os:indices.stats/10_index/Index - all
+os:indices.stats/10_index/Index - blank
+os:indices.stats/10_index/Index - multi-index
+os:indices.stats/10_index/Index - one index
+os:indices.stats/10_index/Index - pattern
+os:indices.stats/10_index/Index - star
+os:indices.stats/10_index/Index - star, no match
+os:indices.stats/10_index/Indices stats unrecognized parameter
+os:indices.stats/11_metric/Metric - _all
+os:indices.stats/11_metric/Metric - _all include_segment_file_sizes
+os:indices.stats/11_metric/Metric - blank
+os:indices.stats/11_metric/Metric - multi
+os:indices.stats/11_metric/Metric - one
+os:indices.stats/11_metric/Metric - recovery
+os:indices.stats/11_metric/Metric - segments include_segment_file_sizes
+os:indices.stats/12_level/Level - blank
+os:indices.stats/12_level/Level - cluster
+os:indices.stats/12_level/Level - indices
+os:indices.stats/12_level/Level - shards
+os:indices.stats/13_fields/Completion - all metric
+os:indices.stats/13_fields/Completion fields - multi
+os:indices.stats/13_fields/Completion fields - one
+os:indices.stats/13_fields/Completion fields - star
+os:indices.stats/13_fields/Completion - multi metric
+os:indices.stats/13_fields/Completion - one metric
+os:indices.stats/13_fields/Completion - pattern
+os:indices.stats/13_fields/Fielddata fields - all metric
+os:indices.stats/13_fields/Fielddata fields - multi
+os:indices.stats/13_fields/Fielddata fields - multi metric
+os:indices.stats/13_fields/Fielddata fields - one
+os:indices.stats/13_fields/Fielddata fields - one metric
+os:indices.stats/13_fields/Fielddata fields - pattern
+os:indices.stats/13_fields/Fielddata fields - star
+os:indices.stats/13_fields/Fields - _all metric
+os:indices.stats/13_fields/Fields - blank
+os:indices.stats/13_fields/Fields - completion metric
+os:indices.stats/13_fields/Fields - fielddata metric
+os:indices.stats/13_fields/Fields - multi
+os:indices.stats/13_fields/Fields - multi metric
+os:indices.stats/13_fields/Fields - one
+os:indices.stats/13_fields/Fields - pattern
+os:indices.stats/13_fields/Fields - star
+os:indices.stats/14_groups/Groups - _all metric
+os:indices.stats/14_groups/Groups - blank
+os:indices.stats/14_groups/Groups - multi
+os:indices.stats/14_groups/Groups - multi metric
+os:indices.stats/14_groups/Groups - one
+os:indices.stats/14_groups/Groups - pattern
+os:indices.stats/14_groups/Groups - search metric
+os:indices.stats/14_groups/Groups - star
+os:indices.stats/20_translog/Translog last modified age stats
+os:indices.stats/20_translog/Translog retention
+os:indices.stats/20_translog/Translog retention settings are deprecated
+os:indices.stats/20_translog/Translog stats on closed indices
+os:indices.stats/30_segments/Segment Stats
+os:indices.stats/40_updates_on_refresh/Completion stats
+os:indices.stats/50_noop_update/Test noop_update_total metric can be updated by both update API and bulk API
+os:indices.stats/60_include_both_time_and_gettime_in_stats/Test _stats API includes both time and getTime metrics with human filter
+os:indices.update_aliases/10_basic/Basic test for aliases
+os:indices.update_aliases/10_basic/Basic test for multiple aliases
+os:indices.update_aliases/10_basic/Remove alias
+os:indices.update_aliases/20_routing/Index, Default Routing
+os:indices.update_aliases/20_routing/Index Routing
+os:indices.update_aliases/20_routing/Index, Search, Default Routing
+os:indices.update_aliases/20_routing/Numeric Routing
+os:indices.update_aliases/20_routing/Routing
+os:indices.update_aliases/20_routing/Search, Default Routing
+os:indices.update_aliases/20_routing/Search Routing
+os:indices.update_aliases/30_remove_index_and_replace_with_alias/Remove an index and replace it with an alias
+os:indices.update_aliases/40_remove_with_must_exist/Remove silently when all of the specified aliases are non-existing and must_exist is false
+os:indices.update_aliases/40_remove_with_must_exist/Remove successfully when some specified aliases are non-existing
+os:indices.update_aliases/40_remove_with_must_exist/Throw aliases missing exception when all of the specified aliases are non-existing
+os:indices.update_aliases/40_remove_with_must_exist/Throw aliases missing exception when removing non-existing alias with setting must_exist to true
+os:indices.upgrade/10_basic/Basic test for upgrade indices
+os:indices.upgrade/10_basic/Upgrade indices allow no indices
+os:indices.upgrade/10_basic/Upgrade indices disallow no indices
+os:indices.upgrade/10_basic/Upgrade indices disallow unavailable
+os:indices.upgrade/10_basic/Upgrade indices ignore unavailable
+os:indices.validate_query/10_basic/Validate body without query element
+os:indices.validate_query/10_basic/Validate query api
+os:indices.validate_query/20_query_string_field_match_only_text/validate_query with query_string parameters
+os:indices.validate_query/20_query_string/validate_query with query_string parameters
+os:info/10_info/Info
+os:info/20_lucene_version/Lucene Version
+os:ingest/10_basic/Test basic pipeline crud
+os:ingest/10_basic/Test Get All Pipelines
+os:ingest/10_basic/Test invalid config
+os:ingest/10_basic/Test Put Versioned Pipeline
+os:mget/10_basic/Basic multi-get
+os:mget/12_non_existent_index/Non-existent index
+os:mget/13_missing_metadata/Missing metadata
+os:mget/14_alias_to_multiple_indices/Multi Get with alias that resolves to multiple indices
+os:mget/15_ids/IDs
+os:mget/17_default_index/Default index/type
+os:mget/20_stored_fields/Stored fields
+os:mget/40_routing/Routing
+os:mget/60_realtime_refresh/Realtime Refresh
+os:mget/70_source_filtering/Source filtering -  exclude field
+os:mget/70_source_filtering/Source filtering -  ids and exclude field
+os:mget/70_source_filtering/Source filtering -  ids and include field
+os:mget/70_source_filtering/Source filtering -  ids and include nested field
+os:mget/70_source_filtering/Source filtering -  ids and true/false
+os:mget/70_source_filtering/Source filtering -  include field
+os:mget/70_source_filtering/Source filtering -  include nested field
+os:mget/70_source_filtering/Source filtering -  true/false
+os:mget/80_deprecated/Deprecated parameters should fail in Multi Get query
+os:mget/90_error_traces/Returns a detailed error stack trace when requested
+os:mget/90_error_traces/Skips a detailed error stack trace when requested
+os:mlt/10_basic/Basic mlt
+os:mlt/20_docs/Basic mlt query with docs
+os:mlt/30_unlike/Basic mlt query with unlike
+os:msearch/10_basic/Basic multi-search
+os:msearch/10_basic/Least impact smoke test
+os:msearch/10_basic/Search with new response format
+os:msearch/11_status/Check Status
+os:msearch/20_typed_keys/Multisearch test with typed_keys parameter
+os:msearch/20_typed_keys/Multisearch test with typed_keys parameter for sampler and significant terms
+os:msearch/30_error_traces/Returns a detailed error stack trace when requested
+os:msearch/30_error_traces/Skips a detailed error stack trace when requested
+os:mtermvectors/10_basic/Basic tests for multi termvector get
+os:mtermvectors/20_deprecated/Deprecated camel case and _ parameters should fail in Term Vectors query
+os:mtermvectors/30_error_traces/Returns a detailed error stack trace when requested
+os:mtermvectors/30_error_traces/Skips a detailed error stack trace when requested
+os:nodes.info/10_basic/node_info role test
+os:nodes.info/10_basic/node_info test
+os:nodes.info/20_transport/node_info test profile is empty
+os:nodes.info/30_settings/node_info test flat_settings
+os:nodes.info/40_aggs/node_info test aggregations
+os:nodes.info/50_nodes_total_indexing_buffer_format/Test total indexing buffer fields should have correct formats
+os:nodes.reload_secure_settings/10_basic/node_reload_secure_settings test wrong password
+os:nodes.reload_secure_settings/11_no_password/node_reload_secure_settings test correct(empty) password
+os:nodes.stats/10_basic/Nodes stats
+os:nodes.stats/10_basic/Nodes stats level
+os:nodes.stats/10_basic/Nodes stats unrecognized parameter
+os:nodes.stats/11_indices_metrics/Metric - _all
+os:nodes.stats/11_indices_metrics/Metric - _all include_segment_file_sizes
+os:nodes.stats/11_indices_metrics/Metric - blank
+os:nodes.stats/11_indices_metrics/Metric - indexing doc_status
+os:nodes.stats/11_indices_metrics/Metric - indices _all
+os:nodes.stats/11_indices_metrics/Metric - multi
+os:nodes.stats/11_indices_metrics/Metric - one
+os:nodes.stats/11_indices_metrics/Metric - recovery
+os:nodes.stats/11_indices_metrics/Metric - segments include_segment_file_sizes
+os:nodes.stats/20_response_filtering/Nodes Stats filtered using both includes and excludes filters
+os:nodes.stats/20_response_filtering/Nodes Stats with response filtering
+os:nodes.stats/30_discovery/Discovery stats
+os:nodes.stats/50_indexing_pressure/Indexing pressure memory limit
+os:nodes.stats/50_indexing_pressure/Indexing pressure stats
+os:nodes.stats/60_transport_stats/Transport stats
+os:ping/10_ping/Ping
+os:pit/10_basic/Create PIT, Search with PIT ID and Delete
+os:pit/10_basic/Delete all
+os:range/10_basic/Date range
+os:range/10_basic/Date range rounding
+os:range/10_basic/Double range
+os:range/10_basic/Float range
+os:range/10_basic/Integer range
+os:range/10_basic/IP range
+os:range/10_basic/Long range
+os:scripts/20_get_script_context/Action to get all contexts
+os:scripts/25_get_script_languages/Action to get script languages
+os:scroll/10_basic/Basic scroll
+os:scroll/10_basic/Basic scroll with 1 shard
+os:scroll/10_basic/Body params override query string
+os:scroll/10_basic/Scroll cannot used the request cache
+os:scroll/10_basic/Scroll max_score is null
+os:scroll/10_basic/Scroll with new response format
+os:scroll/10_basic/Scroll with size 0
+os:scroll/10_basic_timeseries/Basic scroll on time series workload for reversed leaf sorter
+os:scroll/11_clear/Body params with array param override query string
+os:scroll/11_clear/Body params with string param scroll id override query string
+os:scroll/11_clear/Clear scroll
+os:scroll/12_slices/Sliced scroll
+os:scroll/12_slices/Sliced scroll with invalid arguments
+os:scroll/20_keep_alive/Max keep alive
+os:search/100_stored_fields/Stored fields
+os:search/10_source_filtering/docvalue_fields
+os:search/10_source_filtering/docvalue_fields as url param
+os:search/10_source_filtering/docvalue_fields - double
+os:search/10_source_filtering/docvalue_fields with default format
+os:search/10_source_filtering/docvalue_fields with explicit format
+os:search/10_source_filtering/fields in body
+os:search/10_source_filtering/fields in body with source
+os:search/10_source_filtering/multiple docvalue_fields
+os:search/10_source_filtering/no filtering
+os:search/10_source_filtering/_source_excludes
+os:search/10_source_filtering/_source: false
+os:search/10_source_filtering/_source field1 field2
+os:search/10_source_filtering/_source filtering on bigint
+os:search/10_source_filtering/_source in body
+os:search/10_source_filtering/_source.include field1 field2
+os:search/10_source_filtering/_source include on bigint
+os:search/10_source_filtering/_source_includes
+os:search/10_source_filtering/_source includes and excludes
+os:search/10_source_filtering/_source_includes and _source in body
+os:search/10_source_filtering/_source: true
+os:search/10_source_filtering/_source with an ambiguous field
+os:search/110_field_collapsing/field collapsing
+os:search/110_field_collapsing/field collapsing and from
+os:search/110_field_collapsing/field collapsing and multiple inner_hits
+os:search/110_field_collapsing/field collapsing and rescore
+os:search/110_field_collapsing/field collapsing and scroll
+os:search/110_field_collapsing/field collapsing, inner_hits, and fields
+os:search/110_field_collapsing/field collapsing, inner_hits and maxConcurrentGroupRequests
+os:search/110_field_collapsing/field collapsing, inner_hits and seq_no
+os:search/110_field_collapsing/field collapsing, inner_hits and version
+os:search/110_field_collapsing/field collapsing on a field alias
+os:search/110_field_collapsing/field collapsing with search_after - basic functionality
+os:search/110_field_collapsing/field collapsing with search_after - concurrent segment search enabled
+os:search/110_field_collapsing/field collapsing with search_after - _score and _doc sorts
+os:search/110_field_collapsing/no hits and inner_hits max_score null
+os:search/110_field_collapsing/Test field collapsing with sort
+os:search/110_field_collapsing/Test field collapsing with sort when concurrent segment search enabled
+os:search/115_multiple_field_collapsing/two levels fields collapsing
+os:search/120_batch_reduce_size/batched_reduce_size 2 with 5 shards
+os:search/120_batch_reduce_size/batched_reduce_size lower limit
+os:search/140_pre_filter_search_shards/pre_filter_shard_size with invalid parameter
+os:search/140_pre_filter_search_shards/pre_filter_shard_size with shards that have no hit
+os:search/150_rewrite_on_coordinator/Ensure that we fetch the document only once
+os:search/160_exists_query_match_only_text/Test exists query on mapped match_only_text field
+os:search/160_exists_query_match_only_text/Test exists query on match_only_text field in empty index
+os:search/160_exists_query_match_only_text/Test exists query on unmapped match_only_text field
+os:search/160_exists_query/Test exists query on binary field in empty index
+os:search/160_exists_query/Test exists query on boolean field in empty index
+os:search/160_exists_query/Test exists query on byte field in empty index
+os:search/160_exists_query/Test exists query on date field in empty index
+os:search/160_exists_query/Test exists query on double field in empty index
+os:search/160_exists_query/Test exists query on float field in empty index
+os:search/160_exists_query/Test exists query on geo_point field in empty index
+os:search/160_exists_query/Test exists query on half_float field in empty index
+os:search/160_exists_query/Test exists query on _id field
+os:search/160_exists_query/Test exists query on _index field
+os:search/160_exists_query/Test exists query on integer field in empty index
+os:search/160_exists_query/Test exists query on ip field in empty index
+os:search/160_exists_query/Test exists query on keyword field in empty index
+os:search/160_exists_query/Test exists query on long field in empty index
+os:search/160_exists_query/Test exists query on mapped binary field
+os:search/160_exists_query/Test exists query on mapped binary field with no doc values
+os:search/160_exists_query/Test exists query on mapped boolean field
+os:search/160_exists_query/Test exists query on mapped boolean field with no doc values
+os:search/160_exists_query/Test exists query on mapped byte field
+os:search/160_exists_query/Test exists query on mapped byte field with no doc values
+os:search/160_exists_query/Test exists query on mapped date field
+os:search/160_exists_query/Test exists query on mapped date field with no doc values
+os:search/160_exists_query/Test exists query on mapped double field
+os:search/160_exists_query/Test exists query on mapped double field with no doc values
+os:search/160_exists_query/Test exists query on mapped float field
+os:search/160_exists_query/Test exists query on mapped float field with no doc values
+os:search/160_exists_query/Test exists query on mapped geo_point field
+os:search/160_exists_query/Test exists query on mapped geo_point field with no doc values
+os:search/160_exists_query/Test exists query on mapped half_float field
+os:search/160_exists_query/Test exists query on mapped half_float field with no doc values
+os:search/160_exists_query/Test exists query on mapped integer field
+os:search/160_exists_query/Test exists query on mapped integer field with no doc values
+os:search/160_exists_query/Test exists query on mapped ip field
+os:search/160_exists_query/Test exists query on mapped ip field with no doc values
+os:search/160_exists_query/Test exists query on mapped keyword field
+os:search/160_exists_query/Test exists query on mapped keyword field with no doc values
+os:search/160_exists_query/Test exists query on mapped long field
+os:search/160_exists_query/Test exists query on mapped long field with no doc values
+os:search/160_exists_query/Test exists query on mapped object field
+os:search/160_exists_query/Test exists query on mapped object field with no doc values
+os:search/160_exists_query/Test exists query on mapped object inner field
+os:search/160_exists_query/Test exists query on mapped object inner field with no doc values
+os:search/160_exists_query/Test exists query on mapped short field
+os:search/160_exists_query/Test exists query on mapped short field with no doc values
+os:search/160_exists_query/Test exists query on mapped text field
+os:search/160_exists_query/Test exists query on mapped text field with no doc values
+os:search/160_exists_query/Test exists query on object field in empty index
+os:search/160_exists_query/Test exists query on object inner field in empty index
+os:search/160_exists_query/Test exists query on _routing field
+os:search/160_exists_query/Test exists query on _seq_no field
+os:search/160_exists_query/Test exists query on short field in empty index
+os:search/160_exists_query/Test exists query on _source field
+os:search/160_exists_query/Test exists query on text field in empty index
+os:search/160_exists_query/Test exists query on unmapped binary field
+os:search/160_exists_query/Test exists query on unmapped boolean field
+os:search/160_exists_query/Test exists query on unmapped byte field
+os:search/160_exists_query/Test exists query on unmapped date field
+os:search/160_exists_query/Test exists query on unmapped double field
+os:search/160_exists_query/Test exists query on unmapped float field
+os:search/160_exists_query/Test exists query on unmapped geo_point field
+os:search/160_exists_query/Test exists query on unmapped half_float field
+os:search/160_exists_query/Test exists query on unmapped integer field
+os:search/160_exists_query/Test exists query on unmapped ip field
+os:search/160_exists_query/Test exists query on unmapped keyword field
+os:search/160_exists_query/Test exists query on unmapped long field
+os:search/160_exists_query/Test exists query on unmapped object field
+os:search/160_exists_query/Test exists query on unmapped object inner field
+os:search/160_exists_query/Test exists query on unmapped short field
+os:search/160_exists_query/Test exists query on unmapped text field
+os:search/160_exists_query/Test exists query on _version field
+os:search/170_terms_query/Terms Query with No.of terms exceeding index.max_terms_count should FAIL
+os:search/171_terms_lookup_query/Terms Query - Lookup by Query
+os:search/190_index_prefix_search/search index prefixes with multiple values
+os:search/190_index_prefix_search/search index prefixes with multiple values and custom position_increment_gap
+os:search/190_index_prefix_search/search index prefixes with span_multi
+os:search/190_index_prefix_search/search with index prefixes
+os:search/190_index_prefix_search/search with uppercase regex
+os:search/200_ignore_malformed/Exists on _ignored
+os:search/200_ignore_malformed/field-level setting shall override index-level setting
+os:search/200_ignore_malformed/_ignored is returned by default
+os:search/200_ignore_malformed/_ignored is still returned with explicit list of stored fields
+os:search/200_ignore_malformed/Search on _ignored with term
+os:search/200_ignore_malformed/Search on _ignored with terms
+os:search/200_index_phrase_search/search with indexed phrases
+os:search/200_phrase_search_field_match_only_text/search with indexed phrases
+os:search/20_default_values/Basic search
+os:search/20_default_values/Search body without query element
+os:search/20_default_values/Search with new response format
+os:search/210_rescore_explain/Score should match explanation in rescore
+os:search/220_total_hits_object/hits.total as an object
+os:search/220_total_hits_object/track_total_hits with rest_total_hits_as_int
+os:search/230_interval_query/Test after
+os:search/230_interval_query/Test before
+os:search/230_interval_query/Test block combination
+os:search/230_interval_query/Test contained_by
+os:search/230_interval_query/Test containing
+os:search/230_interval_query/Test default unordered matching
+os:search/230_interval_query/Test explicit unordered matching
+os:search/230_interval_query/Test explicit unordered matching via mode
+os:search/230_interval_query/Test fuzzy match
+os:search/230_interval_query/Test nested unordered combination no overlap
+os:search/230_interval_query/Test nested unordered combination with overlap
+os:search/230_interval_query/Test not_contained_by
+os:search/230_interval_query/Test not containing
+os:search/230_interval_query/Test not_overlapping
+os:search/230_interval_query/Test ordered combination
+os:search/230_interval_query/Test ordered combination with disjunction
+os:search/230_interval_query/Test ordered combination with disjunction via mode
+os:search/230_interval_query/Test ordered combination with max_gaps
+os:search/230_interval_query/Test ordered matching
+os:search/230_interval_query/Test ordered matching with via mode
+os:search/230_interval_query/Test ordered max_gaps matching
+os:search/230_interval_query/Test overlapping
+os:search/230_interval_query/Test phrase matching
+os:search/230_interval_query/Test prefix
+os:search/230_interval_query/Test regexp
+os:search/230_interval_query/Test regexp, explicit case insensitive
+os:search/230_interval_query/Test regexp, explicit case sensitive
+os:search/230_interval_query/Test unordered combination
+os:search/230_interval_query/Test unordered combination no overlap
+os:search/230_interval_query/Test unordered combination via mode
+os:search/230_interval_query/Test unordered combination with overlap
+os:search/230_interval_query/Test unordered max_gaps matching
+os:search/230_interval_query/Test unordered with no overlap in match
+os:search/230_interval_query/Test unordered with overlap in match
+os:search/230_interval_query/Test wildcard
+os:search/240_date_nanos/date histogram aggregation with date and date_nanos mapping
+os:search/240_date_nanos/date_nanos requires dates after 1970 and before 2262
+os:search/240_date_nanos/date with nested sort now
+os:search/240_date_nanos/doc value fields are working as expected across date and date_nanos fields
+os:search/240_date_nanos/test sorting against date_nanos only fields
+os:search/250_distance_feature/test distance_feature query on date_nanos type
+os:search/250_distance_feature/test distance_feature query on date type
+os:search/250_distance_feature/test distance_feature query on geo_point type
+os:search/260_sort_double/test sorting against double only fields
+os:search/260_sort_geopoint/test query then sort with geo_point distance
+os:search/260_sort_long/test sorting against long only fields
+os:search/260_sort_mixed/search across indices with mixed long and double and float numeric types
+os:search/260_sort_mixed/search across indices with mixed long and double numeric types
+os:search/260_sort_mixed/search across indices with mixed long, double and unsigned_long numeric types
+os:search/260_sort_unsigned_long/test sorting against unsigned_long only fields
+os:search/270_wildcard_fieldtype_queries/case insensitive query on wildcard field
+os:search/270_wildcard_fieldtype_queries/case insensitive regexp query on wildcard field
+os:search/270_wildcard_fieldtype_queries/Mappings
+os:search/270_wildcard_fieldtype_queries/prefix query matches
+os:search/270_wildcard_fieldtype_queries/regexp match-all works
+os:search/270_wildcard_fieldtype_queries/regexp query matches
+os:search/270_wildcard_fieldtype_queries/regexp query matches lowercase-normalized field
+os:search/270_wildcard_fieldtype_queries/regexp query works on values contains escaped characters
+os:search/270_wildcard_fieldtype_queries/sort on doc value enabled wildcard
+os:search/270_wildcard_fieldtype_queries/term query contains escaped characters
+os:search/270_wildcard_fieldtype_queries/term query matches exact value
+os:search/270_wildcard_fieldtype_queries/term query matches lowercase-normalized value
+os:search/270_wildcard_fieldtype_queries/terms query contains escaped characters
+os:search/270_wildcard_fieldtype_queries/terms query on wildcard field matches
+os:search/270_wildcard_fieldtype_queries/wildcard field short terms query matches
+os:search/270_wildcard_fieldtype_queries/wildcard match-all works
+os:search/270_wildcard_fieldtype_queries/wildcard query matches
+os:search/270_wildcard_fieldtype_queries/wildcard query matches lowercase-normalized field
+os:search/270_wildcard_fieldtype_queries/wildcard query works on values contains escaped characters
+os:search/300_sequence_numbers/sequence numbers are not returned if not requested
+os:search/300_sequence_numbers/sequence numbers are returned if requested from body
+os:search/300_sequence_numbers/sequence numbers are returned if requested from url
+os:search/30_limits/Docvalues_fields size limit
+os:search/30_limits/Regexp length limit
+os:search/30_limits/Request window limits without scroll
+os:search/30_limits/Request window limits with scroll
+os:search/30_limits/Request with negative from value
+os:search/30_limits/Request with size exceeding max integer value
+os:search/30_limits/Rescore window limits
+os:search/30_limits/Script_fields size limit
+os:search/310_match_bool_prefix/analyzer
+os:search/310_match_bool_prefix_field_match_only_text/analyzer
+os:search/310_match_bool_prefix_field_match_only_text/fuzziness
+os:search/310_match_bool_prefix_field_match_only_text/minimum should match
+os:search/310_match_bool_prefix_field_match_only_text/multi_match multiple fields complete term
+os:search/310_match_bool_prefix_field_match_only_text/multi_match multiple fields partial term
+os:search/310_match_bool_prefix_field_match_only_text/multi_match multiple fields with analyzer
+os:search/310_match_bool_prefix_field_match_only_text/multi_match multiple fields with cutoff_frequency throws exception
+os:search/310_match_bool_prefix_field_match_only_text/multi_match multiple fields with fuzziness
+os:search/310_match_bool_prefix_field_match_only_text/multi_match multiple fields with minimum_should_match
+os:search/310_match_bool_prefix_field_match_only_text/multi_match multiple fields with slop throws exception
+os:search/310_match_bool_prefix_field_match_only_text/multi_match single field complete term
+os:search/310_match_bool_prefix_field_match_only_text/multi_match single field partial term
+os:search/310_match_bool_prefix_field_match_only_text/operator
+os:search/310_match_bool_prefix/fuzziness
+os:search/310_match_bool_prefix/minimum should match
+os:search/310_match_bool_prefix/multi_match multiple fields complete term
+os:search/310_match_bool_prefix/multi_match multiple fields partial term
+os:search/310_match_bool_prefix/multi_match multiple fields with analyzer
+os:search/310_match_bool_prefix/multi_match multiple fields with boost
+os:search/310_match_bool_prefix/multi_match multiple fields with cutoff_frequency throws exception
+os:search/310_match_bool_prefix/multi_match multiple fields with fuzziness
+os:search/310_match_bool_prefix/multi_match multiple fields with minimum_should_match
+os:search/310_match_bool_prefix/multi_match multiple fields with slop throws exception
+os:search/310_match_bool_prefix/multi_match single field complete term
+os:search/310_match_bool_prefix/multi_match single field partial term
+os:search/310_match_bool_prefix/operator
+os:search/310_match_bool_prefix/scoring complete term
+os:search/310_match_bool_prefix/scoring partial term
+os:search/320_disallow_queries_field_match_only_text/Test disallow expensive queries
+os:search/320_disallow_queries/Test disallow expensive queries
+os:search/330_distributed_sort/test distributed sort can rewrite query to match no docs
+os:search/330_fetch_fields/Test basic field retrieval
+os:search/330_fetch_fields/Test date formatting
+os:search/330_fetch_fields/Test disable source
+os:search/330_fetch_fields/Test disable _source loading
+os:search/330_fetch_fields/Test ignore malformed
+os:search/330_fetch_fields/Test search rewrite
+os:search/330_fetch_fields/Test token count
+os:search/340_doc_values_field/search on fields with both index and doc_values enabled
+os:search/340_doc_values_field/search on fields with only doc_values enabled
+os:search/340_doc_values_field/search on fields with only index enabled
+os:search/350_matched_queries/matched queries
+os:search/350_matched_queries/matched queries with scores
+os:search/350_matched_queries/named queries in rescore
+os:search/350_matched_queries/named queries in rescore with scores
+os:search/360_from_and_size/Throws exception if from or size query parameter is negative
+os:search/360_from_and_size/Throws exception if from or size request body parameter is negative
+os:search/370_approximate_range/search with approximate range
+os:search/380_bitmap_filtering/Boolean must bitmap filtering
+os:search/380_bitmap_filtering/Boolean should bitmap filtering
+os:search/380_bitmap_filtering/Terms lookup on a binary field with bitmap
+os:search/380_bitmap_filtering/Terms query accepting bitmap as value
+os:search/381_bitmap_filtering_long/Terms lookup on a binary field with bitmap (long)
+os:search/381_bitmap_filtering_long/Terms query accepting bitmap as value (long)
+os:search/390_search_as_you_type/Test search_as_you_type data type supports multi-fields
+os:search/400_combined_fields/Combined_fields query uses BM25F ranking across weighted fields
+os:search/400_combined_fields/Combined_fields query with OR operator favors high-frequency single-term docs
+os:search/400_max_score/Test max score with sorting on score firstly
+os:search/400_max_score/Test max score with sorting on score firstly primarily for field collapsing with concurrent segment search enabled
+os:search/400_max_score/Test max score with sorting on score firstly with concurrent segment search enabled
+os:search/400_max_score/Test max score with sorting on score primarily for field collapsing
+os:search/40_indices_boost/Indices boost for nonexistent index/alias
+os:search/40_indices_boost/Indices boost using array
+os:search/40_indices_boost/Indices boost using array multiple match
+os:search/40_indices_boost/Indices boost using array with alias
+os:search/40_indices_boost/Indices boost using array with wildcard
+os:search/40_indices_boost/Indices boost using object
+os:search/50_multi_match/Cross fields do not return negative scores
+os:search/50_multi_match/Query string with null field throws 400
+os:search/60_query_string/search with query_string parameters
+os:search/61_query_string_field_alias/regex search on alias field
+os:search/61_query_string_field_alias/regex search on normal field
+os:search/70_response_filtering/Search results filtered using both includes and excludes filters
+os:search/70_response_filtering/Search with response filtering
+os:search/80_indices_options/Closed index
+os:search/80_indices_options/Missing index
+os:search/80_indices_options/Missing index date math with catch
+os:search/90_search_after/date
+os:search/90_search_after/date_nanos
+os:search/90_search_after/half float
+os:search/90_search_after/numeric skipping logic with competitive missing value
+os:search/90_search_after/search with search_after parameter
+os:search/90_search_after/unsigned long
+os:search/95_search_after_shard_doc/accept _shard_doc with PIT + paginate with search_after (multi-shard)
+os:search/95_search_after_shard_doc/detect _shard_doc via FieldSortBuilder-style object without PIT
+os:search/95_search_after_shard_doc/reject _shard_doc without PIT
+os:search.aggregation/100_avg_metric/Aggregating wrong datatype test
+os:search.aggregation/100_avg_metric/Basic test
+os:search.aggregation/100_avg_metric/Filtered test
+os:search.aggregation/100_avg_metric/Metadata test
+os:search.aggregation/100_avg_metric/Missing field with missing param
+os:search.aggregation/100_avg_metric/Missing field without missing param
+os:search.aggregation/100_avg_metric/Only aggs test
+os:search.aggregation/100_avg_metric_unsigned/Basic test
+os:search.aggregation/100_avg_metric_unsigned/Filtered test
+os:search.aggregation/100_avg_metric_unsigned/Metadata test
+os:search.aggregation/100_avg_metric_unsigned/Missing field with missing param
+os:search.aggregation/100_avg_metric_unsigned/Missing field without missing param
+os:search.aggregation/100_avg_metric_unsigned/Only aggs test
+os:search.aggregation/10_histogram/Basic test
+os:search.aggregation/10_histogram/date_histogram
+os:search.aggregation/10_histogram/date_histogram on range
+os:search.aggregation/10_histogram/date_histogram on range with offset
+os:search.aggregation/10_histogram/date_histogram profiler
+os:search.aggregation/10_histogram/date_histogram profiler shows filter rewrite info
+os:search.aggregation/10_histogram/date_histogram with pre-epoch daylight savings time transition
+os:search.aggregation/10_histogram/Deprecated _time order
+os:search.aggregation/10_histogram/Format test
+os:search.aggregation/10_histogram/histogram profiler
+os:search.aggregation/10_histogram/histogram with hard bounds
+os:search.aggregation/110_max_metric/Aggregating wrong datatype test
+os:search.aggregation/110_max_metric/Basic test
+os:search.aggregation/110_max_metric/Filtered test
+os:search.aggregation/110_max_metric/Metadata test
+os:search.aggregation/110_max_metric/Missing field with missing param
+os:search.aggregation/110_max_metric/Missing field without missing param
+os:search.aggregation/110_max_metric/Only aggs test
+os:search.aggregation/110_max_metric_unsigned/Basic test
+os:search.aggregation/110_max_metric_unsigned/Filtered test
+os:search.aggregation/110_max_metric_unsigned/Metadata test
+os:search.aggregation/110_max_metric_unsigned/Missing field with missing param
+os:search.aggregation/110_max_metric_unsigned/Missing field without missing param
+os:search.aggregation/110_max_metric_unsigned/Only aggs test
+os:search.aggregation/120_min_metric/Aggregating wrong datatype test
+os:search.aggregation/120_min_metric/Basic test
+os:search.aggregation/120_min_metric/Filtered test
+os:search.aggregation/120_min_metric/Metadata test
+os:search.aggregation/120_min_metric/Missing field with missing param
+os:search.aggregation/120_min_metric/Missing field without missing param
+os:search.aggregation/120_min_metric/Only aggs test
+os:search.aggregation/120_min_metric_unsigned/Basic test
+os:search.aggregation/120_min_metric_unsigned/Filtered test
+os:search.aggregation/120_min_metric_unsigned/Metadata test
+os:search.aggregation/120_min_metric_unsigned/Missing field with missing param
+os:search.aggregation/120_min_metric_unsigned/Missing field without missing param
+os:search.aggregation/120_min_metric_unsigned/Only aggs test
+os:search.aggregation/130_sum_metric/Aggregating wrong datatype test
+os:search.aggregation/130_sum_metric/Basic test
+os:search.aggregation/130_sum_metric/Filtered test
+os:search.aggregation/130_sum_metric/Metadata test
+os:search.aggregation/130_sum_metric/Missing field with missing param
+os:search.aggregation/130_sum_metric/Missing field without missing param
+os:search.aggregation/130_sum_metric/Only aggs test
+os:search.aggregation/130_sum_metric_unsigned/Basic test
+os:search.aggregation/130_sum_metric_unsigned/Filtered test
+os:search.aggregation/130_sum_metric_unsigned/Metadata test
+os:search.aggregation/130_sum_metric_unsigned/Missing field with missing param
+os:search.aggregation/130_sum_metric_unsigned/Missing field without missing param
+os:search.aggregation/130_sum_metric_unsigned/Only aggs test
+os:search.aggregation/140_value_count_metric/Basic test
+os:search.aggregation/140_value_count_metric/Filtered test
+os:search.aggregation/140_value_count_metric/Metadata test
+os:search.aggregation/140_value_count_metric/Missing field with missing param
+os:search.aggregation/140_value_count_metric/Missing field without missing param
+os:search.aggregation/140_value_count_metric/Only aggs test
+os:search.aggregation/140_value_count_metric_unsigned/Basic test
+os:search.aggregation/140_value_count_metric_unsigned/Filtered test
+os:search.aggregation/140_value_count_metric_unsigned/Metadata test
+os:search.aggregation/140_value_count_metric_unsigned/Missing field with missing param
+os:search.aggregation/140_value_count_metric_unsigned/Missing field without missing param
+os:search.aggregation/140_value_count_metric_unsigned/Only aggs test
+os:search.aggregation/150_stats_metric/Basic test
+os:search.aggregation/150_stats_metric/Filtered test
+os:search.aggregation/150_stats_metric/Metadata test
+os:search.aggregation/150_stats_metric/Missing field with missing param
+os:search.aggregation/150_stats_metric/Missing field without missing param
+os:search.aggregation/150_stats_metric/Only aggs test
+os:search.aggregation/150_stats_metric_unsigned/Basic test
+os:search.aggregation/150_stats_metric_unsigned/Filtered test
+os:search.aggregation/150_stats_metric_unsigned/Metadata test
+os:search.aggregation/150_stats_metric_unsigned/Missing field with missing param
+os:search.aggregation/150_stats_metric_unsigned/Missing field without missing param
+os:search.aggregation/150_stats_metric_unsigned/Only aggs test
+os:search.aggregation/160_extended_stats_metric/Bad sigma test
+os:search.aggregation/160_extended_stats_metric/Basic test
+os:search.aggregation/160_extended_stats_metric/Filtered test
+os:search.aggregation/160_extended_stats_metric/Metadata test
+os:search.aggregation/160_extended_stats_metric/Missing field with missing param
+os:search.aggregation/160_extended_stats_metric/Missing field without missing param
+os:search.aggregation/160_extended_stats_metric/Only aggs test
+os:search.aggregation/160_extended_stats_metric/Sigma test
+os:search.aggregation/160_extended_stats_metric_unsigned/Basic test
+os:search.aggregation/160_extended_stats_metric_unsigned/Filtered test
+os:search.aggregation/160_extended_stats_metric_unsigned/Metadata test
+os:search.aggregation/160_extended_stats_metric_unsigned/Missing field with missing param
+os:search.aggregation/160_extended_stats_metric_unsigned/Missing field without missing param
+os:search.aggregation/160_extended_stats_metric_unsigned/Only aggs test
+os:search.aggregation/160_extended_stats_metric_unsigned/Sigma test
+os:search.aggregation/170_cardinality_metric/Basic test
+os:search.aggregation/170_cardinality_metric/Filtered test
+os:search.aggregation/170_cardinality_metric/Invalid Precision test
+os:search.aggregation/170_cardinality_metric/Metadata test
+os:search.aggregation/170_cardinality_metric/Missing field with missing param
+os:search.aggregation/170_cardinality_metric/Missing field without missing param
+os:search.aggregation/170_cardinality_metric/Only aggs test
+os:search.aggregation/170_cardinality_metric/profiler string
+os:search.aggregation/170_cardinality_metric_unsigned/Basic test
+os:search.aggregation/170_cardinality_metric_unsigned/Filtered test
+os:search.aggregation/170_cardinality_metric_unsigned/Invalid Precision test
+os:search.aggregation/170_cardinality_metric_unsigned/Metadata test
+os:search.aggregation/170_cardinality_metric_unsigned/Missing field with missing param
+os:search.aggregation/170_cardinality_metric_unsigned/Missing field without missing param
+os:search.aggregation/170_cardinality_metric_unsigned/Only aggs test
+os:search.aggregation/170_cardinality_metric_unsigned/profiler double
+os:search.aggregation/170_cardinality_metric_unsigned/profiler string
+os:search.aggregation/170_cardinality_metric_unsigned/profiler unsigned_long
+os:search.aggregation/180_percentiles_tdigest_metric/Basic 3.x test
+os:search.aggregation/180_percentiles_tdigest_metric/Compression test
+os:search.aggregation/180_percentiles_tdigest_metric/Explicit Percents test
+os:search.aggregation/180_percentiles_tdigest_metric/Filtered test
+os:search.aggregation/180_percentiles_tdigest_metric/Invalid params test
+os:search.aggregation/180_percentiles_tdigest_metric/Metadata test
+os:search.aggregation/180_percentiles_tdigest_metric/Missing field with missing param
+os:search.aggregation/180_percentiles_tdigest_metric/Missing field without missing param
+os:search.aggregation/180_percentiles_tdigest_metric/Non-keyed test
+os:search.aggregation/180_percentiles_tdigest_metric/Only aggs test
+os:search.aggregation/180_percentiles_tdigest_metric_unsigned/Basic 3.x test
+os:search.aggregation/180_percentiles_tdigest_metric_unsigned/Compression 3.x test
+os:search.aggregation/180_percentiles_tdigest_metric_unsigned/Explicit Percents 3.x test
+os:search.aggregation/180_percentiles_tdigest_metric_unsigned/Filtered 3.x test
+os:search.aggregation/180_percentiles_tdigest_metric_unsigned/Metadata 3.x test
+os:search.aggregation/180_percentiles_tdigest_metric_unsigned/Non-keyed 3.x test
+os:search.aggregation/180_percentiles_tdigest_metric_unsigned/Only aggs 3.x test
+os:search.aggregation/190_percentiles_hdr_metric/Basic test
+os:search.aggregation/190_percentiles_hdr_metric/Explicit Percents test
+os:search.aggregation/190_percentiles_hdr_metric/Filtered test
+os:search.aggregation/190_percentiles_hdr_metric/Invalid params test
+os:search.aggregation/190_percentiles_hdr_metric/Metadata test
+os:search.aggregation/190_percentiles_hdr_metric/Missing field with missing param
+os:search.aggregation/190_percentiles_hdr_metric/Missing field without missing param
+os:search.aggregation/190_percentiles_hdr_metric/Negative values test
+os:search.aggregation/190_percentiles_hdr_metric/Non-keyed test
+os:search.aggregation/190_percentiles_hdr_metric/Only aggs test
+os:search.aggregation/190_percentiles_hdr_metric_unsigned/Basic test
+os:search.aggregation/190_percentiles_hdr_metric_unsigned/Explicit Percents test
+os:search.aggregation/190_percentiles_hdr_metric_unsigned/Filtered test
+os:search.aggregation/190_percentiles_hdr_metric_unsigned/Metadata test
+os:search.aggregation/190_percentiles_hdr_metric_unsigned/Missing field with missing param
+os:search.aggregation/190_percentiles_hdr_metric_unsigned/Missing field without missing param
+os:search.aggregation/190_percentiles_hdr_metric_unsigned/Non-keyed test
+os:search.aggregation/190_percentiles_hdr_metric_unsigned/Only aggs test
+os:search.aggregation/200_top_hits_metric/top_hits aggregation with nested documents
+os:search.aggregation/200_top_hits_metric/top_hits aggregation with sequence numbers
+os:search.aggregation/20_terms/Basic test
+os:search.aggregation/20_terms/Boolean test
+os:search.aggregation/20_terms/Date test
+os:search.aggregation/20_terms/Deprecated _term order
+os:search.aggregation/20_terms/Double test
+os:search.aggregation/20_terms/Global ordinals are loaded with the global_ordinals execution hint
+os:search.aggregation/20_terms/Global ordinals are not loaded with the map execution hint
+os:search.aggregation/20_terms/Integer test
+os:search.aggregation/20_terms/IP test
+os:search.aggregation/20_terms/Long test
+os:search.aggregation/20_terms/Mixing longs and doubles
+os:search.aggregation/20_terms/Mixing longs, unsigned  long and doubles
+os:search.aggregation/20_terms/No field or script
+os:search.aggregation/20_terms/numeric profiler
+os:search.aggregation/20_terms/Partitioned integer test
+os:search.aggregation/20_terms/Partitioned string test
+os:search.aggregation/20_terms/string profiler via global ordinals
+os:search.aggregation/20_terms/string profiler via map
+os:search.aggregation/20_terms/Unmapped booleans
+os:search.aggregation/20_terms/Unmapped dates
+os:search.aggregation/20_terms/Unmapped doubles
+os:search.aggregation/20_terms/Unmapped longs
+os:search.aggregation/20_terms/Unmapped strings
+os:search.aggregation/20_terms/Unmapped unsigned longs
+os:search.aggregation/20_terms/Unsigned Long test
+os:search.aggregation/220_filters_bucket/Anonymous filters test
+os:search.aggregation/220_filters_bucket/Bad params
+os:search.aggregation/220_filters_bucket/Basic test
+os:search.aggregation/220_filters_bucket/Filtered test
+os:search.aggregation/220_filters_bucket/Metadata test
+os:search.aggregation/220_filters_bucket/Only aggs test
+os:search.aggregation/220_filters_bucket_unsigned/Anonymous filters test
+os:search.aggregation/220_filters_bucket_unsigned/Basic test
+os:search.aggregation/220_filters_bucket_unsigned/Filtered test
+os:search.aggregation/220_filters_bucket_unsigned/Metadata test
+os:search.aggregation/220_filters_bucket_unsigned/Only aggs test
+os:search.aggregation/230_composite/Aggregate After
+os:search.aggregation/230_composite/Aggregate After Missing
+os:search.aggregation/230_composite/Composite aggregation and array size
+os:search.aggregation/230_composite/composite aggregation date_histogram profile shows filter rewrite info
+os:search.aggregation/230_composite/Composite aggregation with after_key in the response
+os:search.aggregation/230_composite/Composite aggregation with date_histogram offset
+os:search.aggregation/230_composite/Composite aggregation with filtered nested parent
+os:search.aggregation/230_composite/Composite aggregation with filtered reverse nested parent
+os:search.aggregation/230_composite/Composite aggregation with format
+os:search.aggregation/230_composite/Composite aggregation with format and calendar_interval
+os:search.aggregation/230_composite/Composite aggregation with nested parent
+os:search.aggregation/230_composite/Composite aggregation with unmapped field
+os:search.aggregation/230_composite/date_histogram on date_nanos
+os:search.aggregation/230_composite/date_histogram with time_zone
+os:search.aggregation/230_composite/Duplicate sources
+os:search.aggregation/230_composite/Invalid Composite aggregation
+os:search.aggregation/230_composite/Missing source
+os:search.aggregation/230_composite/Mixed ip and unmapped fields
+os:search.aggregation/230_composite/Nested Composite aggregation
+os:search.aggregation/230_composite/Simple Composite aggregation
+os:search.aggregation/230_composite/Simple Composite aggregation with missing order
+os:search.aggregation/230_composite/Terms source from part of sorted
+os:search.aggregation/230_composite/Terms source from sorted
+os:search.aggregation/230_composite_unsigned/Aggregate After
+os:search.aggregation/230_composite_unsigned/Composite aggregation with nested parent
+os:search.aggregation/230_composite_unsigned/Composite aggregation with unmapped field
+os:search.aggregation/230_composite_unsigned/Nested Composite aggregation
+os:search.aggregation/230_composite_unsigned/Terms source from sorted
+os:search.aggregation/240_max_buckets/Max bucket
+os:search.aggregation/250_moving_fn/Bad window
+os:search.aggregation/250_moving_fn/Bad window deprecated interval
+os:search.aggregation/250_moving_fn/Not under date_histo
+os:search.aggregation/260_weighted_avg/Basic test
+os:search.aggregation/260_weighted_avg_unsigned/Basic test
+os:search.aggregation/270_median_absolute_deviation_metric/bad arguments
+os:search.aggregation/270_median_absolute_deviation_metric/basic test
+os:search.aggregation/270_median_absolute_deviation_metric/missing value
+os:search.aggregation/270_median_absolute_deviation_metric/no documents
+os:search.aggregation/270_median_absolute_deviation_metric_unsigned/basic test
+os:search.aggregation/270_median_absolute_deviation_metric_unsigned/missing value
+os:search.aggregation/270_median_absolute_deviation_metric_unsigned/no documents
+os:search.aggregation/270_median_absolute_deviation_metric_unsigned/with setting compression
+os:search.aggregation/270_median_absolute_deviation_metric/with setting compression
+os:search.aggregation/280_rare_terms/avg_bucket
+os:search.aggregation/280_rare_terms/Basic test
+os:search.aggregation/280_rare_terms/Boolean test
+os:search.aggregation/280_rare_terms/Date test
+os:search.aggregation/280_rare_terms/Integer test
+os:search.aggregation/280_rare_terms/IP test
+os:search.aggregation/280_rare_terms/sub aggs
+os:search.aggregation/280_rare_terms/Unmapped booleans
+os:search.aggregation/280_rare_terms/Unmapped dates
+os:search.aggregation/280_rare_terms/Unmapped longs
+os:search.aggregation/280_rare_terms/Unmapped strings
+os:search.aggregation/300_pipeline/deep cumulative sum
+os:search.aggregation/300_pipeline/Max pipeline on percentiles agg without specifying percent
+os:search.aggregation/300_pipeline/Max pipeline on terms agg
+os:search.aggregation/300_pipeline/Max pipeline through terms agg
+os:search.aggregation/300_pipeline/Top level bucket_sort
+os:search.aggregation/30_sig_terms/Default index
+os:search.aggregation/30_sig_terms_field_match_only_text/Default index
+os:search.aggregation/30_sig_terms/IP test
+os:search.aggregation/30_sig_terms/Misspelled fields get "did you mean"
+os:search.aggregation/310_date_agg_per_day_of_week/Date aggregation per day of week
+os:search.aggregation/320_missing/match all
+os:search.aggregation/320_missing/match none
+os:search.aggregation/320_missing/match some
+os:search.aggregation/320_missing/missing param
+os:search.aggregation/330_auto_date_histogram/auto_date_histogram profile shows filter rewrite info
+os:search.aggregation/330_auto_date_histogram/avg_bucket
+os:search.aggregation/330_auto_date_histogram/basic
+os:search.aggregation/340_geo_distance/avg_bucket
+os:search.aggregation/340_geo_distance/basic
+os:search.aggregation/360_date_histogram/Date histogram aggregation w/ filter query test
+os:search.aggregation/360_date_histogram/Date histogram aggregation w/ shared field range test
+os:search.aggregation/360_date_histogram/date_histogram on range with hard bounds
+os:search.aggregation/370_multi_terms/aggregate over multi-terms test
+os:search.aggregation/370_multi_terms/Basic test
+os:search.aggregation/370_multi_terms/Boolean test
+os:search.aggregation/370_multi_terms/Date test
+os:search.aggregation/370_multi_terms/Double test
+os:search.aggregation/370_multi_terms/IP test
+os:search.aggregation/370_multi_terms/Long test
+os:search.aggregation/370_multi_terms/min_doc_count
+os:search.aggregation/370_multi_terms/multiple multi_terms bucket
+os:search.aggregation/370_multi_terms/multi_terms bucket and multiple orders test
+os:search.aggregation/370_multi_terms/multi_terms bucket and multiple orders with size test
+os:search.aggregation/370_multi_terms/Null value
+os:search.aggregation/370_multi_terms/ordered by metrics
+os:search.aggregation/370_multi_terms/sum_other_doc_count
+os:search.aggregation/370_multi_terms/top 1 ordered by metrics 
+os:search.aggregation/370_multi_terms/Unmapped keywords
+os:search.aggregation/370_multi_terms/Unsigned Long test
+os:search.aggregation/400_inner_hits/Include inner hits in top hits
+os:search.aggregation/40_range/Date range
+os:search.aggregation/40_range/Date Range Missing
+os:search.aggregation/40_range/Date range unmapped with children
+os:search.aggregation/40_range/Double range
+os:search.aggregation/40_range/Double range profiler shows filter rewrite info
+os:search.aggregation/40_range/Filter query w/ aggregation test
+os:search.aggregation/40_range/IP range
+os:search.aggregation/40_range/IP Range avg_bucket
+os:search.aggregation/40_range/IP Range Key Generation
+os:search.aggregation/40_range/Scaled Float Range Aggregation
+os:search.aggregation/40_range/Unsigned long range
+os:search.aggregation/410_nested_aggs/Supported queries
+os:search.aggregation/50_filter/As a child of terms
+os:search.aggregation/50_filter/Filter aggs no lookup and ensure it's cached
+os:search.aggregation/50_filter/Filter aggs with terms lookup and ensure it's cached
+os:search.aggregation/50_filter/Sorting terms
+os:search.aggregation/60_empty/Empty aggs Body
+os:search.aggregation/70_adjacency_matrix/Filters intersections
+os:search.aggregation/70_adjacency_matrix/Show only intersections
+os:search.aggregation/70_adjacency_matrix/Terms lookup
+os:search.aggregation/80_typed_keys/Test typed keys parameter for avg aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for cardinality aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for extended_stats aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for max aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for min aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for percentile_ranks aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for percentiles aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for stats aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for sum aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for terms aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for terms and top_hits aggregation
+os:search.aggregation/80_typed_keys/Test typed keys parameter for value_count aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for avg aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for cardinality aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for extended_stats aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for max aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for min aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for percentile_ranks aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for percentiles aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for stats aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for sum aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for terms aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for terms and top_hits aggregation
+os:search.aggregation/80_typed_keys_unsigned/Test typed keys parameter for value_count aggregation
+os:search.aggregation/90_sig_text/Dedup noise
+os:search.aggregation/90_sig_text/Default index
+os:search.aggregation/90_sig_text_field_match_only_text/Dedup noise
+os:search.aggregation/90_sig_text_field_match_only_text/Default index
+os:search.backpressure/10_basic/Test set invalid search backpressure mode
+os:search.backpressure/10_basic/Test set search backpressure mode
+os:search.backpressure/10_basic/Test setting invalid search backpressure cancellation_rate and cancellation_ratio
+os:search.backpressure/10_basic/Test setting search backpressure cancellation settings
+os:search.backpressure/10_basic/Test setting search backpressure node settings
+os:search.backpressure/10_basic/Test setting search backpressure search_shard_task settings
+os:search.backpressure/10_basic/Test setting search backpressure search_task settings
+os:search.highlight/10_unified/Basic
+os:search.highlight/10_unified/With matched_fields
+os:search.highlight/20_fvh/Highlight query
+os:search.highlight/30_max_analyzed_offset/Plain highlighter on a field WITH OFFSETS exceeding index.highlight.max_analyzed_offset should FAIL
+os:search.highlight/30_max_analyzed_offset/Plain highlighter on a field WITHOUT OFFSETS exceeding index.highlight.max_analyzed_offset should FAIL
+os:search.highlight/30_max_analyzed_offset/Plain highlighter on a field WITHOUT OFFSETS using max_analyzer_offset should SUCCEED
+os:search.highlight/30_max_analyzed_offset/Unified highlighter on a field WITH OFFSETS exceeding index.highlight.max_analyzed_offset should SUCCEED
+os:search.highlight/30_max_analyzed_offset/Unified highlighter on a field WITHOUT OFFSETS exceeding index.highlight.max_analyzed_offset should FAIL
+os:search.highlight/30_max_analyzed_offset/Unified highlighter on a field WITHOUT OFFSETS using max_analyzer_offset should SUCCEED
+os:search.highlight/40_keyword_ignore/Plain Highligher should skip highlighting ignored keyword values
+os:search.highlight/40_keyword_ignore/Unified Highligher should skip highlighting ignored keyword values
+os:search.inner_hits/10_basic/Nested doc version and seqIDs
+os:search.inner_hits/10_basic/Nested inner hits
+os:search.inner_hits/20_highlighting_field_match_only_text/Unified highlighter
+os:search.inner_hits/20_highlighting_field_match_only_text/Unified highlighter with stored fields
+os:search.inner_hits/20_highlighting_field_match_only_text/Unified highlighter with stored fields and disabled source
+os:search.inner_hits/20_highlighting/Unified highlighter
+os:search.inner_hits/20_highlighting/Unified highlighter with stored fields
+os:search/issue4895/Test with _local preference placed in query body - should fail
+os:search/issue9606/Test search_type=dfs_query_and_fetch not supported from REST layer
+os:search/issue9606/Test search_type=query_and_fetch not supported from REST layer
+os:search_pipeline/10_basic/Test basic pipeline crud
+os:search_pipeline/10_basic/Test Get All Pipelines
+os:search_pipeline/10_basic/Test invalid config
+os:search_pipeline/10_basic/Test Put Versioned Pipeline
+os:search.profile/10_fetch_phase/Combined fetch sub-phases profiling
+os:search.profile/10_fetch_phase/No source or empty fetch profiling
+os:search.profile/10_fetch_phase/Top-hits aggregation profiling
+os:search_shards/10_basic/Basic /_search_shards test
+os:search_shards/10_basic_field_match_only_field/Search shards aliases with and without filters
+os:search_shards/10_basic/Search shards aliases with and without filters
+os:search_shards/20_slice/Search shards with slice specified in body
+os:snapshot.clone/10_basic/Clone a snapshot
+os:snapshot.create/10_basic/Create a snapshot
+os:snapshot.create/10_basic/Create a snapshot and clean up repository
+os:snapshot.create/10_basic/Create a snapshot for missing index
+os:snapshot.get/10_basic/Get missing snapshot info succeeds when ignore_unavailable is true
+os:snapshot.get/10_basic/Get missing snapshot info throws an exception
+os:snapshot.get/10_basic/Get snapshot info
+os:snapshot.get/10_basic/Get snapshot info contains include_global_state
+os:snapshot.get/10_basic/Get snapshot info when verbose is false
+os:snapshot.get/10_basic/Get snapshot info with metadata
+os:snapshot.get_repository/10_basic/Get all repositories
+os:snapshot.get_repository/10_basic/Get all repositories with local flag
+os:snapshot.get_repository/10_basic/Get missing repository by name
+os:snapshot.get_repository/10_basic/Get repository by name
+os:snapshot.get_repository/10_basic/Verify created repository
+os:snapshot.restore/10_basic/Create a snapshot and then restore it
+os:snapshot.status/10_basic/Get missing snapshot status succeeds when ignoreUnavailable is true
+os:snapshot.status/10_basic/Get missing snapshot status throws an exception
+os:snapshot.status/10_basic/Get snapshot status
+os:suggest/10_basic/Basic tests for suggest API
+os:suggest/20_completion/Multiple Completion fields should work
+os:suggest/20_completion/Simple suggestion array should work
+os:suggest/20_completion/Simple suggestion should work
+os:suggest/20_completion/Skip duplicates should work
+os:suggest/20_completion/Suggestion entry array should work
+os:suggest/20_completion/Suggestion entry should work
+os:suggest/20_completion/Suggestions with source should work
+os:suggest/30_context/Category suggest context from path should work
+os:suggest/30_context/Geo suggest should work
+os:suggest/30_context/Indexing and Querying without contexts is forbidden
+os:suggest/30_context/Multi contexts should work
+os:suggest/30_context/Simple context suggestion should work
+os:suggest/30_context/Skip duplicates with contexts should work
+os:suggest/40_typed_keys/Test typed keys parameter for suggesters
+os:suggest/50_completion_with_multi_fields/Search by suggestion and by keyword sub-field should work
+os:suggest/50_completion_with_multi_fields/Search by suggestion on geofield-hash on sub field should work
+os:suggest/50_completion_with_multi_fields/Search by suggestion on sub field should work
+os:suggest/50_completion_with_multi_fields/Search by suggestion on sub field with context should work
+os:suggest/50_completion_with_multi_fields/Search by suggestion on sub field with weight should work
+os:tasks.cancel/10_basic/tasks_cancel test
+os:tasks.get/10_basic/get task test
+os:tasks.list/10_basic/tasks_list detailed (with thread info)
+os:tasks.list/10_basic/tasks_list headers
+os:tasks.list/10_basic/tasks_list test
+os:tasks.list/10_basic/tasks_list test detailed
+os:termvectors/10_basic/Basic tests for termvector get
+os:termvectors/20_issue7121/Term vector API should return 'found: false' for docs between index and refresh
+os:termvectors/30_realtime/Realtime Term Vectors
+os:update/10_doc/Partial document
+os:update/11_shard_header/Update check shard header
+os:update/12_result/Update result field
+os:update/13_legacy_doc/Partial document
+os:update/16_noop/Noop
+os:update/20_doc_upsert/Doc upsert
+os:update/22_doc_as_upsert/Doc as upsert
+os:update/35_if_seq_no/Update with if_seq_no
+os:update/40_routing/Routing
+os:update/60_refresh/Refresh
+os:update/60_refresh/refresh=wait_for waits until changes are visible in search
+os:update/60_refresh/When refresh url parameter is an empty string that means "refresh immediately"
+os:update/80_source_filtering/Source filtering
+os:update/90_error/Misspelled fields get "did you mean"
+os:update/95_require_alias/Set require_alias flag
+os:wlm_stats/10_basic/Custom size param still returns headers
+os:wlm_stats/10_basic/Default request returns 200 and contains expected keys
+os:wlm_stats/10_basic/Invalid sort field returns error
+os:wlm_stats/10_basic/Invalid sort order returns error
+os:wlm_stats/10_basic/Invalid token returns 400
+os:wlm_stats/10_basic/Max allowed size param returns success
+os:wlm_stats/10_basic/Negative page size returns error
+os:wlm_stats/10_basic/Sort by node_id asc does not error
+os:wlm_stats/10_basic/Sort by workload_group_id desc does not error
+os:wlm_stats/10_basic/Sort param omitted uses default 'node_id'
+os:wlm_stats/10_basic/Too large page size returns error

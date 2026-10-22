@@ -1,0 +1,19 @@
+[package]
+name = "search-codec"
+description = "roll search segment format: term dictionary, postings with block-max impacts, norms, doc values, BKD points, stored fields, vectors, live docs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+crc32c.workspace = true
+memmap2.workspace = true
+thiserror.workspace = true
+regex-syntax.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+serde_json.workspace = true

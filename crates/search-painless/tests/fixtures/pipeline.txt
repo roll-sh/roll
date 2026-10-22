@@ -1,0 +1,1654 @@
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x * 2"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x / params.c"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x + params.y"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.c"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x > 0 ? params.x : null"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "return 'str'"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x * params.f",
+       "params": {
+        "f": 2.5
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x.foo()"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x +"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.y * 2"
+      },
+      "gap_policy": "insert_zeros"
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.y"
+      },
+      "gap_policy": "keep_values"
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "Math.sqrt(params.c)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "(int) params.x"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x > 1"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.missing"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x / 0"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "1 / (params.c - params.c)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.size()"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x - params.x"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_script": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "throw new IllegalStateException('bs')"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x > 5"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.c == 0"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "true"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.y >= 7"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.x > params.t",
+       "params": {
+        "t": 4
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.y > 1"
+      },
+      "gap_policy": "insert_zeros"
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "params.c.foo()"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "return null"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "bucket_selector": {
+      "buckets_path": {
+       "x": "s",
+       "y": "m",
+       "c": "_count"
+      },
+      "script": {
+       "source": "def r = params.x > 3; return r"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.unweightedAvg(values)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.max(values)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.sum(values)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "values.length"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.ewma(values, 0.3)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.holt(values, 0.3, 0.1)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.holtWinters(values, 0.3, 0.1, 0.1, 2, false)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "values.length > 0 ? values[0] : Double.NaN"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.linearWeightedAvg(values) * params.k",
+       "params": {
+        "k": 3
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.unweightedAvg(values)"
+      },
+      "shift": 1
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 5,
+      "script": {
+       "source": "MovingFunctions.sum(values)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "m",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.min(values)"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "m",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.min(values)"
+      },
+      "gap_policy": "insert_zeros"
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "MovingFunctions.stdDev(values, MovingFunctions.unweightedAvg(values))"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "values[5]"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 3,
+      "script": {
+       "source": "return 'x'"
+      }
+     }
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "h": {
+   "date_histogram": {
+    "field": "day",
+    "calendar_interval": "day"
+   },
+   "aggs": {
+    "s": {
+     "sum": {
+      "field": "v"
+     }
+    },
+    "m": {
+     "max": {
+      "field": "n"
+     }
+    },
+    "p": {
+     "moving_fn": {
+      "buckets_path": "s",
+      "window": 6,
+      "script": {
+       "source": "MovingFunctions.holtWinters(values, 0.3, 0.1, 0.1, 2, true)"
+      }
+     }
+    }
+   }
+  }
+ }
+}

@@ -1,0 +1,366 @@
+{
+ "source": "Elasticsearch 9.5.5 (PUT <index>/_doc/<id>, then GET for _ignored)",
+ "mapping": {
+  "properties": {
+   "all": {
+    "type": "text"
+   },
+   "f": {
+    "type": "flattened",
+    "ignore_above": 3
+   },
+   "flat_o": {
+    "subobjects": false,
+    "properties": {
+     "a.b": {
+      "type": "long"
+     }
+    }
+   },
+   "k": {
+    "type": "keyword",
+    "copy_to": [
+     "all"
+    ]
+   },
+   "n": {
+    "type": "nested",
+    "include_in_parent": true,
+    "properties": {
+     "deep": {
+      "type": "nested",
+      "include_in_root": true,
+      "properties": {
+       "x": {
+        "type": "keyword"
+       }
+      }
+     },
+     "v": {
+      "type": "long"
+     }
+    }
+   },
+   "nd": {
+    "type": "object",
+    "dynamic": "false"
+   },
+   "nv": {
+    "type": "long",
+    "null_value": 5
+   },
+   "o": {
+    "properties": {
+     "p": {
+      "properties": {
+       "q": {
+        "type": "long"
+       }
+      }
+     }
+    }
+   },
+   "rt": {
+    "type": "object",
+    "dynamic": "runtime"
+   },
+   "st": {
+    "dynamic": "strict",
+    "properties": {
+     "ok": {
+      "type": "long"
+     }
+    }
+   },
+   "t": {
+    "type": "text",
+    "fields": {
+     "num": {
+      "type": "long",
+      "ignore_malformed": true
+     },
+     "raw": {
+      "type": "keyword",
+      "ignore_above": 3
+     }
+    }
+   }
+  }
+ },
+ "cases": [
+  {
+   "doc": "{\"t\":\"hello\"}",
+   "id": "1",
+   "ignored": [
+    "t.num",
+    "t.raw"
+   ]
+  },
+  {
+   "doc": "{\"t\":\"abcd\"}",
+   "id": "2",
+   "ignored": [
+    "t.num",
+    "t.raw"
+   ]
+  },
+  {
+   "doc": "{\"t\":123}",
+   "id": "3",
+   "ignored": []
+  },
+  {
+   "doc": "{\"t\":[\"a\",\"b\"]}",
+   "id": "4",
+   "ignored": [
+    "t.num"
+   ]
+  },
+  {
+   "doc": "{\"k\":\"x\"}",
+   "id": "5",
+   "ignored": []
+  },
+  {
+   "doc": "{\"k\":[\"x\",{\"a\":1}]}",
+   "id": "6",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:17] failed to parse field [k] of type [keyword] in document with id '6'. Preview of field's value: '{a=1}'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Expected text at 1:11 but found START_OBJECT"
+    }
+   }
+  },
+  {
+   "doc": "{\"n\":[{\"v\":1},{\"v\":\"abc\"}]}",
+   "id": "7",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:20] failed to parse field [n.v] of type [long] in document with id '7'. Preview of field's value: 'abc'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \"abc\""
+    }
+   }
+  },
+  {
+   "doc": "{\"n\":{\"deep\":[{\"x\":\"a\"},{\"x\":{\"y\":1}}]}}",
+   "id": "8",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:36] failed to parse field [n.deep.x] of type [keyword] in document with id '8'. Preview of field's value: '{y=1}'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Expected text at 1:30 but found START_OBJECT"
+    }
+   }
+  },
+  {
+   "doc": "{\"o\":{\"p\":{\"q\":\"z\"}}}",
+   "id": "9",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:16] failed to parse field [o.p.q] of type [long] in document with id '9'. Preview of field's value: 'z'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \"z\""
+    }
+   }
+  },
+  {
+   "doc": "{\"o\":{\"p\":[{\"q\":1},{\"q\":\"zz\"}]}}",
+   "id": "10",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:25] failed to parse field [o.p.q] of type [long] in document with id '10'. Preview of field's value: 'zz'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \"zz\""
+    }
+   }
+  },
+  {
+   "doc": "{\"o.p.q\":\"x\"}",
+   "id": "11",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:10] failed to parse field [o.p.q] of type [long] in document with id '11'. Preview of field's value: 'x'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \"x\""
+    }
+   }
+  },
+  {
+   "doc": "{\"o\":{\"p.q\":\"x\"}}",
+   "id": "12",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:13] failed to parse field [o.p.q] of type [long] in document with id '12'. Preview of field's value: 'x'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \"x\""
+    }
+   }
+  },
+  {
+   "doc": "{\"flat_o\":{\"a.b\":\"x\"}}",
+   "id": "13",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:18] failed to parse field [flat_o.a.b] of type [long] in document with id '13'. Preview of field's value: 'x'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \"x\""
+    }
+   }
+  },
+  {
+   "doc": "{\"flat_o\":{\"a\":{\"b\":1}}}",
+   "id": "14",
+   "ignored": []
+  },
+  {
+   "doc": "{\"nd\":{\"anything\":{\"deep\":\"x\"}}}",
+   "id": "15",
+   "ignored": []
+  },
+  {
+   "doc": "{\"st\":{\"ok\":1,\"bad\":2}}",
+   "id": "16",
+   "error": {
+    "type": "strict_dynamic_mapping_exception",
+    "reason": "[1:21] mapping set to strict, dynamic introduction of [bad] within [st] is not allowed"
+   }
+  },
+  {
+   "doc": "{\"st\":{\"bad\":{\"x\":1}}}",
+   "id": "17",
+   "error": {
+    "type": "strict_dynamic_mapping_exception",
+    "reason": "[1:14] mapping set to strict, dynamic introduction of [bad] within [st] is not allowed"
+   }
+  },
+  {
+   "doc": "{\"rt\":{\"x\":1}}",
+   "id": "18",
+   "ignored": []
+  },
+  {
+   "doc": "{\"nv\":null}",
+   "id": "19",
+   "ignored": []
+  },
+  {
+   "doc": "{\"nv\":[null,1]}",
+   "id": "20",
+   "ignored": []
+  },
+  {
+   "doc": "{\"f\":{\"a\":\"abcd\",\"b\":\"ab\"}}",
+   "id": "21",
+   "ignored": []
+  },
+  {
+   "doc": "{\"new_long\":1,\"new_text\":\"x\",\"new_obj\":{\"a\":1.5}}",
+   "id": "22",
+   "ignored": []
+  },
+  {
+   "doc": "{\"new\":\"2020-01-01\"}",
+   "id": "23",
+   "ignored": []
+  },
+  {
+   "doc": "{\"bad\":1,\"t\":{\"x\":1}}",
+   "id": "24",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:20] failed to parse field [t] of type [text] in document with id '24'. Preview of field's value: '{x=1}'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Expected text at 1:14 but found START_OBJECT"
+    }
+   }
+  },
+  {
+   "doc": "{\"t\":{\"x\":1},\"bad\":1}",
+   "id": "25",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:12] failed to parse field [t] of type [text] in document with id '25'. Preview of field's value: '{x=1}'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Expected text at 1:6 but found START_OBJECT"
+    }
+   }
+  },
+  {
+   "doc": "{\"a\":[[1,2],[3,\"x\"]]}",
+   "id": "26",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:16] failed to parse field [a] of type [long] in document with id '26'. Preview of field's value: 'x'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \"x\""
+    }
+   }
+  },
+  {
+   "doc": "{\"o\":[1]}",
+   "id": "27",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:7] object mapping for [o] tried to parse field [null] as object, but found a concrete value"
+   }
+  },
+  {
+   "doc": "{\"o\":[{\"p\":{\"q\":1}},\"x\"]}",
+   "id": "28",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[1:21] object mapping for [o] tried to parse field [null] as object, but found a concrete value"
+   }
+  },
+  {
+   "doc": "{\"n\":[[{\"v\":1}]]}",
+   "id": "29",
+   "ignored": []
+  },
+  {
+   "doc": "{\"t\":null,\"k\":null}",
+   "id": "30",
+   "ignored": []
+  },
+  {
+   "doc": "{\"o\":null}",
+   "id": "31",
+   "ignored": []
+  },
+  {
+   "doc": "{\"n\":null}",
+   "id": "32",
+   "ignored": []
+  },
+  {
+   "doc": "{\"x\":{\"y\":{\"z\":{\"w\":\"deep\"}}}}",
+   "id": "33",
+   "ignored": []
+  },
+  {
+   "doc": "{\n  \"o\": {\n    \"p\": {\n      \"q\": \"multi\"\n    }\n  }\n}",
+   "id": "900",
+   "error": {
+    "type": "document_parsing_exception",
+    "reason": "[4:12] failed to parse field [o.p.q] of type [long] in document with id '900'. Preview of field's value: 'multi'",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "For input string: \"multi\""
+    }
+   }
+  }
+ ]
+}

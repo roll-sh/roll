@@ -1,0 +1,13 @@
+{
+  "description": "geo_point values indexed in Elasticsearch 9.5.5 and read back through docvalue_fields (Lucene's quantized LatLonPoint encoding, decoded)",
+  "points": [
+    {"lat": 40.7128, "lon": -74.006, "docvalue": [40.712799984030426, -74.00600004941225]},
+    {"lat": -33.8688, "lon": 151.2093, "docvalue": [-33.86880002450198, 151.20929994620383]},
+    {"lat": 89.9999999, "lon": 179.9999999, "docvalue": [89.99999987427145, 179.99999983236194]},
+    {"lat": -90, "lon": -180, "docvalue": [-90.0, -180.0]},
+    {"lat": 90, "lon": 180, "docvalue": [89.99999995809048, 179.99999991618097]},
+    {"lat": 0.1, "lon": 0.2, "docvalue": [0.09999996051192284, 0.19999992102384567]},
+    {"lat": 51.5074, "lon": -0.1278, "docvalue": [51.50739999487996, -0.12780005112290382]},
+    {"lat": 12.345678901, "lon": -98.7654321, "docvalue": [12.345678862184286, -98.76543215475976]}
+  ]
+}

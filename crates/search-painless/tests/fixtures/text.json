@@ -1,0 +1,3140 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.00, -0.00, 1.00, -1.00, 0.50, 1.50, 2.50, -2.50, 0.12, 0.14, 1,234,567.89, 0.00, 100,000,000,000,000,000,000.00, 123,456,789,012,345,678.00, NaN, ∞, -∞, 179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000.00, 0.00, 9,223,372,036,854,775,807.00, -9,223,372,036,854,775,808.00, 42.00, 0.10, 0.70, 100.00, 1.00, -1,234.57]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('0.###'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, -0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 0, 100000000000000000000, 123456789012345678, NaN, ∞, -∞, 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, 0, 9223372036854775807, -9223372036854775808, 42, 0.1, 0.7, 99.995, 1.005, -1234.568]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, -0, 1, -1, 0, 2, 2, -2, 0, 0, 1234568, 0, 100000000000000000000, 123456789012345678, NaN, ∞, -∞, 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, 0, 9223372036854775807, -9223372036854775808, 42, 0, 1, 100, 1, -1235]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, -0, 1, -1, 0, 2, 2, -2, 0, 0, 1234568, 0, 100000000000000000000, 123456789012345678, NaN, ∞, -∞, 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, 0, 9223372036854775807, -9223372036854775808, 42, 0, 1, 100, 1, -1235]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('00.00'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[00.00, -00.00, 01.00, -01.00, 00.50, 01.50, 02.50, -02.50, 00.12, 00.14, 1234567.89, 00.00, 100000000000000000000.00, 123456789012345678.00, NaN, ∞, -∞, 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.00, 00.00, 9223372036854775807.00, -9223372036854775808.00, 42.00, 00.10, 00.70, 100.00, 01.00, -1234.57]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.###'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, -0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1,234,567.891, 0, 100,000,000,000,000,000,000, 123,456,789,012,345,678, NaN, ∞, -∞, 179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000, 0, 9,223,372,036,854,775,807, -9,223,372,036,854,775,808, 42, 0.1, 0.7, 99.995, 1.005, -1,234.568]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('0.00E0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.00E0, -0.00E0, 1.00E0, -1.00E0, 5.00E-1, 1.50E0, 2.50E0, -2.50E0, 1.25E-1, 1.35E-1, 1.23E6, 1.00E-10, 1.00E20, 1.23E17, NaN, ∞, -∞, 1.80E308, 4.90E-324, 9.22E18, -9.22E18, 4.20E1, 1.00E-1, 7.00E-1, 1.00E2, 1.00E0, -1.23E3]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('##0.#####E0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0E0, -0E0, 1E0, -1E0, 500E-3, 1.5E0, 2.5E0, -2.5E0, 125E-3, 135E-3, 1.2345679E6, 100E-12, 100E18, 123.45679E15, NaN, ∞, -∞, 179.76931E306, 4.9E-324, 9.223372E18, -9.223372E18, 42E0, 100E-3, 700E-3, 99.995E0, 1.005E0, -1.2345678E3]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#%'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0%, -0%, 100%, -100%, 50%, 150%, 250%, -250%, 12%, 14%, 123456789%, 0%, 10000000000000000000000%, 12345678901234567800%, NaN, ∞%, -∞%, ∞%, 0%, 922337203685477580700%, -922337203685477580800%, 4200%, 10%, 70%, 10000%, 100%, -123457%]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('0.0%'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.0%, -0.0%, 100.0%, -100.0%, 50.0%, 150.0%, 250.0%, -250.0%, 12.5%, 13.5%, 123456789.1%, 0.0%, 10000000000000000000000.0%, 12345678901234567800.0%, NaN, ∞%, -∞%, ∞%, 0.0%, 922337203685477580700.0%, -922337203685477580800.0%, 4200.0%, 10.0%, 70.0%, 9999.5%, 100.5%, -123456.8%]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00;(#,##0.00)'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.00, (0.00), 1.00, (1.00), 0.50, 1.50, 2.50, (2.50), 0.12, 0.14, 1,234,567.89, 0.00, 100,000,000,000,000,000,000.00, 123,456,789,012,345,678.00, NaN, ∞, (∞), 179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000.00, 0.00, 9,223,372,036,854,775,807.00, (9,223,372,036,854,775,808.00), 42.00, 0.10, 0.70, 100.00, 1.00, (1,234.57)]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('\\'$\\'#,##0.00'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[$0.00, -$0.00, $1.00, -$1.00, $0.50, $1.50, $2.50, -$2.50, $0.12, $0.14, $1,234,567.89, $0.00, $100,000,000,000,000,000,000.00, $123,456,789,012,345,678.00, NaN, $∞, -$∞, $179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000.00, $0.00, $9,223,372,036,854,775,807.00, -$9,223,372,036,854,775,808.00, $42.00, $0.10, $0.70, $100.00, $1.00, -$1,234.57]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('\\u2030 0.0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... at f = new DecimalFormat('\\u2030 0.0'); return [0, ...",
+       "                             ^---- HERE"
+      ],
+      "script": "DecimalFormat f = new DecimalFormat('\\u2030 0.0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+      "lang": "painless",
+      "position": {
+       "offset": 36,
+       "start": 11,
+       "end": 61
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... at f = new DecimalFormat('\\u2030 0.0'); return [0, ...",
+     "                             ^---- HERE"
+    ],
+    "script": "DecimalFormat f = new DecimalFormat('\\u2030 0.0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless",
+    "position": {
+     "offset": 36,
+     "start": 11,
+     "end": 61
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected character ['\\u]. The only valid escape sequences in strings starting with ['] are [\\\\] and [\\'].",
+     "caused_by": {
+      "type": "lexer_no_viable_alt_exception",
+      "reason": null
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##,###'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, -0, 1, -1, 0, 2, 2, -2, 0, 0, 1,234,568, 0, 100,000,000,000,000,000,000, 123,456,789,012,345,678, NaN, ∞, -∞, 179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000, 0, 9,223,372,036,854,775,807, -9,223,372,036,854,775,808, 42, 0, 1, 100, 1, -1,235]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('0000'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0000, -0000, 0001, -0001, 0000, 0002, 0002, -0002, 0000, 0000, 1234568, 0000, 100000000000000000000, 123456789012345678, NaN, ∞, -∞, 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, 0000, 9223372036854775807, -9223372036854775808, 0042, 0000, 0001, 0100, 0001, -1235]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('0.0##'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.0, -0.0, 1.0, -1.0, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 0.0, 100000000000000000000.0, 123456789012345678.0, NaN, ∞, -∞, 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0, 0.0, 9223372036854775807.0, -9223372036854775808.0, 42.0, 0.1, 0.7, 99.995, 1.005, -1234.568]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#.##'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, -0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.12, 0.14, 1234567.89, 0, 100000000000000000000, 123456789012345678, NaN, ∞, -∞, 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, 0, 9223372036854775807, -9223372036854775808, 42, 0.1, 0.7, 100, 1, -1234.57]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('##0.0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.0, -0.0, 1.0, -1.0, 0.5, 1.5, 2.5, -2.5, 0.1, 0.1, 1234567.9, 0.0, 100000000000000000000.0, 123456789012345678.0, NaN, ∞, -∞, 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0, 0.0, 9223372036854775807.0, -9223372036854775808.0, 42.0, 0.1, 0.7, 100.0, 1.0, -1234.6]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('0.000E00'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.000E00, -0.000E00, 1.000E00, -1.000E00, 5.000E-01, 1.500E00, 2.500E00, -2.500E00, 1.250E-01, 1.350E-01, 1.235E06, 1.000E-10, 1.000E20, 1.235E17, NaN, ∞, -∞, 1.798E308, 4.900E-324, 9.223E18, -9.223E18, 4.200E01, 1.000E-01, 7.000E-01, 1.000E02, 1.005E00, -1.235E03]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,###'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, -0, 1, -1, 0, 2, 2, -2, 0, 0, 1,234,568, 0, 100,000,000,000,000,000,000, 123,456,789,012,345,678, NaN, ∞, -∞, 179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000, 0, 9,223,372,036,854,775,807, -9,223,372,036,854,775,808, 42, 0, 1, 100, 1, -1,235]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#0.0#;-#0.0#'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.0, -0.0, 1.0, -1.0, 0.5, 1.5, 2.5, -2.5, 0.12, 0.14, 1234567.89, 0.0, 100000000000000000000.0, 123456789012345678.0, NaN, ∞, -∞, 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0, 0.0, 9223372036854775807.0, -9223372036854775808.0, 42.0, 0.1, 0.7, 100.0, 1.0, -1234.57]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('\\'#\\'#'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[#0, -#0, #1, -#1, #0, #2, #2, -#2, #0, #0, #1234568, #0, #100000000000000000000, #123456789012345678, NaN, #∞, -#∞, #179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, #0, #9223372036854775807, -#9223372036854775808, #42, #0, #1, #100, #1, -#1235]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.0 \\'units\\''); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.0 units, -0.0 units, 1.0 units, -1.0 units, 0.5 units, 1.5 units, 2.5 units, -2.5 units, 0.1 units, 0.1 units, 1,234,567.9 units, 0.0 units, 100,000,000,000,000,000,000.0 units, 123,456,789,012,345,678.0 units, NaN, ∞ units, -∞ units, 179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000.0 units, 0.0 units, 9,223,372,036,854,775,807.0 units, -9,223,372,036,854,775,808.0 units, 42.0 units, 0.1 units, 0.7 units, 100.0 units, 1.0 units, -1,234.6 units]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('00.###E0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[00E0, -00E0, 10E-1, -10E-1, 50E-2, 15E-1, 25E-1, -25E-1, 12.5E-2, 13.5E-2, 12.346E5, 10E-11, 10E19, 12.346E16, NaN, ∞, -∞, 17.977E307, 49E-325, 92.234E17, -92.234E17, 42E0, 10E-2, 70E-2, 99.995E0, 10.05E-1, -12.346E2]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('0.#E0'); return [0, -0.0, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.135, 1234567.891, 1e-10, 1e20, 123456789012345678L, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MAX_VALUE, Double.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 42, 0.1, 0.7, 99.995, 1.005, -1234.5678].stream().map(x -> f.format(x)).collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0E0, -0E0, 1E0, -1E0, 5E-1, 1.5E0, 2.5E0, -2.5E0, 1.2E-1, 1.4E-1, 1.2E6, 1E-10, 1E20, 1.2E17, NaN, ∞, -∞, 1.8E308, 4.9E-324, 9.2E18, -9.2E18, 4.2E1, 1E-1, 7E-1, 1E2, 1E0, -1.2E3]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.00').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#,##0.00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.00').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#,##0.00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.###').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#0.###"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('00.00').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#00.00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.###').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#,##0.###"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.00E0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.00E0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('##0.#####E0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "##0.#####E0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#%').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#%"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0%').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#0.0%"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.00;(#,##0.00)').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#,##0.00;(#,##0.00)"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('\\'$\\'#,##0.00').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "$#,##0.00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('\\u2030 0.0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return new DecimalFormat('\\u2030 0.0').toPattern()",
+       "                         ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('\\u2030 0.0').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 25,
+       "start": 0,
+       "end": 50
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return new DecimalFormat('\\u2030 0.0').toPattern()",
+     "                         ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('\\u2030 0.0').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 25,
+     "start": 0,
+     "end": 50
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected character ['\\u]. The only valid escape sequences in strings starting with ['] are [\\\\] and [\\'].",
+     "caused_by": {
+      "type": "lexer_no_viable_alt_exception",
+      "reason": null
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##,###').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#,###"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0000').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#0000"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0##').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#0.0##"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#.##').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#0.##"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('##0.0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#0.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.000E00').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.000E00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,###').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#,###"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#0.0#;-#0.0#').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#0.0#"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('\\'#\\'#').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "'#'#"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.0 \\'units\\'').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#,##0.0 units"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('00.###E0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "00.###E0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.#E0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.#E0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#.#.#').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3896)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('#.#.#').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('#.#.#').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3896)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('#.#.#').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('#.#.#').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Multiple decimal separators in pattern \"#.#.#\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0#').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3966)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('0#').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('0#').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3966)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('0#').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('0#').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Malformed pattern \"0#\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3966)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('#,').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('#,').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3966)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('#,').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('#,').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Malformed pattern \"#,\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat(',#').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#,#"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0.0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3896)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('0.0.0').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('0.0.0').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3896)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('0.0.0').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('0.0.0').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Multiple decimal separators in pattern \"0.0.0\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#E').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3919)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('#E').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('#E').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3919)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('#E').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('#E').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Malformed exponential pattern \"#E\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0E0E0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "00E0E;00E0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#;#;#').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3801)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('#;#;#').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('#;#;#').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3801)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('#;#;#').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('#;#;#').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unquoted special character ';' in pattern \"#;#;#\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('\\'\\'').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "''#"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.0#0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3885)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('#,##0.0#0').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('#,##0.0#0').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 49
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3885)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('#,##0.0#0').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('#,##0.0#0').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 49
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unexpected '0' in pattern \"#,##0.0#0\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('%%').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3812)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('%%').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('%%').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3812)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('%%').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('%%').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Too many percent/per mille characters in pattern \"%%\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0%%').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3812)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('0.0%%').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('0.0%%').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3812)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('0.0%%').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('0.0%%').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Too many percent/per mille characters in pattern \"0.0%%\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#,###.####################################################################################################################################################################################################################################################################################################################################################"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0E0.0').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3896)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+       "return new DecimalFormat('0.0E0.0').toPattern()",
+       "       ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('0.0E0.0').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 47
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3896)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:493)",
+     "return new DecimalFormat('0.0E0.0').toPattern()",
+     "       ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('0.0E0.0').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 47
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Multiple decimal separators in pattern \"0.0E0.0\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#\\u00a4').toPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return new DecimalFormat('#\\u00a4').toPattern()",
+       "                         ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('#\\u00a4').toPattern()",
+      "lang": "painless",
+      "position": {
+       "offset": 25,
+       "start": 0,
+       "end": 47
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return new DecimalFormat('#\\u00a4').toPattern()",
+     "                         ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('#\\u00a4').toPattern()",
+    "lang": "painless",
+    "position": {
+     "offset": 25,
+     "start": 0,
+     "end": 47
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected character ['#\\u]. The only valid escape sequences in strings starting with ['] are [\\\\] and [\\'].",
+     "caused_by": {
+      "type": "lexer_no_viable_alt_exception",
+      "reason": null
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMaximumFractionDigits(1); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.6, -0.1, 2.5, 0.0, 0.0, #,##0.0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMinimumFractionDigits(4); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.5678, -0.1250, 2.5000, 0.0000, 0.0000, #,##0.0000]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.HALF_UP); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.57, -0.13, 2.50, 0.00, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.HALF_DOWN); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.57, -0.12, 2.50, 0.00, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.FLOOR); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.56, -0.13, 2.50, 0.00, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.CEILING); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.57, -0.12, 2.50, 0.00, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.DOWN); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.56, -0.12, 2.50, 0.00, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.UP); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.57, -0.13, 2.50, 0.00, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setGroupingUsed(false); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1234.57, -0.12, 2.50, 0.00, 0.00, ###0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setGroupingSize(4); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1234.57, -0.12, 2.50, 0.00, 0.00, #,###0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMinimumIntegerDigits(5); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[01,234.57, -00,000.12, 00,002.50, 00,000.00, 00,000.00, #00,000.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMaximumIntegerDigits(2); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[34.57, -0.12, 2.50, 0.00, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setDecimalSeparatorAlwaysShown(true); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.57, -0.12, 2.50, 0.00, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMultiplier(1000); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234,567.80, -125.00, 2,500.00, 0.01, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setPositivePrefix('+'); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[+1,234.57, -0.12, +2.50, +0.00, +0.00, +#,##0.00;-#,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setNegativePrefix('neg '); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.57, neg 0.12, 2.50, 0.00, 0.00, #,##0.00;neg #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setNegativeSuffix(' !'); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.57, -0.12 !, 2.50, 0.00, 0.00, #,##0.00;-#,##0.00 !]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setPositiveSuffix(' pos'); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.57 pos, -0.12, 2.50 pos, 0.00 pos, 0.00 pos, #,##0.00 pos;-#,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMaximumFractionDigits(400); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.5678, -0.125, 2.50, 0.00001, 0.00, #,##0.00##############################################################################################################################################################################################################################################################################################################################################################################################################]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMinimumIntegerDigits(0); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234.57, -.12, 2.50, .00, .00, #,###.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMultiplier(-1); return [f.format(1234.5678), f.format(-0.125), f.format(2.5), f.format(1e-5), f.format(0), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-1,234.57, 0.12, -2.50, -0.00, 0.00, #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.UNNECESSARY); return f.format(1.5)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.50"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.UNNECESSARY); return f.format(1.555)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DigitList.shouldRoundUp(DigitList.java:543)",
+       "java.base/java.text.DigitList.round(DigitList.java:423)",
+       "java.base/java.text.DigitList.set(DigitList.java:392)",
+       "java.base/java.text.DigitList.set(DigitList.java:334)",
+       "java.base/java.text.DecimalFormat.doubleSubformat(DecimalFormat.java:753)",
+       "java.base/java.text.DecimalFormat.format(DecimalFormat.java:679)",
+       "java.base/java.text.DecimalFormat.format(DecimalFormat.java:639)",
+       "java.base/java.text.DecimalFormat.format(DecimalFormat.java:587)",
+       "java.base/java.text.Format.format(Format.java:165)",
+       "return f.format(1.555)",
+       "                ^---- HERE"
+      ],
+      "script": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.UNNECESSARY); return f.format(1.555)",
+      "lang": "painless",
+      "position": {
+       "offset": 110,
+       "start": 94,
+       "end": 116
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DigitList.shouldRoundUp(DigitList.java:543)",
+     "java.base/java.text.DigitList.round(DigitList.java:423)",
+     "java.base/java.text.DigitList.set(DigitList.java:392)",
+     "java.base/java.text.DigitList.set(DigitList.java:334)",
+     "java.base/java.text.DecimalFormat.doubleSubformat(DecimalFormat.java:753)",
+     "java.base/java.text.DecimalFormat.format(DecimalFormat.java:679)",
+     "java.base/java.text.DecimalFormat.format(DecimalFormat.java:639)",
+     "java.base/java.text.DecimalFormat.format(DecimalFormat.java:587)",
+     "java.base/java.text.Format.format(Format.java:165)",
+     "return f.format(1.555)",
+     "                ^---- HERE"
+    ],
+    "script": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setRoundingMode(RoundingMode.UNNECESSARY); return f.format(1.555)",
+    "lang": "painless",
+    "position": {
+     "offset": 110,
+     "start": 94,
+     "end": 116
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Rounding needed with the rounding mode being set to RoundingMode.UNNECESSARY"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); f.setMultiplier(0); return f.format(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('0.00'); return [f.getMaximumFractionDigits(), f.getMinimumFractionDigits(), f.getMaximumIntegerDigits(), f.getMinimumIntegerDigits(), f.getGroupingSize(), f.isGroupingUsed(), f.getMultiplier(), f.getPositivePrefix(), f.getNegativePrefix(), f.getPositiveSuffix(), f.getNegativeSuffix(), f.isDecimalSeparatorAlwaysShown(), f.getRoundingMode()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[2, 2, 2147483647, 1, 0, false, 1, , -, , , false, HALF_EVEN]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.0#%;(#)'); return [f.getMaximumFractionDigits(), f.getMinimumFractionDigits(), f.getMaximumIntegerDigits(), f.getMinimumIntegerDigits(), f.getGroupingSize(), f.isGroupingUsed(), f.getMultiplier(), f.getPositivePrefix(), f.getNegativePrefix(), f.getPositiveSuffix(), f.getNegativeSuffix(), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[2, 1, 2147483647, 1, 3, true, 100, , (, %, ), #,##0.0#%;(#,##0.0#)]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234,567.891, -0.5, 2.5, 0.125, NaN, -∞, 42, -9,876,543,210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getNumberInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234,567.891, -0.5, 2.5, 0.125, NaN, -∞, 42, -9,876,543,210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getIntegerInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234,568, -0, 2, 0, NaN, -∞, 42, -9,876,543,210, #,##0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getPercentInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[123,456,789%, -50%, 250%, 12%, NaN, -∞%, 4,200%, -987,654,321,000%, #,##0%]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getCurrencyInstance(); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[$1,234,567.89, -$0.50, $2.50, $0.12, NaN, -$∞, $42.00, -$9,876,543,210.00, ¤#,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(Locale.ROOT); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234,567.891, -0.5, 2.5, 0.125, NaN, -∞, 42, -9,876,543,210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(Locale.GERMANY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.234.567,891, -0,5, 2,5, 0,125, NaN, -∞, 42, -9.876.543.210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(Locale.FRANCE); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1 234 567,891, -0,5, 2,5, 0,125, NaN, -∞, 42, -9 876 543 210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(Locale.US); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234,567.891, -0.5, 2.5, 0.125, NaN, -∞, 42, -9,876,543,210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(Locale.UK); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234,567.891, -0.5, 2.5, 0.125, NaN, -∞, 42, -9,876,543,210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(Locale.JAPAN); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234,567.891, -0.5, 2.5, 0.125, NaN, -∞, 42, -9,876,543,210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(Locale.ITALY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.234.567,891, -0,5, 2,5, 0,125, NaN, -∞, 42, -9.876.543.210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(new Locale('es', 'ES')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.234.567,891, -0,5, 2,5, 0,125, NaN, -∞, 42, -9.876.543.210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(new Locale('pt', 'BR')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.234.567,891, -0,5, 2,5, 0,125, NaN, -∞, 42, -9.876.543.210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(new Locale('ru', 'RU')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1 234 567,891, -0,5, 2,5, 0,125, не число, -∞, 42, -9 876 543 210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(new Locale('de', 'CH')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1'234'567.891, -0.5, 2.5, 0.125, NaN, -∞, 42, -9'876'543'210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(new Locale('hi', 'IN')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1,234,567.891, -0.5, 2.5, 0.125, NaN, -∞, 42, -9,876,543,210, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getPercentInstance(Locale.GERMANY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[123.456.789 %, -50 %, 250 %, 12 %, NaN, -∞ %, 4.200 %, -987.654.321.000 %, #,##0 %]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getPercentInstance(Locale.FRANCE); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[123 456 789 %, -50 %, 250 %, 12 %, NaN, -∞ %, 4 200 %, -987 654 321 000 %, #,##0 %]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getCurrencyInstance(Locale.GERMANY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.234.567,89 €, -0,50 €, 2,50 €, 0,12 €, NaN, -∞ €, 42,00 €, -9.876.543.210,00 €, #,##0.00 ¤]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getCurrencyInstance(Locale.UK); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[£1,234,567.89, -£0.50, £2.50, £0.12, NaN, -£∞, £42.00, -£9,876,543,210.00, ¤#,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getCurrencyInstance(Locale.JAPAN); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[￥1,234,568, -￥0, ￥2, ￥0, NaN, -￥∞, ￥42, -￥9,876,543,210, ¤#,##0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getCurrencyInstance(Locale.ROOT); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[¤ 1,234,567.89, -¤ 0.50, ¤ 2.50, ¤ 0.12, NaN, -¤ ∞, ¤ 42.00, -¤ 9,876,543,210.00, ¤ #,##0.00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getCurrencyInstance(Locale.FRANCE); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1 234 567,89 €, -0,50 €, 2,50 €, 0,12 €, NaN, -∞ €, 42,00 €, -9 876 543 210,00 €, #,##0.00 ¤]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getIntegerInstance(Locale.GERMANY); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.234.568, -0, 2, 0, NaN, -∞, 42, -9.876.543.210, #,##0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getNumberInstance(new Locale('ar', 'EG')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[١٬٢٣٤٬٥٦٧٫٨٩١, ؜-٠٫٥, ٢٫٥, ٠٫١٢٥, ليس رقمًا, ؜-∞, ٤٢, ؜-٩٬٨٧٦٬٥٤٣٬٢١٠, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(new Locale('th', 'TH', 'TH')); return [f.format(1234567.891), f.format(-0.5), f.format(2.5), f.format(0.125), f.format(Double.NaN), f.format(Double.NEGATIVE_INFINITY), f.format(42), f.format(-9876543210L), ((DecimalFormat) f).toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[๑,๒๓๔,๕๖๗.๘๙๑, -๐.๕, ๒.๕, ๐.๑๒๕, NaN, -∞, ๔๒, -๙,๘๗๖,๕๔๓,๒๑๐, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('1,234.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1234.5, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('abc'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[PE, Unparseable number: \"abc\", 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('12abc'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[12, Long]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('1e3'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, Long]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('1E3'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1000, Long]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('-0'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-0.0, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('0'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, Long]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('-0.0'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-0.0, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('9223372036854775807'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[9223372036854775807, Long]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('9223372036854775808'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[9.223372036854776E18, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('1.0'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, Long]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('1.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.5, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse(' 12'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[PE, Unparseable number: \" 12\", 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('+12'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[PE, Unparseable number: \"+12\", 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('∞'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[Infinity, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('NaN'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[NaN, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('1,2,3'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[123, Long]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('1.2.3'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.2, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('-'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[PE, Unparseable number: \"-\", 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse(''); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[PE, Unparseable number: \"\", 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('(5)'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[PE, Unparseable number: \"(5)\", 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('5%'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[5, Long]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('12,34.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1234.5, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('0.000000001'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.0E-9, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getInstance().parse('123456789012345678901234567890'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.2345678901234568E29, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getPercentInstance().parse('5%'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.05, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getPercentInstance().parse('5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[PE, Unparseable number: \"5\", 1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getPercentInstance().parse('12.5%'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.125, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = NumberFormat.getPercentInstance().parse('abc%'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[PE, Unparseable number: \"abc%\", 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = new DecimalFormat('#,##0.0;(#)').parse('(1,234.5)'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-1234.5, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = new DecimalFormat('#,##0.0;(#)').parse('-1,234.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[PE, Unparseable number: \"-1,234.5\", 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "try { def n = new DecimalFormat('#,##0.0;(#)').parse('1,234.5'); return [n, n instanceof Long ? 'Long' : n instanceof Double ? 'Double' : n instanceof BigDecimal ? 'BigDecimal' : 'other'] } catch (ParseException e) { return ['PE', e.getMessage(), e.getErrorOffset()] }",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1234.5, Double]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(); f.setParseIntegerOnly(true); return [f.parse('12.75'), f.parse('-3.9')]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[12, -3]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#.#'); f.setParseBigDecimal(true); def n = f.parse('12.345'); return [n, n instanceof BigDecimal, f.isParseBigDecimal()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[12.345, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ParsePosition pp = new ParsePosition(0); def n = NumberFormat.getInstance().parse('12 apples', pp); return [n, pp.getIndex(), pp.getErrorIndex()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[12, 2, -1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ParsePosition pp = new ParsePosition(0); def n = NumberFormat.getInstance().parse('apples', pp); return [n, pp.getIndex(), pp.getErrorIndex()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[null, 0, 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return NumberFormat.getInstance().format(new BigDecimal('12345.678901234567890123'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "12,345.679"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return NumberFormat.getInstance().format(new BigInteger('123456789012345678901234567890'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "123,456,789,012,345,678,901,234,567,890"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.000').format(new BigDecimal('1.0005'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.000"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.00').format(Integer.valueOf(7))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "7.00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.00').format('x')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.format(DecimalFormat.java:588)",
+       "java.base/java.text.Format.format(Format.java:165)",
+       "return new DecimalFormat('0.00').format('x')",
+       "                                        ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('0.00').format('x')",
+      "lang": "painless",
+      "position": {
+       "offset": 40,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.format(DecimalFormat.java:588)",
+     "java.base/java.text.Format.format(Format.java:165)",
+     "return new DecimalFormat('0.00').format('x')",
+     "                                        ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('0.00').format('x')",
+    "lang": "painless",
+    "position": {
+     "offset": 40,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot format given Object as a Number"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.00').format(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.format(DecimalFormat.java:588)",
+       "java.base/java.text.Format.format(Format.java:165)",
+       "return new DecimalFormat('0.00').format(null)",
+       "                                ^---- HERE"
+      ],
+      "script": "return new DecimalFormat('0.00').format(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 32,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.format(DecimalFormat.java:588)",
+     "java.base/java.text.Format.format(Format.java:165)",
+     "return new DecimalFormat('0.00').format(null)",
+     "                                ^---- HERE"
+    ],
+    "script": "return new DecimalFormat('0.00').format(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 32,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot format given Object as a Number"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return NumberFormat.getInstance().format(1.0f / 3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.333"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return NumberFormat.getInstance().getMaximumFractionDigits()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [NumberFormat.getIntegerInstance().getRoundingMode(), NumberFormat.getIntegerInstance().format(2.5), NumberFormat.getIntegerInstance().format(3.5), NumberFormat.getIntegerInstance().isParseIntegerOnly()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[HALF_EVEN, 2, 4, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormatSymbols s = DecimalFormatSymbols.getInstance(); return [s.getDecimalSeparator(), s.getGroupingSeparator(), s.getMinusSign(), s.getPercent(), s.getPerMill(), s.getZeroDigit(), s.getDigit(), s.getPatternSeparator(), s.getInfinity(), s.getNaN(), s.getExponentSeparator(), s.getCurrencySymbol(), s.getInternationalCurrencySymbol(), s.getMonetaryDecimalSeparator()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[., ,, -, %, ‰, 0, #, ;, ∞, NaN, E, $, USD, .]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormatSymbols s = DecimalFormatSymbols.getInstance(Locale.GERMANY); return [s.getDecimalSeparator(), s.getGroupingSeparator(), s.getMinusSign(), s.getPercent(), s.getPerMill(), s.getCurrencySymbol(), s.getInternationalCurrencySymbol()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[,, ., -, %, ‰, €, EUR]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormatSymbols s = new DecimalFormatSymbols(Locale.FRANCE); return [s.getDecimalSeparator(), (int) s.getGroupingSeparator(), s.getCurrencySymbol()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[,, 8239, €]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormatSymbols s = new DecimalFormatSymbols(); s.setDecimalSeparator((char) ','); s.setGroupingSeparator((char) '.'); return new DecimalFormat('#,##0.00', s).format(1234567.891)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.234.567,89"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00'); DecimalFormatSymbols s = f.getDecimalFormatSymbols(); s.setNaN('nan'); f.setDecimalFormatSymbols(s); return f.format(Double.NaN)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "nan"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.00', DecimalFormatSymbols.getInstance(Locale.GERMANY)).toLocalizedPattern()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "#.##0,00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat(); f.applyPattern('0.0'); return [f.format(3.14159), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[3.1, #0.0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat(); return [f.format(3.14159), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[3.142, #,##0.###]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DecimalFormat f = new DecimalFormat('#,##0.00', DecimalFormatSymbols.getInstance(Locale.GERMANY)); f.applyLocalizedPattern('#.##0,0'); return [f.format(1234.56), f.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.234,6, #,##0.0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "NumberFormat f = NumberFormat.getInstance(); return [f.equals(NumberFormat.getInstance()), f.hashCode() == NumberFormat.getInstance().hashCode(), f.clone().format(1.5)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, 1.5]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return NumberFormat.getAvailableLocales().length > 10",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return NumberFormat.getInstance().getCurrency().getCurrencyCode()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "USD"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [NumberFormat.Field.INTEGER.toString(), NumberFormat.INTEGER_FIELD, NumberFormat.FRACTION_FIELD]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[java.text.NumberFormat$Field(integer), 0, 1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.00').format(1.0E-300)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.##########').format(0.1 + 0.2)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.##########E0').format(123456789)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.23456789E8"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('##0.##E0').format(12345)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "12.345E3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('##0.##E0').format(0.00012345)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "123.45E-6"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.###E0').format(-0.0)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-0E0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [new DecimalFormat('0').format(0.5), new DecimalFormat('0').format(1.5), new DecimalFormat('0').format(-0.5), new DecimalFormat('0').format(-1.5)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, 2, -0, -2]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0').format(-0.4)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0').format(0.05)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0').format(0.15)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0').format(0.25)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0').format(0.35)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0').format(0.45)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.00').format(1.115)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.11"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.00').format(1.125)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.12"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.00').format(1.135)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.14"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.00').format(2.675)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2.67"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.000').format(1.0005)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.000"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0').format(9.95)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "9.9"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('0.0').format(1e15 + 0.25)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1000000000000000.2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#').format(1e300)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new DecimalFormat('#,##0.00').format(123456789.125)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "123,456,789.12"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%,.2f', 1234567.891)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... n String.format('%,.2f', 1234567.891)",
+       "                             ^---- HERE"
+      ],
+      "script": "return String.format('%,.2f', 1234567.891)",
+      "lang": "painless",
+      "position": {
+       "offset": 30,
+       "start": 5,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... n String.format('%,.2f', 1234567.891)",
+     "                             ^---- HERE"
+    ],
+    "script": "return String.format('%,.2f', 1234567.891)",
+    "lang": "painless",
+    "position": {
+     "offset": 30,
+     "start": 5,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [double] to [def[]]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return NumberFormat.getCompactNumberInstance().format(12345)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return NumberFormat.getCompactNumberInstance ...",
+       "                   ^---- HERE"
+      ],
+      "script": "return NumberFormat.getCompactNumberInstance().format(12345)",
+      "lang": "painless",
+      "position": {
+       "offset": 19,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return NumberFormat.getCompactNumberInstance ...",
+     "                   ^---- HERE"
+    ],
+    "script": "return NumberFormat.getCompactNumberInstance().format(12345)",
+    "lang": "painless",
+    "position": {
+     "offset": 19,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [java.text.NumberFormat, getCompactNumberInstance/0] not found"
+    }
+   },
+   "status": 400
+  }
+ }
+]

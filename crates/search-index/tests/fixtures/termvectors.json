@@ -1,0 +1,301 @@
+[
+{
+"id": "0",
+"tv": {
+"field_statistics": {
+"sum_doc_freq": 57,
+"doc_count": 10,
+"sum_ttf": 69
+},
+"terms": {
+"brown": {
+"doc_freq": 4,
+"ttf": 5,
+"term_freq": 1,
+"tokens": [
+{
+"position": 2,
+"start_offset": 10,
+"end_offset": 15
+}
+]
+},
+"dog": {
+"doc_freq": 3,
+"ttf": 3,
+"term_freq": 1,
+"tokens": [
+{
+"position": 8,
+"start_offset": 40,
+"end_offset": 43
+}
+]
+},
+"fox": {
+"doc_freq": 6,
+"ttf": 10,
+"term_freq": 1,
+"tokens": [
+{
+"position": 3,
+"start_offset": 16,
+"end_offset": 19
+}
+]
+},
+"jumps": {
+"doc_freq": 1,
+"ttf": 1,
+"term_freq": 1,
+"tokens": [
+{
+"position": 4,
+"start_offset": 20,
+"end_offset": 25
+}
+]
+},
+"lazy": {
+"doc_freq": 4,
+"ttf": 4,
+"term_freq": 1,
+"tokens": [
+{
+"position": 7,
+"start_offset": 35,
+"end_offset": 39
+}
+]
+},
+"over": {
+"doc_freq": 3,
+"ttf": 3,
+"term_freq": 1,
+"tokens": [
+{
+"position": 5,
+"start_offset": 26,
+"end_offset": 30
+}
+]
+},
+"quick": {
+"doc_freq": 7,
+"ttf": 8,
+"term_freq": 1,
+"tokens": [
+{
+"position": 1,
+"start_offset": 4,
+"end_offset": 9
+}
+]
+},
+"the": {
+"doc_freq": 5,
+"ttf": 11,
+"term_freq": 2,
+"tokens": [
+{
+"position": 0,
+"start_offset": 0,
+"end_offset": 3
+},
+{
+"position": 6,
+"start_offset": 31,
+"end_offset": 34
+}
+]
+}
+}
+}
+},
+{
+"id": "3",
+"tv": {
+"field_statistics": {
+"sum_doc_freq": 57,
+"doc_count": 10,
+"sum_ttf": 69
+},
+"terms": {
+"and": {
+"doc_freq": 3,
+"ttf": 3,
+"term_freq": 1,
+"tokens": [
+{
+"position": 2,
+"start_offset": 8,
+"end_offset": 11
+}
+]
+},
+"are": {
+"doc_freq": 1,
+"ttf": 1,
+"term_freq": 1,
+"tokens": [
+{
+"position": 5,
+"start_offset": 22,
+"end_offset": 25
+}
+]
+},
+"brown": {
+"doc_freq": 4,
+"ttf": 5,
+"term_freq": 1,
+"tokens": [
+{
+"position": 10,
+"start_offset": 47,
+"end_offset": 52
+}
+]
+},
+"dog": {
+"doc_freq": 3,
+"ttf": 3,
+"term_freq": 1,
+"tokens": [
+{
+"position": 11,
+"start_offset": 53,
+"end_offset": 56
+}
+]
+},
+"fox": {
+"doc_freq": 6,
+"ttf": 10,
+"term_freq": 1,
+"tokens": [
+{
+"position": 1,
+"start_offset": 4,
+"end_offset": 7
+}
+]
+},
+"friends": {
+"doc_freq": 1,
+"ttf": 1,
+"term_freq": 1,
+"tokens": [
+{
+"position": 6,
+"start_offset": 26,
+"end_offset": 33
+}
+]
+},
+"hound": {
+"doc_freq": 1,
+"ttf": 1,
+"term_freq": 1,
+"tokens": [
+{
+"position": 4,
+"start_offset": 16,
+"end_offset": 21
+}
+]
+},
+"of": {
+"doc_freq": 2,
+"ttf": 2,
+"term_freq": 1,
+"tokens": [
+{
+"position": 7,
+"start_offset": 34,
+"end_offset": 36
+}
+]
+},
+"quick": {
+"doc_freq": 7,
+"ttf": 8,
+"term_freq": 1,
+"tokens": [
+{
+"position": 9,
+"start_offset": 41,
+"end_offset": 46
+}
+]
+},
+"the": {
+"doc_freq": 5,
+"ttf": 11,
+"term_freq": 3,
+"tokens": [
+{
+"position": 0,
+"start_offset": 0,
+"end_offset": 3
+},
+{
+"position": 3,
+"start_offset": 12,
+"end_offset": 15
+},
+{
+"position": 8,
+"start_offset": 37,
+"end_offset": 40
+}
+]
+}
+}
+}
+},
+{
+"id": "6",
+"tv": {
+"field_statistics": {
+"sum_doc_freq": 57,
+"doc_count": 10,
+"sum_ttf": 69
+},
+"terms": {
+"fox": {
+"doc_freq": 6,
+"ttf": 10,
+"term_freq": 5,
+"tokens": [
+{
+"position": 0,
+"start_offset": 0,
+"end_offset": 3
+},
+{
+"position": 1,
+"start_offset": 4,
+"end_offset": 7
+},
+{
+"position": 2,
+"start_offset": 8,
+"end_offset": 11
+},
+{
+"position": 3,
+"start_offset": 12,
+"end_offset": 15
+},
+{
+"position": 4,
+"start_offset": 16,
+"end_offset": 19
+}
+]
+}
+}
+}
+}
+]
