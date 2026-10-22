@@ -34,8 +34,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50927 (**99.56%**) |
-| units differing | 223 |
+| units matching | 50931 (**99.57%**) |
+| units differing | 219 |
 | files fully matching | 198 |
 | engine output == expected/*.out (pg_regress "ok") | 171 files |
 | engine crashes / panics | none |
@@ -44,16 +44,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 214 | 96.0% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 8 | 3.6% |
-| by design (a parallel plan's combine function) | 1 | 0.4% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 210 | 95.9% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 8 | 3.7% |
+| by design (a parallel plan's combine function) | 1 | 0.5% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 214 units
-join (74), partition_join (28), partition_prune (12), subselect (10), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (3), equivclass (6), aggregates (7), rowtypes (5), rowsecurity (2), generated_virtual (3), join_hash (3), collate (2), window (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), limit (1), insert_conflict (1), foreign_key (1), create_table (1)
+### EXPLAIN (group C1) — 210 units
+join (74), partition_join (28), partition_prune (12), subselect (6), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (3), equivclass (6), aggregates (7), rowtypes (5), rowsecurity (2), generated_virtual (3), join_hash (3), collate (2), window (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), limit (1), insert_conflict (1), foreign_key (1), create_table (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -110,6 +110,44 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Fixed in round 14, agent 3 (strict-NULL folding, semi joins unique-ified early, EXISTS with sublinks)
+
+A full run of the schedule against 3b11900 plus this batch's constant folding measured 50831:
+every file's count as below except three run artifacts, test_setup 7 (the shared reference
+cluster's `regress_tblspace` from a concurrent run), and two `ALTER TABLE` stalls past the psql
+timeout (alter_table 830, and fast_default 177–179 after `ALTER TABLE t ADD COLUMN y` stalled:
+fast_default matches 275/275 in a subset run). The units below were then fixed and checked in
+subset runs (the first batches' files): none broken.
+
+| file | fixed units |
+|---|---|
+| subselect | 310, 322, 326, 342 |
+
+What changed:
+
+- eval_const_expressions' simplify_function: a strict function over a NULL constant is NULL,
+  whatever its other arguments (a custom plan's NULL parameter too, so `... / $3::real = ANY
+  (...)` is a constant-false qual, `One-Time Filter: false`); COALESCE drops NULL constants and
+  ends at a constant, one first being the result. Not in views (deparse) or unplanned binds.
+- A semi join's clauses need only their own relations, as an inner join's (deconstruct_jointree
+  gives a semi join no ojscope), and join_is_legal lets the semi join's right side, unique-ified
+  on all its semi join clauses' keys, join a part of its left side first (326: `a ⋈ unique(c)`,
+  then `⋈ b`).
+- An EXISTS whose WHERE clause has a sub-select reading the EXISTS's rows and the outer query's
+  (a correlated IN) is still pulled up into a semi join: the sub-select a SubPlan of the semi
+  join's clause, its parameters moved to the join's row (322); a correlated clause's volatility
+  is its sub-select's plan's.
+- VERBOSE row marks of locked rows: a locked scan and its LockRows return the row's ctid, a FROM
+  subquery locking rows shows its Subquery Scan (its plan carries the mark as resjunk), a
+  LockRows at a level's top returns the marks after the target list (310).
+- MERGE into an empty partitioned table: the dummy relation is the target's, its columns
+  qualified by the target's name, its row identity a ctid, last (merge 462 still lacks Inner
+  Unique: the empty relation knows no unique index).
+
+Goldens added: `tests/sql/a3_const_fold.sql`; `a3_sublink_pullup.sql` extended.
+
+Still open in subselect: 218, 221, 288, 327, 328, 332, 350.
 
 ## Fixed in round 14, agent 5 (run-time pruning, expression merge keys, EC orientation)
 
@@ -1352,7 +1390,7 @@ produces no units on Linux (skipped by the file itself).
 | select_distinct_on | 23 | 23 | 100% | yes | yes |  |
 | select_implicit | 44 | 44 | 100% | yes | yes |  |
 | select_having | 23 | 23 | 100% | yes | yes |  |
-| subselect | 356 | 345 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
+| subselect | 356 | 349 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
 | join | 925 | 851 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (72) |

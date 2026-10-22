@@ -2,7 +2,9 @@
 -- `x = ANY ('{...}')` (convert_VALUES_to_ANY; not over a FROM subquery's VALUES or
 -- non-constant items), other uncorrelated subqueries (VALUES lists, LIMIT / ORDER BY) as
 -- semi joins, a correlated IN's own WHERE clauses before its comparison, sublinks in an
--- inner join's ON clause; IN over a VALUES list reading the outer row as a LATERAL semi join.
+-- inner join's ON clause; IN over a VALUES list reading the outer row as a LATERAL semi join;
+-- a semi join's unique-ified side joined with part of its left side first; an EXISTS whose
+-- WHERE has a correlated IN (its SubPlan in the semi join's clause).
 CREATE TABLE a3_sp_a (id int PRIMARY KEY, grp int, odd int, v text);
 CREATE TABLE a3_sp_b (id int, grp int, odd int);
 INSERT INTO a3_sp_a SELECT g, g % 100, g % 2, 'v' || g FROM generate_series(1, 1000) g;
@@ -46,4 +48,22 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM a3_sp_o t1, LATERAL (SELECT * FROM a3_sp_o t2 WHERE t2.ten IN (VALUES (t1.ten), (1))) ss;
 SELECT count(*) FROM a3_sp_o t1, LATERAL (SELECT * FROM a3_sp_o t2 WHERE t2.ten IN (VALUES (t1.ten), (1))) ss
 WHERE t1.unique1 < 20;
-DROP TABLE a3_sp_a, a3_sp_b, a3_sp_o;
+CREATE TABLE a3_sp_t1 (unique1 int, unique2 int, hundred int, odd int, thousand int);
+INSERT INTO a3_sp_t1 SELECT g, 10000 - g, g % 100, (g % 100) * 2 + 1, g % 1000 FROM generate_series(1, 2000) g;
+CREATE TABLE a3_sp_t2 AS SELECT * FROM a3_sp_t1;
+ANALYZE a3_sp_t1;
+ANALYZE a3_sp_t2;
+EXPLAIN (COSTS OFF)
+SELECT * FROM a3_sp_t1 a INNER JOIN a3_sp_t2 b
+ON a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd)
+WHERE a.thousand < 750;
+SELECT count(*) FROM a3_sp_t1 a INNER JOIN a3_sp_t2 b
+ON a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd)
+WHERE a.thousand < 750;
+EXPLAIN (COSTS OFF)
+SELECT * FROM a3_sp_t1 a WHERE EXISTS
+(SELECT 1 FROM a3_sp_t2 b WHERE a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd));
+SELECT count(*) FROM a3_sp_t1 a WHERE EXISTS
+(SELECT 1 FROM a3_sp_t2 b WHERE a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd))
+AND a.unique1 < 40;
+DROP TABLE a3_sp_a, a3_sp_b, a3_sp_o, a3_sp_t1, a3_sp_t2;

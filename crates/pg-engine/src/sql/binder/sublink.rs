@@ -119,14 +119,56 @@ fn pull_up_parts(cat: &Catalog, plan: Plan, parts: Vec<Expr>) -> (Plan, Option<E
 /// partitioned parent, nothing in its filter but plain expressions.
 fn plain_scan(p: &Plan) -> Option<&ScanPlan> {
     let Plan::Scan(s) = p else { return None };
+    let subs = EXISTS_SUBLINKS.with(|c| c.get());
     let ok = s.sample.is_none()
         && s.current_of.is_none()
         && s.mark.is_none()
         && !s.with_key
         && !s.sys
         && s.table.partkey.is_none()
-        && s.filter.as_ref().is_none_or(|f| !has_sublink(f) && !deep_outer(f));
+        && s.filter.as_ref().is_none_or(|f| {
+            !deep_outer(f) && if subs { !has_aggregates(f) && shallow_sublinks(f) } else { !has_sublink(f) }
+        });
     ok.then_some(&**s)
+}
+
+thread_local! {
+    /// An EXISTS's WHERE clause is being pulled up: its sub-selects go along (SubPlans of
+    /// the semi join's clause), when they read nothing further out than this query.
+    static EXISTS_SUBLINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn has_aggregates(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| found |= matches!(x, Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+    found
+}
+
+/// Its sub-selects read nothing past their own parameters (no reference two levels up from
+/// their own rows).
+fn shallow_sublinks(e: &Expr) -> bool {
+    fn plan_ok(p: &Plan) -> bool {
+        let mut exprs = Vec::new();
+        crate::sql::explain::node_exprs(p, &mut exprs);
+        exprs.iter().all(|x| {
+            let mut ok = true;
+            x.walk(&mut |y| {
+                if let Expr::Outer(d, ..) = y
+                    && *d >= 2
+                {
+                    ok = false;
+                }
+            });
+            ok
+        }) && crate::sql::explain::plan_inputs(p).iter().all(|c| plan_ok(c))
+    }
+    let mut ok = true;
+    e.walk(&mut |x| {
+        if let Expr::Subquery(s) = x {
+            ok &= s.func.is_none() && plan_ok(&s.plan);
+        }
+    });
+    ok
 }
 
 fn has_sublink(e: &Expr) -> bool {
@@ -603,7 +645,10 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
             info,
         });
     }
-    let (corr, rhs, _, scan_limited) = match sub_rel(p) {
+    EXISTS_SUBLINKS.with(|c| c.set(true));
+    let rel = sub_rel(p);
+    EXISTS_SUBLINKS.with(|c| c.set(false));
+    let (corr, rhs, _, scan_limited) = match rel {
         Some(x) => x,
         None => {
             let (corr, rhs) = sub_join(p)?;
@@ -613,8 +658,14 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
     if scan_limited && !limited {
         return None;
     }
-    // Uncorrelated: it stays an InitPlan.
-    if corr.is_empty() || corr.iter().any(Expr::is_volatile) {
+    // Uncorrelated: it stays an InitPlan. (A sub-select's own volatility counts.)
+    if corr.is_empty() || corr.iter().any(crate::sql::explain::expr_volatile_deep) {
+        return None;
+    }
+    // (Its local quals keep no sub-select: they would be the semi join's side's own.)
+    if let Plan::Scan(s) = &rhs
+        && s.filter.as_ref().is_some_and(has_sublink)
+    {
         return None;
     }
     let nleft = width(plan);

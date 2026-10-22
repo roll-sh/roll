@@ -223,6 +223,68 @@ count:int8
 3600
 -- SELECT 1
 
-> DROP TABLE a3_sp_a, a3_sp_b, a3_sp_o
+> CREATE TABLE a3_sp_t1 (unique1 int, unique2 int, hundred int, odd int, thousand int)
+-- CREATE TABLE
+
+> INSERT INTO a3_sp_t1 SELECT g, 10000 - g, g % 100, (g % 100) * 2 + 1, g % 1000 FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> CREATE TABLE a3_sp_t2 AS SELECT * FROM a3_sp_t1
+-- SELECT 2000
+
+> ANALYZE a3_sp_t1
+-- ANALYZE
+
+> ANALYZE a3_sp_t2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_sp_t1 a INNER JOIN a3_sp_t2 b
+> ON a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd)
+> WHERE a.thousand < 750
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (c.odd = b.odd)
+  ->  Hash Join
+        Hash Cond: (a.hundred = c.hundred)
+        ->  Seq Scan on a3_sp_t1 a
+              Filter: (thousand < 750)
+        ->  Hash
+              ->  HashAggregate
+                    Group Key: c.odd, c.hundred
+                    ->  Seq Scan on a3_sp_t2 c
+  ->  Hash
+        ->  Seq Scan on a3_sp_t2 b
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_t1 a INNER JOIN a3_sp_t2 b
+> ON a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd)
+> WHERE a.thousand < 750
+count:int8
+30000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_sp_t1 a WHERE EXISTS
+> (SELECT 1 FROM a3_sp_t2 b WHERE a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd))
+QUERY PLAN:text
+Nested Loop Semi Join
+  Join Filter: (ANY (a.hundred = (SubPlan 1).col1))
+  ->  Seq Scan on a3_sp_t1 a
+  ->  Materialize
+        ->  Seq Scan on a3_sp_t2 b
+  SubPlan 1
+    ->  Seq Scan on a3_sp_t2 c
+          Filter: (odd = b.odd)
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_t1 a WHERE EXISTS
+> (SELECT 1 FROM a3_sp_t2 b WHERE a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd))
+> AND a.unique1 < 40
+count:int8
+39
+-- SELECT 1
+
+> DROP TABLE a3_sp_a, a3_sp_b, a3_sp_o, a3_sp_t1, a3_sp_t2
 -- DROP TABLE
 

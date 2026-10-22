@@ -150,7 +150,30 @@ impl Binder<'_, '_> {
                         .collect::<Result<Vec<_>>>()
                 })?;
                 let (args, ty) = self.unify(args, "COALESCE")?;
-                Ok(Expr::Coalesce(args, ty))
+                if self.deparse || self.unplanned {
+                    return Ok(Expr::Coalesce(args, ty));
+                }
+                // eval_const_expressions: NULL constants go, a constant ends the list (one
+                // first is the result).
+                let mut kept = Vec::new();
+                for a in args {
+                    match &a {
+                        Expr::Const(v, _) if v.is_null() => {}
+                        Expr::Const(..) => {
+                            if kept.is_empty() {
+                                return Ok(a);
+                            }
+                            kept.push(a);
+                            break;
+                        }
+                        _ => kept.push(a),
+                    }
+                }
+                Ok(if kept.is_empty() {
+                    Expr::Const(Value::Null, ty)
+                } else {
+                    Expr::Coalesce(kept, ty)
+                })
             }
             NodeEnum::MinMaxExpr(m) => {
                 let greatest = m.op == pb::MinMaxOp::IsGreatest as i32;
@@ -2095,6 +2118,17 @@ impl Binder<'_, '_> {
     }
 
     fn fold_call(&mut self, e: Expr) -> Result<Expr> {
+        // simplify_function: a strict function over a NULL constant is NULL, whatever its
+        // other arguments.
+        if let Expr::Call(def, args, ty) = &e
+            && !self.deparse
+            && !self.unplanned
+            && def.strict
+            && !def.is_srf()
+            && args.iter().any(|a| matches!(a, Expr::Const(v, _) if v.is_null()))
+        {
+            return Ok(Expr::Const(crate::types::Value::Null, ty.clone()));
+        }
         if let Expr::Call(def, args, ty) = &e
             && !self.deparse
             && def.volatility == 'i'

@@ -2220,10 +2220,12 @@ impl Search<'_, '_, '_> {
     /// make_join_rel.
     fn make_join_rel(&mut self, r1: usize, r2: usize) {
         let (mut r1, mut r2) = (r1, r2);
+        let mut unique_only = false;
         let jt = if self.general {
-            let Some((sj, rev)) = self.join_is_legal(self.rels[r1].set, self.rels[r2].set) else {
+            let Some((sj, rev, u)) = self.join_is_legal_u(self.rels[r1].set, self.rels[r2].set) else {
                 return;
             };
+            unique_only = u;
             if rev {
                 std::mem::swap(&mut r1, &mut r2);
             }
@@ -2278,10 +2280,14 @@ impl Search<'_, '_, '_> {
                 self.add_paths(ri, r2, r1, Jt::Full, &restrict);
             }
             Jt::Semi => {
-                self.add_paths(ri, r1, r2, Jt::Semi, &restrict);
-                self.add_paths(ri, r2, r1, Jt::RightSemi, &restrict);
-                // The right side unique-ified, then an inner join either way round.
-                if let Some(u) = self.unique_rel(r2, &restrict) {
+                if !unique_only {
+                    self.add_paths(ri, r1, r2, Jt::Semi, &restrict);
+                    self.add_paths(ri, r2, r1, Jt::RightSemi, &restrict);
+                }
+                // The right side unique-ified, then an inner join either way round (on all
+                // its semi join clauses when the left side isn't all of the semi join's).
+                let uclauses = if unique_only { self.semi_rhs_clauses(self.rels[r2].set) } else { restrict.clone() };
+                if let Some(u) = self.unique_rel(r2, &uclauses) {
                     self.rels.push(u);
                     let ui = self.rels.len() - 1;
                     self.add_paths_u(ri, r1, ui, Jt::Inner, Uniq::Inner, &restrict);

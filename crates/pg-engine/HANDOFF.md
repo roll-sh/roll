@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 50,927 of 51,150 statements match (99.56%).** 223 differ. The full
+- **Regression suite: 50,931 of 51,150 statements match (99.57%).** 219 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 214 are `EXPLAIN` plan text (96%). Query results already match.
+  - 210 are `EXPLAIN` plan text (96%). Query results already match.
   - 8 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -215,28 +215,27 @@ them all with the "Fixed in round N" sections describing what was already tried.
    (partition_join 599–601), a pulled-up UNION ALL's alias as a range table entry
    (partition_prune 392/393/399), partition_prune's parallel plans (377–383, 652), 265 / 410 /
    746.
-3. **subselect** (10 units; round 13 fixed the row comparisons with sub-selects, most of
-   PostgreSQL 18's IN / VALUES pull-up, sub-select copies, per-member EXISTS alternatives and
-   reltarget orders, see STATUS.md):
+3. **subselect** (6 units; rounds 13–14 fixed the row comparisons with sub-selects, most of
+   PostgreSQL 18's IN / VALUES pull-up, sub-select copies, per-member EXISTS alternatives,
+   reltarget orders, strict-NULL folding and early unique-ified semi joins, see STATUS.md):
    - 218: IN with a set-returning select list as a semi join over a Subquery Scan (its filter
      derived from the equivalence class).
    - 221: a pushed-down qual that reads a LATERAL reference stays the Subquery Scan's filter
      (qual_is_pushdown_safe refuses lateral Vars; the engine can't tell them from an outer
      query's values at that point).
-   - 288: a system catalog's parameterized index path inside a join.
-   - 310: FOR UPDATE inside a FROM subquery: a LockRows at the top of the subquery's level
-     (the engine locks rows at the scans, so LockRows shows over each locked scan).
-   - 322, 326/327, 332, 350: the IN pull-up's remaining shapes (a correlated IN inside an
-     EXISTS's WHERE, the unique-ified side joined with one relation first, a correlated
-     aggregate IN as a LATERAL subquery, unique-ifying on a computed expression, a LATERAL
-     VALUES list with a correlated sub-select inside); 328 (an EC member relabeled to the
-     class's collation); 342 (a strict operator over a NULL constant folding to NULL).
-   merge 348 needs the sub-select copies too (a MERGE action's condition and SET).
+   - 288: a system catalog's parameterized index path inside a join (catalog leaves are opaque
+     to the join search).
+   - 327: a correlated aggregate IN as a LATERAL subquery (Memoize over a Subquery Scan).
+   - 328 (an EC member relabeled to the class's collation: `("*VALUES*".column1)::text`), 332
+     (unique-ifying a semi join's side on a computed expression), 350 (a LATERAL VALUES list
+     with a correlated sub-select inside).
+   merge 348 needs the sub-select copies in a MERGE's action conditions and SET lists.
 4. **Row marks in VERBOSE target lists**: done for UPDATE / DELETE / MERGE over joins with a
-   plain (or, for MERGE, partitioned) target. Left: merge 462 (an empty partitioned target's
-   dummy Result), returning 103/105 (rule-rewritten statements, which run as a CTE of the
-   rule's actions), whole-row marks (`s.*`) of subquery / function sources, inherited
-   UPDATE / DELETE targets, and SELECT ... FOR UPDATE's LockRows placement (see 310).
+   plain (or, for MERGE, partitioned) target, and for locked scans (a FROM subquery's FOR
+   UPDATE). Left: merge 462 (Inner Unique over an empty partitioned target), returning 103/105
+   (rule-rewritten statements, which run as a CTE of the rule's actions), whole-row marks
+   (`s.*`) of subquery / function sources, inherited UPDATE / DELETE targets, and SELECT ...
+   FOR UPDATE over joins (the engine locks at the scans: one LockRows per locked scan).
 5. **collate.icu.utf8** (23), **incremental_sort** (11), **select_parallel** (5; both mostly
    need more than one partial path per relation, see STATUS.md),
    **updatable_views** (13), **groupingsets** (12, including the sorted-vs-hashed choice and

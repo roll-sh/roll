@@ -343,7 +343,10 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
                 // The join's own condition: checked exactly where it joins (a volatile
                 // one too: the binder kept it out of the nullable side).
                 clauses.push((e.clone(), true));
-                meta.push((Some(me), it | min_l | min_r, 0));
+                // (A semi join's clause needs only its own items, as an inner join's:
+                // ojscope is NULL for it; join_is_legal keeps it from joining early.)
+                let req = if j.kind == JoinKind::Semi { it } else { it | min_l | min_r };
+                meta.push((Some(me), req, 0));
             } else {
                 // A degenerate one (only the nullable side's items): pushed down there.
                 let (req, nullable) = delay(it, &sjs[..below]);
@@ -373,8 +376,22 @@ impl Search<'_, '_, '_> {
     /// join_is_legal: whether the items of `a` and `b` may be joined now, and if so as
     /// which outer join (None: an inner join) and whether `b` is its left side.
     pub(super) fn join_is_legal(&self, a: u32, b: u32) -> Option<(Option<usize>, bool)> {
+        self.join_is_legal_u(a, b).map(|(sj, rev, _)| (sj, rev))
+    }
+
+    /// join_is_legal, and whether the join is legal only with the semi join's right side
+    /// unique-ified (it is exactly one side, the other less than the semi join's left side).
+    pub(super) fn join_is_legal_u(&self, a: u32, b: u32) -> Option<(Option<usize>, bool, bool)> {
         let j = a | b;
         let mut matched: Option<(usize, bool)> = None;
+        let mut unique = false;
+        // (create_unique_path succeeds: one item, joined by equalities.)
+        let uniqueable = |x: u32| {
+            x.count_ones() == 1
+                && self
+                    .rel_index(x)
+                    .is_some_and(|r| self.unique_rel(r, &self.semi_rhs_clauses(x)).is_some())
+        };
         let mut must_be_left = false;
         for (i, s) in self.sjs.iter().enumerate() {
             if s.min_r & j == 0 || j & !s.min_r == 0 {
@@ -402,6 +419,19 @@ impl Search<'_, '_, '_> {
                     return None;
                 }
                 matched = Some((i, true));
+            } else if s.kind == JoinKind::Semi && s.syn_r == b && uniqueable(b) {
+                // (For a semi join, the right side unique-ified joins anything.)
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some((i, false));
+                unique = true;
+            } else if s.kind == JoinKind::Semi && s.syn_r == a && uniqueable(a) {
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some((i, true));
+                unique = true;
             } else {
                 if a & s.min_r != 0 && b & s.min_r != 0 {
                     continue;
@@ -419,9 +449,16 @@ impl Search<'_, '_, '_> {
             }
         }
         Some(match matched {
-            Some((i, rev)) => (Some(i), rev),
-            None => (None, false),
+            Some((i, rev)) => (Some(i), rev, unique),
+            None => (None, false, false),
         })
+    }
+
+    /// The clauses a semi join's right side `x` (one item) is compared by: all of them
+    /// between it and the other items (its semi_rhs_exprs are unique-ified together).
+    pub(super) fn semi_rhs_clauses(&self, x: u32) -> Vec<usize> {
+        let full = (1u32 << self.leaves.len()) - 1;
+        self.crossing(x, full & !x)
     }
 
     /// have_join_order_restriction.
