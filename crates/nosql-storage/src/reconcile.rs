@@ -113,8 +113,8 @@ fn resolve_counter(a: Cell, b: Cell) -> Cell {
         return if a.is_tombstone() { a } else { b };
     }
     let ts = a.timestamp.max(b.timestamp);
-    let ka = a.counter_parts().map_or((i64::MIN, i64::MIN), |p| p);
-    let kb = b.counter_parts().map_or((i64::MIN, i64::MIN), |p| p);
+    let ka = a.counter_parts().unwrap_or((i64::MIN, i64::MIN));
+    let kb = b.counter_parts().unwrap_or((i64::MIN, i64::MIN));
     let mut w = if ka >= kb { a } else { b };
     w.timestamp = ts;
     w

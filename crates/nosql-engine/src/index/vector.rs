@@ -238,8 +238,7 @@ pub struct Ann {
 }
 
 fn floats(v: &[u8]) -> Vec<f32> {
-    v.chunks_exact(4)
-        .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+    v.as_chunks::<4>().0.iter().map(|c| f32::from_be_bytes(*c))
         .collect()
 }
 

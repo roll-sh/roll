@@ -117,6 +117,7 @@ fn bearer(h: &HeaderMap) -> Option<String> {
 }
 
 /// The lease of the database the request's token grants.
+#[allow(clippy::result_large_err)] // the error is the response to send
 async fn authorize(st: &HttpState, headers: &HeaderMap, query_token: Option<&str>) -> Result<Lease, Response> {
     let token = bearer(headers).or_else(|| query_token.map(str::to_string));
     let Some(spec) = st.dir.route_token(token.as_deref()).await else {

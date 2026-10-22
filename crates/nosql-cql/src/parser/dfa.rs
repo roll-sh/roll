@@ -38,7 +38,7 @@ pub(crate) struct Tables {
 
 fn unpack(packed: &[u16]) -> Vec<i32> {
     let mut out = Vec::new();
-    for pair in packed.chunks_exact(2) {
+    for pair in packed.as_chunks::<2>().0 {
         let v = if pair[1] == u16::MAX { -1 } else { pair[1] as i32 };
         out.extend(std::iter::repeat_n(v, pair[0] as usize));
     }
@@ -47,7 +47,7 @@ fn unpack(packed: &[u16]) -> Vec<i32> {
 
 fn unpack_chars(packed: &[u16]) -> Vec<u32> {
     let mut out = Vec::new();
-    for pair in packed.chunks_exact(2) {
+    for pair in packed.as_chunks::<2>().0 {
         out.extend(std::iter::repeat_n(pair[1] as u32, pair[0] as usize));
     }
     out

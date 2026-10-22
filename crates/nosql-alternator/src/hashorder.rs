@@ -17,10 +17,8 @@ pub fn hash_bytes(b: &[u8]) -> u64 {
     let len = b.len();
     let aligned = len & !7;
     let mut h = 0xc70f_6907u64 ^ (len as u64).wrapping_mul(MUL);
-    for chunk in b[..aligned].chunks_exact(8) {
-        let mut w = [0u8; 8];
-        w.copy_from_slice(chunk);
-        let d = shift_mix(u64::from_le_bytes(w).wrapping_mul(MUL)).wrapping_mul(MUL);
+    for chunk in b[..aligned].as_chunks::<8>().0 {
+        let d = shift_mix(u64::from_le_bytes(*chunk).wrapping_mul(MUL)).wrapping_mul(MUL);
         h ^= d;
         h = h.wrapping_mul(MUL);
     }

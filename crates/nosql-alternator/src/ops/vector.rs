@@ -269,13 +269,12 @@ fn hash_bytes(b: &[u8]) -> u64 {
     const MUL: u64 = (0xc6a4_a793 << 32) + 0x5bd1_e995;
     let shift_mix = |v: u64| v ^ (v >> 47);
     let mut hash = 0xc70f_6907u64 ^ (b.len() as u64).wrapping_mul(MUL);
-    let mut chunks = b.chunks_exact(8);
-    for c in &mut chunks {
-        let d = u64::from_le_bytes(c.try_into().unwrap_or_default());
+    let (chunks, rest) = b.as_chunks::<8>();
+    for c in chunks {
+        let d = u64::from_le_bytes(*c);
         hash ^= shift_mix(d.wrapping_mul(MUL)).wrapping_mul(MUL);
         hash = hash.wrapping_mul(MUL);
     }
-    let rest = chunks.remainder();
     if !rest.is_empty() {
         let d = rest.iter().rev().fold(0u64, |acc, &x| (acc << 8) | x as u64);
         hash ^= d;

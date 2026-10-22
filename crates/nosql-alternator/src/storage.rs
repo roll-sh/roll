@@ -100,8 +100,10 @@ pub fn decode_value(b: &[u8]) -> Option<Json> {
             "FLOAT32VECTOR",
             Json::Array(
                 payload
-                    .chunks_exact(4)
-                    .map(|c| Json::f64(f32::from_be_bytes([c[0], c[1], c[2], c[3]]) as f64))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| Json::f64(f32::from_be_bytes(*c) as f64))
                     .collect(),
             ),
         ),

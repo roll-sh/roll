@@ -102,11 +102,24 @@ async fn unload_gives_the_heap_back() {
         ..Default::default()
     };
     let s = Store::start(nosql_storage::test_objects("memory-unload"), cfg).await.unwrap();
-    // Warm up what the process keeps anyway (runtime, object storage, the first database).
+    // Warm up what the process keeps anyway: the runtime, and object storage's client with its
+    // connection pool (on S3 it grows with the concurrent uploads and range reads a flush,
+    // compaction and cold reads make), so the same work runs once on a throwaway database.
     let db = s.open("warm", DbConfig::default()).await.unwrap();
-    db.table(TableId(1), TableOptions::default()).await.unwrap().apply(update(0, 1)).await.unwrap();
+    let t = db.table(TableId(1), TableOptions { block_size: 4 << 10, ..Default::default() }).await.unwrap();
+    for round in 0..4u64 {
+        for i in 0..5_000 {
+            t.apply(update(round * 1_000_000 + i, 2)).await.unwrap();
+        }
+        t.flush().await.unwrap();
+    }
+    for i in (0..5_000).step_by(7) {
+        let r = nosql_storage::read::PartitionRead::new(key(i), 2_000_000);
+        assert_eq!(t.read(r).partitions().await.unwrap().len(), 1);
+    }
+    t.compact_major().await.unwrap();
     s.unload("warm").await.unwrap();
-    drop(db);
+    drop((t, db));
     let baseline = LIVE.load(Ordering::Relaxed);
     let db = s.open("d", DbConfig::default()).await.unwrap();
     let t = db.table(TableId(1), TableOptions { block_size: 4 << 10, ..Default::default() }).await.unwrap();

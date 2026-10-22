@@ -9,14 +9,11 @@ pub fn hash_bytes(b: &[u8]) -> u64 {
     const MUL: u64 = (0xc6a4_a793_u64 << 32) + 0x5bd1_e995;
     let shift_mix = |v: u64| v ^ (v >> 47);
     let mut h = 0xc70f_6907_u64 ^ (b.len() as u64).wrapping_mul(MUL);
-    let mut chunks = b.chunks_exact(8);
-    for c in &mut chunks {
-        let mut w = [0u8; 8];
-        w.copy_from_slice(c);
-        let d = shift_mix(u64::from_le_bytes(w).wrapping_mul(MUL)).wrapping_mul(MUL);
+    let (chunks, rest) = b.as_chunks::<8>();
+    for c in chunks {
+        let d = shift_mix(u64::from_le_bytes(*c).wrapping_mul(MUL)).wrapping_mul(MUL);
         h = (h ^ d).wrapping_mul(MUL);
     }
-    let rest = chunks.remainder();
     if !rest.is_empty() {
         let mut w = [0u8; 8];
         w[..rest.len()].copy_from_slice(rest);

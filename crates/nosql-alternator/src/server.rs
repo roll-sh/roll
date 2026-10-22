@@ -63,6 +63,8 @@ async fn handle(alt: &Alternator, req: Request) -> Response {
 
 /// Reads an axum request into an [`HttpRequest`] (the body up to [`MAX_REQUEST_BYTES`]); a
 /// larger one is answered with 413 at once.
+// The error is the response to send (axum's `Response` is large by design).
+#[allow(clippy::result_large_err)]
 pub async fn read_request(req: Request) -> Result<HttpRequest, Response> {
     let (parts, body) = req.into_parts();
     let headers: Vec<(String, String)> = parts
