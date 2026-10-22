@@ -408,6 +408,8 @@ struct Search<'s, 'c, 'a> {
     general: bool,
     /// The WHERE clauses the group took in (`plan_filtered_join`).
     extra: Vec<Expr>,
+    /// The per-row cost of a filter left over the group's top join (`Planner::post_cost`).
+    post: f64,
     /// The outer join the join being made implements.
     cur_sj: Option<usize>,
     /// Building a parameterized join path's plan: per enclosing nested loop, the values
@@ -3193,7 +3195,8 @@ impl Search<'_, '_, '_> {
                 set: ip.set,
             });
         }
-        let JNode::Scan { enforced, .. } = &ip.node else {
+        // (A parameterized scan, or an append relation's members scanned so.)
+        let (JNode::Scan { enforced, .. } | JNode::Append { enforced, .. }) = &ip.node else {
             return None;
         };
         if enforced.is_empty() {
@@ -3387,7 +3390,9 @@ impl Search<'_, '_, '_> {
                 quals.push(ci);
             }
         }
-        let qc: f64 = quals.iter().map(|&c| self.clauses[c].cost).sum();
+        let full = (1u32 << self.leaves.len()) - 1;
+        let post = if ex.set == full { self.post } else { 0.0 };
+        let qc: f64 = quals.iter().map(|&c| self.clauses[c].cost).sum::<f64>() + post;
         let indexed = ip.req != 0
             && quals.is_empty()
             && !enforced.is_empty()
@@ -3567,7 +3572,8 @@ impl Search<'_, '_, '_> {
             },
             other_quals: QualCost {
                 startup: 0.0,
-                per_tuple: quals.iter().map(|&c| self.clauses[c].cost).sum(),
+                per_tuple: quals.iter().map(|&c| self.clauses[c].cost).sum::<f64>()
+                    + if ex.set == (1u32 << self.leaves.len()) - 1 { self.post } else { 0.0 },
             },
             // (A unique-ified inner side: one row per bucket.)
             bucket: (!matches!(ip.node, JNode::Unique { .. })).then_some(bucket),
@@ -3732,7 +3738,8 @@ impl Search<'_, '_, '_> {
             },
             other_quals: QualCost {
                 startup: 0.0,
-                per_tuple: quals.iter().map(|&c| self.clauses[c].cost).sum(),
+                per_tuple: quals.iter().map(|&c| self.clauses[c].cost).sum::<f64>()
+                    + if ex.set == (1u32 << self.leaves.len()) - 1 { self.post } else { 0.0 },
             },
             scansel,
             merge_tuples: costs::clamp_rows(msel * op.rows * ip.rows),
@@ -5556,6 +5563,7 @@ impl Planner<'_, '_> {
             sjs,
             general,
             extra: if general { extra } else { Vec::new() },
+            post: self.post_cost.take(),
             cur_sj: None,
             param_stack: Default::default(),
             loop_rows: self.pw_loop_rows.take(),

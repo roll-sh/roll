@@ -34,26 +34,26 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50944 (**99.60%**) |
-| units differing | 206 |
-| files fully matching | 201 |
-| engine output == expected/*.out (pg_regress "ok") | 174 files |
+| units matching | 50950 (**99.61%**) |
+| units differing | 200 |
+| files fully matching | 202 |
+| engine output == expected/*.out (pg_regress "ok") | 175 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 199 | 96.6% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 6 | 2.9% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 193 | 96.5% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 6 | 3.0% |
 | by design (a parallel plan's combine function) | 1 | 0.5% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 199 units
-join (74), partition_join (21), partition_prune (12), subselect (6), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (3), equivclass (6), aggregates (7), rowtypes (4), rowsecurity (2), generated_virtual (3), join_hash (3), window (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
+### EXPLAIN (group C1) — 193 units
+join (74), partition_join (21), partition_prune (12), subselect (6), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (2), equivclass (6), aggregates (7), rowtypes (4), rowsecurity (2), generated_virtual (1), join_hash (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -335,6 +335,36 @@ Still open in these files, and why:
   them in Postgres), and the two together flipped partition_prune 355; a sort's input target
   doesn't count computed resjunk sort keys in its width; a partitionwise grouping's serial
   members show the width before their projection.
+
+## Fixed in round 14, agent 4, third batch (joins under windows, Memoize over appendrels, filters over outer joins)
+
+Measured against the engine of 1a2f31a in a 36-file subset (`test_setup`, create_misc,
+create_table, create_index, create_view, create_function_sql, select, inherit, insert_conflict,
+updatable_views, select_distinct, subselect, union, join, aggregates, hash_index, gist, collate,
+rowsecurity, groupingsets, join_hash, tsrf, rules, collate.icu.utf8, generated_virtual, window,
+equivclass, sqljson_jsontable, limit, rangefuncs, rowtypes, with, partition_join, tuplesort,
+partition_info, memoize): 6 units fixed, none broken.
+
+| file | fixed units |
+|---|---|
+| window | 392, 394, 395 |
+| generated_virtual | 450, 452 |
+| memoize | 52 |
+
+What changed:
+
+- A join under a window is planned for the window's order (its PARTITION BY and ORDER BY
+  keys are the query's pathkeys then), its presorted paths (an index-ordered nested loop, a
+  merge join over an index) competing with sorting the cheapest; under a LIMIT, for the rows
+  read before the window's first output when its frame doesn't need them all (a frame ending
+  `UNBOUNDED FOLLOWING` or `n FOLLOWING`: the cheapest in total).
+- A Memoize may cache an append relation's parameterized members (a UNION ALL's index scans
+  by the outer value), as it does a parameterized scan.
+- A filter left over an outer join (a WHERE clause over the nullable side, `COALESCE(t2.b, 1)
+  = 2`) is part of the join's restriction list in Postgres: its cost per row now counts in the
+  join's nested loop, hash and merge costs (the Hash Left Join wins over the Nested Loop then).
+
+Goldens added: `tests/sql/ga4_plan_tail4.sql`.
 
 ## Fixed in round 14, agent 4, second batch (whole-row Vars, catalog join stats, resjunk keys)
 
@@ -1494,7 +1524,7 @@ produces no units on Linux (skipped by the file itself).
 | incremental_sort | 120 | 109 | 91% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |
-| generated_virtual | 489 | 486 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| generated_virtual | 489 | 488 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | rules | 632 | 632 | 100% | yes | yes |  |
 | psql | 1264 | 1264 | 100% | no | no |  |
 | psql_crosstab | 32 | 32 | 100% | yes | yes |  |
@@ -1519,7 +1549,7 @@ produces no units on Linux (skipped by the file itself).
 | tsearch | 451 | 451 | 100% | yes | yes |  |
 | tsdicts | 131 | 131 | 100% | yes | yes |  |
 | foreign_data | 624 | 624 | 100% | no | no |  |
-| window | 400 | 397 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| window | 400 | 400 | 100% | yes | yes |  |
 | xmlmap | 40 | 40 | 100% | no | no |  |
 | functional_deps | 40 | 40 | 100% | yes | yes |  |
 | advisory_lock | 38 | 38 | 100% | yes | yes |  |
@@ -1561,7 +1591,7 @@ produces no units on Linux (skipped by the file itself).
 | partition_info | 73 | 73 | 100% | yes | yes |  |
 | tuplesort | 108 | 106 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | explain | 60 | 60 | 100% | yes | yes |  |
-| memoize | 73 | 70 | 96% | yes | no | wrong result `SELECT: values differ` (3) |
+| memoize | 73 | 71 | 97% | yes | no | wrong result `SELECT: values differ` (2) |
 | stats | 482 | 482 | 100% | yes | yes |  |
 | predicate | 42 | 42 | 100% | yes | yes |  |
 | numa | 3 | 3 | 100% | yes | yes |  |

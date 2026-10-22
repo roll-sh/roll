@@ -1741,6 +1741,9 @@ struct Planner<'c, 'a> {
     pw_joins: std::cell::RefCell<Vec<(usize, joinpath::PwJoin)>>,
     /// WHERE clauses a join group takes in (`plan_filtered_join`), for the next group.
     absorbed: std::cell::RefCell<Vec<Expr>>,
+    /// The per-row cost of a filter over an outer join that its group didn't take in: the
+    /// join's restriction list has it in Postgres (joinrestrictinfo), for the next group.
+    post_cost: std::cell::Cell<f64>,
     /// The ORDER BY over the grouping below: per key, (group key, descending, nulls
     /// first), for the order of the GROUP BY (`joinpath::grouped_join`).
     group_dirs: std::cell::RefCell<Option<Vec<(usize, bool, bool)>>>,
@@ -1780,6 +1783,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             whole_rows: Default::default(),
             pw_joins: Default::default(),
             absorbed: Default::default(),
+            post_cost: Default::default(),
             group_dirs: Default::default(),
             pw_agg_join: Default::default(),
             merge_target: Default::default(),
@@ -4551,6 +4555,10 @@ impl Planner<'_, '_> {
     }
 
     fn walk(&self, p: &mut Plan, needed: &[bool], lim: Option<(f64, f64)>) {
+        // (A filter's cost is for the join right under it only.)
+        if !matches!(p, Plan::Join { .. }) {
+            self.post_cost.set(0.0);
+        }
         // A WHERE over a UNION ALL (an append relation): each arm takes the clauses.
         if self.push_into_union_all(p) {
             return self.walk(p, needed, lim);
@@ -4570,6 +4578,12 @@ impl Planner<'_, '_> {
         }
         if matches!(p, Plan::Filter { .. }) && self.plan_filtered_join(p, needed) {
             return;
+        }
+        // (A filter over an outer join that stays above it: its cost is the join's.)
+        if let Plan::Filter { input, pred } = &*p
+            && matches!(&**input, Plan::Join { params, kind, .. } if params.is_empty() && *kind != JoinKind::Inner)
+        {
+            self.post_cost.set(costs::qual_cost(pred));
         }
         // A Sort over a scan may read an index in order instead.
         if matches!(p, Plan::Sort { .. }) {
@@ -4669,6 +4683,62 @@ impl Planner<'_, '_> {
                 return;
             }
             let _ = calls;
+        }
+        // A window over a join: the join planned for the window's order (query_pathkeys
+        // are the window's), presorted paths competing with sorting the cheapest; under a
+        // LIMIT, for the rows read before its first output when its frame doesn't need them
+        // all (get_windowclause_startup_tuples).
+        if let Plan::Window { input, calls } = p
+            && let Some(first) = calls.first()
+            && calls.iter().all(|c| {
+                c.partition_by.len() == first.partition_by.len()
+                    && c.order_by.len() == first.order_by.len()
+                    && c.partition_by.iter().zip(&first.partition_by).all(|(a, b)| a.same_as(b))
+                    && c.order_by.iter().zip(&first.order_by).all(|(a, b)| {
+                        a.expr.same_as(&b.expr) && a.desc == b.desc && a.nulls_first == b.nulls_first
+                    })
+            })
+            && !(first.partition_by.is_empty() && first.order_by.is_empty())
+            && first.order_by.iter().all(|k| k.using.is_none())
+            && {
+                let mut q: &Plan = input;
+                while let Plan::Project { input, .. } = q {
+                    q = input;
+                }
+                matches!(q, Plan::Join { .. })
+            }
+        {
+            let all_rows = calls.iter().any(|c| {
+                matches!(
+                    c.frame.end,
+                    crate::sql::plan::FrameBound::UnboundedFollowing | crate::sql::plan::FrameBound::Following(_)
+                )
+            });
+            let keys: Vec<SortKey> = first
+                .partition_by
+                .iter()
+                .map(|e| SortKey {
+                    expr: e.clone(),
+                    desc: false,
+                    nulls_first: false,
+                    using: None,
+                })
+                .chain(first.order_by.iter().cloned())
+                .collect();
+            let n = child_needs(p, needed).pop().unwrap_or_default();
+            let Plan::Window { input, .. } = p else { unreachable!() };
+            let mut tmp = Plan::Sort {
+                input: input.clone(),
+                keys,
+            };
+            if self.ordered_join(&mut tmp, &n, if all_rows { None } else { lim }) {
+                // (The window sorts its input unless it comes in order.)
+                *input = match tmp {
+                    Plan::Sort { input, .. } => input,
+                    other => Arc::new(other),
+                };
+                return;
+            }
         }
         if let Plan::Scan(s) = p {
             if plannable(s) {
