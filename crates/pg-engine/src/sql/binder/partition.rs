@@ -444,11 +444,20 @@ pub fn with_known(
             Expr::Call(d, args, ty)
                 if args.len() == 2 && matches!(d.name, "=" | "<>" | "<" | "<=" | ">" | ">=") =>
             {
-                Expr::Call(
-                    d.clone(),
-                    vec![val(&args[0], any)?, val(&args[1], any)?],
-                    ty.clone(),
-                )
+                let mut args = vec![val(&args[0], any)?, val(&args[1], any)?];
+                // (A key compared with a constant of the other time stamp type: the
+                // comparison reads TimeZone, stable, so the executor prunes with it.)
+                for (k, c) in [(0, 1), (1, 0)] {
+                    if let Some(key_ty) = tz_cross(&args[k], &args[c]) {
+                        *any = true;
+                        if let Expr::Const(v, vt) = strip_const(&args[c])
+                            && let Some(v) = tz_converted(v, vt, &key_ty, eval)
+                        {
+                            args[c] = Expr::Const(v, key_ty);
+                        }
+                    }
+                }
+                Expr::Call(d.clone(), args, ty.clone())
             }
             Expr::InList(x, list, neg) => {
                 let list = list
@@ -462,14 +471,99 @@ pub fn with_known(
                 right,
                 op,
                 all,
-            } => Expr::ArrayOp {
-                left: left.clone(),
-                right: Box::new(val(right, any)?),
-                op: op.clone(),
-                all: *all,
-            },
+            } if !matches!(&**right, Expr::Cast(_, from, to, _) if from.is_array() && to.is_array() && from != to) => {
+                let mut right = val(right, any)?;
+                // (An array of the other time stamp type: its elements converted, as above.)
+                if let Some(key_ty) = tz_cross(left, &right) {
+                    *any = true;
+                    if let Expr::Const(Value::Array(a), _) = strip_const(&right) {
+                        let elem_ty = a.elem.clone();
+                        let conv: Option<Vec<Value>> = a
+                            .items
+                            .iter()
+                            .map(|v| match v {
+                                Value::Null => Some(Value::Null),
+                                v => tz_converted(v, &elem_ty, &key_ty, eval),
+                            })
+                            .collect();
+                        if let Some(vals) = conv {
+                            right = Expr::Const(
+                                Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(
+                                    key_ty.clone(),
+                                    vals,
+                                ))),
+                                crate::types::DataType::array_of(key_ty),
+                            );
+                        }
+                    }
+                }
+                Expr::ArrayOp {
+                    left: left.clone(),
+                    right: Box::new(right),
+                    op: op.clone(),
+                    all: *all,
+                }
+            }
             e => e.clone(),
         })
+    }
+    fn strip_const(e: &Expr) -> &Expr {
+        match e {
+            Expr::Relabel(x, _) | Expr::Collate(x, ..) => strip_const(x),
+            e => e,
+        }
+    }
+    /// The key's type when `key` reads columns of a time stamp type and `other` is a
+    /// constant (an array of them) of the other one.
+    fn tz_cross(key: &Expr, other: &Expr) -> Option<crate::types::DataType> {
+        use crate::types::DataType as T;
+        if key.columns().is_empty() || !matches!(strip_const(other), Expr::Const(..)) {
+            return None;
+        }
+        let kt = key.ty();
+        let ot = match strip_const(other).ty() {
+            T::Array(e) => *e,
+            t => t,
+        };
+        match (&kt, &ot) {
+            (T::Timestamp(_), T::Timestamptz(_)) | (T::Timestamptz(_), T::Timestamp(_)) => Some(kt),
+            _ => None,
+        }
+    }
+    /// `v` (of type `from`) as a value of the other time stamp type `to`, when the
+    /// conversion is exact there and an hour either side (no daylight-saving shift for the
+    /// comparison to straddle); None otherwise (that clause then prunes nothing).
+    fn tz_converted(
+        v: &Value,
+        from: &crate::types::DataType,
+        to: &crate::types::DataType,
+        eval: &mut dyn FnMut(&Expr) -> crate::error::Result<Value>,
+    ) -> Option<Value> {
+        const HOUR: i64 = 3_600_000_000;
+        let raw = |v: &Value| match v {
+            Value::Timestamp(t) | Value::Timestamptz(t) => Some(*t),
+            _ => None,
+        };
+        let with = |v: &Value, t: i64| match v {
+            Value::Timestamp(_) => Value::Timestamp(t),
+            _ => Value::Timestamptz(t),
+        };
+        let mut cast = |v: Value, a: &crate::types::DataType, b: &crate::types::DataType| {
+            eval(&Expr::Cast(Box::new(Expr::Const(v, a.clone())), a.clone(), b.clone(), false)).ok()
+        };
+        let x = raw(v)?;
+        if x.checked_sub(HOUR)?.checked_add(2 * HOUR).is_none() {
+            return None;
+        }
+        let out = cast(v.clone(), from, to)?;
+        let y = raw(&out)?;
+        for d in [-HOUR, 0, HOUR] {
+            let back = cast(with(&out, y.checked_add(d)?), to, from)?;
+            if raw(&back)? != x + d {
+                return None;
+            }
+        }
+        Some(out)
     }
     let mut any = false;
     let out = quals

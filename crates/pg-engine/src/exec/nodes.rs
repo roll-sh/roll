@@ -210,7 +210,9 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
                 && inputs
                     .first()
                     .is_some_and(|p| matches!(&**p, Plan::Update(_) | Plan::Delete(_)));
-            let inputs = if inh.is_some() && !dml {
+            // (A UNION ALL's members that are partitions are pruned too: make_partition_pruneinfo
+            // for an appendrel of several partitioned tables.)
+            let inputs = if (inh.is_some() && !dml) || (inh.is_none() && !inputs.iter().any(|p| p.writes())) {
                 runtime_pruned(inputs, crate::sql::binder::partition::Known::Exec, ctx)
             } else {
                 inputs.clone()
@@ -295,6 +297,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
                     *nleft,
                     *nright,
                 );
+                nl.key = Arc::as_ptr(plan) as usize;
                 if let Some(m) = meta.memoize.as_ref().filter(|_| !params.is_empty()) {
                     nl.memo = Some(Memoize {
                         keys: m.keys.clone(),
@@ -1583,7 +1586,21 @@ pub fn runtime_pruned(
     /// parent's columns is read through it).
     fn member(p: &Plan) -> Option<(&crate::sql::plan::ScanPlan, Vec<Expr>)> {
         match p {
-            Plan::Scan(s) => Some((s, s.filter.iter().cloned().collect())),
+            // (Its index conditions too: a parameterized scan's join clauses.)
+            Plan::Scan(s) => {
+                let mut quals: Vec<Expr> = s.filter.iter().cloned().collect();
+                if let crate::sql::plan::Access::Index { quals: iq, .. } = &s.access {
+                    for q in iq {
+                        if !quals.iter().any(|x| x.same_as(&q.orig)) {
+                            quals.push(q.orig.clone());
+                        }
+                    }
+                }
+                Some((s, quals))
+            }
+            // (A UNION ALL arm's projection: whatever it computes, the scan's quals are its
+            // own.)
+            Plan::Project { input, .. } if matches!(&**input, Plan::Scan(_)) => member(input),
             Plan::Project { input, exprs }
                 if exprs
                     .iter()
@@ -1609,6 +1626,11 @@ pub fn runtime_pruned(
             }
             _ => None,
         }
+    }
+    // (An Append of one member is no Append at all: set_append_references removes it, and
+    // its run-time pruning with it.)
+    if inputs.len() == 1 {
+        return inputs.to_vec();
     }
     // (enable_partition_pruning off: none pruned when the plan runs either.)
     let on = ctx
@@ -1714,6 +1736,8 @@ struct NestLoopNode {
     /// A RIGHT / FULL join whose right side reads only an enclosing query's values: run
     /// once, its rows' matches kept.
     fixed: bool,
+    /// Its plan's instrumentation key (EXPLAIN ANALYZE's rows the join filter removed).
+    key: usize,
 }
 
 impl NestLoopNode {
@@ -1743,6 +1767,7 @@ impl NestLoopNode {
             unmatched_right: None,
             memo: None,
             fixed,
+            key: 0,
         }
     }
 
@@ -1881,6 +1906,9 @@ impl Node for NestLoopNode {
                     None => true,
                 };
                 if !ok {
+                    if self.key != 0 {
+                        ctx.filtered(self.key);
+                    }
                     continue;
                 }
                 *matched = true;

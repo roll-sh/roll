@@ -2605,7 +2605,13 @@ impl Binder<'_, '_> {
                     useful: Default::default(),
                 };
                 if inh {
-                    self.expand_inheritance(scan, alias)?
+                    // (Through a view: its relation's name in the view, not the MERGE's
+                    // alias of the view.)
+                    let base = match view {
+                        Some(v) => v.base_alias().unwrap_or_else(|| t.name.clone()),
+                        None => alias.to_string(),
+                    };
+                    self.expand_inheritance(scan, &base)?
                 } else {
                     Plan::Scan(Box::new(scan))
                 }

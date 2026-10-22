@@ -448,6 +448,14 @@ pub(super) struct Order {
 }
 
 /// The column a key expression is, through the binder's widening casts.
+/// An expression a merge join can sort its side by: of that side's columns, nothing
+/// volatile, no sub-select or aggregate.
+fn merge_expr(e: &Expr) -> bool {
+    let mut ok = !e.columns().is_empty() && !e.is_volatile();
+    e.walk(&mut |x| ok &= !matches!(x, Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..) | Expr::Outer(..)));
+    ok
+}
+
 fn key_col(e: &Expr) -> Option<usize> {
     match key_operand(e) {
         Expr::Col(i, _) => Some(*i),
@@ -647,6 +655,45 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         est.clause(&c.expr)
     }
 
+    /// The equivalence class a merge clause's side sorts by: its column's, or for an
+    /// expression the class of the column a mergeable clause equates it with.
+    fn side_ec(&self, e: &Expr) -> Option<usize> {
+        if let Some(g) = key_col(e) {
+            return Some(self.ec[g]);
+        }
+        let ec = self.clauses.iter().filter(|c| c.mergeable).find_map(|c| {
+            let (a, b, _, _) = c.eq.as_ref()?;
+            if a.same_as(e) {
+                key_col(b).map(|g| self.ec[g])
+            } else if b.same_as(e) {
+                key_col(a).map(|g| self.ec[g])
+            } else {
+                None
+            }
+        })?;
+        // (Not when a column of the expression's own items is in the class: an order by
+        // that column isn't the expression's, no clause between them making it so.)
+        let mine = self.leaves_of(e);
+        (!(0..self.ec.len()).any(|h| self.ec[h] == ec && (1u32 << self.leaf_of[h]) & mine != 0)).then_some(ec)
+    }
+
+    /// An expression member of class `ec` computable over the columns `layout` has: the
+    /// expression side of a mergeable clause whose column side is in the class.
+    fn ec_expr_in(&self, ec: usize, layout: &[usize]) -> Option<Expr> {
+        self.clauses.iter().filter(|c| c.mergeable).find_map(|c| {
+            let (a, b, _, _) = c.eq.as_ref()?;
+            for (x, y) in [(a, b), (b, a)] {
+                if key_col(x).is_none()
+                    && key_col(y).is_some_and(|g| self.ec[g] == ec)
+                    && x.columns().iter().all(|g| layout.contains(g))
+                {
+                    return Some(x.clone());
+                }
+            }
+            None
+        })
+    }
+
     /// The columns the equivalence class of a mergeable column equality clause has, in
     /// the order its clauses brought them in (None: not such a clause).
     fn clause_ec(&self, c: &Clause) -> Option<usize> {
@@ -730,6 +777,90 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             }
         }
         self.clauses.extend(add);
+    }
+
+    /// The orientation an equivalence class's join clauses get from their first
+    /// derivation (create_join_clause reuses a clause either way round, never an original
+    /// one): before the join search, check_index_predicates for each relation with a
+    /// partial index (the other relations' member first), then the index paths of each
+    /// relation with an index on a member (its member first), relations in order.
+    fn orient_ec_clauses(&mut self) {
+        let members = self.ec_members();
+        if members.len() < 2 {
+            return;
+        }
+        let mut oriented: Vec<(usize, usize)> = Vec::new();
+        let known = |o: &[(usize, usize)], x: usize, y: usize| o.iter().any(|&(p, q)| (p == x && q == y) || (p == y && q == x));
+        let leaf_cols = |s: &Self, l: usize, c: usize| -> Option<usize> {
+            let g = s.leaves[l].off + c;
+            members.contains(&g).then_some(g)
+        };
+        let nleaves = self.leaves.len();
+        // (check_index_predicates: one clause per class, its first member in the other
+        // relations and its first in this one.)
+        for l in 0..nleaves {
+            let Some((_, rel)) = &self.leaves[l].scan else { continue };
+            if !rel.indexes.iter().any(|ii| !ii.pred.is_empty()) {
+                continue;
+            }
+            let mut ecs: Vec<usize> = Vec::new();
+            for &g in &members {
+                if self.leaf_of[g] == l && !ecs.contains(&self.ec[g]) {
+                    ecs.push(self.ec[g]);
+                }
+            }
+            for e in ecs {
+                let outer = members.iter().copied().find(|&g| self.ec[g] == e && self.leaf_of[g] != l);
+                let inner = members.iter().copied().find(|&g| self.ec[g] == e && self.leaf_of[g] == l);
+                if let (Some(x), Some(y)) = (outer, inner)
+                    && !known(&oriented, x, y)
+                {
+                    oriented.push((x, y));
+                }
+            }
+        }
+        // (match_eclass_clauses_to_index: the indexed member with every other one.)
+        for l in 0..nleaves {
+            let Some((_, rel)) = &self.leaves[l].scan else { continue };
+            let mut cols: Vec<usize> = Vec::new();
+            for ii in &rel.indexes {
+                if !matches!(ii.am, crate::sql::paths::Am::Btree | crate::sql::paths::Am::Hash) {
+                    continue;
+                }
+                for k in &ii.keys {
+                    if let Expr::Col(c, _) = k
+                        && !cols.contains(c)
+                    {
+                        cols.push(*c);
+                    }
+                }
+            }
+            for c in cols {
+                let Some(g) = leaf_cols(self, l, c) else { continue };
+                for &h in &members {
+                    if self.ec[h] == self.ec[g] && self.leaf_of[h] != l && !known(&oriented, g, h) {
+                        oriented.push((g, h));
+                    }
+                }
+            }
+        }
+        for c in self.clauses.iter_mut() {
+            if !c.mergeable || c.on {
+                continue;
+            }
+            let Some((a, b, _, _)) = c.eq.clone() else { continue };
+            let (Some(x), Some(y)) = (key_col(&a), key_col(&b)) else { continue };
+            if !oriented.contains(&(y, x)) || a.ty().without_typmod() != b.ty().without_typmod() {
+                continue;
+            }
+            let Expr::Call(def, args, rt) = &c.expr else { continue };
+            if args.len() != 2 {
+                continue;
+            }
+            // (Only the clause as shown: the class's members keep the order their clauses
+            // brought them in.)
+            c.expr = Expr::Call(def.clone(), vec![args[1].clone(), args[0].clone()], rt.clone());
+        }
     }
 
     /// The clauses joining `a` and `b` (in a set together, in neither alone); clauses of
@@ -1141,7 +1272,8 @@ impl Search<'_, '_, '_> {
         }
         let tid_cand = cands.iter().any(|c| matches!(c.0, Expr::Col(_, DataType::Tid)) && c.0.columns()[0] >= r.table.columns.len());
         if cands.is_empty() || (r.indexes.is_empty() && !tid_cand) {
-            return Vec::new();
+            // (Its OR join clauses may still parameterize an index scan or a BitmapOr.)
+            return if r.indexes.is_empty() { Vec::new() } else { self.or_param_paths(l, r, width, set) };
         }
         // consider_index_join_outer_rels: each clause's set of outer leaves, and its union
         // with each set tried before (but not with one using its equivalence class
@@ -1546,6 +1678,57 @@ impl Search<'_, '_, '_> {
                 continue;
             };
             prel.quals.push(q.clone());
+            // get_baserel_parampathinfo: the other join clauses movable into the leaf with
+            // these outer leaves (one per equivalence class) are the path's filter too.
+            let mut enforced = vec![ci];
+            let mut ecs: Vec<usize> = Vec::new();
+            for (cj, d) in self.clauses.iter().enumerate() {
+                if cj == ci
+                    || d.leaves & set == 0
+                    || d.leaves == set
+                    || d.leaves & !(set | req) != 0
+                    || d.expr.is_volatile()
+                    || !self.movable_to(cj, l)
+                {
+                    continue;
+                }
+                if let Some(e) = self.clause_ec(d) {
+                    if ecs.contains(&e) {
+                        continue;
+                    }
+                    ecs.push(e);
+                }
+                let mut plain = true;
+                d.expr.walk(&mut |e| {
+                    if matches!(e, Expr::Outer(..) | Expr::Subquery(_) | Expr::Param(..)) {
+                        plain = false;
+                    }
+                });
+                if !plain {
+                    continue;
+                }
+                let Ok(dq) = d.expr.clone().transform(&mut |e| {
+                    Ok(match e {
+                        Expr::Col(g, t) if self.leaf_of.get(g) == Some(&l) => Expr::Col(g - leaf.off, t),
+                        Expr::Col(g, t) => {
+                            let x = Expr::Col(g, t.clone());
+                            let k = match params.iter().position(|p| p.same_as(&x)) {
+                                Some(k) => k,
+                                None => {
+                                    params.push(x);
+                                    params.len() - 1
+                                }
+                            };
+                            Expr::Outer(1, k, t)
+                        }
+                        e => e,
+                    })
+                }) else {
+                    continue;
+                };
+                prel.quals.push(dq);
+                enforced.push(cj);
+            }
             prel.loop_count = self.loop_count(req);
             prel.rows = costs::clamp_rows(prel.size.tuples * self.pl.sel(&prel, &prel.quals));
             (prel.qual_startup, prel.qual_cost) = self.pl.quals_cost(&prel.quals);
@@ -1563,7 +1746,7 @@ impl Search<'_, '_, '_> {
                     leaf: l,
                     path,
                     params: params.clone(),
-                    enforced: vec![ci],
+                    enforced: enforced.clone(),
                     rel: prel.clone(),
                 },
             };
@@ -1663,8 +1846,22 @@ impl Search<'_, '_, '_> {
             if !self.movable_to(ci, l) {
                 continue;
             }
-            let Some((a, b, al, bl)) = &c.eq else { continue };
-            for (mine, other, ml, ol) in [(a, b, al, bl), (b, a, bl, al)] {
+            // (An equality, or a btree comparison of the leaf's column with the other
+            // leaves' values, as match_clause_to_indexcol takes it.)
+            let (a, b, al, bl) = match (&c.eq, &c.expr) {
+                (Some((a, b, al, bl)), _) => (a.clone(), b.clone(), *al, *bl),
+                (None, Expr::Call(def, args, _))
+                    if args.len() == 2 && matches!(def.name, "<" | "<=" | ">" | ">=") && !c.expr.is_volatile() =>
+                {
+                    let (la, lb) = (self.leaves_of(&args[0]), self.leaves_of(&args[1]));
+                    if la == 0 || lb == 0 {
+                        continue;
+                    }
+                    (args[0].clone(), args[1].clone(), la, lb)
+                }
+                _ => continue,
+            };
+            for (mine, other, ml, ol) in [(&a, &b, &al, &bl), (&b, &a, &bl, &al)] {
                 if *ml != set || *ol & set != 0 {
                     continue;
                 }
@@ -1787,6 +1984,7 @@ impl Search<'_, '_, '_> {
                     let mine_first = if self.kind == JoinKind::Inner
                         && !self.clauses[*ci].on
                         && args[0].ty().without_typmod() == args[1].ty().without_typmod()
+                        && self.clauses[*ci].eq.is_some()
                     {
                         false
                     } else {
@@ -2069,9 +2267,11 @@ impl Search<'_, '_, '_> {
                 self.add_paths(ri, r1, r2, Jt::Left, &restrict);
                 self.add_paths(ri, r2, r1, Jt::Right, &restrict);
             }
+            // (A RIGHT JOIN is a LEFT one with its sides swapped to the planner: its paths
+            // that way round first, as populate_joinrel_with_paths makes them.)
             Jt::Right => {
-                self.add_paths(ri, r1, r2, Jt::Right, &restrict);
                 self.add_paths(ri, r2, r1, Jt::Left, &restrict);
+                self.add_paths(ri, r1, r2, Jt::Right, &restrict);
             }
             Jt::Full => {
                 self.add_paths(ri, r1, r2, Jt::Full, &restrict);
@@ -2541,10 +2741,18 @@ impl Search<'_, '_, '_> {
                 }
             })
             .collect();
+        // (A semi or anti join merges on columns only: its unique-ified side, which
+        // Postgres would prefer, groups by columns here.)
+        let semi_like = matches!(jt, Jt::Semi | Jt::Anti | Jt::RightSemi | Jt::RightAnti);
         let merge: Vec<(usize, bool)> = sides
             .iter()
             .copied()
-            .filter(|(c, _)| self.clauses[*c].mergeable)
+            .filter(|(c, _)| {
+                let cl = &self.clauses[*c];
+                cl.mergeable
+                    && (!semi_like
+                        || cl.eq.as_ref().is_some_and(|(a, b, _, _)| key_col(a).is_some() && key_col(b).is_some()))
+            })
             .collect();
         let hash: Vec<(usize, bool)> = sides
             .iter()
@@ -2657,7 +2865,7 @@ impl Search<'_, '_, '_> {
             for &(c, oa) in merge {
                 let (a, b, _, _) = self.clauses[c].eq.as_ref().unwrap();
                 let oe = if oa { a } else { b };
-                if key_col(oe).is_some_and(|g| self.ec[g] == k.ec) && !out.contains(&(c, oa)) {
+                if self.side_ec(oe) == Some(k.ec) && !out.contains(&(c, oa)) {
                     out.push((c, oa));
                     found = true;
                 }
@@ -2676,12 +2884,12 @@ impl Search<'_, '_, '_> {
         for &(c, oa) in clauses {
             let (a, b, _, _) = self.clauses[c].eq.as_ref().unwrap();
             let (oe, ie) = if oa { (a, b) } else { (b, a) };
-            let (Some(og), Some(ig)) = (key_col(oe), key_col(ie)) else {
+            let (Some(oec), Some(iec)) = (self.side_ec(oe), self.side_ec(ie)) else {
                 continue;
             };
-            let ok = okeys.iter().find(|k| k.ec == self.ec[og]);
+            let ok = okeys.iter().find(|k| k.ec == oec);
             let k = GKey {
-                ec: self.ec[ig],
+                ec: iec,
                 desc: ok.is_some_and(|k| k.desc),
                 nulls_first: ok.is_some_and(|k| k.nulls_first),
             };
@@ -2703,8 +2911,7 @@ impl Search<'_, '_, '_> {
         for &(c, oa) in merge {
             let (a, b, _, _) = self.clauses[c].eq.as_ref().unwrap();
             let oe = if oa { a } else { b };
-            let Some(g) = key_col(oe) else { continue };
-            let ec = self.ec[g];
+            let Some(ec) = self.side_ec(oe) else { continue };
             if ecs.iter().any(|(e, _)| *e == ec) {
                 continue;
             }
@@ -4048,8 +4255,16 @@ impl Search<'_, '_, '_> {
                     let keys = ks
                         .iter()
                         .filter_map(|k| {
-                            let g = (0..self.ec.len())
-                                .find(|&g| self.ec[g] == k.ec && pos(layout, g).is_some())?;
+                            let Some(g) = (0..self.ec.len()).find(|&g| self.ec[g] == k.ec && pos(layout, g).is_some()) else {
+                                // (Sorted by an expression of the class: a merge clause's.)
+                                let e = self.ec_expr_in(k.ec, layout)?;
+                                return Some(SortKey {
+                                    expr: e.remap_cols(&|g| pos(layout, g).unwrap_or(g)),
+                                    desc: k.desc,
+                                    nulls_first: k.nulls_first,
+                                    using: None,
+                                });
+                            };
                             let ty = self.col_type(g);
                             Some(SortKey {
                                 expr: Expr::Col(pos(layout, g)?, ty),
@@ -4156,11 +4371,21 @@ impl Search<'_, '_, '_> {
                     }
                 }
                 if *method == JoinMethod::NestLoop {
-                    cond.extend(
-                        keys.iter()
-                            .filter(|&&c| !moved_clauses.contains(&c))
-                            .map(|&c| remap(&self.clauses[c].expr, &both)),
-                    );
+                    let ks: Vec<Expr> = keys
+                        .iter()
+                        .filter(|&&c| !moved_clauses.contains(&c))
+                        .map(|&c| remap(&self.clauses[c].expr, &both))
+                        .collect();
+                    // (build_joinrel_restrictlist: an inner join's equivalence class clauses
+                    // come first; then order_qual_clauses, cheapest first, stable.)
+                    if *jt == Jt::Inner {
+                        let rest = std::mem::take(&mut cond);
+                        cond = ks;
+                        cond.extend(rest);
+                    } else {
+                        cond.extend(ks);
+                    }
+                    cond.sort_by(|a, b| costs::qual_cost(a).total_cmp(&costs::qual_cost(b)));
                 } else {
                     let (mut lk, mut rk) = (Vec::new(), Vec::new());
                     for &c in keys {
@@ -4172,12 +4397,12 @@ impl Search<'_, '_, '_> {
                         // again shows it so.)
                         key_flipped.push(a_outer == swapped);
                         if *method == JoinMethod::Merge {
-                            let ok = key_col(oe).and_then(|g| {
+                            let ok = self.side_ec(oe).and_then(|ec| {
                                 outer_sort
                                     .as_deref()
                                     .unwrap_or(&outer.keys)
                                     .iter()
-                                    .find(|k| k.ec == self.ec[g])
+                                    .find(|k| k.ec == ec)
                             });
                             merge_dirs.push(ok.map_or((false, false), |k| (k.desc, k.nulls_first)));
                         }
@@ -4889,6 +5114,27 @@ impl Planner<'_, '_> {
         sort_exprs: &[Expr],
     ) -> Option<bool> {
         let lift::Lifted { plan: mut lp, map, results } = l;
+        // (Clauses the lifting put over a scan or an inheritance tree: its quals, each
+        // member's, to be pruned with.)
+        fn sink(cat: &crate::catalog::Catalog, p: &mut Plan) {
+            match p {
+                Plan::Join { left, right, .. } => {
+                    sink(cat, Arc::make_mut(left));
+                    sink(cat, Arc::make_mut(right));
+                }
+                Plan::Filter { input, .. }
+                    if matches!(&**input, Plan::Scan(_) | Plan::Append { inh: Some(_), .. }) =>
+                {
+                    let Plan::Filter { input, pred } = std::mem::replace(p, Plan::One) else {
+                        unreachable!()
+                    };
+                    let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
+                    *p = crate::sql::binder::optimize::add_filter(cat, i, pred);
+                }
+                _ => {}
+            }
+        }
+        sink(&self.cat, &mut lp);
         let lw = crate::sql::binder::plan_width(&lp);
         let mut need = vec![false; lw];
         for (i, e) in map.iter().enumerate() {
@@ -5333,10 +5579,15 @@ impl Planner<'_, '_> {
                     // (integer_ops: int2, int4 and int8 hash and sort alike.)
                     let int = |t: &DataType| matches!(t, DataType::Int2 | DataType::Int4 | DataType::Int8);
                     let same = ta.without_typmod() == tb.without_typmod() || (int(&ta) && int(&tb));
-                    // (Merging needs the sides' orders: plain columns here.)
+                    // (Merging needs the sides' orders: plain columns here, or a column and
+                    // an expression of the other side's columns, sorted by it: a pathkey of
+                    // the column's class.)
                     (
                         same && crate::sql::binder::optimize::hashable_type(&ta),
-                        same && mergeable(&ta) && key_col(a).is_some() && key_col(b).is_some(),
+                        same && mergeable(&ta)
+                            && ((key_col(a).is_some() && key_col(b).is_some())
+                                || (key_col(a).is_some() && merge_expr(b))
+                                || (key_col(b).is_some() && merge_expr(a))),
                     )
                 }
                 None => (false, false),
@@ -5538,6 +5789,7 @@ impl Planner<'_, '_> {
                     width: 0,
                     node_type: "Seq Scan",
                     presorted: 0,
+                    disabled: 0,
                     cols: Vec::new(),
                 },
                 None => crate::sql::explain::estimate(&Arc::new(plan.clone()), self.ctx),
@@ -5648,6 +5900,9 @@ impl Planner<'_, '_> {
         if s.kind == JoinKind::Inner && !s.general && s.leaves.len() >= 3 {
             s.derive_equalities();
         }
+        if s.kind == JoinKind::Inner && !s.general {
+            s.orient_ec_clauses();
+        }
         // reduce_unique_semijoins: a semi join whose right side has at most one match
         // per row is an inner join.
         if s.kind == JoinKind::Semi && s.leaves.len() == 2 {
@@ -5674,11 +5929,20 @@ impl Planner<'_, '_> {
             }
         }
         let (best, sorted) = s.run()?;
-        // Partitionwise join, when it is cheaper.
-        if alias.iter().enumerate().all(|(i, &g)| i == g)
-            && let Some((children, pw_total, pw_rows, pw_join)) =
-                self.partitionwise(p, &s, &needed[..width.min(needed.len())])
-        {
+        // Partitionwise join, when it is cheaper. (Under a LIMIT without an order: its
+        // child joins planned for the rows it reads, the two compared for them.)
+        let lim = s.order.as_ref().filter(|o| o.keys.is_empty() && o.complete && !o.hint).and_then(|o| match o.limit {
+            Some((c, off)) if c > 0.0 && off >= 0.0 => Some((c, off)),
+            _ => None,
+        });
+        let saved_lim = self.pw_limit.replace(lim);
+        let pwj = if alias.iter().enumerate().all(|(i, &g)| i == g) {
+            self.partitionwise(p, &s, &needed[..width.min(needed.len())])
+        } else {
+            None
+        };
+        self.pw_limit.set(saved_lim);
+        if let Some((children, pw_total, pw_rows, pw_join)) = pwj {
             let pw = match &s.order {
                 Some(o) if sorted => {
                     let limit = match o.limit {
@@ -5689,7 +5953,20 @@ impl Planner<'_, '_> {
                 }
                 _ => pw_total,
             };
-            if pw < best.total || self.pw_agg_join.get() {
+            let frac = |st: f64, tot: f64, rows: f64, (c, off): (f64, f64)| {
+                let k = (c + off).min(rows.max(1.0));
+                st + (tot - st) * k / rows.max(1.0)
+            };
+            let cheaper = match lim {
+                Some(l) => {
+                    let st = children
+                        .first()
+                        .map_or(0.0, |c| crate::sql::explain::estimate(&Arc::new(c.clone()), self.ctx).startup);
+                    frac(st, pw_total, pw_rows, l) < frac(best.startup, best.total, best.rows, l)
+                }
+                None => pw < best.total,
+            };
+            if cheaper || self.pw_agg_join.get() {
                 // (One child join needs no Append: Postgres removes it.)
                 *p = if children.len() == 1 {
                     children.into_iter().next().unwrap()

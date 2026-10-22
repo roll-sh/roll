@@ -2424,6 +2424,20 @@ impl Binder<'_, '_> {
                 Expr::Or(parts)
             });
         }
+        // (transformAExprIn: values of an array type have no array type of their own to
+        // probe, get_array_type: the comparisons ORed, NOT IN's `<>` ANDed.)
+        if items.len() > 1 && items.iter().filter(|e| e.columns().is_empty()).count() > 1 {
+            let mut types = vec![l.ty()];
+            types.extend(items.iter().map(|e| e.ty()));
+            if super::unify_types(&types, "IN").is_ok_and(|t| t.is_array()) {
+                let op = if not { "<>" } else { "=" };
+                let parts = items
+                    .into_iter()
+                    .map(|it| self.binop(op, l.clone(), it, loc))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(if not { Expr::And(parts) } else { Expr::Or(parts) });
+            }
+        }
         if self.deparse {
             return self.in_list_parsed(l, items, not, loc);
         }
@@ -2434,6 +2448,17 @@ impl Binder<'_, '_> {
         if let Ok(ty) = super::unify_types(&types, "IN")
             && let Ok(res) = resolve_binop("=", &ty, &ty)
         {
+            // (Values not all constants, of a common type the operator takes only coerced
+            // (varchar's `=` is text's): the array of them coerced as a whole, as the
+            // parser leaves it (an ArrayCoerceExpr, which partition pruning can't use).)
+            if res.arg_types[1] != ty.without_typmod()
+                && matches!(ty, DataType::Varchar(_))
+                && items.len() > 1
+                && items.iter().all(|i| i.columns().is_empty())
+                && !items.iter().all(|i| matches!(i, Expr::Const(..)))
+            {
+                return self.in_list_parsed(l, items, not, loc);
+            }
             // transformAExprIn: the values take the common type first (an unknown literal
             // read as regclass, say), then the operator's.
             let left = self.coerce_implicit(l.clone(), &res.arg_types[0]);

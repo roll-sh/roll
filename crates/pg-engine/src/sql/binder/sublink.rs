@@ -623,16 +623,88 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
         .map(|e| outer_to_params(e.shift_cols(nleft as isize), &sub.params))
         .collect::<Option<_>>()?;
     let nright = width(&rhs);
+    // (A semi join's clauses are equivalence classes: one equating an outer column with a
+    // column the subquery fixes to a constant fixes the outer one too, and goes.)
+    let (left, cond) = if anti { (plan.clone(), cond) } else { semi_constants(cat, plan, &rhs, cond, nleft) };
     Some(super::optimize::join(
         cat,
         if anti { JoinKind::Anti } else { JoinKind::Semi },
-        plan.clone(),
+        left,
         rhs,
         and_all(cond),
         Vec::new(),
         nleft,
         nright,
     ))
+}
+
+/// generate_base_implied_equalities_const over a semi join: `l = r` where the right side's
+/// scan has `r = k` gives the left side `l = k`, the join clause implied by the two.
+fn semi_constants(cat: &Catalog, left: &Plan, rhs: &Plan, cond: Vec<Expr>, nleft: usize) -> (Plan, Vec<Expr>) {
+    let Plan::Scan(rs) = rhs else {
+        return (left.clone(), cond);
+    };
+    let mut fixed: Vec<(usize, Expr, Expr)> = Vec::new();
+    if let Some(f) = &rs.filter {
+        let mut parts = Vec::new();
+        conjuncts(f.clone(), &mut parts);
+        for q in parts {
+            if let Expr::Call(d, args, _) = &q
+                && d.name == "="
+                && args.len() == 2
+                && !q.is_volatile()
+                && d.coll.as_ref().is_none_or(|c| c.deterministic)
+            {
+                for (a, b) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+                    if let Expr::Col(i, _) = a
+                        && matches!(b, Expr::Const(..))
+                    {
+                        fixed.push((*i, b.clone(), q.clone()));
+                    }
+                }
+            }
+        }
+    }
+    if fixed.is_empty() {
+        return (left.clone(), cond);
+    }
+    let mut keep = Vec::new();
+    let mut push = Vec::new();
+    for c in cond {
+        let derived = match &c {
+            Expr::Call(d, args, _) if d.name == "=" && args.len() == 2 && d.coll.as_ref().is_none_or(|c| c.deterministic) => {
+                let side = |e: &Expr| match e {
+                    Expr::Col(i, t) => Some((*i, t.clone())),
+                    _ => None,
+                };
+                match (side(&args[0]), side(&args[1])) {
+                    (Some((l, lt)), Some((r, rt))) | (Some((r, rt)), Some((l, lt))) if l < nleft && r >= nleft => fixed
+                        .iter()
+                        .find(|(i, _, _)| *i == r - nleft)
+                        .filter(|_| lt.without_typmod() == rt.without_typmod())
+                        .map(|(_, k, q)| {
+                            let Expr::Call(qd, qa, qt) = q else { unreachable!() };
+                            let col = Expr::Col(l, lt.clone());
+                            if matches!(&qa[0], Expr::Col(..)) {
+                                Expr::Call(qd.clone(), vec![col, k.clone()], qt.clone())
+                            } else {
+                                Expr::Call(qd.clone(), vec![k.clone(), col], qt.clone())
+                            }
+                        }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        match derived {
+            Some(d) => push.push(d),
+            None => keep.push(c),
+        }
+    }
+    if push.is_empty() {
+        return (left.clone(), keep);
+    }
+    (super::optimize::add_filter(cat, left.clone(), Expr::And(push)), keep)
 }
 
 /// The subquery's references to this query: the expressions they stand for.

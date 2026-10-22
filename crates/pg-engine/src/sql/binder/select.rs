@@ -1015,7 +1015,7 @@ impl Binder<'_, '_> {
                         && !b.unplanned
                         && b.deps.is_none()
                         && b.refs.is_none()
-                        && own_query_level_stmt(n, &plan) =>
+                        && (own_query_level_stmt(n, &plan) || !safe_append_member(n)) =>
                 {
                     Plan::Barrier {
                         input: Arc::new(plan),
@@ -2077,7 +2077,10 @@ impl Binder<'_, '_> {
             }
             // HAVING without GROUP BY or aggregates is degenerate grouping: one group whatever
             // the input, which isn't read at all (is_degenerate_grouping).
-            if st.aggs.is_empty() && !grouped && sets.is_none() && !self.deparse {
+            // (So is GROUP BY () alone, empty grouping sets without keys: one row per set.)
+            let empty_sets = groups.is_empty() && sets.as_ref().is_some_and(|v| v.iter().all(|x| x.is_empty()));
+            let degenerate = st.aggs.is_empty() && ((!grouped && sets.is_none()) || empty_sets) && !self.deparse;
+            if degenerate {
                 plan = Plan::One;
             }
             // HAVING clauses that need no aggregation go to WHERE (subquery_planner): moved
@@ -2102,12 +2105,30 @@ impl Binder<'_, '_> {
                     plan = optimize::add_filter(&self.cat, plan, w);
                 }
             }
-            plan = Plan::Agg {
-                input: Arc::new(plan),
-                groups: groups.iter().map(|g| self.hashed_key(g)).collect(),
-                sets: sets.clone(),
-                aggs: std::mem::take(&mut st.aggs),
-            };
+            if degenerate {
+                // (create_degenerate_grouping_paths: a Result per grouping set, each gated by
+                // the HAVING clauses; no aggregation.)
+                let one = match having.take() {
+                    Some(h) => optimize::add_filter(&self.cat, Plan::One, h),
+                    None => Plan::One,
+                };
+                let n = sets.as_ref().map_or(1, |v| v.len());
+                plan = if n > 1 {
+                    Plan::Append {
+                        inputs: (0..n).map(|_| Arc::new(one.clone())).collect(),
+                        inh: None,
+                    }
+                } else {
+                    one
+                };
+            } else {
+                plan = Plan::Agg {
+                    input: Arc::new(plan),
+                    groups: groups.iter().map(|g| self.hashed_key(g)).collect(),
+                    sets: sets.clone(),
+                    aggs: std::mem::take(&mut st.aggs),
+                };
+            }
             if let Some(h) = having.take() {
                 plan = Plan::Filter {
                     input: Arc::new(plan),
@@ -7156,6 +7177,22 @@ pub(super) fn own_query_level_stmt(s: &pb::SelectStmt, plan: &Plan) -> bool {
         || s.having_clause.is_some()
         || !s.locking_clause.is_empty()
         || s.with_clause.is_some()
+}
+
+/// is_safe_append_member: a UNION ALL leaf query pulled up into the appendrel has one
+/// FROM item and no WHERE (there is no place for its quals in an appendrel); any other
+/// stays a subquery, planned apart.
+fn safe_append_member(s: &pb::SelectStmt) -> bool {
+    let op = pb::SetOperation::try_from(s.op).unwrap_or(pb::SetOperation::SetopNone);
+    if !matches!(op, pb::SetOperation::SetopNone | pb::SetOperation::Undefined) || !s.values_lists.is_empty() {
+        return true;
+    }
+    s.where_clause.is_none()
+        && s.from_clause.len() <= 1
+        && !s
+            .from_clause
+            .iter()
+            .any(|f| matches!(f.node.as_ref(), Some(pg_query::NodeEnum::JoinExpr(_))))
 }
 
 pub(super) fn grouping_sets_subquery(p: &Plan) -> bool {

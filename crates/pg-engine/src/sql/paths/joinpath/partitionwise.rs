@@ -424,6 +424,7 @@ impl Planner<'_, '_> {
         if parted.iter().any(|p| p.bounds != first.bounds) {
             return self.partitionwise_merged(p, s, needed, &parted);
         }
+        let mut wholes: Vec<Option<Plan>> = Vec::new();
         let mut children = Vec::new();
         let mut idx = Vec::new();
         for i in 0..first.bounds.len() {
@@ -478,14 +479,58 @@ impl Planner<'_, '_> {
             } else {
                 substitute(p, true, &mut plans.into_iter())?
             };
+            let lim = self.pw_limit.get().map(|l| Order {
+                keys: Vec::new(),
+                complete: true,
+                limit: Some(l),
+                width: 0,
+                hint: false,
+            });
+            // (Under a LIMIT: each child's cheapest total path too, the Append of those
+            // the other candidate.)
+            let mut whole = lim.is_some().then(|| child.clone());
             self.absorbed.replace(s.extra.clone());
             self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
-            let planned = self.plan_joins_with(&mut child, needed, None, &[]);
+            let planned = self.plan_joins_with(&mut child, needed, lim.as_ref(), &[]);
             self.pw_loop_rows.take();
             self.absorbed.take();
             planned?;
+            if let Some(w) = whole.as_mut() {
+                self.absorbed.replace(s.extra.clone());
+                self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
+                let planned = self.plan_joins_with(w, needed, None, &[]);
+                self.pw_loop_rows.take();
+                self.absorbed.take();
+                planned?;
+            }
             children.push(child);
+            wholes.push(whole);
             idx.push(i);
+        }
+        // (The Append of the fractional paths or of the cheapest total ones, whichever
+        // reads the LIMIT's rows cheaper.)
+        if let Some((c, off)) = self.pw_limit.get()
+            && wholes.iter().all(|w| w.is_some())
+            && !children.is_empty()
+        {
+            let cost = |cs: &[Plan]| {
+                let (mut st, mut tot, mut rows) = (0.0, 0.0, 0.0);
+                for (k, ch) in cs.iter().enumerate() {
+                    let e = crate::sql::explain::estimate(&Arc::new(ch.clone()), self.ctx);
+                    if k == 0 {
+                        st = e.startup;
+                    }
+                    tot += e.total;
+                    rows += e.rows;
+                }
+                tot += rows * CPU_TUPLE_COST * 0.5;
+                let k = (c + off).min(rows.max(1.0));
+                st + (tot - st) * k / rows.max(1.0)
+            };
+            let ws: Vec<Plan> = wholes.into_iter().map(|w| w.unwrap()).collect();
+            if cost(&ws) < cost(&children) {
+                children = ws;
+            }
         }
         if children.is_empty() {
             return None;
@@ -747,7 +792,14 @@ impl Planner<'_, '_> {
             };
             self.absorbed.replace(s.extra.clone());
             self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
-            let planned = self.plan_joins_with(&mut child, needed, None, &[]);
+            let lim = self.pw_limit.get().map(|l| Order {
+                keys: Vec::new(),
+                complete: true,
+                limit: Some(l),
+                width: 0,
+                hint: false,
+            });
+            let planned = self.plan_joins_with(&mut child, needed, lim.as_ref(), &[]);
             self.pw_loop_rows.take();
             self.absorbed.take();
             planned?;

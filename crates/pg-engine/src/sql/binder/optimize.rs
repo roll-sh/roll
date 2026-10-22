@@ -305,6 +305,9 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
     }
     match plan {
         Plan::Scan(mut s) => {
+            // (eval_const_expressions: a COLLATE naming the collation its column already has
+            // is no relabelling at all.)
+            let parts: Vec<Expr> = parts.into_iter().map(|p| same_collation_dropped(p, &s.table.columns)).collect();
             let mut all = Vec::new();
             if let Some(f) = s.filter.take() {
                 conjuncts(f, &mut all);
@@ -752,8 +755,10 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         // Into a plain view (or subquery) pulled up: the clauses on its plain values, a
         // volatile one too (a security barrier is a `Barrier` below); the rest above.
         Plan::Project { input, exprs }
-            if matches!(&*input, Plan::Scan(_) | Plan::SysScan { .. } | Plan::Join { .. } | Plan::Project { .. })
-                && parts.iter().any(|p| projectable(p, &exprs)) =>
+            if matches!(
+                &*input,
+                Plan::Scan(_) | Plan::SysScan { .. } | Plan::Join { .. } | Plan::Project { .. } | Plan::Append { inh: Some(_), .. }
+            ) && parts.iter().any(|p| projectable(p, &exprs)) =>
         {
             let (down, up): (Vec<Expr>, Vec<Expr>) =
                 parts.into_iter().partition(|p| projectable(p, &exprs));
@@ -1318,6 +1323,32 @@ fn projectable(p: &Expr, exprs: &[Expr]) -> bool {
     })
 }
 
+/// `col COLLATE c` where the column's collation is `c` already: the column
+/// (applyRelabelType keeps no RelabelType that changes nothing).
+fn same_collation_dropped(e: Expr, cols: &[crate::catalog::Column]) -> Expr {
+    let mut any = false;
+    e.walk(&mut |x| any |= matches!(x, Expr::Collate(..)));
+    if !any {
+        return e;
+    }
+    e.transform(&mut |x| {
+        Ok(match x {
+            Expr::Collate(inner, c, l) => match &*inner {
+                Expr::Col(i, _)
+                    if cols.get(*i).is_some_and(|col| {
+                        col.collation.as_deref().or(col.ty.default_collation()) == Some(c.as_str())
+                    }) =>
+                {
+                    *inner
+                }
+                _ => Expr::Collate(inner, c, l),
+            },
+            x => x,
+        })
+    })
+    .unwrap()
+}
+
 /// A filter over an inheritance member's rows: a child's scan projected to the parent's
 /// columns takes it whatever it is (volatile, or reading a subquery), as an appendrel
 /// child's restrictions are the parent's translated (no projection in between).
@@ -1399,9 +1430,16 @@ fn ec_constants(
         {
             return None;
         }
+        // (Or an expression of them: an equivalence class member too, `COALESCE(b.x, a.x)`
+        // equated with a constant above an outer join, reconsider_outer_join_clause.)
         let colish = |x: &Expr| match x {
             Expr::Col(..) => true,
             Expr::Cast(y, ..) | Expr::Relabel(y, _) => matches!(&**y, Expr::Col(..)),
+            Expr::Coalesce(..) => {
+                let mut plain = !x.columns().is_empty() && !x.is_volatile();
+                x.walk(&mut |y| plain &= !matches!(y, Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+                plain
+            }
             _ => false,
         };
         if colish(&args[0]) && pseudo_constant(&args[1]) {

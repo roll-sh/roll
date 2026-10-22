@@ -173,6 +173,24 @@ fn absorb_in(c: &mut Classes, pred: &Expr, coll: &dyn Fn(usize) -> Option<String
     }
 }
 
+/// A partitionwise join's child join: a join (through projections and filters) over
+/// partitions.
+fn child_join(p: &Plan) -> bool {
+    fn has_partition(p: &Plan) -> bool {
+        match p {
+            Plan::Scan(s) => s.part.is_some(),
+            Plan::Join { left, right, .. } => has_partition(left) || has_partition(right),
+            Plan::Project { input, .. } | Plan::Filter { input, .. } | Plan::Sort { input, .. } => has_partition(input),
+            _ => false,
+        }
+    }
+    match p {
+        Plan::Project { input, .. } | Plan::Filter { input, .. } => child_join(input),
+        Plan::Join { .. } => has_partition(p),
+        _ => false,
+    }
+}
+
 /// Per output column of an inheritance member (a scan, through projections): the
 /// constant its filter equates it with.
 fn member_consts(p: &Plan) -> Vec<Option<Expr>> {
@@ -286,6 +304,27 @@ fn classes(p: &Plan) -> Classes {
             for (k, f) in fixed.into_iter().enumerate() {
                 if f.is_some() && k < w {
                     c.set_const(k);
+                }
+            }
+            c
+        }
+        // (A partitionwise join's child joins: the columns every one equates, the parent
+        // join's classes. Not a UNION ALL's arms: their classes aren't the query's.)
+        Plan::Append { inputs, inh: None } if !inputs.is_empty() && inputs.iter().all(|i| child_join(i)) => {
+            let mut c = Classes::new(w);
+            let mut members: Vec<Classes> = inputs
+                .iter()
+                .filter(|i| !matches!(&***i, Plan::Empty { .. }))
+                .map(|i| classes(i))
+                .collect();
+            if members.is_empty() {
+                return c;
+            }
+            for i in 0..w {
+                for j in 0..i {
+                    if members.iter_mut().all(|m| i < m.parent.len() && j < m.parent.len() && m.find(i) == m.find(j)) {
+                        c.union(i, j);
+                    }
                 }
             }
             c

@@ -1420,8 +1420,9 @@ fn tableoid_first(n: &mut ExNode) {
 /// The inheritance trees a plan reads whose parent takes no name of its own (an Append of
 /// one member, dropped): each a range table entry all the same.
 fn inh_parents(p: &Plan) -> usize {
+    // (Its members are range table entries too, the ones pruning removes as well.)
     let own = match p {
-        Plan::Append { inh: Some(_), inputs } if inputs.len() == 1 => 1,
+        Plan::Append { inh: Some(_), inputs } => inputs.len(),
         _ => 0,
     };
     own + plan_inputs(p).into_iter().map(|c| inh_parents(c)).sum::<usize>()
@@ -1485,6 +1486,8 @@ fn assign_refnames_skip(
         }
     }
     let shown = shown_subqueries(root, &needed_masks_of(root));
+    let mut union_flat: Vec<usize> = Vec::new();
+    union_inh_appends(root, &mut union_flat);
     let mut queue: Vec<&Plan> = vec![root];
     let mut qi = 0;
     // (A partition grouped partitionwise that is itself partitioned: its Append, though
@@ -1500,8 +1503,11 @@ fn assign_refnames_skip(
         // them in the plan, the subplans after the whole plan.)
         let mut later_sub: Vec<&Plan> = Vec::new();
         while let Some(p) = stack.pop() {
+            // (A UNION ALL's arm flattened into its Append: no level of it named, its
+            // sub-partitioned members' neither.)
             if let Plan::Append { inh: Some(n), inputs } = p
                 && skip.contains(&addr(p))
+                && !union_flat.contains(&addr(p))
             {
                 let members: Vec<&Arc<Plan>> = inputs
                     .iter()
@@ -1771,8 +1777,9 @@ fn assign_refnames_skip(
                     }
                 }
             }
-            if let (Some(ctx), Plan::Append { inputs: all, inh: Some(_) }) = (ctx, p)
+            if let (Some(ctx), Plan::Append { inputs: all, inh }) = (ctx, p)
                 && !matches!(all.first().map(|i| &**i), Some(Plan::Update(_) | Plan::Delete(_)))
+                && (inh.is_some() || !all.iter().any(|i| i.writes()))
             {
                 let kept = crate::exec::nodes::runtime_pruned(
                     all,
@@ -4147,7 +4154,11 @@ impl Builder<'_, '_> {
                             return format!("{} COLLATE {}", self.pick(name, Cx::Upper), quote_ident(coll)) + &sort_suffix(k);
                         }
                         let t = self.show(&k.expr, &c.exported, Cx::Upper);
-                        let t = if member_sort && !matches!(k.expr, Expr::Col(..)) && c.node.is_scan() {
+                        // (Or over a join, sorting it for a merge join on an expression the
+                        // join's target list computes: a reference to it.)
+                        let t = if !matches!(k.expr, Expr::Col(..) | Expr::Const(..))
+                            && ((member_sort && c.node.is_scan()) || !member_sort)
+                        {
                             format!("({t})")
                         } else {
                             t
@@ -4217,6 +4228,10 @@ impl Builder<'_, '_> {
                     let logn = n.log2();
                     let mut ma = ExNode::new("Merge Append");
                     ma.details.push(Detail::List("Sort Key", list.clone()));
+                    // (The members run-time pruning removed as the executor starts.)
+                    ma.details.extend(
+                        c.node.details.iter().filter(|d| matches!(d, Detail::Text("Subplans Removed", _))).cloned(),
+                    );
                     ma.rows = kids.iter().map(|k| k.rows).sum();
                     ma.width = c.node.width;
                     ma.cols = c.node.cols.clone();
@@ -4301,6 +4316,20 @@ impl Builder<'_, '_> {
                 n.order = list.clone();
                 if self.o.verbose && matches!(&**input, Plan::Scan(_)) && c.node.is_scan() {
                     n.output = c.node.output.clone();
+                }
+                // (A key the Sort's input computes for it, a merge join's expression: in that
+                // input's target list, the Sort's referring to it.)
+                if self.o.verbose && !member_sort {
+                    for k in keys.iter().filter(|k| !matches!(k.expr, Expr::Col(..) | Expr::Const(..))) {
+                        let t = self.show(&k.expr, &c.exported, Cx::Upper);
+                        if !c.node.output.contains(&t) {
+                            c.node.output.push(t.clone());
+                        }
+                        let r = format!("({t})");
+                        if !n.output.contains(&r) {
+                            n.output.push(r);
+                        }
+                    }
                 }
                 n.children.push(c.node.child("Outer"));
                 // Or each worker sorts its share, merged by a Gather Merge.
@@ -5067,8 +5096,9 @@ impl Builder<'_, '_> {
                     }
                     INH_SCANS.with(|m| m.borrow_mut().extend(direct.iter().copied()));
                 }
-                // Partitions pruned when the executor starts aren't shown.
-                let kept = if inh.is_some() {
+                // Partitions pruned when the executor starts aren't shown (a UNION ALL's
+                // too).
+                let kept = if inh.is_some() || !inputs.iter().any(|i| i.writes()) {
                     crate::exec::nodes::runtime_pruned(
                         inputs,
                         crate::sql::binder::partition::Known::Start,
@@ -5080,7 +5110,8 @@ impl Builder<'_, '_> {
                 let arms: Vec<&Arc<Plan>> = kept.iter().collect();
                 // (Every member pruned as the executor starts: the plan is still the one
                 // made for them all, its parallel form too, without members to show.)
-                let mut b = if arms.is_empty() && inputs.len() > 1 && inh.is_some() {
+                let all_pruned = arms.is_empty() && inputs.len() > 1 && inh.is_some();
+                let mut b = if all_pruned {
                     let all: Vec<&Arc<Plan>> = inputs.iter().collect();
                     let mut b = self.append_of(&all, true);
                     b.node.children.clear();
@@ -5089,7 +5120,17 @@ impl Builder<'_, '_> {
                     }
                     b
                 } else {
-                    self.append_of(&arms, inh.is_some())
+                    let mut b = self.append_of(&arms, inh.is_some());
+                    // (The plan was made, and costed, for every member: pruning removes
+                    // them only as the executor starts.)
+                    if inh.is_some() && arms.len() < inputs.len() {
+                        for i in inputs.iter().filter(|i| !kept.iter().any(|k| Arc::ptr_eq(k, i))) {
+                            let e = estimate(i, self.ctx);
+                            b.node.rows += e.rows;
+                            b.node.total_cost += e.total + e.rows * costs::CPU_TUPLE_COST * 0.5;
+                        }
+                    }
+                    b
                 };
                 INH_SCANS.with(|m| {
                     let mut m = m.borrow_mut();
@@ -5149,7 +5190,10 @@ impl Builder<'_, '_> {
                         .map(|m| format!("{}.", quote_ident(m)))
                         .filter(|m| *m != format!("{parent}."));
                     for n in b.exported.iter_mut() {
-                        if n.full != n.plain && n.full.ends_with(&format!(".{}", n.plain)) {
+                        if n.full != n.plain && n.full.ends_with(&format!(".{}", n.plain))
+                            // (Every member pruned: none named, the columns still the parent's.)
+                            || all_pruned && n.full == n.plain
+                        {
                             n.full = format!("{parent}.{}", n.plain);
                         } else if let Some(m) = &member
                             && n.full != n.plain
@@ -5159,10 +5203,10 @@ impl Builder<'_, '_> {
                     }
                 }
                 if kept.len() < inputs.len() {
-                    let d = Detail::Text("Subplans Removed", (inputs.len() - kept.len()).to_string());
-                    b.node.details.insert(0, d.clone());
+                    let k = inputs.len() - kept.len();
+                    add_removed(&mut b.node.details, k);
                     if let Some(pt) = &mut b.node.partial {
-                        pt.details.insert(0, d);
+                        add_removed(&mut pt.details, k);
                     }
                 }
                 // (Its members' rows locked: one LockRows above the Append.)
@@ -5792,12 +5836,36 @@ impl Builder<'_, '_> {
                     let mut n = self.modify("Merge", t, &app, &c.node);
                     let mut targets = Vec::new();
                     // (A partitioned parent holds no rows: not a target. Members pruned away
-                    // aren't either.)
+                    // aren't either, as the executor starts too.)
                     let own = (t.partkey.is_none()).then_some(t);
+                    let kept: Option<Vec<Arc<Plan>>> = match target_append(&mp.source) {
+                        Some(Plan::Append { inputs, .. }) => Some(crate::exec::nodes::runtime_pruned(
+                            inputs,
+                            crate::sql::binder::partition::Known::Start,
+                            self.ctx,
+                        )),
+                        _ => None,
+                    };
+                    let live = |oid: u32| match (&kept, target_scan(&mp.source, oid)) {
+                        (_, None) => false,
+                        (None, Some(_)) => true,
+                        (Some(k), Some(s)) => k.iter().any(|m| {
+                            let mut x: &Plan = m;
+                            loop {
+                                if std::ptr::eq(x, s) {
+                                    return true;
+                                }
+                                match x {
+                                    Plan::Project { input, .. } | Plan::Filter { input, .. } => x = input,
+                                    _ => return false,
+                                }
+                            }
+                        }),
+                    };
                     for m in own
                         .into_iter()
                         .chain(mp.members.iter().map(|m| &m.rules.table))
-                        .filter(|m| target_scan(&mp.source, m.oid).is_some())
+                        .filter(|m| live(m.oid))
                     {
                         let r = target_scan(&mp.source, m.oid)
                             .map(|s| self.refname(s))
@@ -6716,7 +6784,28 @@ impl Builder<'_, '_> {
             names.get_or_insert(c.exported);
             // (A UNION ALL arm's own Append is flattened into this one:
             // accumulate_append_subpath.)
-            if !inh && c.node.node_type == "Append" && c.node.partial.is_none() {
+            // (Not a leaf query planned apart, a subquery: its Append is a member.)
+            let apart = {
+                let mut x = &***a;
+                while let Plan::Project { input, .. } = x {
+                    x = input;
+                }
+                matches!(x, Plan::Barrier { secure: false, .. })
+            };
+            if !inh && !apart && c.node.node_type == "Append" && c.node.partial.is_none() {
+                // (Its members pruned as the executor starts count as this one's.)
+                let removed: usize = c
+                    .node
+                    .details
+                    .iter()
+                    .filter_map(|d| match d {
+                        Detail::Text("Subplans Removed", k) => k.parse::<usize>().ok(),
+                        _ => None,
+                    })
+                    .sum();
+                if removed > 0 {
+                    add_removed(&mut n.details, removed);
+                }
                 n.total_cost += c.node.children.iter().map(|k| k.total_cost).sum::<f64>();
                 n.children.extend(c.node.children.into_iter().map(|k| k.child("Member")));
                 continue;
@@ -8384,8 +8473,19 @@ impl Builder<'_, '_> {
             Some(ss) => (0..ss.len()).filter(|&i| ss[i].iter().any(|k| unsortable.contains(k))).collect(),
             None => Vec::new(),
         };
+        // (Input sorted for the first rollup already, its keys all fixed by equalities with
+        // constants (the group pathkeys redundant): consider_groupingsets_paths is offered
+        // sorted input, and tries only the sorted and the mixed plans.)
+        let first_fixed = sets.is_some_and(|sets| {
+            let fixed = super::paths::constant_columns(input);
+            crate::exec::agg::rollup_chains(sets).first().is_some_and(|(_, cols)| {
+                !cols.is_empty()
+                    && cols.iter().all(|i| matches!(groups.get(*i), Some(Expr::Col(j, _)) if fixed.get(*j).copied().unwrap_or(false)))
+            })
+        });
         let sorted_cheaper = match sets {
             Some(_) if must_sort || !must_hash.is_empty() => true,
+            Some(_) if !ordered && !no_hash && first_fixed => true,
             Some(sets) if !ordered && !no_hash => self.sets_sorted_cheaper(&c.node, groups, sets, aggs),
             _ => false,
         };
@@ -10128,9 +10228,18 @@ impl Builder<'_, '_> {
                 }
                 k2 => relabel(k, this.show(k2, names, Cx::Upper), cols),
             };
+            // (A merge key computed by the Sort's input: a reference to that value.)
+            let sorted_expr = |k: &Expr, child: &ExNode| {
+                method == JoinMethod::Merge
+                    && child.node_type == "Sort"
+                    && !matches!(strip_widening(k), Expr::Col(..) | Expr::Const(..))
+                    && !matches!(strip_widening(k), Expr::Cast(x, ..) if matches!(**x, Expr::Col(..)))
+            };
             let a = side(self, oa, outer_names, outer_cols);
+            let a = if sorted_expr(oa, &l.node) { format!("({a})") } else { a };
             let before = self.pending.len();
             let b = side(self, ib, inner_names, inner_cols);
+            let b = if sorted_expr(ib, &r.node) { format!("({b})") } else { b };
             // (The inner keys are the Hash's to compute: their SubPlans are its.)
             if method == JoinMethod::Hash && self.pending.len() > before {
                 hash_subplans.extend(self.pending.drain(before..));
@@ -10207,7 +10316,9 @@ impl Builder<'_, '_> {
             join_filter.push(self.show(&p, &all, Cx::Upper));
         }
         if let Some(t) = and_text(join_filter) {
-            n.details.push(Detail::Text("Join Filter", t));
+            // (Under ANALYZE, the pairs a nested loop's filter rejected.)
+            let removed = (method == JoinMethod::NestLoop).then_some(Removed::Scan(at));
+            n.add_qual("Join Filter", "Rows Removed by Join Filter", t, removed);
         }
         if material {
             let m = joins::material(&input(&r.node), &g);
@@ -10894,6 +11005,17 @@ fn ordered_append(order: &[crate::sql::paths::PartOrder], slots: &mut [Option<Ex
     a
 }
 
+/// `k` more members pruned as the executor starts, on an Append's details (first).
+fn add_removed(details: &mut Vec<Detail>, k: usize) {
+    if let Some(Detail::Text("Subplans Removed", n)) =
+        details.iter_mut().find(|d| matches!(d, Detail::Text("Subplans Removed", _)))
+    {
+        *n = (n.parse::<usize>().unwrap_or(0) + k).to_string();
+        return;
+    }
+    details.insert(0, Detail::Text("Subplans Removed", k.to_string()));
+}
+
 /// A Result over `n` returning `output` (None: `n` as it is).
 fn result_over(n: ExNode, output: Option<Vec<String>>) -> ExNode {
     let Some(output) = output else { return n };
@@ -11494,6 +11616,9 @@ struct Render<'r> {
     /// Inside a nested loop's inner side the executor ran once for all the outer rows:
     /// the scans Postgres makes of it.
     rescans: u64,
+    /// A nested loop's inner Materialize about to be shown: the outer rows, each a rescan
+    /// of it (its input read once).
+    mat_loops: Option<u64>,
     /// The hash join settings (a Hash's batches).
     jg: super::joins::JoinGucs,
     /// track_io_timing: buffer usage comes with its I/O times.
@@ -11512,6 +11637,33 @@ impl Render<'_> {
         (s.loops > 0).then_some(s)
     }
 
+    /// The node's own actual rows and loops: an inner Materialize is rescanned for each
+    /// outer row (its input, sharing its counters, read once).
+    fn header_stats(&mut self, n: &ExNode) -> Option<NodeStats> {
+        let mat = if n.node_type == "Materialize" { self.mat_loops.take() } else { None };
+        // (A sub-partitioned table's Append or Merge Append among an ordered Append's
+        // members, which the executor runs as its members: what they did.)
+        if n.key.is_none() && matches!(n.node_type, "Append" | "Merge Append") {
+            let kids: Vec<NodeStats> = n.children.iter().filter_map(|c| self.stats(c.key)).collect();
+            let loops = kids.iter().map(|k| k.loops).max()?;
+            return Some(NodeStats {
+                loops,
+                rows: kids.iter().map(|k| k.rows).sum(),
+                ..Default::default()
+            });
+        }
+        let s = self.stats(n.key)?;
+        match mat {
+            Some(0) => None,
+            Some(r) if r > s.loops => Some(NodeStats {
+                rows: s.rows / s.loops.max(1) * r,
+                loops: r,
+                ..s
+            }),
+            _ => Some(s),
+        }
+    }
+
     /// Render a node's children, the inner side of a nested loop the executor read once
     /// as the outer rows' many scans of it.
     fn children_of(&mut self, n: &ExNode, f: &mut dyn FnMut(&mut Self, &ExNode)) {
@@ -11522,7 +11674,12 @@ impl Render<'_> {
                 let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
                 self.rescans = saved * outer_rows;
             }
+            if n.node_type == "Nested Loop" && i == n.initplans.len() + 1 && c.node_type == "Materialize" {
+                let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
+                self.mat_loops = Some(outer_rows);
+            }
             f(self, c);
+            self.mat_loops = None;
             self.rescans = saved;
         }
     }
@@ -11592,7 +11749,7 @@ impl Render<'_> {
             );
         }
         if self.o.analyze {
-            match self.stats(n.key) {
+            match self.header_stats(n) {
                 Some(s) => {
                     let loops = s.loops as f64;
                     let rows = s.rows as f64 / loops;
@@ -11997,7 +12154,7 @@ impl Render<'_> {
             self.w.prop("Plan Width", &n.width.to_string(), true);
         }
         if self.o.analyze {
-            let s = self.stats(n.key).unwrap_or_default();
+            let s = self.header_stats(n).unwrap_or_default();
             let loops = s.loops.max(1) as f64;
             if self.o.timing {
                 self.w.prop(
@@ -12052,6 +12209,8 @@ pub struct PlanEstimate {
     pub presorted: usize,
     /// Per output column: its width, the base column it is, a known distinct count.
     pub cols: Vec<(u32, Option<costs::VarRef>, Option<f64>)>,
+    /// Its disabled nodes (add_path compares them before costs).
+    pub disabled: usize,
 }
 
 /// cost_subplan for the sub-selects in `exprs`: (startup, per evaluation). A hashed one
@@ -12923,6 +13082,7 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         width: n.width,
         node_type: n.node_type,
         presorted,
+        disabled: parallel::disabled_nodes(&n),
         cols,
     }
 }
@@ -13248,6 +13408,7 @@ pub fn explain(
         w: Writer::new(o.format),
         procs: 1,
         rescans: 1,
+        mat_loops: None,
         leader: crate::sql::paths::parallel::ParCfg::read(ctx).leader,
         jg: super::joins::JoinGucs::read(ctx),
         io_timing: ctx.sess.settings.borrow().get_raw("track_io_timing").is_some_and(|v| v == "on" || v == "true"),

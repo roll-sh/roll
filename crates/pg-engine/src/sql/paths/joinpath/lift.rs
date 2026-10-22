@@ -34,6 +34,8 @@ fn nonstrict(e: &Expr) -> bool {
 fn movable(e: &Expr) -> bool {
     let mut ok = !e.is_volatile();
     e.walk(&mut |x| match x {
+        // (A call of a function that isn't volatile is a function call: it moves.)
+        Expr::Subquery(s) if s.call.is_some() && matches!(s.func, Some('i' | 's')) => {}
         Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Grouping(_) | Expr::Srf(..) => {
             ok = false
         }
@@ -441,6 +443,38 @@ fn lift(
                 };
                 return (plan, map, nul);
             }
+            // (Its equalities with the empty relation's values, hash keys of the join:
+            // plain clauses again, the values being constants of the other side.)
+            let (hash2, cond2) = match hash2 {
+                Some((lk, rk))
+                    if (matches!(l2, Plan::One) || matches!(r2, Plan::One))
+                        && *kind == JoinKind::Inner
+                        && wk == JoinKind::Inner
+                        && params2.is_empty() =>
+                {
+                    let mut eqs = Vec::new();
+                    for (i, (a, b)) in lk.iter().zip(&rk).enumerate() {
+                        let (a, bad, coll) = crate::sql::binder::hash_key_operand(a);
+                        let (b, _, _) = crate::sql::binder::hash_key_operand(b);
+                        let (a, b) = if meta.key_flipped.get(i) == Some(&true) { (b, a) } else { (a, b) };
+                        if let Ok(r) = crate::sql::func::resolve_binop("=", &a.ty(), &b.ty()) {
+                            let e = crate::sql::binder::eq_under(Expr::Call(r.def, vec![a, b], DataType::Bool), coll);
+                            eqs.push(if bad { crate::sql::binder::indeterminate_eq(e) } else { e });
+                        }
+                    }
+                    if eqs.len() == lk.len() {
+                        let mut all = Vec::new();
+                        if let Some(c) = cond2 {
+                            conjuncts(c, &mut all);
+                        }
+                        all.extend(eqs);
+                        (None, and_all(all))
+                    } else {
+                        (Some((lk, rk)), cond2)
+                    }
+                }
+                h => (h, cond2),
+            };
             // remove_useless_result_rtes: an inner join with an empty relation (a pulled
             // up one-row VALUES) is its other side, the join's clauses checked there.
             if matches!(l2, Plan::One) && *kind == JoinKind::Inner && wk == JoinKind::Inner && hash2.is_none() && params2.is_empty() {
@@ -465,6 +499,14 @@ fn lift(
                 };
                 return (plan, map, nul);
             }
+            // (An equivalence class with a value the lifting put in: `l = r` over an inner
+            // join whose side has `r = k` gives the other side `l = k`, the join clause
+            // implied by the two, the class's clauses each member's.)
+            let (l2, r2, hash2, meta2) = if *kind == JoinKind::Inner && wk == JoinKind::Inner && params2.is_empty() {
+                ec_lifted_constants(l2, r2, hash2, meta2)
+            } else {
+                (l2, r2, hash2, meta2)
+            };
             (
                 Plan::Join {
                     kind: *kind,
@@ -1075,4 +1117,117 @@ pub(super) fn lift_group(p: &Plan) -> Option<Lifted> {
         })
         .collect();
     Some(Lifted { plan, map, results: cx.results })
+}
+
+/// The `col = k` clauses (k a pseudo-constant a lifting put in: a value of no column) at the
+/// top of a join side: the column and the value.
+fn lifted_constants(p: &Plan) -> Vec<(usize, Expr)> {
+    let pred = match p {
+        Plan::Filter { input, pred } if matches!(&**input, Plan::Scan(_)) => Some(pred),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    let Some(pred) = pred else { return out };
+    let mut parts = Vec::new();
+    conjuncts(pred.clone(), &mut parts);
+    for q in parts {
+        let Expr::Call(d, args, _) = &q else { continue };
+        if d.name != "=" || args.len() != 2 || d.coll.as_ref().is_some_and(|c| !c.deterministic) {
+            continue;
+        }
+        for (a, b) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+            if let Expr::Col(i, _) = a
+                && b.columns().is_empty()
+                && !matches!(b, Expr::Const(..))
+                && movable(b)
+                && crate::sql::binder::optimize::pseudo_constant(b)
+            {
+                out.push((*i, b.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// `lifted_constants` across an inner join's hash keys (generate_base_implied_equalities_const
+/// over a class the pulled-up value is a member of): each side gets `member = value`, the
+/// written `value = member` turned round as the class generates it, and the key goes.
+fn ec_lifted_constants(
+    l: Plan,
+    r: Plan,
+    hash: Option<(Vec<Expr>, Vec<Expr>)>,
+    mut meta: crate::sql::plan::JoinMeta,
+) -> (Plan, Plan, Option<(Vec<Expr>, Vec<Expr>)>, crate::sql::plan::JoinMeta) {
+    let Some((lk, rk)) = hash else { return (l, r, None, meta) };
+    let (lc, rc) = (lifted_constants(&l), lifted_constants(&r));
+    if lc.is_empty() && rc.is_empty() {
+        return (l, r, Some((lk, rk)), meta);
+    }
+    let eq_of = |a: &Expr, k: &Expr| -> Option<Expr> {
+        let res = crate::sql::func::resolve_binop("=", &a.ty(), &k.ty()).ok()?;
+        Some(Expr::Call(res.def, vec![a.clone(), k.clone()], DataType::Bool))
+    };
+    let (mut lpush, mut rpush) = (Vec::new(), Vec::new());
+    let (mut lk2, mut rk2) = (Vec::new(), Vec::new());
+    let (mut hs, mut kf) = (Vec::new(), Vec::new());
+    for (i, (a, b)) in lk.iter().zip(&rk).enumerate() {
+        let k = match (a, b) {
+            (Expr::Col(x, _), Expr::Col(y, _)) => rc
+                .iter()
+                .find(|(c, _)| c == y)
+                .or_else(|| lc.iter().find(|(c, _)| c == x))
+                .map(|(_, k)| k.clone()),
+            _ => None,
+        };
+        match k.and_then(|k| Some((eq_of(a, &k)?, eq_of(b, &k)?))) {
+            Some((le, re)) => {
+                lpush.push(le);
+                rpush.push(re);
+            }
+            None => {
+                lk2.push(a.clone());
+                rk2.push(b.clone());
+                hs.push(meta.hash_swapped.get(i).copied().unwrap_or(false));
+                kf.push(meta.key_flipped.get(i).copied().unwrap_or(false));
+            }
+        }
+    }
+    if lpush.is_empty() {
+        return (l, r, Some((lk, rk)), meta);
+    }
+    // (A side's own `value = member` is the class's `member = value` now.)
+    let regen = |p: Plan, push: Vec<Expr>| -> Plan {
+        let (input, pred) = match p {
+            Plan::Filter { input, pred } => (input, Some(pred)),
+            p => (Arc::new(p), None),
+        };
+        let mut parts = Vec::new();
+        if let Some(pr) = pred {
+            conjuncts(pr, &mut parts);
+        }
+        let mut out: Vec<Expr> = Vec::new();
+        for q in parts {
+            let same = push.iter().any(|e| match (e, &q) {
+                (Expr::Call(_, ea, _), Expr::Call(d, qa, _)) => {
+                    d.name == "=" && qa.len() == 2 && ea[0].same_as(&qa[1]) && ea[1].same_as(&qa[0])
+                }
+                _ => false,
+            });
+            if !same {
+                out.push(q);
+            }
+        }
+        for e in push {
+            if !out.iter().any(|q| q.same_as(&e)) {
+                out.push(e);
+            }
+        }
+        Plan::Filter { input, pred: Expr::And(out) }
+    };
+    let l = regen(l, lpush);
+    let r = regen(r, rpush);
+    meta.hash_swapped = hs;
+    meta.key_flipped = kf;
+    let hash = (!lk2.is_empty()).then_some((lk2, rk2));
+    (l, r, hash, meta)
 }

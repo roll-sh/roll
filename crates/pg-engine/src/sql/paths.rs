@@ -1761,6 +1761,9 @@ struct Planner<'c, 'a> {
     /// its parameterized paths' loop counts come from (a child relation's are made
     /// parameterized by the parent relations, then reparameterized by child).
     pw_loop_rows: std::cell::RefCell<Vec<f64>>,
+    /// Planning a partitionwise join's child joins under a LIMIT (no ORDER BY): its count
+    /// and offset, each child's cheapest path for that fraction (get_cheapest_fractional_path).
+    pw_limit: std::cell::Cell<Option<(f64, f64)>>,
 }
 
 impl<'c, 'a> Planner<'c, 'a> {
@@ -1781,6 +1784,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             lifting: Default::default(),
             lifted: Default::default(),
             pw_loop_rows: Default::default(),
+            pw_limit: Default::default(),
         }
     }
 
@@ -4812,15 +4816,16 @@ impl Planner<'_, '_> {
             return false;
         };
         let is_setop = |x: &Plan| matches!(x, Plan::SetOp { .. } | Plan::Append { inh: None, .. });
-        if !is_setop(input) || pred.is_volatile() {
+        if !is_setop(input) || expr_volatile_deep(pred) {
             return false;
         }
+        // (An uncorrelated sub-select is an InitPlan's parameter and a statement's parameter
+        // a value: set_append_rel_size gives every child the clauses as they are.)
         let mut unsafe_pred = false;
         pred.walk(&mut |x| {
-            unsafe_pred |= matches!(
-                x,
-                Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..) | Expr::Param(..)
-            ) || matches!(x, Expr::Outer(..));
+            unsafe_pred |= matches!(x, Expr::Subquery(s) if !s.params.is_empty())
+                || matches!(x, Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..))
+                || matches!(x, Expr::Outer(..));
         });
         if unsafe_pred {
             return false;
@@ -4943,6 +4948,14 @@ impl Planner<'_, '_> {
                     1 if drop => Arc::try_unwrap(out.pop().unwrap()).unwrap_or_else(|a| (*a).clone()),
                     _ => Plan::Append { inputs: out, inh: None },
                 }))
+            }
+            // pull_up_simple_values: a one-row VALUES arm is its expressions over an empty
+            // row (a Result), the clauses over them its gating quals.
+            Plan::Values { .. } | Plan::Project { .. }
+                if values_row(p).is_some_and(|r| r.iter().all(|e| e.columns().is_empty() && !e.is_volatile())) =>
+            {
+                let exprs = values_row(p).unwrap();
+                self.push_qual_setop(&Arc::new(Plan::Project { input: Arc::new(Plan::One), exprs }), pred, cols, drop)
             }
             arm => {
                 let (exprs, below): (Option<&Vec<Expr>>, &Plan) = match arm {
@@ -5700,9 +5713,9 @@ impl Planner<'_, '_> {
         }
         // One table: its scan, or an inheritance tree's Append of its members' scans.
         let ok_input = match &**input {
+            // (A partition named directly is a table of its own.)
             Plan::Scan(s) => {
-                s.part.is_none()
-                    && s.sample.is_none()
+                s.sample.is_none()
                     && s.mark.is_none()
                     && s.current_of.is_none()
                     && !s.with_key
@@ -5836,13 +5849,12 @@ impl Planner<'_, '_> {
             seen.push((name, arg));
             cands.push((Arc::new(lim), a.ty.clone()));
         }
-        let agg_cost = crate::sql::explain::estimate(&Arc::new(p.clone()), self.ctx).total;
-        let cost: f64 = cands
-            .iter()
-            .map(|c| crate::sql::explain::estimate(&c.0, self.ctx).total)
-            .sum::<f64>()
-            + CPU_TUPLE_COST;
-        if cost >= agg_cost {
+        // (Disabled nodes first: a disabled sequential scan loses to the index paths.)
+        let agg = crate::sql::explain::estimate(&Arc::new(p.clone()), self.ctx);
+        let ests: Vec<_> = cands.iter().map(|c| crate::sql::explain::estimate(&c.0, self.ctx)).collect();
+        let cost: f64 = ests.iter().map(|e| e.total).sum::<f64>() + CPU_TUPLE_COST;
+        let disabled: usize = ests.iter().map(|e| e.disabled).sum();
+        if disabled > agg.disabled || (disabled == agg.disabled && cost >= agg.total) {
             return;
         }
         let subs: Vec<Expr> = cands
@@ -5948,5 +5960,32 @@ fn byte_order_op(def: &FuncDef) -> bool {
     match &def.coll {
         None => true,
         Some(c) => c.deterministic && (c.bytewise() || def.name == "="),
+    }
+}
+
+/// The one row of a one-row VALUES list (through a projection of it), as the arm's output
+/// expressions.
+fn values_row(p: &Plan) -> Option<Vec<Expr>> {
+    match p {
+        Plan::Values { rows, .. } if rows.len() == 1 => Some(rows[0].clone()),
+        Plan::Project { input, exprs } => {
+            let row = match &**input {
+                Plan::Values { rows, .. } if rows.len() == 1 => &rows[0],
+                _ => return None,
+            };
+            exprs
+                .iter()
+                .map(|e| {
+                    e.clone().transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(i, t) => row.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                            x => x,
+                        })
+                    })
+                })
+                .collect::<crate::error::Result<Vec<_>>>()
+                .ok()
+        }
+        _ => None,
     }
 }

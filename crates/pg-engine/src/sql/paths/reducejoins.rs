@@ -59,6 +59,42 @@ fn nonnull_cols(e: &Expr, top: bool) -> Cols {
         Expr::InList(x, items, _) if !items.is_empty() && items.iter().all(|(_, d)| d.strict) => {
             nonnull_cols(x, false)
         }
+        // A SubPlan's test expression (the sub-link's left side compared with its columns):
+        // ANY at the top level, a row comparison anywhere, are as strict as it is.
+        Expr::Subquery(sq)
+            if sq.test_op.is_none()
+                && sq.left.len() == sq.ops.len()
+                && ((top && sq.kind == crate::sql::expr::SubqueryKind::Any)
+                    || sq.kind == crate::sql::expr::SubqueryKind::RowCompare) =>
+        {
+            let per: Vec<Cols> = sq
+                .left
+                .iter()
+                .zip(&sq.ops)
+                .map(|(l, op)| if op.strict { nonnull_cols(l, false) } else { Cols::new() })
+                .collect();
+            match per.len() {
+                0 => Cols::new(),
+                1 => per.into_iter().next().unwrap(),
+                // (Several columns: their comparisons ANDed, `=`; `<>` ORed; an ordering
+                // comparison is a RowCompareExpr, which proves nothing.)
+                _ if sq.ops.iter().all(|o| o.name == "=") => {
+                    if top || sq.kind == crate::sql::expr::SubqueryKind::Any {
+                        per.into_iter().flatten().collect()
+                    } else {
+                        let mut it = per.into_iter();
+                        let first = it.next().unwrap_or_default();
+                        it.fold(first, |m, x| m.intersection(&x).copied().collect())
+                    }
+                }
+                _ if sq.ops.iter().all(|o| o.name == "<>") => {
+                    let mut it = per.into_iter();
+                    let first = it.next().unwrap_or_default();
+                    it.fold(first, |m, x| m.intersection(&x).copied().collect())
+                }
+                _ => Cols::new(),
+            }
+        }
         _ => Cols::new(),
     }
 }

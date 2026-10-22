@@ -304,6 +304,16 @@ fn strip(e: &Expr) -> &Expr {
         {
             strip(x)
         }
+        // (int4 and oid are binary coercible: `(x::oid)::integer` is two RelabelTypes over
+        // the int4 `x`.)
+        Expr::Cast(x, DataType::Oid, DataType::Int4, _)
+            if matches!(&**x, Expr::Cast(_, DataType::Int4, DataType::Oid, _)) =>
+        {
+            match &**x {
+                Expr::Cast(y, ..) => strip(y),
+                _ => unreachable!(),
+            }
+        }
         e => e,
     }
 }
