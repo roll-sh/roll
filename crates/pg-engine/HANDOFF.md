@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 50,968 of 51,150 statements match (99.64%).** 182 differ. The full
+- **Regression suite: 50,971 of 51,150 statements match (99.65%).** 179 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 175 are `EXPLAIN` plan text (96%). Query results already match.
+  - 172 are `EXPLAIN` plan text (96%). Query results already match.
   - 6 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner

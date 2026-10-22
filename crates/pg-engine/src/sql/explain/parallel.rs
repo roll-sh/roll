@@ -579,8 +579,21 @@ impl Builder<'_, '_> {
         // or serialized), and parallel safe.)
         let cat0 = self.ctx.catalog();
         let partial_ok = |a: &AggCall| {
+            // (agg_args_support_sendreceive: an internal state serialized with an anonymous
+            // record argument can't be read back, record_recv needing its typmod.)
+            let record_arg = a.args.iter().any(|e| e.ty().oid() == crate::types::oid::RECORD);
             if a.user.is_none() {
-                return crate::sql::paths::parallel::agg_partial_ok(a.def.sig.oid);
+                return crate::sql::paths::parallel::agg_partial_ok(a.def.sig.oid)
+                    && !(record_arg && crate::sql::paths::parallel::agg_internal_state(a.def.sig.oid));
+            }
+            if record_arg
+                && cat0
+                    .functions
+                    .get(&a.def.sig.oid)
+                    .and_then(|f| f.agg.as_ref())
+                    .is_some_and(|g| g.transtype.oid() == 2281)
+            {
+                return false;
             }
             cat0.functions.get(&a.def.sig.oid).is_some_and(|f| {
                 f.parallel == 's'

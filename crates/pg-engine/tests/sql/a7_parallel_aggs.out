@@ -1,0 +1,148 @@
+> CREATE TABLE a7_pa (unique1 int, two int, four int, filler text)
+-- CREATE TABLE
+
+> INSERT INTO a7_pa SELECT i, i % 2, i % 4, repeat('x', 50) FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> ANALYZE a7_pa
+-- ANALYZE
+
+> CREATE TABLE a7_lp (a int) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE a7_lp_12 PARTITION OF a7_lp FOR VALUES IN (1, 2) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE a7_lp_12_1 PARTITION OF a7_lp_12 FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE a7_lp_12_2 PARTITION OF a7_lp_12 FOR VALUES IN (2)
+-- CREATE TABLE
+
+> ALTER TABLE a7_lp_12_1 SET (parallel_workers = 0)
+-- ALTER TABLE
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL jit = off
+-- SET
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL min_parallel_table_scan_size = 0
+-- SET
+
+> SET LOCAL max_parallel_workers_per_gather = 2
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT array_dims(array_agg(s)) FROM (SELECT * FROM a7_pa) s
+QUERY PLAN:text
+Aggregate
+  ->  Gather
+        Workers Planned: 2
+        ->  Parallel Seq Scan on a7_pa
+-- EXPLAIN
+
+> SELECT array_dims(array_agg(s)) FROM (SELECT * FROM a7_pa) s
+array_dims:text
+[1:10000]
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT array_dims(array_agg(t)) FROM a7_pa t
+QUERY PLAN:text
+Finalize Aggregate
+  ->  Gather
+        Workers Planned: 2
+        ->  Partial Aggregate
+              ->  Parallel Seq Scan on a7_pa t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT array_dims(array_agg(row(t.unique1, t.two))) FROM a7_pa t
+QUERY PLAN:text
+Aggregate
+  ->  Gather
+        Workers Planned: 2
+        ->  Parallel Seq Scan on a7_pa t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT count(s) FROM (SELECT * FROM a7_pa) s
+QUERY PLAN:text
+Finalize Aggregate
+  ->  Gather
+        Workers Planned: 2
+        ->  Partial Aggregate
+              ->  Parallel Seq Scan on a7_pa
+-- EXPLAIN
+
+> SET LOCAL max_parallel_workers_per_gather = 4
+-- SET
+
+> SET LOCAL parallel_leader_participation = off
+-- SET
+
+> EXPLAIN (COSTS OFF, VERBOSE)
+> SELECT variance(unique1::int4), sum(unique1::int8)
+> FROM (SELECT * FROM a7_pa UNION ALL SELECT * FROM a7_pa) u
+QUERY PLAN:text
+Finalize Aggregate
+  Output: variance(a7_pa.unique1), sum((a7_pa.unique1)::bigint)
+  ->  Gather
+        Output: (PARTIAL variance(a7_pa.unique1)), (PARTIAL sum((a7_pa.unique1)::bigint))
+        Workers Planned: 4
+        ->  Partial Aggregate
+              Output: PARTIAL variance(a7_pa.unique1), PARTIAL sum((a7_pa.unique1)::bigint)
+              ->  Parallel Append
+                    ->  Parallel Seq Scan on public.a7_pa
+                          Output: a7_pa.unique1
+                    ->  Parallel Seq Scan on public.a7_pa a7_pa_1
+                          Output: a7_pa_1.unique1
+-- EXPLAIN
+
+> SELECT variance(unique1::int4), sum(unique1::int8)
+> FROM (SELECT * FROM a7_pa UNION ALL SELECT * FROM a7_pa) u
+variance:numeric | sum:numeric
+8333749.937496874844 | 99990000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF, VERBOSE)
+> SELECT count(*) FROM (SELECT * FROM a7_pa UNION ALL SELECT * FROM a7_pa) u
+QUERY PLAN:text
+Finalize Aggregate
+  Output: count(*)
+  ->  Gather
+        Output: (PARTIAL count(*))
+        Workers Planned: 4
+        ->  Partial Aggregate
+              Output: PARTIAL count(*)
+              ->  Parallel Append
+                    ->  Parallel Seq Scan on public.a7_pa
+                    ->  Parallel Seq Scan on public.a7_pa a7_pa_1
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a7_lp WHERE a = (SELECT 1)
+QUERY PLAN:text
+Gather
+  Workers Planned: 3
+  InitPlan 1
+    ->  Result
+  ->  Parallel Append
+        ->  Seq Scan on a7_lp_12_1 a7_lp_1
+              Filter: (a = (InitPlan 1).col1)
+        ->  Parallel Seq Scan on a7_lp_12_2 a7_lp_2
+              Filter: (a = (InitPlan 1).col1)
+-- EXPLAIN
+
+> COMMIT
+-- COMMIT
+
+> DROP TABLE a7_pa
+-- DROP TABLE
+
+> DROP TABLE a7_lp
+-- DROP TABLE
+

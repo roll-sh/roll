@@ -5464,25 +5464,26 @@ impl Builder<'_, '_> {
             } if inputs.len() == 1 => self.node(&inputs[0]),
             Plan::Append { inputs, inh } => {
                 let mut direct = Vec::new();
-                if inh.is_some() {
-                    for i in inputs.iter() {
-                        let mut x = &**i;
-                        while let Plan::Sort { input, .. } = x {
-                            x = input;
-                        }
-                        // (A member's column mapping over its scan: the scan is the member.)
-                        if let Plan::Project { input, exprs } = x
-                            && matches!(&**input, Plan::Scan(_))
-                            && exprs.iter().all(|e| matches!(e, Expr::Col(..)))
-                        {
-                            x = input;
-                        }
-                        if matches!(x, Plan::Scan(_)) {
-                            direct.push(addr(x));
-                        }
+                for i in inputs.iter() {
+                    let mut x = &**i;
+                    while let Plan::Sort { input, .. } = x {
+                        x = input;
                     }
-                    INH_SCANS.with(|m| m.borrow_mut().extend(direct.iter().copied()));
+                    // (A member's column mapping over its scan: the scan is the member.)
+                    if let Plan::Project { input, exprs } = x
+                        && matches!(&**input, Plan::Scan(_))
+                        && exprs.iter().all(|e| matches!(e, Expr::Col(..)))
+                    {
+                        x = input;
+                    }
+                    // (A UNION ALL's arm of one table without quals of its own is an
+                    // appendrel member too, is_safe_append_member: no physical target
+                    // list.)
+                    if matches!(x, Plan::Scan(s) if inh.is_some() || s.filter.is_none()) {
+                        direct.push(addr(x));
+                    }
                 }
+                INH_SCANS.with(|m| m.borrow_mut().extend(direct.iter().copied()));
                 // Partitions pruned when the executor starts aren't shown (a UNION ALL's
                 // too).
                 let kept = if inh.is_some() || !inputs.iter().any(|i| i.writes()) {
@@ -7457,18 +7458,31 @@ impl Builder<'_, '_> {
                     }
                 }
                 if !inits.is_empty() {
-                    // SS_charge_for_initplans: its plan pays for them, and none of its
-                    // paths is parallel safe any more (a Gather below them stays).
-                    self.settle(&mut c.node);
+                    // SS_charge_for_initplans: its paths pay for them; one of them not
+                    // parallel safe (a Gather in it) leaves none of its paths parallel safe
+                    // (a Gather below them stays), else its partial plan keeps them too.
+                    let unsafe_inits = inits.iter().any(parallel::has_gather);
+                    if unsafe_inits {
+                        self.settle(&mut c.node);
+                    }
                     let cost: f64 = inits.iter().filter(|i| !i.charged).map(|i| i.total_cost).sum();
                     c.node.startup_cost += cost;
                     c.node.total_cost += cost;
                     for i in &mut inits {
                         i.charged = true;
                     }
+                    if !unsafe_inits && let Some(pt) = c.node.partial.as_deref_mut() {
+                        pt.startup_cost += cost;
+                        pt.total_cost += cost;
+                        let mut own = inits.clone();
+                        own.append(&mut pt.initplans);
+                        pt.initplans = own;
+                    }
                     inits.append(&mut c.node.initplans);
                     c.node.initplans = inits;
-                    c.node.par_safe = false;
+                    if unsafe_inits {
+                        c.node.par_safe = false;
+                    }
                 }
             }
             self.member_scan = saved;

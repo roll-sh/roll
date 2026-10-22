@@ -472,6 +472,24 @@ pub fn agg_partial_ok(oid: u32) -> bool {
     m.get(&oid).copied().unwrap_or(false)
 }
 
+/// Whether an aggregate's transition state is `internal` (pg_aggregate.aggtranstype).
+pub fn agg_internal_state(oid: u32) -> bool {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<u32, bool>> =
+        std::sync::OnceLock::new();
+    let m = MAP.get_or_init(|| {
+        include_str!("../../catalog/data/pg_aggregate.tsv")
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                let oid = f.first()?.parse::<u32>().ok()?;
+                let trans_type = f.get(16)?.parse::<u32>().unwrap_or(0);
+                Some((oid, trans_type == 2281))
+            })
+            .collect()
+    });
+    m.get(&oid).copied().unwrap_or(false)
+}
+
 /// get_agg_clause_costs' transition space of an aggregate: its state's average width when
 /// the state type is passed by reference (MAXALIGNed; an internal state without a declared
 /// size: ALLOCSET_DEFAULT_INITSIZE), else 0.
