@@ -34,9 +34,9 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50877 (**99.47%**) |
-| units differing | 273 |
-| files fully matching | 197 |
+| units matching | 50927 (**99.56%**) |
+| units differing | 223 |
+| files fully matching | 198 |
 | engine output == expected/*.out (pg_regress "ok") | 171 files |
 | engine crashes / panics | none |
 
@@ -44,25 +44,25 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 261 | 95.6% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 4.0% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 214 | 96.0% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 8 | 3.6% |
 | by design (a parallel plan's combine function) | 1 | 0.4% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 261 units
-join (87), partition_join (35), partition_prune (38), subselect (10), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (3), equivclass (6), aggregates (7), rowtypes (5), rowsecurity (2), generated_virtual (3), join_hash (3), collate (2), window (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), limit (1), insert_conflict (1), foreign_key (1), create_table (1), create_index (1)
+### EXPLAIN (group C1) — 214 units
+join (74), partition_join (28), partition_prune (12), subselect (10), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (3), equivclass (6), aggregates (7), rowtypes (5), rowsecurity (2), generated_virtual (3), join_hash (3), collate (2), window (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), limit (1), insert_conflict (1), foreign_key (1), create_table (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
 
-### Plan choice visible in results (C1 area) — 11 units
-join (3), updatable_views (1), join_hash (2), partition_info (2), stats_ext (1), subselect (1), sqljson_jsontable (1)
+### Plan choice visible in results (C1 area) — 8 units
+updatable_views (1), join_hash (2), partition_info (2), stats_ext (1), subselect (1), sqljson_jsontable (1)
 
 - sqljson_jsontable, partition_info (2), updatable_views (1): which
-  side a hash join builds on. join: FULL JOIN row order.
+  side a hash join builds on. (join's FULL JOIN row order units 77, 85 and 459 match now.)
   join_hash, subselect, stats_ext: values of EXPLAIN ANALYZE-style helpers over plans
   that differ.
 
@@ -110,6 +110,97 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Fixed in round 14, agent 5 (run-time pruning, expression merge keys, EC orientation)
+
+Measured in subset runs against the engine of 7be2e83 rebased onto 4186dde (test_setup,
+create_misc, create_index,
+create_view, create_table, select, subselect, join, aggregates, union, select_distinct,
+select_distinct_on, inherit, groupingsets, partition_join, partition_prune, partition_aggregate,
+partition_info, rowsecurity, updatable_views, with, equivclass, memoize, rowtypes,
+select_parallel, rules, merge, returning, insert_conflict, incremental_sort, collate, window,
+limit, tsrf, explain, stats_ext, join_hash, rangefuncs, generated_virtual, tuplesort, update,
+privileges, foreign_key, create_function_sql, hash_index, sqljson_jsontable), and a full run of
+the schedule up to `truncate`: 50 units fixed, none broken (every other file of the subset
+matches this table's counts).
+
+| file | fixed units |
+|---|---|
+| partition_prune | 24, 203, 414, 435, 440, 446, 485, 489, 490, 524, 526, 528, 532, 534, 544, 555, 623, 626, 633, 664, 722, 725, 729, 735, 754, 756 |
+| join | 77, 85, 349, 364, 379, 458, 459, 462, 513, 514, 515, 566, 591, 647, 844, 867, 921, 923 (90 → 74) |
+| partition_join | 94, 134, 158, 235, 603, 604, 605 |
+| create_index | 671 |
+
+What changed:
+
+- Run-time partition pruning: a timestamp key compared with timestamptz constants (stable,
+  reads TimeZone) prunes as the executor starts, the constants converted to the key's type
+  when that's exact an hour either side; an Append of one member is no Append (no pruning of
+  it); a Merge Append shows `Subplans Removed`; every member pruned, the columns still the
+  parent's (qualified, the pruned members range table entries); a UNION ALL's members are
+  pruned too (an appendrel of several partitioned tables), the counts of flattened arms
+  summed; a parameterized index scan's conditions prune per outer row; the plan is costed for
+  every member (pruning only removes them as the executor starts).
+- WHERE clauses with an uncorrelated sub-select (an InitPlan) or a parameter go into a UNION
+  ALL's arms; a one-row VALUES arm is its constants (pull_up_simple_values: a gating Result);
+  an arm with a WHERE or several FROM items stays a subquery (is_safe_append_member): its
+  relations named after the level's own, its Append kept; a flattened arm's parent and
+  sub-partitions take no name.
+- `x COLLATE c` with `c` the column's own collation is the column; IN over array values is
+  ORed comparisons (no array of arrays); a varchar IN with a non-constant value is the array
+  coerced to text[] (an ArrayCoerceExpr, which pruning can't use, so no pruning).
+- int4 and oid relabels through a subquery's output (`(x::oid)::integer`) are the key to
+  pruning; a clause over a projection of an inheritance Append goes into its members.
+- Grouping sets whose first rollup's keys are fixed by constants: the sorted / mixed plans only
+  (consider_groupingsets_paths given sorted input): a MixedAggregate.
+- GROUP BY () (or HAVING) without aggregates is degenerate grouping: a Result (gated by the
+  HAVING), one per empty grouping set, the input not read.
+- join strength reduction: an ANY SubPlan at the top level (and a row comparison anywhere)
+  proves its left side non-null.
+- Merge joins on an expression of one side and a column of the other (a FULL JOIN USING's
+  merged column, `a.q2 = COALESCE(b.q1, 1)`): the expression side sorted by it (`Sort Key:
+  (expr)`, the input's target list computing it under VERBOSE), not for semi / anti joins
+  (their unique-ified side groups by columns here). FULL JOIN row order now Postgres's (join
+  77, 85).
+- Equivalence-class clauses get the orientation of their first derivation: check_index_predicates
+  for each relation with a partial index (the other relations' member first), then each
+  relation's index paths (its member first), in range-table order; create_join_clause reuses
+  either way round.
+- Nested loop join filters: an inner join's equivalence clauses first, then cheapest first
+  (order_qual_clauses); `Rows Removed by Join Filter` under ANALYZE; an inner Materialize shows
+  the outer rows as its loops; a nested Append / Merge Append the planner flattened shows its
+  members' counters.
+- A RIGHT JOIN tries its LEFT JOIN form first (equal costs keep it).
+- OR join clauses parameterize an index scan as `= ANY (ARRAY[outer values])` even with no other
+  candidate clause, the other movable join clauses its filter; inequality join clauses
+  parameterize an appendrel's index scans.
+- A semi join's clause with a column the subquery fixes to a constant fixes the outer column
+  too (the clause goes); a COALESCE equated with a constant above an outer join fixes the next
+  join's inner side (reconsider_outer_join_clause).
+- Equivalence classes survive a grouping and a partitionwise join's Append (redundant GROUP BY
+  and ORDER BY keys go, the group count estimated over the keys left).
+- MIN / MAX over a partition named directly; the choice compares disabled nodes first.
+- A FROM-less subquery's non-volatile function call is pulled up (its equality with a column of
+  the other side a restriction of it, an equivalence class member across the join above,
+  generated member first); MERGE through a view names the view's relation and lists only the
+  result relations left after pruning.
+- Partitionwise joins under a LIMIT: each child planned for it, the Append of those or of the
+  cheapest total paths, whichever reads the LIMIT's rows cheaper.
+
+Goldens added: `tests/sql/a5_runtime_pruning.sql`, `a5_join_misc.sql`, `a5_lifted_merge.sql`.
+
+Still open from this list, and why:
+
+- partition_prune 392 / 393 / 399: a UNION ALL FROM subquery's alias is a range table entry
+  named first (`ab`, so its leaves are `ab_1`…); the plan doesn't keep the alias of a pulled-up
+  UNION ALL. 392 / 393 also show the InitPlan at the top Append (the arm subquery's quals read
+  the outer level's). 265 (a SubPlan copied into each index condition), 410 (an index entry
+  for a dead tuple: `Heap Blocks: exact=1` with no row), 746 (window functions over
+  partitions: ordered partition scans under each arm's WindowAgg), 377–383 / 652 (parallel).
+- partition_join 599–601: ORDER BY … LIMIT over a partitionwise join is a Merge Append of
+  ordered child joins; the child joins are planned without the order.
+- join 609 / 610: the equivalence class has the scan-level `t1.a = t1.b` too, so Postgres
+  joins on `t1.a = t2.b`; the engine's classes come from join clauses only.
 
 ## Fixed in round 14, agent 6 (dummy-rel classes, parallel plans, incremental sort stats)
 
@@ -1234,7 +1325,7 @@ produces no units on Linux (skipped by the file itself).
 | create_table | 348 | 347 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | create_type | 88 | 88 | 100% | no | no |  |
 | create_schema | 30 | 30 | 100% | yes | yes |  |
-| create_index | 708 | 707 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| create_index | 708 | 708 | 100% | yes | yes |  |
 | create_index_spgist | 202 | 202 | 100% | yes | yes |  |
 | create_view | 343 | 343 | 100% | no | no |  |
 | index_including | 137 | 137 | 100% | yes | yes |  |
@@ -1264,7 +1355,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 345 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 835 | 90% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (86) |
+| join | 925 | 851 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (72) |
 | aggregates | 556 | 548 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -1374,8 +1465,8 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 303 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 579 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (35) |
-| partition_prune | 771 | 733 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (30) |
+| partition_join | 614 | 586 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (28) |
+| partition_prune | 771 | 759 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
 | indexing | 645 | 645 | 100% | yes | yes |  |
