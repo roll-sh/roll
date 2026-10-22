@@ -228,7 +228,7 @@ pub(crate) fn copy_source(ctx: &Ctx) -> Result<(String, String, Option<String>),
     let header = ctx.h("x-amz-copy-source").unwrap_or_default();
     let raw = header.trim();
     let (path, query) = raw.split_once('?').unwrap_or((raw, ""));
-    let decoded = percent_decode_utf8(path)?;
+    let decoded = s3_proto::http::percent_decode_utf8(path)?;
     let p = decoded.strip_prefix('/').unwrap_or(&decoded);
     let bad = || S3Error::msg(Code::InvalidArgument, "Copy Source must mention the source bucket and key: sourcebucket/sourcekey").with("ArgumentName", "x-amz-copy-source");
     let (found, key, vid) = if p.starts_with("arn:") {
