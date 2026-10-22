@@ -43,6 +43,12 @@ pub enum Storage {
         /// Remove every CORS rule.
         #[arg(long, conflicts_with = "cors_origins")]
         no_cors: bool,
+        /// Set the bucket's tags (repeatable `key=value`). Replaces them all.
+        #[arg(long = "tag", value_name = "KEY=VALUE")]
+        tags: Vec<String>,
+        /// Remove every bucket tag.
+        #[arg(long, conflicts_with = "tags")]
+        no_tags: bool,
     },
     /// Delete a bucket (it must be empty unless --force).
     Delete {
@@ -407,6 +413,15 @@ fn print_bucket(b: &Value) {
         let off = if r["enabled"].as_bool() == Some(false) { " (disabled)" } else { "" };
         println!("  lifecycle  {}: prefix {:?} {}{off}", s(&r["id"]), r["prefix"].as_str().unwrap_or(""), what.join(", "));
     }
+    for (k, v) in b["tags"].as_object().into_iter().flatten() {
+        println!("  tag        {k} = {}", s(v));
+    }
+    if let Some(w) = b["website"].as_object() {
+        match w.get("redirect_all").filter(|r| !r.is_null()) {
+            Some(r) => println!("  website    redirects to {}", s(&r["host_name"])),
+            None => println!("  website    index {}", w.get("index_document").map(s).unwrap_or_default()),
+        }
+    }
     println!("  url        {}", s(&b["url"]));
     if let Some(v) = b["virtual_host_url"].as_str() {
         println!("             {v}");
@@ -500,7 +515,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
             }
             v
         }
-        Storage::Update { bucket, public, private, recover_days, cors_origins, no_cors } => {
+        Storage::Update { bucket, public, private, recover_days, cors_origins, no_cors, tags, no_tags } => {
             let mut body = json!({});
             if public || private {
                 body["public"] = json!(public);
@@ -519,8 +534,18 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                     "max_age_s": 3600,
                 }]);
             }
+            if no_tags {
+                body["tags"] = json!({});
+            } else if !tags.is_empty() {
+                let mut map = serde_json::Map::new();
+                for t in &tags {
+                    let (k, v) = t.split_once('=').with_context(|| format!("--tag {t:?}: expected key=value"))?;
+                    map.insert(k.to_string(), json!(v));
+                }
+                body["tags"] = Value::Object(map);
+            }
             if body.as_object().is_some_and(|o| o.is_empty()) {
-                bail!("nothing to change: pass --public, --private, --recover-days, --cors-origin or --no-cors");
+                bail!("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag or --no-tags");
             }
             let v = api.call(Method::PATCH, &bucket_path(&bucket, ""), Some(body)).await?;
             if !as_json {

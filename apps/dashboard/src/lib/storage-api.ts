@@ -27,6 +27,18 @@ export interface StorageInfo {
   objects: number;
   bytes: number;
   scrub: { last_at: number | null; missing: number; mismatched: number };
+  /** The deployment's canonical owner id (64 hex chars) and 12-digit account id, as in ACLs and ARNs. */
+  owner_id: string;
+  account_id: string;
+  /** Block Public Access applies to every bucket (`ROLL_S3_BLOCK_PUBLIC_ACCESS`). */
+  block_public_access: boolean;
+}
+
+export interface WebsiteConfig {
+  index_document: string | null;
+  error_document: string | null;
+  redirect_all: { host_name: string; protocol: string | null } | null;
+  routing_rules: unknown[];
 }
 
 export interface CorsRule {
@@ -65,6 +77,8 @@ export interface Bucket {
   /** Path-style URL of the bucket. */
   url: string;
   virtual_host_url: string | null;
+  tags: Record<string, string>;
+  website: WebsiteConfig | null;
 }
 
 export interface BucketPatch {
@@ -72,6 +86,8 @@ export interface BucketPatch {
   recover_days?: number;
   cors?: CorsRule[];
   lifecycle?: LifecycleRule[];
+  /** Replaces every bucket tag; `{}` removes them. */
+  tags?: Record<string, string>;
 }
 
 export interface ObjectSummary {

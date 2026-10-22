@@ -326,7 +326,17 @@ async fn update_settings() {
 
     // Nothing to change: refused before calling the API.
     let e = t.fail(&["update", "site"]).await;
-    assert!(e.contains("nothing to change: pass --public, --private, --recover-days, --cors-origin or --no-cors"), "{e}");
+    assert!(e.contains("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag or --no-tags"), "{e}");
+
+    // Bucket tags: replaced whole, shown, removed.
+    let v = t.json(&["update", "site", "--tag", "team=web", "--tag", "env=prod"]).await;
+    assert_eq!(v["tags"], json!({ "env": "prod", "team": "web" }));
+    let shown = t.ok(&["show", "site"]).await;
+    assert!(shown.contains("tag        env = prod") && shown.contains("tag        team = web"), "{shown}");
+    assert_eq!(t.json(&["update", "site", "--tag", "only=one"]).await["tags"], json!({ "only": "one" }));
+    assert_eq!(t.json(&["update", "site", "--no-tags"]).await["tags"], json!({}));
+    assert!(t.fail(&["update", "site", "--tag", "novalue"]).await.contains("expected key=value"));
+    assert!(t.fail(&["update", "site", "--tag", "aws:x=1"]).await.contains("System tags"));
     let e = t.run_at("http://127.0.0.1:1", &["storage", "update", "site"], None).await;
     assert!(e.stderr.contains("nothing to change"), "{}", e.stderr);
     // Conflicting flags are usage errors.
