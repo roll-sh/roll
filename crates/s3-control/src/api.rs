@@ -120,21 +120,25 @@ async fn show_bucket(State(c): State<AppState>, Path(name): Path<String>) -> Api
     Ok(Json(c.bucket_view(&c.store.bucket(&name)?)))
 }
 
-/// `PATCH /buckets/{name}`: the store's settings, plus the bucket's tags (replaced whole; `{}`
-/// removes them).
+/// `PATCH /buckets/{name}`: the store's settings, the bucket's tags (replaced whole; `{}`
+/// removes them), notifications, and the settings in [`crate::settings`]. Everything is checked
+/// before anything is applied.
 #[derive(Deserialize)]
 struct BucketPatch {
     #[serde(flatten)]
     update: BucketUpdate,
     tags: Option<BTreeMap<String, String>>,
     notifications: Option<NotificationsPatch>,
+    #[serde(flatten)]
+    settings: crate::settings::SettingsPatch,
 }
 
-/// `notifications` in a bucket `PATCH`: the whole configuration, replaced.
+/// `notifications` in a bucket `PATCH`: the configurations (replaced whole; omitted:
+/// unchanged), and the webhook secret.
 #[derive(Deserialize)]
 struct NotificationsPatch {
-    #[serde(flatten)]
-    config: s3_store::NotificationConfig,
+    configurations: Option<Vec<s3_store::NotificationTarget>>,
+    event_bridge: Option<bool>,
     /// S3's `x-amz-skip-destination-validation`.
     #[serde(default)]
     skip_destination_validation: bool,
@@ -144,22 +148,33 @@ struct NotificationsPatch {
 }
 
 async fn update_bucket(State(c): State<AppState>, Path(name): Path<String>, JsonBody(p): JsonBody<BucketPatch>) -> ApiResult<Value> {
+    let b = c.store.bucket(&name)?;
     if let Some(t) = &p.tags {
         s3_store::config::validate_bucket_tags(t.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
     }
-    // Notifications first: a refused configuration leaves the rest of the PATCH unapplied.
+    let settings = c.prepare_settings(&b, p.update.versioning.as_deref(), p.update.public, p.settings)?;
+    // Notifications next (their destinations are checked by sending them a test event): a
+    // refused configuration leaves the rest of the PATCH unapplied.
     if let Some(n) = p.notifications {
+        if n.configurations.is_some() || n.event_bridge.is_some() {
+            let current = c.store.notifications(&name)?.unwrap_or_default();
+            let cfg = s3_store::NotificationConfig {
+                configurations: n.configurations.unwrap_or(current.configurations),
+                event_bridge: n.event_bridge.unwrap_or(current.event_bridge),
+            };
+            c.set_notifications(&name, cfg, n.skip_destination_validation).await?;
+        }
         if n.rotate_webhook_secret {
             c.store.webhook_secret(&name, true).await?;
         }
-        c.set_notifications(&name, n.config, n.skip_destination_validation).await?;
     }
-    let mut b = c.store.update_bucket(&name, p.update).await?;
+    c.apply_settings(&name, &settings, true).await?;
+    c.store.update_bucket(&name, p.update).await?;
     if let Some(t) = &p.tags {
         c.store.set_bucket_tags(&name, t).await?;
-        b = c.store.bucket(&name)?;
     }
-    Ok(Json(c.bucket_view(&b)))
+    c.apply_settings(&name, &settings, false).await?;
+    Ok(Json(c.bucket_view(&c.store.bucket(&name)?)))
 }
 
 #[derive(Deserialize)]

@@ -61,6 +61,15 @@ pub fn validate_identity_policy(doc: &str, max: usize) -> Result<String, String>
     serde_json::from_str::<serde_json::Value>(doc).map(|v| v.to_string()).map_err(|e| e.to_string())
 }
 
+/// Check a bucket policy for `bucket` as PutBucketPolicy does. `Ok`: whether it's public (grants
+/// anonymous access); `Err` says what's wrong (`MalformedPolicy`'s message).
+pub fn validate_bucket_policy(doc: &str, bucket: &str) -> Result<bool, String> {
+    if doc.len() > policy::MAX_POLICY_BYTES {
+        return Err("Policy exceeds the maximum allowed document size.".into());
+    }
+    policy::Policy::parse(doc.as_bytes(), bucket).map(|p| p.is_public()).map_err(|e| e.message)
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// `<bucket>.<domain>` addresses a bucket (virtual-host style). Path style always works.

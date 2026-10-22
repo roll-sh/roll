@@ -19,12 +19,14 @@ import {
 import { AppShell } from "../app-shell";
 import { btn, Connecting, EmptyPanel, ErrorNote, input, Offline, panel, primary, Stats } from "../ui";
 import { KeysTab } from "./keys";
+import { RolesTab } from "./roles";
 import { Field, PublicBadge, Segmented, TabNav, useAction, useHashTab, useStorage } from "./shared";
 import { UsageTab } from "./usage";
 
 const TABS = [
   { value: "buckets", label: "Buckets" },
   { value: "keys", label: "Access keys" },
+  { value: "roles", label: "Roles" },
   { value: "usage", label: "Usage" },
 ] as const;
 type Tab = (typeof TABS)[number]["value"];
@@ -140,6 +142,7 @@ export function StorageHome() {
               </>
             )}
             {tab === "keys" && <KeysTab info={info} buckets={buckets} />}
+            {tab === "roles" && <RolesTab buckets={buckets} />}
             {tab === "usage" && <UsageTab info={info} />}
           </div>
         </>

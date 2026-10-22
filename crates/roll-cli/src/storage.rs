@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
+mod events;
 mod roles;
 
 #[derive(Subcommand)]
@@ -152,6 +153,37 @@ pub enum Storage {
     Sessions {
         #[command(subcommand)]
         action: roles::SessionsCmd,
+    },
+    /// A bucket's event notifications (`notify <bucket>`), or add / remove one, or its webhook
+    /// secret.
+    #[command(args_conflicts_with_subcommands = true)]
+    Notify {
+        bucket: Option<String>,
+        #[command(subcommand)]
+        action: Option<events::NotifyCmd>,
+    },
+    /// Replicate a bucket to another roll bucket (`--to`), list its rules, or `rm` them. Inside
+    /// roll a replica shares the source's data: instant, nothing copied, no transfer cost.
+    #[command(args_conflicts_with_subcommands = true)]
+    Replicate {
+        bucket: Option<String>,
+        /// The destination bucket (versioned, like the source).
+        #[arg(long, value_name = "BUCKET")]
+        to: Option<String>,
+        /// Only keys starting with this.
+        #[arg(long, requires = "to")]
+        prefix: Option<String>,
+        /// Replicate delete markers too.
+        #[arg(long, requires = "to")]
+        delete_markers: bool,
+        /// Replicate the versions already in the bucket too, not just new ones.
+        #[arg(long, requires = "to")]
+        existing: bool,
+        /// The rule's id (generated when not given).
+        #[arg(long, requires = "to")]
+        id: Option<String>,
+        #[command(subcommand)]
+        action: Option<events::ReplicateCmd>,
     },
 }
 
@@ -574,6 +606,30 @@ fn print_bucket(b: &Value) {
                 println!("  website    {line}");
             }
         }
+    }
+    if let Some(u) = b["website_url"].as_str() {
+        println!("             {u}");
+    }
+    if !b["policy"].is_null() {
+        println!("  policy     {}", if b["policy_public"].as_bool() == Some(true) { "set, public" } else { "set" });
+    }
+    if let Some(p) = b["public_access_block"].as_object() {
+        let on: Vec<&str> = [("block_public_acls", "BlockPublicAcls"), ("ignore_public_acls", "IgnorePublicAcls"), ("block_public_policy", "BlockPublicPolicy"), ("restrict_public_buckets", "RestrictPublicBuckets")]
+            .into_iter()
+            .filter(|(k, _)| p.get(*k).and_then(Value::as_bool) == Some(true))
+            .map(|(_, n)| n)
+            .collect();
+        println!("  blocked    {}", if on.is_empty() { "nothing".to_string() } else { on.join(", ") });
+    }
+    let n = &b["notifications"];
+    for c in n["configurations"].as_array().into_iter().flatten() {
+        println!("  notify     {}", events::notify_line(c, &n["backlog"]));
+    }
+    if n["event_bridge"].as_bool() == Some(true) {
+        println!("  notify     every event → EventBridge");
+    }
+    for r in b["replication"]["rules"].as_array().into_iter().flatten() {
+        println!("  replicate  {}", events::replicate_line(r));
     }
     println!("  url        {}", s(&b["url"]));
     if let Some(v) = b["virtual_host_url"].as_str() {
@@ -1080,6 +1136,16 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
             Some(v) => v,
             None => return Ok(()),
         },
+        Storage::Notify { bucket, action } => match events::notify(api, as_json, bucket, action).await? {
+            Some(v) => v,
+            None => return Ok(()),
+        },
+        Storage::Replicate { bucket, to, prefix, delete_markers, existing, id, action } => {
+            match events::replicate(api, as_json, bucket, to, prefix, delete_markers, existing, id, action).await? {
+                Some(v) => v,
+                None => return Ok(()),
+            }
+        }
         Storage::Keys { action: Some(KeysCmd::Delete { id }) } => {
             let v = api.call(Method::DELETE, &format!("/v1/storage/keys/{}", enc(&id)), None).await?;
             if !as_json {

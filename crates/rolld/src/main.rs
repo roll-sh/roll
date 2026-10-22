@@ -407,7 +407,7 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
         scfg.internal_cidrs = s3_server::parse_cidrs(c)?;
     }
     let endpoint = format!("http://{}:{}", args.public_host, args.s3.port());
-    let ccfg = s3_control::ControlConfig { endpoint, region: scfg.region.clone(), virtual_host_domain: args.s3_domain.clone(), storage_class: class, pricing: Default::default() };
+    let ccfg = s3_control::ControlConfig { endpoint, region: scfg.region.clone(), virtual_host_domain: args.s3_domain.clone(), website_domain: args.s3_website_domain.clone(), storage_class: class, pricing: Default::default() };
     let control = s3_control::Control::new(store.clone(), ccfg).await?;
     let server = s3_server::Server::new(store, scfg);
     info!(s3 = %args.s3, storage = %server.store.describe(), "storage (S3 API) listening");

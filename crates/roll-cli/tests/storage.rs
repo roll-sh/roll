@@ -40,10 +40,14 @@ async fn start() -> T {
 
     let s3_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let s3 = format!("http://127.0.0.1:{}", s3_listener.local_addr().unwrap().port());
-    let server = s3_server::Server::new(store.clone(), s3_server::Config { spool_dir: data.path().to_path_buf(), ..Default::default() });
+    // Webhooks may reach this machine (the tests' receivers listen on loopback).
+    let notify = s3_server::NotifyConfig { webhook_allow_private: true, ..Default::default() };
+    let server = s3_server::Server::new(store.clone(), s3_server::Config { spool_dir: data.path().to_path_buf(), notify, ..Default::default() });
+    let notifier = server.notifier.clone();
     tokio::spawn(async move { s3_server::serve(s3_listener, server).await.unwrap() });
 
     let control = Control::new(store.clone(), ControlConfig::local(s3.clone())).await.unwrap();
+    control.set_notifier(notifier);
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", api_listener.local_addr().unwrap().port());
     tokio::spawn(async move { axum::serve(api_listener, s3_control::api::router(control)).await.unwrap() });
@@ -1250,4 +1254,160 @@ async fn roles_and_sessions() {
     assert_eq!(t.ok(&["roles", "delete", "google"]).await.trim(), "deleted role google");
     assert!(t.fail(&["roles", "show", "google"]).await.contains("no role"));
     assert_eq!(t.json(&["roles"]).await.as_array().unwrap().len(), 1);
+}
+
+/// What a webhook receiver got: each delivery's headers and body.
+type Received = Arc<std::sync::Mutex<Vec<(axum::http::HeaderMap, Vec<u8>)>>>;
+
+/// A webhook on loopback that records every POST to `/hook`; its URL.
+async fn webhook() -> (String, Received) {
+    let got: Received = Default::default();
+    let sink = got.clone();
+    let app = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            let sink = sink.clone();
+            async move {
+                sink.lock().unwrap().push((headers, body.to_vec()));
+                "ok"
+            }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}/hook", l.local_addr().unwrap().port());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (url, got)
+}
+
+/// Wait (up to 10 s) for `f` to hold.
+async fn eventually<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
+    for _ in 0..200 {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+/// The S3 event records a receiver got, as `(eventName, key)`.
+fn records(got: &Received) -> Vec<(String, String)> {
+    got.lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, b)| serde_json::from_slice::<Value>(b).ok())
+        .flat_map(|v| v["Records"].as_array().cloned().unwrap_or_default())
+        .map(|r| (r["eventName"].as_str().unwrap_or("").to_string(), r["s3"]["object"]["key"].as_str().unwrap_or("").to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn notifications_to_a_webhook() {
+    let t = start().await;
+    t.ok(&["create", "events"]).await;
+    assert!(t.ok(&["notify", "events"]).await.contains("no notifications on events"));
+    let (url, got) = webhook().await;
+
+    // Added with a friendly destination; S3's validation sends it a test event first.
+    let out = t.ok(&["notify", "add", "events", "--to", &url, "--prefix", "img/", "--id", "hook"]).await;
+    assert!(out.contains(&format!("s3:ObjectCreated:* img/* → {url} (id hook)")), "{out}");
+    assert!(got.lock().unwrap().iter().any(|(_, b)| String::from_utf8_lossy(b).contains("s3:TestEvent")), "the test event");
+    let n = t.json(&["notify", "events"]).await;
+    assert_eq!(n["configurations"][0]["destination"], format!("arn:roll:webhook:{url}"));
+    assert_eq!(n["configurations"][0]["type"], "topic");
+    let listed = t.ok(&["notify", "events"]).await;
+    assert!(listed.contains("hook") && listed.contains(&url) && listed.contains("img/*"), "{listed}");
+    let secret = t.ok(&["notify", "secret", "events"]).await.trim().to_string();
+    assert!(secret.starts_with("whsec_"), "{secret}");
+
+    // A real event: only keys under the prefix, signed with the bucket's secret.
+    t.put("events", "doc/skip.txt", b"no").await;
+    t.put("events", "img/cat.png", b"meow").await;
+    eventually("the ObjectCreated event", || async { records(&got).iter().any(|(_, k)| k == "img/cat.png") }).await;
+    let rs = records(&got);
+    assert!(rs.contains(&("ObjectCreated:Put".to_string(), "img/cat.png".to_string())), "{rs:?}");
+    assert!(!rs.iter().any(|(_, k)| k == "doc/skip.txt"), "outside the filter: {rs:?}");
+    {
+        let all = got.lock().unwrap();
+        let (h, body) = all.iter().find(|(_, b)| String::from_utf8_lossy(b).contains("img/cat.png")).unwrap();
+        let sig = h["x-roll-signature"].to_str().unwrap();
+        let ts: i64 = sig.strip_prefix("t=").and_then(|r| r.split(',').next()).unwrap().parse().unwrap();
+        assert_eq!(sig, s3_server::notify::webhook_signature(&secret, ts, body));
+        assert_eq!(h["x-roll-event"].to_str().unwrap(), "s3:ObjectCreated:Put");
+    }
+
+    // Rotating the secret changes it and keeps the destination.
+    let rotated = t.ok(&["notify", "secret", "events", "--rotate"]).await.trim().to_string();
+    assert!(rotated.starts_with("whsec_") && rotated != secret);
+    assert_eq!(t.json(&["notify", "events"]).await["configurations"].as_array().unwrap().len(), 1);
+
+    // Other destinations: a queue (refused: no roll queues in this test), forms that aren't
+    // destinations, bad events, and a stream added without validation.
+    let e = t.fail(&["notify", "add", "events", "--to", "queue:orders", "--events", "s3:ObjectRemoved:*"]).await;
+    assert!(e.contains("arn:roll:queues:%2F:orders"), "{e}");
+    let e = t.fail(&["notify", "add", "events", "--to", "ftp://example.com"]).await;
+    assert!(e.contains("expected queue:<vhost>/<queue>"), "{e}");
+    let e = t.fail(&["notify", "add", "events", "--to", "stream:s/t", "--events", "s3:Nope"]).await;
+    assert!(e.contains("s3:Nope"), "{e}");
+    t.ok(&["notify", "add", "events", "--to", "stream:events/uploads", "--events", "s3:ObjectRemoved:*,s3:ObjectTagging:*", "--skip-validation", "--id", "removed"]).await;
+    let n = t.json(&["notify", "events"]).await;
+    assert_eq!(n["configurations"][1]["destination"], "arn:roll:streams:events:uploads");
+    assert_eq!(n["configurations"][1]["events"], json!(["s3:ObjectRemoved:*", "s3:ObjectTagging:*"]));
+    let show = t.ok(&["show", "events"]).await;
+    assert!(show.contains(&format!("notify     hook: s3:ObjectCreated:* img/* → {url}")), "{show}");
+    assert!(show.contains("notify     removed: s3:ObjectRemoved:*,s3:ObjectTagging:* * → stream:events/uploads"), "{show}");
+
+    // Removing one keeps the other; an unknown id is an error.
+    assert!(t.ok(&["notify", "rm", "events", "removed"]).await.contains("removed notification removed"));
+    assert!(t.fail(&["notify", "rm", "events", "removed"]).await.contains("no notification removed"));
+    t.ok(&["notify", "rm", "events", "hook"]).await;
+    assert!(t.ok(&["notify", "events"]).await.contains("no notifications"));
+    assert!(t.fail(&["notify"]).await.contains("give a bucket"));
+}
+
+#[tokio::test]
+async fn replication_between_buckets() {
+    let t = start().await;
+    t.ok(&["create", "origin"]).await;
+    t.ok(&["create", "mirror"]).await;
+    assert!(t.ok(&["replicate", "origin"]).await.contains("doesn't replicate"));
+    // Both buckets must be versioned; the error says how.
+    let e = t.fail(&["replicate", "origin", "--to", "mirror"]).await;
+    assert!(e.contains("Versioning must be 'Enabled'") && e.contains("roll storage update origin --versioning on"), "{e}");
+    t.ok(&["update", "origin", "--versioning", "on"]).await;
+    let e = t.fail(&["replicate", "origin", "--to", "mirror"]).await;
+    assert!(e.contains("Destination bucket must have versioning enabled: mirror"), "{e}");
+    t.ok(&["update", "mirror", "--versioning", "on"]).await;
+    assert!(t.fail(&["replicate", "origin", "--to", "nowhere"]).await.contains("Destination bucket must exist"));
+    assert!(t.fail(&["replicate", "origin", "--to", "origin"]).await.contains("cannot be the same"));
+
+    let o = t.run(&["replicate", "origin", "--to", "mirror", "--prefix", "img/", "--delete-markers", "--id", "imgs"]).await;
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    assert!(o.text().contains("origin/img/* → mirror (rule imgs)"), "{}", o.text());
+    assert!(o.stderr.contains("no bytes copied"), "{}", o.stderr);
+    let r = t.json(&["replicate", "origin"]).await;
+    assert_eq!(r["rules"][0]["id"], "imgs");
+    assert_eq!((r["rules"][0]["delete_markers"].as_bool(), r["rules"][0]["prefix"].as_str()), (Some(true), Some("img/")));
+
+    // New versions under the prefix appear in the mirror.
+    t.put("origin", "img/a.png", b"aaaa").await;
+    t.put("origin", "notes/b.txt", b"bbbb").await;
+    eventually("the replica", || async { t.get("mirror", "img/a.png").await.is_some() }).await;
+    assert_eq!(t.get("mirror", "img/a.png").await.unwrap(), b"aaaa");
+    assert!(t.get("mirror", "notes/b.txt").await.is_none());
+    // A second rule, with existing objects: the version already there follows.
+    t.ok(&["replicate", "origin", "--to", "mirror", "--prefix", "notes/", "--existing", "--id", "notes"]).await;
+    eventually("the backfilled replica", || async { t.get("mirror", "notes/b.txt").await.is_some() }).await;
+    let listed = t.ok(&["replicate", "origin"]).await;
+    assert!(listed.contains("imgs") && listed.contains("notes") && listed.contains("img/*"), "{listed}");
+    let show = t.ok(&["show", "origin"]).await;
+    assert!(show.contains("replicate  imgs: img/* → mirror (delete markers)"), "{show}");
+
+    // One rule, then all of them.
+    assert!(t.ok(&["replicate", "rm", "origin", "notes"]).await.contains("removed replication rule notes"));
+    assert!(t.fail(&["replicate", "rm", "origin", "notes"]).await.contains("no replication rule notes"));
+    assert_eq!(t.json(&["replicate", "origin"]).await["rules"].as_array().unwrap().len(), 1);
+    assert!(t.ok(&["replicate", "rm", "origin"]).await.contains("no longer replicates"));
+    assert!(t.ok(&["replicate", "origin"]).await.contains("doesn't replicate"));
+    assert!(t.store.replication("origin").unwrap().is_none());
 }

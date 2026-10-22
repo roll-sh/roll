@@ -32,6 +32,8 @@ export interface StorageInfo {
   account_id: string;
   /** Block Public Access applies to every bucket (`ROLL_S3_BLOCK_PUBLIC_ACCESS`). */
   block_public_access: boolean;
+  /** `<bucket>.<website_domain>` serves a bucket's website (`ROLL_S3_WEBSITE_DOMAIN`); `null`: none. */
+  website_domain: string | null;
 }
 
 export interface WebsiteRoutingRule {
@@ -45,7 +47,7 @@ export interface WebsiteRoutingRule {
   };
 }
 
-/** Set through the S3 API (`PutBucketWebsite`); the control plane only shows it. */
+/** Index and error documents are set here or through the S3 API; redirects only through the S3 API. */
 export interface WebsiteConfig {
   index_document: string | null;
   error_document: string | null;
@@ -116,6 +118,92 @@ export interface ObjectLockConfig {
   years: number | null;
 }
 
+/** An IAM policy document, as JSON. */
+export type IamPolicy = Record<string, unknown>;
+
+/** One notification configuration: events under a key filter go to a destination (by ARN). */
+export interface NotificationConfig {
+  id: string;
+  /** S3's element (queue, topic, function); follows the ARN when left out. */
+  type: "queue" | "topic" | "function";
+  /** `arn:roll:queues:<vhost>:<queue>`, `arn:roll:streams:<stream>:<topic>`, `arn:roll:webhook:<url>` or an AWS ARN. */
+  destination: string;
+  events: string[];
+  prefix: string | null;
+  suffix: string | null;
+}
+
+/** A configuration as written: the id is generated and the type taken from the ARN when left out. */
+export interface NotificationInput {
+  id?: string;
+  type?: NotificationConfig["type"];
+  destination: string;
+  events: string[];
+  prefix?: string | null;
+  suffix?: string | null;
+}
+
+export interface BucketNotifications {
+  configurations: NotificationConfig[];
+  event_bridge: boolean;
+  /** Signs `arn:roll:webhook` deliveries (`X-Roll-Signature`); created with the first webhook. */
+  webhook_secret: string | null;
+  /** Undelivered events by destination ARN (only destinations with some). */
+  backlog: Record<string, { pending: number; last_error: string | null }>;
+}
+
+export interface NotificationsPatch {
+  /** Replaces them all (`[]` removes); left out: unchanged. */
+  configurations?: NotificationInput[];
+  event_bridge?: boolean;
+  /** Don't send each destination an `s3:TestEvent` first. */
+  skip_destination_validation?: boolean;
+  rotate_webhook_secret?: boolean;
+}
+
+/** A replication rule to another roll bucket, with its status. */
+export interface ReplicationRule {
+  id: string;
+  priority: number | null;
+  enabled: boolean;
+  /** `""`: every key. */
+  prefix: string;
+  tags: Record<string, string>;
+  delete_markers: boolean;
+  existing_objects: boolean;
+  /** A roll bucket. */
+  destination: string;
+  storage_class: string | null;
+  owner_override: boolean;
+  /** Versions waiting for this destination (at most 1000 counted). */
+  pending: number;
+  last_error: string | null;
+  /** Objects written before the rule are still being queued. */
+  backfilling: boolean;
+}
+
+export interface ReplicationRuleInput {
+  destination: string;
+  id?: string;
+  priority?: number | null;
+  /** Default true. */
+  enabled?: boolean;
+  prefix?: string;
+  tags?: Record<string, string>;
+  delete_markers?: boolean;
+  existing_objects?: boolean;
+  storage_class?: string | null;
+  owner_override?: boolean;
+}
+
+/** S3's Block Public Access settings. */
+export interface PublicAccessBlock {
+  block_public_acls: boolean;
+  ignore_public_acls: boolean;
+  block_public_policy: boolean;
+  restrict_public_buckets: boolean;
+}
+
 export interface Bucket {
   id: string;
   name: string;
@@ -141,6 +229,16 @@ export interface Bucket {
   virtual_host_url: string | null;
   tags: Record<string, string>;
   website: WebsiteConfig | null;
+  /** `<scheme>://<bucket>.<website domain>`, when the deployment has one and the bucket a website. */
+  website_url: string | null;
+  notifications: BucketNotifications;
+  replication: { rules: ReplicationRule[] } | null;
+  /** The bucket policy. */
+  policy: IamPolicy | null;
+  /** Whether the policy grants anonymous access. */
+  policy_public: boolean;
+  /** The bucket's own block (`null`: none); the deployment's applies on top. */
+  public_access_block: PublicAccessBlock | null;
 }
 
 export interface BucketPatch {
@@ -152,6 +250,14 @@ export interface BucketPatch {
   tags?: Record<string, string>;
   /** Turn versioning on, or suspend it. There's no way back to never versioned. */
   versioning?: "Enabled" | "Suspended";
+  notifications?: NotificationsPatch;
+  /** Replaces every rule; `null` (or no rules) removes replication. */
+  replication?: { rules: ReplicationRuleInput[] } | null;
+  /** Index and error documents (routing rules set through the S3 API are kept); `null` removes. */
+  website?: { index_document: string; error_document?: string | null } | null;
+  /** The bucket policy (object or JSON text); `null` removes it. */
+  policy?: IamPolicy | string | null;
+  public_access_block?: PublicAccessBlock | null;
 }
 
 export interface ObjectSummary {
@@ -240,6 +346,92 @@ export interface CreatedKey extends AccessKey {
   secret_access_key: string;
 }
 
+export interface OidcProvider {
+  /** Exactly the tokens' `iss`. */
+  issuer: string;
+  /** Accepted `aud` values (client ids). */
+  audiences: string[];
+  /** A pattern (`*`, `?`) the token's `sub` must match. */
+  subject?: string;
+  /** Default: the issuer's discovery document. */
+  jwks_uri?: string;
+}
+
+/** Who may assume a role. */
+export interface Trust {
+  /** Permanent access key ids (AssumeRole). */
+  keys: string[];
+  /** OIDC providers (AssumeRoleWithWebIdentity). */
+  oidc: OidcProvider[];
+  external_id?: string;
+}
+
+export interface Role {
+  name: string;
+  /** `RR…` */
+  id: string;
+  arn: string;
+  description: string;
+  permission: Permission;
+  buckets: string[] | null;
+  policy: IamPolicy | null;
+  trust: Trust;
+  max_session_s: number;
+  generation: number;
+  /** Sessions issued until then (ms) are revoked; 0: never. */
+  revoked_before: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface RoleSpec {
+  description?: string;
+  permission: Permission;
+  /** `null`: every bucket. */
+  buckets?: string[] | null;
+  policy?: IamPolicy | string | null;
+  trust?: Trust;
+  /** 900–43200, default 3600. */
+  max_session_s?: number;
+}
+
+export interface SessionRequest {
+  session_name?: string;
+  /** 60 up to the role's max_session_s (default 3600). */
+  duration_s?: number;
+  /** At most the role's. */
+  permission?: Permission;
+  /** Within the role's. */
+  buckets?: string[];
+  policy?: IamPolicy | string;
+  tags?: Record<string, string>;
+  transitive_tag_keys?: string[];
+  source_identity?: string;
+}
+
+/** Temporary credentials, returned once. */
+export interface Session {
+  /** `RT…` */
+  access_key_id: string;
+  secret_access_key: string;
+  session_token: string;
+  /** Unix ms. */
+  expiration: number;
+  role_arn: string;
+  assumed_role_arn: string;
+  permission: Permission;
+  buckets: string[] | null;
+  endpoint: string;
+  region: string;
+  env: {
+    AWS_ACCESS_KEY_ID: string;
+    AWS_SECRET_ACCESS_KEY: string;
+    AWS_SESSION_TOKEN: string;
+    AWS_ENDPOINT_URL: string;
+    AWS_REGION: string;
+  };
+}
+
 export interface StorageCost {
   storage_usd: number;
   class_a_usd: number;
@@ -273,6 +465,7 @@ export interface StorageUsageAll {
 }
 
 const bucket = (name: string) => `/v1/storage/buckets/${encodeURIComponent(name)}`;
+const role = (name: string) => `/v1/storage/roles/${encodeURIComponent(name)}`;
 const q = (params: Record<string, string | number | undefined | null>) => {
   const s = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v != null && v !== "") s.set(k, String(v));
@@ -332,6 +525,35 @@ export const storageApi = {
   createKey: (name: string, permission: Permission, buckets: string[] | null) =>
     call<CreatedKey>("POST", "/v1/storage/keys", { name, permission, buckets: buckets ?? undefined }),
   deleteKey: (id: string) => call<{ deleted: string }>("DELETE", `/v1/storage/keys/${encodeURIComponent(id)}`),
+
+  /** Replace the notification configurations (validated, and each destination sent a test event, unless skipped). */
+  setNotifications: (name: string, configurations: NotificationInput[], opts: { skipValidation?: boolean } = {}) =>
+    call<Bucket>("PATCH", bucket(name), {
+      notifications: { configurations, ...(opts.skipValidation ? { skip_destination_validation: true } : {}) },
+    }),
+  /** A new webhook signing secret; the configurations stay as they are. */
+  rotateWebhookSecret: (name: string) =>
+    call<Bucket>("PATCH", bucket(name), { notifications: { rotate_webhook_secret: true } }),
+  /** Replace the replication rules; an empty list removes replication. */
+  setReplication: (name: string, rules: ReplicationRuleInput[]) =>
+    call<Bucket>("PATCH", bucket(name), { replication: rules.length ? { rules } : null }),
+  setWebsite: (name: string, website: { index_document: string; error_document?: string | null } | null) =>
+    call<Bucket>("PATCH", bucket(name), { website }),
+  setPolicy: (name: string, policy: IamPolicy | string | null) => call<Bucket>("PATCH", bucket(name), { policy }),
+  setPublicAccessBlock: (name: string, block: PublicAccessBlock | null) =>
+    call<Bucket>("PATCH", bucket(name), { public_access_block: block }),
+
+  roles: () => call<Role[]>("GET", "/v1/storage/roles"),
+  role: (name: string) => call<Role>("GET", role(name)),
+  createRole: (name: string, spec: RoleSpec) => call<Role>("POST", "/v1/storage/roles", { name, ...spec }),
+  /** Change some fields (`null` clears buckets and policy). The role's sessions stop working. */
+  updateRole: (name: string, patch: Partial<RoleSpec>) => call<Role>("PATCH", role(name), patch),
+  deleteRole: (name: string) => call<{ deleted: string }>("DELETE", role(name)),
+  /** Sessions issued until now stop working. */
+  revokeRole: (name: string) => call<Role>("POST", `${role(name)}/revoke`),
+  mintSession: (name: string, req: SessionRequest = {}) => call<Session>("POST", `${role(name)}/sessions`, req),
+  /** A new current session-token key; tokens of the previous key keep working, older ones stop. */
+  rotateSessionKey: () => call<{ key_id: number | string }>("POST", "/v1/storage/session-keys/rotate"),
 };
 
 /**
@@ -531,4 +753,268 @@ export function retentionLabel(lock: ObjectLockConfig | null): string | null {
 export function isLocked(lock: ObjectLock | null, now = Date.now()) {
   if (!lock) return false;
   return lock.legal_hold === true || (lock.mode != null && lock.retain_until != null && lock.retain_until > now);
+}
+
+// --- Events ------------------------------------------------------------------------------------
+
+/** S3's event types a configuration can name (`s3:TestEvent` is only ever sent, never subscribed to). */
+export const EVENT_TYPES = [
+  "s3:ObjectCreated:*",
+  "s3:ObjectCreated:Put",
+  "s3:ObjectCreated:Post",
+  "s3:ObjectCreated:Copy",
+  "s3:ObjectCreated:CompleteMultipartUpload",
+  "s3:ObjectRemoved:*",
+  "s3:ObjectRemoved:Delete",
+  "s3:ObjectRemoved:DeleteMarkerCreated",
+  "s3:ObjectRestore:*",
+  "s3:ObjectRestore:Post",
+  "s3:ObjectRestore:Completed",
+  "s3:ObjectRestore:Delete",
+  "s3:ReducedRedundancyLostObject",
+  "s3:Replication:*",
+  "s3:Replication:OperationFailedReplication",
+  "s3:Replication:OperationNotTracked",
+  "s3:Replication:OperationMissedThreshold",
+  "s3:Replication:OperationReplicatedAfterThreshold",
+  "s3:LifecycleExpiration:*",
+  "s3:LifecycleExpiration:Delete",
+  "s3:LifecycleExpiration:DeleteMarkerCreated",
+  "s3:LifecycleTransition",
+  "s3:IntelligentTiering",
+  "s3:ObjectTagging:*",
+  "s3:ObjectTagging:Put",
+  "s3:ObjectTagging:Delete",
+  "s3:ObjectAcl:Put",
+] as const;
+
+/** The event families most configurations want, for a compact picker. */
+export const COMMON_EVENTS: readonly string[] = [
+  "s3:ObjectCreated:*",
+  "s3:ObjectRemoved:*",
+  "s3:ObjectTagging:*",
+  "s3:ObjectAcl:Put",
+  "s3:ObjectRestore:*",
+  "s3:LifecycleExpiration:*",
+  "s3:Replication:*",
+];
+
+/** Where events go, in the forms people think in. */
+export type Destination =
+  | { kind: "queue"; vhost: string; queue: string }
+  | { kind: "stream"; stream: string; topic: string }
+  | { kind: "webhook"; url: string }
+  | { kind: "arn"; arn: string };
+
+/** The ARN a configuration names for a destination. The queue's vhost is percent-encoded (`/` → `%2F`). */
+export function destinationArn(d: Destination): string {
+  switch (d.kind) {
+    case "queue":
+      return `arn:roll:queues:${encodeURIComponent(d.vhost.trim() || "/")}:${d.queue.trim()}`;
+    case "stream":
+      return `arn:roll:streams:${d.stream.trim()}:${d.topic.trim()}`;
+    case "webhook":
+      return `arn:roll:webhook:${d.url.trim()}`;
+    case "arn":
+      return d.arn.trim();
+  }
+}
+
+/** A destination ARN back in its friendly form (anything else is a raw ARN). */
+export function parseDestination(arn: string): Destination {
+  const after = (p: string) => (arn.startsWith(p) ? arn.slice(p.length) : null);
+  const q = after("arn:roll:queues:");
+  if (q != null) {
+    const i = q.indexOf(":");
+    if (i > 0 && i < q.length - 1) {
+      try {
+        return { kind: "queue", vhost: decodeURIComponent(q.slice(0, i)), queue: q.slice(i + 1) };
+      } catch {
+        return { kind: "arn", arn };
+      }
+    }
+  }
+  const st = after("arn:roll:streams:");
+  if (st != null) {
+    const i = st.indexOf(":");
+    if (i > 0 && i < st.length - 1) return { kind: "stream", stream: st.slice(0, i), topic: st.slice(i + 1) };
+  }
+  const w = after("arn:roll:webhook:");
+  if (w) return { kind: "webhook", url: w };
+  return { kind: "arn", arn };
+}
+
+/** How a destination reads: its kind and a short label. */
+export function describeDestination(arn: string): { kind: Destination["kind"]; label: string } {
+  const d = parseDestination(arn);
+  switch (d.kind) {
+    case "queue":
+      return { kind: "queue", label: d.vhost === "/" ? d.queue : `${d.vhost}/${d.queue}` };
+    case "stream":
+      return { kind: "stream", label: `${d.stream}/${d.topic}` };
+    case "webhook":
+      return { kind: "webhook", label: d.url };
+    case "arn":
+      return { kind: "arn", label: d.arn };
+  }
+}
+
+/** What's wrong with a destination before it's sent (`null`: fine; the server checks the rest). */
+export function destinationError(d: Destination): string | null {
+  switch (d.kind) {
+    case "queue":
+      return d.queue.trim() ? null : "Name the queue.";
+    case "stream":
+      if (!d.stream.trim() || !d.topic.trim()) return "Name the stream and the topic.";
+      return d.stream.includes(":") ? "A stream name can't contain a colon." : null;
+    case "webhook": {
+      let u: URL;
+      try {
+        u = new URL(d.url.trim());
+      } catch {
+        return "Enter a full URL, e.g. https://example.com/hooks/s3.";
+      }
+      if (u.protocol !== "https:" && u.protocol !== "http:") return "Webhooks are http(s) URLs.";
+      if (u.username || u.password) return "Leave credentials out of the URL.";
+      return null;
+    }
+    case "arn":
+      return /^arn:[^:]+:[^:]+:/.test(d.arn.trim()) ? null : "Enter an ARN, e.g. arn:aws:sqs:us-east-1:123456789012:jobs.";
+  }
+}
+
+/** A stored configuration as written back unchanged, for replacing the list without it or with more. */
+export function notificationInput(c: NotificationConfig): NotificationInput {
+  return { id: c.id, type: c.type, destination: c.destination, events: c.events, prefix: c.prefix, suffix: c.suffix };
+}
+
+/** A secret with only its start visible. */
+export function maskSecret(secret: string, visible = 10) {
+  return `${secret.slice(0, visible)}${"•".repeat(16)}`;
+}
+
+// --- Replication -------------------------------------------------------------------------------
+
+/** A rule as written back, without its status. */
+export function replicationInput(r: ReplicationRule): ReplicationRuleInput {
+  return {
+    id: r.id,
+    priority: r.priority,
+    enabled: r.enabled,
+    prefix: r.prefix,
+    tags: r.tags,
+    delete_markers: r.delete_markers,
+    existing_objects: r.existing_objects,
+    destination: r.destination,
+    storage_class: r.storage_class,
+    owner_override: r.owner_override,
+  };
+}
+
+/** How a rule is doing, in a few words. */
+export function replicationStatus(r: ReplicationRule): string {
+  if (!r.enabled) return "disabled";
+  if (r.last_error) return "retrying";
+  if (r.backfilling) return "copying existing objects";
+  if (r.pending > 0) return `${r.pending >= 1000 ? "1000+" : r.pending} pending`;
+  return "up to date";
+}
+
+// --- Access ------------------------------------------------------------------------------------
+
+export const NO_BLOCK: PublicAccessBlock = {
+  block_public_acls: false,
+  ignore_public_acls: false,
+  block_public_policy: false,
+  restrict_public_buckets: false,
+};
+
+/** The block in force: the bucket's own, with the deployment-wide block (all four) on top. */
+export function effectiveBlock(own: PublicAccessBlock | null, deploymentWide: boolean): PublicAccessBlock {
+  if (deploymentWide) {
+    return { block_public_acls: true, ignore_public_acls: true, block_public_policy: true, restrict_public_buckets: true };
+  }
+  return own ?? NO_BLOCK;
+}
+
+/**
+ * A bucket policy as typed: `null` when it's a JSON object with statements (the server checks the
+ * rest), else what's wrong. Empty text is fine: it means no policy.
+ */
+export function policyError(text: string): string | null {
+  if (!text.trim()) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch (e) {
+    return `Not valid JSON: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return "A policy is a JSON object.";
+  if (!("Statement" in v)) return "A policy needs a Statement.";
+  return null;
+}
+
+/** A starting policy: anyone may read the bucket's objects. */
+export function publicReadPolicy(bucketName: string): IamPolicy {
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      { Sid: "PublicRead", Effect: "Allow", Principal: "*", Action: "s3:GetObject", Resource: `arn:aws:s3:::${bucketName}/*` },
+    ],
+  };
+}
+
+// --- Website -----------------------------------------------------------------------------------
+
+/** The website URL a bucket would have (`null` without a website domain), with the endpoint's scheme and port. */
+export function websiteUrlFor(bucketName: string, info: Pick<StorageInfo, "endpoint" | "website_domain">): string | null {
+  if (!info.website_domain) return null;
+  try {
+    const u = new URL(info.endpoint);
+    return `${u.protocol}//${bucketName}.${info.website_domain}${u.port ? `:${u.port}` : ""}`;
+  } catch {
+    return null;
+  }
+}
+
+/** S3's rule for an index document: a non-empty suffix without `/`. */
+export function indexDocumentError(v: string): string | null {
+  if (!v.trim()) return "Name the index document, e.g. index.html.";
+  if (v.includes("/")) return "The index document is a suffix like index.html, without /.";
+  return null;
+}
+
+// --- Roles -------------------------------------------------------------------------------------
+
+/** Longest-session choices (15 min to 12 h). */
+export const MAX_SESSION_OPTIONS = [900, 1800, 3600, 7200, 14400, 28800, 43200];
+
+/** Session lengths to mint, up to the role's maximum (control-plane sessions may be short). */
+export function sessionDurations(max: number): number[] {
+  return [300, 900, 3600, 7200, 14400, 28800, 43200].filter((d) => d <= max);
+}
+
+/** Seconds as `45s`, `15m`, `1h`, `1h 30m`. */
+export function durationLabel(s: number): string {
+  if (s < 60) return `${s}s`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h === 0) return `${m}m`;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+/** Who may assume a role, in a line. */
+export function trustSummary(t: Trust): string {
+  const parts: string[] = [];
+  if (t.keys.length) parts.push(`${t.keys.length} key${t.keys.length === 1 ? "" : "s"}`);
+  for (const p of t.oidc) parts.push(p.issuer.replace(/^https?:\/\//, "").replace(/\/$/, ""));
+  if (t.external_id) parts.push("external id");
+  return parts.length ? parts.join(" · ") : "control-plane sessions only";
+}
+
+/** A session's credentials as `.env` lines. */
+export function sessionEnv(s: Session): string {
+  return Object.entries(s.env)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n");
 }

@@ -5,8 +5,33 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { ROLL_API } from "../src/lib/roll-api";
 import {
+  COMMON_EVENTS,
+  EVENT_TYPES,
+  MAX_SESSION_OPTIONS,
+  NO_BLOCK,
   PERMISSIONS,
   RECOVER_OPTIONS,
+  describeDestination,
+  destinationArn,
+  destinationError,
+  durationLabel,
+  effectiveBlock,
+  indexDocumentError,
+  maskSecret,
+  notificationInput,
+  parseDestination,
+  policyError,
+  publicReadPolicy,
+  replicationInput,
+  replicationStatus,
+  sessionDurations,
+  sessionEnv,
+  trustSummary,
+  websiteUrlFor,
+  type Destination,
+  type ReplicationRule,
+  type Role,
+  type Session,
   agoMs,
   baseName,
   bucketNameError,
@@ -485,6 +510,20 @@ describe("errors", () => {
       () => storageApi.keys(),
       () => storageApi.createKey("k", "read", null),
       () => storageApi.deleteKey("RK"),
+      () => storageApi.setNotifications("b-1", []),
+      () => storageApi.rotateWebhookSecret("b-1"),
+      () => storageApi.setReplication("b-1", []),
+      () => storageApi.setWebsite("b-1", null),
+      () => storageApi.setPolicy("b-1", null),
+      () => storageApi.setPublicAccessBlock("b-1", null),
+      () => storageApi.roles(),
+      () => storageApi.role("r"),
+      () => storageApi.createRole("r", { permission: "read" }),
+      () => storageApi.updateRole("r", { description: "x" }),
+      () => storageApi.deleteRole("r"),
+      () => storageApi.revokeRole("r"),
+      () => storageApi.mintSession("r"),
+      () => storageApi.rotateSessionKey(),
     ];
     for (const f of all) await assert.rejects(f(), { message: "storage unavailable: fenced" });
     assert.equal(calls.length, all.length);
@@ -826,6 +865,37 @@ describe("contract shapes (docs/storage/architecture.md)", () => {
           },
         ],
       },
+      website_url: "http://ver.web.example:59000",
+      notifications: {
+        configurations: [
+          { id: "hook", type: "topic", destination: "arn:roll:webhook:https://example.com/s3", events: ["s3:ObjectCreated:*"], prefix: "img/", suffix: null },
+        ],
+        event_bridge: false,
+        webhook_secret: "whsec_0123",
+        backlog: { "arn:roll:webhook:https://example.com/s3": { pending: 2, last_error: "webhook answered 500" } },
+      },
+      replication: {
+        rules: [
+          {
+            id: "r1",
+            priority: null,
+            enabled: true,
+            prefix: "",
+            tags: {},
+            delete_markers: true,
+            existing_objects: false,
+            destination: "ver-copy",
+            storage_class: null,
+            owner_override: false,
+            pending: 0,
+            last_error: null,
+            backfilling: false,
+          },
+        ],
+      },
+      policy: { Version: "2012-10-17", Statement: [] },
+      policy_public: false,
+      public_access_block: { block_public_acls: true, ignore_public_acls: true, block_public_policy: true, restrict_public_buckets: true },
     };
     assert.equal(JSON.parse(JSON.stringify(b)).version_bytes, 3);
     const o: ObjectInfo = {
@@ -951,5 +1021,325 @@ describe("versioning helpers", () => {
     assert.match(bucketTagsError([["aws:x", "v"]]) ?? "", /aws:/);
     assert.match(bucketTagsError([["AWS:x", "v"]]) ?? "", /aws:/);
     assert.match(bucketTagsError([["a", "1"], ["a", "2"]]) ?? "", /Duplicate/);
+  });
+});
+
+describe("bucket events, replication, website and access requests", () => {
+  it("setNotifications replaces the configurations, optionally skipping validation", async () => {
+    const hook = { destination: "arn:roll:webhook:https://example.com/s3", events: ["s3:ObjectCreated:*"], prefix: "img/" };
+    await expectRequest(() => storageApi.setNotifications("site", [hook]), "PATCH", "/v1/storage/buckets/site", "", {
+      notifications: { configurations: [hook] },
+    });
+    calls = [];
+    await expectRequest(
+      () => storageApi.setNotifications("site", [], { skipValidation: true }),
+      "PATCH",
+      "/v1/storage/buckets/site",
+      "",
+      { notifications: { configurations: [], skip_destination_validation: true } },
+    );
+  });
+
+  it("rotateWebhookSecret leaves the configurations out", async () => {
+    await expectRequest(() => storageApi.rotateWebhookSecret("a b"), "PATCH", "/v1/storage/buckets/a%20b", "", {
+      notifications: { rotate_webhook_secret: true },
+    });
+  });
+
+  it("setReplication: rules, or null to remove", async () => {
+    const rules = [{ destination: "backup", prefix: "img/", delete_markers: true, existing_objects: true }];
+    await expectRequest(() => storageApi.setReplication("site", rules), "PATCH", "/v1/storage/buckets/site", "", {
+      replication: { rules },
+    });
+    calls = [];
+    await expectRequest(() => storageApi.setReplication("site", []), "PATCH", "/v1/storage/buckets/site", "", { replication: null });
+  });
+
+  it("setWebsite, setPolicy and setPublicAccessBlock", async () => {
+    await expectRequest(
+      () => storageApi.setWebsite("site", { index_document: "index.html", error_document: "404.html" }),
+      "PATCH",
+      "/v1/storage/buckets/site",
+      "",
+      { website: { index_document: "index.html", error_document: "404.html" } },
+    );
+    calls = [];
+    await expectRequest(() => storageApi.setWebsite("site", null), "PATCH", "/v1/storage/buckets/site", "", { website: null });
+    calls = [];
+    const policy = publicReadPolicy("site");
+    await expectRequest(() => storageApi.setPolicy("site", policy), "PATCH", "/v1/storage/buckets/site", "", { policy });
+    calls = [];
+    await expectRequest(() => storageApi.setPolicy("site", null), "PATCH", "/v1/storage/buckets/site", "", { policy: null });
+    calls = [];
+    const block = { ...NO_BLOCK, block_public_policy: true };
+    await expectRequest(() => storageApi.setPublicAccessBlock("site", block), "PATCH", "/v1/storage/buckets/site", "", {
+      public_access_block: block,
+    });
+    calls = [];
+    await expectRequest(() => storageApi.setPublicAccessBlock("site", null), "PATCH", "/v1/storage/buckets/site", "", {
+      public_access_block: null,
+    });
+  });
+
+  it("updateBucket passes the new fields through", async () => {
+    await expectRequest(
+      () => storageApi.updateBucket("site", { versioning: "Enabled", replication: { rules: [{ destination: "b2" }] } }),
+      "PATCH",
+      "/v1/storage/buckets/site",
+      "",
+      { versioning: "Enabled", replication: { rules: [{ destination: "b2" }] } },
+    );
+  });
+});
+
+describe("roles and sessions requests", () => {
+  it("roles, role", async () => {
+    await expectRequest(() => storageApi.roles(), "GET", "/v1/storage/roles", "");
+    calls = [];
+    await expectRequest(() => storageApi.role("web/app"), "GET", "/v1/storage/roles/web%2Fapp", "");
+  });
+
+  it("createRole sends the name with the spec", async () => {
+    const trust = {
+      keys: ["RK123"],
+      oidc: [{ issuer: "https://token.actions.githubusercontent.com", audiences: ["sts.amazonaws.com"], subject: "repo:acme/*" }],
+    };
+    await expectRequest(
+      () => storageApi.createRole("ci", { permission: "write", buckets: ["builds"], trust, max_session_s: 3600, description: "CI uploads" }),
+      "POST",
+      "/v1/storage/roles",
+      "",
+      { name: "ci", permission: "write", buckets: ["builds"], trust, max_session_s: 3600, description: "CI uploads" },
+    );
+  });
+
+  it("updateRole sends only the patch (null clears)", async () => {
+    await expectRequest(() => storageApi.updateRole("ci", { buckets: null, policy: null }), "PATCH", "/v1/storage/roles/ci", "", {
+      buckets: null,
+      policy: null,
+    });
+  });
+
+  it("deleteRole, revokeRole, mintSession and rotateSessionKey", async () => {
+    await expectRequest(() => storageApi.deleteRole("ci"), "DELETE", "/v1/storage/roles/ci", "");
+    calls = [];
+    await expectRequest(() => storageApi.revokeRole("ci"), "POST", "/v1/storage/roles/ci/revoke", "");
+    calls = [];
+    await expectRequest(() => storageApi.mintSession("ci"), "POST", "/v1/storage/roles/ci/sessions", "", {});
+    calls = [];
+    await expectRequest(
+      () => storageApi.mintSession("ci", { duration_s: 900, permission: "read", buckets: ["builds"] }),
+      "POST",
+      "/v1/storage/roles/ci/sessions",
+      "",
+      { duration_s: 900, permission: "read", buckets: ["builds"] },
+    );
+    calls = [];
+    await expectRequest(() => storageApi.rotateSessionKey(), "POST", "/v1/storage/session-keys/rotate", "");
+  });
+});
+
+describe("event helpers", () => {
+  it("event types match crates/s3-store/src/events.rs, without s3:TestEvent", () => {
+    assert.equal(EVENT_TYPES.length, 27);
+    assert.ok(!(EVENT_TYPES as readonly string[]).includes("s3:TestEvent"));
+    for (const e of COMMON_EVENTS) assert.ok((EVENT_TYPES as readonly string[]).includes(e), e);
+  });
+
+  it("destinationArn and parseDestination round-trip", () => {
+    const cases: [Destination, string][] = [
+      [{ kind: "queue", vhost: "/", queue: "orders" }, "arn:roll:queues:%2F:orders"],
+      [{ kind: "queue", vhost: "shop:eu", queue: "a:b" }, "arn:roll:queues:shop%3Aeu:a:b"],
+      [{ kind: "stream", stream: "events", topic: "uploads" }, "arn:roll:streams:events:uploads"],
+      [{ kind: "webhook", url: "https://example.com/hook?a=1" }, "arn:roll:webhook:https://example.com/hook?a=1"],
+      [{ kind: "arn", arn: "arn:aws:sqs:us-east-1:123456789012:jobs" }, "arn:aws:sqs:us-east-1:123456789012:jobs"],
+    ];
+    for (const [d, arn] of cases) {
+      assert.equal(destinationArn(d), arn);
+      assert.deepEqual(parseDestination(arn), d);
+    }
+    // An empty vhost is the default one; whitespace is trimmed.
+    assert.equal(destinationArn({ kind: "queue", vhost: "", queue: " q " }), "arn:roll:queues:%2F:q");
+    // The server also accepts an unencoded "/".
+    assert.deepEqual(parseDestination("arn:roll:queues:/:orders"), { kind: "queue", vhost: "/", queue: "orders" });
+    // Malformed roll ARNs read as raw ARNs.
+    for (const arn of ["arn:roll:queues:orders", "arn:roll:queues:%E0%A4%A:q", "arn:roll:streams::t", "arn:roll:webhook:"]) {
+      assert.equal(parseDestination(arn).kind, "arn", arn);
+    }
+  });
+
+  it("describeDestination", () => {
+    assert.deepEqual(describeDestination("arn:roll:queues:%2F:orders"), { kind: "queue", label: "orders" });
+    assert.deepEqual(describeDestination("arn:roll:queues:shop:orders"), { kind: "queue", label: "shop/orders" });
+    assert.deepEqual(describeDestination("arn:roll:streams:events:uploads"), { kind: "stream", label: "events/uploads" });
+    assert.deepEqual(describeDestination("arn:roll:webhook:https://x.dev/h"), { kind: "webhook", label: "https://x.dev/h" });
+    assert.deepEqual(describeDestination("arn:aws:sns:us-east-1:1:t"), { kind: "arn", label: "arn:aws:sns:us-east-1:1:t" });
+  });
+
+  it("destinationError", () => {
+    assert.equal(destinationError({ kind: "queue", vhost: "/", queue: "orders" }), null);
+    assert.ok(destinationError({ kind: "queue", vhost: "/", queue: " " }));
+    assert.equal(destinationError({ kind: "stream", stream: "s", topic: "t" }), null);
+    assert.ok(destinationError({ kind: "stream", stream: "s", topic: "" }));
+    assert.ok(destinationError({ kind: "stream", stream: "a:b", topic: "t" }));
+    assert.equal(destinationError({ kind: "webhook", url: "https://example.com/s3" }), null);
+    assert.equal(destinationError({ kind: "webhook", url: "http://10.0.0.1:8080/h" }), null);
+    assert.ok(destinationError({ kind: "webhook", url: "example.com" }));
+    assert.ok(destinationError({ kind: "webhook", url: "ftp://example.com" }));
+    assert.ok(destinationError({ kind: "webhook", url: "https://u:p@example.com/" }));
+    assert.equal(destinationError({ kind: "arn", arn: "arn:aws:lambda:us-east-1:1:function:f" }), null);
+    assert.ok(destinationError({ kind: "arn", arn: "sqs://nope" }));
+  });
+
+  it("notificationInput and maskSecret", () => {
+    const c = {
+      id: "a",
+      type: "queue" as const,
+      destination: "arn:roll:queues:%2F:q",
+      events: ["s3:ObjectRemoved:*"],
+      prefix: null,
+      suffix: ".jpg",
+    };
+    assert.deepEqual(notificationInput(c), c);
+    const m = maskSecret("whsec_abcdef0123456789");
+    assert.ok(m.startsWith("whsec_abcd"));
+    assert.ok(!m.includes("0123456789"));
+  });
+});
+
+describe("replication, access, website and role helpers", () => {
+  const rule: ReplicationRule = {
+    id: "r1",
+    priority: 1,
+    enabled: true,
+    prefix: "img/",
+    tags: { a: "b" },
+    delete_markers: false,
+    existing_objects: true,
+    destination: "backup",
+    storage_class: null,
+    owner_override: false,
+    pending: 0,
+    last_error: null,
+    backfilling: false,
+  };
+
+  it("replicationInput drops the status", () => {
+    assert.deepEqual(replicationInput({ ...rule, pending: 5, last_error: "x", backfilling: true }), {
+      id: "r1",
+      priority: 1,
+      enabled: true,
+      prefix: "img/",
+      tags: { a: "b" },
+      delete_markers: false,
+      existing_objects: true,
+      destination: "backup",
+      storage_class: null,
+      owner_override: false,
+    });
+  });
+
+  it("replicationStatus", () => {
+    assert.equal(replicationStatus(rule), "up to date");
+    assert.equal(replicationStatus({ ...rule, pending: 3 }), "3 pending");
+    assert.equal(replicationStatus({ ...rule, pending: 1000 }), "1000+ pending");
+    assert.equal(replicationStatus({ ...rule, backfilling: true, pending: 3 }), "copying existing objects");
+    assert.equal(replicationStatus({ ...rule, last_error: "boom" }), "retrying");
+    assert.equal(replicationStatus({ ...rule, enabled: false, last_error: "boom" }), "disabled");
+  });
+
+  it("effectiveBlock", () => {
+    assert.deepEqual(effectiveBlock(null, false), NO_BLOCK);
+    const own = { ...NO_BLOCK, block_public_acls: true };
+    assert.deepEqual(effectiveBlock(own, false), own);
+    assert.ok(Object.values(effectiveBlock(own, true)).every(Boolean));
+    assert.ok(Object.values(effectiveBlock(null, true)).every(Boolean));
+  });
+
+  it("policyError and publicReadPolicy", () => {
+    assert.equal(policyError(""), null);
+    assert.equal(policyError(JSON.stringify(publicReadPolicy("b"))), null);
+    assert.match(policyError("{") ?? "", /^Not valid JSON/);
+    assert.ok(policyError("[]"));
+    assert.ok(policyError("42"));
+    assert.ok(policyError('{"Version":"2012-10-17"}'));
+    const p = publicReadPolicy("my-site") as { Statement: { Resource: string; Principal: string }[] };
+    assert.equal(p.Statement[0].Resource, "arn:aws:s3:::my-site/*");
+    assert.equal(p.Statement[0].Principal, "*");
+  });
+
+  it("websiteUrlFor and indexDocumentError", () => {
+    assert.equal(websiteUrlFor("site", { endpoint: "http://127.0.0.1:59000", website_domain: null }), null);
+    assert.equal(
+      websiteUrlFor("site", { endpoint: "http://127.0.0.1:59000", website_domain: "web.localtest" }),
+      "http://site.web.localtest:59000",
+    );
+    assert.equal(
+      websiteUrlFor("site", { endpoint: "https://s3.example.com", website_domain: "web.example.com" }),
+      "https://site.web.example.com",
+    );
+    assert.equal(websiteUrlFor("site", { endpoint: "not a url", website_domain: "w" }), null);
+    assert.equal(indexDocumentError("index.html"), null);
+    assert.ok(indexDocumentError(""));
+    assert.ok(indexDocumentError("docs/index.html"));
+  });
+
+  it("durations, trust and session env", () => {
+    assert.deepEqual(MAX_SESSION_OPTIONS, [900, 1800, 3600, 7200, 14400, 28800, 43200]);
+    assert.equal(durationLabel(45), "45s");
+    assert.equal(durationLabel(900), "15m");
+    assert.equal(durationLabel(3600), "1h");
+    assert.equal(durationLabel(5400), "1h 30m");
+    assert.equal(durationLabel(43200), "12h");
+    assert.deepEqual(sessionDurations(3600), [300, 900, 3600]);
+    assert.equal(sessionDurations(43200).at(-1), 43200);
+    assert.equal(trustSummary({ keys: [], oidc: [] }), "control-plane sessions only");
+    assert.equal(
+      trustSummary({
+        keys: ["RK1", "RK2"],
+        oidc: [{ issuer: "https://token.actions.githubusercontent.com/", audiences: ["sts.amazonaws.com"] }],
+        external_id: "x",
+      }),
+      "2 keys · token.actions.githubusercontent.com · external id",
+    );
+    const s: Session = {
+      access_key_id: "RTABC",
+      secret_access_key: "sec",
+      session_token: "tok",
+      expiration: 1,
+      role_arn: "arn:aws:iam::000000000001:role/ci",
+      assumed_role_arn: "arn:aws:sts::000000000001:assumed-role/ci/roll-control-plane",
+      permission: "read",
+      buckets: null,
+      endpoint: "http://127.0.0.1:59000",
+      region: "us-east-1",
+      env: {
+        AWS_ACCESS_KEY_ID: "RTABC",
+        AWS_SECRET_ACCESS_KEY: "sec",
+        AWS_SESSION_TOKEN: "tok",
+        AWS_ENDPOINT_URL: "http://127.0.0.1:59000",
+        AWS_REGION: "us-east-1",
+      },
+    };
+    assert.equal(
+      sessionEnv(s),
+      "AWS_ACCESS_KEY_ID=RTABC\nAWS_SECRET_ACCESS_KEY=sec\nAWS_SESSION_TOKEN=tok\nAWS_ENDPOINT_URL=http://127.0.0.1:59000\nAWS_REGION=us-east-1",
+    );
+    const r: Role = {
+      name: "ci",
+      id: "RR1",
+      arn: "arn:aws:iam::000000000001:role/ci",
+      description: "",
+      permission: "write",
+      buckets: null,
+      policy: null,
+      trust: { keys: [], oidc: [] },
+      max_session_s: 3600,
+      generation: 1,
+      revoked_before: 0,
+      created_at: 1,
+      updated_at: 1,
+    };
+    assert.equal(r.trust.oidc.length, 0);
   });
 });
